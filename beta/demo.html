@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>macprovider PoC — seeing is believing</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    grid-template-rows: auto 1fr;
+    height: 100vh;
+  }
+  header {
+    grid-column: 1 / -1;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .sub { color: var(--muted); font-size: 12px; margin-left: 12px; }
+  main {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid var(--border);
+  }
+  #log {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 20px;
+  }
+  .msg { margin-bottom: 18px; }
+  .msg .who {
+    font-size: 11px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 4px;
+  }
+  .msg.user .who { color: var(--accent); }
+  .msg .body {
+    white-space: pre-wrap;
+    line-height: 1.5;
+    font-size: 14px;
+  }
+  .msg.assistant .body { font-family: var(--mono); font-size: 13px; }
+  form {
+    border-top: 1px solid var(--border);
+    padding: 12px 20px;
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  select, textarea, button {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 8px 10px;
+    font: inherit;
+  }
+  textarea {
+    flex: 1;
+    resize: none;
+    height: 38px;
+    font-size: 14px;
+  }
+  button {
+    cursor: pointer;
+    font-weight: 600;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: 0.5; cursor: not-allowed; }
+  aside {
+    padding: 16px 18px;
+    overflow-y: auto;
+    background: var(--panel);
+  }
+  aside h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--muted);
+    margin: 0 0 10px;
+  }
+  .receipt {
+    font-family: var(--mono);
+    font-size: 12px;
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 14px;
+    margin-bottom: 22px;
+  }
+  .receipt .k { color: var(--muted); }
+  .receipt .v { word-break: break-all; }
+  .badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-family: var(--mono);
+    background: rgba(63,185,80,0.15);
+    color: var(--ok);
+  }
+  .badge.warn { background: rgba(210,153,34,0.15); color: var(--warn); }
+  .badge.err { background: rgba(248,81,73,0.15); color: #f85149; }
+  .note {
+    color: var(--muted);
+    font-size: 11px;
+    line-height: 1.55;
+    margin-top: 18px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .note b { color: var(--text); }
+</style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>macprovider PoC — chat</h1>
+      <span class="sub">prompts traverse the same Cloudflare tunnel the harness uses</span>
+    </div>
+    <span class="badge" id="status">idle</span>
+  </header>
+  <main>
+    <div id="log"></div>
+    <form id="form">
+      <select id="provider">
+        <option value="m1">M1 · llama-3.2-3b</option>
+        <option value="m4">M4 · qwen2.5-7b</option>
+      </select>
+      <textarea id="prompt" placeholder="ask anything... (Enter to send, Shift+Enter for newline)" autofocus></textarea>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </main>
+  <aside>
+    <h2>Receipt</h2>
+    <div class="receipt" id="receipt">
+      <div class="k">provider</div><div class="v" id="r-provider">—</div>
+      <div class="k">tunnel</div><div class="v" id="r-tunnel">—</div>
+      <div class="k">model</div><div class="v" id="r-model">—</div>
+      <div class="k">http</div><div class="v" id="r-http">—</div>
+      <div class="k">ttft</div><div class="v" id="r-ttft">—</div>
+      <div class="k">total</div><div class="v" id="r-total">—</div>
+      <div class="k">deltas</div><div class="v" id="r-tokens">—</div>
+      <div class="k">tok/s</div><div class="v" id="r-tps">—</div>
+      <div class="k">attested</div><div class="v" id="r-attest">—</div>
+    </div>
+    <div class="note">
+      <b>What this proves:</b> the request left your browser, traversed the
+      Cloudflare tunnel for the chosen Mac, and a real model on that machine
+      streamed the answer back. TTFT and tok/s are measured client-side.
+      <br><br>
+      <b>What it doesn't prove yet:</b> the response isn't cryptographically
+      bound to the model weights — only attested by the tunnel hostname.
+      Signed receipts land in Phase 3.
+    </div>
+  </aside>
+
+<script>
+const log = document.getElementById('log');
+const form = document.getElementById('form');
+const promptEl = document.getElementById('prompt');
+const providerEl = document.getElementById('provider');
+const sendBtn = document.getElementById('send');
+const statusEl = document.getElementById('status');
+
+let providers = {};
+fetch('/providers').then(r => r.json()).then(p => { providers = p; });
+
+function setReceipt(fields) {
+  for (const [k, v] of Object.entries(fields)) {
+    const el = document.getElementById('r-' + k);
+    if (el) el.textContent = (v ?? '—');
+  }
+}
+
+function setStatus(text, cls) {
+  statusEl.textContent = text;
+  statusEl.className = 'badge' + (cls ? ' ' + cls : '');
+}
+
+function addMsg(who, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + who;
+  div.innerHTML = '<div class="who"></div><div class="body"></div>';
+  div.querySelector('.who').textContent = who;
+  div.querySelector('.body').textContent = text;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+  return div.querySelector('.body');
+}
+
+form.addEventListener('submit', async e => {
+  e.preventDefault();
+  const prompt = promptEl.value.trim();
+  if (!prompt) return;
+  const provider = providerEl.value;
+  const p = providers[provider] || {};
+
+  addMsg('user', prompt);
+  const out = addMsg('assistant', '');
+  promptEl.value = '';
+  sendBtn.disabled = true;
+  setStatus('streaming', 'warn');
+
+  setReceipt({
+    provider: provider.toUpperCase(),
+    tunnel: p.tunnel_url || '—',
+    model: p.model || '—',
+    http: '…',
+    ttft: '…',
+    total: '…',
+    tokens: '0',
+    tps: '…',
+    attest: '…',
+  });
+
+  const t0 = performance.now();
+  let tFirst = null;
+  let tokenCount = 0;
+
+  try {
+    const resp = await fetch('/chat', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({provider, prompt, max_tokens: 512}),
+    });
+    setReceipt({http: resp.status});
+    if (!resp.ok) {
+      const txt = await resp.text();
+      out.textContent = '[error] HTTP ' + resp.status + ' — ' + txt;
+      setStatus('error', 'err');
+      return;
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const {value, done} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream: true});
+      let idx;
+      while ((idx = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        try {
+          const obj = JSON.parse(payload);
+          const delta = obj.choices?.[0]?.delta?.content || '';
+          if (delta) {
+            if (tFirst === null) {
+              tFirst = performance.now();
+              setReceipt({ttft: ((tFirst - t0) / 1000).toFixed(2) + 's'});
+            }
+            out.textContent += delta;
+            tokenCount += 1;
+            log.scrollTop = log.scrollHeight;
+            const elapsed = (performance.now() - tFirst) / 1000;
+            setReceipt({
+              tokens: tokenCount,
+              tps: elapsed > 0 ? (tokenCount / elapsed).toFixed(1) : '—',
+            });
+          }
+        } catch {}
+      }
+    }
+    const total = (performance.now() - t0) / 1000;
+    const host = (p.tunnel_url || '').replace(/^https?:\/\//, '');
+    setReceipt({
+      total: total.toFixed(2) + 's',
+      attest: 'tunnel: ' + host,
+    });
+    setStatus('done');
+  } catch (err) {
+    out.textContent = '[error] ' + err.message;
+    setStatus('error', 'err');
+  } finally {
+    sendBtn.disabled = false;
+    promptEl.focus();
+  }
+});
+
+promptEl.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    form.requestSubmit();
+  }
+});
+</script>
+</body>
+</html>
