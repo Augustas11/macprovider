@@ -1,0 +1,24 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OMC / OMX state (Claude Code orchestration)
+.omc/
+.omx/
+
+# macOS
+.DS_Store
+
+# Runtime state
+state/
+
+# Beta runtime artifacts are covered by beta/.gitignore

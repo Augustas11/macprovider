@@ -1,0 +1,8 @@
+=== Baseline single request ===
+Single: 1.84s | baseline<|eot_id|>
+=== Concurrent (3 parallel) ===
+Req 2: 1.40s | 2<|eot_id|>
+Req 1: 1.40s | 1<|eot_id|>
+Req 3: 1.44s | 3<|eot_id|>
+Wall time: 1.66s
+=== All 3 completed ===

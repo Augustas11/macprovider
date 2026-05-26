@@ -1,0 +1,22 @@
+: keepalive 4/5
+
+data: {"id": "chatcmpl-2b4b462f-b156-41cc-bb75-df012c5a1b1e", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759387, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "\"", "tool_calls": []}}]}
+
+data: {"id": "chatcmpl-2b4b462f-b156-41cc-bb75-df012c5a1b1e", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759387, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "Hello", "tool_calls": []}}]}
+
+data: {"id": "chatcmpl-2b4b462f-b156-41cc-bb75-df012c5a1b1e", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759387, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": ",", "tool_calls": []}}]}
+
+data: {"id": "chatcmpl-2b4b462f-b156-41cc-bb75-df012c5a1b1e", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759387, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": " I", "tool_calls": []}}]}
+
+data: {"id": "chatcmpl-2b4b462f-b156-41cc-bb75-df012c5a1b1e", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759387, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": " am", "tool_calls": []}}]}
+
+data: {"id": "chatcmpl-2b4b462f-b156-41cc-bb75-df012c5a1b1e", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759387, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": " Ph", "tool_calls": []}}]}
+
+data: {"id": "chatcmpl-2b4b462f-b156-41cc-bb75-df012c5a1b1e", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759387, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "i", "tool_calls": []}}]}
+
+data: {"id": "chatcmpl-2b4b462f-b156-41cc-bb75-df012c5a1b1e", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759387, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": ",", "tool_calls": []}}]}
+
+data: {"id": "chatcmpl-2b4b462f-b156-41cc-bb75-df012c5a1b1e", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759387, "choices": [{"index": 0, "finish_reason": "length", "delta": {"role": "assistant", "content": "", "tool_calls": []}}]}
+
+data: [DONE]
+

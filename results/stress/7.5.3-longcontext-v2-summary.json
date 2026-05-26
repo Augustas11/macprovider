@@ -1,0 +1,29 @@
+[
+  {
+    "target": 8000,
+    "actual_in": 8000,
+    "wall_s": 47.064948081970215,
+    "tok_in": 8000,
+    "tok_out": 20,
+    "prefill_tok_per_s_est": "175.3",
+    "ok": true
+  },
+  {
+    "target": 16000,
+    "actual_in": 16000,
+    "wall_s": 76.48717284202576,
+    "tok_in": 16000,
+    "tok_out": 20,
+    "prefill_tok_per_s_est": "213.2",
+    "ok": true
+  },
+  {
+    "target": 32000,
+    "actual_in": "?",
+    "wall_s": 57.22350811958313,
+    "tok_in": "?",
+    "tok_out": "?",
+    "prefill_tok_per_s_est": "?",
+    "ok": false
+  }
+]

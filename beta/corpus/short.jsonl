@@ -1,0 +1,101 @@
+{"system": null, "user": "What is the difference between a list and a tuple in Python?", "source": "curated/short"}
+{"system": null, "user": "Explain recursion in one paragraph.", "source": "curated/short"}
+{"system": null, "user": "What does HTTP status 429 mean?", "source": "curated/short"}
+{"system": null, "user": "Name three sorting algorithms and their time complexities.", "source": "curated/short"}
+{"system": null, "user": "What is a deadlock in operating systems?", "source": "curated/short"}
+{"system": null, "user": "Explain the CAP theorem briefly.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between TCP and UDP?", "source": "curated/short"}
+{"system": null, "user": "What is a hash table and when would you use one?", "source": "curated/short"}
+{"system": null, "user": "Explain what a REST API is.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between stack and heap memory?", "source": "curated/short"}
+{"system": null, "user": "What is Big O notation?", "source": "curated/short"}
+{"system": null, "user": "Explain the difference between concurrency and parallelism.", "source": "curated/short"}
+{"system": null, "user": "What is a race condition?", "source": "curated/short"}
+{"system": null, "user": "Define polymorphism in object-oriented programming.", "source": "curated/short"}
+{"system": null, "user": "What is DNS and how does it work?", "source": "curated/short"}
+{"system": null, "user": "Explain what CORS is and why it exists.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between authentication and authorization?", "source": "curated/short"}
+{"system": null, "user": "What is a binary search tree?", "source": "curated/short"}
+{"system": null, "user": "Explain eventual consistency.", "source": "curated/short"}
+{"system": null, "user": "What is a semaphore?", "source": "curated/short"}
+{"system": null, "user": "Define idempotency in the context of APIs.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between SQL and NoSQL databases?", "source": "curated/short"}
+{"system": null, "user": "Explain what a load balancer does.", "source": "curated/short"}
+{"system": null, "user": "What is a memory leak?", "source": "curated/short"}
+{"system": null, "user": "What does ACID stand for in databases?", "source": "curated/short"}
+{"system": null, "user": "Explain the publish-subscribe pattern.", "source": "curated/short"}
+{"system": null, "user": "What is a CDN and why is it useful?", "source": "curated/short"}
+{"system": null, "user": "Define technical debt.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between synchronous and asynchronous I/O?", "source": "curated/short"}
+{"system": null, "user": "Explain what a microservice is.", "source": "curated/short"}
+{"system": null, "user": "What is a Docker container?", "source": "curated/short"}
+{"system": null, "user": "Explain the MVC pattern.", "source": "curated/short"}
+{"system": null, "user": "What is a foreign key in a database?", "source": "curated/short"}
+{"system": null, "user": "What is the difference between compiled and interpreted languages?", "source": "curated/short"}
+{"system": null, "user": "Explain what a webhook is.", "source": "curated/short"}
+{"system": null, "user": "What is rate limiting?", "source": "curated/short"}
+{"system": null, "user": "Define coupling and cohesion in software design.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between git merge and git rebase?", "source": "curated/short"}
+{"system": null, "user": "Explain what a proxy server does.", "source": "curated/short"}
+{"system": null, "user": "What is the single responsibility principle?", "source": "curated/short"}
+{"system": null, "user": "What is a closure in programming?", "source": "curated/short"}
+{"system": null, "user": "Explain what a thread pool is.", "source": "curated/short"}
+{"system": null, "user": "What is an ORM?", "source": "curated/short"}
+{"system": null, "user": "Define the difference between latency and throughput.", "source": "curated/short"}
+{"system": null, "user": "What is a message queue?", "source": "curated/short"}
+{"system": null, "user": "Explain what sharding means in databases.", "source": "curated/short"}
+{"system": null, "user": "What is a virtual machine?", "source": "curated/short"}
+{"system": null, "user": "What is the difference between mutable and immutable objects?", "source": "curated/short"}
+{"system": null, "user": "Explain the open/closed principle.", "source": "curated/short"}
+{"system": null, "user": "What is a daemon process?", "source": "curated/short"}
+{"system": null, "user": "What is the difference between a process and a thread?", "source": "curated/short"}
+{"system": null, "user": "Explain what a bloom filter is.", "source": "curated/short"}
+{"system": null, "user": "What is dependency injection?", "source": "curated/short"}
+{"system": null, "user": "Define the Liskov substitution principle.", "source": "curated/short"}
+{"system": null, "user": "What is an event loop?", "source": "curated/short"}
+{"system": null, "user": "Explain what a trie data structure is.", "source": "curated/short"}
+{"system": null, "user": "What is a circuit breaker pattern?", "source": "curated/short"}
+{"system": null, "user": "Define the interface segregation principle.", "source": "curated/short"}
+{"system": null, "user": "What is a graph database?", "source": "curated/short"}
+{"system": null, "user": "Explain what back pressure means in streaming systems.", "source": "curated/short"}
+{"system": null, "user": "What is gRPC?", "source": "curated/short"}
+{"system": null, "user": "Define the dependency inversion principle.", "source": "curated/short"}
+{"system": null, "user": "What is a B-tree?", "source": "curated/short"}
+{"system": null, "user": "Explain what a service mesh is.", "source": "curated/short"}
+{"system": null, "user": "What is WebSocket?", "source": "curated/short"}
+{"system": null, "user": "What is the difference between horizontal and vertical scaling?", "source": "curated/short"}
+{"system": null, "user": "Explain what a saga pattern is.", "source": "curated/short"}
+{"system": null, "user": "What is an index in a database?", "source": "curated/short"}
+{"system": null, "user": "Define what a monorepo is.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between strong and weak typing?", "source": "curated/short"}
+{"system": null, "user": "Explain what a cursor is in database queries.", "source": "curated/short"}
+{"system": null, "user": "What is tail call optimization?", "source": "curated/short"}
+{"system": null, "user": "Define what a sidecar pattern is.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between GET and POST?", "source": "curated/short"}
+{"system": null, "user": "Explain what a materialized view is.", "source": "curated/short"}
+{"system": null, "user": "What is a state machine?", "source": "curated/short"}
+{"system": null, "user": "Define what a pipeline pattern is.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between abstract class and interface?", "source": "curated/short"}
+{"system": null, "user": "Explain what a write-ahead log is.", "source": "curated/short"}
+{"system": null, "user": "What is a coroutine?", "source": "curated/short"}
+{"system": null, "user": "Define what leader election means in distributed systems.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between a monolith and microservices?", "source": "curated/short"}
+{"system": null, "user": "Explain what a token bucket algorithm is.", "source": "curated/short"}
+{"system": null, "user": "What is a flyweight pattern?", "source": "curated/short"}
+{"system": null, "user": "Define what consensus means in distributed systems.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between optimistic and pessimistic locking?", "source": "curated/short"}
+{"system": null, "user": "Explain what a skip list is.", "source": "curated/short"}
+{"system": null, "user": "What is a bulkhead pattern?", "source": "curated/short"}
+{"system": null, "user": "Define what a quorum is in distributed systems.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between a queue and a deque?", "source": "curated/short"}
+{"system": null, "user": "Explain what a red-black tree is.", "source": "curated/short"}
+{"system": null, "user": "What is an API gateway?", "source": "curated/short"}
+{"system": null, "user": "Define what a vector clock is.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between a soft delete and a hard delete?", "source": "curated/short"}
+{"system": null, "user": "Explain what a consistent hash ring is.", "source": "curated/short"}
+{"system": null, "user": "What is a command pattern?", "source": "curated/short"}
+{"system": null, "user": "Define what a tombstone is in distributed databases.", "source": "curated/short"}
+{"system": null, "user": "What is the difference between a mutex and a spinlock?", "source": "curated/short"}
+{"system": null, "user": "Explain what anti-entropy means in distributed systems.", "source": "curated/short"}
+{"system": null, "user": "What is a strategy pattern?", "source": "curated/short"}
+{"system": null, "user": "Define what a gossip protocol is.", "source": "curated/short"}

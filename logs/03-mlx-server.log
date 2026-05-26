@@ -1,0 +1,441 @@
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Calling `python -m mlx_lm.server...` directly is deprecated. Use `mlx_lm.server...` or `python -m mlx_lm server ...` instead.
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 93902.33it/s]
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py:1468: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-05-26 08:50:30,657 - INFO - Starting httpd at 127.0.0.1 on port 8090...
+127.0.0.1 - - [26/May/2026 08:53:18] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 08:53:19,921 - INFO - Prompt processing progress: 46/47
+127.0.0.1 - - [26/May/2026 08:53:20] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 08:53:20,504 - INFO - Prompt processing progress: 16/17
+127.0.0.1 - - [26/May/2026 08:53:24] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 08:53:24,429 - INFO - Prompt processing progress: 5/6
+127.0.0.1 - - [26/May/2026 08:53:24] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 08:53:25] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 08:53:25] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 08:53:26] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 08:53:45] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 08:53:46,260 - INFO - Prompt processing progress: 18/19
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 49310)
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 683, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 360, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 1461, in <lambda>
+    lambda *args, **kwargs: handler_class(
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 867, in __init__
+    super().__init__(*args, **kwargs)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 747, in __init__
+    self.handle()
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/http/server.py", line 434, in handle
+    self.handle_one_request()
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/http/server.py", line 422, in handle_one_request
+    method()
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 960, in do_POST
+    self.handle_completion(request, stop_words)
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 1274, in handle_completion
+    self.wfile.write(f"data: {json.dumps(response)}\n\n".encode())
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 826, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+127.0.0.1 - - [26/May/2026 08:54:05] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 08:54:05,717 - INFO - Prompt processing progress: 9/10
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Calling `python -m mlx_lm.server...` directly is deprecated. Use `mlx_lm.server...` or `python -m mlx_lm server ...` instead.
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 76959.71it/s]
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py:1468: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-05-26 09:07:01,286 - INFO - Starting httpd at 127.0.0.1 on port 8090...
+127.0.0.1 - - [26/May/2026 09:08:00] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:08:00,787 - INFO - Prompt processing progress: 37/38
+127.0.0.1 - - [26/May/2026 09:10:30] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:10:31,400 - INFO - Prompt processing progress: 9/10
+127.0.0.1 - - [26/May/2026 09:19:40] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:19:40,979 - INFO - Prompt processing progress: 7/8
+127.0.0.1 - - [26/May/2026 09:19:41] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:19:41] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:19:41] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:19:42,480 - INFO - Prompt processing progress: 7/8
+2026-05-26 09:19:42,481 - INFO - Prompt processing progress: 7/8
+2026-05-26 09:19:42,481 - INFO - Prompt processing progress: 7/8
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Calling `python -m mlx_lm.server...` directly is deprecated. Use `mlx_lm.server...` or `python -m mlx_lm server ...` instead.
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 90851.35it/s]
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py:1468: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-05-26 09:20:43,332 - INFO - Starting httpd at 127.0.0.1 on port 8090...
+127.0.0.1 - - [26/May/2026 09:21:05] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:21:06,340 - INFO - Prompt processing progress: 35/36
+127.0.0.1 - - [26/May/2026 09:21:07] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:21:43] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:21:51,546 - INFO - Prompt processing progress: 2048/2422
+2026-05-26 09:21:53,059 - INFO - Prompt processing progress: 2421/2422
+127.0.0.1 - - [26/May/2026 09:21:55] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:22:04,241 - INFO - Prompt processing progress: 2048/2422
+2026-05-26 09:22:06,084 - INFO - Prompt processing progress: 2421/2422
+127.0.0.1 - - [26/May/2026 09:22:50] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:22:51,608 - INFO - Prompt processing progress: 11/12
+127.0.0.1 - - [26/May/2026 09:22:52] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:22:54] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:22:55] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:22:56] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:22:57] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:22:59] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:00] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:01] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:03] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:04] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:05] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:07] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:08] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:09] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:11] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:12] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:14] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:15] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:17] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:18] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:19] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:21] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:22] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:23] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:24] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:26] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:27] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:28] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:29] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:31] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:32] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:33] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:34] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:35] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:37] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:38] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:39] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:40] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:42] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:43] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:44] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:45] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:47] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:48] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:49] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:50] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:52] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:53] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:54] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:55] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:56] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:58] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:23:59] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:00] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:01] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:03] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:04] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:05] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:06] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:08] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:09] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:11] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:12] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:14] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:15] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:16] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:18] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:19] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:20] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:21] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:23] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:24] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:25] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:26] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:28] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:29] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:31] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:32] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:33] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:34] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:36] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:37] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:38] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:40] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:41] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:42] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:44] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:45] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:46] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:47] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:49] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:50] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:51] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:53] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:54] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:55] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:56] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:58] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:24:59] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:00] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:02] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:03] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:05] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:06] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:07] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:09] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:11] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:12] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:13] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:15] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:16] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:17] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:18] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:20] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:21] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:22] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:24] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:25] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:26] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:27] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:29] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:30] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:31] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:33] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:34] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:36] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:39] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:41] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:42] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:44] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:45] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:47] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:49] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:51] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:52] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:54] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:55] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:57] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:25:59] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:00] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:02] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:03] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:05] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:06] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:08] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:10] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:12] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:14] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:15] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:17] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:19] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:21] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:22] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:24] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:25] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:27] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:28] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:30] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:32] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:33] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:34] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:36] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:37] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:39] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:40] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:43] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:45] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:47] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:49] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:51] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:53] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:54] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:56] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:57] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:26:58] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:00] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:01] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:03] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:04] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:06] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:07] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:08] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:09] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:11] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:13] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:14] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:16] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:17] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:18] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:20] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:21] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:23] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:24] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:25] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:27] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:28] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:30] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:31] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:33] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:35] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:36] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:38] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:39] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:41] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:43] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:44] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:46] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:47] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:27:49] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:31:04] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:31:25,480 - INFO - Prompt processing progress: 10/11
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Calling `python -m mlx_lm.server...` directly is deprecated. Use `mlx_lm.server...` or `python -m mlx_lm server ...` instead.
+Fetching 11 files:   0%|          | 0/11 [00:00<?, ?it/s]Fetching 11 files: 100%|██████████| 11/11 [00:00<00:00, 117998.32it/s]
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py:1468: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-05-26 09:35:03,562 - INFO - Starting httpd at 127.0.0.1 on port 8090...
+127.0.0.1 - - [26/May/2026 09:35:50] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:35:52,187 - INFO - Prompt processing progress: 13/14
+127.0.0.1 - - [26/May/2026 09:35:53] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:35:54,032 - INFO - Prompt processing progress: 6/7
+----------------------------------------
+Exception occurred during processing of request from ('127.0.0.1', 56202)
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 683, in process_request_thread
+    self.finish_request(request, client_address)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 360, in finish_request
+    self.RequestHandlerClass(request, client_address, self)
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 1461, in <lambda>
+    lambda *args, **kwargs: handler_class(
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 867, in __init__
+    super().__init__(*args, **kwargs)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 747, in __init__
+    self.handle()
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/http/server.py", line 434, in handle
+    self.handle_one_request()
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/http/server.py", line 422, in handle_one_request
+    method()
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 960, in do_POST
+    self.handle_completion(request, stop_words)
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 1274, in handle_completion
+    self.wfile.write(f"data: {json.dumps(response)}\n\n".encode())
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 826, in write
+    self._sock.sendall(b)
+BrokenPipeError: [Errno 32] Broken pipe
+----------------------------------------
+127.0.0.1 - - [26/May/2026 09:36:27] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:36:28,414 - INFO - Prompt processing progress: 4/5
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Calling `python -m mlx_lm.server...` directly is deprecated. Use `mlx_lm.server...` or `python -m mlx_lm server ...` instead.
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 73156.47it/s]
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py:1468: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-05-26 09:43:52,059 - INFO - Starting httpd at 127.0.0.1 on port 8090...
+127.0.0.1 - - [26/May/2026 09:44:27] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:44:27,972 - INFO - Prompt processing progress: 36/37
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Calling `python -m mlx_lm.server...` directly is deprecated. Use `mlx_lm.server...` or `python -m mlx_lm server ...` instead.
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 89240.51it/s]
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py:1468: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-05-26 09:51:39,106 - INFO - Starting httpd at 127.0.0.1 on port 8090...
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Calling `python -m mlx_lm.server...` directly is deprecated. Use `mlx_lm.server...` or `python -m mlx_lm server ...` instead.
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 139810.13it/s]
+Traceback (most recent call last):
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 197, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/runpy.py", line 87, in _run_code
+    exec(code, run_globals)
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 1586, in <module>
+    main()
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 1578, in main
+    run(args.host, args.port, ModelProvider(args))
+  File "/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py", line 1459, in run
+    httpd = server_class(
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 452, in __init__
+    self.server_bind()
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/http/server.py", line 138, in server_bind
+    socketserver.TCPServer.server_bind(self)
+  File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/socketserver.py", line 466, in server_bind
+    self.socket.bind(self.server_address)
+OSError: [Errno 48] Address already in use
+127.0.0.1 - - [26/May/2026 09:51:59] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:52:07,865 - INFO - Prompt processing progress: 37/38
+127.0.0.1 - - [26/May/2026 09:52:35] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:52:36,478 - INFO - Prompt processing progress: 10/11
+127.0.0.1 - - [26/May/2026 09:53:00] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 09:53:00,886 - INFO - Prompt processing progress: 5/6
+127.0.0.1 - - [26/May/2026 09:53:05] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:53:11] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:53:16] "POST /v1/chat/completions HTTP/1.1" 200 -
+127.0.0.1 - - [26/May/2026 09:53:21] "POST /v1/chat/completions HTTP/1.1" 200 -
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Calling `python -m mlx_lm.server...` directly is deprecated. Use `mlx_lm.server...` or `python -m mlx_lm server ...` instead.
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 74898.29it/s]
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py:1468: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-05-26 09:59:12,498 - INFO - Starting httpd at 127.0.0.1 on port 8090...
+127.0.0.1 - - [26/May/2026 10:00:11] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 10:00:27,289 - INFO - Prompt processing progress: 2048/8000
+2026-05-26 10:00:35,916 - INFO - Prompt processing progress: 4096/8000
+2026-05-26 10:00:45,554 - INFO - Prompt processing progress: 6144/8000
+2026-05-26 10:00:56,431 - INFO - Prompt processing progress: 7999/8000
+127.0.0.1 - - [26/May/2026 10:00:59] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 10:01:13,101 - INFO - Prompt processing progress: 2048/8027
+2026-05-26 10:01:29,886 - INFO - Prompt processing progress: 4096/8027
+2026-05-26 10:01:48,068 - INFO - Prompt processing progress: 6144/8027
+2026-05-26 10:02:06,489 - INFO - Prompt processing progress: 8026/8027
+127.0.0.1 - - [26/May/2026 10:02:24] "POST /v1/chat/completions HTTP/1.1" 200 -
+libc++abi: terminating due to uncaught exception of type std::runtime_error: [METAL] Command buffer execution failed: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Calling `python -m mlx_lm.server...` directly is deprecated. Use `mlx_lm.server...` or `python -m mlx_lm server ...` instead.
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 105296.33it/s]
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/mlx_lm/server.py:1468: UserWarning: mlx_lm.server is not recommended for production as it only implements basic security checks.
+  warnings.warn(
+2026-05-26 11:41:23,334 - INFO - Starting httpd at 127.0.0.1 on port 8090...
+Python(30235) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+Python(30236) MallocStackLogging: can't turn off malloc stack logging because it was not enabled.
+127.0.0.1 - - [26/May/2026 11:42:11] "POST /v1/chat/completions HTTP/1.1" 200 -
+2026-05-26 11:42:28,400 - INFO - Prompt processing progress: 2048/32000
+2026-05-26 11:42:37,183 - INFO - Prompt processing progress: 4096/32000
+2026-05-26 11:42:46,917 - INFO - Prompt processing progress: 6144/32000
+2026-05-26 11:42:57,624 - INFO - Prompt processing progress: 8192/32000
+2026-05-26 11:43:09,336 - INFO - Prompt processing progress: 10240/32000
+2026-05-26 11:43:22,086 - INFO - Prompt processing progress: 12288/32000
+2026-05-26 11:43:36,606 - INFO - Prompt processing progress: 14336/32000
+2026-05-26 11:43:53,724 - INFO - Prompt processing progress: 16384/32000
+2026-05-26 11:44:12,118 - INFO - Prompt processing progress: 18432/32000
+2026-05-26 11:44:32,040 - INFO - Prompt processing progress: 20480/32000
+2026-05-26 11:44:53,585 - INFO - Prompt processing progress: 22528/32000
+2026-05-26 11:45:16,618 - INFO - Prompt processing progress: 24576/32000
+2026-05-26 11:45:40,912 - INFO - Prompt processing progress: 26624/32000
+libc++abi: terminating due to uncaught exception of type std::runtime_error: [METAL] Command buffer execution failed: Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)
+/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/multiprocessing/resource_tracker.py:216: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown
+  warnings.warn('resource_tracker: There appear to be %d '

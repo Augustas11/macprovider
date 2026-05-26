@@ -1,0 +1,7 @@
+runs.sqlite
+runs.sqlite-journal
+runs.sqlite-wal
+runs.sqlite-shm
+reports/
+cron.log
+.cache/

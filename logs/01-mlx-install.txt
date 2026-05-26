@@ -1,0 +1,10 @@
+Name: mlx-lm
+Version: 0.29.1
+Summary: LLMs with MLX and the Hugging Face Hub
+Home-page: https://github.com/ml-explore/mlx-lm
+Author: MLX Contributors
+Author-email: mlx@group.apple.com
+License: MIT
+Location: /Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages
+Requires: jinja2, mlx, numpy, protobuf, pyyaml, sentencepiece, transformers
+Required-by: 

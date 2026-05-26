@@ -1,0 +1,18 @@
+/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
+  warnings.warn(
+Loading tokenizer...
+Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 146312.93it/s]
+Tokenizer loaded.
+Built prompt for target=8000: tokenized length=8000
+Built prompt for target=16000: tokenized length=16000
+Built prompt for target=32000: tokenized length=32000
+
+Stopping early — failed at target=32000
+
+  target    actual_in     wall_s     tok_in    tok_out    tok/s_prefill     status
+------------------------------------------------------------------------------------------
+    8000         8000      47.06       8000         20            175.3         OK
+   16000        16000      76.49      16000         20            213.2         OK
+   32000            ?      57.22          ?          ?                ?       FAIL
+
+Summary written to /Users/augstar/macprovider-poc/results/stress/7.5.3-longcontext-v2-summary.json
