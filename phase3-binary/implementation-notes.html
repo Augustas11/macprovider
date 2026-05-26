@@ -6,6 +6,7 @@ body { font: 14px/1.45 -apple-system, system-ui, sans-serif;
 h1 { font-size: 1.4em; }
 h2 { font-size: 1.1em; border-bottom: 1px solid #ccc;
      padding-bottom: 0.2em; margin-top: 2em; }
+h3 { font-size: 1em; margin-top: 1.5em; }
 .meta { color: #666; font-size: 0.9em; }
 .entry { border-left: 3px solid #ddd; padding-left: 1em;
          margin: 1em 0; }
@@ -15,6 +16,69 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 <h1>SPEC-001 — phase3-binary — implementation notes</h1>
 <p class=meta>Status: <strong>not started</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001</a></p>
+
+<section id="v1-1-revision">
+  <h2>SPEC-001 v1.1 revision (2026-05-27)</h2>
+  <p class=meta>Applied audit findings from
+  <a href="../specs/SPEC-001-audit.md">SPEC-001-audit.md</a>.</p>
+
+  <h3>Resolved operator decisions</h3>
+  <ul>
+    <li><strong>Provider auth:</strong> deferred to SPEC-002.</li>
+    <li><strong>HTTP 500 during adversarial:</strong> disallowed; only
+    200/400/413/429 acceptable.</li>
+    <li><strong>Tier 2 encrypted prompts:</strong> hard architecture
+    constraint; decrypt before token pre-flight.</li>
+  </ul>
+
+  <h3>Reference hygiene update</h3>
+  <p>DARKBLOOM LICENSE AGREEMENT verified as custom restrictive license,
+  not OSI-approved open source. Switched to strict clean-room for
+  d-inference: no source files referenced, only public papers/blog posts.</p>
+
+  <h3>Findings addressed</h3>
+  <p>2 CRITICAL, 17 MAJOR, 7 MINOR addressed. See audit finding IDs below.</p>
+  <ul>
+    <li><strong>D1 (CRITICAL):</strong> License recording — replaced Section 7.2 with strict clean-room policy, SPDX NOASSERTION.</li>
+    <li><strong>E1 (CRITICAL):</strong> Full request schema — Section 6.2 rewritten with per-field types, message validation, tool-call validation, validation order.</li>
+    <li><strong>C1 (MAJOR):</strong> Tier 2 decrypt ordering — architecture diagram restructured, FR-8 split into two stages.</li>
+    <li><strong>A1 (MAJOR):</strong> D1 mapping — explicit "deferred to SPEC-002" for coordinator backoff logic.</li>
+    <li><strong>A2 (MAJOR):</strong> D4 mapping — buyer-facing routing deferred to SPEC-002.</li>
+    <li><strong>A4 (MAJOR):</strong> malformed_tool_call — Section 6.2 now validates tool shapes, rejects with 400.</li>
+    <li><strong>A5 (MAJOR):</strong> AC-2 tightened — HTTP 500 disallowed during adversarial.</li>
+    <li><strong>B2 (MAJOR):</strong> Heartbeat schema — all FR-17 fields now in heartbeat and hello.</li>
+    <li><strong>B3 (MAJOR):</strong> state_update message type added to Section 6.5.</li>
+    <li><strong>B4 (MAJOR):</strong> drain_status P→C message added to Section 6.5.</li>
+    <li><strong>B5/G2 (MAJOR):</strong> coordinator_token removed; auth deferred to SPEC-002.</li>
+    <li><strong>B6 (MAJOR):</strong> AC-6 through AC-10 added covering FR-12, FR-16, FR-18, FR-19, FR-20.</li>
+    <li><strong>E2 (MAJOR):</strong> Global 404/405, malformed JSON, streaming error, health 503, coordinator nak added.</li>
+    <li><strong>E3 (MAJOR):</strong> Preflight reason enum with 6 values and per-reason fields.</li>
+    <li><strong>F1 (MAJOR):</strong> "Run by:" commands added to every AC.</li>
+    <li><strong>H1 (MAJOR):</strong> Dependency versions pinned in Section 7.1.</li>
+    <li><strong>H2 (MAJOR):</strong> Resolved by E1 + B2-B4 + F1 (clarifications eliminated).</li>
+    <li><strong>I1 (MAJOR):</strong> Coordinator-internals language softened to "MAY use".</li>
+    <li><strong>F2 (MINOR):</strong> Global pass rule added to Section 9 introduction.</li>
+    <li><strong>A3 (MINOR):</strong> D5 marked as "process-only" in coverage matrix.</li>
+    <li><strong>B1 (MINOR):</strong> SSE transport wording corrected (chunked transfer is normal for SSE).</li>
+    <li><strong>C2 (MINOR):</strong> "Secure enclave key derivation" removed from Tier 2 scope list.</li>
+    <li><strong>G1 (MINOR):</strong> Open questions trimmed from 9 to 4; rest converted to defaults.</li>
+    <li><strong>D2 (MINOR):</strong> Appendix A updated; d-inference refs removed per clean-room.</li>
+    <li><strong>I2 (MINOR):</strong> WebSocket auth fully deferred to SPEC-002.</li>
+  </ul>
+
+  <h3>Knowingly deferred minor findings</h3>
+  <ul>
+    <li><strong>A6 (MINOR):</strong> Section 11 still describes build sequence with deliverables.
+    Removed the literal <code>swift build</code> command but kept step descriptions with
+    test deliverables. Risk of rephrasing introducing new ambiguity outweighs strict
+    prompt compliance on this point.</li>
+    <li><strong>C3 (MINOR):</strong> <code>content_filter</code> finish_reason removed from Tier 1
+    response contract (now only <code>stop</code> and <code>length</code>). The <code>response_format</code>
+    field accepts <code>json_object</code> but rejects unknown values with 400, keeping the
+    wire contract clean without a Tier 2 reservation in Tier 1 responses.</li>
+  </ul>
+</section>
+
 <section><h2>Design decisions</h2>
 <p class=meta>Choices made where the spec was ambiguous.</p>
 </section>
@@ -29,6 +93,6 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </section>
 <section><h2>References consulted</h2>
 <p class=meta>External resources read during implementation, with
-what was taken. Especially d-inference paths consulted.</p>
+what was taken. d-inference is strictly prohibited per Section 7.2.</p>
 </section>
 </body></html>

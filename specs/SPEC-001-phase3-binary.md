@@ -1,5 +1,8 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
+**Version:** 1.1 (2026-05-27)
+**Revision:** Addresses audit findings from `specs/SPEC-001-audit.md`.
+
 ---
 
 ## 0. Operator-paste invocation block
@@ -46,7 +49,7 @@ behind the Phase 4 coordinator.
 - SSE streaming with clean OpenAI format (no keepalive comments)
 - Stop-token defensive stripping derived from model's `tokenizer_config.json`
 - Streaming usage chunk synthesis (mlx_lm.server omits this)
-- Context length pre-flight: tokenize prompt, reject with HTTP 413 if exceeds safe capacity
+- Two-stage context length pre-flight (envelope size + token count)
 - Per-RAM-tier capacity computation at startup (8 GB, 16 GB, 32 GB+ tiers)
 - Bounded concurrent request queue with configurable max concurrency
 - Mid-stream client disconnect detection and slot release within 5 seconds
@@ -54,7 +57,7 @@ behind the Phase 4 coordinator.
 - Outbound coordinator WebSocket client (connects to configurable URL)
 - Coordinator handshake with tier, model, capacity, and throughput metadata
 - Capacity heartbeat at configurable interval
-- Health state reporting over WebSocket (awake, degraded, unreachable distinction)
+- Health state reporting over WebSocket (ready, busy, degraded, draining, unavailable)
 - Post-wake warm-up inference before accepting buyer traffic
 - Startup self-test: load model, run one inference, verify output
 - Structured logging to stdout (JSON lines format)
@@ -68,7 +71,6 @@ behind the Phase 4 coordinator.
 - `ResponseSeal` middleware: output signing or encryption for buyer verification
 - `AttestationProvider` coordinator component: hardware attestation proof on handshake
 - Coordinator tier capability upgrade (`tier: 1` to `tier: 2`)
-- Secure enclave key derivation for identity binding
 
 Each of these is a named Swift protocol with a Tier 1 no-op (passthrough)
 implementation. The request handler chain has explicit insertion points
@@ -86,6 +88,7 @@ for each. See Section 3 for hook-point diagram.
 - Contributor onboarding flow beyond "run this binary"
 - Antseed seller plugin integration (coordinator's responsibility)
 - Automatic model downloading (contributor pre-downloads via `huggingface-cli`)
+- Provider authentication to coordinator (deferred to SPEC-002)
 
 ---
 
@@ -111,17 +114,23 @@ for each. See Section 3 for hook-point diagram.
 │  │       │                                         │            │    │
 │  │       ▼                                         │            │    │
 │  │  ┌─────────────────┐                            │            │    │
-│  │  │ Request Router   │   /v1/models              │            │    │
-│  │  │ /v1/models       │──→ static JSON            │            │    │
-│  │  │ /v1/chat/complet │                            │            │    │
-│  │  │ /v1/health       │──→ health JSON             │            │    │
+│  │  │ Request Router   │   /v1/models → static JSON│            │    │
+│  │  │                  │   /v1/health → health JSON │            │    │
+│  │  │   404 for unknown paths                      │            │    │
+│  │  │   405 for wrong methods                      │            │    │
 │  │  └────────┬────────┘                            │            │    │
 │  │           │ /v1/chat/completions                  │            │    │
 │  │           ▼                                      │            │    │
 │  │  ┌─────────────────┐                            │            │    │
-│  │  │ Context          │  Tokenize prompt,          │            │    │
-│  │  │ Pre-flight       │  check against RAM cap.    │            │    │
-│  │  │                  │  Reject → HTTP 413         │            │    │
+│  │  │ Request          │  JSON parse, schema check,  │            │    │
+│  │  │ Validator        │  tool validation, model     │            │    │
+│  │  │                  │  match. Reject → 400/404    │            │    │
+│  │  └────────┬────────┘                            │            │    │
+│  │           ▼                                      │            │    │
+│  │  ┌─────────────────┐                            │            │    │
+│  │  │ Pre-flight       │  Stage 1: envelope size     │            │    │
+│  │  │ Stage 1          │  check (raw bytes).         │            │    │
+│  │  │                  │  Reject → HTTP 413          │            │    │
 │  │  └────────┬────────┘                            │            │    │
 │  │           ▼                                      │            │    │
 │  │  ┌─────────────────┐  ← TIER 2 HOOK POINT      │            │    │
@@ -130,8 +139,14 @@ for each. See Section 3 for hook-point diagram.
 │  │  └────────┬────────┘                            │            │    │
 │  │           ▼                                      │            │    │
 │  │  ┌─────────────────┐  ← TIER 2 HOOK POINT      │            │    │
-│  │  │ [InputDecryptor] │  Tier 1: passthrough       │            │    │
+│  │  │ [InputDecryptor] │  Tier 1: SKIP (no-op)      │            │    │
 │  │  │                  │  Tier 2: decrypt prompt     │            │    │
+│  │  └────────┬────────┘                            │            │    │
+│  │           ▼                                      │            │    │
+│  │  ┌─────────────────┐                            │            │    │
+│  │  │ Pre-flight       │  Stage 2: tokenize prompt,  │            │    │
+│  │  │ Stage 2          │  check token count against  │            │    │
+│  │  │                  │  RAM cap. Reject → 413     │            │    │
 │  │  └────────┬────────┘                            │            │    │
 │  │           ▼                                      │            │    │
 │  │  ┌─────────────────┐                            │            │    │
@@ -143,9 +158,9 @@ for each. See Section 3 for hook-point diagram.
 │  │  │ Inference Engine                                │          │    │
 │  │  │ (mlx-swift-lm generate / stream)               │          │    │
 │  │  │ Tracks prompt_tokens + completion_tokens        │          │    │
-│  │  └────────────────────────────────┬───────────────┘          │    │
-│  │                                    │                          │    │
-│  │                                    ▼                          │    │
+│  │  └────────────────────────────┬───────────────────┘          │    │
+│  │                                │                              │    │
+│  │                                ▼                              │    │
 │  │  ┌─────────────────┐  ← TIER 2 HOOK POINT                   │    │
 │  │  │ [ResponseSeal]   │  Tier 1: passthrough                    │    │
 │  │  │                  │  Tier 2: sign/encrypt output            │    │
@@ -153,10 +168,8 @@ for each. See Section 3 for hook-point diagram.
 │  │           ▼                                                   │    │
 │  │  ┌──────────────────────────────────────────────────┐        │    │
 │  │  │ Response Formatter                                │        │    │
-│  │  │ • Stop-token stripping                            │        │    │
-│  │  │ • SSE framing (data: prefix, [DONE])              │        │    │
-│  │  │ • Usage chunk synthesis (streaming)               │        │    │
-│  │  │ • Non-streaming JSON envelope                     │        │    │
+│  │  │  Stop-token stripping, SSE framing,               │        │    │
+│  │  │  usage chunk synthesis, JSON envelope              │        │    │
 │  │  └──────────────────────────────────────────────────┘        │    │
 │  └──────────────────────────────────────────────────────────────┘    │
 │                                                                     │
@@ -174,7 +187,9 @@ for each. See Section 3 for hook-point diagram.
 │  │  └─────────────────────────┘                                │    │
 │  │                                                              │    │
 │  │  ┌──────────────────────────────────────────────────┐       │    │
-│  │  │ Inbound commands: pre-flight, drain, warm-up     │       │    │
+│  │  │ Inbound: preflight, drain, warm_up               │       │    │
+│  │  │ Outbound: hello, heartbeat, state_update,         │       │    │
+│  │  │           drain_status, preflight_ack, nak        │       │    │
 │  │  └──────────────────────────────────────────────────┘       │    │
 │  └──────────────────────────────────────────────────────────────┘    │
 │                                                                     │
@@ -187,13 +202,30 @@ for each. See Section 3 for hook-point diagram.
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
+### Tier 2 request chain ordering (hard architecture constraint)
+
+The request chain is Tier-aware. The critical ordering difference:
+
+**Tier 1 path:** Validate → Stage 1 pre-flight → [TrustGate: pass] →
+Stage 2 pre-flight (tokenize) → Queue → Inference → [ResponseSeal: pass] → Format
+
+**Tier 2 path:** Validate → Stage 1 pre-flight (envelope bytes) →
+[TrustGate: attest] → [InputDecryptor: decrypt] →
+Stage 2 pre-flight (tokenize plaintext) → Queue → Inference →
+[ResponseSeal: sign/encrypt] → Format
+
+`InputDecryptor` MUST run before Stage 2 pre-flight in Tier 2, because
+encrypted prompts cannot be tokenized. Stage 1 (envelope byte-size
+check) runs before decryption in both tiers as a fast-reject for
+obviously oversized payloads.
+
 ### Tier 2 hook points summary
 
 | Hook point | Location | Tier 1 behavior | Tier 2 behavior |
 |---|---|---|---|
-| `TrustGate` | Request chain, after pre-flight | Passthrough (all requests accepted) | Validate buyer attestation token |
-| `InputDecryptor` | Request chain, before inference | Passthrough (plaintext prompts) | Decrypt buyer-encrypted prompt |
-| `ResponseSeal` | Response chain, after inference | Passthrough (plaintext output) | Sign or encrypt output |
+| `TrustGate` | After Stage 1 pre-flight | Passthrough (all requests accepted) | Validate buyer attestation token |
+| `InputDecryptor` | Before Stage 2 pre-flight | Skip entirely | Decrypt buyer-encrypted prompt |
+| `ResponseSeal` | After inference, before formatter | Passthrough (plaintext output) | Sign or encrypt output |
 | `AttestationProvider` | Coordinator handshake | Omitted from handshake payload | Provides hardware attestation blob |
 
 Each hook point is a Swift protocol. Tier 1 ships with a single conforming
@@ -218,6 +250,7 @@ endpoint returns HTTP 503.
 accepts an OpenAI-format chat completion request and returns a single
 JSON response with the full completion. The response includes
 `usage.prompt_tokens` and `usage.completion_tokens` with accurate counts.
+Full request schema and validation rules are in Section 6.2.
 
 **FR-3. Chat completions — streaming.**
 `POST /v1/chat/completions` with `stream: true` returns an SSE stream
@@ -228,14 +261,16 @@ The stream terminates with `data: [DONE]`.
 Every SSE line in a streaming response uses the `data: ` prefix (with
 exactly one space). No blank `data:` lines between chunks. Each
 `data: {...}` payload is valid JSON. The final line is `data: [DONE]`.
-Content-Type header is `text/event-stream; charset=utf-8`. Connection
-is not chunked-transfer but true SSE.
+Content-Type header is `text/event-stream; charset=utf-8`. The response
+uses HTTP/1.1 chunked transfer encoding (which is the normal transport
+for SSE when Content-Length is unknown). The binary produces valid SSE
+event framing; transport encoding is handled by Swift NIO.
 
 **FR-5. No SSE keepalive comments.**
 The binary never emits SSE comment lines (lines starting with `:`).
 Phase 1 found `mlx_lm.server` emits `: keepalive N/M` lines that break
-strict SSE parsers. This quirk is eliminated — the binary controls the
-SSE output directly.
+strict SSE parsers. The binary controls SSE output directly and does
+not proxy `mlx_lm.server` — it generates SSE from its own inference.
 
 ### Response quality
 
@@ -270,15 +305,25 @@ the OpenAI convention adopted by most proxy-compatible clients.
 
 ### Safety and capacity
 
-**FR-8. Context length pre-flight.**
-Before submitting a request to the inference engine, the binary tokenizes
-the full prompt (system + messages) using the loaded model's tokenizer
-and computes the expected token count. If the count exceeds the safe
-context capacity for the current hardware tier (see FR-9), the request
-is rejected with HTTP 413 and a JSON error body:
+**FR-8. Two-stage context length pre-flight.**
+Pre-flight is split into two stages to support Tier 2 encrypted prompts
+without rewriting the chain:
+
+**Stage 1 — Envelope size check (both Tier 1 and Tier 2).**
+Before any decryption, check the raw HTTP request body size in bytes.
+If the body exceeds a configurable maximum (default: 10 MB), reject
+with HTTP 413 immediately. This is a fast-reject for obviously oversized
+payloads and does not require tokenization.
+
+**Stage 2 — Token-count pre-flight (after decrypt in Tier 2; immediately in Tier 1).**
+Tokenize the full plaintext prompt (system + messages) using the loaded
+model's tokenizer and compute the expected token count. If the count
+exceeds the safe context capacity for the current hardware tier (FR-9),
+reject with HTTP 413 and a JSON error body:
 ```json
 {"error":{"message":"Prompt length (28400 tokens) exceeds this provider's safe capacity (20000 tokens).","type":"context_length_exceeded","param":"messages","code":"context_length_exceeded"}}
 ```
+
 This prevents the Metal GPU OOM crash observed in Phase 1 at ~26K tokens
 on M1 8GB. The binary never forwards a prompt to the inference engine
 if it might exceed capacity.
@@ -315,13 +360,14 @@ limit for the hardware tier (FR-9). Requests beyond the limit are
 queued. If the queue exceeds a configurable depth (default: 2x
 concurrency limit), new requests are rejected with HTTP 429 and a
 `Retry-After` header estimating when a slot may free up. The queue
-is FIFO. Queued requests that are cancelled by the client before
-reaching the inference engine are silently removed from the queue.
+is FIFO with no time-based eviction in v1. Queued requests that are
+cancelled by the client before reaching the inference engine are
+silently removed from the queue.
 
 **FR-12. Graceful SIGTERM drain.**
 On receiving SIGTERM, the binary:
 1. Stops accepting new HTTP connections.
-2. Sends a `drain` status to the coordinator (if connected).
+2. Sends a `drain_status` message to the coordinator (if connected).
 3. Waits for all in-flight requests to complete, up to a configurable
    timeout (default: 30 seconds).
 4. Force-cancels any remaining requests after the timeout.
@@ -342,30 +388,31 @@ coordinator URL is configured, the binary runs in standalone mode
 drops, the binary reconnects with exponential backoff (1s, 2s, 4s, ...
 capped at 60s). The coordinator is a Phase 4 dependency; the binary
 ships with the client protocol fully implemented, tested against a mock.
+Provider authentication to the coordinator is out of scope for this
+binary (deferred to SPEC-002).
 
 **FR-14. Tier capability announcement.**
 On successful WebSocket handshake, the binary sends a `hello` message
 that includes `tier: 1`. This field is the Tier 2 upgrade vector — a
 future binary version sends `tier: 2` with an attached attestation blob
-from the `AttestationProvider` hook. The coordinator uses this to
-advertise tier-aware routing to buyers.
+from the `AttestationProvider` hook.
 
 **FR-15. Health state reporting.**
 The binary reports its health state to the coordinator via the WebSocket.
 States, informed by Phase 2 decision log entry D1 (502 vs 530 routing):
 
-| State | Meaning | Coordinator action |
-|---|---|---|
-| `ready` | Accepting requests, model loaded | Route traffic normally |
-| `busy` | All request slots occupied | Hold traffic, retry in ~5s |
-| `degraded` | Post-wake warm-up in progress (see FR-16) | Hold traffic briefly |
-| `draining` | SIGTERM received, finishing in-flight | Stop routing, wait for close |
-| `unavailable` | Model load failed or fatal error | Remove from pool |
+| State | Meaning |
+|---|---|
+| `ready` | Accepting requests, model loaded |
+| `busy` | All request slots occupied |
+| `degraded` | Post-wake warm-up in progress (see FR-16) |
+| `draining` | SIGTERM received, finishing in-flight |
+| `unavailable` | Model load failed or fatal error |
 
-State transitions are sent as WebSocket messages whenever the state
-changes. The coordinator should interpret a WebSocket close without a
-prior `draining` message as an unclean disconnect (the 530-equivalent
-from D1) and remove the provider from the pool until reconnection.
+State transitions are sent as `state_update` WebSocket messages
+whenever the state changes (see Section 6.5). A WebSocket close
+without a prior `draining` message indicates an unclean disconnect
+(the 530-equivalent from D1).
 
 **FR-16. Post-wake warm-up hook.**
 Phase 2 decision log entry D2 found a -12% throughput dip on the first
@@ -374,8 +421,7 @@ request after a Mac wakes from sleep. The binary detects wake events
 jumped forward significantly since last activity) and runs a synthetic
 warm-up inference (a short fixed prompt, result discarded) before
 transitioning from `degraded` to `ready`. During warm-up, the binary
-reports `degraded` state to the coordinator, which should not route
-buyer traffic until `ready` resumes.
+reports `degraded` state to the coordinator.
 
 The coordinator can also send an explicit `warm_up` command over the
 WebSocket to trigger this behavior.
@@ -394,9 +440,9 @@ must include:
 - `throughput_tps_estimate`: measured tok/s from the startup self-test
 - `ram_gb`: total system RAM
 
-The coordinator cannot assume bigger Mac = faster. It must route by
-`throughput_tps_estimate` and `max_context_tokens` to match buyer
-requests optimally.
+The coordinator MAY use these fields to route by actual measured
+performance rather than assumed hardware capability. The binary's
+responsibility ends at sending accurate values.
 
 ### Operations
 
@@ -407,19 +453,22 @@ requests in-flight, requests queued, total errors, memory usage (RSS),
 current health state (from FR-15), and the per-tier capacity values.
 This endpoint is unauthenticated and intended for local diagnostics
 (the contributor checking their own binary). It is not exposed through
-the coordinator.
+the coordinator. Returns 200 when healthy, 503 when degraded or
+unavailable (same JSON body shape, different `status` value).
 
 **FR-19. Configuration layering.**
 Configuration is loaded in this precedence order (highest wins):
 1. CLI flags (`--port`, `--model`, `--coordinator`, `--config`, etc.)
 2. Environment variables (`MACPROVIDER_PORT`, `MACPROVIDER_MODEL`, etc.)
-3. Config file (YAML, default path: `~/.macprovider/config.yaml`)
+3. Config file (YAML, default path: `~/.config/macprovider/config.yaml`,
+   override with `--config` or `MACPROVIDER_CONFIG`)
 4. Built-in defaults
 
 The config file schema includes at minimum: `port`, `model` (HuggingFace
 model path), `coordinator_url`, `log_format` (`json` or `text`),
+`log_file` (optional path; if set, logs are also written to this file),
 `max_context_override`, `max_concurrency_override`, `drain_timeout_s`,
-`warmup_enabled` (bool).
+`warmup_enabled` (bool), `max_request_body_bytes` (Stage 1 pre-flight limit).
 
 **FR-20. Startup self-test.**
 On launch, after loading the model, the binary runs a single short
@@ -458,21 +507,21 @@ or NIO event loop resources.
 **NFR-4. Startup robustness.**
 If the model path is invalid, the model files are corrupt, or the model
 requires more memory than available, the binary exits with code 1 and
-a clear diagnostic message. It does not hang, segfault, or leave
-orphaned Metal processes. The diagnostic message includes: what failed,
-the model path attempted, available memory, and a suggested action.
+a clear diagnostic message to stderr. It does not hang, segfault, or
+leave orphaned Metal processes. The diagnostic message includes: what
+failed, the model path attempted, available memory, and a suggested
+action. No partial server state is left running.
 
 **NFR-5. Build system.**
 Swift Package Manager only. No Xcode project file required (though one
-may be generated for IDE convenience). No Xcode-only dependencies. The
-binary builds with `swift build -c release` on any Mac with Xcode
-command-line tools and Swift 5.9+.
+may be generated for IDE convenience). No Xcode-only dependencies.
+The binary builds on any Mac with Xcode command-line tools and Swift 5.9+.
 
 **NFR-6. Code signing.**
 The release binary is signed with a Developer ID certificate for macOS
 Gatekeeper approval. First version is not notarized (notarization
 requires an Apple Developer Program subscription and adds review
-latency). Contributors may need to right-click → Open on first launch,
+latency). Contributors may need to right-click -> Open on first launch,
 or the operator provides a `xattr -d com.apple.quarantine` instruction.
 
 **NFR-7. Logging.**
@@ -482,7 +531,8 @@ and structured fields (request_id, model, latency_ms, etc.). A `text`
 format option is available for human readability during development.
 Log level is configurable via `--log-level` (default: `info`). The
 binary never logs prompt content or response content at `info` level
-(privacy default). `debug` level may log truncated previews.
+(privacy default). `debug` level may log truncated previews. If
+`log_file` is set in config, logs are also appended to that file.
 
 **NFR-8. No network calls on startup except coordinator.**
 The binary does not phone home, check for updates, or make any outbound
@@ -494,6 +544,34 @@ model repos include `tokenizer_config.json`).
 ---
 
 ## 6. Interface contracts
+
+### 6.0. Global HTTP behavior
+
+**Unknown paths:** Any request to a path not defined below returns
+HTTP 404:
+```json
+{"error":{"message":"Not found","type":"invalid_request_error","code":"path_not_found"}}
+```
+
+**Wrong method:** A request with an unsupported HTTP method returns
+HTTP 405 with an `Allow` header listing the supported methods.
+
+**Malformed JSON body:** If the request body of a POST is not valid
+JSON, return HTTP 400:
+```json
+{"error":{"message":"Invalid JSON in request body","type":"invalid_request_error","code":"invalid_json"}}
+```
+
+**Streaming errors after headers sent:** If an error occurs after the
+SSE response headers have been sent (e.g., inference engine failure
+mid-stream), emit a final SSE event with the error, then `[DONE]`:
+```
+data: {"error":{"message":"Inference engine error","type":"server_error","code":"internal_error"}}
+
+data: [DONE]
+
+```
+Do not change the HTTP status code mid-stream.
 
 ### 6.1. GET /v1/models
 
@@ -529,32 +607,89 @@ always `"macprovider"`.
 }
 ```
 
-### 6.2. POST /v1/chat/completions (non-streaming)
+### 6.2. POST /v1/chat/completions
 
-**Request:**
+#### Request schema
+
+**Required fields:**
+
+| Field | Type | Constraint |
+|---|---|---|
+| `model` | string | Must match the loaded model's id. Mismatch returns 404. |
+| `messages` | array | Non-empty array of message objects. |
+
+**Optional fields:**
+
+| Field | Type | Default | Constraint |
+|---|---|---|---|
+| `max_tokens` | int | Remaining context capacity | Must be > 0 |
+| `temperature` | float | 1.0 | 0.0 to 2.0 |
+| `top_p` | float | 1.0 | 0.0 to 1.0 |
+| `n` | int | 1 | MUST be 1. Values > 1 rejected with 400 (single-tenant). |
+| `stream` | bool | false | |
+| `stream_options` | object | null | `{include_usage: bool}`. See FR-7. |
+| `stop` | string or array | null | Max 4 stop sequences. |
+| `presence_penalty` | float | 0.0 | -2.0 to 2.0 |
+| `frequency_penalty` | float | 0.0 | -2.0 to 2.0 |
+| `seed` | int | null | Passed to MLX for deterministic decoding if supported. |
+| `user` | string | null | Logged at DEBUG level for diagnostics only. |
+| `response_format` | object | `{type:"text"}` | `type` is `"text"` or `"json_object"`. `"json_object"` engages MLX structured-decoding hint if available. Any other value rejected with 400. |
+| `tools` | array | null | Parsed and validated syntactically (see below). |
+| `tool_choice` | string or object | null | Parsed, not acted upon in Tier 1. |
+
+Unknown top-level fields are silently ignored (forward-compatible) and
+logged at DEBUG level.
+
+#### Per-message validation
+
+Each entry in `messages` must satisfy:
+
+| Role | Required fields | Rules |
+|---|---|---|
+| `"system"` | `content` (string) | Must be non-empty string. |
+| `"user"` | `content` (string) | Must be non-empty string. No multimodal content arrays in Tier 1. |
+| `"assistant"` | `content` (string) or `tool_calls` (array) | At least one must be present and non-null. `content` may be null if `tool_calls` is present. Both null/absent -> 400. |
+| `"tool"` | `tool_call_id` (string), `content` (string) | Both required. |
+
+Any other `role` value is rejected with 400.
+
+#### Tool-call validation
+
+**`tools` array** (top-level request field): Each tool object must have
+`type: "function"` and a `function` object with `name` (string) and
+`parameters` (valid JSON Schema object). If any tool is malformed,
+reject with 400:
 ```json
-{
-  "model": "mlx-community/Qwen2.5-7B-Instruct-4bit",
-  "messages": [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "Hello"}
-  ],
-  "max_tokens": 200,
-  "temperature": 0.7,
-  "top_p": 0.9,
-  "stream": false,
-  "stop": ["STOP"]
-}
+{"error":{"message":"Invalid tools[0]: missing function.name","type":"invalid_request_error","code":"invalid_tools"}}
 ```
 
-Required fields: `messages` (array of `{role, content}` objects).
-Optional fields: `model` (ignored — uses loaded model), `max_tokens`
-(default: 512), `temperature` (default: 1.0), `top_p` (default: 1.0),
-`stream` (default: false), `stop` (array of strings, optional).
-`tool_calls`, `tools`, `response_format`, and other OpenAI fields are
-accepted and silently ignored in Tier 1 (forward-compatible).
+**`tool_calls` in assistant messages** (message history): Each entry
+must have `id` (string), `type: "function"`, and `function` with `name`
+(string) and `arguments` (string containing valid JSON). If `arguments`
+is not valid JSON, reject with 400.
 
-**Response (200):**
+The binary validates tool shapes syntactically but does not execute
+tool calls in Tier 1.
+
+#### Validation order
+
+The request handler processes validation in this sequence. The first
+failure short-circuits:
+
+| Step | Check | Failure response |
+|---|---|---|
+| 1 | JSON parse | 400 `invalid_json` |
+| 2 | Required fields present (`messages` non-empty) | 400 `invalid_request` |
+| 3 | Field types and ranges (temperature, top_p, n, etc.) | 400 `invalid_request` |
+| 4 | Per-message role and content validation | 400 `invalid_request` |
+| 5 | Tool/tool_call shape validation (if present) | 400 `invalid_tools` |
+| 6 | Model match (`model` field vs loaded model) | 404 `model_not_found` |
+| 7 | Stage 1 pre-flight (envelope bytes) | 413 `context_length_exceeded` |
+| 8 | Stage 2 pre-flight (token count) | 413 `context_length_exceeded` |
+| 9 | Queue admission | 429 `rate_limit_exceeded` |
+
+#### Non-streaming response (200)
+
 ```json
 {
   "id": "chatcmpl-abc123",
@@ -580,23 +715,28 @@ accepted and silently ignored in Tier 1 (forward-compatible).
 ```
 
 `id` is a unique identifier per request (format: `chatcmpl-{uuid-hex}`).
-`finish_reason` is `"stop"` (natural end or stop token hit), `"length"`
-(max_tokens reached), or `"content_filter"` (reserved for Tier 2).
+`finish_reason` is `"stop"` (natural end or stop token hit) or `"length"`
+(max_tokens reached).
 
-**Error responses:**
+#### Error responses
 
 | Status | Condition | Error code |
 |---|---|---|
-| 400 | Missing or invalid `messages` | `invalid_request` |
+| 400 | Missing/invalid fields, malformed tools, n>1 | `invalid_request` or `invalid_tools` |
+| 404 | `model` field doesn't match loaded model | `model_not_found` |
 | 413 | Prompt exceeds context capacity (FR-8) | `context_length_exceeded` |
 | 429 | Request queue full (FR-11) | `rate_limit_exceeded` |
-| 500 | Inference engine error | `internal_error` |
 | 503 | Model not loaded or draining | `model_not_loaded` |
 
 All error responses use the OpenAI error envelope:
 ```json
-{"error": {"message": "...", "type": "...", "param": null, "code": "..."}}
+{"error":{"message":"...","type":"...","param":null,"code":"..."}}
 ```
+
+Note: HTTP 500 is not an expected response. Internal inference errors
+are caught and returned as structured errors (400 for input issues,
+503 for model issues). If a 500 escapes, it indicates a bug in the
+binary. See AC-2.
 
 ### 6.3. POST /v1/chat/completions (streaming)
 
@@ -604,15 +744,15 @@ All error responses use the OpenAI error envelope:
 
 **Response:** `Content-Type: text/event-stream; charset=utf-8`
 
-Each SSE event:
-```
-data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1716768000,"model":"mlx-community/Qwen2.5-7B-Instruct-4bit","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
-
-```
-
 First chunk includes `delta.role`:
 ```
 data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1716768000,"model":"mlx-community/Qwen2.5-7B-Instruct-4bit","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+```
+
+Content chunks:
+```
+data: {"id":"chatcmpl-abc123","object":"chat.completion.chunk","created":1716768000,"model":"mlx-community/Qwen2.5-7B-Instruct-4bit","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}
 
 ```
 
@@ -639,7 +779,7 @@ No blank `data:` lines between events.
 
 ### 6.4. GET /v1/health
 
-**Response (200):**
+**Response (200 when healthy, 503 when degraded/unavailable):**
 ```json
 {
   "status": "ready",
@@ -661,12 +801,15 @@ No blank `data:` lines between events.
 }
 ```
 
+Same JSON body shape at both 200 and 503. The `status` field
+distinguishes the state.
+
 ### 6.5. Coordinator WebSocket envelope
 
-All messages are JSON. Direction indicated as C→P (coordinator to
-provider) or P→C (provider to coordinator).
+All messages are JSON. Direction indicated as C->P (coordinator to
+provider) or P->C (provider to coordinator).
 
-#### Handshake (P→C) — sent on WebSocket open
+#### Handshake (P->C) — sent on WebSocket open
 ```json
 {
   "type": "hello",
@@ -688,7 +831,7 @@ provider) or P→C (provider to coordinator).
 `attestation` is `null` in Tier 1. Tier 2 populates it with the
 `AttestationProvider` hook output.
 
-#### Handshake acknowledgement (C→P)
+#### Handshake acknowledgement (C->P)
 ```json
 {
   "type": "hello_ack",
@@ -700,22 +843,66 @@ provider) or P→C (provider to coordinator).
 
 The coordinator may override the heartbeat interval.
 
-#### Capacity heartbeat (P→C) — sent every `heartbeat_interval_s`
+#### Capacity heartbeat (P->C) — sent every `heartbeat_interval_s`
 ```json
 {
   "type": "heartbeat",
   "status": "ready",
+  "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+  "model_params_b": 7.0,
+  "ram_gb": 16,
+  "max_context_tokens": 50000,
+  "max_concurrency": 2,
   "slots_free": 1,
   "slots_total": 2,
+  "throughput_tps_estimate": 19.8,
   "requests_served_since_last": 12,
   "avg_latency_ms_since_last": 450.0,
   "throughput_tps_since_last": 18.5
 }
 ```
 
-`status` is one of the health states from FR-15.
+Static fields (`model_id`, `model_params_b`, `ram_gb`, `max_context_tokens`,
+`max_concurrency`) are repeated in every heartbeat so the coordinator can
+re-establish state after a coordinator restart without requiring a new
+handshake.
 
-#### Pre-flight check (C→P) — coordinator asks before routing
+#### State update (P->C) — sent on state change, independent of heartbeat
+```json
+{
+  "type": "state_update",
+  "state": "degraded",
+  "reason": "post-wake warm-up in progress",
+  "since": "2026-05-27T14:30:00Z",
+  "metrics_snapshot": {
+    "slots_free": 2,
+    "slots_total": 2,
+    "requests_served_since_last": 0,
+    "avg_latency_ms_since_last": null,
+    "throughput_tps_since_last": null
+  }
+}
+```
+
+`state` is one of `ready`, `busy`, `degraded`, `draining`, `unavailable`.
+Fired whenever the state changes, independent of the heartbeat schedule.
+
+#### Drain status (P->C) — sent during drain sequence
+```json
+{
+  "type": "drain_status",
+  "phase": "in_progress",
+  "inflight_requests": 2,
+  "estimated_drain_seconds": 15
+}
+```
+
+`phase` is `"starting"` (SIGTERM just received), `"in_progress"` (waiting
+for in-flight requests), or `"complete"` (all drained, about to close
+WebSocket). Sent when the binary enters drain (FR-12) or receives a
+coordinator `drain` command.
+
+#### Pre-flight check (C->P) — coordinator asks before routing
 ```json
 {
   "type": "preflight",
@@ -724,27 +911,39 @@ The coordinator may override the heartbeat interval.
 }
 ```
 
-#### Pre-flight response (P→C)
+#### Pre-flight response (P->C)
 ```json
 {
   "type": "preflight_ack",
   "request_id": "buyer-req-uuid",
-  "can_serve": true,
+  "accepted": true,
   "estimated_wait_ms": 0
 }
 ```
 
-If `can_serve` is false, the provider includes a reason:
+If `accepted` is false, the provider includes a reason and relevant context:
+
+| Reason | Additional fields | Meaning |
+|---|---|---|
+| `context_exceeds_capacity` | `max_context_tokens` | Prompt too large for this provider |
+| `queue_full` | `estimated_wait_ms` | All slots and queue occupied |
+| `draining` | — | Provider is shutting down |
+| `model_not_loaded` | — | Model failed to load or is loading |
+| `unhealthy` | — | Provider in unavailable state |
+| `tier_mismatch` | `provider_tier` | Coordinator requested Tier 2 but binary is Tier 1 |
+
+Example rejection:
 ```json
 {
   "type": "preflight_ack",
   "request_id": "buyer-req-uuid",
-  "can_serve": false,
-  "reason": "context_exceeds_capacity"
+  "accepted": false,
+  "reason": "context_exceeds_capacity",
+  "max_context_tokens": 50000
 }
 ```
 
-#### Drain signal (C→P) — coordinator tells provider to stop
+#### Drain signal (C->P) — coordinator tells provider to stop
 ```json
 {
   "type": "drain"
@@ -752,10 +951,10 @@ If `can_serve` is false, the provider includes a reason:
 ```
 
 Provider responds by entering the `draining` state (same as SIGTERM
-behavior in FR-12) and sends state updates until all in-flight requests
-complete, then closes the WebSocket cleanly.
+behavior in FR-12), sends `drain_status` updates, then closes the
+WebSocket cleanly after all in-flight requests complete.
 
-#### Warm-up command (C→P)
+#### Warm-up command (C->P)
 ```json
 {
   "type": "warm_up"
@@ -763,7 +962,22 @@ complete, then closes the WebSocket cleanly.
 ```
 
 Provider runs the warm-up inference (FR-16) and responds with a
-state transition to `ready` via the next heartbeat.
+`state_update` transitioning to `ready`.
+
+#### Negative acknowledgement (P->C) — protocol error response
+```json
+{
+  "type": "nak",
+  "in_reply_to": "preflight",
+  "error": {
+    "code": "unknown_message_type",
+    "message": "Unrecognized message type: 'foo'"
+  }
+}
+```
+
+Sent when the binary receives a malformed or unrecognized coordinator
+message. The binary continues operating; a `nak` is informational.
 
 ---
 
@@ -771,46 +985,65 @@ state transition to `ready` via the next heartbeat.
 
 ### 7.1. Direct dependencies (use as libraries)
 
-| Dependency | License (SPDX) | Purpose |
-|---|---|---|
-| [mlx-swift-lm](https://github.com/apple/mlx-swift-examples) | MIT | MLX model loading and inference |
-| [swift-nio](https://github.com/apple/swift-nio) | Apache-2.0 | HTTP server and WebSocket client |
-| [swift-log](https://github.com/apple/swift-log) | Apache-2.0 | Structured logging |
-| [swift-argument-parser](https://github.com/apple/swift-argument-parser) | Apache-2.0 | CLI flag parsing |
-| [Yams](https://github.com/jpsim/Yams) | MIT | YAML config parsing |
+| Dependency | License (SPDX) | Version pin | Purpose |
+|---|---|---|---|
+| [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-examples) | MIT | Pin to latest stable tag at build time; record tag + commit SHA in implementation-notes.html | MLX model loading and inference |
+| [swift-nio](https://github.com/apple/swift-nio) | Apache-2.0 | 2.65.0 (starting pin) | HTTP server and WebSocket client |
+| [swift-log](https://github.com/apple/swift-log) | Apache-2.0 | 1.6.0 (starting pin) | Structured logging |
+| [swift-argument-parser](https://github.com/apple/swift-argument-parser) | Apache-2.0 | 1.5.0 (starting pin) | CLI flag parsing |
+| [Yams](https://github.com/jpsim/Yams) | MIT | 5.1.0 (starting pin) | YAML config parsing |
 
 **Runtime requirements:** Swift 5.9+, macOS 14+ (Sonoma), Apple Silicon.
 
-### 7.2. Reference implementation (study with discipline)
+Version pins are starting points. The build session may bump versions
+after testing, with a documented reason in `implementation-notes.html`.
 
-**Darkbloom d-inference** — https://github.com/layr-labs/d-inference
+Provider authentication to coordinator is specified in SPEC-002 and is
+out of scope for this binary's wire protocol.
 
-- **License:** Proprietary, all rights reserved. **Not open source.**
-  SPDX: `LicenseRef-Proprietary`
-- **Operating principle:** Informed by, not copied. The build prompt and
-  this spec originally assumed d-inference was open source. Verification
-  at spec-write time (2026-05-27) confirmed the license is proprietary.
-  This strengthens the decision to build our own binary rather than fork.
-- **Repo structure observed:** `coordinator/`, `provider/`,
-  `provider-swift/`, `console-ui/`, `landing/`, `libs/`, `enclave/`,
-  `deploy/`, `docs/`, `scripts/`, `tests/`, `e2e/`, `papers/`
-- **What was studied from the public README:** That the Swift provider
-  uses `mlx-swift-lm` for inference via Metal, confirming our dependency
-  choice. Architecture shape (coordinator + provider + Swift CLI).
-- **PERMITTED conceptual study (public README and non-privacy source):**
-  Server bootstrap pattern, `mlx-swift-lm` wiring, OpenAI HTTP compat
-  layer shape, SSE streaming approach, model loading, graceful shutdown.
-- **NOT studied, NOT replicated:** Privacy modules, attestation,
-  secure enclave, key derivation, sealed encryption. Directories:
-  `enclave/`, anything with `privacy`, `attest`, `sealed`, `crypto`
-  in the path. Their privacy stack is patented.
-- **Attribution:** The shipped binary includes a `THIRD_PARTY_NOTICES.md`
-  crediting Darkbloom d-inference as architectural reference for
-  non-privacy components, citing the proprietary license.
+### 7.2. Reference hygiene — strict clean-room for d-inference
+
+This binary is built strict clean-room with respect to d-inference.
+
+PROHIBITED references for this spec and the Phase 3 binary build:
+- The d-inference GitHub repository (https://github.com/Layr-Labs/d-inference)
+- Any d-inference source files, including the README and config files
+- Any third-party analyses that quote or reproduce d-inference source
+- Reverse-engineered analyses of any compiled Darkbloom binary
+
+Reason: the DARKBLOOM LICENSE AGREEMENT (Eigen Labs, Inc., copyright 2026;
+SPDX NOASSERTION; canonical URL https://github.com/Layr-Labs/d-inference/blob/master/LICENSE
+as inspected 2026-05-27) explicitly prohibits in Section 3 the use of the
+Software to "provide, operate, or enable any hosted service, platform,
+marketplace, or product that offers AI inference coordination, private
+inference services, or decentralized compute marketplace capabilities
+that compete with Darkbloom." Mac Provider fits this description.
+
+PERMITTED references:
+- Darkbloom / Eigen Labs published academic papers (cite by URL/DOI)
+- Darkbloom blog posts, conference talks, marketing pages (public)
+- Third-party reviews that do NOT reproduce d-inference source
+- mlx-swift-lm (MIT, Apple/mlx-swift-examples, unrelated to Darkbloom)
+- swift-nio, swift-log, swift-argument-parser (Apache 2.0)
+- Yams (MIT)
+- Apple MLX documentation
+- OpenAI API reference (https://platform.openai.com/docs/api-reference)
+- HuggingFace tokenizer_config.json schema
+- This repository: Phase 1 results/REPORT.md, Phase 2 DECISION_CRITERIA.md,
+  harness.py, workloads_adversarial.py
+
+Patent analysis is separate from license. Darkbloom holds patents around
+their privacy/attestation model. Tier 1 of this binary does not implement
+that model; Tier 2 hooks are designed-in but unimplemented. Patent risk
+analysis for Tier 2 is deferred to its eventual SPEC.
+
+If during implementation you are uncertain how Darkbloom solved a problem,
+STOP and add an open question to implementation-notes.html. Do not resolve
+it by reading their source.
 
 ### 7.3. Public spec sources
 
-- Darkbloom academic paper (conceptual architecture reference)
+- Darkbloom / Eigen Labs published academic papers (cite by URL/DOI)
 - [Apple MLX documentation](https://ml-explore.github.io/mlx-swift/latest/)
 - [OpenAI API reference](https://platform.openai.com/docs/api-reference/chat)
 - [HuggingFace tokenizer_config.json](https://huggingface.co/docs/transformers/main_classes/tokenizer) schema
@@ -830,6 +1063,16 @@ state transition to `ready` via the next heartbeat.
 This section maps every decision log entry from
 `beta/DECISION_CRITERIA.md` to functional requirements.
 
+### Coverage matrix
+
+| Decision log entry | Coverage | FRs | Notes |
+|---|---|---|---|
+| D1 — 502 vs 530 routing | Fully covered (binary scope) | FR-13, FR-15 | Backoff/tunnel-signal logic is coordinator-side; deferred to SPEC-002 |
+| D2 — Post-wake throughput dip | Fully covered | FR-16 | |
+| D3 — Stop-token leakage status | Fully covered | FR-6 | Defensive; may be no-op if upstream clean |
+| D4 — Cross-provider throughput inversion | Fully covered (binary scope) | FR-17, FR-20 | Buyer-facing model choice is coordinator-side; deferred to SPEC-002 |
+| D5 — Timeline compression | Process-only | — | No binary behavior; accelerated Phase 3 timeline by 11 days |
+
 ### D1 — 502 vs 530 routing distinction
 
 **Observation:** M4 sleep transition produced two distinct failure modes:
@@ -839,12 +1082,13 @@ lagged actual buyer-visible failure.
 
 **FR mapping:**
 - **FR-15** (health state reporting): The binary reports `degraded` vs
-  `unavailable` states. The coordinator distinguishes these: `degraded`
-  means "hold traffic, may recover soon" (the 502 equivalent); a
-  WebSocket close without `draining` means "remove from pool" (the 530
-  equivalent).
+  `unavailable` states via `state_update` messages.
 - **FR-13** (coordinator WebSocket): Clean WebSocket close protocol
-  ensures the coordinator can distinguish graceful shutdown from crash.
+  allows the coordinator to distinguish graceful shutdown from crash.
+
+Backoff behavior (e.g., short 30s retry for degraded providers) and
+tunnel-signal monitoring (`cfd_tunnel` connection count) are coordinator
+responsibilities, deferred to SPEC-002.
 
 ### D2 — Post-wake throughput dip
 
@@ -875,20 +1119,23 @@ on M4 16GB (17-20 tok/s). Even TTFT favored M1 (646 vs 708 ms).
 
 **FR mapping:**
 - **FR-17** (capacity includes model + throughput): The capacity
-  heartbeat includes `model_params_b` and `throughput_tps_estimate` so
-  the coordinator can route by actual measured performance, not assumed
-  hardware superiority.
+  heartbeat includes `model_params_b` and `throughput_tps_estimate`.
+  The coordinator MAY use these to route by actual measured performance.
 - **FR-20** (startup self-test): The self-test measures tok/s, which
   becomes the `throughput_tps_estimate` in the capacity advertisement.
+
+Buyer-facing model-size choice or auto-routing by latency/quality
+preference is a coordinator responsibility, deferred to SPEC-002.
 
 ### D5 — Timeline compression
 
 **Observation:** Day 0 already captured 3 Phase 3 spec changes. 14-day
 timeline compressed to 3 days.
 
-**FR mapping:** No direct FR. This decision accelerated Phase 3 start
-by 11 days. The binary spec (this document) benefits from landing sooner
-while Phase 2 data is fresh.
+**Classification:** Process-only. No binary behavior; this decision
+accelerated Phase 3 start by 11 days. Intentionally excluded from FR
+mapping per the "every row maps" rule because it has no binary-level
+requirement.
 
 ### Additional Phase 1 findings (from REPORT.md)
 
@@ -897,7 +1144,8 @@ while Phase 2 data is fresh.
 - **FR-9** (per-RAM capacity): 8 GB tier capped at 20K tokens.
 
 **SSE keepalive comments (`: keepalive N/M`):**
-- **FR-5** (no keepalive comments): Binary controls SSE output directly.
+- **FR-5** (no keepalive comments): Binary generates its own SSE; does
+  not proxy `mlx_lm.server`.
 
 **Extra response fields (`system_fingerprint`, `tool_calls`):**
 - **FR-2, FR-3**: The binary's responses include only the standard
@@ -914,23 +1162,34 @@ while Phase 2 data is fresh.
 
 ## 9. Acceptance criteria
 
+**AC-1 through AC-10 must ALL pass for the binary to be considered
+build-complete. No partial passes. No operator waivers without an
+explicit waiver entry in `implementation-notes.html` explaining why.**
+
 **AC-1. Phase 2 cooperative workload parity.**
 All 6 cooperative workloads from `beta/workloads.py` (`short_chat`,
 `medium_with_system`, `long_context`, `code_completion`, `agent_style`,
-`streaming_check`) pass when the Phase 2 harness (`beta/harness.py`)
-targets the binary's HTTP endpoint instead of `mlx_lm.server`. Pass
-means: HTTP 200, response content non-empty, throughput within 10% of
-Phase 2 baseline for the same model and hardware. Baseline values are
-in `beta/DECISION_CRITERIA.md` pre-launch facts table.
+`streaming_check`) pass when the Phase 2 harness targets the binary's
+HTTP endpoint instead of `mlx_lm.server`. Pass means: HTTP 200,
+response content non-empty, throughput within 10% of Phase 2 baseline
+for the same model and hardware. Baseline values are in
+`beta/DECISION_CRITERIA.md` pre-launch facts table.
+
+**Run by:** `cd beta && python harness.py --config config-phase3-test.yaml --batch cooperative --verbose`
+where `config-phase3-test.yaml` points `tunnel_url` at the binary's local endpoint.
+The build session creates this fixture file.
 
 **AC-2. Phase 2 adversarial workload survival.**
-All 5 adversarial workloads from `beta/workloads_adversarial.py`
-(`retry_storm`, `long_context_oom_probe`, `concurrent_burst_8way`,
-`midstream_disconnect`, `malformed_tool_call`) complete without
-crashing the binary or its host process. "Complete" means the binary
-is still serving requests after each workload finishes. The binary
-may return error responses (429, 413, 500) during adversarial load;
-it must not crash, hang, or require restart.
+Each adversarial workload (`retry_storm`, `concurrent_burst_8way`,
+`midstream_disconnect`, `malformed_tool_call`, `long_context_oom_probe`)
+must complete with NO HTTP 500 responses. Acceptable responses during
+adversarial load are: 200 (success), 400 (malformed request),
+413 (payload too large), 429 (rate limited / queue full). The binary
+must remain healthy (passes `GET /v1/health` with 200) within 30
+seconds of workload completion. Any 500 response or process crash is
+a hard failure of AC-2.
+
+**Run by:** `cd beta && python harness.py --config config-phase3-test.yaml --batch adversarial --verbose`
 
 **AC-3. 24-hour soak test.**
 On M4 hardware with a 7B 4-bit model, the binary runs for 24 hours
@@ -939,22 +1198,72 @@ Criteria: zero crashes, zero process restarts, memory RSS growth <5%
 from post-startup baseline, no file descriptor leaks, no degradation
 in throughput beyond 5% from hour-1 to hour-24.
 
+**Run by:** `phase3-binary/scripts/soak-test.sh` — created during the
+build session. Wraps a long-running harness invocation with a
+memory-pressure monitor that samples RSS every 60 seconds.
+
 **AC-4. Harness swap compatibility.**
 `beta/harness.py` can be configured (by changing `tunnel_url` in
-`config.yaml` to the binary's local endpoint) and run with
+`config-phase3-test.yaml` to the binary's local endpoint) and run with
 `--batch cooperative` with zero test failures. The harness's SSE
 parsing, stop-token detection, and response validation all pass
 without modification.
+
+**Run by:** Same command as AC-1. AC-4 verifies that the existing
+harness code requires zero modifications.
 
 **AC-5. Coordinator mock integration.**
 The binary connects to a mock coordinator (a simple WebSocket echo
 server that validates JSON message shapes) and successfully:
 1. Sends a `hello` message with all required fields.
 2. Receives a `hello_ack` and honors the `heartbeat_interval_s`.
-3. Sends at least 3 capacity heartbeats.
+3. Sends at least 3 capacity heartbeats with all FR-17 fields.
 4. Responds to a `preflight` request with a valid `preflight_ack`.
-5. Responds to a `drain` command by entering draining state and
-   closing the WebSocket after in-flight requests complete.
+5. Responds to a `drain` command by entering draining state, sending
+   `drain_status` messages, and closing the WebSocket.
+
+**Run by:** `phase3-binary/scripts/test-coordinator.sh` — created during
+the build session. Spins up a mock WebSocket server that exchanges
+handshake, 5 heartbeats, a preflight check, and a drain command.
+
+**AC-6. Graceful SIGTERM drain.**
+With 3 in-flight streaming requests, sending SIGTERM causes the binary
+to drain all requests to completion within 30 seconds. `drain_status`
+messages are logged. Zero mid-stream response truncations. The binary
+exits with code 0.
+
+**Run by:** Manual test during build. Start 3 concurrent streaming
+requests, send `kill -TERM <pid>`, verify all 3 complete and binary exits 0.
+
+**AC-7. Post-wake warm-up.**
+After receiving a `warm_up` command from the coordinator, the first
+real request shows throughput within 95% of the long-running baseline
+(measured as tok/s on `short_chat` workload).
+
+**Run by:** Send `warm_up` via mock coordinator, then fire `short_chat`
+via harness, compare tok/s to baseline from AC-1.
+
+**AC-8. Health endpoint.**
+`GET /v1/health` returns 200 with JSON containing at minimum: `status`,
+`model`, `uptime_s`, `requests_in_flight`, `requests_queued`,
+`capacity.max_concurrency`. Returns 503 with same JSON shape when the
+binary is in `degraded` or `unavailable` state.
+
+**Run by:** `curl -s http://localhost:8080/v1/health | python -m json.tool`
+during AC-1 run (healthy) and during model-load-failure test (unhealthy).
+
+**AC-9. Config precedence.**
+Override `port` at each precedence layer and verify the binary binds
+to the correct port: CLI flag beats env var beats config file beats
+default.
+
+**Run by:** Manual test during build with 4 invocations.
+
+**AC-10. Startup self-test failure.**
+Point the binary at a nonexistent model path. Verify: exits with code 1,
+prints diagnostic to stderr, no HTTP server starts, no partial state.
+
+**Run by:** `macprovider-cli --model /nonexistent/path 2>&1; echo "exit: $?"`
 
 ---
 
@@ -968,57 +1277,20 @@ choices. Alternative: embed usage in the final content chunk alongside
 behavior as of May 2025). Operator should confirm which downstream
 clients will consume this and test.
 
-**OQ-2. Model field in request — honor or ignore?**
-The spec (FR-2) says the `model` field in the request body is ignored
-because the binary loads a single model. Alternative: if the `model`
-field doesn't match the loaded model, return HTTP 404. This would be
-more correct but could break clients that hardcode a different model
-name. Spec picks "ignore" for maximum compatibility. Revisit if
-multi-model support is added.
+**OQ-2. stream_options.include_usage=false behavior.**
+If a client sends `stream_options: {include_usage: false}`, should the
+binary respect this and omit the usage chunk? FR-7 says always
+synthesize usage. The spec picks "always emit usage" for consistency
+with the coordinator's need for token accounting. Clients that can't
+handle the extra chunk should ignore it. Operator confirm.
 
-**OQ-3. Coordinator URL discovery.**
-FR-13 specifies three discovery methods: CLI flag, env var, config file.
-Should there be a fourth: mDNS/Bonjour discovery for a coordinator
-running on the local network? This could simplify local development but
-adds complexity. The spec omits it — the coordinator URL is always
-explicit. Operator confirm.
-
-**OQ-4. Logging destination.**
-NFR-7 sends all logs to stdout, suitable for `launchd` / Console.app
-capture. Should the binary also write to a local SQLite database (like
-the Phase 2 companion script) for self-reporting? This would let the
-contributor see their own stats without the operator's report. The spec
-omits it — stdout only for v1. The `/v1/health` endpoint provides
-real-time stats. A future version could add a `--log-db` option.
-
-**OQ-5. Tier announcement format.**
+**OQ-3. Tier announcement format.**
 FR-14 sends `tier: 1` as an integer. Should this be a version string
 (`"tier-1"`) or a structured object (`{"level": 1, "capabilities": [...]}`)
 to allow for tier 1.5 or partial upgrades? The spec picks integer for
 simplicity. Tier 2 SPEC can revisit if needed.
 
-**OQ-6. Config file location.**
-FR-19 defaults to `~/.macprovider/config.yaml`. Alternative:
-`~/.config/macprovider/config.yaml` (XDG convention) or alongside the
-binary. The spec picks `~/.macprovider/` because it matches the Phase 2
-companion script's location and is Mac-conventional. Operator confirm.
-
-**OQ-7. WebSocket authentication.**
-FR-13 specifies a bare WebSocket connection to the coordinator. In
-production, the coordinator will need to authenticate providers. Should
-the binary include a bearer token in the WebSocket upgrade headers?
-The spec leaves this as a coordinator-side design decision (Phase 4
-SPEC). The binary should accept a `coordinator_token` config field and
-send it as a Bearer token in the upgrade request if present.
-
-**OQ-8. Queue behavior under sustained overload.**
-FR-11 rejects with HTTP 429 when the queue is full. Should the queue
-have a time-based eviction (e.g., queued requests older than 30 seconds
-auto-rejected)? Long queue wait times degrade buyer experience. The
-spec picks fixed-depth FIFO with no timeout. Operator may want
-time-based eviction added.
-
-**OQ-9. Binary distribution method.**
+**OQ-4. Binary distribution method.**
 NFR-6 specifies code signing. How does the binary reach contributors?
 Options: GitHub Releases download, Homebrew tap, direct link from
 operator. The spec does not specify distribution — that's an operational
@@ -1035,9 +1307,8 @@ deliverable that can be tested before moving to the next.
 
 **Step 1. Create Swift package.**
 Initialize `phase3-binary/` as a Swift Package Manager project. Add
-dependencies: `mlx-swift-lm`, `swift-nio`, `swift-log`,
-`swift-argument-parser`, `Yams`. Verify `swift build` compiles an
-empty main.
+dependencies per Section 7.1 version pins. Verify the package resolves
+and compiles an empty main.
 
 **Step 2. CLI entry and config loader.**
 Implement argument parsing (FR-19) and YAML config loading. The binary
@@ -1051,23 +1322,23 @@ binary loads a model and prints its parameter count to stdout.
 
 **Step 4. /v1/models endpoint.**
 Stand up a minimal Swift NIO HTTP server. Implement `GET /v1/models`
-returning the loaded model. Deliverable: `curl localhost:8080/v1/models`
-returns valid JSON matching Section 6.1.
+returning the loaded model, plus global 404/405 handling. Deliverable:
+`curl localhost:8080/v1/models` returns valid JSON matching Section 6.1.
 
 **Step 5. /v1/chat/completions non-streaming.**
-Implement `POST /v1/chat/completions` with `stream: false`. Wire
-request parsing, inference, stop-token stripping, and response
-formatting. Deliverable: `curl -X POST ... -d '{"messages":[...]}'`
-returns a valid completion with usage.
+Implement `POST /v1/chat/completions` with `stream: false`. Wire the
+full request validation chain (Section 6.2), inference, stop-token
+stripping, and response formatting. Deliverable: valid completion with
+usage; malformed requests return 400.
 
 **Step 6. SSE streaming.**
 Add `stream: true` support. Implement the SSE framing (FR-4), usage
 chunk synthesis (FR-7), and stop-token stripping on streamed tokens.
-Deliverable: streaming response with no keepalive comments, clean
-deltas, usage chunk before `[DONE]`.
+Deliverable: streaming response with clean deltas, usage chunk before
+`[DONE]`.
 
 **Step 7. Context pre-flight and capacity.**
-Implement FR-8 (tokenize and reject) and FR-9 (per-RAM capacity at
+Implement FR-8 (two-stage pre-flight) and FR-9 (per-RAM capacity at
 startup). Deliverable: a prompt exceeding the context cap returns
 HTTP 413.
 
@@ -1078,17 +1349,18 @@ queued; beyond queue depth get 429.
 
 **Step 9. Coordinator WebSocket client.**
 Implement FR-13 (outbound WebSocket), FR-14 (hello + tier), FR-15
-(health states), FR-16 (warm-up), FR-17 (capacity heartbeat). Test
-against a mock WebSocket server. Deliverable: binary connects, sends
-hello, heartbeats, responds to preflight and drain.
+(health states + state_update), FR-16 (warm-up), FR-17 (capacity
+heartbeat with all fields). Test against a mock WebSocket server.
+Deliverable: binary connects, sends hello, heartbeats, responds to
+preflight and drain.
 
 **Step 10. Graceful shutdown and self-test.**
-Implement FR-12 (SIGTERM drain) and FR-20 (startup self-test).
-Deliverable: binary passes self-test on start; SIGTERM drains and exits
-cleanly.
+Implement FR-12 (SIGTERM drain with drain_status messages) and FR-20
+(startup self-test). Deliverable: binary passes self-test on start;
+SIGTERM drains and exits cleanly.
 
 **Step 11. Acceptance testing.**
-Run AC-1 through AC-5. Fix issues. Deliver a binary that passes all
+Run AC-1 through AC-10. Fix issues. Deliver a binary that passes all
 acceptance criteria.
 
 ### File structure (expected)
@@ -1103,12 +1375,13 @@ phase3-binary/
 │       ├── ModelLoader.swift            # Step 3, FR-6
 │       ├── StopTokenFilter.swift        # FR-6
 │       ├── HTTPServer.swift             # Swift NIO server setup
-│       ├── Router.swift                 # Route dispatch
+│       ├── Router.swift                 # Route dispatch, 404/405
+│       ├── RequestValidator.swift       # Section 6.2 validation chain
 │       ├── ModelsHandler.swift          # FR-1
 │       ├── ChatCompletionsHandler.swift # FR-2, FR-3
 │       ├── HealthHandler.swift          # FR-18
 │       ├── SSEWriter.swift              # FR-4, FR-5, FR-7
-│       ├── ContextPreflight.swift       # FR-8
+│       ├── ContextPreflight.swift       # FR-8 (both stages)
 │       ├── CapacityManager.swift        # FR-9, FR-11
 │       ├── CoordinatorClient.swift      # FR-13, FR-14, FR-15, FR-17
 │       ├── WarmupManager.swift          # FR-16
@@ -1120,11 +1393,15 @@ phase3-binary/
 │       └── Logging.swift                # NFR-7
 ├── Tests/
 │   └── macprovider-cliTests/
+│       ├── RequestValidatorTests.swift
 │       ├── StopTokenFilterTests.swift
 │       ├── ContextPreflightTests.swift
 │       ├── SSEWriterTests.swift
 │       ├── CoordinatorClientTests.swift
 │       └── CapacityManagerTests.swift
+├── scripts/
+│   ├── soak-test.sh                     # AC-3
+│   └── test-coordinator.sh              # AC-5
 ├── implementation-notes.html            # Populated by build session
 └── THIRD_PARTY_NOTICES.md
 ```
@@ -1142,10 +1419,12 @@ phase3-binary/
 | `beta/harness.py` | SSE parsing approach, per-model leak detection pattern, adversarial workload runner interface |
 | `beta/workloads_adversarial.py` | Adversarial workload definitions: retry_storm, OOM probe, burst, disconnect, malformed |
 | `beta/stop_tokens.py` | Stop-token derivation from tokenizer_config.json: extraction logic, caching, fallback |
-| d-inference GitHub README (https://github.com/layr-labs/d-inference) | Repo structure, license verification (proprietary), confirmation that mlx-swift-lm is used for Metal inference |
 | OpenAI API reference | Chat completions request/response schema, SSE streaming format, error envelope |
+| `specs/SPEC-001-audit.md` | Audit findings (2 CRITICAL, 17 MAJOR, 9 MINOR) driving v1.1 revision |
 
-**d-inference files NOT opened:** Any file in `enclave/`, `privacy/`,
-`attestation/`, `sealed/`, `crypto/` directories, or any file with
-`privacy`, `attest`, `sealed`, or `crypto` in the path. Only the
-public README and repo file listing were consulted.
+**Clean-room note:** v1.0 (2026-05-27) consulted the d-inference public
+README for repo structure and license verification. v1.1 established
+strict clean-room policy (Section 7.2). No d-inference source files
+were read during either v1.0 or v1.1. The v1.0 README consultation
+predates the clean-room policy and is recorded here for transparency.
+No further d-inference references are permitted.
