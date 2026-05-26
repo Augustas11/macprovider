@@ -15,7 +15,77 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-001 — phase3-binary — implementation notes</h1>
 <p class=meta>Status: <strong>not started</strong> · Spec:
-<a href="../specs/SPEC-001-phase3-binary.md">SPEC-001</a></p>
+<a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
+
+<section id="v1-1-1-patches">
+  <h2>SPEC-001 v1.1.1 post-re-audit patches (2026-05-27)</h2>
+  <p class=meta>Applied after re-audit at
+  <a href="../specs/SPEC-001-v1-1-audit.md">SPEC-001-v1-1-audit.md</a>
+  identified 3 MAJOR + 3 MINOR regressions. Patched in place; no
+  separate v1.2 cycle required.</p>
+
+  <h3>MAJOR regressions resolved</h3>
+  <ul>
+    <li><strong>R-MAJOR-1 (B2 second pass):</strong> Renamed
+    <code>current_slots_free</code> → <code>slots_free</code> in FR-17 to
+    match the § 6.5 heartbeat schema. Also added <code>slots_total</code>
+    to FR-17 for completeness.</li>
+
+    <li><strong>R-MAJOR-2 (stream_options ambiguity):</strong> Deleted
+    OQ-2 from § 10. Updated § 6.2 schema row for <code>stream_options</code>
+    to state explicitly: per FR-7, binary always emits the usage chunk
+    when <code>stream=true</code>; a client-provided
+    <code>include_usage=false</code> is silently ignored (not an error).
+    Decision: lenient ignore over strict reject, for broader buyer
+    compatibility. Documented in the schema cell, no wire-contract
+    surprise.</li>
+
+    <li><strong>R-MAJOR-3 (H1 second pass):</strong> Pinned
+    <code>mlx-swift-lm</code> to tag <code>2.29.1</code>, commit
+    <code>9bff95ca5f0b9e8c021acc4d71a2bbe4a7441631</code> (verified via
+    GitHub release lookup by re-auditor). Build session may bump with
+    documented reason here.</li>
+  </ul>
+
+  <h3>MINOR regressions resolved</h3>
+  <ul>
+    <li><strong>R-MINOR-3:</strong> § 7.2 heading normalized
+    (<code>### 7.2.</code> → <code>### 7.2</code>) to match fix-prompt
+    text exactly.</li>
+  </ul>
+
+  <h3>MINOR regressions knowingly deferred</h3>
+  <ul>
+    <li><strong>R-MINOR-1 ("healthy" vs "ready" enum):</strong> Prose use
+    of "healthy" remains in AC-2 and AC-8 documentation. The actual wire
+    enum values (<code>ready</code>, <code>busy</code>,
+    <code>degraded</code>, <code>draining</code>, <code>unavailable</code>)
+    are unchanged. Build session should write tests against the enum
+    values, not the prose. Not patched because it introduces no
+    contract ambiguity, only stylistic drift in prose.</li>
+
+    <li><strong>R-MINOR-2 (AC-6/7/9 manual test commands):</strong>
+    AC-6, AC-7, AC-9 remain "manual test during build" because the
+    actual commands depend on phase3-binary scripts that don't exist
+    yet (the build session creates them). Adding placeholder commands
+    now would be lying. Build session must turn these into
+    <code>phase3-binary/scripts/*.sh</code> as part of acceptance test
+    delivery — recorded as an explicit build-session obligation here.</li>
+  </ul>
+
+  <h3>Renumbering</h3>
+  <ul>
+    <li>OQ-3 → OQ-2 (Tier announcement format)</li>
+    <li>OQ-4 → OQ-3 (Binary distribution method)</li>
+    <li>Open questions now total 3 (was 4).</li>
+  </ul>
+
+  <h3>Verification</h3>
+  <p>All Phase 1 re-audit blocking findings (R-MAJOR-1/2/3) addressed.
+  Spec version bumped to <strong>1.1.1</strong>. Re-re-audit not
+  required for these targeted patches; commit and proceed to binary
+  build.</p>
+</section>
 
 <section id="v1-1-revision">
   <h2>SPEC-001 v1.1 revision (2026-05-27)</h2>

@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.1 (2026-05-27)
+**Version:** 1.1.1 (2026-05-27, post-re-audit patches)
 **Revision:** Addresses audit findings from `specs/SPEC-001-audit.md`.
 
 ---
@@ -436,7 +436,8 @@ must include:
 - `model_params_b`: approximate parameter count in billions
 - `max_context_tokens`: computed from FR-9
 - `max_concurrency`: computed from FR-9
-- `current_slots_free`: real-time availability
+- `slots_free`: real-time availability (matches heartbeat schema in § 6.5)
+- `slots_total`: total inference slots configured for this provider
 - `throughput_tps_estimate`: measured tok/s from the startup self-test
 - `ram_gb`: total system RAM
 
@@ -627,7 +628,7 @@ always `"macprovider"`.
 | `top_p` | float | 1.0 | 0.0 to 1.0 |
 | `n` | int | 1 | MUST be 1. Values > 1 rejected with 400 (single-tenant). |
 | `stream` | bool | false | |
-| `stream_options` | object | null | `{include_usage: bool}`. See FR-7. |
+| `stream_options` | object | null | `{include_usage: bool}`. Per FR-7, binary always emits the usage chunk when `stream=true`; a client-provided `include_usage=false` is silently ignored (not an error). Documented to remove ambiguity for buyers expecting strict opt-out semantics. |
 | `stop` | string or array | null | Max 4 stop sequences. |
 | `presence_penalty` | float | 0.0 | -2.0 to 2.0 |
 | `frequency_penalty` | float | 0.0 | -2.0 to 2.0 |
@@ -987,7 +988,7 @@ message. The binary continues operating; a `nak` is informational.
 
 | Dependency | License (SPDX) | Version pin | Purpose |
 |---|---|---|---|
-| [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-examples) | MIT | Pin to latest stable tag at build time; record tag + commit SHA in implementation-notes.html | MLX model loading and inference |
+| [mlx-swift-lm](https://github.com/ml-explore/mlx-swift-examples) | MIT | Tag `2.29.1`, commit `9bff95ca5f0b9e8c021acc4d71a2bbe4a7441631` (verified 2026-05-27). Build session may bump with documented reason in implementation-notes.html. | MLX model loading and inference |
 | [swift-nio](https://github.com/apple/swift-nio) | Apache-2.0 | 2.65.0 (starting pin) | HTTP server and WebSocket client |
 | [swift-log](https://github.com/apple/swift-log) | Apache-2.0 | 1.6.0 (starting pin) | Structured logging |
 | [swift-argument-parser](https://github.com/apple/swift-argument-parser) | Apache-2.0 | 1.5.0 (starting pin) | CLI flag parsing |
@@ -1001,7 +1002,7 @@ after testing, with a documented reason in `implementation-notes.html`.
 Provider authentication to coordinator is specified in SPEC-002 and is
 out of scope for this binary's wire protocol.
 
-### 7.2. Reference hygiene — strict clean-room for d-inference
+### 7.2 Reference hygiene — strict clean-room for d-inference
 
 This binary is built strict clean-room with respect to d-inference.
 
@@ -1277,20 +1278,13 @@ choices. Alternative: embed usage in the final content chunk alongside
 behavior as of May 2025). Operator should confirm which downstream
 clients will consume this and test.
 
-**OQ-2. stream_options.include_usage=false behavior.**
-If a client sends `stream_options: {include_usage: false}`, should the
-binary respect this and omit the usage chunk? FR-7 says always
-synthesize usage. The spec picks "always emit usage" for consistency
-with the coordinator's need for token accounting. Clients that can't
-handle the extra chunk should ignore it. Operator confirm.
-
-**OQ-3. Tier announcement format.**
+**OQ-2. Tier announcement format.**
 FR-14 sends `tier: 1` as an integer. Should this be a version string
 (`"tier-1"`) or a structured object (`{"level": 1, "capabilities": [...]}`)
 to allow for tier 1.5 or partial upgrades? The spec picks integer for
 simplicity. Tier 2 SPEC can revisit if needed.
 
-**OQ-4. Binary distribution method.**
+**OQ-3. Binary distribution method.**
 NFR-6 specifies code signing. How does the binary reach contributors?
 Options: GitHub Releases download, Homebrew tap, direct link from
 operator. The spec does not specify distribution — that's an operational
