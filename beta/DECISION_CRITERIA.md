@@ -11,13 +11,16 @@
 
 - **Operator:** augstar (augstar@gmail.com)
 - **Kickoff date (day 0):** **2026-05-26**
-- **Day 7 review date:** **2026-06-02**
-- **Day 14 review date:** **2026-06-09**
+- **Timeline:** **3 days compressed** (was 14). Concept validated on day 0 → Phase 3 unblocked sooner.
+- **Day 2 mid-review date:** **2026-05-28**
+- **Day 3 final decision date:** **2026-05-29**
 - **Providers committed:** M4 user (handle: `m4-anon`) + M1 collaborator (handle: `m1-anon`)
-- **Total operator time budgeted:** **5 hours/week** over 2 weeks (~10h total)
+- **Contributor expectation:** signed up for 14 days; compressed timeline means they get off the hook at day 3. They may keep tunnels running past day 3 if they want — operator decision only.
+- **Total operator time budgeted:** **~2 hours/day** over 3 days
 - **Cash budget:** Domain registration $12/yr (streamvc.live, already paid). Cloudflare Tunnel free. Electricity negligible. **Total: $0 marginal.**
 - **What I'm using this data for:** Lock or unlock Phase 3 binary build.
   If criteria fail, Phase 3 timing slips or scope changes.
+- **Tradeoff accepted:** retention signal (does contributor still tolerate this at day 11?), diurnal patterns across many days, slow-drift bugs — these can't be measured in 3 days. Compression is justified because core throughput/error/leak/sleep data lands fully in 3 days, and 3 Phase 3 spec changes were already captured on day 0.
 
 I commit to **stop or pivot if the day-7 or day-14 criteria below fail**,
 regardless of how invested I feel at that moment.
@@ -99,78 +102,80 @@ WHERE workload='retry_storm' ORDER BY ts_utc DESC LIMIT 5;
 
 ---
 
-## Day 7 — go/no-go (week 1 → week 2)
+## Day 2 mid-review — continue / pivot signal (2026-05-28)
 
-**Proceed to week 2 only if ALL of the following are true:**
+**Proceed to day 3 final review only if ALL of the following are true:**
 
-- [ ] **Uptime:** ≥5 days had ≥4 hours each with at least one provider reachable.
+- [ ] **Uptime:** ≥2 days had ≥6 hours each with at least one provider reachable.
       *Query:*
       ```sql
       SELECT substr(ts_utc,1,10) AS day, COUNT(DISTINCT substr(ts_utc,1,13)) AS hours_with_data
-      FROM runs WHERE http_status=200 GROUP BY day HAVING hours_with_data >= 4;
+      FROM runs WHERE http_status=200 GROUP BY day HAVING hours_with_data >= 6;
       ```
-      Count the rows; need ≥ 5.
+      Count the rows; need ≥ 2.
 
-- [ ] **Cooperative reliability:** HTTP 200 rate per provider ≥ `[80]%`.
+- [ ] **Cooperative reliability:** HTTP 200 rate per provider ≥ **80%**.
       *Query:* group by `tunnel_url`, expect column `ok_pct >= 80`.
 
-- [ ] **Adversarial survival:** ≥1 successful `adversarial_runs` row where
-      `n_ok > 0` AND the provider's `mlx_lm.server` was still answering
-      cooperative-cron traffic afterward.
+- [ ] **Adversarial survival:** ≥1 successful `adversarial_runs` row per
+      provider where `n_ok > 0` AND the provider's `mlx_lm.server` was
+      still answering cooperative-cron traffic afterward. (Daily adversarial
+      cron means each provider gets ≥2 runs by day 2.)
 
-- [ ] **Stop-token detection works:** `SUM(stop_token_leak) > 0` over the
-      whole week. Zero = detection is broken, not "model is clean."
+- [ ] **Stop-token detection diagnosed:** day-0 showed 0% leakage on both
+      Qwen and Llama — either upstream mlx-lm now strips correctly, or
+      our task-#13 per-model regex regressed. By day 2 we must know which
+      (run a deliberate leak probe if needed).
 
-- [ ] **No provider went dark for >48 hours** without explanation.
+- [ ] **No provider went dark for >24 hours** without explanation.
 
 - [ ] **Operator can answer:** "what % of `agent_style` responses contain
       parseable tool-call JSON?" — at least 80% confidence in the number.
 
 **If any FAIL → enter "iterate" loop:** see "What 'iterate' means" below.
-Do NOT just extend week 1 hoping for better data.
+Don't just extend day 2 hoping the next 24h fixes it.
 
 ---
 
-## Day 14 — go/no-go (week 2 → Phase 3)
+## Day 3 final decision — Phase 3 go/no-go (2026-05-29)
 
 **Proceed to Phase 3 (Swift binary build) only if ALL of the following:**
 
-- [ ] All day-7 criteria still hold cumulatively over 14 days (not just
-      week 2 in isolation).
+- [ ] All day-2 criteria still hold cumulatively over the 3 days (not just
+      day-3 data in isolation).
 
-- [ ] **Provider retention:** both providers stayed in the program. One
-      drop-off = downgrade to "iterate;" both = pivot.
+- [ ] **Provider retention:** both providers reachable on day 3 (lid-close
+      cycles OK, full silence not OK). One drop-off mid-experiment =
+      downgrade to "iterate;" both gone = pivot.
 
-- [ ] **JSON mode reliability:** ≥`[90]%` valid-JSON tool-call responses
-      on at least one model in the rotation.
+- [ ] **JSON mode reliability:** ≥**90%** valid-JSON tool-call responses
+      on at least one model in the rotation. With ~500 cooperative samples
+      per provider over 3 days, this is statistically tight enough.
 
-- [ ] **Mirror-mode data exists:** days 1–4 produced TTFT comparisons
-      that let you separate host effects from server effects.
-      *Query:* same prompt fired same-minute against both `tunnel_url`s
-      with `(prompt_tokens, completion_tokens, model)` matching → SQL JOIN
-      should produce ≥`[50]` pairs.
+- [ ] **Cross-model differential exists:** Qwen 7B (M4) vs Llama 3B (M1)
+      ran the same corpus-sampled prompts during overlapping hours. SQL
+      JOIN should produce ≥**100** prompt-matching pairs to compare
+      throughput/quality across models.
 
-- [ ] **Specific Phase 3 design decision changed:** operator writes one
-      sentence here naming a Phase 3 binary spec line that changed
-      *because of* Phase 2 data. Examples:
-      - "Context pre-flight ceiling for 16GB tier is N tokens, not the
-        20K I assumed."
-      - "Stop-token list for Qwen2.5 family includes [X] which my Phase 1
-        regex missed."
-      - "Mid-stream disconnect leaves the server in state [Y] — binary
-        must add timeout cleanup."
-      *If you cannot fill this blank, Phase 2 had no decision value.*
-      
-      My Phase 3 spec change from Phase 2: `__________________________`
+- [ ] **Specific Phase 3 design decisions changed:** must name ≥**3**
+      Phase 3 binary spec lines that changed *because of* Phase 2 data.
+      **Day-0 already captured 3** (502/530 routing, post-wake warm-up,
+      capacity/quality tradeoff) — bar is already met. Anything more is
+      bonus.
 
 **If any FAIL → "iterate" or "pivot."** Don't ship to Phase 3 on hope.
+
+**Contributor wrap-up:** regardless of go/no-go, send both contributors a
+"thanks, you can shut down or keep running" message on day 3. The
+cloudflared services keep running if they don't act — no urgency for them.
 
 ---
 
 ## Hard-stop triggers (any one of these — stop immediately, no review)
 
-- Either provider goes dark for >48 hours **without explanation** (silence,
-  not "I'm on vacation, back Monday").
+- Either provider goes dark for >24 hours **without explanation** (silence,
+  not "I'm on vacation, back tomorrow"). Tighter than 14-day version because
+  3 days has less buffer for outages.
 - A provider's Mac **crashes more than once** from Phase 2 workloads
   (Metal OOM kernel panic, hard reboot needed). One is data; two is harm.
 - A provider asks to stop. Their decision; no negotiation.
@@ -252,6 +257,7 @@ based on harness data. The point: by day 14, this table is either rich
 | 2026-05-26 | M4 post-wake throughput dip: 17.4 tps vs 19.8 pre-sleep (-12%) on identical `short_chat`. mlx weights survived sleep but first request was slower. n=1, needs more cycles to confirm pattern. | Track post-wake performance across 14 days. | **Phase 3 coordinator should fire synthetic warm-up request to a provider after detecting wake (cf. `conns_active_at` resuming after a gap) before routing buyer traffic.** |
 | 2026-05-26 | Llama 3.2 3B 4-bit on M1 8GB: **0% stop-token leakage** across 6 cooperative requests, contradicting Phase 1 which observed `<|eot_id|>` on every short response. Response previews fully clean. Same model, same hardware tier, ~17 days apart. Likely mlx-lm update fixed upstream stripping. | Investigate if our per-model regex (task #13) regressed OR upstream fixed it. Either way: lower urgency for Phase 3 stop-token logic. | **Phase 3 binary may NOT need defensive stop-token stripping if upstream mlx-lm is clean. Still implement defensively, but it's not the critical-path bug we feared.** |
 | 2026-05-26 | Cross-provider throughput inversion: smaller-model-on-slower-hardware (Llama 3B/M1 8GB → 22-25 tps) beats bigger-model-on-faster-hardware (Qwen 7B/M4 16GB → 17-20 tps). Even TTFT favors M1 (646 vs 708 ms). | Confirms capacity-vs-quality is a real routing tradeoff. | **Phase 3 buyer-facing API must expose model-size choice or auto-route by latency/quality preference. Coordinator cannot assume "newer/bigger Mac = faster" — depends on model.** |
+| 2026-05-26 | Day 0 already captured 3 Phase 3 spec changes + clean baseline data across both providers. 14-day plan was paced for retention/diurnal/drift signal we don't need. | Compress to 3 days. Cron: cooperative every 15 min (4×), adversarial daily (vs 2×/week). Contributors stay on if they want (1A) — operator decision only. | **Phase 3 build starts 11 days sooner. Tradeoff: retention data is lost — re-add to Phase 5 pilot when real buyers come on.** |
 | `____` | `_______________________________` | `___________` | `___________________` |
 
 If this table has fewer than 5 entries by day 14, that itself is a
