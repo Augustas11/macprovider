@@ -1,0 +1,35 @@
+# Phase 2 config — M4 user (provider)
+# Hostname is pre-provisioned via Cloudflare named tunnel.
+# Model: fill in once the M4 user reports what their agent picked.
+
+tunnel_url: "https://m4.streamvc.live"
+
+# Confirmed by M4 contributor 2026-05-26 — Qwen 7B suggests ~16 GB RAM tier.
+model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+
+# Per-request HTTP timeout (seconds).
+timeout_s: 180
+
+# Cooperative workloads — every hour during M4's window.
+batch:
+  - short_chat
+  - medium_with_system
+  - code_completion
+  - agent_style
+  - streaming_check
+  # long_context starts disabled; flip on once you have baseline data.
+  # - long_context
+
+# Adversarial workloads — twice per week, off-peak, never simultaneous
+# with the M1 provider's adversarial cron.
+batch_adversarial:
+  - retry_storm
+  - concurrent_burst_8way
+  - midstream_disconnect
+  - malformed_tool_call
+  # long_context_oom_probe is heavy (~30K tokens) — opt in deliberately.
+  # - long_context_oom_probe
+
+# Shared SQLite DB across both providers — tunnel_url column distinguishes.
+db_path: "runs.sqlite"
+reports_dir: "reports"

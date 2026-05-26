@@ -5,3 +5,7 @@ runs.sqlite-shm
 reports/
 cron.log
 .cache/
+
+# Cloudflared install tokens — sensitive
+CONTRIBUTOR_TUNNEL_TOKENS.txt
+

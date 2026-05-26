@@ -1,0 +1,30 @@
+# Phase 2 config — M1 collaborator (provider)
+# Hostname is pre-provisioned via Cloudflare named tunnel.
+# Model: fill in once the M1 partner reports what their agent picked.
+
+tunnel_url: "https://m1.streamvc.live"
+
+# M1 partner has 8GB — Llama 3.2 3B 4-bit (validated on identical hardware in
+# Phase 1). NOTE: case must match exactly what their mlx_lm.server reports
+# at /v1/models — they're running the lowercase form.
+model: "mlx-community/llama-3.2-3b-instruct-4bit"
+
+timeout_s: 180
+
+batch:
+  - short_chat
+  - medium_with_system
+  - code_completion
+  - agent_style
+  - streaming_check
+  # - long_context
+
+batch_adversarial:
+  - retry_storm
+  - concurrent_burst_8way
+  - midstream_disconnect
+  - malformed_tool_call
+  # - long_context_oom_probe
+
+db_path: "runs.sqlite"
+reports_dir: "reports"

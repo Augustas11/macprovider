@@ -1,0 +1,42 @@
+# Mac Provider Phase 2 — crontab template
+#
+# Copy the active lines (no leading #) into `crontab -e` AFTER both
+# providers are confirmed live (scripts/status.sh shows ONLINE for both).
+#
+# Times are in YOUR LOCAL TIME (whatever cron uses on your M1 by default —
+# usually local). Adjust hours to match contributor availability windows.
+#
+# Schedule strategy:
+#   - Cooperative: every hour, during a 9am-10pm window each day
+#   - Adversarial: twice/week per provider, never overlapping between
+#     providers, never overlapping with cooperative bursts on the same hour
+#
+# Why per-provider scripts: independent failure surfaces, easy to disable
+# one provider while the other keeps collecting data.
+
+# ─── cooperative (every hour, both providers in parallel) ──────────────
+0 9-22 * * * /Users/augstar/macprovider-poc/beta/scripts/m4-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+2 9-22 * * * /Users/augstar/macprovider-poc/beta/scripts/m1-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+#                                                                                                          ↑
+# Note: m1 runs at :02 not :00 so the two providers don't write to SQLite
+# at exactly the same moment. Avoids any lock contention; harmless even
+# if both happen to hit the same minute.
+
+# ─── adversarial (different days for each provider) ────────────────────
+# M4: Tuesday + Friday at 14:00
+0 14 * * 2 /Users/augstar/macprovider-poc/beta/scripts/m4-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+0 14 * * 5 /Users/augstar/macprovider-poc/beta/scripts/m4-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+
+# M1: Wednesday + Saturday at 14:00
+0 14 * * 3 /Users/augstar/macprovider-poc/beta/scripts/m1-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+0 14 * * 6 /Users/augstar/macprovider-poc/beta/scripts/m1-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+
+# ─── tips ──────────────────────────────────────────────────────────────
+# • Watch the first day: `tail -f /Users/augstar/macprovider-poc/beta/cron.log`
+# • If you need to pause everything, comment out all 6 lines.
+# • If you need to pause one provider, comment out its 3 lines.
+# • Check cron output: `tail -200 /Users/augstar/macprovider-poc/beta/cron.log`
+# • macOS Sequoia / Sonoma may require Full Disk Access for cron to write
+#   into /Users/augstar/macprovider-poc/. If cron is silently not firing,
+#   add /usr/sbin/cron to System Settings → Privacy & Security → Full Disk
+#   Access.
