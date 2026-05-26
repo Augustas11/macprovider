@@ -111,8 +111,13 @@ CREATE TABLE IF NOT EXISTS full_responses (
 def load_config(path: Path) -> dict:
     with path.open() as f:
         cfg = yaml.safe_load(f)
-    if not cfg.get("tunnel_url") or "CHANGE-ME" in cfg["tunnel_url"]:
+    url = cfg.get("tunnel_url") or ""
+    if not url or "CHANGE-ME" in url:
         sys.exit(f"config: set tunnel_url in {path} before running")
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    if parsed.hostname not in ("127.0.0.1", "localhost") and parsed.scheme != "https":
+        sys.exit(f"config: tunnel_url must use HTTPS for non-localhost targets (got {parsed.scheme}://)")
     return cfg
 
 

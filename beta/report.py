@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import re
 import sqlite3
 import statistics
 import sys
@@ -203,6 +204,9 @@ def main() -> int:
     ap.add_argument("--date", help="UTC date as YYYY-MM-DD (default: today)")
     ap.add_argument("--all", action="store_true", help="rebuild a report for every date with data")
     args = ap.parse_args()
+
+    if args.date and not re.match(r'^\d{4}-\d{2}-\d{2}$', args.date):
+        sys.exit(f"--date must be YYYY-MM-DD, got: {args.date!r}")
 
     cfg = load_config(Path(args.config))
     db_path = BETA_DIR / cfg.get("db_path", "runs.sqlite")

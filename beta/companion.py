@@ -9,7 +9,7 @@ the contributor's Mac.
 Usage:
     python companion.py                   # default: poll every 60s
     python companion.py --interval 10     # poll every 10s
-    python companion.py --no-app          # skip foreground-app capture (privacy)
+    python companion.py --with-app         # also capture foreground app name
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def get_foreground_app() -> str | None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Host telemetry for macprovider contributors")
     ap.add_argument("--interval", type=int, default=60, help="polling interval in seconds (default: 60)")
-    ap.add_argument("--no-app", action="store_true", help="skip foreground-app capture (privacy opt-out)")
+    ap.add_argument("--with-app", action="store_true", help="capture foreground app name (off by default for privacy)")
     args = ap.parse_args()
 
     signal.signal(signal.SIGTERM, _handle_signal)
@@ -78,7 +78,7 @@ def main() -> int:
     while _running:
         cpu = psutil.cpu_percent(interval=1)
         ram = psutil.virtual_memory().percent
-        app = None if args.no_app else get_foreground_app()
+        app = get_foreground_app() if args.with_app else None
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
         conn.execute(
