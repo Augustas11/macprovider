@@ -84,3 +84,56 @@ func (r *Registry) Count() int {
 	defer r.mu.RUnlock()
 	return len(r.providers)
 }
+
+type HeartbeatUpdate struct {
+	Status                State
+	ModelID               string
+	ModelParamsB          float64
+	RAMGB                 int
+	MaxContextTokens      int
+	MaxConcurrency        int
+	SlotsFree             int
+	SlotsTotal            int
+	ThroughputTPSEstimate float64
+	At                    time.Time
+}
+
+func (r *Registry) ApplyHeartbeat(providerID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil {
+		return nil, 0, false
+	}
+	prev := p.LastHeartbeatAt
+	p.LastHeartbeatAt = hb.At
+	p.ModelID = hb.ModelID
+	p.ModelParamsB = hb.ModelParamsB
+	p.RAMGB = hb.RAMGB
+	p.MaxContextTokens = hb.MaxContextTokens
+	p.MaxConcurrency = hb.MaxConcurrency
+	p.SlotsFree = hb.SlotsFree
+	p.SlotsTotal = hb.SlotsTotal
+	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
+	if hb.Status != "" && hb.Status != p.State {
+		p.State = hb.Status
+	}
+	cp := *p
+	var gap time.Duration
+	if !prev.IsZero() {
+		gap = hb.At.Sub(prev)
+	}
+	return &cp, gap, true
+}
+
+func (r *Registry) Snapshot() []Provider {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Provider, 0, len(r.providers))
+	for _, p := range r.providers {
+		cp := *p
+		cp.conn = nil
+		out = append(out, cp)
+	}
+	return out
+}

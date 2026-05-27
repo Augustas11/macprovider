@@ -28,6 +28,22 @@ type HelloAck struct {
 	HeartbeatIntervalS int    `json:"heartbeat_interval_s"`
 }
 
+type Heartbeat struct {
+	Type                    string  `json:"type"`
+	Status                  string  `json:"status"`
+	ModelID                 string  `json:"model_id"`
+	ModelParamsB            float64 `json:"model_params_b"`
+	RAMGB                   int     `json:"ram_gb"`
+	MaxContextTokens        int     `json:"max_context_tokens"`
+	MaxConcurrency          int     `json:"max_concurrency"`
+	SlotsFree               int     `json:"slots_free"`
+	SlotsTotal              int     `json:"slots_total"`
+	ThroughputTPSEstimate   float64 `json:"throughput_tps_estimate"`
+	RequestsServedSinceLast int     `json:"requests_served_since_last"`
+	AvgLatencyMSSinceLast   float64 `json:"avg_latency_ms_since_last"`
+	ThroughputTPSSinceLast  float64 `json:"throughput_tps_since_last"`
+}
+
 func ParseHello(payload []byte) (Hello, string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
@@ -121,4 +137,46 @@ func requireFloat(raw map[string]json.RawMessage, field string, out *float64) *f
 		return &fieldError{Field: field}
 	}
 	return nil
+}
+
+func ParseHeartbeat(payload []byte) (Heartbeat, string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return Heartbeat{}, "json", err
+	}
+	var hb Heartbeat
+	if err := requireString(raw, "type", &hb.Type); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if hb.Type != "heartbeat" {
+		return Heartbeat{}, "type", fmt.Errorf("expected heartbeat, got %q", hb.Type)
+	}
+	if err := requireString(raw, "status", &hb.Status); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireString(raw, "model_id", &hb.ModelID); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireFloat(raw, "model_params_b", &hb.ModelParamsB); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireInt(raw, "ram_gb", &hb.RAMGB); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireInt(raw, "max_context_tokens", &hb.MaxContextTokens); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireInt(raw, "max_concurrency", &hb.MaxConcurrency); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireInt(raw, "slots_free", &hb.SlotsFree); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireInt(raw, "slots_total", &hb.SlotsTotal); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireFloat(raw, "throughput_tps_estimate", &hb.ThroughputTPSEstimate); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	return hb, "", nil
 }

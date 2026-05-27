@@ -44,6 +44,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/provider", s.handleProvider)
+	mux.HandleFunc("/poolz", s.handlePoolz)
 	return mux
 }
 
@@ -128,12 +129,112 @@ func (s *Server) handleConn(conn net.Conn) {
 		return
 	}
 
-	// Step 2 stops after handshake. Later steps keep this goroutine alive for
-	// heartbeat, state_update, preflight_ack, drain_status, and nak handling.
+	for {
+		payload, op, err := wsutil.ReadClientData(conn)
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("provider websocket read failed")
+			return
+		}
+		if op != gobwas.OpText {
+			s.log.Warn().Str("provider_id", hello.ProviderID).Uint8("op", uint8(op)).Msg("ignoring non-text provider frame")
+			continue
+		}
+		s.handleMessage(hello.ProviderID, payload)
+	}
 }
 
 func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 	_ = wsutil.WriteServerMessage(conn, gobwas.OpClose, gobwas.NewCloseFrameBody(code, reason))
+}
+
+func (s *Server) handleMessage(providerID string, payload []byte) {
+	var envelope struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid provider message json")
+		return
+	}
+	switch envelope.Type {
+	case "heartbeat":
+		hb, field, err := ParseHeartbeat(payload)
+		if err != nil {
+			s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid heartbeat")
+			return
+		}
+		entry, gap, ok := s.pool.ApplyHeartbeat(providerID, pool.HeartbeatUpdate{
+			Status:                pool.State(hb.Status),
+			ModelID:               hb.ModelID,
+			ModelParamsB:          hb.ModelParamsB,
+			RAMGB:                 hb.RAMGB,
+			MaxContextTokens:      hb.MaxContextTokens,
+			MaxConcurrency:        hb.MaxConcurrency,
+			SlotsFree:             hb.SlotsFree,
+			SlotsTotal:            hb.SlotsTotal,
+			ThroughputTPSEstimate: hb.ThroughputTPSEstimate,
+			At:                    s.now(),
+		})
+		if !ok {
+			s.log.Warn().Str("provider_id", providerID).Msg("heartbeat for unknown provider")
+			return
+		}
+		threshold := s.cfg.HeartbeatInterval() + s.cfg.HeartbeatInterval()/2
+		if gap > threshold {
+			s.log.Warn().Str("provider_id", providerID).Dur("gap", gap).Dur("threshold", threshold).Msg("provider heartbeat stale")
+		}
+		s.log.Debug().
+			Str("provider_id", providerID).
+			Str("state", string(entry.State)).
+			Int("slots_free", entry.SlotsFree).
+			Int("slots_total", entry.SlotsTotal).
+			Msg("provider heartbeat")
+	default:
+		s.log.Warn().Str("provider_id", providerID).Str("type", envelope.Type).Msg("unknown provider message type")
+	}
+}
+
+func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.cfg.Auth.OperatorKey != "" && r.Header.Get("Authorization") != "Bearer "+s.cfg.Auth.OperatorKey {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":{"message":"unauthorized","code":"invalid_operator_token"}}`))
+		return
+	}
+
+	providers := s.pool.Snapshot()
+	modelSet := map[string]struct{}{}
+	summary := struct {
+		TotalProviders int      `json:"total_providers"`
+		Ready          int      `json:"ready"`
+		TotalSlots     int      `json:"total_slots"`
+		FreeSlots      int      `json:"free_slots"`
+		Models         []string `json:"models"`
+	}{TotalProviders: len(providers)}
+	for _, p := range providers {
+		if p.State == pool.StateReady {
+			summary.Ready++
+		}
+		summary.TotalSlots += p.SlotsTotal
+		summary.FreeSlots += p.SlotsFree
+		if _, ok := modelSet[p.ModelID]; !ok {
+			modelSet[p.ModelID] = struct{}{}
+			summary.Models = append(summary.Models, p.ModelID)
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(struct {
+		Pool    []pool.Provider `json:"pool"`
+		Summary any             `json:"summary"`
+	}{
+		Pool:    providers,
+		Summary: summary,
+	})
 }
 
 func itoa(n int) string {

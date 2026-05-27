@@ -3,11 +3,13 @@ package ws_test
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -46,6 +48,97 @@ func TestProviderHelloAcceptsAuthorizationHeaderInStep2(t *testing.T) {
 	defer conn.Close()
 
 	assertHelloAck(t, conn)
+}
+
+func TestHeartbeatUpdatesPoolz(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+
+	hb := heartbeat()
+	hb["slots_free"] = 0
+	hb["status"] = "busy"
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+
+	var got struct {
+		Pool []struct {
+			ProviderID string `json:"provider_id"`
+			State      string `json:"state"`
+			SlotsFree  int    `json:"slots_free"`
+			SlotsTotal int    `json:"slots_total"`
+			Endpoint   string `json:"endpoint_url"`
+		} `json:"pool"`
+		Summary struct {
+			TotalProviders int `json:"total_providers"`
+			Ready          int `json:"ready"`
+			FreeSlots      int `json:"free_slots"`
+		} `json:"summary"`
+	}
+	eventually(t, func() bool {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/poolz", nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer test-operator-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("poolz: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			t.Fatalf("poolz status=%d body=%s", resp.StatusCode, body)
+		}
+		got = struct {
+			Pool []struct {
+				ProviderID string `json:"provider_id"`
+				State      string `json:"state"`
+				SlotsFree  int    `json:"slots_free"`
+				SlotsTotal int    `json:"slots_total"`
+				Endpoint   string `json:"endpoint_url"`
+			} `json:"pool"`
+			Summary struct {
+				TotalProviders int `json:"total_providers"`
+				Ready          int `json:"ready"`
+				FreeSlots      int `json:"free_slots"`
+			} `json:"summary"`
+		}{}
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("poolz json: %v", err)
+		}
+		return len(got.Pool) == 1 && got.Pool[0].State == "busy" && got.Pool[0].SlotsFree == 0
+	})
+	if got.Pool[0].ProviderID != "m4-anon" {
+		t.Fatalf("provider_id = %q", got.Pool[0].ProviderID)
+	}
+	if got.Pool[0].Endpoint != "https://m4.streamvc.live" {
+		t.Fatalf("endpoint = %q", got.Pool[0].Endpoint)
+	}
+	if got.Summary.TotalProviders != 1 || got.Summary.Ready != 0 || got.Summary.FreeSlots != 0 {
+		t.Fatalf("summary = %+v", got.Summary)
+	}
+}
+
+func TestPoolzRequiresOperatorKey(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/poolz")
+	if err != nil {
+		t.Fatalf("poolz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
 }
 
 func assertHelloAck(t *testing.T, conn net.Conn) {
@@ -183,6 +276,38 @@ func validHello(providerID string) map[string]any {
 		"throughput_tps_estimate": 19.8,
 		"binary_version":          "0.1.0",
 		"attestation":             nil,
+	}
+}
+
+func heartbeat() map[string]any {
+	return map[string]any{
+		"type":                       "heartbeat",
+		"status":                     "ready",
+		"model_id":                   "mlx-community/Qwen2.5-7B-Instruct-4bit",
+		"model_params_b":             7.0,
+		"ram_gb":                     16,
+		"max_context_tokens":         50000,
+		"max_concurrency":            1,
+		"slots_free":                 1,
+		"slots_total":                1,
+		"throughput_tps_estimate":    19.8,
+		"requests_served_since_last": 1,
+		"avg_latency_ms_since_last":  450.0,
+		"throughput_tps_since_last":  18.5,
+	}
+}
+
+func eventually(t *testing.T, f func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if f() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("condition did not become true before deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

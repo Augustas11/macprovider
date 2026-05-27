@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>Step 2 hello/hello_ack verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 3 heartbeat and poolz verified</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
 
 <section id="step1-scaffold">
@@ -41,6 +41,30 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     local toolchain's <code>1.26.3</code>, because SPEC-002 requires Go
     1.22+ and the deployment target should not accidentally require the
     operator's newest local Go version.</p>
+  </div>
+</section>
+
+<section id="step3-heartbeat-poolz">
+  <h2>Step 3 pool registry and heartbeat handling (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> heartbeat parsing and live pool
+    updates for repeated capacity fields, <code>last_heartbeat_at</code>,
+    dynamic slots, throughput estimate, and implicit state changes from
+    heartbeat <code>status</code>.</p>
+    <p><strong>Observability:</strong> added authenticated
+    <code>GET /poolz</code> returning provider entries plus summary
+    counts (<code>total_providers</code>, <code>ready</code>,
+    <code>total_slots</code>, <code>free_slots</code>, models).</p>
+    <p><strong>Staleness:</strong> heartbeat gaps over
+    <code>1.5 * heartbeat_interval_s</code> are logged at warn level.
+    Removal/discounting remains a later disconnect/state-machine step
+    per SPEC-002 FR-P10/Step 4.</p>
+    <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes with a mock provider sending a real WebSocket heartbeat and
+    <code>/poolz</code> reflecting <code>busy</code> plus live slot data.
+    <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    passes.</p>
   </div>
 </section>
 
@@ -340,6 +364,16 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </section>
 <section><h2>Tradeoffs considered</h2>
 <p class=meta>Alternatives evaluated and why we picked what we did.</p>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Temporary /poolz placement:</strong> Step 3 mounts
+  <code>/poolz</code> on the current coordinator HTTP handler alongside
+  <code>/ws/provider</code>. SPEC-002 ultimately separates buyer and
+  provider listen ports, with operator endpoints on the HTTP side. This
+  keeps Step 3 observable without inventing the buyer server early; Step
+  10 should move or remount the same handler into the final operator
+  endpoint surface.</p>
+</div>
 </section>
 <section><h2>Open questions for operator</h2>
 <p class=meta>Things needing operator confirmation or revision.</p>
