@@ -1,0 +1,1 @@
+print("macprovider-cli scaffold")

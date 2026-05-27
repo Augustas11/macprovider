@@ -14,8 +14,90 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-001 — phase3-binary — implementation notes</h1>
-<p class=meta>Status: <strong>not started</strong> · Spec:
+<p class=meta>Status: <strong>Step 1 verified; Step 2 in progress</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
+
+<section id="step1-blocker-diagnosis">
+  <h2>Step 1 blocker diagnosis (2026-05-28)</h2>
+  <p class=meta>Codex correctly scaffolded the Swift package per SPEC-001 § 11 Step 1.
+  The Package.swift is well-formed for swift-tools-version 5.9. The blocker is
+  NOT in the Package.swift — it is in the operator's macOS Swift toolchain
+  install.</p>
+
+  <h3>Root cause</h3>
+  <p>The CommandLineTools install at <code>/Library/Developer/CommandLineTools</code>
+  is internally inconsistent. Investigation:</p>
+  <ul>
+    <li><code>libPackageDescription.dylib</code> — built Dec 7, 2024 (Swift 6.0.3)</li>
+    <li>Public <code>swiftinterface</code> — Dec 6, 2024 (matches dylib)</li>
+    <li><strong>Private <code>swiftinterface</code> — Feb 15, 2024 (stale, Swift 5.10 era)</strong></li>
+  </ul>
+  <p>The stale private swiftinterface advertises a deprecated 5.3-era
+  <code>Package.init</code> with parameter <code>swiftLanguageVersions:</code>
+  marked <code>@_disfavoredOverload</code>. The Swift 6.0 dylib only contains
+  the modern init with parameter <code>swiftLanguageModes:</code>. When the
+  compiler resolves <code>Package(...)</code>, it picks the stale-interface
+  init's symbol; the linker can't find it in the dylib → unresolved symbol
+  error.</p>
+
+  <p>Tried and failed:</p>
+  <ul>
+    <li>Bumping <code>swift-tools-version</code> 5.9 → 6.0</li>
+    <li>Passing <code>pkgConfig: nil, providers: nil</code> explicitly to
+        force overload disambiguation</li>
+    <li>Clearing <code>~/Library/Caches/org.swift.swiftpm</code>,
+        <code>~/Library/org.swift.swiftpm</code>, <code>.build/</code>,
+        Xcode DerivedData</li>
+  </ul>
+  <p>None of these help because the issue is in the toolchain's stored
+  swiftinterface files, not in any cache.</p>
+
+  <h3>Resolution path (operator action)</h3>
+  <p><strong>Recommended: reinstall CommandLineTools.</strong> Takes ~5-10 min.</p>
+  <pre>sudo rm -rf /Library/Developer/CommandLineTools
+sudo xcode-select --install
+# GUI installer pops up; click Install; wait ~600 MB download</pre>
+
+  <p>Alternatives:</p>
+  <ul>
+    <li>Install Xcode.app from Mac App Store (~7 GB, slower, also fixes)</li>
+    <li>Install Swift toolchain from swift.org (no sudo, alternative path)</li>
+  </ul>
+
+  <p><strong>After CLT reinstall:</strong></p>
+  <pre>cd /Users/augstar/macprovider-poc/phase3-binary
+swift --version    # should show Swift 6.0.x
+rm -rf .build
+swift package describe</pre>
+  <p>If that succeeds, run <code>swift build</code> to verify Step 1 deliverable.</p>
+
+  <h3>Why this isn't a Codex bug</h3>
+  <p>The Package.swift is correct per SPEC-001's pinned versions and per
+  Apple's Package Manager documentation for swift-tools-version 5.9. The
+  toolchain is the broken party. Codex correctly stopped at the blocker
+  rather than committing unverifiable code.</p>
+
+  <h3>Open question for operator</h3>
+  <p>Resolved 2026-05-28: operator reinstalled CommandLineTools, upgrading
+  Swift from 6.0.3 to 6.3.2. SwiftPM is now coherent; <code>swift build</code>
+  succeeds and the scaffold binary runs.</p>
+</section>
+
+<section id="step1-verification">
+  <h2>Step 1 verification (2026-05-28)</h2>
+  <div class="entry">
+    <time>2026-05-28</time>
+    <p><strong>Verified:</strong> <code>swift build</code> succeeds after the
+    CommandLineTools reinstall. First build took 249 seconds; future builds
+    should be incremental. The scaffold executable runs at
+    <code>./.build/arm64-apple-macosx/debug/macprovider-cli</code>.</p>
+    <p><strong>Package name correction:</strong> Initial scaffold referenced
+    MLX products with <code>package: "mlx-libraries"</code>. SwiftPM resolution
+    showed the actual package identity is <code>"mlx-swift-examples"</code>;
+    <code>Package.swift</code> was fixed in place to use that package name for
+    <code>MLXLLM</code> and <code>MLXLMCommon</code>.</p>
+  </div>
+</section>
 
 <section id="v1-1-1-patches">
   <h2>SPEC-001 v1.1.1 post-re-audit patches (2026-05-27)</h2>
@@ -151,18 +233,75 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 
 <section><h2>Design decisions</h2>
 <p class=meta>Choices made where the spec was ambiguous.</p>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Canonical step sequence:</strong> The operator wrapper prompt
+  contains a condensed 9-step build sequence that differs from
+  SPEC-001 § 11's 11-step implementation hand-off. I am treating
+  SPEC-001 § 11 as canonical because the wrapper says to implement
+  SPEC-001 and § 11 is the versioned spec text.</p>
+</div>
 </section>
 <section><h2>Deviations from spec</h2>
 <p class=meta>Intentional departures, with reason.</p>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>None committed.</strong> I temporarily tested SwiftPM manifest
+  variants while diagnosing the local toolchain, then restored the package
+  manifest to the spec-conformant Swift 5.9 form with macOS 14 platform
+  declaration and pinned dependency versions.</p>
+</div>
 </section>
 <section><h2>Tradeoffs considered</h2>
 <p class=meta>Alternatives evaluated and why we picked what we did.</p>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Do not keep a Swift 6 manifest workaround:</strong> The installed
+  CommandLineTools manifest API appears internally inconsistent. I tested
+  whether a Swift 6 manifest path would avoid the broken Swift 5.9
+  <code>PackageDescription</code> overload, but it still failed. I restored
+  <code>// swift-tools-version: 5.9</code> because SPEC-001 requires Swift
+  5.9+ compatibility and the workaround did not produce a successful build.</p>
+</div>
 </section>
 <section><h2>Open questions for operator</h2>
 <p class=meta>Things needing operator confirmation or revision.</p>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Resolved Step 1 blocker:</strong> The local SwiftPM installation could not
+  compile even the package manifest. With cache writes redirected into
+  <code>phase3-binary/.build/</code>, <code>swift build</code> fails while
+  linking the manifest with an undefined
+  <code>PackageDescription.Package.__allocating_init(... swiftLanguageVersions:
+  [PackageDescription.SwiftVersion]?...)</code> symbol. Inspecting
+  <code>/Library/Developer/CommandLineTools/usr/lib/swift/pm/ManifestAPI</code>
+  shows the installed <code>PackageDescription.swiftinterface</code> advertises
+  the older <code>SwiftVersion</code> initializer while
+  <code>libPackageDescription.dylib</code> exports the newer
+  <code>SwiftLanguageMode</code> initializer. This looks like a mismatched or
+  partially updated CommandLineTools install. Operator repaired this by
+  reinstalling CommandLineTools; Step 1 is now verified.</p>
+</div>
 </section>
 <section><h2>References consulted</h2>
 <p class=meta>External resources read during implementation, with
 what was taken. d-inference is strictly prohibited per Section 7.2.</p>
+<div class="entry">
+  <time>2026-05-27</time>
+  <ul>
+    <li><code>specs/SPEC-001-phase3-binary.md</code> — full implementation
+    contract, dependencies, acceptance criteria, and § 11 build sequence.</li>
+    <li><code>specs/SPEC-001-audit.md</code>,
+    <code>specs/SPEC-001-v1-1-audit.md</code>, and
+    <code>specs/JOINT-SPEC-001-002-audit.md</code> — audit context and
+    confirmation that SPEC-001 v1.1.1 is build-ready.</li>
+    <li><code>HANDOFF.md</code> and <code>results/REPORT.md</code> — Phase 1
+    context, SSE quirks, stop-token leakage, tunnel behavior, and M1 8GB
+    long-context OOM evidence.</li>
+    <li><code>beta/harness.py</code> and
+    <code>beta/workloads_adversarial.py</code> — acceptance driver behavior,
+    SSE parsing expectations, cooperative/adversarial workload shapes.</li>
+  </ul>
+</div>
 </section>
 </body></html>
