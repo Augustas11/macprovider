@@ -22,3 +22,9 @@ __pycache__/
 state/
 
 # Beta runtime artifacts are covered by beta/.gitignore
+
+# Phase 4 coordinator build artifacts
+phase4-coordinator/coordinator
+phase4-coordinator/coordinator-cli
+phase4-coordinator/mockprovider
+default.profraw

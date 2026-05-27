@@ -142,8 +142,12 @@ func (c Config) Validate() error {
 		}
 		seen[p.ProviderID] = struct{}{}
 		u, err := url.Parse(p.EndpointURL)
-		if err != nil || u.Scheme != "https" || u.Host == "" {
-			return fmt.Errorf("provider %q endpoint_url must be a valid https URL", p.ProviderID)
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("provider %q endpoint_url must be a valid URL", p.ProviderID)
+		}
+		isLocal := u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost"
+		if u.Scheme != "https" && !(u.Scheme == "http" && isLocal) {
+			return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 		}
 	}
 	return nil
