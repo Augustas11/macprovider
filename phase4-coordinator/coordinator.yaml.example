@@ -1,0 +1,36 @@
+listen:
+  buyer_port: 8443
+  provider_port: 8444
+  bind_address: "127.0.0.1"
+
+pool:
+  heartbeat_interval_s: 30
+  disconnect_grace_period_s: 30
+  wake_gap_threshold_s: 120
+  degraded_backoff_s: 30
+  degraded_max_retries: 3
+  degraded_probe_after_502: true
+
+routing:
+  preflight_threshold_tokens: 4096
+  preflight_timeout_s: 5
+  request_timeout_s: 300
+
+auth:
+  operator_key: "change-me"
+
+storage:
+  db_path: "coordinator.db"
+  snapshot_interval_s: 300
+
+logging:
+  level: "info"
+  format: "json"
+
+providers:
+  - provider_id: "m4-anon"
+    endpoint_url: "https://m4.streamvc.live"
+    display_name: "M4 partner (Qwen 7B)"
+  - provider_id: "m1-anon"
+    endpoint_url: "https://m1.streamvc.live"
+    display_name: "M1 partner (Llama 3B)"

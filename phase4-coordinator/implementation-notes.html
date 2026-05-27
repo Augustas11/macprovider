@@ -14,8 +14,35 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>not started</strong> · Spec:
+<p class=meta>Status: <strong>Step 1 scaffold verified</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
+
+<section id="step1-scaffold">
+  <h2>Step 1 scaffold verification (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> initialized
+    <code>phase4-coordinator/</code> as Go module
+    <code>github.com/augstar/macprovider-coordinator</code>, added empty
+    <code>cmd/coordinator</code> and <code>cmd/coordinator-cli</code>
+    entrypoints, and added <code>coordinator.yaml.example</code> matching
+    SPEC-002 § 13's static provider endpoint schema.</p>
+    <p><strong>Dependency pins:</strong> added the exact SPEC-002 § 8.1
+    versions: <code>github.com/gobwas/ws v1.4.0</code>,
+    <code>github.com/go-chi/chi/v5 v5.1.0</code>,
+    <code>modernc.org/sqlite v1.33.0</code>,
+    <code>github.com/rs/zerolog v1.33.0</code>,
+    <code>github.com/google/uuid v1.6.0</code>, and
+    <code>gopkg.in/yaml.v3 v3.0.1</code>.</p>
+    <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    succeeds.</p>
+    <p><strong>Implementation detail:</strong> the module
+    <code>go</code> directive is set to <code>1.22</code> instead of the
+    local toolchain's <code>1.26.3</code>, because SPEC-002 requires Go
+    1.22+ and the deployment target should not accidentally require the
+    operator's newest local Go version.</p>
+  </div>
+</section>
 
 <section id="v1-0-3-patches">
   <h2>SPEC-002 v1.0.3 post-final-re-audit patches (2026-05-27)</h2>
@@ -283,6 +310,15 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </section>
 <section><h2>Open questions for operator</h2>
 <p class=meta>Things needing operator confirmation or revision.</p>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>OQ-1:</strong> <code>go get</code> reports
+  <code>modernc.org/sqlite v1.33.0</code> is retracted by its module
+  author. The pin still downloads and <code>go build ./...</code>
+  succeeds, so the implementation keeps the exact SPEC-002 pin. No
+  dependency bump was made. Operator should decide whether a future spec
+  patch should replace this pin before production hardening.</p>
+</div>
 </section>
 <section><h2>References consulted</h2>
 <p class=meta>External resources read during implementation, with
