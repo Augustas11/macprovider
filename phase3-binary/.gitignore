@@ -1,2 +1,6 @@
 .build/
 .swiftpm/
+
+# Release build artifacts + shipped tarballs (regeneratable via dist/package.sh)
+build-release/
+dist/*.tar.gz
