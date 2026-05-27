@@ -31,6 +31,12 @@ type Server struct {
 	now     func() time.Time
 	newUUID func() string
 	timers  sync.Map
+	pending sync.Map
+}
+
+type pendingPreflight struct {
+	providerID string
+	ch         chan PreflightAck
 }
 
 func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger) *Server {
@@ -170,9 +176,62 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleHeartbeat(conn, providerID, assignedID, payload)
 	case "state_update":
 		s.handleStateUpdate(providerID, payload)
+	case "preflight_ack":
+		s.handlePreflightAck(providerID, payload)
 	default:
 		s.log.Warn().Str("provider_id", providerID).Str("type", envelope.Type).Msg("unknown provider message type")
 	}
+}
+
+func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (PreflightAck, bool, error) {
+	conn, err := s.pool.Conn(provider.ProviderID, provider.AssignedID)
+	if err != nil {
+		return PreflightAck{}, false, err
+	}
+	ch := make(chan PreflightAck, 1)
+	s.pending.Store(requestID, pendingPreflight{providerID: provider.ProviderID, ch: ch})
+	defer s.pending.Delete(requestID)
+	msg := map[string]any{
+		"type":             "preflight",
+		"request_id":       requestID,
+		"estimated_tokens": estimatedTokens,
+	}
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		return PreflightAck{}, false, err
+	}
+	if err := wsutil.WriteServerText(conn, payload); err != nil {
+		return PreflightAck{}, false, err
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case ack := <-ch:
+		return ack, true, nil
+	case <-timer.C:
+		return PreflightAck{}, false, nil
+	}
+}
+
+func (s *Server) handlePreflightAck(providerID string, payload []byte) {
+	ack, field, err := ParsePreflightAck(payload)
+	if err != nil {
+		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid preflight_ack")
+		return
+	}
+	if pending, ok := s.pending.Load(ack.RequestID); ok {
+		pf := pending.(pendingPreflight)
+		if pf.providerID != providerID {
+			s.log.Warn().Str("provider_id", providerID).Str("expected_provider_id", pf.providerID).Str("request_id", ack.RequestID).Msg("preflight_ack from wrong provider")
+			return
+		}
+		select {
+		case pf.ch <- ack:
+		default:
+		}
+		return
+	}
+	s.log.Warn().Str("provider_id", providerID).Str("request_id", ack.RequestID).Msg("unexpected preflight_ack")
 }
 
 func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, payload []byte) {

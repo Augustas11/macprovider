@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -222,6 +223,132 @@ func TestChatCompletionsRoutingPreferences(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsPreflightSkipsRejectedCandidate(t *testing.T) {
+	rejectedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("rejected provider should not receive request")
+	}))
+	defer rejectedUpstream.Close()
+	acceptedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"accepted","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer acceptedUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: rejectedUpstream.URL},
+		{ProviderID: "p2", EndpointURL: acceptedUpstream.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, rejectedUpstream.URL, 20)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 2, acceptedUpstream.URL, 20)
+
+	var calls []string
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithPreflightConfig(1, time.Second),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			calls = append(calls, provider.ProviderID)
+			if provider.ProviderID == "p1" {
+				return buyer.PreflightResult{Accepted: false, Reason: "queue_full"}, true, nil
+			}
+			return buyer.PreflightResult{Accepted: true}, true, nil
+		}),
+	)
+	body := chatBodyWithContent("model-a", strings.Repeat("x", 64))
+
+	rr := postChat(t, server, body, nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
+		t.Fatalf("provider = %q, want p2", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if strings.Join(calls, ",") != "p1,p2" {
+		t.Fatalf("preflight calls = %v", calls)
+	}
+}
+
+func TestChatCompletionsPinnedPreflightRejectDoesNotFallback(t *testing.T) {
+	pinnedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("rejected pinned provider should not receive request")
+	}))
+	defer pinnedUpstream.Close()
+	fallbackUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("pinned rejection should not fallback")
+	}))
+	defer fallbackUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: pinnedUpstream.URL},
+		{ProviderID: "p2", EndpointURL: fallbackUpstream.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, pinnedUpstream.URL, 20)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, fallbackUpstream.URL, 20)
+	var calls []string
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithPreflightConfig(1, time.Second),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			calls = append(calls, provider.ProviderID)
+			return buyer.PreflightResult{Accepted: false, Reason: "context_exceeds_capacity"}, true, nil
+		}),
+	)
+
+	rr := postChat(t, server, chatBodyWithContent("model-a", strings.Repeat("x", 64)), http.Header{"X-MacProvider-Provider": []string{"p1"}})
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"preflight_rejected"`)) {
+		t.Fatalf("body missing preflight_rejected: %s", rr.Body.String())
+	}
+	if strings.Join(calls, ",") != "p1" {
+		t.Fatalf("preflight calls = %v", calls)
+	}
+}
+
+func TestChatCompletionsContextLengthRoutesOrReturns413(t *testing.T) {
+	smallUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("small context provider should be prefiltered")
+	}))
+	defer smallUpstream.Close()
+	largeUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"large","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer largeUpstream.Close()
+
+	longBody := chatBodyWithContent("model-a", strings.Repeat("x", 512))
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "small", EndpointURL: smallUpstream.URL},
+		{ProviderID: "large", EndpointURL: largeUpstream.URL},
+	})
+	registerWithEndpoint(registry, "small", "s1", "model-a", pool.StateReady, 20, 1, smallUpstream.URL, 20)
+	registerWithEndpoint(registry, "large", "s2", "model-a", pool.StateReady, 1000, 1, largeUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, longBody, nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "large" {
+		t.Fatalf("provider = %q, want large", rr.Header().Get("X-MacProvider-Provider"))
+	}
+
+	onlySmall := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "small", EndpointURL: smallUpstream.URL}})
+	registerWithEndpoint(onlySmall, "small", "s1", "model-a", pool.StateReady, 20, 1, smallUpstream.URL, 20)
+	smallServer := buyer.NewServer(onlySmall, zerolog.Nop(), time.Unix(1716768000, 0))
+	tooLarge := postChat(t, smallServer, longBody, nil)
+	if tooLarge.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", tooLarge.Code, tooLarge.Body.String())
+	}
+	if !bytes.Contains(tooLarge.Body.Bytes(), []byte(`"code":"context_exceeds_capacity"`)) {
+		t.Fatalf("body missing context_exceeds_capacity: %s", tooLarge.Body.String())
+	}
+}
+
 func TestChatCompletionsValidationPrecedesModelLookup(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
@@ -236,6 +363,67 @@ func TestChatCompletionsValidationPrecedesModelLookup(t *testing.T) {
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"invalid_tools"`)) {
 		t.Fatalf("body missing invalid_tools: %s", rr.Body.String())
+	}
+}
+
+func TestProviderFailureStartsRecoveryPreflight(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	recoveryIDs := make(chan string, 1)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRecoveryConfig(10*time.Millisecond, 1, true),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			recoveryIDs <- requestID
+			return buyer.PreflightResult{Accepted: true}, true, nil
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	select {
+	case requestID := <-recoveryIDs:
+		if !strings.HasPrefix(requestID, "recovery-probe-") {
+			t.Fatalf("requestID = %q", requestID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery preflight did not run")
+	}
+	eventually(t, func() bool {
+		for _, p := range registry.Snapshot() {
+			return p.ProviderID == "p1" && p.State == pool.StateReady
+		}
+		return false
+	})
+}
+
+func TestProviderHTTP530MarksUnavailable(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(530)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	providers := registry.Snapshot()
+	if len(providers) != 1 || providers[0].State != pool.StateUnavailable {
+		t.Fatalf("providers = %#v", providers)
 	}
 }
 
@@ -298,4 +486,31 @@ func postChat(t *testing.T, server *buyer.Server, body []byte, headers http.Head
 	server.Handler().ServeHTTP(rr, req)
 	_, _ = io.Copy(io.Discard, rr.Result().Body)
 	return rr
+}
+
+func chatBodyWithContent(model, content string) []byte {
+	b, err := json.Marshal(map[string]any{
+		"model": model,
+		"messages": []map[string]string{
+			{"role": "user", "content": content},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	return b
+}
+
+func eventually(t *testing.T, f func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if f() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("condition did not become true before deadline")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }

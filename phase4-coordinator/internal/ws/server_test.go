@@ -205,6 +205,98 @@ func TestWakeGapSendsWarmUpAndMarksDegraded(t *testing.T) {
 	})
 }
 
+func TestPreflightRoundTrip(t *testing.T) {
+	h := newProviderHarness(t)
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	resultCh := make(chan struct {
+		ack providerws.PreflightAck
+		ok  bool
+		err error
+	}, 1)
+	go func() {
+		ack, ok, err := h.Provider.Preflight(pool.Provider{ProviderID: "m4-anon", AssignedID: assignedID}, "req-1", 9000, time.Second)
+		resultCh <- struct {
+			ack providerws.PreflightAck
+			ok  bool
+			err error
+		}{ack: ack, ok: ok, err: err}
+	}()
+
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read preflight: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+	var preflight map[string]any
+	if err := json.Unmarshal(payload, &preflight); err != nil {
+		t.Fatalf("preflight json: %v", err)
+	}
+	if preflight["type"] != "preflight" || preflight["request_id"] != "req-1" || int(preflight["estimated_tokens"].(float64)) != 9000 {
+		t.Fatalf("preflight = %#v", preflight)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(map[string]any{
+		"type":              "preflight_ack",
+		"request_id":        "req-1",
+		"accepted":          true,
+		"estimated_wait_ms": 0,
+	})); err != nil {
+		t.Fatalf("write preflight_ack: %v", err)
+	}
+
+	select {
+	case got := <-resultCh:
+		if got.err != nil || !got.ok || !got.ack.Accepted {
+			t.Fatalf("preflight result = ack:%#v ok:%v err:%v", got.ack, got.ok, got.err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("preflight result timed out")
+	}
+}
+
+func TestParsePreflightAckAcceptsAllSpecRejectionReasons(t *testing.T) {
+	reasons := []string{
+		"context_exceeds_capacity",
+		"queue_full",
+		"draining",
+		"model_not_loaded",
+		"unhealthy",
+		"tier_mismatch",
+	}
+	for _, reason := range reasons {
+		ack, field, err := providerws.ParsePreflightAck(mustJSON(map[string]any{
+			"type":       "preflight_ack",
+			"request_id": "req-" + reason,
+			"accepted":   false,
+			"reason":     reason,
+		}))
+		if err != nil {
+			t.Fatalf("reason %s rejected at %s: %v", reason, field, err)
+		}
+		if ack.Reason != reason {
+			t.Fatalf("reason = %q, want %q", ack.Reason, reason)
+		}
+	}
+	_, field, err := providerws.ParsePreflightAck(mustJSON(map[string]any{
+		"type":       "preflight_ack",
+		"request_id": "req-bad",
+		"accepted":   false,
+		"reason":     "unknown",
+	}))
+	if err == nil || field != "reason" {
+		t.Fatalf("invalid reason field=%q err=%v", field, err)
+	}
+}
+
 func TestDisconnectMarksUnavailableThenRemovesAfterGrace(t *testing.T) {
 	ts := newProviderServer(t, func(cfg *config.Config) {
 		cfg.Pool.DisconnectGracePeriodS = 1
@@ -244,7 +336,7 @@ func TestPoolzRequiresOperatorKey(t *testing.T) {
 	}
 }
 
-func assertHelloAck(t *testing.T, conn net.Conn) {
+func assertHelloAck(t *testing.T, conn net.Conn) string {
 	t.Helper()
 	if err := wsutil.WriteClientText(conn, mustJSON(validHello("m4-anon"))); err != nil {
 		t.Fatalf("write hello: %v", err)
@@ -273,6 +365,7 @@ func assertHelloAck(t *testing.T, conn net.Conn) {
 	if ack.HeartbeatIntervalS != 30 {
 		t.Fatalf("heartbeat_interval_s = %d", ack.HeartbeatIntervalS)
 	}
+	return ack.AssignedID
 }
 
 func TestProviderHelloRejectsUnknownProvider(t *testing.T) {
@@ -366,7 +459,18 @@ func fetchPoolz(t *testing.T, serverURL string) poolzResponse {
 	return got
 }
 
+type providerHarness struct {
+	HTTP     *httptest.Server
+	Provider *providerws.Server
+	Registry *pool.Registry
+}
+
 func newProviderServer(t *testing.T, opts ...func(*config.Config)) *httptest.Server {
+	t.Helper()
+	return newProviderHarness(t, opts...).HTTP
+}
+
+func newProviderHarness(t *testing.T, opts ...func(*config.Config)) providerHarness {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
@@ -382,7 +486,11 @@ func newProviderServer(t *testing.T, opts ...func(*config.Config)) *httptest.Ser
 	}
 	registry := pool.NewRegistry(cfg.Providers)
 	server := providerws.NewServer(cfg, registry, zerolog.Nop())
-	return httptest.NewServer(server.Handler())
+	return providerHarness{
+		HTTP:     httptest.NewServer(server.Handler()),
+		Provider: server,
+		Registry: registry,
+	}
 }
 
 func sendHelloExpectClose(t *testing.T, serverURL string, hello map[string]any) (gobwas.StatusCode, string) {

@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -16,17 +18,71 @@ import (
 )
 
 type Server struct {
-	pool      *pool.Registry
-	log       zerolog.Logger
-	createdAt int64
+	pool               *pool.Registry
+	log                zerolog.Logger
+	createdAt          int64
+	preflight          PreflightFunc
+	preflightThreshold int
+	preflightTimeout   time.Duration
+	recoveryBackoff    time.Duration
+	recoveryMaxRetries int
+	recoveryProbe      bool
+	recovering         sync.Map
 }
 
-func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Time) *Server {
-	return &Server{
-		pool:      registry,
-		log:       logger,
-		createdAt: startedAt.Unix(),
+type PreflightResult struct {
+	Accepted bool
+	Reason   string
+}
+
+type PreflightFunc func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (PreflightResult, bool, error)
+
+type Option func(*Server)
+
+func WithPreflight(fn PreflightFunc) Option {
+	return func(s *Server) {
+		s.preflight = fn
 	}
+}
+
+func WithPreflightConfig(thresholdTokens int, timeout time.Duration) Option {
+	return func(s *Server) {
+		if thresholdTokens > 0 {
+			s.preflightThreshold = thresholdTokens
+		}
+		if timeout > 0 {
+			s.preflightTimeout = timeout
+		}
+	}
+}
+
+func WithRecoveryConfig(backoff time.Duration, maxRetries int, enabled bool) Option {
+	return func(s *Server) {
+		if backoff > 0 {
+			s.recoveryBackoff = backoff
+		}
+		if maxRetries > 0 {
+			s.recoveryMaxRetries = maxRetries
+		}
+		s.recoveryProbe = enabled
+	}
+}
+
+func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Time, opts ...Option) *Server {
+	s := &Server{
+		pool:               registry,
+		log:                logger,
+		createdAt:          startedAt.Unix(),
+		preflightThreshold: 4096,
+		preflightTimeout:   5 * time.Second,
+		recoveryBackoff:    30 * time.Second,
+		recoveryMaxRetries: 3,
+		recoveryProbe:      true,
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -119,7 +175,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider, routeErr := selectProvider(s.pool.Snapshot(), req, r.Header)
+	provider, routeErr := s.selectProvider(requestID, req, r.Header)
 	if routeErr != nil {
 		writeError(w, routeErr.status, routeErr.code, routeErr.message)
 		return
@@ -144,6 +200,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider returned non-200")
+		s.handleProviderFailure(provider, resp.StatusCode)
 		writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
 		return
 	}
@@ -175,6 +232,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
+		s.handleProviderFailure(provider, resp.StatusCode)
 		writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
 		return
 	}
@@ -379,12 +437,17 @@ type routeError struct {
 	message string
 }
 
-func selectProvider(providers []pool.Provider, req chatRequest, headers http.Header) (pool.Provider, *routeError) {
+func (s *Server) selectProvider(requestID string, req chatRequest, headers http.Header) (pool.Provider, *routeError) {
+	providers := s.pool.Snapshot()
 	estimatedTokens := estimateTokens(req.raw)
 	if session := headers.Get("X-MacProvider-Session"); session != "" {
 		for _, p := range providers {
 			if p.AssignedID == session {
-				return validatePinnedProvider(p, req.Model, estimatedTokens, "Pinned session not available")
+				provider, routeErr := validatePinnedProvider(p, req.Model, estimatedTokens, "Pinned session not available")
+				if routeErr != nil {
+					return provider, routeErr
+				}
+				return s.preflightCandidate(provider, requestID, estimatedTokens)
 			}
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "session_ended", message: "Pinned session has ended"}
@@ -392,20 +455,32 @@ func selectProvider(providers []pool.Provider, req chatRequest, headers http.Hea
 	if providerID := headers.Get("X-MacProvider-Provider"); providerID != "" {
 		for _, p := range providers {
 			if p.ProviderID == providerID {
-				return validatePinnedProvider(p, req.Model, estimatedTokens, "Pinned provider not available")
+				provider, routeErr := validatePinnedProvider(p, req.Model, estimatedTokens, "Pinned provider not available")
+				if routeErr != nil {
+					return provider, routeErr
+				}
+				return s.preflightCandidate(provider, requestID, estimatedTokens)
 			}
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "Pinned provider not in pool"}
 	}
 
 	candidates := make([]pool.Provider, 0, len(providers))
+	hasRoutableContextMiss := false
 	for _, p := range providers {
-		if p.ModelID != req.Model || !p.RoutingEligible() || p.MaxContextTokens < estimatedTokens {
+		if p.ModelID != req.Model || !p.RoutingEligible() {
+			continue
+		}
+		if p.MaxContextTokens < estimatedTokens {
+			hasRoutableContextMiss = true
 			continue
 		}
 		candidates = append(candidates, p)
 	}
 	if len(candidates) == 0 {
+		if hasRoutableContextMiss {
+			return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds provider context capacity"}
+		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 	}
 	switch headers.Get("X-MacProvider-Pref") {
@@ -431,17 +506,88 @@ func selectProvider(providers []pool.Provider, req chatRequest, headers http.Hea
 			return candidates[i].SlotsFree < candidates[j].SlotsFree
 		})
 	}
-	return candidates[0], nil
+	for _, candidate := range candidates {
+		provider, routeErr := s.preflightCandidate(candidate, requestID, estimatedTokens)
+		if routeErr == nil {
+			return provider, nil
+		}
+	}
+	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: "All providers rejected the request"}
+}
+
+func (s *Server) preflightCandidate(provider pool.Provider, requestID string, estimatedTokens int) (pool.Provider, *routeError) {
+	if estimatedTokens <= s.preflightThreshold || s.preflight == nil {
+		return provider, nil
+	}
+	result, ok, err := s.preflight(provider, requestID, estimatedTokens, s.preflightTimeout)
+	if err != nil || !ok {
+		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: "Provider preflight timed out"}
+	}
+	if !result.Accepted {
+		msg := "Provider rejected preflight"
+		if result.Reason != "" {
+			msg += ": " + result.Reason
+		}
+		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: msg}
+	}
+	return provider, nil
 }
 
 func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, unavailableMessage string) (pool.Provider, *routeError) {
 	if p.ModelID != model {
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
-	if !p.RoutingEligible() || p.MaxContextTokens < estimatedTokens {
+	if p.MaxContextTokens < estimatedTokens {
+		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
+	}
+	if !p.RoutingEligible() {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
 	return p, nil
+}
+
+func (s *Server) handleProviderFailure(provider pool.Provider, status int) {
+	switch status {
+	case http.StatusBadGateway, http.StatusGatewayTimeout:
+		if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateDegraded) {
+			s.log.Warn().Str("provider_id", provider.ProviderID).Int("status", status).Msg("provider marked degraded after upstream failure")
+			s.startRecoveryProbe(provider)
+		}
+	case 530:
+		if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable) {
+			s.log.Warn().Str("provider_id", provider.ProviderID).Int("status", status).Str("reason", "http_530_observed").Msg("provider marked unavailable after HTTP 530")
+		}
+	}
+}
+
+func (s *Server) startRecoveryProbe(provider pool.Provider) {
+	if !s.recoveryProbe || s.preflight == nil || s.recoveryMaxRetries <= 0 {
+		return
+	}
+	key := provider.ProviderID + "/" + provider.AssignedID
+	if _, loaded := s.recovering.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer s.recovering.Delete(key)
+		delay := s.recoveryBackoff
+		for attempt := 1; attempt <= s.recoveryMaxRetries; attempt++ {
+			time.Sleep(delay)
+			requestID := fmt.Sprintf("recovery-probe-%s-%d", provider.AssignedID, attempt)
+			result, ok, err := s.preflight(provider, requestID, 128, s.preflightTimeout)
+			if err == nil && ok && result.Accepted {
+				if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateReady) {
+					s.log.Info().Str("provider_id", provider.ProviderID).Str("request_id", requestID).Msg("provider recovery preflight accepted")
+				}
+				return
+			}
+			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Str("request_id", requestID).Msg("provider recovery preflight failed")
+			delay = s.recoveryBackoff * 2
+		}
+		if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable) {
+			s.log.Warn().Str("provider_id", provider.ProviderID).Msg("provider marked unavailable after recovery preflight failures")
+		}
+	}()
 }
 
 func estimateTokens(raw json.RawMessage) int {
@@ -470,6 +616,8 @@ func errorType(status int) string {
 	case http.StatusBadRequest:
 		return "invalid_request_error"
 	case http.StatusNotFound:
+		return "invalid_request_error"
+	case http.StatusRequestEntityTooLarge:
 		return "invalid_request_error"
 	case http.StatusServiceUnavailable:
 		return "service_unavailable"

@@ -14,8 +14,47 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>Step 7 SSE streaming relay verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 8 preflight and capacity routing verified</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
+
+<section id="step8-preflight-capacity">
+  <h2>Step 8 preflight and capacity routing (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> context-heavy buyer requests now use
+    the SPEC-002 bytes/4 token estimate and send C-&gt;P
+    <code>preflight</code> messages before forwarding when the estimate
+    exceeds <code>routing.preflight_threshold_tokens</code>. Provider
+    <code>preflight_ack</code> responses are correlated by
+    <code>request_id</code> and provider ID, with timeout/rejection
+    causing the router to skip that provider for the current request.</p>
+    <p><strong>Capacity routing:</strong> default, session-pinned, and
+    provider-pinned routing all enforce the FR-R5 context-length filter.
+    If another ready provider can fit the request, the router selects it;
+    if every ready provider for the model is too small, the buyer receives
+    413 with <code>context_exceeds_capacity</code>. Pinned providers do
+    not fall back after a preflight rejection.</p>
+    <p><strong>Preflight reasons:</strong> <code>preflight_ack</code>
+    validation accepts the six SPEC-001 rejection reasons:
+    <code>context_exceeds_capacity</code>, <code>queue_full</code>,
+    <code>draining</code>, <code>model_not_loaded</code>,
+    <code>unhealthy</code>, and <code>tier_mismatch</code>.</p>
+    <p><strong>Failure recovery:</strong> routed provider HTTP 502/504
+    responses mark the provider <code>degraded</code> and start the
+    configured recovery preflight loop with
+    <code>recovery-probe-</code> request IDs. Accepted recovery preflight
+    marks the same session <code>ready</code>; repeated failures mark it
+    <code>unavailable</code>. Literal HTTP 530 marks the provider
+    <code>unavailable</code> immediately with
+    <code>http_530_observed</code> in the log.</p>
+    <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes with tests for rejected-candidate fallback, pinned preflight
+    rejection without fallback, context route-or-413 behavior, recovery
+    preflight IDs, HTTP 530 state handling, WebSocket preflight round
+    trip, and all six rejection reasons. <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    passes.</p>
+  </div>
+</section>
 
 <section id="step1-scaffold">
   <h2>Step 1 scaffold verification (2026-05-27)</h2>

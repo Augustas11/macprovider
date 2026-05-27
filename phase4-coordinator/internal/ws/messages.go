@@ -52,6 +52,24 @@ type StateUpdate struct {
 	MetricsSnapshot MetricsSnapshot `json:"metrics_snapshot"`
 }
 
+type PreflightAck struct {
+	Type             string `json:"type"`
+	RequestID        string `json:"request_id"`
+	Accepted         bool   `json:"accepted"`
+	EstimatedWaitMS  int    `json:"estimated_wait_ms"`
+	Reason           string `json:"reason"`
+	MaxContextTokens int    `json:"max_context_tokens"`
+}
+
+var preflightRejectionReasons = map[string]struct{}{
+	"context_exceeds_capacity": {},
+	"queue_full":               {},
+	"draining":                 {},
+	"model_not_loaded":         {},
+	"unhealthy":                {},
+	"tier_mismatch":            {},
+}
+
 type MetricsSnapshot struct {
 	SlotsFree  *int `json:"slots_free"`
 	SlotsTotal *int `json:"slots_total"`
@@ -221,4 +239,23 @@ func ParseStateUpdate(payload []byte) (StateUpdate, string, error) {
 		}
 	}
 	return update, "", nil
+}
+
+func ParsePreflightAck(payload []byte) (PreflightAck, string, error) {
+	var ack PreflightAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		return PreflightAck{}, "json", err
+	}
+	if ack.Type != "preflight_ack" {
+		return PreflightAck{}, "type", fmt.Errorf("expected preflight_ack, got %q", ack.Type)
+	}
+	if ack.RequestID == "" {
+		return PreflightAck{}, "request_id", fieldError{Field: "missing request_id"}
+	}
+	if !ack.Accepted {
+		if _, ok := preflightRejectionReasons[ack.Reason]; !ok {
+			return PreflightAck{}, "reason", fieldError{Field: "invalid reason"}
+		}
+	}
+	return ack, "", nil
 }

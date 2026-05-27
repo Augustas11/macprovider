@@ -28,7 +28,17 @@ func main() {
 	registry := pool.NewRegistry(cfg.Providers)
 	startedAt := time.Now().UTC()
 	wsServer := providerws.NewServer(cfg, registry, logger)
-	buyerServer := buyer.NewServer(registry, logger, startedAt)
+	buyerServer := buyer.NewServer(
+		registry,
+		logger,
+		startedAt,
+		buyer.WithPreflightConfig(cfg.Routing.PreflightThresholdTokens, time.Duration(cfg.Routing.PreflightTimeoutS)*time.Second),
+		buyer.WithRecoveryConfig(time.Duration(cfg.Pool.DegradedBackoffS)*time.Second, cfg.Pool.DegradedMaxRetries, cfg.Pool.DegradedProbeAfter502),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
+			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err
+		}),
+	)
 	providerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	errs := make(chan error, 2)

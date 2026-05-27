@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"fmt"
 	"net"
 	"sync"
 	"time"
@@ -193,6 +194,16 @@ func (r *Registry) RemoveIfSession(providerID, assignedID string) bool {
 	delete(r.providers, providerID)
 	delete(r.sessions, assignedID)
 	return true
+}
+
+func (r *Registry) Conn(providerID, assignedID string) (net.Conn, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || p.conn == nil {
+		return nil, fmt.Errorf("provider session not connected")
+	}
+	return p.conn, nil
 }
 
 func (r *Registry) Snapshot() []Provider {
