@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>Step 5 /v1/models verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 6 non-streaming chat routing verified</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
 
 <section id="step1-scaffold">
@@ -41,6 +41,38 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     local toolchain's <code>1.26.3</code>, because SPEC-002 requires Go
     1.22+ and the deployment target should not accidentally require the
     operator's newest local Go version.</p>
+  </div>
+</section>
+
+<section id="step6-chat-nonstream">
+  <h2>Step 6 non-streaming chat routing (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> <code>POST /v1/chat/completions</code>
+    for non-streaming requests. The buyer server validates JSON and
+    OpenAI-compatible request shape before model lookup, selects an
+    eligible provider, forwards the request body to the provider HTTP
+    endpoint, relays the provider JSON response, and adds
+    <code>X-MacProvider-Provider</code> plus
+    <code>X-MacProvider-Route</code>.</p>
+    <p><strong>Validation order:</strong> JSON parse, required fields,
+    field type/range checks, per-message validation, tool/tool_call
+    validation, then model existence. This preserves the SPEC-001/SPEC-002
+    malformed-tool-call behavior that returns 400 before a bad model can
+    become 404.</p>
+    <p><strong>Routing:</strong> implemented session pin,
+    stable-provider pin, exact model match, <code>ready</code> +
+    <code>slots_free &gt; 0</code> eligibility, context-length heuristic
+    filter, default utilization-favoring sort, and
+    <code>X-MacProvider-Pref: fast</code>/<code>accurate</code> sorting.
+    Large-request preflight remains Step 8.</p>
+    <p><strong>Current stream behavior:</strong> <code>stream=true</code>
+    is rejected with 400 until Step 7 adds SSE pass-through.</p>
+    <p><strong>Verification:</strong> <code>gofmt -w ... &amp;&amp;
+    GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes with real <code>httptest</code> mock provider HTTP endpoints.
+    <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    passes.</p>
   </div>
 </section>
 

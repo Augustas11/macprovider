@@ -48,6 +48,7 @@ type Registry struct {
 	providers   map[string]*Provider
 	sessions    map[string]*Provider
 	endpoints   map[string]config.ProviderConfig
+	seenModels  map[string]struct{}
 	maxProvider int
 }
 
@@ -57,9 +58,10 @@ func NewRegistry(providers []config.ProviderConfig) *Registry {
 		endpoints[p.ProviderID] = p
 	}
 	return &Registry{
-		providers: map[string]*Provider{},
-		sessions:  map[string]*Provider{},
-		endpoints: endpoints,
+		providers:  map[string]*Provider{},
+		sessions:   map[string]*Provider{},
+		endpoints:  endpoints,
+		seenModels: map[string]struct{}{},
 	}
 }
 
@@ -80,6 +82,7 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 	p.conn = conn
 	r.providers[p.ProviderID] = p
 	r.sessions[p.AssignedID] = p
+	r.seenModels[p.ModelID] = struct{}{}
 	return old
 }
 
@@ -130,6 +133,7 @@ func (r *Registry) ApplyHeartbeat(providerID string, hb HeartbeatUpdate) (*Provi
 	p.SlotsFree = hb.SlotsFree
 	p.SlotsTotal = hb.SlotsTotal
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
+	r.seenModels[hb.ModelID] = struct{}{}
 	if hb.Status != "" && hb.Status != p.State {
 		p.State = hb.Status
 	}
@@ -139,6 +143,20 @@ func (r *Registry) ApplyHeartbeat(providerID string, hb HeartbeatUpdate) (*Provi
 		gap = hb.At.Sub(prev)
 	}
 	return &cp, gap, true
+}
+
+func (r *Registry) ModelKnown(modelID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if _, ok := r.seenModels[modelID]; ok {
+		return true
+	}
+	for _, p := range r.providers {
+		if p.ModelID == modelID {
+			return true
+		}
+	}
+	return false
 }
 
 type StateUpdate struct {
