@@ -13,6 +13,10 @@ actor ModelRuntime {
         modelID
     }
 
+    var isLoaded: Bool {
+        container != nil
+    }
+
     init(modelID: String?, maxContextTokensOverride: Int? = nil) async throws {
         self.modelID = modelID
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
@@ -166,6 +170,28 @@ actor ModelRuntime {
         }
     }
 
+    func measureStartupThroughput(maxTokens: Int = 8) async -> Double {
+        guard let container else {
+            return 0.0
+        }
+
+        do {
+            let start = Date()
+            let result: GenerateResult = try await container.perform { context in
+                let input = UserInput(chat: [.user("Reply with a short greeting.")])
+                let lmInput = try await context.processor.prepare(input: input)
+                let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0.0, topP: 1.0)
+                return try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                    GenerateDisposition.more
+                }
+            }
+            let elapsed = max(Date().timeIntervalSince(start), 0.001)
+            return Double(result.generationTokenCount) / elapsed
+        } catch {
+            return 0.0
+        }
+    }
+
     private static func configuration(for modelID: String) -> ModelConfiguration {
         if modelID.hasPrefix("/") || FileManager.default.fileExists(atPath: modelID) {
             return ModelConfiguration(directory: URL(fileURLWithPath: modelID))
@@ -189,17 +215,7 @@ actor ModelRuntime {
     }
 
     private static func defaultMaxContextTokens() -> Int {
-        let ramGiB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
-        switch ramGiB {
-        case ...12:
-            return 20_000
-        case ...24:
-            return 50_000
-        case ...48:
-            return 120_000
-        default:
-            return 200_000
-        }
+        ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil).maxContextTokens
     }
 
     private static func localHuggingFaceSnapshot(for modelID: String) -> URL? {

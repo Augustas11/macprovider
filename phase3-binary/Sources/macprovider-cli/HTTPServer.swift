@@ -6,6 +6,7 @@ import MacProviderCore
 struct HTTPServer {
     let config: AppConfig
     let modelRuntime: ModelRuntime
+    let providerStatus: ProviderStatus
 
     func run() throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
@@ -22,6 +23,7 @@ struct HTTPServer {
                         RouterHandler(
                             modelID: config.model,
                             modelRuntime: modelRuntime,
+                            providerStatus: providerStatus,
                             maxBodyBytes: config.maxRequestBodyBytes
                         )
                     )
@@ -41,14 +43,16 @@ private final class RouterHandler: ChannelInboundHandler {
 
     private let modelID: String?
     private let modelRuntime: ModelRuntime
+    private let providerStatus: ProviderStatus
     private let maxBodyBytes: Int
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
 
-    init(modelID: String?, modelRuntime: ModelRuntime, maxBodyBytes: Int) {
+    init(modelID: String?, modelRuntime: ModelRuntime, providerStatus: ProviderStatus, maxBodyBytes: Int) {
         self.modelID = modelID
         self.modelRuntime = modelRuntime
+        self.providerStatus = providerStatus
         self.maxBodyBytes = maxBodyBytes
     }
 
@@ -101,6 +105,10 @@ private final class RouterHandler: ChannelInboundHandler {
             handleModelList(context: context)
         case (_, "/v1/models"):
             writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
+        case (.GET, "/v1/health"):
+            handleHealth(context: context)
+        case (_, "/v1/health"):
+            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
         case (.POST, "/v1/chat/completions"):
             handleChatCompletions(context: context)
         case (_, "/v1/chat/completions"):
@@ -136,6 +144,22 @@ private final class RouterHandler: ChannelInboundHandler {
         )
     }
 
+    private func handleHealth(context: ChannelHandlerContext) {
+        let writer = ResponseWriter(context: context)
+        let providerStatus = providerStatus
+        Task.detached { @Sendable [providerStatus, writer] in
+            let snapshot = await providerStatus.snapshot()
+            let status: HTTPResponseStatus
+            switch snapshot.status {
+            case .ready, .busy:
+                status = .ok
+            case .degraded, .draining, .unavailable:
+                status = .serviceUnavailable
+            }
+            writer.writeJSON(status: status, body: Self.healthResponse(snapshot))
+        }
+    }
+
     private func handleChatCompletions(context: ChannelHandlerContext) {
         var body = bodyBuffer ?? context.channel.allocator.buffer(capacity: 0)
         let data = Data(body.readBytes(length: body.readableBytes) ?? [])
@@ -151,22 +175,33 @@ private final class RouterHandler: ChannelInboundHandler {
                 return
             }
 
-            Task.detached { @Sendable [modelRuntime, request, writer] in
+            let providerStatus = providerStatus
+            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer] in
+                let startedAt = await providerStatus.beginRequest()
                 do {
                     let completion = try await modelRuntime.complete(request)
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
                     let response = Self.chatCompletionResponse(request: request, completion: completion)
                     writer.writeJSON(status: .ok, body: response)
                 } catch let error as APIError {
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                     writer.writeAPIError(error)
                 } catch {
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                     writer.writeAPIError(
                         APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
                     )
                 }
             }
         } catch let error as APIError {
+            Task {
+                await providerStatus.recordError()
+            }
             writeAPIError(context: context, error)
         } catch {
+            Task {
+                await providerStatus.recordError()
+            }
             writeAPIError(
                 context: context,
                 APIError(status: 400, message: "Invalid request", code: "invalid_request")
@@ -182,13 +217,17 @@ private final class RouterHandler: ChannelInboundHandler {
         let created = Int(Date().timeIntervalSince1970)
         let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
-        Task.detached { @Sendable [modelRuntime, request, writer] in
+        let providerStatus = providerStatus
+        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer] in
+            let startedAt = await providerStatus.beginRequest()
             do {
                 try await modelRuntime.preflight(request)
             } catch let error as APIError {
+                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                 writer.writeAPIError(error)
                 return
             } catch {
+                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                 writer.writeAPIError(
                     APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
                 )
@@ -218,6 +257,7 @@ private final class RouterHandler: ChannelInboundHandler {
                         )
                     )
                 }
+                await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
 
                 writer.writeSSEJSON(
                     Self.chatCompletionChunk(
@@ -244,9 +284,11 @@ private final class RouterHandler: ChannelInboundHandler {
                 )
                 writer.writeSSEDone()
             } catch let error as APIError {
+                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                 writer.writeSSEJSON(error.envelope)
                 writer.writeSSEDone()
             } catch {
+                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                 writer.writeSSEJSON(
                     APIError(
                         status: 500,
@@ -281,6 +323,27 @@ private final class RouterHandler: ChannelInboundHandler {
                 "prompt_tokens": completion.promptTokens,
                 "completion_tokens": completion.completionTokens,
                 "total_tokens": completion.promptTokens + completion.completionTokens,
+            ],
+        ]
+    }
+
+    private static func healthResponse(_ snapshot: ProviderSnapshot) -> [String: Any] {
+        [
+            "status": snapshot.status.rawValue,
+            "model": snapshot.modelID ?? NSNull(),
+            "model_loaded": snapshot.modelLoaded,
+            "uptime_s": snapshot.uptimeSeconds,
+            "requests_total": snapshot.requestsTotal,
+            "requests_in_flight": snapshot.requestsInFlight,
+            "requests_queued": snapshot.requestsQueued,
+            "errors_total": snapshot.errorsTotal,
+            "memory_rss_mb": snapshot.memoryRSSMB,
+            "capacity": [
+                "ram_gb": snapshot.capacity.ramGB,
+                "ram_tier": snapshot.capacity.ramTier,
+                "max_context_tokens": snapshot.capacity.maxContextTokens,
+                "max_concurrency": snapshot.capacity.maxConcurrency,
+                "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
             ],
         ]
     }

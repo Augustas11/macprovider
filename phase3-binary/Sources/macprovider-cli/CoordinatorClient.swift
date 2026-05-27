@@ -3,24 +3,18 @@ import MacProviderCore
 import Darwin
 
 actor CoordinatorClient {
-    private let config: AppConfig
     private let coordinatorURL: URL
-    private let capacity: ProviderCapacity
+    private let providerStatus: ProviderStatus
     private var webSocket: URLSessionWebSocketTask?
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
-    private var state = "ready"
 
-    init?(config: AppConfig) {
+    init?(config: AppConfig, providerStatus: ProviderStatus) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
             return nil
         }
-        self.config = config
         self.coordinatorURL = url
-        self.capacity = ProviderCapacity(
-            maxContextOverride: config.maxContextOverride,
-            maxConcurrencyOverride: config.maxConcurrencyOverride
-        )
+        self.providerStatus = providerStatus
     }
 
     func start() {
@@ -62,7 +56,7 @@ actor CoordinatorClient {
         webSocket = socket
         socket.resume()
 
-        try await send(helloMessage())
+        try await send(await helloMessage())
 
         while !Task.isCancelled {
             let message = try await socket.receive()
@@ -95,14 +89,14 @@ actor CoordinatorClient {
         case "hello_ack":
             let interval = max((dict["heartbeat_interval_s"] as? Int) ?? 30, 1)
             startHeartbeat(intervalSeconds: interval)
-            try await sendStateUpdate(state: "ready", reason: "coordinator hello_ack received")
+            try await sendStateUpdate(state: nil, reason: "coordinator hello_ack received")
         case "preflight":
             try await handlePreflight(dict)
         case "drain":
             await drainAndExit(reason: "coordinator drain requested")
         case "warm_up":
-            try await sendStateUpdate(state: "degraded", reason: "coordinator warm_up requested")
-            try await sendStateUpdate(state: "ready", reason: "warm_up complete")
+            try await sendStateUpdate(state: .degraded, reason: "coordinator warm_up requested")
+            try await sendStateUpdate(state: .ready, reason: "warm_up complete")
         default:
             try await sendNAK(
                 inReplyTo: type,
@@ -125,21 +119,36 @@ actor CoordinatorClient {
     private func handlePreflight(_ message: [String: Any]) async throws {
         let requestID = message["request_id"] as? String ?? ""
         let estimatedTokens = message["estimated_tokens"] as? Int ?? 0
+        let snapshot = await providerStatus.snapshot()
 
-        if estimatedTokens > capacity.maxContextTokens {
+        if estimatedTokens > snapshot.capacity.maxContextTokens {
             try await send([
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "context_exceeds_capacity",
-                "max_context_tokens": capacity.maxContextTokens,
+                "max_context_tokens": snapshot.capacity.maxContextTokens,
             ])
-        } else if state == "draining" {
+        } else if snapshot.status == .draining {
             try await send([
                 "type": "preflight_ack",
                 "request_id": requestID,
                 "accepted": false,
                 "reason": "draining",
+            ])
+        } else if !snapshot.modelLoaded {
+            try await send([
+                "type": "preflight_ack",
+                "request_id": requestID,
+                "accepted": false,
+                "reason": "model_not_loaded",
+            ])
+        } else if snapshot.status == .unavailable {
+            try await send([
+                "type": "preflight_ack",
+                "request_id": requestID,
+                "accepted": false,
+                "reason": "unhealthy",
             ])
         } else {
             try await send([
@@ -152,7 +161,7 @@ actor CoordinatorClient {
     }
 
     func drainAndExit(reason: String, exitCode: Int32 = 0) async {
-        try? await sendStateUpdate(state: "draining", reason: reason)
+        try? await sendStateUpdate(state: .draining, reason: reason)
         try? await sendDrainStatus(phase: "starting")
         try? await sendDrainStatus(phase: "in_progress")
         try? await sendDrainStatus(phase: "complete")
@@ -161,45 +170,50 @@ actor CoordinatorClient {
     }
 
     private func sendHeartbeat() async throws {
+        let snapshot = await providerStatus.snapshot(resetWindow: true)
         try await send([
             "type": "heartbeat",
-            "status": state,
-            "model_id": config.model ?? "",
-            "model_params_b": capacity.modelParamsB(modelID: config.model),
-            "ram_gb": capacity.ramGB,
-            "max_context_tokens": capacity.maxContextTokens,
-            "max_concurrency": capacity.maxConcurrency,
-            "slots_free": capacity.maxConcurrency,
-            "slots_total": capacity.maxConcurrency,
-            "throughput_tps_estimate": capacity.throughputTPSEstimate,
-            "requests_served_since_last": 0,
-            "avg_latency_ms_since_last": NSNull(),
-            "throughput_tps_since_last": NSNull(),
+            "status": snapshot.status.rawValue,
+            "model_id": snapshot.modelID ?? "",
+            "model_params_b": snapshot.capacity.modelParamsB(modelID: snapshot.modelID),
+            "ram_gb": snapshot.capacity.ramGB,
+            "max_context_tokens": snapshot.capacity.maxContextTokens,
+            "max_concurrency": snapshot.capacity.maxConcurrency,
+            "slots_free": snapshot.slotsFree,
+            "slots_total": snapshot.slotsTotal,
+            "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
+            "requests_served_since_last": snapshot.requestsServedSinceLast,
+            "avg_latency_ms_since_last": nullableNumber(snapshot.avgLatencyMSSinceLast),
+            "throughput_tps_since_last": nullableNumber(snapshot.throughputTPSSinceLast),
         ])
     }
 
-    private func sendStateUpdate(state newState: String, reason: String) async throws {
-        state = newState
+    private func sendStateUpdate(state newState: ProviderHealthState?, reason: String) async throws {
+        if let newState {
+            await providerStatus.setState(newState)
+        }
+        let snapshot = await providerStatus.snapshot()
         try await send([
             "type": "state_update",
-            "state": newState,
+            "state": snapshot.status.rawValue,
             "reason": reason,
             "since": ISO8601DateFormatter().string(from: Date()),
             "metrics_snapshot": [
-                "slots_free": newState == "busy" ? 0 : capacity.maxConcurrency,
-                "slots_total": capacity.maxConcurrency,
-                "requests_served_since_last": 0,
-                "avg_latency_ms_since_last": NSNull(),
-                "throughput_tps_since_last": NSNull(),
+                "slots_free": snapshot.slotsFree,
+                "slots_total": snapshot.slotsTotal,
+                "requests_served_since_last": snapshot.requestsServedSinceLast,
+                "avg_latency_ms_since_last": nullableNumber(snapshot.avgLatencyMSSinceLast),
+                "throughput_tps_since_last": nullableNumber(snapshot.throughputTPSSinceLast),
             ],
         ])
     }
 
     private func sendDrainStatus(phase: String) async throws {
+        let snapshot = await providerStatus.snapshot()
         try await send([
             "type": "drain_status",
             "phase": phase,
-            "inflight_requests": 0,
+            "inflight_requests": snapshot.requestsInFlight,
             "estimated_drain_seconds": 0,
         ])
     }
@@ -215,19 +229,20 @@ actor CoordinatorClient {
         ])
     }
 
-    private func helloMessage() -> [String: Any] {
-        [
+    private func helloMessage() async -> [String: Any] {
+        let snapshot = await providerStatus.snapshot()
+        return [
             "type": "hello",
             "version": 1,
             "tier": 1,
             "provider_id": UUID().uuidString,
             "hostname": Host.current().localizedName ?? "unknown",
-            "model_id": config.model ?? "",
-            "model_params_b": capacity.modelParamsB(modelID: config.model),
-            "ram_gb": capacity.ramGB,
-            "max_context_tokens": capacity.maxContextTokens,
-            "max_concurrency": capacity.maxConcurrency,
-            "throughput_tps_estimate": capacity.throughputTPSEstimate,
+            "model_id": snapshot.modelID ?? "",
+            "model_params_b": snapshot.capacity.modelParamsB(modelID: snapshot.modelID),
+            "ram_gb": snapshot.capacity.ramGB,
+            "max_context_tokens": snapshot.capacity.maxContextTokens,
+            "max_concurrency": snapshot.capacity.maxConcurrency,
+            "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
             "binary_version": "0.1.0",
             "attestation": NSNull(),
         ]
@@ -239,44 +254,9 @@ actor CoordinatorClient {
         let text = String(decoding: data, as: UTF8.self)
         try await webSocket.send(.string(text))
     }
-}
 
-private struct ProviderCapacity: Sendable {
-    let ramGB: Int
-    let maxContextTokens: Int
-    let maxConcurrency: Int
-    let throughputTPSEstimate: Double
-
-    init(maxContextOverride: Int?, maxConcurrencyOverride: Int?) {
-        let physicalMemoryGB = max(1, Int((ProcessInfo.processInfo.physicalMemory + 1_073_741_823) / 1_073_741_824))
-        self.ramGB = physicalMemoryGB
-
-        let defaults: (context: Int, concurrency: Int)
-        switch physicalMemoryGB {
-        case ...12:
-            defaults = (20_000, 1)
-        case ...24:
-            defaults = (50_000, 2)
-        case ...48:
-            defaults = (120_000, 4)
-        default:
-            defaults = (200_000, 8)
-        }
-
-        self.maxContextTokens = maxContextOverride ?? defaults.context
-        self.maxConcurrency = maxConcurrencyOverride ?? defaults.concurrency
-        self.throughputTPSEstimate = 0.0
-    }
-
-    func modelParamsB(modelID: String?) -> Double {
-        guard let modelID else { return 0.0 }
-        let pattern = #"(?i)(\d+(?:\.\d+)?)\s*b"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
-              let match = regex.firstMatch(in: modelID, range: NSRange(modelID.startIndex..., in: modelID)),
-              let range = Range(match.range(at: 1), in: modelID)
-        else {
-            return 0.0
-        }
-        return Double(modelID[range]) ?? 0.0
+    private func nullableNumber(_ value: Double?) -> Any {
+        guard let value else { return NSNull() }
+        return value
     }
 }

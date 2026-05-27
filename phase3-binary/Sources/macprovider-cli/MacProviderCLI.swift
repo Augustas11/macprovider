@@ -43,9 +43,19 @@ struct MacProviderCLI: AsyncParsableCommand {
             modelID: resolved.model,
             maxContextTokensOverride: resolved.maxContextOverride
         )
-        let coordinatorClient = CoordinatorClient(config: resolved)
+        let capacityDefaults = ProviderCapacity(
+            maxContextOverride: resolved.maxContextOverride,
+            maxConcurrencyOverride: resolved.maxConcurrencyOverride
+        )
+        let throughputEstimate = await modelRuntime.measureStartupThroughput()
+        let providerStatus = ProviderStatus(
+            modelID: resolved.model,
+            modelLoaded: await modelRuntime.isLoaded,
+            capacity: capacityDefaults.withThroughputEstimate(throughputEstimate)
+        )
+        let coordinatorClient = CoordinatorClient(config: resolved, providerStatus: providerStatus)
         await coordinatorClient?.start()
-        let server = HTTPServer(config: resolved, modelRuntime: modelRuntime)
+        let server = HTTPServer(config: resolved, modelRuntime: modelRuntime, providerStatus: providerStatus)
         let terminationHandler = installTerminationHandler(coordinatorClient: coordinatorClient)
         defer {
             Task {

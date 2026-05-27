@@ -1,0 +1,189 @@
+import Darwin
+import Foundation
+
+enum ProviderHealthState: String, Sendable {
+    case ready
+    case busy
+    case degraded
+    case draining
+    case unavailable
+}
+
+struct ProviderCapacity: Sendable {
+    let ramGB: Int
+    let ramTier: String
+    let maxContextTokens: Int
+    let maxConcurrency: Int
+    let throughputTPSEstimate: Double
+
+    init(maxContextOverride: Int?, maxConcurrencyOverride: Int?, throughputTPSEstimate: Double = 0.0) {
+        let physicalMemoryGB = Self.systemMemoryGB()
+        self.ramGB = physicalMemoryGB
+
+        let defaults: (tier: String, context: Int, concurrency: Int)
+        switch physicalMemoryGB {
+        case ...12:
+            defaults = ("8GB", 20_000, 1)
+        case ...24:
+            defaults = ("16GB", 50_000, 2)
+        case ...48:
+            defaults = ("32GB", 120_000, 4)
+        default:
+            defaults = ("64GB+", 200_000, 8)
+        }
+
+        self.ramTier = defaults.tier
+        self.maxContextTokens = maxContextOverride ?? defaults.context
+        self.maxConcurrency = maxConcurrencyOverride ?? defaults.concurrency
+        self.throughputTPSEstimate = throughputTPSEstimate
+    }
+
+    func withThroughputEstimate(_ value: Double) -> ProviderCapacity {
+        ProviderCapacity(
+            maxContextOverride: maxContextTokens,
+            maxConcurrencyOverride: maxConcurrency,
+            throughputTPSEstimate: value
+        )
+    }
+
+    func modelParamsB(modelID: String?) -> Double {
+        guard let modelID else { return 0.0 }
+        let pattern = #"(?i)(\d+(?:\.\d+)?)\s*b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: modelID, range: NSRange(modelID.startIndex..., in: modelID)),
+              let range = Range(match.range(at: 1), in: modelID)
+        else {
+            return 0.0
+        }
+        return Double(modelID[range]) ?? 0.0
+    }
+
+    private static func systemMemoryGB() -> Int {
+        var memsize: UInt64 = 0
+        var size = MemoryLayout<UInt64>.size
+        if sysctlbyname("hw.memsize", &memsize, &size, nil, 0) == 0, memsize > 0 {
+            return max(1, Int((memsize + 1_073_741_823) / 1_073_741_824))
+        }
+        return max(1, Int((ProcessInfo.processInfo.physicalMemory + 1_073_741_823) / 1_073_741_824))
+    }
+}
+
+struct ProviderSnapshot: Sendable {
+    let status: ProviderHealthState
+    let modelID: String?
+    let modelLoaded: Bool
+    let uptimeSeconds: Int
+    let requestsTotal: Int
+    let requestsInFlight: Int
+    let requestsQueued: Int
+    let errorsTotal: Int
+    let memoryRSSMB: Int
+    let capacity: ProviderCapacity
+    let requestsServedSinceLast: Int
+    let avgLatencyMSSinceLast: Double?
+    let throughputTPSSinceLast: Double?
+
+    var slotsFree: Int {
+        max(0, capacity.maxConcurrency - requestsInFlight)
+    }
+
+    var slotsTotal: Int {
+        capacity.maxConcurrency
+    }
+}
+
+actor ProviderStatus {
+    private let startedAt = Date()
+    private let modelID: String?
+    private let modelLoaded: Bool
+    private var capacity: ProviderCapacity
+    private var status: ProviderHealthState
+    private var requestsTotal = 0
+    private var requestsInFlight = 0
+    private var requestsQueued = 0
+    private var errorsTotal = 0
+    private var windowRequests = 0
+    private var windowLatencyMS = 0.0
+    private var windowCompletionTokens = 0
+    private var windowGenerationSeconds = 0.0
+
+    init(modelID: String?, modelLoaded: Bool, capacity: ProviderCapacity) {
+        self.modelID = modelID
+        self.modelLoaded = modelLoaded
+        self.capacity = capacity
+        self.status = modelLoaded ? .ready : .unavailable
+    }
+
+    func beginRequest() -> Date {
+        requestsInFlight += 1
+        refreshAvailabilityState()
+        return Date()
+    }
+
+    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool) {
+        requestsInFlight = max(0, requestsInFlight - 1)
+        requestsTotal += 1
+        if failed {
+            errorsTotal += 1
+        }
+
+        let elapsed = max(Date().timeIntervalSince(startedAt), 0.001)
+        windowRequests += 1
+        windowLatencyMS += elapsed * 1000.0
+        if let completion {
+            windowCompletionTokens += completion.completionTokens
+            windowGenerationSeconds += elapsed
+        }
+        refreshAvailabilityState()
+    }
+
+    func recordError() {
+        errorsTotal += 1
+    }
+
+    func setState(_ newState: ProviderHealthState) {
+        status = newState
+    }
+
+    func snapshot(resetWindow: Bool = false) -> ProviderSnapshot {
+        let avgLatency = windowRequests > 0 ? windowLatencyMS / Double(windowRequests) : nil
+        let throughput = windowGenerationSeconds > 0 ? Double(windowCompletionTokens) / windowGenerationSeconds : nil
+        let snapshot = ProviderSnapshot(
+            status: status,
+            modelID: modelID,
+            modelLoaded: modelLoaded,
+            uptimeSeconds: Int(Date().timeIntervalSince(startedAt)),
+            requestsTotal: requestsTotal,
+            requestsInFlight: requestsInFlight,
+            requestsQueued: requestsQueued,
+            errorsTotal: errorsTotal,
+            memoryRSSMB: Self.memoryRSSMB(),
+            capacity: capacity,
+            requestsServedSinceLast: windowRequests,
+            avgLatencyMSSinceLast: avgLatency,
+            throughputTPSSinceLast: throughput
+        )
+        if resetWindow {
+            windowRequests = 0
+            windowLatencyMS = 0
+            windowCompletionTokens = 0
+            windowGenerationSeconds = 0
+        }
+        return snapshot
+    }
+
+    private func refreshAvailabilityState() {
+        guard modelLoaded, status == .ready || status == .busy else {
+            return
+        }
+        status = requestsInFlight >= capacity.maxConcurrency ? .busy : .ready
+    }
+
+    private static func memoryRSSMB() -> Int {
+        var usage = rusage()
+        guard getrusage(RUSAGE_SELF, &usage) == 0 else {
+            return 0
+        }
+        return max(0, Int(usage.ru_maxrss / 1_048_576))
+    }
+}
