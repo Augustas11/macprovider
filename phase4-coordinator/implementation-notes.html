@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>Step 4 state machine verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 5 /v1/models verified</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
 
 <section id="step1-scaffold">
@@ -41,6 +41,34 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     local toolchain's <code>1.26.3</code>, because SPEC-002 requires Go
     1.22+ and the deployment target should not accidentally require the
     operator's newest local Go version.</p>
+  </div>
+</section>
+
+<section id="step5-models">
+  <h2>Step 5 /v1/models aggregation (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> buyer HTTP server using
+    <code>go-chi/chi/v5</code> with <code>GET /v1/models</code>.
+    The endpoint returns OpenAI list shape with SPEC-002 extensions:
+    <code>provider_count</code>, <code>max_context_tokens</code>, and
+    <code>total_slots</code>.</p>
+    <p><strong>Aggregation rule:</strong> only providers in
+    <code>ready</code> state contribute to the model list. Duplicate
+    model IDs are collapsed; <code>max_context_tokens</code> is the max
+    across ready providers and <code>total_slots</code> is summed across
+    ready providers. Busy/degraded/draining/unavailable providers are
+    excluded.</p>
+    <p><strong>Server split:</strong> <code>cmd/coordinator</code> now
+    starts both configured listeners: provider WebSocket/control-plane
+    port and buyer HTTP port. <code>/poolz</code> remains temporarily
+    mounted with the provider handler until the final Step 10 operator
+    endpoint surface is assembled.</p>
+    <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes with tests for two ready providers serving the same model
+    plus one ready provider serving a different model, and for the empty
+    no-ready-provider response. <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    passes.</p>
   </div>
 </section>
 

@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
@@ -24,11 +26,21 @@ func main() {
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	registry := pool.NewRegistry(cfg.Providers)
+	startedAt := time.Now().UTC()
 	wsServer := providerws.NewServer(cfg, registry, logger)
-	addr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
+	buyerServer := buyer.NewServer(registry, logger, startedAt)
+	providerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
+	buyerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
+	errs := make(chan error, 2)
 
-	logger.Info().Str("addr", addr).Msg("provider websocket server listening")
-	if err := http.ListenAndServe(addr, wsServer.Handler()); err != nil {
-		logger.Fatal().Err(err).Msg("provider websocket server stopped")
-	}
+	go func() {
+		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
+		errs <- http.ListenAndServe(providerAddr, wsServer.Handler())
+	}()
+	go func() {
+		logger.Info().Str("addr", buyerAddr).Msg("buyer http server listening")
+		errs <- http.ListenAndServe(buyerAddr, buyerServer.Handler())
+	}()
+
+	logger.Fatal().Err(<-errs).Msg("coordinator server stopped")
 }
