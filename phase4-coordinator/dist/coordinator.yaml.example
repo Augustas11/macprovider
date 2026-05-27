@@ -1,0 +1,42 @@
+# Template for production coordinator config — Pearl VPS deployment.
+# Copy to coordinator.yaml and fill in the operator_key. Real coordinator.yaml
+# is gitignored because it contains a secret.
+#
+# Generate operator_key with:  openssl rand -hex 32
+
+listen:
+  buyer_port: 8443
+  provider_port: 8444
+  bind_address: "127.0.0.1"
+
+pool:
+  heartbeat_interval_s: 30
+  disconnect_grace_period_s: 30
+  wake_gap_threshold_s: 120
+  degraded_backoff_s: 30
+  degraded_max_retries: 3
+  degraded_probe_after_502: true
+
+routing:
+  preflight_threshold_tokens: 4096
+  preflight_timeout_s: 5
+  request_timeout_s: 300
+
+auth:
+  # 64 hex chars (256 bits). Generated with: openssl rand -hex 32
+  operator_key: "REPLACE_ME_WITH_RANDOM_HEX_64"
+
+storage:
+  db_path: "/var/lib/macprovider/coordinator.db"
+  snapshot_interval_s: 300
+
+logging:
+  level: "info"
+  format: "json"
+
+# Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that
+# may connect MUST be listed here).
+providers:
+  - provider_id: "m4-anon"
+    endpoint_url: "https://m4.streamvc.live"
+    display_name: "M4 partner (Qwen 7B)"

@@ -1,0 +1,45 @@
+[Unit]
+Description=Mac Provider Coordinator (Phase 4)
+Documentation=https://github.com/augstar/macprovider-poc specs/SPEC-002-coordinator.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=macprovider
+Group=macprovider
+WorkingDirectory=/opt/macprovider
+
+# Binary + config paths
+ExecStart=/opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml
+
+# Graceful shutdown: SIGTERM triggers SPEC-002 § 6 drain sequence.
+# coordinator drains in-flight requests up to request_timeout_s (300s)
+# and sends drain to providers. Allow up to 360s before SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=360
+Restart=on-failure
+RestartSec=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/macprovider /var/log/macprovider
+
+# Resource limits (Pearl VPS has 4GB; coordinator should never need more than 256MB)
+MemoryMax=512M
+TasksMax=512
+
+# stdout/stderr -> journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=macprovider-coordinator
+
+[Install]
+WantedBy=multi-user.target
