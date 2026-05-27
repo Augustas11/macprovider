@@ -1,6 +1,6 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.0.1 (2026-05-27, post-audit patches — see SPEC-002-audit.md)
+**Version:** 1.0.2 (2026-05-27, post-joint-audit patches — see SPEC-002-audit.md + JOINT-SPEC-001-002-audit.md)
 **Depends on:** SPEC-001 v1.1.1 (Phase 3 binary wire protocol, locked)
 
 ---
@@ -164,7 +164,8 @@ the provider's HTTP endpoint from a **static configuration map** keyed by
 `provider_id` (the same identifier the provider sends in `hello`). The
 operator maintains this map in the coordinator's config file. If a
 provider connects whose `provider_id` is not in the map, the coordinator
-sends a `nak` with code `unknown_provider_id` and closes the WebSocket.
+closes the WebSocket using a standard application close code (see
+"Provider rejection via WebSocket close codes" later in this section).
 
 This preserves SPEC-001 v1.1.1 wire compatibility exactly. Future
 revisions may add `endpoint_url` to `hello` via SPEC-001 amendment, but
@@ -234,18 +235,16 @@ On receiving a `hello` message (SPEC-001 section 6.5), the coordinator:
    is the binary's self-assigned ID). The `heartbeat_interval_s` is
    configurable (default: 30 seconds).
 
-If any validation fails, the coordinator sends a `nak` message with the
-error and closes the WebSocket:
-```json
-{
-  "type": "nak",
-  "in_reply_to": "hello",
-  "error": {
-    "code": "invalid_hello",
-    "message": "Missing required field: model_id"
-  }
-}
-```
+If any validation fails, the coordinator closes the WebSocket using a
+standard application close code with a human-readable reason. SPEC-001
+§ 6.5 defines `nak` as provider-to-coordinator only; the coordinator
+does not send a wire-level `nak` to the provider. See "Provider
+rejection via WebSocket close codes" later in this section for the full
+close-code table.
+
+For an invalid hello, the coordinator closes with code `4001` and
+reason `"invalid_hello: <field>"` (e.g. `"invalid_hello: missing
+model_id"`).
 
 **FR-P3. Maintain provider pool entry with last-heard timestamp.**
 Each provider pool entry tracks: `provider_id`, `assigned_id`,
@@ -330,28 +329,40 @@ Informed by Phase 2 D1 (502 vs 530):
 
 | Failure | Detection | Action | Recovery |
 |---|---|---|---|
-| WS disconnect (530) | WS close, no prior drain | `unavailable`, grace period | Reconnects with new hello |
-| HTTP 502 (MLX down) | Provider returns 502 | `degraded`, 30s backoff | Preflight test after 30s |
+| WS disconnect (530-equivalent) | WS close, no prior drain | `unavailable`, grace period | Reconnects with new hello |
+| HTTP 502 (MLX down) | Provider returns 502 on routed buyer request | `degraded`, 30s backoff | Recovery preflight after 30s |
 | HTTP 504 (timeout) | No response in time | `degraded`, 30s backoff | Same as 502 |
+| **HTTP 530 (Cloudflare tunnel daemon disconnected)** | Provider endpoint returns literal HTTP 530 on routed buyer request | `unavailable` immediately; log `state_update.reason = "http_530_observed"`; trigger WebSocket liveness probe (ping with 5s ack timeout) | Removed from pool until WebSocket reconnects with fresh hello, OR if WS is still alive, until next heartbeat confirms `state: ready` |
 
 On 502/504 degraded: after 30s backoff, send a **recovery preflight**.
 If accepted, mark `ready`. If rejected/timeout, extend to 60s and retry.
 After 3 consecutive failures, mark `unavailable`.
+
+**Literal HTTP 530 is normative in v1.** Phase 2 observed the M4
+provider's Cloudflare tunnel emit HTTP 530 to a routed buyer request
+while the WebSocket control plane briefly remained connected (mac
+sleeping, cloudflared partially alive). The coordinator must treat this
+as a stronger signal than 502: 502 is "mlx down, tunnel up, retry soon";
+530 is "tunnel daemon itself disconnected, this provider is not
+reachable until tunnel reconnects." The WebSocket liveness probe in this
+row catches the case where the WS appears alive but cannot deliver
+control messages.
 
 **Recovery preflight shape (SPEC-001-legal health probe):**
 ```json
 {
   "type": "preflight",
   "request_id": "recovery-probe-<uuid>",
-  "estimated_tokens": 128,
-  "purpose": "health_recovery"
+  "estimated_tokens": 128
 }
 ```
 
-The `request_id` prefix `recovery-probe-` is a coordinator convention so
-the binary's logs can distinguish recovery probes from real buyer
-requests. The `purpose` field is additive metadata (SPEC-001 § 6.5
-tolerates extra fields).
+This is a strict subset of SPEC-001 § 6.5's `preflight` schema — no extra
+fields, no protocol extension. The `request_id` prefix `recovery-probe-`
+is a coordinator-side convention that lets the coordinator (and any
+operator inspecting logs) distinguish health probes from real buyer
+requests by string match. The binary cannot and need not distinguish
+them — recovery probes are processed identically to buyer preflights.
 
 **Important:** the recovery preflight is NOT followed by an HTTP request.
 The provider responds with `preflight_ack` indicating whether it would
@@ -374,8 +385,9 @@ Two paths, depending on whether the WebSocket upgrade carried an
 The coordinator accepts the upgrade and waits for `hello`. On `hello`,
 the coordinator looks up `provider_id` in its static config map. If
 found, the provider is admitted to the pool. If not found, the
-coordinator sends a `nak` with code `unknown_provider_id` and closes the
-WebSocket.
+coordinator closes the WebSocket with application close code `4002`
+and reason `"unknown_provider_id: <id>"` (see "Provider rejection via
+WebSocket close codes" above).
 
 **Path B — Authorization header present (forward-compatible):**
 Coordinator computes SHA-256 of the bearer token, looks up in
@@ -395,22 +407,33 @@ v1, SPEC-001 will be amended to require token-based auth (path B
 mandatory). Deploy v1 coordinator behind Cloudflare or similar so the
 provider endpoint is not publicly enumerable.
 
-**FR-P13. Reject Tier 2 providers with explicit nak.**
+**FR-P13. Reject Tier 2 providers via WebSocket close.**
 If a provider's `hello` message contains `tier: 2` (or any value other
-than 1), the coordinator rejects with a nak and closes the WebSocket:
-```json
-{
-  "type": "nak",
-  "in_reply_to": "hello",
-  "error": {
-    "code": "tier_unsupported",
-    "message": "Coordinator v1 supports Tier 1 only"
-  }
-}
-```
+than 1), the coordinator closes the WebSocket with application close
+code `4003` and reason `"tier_unsupported: coordinator v1 supports tier 1 only"`.
 
 This is a clean rejection — the provider should not retry until
 upgraded. The coordinator logs the rejection at info level.
+
+### Provider rejection via WebSocket close codes
+
+Because SPEC-001 § 6.5 does not define a coordinator-to-provider `nak`
+direction, all coordinator-initiated rejections use standard WebSocket
+application close codes (RFC 6455, range 4000–4999). The provider's
+binary already handles WebSocket close per SPEC-001 FR-13.
+
+| Close code | Name | Sent when | Reason text format |
+|---|---|---|---|
+| `4001` | `invalid_hello` | Required field missing or malformed | `"invalid_hello: <field>"` |
+| `4002` | `unknown_provider_id` | `provider_id` not in coordinator config map | `"unknown_provider_id: <id>"` |
+| `4003` | `tier_unsupported` | `tier != 1` | `"tier_unsupported: tier <n> not supported"` |
+| `4004` | `version_unsupported` | `version != 1` | `"version_unsupported: protocol version <n>"` |
+| `4005` | `invalid_token` | Authorization header present but token invalid/revoked | `"invalid_token"` |
+| `4429` | `pool_full` | Coordinator at configured max provider count | `"pool_full"` |
+
+Codes are mnemonic (4000-range maps to "rejected") and the reason text
+provides operator-visible detail. Provider binaries log the close code
+and reason per SPEC-001 standard logging; no special parsing required.
 
 ### Buyer-side
 
@@ -766,12 +789,16 @@ function route(request, pool, headers) -> provider | error:
     model = request.model
     estimated_tokens = estimate_tokens(request.messages)
 
-    # Step 1: Provider pinning
-    if headers["X-MacProvider-Provider"] is set:
-        pinned_id = headers["X-MacProvider-Provider"]
-        provider = pool.get(pinned_id)
+    # Step 1: Provider pinning (X-MacProvider-Session takes precedence)
+    if headers["X-MacProvider-Session"] is set:
+        provider = pool.get_by_assigned_id(headers["X-MacProvider-Session"])
         if provider is nil:
-            return error(503, "Pinned provider not found")
+            return error(503, "code=session_ended")
+    elif headers["X-MacProvider-Provider"] is set:
+        provider = pool.get_by_provider_id(headers["X-MacProvider-Provider"])
+        if provider is nil:
+            return error(503, "Pinned provider not in pool")
+    if provider is set:
         if provider.state != "ready" or provider.slots_free <= 0:
             return error(503, "Pinned provider not available")
         if provider.model_id != model:
@@ -1184,7 +1211,8 @@ When coordinator sends this:
 - Coordinator waits for `state_update` with `state: "ready"` before
   routing to this provider.
 
-**nak (P->C or C->P)** — protocol error:
+**nak (P->C only)** — per SPEC-001 § 6.5, `nak` is provider-to-coordinator
+only. Protocol error from provider:
 ```json
 {
   "type": "nak",
@@ -1202,10 +1230,15 @@ Coordinator behavior when receiving nak from provider:
   provider does not understand a specific message but is otherwise
   healthy.
 
-Coordinator sends nak when:
-- Provider sends a malformed message (missing `type`, invalid JSON).
-- Provider sends an unrecognized message type.
-- Provider sends a `hello` that fails validation (FR-P2).
+**Coordinator does NOT send `nak` to providers.** Coordinator-initiated
+rejection (invalid hello, unknown provider_id, tier mismatch, version
+mismatch, invalid token, pool full) uses WebSocket application close
+codes 4001–4005, 4429 with descriptive reason strings. See FR-P13's
+"Provider rejection via WebSocket close codes" table.
+
+This preserves SPEC-001 § 6.5's locked one-directional `nak` semantics
+exactly. Provider binaries do not need any new parser logic; standard
+WebSocket close handling per SPEC-001 FR-13 is sufficient.
 
 ### 7.2. Buyer HTTP API
 
@@ -1307,12 +1340,24 @@ providers.)
 shape as SPEC-001 section 6.3. The coordinator adds the same response
 headers.
 
-**Custom request headers:**
+**Custom request headers (buyer → coordinator):**
 
 | Header | Type | Description |
 |---|---|---|
-| `X-MacProvider-Pref` | string | `fast` or `accurate` (FR-R2) |
-| `X-MacProvider-Provider` | string | Provider `assigned_id` for pinning (FR-R3) |
+| `X-MacProvider-Pref` | string | Same-model preference; `fast` or `accurate` (FR-R2) |
+| `X-MacProvider-Provider` | string | **Stable `provider_id`** for pinning across reconnects (FR-R3) |
+| `X-MacProvider-Session` | string | Session-scoped `assigned_id` for pinning a specific WebSocket session (FR-R3). Takes precedence over `X-MacProvider-Provider` when both are sent (more specific). |
+
+**Custom response headers (coordinator → buyer):**
+
+| Header | Type | Description |
+|---|---|---|
+| `X-MacProvider-Provider` | string | Stable `provider_id` of the provider that served the request (operator-meaningful identity) |
+| `X-MacProvider-Route` | string | Session `assigned_id` of the WebSocket session that served the request (correlation with coordinator logs) |
+
+(`X-MacProvider-Provider` appears as both a request and response header.
+On request it selects; on response it reports. The two semantics share
+the same value space — the stable `provider_id`.)
 
 **Reserved response headers (namespace reserved, not enforced in v1):**
 
@@ -1797,8 +1842,10 @@ Run by: `phase4-coordinator/scripts/test-reconnection.sh`
    mock provider sends `state_update: ready`, or (b) 60s elapse with
    continuous heartbeats — whichever first.
 6. Assert: while provider is `degraded`, buyer requests for that
-   provider's model route to it ONLY if no other ready provider serves
-   the same model (degraded is last-resort, not removed).
+   provider's model are NOT routed to it (FR-R4 filters to `state=ready`
+   only). If no other ready provider serves the same model, buyer
+   receives 503 `no_provider_available` until this provider exits
+   degraded state.
 
 Run by: `phase4-coordinator/scripts/test-warmup-dispatch.sh`
 
@@ -1818,9 +1865,19 @@ Run by: `phase4-coordinator/scripts/test-routing-preference.sh`
 **AC-10. Operator endpoints.**
 1. `GET /healthz` returns 200 with pool size.
 2. `GET /poolz` without auth returns 401.
-3. `GET /poolz` with valid operator key returns 200 with provider list.
-4. `POST /admin/blacklist` with valid assigned_id removes provider
-   from pool and sends drain.
+3. `GET /poolz` with valid operator key returns 200 with provider list
+   showing both `provider_id` (stable) and `assigned_id` (session) per
+   entry.
+4. `POST /admin/blacklist` with a valid `provider_id` returns 200 with
+   `{status: "draining", provider_id, assigned_id, drain_sent: true}`.
+5. **Two-phase observable behavior** (per § 7.4):
+   - **Phase 1 (immediate):** within 1s of the blacklist POST, the
+     provider's `state` in `/poolz` transitions to `draining`. The
+     provider is no longer routed to (FR-R4 filters out non-`ready`).
+   - **Phase 2 (deferred):** within 60s — or sooner if the mock provider
+     sends `drain_status: complete` — the provider's WebSocket closes
+     and the entry disappears from `/poolz` entirely.
+6. POSTing `/admin/blacklist` with an unknown `provider_id` returns 404.
 
 Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh`
 
@@ -1844,26 +1901,9 @@ Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh`
 - **Buyer auth in v1:** none; trust delegated to Antseed seller
   integration (SPEC-003). Buyer API keys are SPEC-006 scope.
 
-**OQ-1. HTTP 530 vs WebSocket close — should the coordinator handle
-literal HTTP 530 as a distinct failure signal?**
-
-SPEC-002 currently equates "530" with unclean WebSocket close (FR-P11).
-Phase 2 observed a real HTTP 530 response from Cloudflare's edge when
-the provider's `cloudflared` daemon stayed connected to the edge but
-the underlying `mlx_lm.server` was unreachable (Mac mostly asleep). In
-that state, the coordinator's WebSocket to the provider may still be
-open even though the HTTP path is broken.
-
-Options:
-- **(a)** Treat HTTP 530 on a routed buyer request as a distinct signal:
-  log it in `state_update.reason = "http_530_observed"`, mark provider
-  as `unavailable`, and proactively check WebSocket liveness. Same pool
-  removal behavior as a WebSocket close, but distinguishable in logs.
-- **(b)** Treat HTTP 530 like any other upstream 5xx and rely on the
-  provider's own `state_update` to report unhealthy.
-
-Default if operator does not respond: **(a)** — Phase 2 surfaced the
-distinction as worth tracking, and (a) costs little to implement.
+No open questions remain. v1.0.2 resolved all prior open items into
+normative requirements (see FR-P11 for the HTTP 530 handling that was
+previously OQ-1).
 
 ---
 
@@ -1989,21 +2029,65 @@ phase4-coordinator/
 
 ### Configuration file schema (coordinator.yaml)
 
-Key fields (all have sensible defaults):
-- `listen.buyer_port` (8443), `listen.provider_port` (8444),
-  `listen.bind_address` ("127.0.0.1")
-- `pool.heartbeat_interval_s` (30), `pool.disconnect_grace_period_s`
-  (30), `pool.wake_gap_threshold_s` (120), `pool.degraded_backoff_s`
-  (30), `pool.degraded_max_retries` (3)
-- `routing.preflight_threshold_tokens` (4096),
-  `routing.preflight_timeout_s` (5), `routing.request_timeout_s` (300),
-  `routing.retry_on_502` (true)
-- `auth.operator_key` (required, for /poolz and /admin)
-- `storage.db_path` ("coordinator.db"),
-  `storage.snapshot_interval_s` (300)
-- `logging.level` ("info"), `logging.format` ("json")
+```yaml
+listen:
+  buyer_port: 8443           # HTTP port for buyer API
+  provider_port: 8444        # WebSocket port for provider connections
+  bind_address: "127.0.0.1"  # Listen address; TLS terminated by Caddy in front
 
-An example `coordinator.yaml.example` is included in the repo.
+pool:
+  heartbeat_interval_s: 30
+  disconnect_grace_period_s: 30
+  wake_gap_threshold_s: 120
+  degraded_backoff_s: 30      # Initial backoff after 502/504
+  degraded_max_retries: 3     # After N consecutive failed recovery preflights, mark unavailable
+  degraded_probe_after_502: true   # Send recovery preflight after 502/504 backoff (default true)
+                                    # Set to false to skip auto-recovery probing for debug
+
+routing:
+  preflight_threshold_tokens: 4096   # Skip preflight for prompts under this size
+  preflight_timeout_s: 5
+  request_timeout_s: 300
+
+auth:
+  operator_key: "<required>"   # Bearer token for /poolz and /admin/blacklist
+
+storage:
+  db_path: "coordinator.db"
+  snapshot_interval_s: 300
+
+logging:
+  level: "info"
+  format: "json"
+
+# Provider endpoint map (required; coordinator refuses to start if empty)
+providers:
+  - provider_id: "m4-anon"
+    endpoint_url: "https://m4.streamvc.live"
+    display_name: "M4 partner (Qwen 7B)"    # optional; used in /poolz
+  - provider_id: "m1-anon"
+    endpoint_url: "https://m1.streamvc.live"
+    display_name: "M1 partner (Llama 3B)"
+```
+
+**Startup validation rules** (coordinator exits with error on any failure):
+- `providers` must be non-empty (no providers = no routing possible).
+- Each `provider_id` must be unique across the list (duplicates rejected).
+- Each `endpoint_url` must be a syntactically valid `https://` URL (the
+  v1 coordinator only forwards over TLS).
+- Each `provider_id` must match the regex `[a-zA-Z0-9_.-]{1,64}`
+  (filesystem-and-URL-safe identifier).
+- `auth.operator_key` must be set and non-empty (operator endpoints
+  require auth).
+
+An example `coordinator.yaml.example` is included in the repo. The
+example MUST be kept in sync with this schema as part of the build
+session deliverable.
+
+(Note: `routing.retry_on_502` from earlier drafts was renamed to
+`pool.degraded_probe_after_502` to reflect what it actually controls —
+the degraded recovery probe behavior, not buyer-visible retry. The
+buyer never sees coordinator-managed retry in v1 per FR-B7.)
 
 ---
 

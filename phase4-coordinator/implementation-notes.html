@@ -15,7 +15,100 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
 <p class=meta>Status: <strong>not started</strong> · Spec:
-<a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.1</a></p>
+<a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.2</a></p>
+
+<section id="v1-0-2-patches">
+  <h2>SPEC-002 v1.0.2 post-joint-audit patches (2026-05-27)</h2>
+  <p class=meta>Applied after joint SPEC-001 + SPEC-002 audit at
+  <a href="../specs/JOINT-SPEC-001-002-audit.md">JOINT-SPEC-001-002-audit.md</a>
+  identified 0 CRITICAL, 6 MAJOR, 2 MINOR, 1 QUESTION. All addressed
+  in-place; no SPEC-001 amendment required.</p>
+
+  <h3>MAJOR cross-spec findings resolved</h3>
+  <ul>
+    <li><strong>M-J1 (preflight.purpose extra field):</strong> Removed
+    <code>"purpose": "health_recovery"</code> from recovery preflight.
+    Recovery probes now use only the <code>recovery-probe-</code> prefix
+    on <code>request_id</code> as the coordinator-side discriminator.
+    Wire-strict subset of SPEC-001 § 6.5.</li>
+
+    <li><strong>M-J2 (C→P nak direction):</strong> Coordinator never
+    sends <code>nak</code> to providers — that direction isn't in
+    SPEC-001 § 6.5. All coordinator-initiated rejections (invalid
+    hello, unknown provider_id, tier mismatch, version mismatch,
+    invalid token, pool full) now use standard WebSocket application
+    close codes 4001–4005 + 4429 with descriptive reason text. New
+    table "Provider rejection via WebSocket close codes" in FR-P13.</li>
+
+    <li><strong>M-J3 (header table contradiction):</strong> § 7.2
+    custom-header table now correctly shows
+    <code>X-MacProvider-Provider</code> = stable <code>provider_id</code>
+    and adds <code>X-MacProvider-Session</code> = session
+    <code>assigned_id</code>. Routing pseudocode updated to check
+    Session first (more specific), then Provider. Cross-references
+    FR-R3 precedence.</li>
+
+    <li><strong>M-J4 + Q-J1 (HTTP 530 open question):</strong>
+    Promoted to normative FR-P11 row. Literal HTTP 530 on a routed
+    buyer request → <code>unavailable</code>, log
+    <code>state_update.reason = "http_530_observed"</code>, trigger
+    WebSocket liveness probe with 5s ack timeout. OQ-1 deleted from
+    § 12; § 12 now has zero open questions.</li>
+
+    <li><strong>M-J5 (static endpoint YAML schema):</strong> § 13
+    config schema replaced with full YAML example including
+    <code>providers: [{provider_id, endpoint_url, display_name?}]</code>
+    block plus 5 startup validation rules (non-empty list, unique IDs,
+    HTTPS URLs, ID regex, operator_key set).</li>
+
+    <li><strong>M-J6 (routing.retry_on_502 stale config):</strong>
+    Renamed to <code>pool.degraded_probe_after_502</code> in the YAML
+    schema. The config controls the degraded recovery probe behavior,
+    which is real; the previous name implied buyer-visible retry which
+    v1 FR-B7 forbids. Explanatory note in § 13 documents the rename.</li>
+  </ul>
+
+  <h3>MINOR findings resolved</h3>
+  <ul>
+    <li><strong>m-J1 (header namespace incomplete):</strong> § 7.2 now
+    has TWO header tables (request + response) with all four headers
+    enumerated and direction-tagged.</li>
+
+    <li><strong>m-J2 (AC-8b degraded routing conflict):</strong> AC-8b
+    step 6 rewritten to assert NO routing while degraded (matches
+    FR-R4's <code>state=ready</code> filter). Removed the "ONLY if no
+    other ready provider" last-resort clause that contradicted the
+    main routing rule.</li>
+
+    <li><strong>AC-10 alignment:</strong> Step 5 added with explicit
+    two-phase observable behavior (draining → close → remove), matches
+    § 7.4 blacklist semantics. Step 6 covers 404 for unknown provider.</li>
+  </ul>
+
+  <h3>Patch verification (joint audit Part 1) — items revisited</h3>
+  <ul>
+    <li><strong>M3 (NOT ADDRESSED in v1.0.1) → now ADDRESSED:</strong>
+    § 7.2 header table reflects FR-R3's stable-provider_id semantics.</li>
+    <li><strong>M8 (NOT ADDRESSED in v1.0.1) → now ADDRESSED:</strong>
+    recovery preflight is SPEC-001-§6.5-strict subset (no extra fields).</li>
+    <li><strong>M9 (NOT ADDRESSED in v1.0.1) → now ADDRESSED:</strong>
+    AC-10 step 5/6 align with § 7.4 two-phase removal.</li>
+    <li><strong>Q1 (NOT RESOLVED in v1.0.1) → now RESOLVED:</strong>
+    HTTP 530 is normative in FR-P11; OQ-1 deleted.</li>
+  </ul>
+
+  <h3>Knowingly deferred</h3>
+  <ul>
+    <li>None. All joint-audit findings either addressed or rolled into
+    explicit normative requirements.</li>
+  </ul>
+
+  <h3>Verification</h3>
+  <p>Spec version bumped to <strong>1.0.2</strong>. Open questions: 0.
+  Status: build-ready. Recommended next step: one optional final pass
+  with Codex on v1.0.2 (~20 min) to confirm zero new regressions, or
+  proceed directly to coordinator + binary parallel builds.</p>
+</section>
 
 <section id="v1-0-1-patches">
   <h2>SPEC-002 v1.0.1 post-audit patches (2026-05-27)</h2>
