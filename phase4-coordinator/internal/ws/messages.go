@@ -61,6 +61,13 @@ type PreflightAck struct {
 	MaxContextTokens int    `json:"max_context_tokens"`
 }
 
+type DrainStatus struct {
+	Type                  string `json:"type"`
+	Phase                 string `json:"phase"`
+	InflightRequests      int    `json:"inflight_requests"`
+	EstimatedDrainSeconds int    `json:"estimated_drain_seconds"`
+}
+
 var preflightRejectionReasons = map[string]struct{}{
 	"context_exceeds_capacity": {},
 	"queue_full":               {},
@@ -258,4 +265,26 @@ func ParsePreflightAck(payload []byte) (PreflightAck, string, error) {
 		}
 	}
 	return ack, "", nil
+}
+
+func ParseDrainStatus(payload []byte) (DrainStatus, string, error) {
+	var status DrainStatus
+	if err := json.Unmarshal(payload, &status); err != nil {
+		return DrainStatus{}, "json", err
+	}
+	if status.Type != "drain_status" {
+		return DrainStatus{}, "type", fmt.Errorf("expected drain_status, got %q", status.Type)
+	}
+	switch status.Phase {
+	case "starting", "in_progress", "complete":
+	default:
+		return DrainStatus{}, "phase", fieldError{Field: "invalid phase"}
+	}
+	if status.InflightRequests < 0 {
+		return DrainStatus{}, "inflight_requests", fieldError{Field: "invalid inflight_requests"}
+	}
+	if status.EstimatedDrainSeconds < 0 {
+		return DrainStatus{}, "estimated_drain_seconds", fieldError{Field: "invalid estimated_drain_seconds"}
+	}
+	return status, "", nil
 }

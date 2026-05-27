@@ -35,6 +35,7 @@ type Server struct {
 	timers  sync.Map
 	pending sync.Map
 	tokens  TokenValidator
+	started time.Time
 }
 
 type TokenValidator interface {
@@ -61,6 +62,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		log:     logger,
 		now:     func() time.Time { return time.Now().UTC() },
 		newUUID: func() string { return uuid.NewString() },
+		started: time.Now().UTC(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -71,7 +73,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws/provider", s.handleProvider)
+	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/poolz", s.handlePoolz)
+	mux.HandleFunc("/admin/blacklist", s.handleBlacklist)
 	return mux
 }
 
@@ -222,8 +226,30 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleStateUpdate(providerID, payload)
 	case "preflight_ack":
 		s.handlePreflightAck(providerID, payload)
+	case "drain_status":
+		s.handleDrainStatus(conn, providerID, assignedID, payload)
 	default:
 		s.log.Warn().Str("provider_id", providerID).Str("type", envelope.Type).Msg("unknown provider message type")
+	}
+}
+
+func (s *Server) handleDrainStatus(conn net.Conn, providerID, assignedID string, payload []byte) {
+	status, field, err := ParseDrainStatus(payload)
+	if err != nil {
+		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid drain_status")
+		return
+	}
+	if status.Phase == "starting" {
+		s.pool.MarkState(providerID, assignedID, pool.StateDraining)
+	}
+	s.log.Info().
+		Str("provider_id", providerID).
+		Str("phase", status.Phase).
+		Int("inflight_requests", status.InflightRequests).
+		Int("estimated_drain_seconds", status.EstimatedDrainSeconds).
+		Msg("provider drain progress")
+	if status.Phase == "complete" {
+		_ = conn.Close()
 	}
 }
 
@@ -373,6 +399,10 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 }
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
+	if s.pool.RemoveIfSessionState(providerID, assignedID, pool.StateDraining) {
+		s.log.Info().Str("provider_id", providerID).Msg("draining provider removed after websocket close")
+		return
+	}
 	if !s.pool.MarkState(providerID, assignedID, pool.StateUnavailable) {
 		return
 	}
@@ -414,13 +444,53 @@ func (s *Server) disconnectGracePeriod() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	providers := s.pool.Snapshot()
+	resp := struct {
+		Status          string `json:"status"`
+		UptimeS         int64  `json:"uptime_s"`
+		PoolSize        int    `json:"pool_size"`
+		PoolReady       int    `json:"pool_ready"`
+		PoolDegraded    int    `json:"pool_degraded"`
+		PoolDraining    int    `json:"pool_draining"`
+		PoolUnavailable int    `json:"pool_unavailable"`
+		RequestsTotal   int    `json:"requests_total"`
+		RequestsActive  int    `json:"requests_active"`
+		Version         string `json:"version"`
+	}{
+		Status:   "ok",
+		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
+		PoolSize: len(providers),
+		Version:  "0.1.0",
+	}
+	for _, p := range providers {
+		switch p.State {
+		case pool.StateReady:
+			resp.PoolReady++
+		case pool.StateDegraded:
+			resp.PoolDegraded++
+		case pool.StateDraining:
+			resp.PoolDraining++
+		case pool.StateUnavailable:
+			resp.PoolUnavailable++
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
 func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if s.cfg.Auth.OperatorKey != "" && r.Header.Get("Authorization") != "Bearer "+s.cfg.Auth.OperatorKey {
+	if !s.authorizedOperator(r) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":{"message":"unauthorized","code":"invalid_operator_token"}}`))
@@ -456,6 +526,67 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		Pool:    providers,
 		Summary: summary,
 	})
+}
+
+func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.authorizedOperator(r) {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": map[string]any{"message": "unauthorized", "code": "invalid_operator_token"}})
+		return
+	}
+	var req struct {
+		ProviderID string `json:"provider_id"`
+		AssignedID string `json:"assigned_id"`
+		Reason     string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": map[string]any{"message": "invalid json", "code": "invalid_request"}})
+		return
+	}
+	provider, ok := s.pool.Resolve(req.ProviderID, req.AssignedID)
+	if !ok {
+		id := req.ProviderID
+		if id == "" {
+			id = req.AssignedID
+		}
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "provider " + id + " not in pool", "code": "provider_not_found"}})
+		return
+	}
+	conn, err := s.pool.Conn(provider.ProviderID, provider.AssignedID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "provider " + provider.ProviderID + " not in pool", "code": "provider_not_found"}})
+		return
+	}
+	drainSent := true
+	if err := wsutil.WriteServerText(conn, []byte(`{"type":"drain"}`)); err != nil {
+		drainSent = false
+		s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("drain write failed during blacklist")
+	}
+	s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateDraining)
+	time.AfterFunc(time.Minute, func() {
+		_ = conn.Close()
+	})
+	s.log.Warn().Str("provider_id", provider.ProviderID).Str("assigned_id", provider.AssignedID).Str("reason", req.Reason).Msg("provider blacklisted")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":      "draining",
+		"provider_id": provider.ProviderID,
+		"assigned_id": provider.AssignedID,
+		"drain_sent":  drainSent,
+	})
+}
+
+func (s *Server) authorizedOperator(r *http.Request) bool {
+	return s.cfg.Auth.OperatorKey == "" || r.Header.Get("Authorization") == "Bearer "+s.cfg.Auth.OperatorKey
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
 }
 
 func itoa(n int) string {

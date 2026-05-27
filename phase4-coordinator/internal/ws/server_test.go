@@ -1,6 +1,7 @@
 package ws_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -376,6 +377,117 @@ func TestPoolzRequiresOperatorKey(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}
+
+func TestOperatorEndpointsBlacklistTwoPhaseDrain(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	healthResp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	defer healthResp.Body.Close()
+	if healthResp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz status = %d", healthResp.StatusCode)
+	}
+	var health struct {
+		Status   string `json:"status"`
+		PoolSize int    `json:"pool_size"`
+	}
+	if err := json.NewDecoder(healthResp.Body).Decode(&health); err != nil {
+		t.Fatalf("health json: %v", err)
+	}
+	if health.Status != "ok" || health.PoolSize != 1 {
+		t.Fatalf("health = %#v", health)
+	}
+
+	reqBody := bytes.NewReader(mustJSON(map[string]string{
+		"provider_id": "m4-anon",
+		"reason":      "test blacklist",
+	}))
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/admin/blacklist", reqBody)
+	if err != nil {
+		t.Fatalf("blacklist request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-operator-key")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("blacklist: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("blacklist status=%d body=%s", resp.StatusCode, body)
+	}
+	var blacklist struct {
+		Status     string `json:"status"`
+		ProviderID string `json:"provider_id"`
+		AssignedID string `json:"assigned_id"`
+		DrainSent  bool   `json:"drain_sent"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&blacklist); err != nil {
+		t.Fatalf("blacklist json: %v", err)
+	}
+	if blacklist.Status != "draining" || blacklist.ProviderID != "m4-anon" || blacklist.AssignedID != assignedID || !blacklist.DrainSent {
+		t.Fatalf("blacklist response = %#v", blacklist)
+	}
+
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read drain: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+	var drain map[string]string
+	if err := json.Unmarshal(payload, &drain); err != nil {
+		t.Fatalf("drain json: %v", err)
+	}
+	if drain["type"] != "drain" {
+		t.Fatalf("drain = %#v", drain)
+	}
+	eventually(t, func() bool {
+		got := fetchPoolz(t, ts.URL)
+		return len(got.Pool) == 1 && got.Pool[0].State == "draining"
+	})
+
+	if err := wsutil.WriteClientText(conn, mustJSON(map[string]any{
+		"type":                    "drain_status",
+		"phase":                   "complete",
+		"inflight_requests":       0,
+		"estimated_drain_seconds": 0,
+	})); err != nil {
+		t.Fatalf("write drain_status complete: %v", err)
+	}
+	eventually(t, func() bool {
+		got := fetchPoolz(t, ts.URL)
+		return len(got.Pool) == 0
+	})
+
+	missingBody := bytes.NewReader(mustJSON(map[string]string{"provider_id": "missing"}))
+	missing, err := http.NewRequest(http.MethodPost, ts.URL+"/admin/blacklist", missingBody)
+	if err != nil {
+		t.Fatalf("missing request: %v", err)
+	}
+	missing.Header.Set("Authorization", "Bearer test-operator-key")
+	missingResp, err := http.DefaultClient.Do(missing)
+	if err != nil {
+		t.Fatalf("missing blacklist: %v", err)
+	}
+	defer missingResp.Body.Close()
+	if missingResp.StatusCode != http.StatusNotFound {
+		body, _ := io.ReadAll(missingResp.Body)
+		t.Fatalf("missing status=%d body=%s", missingResp.StatusCode, body)
 	}
 }
 

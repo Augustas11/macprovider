@@ -14,8 +14,39 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>Step 9 provider token auth verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 10 operator endpoints verified</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
+
+<section id="step10-operator-endpoints">
+  <h2>Step 10 operator endpoints (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> unauthenticated
+    <code>GET /healthz</code> with pool state counters and version, retained
+    authenticated <code>GET /poolz</code>, and added authenticated
+    <code>POST /admin/blacklist</code> accepting either
+    <code>provider_id</code> or <code>assigned_id</code>.</p>
+    <p><strong>Blacklist behavior:</strong> the coordinator sends
+    <code>{"type":"drain"}</code>, marks the provider
+    <code>draining</code> immediately, returns
+    <code>{status, provider_id, assigned_id, drain_sent}</code>, and stops
+    routing because draining providers are not eligible. Unknown providers
+    return 404 <code>provider_not_found</code>.</p>
+    <p><strong>Two-phase removal:</strong> <code>drain_status</code> is now
+    parsed and logged. <code>phase: "complete"</code> closes the provider
+    WebSocket; disconnect handling removes sessions already in
+    <code>draining</code> state immediately, while ordinary disconnects
+    still use the configured grace period. A 60-second close timer is
+    started for blacklisted providers that do not complete drain.</p>
+    <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes under escalated local-port permission for <code>httptest</code>
+    bind. Coverage includes <code>/healthz</code>, blacklist 200 response,
+    drain command delivery, immediate <code>draining</code> visibility in
+    <code>/poolz</code>, removal after <code>drain_status: complete</code>,
+    and unknown-provider 404. <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    passes.</p>
+  </div>
+</section>
 
 <section id="step9-provider-auth">
   <h2>Step 9 provider token auth (2026-05-27)</h2>

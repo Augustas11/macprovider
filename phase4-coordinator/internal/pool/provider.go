@@ -196,6 +196,35 @@ func (r *Registry) RemoveIfSession(providerID, assignedID string) bool {
 	return true
 }
 
+func (r *Registry) RemoveIfSessionState(providerID, assignedID string, state State) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID || p.State != state {
+		return false
+	}
+	delete(r.providers, providerID)
+	delete(r.sessions, assignedID)
+	return true
+}
+
+func (r *Registry) Resolve(providerID, assignedID string) (Provider, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var p *Provider
+	if providerID != "" {
+		p = r.providers[providerID]
+	} else if assignedID != "" {
+		p = r.sessions[assignedID]
+	}
+	if p == nil {
+		return Provider{}, false
+	}
+	cp := *p
+	cp.conn = nil
+	return cp, true
+}
+
 func (r *Registry) Conn(providerID, assignedID string) (net.Conn, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
