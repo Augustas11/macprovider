@@ -172,6 +172,17 @@ actor ProviderStatus {
         return snapshot
     }
 
+    func waitUntilDrained(timeoutSeconds: Int) async -> Bool {
+        let deadline = Date().addingTimeInterval(TimeInterval(max(0, timeoutSeconds)))
+        while requestsInFlight > 0 {
+            if Date() >= deadline {
+                return false
+            }
+            try? await Task.sleep(nanoseconds: 100_000_000)
+        }
+        return true
+    }
+
     private func refreshAvailabilityState() {
         guard modelLoaded, status == .ready || status == .busy else {
             return

@@ -8,6 +8,7 @@ actor ModelRuntime {
     private let container: ModelContainer?
     private let stopTokenFilter: StopTokenFilter
     private let maxContextTokens: Int
+    private let inferenceGate = AsyncSemaphore(value: 1)
 
     var loadedModelID: String? {
         modelID
@@ -47,10 +48,12 @@ actor ModelRuntime {
         }
 
         let maxContextTokens = maxContextTokens
-        try await container.perform { context in
-            let input = UserInput(chat: request.messages.map { $0.mlxMessage })
-            let lmInput = try await context.processor.prepare(input: input)
-            try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+        try await inferenceGate.withPermit {
+            try await container.perform { context in
+                let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+                let lmInput = try await context.processor.prepare(input: input)
+                try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+            }
         }
     }
 
@@ -61,38 +64,40 @@ actor ModelRuntime {
         }
 
         let maxContextTokens = maxContextTokens
-        return try await container.perform { context in
-            let input = UserInput(chat: request.messages.map { $0.mlxMessage })
-            let lmInput = try await context.processor.prepare(input: input)
-            try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-            let parameters = GenerateParameters(
-                maxTokens: request.maxTokens,
-                temperature: Float(request.temperature),
-                topP: Float(request.topP)
-            )
-            let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
-                GenerateDisposition.more
+        return try await inferenceGate.withPermit {
+            try await container.perform { context in
+                let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+                let lmInput = try await context.processor.prepare(input: input)
+                try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+                let parameters = GenerateParameters(
+                    maxTokens: request.maxTokens,
+                    temperature: Float(request.temperature),
+                    topP: Float(request.topP)
+                )
+                let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                    GenerateDisposition.more
+                }
+
+                let filtered = Self.applyOutputFilters(
+                    result.output,
+                    stopTokenFilter: stopTokenFilter,
+                    requestStops: request.stop
+                )
+
+                let finishReason: String
+                if let maxTokens = request.maxTokens, result.generationTokenCount >= maxTokens, !filtered.hitStop {
+                    finishReason = "length"
+                } else {
+                    finishReason = "stop"
+                }
+
+                return CompletionResult(
+                    content: filtered.text,
+                    finishReason: finishReason,
+                    promptTokens: result.promptTokenCount,
+                    completionTokens: result.generationTokenCount
+                )
             }
-
-            let filtered = Self.applyOutputFilters(
-                result.output,
-                stopTokenFilter: stopTokenFilter,
-                requestStops: request.stop
-            )
-
-            let finishReason: String
-            if let maxTokens = request.maxTokens, result.generationTokenCount >= maxTokens, !filtered.hitStop {
-                finishReason = "length"
-            } else {
-                finishReason = "stop"
-            }
-
-            return CompletionResult(
-                content: filtered.text,
-                finishReason: finishReason,
-                promptTokens: result.promptTokenCount,
-                completionTokens: result.generationTokenCount
-            )
         }
     }
 
@@ -106,67 +111,69 @@ actor ModelRuntime {
         }
 
         let maxContextTokens = maxContextTokens
-        return try await container.perform { context in
-            let input = UserInput(chat: request.messages.map { $0.mlxMessage })
-            let lmInput = try await context.processor.prepare(input: input)
-            try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-            let parameters = GenerateParameters(
-                maxTokens: request.maxTokens,
-                temperature: Float(request.temperature),
-                topP: Float(request.topP)
-            )
+        return try await inferenceGate.withPermit {
+            try await container.perform { context in
+                let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+                let lmInput = try await context.processor.prepare(input: input)
+                try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+                let parameters = GenerateParameters(
+                    maxTokens: request.maxTokens,
+                    temperature: Float(request.temperature),
+                    topP: Float(request.topP)
+                )
 
-            var emittedText = ""
-            var stoppedByRequestStop = false
+                var emittedText = ""
+                var stoppedByRequestStop = false
 
-            let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
-                let decoded = context.tokenizer.decode(tokens: tokens)
-                let candidate = Self.streamingSafePrefix(
-                    decoded,
+                let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
+                    let decoded = context.tokenizer.decode(tokens: tokens)
+                    let candidate = Self.streamingSafePrefix(
+                        decoded,
+                        stopTokenFilter: stopTokenFilter,
+                        requestStops: request.stop
+                    )
+
+                    let delta = Self.delta(from: emittedText, to: candidate.text)
+                    if !delta.isEmpty {
+                        emittedText = candidate.text
+                        onChunk(delta)
+                    }
+
+                    if candidate.hitStop {
+                        stoppedByRequestStop = true
+                        return .stop
+                    }
+                    return .more
+                }
+
+                let final = Self.applyOutputFilters(
+                    result.output,
                     stopTokenFilter: stopTokenFilter,
                     requestStops: request.stop
                 )
-
-                let delta = Self.delta(from: emittedText, to: candidate.text)
-                if !delta.isEmpty {
-                    emittedText = candidate.text
-                    onChunk(delta)
+                let finalDelta = Self.delta(from: emittedText, to: final.text)
+                if !finalDelta.isEmpty {
+                    onChunk(finalDelta)
                 }
 
-                if candidate.hitStop {
-                    stoppedByRequestStop = true
-                    return .stop
+                let finishReason: String
+                if let maxTokens = request.maxTokens,
+                   result.generationTokenCount >= maxTokens,
+                   !stoppedByRequestStop,
+                   !final.hitStop
+                {
+                    finishReason = "length"
+                } else {
+                    finishReason = "stop"
                 }
-                return .more
-            }
 
-            let final = Self.applyOutputFilters(
-                result.output,
-                stopTokenFilter: stopTokenFilter,
-                requestStops: request.stop
-            )
-            let finalDelta = Self.delta(from: emittedText, to: final.text)
-            if !finalDelta.isEmpty {
-                onChunk(finalDelta)
+                return CompletionResult(
+                    content: final.text,
+                    finishReason: finishReason,
+                    promptTokens: result.promptTokenCount,
+                    completionTokens: result.generationTokenCount
+                )
             }
-
-            let finishReason: String
-            if let maxTokens = request.maxTokens,
-               result.generationTokenCount >= maxTokens,
-               !stoppedByRequestStop,
-               !final.hitStop
-            {
-                finishReason = "length"
-            } else {
-                finishReason = "stop"
-            }
-
-            return CompletionResult(
-                content: final.text,
-                finishReason: finishReason,
-                promptTokens: result.promptTokenCount,
-                completionTokens: result.generationTokenCount
-            )
         }
     }
 
@@ -177,12 +184,14 @@ actor ModelRuntime {
 
         do {
             let start = Date()
-            let result: GenerateResult = try await container.perform { context in
-                let input = UserInput(chat: [.user("Reply with a short greeting.")])
-                let lmInput = try await context.processor.prepare(input: input)
-                let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0.0, topP: 1.0)
-                return try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
-                    GenerateDisposition.more
+            let result: GenerateResult = try await inferenceGate.withPermit {
+                try await container.perform { context in
+                    let input = UserInput(chat: [.user("Reply with a short greeting.")])
+                    let lmInput = try await context.processor.prepare(input: input)
+                    let parameters = GenerateParameters(maxTokens: maxTokens, temperature: 0.0, topP: 1.0)
+                    return try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                        GenerateDisposition.more
+                    }
                 }
             }
             let elapsed = max(Date().timeIntervalSince(start), 0.001)

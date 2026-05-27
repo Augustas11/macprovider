@@ -5,6 +5,7 @@ import Darwin
 actor CoordinatorClient {
     private let coordinatorURL: URL
     private let providerStatus: ProviderStatus
+    private let drainTimeoutSeconds: Int
     private var webSocket: URLSessionWebSocketTask?
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
@@ -15,6 +16,7 @@ actor CoordinatorClient {
         }
         self.coordinatorURL = url
         self.providerStatus = providerStatus
+        self.drainTimeoutSeconds = config.drainTimeoutSeconds
     }
 
     func start() {
@@ -164,6 +166,7 @@ actor CoordinatorClient {
         try? await sendStateUpdate(state: .draining, reason: reason)
         try? await sendDrainStatus(phase: "starting")
         try? await sendDrainStatus(phase: "in_progress")
+        _ = await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds)
         try? await sendDrainStatus(phase: "complete")
         webSocket?.cancel(with: .goingAway, reason: nil)
         Darwin.exit(exitCode)

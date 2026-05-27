@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-001 — phase3-binary — implementation notes</h1>
-<p class=meta>Status: <strong>Step 8 verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 9 local acceptance verified</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
 <section id="step1-blocker-diagnosis">
@@ -331,6 +331,17 @@ swift package describe</pre>
   <code>throughput_tps_estimate</code> in hello, heartbeat, and health
   capacity data.</p>
 </div>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Step 9 acceptance scripts:</strong> Acceptance entry points now
+  live under <code>phase3-binary/scripts/</code> and build through
+  <code>xcodebuild</code>. They locate the Xcode product binary and run it
+  with <code>DYLD_FRAMEWORK_PATH=Build/Products/Debug/PackageFrameworks:Build/Products/Debug</code>
+  so MLX can find package frameworks and the compiled Metal shader bundle.
+  The scripts keep the Phase 2 harness clean by writing temporary JSON
+  harness config and a small <code>yaml.safe_load</code> shim under
+  <code>/private/tmp</code> instead of modifying <code>beta/</code>.</p>
+</div>
 </section>
 <section><h2>Deviations from spec</h2>
 <p class=meta>Intentional departures, with reason.</p>
@@ -348,6 +359,13 @@ swift package describe</pre>
   does not yet engage a model-level structured decoding hint because the pinned
   <code>GenerateParameters</code> surface inspected locally does not expose one.</p>
 </div>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Full soak not completed locally:</strong> AC-3's 24-hour soak is
+  marked operator-assisted in the build prompt. This session ran the soak
+  script as a 20-second smoke test only. The script defaults to
+  <code>SOAK_SECONDS=86400</code> for the full run.</p>
+</div>
 </section>
 <section><h2>Tradeoffs considered</h2>
 <p class=meta>Alternatives evaluated and why we picked what we did.</p>
@@ -359,6 +377,17 @@ swift package describe</pre>
   <code>PackageDescription</code> overload, but it still failed. I restored
   <code>// swift-tools-version: 5.9</code> because SPEC-001 requires Swift
   5.9+ compatibility and the workaround did not produce a successful build.</p>
+</div>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Serialize MLX inference inside the process:</strong> The
+  adversarial retry storm initially exposed an MLX/Metal crash:
+  <code>commit an already committed command buffer</code>. I added a FIFO
+  async inference gate around all <code>ModelContainer.perform</code> calls.
+  This preserves provider survival and request-slot accounting under
+  concurrent load at the cost of high tail latency on the 8 GB test machine.
+  The Phase 2 adversarial batch now completes with 200/400/413 responses and
+  no HTTP 500 or process crash.</p>
 </div>
 </section>
 <section><h2>Open questions for operator</h2>
@@ -596,6 +625,48 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     <li>Drain cleanup — the mock sent coordinator <code>drain</code> after the
     capacity checks and observed draining <code>state_update</code> plus all
     three <code>drain_status</code> phases before process exit.</li>
+  </ul>
+</div>
+</section>
+<section><h2>Step 9 acceptance complete</h2>
+<div class="entry">
+  <time>2026-05-27</time>
+  <ul>
+    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    — passed after adding acceptance scripts, SIGTERM drain waiting, and the
+    process-local MLX inference gate.</li>
+    <li><code>test-startup-failure.sh</code> — passed; startup with an invalid
+    model exits 1 with a diagnostic.</li>
+    <li><code>test-config-precedence.sh</code> — passed; config file values are
+    overridden by env, and env values are overridden by CLI flags.</li>
+    <li><code>test-health.sh</code> — passed with real cached model:
+    <code>status=ready</code>, <code>max_concurrency=1</code>,
+    <code>max_context_tokens=20000</code>, and
+    <code>throughput_tps_estimate=3.379931479555677</code>.</li>
+    <li><code>test-coordinator.sh</code> — passed; mock coordinator observed
+    hello, ready state, five heartbeats, preflight ack, draining state, and
+    drain phases <code>starting</code>, <code>in_progress</code>,
+    <code>complete</code>.</li>
+    <li><code>test-warm-up.sh</code> — passed; mock coordinator observed
+    <code>degraded</code> then <code>ready</code> after inbound warm-up.</li>
+    <li><code>test-sigterm-drain.sh</code> — passed; three active streaming
+    requests completed before SIGTERM drain reported
+    <code>starting</code>, <code>in_progress</code>, and
+    <code>complete</code>.</li>
+    <li><code>harness-cooperative.sh</code> — passed all six cooperative
+    workloads, including <code>long_context</code> and
+    <code>streaming_check</code>; all returned HTTP 200 with
+    <code>leak=0</code>.</li>
+    <li><code>harness-adversarial.sh</code> — passed SPEC AC-2 checks:
+    <code>retry_storm</code> 50/50 OK, <code>concurrent_burst_8way</code>
+    8/8 OK, <code>midstream_disconnect</code> 10/10 OK,
+    <code>malformed_tool_call</code> produced HTTP 400 for malformed requests,
+    <code>long_context_oom_probe</code> returned HTTP 413, no HTTP 500 was
+    observed, and <code>/v1/health</code> recovered within 30 seconds.</li>
+    <li><code>SOAK_SECONDS=20 soak-test.sh</code> — passed a short local soak
+    smoke with three successful <code>short_chat</code> runs and stable sampled
+    RSS: <code>baseline_rss_kb=768</code>, <code>max_rss_kb=768</code>. The
+    full 24-hour AC-3 soak remains not run in this session.</li>
   </ul>
 </div>
 </section>
