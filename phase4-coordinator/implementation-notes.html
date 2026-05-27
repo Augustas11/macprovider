@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>Step 3 heartbeat and poolz verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 4 state machine verified</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
 
 <section id="step1-scaffold">
@@ -41,6 +41,36 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     local toolchain's <code>1.26.3</code>, because SPEC-002 requires Go
     1.22+ and the deployment target should not accidentally require the
     operator's newest local Go version.</p>
+  </div>
+</section>
+
+<section id="step4-state-machine">
+  <h2>Step 4 provider state machine (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> <code>state_update</code> parsing,
+    validation for the five SPEC-002 states (<code>ready</code>,
+    <code>busy</code>, <code>degraded</code>, <code>draining</code>,
+    <code>unavailable</code>), metrics snapshot slot updates, and
+    <code>Provider.RoutingEligible()</code> for the Step 5+ router
+    filter (<code>ready</code> + <code>slots_free &gt; 0</code>).</p>
+    <p><strong>Wake handling:</strong> heartbeat gaps greater than
+    <code>pool.wake_gap_threshold_s</code> send
+    <code>{"type":"warm_up"}</code>, mark the provider
+    <code>degraded</code> even if the heartbeat says <code>ready</code>,
+    and start the SPEC fallback timer that returns it to
+    <code>ready</code> after 60 seconds if no <code>state_update:
+    ready</code> arrives.</p>
+    <p><strong>Disconnect handling:</strong> WebSocket read failure marks
+    the current session <code>unavailable</code>, then removes it after
+    <code>pool.disconnect_grace_period_s</code>. Reconnects are protected
+    by session ID matching, so an old disconnected goroutine cannot remove
+    a newer session with the same stable <code>provider_id</code>.</p>
+    <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes with tests for all state transitions, wake <code>warm_up</code>
+    dispatch, degraded marking, disconnect grace removal, and existing
+    hello/heartbeat behavior. <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    passes.</p>
   </div>
 </section>
 

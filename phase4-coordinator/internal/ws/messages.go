@@ -44,6 +44,19 @@ type Heartbeat struct {
 	ThroughputTPSSinceLast  float64 `json:"throughput_tps_since_last"`
 }
 
+type StateUpdate struct {
+	Type            string          `json:"type"`
+	State           string          `json:"state"`
+	Reason          string          `json:"reason"`
+	Since           string          `json:"since"`
+	MetricsSnapshot MetricsSnapshot `json:"metrics_snapshot"`
+}
+
+type MetricsSnapshot struct {
+	SlotsFree  *int `json:"slots_free"`
+	SlotsTotal *int `json:"slots_total"`
+}
+
 func ParseHello(payload []byte) (Hello, string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
@@ -179,4 +192,33 @@ func ParseHeartbeat(payload []byte) (Heartbeat, string, error) {
 		return Heartbeat{}, err.Field, err
 	}
 	return hb, "", nil
+}
+
+func ParseStateUpdate(payload []byte) (StateUpdate, string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return StateUpdate{}, "json", err
+	}
+	var update StateUpdate
+	if err := requireString(raw, "type", &update.Type); err != nil {
+		return StateUpdate{}, err.Field, err
+	}
+	if update.Type != "state_update" {
+		return StateUpdate{}, "type", fmt.Errorf("expected state_update, got %q", update.Type)
+	}
+	if err := requireString(raw, "state", &update.State); err != nil {
+		return StateUpdate{}, err.Field, err
+	}
+	if v, ok := raw["reason"]; ok {
+		_ = json.Unmarshal(v, &update.Reason)
+	}
+	if v, ok := raw["since"]; ok {
+		_ = json.Unmarshal(v, &update.Since)
+	}
+	if v, ok := raw["metrics_snapshot"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &update.MetricsSnapshot); err != nil {
+			return StateUpdate{}, "metrics_snapshot", err
+		}
+	}
+	return update, "", nil
 }

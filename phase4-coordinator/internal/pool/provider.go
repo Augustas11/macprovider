@@ -39,6 +39,10 @@ type Provider struct {
 	conn net.Conn
 }
 
+func (p Provider) RoutingEligible() bool {
+	return p.State == StateReady && p.SlotsFree > 0
+}
+
 type Registry struct {
 	mu          sync.RWMutex
 	providers   map[string]*Provider
@@ -77,6 +81,17 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 	r.providers[p.ProviderID] = p
 	r.sessions[p.AssignedID] = p
 	return old
+}
+
+func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	p.State = state
+	return true
 }
 
 func (r *Registry) Count() int {
@@ -124,6 +139,42 @@ func (r *Registry) ApplyHeartbeat(providerID string, hb HeartbeatUpdate) (*Provi
 		gap = hb.At.Sub(prev)
 	}
 	return &cp, gap, true
+}
+
+type StateUpdate struct {
+	State      State
+	SlotsFree  *int
+	SlotsTotal *int
+}
+
+func (r *Registry) ApplyStateUpdate(providerID string, update StateUpdate) (*Provider, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil {
+		return nil, false
+	}
+	p.State = update.State
+	if update.SlotsFree != nil {
+		p.SlotsFree = *update.SlotsFree
+	}
+	if update.SlotsTotal != nil {
+		p.SlotsTotal = *update.SlotsTotal
+	}
+	cp := *p
+	return &cp, true
+}
+
+func (r *Registry) RemoveIfSession(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	delete(r.providers, providerID)
+	delete(r.sessions, assignedID)
+	return true
 }
 
 func (r *Registry) Snapshot() []Provider {

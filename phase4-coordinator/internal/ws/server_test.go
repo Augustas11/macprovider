@@ -127,6 +127,109 @@ func TestHeartbeatUpdatesPoolz(t *testing.T) {
 	}
 }
 
+func TestStateUpdateCyclesProviderState(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+
+	states := []string{"ready", "busy", "degraded", "draining", "unavailable"}
+	for _, state := range states {
+		msg := map[string]any{
+			"type":   "state_update",
+			"state":  state,
+			"reason": "test transition",
+			"since":  "2026-05-27T14:30:00Z",
+			"metrics_snapshot": map[string]any{
+				"slots_free":  0,
+				"slots_total": 1,
+			},
+		}
+		if state == "ready" {
+			msg["metrics_snapshot"].(map[string]any)["slots_free"] = 1
+		}
+		if err := wsutil.WriteClientText(conn, mustJSON(msg)); err != nil {
+			t.Fatalf("write state_update %s: %v", state, err)
+		}
+		eventually(t, func() bool {
+			got := fetchPoolz(t, ts.URL)
+			return len(got.Pool) == 1 && got.Pool[0].State == state
+		})
+	}
+}
+
+func TestWakeGapSendsWarmUpAndMarksDegraded(t *testing.T) {
+	ts := newProviderServer(t, func(cfg *config.Config) {
+		cfg.Pool.WakeGapThresholdS = 1
+	})
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+
+	if err := wsutil.WriteClientText(conn, mustJSON(heartbeat())); err != nil {
+		t.Fatalf("write first heartbeat: %v", err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	if err := wsutil.WriteClientText(conn, mustJSON(heartbeat())); err != nil {
+		t.Fatalf("write resume heartbeat: %v", err)
+	}
+
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read warm_up: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+	var msg map[string]string
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		t.Fatalf("warm_up json: %v", err)
+	}
+	if msg["type"] != "warm_up" {
+		t.Fatalf("message type = %q, want warm_up", msg["type"])
+	}
+
+	eventually(t, func() bool {
+		got := fetchPoolz(t, ts.URL)
+		return len(got.Pool) == 1 && got.Pool[0].State == "degraded"
+	})
+}
+
+func TestDisconnectMarksUnavailableThenRemovesAfterGrace(t *testing.T) {
+	ts := newProviderServer(t, func(cfg *config.Config) {
+		cfg.Pool.DisconnectGracePeriodS = 1
+	})
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	assertHelloAck(t, conn)
+	if err := conn.Close(); err != nil {
+		t.Fatalf("close provider conn: %v", err)
+	}
+
+	eventually(t, func() bool {
+		got := fetchPoolz(t, ts.URL)
+		return len(got.Pool) == 1 && got.Pool[0].State == "unavailable"
+	})
+	eventually(t, func() bool {
+		got := fetchPoolz(t, ts.URL)
+		return len(got.Pool) == 0
+	})
+}
+
 func TestPoolzRequiresOperatorKey(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()
@@ -225,7 +328,45 @@ func TestProviderHelloRejectsUnsupportedVersionAndTier(t *testing.T) {
 	}
 }
 
-func newProviderServer(t *testing.T) *httptest.Server {
+type poolzResponse struct {
+	Pool []struct {
+		ProviderID string `json:"provider_id"`
+		State      string `json:"state"`
+		SlotsFree  int    `json:"slots_free"`
+		SlotsTotal int    `json:"slots_total"`
+		Endpoint   string `json:"endpoint_url"`
+	} `json:"pool"`
+	Summary struct {
+		TotalProviders int `json:"total_providers"`
+		Ready          int `json:"ready"`
+		FreeSlots      int `json:"free_slots"`
+	} `json:"summary"`
+}
+
+func fetchPoolz(t *testing.T, serverURL string) poolzResponse {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, serverURL+"/poolz", nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-operator-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("poolz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("poolz status=%d body=%s", resp.StatusCode, body)
+	}
+	var got poolzResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("poolz json: %v", err)
+	}
+	return got
+}
+
+func newProviderServer(t *testing.T, opts ...func(*config.Config)) *httptest.Server {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
@@ -235,6 +376,9 @@ func newProviderServer(t *testing.T) *httptest.Server {
 			EndpointURL: "https://m4.streamvc.live",
 			DisplayName: "M4 test provider",
 		},
+	}
+	for _, opt := range opts {
+		opt(&cfg)
 	}
 	registry := pool.NewRegistry(cfg.Providers)
 	server := providerws.NewServer(cfg, registry, zerolog.Nop())
