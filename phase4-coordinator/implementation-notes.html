@@ -14,8 +14,40 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>Step 10 operator endpoints verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 11 acceptance entrypoints partial</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
+
+<section id="step11-acceptance-entrypoints">
+  <h2>Step 11 acceptance entrypoints (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> added executable
+    <code>phase4-coordinator/scripts/test-*.sh</code> entrypoints for
+    the named SPEC-002 acceptance checks. Mock-backed scripts map to the
+    current Go integration coverage for provider lifecycle, auth flow,
+    degraded recovery, reconnection, warm-up/degraded routing, routing
+    preferences/capacity, operator endpoints, and streaming relay smoke.</p>
+    <p><strong>Verified scripts:</strong>
+    <code>test-provider-lifecycle.sh</code>,
+    <code>test-provider-disconnect.sh</code>,
+    <code>test-auth-flow.sh</code>,
+    <code>test-degraded-recovery.sh</code>,
+    <code>test-reconnection.sh</code>,
+    <code>test-warmup-dispatch.sh</code>,
+    <code>test-routing-preference.sh</code>, and
+    <code>test-operator-endpoints.sh</code> pass under escalated local-port
+    permission for <code>httptest</code> fixtures.</p>
+    <p><strong>Remaining Step 11 gaps:</strong>
+    <code>test-sigterm-drain.sh</code> is an explicit failing placeholder
+    until coordinator SIGTERM draining is implemented. AC-2/AC-3 remain
+    external Phase 2 harness runs via <code>test-harness-batches.sh</code>
+    and require <code>beta/config-coord-test.yaml</code> plus live mock
+    provider orchestration.</p>
+    <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes under escalated local-port permission. <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    passes.</p>
+  </div>
+</section>
 
 <section id="step10-operator-endpoints">
   <h2>Step 10 operator endpoints (2026-05-27)</h2>

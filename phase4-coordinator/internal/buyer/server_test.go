@@ -449,6 +449,21 @@ func TestChatCompletionsSplitsUnknownModelAndUnavailableProvider(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsDoesNotRouteToDegradedProvider(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "http://p1.example"}})
+	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateDegraded, 20000, 1, "http://p1.example", 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"no_provider_available"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
 func register(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int) {
 	registerWithEndpoint(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, "https://"+providerID+".example", 20)
 }
