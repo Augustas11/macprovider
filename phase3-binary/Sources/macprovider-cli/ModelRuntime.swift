@@ -7,13 +7,15 @@ actor ModelRuntime {
     private let modelID: String?
     private let container: ModelContainer?
     private let stopTokenFilter: StopTokenFilter
+    private let maxContextTokens: Int
 
     var loadedModelID: String? {
         modelID
     }
 
-    init(modelID: String?) async throws {
+    init(modelID: String?, maxContextTokensOverride: Int? = nil) async throws {
         self.modelID = modelID
+        self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
 
         guard let modelID else {
             self.container = nil
@@ -34,15 +36,31 @@ actor ModelRuntime {
         }
     }
 
+    func preflight(_ request: ChatCompletionRequest) async throws {
+        try request.validateModelMatches(modelID)
+        guard let container else {
+            throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+
+        let maxContextTokens = maxContextTokens
+        try await container.perform { context in
+            let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+            let lmInput = try await context.processor.prepare(input: input)
+            try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+        }
+    }
+
     func complete(_ request: ChatCompletionRequest) async throws -> CompletionResult {
         try request.validateModelMatches(modelID)
         guard let container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
 
+        let maxContextTokens = maxContextTokens
         return try await container.perform { context in
             let input = UserInput(chat: request.messages.map { $0.mlxMessage })
             let lmInput = try await context.processor.prepare(input: input)
+            try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             let parameters = GenerateParameters(
                 maxTokens: request.maxTokens,
                 temperature: Float(request.temperature),
@@ -83,9 +101,11 @@ actor ModelRuntime {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
 
+        let maxContextTokens = maxContextTokens
         return try await container.perform { context in
             let input = UserInput(chat: request.messages.map { $0.mlxMessage })
             let lmInput = try await context.processor.prepare(input: input)
+            try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             let parameters = GenerateParameters(
                 maxTokens: request.maxTokens,
                 temperature: Float(request.temperature),
@@ -154,6 +174,32 @@ actor ModelRuntime {
             return ModelConfiguration(directory: cachedSnapshot)
         }
         return LLMModelFactory.shared.configuration(id: modelID)
+    }
+
+    private static func validatePromptTokenCount(_ promptTokens: Int, maxContextTokens: Int) throws {
+        guard promptTokens <= maxContextTokens else {
+            throw APIError(
+                status: 413,
+                message: "Prompt length (\(promptTokens) tokens) exceeds this provider's safe capacity (\(maxContextTokens) tokens).",
+                type: "context_length_exceeded",
+                code: "context_length_exceeded",
+                param: "messages"
+            )
+        }
+    }
+
+    private static func defaultMaxContextTokens() -> Int {
+        let ramGiB = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+        switch ramGiB {
+        case ...12:
+            return 20_000
+        case ...24:
+            return 50_000
+        case ...48:
+            return 120_000
+        default:
+            return 200_000
+        }
     }
 
     private static func localHuggingFaceSnapshot(for modelID: String) -> URL? {

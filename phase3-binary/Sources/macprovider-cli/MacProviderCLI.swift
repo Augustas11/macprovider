@@ -37,7 +37,10 @@ struct MacProviderCLI: AsyncParsableCommand {
 
         printResolvedConfiguration(resolved)
 
-        let modelRuntime = try await ModelRuntime(modelID: resolved.model)
+        let modelRuntime = try await ModelRuntime(
+            modelID: resolved.model,
+            maxContextTokensOverride: resolved.maxContextOverride
+        )
         let server = HTTPServer(config: resolved, modelRuntime: modelRuntime)
         try server.run()
     }

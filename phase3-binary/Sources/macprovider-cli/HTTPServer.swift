@@ -86,7 +86,12 @@ private final class RouterHandler: ChannelInboundHandler {
         if bodyTooLarge {
             writeAPIError(
                 context: context,
-                APIError(status: 413, message: "Request body too large", code: "context_length_exceeded")
+                APIError(
+                    status: 413,
+                    message: "Request body too large",
+                    type: "context_length_exceeded",
+                    code: "context_length_exceeded"
+                )
             )
             return
         }
@@ -177,18 +182,30 @@ private final class RouterHandler: ChannelInboundHandler {
         let created = Int(Date().timeIntervalSince1970)
         let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
-        writer.startSSE()
-        writer.writeSSEJSON(
-            Self.chatCompletionChunk(
-                id: id,
-                created: created,
-                model: request.model,
-                delta: ["role": "assistant", "content": ""],
-                finishReason: NSNull()
-            )
-        )
-
         Task.detached { @Sendable [modelRuntime, request, writer] in
+            do {
+                try await modelRuntime.preflight(request)
+            } catch let error as APIError {
+                writer.writeAPIError(error)
+                return
+            } catch {
+                writer.writeAPIError(
+                    APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
+                )
+                return
+            }
+
+            writer.startSSE()
+            writer.writeSSEJSON(
+                Self.chatCompletionChunk(
+                    id: id,
+                    created: created,
+                    model: request.model,
+                    delta: ["role": "assistant", "content": ""],
+                    finishReason: NSNull()
+                )
+            )
+
             do {
                 let completion = try await modelRuntime.stream(request) { chunk in
                     writer.writeSSEJSON(

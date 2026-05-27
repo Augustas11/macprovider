@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-001 — phase3-binary — implementation notes</h1>
-<p class=meta>Status: <strong>Step 5 verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 6 verified</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
 <section id="step1-blocker-diagnosis">
@@ -293,6 +293,16 @@ swift package describe</pre>
   <code>GenerateResult</code> still supplies authoritative prompt and
   completion token counts for the synthesized usage chunk.</p>
 </div>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Step 6 context pre-flight:</strong> Stage 2 pre-flight uses
+  <code>context.processor.prepare(input:)</code> to tokenize the full chat
+  prompt with the loaded model tokenizer, then rejects before generation if
+  prompt tokens exceed the runtime's safe context capacity. Capacity defaults
+  follow the FR-9 RAM tiers using <code>ProcessInfo.physicalMemory</code>, and
+  the existing <code>max_context_override</code> config/env setting can pin a
+  deterministic lower cap for tests or operator policy.</p>
+</div>
 </section>
 <section><h2>Deviations from spec</h2>
 <p class=meta>Intentional departures, with reason.</p>
@@ -486,6 +496,27 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     <code>yaml.safe_load</code> shim. The first sandboxed harness attempt was
     blocked by local socket policy with <code>[Errno 1] Operation not
     permitted</code>; the same command passed outside the sandbox.</li>
+  </ul>
+</div>
+</section>
+<section><h2>Step 6 verification</h2>
+<div class="entry">
+  <time>2026-05-27</time>
+  <ul>
+    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    — passed after adding token-count pre-flight.</li>
+    <li>Normal inference guard — with
+    <code>MACPROVIDER_MAX_CONTEXT_OVERRIDE=20000</code>, a short
+    non-streaming request still returned HTTP 200 with
+    <code>prompt_tokens=40</code>, <code>completion_tokens=2</code>,
+    <code>total_tokens=42</code>.</li>
+    <li>Synthetic long-context pre-flight — a 180 KB request containing
+    roughly 30K repeated prompt tokens returned HTTP 413 before generation:
+    <code>Prompt length (30037 tokens) exceeds this provider's safe capacity
+    (20000 tokens).</code></li>
+    <li>Streaming pre-flight ordering — the same over-capacity request with
+    <code>stream=true</code> returned a JSON HTTP 413 response, not SSE
+    headers, confirming that pre-flight runs before stream setup.</li>
   </ul>
 </div>
 </section>
