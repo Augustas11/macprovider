@@ -1,7 +1,13 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.0.3 (2026-05-27, post-final-re-audit patches — see SPEC-002-v1-0-2-audit.md)
+**Version:** 1.0.4 (2026-05-28, post-Phase-4-local-acceptance findings — see Decision log Entry 12)
 **Depends on:** SPEC-001 v1.1.1 (Phase 3 binary wire protocol, locked)
+
+**Change log since v1.0.3:**
+- § 5 Tie-breaking: added "Operator-visible behavior" note on order-sticky routing under equal metrics (Finding F-1).
+- § 7.4 Operator endpoints: explicit port placement — `/admin/*` and `/poolz` live on `provider_port` (default 8444), not `buyer_port` (Finding F-3).
+- § 10 added D6 (Phase 4 local acceptance findings F-1, F-2, F-3).
+- No FR changes; no normative-behavior changes. v1.0.4 is documentation-only — the implementation already exhibits these behaviors and the corresponding SPEC-002 prose now matches operator-visible reality.
 
 ---
 
@@ -896,6 +902,24 @@ function route(request, pool, headers) -> provider | error:
 - **Accurate mode:** If two providers have the same `model_params_b`,
   the one with fewer `slots_free` wins. If still tied, `connected_at`.
 
+**Operator-visible behavior under equal metrics (v1.0.4 clarification,
+Finding F-1).** Because all tiebreaks ultimately fall back to
+`connected_at` and the sort is stable, when two providers advertise
+identical primary metrics in steady state, **all traffic deterministically
+routes to whichever provider connected first**. This is by design — slot
+counts are decremented only on heartbeat tick, not on dispatch, so
+sub-heartbeat-interval bursts do not cause metric drift between
+equivalent providers. Operators running pools of N≥2 identical providers
+should expect skewed utilization until at least one provider's metrics
+diverge (different `model_id`, different `throughput_tps_estimate` from
+real traffic, or one being marked `degraded`/`draining`). Operators who
+want active load distribution across equivalent providers should set
+different `model_id` aliases or use `/admin/blacklist` to drain providers
+in rotation. A future SPEC-004 (smart router) may introduce a randomized
+tiebreak with tolerance ε on metric equality; v1.0.4 explicitly does NOT
+randomize, to preserve reproducibility of routing decisions in audit
+logs.
+
 ### Token estimation heuristic
 
 The coordinator does NOT have access to the model's tokenizer (it does
@@ -1463,6 +1487,19 @@ stored for display and revocation convenience only.
 
 ### 7.4. Operator endpoints
 
+**Port placement (v1.0.4 clarification, Finding F-3).** All operator
+endpoints — `/healthz`, `/poolz`, `/admin/*` — are mounted on
+`listen.provider_port` (default **8444**), the same listener that serves
+provider WebSocket upgrades at `/ws/provider`. They are NOT on
+`listen.buyer_port` (default 8443). Rationale: operator endpoints are an
+administrative concern co-located with the control plane, and exposing
+them on the buyer port would force buyer-port firewall rules to also
+account for admin auth surface. Operators behind the VPS firewall should
+bind `provider_port` to the loopback or a tunnel and reach `/admin/*`
+through the same secured channel as provider WebSockets — never via the
+public buyer port. Runbook entries that previously implied "use the
+buyer URL" should reference the provider-port URL for admin actions.
+
 #### GET /healthz
 
 No authentication. Returns coordinator health (FR-O1).
@@ -1757,6 +1794,58 @@ and explicitly does NOT validate cross-model routing.
 **Classification:** Process-only. No coordinator behavior. Timeline
 compressed from 14 days to 3 days. Phase 3 build started 11 days
 sooner. No FR mapping.
+
+### D6 — Phase 4 local acceptance findings (2026-05-28, v1.0.4)
+
+**Source:** AC-2/AC-3/AC-6 closed locally via the Go mock-provider
+toolkit at `phase4-coordinator/tools/mockprovider/`. All three findings
+are operator-visible properties of the as-built coordinator, not bugs
+and not FR changes — they are documented here so SPEC-002 prose matches
+deployment reality.
+
+**F-1 — Order-sticky routing under equal metrics.** The default sort
+(`SlotsFree ASC, Throughput DESC, connected_at ASC`) is stable and slot
+counts are decremented only on heartbeat tick. With two identical
+providers in steady state, every primary key is equal and the
+`connected_at` tertiary tiebreak fires every time, so all traffic routes
+to whichever provider connected first until metrics diverge. See § 5
+"Operator-visible behavior under equal metrics" for the normative
+clarification. A future SPEC-004 may introduce a randomized tiebreak
+with tolerance ε; v1 deliberately does not, to keep audit logs
+reproducible.
+
+**F-2 — Dynamic provider registration is not supported.** A `hello`
+whose `provider_id` is not in `config.providers[]` is rejected with WS
+close code **4002 `unknown_provider_id`** (already normative in § 7.1 +
+FR-P13). The v1.0.4 clarification: this means every provider that may
+ever connect to a given coordinator instance MUST be enumerated in the
+operator's static config map before its first connection attempt;
+adding a new provider requires editing the config and restarting (or
+SIGHUP, when implemented). v1 does NOT support on-the-fly registration,
+auto-discovery, or provider self-enrollment. This is by design —
+operator approval of each `provider_id` is the v1 trust-pool admission
+mechanism (per § 2 Tier 1 launch scope). SPEC-005/006 may relax this.
+
+**F-3 — Operator endpoints live on the provider WS port.** All
+operator-facing endpoints (`/healthz`, `/poolz`, `/admin/*`) are mounted
+on `listen.provider_port` (default 8444), not `listen.buyer_port`
+(default 8443). See § 7.4 "Port placement" for the normative
+clarification.
+
+**Why these surfaced in Phase 4 but not in spec audits.** All three
+were latent in the audited spec text — F-1 was implicit in "stable sort
+by connected_at" but not called out as an operator-visible behavior;
+F-2 was implicit in close code 4002 but the operational implication for
+deployment runbooks was not stated; F-3 was implicit in the architecture
+diagram (§ 3) listing operator endpoints inside the same coordinator
+box as the WebSocket server, but no section spelled out "same port as
+provider WS." The Phase 4 local-acceptance harness made the operator
+implications visible by forcing explicit decisions during test-script
+authoring. Lesson for future specs: when an audit produces "this is
+implicit in section X" answers to operator-runbook questions, prefer
+to make the operator-visible behavior explicit in the user-facing
+section (§ 5, § 7.4) even when it is a derived consequence of normative
+text elsewhere.
 
 ---
 
