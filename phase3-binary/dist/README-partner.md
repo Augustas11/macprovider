@@ -33,10 +33,25 @@ The install script handles the swap automatically. You should NOT:
 ## Install
 
 ```bash
-# Drop the three files into ~/Downloads or wherever convenient
+# Easiest path — bypasses macOS quarantine on downloaded scripts:
+bash ~/Downloads/install-m4.sh ~/Downloads/phase3-binary-m4-<tag>.tar.gz
+```
+
+If you'd rather run with the usual `./script` style, clear the
+quarantine xattr first:
+
+```bash
+cd ~/Downloads
+xattr -d com.apple.quarantine install-m4.sh rollback-m4.sh \
+       phase3-binary-m4-<tag>.tar.gz
 chmod +x install-m4.sh rollback-m4.sh
 ./install-m4.sh ~/Downloads/phase3-binary-m4-<tag>.tar.gz
 ```
+
+Either form works. macOS marks files downloaded via Safari / Signal /
+AirDrop with a `com.apple.quarantine` attribute that blocks
+`./script.sh`. Running via `bash script.sh` bypasses the
+shebang-quarantine check entirely.
 
 The installer:
 1. Stops your current `mlx_lm.server` tmux session
