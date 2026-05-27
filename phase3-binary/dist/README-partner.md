@@ -17,6 +17,19 @@ Three files (via Signal/Telegram/whatever channel we've been using):
 2. `install-m4.sh` — installer script
 3. `rollback-m4.sh` — revert script (KEEP THIS HANDY)
 
+## Before you start — what NOT to touch
+
+The install script handles the swap automatically. You should NOT:
+
+- **Stop or uninstall `cloudflared`** — it's a system service (`launchd`).
+  It keeps relaying `m4.streamvc.live` to `localhost:8080`. The swap
+  reuses the same port so cloudflared doesn't notice.
+- **Delete `~/macprovider`** — that's your Python venv with
+  `mlx_lm.server`. The rollback script reuses it.
+- **Close your Mac's lid or restart during the swap** — let the
+  5-minute swap window finish before doing anything that suspends the
+  Mac. After the swap completes, normal lid-close behavior is fine.
+
 ## Install
 
 ```bash
@@ -29,12 +42,39 @@ The installer:
 1. Stops your current `mlx_lm.server` tmux session
 2. Unpacks the binary to `~/phase3-binary-m4/`
 3. Clears macOS Gatekeeper quarantine (so it can execute)
-4. Starts the binary in the same `mlx` tmux session
+4. Starts the binary in the same `mlx` tmux session (same port 8080)
 5. Waits up to 2 minutes for the model to load
 6. Verifies `/v1/models` responds
 
 If step 6 succeeds, you're done. The Cloudflare tunnel keeps relaying
 traffic; our buyer harness hits the new binary instead of `mlx_lm.server`.
+
+## Expected brief outage during swap
+
+There's a ~60-90 second window between killing `mlx_lm.server` and
+phase3-binary finishing model load where `m4.streamvc.live` returns
+HTTP 502 (cloudflared up, no origin process responding). This is
+expected — the operator's harness may log a few error rows during
+this window and that's fine.
+
+## How to tell phase3-binary is running (vs mlx_lm.server)
+
+After the install completes, the verification curl shows:
+```json
+{
+    "data": [
+        {
+            "id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            "object": "model",
+            "owned_by": "macprovider"
+        }
+    ],
+    "object": "list"
+}
+```
+
+The `"owned_by": "macprovider"` field is the signal — phase3-binary
+sets that; `mlx_lm.server` would say `"owned_by": "user"` or similar.
 
 ## What's different about the new binary
 
