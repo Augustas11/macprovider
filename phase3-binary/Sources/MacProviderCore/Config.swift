@@ -1,0 +1,314 @@
+import Foundation
+import Yams
+
+public enum LogFormat: String, Sendable {
+    case json
+    case text
+}
+
+public enum LogLevel: String, Sendable {
+    case trace
+    case debug
+    case info
+    case notice
+    case warning
+    case error
+    case critical
+}
+
+public struct AppConfig: Equatable, Sendable {
+    public var port: Int
+    public var model: String?
+    public var coordinatorURL: String?
+    public var configPath: String
+    public var logLevel: LogLevel
+    public var logFormat: LogFormat
+    public var logFile: String?
+    public var maxContextOverride: Int?
+    public var maxConcurrencyOverride: Int?
+    public var drainTimeoutSeconds: Int
+    public var warmupEnabled: Bool
+    public var maxRequestBodyBytes: Int
+
+    public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
+
+    public static func defaults(configPath: String = defaultConfigPath) -> AppConfig {
+        AppConfig(
+            port: 8080,
+            model: nil,
+            coordinatorURL: nil,
+            configPath: configPath,
+            logLevel: .info,
+            logFormat: .json,
+            logFile: nil,
+            maxContextOverride: nil,
+            maxConcurrencyOverride: nil,
+            drainTimeoutSeconds: 30,
+            warmupEnabled: true,
+            maxRequestBodyBytes: 10 * 1024 * 1024
+        )
+    }
+}
+
+public struct CLIOverrides: Equatable, Sendable {
+    public var port: Int?
+    public var model: String?
+    public var coordinatorURL: String?
+    public var configPath: String?
+    public var logLevel: String?
+
+    public init(
+        port: Int? = nil,
+        model: String? = nil,
+        coordinatorURL: String? = nil,
+        configPath: String? = nil,
+        logLevel: String? = nil
+    ) {
+        self.port = port
+        self.model = model
+        self.coordinatorURL = coordinatorURL
+        self.configPath = configPath
+        self.logLevel = logLevel
+    }
+}
+
+public enum ConfigError: Error, CustomStringConvertible, Equatable {
+    case unreadableConfig(path: String, underlying: String)
+    case invalidYAML(path: String, underlying: String)
+    case invalidValue(key: String, value: String, expected: String)
+
+    public var description: String {
+        switch self {
+        case let .unreadableConfig(path, underlying):
+            return "Unable to read config at \(path): \(underlying)"
+        case let .invalidYAML(path, underlying):
+            return "Invalid YAML in config at \(path): \(underlying)"
+        case let .invalidValue(key, value, expected):
+            return "Invalid \(key)=\(value); expected \(expected)"
+        }
+    }
+}
+
+public enum ConfigLoader {
+    public static func load(
+        cli: CLIOverrides,
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: expandTilde($0)) },
+        readFile: (String) throws -> String = { try String(contentsOfFile: expandTilde($0), encoding: .utf8) }
+    ) throws -> AppConfig {
+        let configPath = cli.configPath
+            ?? environment["MACPROVIDER_CONFIG"]
+            ?? AppConfig.defaultConfigPath
+        let explicitConfigPath = cli.configPath != nil || environment["MACPROVIDER_CONFIG"] != nil
+
+        var config = AppConfig.defaults(configPath: configPath)
+        if fileExists(configPath) {
+            config = try applyYAMLConfig(config, path: configPath, readFile: readFile)
+        } else if explicitConfigPath {
+            throw ConfigError.unreadableConfig(path: configPath, underlying: "file does not exist")
+        }
+
+        config = try applyEnvironment(config, environment: environment)
+        config = try applyCLI(config, cli: cli)
+        config.configPath = configPath
+        return config
+    }
+
+    public static func expandTilde(_ path: String) -> String {
+        if path == "~" {
+            return FileManager.default.homeDirectoryForCurrentUser.path
+        }
+        if path.hasPrefix("~/") {
+            return FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(String(path.dropFirst(2))).path
+        }
+        return path
+    }
+
+    private static func applyYAMLConfig(
+        _ base: AppConfig,
+        path: String,
+        readFile: (String) throws -> String
+    ) throws -> AppConfig {
+        let text: String
+        do {
+            text = try readFile(path)
+        } catch {
+            throw ConfigError.unreadableConfig(path: path, underlying: String(describing: error))
+        }
+
+        let raw: Any?
+        do {
+            raw = try Yams.load(yaml: text)
+        } catch {
+            throw ConfigError.invalidYAML(path: path, underlying: String(describing: error))
+        }
+
+        guard let dict = raw as? [String: Any] else {
+            return base
+        }
+
+        var config = base
+        try assign(&config.port, from: dict, key: "port", expected: "integer")
+        try assign(&config.model, from: dict, key: "model", expected: "string")
+        try assign(&config.coordinatorURL, from: dict, key: "coordinator_url", expected: "string")
+        try assign(&config.logFormat, from: dict, key: "log_format", expected: "json or text")
+        try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
+        try assign(&config.maxContextOverride, from: dict, key: "max_context_override", expected: "integer")
+        try assign(&config.maxConcurrencyOverride, from: dict, key: "max_concurrency_override", expected: "integer")
+        try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
+        try assign(&config.warmupEnabled, from: dict, key: "warmup_enabled", expected: "boolean")
+        try assign(&config.maxRequestBodyBytes, from: dict, key: "max_request_body_bytes", expected: "integer")
+        return config
+    }
+
+    private static func applyEnvironment(
+        _ base: AppConfig,
+        environment: [String: String]
+    ) throws -> AppConfig {
+        var config = base
+        try assign(&config.port, from: environment, env: "MACPROVIDER_PORT", expected: "integer")
+        try assign(&config.model, from: environment, env: "MACPROVIDER_MODEL", expected: "string")
+        try assign(&config.coordinatorURL, from: environment, env: "MACPROVIDER_COORDINATOR_URL", expected: "string")
+        try assign(&config.logLevel, from: environment, env: "MACPROVIDER_LOG_LEVEL", expected: "valid log level")
+        try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
+        try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
+        try assign(&config.maxContextOverride, from: environment, env: "MACPROVIDER_MAX_CONTEXT_OVERRIDE", expected: "integer")
+        try assign(&config.maxConcurrencyOverride, from: environment, env: "MACPROVIDER_MAX_CONCURRENCY_OVERRIDE", expected: "integer")
+        try assign(&config.drainTimeoutSeconds, from: environment, env: "MACPROVIDER_DRAIN_TIMEOUT_S", expected: "integer")
+        try assign(&config.warmupEnabled, from: environment, env: "MACPROVIDER_WARMUP_ENABLED", expected: "boolean")
+        try assign(&config.maxRequestBodyBytes, from: environment, env: "MACPROVIDER_MAX_REQUEST_BODY_BYTES", expected: "integer")
+        return config
+    }
+
+    private static func applyCLI(_ base: AppConfig, cli: CLIOverrides) throws -> AppConfig {
+        var config = base
+        if let port = cli.port {
+            config.port = port
+        }
+        if let model = cli.model {
+            config.model = model
+        }
+        if let coordinatorURL = cli.coordinatorURL {
+            config.coordinatorURL = coordinatorURL
+        }
+        if let logLevel = cli.logLevel {
+            guard let value = LogLevel(rawValue: logLevel.lowercased()) else {
+                throw ConfigError.invalidValue(key: "--log-level", value: logLevel, expected: "valid log level")
+            }
+            config.logLevel = value
+        }
+        return config
+    }
+
+    private static func assign(_ field: inout Int, from dict: [String: Any], key: String, expected: String) throws {
+        guard let value = dict[key], !(value is NSNull) else { return }
+        if let int = value as? Int {
+            field = int
+            return
+        }
+        if let string = value as? String, let int = Int(string) {
+            field = int
+            return
+        }
+        throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
+    }
+
+    private static func assign(_ field: inout Int?, from dict: [String: Any], key: String, expected: String) throws {
+        guard let value = dict[key], !(value is NSNull) else { return }
+        if let int = value as? Int {
+            field = int
+            return
+        }
+        if let string = value as? String, let int = Int(string) {
+            field = int
+            return
+        }
+        throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
+    }
+
+    private static func assign(_ field: inout String?, from dict: [String: Any], key: String, expected: String) throws {
+        guard let value = dict[key], !(value is NSNull) else { return }
+        guard let string = value as? String else {
+            throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
+        }
+        field = string
+    }
+
+    private static func assign(_ field: inout Bool, from dict: [String: Any], key: String, expected: String) throws {
+        guard let value = dict[key], !(value is NSNull) else { return }
+        if let bool = value as? Bool {
+            field = bool
+            return
+        }
+        if let string = value as? String, let bool = parseBool(string) {
+            field = bool
+            return
+        }
+        throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
+    }
+
+    private static func assign(_ field: inout LogFormat, from dict: [String: Any], key: String, expected: String) throws {
+        guard let value = dict[key], !(value is NSNull) else { return }
+        guard let string = value as? String, let format = LogFormat(rawValue: string.lowercased()) else {
+            throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
+        }
+        field = format
+    }
+
+    private static func assign(_ field: inout Int, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let int = Int(value) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = int
+    }
+
+    private static func assign(_ field: inout Int?, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let int = Int(value) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = int
+    }
+
+    private static func assign(_ field: inout String?, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        field = value
+    }
+
+    private static func assign(_ field: inout Bool, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let bool = parseBool(value) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = bool
+    }
+
+    private static func assign(_ field: inout LogLevel, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let level = LogLevel(rawValue: value.lowercased()) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = level
+    }
+
+    private static func assign(_ field: inout LogFormat, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let format = LogFormat(rawValue: value.lowercased()) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = format
+    }
+
+    private static func parseBool(_ value: String) -> Bool? {
+        switch value.lowercased() {
+        case "1", "true", "yes", "on":
+            return true
+        case "0", "false", "no", "off":
+            return false
+        default:
+            return nil
+        }
+    }
+}

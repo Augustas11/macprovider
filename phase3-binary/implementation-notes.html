@@ -241,6 +241,22 @@ swift package describe</pre>
   SPEC-001 § 11 as canonical because the wrapper says to implement
   SPEC-001 and § 11 is the versioned spec text.</p>
 </div>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p><strong>Step 2 config defaults:</strong> SPEC-001 defines a default
+  port, log level, log format, drain timeout, warm-up behavior, and request
+  body size limit, but does not define a built-in model. The resolved config
+  therefore leaves <code>model</code> unset until provided by CLI, env, or
+  YAML. Step 3 model loading will fail clearly if no model is configured.</p>
+</div>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p><strong>Testable config core:</strong> I introduced a small
+  <code>MacProviderCore</code> library target for config loading, with the
+  executable target depending on it. This keeps the CLI entry point thin and
+  lets future tests exercise config and request handling without shelling out
+  to the binary.</p>
+</div>
 </section>
 <section><h2>Deviations from spec</h2>
 <p class=meta>Intentional departures, with reason.</p>
@@ -282,6 +298,15 @@ swift package describe</pre>
   partially updated CommandLineTools install. Operator repaired this by
   reinstalling CommandLineTools; Step 1 is now verified.</p>
 </div>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p><strong>Non-blocking test-toolchain note:</strong> The current
+  CommandLineTools-only environment does not expose <code>Testing</code> or
+  <code>XCTest</code> modules to SwiftPM test targets. <code>swift test</code>
+  now builds the package test bundle successfully, but Step 2 behavioral
+  verification was performed with CLI smoke tests instead of framework-backed
+  unit assertions. Revisit once an XCTest-capable Xcode toolchain is available.</p>
+</div>
 </section>
 <section><h2>References consulted</h2>
 <p class=meta>External resources read during implementation, with
@@ -301,6 +326,29 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     <li><code>beta/harness.py</code> and
     <code>beta/workloads_adversarial.py</code> — acceptance driver behavior,
     SSE parsing expectations, cooperative/adversarial workload shapes.</li>
+  </ul>
+</div>
+</section>
+<section><h2>Step 2 verification</h2>
+<div class="entry">
+  <time>2026-05-28</time>
+  <ul>
+    <li><code>swift build</code> — passed; incremental build completed in
+    1.30s.</li>
+    <li><code>swift test</code> — passed as a build-only test bundle after
+    removing unavailable test-framework imports.</li>
+    <li><code>macprovider-cli --help</code> — printed usage with
+    <code>--port</code>, <code>--model</code>, <code>--coordinator</code>,
+    <code>--config</code>, and <code>--log-level</code>.</li>
+    <li>Default run with no config file — resolved port <code>8080</code>,
+    log level <code>info</code>, log format <code>json</code>, model unset.</li>
+    <li>YAML smoke test — loaded <code>port</code>, <code>model</code>,
+    <code>coordinator_url</code>, and <code>log_format</code> from a temporary
+    config file.</li>
+    <li>Precedence smoke test — env values override YAML; CLI flags override
+    env values.</li>
+    <li>Explicit missing config path — exits with code 1 and a clear
+    <code>Unable to read config</code> error.</li>
   </ul>
 </div>
 </section>

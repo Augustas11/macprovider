@@ -7,6 +7,10 @@ let package = Package(
         .macOS(.v14)
     ],
     products: [
+        .library(
+            name: "MacProviderCore",
+            targets: ["MacProviderCore"]
+        ),
         .executable(
             name: "macprovider-cli",
             targets: ["macprovider-cli"]
@@ -35,9 +39,20 @@ let package = Package(
         )
     ],
     targets: [
+        .target(
+            name: "MacProviderCore",
+            dependencies: [
+                .product(name: "Yams", package: "Yams")
+            ],
+            path: "Sources/MacProviderCore",
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
+            ]
+        ),
         .executableTarget(
             name: "macprovider-cli",
             dependencies: [
+                "MacProviderCore",
                 .product(name: "MLXLLM", package: "mlx-swift-examples"),
                 .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
                 .product(name: "NIO", package: "swift-nio"),
@@ -53,7 +68,7 @@ let package = Package(
         ),
         .testTarget(
             name: "macprovider-cliTests",
-            dependencies: ["macprovider-cli"],
+            dependencies: ["MacProviderCore"],
             path: "Tests/macprovider-cliTests"
         )
     ]
