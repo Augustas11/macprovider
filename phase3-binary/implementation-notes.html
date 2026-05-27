@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-001 — phase3-binary — implementation notes</h1>
-<p class=meta>Status: <strong>Step 3 verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 4 verified</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
 <section id="step1-blocker-diagnosis">
@@ -258,6 +258,31 @@ swift package describe</pre>
   lets future tests exercise config and request handling without shelling out
   to the binary.</p>
 </div>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p><strong>Step 4 design:</strong> The current implementation loads
+  the configured MLX model at startup, validates non-streaming chat requests
+  before inference, and returns OpenAI-shaped responses with usage populated
+  from MLX token counts. User-provided <code>stop</code> sequences are applied
+  to the final text along with model special-token stripping.</p>
+</div>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p><strong>Canonical MLX build path:</strong> For this binary, the canonical
+  macOS build command is <code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>.
+  <code>swift build</code> can compile Swift code but does not produce the
+  MLX Metal shader resource bundle needed for a working inference binary.</p>
+</div>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p><strong>Local HuggingFace cache fallback:</strong> When <code>--model</code>
+  is a HuggingFace id and a matching standard cache snapshot exists under
+  <code>~/.cache/huggingface/hub/models--org--name/refs/main</code>, the
+  runtime loads that snapshot directory while preserving the public model id
+  for request validation and API responses. This keeps local verification
+  deterministic and avoids an unnecessary Hub download path when the model is
+  already cached.</p>
+</div>
 </section>
 <section><h2>Deviations from spec</h2>
 <p class=meta>Intentional departures, with reason.</p>
@@ -267,6 +292,13 @@ swift package describe</pre>
   variants while diagnosing the local toolchain, then restored the package
   manifest to the spec-conformant Swift 5.9 form with macOS 14 platform
   declaration and pinned dependency versions.</p>
+</div>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p><strong>Structured decoding hint:</strong> The code currently accepts
+  <code>response_format: {"type":"json_object"}</code> and validates it, but
+  does not yet engage a model-level structured decoding hint because the pinned
+  <code>GenerateParameters</code> surface inspected locally does not expose one.</p>
 </div>
 </section>
 <section><h2>Tradeoffs considered</h2>
@@ -310,15 +342,24 @@ swift package describe</pre>
 </div>
 <div class="entry">
   <time>2026-05-28</time>
-  <p><strong>Upcoming MLX runtime note:</strong> Local inspection of the pinned
+  <p><strong>Resolved MLX runtime prerequisite:</strong> Local inspection of the pinned
   <code>mlx-swift</code> docs shows command-line MLX execution expects a
   <code>mlx-swift_Cmlx.bundle</code> with compiled Metal shaders, normally
   produced by Xcode/<code>xcodebuild</code> and found via
-  <code>DYLD_FRAMEWORK_PATH</code>. The current CommandLineTools-only install
-  has no <code>xcodebuild</code>, <code>metal</code>, or <code>metallib</code>
-  available via <code>xcrun</code>. This does not block Step 3, but Step 4
-  inference may require an Xcode toolchain or an equivalent documented MLX
-  resource-bundle path.</p>
+  <code>DYLD_FRAMEWORK_PATH</code>. Operator resolved the blocker by installing
+  <code>Xcode.app</code> and the Metal Toolchain via
+  <code>xcodebuild -downloadComponent MetalToolchain</code>. The Xcode build
+  now produces
+  <code>Build/Products/Debug/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib</code>.</p>
+</div>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p><strong>Resolved Step 4 blocker:</strong> Xcode build products contain
+  <code>macprovider-cli</code>, <code>mlx-swift_Cmlx.bundle</code>, and
+  <code>default.metallib</code>. When running the Xcode-built command-line
+  binary from the shell, set <code>DYLD_FRAMEWORK_PATH</code> to
+  <code>Build/Products/Debug/PackageFrameworks:Build/Products/Debug</code>
+  so MLX can find package frameworks and the Cmlx resource bundle.</p>
 </div>
 </section>
 <section><h2>References consulted</h2>
@@ -380,6 +421,33 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     and verified <code>curl -i http://127.0.0.1:18080/v1/models</code>
     returns HTTP 200 with OpenAI list-shaped JSON containing exactly that
     model id.</li>
+  </ul>
+</div>
+</section>
+<section><h2>Step 4 verification</h2>
+<div class="entry">
+  <time>2026-05-28</time>
+  <ul>
+    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    — passed and produced the MLX Metal shader bundle.</li>
+    <li>No-model smoke test — <code>GET /v1/models</code> returns HTTP 503
+    with OpenAI error envelope <code>model_not_loaded</code>.</li>
+    <li>No-model chat smoke test — <code>POST /v1/chat/completions</code>
+    returns HTTP 503 <code>model_not_loaded</code> after validating a valid
+    non-streaming request envelope.</li>
+    <li>Invalid JSON smoke test — returns HTTP 400 <code>invalid_json</code>.</li>
+    <li>Xcode-built CLI <code>--help</code> — passed.</li>
+    <li>MLX resource check — verified
+    <code>Build/Products/Debug/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib</code>
+    exists.</li>
+    <li>Actual cached model startup — passed with
+    <code>--model mlx-community/Llama-3.2-3B-Instruct-4bit</code>, resolved
+    through the local HuggingFace cache fallback, and the Xcode products
+    <code>DYLD_FRAMEWORK_PATH</code>.</li>
+    <li><code>short_chat</code> smoke test — <code>POST /v1/chat/completions</code>
+    returned HTTP 200 with assistant content <code>Hello.</code> and usage
+    populated: <code>prompt_tokens=44</code>, <code>completion_tokens=2</code>,
+    <code>total_tokens=46</code>.</li>
   </ul>
 </div>
 </section>

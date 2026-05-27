@@ -37,7 +37,8 @@ struct MacProviderCLI: AsyncParsableCommand {
 
         printResolvedConfiguration(resolved)
 
-        let server = HTTPServer(config: resolved)
+        let modelRuntime = try await ModelRuntime(modelID: resolved.model)
+        let server = HTTPServer(config: resolved, modelRuntime: modelRuntime)
         try server.run()
     }
 }
