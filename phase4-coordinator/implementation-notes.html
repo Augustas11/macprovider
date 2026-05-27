@@ -15,7 +15,77 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
 <p class=meta>Status: <strong>not started</strong> · Spec:
-<a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.2</a></p>
+<a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
+
+<section id="v1-0-3-patches">
+  <h2>SPEC-002 v1.0.3 post-final-re-audit patches (2026-05-27)</h2>
+  <p class=meta>Applied after the final re-audit at
+  <a href="../specs/SPEC-002-v1-0-2-audit.md">SPEC-002-v1-0-2-audit.md</a>
+  identified 3 MAJOR + 1 MINOR text drifts (no architectural changes).
+  In-place fixes, no FIX prompt cycle.</p>
+
+  <h3>MAJOR text drifts resolved</h3>
+  <ul>
+    <li><strong>M1 (stale coordinator nak text):</strong> Removed three
+    remaining coordinator-acting <code>nak</code> instructions:
+      <ul>
+        <li>§ 7.1 hello behavior: <em>"Rejects tier != 1 with nak"</em>
+        → replaced with WS close code 4003 reference</li>
+        <li>§ 9 protocol matrix: removed C→P <code>nak</code> row;
+        replaced with explicit "(WS close, not nak)" row pointing at
+        FR-P13 close codes</li>
+        <li>§ 13 Step 2: <em>"Reject invalid hello with nak"</em> →
+        replaced with FR-P13 close-code references (4001/4002/4003/4004)</li>
+      </ul>
+    The two remaining instances of "nak" in coordinator context are
+    NEGATIVE statements ("does not send nak to providers") which are
+    correct and intentional.</li>
+
+    <li><strong>M2 (Q1 wording in § 10):</strong> Rewrote the § 10 D1
+    bullet about HTTP 530. It no longer says "Q1 in § 12 covers..." or
+    "v1 default is..."; it now states the FR-P11 behavior as normative,
+    with a back-reference noting OQ-1 was resolved in v1.0.2.</li>
+
+    <li><strong>M3 (/admin/blacklist contract drift):</strong> § 7.4
+    and AC-10 now agree exactly:
+      <ul>
+        <li>Request: <code>{provider_id, reason}</code> (with
+        <code>assigned_id</code> accepted as alternate key for
+        session-scoped debugging; <code>provider_id</code> takes
+        precedence if both sent)</li>
+        <li>Response: <code>{status: "draining", provider_id,
+        assigned_id, drain_sent: true}</code></li>
+        <li>404 case: explicit JSON error body with
+        <code>provider_not_found</code> code</li>
+      </ul>
+    The old <code>{status: "blacklisted", assigned_id, drain_sent}</code>
+    response shape is gone (0 occurrences of "blacklisted" status in
+    spec).</li>
+  </ul>
+
+  <h3>MINOR text drift resolved</h3>
+  <ul>
+    <li><strong>m1 (FR-B2/FR-B3 response headers):</strong> Both FRs now
+    explicitly mention <code>X-MacProvider-Provider</code> alongside
+    <code>X-MacProvider-Route</code>, matching the § 7.2 response-header
+    table.</li>
+  </ul>
+
+  <h3>Verification (grep evidence)</h3>
+  <ul>
+    <li>Active coordinator-acting "nak" instructions: <strong>0</strong></li>
+    <li>Q1 / OQ-1 references in active text: <strong>0</strong></li>
+    <li>Old <code>status: "blacklisted"</code> mentions: <strong>0</strong></li>
+    <li>New <code>status: "draining"</code> in /admin/blacklist contract: <strong>2</strong> (§ 7.4 response + AC-10 assertion)</li>
+    <li>Open questions in § 12: <strong>0</strong></li>
+  </ul>
+
+  <h3>Verification result</h3>
+  <p>Spec version bumped to <strong>1.0.3</strong>. All four re-audit
+  findings addressed. Build-ready. No further audit rounds planned;
+  the joint audit established build-readiness, this round closed the
+  text drifts that survived patching.</p>
+</section>
 
 <section id="v1-0-2-patches">
   <h2>SPEC-002 v1.0.2 post-joint-audit patches (2026-05-27)</h2>

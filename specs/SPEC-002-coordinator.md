@@ -1,6 +1,6 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.0.2 (2026-05-27, post-joint-audit patches — see SPEC-002-audit.md + JOINT-SPEC-001-002-audit.md)
+**Version:** 1.0.3 (2026-05-27, post-final-re-audit patches — see SPEC-002-v1-0-2-audit.md)
 **Depends on:** SPEC-001 v1.1.1 (Phase 3 binary wire protocol, locked)
 
 ---
@@ -499,8 +499,13 @@ section 6.2. The coordinator:
 6. Returns it to the buyer unmodified (the provider's response is
    already SPEC-001 section 6.2 compliant).
 
-The coordinator adds a `X-MacProvider-Route` response header with the
-assigned_id of the provider that served the request (for debugging).
+The coordinator adds two response headers:
+- `X-MacProvider-Provider`: the stable `provider_id` of the provider
+  that served the request (operator-meaningful identity).
+- `X-MacProvider-Route`: the session `assigned_id` of the WebSocket
+  session that served the request (for log correlation).
+
+Full header list in § 7.2.
 
 **FR-B3. /v1/chat/completions (streaming).**
 `POST /v1/chat/completions` with `stream: true` returns an SSE stream.
@@ -510,7 +515,9 @@ The coordinator:
 3. Receives the provider's SSE stream.
 4. Relays each SSE event to the buyer in real-time (chunk-by-chunk
    passthrough).
-5. Adds `X-MacProvider-Route` response header.
+5. Adds both `X-MacProvider-Provider` (stable provider_id) and
+   `X-MacProvider-Route` (session assigned_id) response headers, same
+   as FR-B2. See § 7.2 for full header list.
 
 The coordinator does NOT buffer the entire stream — it relays each
 `data: {...}` line as it arrives from the provider. This preserves
@@ -1041,7 +1048,7 @@ All messages are JSON objects with a `type` field.
 
 Coordinator behavior:
 - Validates all fields present and correctly typed (FR-P2).
-- Rejects `tier != 1` with nak (FR-P13).
+- Rejects `tier != 1` by closing the WebSocket with application close code 4003 `tier_unsupported` (FR-P13).
 - Rejects duplicate `provider_id` by closing the older connection.
 - Registers provider in pool with state `ready`.
 - Responds with `hello_ack`.
@@ -1506,18 +1513,35 @@ Requires `Authorization: Bearer <operator-key>`.
 **Request:**
 ```json
 {
-  "assigned_id": "abc-123",
+  "provider_id": "m4-anon",
   "reason": "Provider operator requested removal"
 }
 ```
 
+The request key is the stable `provider_id`. For session-scoped
+debugging, `assigned_id` may be sent INSTEAD — the coordinator accepts
+either field name and resolves to the same pool entry. If both are sent,
+`provider_id` takes precedence. If neither resolves to a current pool
+entry, returns 404.
+
 **Response (200):**
 ```json
 {
-  "status": "blacklisted",
+  "status": "draining",
+  "provider_id": "m4-anon",
   "assigned_id": "abc-123",
   "drain_sent": true
 }
+```
+
+Both IDs are returned so the caller can correlate against either `/poolz`
+column. `status: "draining"` reflects the immediate pool state after the
+drain command is sent (matches AC-10 Phase 1); the entry transitions to
+removed after the WebSocket closes (AC-10 Phase 2).
+
+**404 Not Found** body:
+```json
+{"error": {"code": "provider_not_found", "message": "provider <id> not in pool"}}
 ```
 
 The coordinator:
@@ -1532,12 +1556,9 @@ The coordinator:
 
 `/poolz` continues to show the provider in `draining` state for the up-
 to-60s window between drain command and WebSocket close. After close,
-the entry is gone. AC-10 must assert this two-phase observable behavior
+the entry is gone. AC-10 asserts this two-phase observable behavior
 (not "removed immediately" — that would conflict with FR-P6's normal
 disconnect-then-remove flow).
-
-**404 Not Found** if `provider_id` (or `assigned_id`) is not in the
-pool.
 
 ---
 
@@ -1648,8 +1669,8 @@ corresponding SPEC-002 coverage.
 | `preflight_ack` | P->C | FR-P7, FR-R5 | Accept or reject; rejection reasons per SPEC-001 |
 | `drain` | C->P | FR-P9, FR-O3 | Sent on coordinator shutdown or operator blacklist |
 | `warm_up` | C->P | FR-P8 | Sent after wake detection (heartbeat gap > 120s) |
-| `nak` | P->C | FR-P2 (send on invalid hello), section 7.1 (receive from provider) | Informational; does not disconnect provider |
-| `nak` | C->P | FR-P2, FR-P13 | Sent on invalid hello or unsupported tier |
+| `nak` | P->C | § 7.1 (receive from provider) | Informational; coordinator logs at warn, does not disconnect provider |
+| (WS close, not nak) | C→provider close | FR-P2, FR-P13 | Coordinator rejects invalid provider connections via WebSocket close codes 4001–4005 / 4429 (see FR-P13 table). SPEC-001 § 6.5 does not define a C→P `nak` direction; coordinator never sends one. |
 
 **Verification:** Every message type in SPEC-001 section 6.5 maps to at least
 one FR in SPEC-002. No gaps.
@@ -1683,10 +1704,13 @@ buyer-visible failure.
   edge connection and the WebSocket close being detected (≤ heartbeat
   interval, ~15s). That window manifests as HTTP 502/530 on the routed
   request and is handled by FR-P11.
-- Q1 in § 12 covers whether HTTP 530 (Cloudflare-edge "tunnel daemon
-  disconnected" code, observed directly on a routed buyer request) is
-  treated as a distinct signal from WebSocket disconnect. v1 default is
-  yes (logged via `state_update.reason = "http_530_observed"`).
+- **Literal HTTP 530** (Cloudflare-edge "tunnel daemon disconnected" code,
+  observed directly on a routed buyer request) is treated as a distinct
+  normative signal per FR-P11: mark `unavailable` immediately, log
+  `state_update.reason = "http_530_observed"`, trigger a WebSocket
+  liveness probe (5s ack timeout). Removed from pool until the
+  WebSocket reconnects with fresh hello. This was previously open
+  question OQ-1; resolved as normative in v1.0.2.
 
 ### D2 — Post-wake throughput dip
 
@@ -1919,7 +1943,7 @@ Deliverable: `go build ./...` succeeds.
 **Step 2. WebSocket /ws/provider endpoint + hello/hello_ack.**
 Implement the WebSocket server that accepts provider connections.
 Parse `hello`, validate fields, generate `assigned_id`, respond with
-`hello_ack`. Reject invalid hello with nak. Deliverable: mock provider
+`hello_ack`. Reject invalid hello by closing the WebSocket with FR-P13 close codes (4001 for invalid_hello, 4002 for unknown_provider_id, 4003 for tier_unsupported, 4004 for version_unsupported). Deliverable: mock provider
 connects, exchanges hello/hello_ack.
 
 **Step 3. Pool registry + heartbeat handling.**
