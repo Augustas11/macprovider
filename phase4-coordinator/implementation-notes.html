@@ -1,0 +1,128 @@
+<!doctype html><html><head>
+<title>SPEC-002 implementation notes</title>
+<style>
+body { font: 14px/1.45 -apple-system, system-ui, sans-serif;
+       margin: 2em; max-width: 980px; }
+h1 { font-size: 1.4em; }
+h2 { font-size: 1.1em; border-bottom: 1px solid #ccc;
+     padding-bottom: 0.2em; margin-top: 2em; }
+h3 { font-size: 1em; margin-top: 1.5em; }
+.meta { color: #666; font-size: 0.9em; }
+.entry { border-left: 3px solid #ddd; padding-left: 1em;
+         margin: 1em 0; }
+.entry time { color: #888; font-size: 0.85em; }
+code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
+</style></head><body>
+<h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
+<p class=meta>Status: <strong>not started</strong> · Spec:
+<a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.1</a></p>
+
+<section id="v1-0-1-patches">
+  <h2>SPEC-002 v1.0.1 post-audit patches (2026-05-27)</h2>
+  <p class=meta>Applied after audit at
+  <a href="../specs/SPEC-002-audit.md">SPEC-002-audit.md</a> identified
+  3 CRITICAL, 9 MAJOR, 5 MINOR, 1 QUESTION. All CRITICALs and the
+  build-blocking MAJORs patched in place; no full FIX prompt cycle.</p>
+
+  <h3>Resolved operator decisions (locked into spec)</h3>
+  <ul>
+    <li><strong>C1 endpoint discovery:</strong> static
+    <code>provider_id → endpoint_url</code> config map in coordinator.
+    No SPEC-001 amendment. Documented in § 3 "Request forwarding model"
+    and FR-P3.</li>
+    <li><strong>C2 provider auth:</strong> optional in v1 (two-path
+    FR-P12 — no header OR bearer-token). SPEC-001 v1.1.1 binaries
+    connect without modification. Path B preserves future-compat for
+    when SPEC-001 mandates auth.</li>
+    <li><strong>C3 retry:</strong> no coordinator-managed retry across
+    providers in v1. Buyer receives clean 502/streaming-error; SPEC-004
+    / SPEC-006 may add visible retry policies later.</li>
+    <li><strong>Q1 HTTP 530:</strong> distinct signal logged as
+    <code>state_update.reason = "http_530_observed"</code>; same pool
+    behavior as WS disconnect but distinguishable in logs.</li>
+  </ul>
+
+  <h3>MAJOR findings addressed</h3>
+  <ul>
+    <li><strong>M1 (D1 tunnel polling):</strong> Explicit rejection
+    documented in § 10 D1 with rationale (rate limits, credential
+    burden, signal lag).</li>
+    <li><strong>M2 (D4 capacity-vs-quality):</strong> Same-model
+    tradeoff is in-scope via <code>X-MacProvider-Pref</code>;
+    cross-model-family routing explicitly deferred to SPEC-004.</li>
+    <li><strong>M3 (pin identity):</strong>
+    <code>X-MacProvider-Provider</code> takes stable <code>provider_id</code>
+    (the operator-meaningful identity);
+    <code>X-MacProvider-Session</code> added for session-scoped pinning
+    via <code>assigned_id</code>.</li>
+    <li><strong>M4 (FR-O5 / pool persistence):</strong> Reframed —
+    auth + request log persisted; pool snapshots are debug-only history;
+    live pool routing state is in-memory only. Scope item in § 2
+    clarified.</li>
+    <li><strong>M5 (buyer API schema):</strong> Full request schema
+    inlined in § 7.2 (was previously a delegate-to-SPEC-001 reference).
+    Spec is now self-contained for build session.</li>
+    <li><strong>M6 (warm-up AC):</strong> AC-8b added with concrete
+    assertions (warm_up sent within 5s of resumption heartbeat,
+    degraded state until ready/60s).</li>
+    <li><strong>M7 (revocation semantics):</strong> Revocation =
+    future-connection-only. Combined with separate blacklist for
+    immediate disconnect. New <code>revoke-and-kick</code> CLI for the
+    combined case.</li>
+    <li><strong>M8 (recovery preflight shape):</strong> Concrete
+    shape defined with <code>request_id="recovery-probe-&lt;uuid&gt;"</code>,
+    <code>estimated_tokens=128</code>, <code>purpose="health_recovery"</code>.
+    Provider treats as normal preflight; no special-casing required.</li>
+    <li><strong>M9 (blacklist semantics):</strong> Two-phase observable
+    behavior — drain command → draining state (up to 60s) → pool removal
+    on close. AC-10 must assert this, not "immediate removal."</li>
+  </ul>
+
+  <h3>MINOR findings addressed</h3>
+  <ul>
+    <li><strong>m1 (clean-room replication):</strong> § 8.2 reframed as
+    "adapted from SPEC-001 § 7.2" with coordinator-specific additions.</li>
+    <li><strong>m2 (dependency pin language):</strong> "starting points"
+    weakening removed; pins are required for v1.0.1, bumps require
+    implementation-notes entry with rationale.</li>
+    <li><strong>m3 (AC-6 manual test):</strong> Replaced with explicit
+    <code>phase4-coordinator/scripts/test-sigterm-drain.sh</code>
+    requirement.</li>
+    <li><strong>m4 (404 vs 503 model errors):</strong> Split clarified
+    in § 7.2 error table — 404 = model unknown to pool history; 503 =
+    known model but no eligible provider right now.</li>
+    <li><strong>m5 (open questions trimmed):</strong> § 12 reduced to
+    1 truly open question (Q1 HTTP 530 handling). Defaults moved to
+    requirements sections.</li>
+  </ul>
+
+  <h3>Knowingly deferred</h3>
+  <ul>
+    <li>No items knowingly deferred this round — all findings either
+    addressed or recorded as explicit scope-out with rationale.</li>
+  </ul>
+
+  <h3>Verification</h3>
+  <p>Spec version bumped to <strong>1.0.1</strong>. Open question count:
+  1 (down from 5). Re-audit recommended before binary/coordinator build
+  begins together; the C1 architecture choice (static config) is the
+  highest-leverage decision and worth one more cross-model pass.</p>
+</section>
+
+<section><h2>Design decisions</h2>
+<p class=meta>Choices made where the spec was ambiguous.</p>
+</section>
+<section><h2>Deviations from spec</h2>
+<p class=meta>Intentional departures, with reason.</p>
+</section>
+<section><h2>Tradeoffs considered</h2>
+<p class=meta>Alternatives evaluated and why we picked what we did.</p>
+</section>
+<section><h2>Open questions for operator</h2>
+<p class=meta>Things needing operator confirmation or revision.</p>
+</section>
+<section><h2>References consulted</h2>
+<p class=meta>External resources read during implementation, with
+what was taken. d-inference is strictly prohibited per Section 8.2.</p>
+</section>
+</body></html>
