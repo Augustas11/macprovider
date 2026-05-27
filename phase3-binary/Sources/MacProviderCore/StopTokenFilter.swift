@@ -2,6 +2,7 @@ import Foundation
 
 public struct StopTokenFilter: Sendable {
     public let tokens: [String]
+    public let maxTokenLength: Int
 
     public init(tokens: [String]) {
         var seen = Set<String>()
@@ -9,6 +10,7 @@ public struct StopTokenFilter: Sendable {
             .filter { !$0.isEmpty }
             .filter { seen.insert($0).inserted }
             .sorted { $0.count > $1.count }
+        self.maxTokenLength = self.tokens.map(\.count).max() ?? 0
     }
 
     public func stripping(from text: String) -> String {

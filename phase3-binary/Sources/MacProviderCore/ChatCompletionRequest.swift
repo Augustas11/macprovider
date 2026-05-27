@@ -54,9 +54,6 @@ public struct ChatCompletionRequest: Sendable {
         }
 
         let stream = try optionalBool(dict["stream"], key: "stream") ?? false
-        if stream {
-            throw APIError(status: 400, message: "stream=true is not implemented until Step 5", code: "invalid_request")
-        }
 
         if let streamOptions = dict["stream_options"], !(streamOptions is NSNull), !(streamOptions is [String: Any]) {
             throw APIError(status: 400, message: "stream_options must be an object", code: "invalid_request")

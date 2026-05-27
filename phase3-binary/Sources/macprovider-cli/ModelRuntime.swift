@@ -74,6 +74,78 @@ actor ModelRuntime {
         }
     }
 
+    func stream(
+        _ request: ChatCompletionRequest,
+        onChunk: @escaping @Sendable (String) -> Void
+    ) async throws -> CompletionResult {
+        try request.validateModelMatches(modelID)
+        guard let container else {
+            throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
+        }
+
+        return try await container.perform { context in
+            let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+            let lmInput = try await context.processor.prepare(input: input)
+            let parameters = GenerateParameters(
+                maxTokens: request.maxTokens,
+                temperature: Float(request.temperature),
+                topP: Float(request.topP)
+            )
+
+            var emittedText = ""
+            var stoppedByRequestStop = false
+
+            let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
+                let decoded = context.tokenizer.decode(tokens: tokens)
+                let candidate = Self.streamingSafePrefix(
+                    decoded,
+                    stopTokenFilter: stopTokenFilter,
+                    requestStops: request.stop
+                )
+
+                let delta = Self.delta(from: emittedText, to: candidate.text)
+                if !delta.isEmpty {
+                    emittedText = candidate.text
+                    onChunk(delta)
+                }
+
+                if candidate.hitStop {
+                    stoppedByRequestStop = true
+                    return .stop
+                }
+                return .more
+            }
+
+            let final = Self.applyOutputFilters(
+                result.output,
+                stopTokenFilter: stopTokenFilter,
+                requestStops: request.stop
+            )
+            let finalDelta = Self.delta(from: emittedText, to: final.text)
+            if !finalDelta.isEmpty {
+                onChunk(finalDelta)
+            }
+
+            let finishReason: String
+            if let maxTokens = request.maxTokens,
+               result.generationTokenCount >= maxTokens,
+               !stoppedByRequestStop,
+               !final.hitStop
+            {
+                finishReason = "length"
+            } else {
+                finishReason = "stop"
+            }
+
+            return CompletionResult(
+                content: final.text,
+                finishReason: finishReason,
+                promptTokens: result.promptTokenCount,
+                completionTokens: result.generationTokenCount
+            )
+        }
+    }
+
     private static func configuration(for modelID: String) -> ModelConfiguration {
         if modelID.hasPrefix("/") || FileManager.default.fileExists(atPath: modelID) {
             return ModelConfiguration(directory: URL(fileURLWithPath: modelID))
@@ -124,6 +196,48 @@ actor ModelRuntime {
             return (String(stripped[..<earliestStop]), true)
         }
         return (stripped, false)
+    }
+
+    private static func streamingSafePrefix(
+        _ text: String,
+        stopTokenFilter: StopTokenFilter,
+        requestStops: [String]
+    ) -> (text: String, hitStop: Bool) {
+        let filtered = applyOutputFilters(
+            text,
+            stopTokenFilter: stopTokenFilter,
+            requestStops: requestStops
+        )
+        guard !filtered.hitStop else {
+            return filtered
+        }
+
+        let candidates = stopTokenFilter.tokens + requestStops.filter { !$0.isEmpty }
+        let holdback = longestSuffixPrefixLength(in: filtered.text, candidates: candidates)
+        guard holdback > 0 else {
+            return filtered
+        }
+        return (String(filtered.text.dropLast(holdback)), false)
+    }
+
+    private static func longestSuffixPrefixLength(in text: String, candidates: [String]) -> Int {
+        guard !text.isEmpty, !candidates.isEmpty else { return 0 }
+        let maxLength = min(text.count, candidates.map(\.count).max() ?? 0)
+        guard maxLength > 0 else { return 0 }
+
+        var longest = 0
+        for length in 1 ... maxLength {
+            let suffix = String(text.suffix(length))
+            if candidates.contains(where: { $0.hasPrefix(suffix) }) {
+                longest = length
+            }
+        }
+        return longest
+    }
+
+    private static func delta(from emitted: String, to current: String) -> String {
+        guard current.hasPrefix(emitted) else { return "" }
+        return String(current.dropFirst(emitted.count))
     }
 }
 

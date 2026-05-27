@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-001 — phase3-binary — implementation notes</h1>
-<p class=meta>Status: <strong>Step 4 verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 5 verified</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
 <section id="step1-blocker-diagnosis">
@@ -283,6 +283,16 @@ swift package describe</pre>
   deterministic and avoids an unnecessary Hub download path when the model is
   already cached.</p>
 </div>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Step 5 streaming design:</strong> Streaming uses the pinned
+  MLX cumulative-token callback instead of waiting for the final
+  <code>GenerateResult</code>. Each callback decodes the current token prefix,
+  emits only the newly safe delta, and keeps any suffix that could still become
+  a configured stop sequence or model special token. The final
+  <code>GenerateResult</code> still supplies authoritative prompt and
+  completion token counts for the synthesized usage chunk.</p>
+</div>
 </section>
 <section><h2>Deviations from spec</h2>
 <p class=meta>Intentional departures, with reason.</p>
@@ -448,6 +458,34 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     returned HTTP 200 with assistant content <code>Hello.</code> and usage
     populated: <code>prompt_tokens=44</code>, <code>completion_tokens=2</code>,
     <code>total_tokens=46</code>.</li>
+  </ul>
+</div>
+</section>
+<section><h2>Step 5 verification</h2>
+<div class="entry">
+  <time>2026-05-27</time>
+  <ul>
+    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    — passed with the Step 5 SSE implementation.</li>
+    <li>Raw SSE smoke test — Xcode-built binary served
+    <code>stream=true</code> on port <code>18084</code> with
+    <code>Content-Type: text/event-stream; charset=utf-8</code>,
+    content chunks, final finish chunk, synthesized usage chunk, and
+    <code>data: [DONE]</code>. A request with
+    <code>stream_options.include_usage=false</code> still emitted usage per
+    FR-7.</li>
+    <li>Phase 2 harness deliverable —
+    <code>streaming_check</code> returned status <code>200</code> with
+    TTFT <code>4041ms</code>, total <code>7337ms</code>,
+    <code>prompt_tokens=45</code>, <code>completion_tokens=80</code>,
+    throughput <code>10.9</code> tok/s, and <code>leak=0</code>.</li>
+    <li>Harness environment note — the repo has no Python virtualenv and
+    the system interpreter lacks <code>PyYAML</code>, so verification used an
+    unmodified <code>beta/harness.py</code> with a temporary
+    <code>PYTHONPATH=/private/tmp</code> JSON-backed
+    <code>yaml.safe_load</code> shim. The first sandboxed harness attempt was
+    blocked by local socket policy with <code>[Errno 1] Operation not
+    permitted</code>; the same command passed outside the sandbox.</li>
   </ul>
 </div>
 </section>

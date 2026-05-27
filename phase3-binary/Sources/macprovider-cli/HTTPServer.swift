@@ -141,6 +141,11 @@ private final class RouterHandler: ChannelInboundHandler {
             let request = try ChatCompletionRequest.parse(data: data)
             try request.validateModelMatches(modelID)
 
+            if request.stream {
+                handleStreamingChatCompletions(request: request, writer: writer, modelRuntime: modelRuntime)
+                return
+            }
+
             Task.detached { @Sendable [modelRuntime, request, writer] in
                 do {
                     let completion = try await modelRuntime.complete(request)
@@ -161,6 +166,80 @@ private final class RouterHandler: ChannelInboundHandler {
                 context: context,
                 APIError(status: 400, message: "Invalid request", code: "invalid_request")
             )
+        }
+    }
+
+    private func handleStreamingChatCompletions(
+        request: ChatCompletionRequest,
+        writer: ResponseWriter,
+        modelRuntime: ModelRuntime
+    ) {
+        let created = Int(Date().timeIntervalSince1970)
+        let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
+
+        writer.startSSE()
+        writer.writeSSEJSON(
+            Self.chatCompletionChunk(
+                id: id,
+                created: created,
+                model: request.model,
+                delta: ["role": "assistant", "content": ""],
+                finishReason: NSNull()
+            )
+        )
+
+        Task.detached { @Sendable [modelRuntime, request, writer] in
+            do {
+                let completion = try await modelRuntime.stream(request) { chunk in
+                    writer.writeSSEJSON(
+                        Self.chatCompletionChunk(
+                            id: id,
+                            created: created,
+                            model: request.model,
+                            delta: ["content": chunk],
+                            finishReason: NSNull()
+                        )
+                    )
+                }
+
+                writer.writeSSEJSON(
+                    Self.chatCompletionChunk(
+                        id: id,
+                        created: created,
+                        model: request.model,
+                        delta: [:],
+                        finishReason: completion.finishReason
+                    )
+                )
+                writer.writeSSEJSON(
+                    [
+                        "id": id,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": request.model,
+                        "choices": [],
+                        "usage": [
+                            "prompt_tokens": completion.promptTokens,
+                            "completion_tokens": completion.completionTokens,
+                            "total_tokens": completion.promptTokens + completion.completionTokens,
+                        ],
+                    ]
+                )
+                writer.writeSSEDone()
+            } catch let error as APIError {
+                writer.writeSSEJSON(error.envelope)
+                writer.writeSSEDone()
+            } catch {
+                writer.writeSSEJSON(
+                    APIError(
+                        status: 500,
+                        message: "Inference engine error",
+                        type: "server_error",
+                        code: "internal_error"
+                    ).envelope
+                )
+                writer.writeSSEDone()
+            }
         }
     }
 
@@ -185,6 +264,28 @@ private final class RouterHandler: ChannelInboundHandler {
                 "prompt_tokens": completion.promptTokens,
                 "completion_tokens": completion.completionTokens,
                 "total_tokens": completion.promptTokens + completion.completionTokens,
+            ],
+        ]
+    }
+
+    private static func chatCompletionChunk(
+        id: String,
+        created: Int,
+        model: String,
+        delta: [String: Any],
+        finishReason: Any
+    ) -> [String: Any] {
+        [
+            "id": id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [
+                [
+                    "index": 0,
+                    "delta": delta,
+                    "finish_reason": finishReason,
+                ]
             ],
         ]
     }
@@ -249,6 +350,37 @@ private struct ResponseWriter: @unchecked Sendable {
     func writeAPIError(_ error: APIError) {
         writeJSON(status: HTTPResponseStatus(statusCode: error.status), body: error.envelope)
     }
+
+    func startSSE() {
+        context.eventLoop.execute {
+            writeRawSSEHead(context: context)
+        }
+    }
+
+    func writeSSEJSON(_ body: Any) {
+        do {
+            let data = try JSONSerialization.data(withJSONObject: body)
+            let payload = String(decoding: data, as: UTF8.self)
+            writeSSEData(payload)
+        } catch {
+            writeSSEData(#"{"error":{"message":"Inference engine error","type":"server_error","code":"internal_error"}}"#)
+        }
+    }
+
+    func writeSSEDone() {
+        writeSSEData("[DONE]")
+        context.eventLoop.execute {
+            context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil))).whenComplete { _ in
+                context.close(promise: nil)
+            }
+        }
+    }
+
+    private func writeSSEData(_ payload: String) {
+        context.eventLoop.execute {
+            writeRawSSEData(context: context, payload: payload)
+        }
+    }
 }
 
 private func writeRawJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, data: Data) {
@@ -265,4 +397,22 @@ private func writeRawJSON(context: ChannelHandlerContext, status: HTTPResponseSt
     context.write(NIOAny(HTTPServerResponsePart.body(.byteBuffer(buffer))), promise: nil)
     context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil)), promise: nil)
     context.close(promise: nil)
+}
+
+private func writeRawSSEHead(context: ChannelHandlerContext) {
+    var headers = HTTPHeaders()
+    headers.add(name: "content-type", value: "text/event-stream; charset=utf-8")
+    headers.add(name: "cache-control", value: "no-cache")
+    headers.add(name: "connection", value: "close")
+    headers.add(name: "transfer-encoding", value: "chunked")
+
+    let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
+    context.writeAndFlush(NIOAny(HTTPServerResponsePart.head(head)), promise: nil)
+}
+
+private func writeRawSSEData(context: ChannelHandlerContext, payload: String) {
+    let line = "data: \(payload)\n\n"
+    var buffer = context.channel.allocator.buffer(capacity: line.utf8.count)
+    buffer.writeString(line)
+    context.writeAndFlush(NIOAny(HTTPServerResponsePart.body(.byteBuffer(buffer))), promise: nil)
 }
