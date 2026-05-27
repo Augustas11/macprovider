@@ -1,4 +1,6 @@
 import ArgumentParser
+import Darwin
+import Dispatch
 import Foundation
 import MacProviderCore
 
@@ -41,9 +43,33 @@ struct MacProviderCLI: AsyncParsableCommand {
             modelID: resolved.model,
             maxContextTokensOverride: resolved.maxContextOverride
         )
+        let coordinatorClient = CoordinatorClient(config: resolved)
+        await coordinatorClient?.start()
         let server = HTTPServer(config: resolved, modelRuntime: modelRuntime)
-        try server.run()
+        let terminationHandler = installTerminationHandler(coordinatorClient: coordinatorClient)
+        defer {
+            Task {
+                await coordinatorClient?.stop()
+            }
+            terminationHandler.cancel()
+        }
+        try withExtendedLifetime(terminationHandler) {
+            try server.run()
+        }
     }
+}
+
+private func installTerminationHandler(coordinatorClient: CoordinatorClient?) -> DispatchSourceSignal {
+    signal(SIGTERM, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .userInitiated))
+    source.setEventHandler {
+        Task {
+            await coordinatorClient?.drainAndExit(reason: "SIGTERM received")
+            Darwin.exit(0)
+        }
+    }
+    source.resume()
+    return source
 }
 
 private func printResolvedConfiguration(_ config: AppConfig) {

@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-001 — phase3-binary — implementation notes</h1>
-<p class=meta>Status: <strong>Step 6 verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 7 verified</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
 <section id="step1-blocker-diagnosis">
@@ -303,6 +303,24 @@ swift package describe</pre>
   the existing <code>max_context_override</code> config/env setting can pin a
   deterministic lower cap for tests or operator policy.</p>
 </div>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Step 7 coordinator client:</strong> The provider uses Foundation
+  <code>URLSessionWebSocketTask</code> for the outbound coordinator connection
+  instead of adding a WebSocket dependency. If <code>--coordinator</code> /
+  <code>coordinator_url</code> is unset, the provider remains a standalone
+  OpenAI-compatible HTTP server. The Step 7 client implements the SPEC-001
+  provider-side protocol messages only; coordinator internals remain deferred
+  to SPEC-002.</p>
+</div>
+<div class="entry">
+  <time>2026-05-27</time>
+  <p><strong>Step 7 capacity placeholder:</strong> Heartbeat and hello messages
+  include all FR-17 capacity fields, but <code>throughput_tps_estimate</code>
+  remains <code>0.0</code> until Step 8 adds the startup self-test measurement.
+  The value must not be treated as production capacity evidence before the
+  Step 8 checkpoint.</p>
+</div>
 </section>
 <section><h2>Deviations from spec</h2>
 <p class=meta>Intentional departures, with reason.</p>
@@ -517,6 +535,33 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     <li>Streaming pre-flight ordering — the same over-capacity request with
     <code>stream=true</code> returned a JSON HTTP 413 response, not SSE
     headers, confirming that pre-flight runs before stream setup.</li>
+  </ul>
+</div>
+</section>
+<section><h2>Step 7 verification</h2>
+<div class="entry">
+  <time>2026-05-27</time>
+  <ul>
+    <li><code>xcodebuild -scheme macprovider-cli -configuration Debug -destination platform=macOS,arch=arm64 build</code>
+    — passed after adding the coordinator WebSocket client.</li>
+    <li>Mock coordinator lifecycle — a temporary stdlib-only WebSocket mock at
+    <code>/private/tmp/phase3_mock_coordinator.py</code> accepted the
+    Xcode-built CLI connection and observed
+    <code>hello</code>, ready <code>state_update</code>, three
+    <code>heartbeat</code> messages, <code>preflight_ack</code>, draining
+    <code>state_update</code>, and three <code>drain_status</code> messages
+    (<code>starting</code>, <code>in_progress</code>, <code>complete</code>).</li>
+    <li>Drain exit behavior — after the mock sent <code>drain</code>, the CLI
+    process exited with code 0 instead of leaving the HTTP server running.</li>
+    <li>SIGTERM drain smoke — a second mock coordinator sent
+    <code>SIGTERM</code> to the provider after the first heartbeat and observed
+    draining <code>state_update</code> plus <code>drain_status</code> phases
+    <code>starting</code>, <code>in_progress</code>, and
+    <code>complete</code> before process exit.</li>
+    <li>Runtime path — verification used the Xcode-built binary with
+    <code>DYLD_FRAMEWORK_PATH=Build/Products/Debug/PackageFrameworks:Build/Products/Debug</code>,
+    matching the MLX runtime path that contains the compiled Metal shader
+    bundle.</li>
   </ul>
 </div>
 </section>
