@@ -1,6 +1,7 @@
 package buyer
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"io"
@@ -113,10 +114,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, status, code, msg)
 		return
 	}
-	if req.Stream {
-		writeError(w, http.StatusBadRequest, "invalid_request", "stream=true is implemented in Step 7")
-		return
-	}
 	if !s.pool.ModelKnown(req.Model) {
 		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)
 		return
@@ -125,6 +122,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	provider, routeErr := selectProvider(s.pool.Snapshot(), req, r.Header)
 	if routeErr != nil {
 		writeError(w, routeErr.status, routeErr.code, routeErr.message)
+		return
+	}
+	if req.Stream {
+		s.forwardStreaming(w, r, requestID, body, provider)
 		return
 	}
 	upstreamURL := provider.EndpointURL + "/v1/chat/completions"
@@ -155,6 +156,63 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider) {
+	upstreamURL := provider.EndpointURL + "/v1/chat/completions"
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+	if err != nil {
+		writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
+		return
+	}
+	upReq.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(upReq)
+	if err != nil {
+		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider request failed")
+		writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
+		writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+
+	reader := bufio.NewReader(resp.Body)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if len(line) > 0 {
+			if _, writeErr := w.Write(line); writeErr != nil {
+				s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if err == io.EOF {
+			return
+		}
+		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
+		_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"Provider disconnected during streaming\",\"type\":\"server_error\",\"code\":\"provider_disconnect\"}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		if flusher != nil {
+			flusher.Flush()
+		}
+		return
+	}
 }
 
 func validateChatRequest(body []byte) (chatRequest, int, string, string) {

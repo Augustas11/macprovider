@@ -14,7 +14,7 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>Step 6 non-streaming chat routing verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 7 SSE streaming relay verified</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
 
 <section id="step1-scaffold">
@@ -41,6 +41,32 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     local toolchain's <code>1.26.3</code>, because SPEC-002 requires Go
     1.22+ and the deployment target should not accidentally require the
     operator's newest local Go version.</p>
+  </div>
+</section>
+
+<section id="step7-sse-streaming">
+  <h2>Step 7 SSE streaming pass-through (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> <code>stream=true</code> path for
+    <code>POST /v1/chat/completions</code>. It reuses the Step 6
+    validation and routing path, forwards the request to the selected
+    provider, and relays provider SSE lines through to the buyer without
+    modifying event payloads.</p>
+    <p><strong>Headers:</strong> streaming responses set
+    <code>Content-Type: text/event-stream; charset=utf-8</code>,
+    <code>X-Accel-Buffering: no</code>, <code>Cache-Control: no-cache</code>,
+    <code>X-MacProvider-Provider</code>, and
+    <code>X-MacProvider-Route</code>.</p>
+    <p><strong>Mid-stream errors:</strong> if provider body reads fail
+    after headers are sent, the coordinator emits the SPEC-002 streaming
+    error event with <code>provider_disconnect</code>, then
+    <code>data: [DONE]</code>. Clean provider EOF ends the relay normally.</p>
+    <p><strong>Verification:</strong> <code>gofmt -w ... &amp;&amp;
+    GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes with a mock provider that streams role/content chunks and
+    <code>[DONE]</code>. <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    passes.</p>
   </div>
 </section>
 

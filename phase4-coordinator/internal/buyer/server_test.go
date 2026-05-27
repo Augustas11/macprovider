@@ -138,6 +138,54 @@ func TestChatCompletionsRoutesNonStreamingRequest(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsRelaysStreamingSSE(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("upstream request json: %v", err)
+		}
+		if req["stream"] != true {
+			t.Fatalf("stream = %v, want true", req["stream"])
+		}
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("Content-Type") != "text/event-stream; charset=utf-8" {
+		t.Fatalf("content-type = %q", rr.Header().Get("Content-Type"))
+	}
+	if rr.Header().Get("X-Accel-Buffering") != "no" || rr.Header().Get("Cache-Control") != "no-cache" {
+		t.Fatalf("missing SSE buffering headers: %#v", rr.Header())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p1" || rr.Header().Get("X-MacProvider-Route") != "session-1" {
+		t.Fatalf("route headers provider=%q route=%q", rr.Header().Get("X-MacProvider-Provider"), rr.Header().Get("X-MacProvider-Route"))
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`data: {"choices":[{"delta":{"content":"hi"}}]}`)) {
+		t.Fatalf("stream body not relayed: %s", rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("data: [DONE]\n\n")) {
+		t.Fatalf("stream terminator missing: %s", rr.Body.String())
+	}
+}
+
 func TestChatCompletionsRoutingPreferences(t *testing.T) {
 	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
