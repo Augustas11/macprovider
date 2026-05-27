@@ -3,7 +3,7 @@ import Foundation
 import MacProviderCore
 
 @main
-struct MacProviderCLI: ParsableCommand {
+struct MacProviderCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI."
@@ -24,7 +24,7 @@ struct MacProviderCLI: ParsableCommand {
     @Option(help: "Log level: trace, debug, info, notice, warning, error, critical.")
     var logLevel: String?
 
-    func run() throws {
+    func run() async throws {
         let resolved = try ConfigLoader.load(
             cli: CLIOverrides(
                 port: port,
@@ -36,6 +36,9 @@ struct MacProviderCLI: ParsableCommand {
         )
 
         printResolvedConfiguration(resolved)
+
+        let server = HTTPServer(config: resolved)
+        try server.run()
     }
 }
 
