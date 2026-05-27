@@ -87,7 +87,7 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.validateProviderToken(r) {
 		s.close(conn, CloseInvalidToken, "invalid_token")
-		_ = conn.Close()
+		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
 		return
 	}
 	go s.handleConn(conn)
@@ -280,6 +280,21 @@ func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTo
 		return ack, true, nil
 	case <-timer.C:
 		return PreflightAck{}, false, nil
+	}
+}
+
+func (s *Server) DrainAll(reason string) {
+	for _, provider := range s.pool.Snapshot() {
+		conn, err := s.pool.Conn(provider.ProviderID, provider.AssignedID)
+		if err != nil {
+			continue
+		}
+		if err := wsutil.WriteServerText(conn, []byte(`{"type":"drain"}`)); err != nil {
+			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Str("reason", reason).Msg("drain write failed")
+			continue
+		}
+		s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateDraining)
+		s.log.Info().Str("provider_id", provider.ProviderID).Str("reason", reason).Msg("provider drain sent")
 	}
 }
 

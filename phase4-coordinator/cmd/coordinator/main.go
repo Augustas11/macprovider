@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
@@ -48,16 +51,43 @@ func main() {
 	)
 	providerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
+	providerHTTP := &http.Server{Addr: providerAddr, Handler: wsServer.Handler()}
+	buyerHTTP := &http.Server{Addr: buyerAddr, Handler: buyerServer.Handler()}
 	errs := make(chan error, 2)
 
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
-		errs <- http.ListenAndServe(providerAddr, wsServer.Handler())
+		errs <- providerHTTP.ListenAndServe()
 	}()
 	go func() {
 		logger.Info().Str("addr", buyerAddr).Msg("buyer http server listening")
-		errs <- http.ListenAndServe(buyerAddr, buyerServer.Handler())
+		errs <- buyerHTTP.ListenAndServe()
 	}()
 
-	logger.Fatal().Err(<-errs).Msg("coordinator server stopped")
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	select {
+	case sig := <-signals:
+		timeout := 30 * time.Second
+		if sig == syscall.SIGINT {
+			timeout = 5 * time.Second
+		}
+		logger.Info().Str("signal", sig.String()).Dur("timeout", timeout).Msg("coordinator shutdown requested")
+		wsServer.DrainAll("coordinator shutdown")
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		if err := buyerHTTP.Shutdown(ctx); err != nil {
+			logger.Error().Err(err).Msg("buyer http shutdown failed")
+			os.Exit(1)
+		}
+		if err := providerHTTP.Shutdown(ctx); err != nil {
+			logger.Error().Err(err).Msg("provider http shutdown failed")
+			os.Exit(1)
+		}
+		logger.Info().Msg("coordinator shutdown complete")
+	case err := <-errs:
+		if err != nil && err != http.ErrServerClosed {
+			logger.Fatal().Err(err).Msg("coordinator server stopped")
+		}
+	}
 }

@@ -37,12 +37,12 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     <code>test-routing-preference.sh</code>, and
     <code>test-operator-endpoints.sh</code> pass under escalated local-port
     permission for <code>httptest</code> fixtures.</p>
-    <p><strong>Remaining Step 11 gaps:</strong>
-    <code>test-sigterm-drain.sh</code> is an explicit failing placeholder
-    until coordinator SIGTERM draining is implemented. AC-2/AC-3 remain
+    <p><strong>Remaining Step 11 gaps:</strong> AC-2/AC-3 remain
     external Phase 2 harness runs via <code>test-harness-batches.sh</code>
     and require <code>beta/config-coord-test.yaml</code> plus live mock
-    provider orchestration.</p>
+    provider orchestration. AC-6 now verifies coordinator-initiated drain
+    dispatch, but the full three in-flight streaming request signal test
+    still needs an external process harness.</p>
     <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
     passes under escalated local-port permission. <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
     passes.</p>

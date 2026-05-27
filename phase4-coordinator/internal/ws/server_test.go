@@ -491,6 +491,38 @@ func TestOperatorEndpointsBlacklistTwoPhaseDrain(t *testing.T) {
 	}
 }
 
+func TestDrainAllSendsDrainAndMarksDraining(t *testing.T) {
+	h := newProviderHarness(t)
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+
+	h.Provider.DrainAll("test shutdown")
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read drain: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+	var drain map[string]string
+	if err := json.Unmarshal(payload, &drain); err != nil {
+		t.Fatalf("drain json: %v", err)
+	}
+	if drain["type"] != "drain" {
+		t.Fatalf("drain = %#v", drain)
+	}
+	eventually(t, func() bool {
+		got := fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].State == "draining"
+	})
+}
+
 func assertHelloAck(t *testing.T, conn net.Conn) string {
 	t.Helper()
 	if err := wsutil.WriteClientText(conn, mustJSON(validHello("m4-anon"))); err != nil {
