@@ -13,17 +13,37 @@ TIMEOUT_S=60
 
 log() { printf "[rollback] %s\n" "$*"; }
 
-log "step 1/4: stopping phase3-binary tmux session 'mlx'"
-if tmux has-session -t mlx 2>/dev/null; then
-  tmux kill-session -t mlx
-  log "  killed"
-else
-  log "  no 'mlx' session found (already stopped?)"
+# Locate tmux explicitly (admin shells may lack /opt/homebrew/bin on PATH)
+TMUX_BIN=$(command -v tmux || true)
+if [ -z "$TMUX_BIN" ]; then
+  for candidate in /opt/homebrew/bin/tmux /usr/local/bin/tmux; do
+    if [ -x "$candidate" ]; then TMUX_BIN=$candidate; break; fi
+  done
+fi
+if [ -z "$TMUX_BIN" ]; then
+  log "FATAL: tmux not found on PATH or in /opt/homebrew/bin or /usr/local/bin"
+  log "  Falling back to direct kill of phase3-binary + nohup launch of mlx_lm.server"
+  TMUX_BIN=""
 fi
 
-log "step 2/4: starting mlx_lm.server in tmux session 'mlx' on port $PORT"
-tmux new-session -d -s mlx \
-    "source ~/macprovider/bin/activate && mlx_lm.server --model '$MODEL' --port $PORT 2>&1 | tee /tmp/mlx_lm.server.log"
+log "step 1/4: stopping phase3-binary"
+if [ -n "$TMUX_BIN" ] && "$TMUX_BIN" has-session -t mlx 2>/dev/null; then
+  "$TMUX_BIN" kill-session -t mlx
+  log "  killed tmux session 'mlx'"
+else
+  pkill -f "macprovider-cli --port $PORT" 2>/dev/null && log "  killed macprovider-cli directly" || log "  no macprovider-cli running"
+fi
+
+log "step 2/4: starting mlx_lm.server on port $PORT"
+if [ -n "$TMUX_BIN" ]; then
+  "$TMUX_BIN" new-session -d -s mlx \
+      "source ~/macprovider/bin/activate && mlx_lm.server --model '$MODEL' --port $PORT 2>&1 | tee /tmp/mlx_lm.server.log"
+else
+  log "  fallback: launching with nohup (no tmux)"
+  nohup bash -c "source ~/macprovider/bin/activate && mlx_lm.server --model '$MODEL' --port $PORT" \
+        > /tmp/mlx_lm.server.log 2>&1 &
+  log "  PID: $!"
+fi
 
 log "step 3/4: waiting for mlx_lm.server to bind + load model (up to ${TIMEOUT_S}s)"
 deadline=$(( $(date +%s) + TIMEOUT_S ))
@@ -47,7 +67,10 @@ if [ $ok -eq 1 ]; then
   exit 0
 else
   log "TIMEOUT — mlx_lm.server did not respond within ${TIMEOUT_S}s"
-  log "Check: tmux attach -t mlx"
+  if [ -n "$TMUX_BIN" ]; then
+    log "Check: $TMUX_BIN attach -t mlx"
+  fi
   log "Or check venv: source ~/macprovider/bin/activate && which mlx_lm.server"
+  log "Or check log: tail -50 /tmp/mlx_lm.server.log"
   exit 1
 fi
