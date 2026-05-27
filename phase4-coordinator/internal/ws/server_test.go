@@ -7,10 +7,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
@@ -48,6 +50,47 @@ func TestProviderHelloAcceptsAuthorizationHeaderInStep2(t *testing.T) {
 	defer conn.Close()
 
 	assertHelloAck(t, conn)
+}
+
+func TestProviderTokenAuthFlow(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	record, token, err := store.IssueToken(context.Background(), "M4 test provider")
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	h := newProviderHarnessWithTokenValidator(t, store)
+	defer h.HTTP.Close()
+
+	conn, _, _, err := bearerDialer(token).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial with issued token: %v", err)
+	}
+	assertHelloAck(t, conn)
+	_ = conn.Close()
+
+	if _, err := store.RevokeToken(context.Background(), record.TokenPrefix); err != nil {
+		t.Fatalf("revoke token: %v", err)
+	}
+	revoked, _, _, err := bearerDialer(token).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial with revoked token: %v", err)
+	}
+	defer revoked.Close()
+	frame, err := gobwas.ReadFrame(revoked)
+	if err != nil {
+		t.Fatalf("read invalid token close: %v", err)
+	}
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close", frame.Header.OpCode)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
 }
 
 func TestHeartbeatUpdatesPoolz(t *testing.T) {
@@ -470,7 +513,17 @@ func newProviderServer(t *testing.T, opts ...func(*config.Config)) *httptest.Ser
 	return newProviderHarness(t, opts...).HTTP
 }
 
+func newProviderHarnessWithTokenValidator(t *testing.T, validator providerws.TokenValidator, opts ...func(*config.Config)) providerHarness {
+	t.Helper()
+	return newProviderHarnessWithOptions(t, validator, opts...)
+}
+
 func newProviderHarness(t *testing.T, opts ...func(*config.Config)) providerHarness {
+	t.Helper()
+	return newProviderHarnessWithOptions(t, nil, opts...)
+}
+
+func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValidator, opts ...func(*config.Config)) providerHarness {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
@@ -485,11 +538,23 @@ func newProviderHarness(t *testing.T, opts ...func(*config.Config)) providerHarn
 		opt(&cfg)
 	}
 	registry := pool.NewRegistry(cfg.Providers)
-	server := providerws.NewServer(cfg, registry, zerolog.Nop())
+	serverOpts := []providerws.Option{}
+	if validator != nil {
+		serverOpts = append(serverOpts, providerws.WithTokenValidator(validator))
+	}
+	server := providerws.NewServer(cfg, registry, zerolog.Nop(), serverOpts...)
 	return providerHarness{
 		HTTP:     httptest.NewServer(server.Handler()),
 		Provider: server,
 		Registry: registry,
+	}
+}
+
+func bearerDialer(token string) gobwas.Dialer {
+	return gobwas.Dialer{
+		Header: gobwas.HandshakeHeaderHTTP(http.Header{
+			"Authorization": []string{"Bearer " + token},
+		}),
 	}
 }
 

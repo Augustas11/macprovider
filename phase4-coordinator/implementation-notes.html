@@ -14,8 +14,39 @@ h3 { font-size: 1em; margin-top: 1.5em; }
 code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 </style></head><body>
 <h1>SPEC-002 — phase4-coordinator — implementation notes</h1>
-<p class=meta>Status: <strong>Step 8 preflight and capacity routing verified</strong> · Spec:
+<p class=meta>Status: <strong>Step 9 provider token auth verified</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
+
+<section id="step9-provider-auth">
+  <h2>Step 9 provider token auth (2026-05-27)</h2>
+  <div class="entry">
+    <time>2026-05-27</time>
+    <p><strong>Implemented:</strong> SQLite-backed
+    <code>provider_tokens</code> storage with WAL mode, SHA-256 token
+    hashes, plaintext token display only at issuance, token prefixes for
+    operator lookup, revocation timestamps, and
+    <code>last_used_at</code> updates on successful validation.</p>
+    <p><strong>CLI:</strong> <code>coordinator-cli issue-token</code>,
+    <code>revoke-token</code>, <code>list-tokens</code>, and
+    <code>revoke-and-kick</code> now operate on the configured SQLite DB.
+    <code>revoke-and-kick</code> revokes locally and calls
+    <code>/admin/blacklist</code>; the endpoint itself is completed in
+    Step 10.</p>
+    <p><strong>WebSocket auth:</strong> provider connections without an
+    <code>Authorization</code> header remain admitted by static
+    <code>provider_id</code> config matching. When a bearer token is
+    present and the coordinator has a token store, the upgrade validates
+    it before reading <code>hello</code>; invalid or revoked tokens receive
+    WebSocket close <code>4005 invalid_token</code>.</p>
+    <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes with token issue/validate/revoke/list coverage and WebSocket
+    auth flow coverage for issued-token success plus revoked-token
+    close 4005. <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
+    passes. CLI smoke: <code>go run ./cmd/coordinator-cli issue-token</code>,
+    <code>list-tokens</code>, and <code>revoke-token</code> succeeded
+    against a temp SQLite DB under <code>/private/tmp</code>.</p>
+  </div>
+</section>
 
 <section id="step8-preflight-capacity">
   <h2>Step 8 preflight and capacity routing (2026-05-27)</h2>

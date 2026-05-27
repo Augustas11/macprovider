@@ -7,6 +7,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -27,7 +28,13 @@ func main() {
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	registry := pool.NewRegistry(cfg.Providers)
 	startedAt := time.Now().UTC()
-	wsServer := providerws.NewServer(cfg, registry, logger)
+	tokenStore, err := auth.OpenStore(cfg.Storage.DBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer tokenStore.Close()
+	wsServer := providerws.NewServer(cfg, registry, logger, providerws.WithTokenValidator(tokenStore))
 	buyerServer := buyer.NewServer(
 		registry,
 		logger,

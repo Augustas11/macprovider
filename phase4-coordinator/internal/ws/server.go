@@ -1,9 +1,11 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +34,19 @@ type Server struct {
 	newUUID func() string
 	timers  sync.Map
 	pending sync.Map
+	tokens  TokenValidator
+}
+
+type TokenValidator interface {
+	ValidateToken(context.Context, string) (bool, error)
+}
+
+type Option func(*Server)
+
+func WithTokenValidator(tokens TokenValidator) Option {
+	return func(s *Server) {
+		s.tokens = tokens
+	}
 }
 
 type pendingPreflight struct {
@@ -39,14 +54,18 @@ type pendingPreflight struct {
 	ch         chan PreflightAck
 }
 
-func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger) *Server {
-	return &Server{
+func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger, opts ...Option) *Server {
+	s := &Server{
 		cfg:     cfg,
 		pool:    registry,
 		log:     logger,
 		now:     func() time.Time { return time.Now().UTC() },
 		newUUID: func() string { return uuid.NewString() },
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
 }
 
 func (s *Server) Handler() http.Handler {
@@ -62,7 +81,32 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn().Err(err).Msg("provider websocket upgrade failed")
 		return
 	}
+	if !s.validateProviderToken(r) {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		_ = conn.Close()
+		return
+	}
 	go s.handleConn(conn)
+}
+
+func (s *Server) validateProviderToken(r *http.Request) bool {
+	authz := r.Header.Get("Authorization")
+	if authz == "" {
+		return true
+	}
+	if s.tokens == nil {
+		return true
+	}
+	const prefix = "Bearer "
+	if !strings.HasPrefix(authz, prefix) {
+		return false
+	}
+	ok, err := s.tokens.ValidateToken(r.Context(), strings.TrimSpace(strings.TrimPrefix(authz, prefix)))
+	if err != nil {
+		s.log.Warn().Err(err).Msg("provider token validation failed")
+		return false
+	}
+	return ok
 }
 
 func (s *Server) handleConn(conn net.Conn) {
