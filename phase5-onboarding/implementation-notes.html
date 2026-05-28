@@ -25,4 +25,79 @@ as <code>phase3-binary/implementation-notes.html</code> and
 
 <!-- Implementation entries go below this line -->
 
+<section class=entry>
+<h2>Distribution stream build</h2>
+<time datetime="2026-05-28">2026-05-28</time>
+
+<h3>Scope boundaries</h3>
+<p>Implemented only the SPEC-003 distribution stream: shell scripts,
+launchd plist template, GitHub Actions release workflow, README content,
+and this implementation note. No Swift, Go, beta, or spec files were
+modified by this stream.</p>
+
+<h3>Design choices</h3>
+<ul>
+  <li><code>install.sh</code> targets <code>~/macprovider</code> and
+  passes explicit CLI flags from launchd because the distribution build
+  prompt superseded the older SPEC-003 <code>~/.local/bin</code> example.
+  The public installer no longer accepts an install-dir override because
+  replacement installs remove the existing install directory.</li>
+  <li>The release workflow wraps the existing
+  <code>phase3-binary/dist/package.sh</code> output and renames the
+  asset to <code>macprovider-cli-&lt;tag&gt;-darwin-arm64.tar.gz</code>
+  so the public installer can use the SPEC-003 release shape.</li>
+  <li>The launchd template adds <code>__MODEL_ID__</code> because the
+  prompt requires <code>--model &lt;MODEL&gt;</code> in
+  <code>ProgramArguments</code> but did not list a model placeholder.</li>
+  <li>The root <code>README.md</code> did not exist in the checkout, so
+  the stream created it with the requested Join the Network section
+  instead of inserting into an existing file.</li>
+</ul>
+
+<h3>Deviations and open questions</h3>
+<ul>
+  <li>OQ-1/OQ-5 code signing remains unresolved. The installer verifies
+  a signed <code>checksums.txt</code> manifest and SHA-256 before
+  extraction, then asks before running
+  <code>xattr -dr com.apple.quarantine</code>. The embedded release
+  signing public key placeholder must be replaced before public hosting.</li>
+  <li>The installer defaults <code>MACPROVIDER_GITHUB_REPO</code> to
+  <code>augstar/macprovider-poc</code>. Operators can override this if
+  releases move to a dedicated artifact repository.</li>
+  <li>Full AC-1 and AC-2 cannot be completed until the v1.2 binary and
+  v1.1.2 coordinator stream are published and deployed.</li>
+</ul>
+
+<h3>Manual validation</h3>
+<ul>
+  <li><code>bash -n phase3-binary/dist/install.sh</code>: PASS.</li>
+  <li><code>bash -n phase3-binary/dist/uninstall.sh</code>: PASS.</li>
+  <li><code>MACPROVIDER_NO_PROMPT=1 bash phase3-binary/dist/install.sh --dry-run</code>:
+  PASS. No downloads, extraction, launchctl, or writes executed.</li>
+  <li><code>MACPROVIDER_NO_PROMPT=1 bash phase3-binary/dist/uninstall.sh --dry-run</code>:
+  PASS. No removal executed.</li>
+  <li><code>MACPROVIDER_NO_PROMPT=1 MACPROVIDER_INSTALL_DIR=/tmp/bad bash phase3-binary/dist/install.sh --dry-run</code>:
+  PASS. The installer ignores the unsafe install-dir override and uses
+  <code>~/macprovider</code>.</li>
+  <li>Rendered the embedded launchd plist from <code>install.sh</code>
+  with representative values and linted it with <code>plutil</code>:
+  PASS.</li>
+  <li>Exercised <code>validate_tarball</code> with a minimal expected
+  archive: PASS, and with an unexpected member: rejected as expected.</li>
+  <li>Exercised <code>verify_checksum_signature</code> with a temporary
+  OpenSSL keypair and detached <code>checksums.txt.sig</code>: PASS.</li>
+  <li><code>plutil -lint phase3-binary/dist/launchd-plist-template.plist</code>:
+  PASS.</li>
+  <li><code>ruby -e 'require "yaml"; YAML.load_file(...)'</code>: PASS
+  for <code>.github/workflows/release.yml</code>. <code>actionlint</code>
+  was not installed in this environment.</li>
+  <li>AC-1: PENDING integration. Current production coordinator still
+  admits only pinned providers.</li>
+  <li>AC-2: PENDING integration. Requires at least two published
+  releases and the binary update command.</li>
+  <li>AC-3: PARTIAL. Template lint passes; reboot survival was not tested
+  in this build session.</li>
+</ul>
+</section>
+
 </body></html>

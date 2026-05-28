@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>live.streamvc.macprovider</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__BINARY_PATH__</string>
+    <string>--port</string>
+    <string>8080</string>
+    <string>--model</string>
+    <string>__MODEL_ID__</string>
+    <string>--provider-id</string>
+    <string>__PROVIDER_ID__</string>
+    <string>--coordinator</string>
+    <string>__COORDINATOR_URL__</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/macprovider.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/macprovider.err.log</string>
+
+  <key>WorkingDirectory</key>
+  <string>__USER_HOME__/macprovider</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__USER_HOME__</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__USER_HOME__/macprovider</string>
+  </dict>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>ProcessType</key>
+  <string>Adaptive</string>
+</dict>
+</plist>

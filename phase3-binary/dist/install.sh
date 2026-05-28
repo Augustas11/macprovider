@@ -1,0 +1,591 @@
+#!/usr/bin/env bash
+# Public Mac Provider installer for https://get.streamvc.live/install.sh.
+#
+# Launchd template substitutions performed by this script:
+#   __USER_HOME__       -> absolute installing user's HOME
+#   __BINARY_PATH__     -> absolute ~/macprovider/macprovider-cli path
+#   __PROVIDER_ID__     -> sanitized provider handle
+#   __COORDINATOR_URL__ -> WSS coordinator URL
+#   __LOG_DIR__         -> absolute ~/Library/Logs/macprovider path
+#   __MODEL_ID__        -> selected MLX model id
+
+set -euo pipefail
+
+GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-augstar/macprovider-poc}"
+COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
+COORDINATOR_MODELS_URL="https://coordinator.streamvc.live/v1/models"
+INSTALL_DIR="$HOME/macprovider"
+BINARY_PATH="$INSTALL_DIR/macprovider-cli"
+CONFIG_DIR="$HOME/.config/macprovider"
+CONFIG_PATH="$CONFIG_DIR/config.yaml"
+PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
+PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
+LOG_DIR="$HOME/Library/Logs/macprovider"
+PORT="${MACPROVIDER_PORT:-8080}"
+DRY_RUN=0
+NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
+NO_LAUNCHD="${MACPROVIDER_NO_LAUNCHD:-0}"
+TMPDIR_PATH=""
+LAUNCHD_INSTALLED=0
+MANUAL_PID=""
+
+log() { printf "[macprovider-install] %s\n" "$*"; }
+die() {
+  code="$1"
+  shift
+  printf "[macprovider-install] ERROR: %s\n" "$*" >&2
+  exit "$code"
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: bash install.sh [--dry-run]
+
+Environment overrides:
+  MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
+  MACPROVIDER_MODEL              model id to install
+  MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
+  MACPROVIDER_NO_PROMPT=1        use defaults without interactive prompts
+  MACPROVIDER_NO_LAUNCHD=1       skip launchd service install
+USAGE
+}
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) die 7 "unknown argument: $arg" ;;
+  esac
+done
+
+cleanup() {
+  if [ -n "$TMPDIR_PATH" ] && [ -d "$TMPDIR_PATH" ]; then
+    rm -rf "$TMPDIR_PATH"
+  fi
+}
+trap cleanup EXIT
+
+run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf "[dry-run] "
+    printf "%q " "$@"
+    printf "\n"
+  else
+    "$@"
+  fi
+}
+
+require_tool() {
+  command -v "$1" >/dev/null 2>&1 || die 2 "missing required tool: $1"
+}
+
+read_line() {
+  REPLY=""
+  if [ -r /dev/tty ]; then
+    IFS= read -r REPLY < /dev/tty || REPLY=""
+  else
+    IFS= read -r REPLY || REPLY=""
+  fi
+}
+
+prompt_yes_no() {
+  prompt="$1"
+  default="$2"
+  if [ "$NO_PROMPT" = "1" ]; then
+    log "$prompt $default (non-interactive default)"
+    [ "$default" = "Y" ]
+    return
+  fi
+
+  printf "%s " "$prompt"
+  read_line
+  answer="$REPLY"
+  answer="${answer:-$default}"
+  case "$answer" in
+    y|Y|yes|YES) return 0 ;;
+    n|N|no|NO) return 1 ;;
+    *) return 1 ;;
+  esac
+}
+
+sanitize_handle() {
+  printf "%s" "$1" \
+    | tr '[:upper:]' '[:lower:]' \
+    | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//; s/-+/-/g' \
+    | cut -c 1-48
+}
+
+reject_newlines() {
+  name="$1"
+  value="$2"
+  case "$value" in
+    *$'\n'*|*$'\r'*) die 7 "$name must not contain newlines" ;;
+  esac
+}
+
+xml_escape() {
+  printf "%s" "$1" | sed \
+    -e 's/&/\&amp;/g' \
+    -e 's/</\&lt;/g' \
+    -e 's/>/\&gt;/g' \
+    -e 's/"/\&quot;/g' \
+    -e "s/'/\&apos;/g"
+}
+
+yaml_escape() {
+  printf "%s" "$1" | sed \
+    -e 's/\\/\\\\/g' \
+    -e 's/"/\\"/g'
+}
+
+detect_platform() {
+  os="$(uname -s)"
+  arch="$(uname -m)"
+  [ "$os" = "Darwin" ] || die 1 "macOS is required; found $os"
+  [ "$arch" = "arm64" ] || die 1 "Apple Silicon arm64 is required; found $arch"
+  require_tool sw_vers
+  macos_version="$(sw_vers -productVersion)"
+  macos_major="${macos_version%%.*}"
+  case "$macos_major" in
+    ''|*[!0-9]*) die 1 "could not determine macOS version from '$macos_version'" ;;
+  esac
+  [ "$macos_major" -ge 14 ] || die 1 "macOS 14 Sonoma or newer is required; found $macos_version"
+}
+
+detect_ram_gb() {
+  bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
+  if [ -z "$bytes" ]; then
+    printf "[macprovider-install] Could not read hw.memsize; defaulting to 8 GB model tier.\n" >&2
+    bytes=8589934592
+  fi
+  awk "BEGIN { printf \"%d\", ($bytes + 1073741823) / 1073741824 }"
+}
+
+model_default_for_ram() {
+  ram_gb="$1"
+  if [ "$ram_gb" -lt 12 ]; then
+    printf "mlx-community/Llama-3.2-3B-Instruct-4bit"
+  elif [ "$ram_gb" -lt 24 ]; then
+    printf "mlx-community/Qwen2.5-7B-Instruct-4bit"
+  else
+    printf "mlx-community/Qwen2.5-14B-Instruct-4bit"
+  fi
+}
+
+choose_model() {
+  ram_gb="$1"
+  if [ -n "${MACPROVIDER_MODEL:-}" ]; then
+    printf "%s" "$MACPROVIDER_MODEL"
+    return
+  fi
+
+  default_model="$(model_default_for_ram "$ram_gb")"
+  if [ "$NO_PROMPT" = "1" ]; then
+    printf "%s" "$default_model"
+    return
+  fi
+
+  printf "[macprovider-install] Detected approximately %s GB RAM.\n" "$ram_gb" >&2
+  printf "Choose a model:\n" >&2
+  printf "  1) mlx-community/Llama-3.2-3B-Instruct-4bit      ~2 GB, 8 GB Macs\n" >&2
+  printf "  2) mlx-community/Qwen2.5-7B-Instruct-4bit        ~4 GB, 16 GB Macs\n" >&2
+  printf "  3) mlx-community/Qwen2.5-14B-Instruct-4bit       ~8 GB, 24 GB+ Macs\n" >&2
+  printf "Selection [default: %s]: " "$default_model" >&2
+  read_line
+  selection="$REPLY"
+  case "$selection" in
+    1) printf "mlx-community/Llama-3.2-3B-Instruct-4bit" ;;
+    2) printf "mlx-community/Qwen2.5-7B-Instruct-4bit" ;;
+    3) printf "mlx-community/Qwen2.5-14B-Instruct-4bit" ;;
+    "") printf "%s" "$default_model" ;;
+    *) die 7 "invalid model selection" ;;
+  esac
+}
+
+choose_provider_id() {
+  if [ -f "$PROVIDER_ID_PATH" ]; then
+    saved="$(cat "$PROVIDER_ID_PATH")"
+    if [ -n "$saved" ]; then
+      printf "%s" "$saved"
+      return
+    fi
+  fi
+
+  default_handle="$(sanitize_handle "$(hostname -s 2>/dev/null || hostname)")"
+  [ -n "$default_handle" ] || default_handle="macprovider"
+  if [ "$NO_PROMPT" = "1" ]; then
+    printf "%s" "$default_handle"
+    return
+  fi
+
+  printf "Choose a provider handle [default: %s]: " "$default_handle" >&2
+  read_line
+  handle="$REPLY"
+  handle="${handle:-$default_handle}"
+  sanitized="$(sanitize_handle "$handle")"
+  [ -n "$sanitized" ] || die 7 "provider handle must contain a letter or number"
+  printf "%s" "$sanitized"
+}
+
+choose_coordinator_url() {
+  if [ -n "${MACPROVIDER_COORDINATOR_URL:-}" ]; then
+    printf "%s" "$MACPROVIDER_COORDINATOR_URL"
+    return
+  fi
+  if [ "$NO_PROMPT" = "1" ]; then
+    printf "%s" "$COORDINATOR_URL_DEFAULT"
+    return
+  fi
+
+  printf "Coordinator URL [default: %s]: " "$COORDINATOR_URL_DEFAULT" >&2
+  read_line
+  value="$REPLY"
+  printf "%s" "${value:-$COORDINATOR_URL_DEFAULT}"
+}
+
+validate_inputs() {
+  model="$1"
+  provider_id="$2"
+  coordinator_url="$3"
+  reject_newlines "model" "$model"
+  reject_newlines "provider_id" "$provider_id"
+  reject_newlines "coordinator_url" "$coordinator_url"
+  case "$model" in
+    ''|*[!A-Za-z0-9._/:+-]*) die 7 "model contains unsupported characters" ;;
+  esac
+  case "$provider_id" in
+    ''|*[!a-z0-9-]*) die 7 "provider_id contains unsupported characters" ;;
+  esac
+  case "$coordinator_url" in
+    wss://*) ;;
+    *) die 7 "coordinator URL must start with wss://" ;;
+  esac
+}
+
+latest_release_tag() {
+  api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+  json="$(curl -fsSL "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
+  tag="$(printf "%s" "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  [ -n "$tag" ] || die 3 "GitHub Releases API response did not include tag_name"
+  printf "%s" "$tag"
+}
+
+download_release() {
+  tag="$1"
+  asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
+  base="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
+  TMPDIR_PATH="$(mktemp -d)"
+  tarball_path="$TMPDIR_PATH/$asset"
+  checksums_path="$TMPDIR_PATH/checksums.txt"
+  checksums_sig_path="$TMPDIR_PATH/checksums.txt.sig"
+
+  log "Downloading $asset from GitHub Releases."
+  curl -fL "$base/$asset" -o "$tarball_path" || die 3 "failed to download release tarball"
+  curl -fL "$base/checksums.txt" -o "$checksums_path" || die 3 "failed to download checksums.txt"
+  curl -fL "$base/checksums.txt.sig" -o "$checksums_sig_path" || die 3 "failed to download checksums.txt.sig"
+}
+
+write_checksum_public_key() {
+  if [ -n "${MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM:-}" ]; then
+    printf "%s\n" "$MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM"
+    return
+  fi
+  cat <<'EOF'
+-----BEGIN PUBLIC KEY-----
+REPLACE_WITH_MACPROVIDER_RELEASE_SIGNING_PUBLIC_KEY
+-----END PUBLIC KEY-----
+EOF
+}
+
+verify_checksum_signature() {
+  public_key_path="$TMPDIR_PATH/release-signing-public.pem"
+  write_checksum_public_key > "$public_key_path"
+  if grep -q "REPLACE_WITH_MACPROVIDER" "$public_key_path"; then
+    die 3 "release signing public key is not configured in install.sh"
+  fi
+  openssl dgst -sha256 \
+    -verify "$public_key_path" \
+    -signature "$checksums_sig_path" \
+    "$checksums_path" >/dev/null || die 4 "checksums.txt signature verification failed"
+  log "checksums.txt signature verified."
+}
+
+verify_sha256() {
+  expected="$(grep "  $(basename "$tarball_path")$" "$checksums_path" | awk '{print $1}' | head -1)"
+  [ -n "$expected" ] || die 4 "checksums.txt has no entry for $(basename "$tarball_path")"
+  actual="$(shasum -a 256 "$tarball_path" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] || die 4 "checksum mismatch for $(basename "$tarball_path")"
+  log "SHA256 verified."
+}
+
+validate_tarball() {
+  entries="$(tar tzf "$tarball_path")" || die 5 "failed to list release tarball"
+  [ -n "$entries" ] || die 5 "release tarball is empty"
+
+  has_binary=0
+  while IFS= read -r entry; do
+    case "$entry" in
+      ""|/*|*"/../"*|../*|*/..|..)
+        die 5 "unsafe tarball path: $entry"
+        ;;
+      macprovider-cli)
+        has_binary=1
+        ;;
+      *.bundle|*.bundle/*)
+        ;;
+      *)
+        die 5 "unexpected tarball member: $entry"
+        ;;
+    esac
+  done <<EOF
+$entries
+EOF
+
+  [ "$has_binary" -eq 1 ] || die 5 "release tarball does not contain macprovider-cli"
+  if tar tvzf "$tarball_path" | awk '{print substr($1,1,1), $0}' | grep -E '^[lhbcp]' >/dev/null; then
+    die 5 "release tarball contains unsafe link or device members"
+  fi
+}
+
+write_config() {
+  model="$1"
+  provider_id="$2"
+  coordinator_url="$3"
+  run mkdir -p "$CONFIG_DIR"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "Would write provider_id to $PROVIDER_ID_PATH and config to $CONFIG_PATH"
+    return
+  fi
+  printf "%s\n" "$provider_id" > "$PROVIDER_ID_PATH"
+  cat > "$CONFIG_PATH" <<EOF
+model: "$(yaml_escape "$model")"
+coordinator_url: "$(yaml_escape "$coordinator_url")"
+provider_id: "$(yaml_escape "$provider_id")"
+port: $PORT
+EOF
+}
+
+install_binary() {
+  run mkdir -p "$INSTALL_DIR"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "Would extract verified release tarball into $INSTALL_DIR"
+    return
+  fi
+  staging_dir="$TMPDIR_PATH/staging"
+  rm -rf "$staging_dir"
+  mkdir -p "$staging_dir"
+  tar xzf "$tarball_path" -C "$staging_dir" || die 5 "failed to extract release tarball"
+  rm -rf "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR"
+  cp -R "$staging_dir"/. "$INSTALL_DIR"/
+  [ -x "$BINARY_PATH" ] || chmod +x "$BINARY_PATH" 2>/dev/null || true
+  [ -x "$BINARY_PATH" ] || die 5 "macprovider-cli was not installed at $BINARY_PATH"
+}
+
+clear_quarantine() {
+  if ! command -v xattr >/dev/null 2>&1; then
+    log "xattr not found; skipping quarantine cleanup."
+    return
+  fi
+  log "The current release is unsigned. Clearing com.apple.quarantine lets macOS run it."
+  if prompt_yes_no "Clear quarantine attribute on $INSTALL_DIR? [Y/n]" "Y"; then
+    run xattr -dr com.apple.quarantine "$INSTALL_DIR"
+  else
+    die 7 "user declined quarantine cleanup"
+  fi
+}
+
+install_plist() {
+  model="$1"
+  provider_id="$2"
+  coordinator_url="$3"
+  [ "$NO_LAUNCHD" = "1" ] && { log "Skipping launchd service install."; return; }
+  if ! prompt_yes_no "Install as a background service? [Y/n]" "Y"; then
+    log "Skipping launchd service install."
+    return
+  fi
+
+  run mkdir -p "$(dirname "$PLIST_PATH")" "$LOG_DIR"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "Would render launchd plist to $PLIST_PATH"
+    log "Would bootstrap with: launchctl bootstrap gui/$UID $PLIST_PATH"
+    return
+  fi
+
+  render_plist "$model" "$provider_id" "$coordinator_url" > "$PLIST_PATH"
+
+  plutil -lint "$PLIST_PATH" >/dev/null || die 5 "rendered launchd plist is invalid"
+  launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
+  launchctl bootstrap "gui/$UID" "$PLIST_PATH" || die 5 "failed to load launchd service"
+  LAUNCHD_INSTALLED=1
+}
+
+render_plist() {
+  model="$(xml_escape "$1")"
+  provider_id="$(xml_escape "$2")"
+  coordinator_url="$(xml_escape "$3")"
+  user_home="$(xml_escape "$HOME")"
+  binary_path="$(xml_escape "$BINARY_PATH")"
+  log_dir="$(xml_escape "$LOG_DIR")"
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>live.streamvc.macprovider</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$binary_path</string>
+    <string>--port</string>
+    <string>$PORT</string>
+    <string>--model</string>
+    <string>$model</string>
+    <string>--provider-id</string>
+    <string>$provider_id</string>
+    <string>--coordinator</string>
+    <string>$coordinator_url</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>$log_dir/macprovider.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>$log_dir/macprovider.err.log</string>
+  <key>WorkingDirectory</key>
+  <string>$user_home/macprovider</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>$user_home</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$user_home/macprovider</string>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>ProcessType</key>
+  <string>Adaptive</string>
+</dict>
+</plist>
+EOF
+}
+
+start_manual_service() {
+  model="$1"
+  provider_id="$2"
+  coordinator_url="$3"
+  [ "$LAUNCHD_INSTALLED" -eq 1 ] && return
+  log "Starting macprovider-cli directly for non-launchd self-test."
+  mkdir -p "$LOG_DIR"
+  (
+    cd "$INSTALL_DIR"
+    nohup "$BINARY_PATH" \
+      --port "$PORT" \
+      --model "$model" \
+      --provider-id "$provider_id" \
+      --coordinator "$coordinator_url" \
+      > "$LOG_DIR/macprovider.out.log" \
+      2> "$LOG_DIR/macprovider.err.log" &
+    echo "$!"
+  ) > "$TMPDIR_PATH/manual.pid"
+  MANUAL_PID="$(cat "$TMPDIR_PATH/manual.pid")"
+}
+
+wait_for_local_model() {
+  model="$1"
+  deadline=$(( $(date +%s) + 60 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    models_json="$(curl -sS --max-time 3 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
+    if printf "%s" "$models_json" | grep -q '"owned_by"[[:space:]]*:[[:space:]]*"macprovider"' &&
+       printf "%s" "$models_json" | grep -Fq "$model"; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+wait_for_coordinator() {
+  provider_id="$1"
+  deadline=$(( $(date +%s) + 30 ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    coord_json="$(curl -sS --max-time 5 "$COORDINATOR_MODELS_URL" 2>/dev/null || true)"
+    if printf "%s" "$coord_json" | grep -Fq "$provider_id"; then
+      return 0
+    fi
+    sleep 2
+  done
+  return 1
+}
+
+print_pid() {
+  if [ -n "$MANUAL_PID" ]; then
+    printf "%s\n" "$MANUAL_PID"
+    return
+  fi
+  launchctl list 2>/dev/null | awk '/live.streamvc.macprovider/ {print $1; exit}'
+}
+
+main() {
+  detect_platform
+  for tool in curl tar shasum grep sed awk date hostname mktemp openssl; do
+    require_tool "$tool"
+  done
+
+  ram_gb="$(detect_ram_gb)"
+  model="$(choose_model "$ram_gb")"
+  provider_id="$(choose_provider_id)"
+  coordinator_url="$(choose_coordinator_url)"
+  validate_inputs "$model" "$provider_id" "$coordinator_url"
+  log "Target model: $model"
+  log "Provider ID: $provider_id"
+  log "Coordinator: $coordinator_url"
+  log "Install dir: $INSTALL_DIR"
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "Dry run: would query latest release for $GITHUB_REPO, download, verify, install, and self-test."
+    write_config "$model" "$provider_id" "$coordinator_url"
+    install_plist "$model" "$provider_id" "$coordinator_url"
+    exit 0
+  fi
+
+  tag="$(latest_release_tag)"
+  log "Latest release: $tag"
+  download_release "$tag"
+  verify_checksum_signature
+  verify_sha256
+  validate_tarball
+  install_binary
+  clear_quarantine
+  write_config "$model" "$provider_id" "$coordinator_url"
+  install_plist "$model" "$provider_id" "$coordinator_url"
+  start_manual_service "$model" "$provider_id" "$coordinator_url"
+
+  log "Waiting up to 60s for local /v1/models."
+  if ! wait_for_local_model "$model"; then
+    log "Local self-test failed. Check logs: tail -f $LOG_DIR/macprovider.err.log"
+    exit 6
+  fi
+
+  log "Waiting up to 30s for coordinator pool visibility."
+  if ! wait_for_coordinator "$provider_id"; then
+    log "Installed locally. Coordinator connection failed; provider will join the pool when connectivity and provisional admission are available."
+    log "This is AC-1a degraded mode, not AC-1 build-complete success."
+    exit 6
+  fi
+
+  pid="$(print_pid || true)"
+  log "Ready to serve."
+  log "PID: ${pid:-unknown}"
+  log "Logs: tail -f $LOG_DIR/macprovider.out.log $LOG_DIR/macprovider.err.log"
+  log "Coordinator pool: $COORDINATOR_MODELS_URL"
+  log "Uninstall: bash <(curl -fsSL https://get.streamvc.live/uninstall.sh)"
+}
+
+main "$@"
