@@ -1,7 +1,13 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.1 (2026-05-28, initial design from locked operator decisions)
+**Version:** 0.2 (2026-05-29, audit closing fix pass)
 **Depends on:** SPEC-001 v1.2.2, SPEC-002 v1.1.3, SPEC-003 v0.5
+
+**Change log v0.2:**
+- Closes the cross-model audit in `specs/SPEC-006-audit.md`: 1 CRITICAL, 21 MAJOR, 9 MINOR findings, and 2 operator questions.
+- Locks D1 v1 single-instance SQLite deployment, D2 HMAC-SHA256 demo tokens, and D3 streaming/error quota reservation and settlement policy.
+- Adds precision for OAuth callback allowlisting and scopes, OpenAI request fields, API key entropy, revocation latency, feedback scope and summaries, capacity signal measurement, quota reservations, kill-switch persistence, provider-pinning header stripping, and failure-mode accounting.
+- Adds AC-26 through AC-37 for the new security, lifecycle, feedback, capacity, provider-transparency, demo-token, and quota-settlement requirements.
 
 **Change log v0.1:**
 - Initial draft following design exploration in specs/SPEC-006-design.md.
@@ -82,6 +88,7 @@ SPEC-006 v1 explicitly does not specify:
 - Provider payout.
 - Revenue share.
 - Provider tipping.
+- Donations.
 - Donation button.
 - "Support us" link.
 - Payment-adjacent UI.
@@ -200,6 +207,12 @@ The gateway MUST forbid in-process state for rate-limiting, quota, or session da
 
 The gateway MUST require data layer abstraction.
 
+SPEC-006 v1 deploys as a single gateway instance with SQLite on Pearl VPS.
+
+The stateless-handlers requirement preserves multi-instance feasibility but is not exercised in v1.
+
+See Section 14.2 for the storage layer's role in this constraint.
+
 Usage events, feedback events, and audit logs MUST be append-only.
 
 No hot-path storage design MAY require row updates for usage, feedback, or audit history.
@@ -214,11 +227,17 @@ Gateway does not intercept those legacy direct-tunnel paths.
 
 ## 2. Locked decisions
 
-This section records operator pre-commitments.
+This section reproduces the operator's pre-commitments from `specs/BUILD_SPEC_006_PROMPT.md` "Locked design choices."
 
-This section is read-only design input.
+Cross-references have been updated to match this document's section numbering.
 
-This section MUST NOT be treated as a place to propose alternatives.
+Punctuation has been normalized for prose flow.
+
+Substantive content is unchanged.
+
+Any apparent semantic divergence from the BUILD prompt is a bug to be fixed in subsequent revisions.
+
+This section is read-only design input and MUST NOT be treated as a place to propose alternatives.
 
 ### 2.1 Architecture
 
@@ -252,7 +271,7 @@ This section MUST NOT be treated as a place to propose alternatives.
 - **GitHub OAuth is the primary identity method.** Web-app credentials, one-click flow, account created on first successful callback.
 - **Email magic link is the secondary method** if it can be implemented cheaply on a free tier (Resend, SendGrid, Postmark; choose whichever has the lowest operator-onboarding cost). If no free tier is practical for v1, defer email magic link to v0.2 and ship GitHub OAuth only.
 - One account per identity. Multiple API keys per account permitted (default: one active key on signup, regeneration/revocation available).
-- Key shape: prefix `mp_`, followed by high-entropy random secret. Server stores only a hash (SHA-256 or HMAC). Full key shown once at issuance, never re-displayable.
+- Key shape: prefix `mp_`, followed by high-entropy random secret (specified in Section 6.4). Server stores only a hash (SHA-256 or HMAC). Full key shown once at issuance, never re-displayable.
 
 ### 2.4 Quotas
 
@@ -326,7 +345,7 @@ Tiered escalation requirements:
   - **(C) Dashboard widget at `/v1/usage` (or front-door /account page)** -- persistent 1-4 rating widget, captures "how is your experience overall" not per-request.
 - **Chat playground bonus capture (not normative but recommended):** the existing Vercel demo MAY prompt the user for a 1-4 rating after N exchanges. Implementation deferred to front-door work.
 - **Aggregation:** ratings are stored as append-only events with timestamp, account_id (or anonymous for chat playground), rating, comment. Operator-readable aggregation endpoint at `/admin/feedback-summary`.
-- **Iteration signal:** if the 7-day rolling distribution shifts toward 1-2 (bad/average) for any 2-week window, the operator MUST review root cause. No MUST-pivot trigger (operator chose iteration), but the rating data is the primary feedback channel replacing the falsification framework's "deprecate" clause.
+- **Iteration signal:** if the 7-day rolling distribution shifts toward 1-2 (bad/average) for any 2-week window, the operator MUST review root cause. The mechanical threshold is specified in Section 11.6. No MUST-pivot trigger (operator chose iteration), but the rating data is the primary feedback channel replacing the falsification framework's "deprecate" clause.
 
 ### 2.10 Donation link
 
@@ -342,7 +361,7 @@ Time to first successful API call (visit -> key issuance -> first successful `/v
 
 The gateway MUST instrument this from the front door's "Get API key" click through the first non-error completion.
 
-The metric MUST be reportable as a 7-day rolling distribution with median, p50, and p95.
+The metric MUST be reportable as a 7-day rolling distribution with median (p50) and p95.
 
 ### 2.12 Failure modes
 
@@ -644,6 +663,8 @@ Audit events MUST be append-only.
 
 Capacity signal events MUST be append-only.
 
+Append-only audit events in v0.2 are not required to be tamper-evident; hash-chain or Merkle-tree integrity SHOULD be considered for v0.3 if the attack surface grows.
+
 API key issuance records MUST be immutable once created.
 
 Revocation MUST be represented by a new revocation event or by a non-hot-path status table mutation that is explicitly outside usage event recording.
@@ -753,7 +774,7 @@ When the request is authenticated, rate-limit headers describe the account daily
 
 When the request is demo traffic, rate-limit headers describe the demo daily token quota.
 
-The gateway SHOULD include:
+The gateway MUST include:
 
 ```text
 X-Request-ID
@@ -762,6 +783,10 @@ X-Request-ID
 on all responses.
 
 The gateway MUST accept an inbound `X-Request-ID` only if it matches a safe bounded identifier pattern; otherwise it MUST generate its own.
+
+`X-RateLimit-Remaining` MUST reflect post-decision remaining quota after admission, rejection, or reservation.
+
+`X-RateLimit-Reset` MUST be a Unix timestamp for OpenAI SDK compatibility.
 
 ### 5.2 Error envelope
 
@@ -788,6 +813,8 @@ The `type` field MUST be one of:
 - `upstream_error`
 
 Streaming errors after headers are sent MUST be emitted as SSE data frames with an OpenAI-shaped error object, followed by `[DONE]`.
+
+The gateway MUST install panic recovery middleware that converts unexpected panics into HTTP 500 responses in this OpenAI-shaped error envelope.
 
 ### 5.3 `GET /v1/models`
 
@@ -869,14 +896,26 @@ Supported request fields:
 - `max_tokens`
 - `temperature`
 - `top_p`
+- `n`
 - `stream`
+- `stream_options`
 - `stop`
 - `presence_penalty`
 - `frequency_penalty`
 - `seed`
+- `user`
 - `response_format`
+- `logprobs`
 - `tools` syntactically only
 - `tool_choice` syntactically only
+
+`n` is accepted for OpenAI SDK compatibility and MUST be 1 in v1. Values greater than 1 MUST be rejected with HTTP 400, `type: "invalid_request_error"`, and `code: "n_must_be_1"`.
+
+`stream_options` MUST be accepted and forwarded to the provider. When `stream_options.include_usage = true`, the final SSE chunk MUST include a `usage` field so OpenAI SDK streaming token accounting works. `stream_options.include_usage = false` MUST be tolerated and MAY be ignored if the provider always emits usage.
+
+`user` is accepted as opaque diagnostics, stored in usage events, and MUST NOT be exposed in buyer-visible responses.
+
+`logprobs` is accepted syntactically. Behavior is model-dependent, and the provider MAY ignore it.
 
 Gateway request caps:
 
@@ -885,6 +924,16 @@ Gateway request caps:
 - Requests exceeding configured caps MUST receive `400` or be clamped only if the clamping behavior is documented. v1 SHOULD reject rather than silently clamp authenticated API requests.
 
 The gateway MUST match model IDs ASCII case-insensitively when interpreting coordinator availability.
+
+The gateway MUST strip these inbound buyer request headers before forwarding to the coordinator:
+
+- `X-MacProvider-Provider`
+- `X-MacProvider-Session`
+- any header starting with `X-MacProvider-` that is not on a documented allowlist
+
+Stripping MUST occur before authentication so a malicious buyer cannot influence provider selection by header injection.
+
+The gateway MAY emit an audit event when an inbound request carried these headers.
 
 The gateway MUST forward the request to the selected coordinator backend without adding buyer-visible provider preference headers.
 
@@ -898,11 +947,12 @@ Non-streaming success response:
 
 - MUST preserve OpenAI-compatible chat completion shape from the coordinator/provider.
 - MUST include rate-limit headers.
-- SHOULD include `X-Request-ID`.
+- MUST include `X-Request-ID`.
 
 Streaming success response:
 
 - MUST preserve OpenAI-compatible SSE chunks from coordinator/provider.
+- MUST frame each JSON chunk as `data: {json}\n\n` per OpenAI streaming behavior.
 - MUST pass through `data: [DONE]`.
 - MUST flush chunks promptly.
 - MUST cancel upstream request within 500 ms after buyer disconnect.
@@ -1020,13 +1070,26 @@ The endpoint MUST NOT expose:
 - operator identity.
 - endpoint URLs.
 
+Gateway-internal coordinator status bridge:
+
+- The gateway MUST source pool status for `/v1/status` by consuming the coordinator's internal `/poolz` endpoint at `http://127.0.0.1:{coordinator_provider_port}/poolz`, typically `:8444`.
+- `/poolz` requires the coordinator operator bearer key when `auth.operator_key` is configured.
+- This is an internal contract; the gateway MUST NOT proxy raw `/poolz` content to buyers.
+- The gateway MUST redact `provider_id`, `assigned_id`, `hostname`, endpoint URLs, per-provider RAM/CPU specs, and operator identity metadata.
+- The gateway MAY aggregate counts for ready, degraded, draining, unavailable providers, per-model slot totals, and degraded-state booleans.
+- Cache TTL for `/poolz` polling is 10 seconds.
+- If the coordinator's `/poolz` shape is insufficient for these aggregation rules, file a SPEC-002 v1.1.4 follow-up; do not extend SPEC-002 in this fix pass.
+
 ### 5.7 `POST /v1/feedback`
 
 `POST /v1/feedback` records authenticated feedback.
 
 Authentication:
 
-- Bearer token required.
+- Bearer token required for `request`, `session`, and `account` feedback.
+- Demo token required in `X-Demo-Token` for `playground` feedback.
+- The gateway SHOULD check bearer auth first, then demo token auth.
+- A request with neither valid bearer token nor valid demo token MUST return 401.
 
 Request shape:
 
@@ -1034,7 +1097,8 @@ Request shape:
 {
   "rating": 4,
   "comment": "optional free text",
-  "request_id": "optional prior request id"
+  "request_id": "optional prior request id",
+  "scope": "request"
 }
 ```
 
@@ -1045,6 +1109,21 @@ Validation:
 - `comment` MUST be length-limited by config, default 2000 bytes.
 - `request_id` MUST be optional.
 - `request_id` MUST be validated as a bounded safe identifier.
+- `scope` MUST be optional and, when present, one of `request`, `session`, `account`, or `playground`.
+- `scope` defaults to `request` when `request_id` is present.
+- `scope` defaults to `account` when `request_id` is absent.
+- `request`, `session`, and `account` feedback MUST require a valid `mp_*` bearer token.
+- `playground` feedback MUST require a valid demo token per Section 6.8.
+
+The `comment` field MUST be treated as untrusted input.
+
+Storage writes preserve raw UTF-8 bytes.
+
+Rendering surfaces, including dashboard, account page, and admin views, MUST escape HTML entities at output time.
+
+The gateway's JSON responses MUST NOT include pre-rendered HTML for feedback content.
+
+Comments MAY contain newlines; clients rendering as text MUST preserve them.
 
 Idempotency:
 
@@ -1065,6 +1144,7 @@ Storage:
 
 - Feedback MUST be append-only.
 - Duplicate idempotent submissions MAY return the original `feedback_id`.
+- Playground feedback events MUST store the demo token's IP hash and expire from queryable feedback summaries after 30 days.
 
 ### 5.8 OAuth callbacks
 
@@ -1075,6 +1155,9 @@ Storage:
 Callbacks MUST:
 
 - validate `state`.
+- generate `state` values with at least 128 bits from a CSPRNG.
+- bind `state` to the user's browser session.
+- reject callbacks whose `redirect_uri` does not exactly match an allowlisted value.
 - exchange provider code server-side.
 - create account on first successful identity.
 - enforce per-IP signup issuance limit.
@@ -1082,6 +1165,18 @@ Callbacks MUST:
 - show the full key once.
 - never log the full key.
 - never re-display the full key.
+
+The GitHub OAuth app MUST be configured with a strict callback URL allowlist containing only:
+
+```text
+https://api.streamvc.live/auth/github/callback
+```
+
+Local development MAY use `http://localhost:{port}/auth/github/callback` as a separate OAuth app with its own callback registration.
+
+The callback allowlist MUST be defined in `gateway.yaml` under `auth.oauth.callback_allowlist` and validated at gateway startup.
+
+An empty callback allowlist MUST cause startup failure.
 
 ### 5.9 `/account`
 
@@ -1119,6 +1214,22 @@ The account identity key MUST be stable across username changes.
 
 The account record SHOULD store a provider-specific immutable ID, not only username.
 
+The gateway MUST request only the `read:user` GitHub OAuth scope.
+
+The `user:email` scope MAY be requested if email magic link is deferred and verified email is needed from GitHub.
+
+Scopes for repository, organization, gist, or write access MUST NOT be requested.
+
+The OAuth app's registered scope list MUST match this minimum scope set.
+
+The GitHub OAuth app MUST be configured with a strict callback URL allowlist containing only `https://api.streamvc.live/auth/github/callback` for production.
+
+The gateway MUST reject callbacks whose `redirect_uri` does not exactly match an allowlisted value.
+
+Local development MUST use a separate OAuth app when using `http://localhost:{port}/auth/github/callback`.
+
+The allowlist MUST be configured at `auth.oauth.callback_allowlist`, and an empty list MUST fail gateway startup.
+
 ### 6.2 Email magic link
 
 Email magic link is secondary.
@@ -1149,7 +1260,11 @@ API keys MUST start with:
 mp_
 ```
 
-The remaining secret MUST be high entropy.
+The random portion of every API key MUST contain at least 256 bits of entropy drawn from a cryptographically secure pseudo-random number generator before base64url encoding.
+
+The encoded form MUST preserve at least 256 bits of effective entropy and MUST NOT truncate the random portion.
+
+The fixed `mp_` prefix is in addition to the random portion.
 
 The full key MUST be shown once at issuance.
 
@@ -1177,7 +1292,17 @@ The account MAY have multiple active keys.
 
 Regeneration MUST create a new key.
 
+Key regeneration MUST NOT affect usage history, quota state, or feedback history.
+
 Revocation MUST make the old key unusable.
+
+Revocation MUST take effect within 60 seconds across all gateway components.
+
+Storage-layer revocation MUST be observed by validation immediately on the next request.
+
+Any caches MUST invalidate within 60 seconds.
+
+Multi-instance deployments after the D1 storage migration MUST honor the same bound across all instances.
 
 Revocation MUST NOT reveal the full key.
 
@@ -1201,7 +1326,39 @@ Disabled signup does not disable existing keys unless a kill switch says so.
 
 The demo token MUST NOT be treated as an account key.
 
-The demo token MUST be bounded, signed, or otherwise validated so arbitrary callers cannot mint unlimited demo principals.
+Demo tokens MUST use HMAC-SHA256 signatures with an operator secret stored at `auth.demo.signing_secret` in `gateway.yaml`.
+
+Static shared demo secrets are forbidden.
+
+Token format:
+
+```text
+{base64url(payload)}.{base64url(hmac)}
+```
+
+Payload JSON MUST include:
+
+```json
+{"v":1,"ip":"1.2.3.4","iat":1710000000,"exp":1710086400}
+```
+
+For IPv6 clients, the `ip` value MAY be the /64 prefix instead of the full address.
+
+The HMAC MUST be computed over the payload bytes using `auth.demo.signing_secret`.
+
+The gateway MUST issue tokens from:
+
+```text
+POST /auth/demo-session
+```
+
+`POST /auth/demo-session` MUST be rate-limited per IP, default 10 requests per IP per hour.
+
+The token maximum TTL is 24 hours.
+
+Validation MUST check signature, expiry, and client IP or IPv6 /64 prefix match.
+
+The operator MAY rotate `auth.demo.signing_secret`; existing demo tokens invalidate immediately.
 
 The gateway MUST combine demo token identity with client IP for quota enforcement.
 
@@ -1234,13 +1391,42 @@ Quota decisions MAY use preflight estimates before forwarding.
 
 Final usage events MUST record whether token counts were provider-reported or gateway-estimated.
 
+Quota enforcement MUST use a reservation ledger to prevent concurrent over-spend.
+
+For each admitted request, the gateway:
+
+1. Reads the account's current daily reservation total via a transactional `SELECT ... FOR UPDATE` or storage-layer equivalent atomic primitive.
+2. If `current_reserved + max_tokens_for_request <= daily_quota`, inserts a reservation row keyed by `(account_id, request_id)` and commits.
+3. If the request completes, settles the reservation to actual `prompt_tokens + completion_tokens` and writes an immutable usage event.
+4. If the request fails, refunds or settles the reservation according to the streaming and upstream-error policy below.
+
+For SQLite v1, the storage-layer equivalent of `SELECT ... FOR UPDATE` MUST be `BEGIN IMMEDIATE` transactions around the reservation check and insert.
+
+Minor overshoot up to `max_tokens_per_request` is acceptable only in the event of system failure between reservation and settlement.
+
+Failed reservations MUST expire and be reclaimed by a reaper job within 24 hours.
+
+For streaming requests (`stream: true`), the gateway MUST reserve `max_tokens` or the configured per-request cap, whichever is smaller, before forwarding.
+
+On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider.
+
+On client disconnect, the gateway MUST cancel the upstream request and settle to actual tokens generated up to disconnect.
+
+On 502 or 504 from the provider, Section 17's refund matrix applies.
+
+On 503 where no provider was reached and the request was never forwarded, the reservation MUST be refunded in full.
+
+The guiding rule is that quota is debited only for work the provider actually performed.
+
 ### 7.3 Daily windows
 
 The default daily quota window MUST be UTC calendar day unless configured otherwise.
 
-`X-RateLimit-Reset` MUST identify the reset time as a Unix timestamp or RFC 3339 value consistently.
+`X-RateLimit-Reset` MUST identify the reset time as a Unix timestamp.
 
 The docs MUST explain reset behavior.
+
+Rate-limit headers MUST reflect post-decision quota state. For admitted requests this means after reservation; for rejected requests this means after the failed admission decision without subtracting rejected work.
 
 ### 7.4 Quota enforcement order
 
@@ -1323,6 +1509,15 @@ Buyers MUST NOT see:
 
 ### 8.3 Header scrubbing
 
+The gateway MUST strip inbound buyer-supplied coordinator routing headers before forwarding:
+
+- `X-MacProvider-Provider`
+- `X-MacProvider-Session`
+- `X-MacProvider-Pref`
+- any other `X-MacProvider-*` header not on a documented allowlist
+
+Buyers MUST NOT be able to influence provider selection through these headers.
+
 The current coordinator may emit route headers such as provider or route identifiers.
 
 The gateway MUST remove any upstream header that discloses provider identity before returning the response to buyers.
@@ -1390,7 +1585,15 @@ The implementation MUST document the chosen mechanism.
 
 Kill-switch activation latency MUST be measurable.
 
-Activation SHOULD take effect within 5 seconds.
+Activation MUST take effect within 5 seconds across all in-flight and new requests.
+
+Kill-switch state MUST persist across gateway restarts.
+
+Admin endpoint mutations MUST write the new state to `gateway.yaml` and update in-memory state.
+
+On gateway startup, kill-switch state MUST be read from `gateway.yaml`.
+
+SIGHUP MUST trigger re-read of `gateway.yaml`.
 
 ---
 
@@ -1413,6 +1616,20 @@ Tier 1 fires when any configured signal is true:
 - Bandwidth over 70% of VPS quota.
 - Any provider explicitly requests reduced load.
 - Projected monthly cost reaches 80% of `capacity.monthly_budget_usd`.
+
+Signal measurement MUST follow this table:
+
+| Signal | Source | Sample cadence | Aggregation window | Threshold | Hysteresis |
+|---|---|---:|---:|---|---|
+| CPU | `/proc/stat` on Linux or `host_processor_info` on macOS | 10s | rolling 4h mean | 70% | 5% below for de-escalation |
+| Memory | `/proc/meminfo` available_kb / total_kb | 10s | rolling 1h mean | 80% | 5% below |
+| Bandwidth | nginx access logs `bytes_sent` aggregated | 60s | rolling 24h | 70% of VPS quota | 10% below |
+| Provider feedback | `/admin/provider-feedback` POST events | event-driven | 7-day count | 1+ event | manual clear required |
+| Cost | sum of VPS, email, and storage projected against `capacity.monthly_budget_usd` | hourly | current month | 80% / 100% | 10% below |
+| Provider drops | coordinator `/poolz` `summary.total_providers` series | 60s | rolling 48h | 2+ drops | 48h since last drop |
+| Operator load | `/admin/operator-load` POST events | event-driven | 7-day | >70% of any week | manual clear |
+
+Every signal MUST emit an audit event on threshold crossing.
 
 Tier 1 action:
 
@@ -1466,6 +1683,16 @@ Choosing capacity expansion MAY reverse the active tier without requiring root-c
 
 The reversal MUST be recorded as an audit event.
 
+If capacity expansion raises `capacity.monthly_budget_usd`, the budget-cap mutation MUST emit an audit event with old value, new value, and actor.
+
+Automatic de-escalation: when all signals that triggered a tier stop firing for a configurable cooldown, default 1 hour, the monitoring job MUST de-escalate to the previous tier.
+
+De-escalation from Tier 3 to Tier 2 requires the additional condition that the capacity-expansion off-ramp was not taken; otherwise the system may return directly to Tier 0.
+
+Manual de-escalation by the operator is permitted via `/admin/capacity-tier` POST with operator key.
+
+Every de-escalation MUST emit an audit event with signal state and elapsed time below threshold.
+
 ### 10.6 Capacity signal storage
 
 Capacity signals MUST be recorded as append-only events.
@@ -1505,7 +1732,7 @@ A persistent dashboard or account widget is required for v1.
 
 The widget captures overall experience.
 
-The widget MAY call `POST /v1/feedback` with a `scope` or omitted `request_id`, or MAY use a thin account-specific feedback endpoint if implementation documents it.
+The widget MUST call `POST /v1/feedback` with `scope: "account"` explicitly, or MAY use a thin account-specific feedback endpoint if implementation documents it.
 
 The storage result MUST still be an append-only feedback event.
 
@@ -1535,9 +1762,45 @@ Operator-readable aggregation endpoint:
 
 This endpoint MUST NOT be exposed publicly at `api.streamvc.live` without operator auth.
 
+The endpoint MUST support `?window=7d` and `?window=14d`; missing `window` defaults to `7d`.
+
+Response shape:
+
+```json
+{
+  "window_start": "2026-05-21T00:00:00Z",
+  "window_end": "2026-05-28T00:00:00Z",
+  "rating_count": 42,
+  "mean": 3.1,
+  "distribution": {"1": 3, "2": 6, "3": 20, "4": 13},
+  "by_scope": {
+    "request": {"rating_count": 10, "mean": 3.0},
+    "session": {"rating_count": 5, "mean": 2.8},
+    "account": {"rating_count": 20, "mean": 3.2},
+    "playground": {"rating_count": 7, "mean": 3.0}
+  },
+  "trend": {
+    "7d_share_1_2": 0.21,
+    "14d_share_1_2": 0.18,
+    "delta_pct": 16.7
+  },
+  "comment_samples": [
+    {"rating": 2, "comment": "optional text", "scope": "request", "timestamp": "2026-05-28T00:00:00Z"}
+  ]
+}
+```
+
+A single account submitting multiple ratings with the same `request_id` counts only the most recent event for aggregation.
+
+Each distinct rating event has equal weight after idempotency.
+
+`comment_samples` MUST contain the 20 most recent non-empty comments at most.
+
 ### 11.6 Iteration signal
 
-If the 7-day rolling distribution shifts toward 1-2 for any 2-week window, the operator MUST review root cause.
+The operator MUST review root cause when the 7-day share of ratings 1-2 exceeds 40% in any window containing at least 20 distinct rating events.
+
+This trigger fires automatically via an `/admin/feedback-summary?window=7d` poll executed by the monitoring job at minimum hourly cadence.
 
 There is no MUST-pivot trigger.
 
@@ -1565,6 +1828,7 @@ The front door MUST be able to consume:
 
 - `GET /v1/models` for model list.
 - `GET /v1/status` for status panel.
+- `POST /auth/demo-session` to obtain HMAC-signed demo tokens.
 - `POST /v1/chat/completions` with `X-Demo-Token` for demo chat.
 - GitHub OAuth start URL for "Get API key".
 - `/account` or account API endpoints for usage and keys.
@@ -1701,7 +1965,19 @@ Handlers MUST depend on interfaces, not SQLite-specific types.
 
 ### 14.2 SQLite v1
 
+SQLite is the concrete v1 implementation.
+
+SPEC-006 v1 is a single-gateway-instance deployment when using SQLite.
+
+Multi-instance horizontal scaling requires migrating the `AuthStore`, `UsageStore`, and `FeedbackStore` interface implementations to a multi-writer-safe backend such as PostgreSQL, Cloudflare D1, or similar.
+
+Handler code MUST require zero changes for this migration.
+
 SQLite v1 MUST use WAL mode unless deployment evidence shows WAL is unsafe.
+
+v1 does not require SQLite encryption at rest because storage runs on an operator-only VPS.
+
+Migration to multi-tenant storage MUST require encryption at rest or an equivalent platform guarantee.
 
 SQLite v1 MUST define indexes for:
 
@@ -1730,11 +2006,28 @@ Required logical storage:
 - capacity_signal_events.
 - runtime_config or config_snapshot events if runtime toggles are storage-backed.
 
+The `audit_events` table MUST record:
+
+- every kill-switch toggle, including switch name, new state, and actor.
+- every quota configuration change, including account_id when applicable, old value, new value, and actor.
+- every key revocation and regeneration, including account_id, key_hash_prefix, and actor.
+- every account block and unblock.
+- every capacity tier transition, including signal state and audit-event chain.
+- every budget cap mutation.
+
+Events are append-only, immutable, and queryable through `/admin/audit-log` with operator-key authentication.
+
+v0.2 records append-only audit events; v0.3 SHOULD add hash-chain tamper evidence if attack surface grows.
+
 ### 14.4 Hot path writes
 
 Hot path writes MUST be append-only except for bounded reservation acquire/release mechanics.
 
 If concurrency reservations use updates, they MUST be isolated to reservation state and MUST be safe on crash through expiry.
+
+Quota reservations MUST use storage-backend-specific atomic semantics.
+
+SQLite v1 MUST acquire token quota reservations with `BEGIN IMMEDIATE` before reading daily reservation totals and inserting the reservation row.
 
 Usage event rows MUST NOT be updated after insertion.
 
@@ -1792,10 +2085,16 @@ auth:
   key_hash: hmac_sha256
   github_oauth_enabled: true
   email_magic_link_enabled: false
+  oauth:
+    callback_allowlist:
+      - https://api.streamvc.live/auth/github/callback
+  demo:
+    signing_secret: env:MACPROVIDER_DEMO_SIGNING_SECRET
 
 quotas:
   account_daily_tokens: 100000
   demo_daily_tokens_per_ip: 1000
+  demo_sessions_per_ip_per_hour: 10
   account_concurrency: 2
   signup_accounts_per_ip_per_day: 3
 
@@ -1877,6 +2176,8 @@ The gateway MUST expose or record:
 - capacity tier state.
 - monthly projected cost.
 
+Capacity metric collection MUST use the signal sources, cadences, aggregation windows, thresholds, hysteresis, and audit events defined in Section 10.2.
+
 ### 16.5 Abuse metrics
 
 The gateway MUST record:
@@ -1929,6 +2230,10 @@ The gateway MUST use:
 - `503` for known model with no provider available, demo paused, public API paused, coordinator unavailable, or no immediate slot.
 - `504` for provider timeout.
 
+405 Method Not Allowed MUST use `type: "invalid_request_error"` and `code: "method_not_allowed"`.
+
+413 Payload Too Large MUST use `type: "invalid_request_error"` and `code: "request_too_large"`.
+
 ### 17.2 Model unknown
 
 If a model is not in any provider's served or recently seen model list, return 404.
@@ -1961,6 +2266,8 @@ provider_failed
 
 If failure occurs after streaming headers are sent, emit an SSE error frame and `[DONE]`.
 
+Quota settlement MUST follow Section 17.7.
+
 ### 17.5 Provider timeout
 
 If provider exceeds timeout, return 504 before response headers are sent.
@@ -1971,15 +2278,33 @@ Code:
 provider_timeout
 ```
 
+Quota settlement MUST follow Section 17.7.
+
 ### 17.6 Streaming cancellation
 
 When the buyer disconnects from an SSE stream, the gateway MUST cancel the upstream coordinator request within 500 ms.
 
 The gateway MUST release concurrency reservation.
 
-The gateway MUST append a cancellation usage or audit event.
+The gateway MUST append a cancellation usage or audit event and settle quota according to Section 17.7.
 
-### 17.7 Kill-switch failure mode
+### 17.7 Quota refund and settlement matrix
+
+The gateway MUST reserve quota before forwarding as defined in Section 7.2 and settle reservations using this matrix:
+
+| Status | Completion tokens | Quota debited | Rationale |
+|---|---:|---|---|
+| 200 | as reported | prompt + completion | Successful work performed |
+| 503 | 0 | none | No provider was reached; request never forwarded |
+| 502 | 0 | prompt only | Provider was reached, processed prompt, then failed |
+| 502 | >0 partial stream | prompt + actual completion | Provider performed partial work |
+| 504 | 0 | prompt only | Provider was reached, processed prompt, then timed out |
+| 504 | >0 partial stream | prompt + actual completion | Provider performed partial work |
+| Client disconnect | >=0 | prompt + actual completion at disconnect | Provider performed work; buyer left early |
+
+The gateway MUST debit only work the provider actually performed.
+
+### 17.8 Kill-switch failure mode
 
 Kill-switch responses MUST be 503.
 
@@ -2320,6 +2645,276 @@ Verification:
 Pass condition:
 
 - Docs cover key issuance, models, chat, streaming, usage, errors, quota, caveats, and feedback.
+
+### AC-26: OAuth callback URL allowlist
+
+Precondition:
+
+- Gateway config contains only `https://api.streamvc.live/auth/github/callback` in `auth.oauth.callback_allowlist`.
+
+Action:
+
+1. POST or simulate a GitHub OAuth callback with a mismatched `redirect_uri`.
+2. Repeat with the exact allowlisted callback URL.
+
+Expected outcome:
+
+- The mismatched callback is rejected before account or key issuance.
+- The exact callback proceeds to normal state/code validation.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestOAuthCallbackAllowlist
+```
+
+### AC-27: token revocation latency
+
+Precondition:
+
+- One active `mp_*` API key exists and succeeds on `/v1/models`.
+
+Action:
+
+1. Revoke the key.
+2. Retry an authenticated request with the same key within 65 seconds.
+
+Expected outcome:
+
+- The request returns 403 for revoked key within the revocation latency bound.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestKeyRevocationLatency
+```
+
+### AC-28: kill-switch persistence
+
+Precondition:
+
+- Gateway is running with `kill_switch.all_public_api=false`.
+
+Action:
+
+1. Toggle `kill_switch.all_public_api=true` through the operator path.
+2. Restart the gateway.
+3. Send an authenticated chat request.
+
+Expected outcome:
+
+- The restarted gateway reads the persisted kill-switch state and returns 503 beta-paused.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestKillSwitchPersistsAcrossRestart
+```
+
+### AC-29: OAuth state CSRF defense
+
+Precondition:
+
+- A signup session has a stored OAuth `state` value generated by the gateway.
+
+Action:
+
+1. Simulate a callback with a forged or unbound `state`.
+2. Simulate a callback with the stored session-bound `state`.
+
+Expected outcome:
+
+- Forged state is rejected and no account is created.
+- Valid session-bound state reaches code exchange.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestOAuthStateCSRF
+```
+
+### AC-30: OAuth scope minimization
+
+Precondition:
+
+- GitHub OAuth callback simulation can include granted scope metadata.
+
+Action:
+
+1. Simulate a callback with allowed `read:user` scope.
+2. Simulate a callback with repository, organization, gist, or write scope.
+
+Expected outcome:
+
+- Allowed scope proceeds.
+- Elevated scope is rejected and audited.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestOAuthScopeMinimization
+```
+
+### AC-31: key rotation preserves history
+
+Precondition:
+
+- An account has usage events, quota state, and feedback history.
+
+Action:
+
+1. Regenerate the account's API key.
+2. Query `/v1/usage` and feedback summary.
+3. Use the old key and the new key.
+
+Expected outcome:
+
+- Usage, quota, and feedback history remain associated with the account.
+- Old key is invalid.
+- New key works.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestKeyRotationPreservesHistory
+```
+
+### AC-32: capacity tier de-escalation
+
+Precondition:
+
+- Tier 1 or Tier 2 is active because a deterministic capacity signal crossed threshold.
+
+Action:
+
+1. Move all triggering signals below hysteresis thresholds.
+2. Advance fake time past the configured cooldown.
+3. Run the monitoring job.
+
+Expected outcome:
+
+- The tier de-escalates to the previous tier and an audit event records signal state and elapsed time.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestCapacityTierDeescalation
+```
+
+### AC-33: feedback summary aggregation shape
+
+Precondition:
+
+- Feedback events exist across `request`, `session`, `account`, and `playground` scopes, including duplicate `request_id` ratings.
+
+Action:
+
+1. Call `/admin/feedback-summary?window=7d`.
+2. Call `/admin/feedback-summary?window=14d`.
+
+Expected outcome:
+
+- Responses match the Section 11.5 schema.
+- Duplicate request ratings count only the most recent event.
+- Comment samples contain at most 20 recent non-empty comments.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestFeedbackSummaryAggregation
+```
+
+### AC-34: provider-pinning header strip
+
+Precondition:
+
+- Coordinator has at least two providers and honors `X-MacProvider-Provider` or `X-MacProvider-Session` if received directly.
+
+Action:
+
+1. Send a gateway chat request containing `X-MacProvider-Provider`, `X-MacProvider-Session`, and `X-MacProvider-Pref`.
+2. Capture the forwarded coordinator request.
+
+Expected outcome:
+
+- The forwarded request contains none of the buyer-supplied provider-pinning headers.
+- Buyer-visible response contains no provider or route identifiers.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestProviderPinningHeadersStripped
+```
+
+### AC-35: demo token forgery rejected
+
+Precondition:
+
+- Gateway has `auth.demo.signing_secret` configured.
+
+Action:
+
+1. Obtain a valid token from `POST /auth/demo-session`.
+2. Mutate the payload or signature.
+3. Replay the valid token from a different IP or after expiry.
+
+Expected outcome:
+
+- The valid token works within its IP binding and TTL.
+- Forged, cross-IP, and expired tokens return 401.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestDemoTokenValidation
+```
+
+### AC-36: quota refund on 504 with zero completion tokens
+
+Precondition:
+
+- Account quota is small and coordinator can simulate provider timeout after prompt processing with zero completion tokens.
+
+Action:
+
+1. Send a request that reserves quota and receives 504 with zero completion tokens.
+2. Query `/v1/usage`.
+
+Expected outcome:
+
+- The reservation settles to prompt tokens only.
+- Completion tokens are not debited.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestQuotaSettlement504ZeroCompletion
+```
+
+### AC-37: streaming quota reservation and settlement
+
+Precondition:
+
+- Account quota is configured near the request limit and streaming provider usage can be simulated.
+
+Action:
+
+1. Start a streaming request with `max_tokens`.
+2. Verify quota reservation before first upstream byte.
+3. Complete the stream with provider-reported actual usage.
+4. Repeat with client disconnect after partial generation.
+
+Expected outcome:
+
+- Concurrent requests cannot oversubscribe the daily quota during the stream.
+- Successful stream settles to provider-reported usage.
+- Disconnect settles to prompt plus actual completion tokens generated before disconnect.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestStreamingQuotaReservationSettlement
+```
 
 ---
 

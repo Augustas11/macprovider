@@ -25,6 +25,43 @@
   </ul>
   <h2>Deviations</h2>
   <p>None. This run wrote the normative spec only and did not implement gateway code.</p>
+  <h2>Resolved in v0.2</h2>
+  <ul>
+    <li><strong>F-C2:</strong> Added strict OAuth callback allowlist config, startup validation, exact redirect URI rejection, and AC-26.</li>
+    <li><strong>F-M1:</strong> Added the locked-decisions provenance note to SPEC-006 Section 2 without reopening operator choices.</li>
+    <li><strong>F-M2:</strong> Added OpenAI-compatible <code>n</code>, <code>stream_options</code>, <code>user</code>, and <code>logprobs</code> request field behavior.</li>
+    <li><strong>F-M3:</strong> Limited GitHub OAuth scopes to <code>read:user</code> plus optional <code>user:email</code>.</li>
+    <li><strong>F-M4:</strong> Required 256 bits of CSPRNG entropy for API key random portions.</li>
+    <li><strong>F-M5:</strong> Bounded key revocation propagation to 60 seconds and added AC-27.</li>
+    <li><strong>F-M6:</strong> Defined atomic quota reservation ledger semantics with SQLite <code>BEGIN IMMEDIATE</code>.</li>
+    <li><strong>F-M7:</strong> Defined streaming reservation, settlement, disconnect, and upstream-error quota behavior.</li>
+    <li><strong>F-M8:</strong> Upgraded kill-switch latency to MUST, required persistence, and added AC-28.</li>
+    <li><strong>F-M9:</strong> Added capacity signal source, cadence, window, threshold, and hysteresis table.</li>
+    <li><strong>F-M10:</strong> Added automatic and manual capacity tier de-escalation rules.</li>
+    <li><strong>F-M11:</strong> Added feedback <code>scope</code> schema, defaults, and auth rules for bearer vs demo feedback.</li>
+    <li><strong>F-M12:</strong> Defined <code>/admin/feedback-summary</code> response shape and aggregation math.</li>
+    <li><strong>F-M13:</strong> Replaced vague feedback trend language with a 40% low-rating threshold over at least 20 events.</li>
+    <li><strong>F-M14:</strong> Locked demo tokens to HMAC-SHA256 with IP binding, expiry, issuer endpoint, and rate limit.</li>
+    <li><strong>F-M15:</strong> Added quota refund and settlement matrix for 200, 502, 503, 504, and disconnect outcomes.</li>
+    <li><strong>F-M16:</strong> Added OpenAI error <code>type</code> and <code>code</code> requirements for 405 and 413.</li>
+    <li><strong>F-M17:</strong> Expanded audit-event coverage for kill switches, quota changes, keys, account blocks, tiers, and budget caps.</li>
+    <li><strong>F-M18:</strong> Acknowledged v1 single-instance SQLite deployment and storage-interface migration path.</li>
+    <li><strong>F-M19:</strong> Defined internal coordinator <code>/poolz</code> bridge and buyer-safe redaction rules. If richer status is needed, file SPEC-002 v1.1.4 follow-up rather than editing SPEC-002 in this pass.</li>
+    <li><strong>F-M20:</strong> Required output-time escaping for feedback comments and no pre-rendered HTML in JSON.</li>
+    <li><strong>F-M21:</strong> Required stripping buyer-supplied provider-pinning headers before coordinator forwarding.</li>
+    <li><strong>F-m1:</strong> Made <code>X-Request-ID</code> mandatory on all responses.</li>
+    <li><strong>F-m2:</strong> Added literal donations exclusion to v1 out-of-scope list.</li>
+    <li><strong>F-m3 / F-m2-7:</strong> Stated v1 SQLite does not require encryption at rest and multi-tenant storage must revisit it.</li>
+    <li><strong>F-m4 / F-m2-8:</strong> Deferred audit tamper-evidence to v0.3 with rationale.</li>
+    <li><strong>F-m5:</strong> Required budget cap changes to emit audit events with old/new values.</li>
+    <li><strong>F-m2-1:</strong> Normalized north-star reporting to median (p50) and p95.</li>
+    <li><strong>F-m2-2 / F-m2-3:</strong> Locked rate-limit headers to Unix reset timestamp and post-decision remaining quota.</li>
+    <li><strong>F-m2-4:</strong> Required OAuth state to use at least 128 bits from CSPRNG and bind to session.</li>
+    <li><strong>F-m2-5:</strong> Required key regeneration to preserve usage, quota, and feedback history.</li>
+    <li><strong>F-m2-6:</strong> Required panic recovery middleware returning the OpenAI error envelope.</li>
+    <li><strong>F-m2-9:</strong> Made SSE <code>data: {json}\n\n</code> framing explicit.</li>
+    <li><strong>F-M15 acceptance gap:</strong> Added AC-26 through AC-37 for the new security, lifecycle, feedback, capacity, header-stripping, demo-token, and quota-settlement cases.</li>
+  </ul>
   <h2>Open questions for implementation</h2>
   <ul>
     <li>Whether v1 email magic link has a low enough operator cost to ship alongside GitHub OAuth.</li>
