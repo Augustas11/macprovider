@@ -107,12 +107,19 @@ else
   exit 2
 fi
 
-log "step 7/7: verifying coordinator connection"
-log "  searching log for 'hello_ack' (wait up to 30s)..."
+log "step 7/7: verifying coordinator link via server-side aggregation"
+# The phase3-binary acts on hello_ack silently (no stdout log line), so a
+# local-log grep is unreliable. The right signal is server-side: if our
+# model appears in the coordinator's aggregated /v1/models, the WebSocket
+# link is provably alive — the coordinator only includes models from
+# currently-connected providers in that list.
+COORD_HOST=$(echo "$COORDINATOR_URL" | sed -E 's|^wss?://([^/]+)/.*|\1|')
+COORD_MODELS_URL="https://$COORD_HOST/v1/models"
 deadline=$(( $(date +%s) + 30 ))
 linked=0
 while [ $(date +%s) -lt $deadline ]; do
-  if grep -q "hello_ack\|coordinator hello accepted" "$LOGFILE" 2>/dev/null; then
+  coord_models=$(curl -sS --max-time 5 "$COORD_MODELS_URL" 2>/dev/null || true)
+  if echo "$coord_models" | grep -q "\"$MODEL\""; then
     linked=1
     break
   fi
@@ -123,18 +130,22 @@ echo
 
 if [ $linked -eq 1 ]; then
   log "  COORDINATOR LINK ESTABLISHED"
-  grep -E "hello_ack|coordinator" "$LOGFILE" | head -3 | sed 's/^/    /'
+  log "  $COORD_MODELS_URL shows our model:"
+  echo "$coord_models" | python3 -m json.tool 2>/dev/null | head -15 | sed 's/^/    /'
   echo
-  log "Done. m4.streamvc.live serves phase3-binary, and the same binary now"
+  log "Done. m1.streamvc.live serves phase3-binary, and the same binary now"
   log "registers with the production coordinator as provider_id=$PROVIDER_ID."
   log "  binary PID: $BINARY_PID  (kept in $PIDFILE)"
   log "  view logs:  tail -f $LOGFILE"
-  log "Operator can verify pool registration via:"
-  log "  curl -H 'Authorization: Bearer \$OP_KEY' https://coordinator.streamvc.live/poolz"
 else
   log "  WARNING: coordinator link not confirmed within 30s"
-  log "  Binary is serving buyer traffic correctly, but the coordinator"
-  log "  WebSocket may have failed to connect. Check log:"
-  log "  tail -50 $LOGFILE"
+  log "  Binary is serving buyer traffic correctly (step 6 passed),"
+  log "  but our model_id did not appear in $COORD_MODELS_URL."
+  log "  Possible causes: WS dial failed (firewall/TLS), provider_id"
+  log "  '$PROVIDER_ID' not enumerated in coordinator config, or first"
+  log "  heartbeat hasn't landed yet."
+  log "  Check binary log: tail -50 $LOGFILE"
+  log "  Operator can check coordinator side via:"
+  log "    curl -H 'Authorization: Bearer \$OP_KEY' https://$COORD_HOST/poolz"
   exit 3
 fi
