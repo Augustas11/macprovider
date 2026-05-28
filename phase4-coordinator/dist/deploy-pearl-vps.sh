@@ -60,11 +60,11 @@ $SSH 'set -e
   install -d -o macprovider -g macprovider -m 0750 /var/log/macprovider
 '
 
-log "step 4/9: upload binary + config"
+log "step 4/9: upload binary + config + nginx site"
 $SCP "$BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-linux-amd64"
 $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:/tmp/coordinator.yaml"
 $SCP "$SERVICE" "$VPS_USER@$VPS_HOST:/tmp/macprovider-coordinator.service"
-$SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-coordinator.conf"
+$SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-coordinator-full.conf"
 
 $SSH "set -e
   install -o macprovider -g macprovider -m 0755 /tmp/coordinator-linux-amd64 /opt/macprovider/coordinator
@@ -73,35 +73,84 @@ $SSH "set -e
   rm -f /tmp/coordinator-linux-amd64 /tmp/coordinator.yaml /tmp/macprovider-coordinator.service
 "
 
-log "step 5/9: install nginx site for $DOMAIN"
+# nginx + Let's Encrypt strategy:
+#   step 5  -> install a port-80-only STUB nginx site (ACME challenge + redirect).
+#              No port 443 block, no ssl_certificate references, nginx -t passes.
+#   step 6  -> certbot certonly --webroot (skipped if cert already present).
+#   step 6b -> install the full TLS site, uncomment the ssl_certificate lines
+#              that point at /etc/letsencrypt/live/<DOMAIN>/, reload.
+#
+# This sequence is idempotent and never mutates the user-authored nginx site
+# config in place — earlier versions used in-place sed surgery on the full
+# config and corrupted brace balance on first run.
+
+log "step 5/9: install port-80 stub nginx site (for ACME challenge)"
 $SSH "set -e
-  install -o root -g root -m 0644 /tmp/nginx-coordinator.conf /etc/nginx/sites-available/$DOMAIN
-  rm -f /tmp/nginx-coordinator.conf
-  # Comment out the ssl_certificate lines for the first nginx -t — certbot adds them.
+  install -d -o www-data -g www-data -m 0755 /var/www/html
+  cat > /etc/nginx/sites-available/$DOMAIN <<'NGINX_STUB'
+# Stub site — replaced by the full TLS config after Let's Encrypt cert
+# is obtained. Only handles HTTP-01 challenge + redirect to https.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN;
+    location /.well-known/acme-challenge/ {
+        root /var/www/html;
+    }
+    location / {
+        return 301 https://\$host\$request_uri;
+    }
+}
+NGINX_STUB
   ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
-  # Drop a no-tls placeholder so nginx -t passes before certbot runs.
-  sed -i 's|listen 443 ssl http2;|listen 443 ssl http2;\n    # certbot will fill ssl_certificate below|' /etc/nginx/sites-available/$DOMAIN || true
+  nginx -t
+  systemctl reload nginx
 "
 
-# certbot --nginx mode is the cleanest: it edits the site config in place
-# to add ssl_certificate directives. We pass --redirect to ensure 80->443.
-log "step 6/9: obtain Let's Encrypt cert via certbot --nginx"
+log "step 6/9: obtain Let's Encrypt cert via certbot webroot (idempotent)"
 $SSH "set -e
-  # certbot needs a working port-80 server block for $DOMAIN. The site
-  # config we just installed provides it. But the 443 block references
-  # cert files that don't exist yet; comment them out so nginx -t passes.
-  if ! nginx -t 2>&1 | grep -q 'syntax is ok'; then
-    # Temporarily strip the entire 443 block so nginx -t passes.
-    cp /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-available/$DOMAIN.full
-    sed -i '/^server {\$/,/^}\$/{ /listen 443/,/^}\$/d }' /etc/nginx/sites-available/$DOMAIN || true
+  if [ -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]; then
+    echo '  cert already present at /etc/letsencrypt/live/$DOMAIN/ — skipping issuance'
+  else
+    certbot certonly --webroot -w /var/www/html -d $DOMAIN \\
+      --non-interactive --agree-tos --email $EMAIL
   fi
-  nginx -t
-  systemctl reload nginx
-  certbot --nginx -d $DOMAIN --non-interactive --agree-tos --email $EMAIL --redirect
-  # Restore full config (certbot will have re-added the 443 block with cert paths)
+"
+
+log "step 6b/9: install full TLS nginx site"
+$SSH "set -e
+  install -o root -g root -m 0644 /tmp/nginx-coordinator-full.conf /etc/nginx/sites-available/$DOMAIN
+  rm -f /tmp/nginx-coordinator-full.conf
+  # The full site config ships with ssl_certificate lines commented; the
+  # cert exists now so uncomment them. (Idempotent: re-running this on an
+  # already-uncommented file is a no-op.)
+  sed -i 's|# ssl_certificate /etc/letsencrypt|ssl_certificate /etc/letsencrypt|g' /etc/nginx/sites-available/$DOMAIN
+  sed -i 's|# ssl_certificate_key /etc/letsencrypt|ssl_certificate_key /etc/letsencrypt|g' /etc/nginx/sites-available/$DOMAIN
+  # Clean up the .full backup file from the broken v1 deploy if present.
+  rm -f /etc/nginx/sites-available/$DOMAIN.full
   nginx -t
   systemctl reload nginx
 "
+
+log "step 6c/9: pre-restart safeguard (check for connected providers)"
+# Coordinator restart triggers SPEC-001 § 6.5 drain on all connected
+# providers. v1.1.3+ phase3-binary handles this gracefully (drops WS,
+# keeps serving direct traffic, reconnects after grace period). Older
+# phase3-binary (v1.1.2 and earlier) exits the process on drain — which
+# kills tunnel-direct buyer traffic. Until you can guarantee every
+# connected provider is on v1.1.3+, refuse to auto-restart with
+# connected providers unless the operator passes --force-restart.
+CONNECTED_COUNT=$(curl -fsS --max-time 5 "https://$DOMAIN/healthz" 2>/dev/null \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('pool_size', 0))" 2>/dev/null \
+  || echo 0)
+if [ "${CONNECTED_COUNT:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
+  log "  REFUSING TO RESTART — $CONNECTED_COUNT provider(s) currently connected."
+  log "  Restart triggers drain; phase3-binary <= v1.1.2 exits the process"
+  log "  on drain and breaks tunnel-direct buyer traffic."
+  log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
+  exit 4
+fi
+log "  ok: $CONNECTED_COUNT connected providers (or FORCE_RESTART=1 set)"
 
 log "step 7/9: enable + start coordinator service"
 $SSH 'set -e

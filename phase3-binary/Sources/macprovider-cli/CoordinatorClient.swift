@@ -49,6 +49,16 @@ actor CoordinatorClient {
                 backoffSeconds = 1
             } catch is CancellationError {
                 return
+            } catch is CoordinatorDrainComplete {
+                // Coordinator asked us to drain (likely it is restarting).
+                // We acknowledged with drain_status; the WS is already closed.
+                // Wait a grace period so the coordinator has time to come back
+                // before we try to reconnect, then loop.
+                heartbeatTask?.cancel()
+                webSocket?.cancel(with: .goingAway, reason: nil)
+                webSocket = nil
+                try? await Task.sleep(nanoseconds: 15 * 1_000_000_000)
+                backoffSeconds = 1
             } catch {
                 heartbeatTask?.cancel()
                 webSocket?.cancel(with: .goingAway, reason: nil)
@@ -101,7 +111,12 @@ actor CoordinatorClient {
         case "preflight":
             try await handlePreflight(dict)
         case "drain":
-            await drainAndExit(reason: "coordinator drain requested")
+            // SPEC-001 v1.1.3: coordinator drain stops registration only.
+            // The local buyer HTTP server keeps serving. Throwing
+            // CoordinatorDrainComplete unwinds connectAndRun and signals
+            // the reconnect loop to wait a grace period before reconnecting.
+            try await drainFromCoordinator(reason: "coordinator drain requested")
+            throw CoordinatorDrainComplete()
         case "warm_up":
             try await sendStateUpdate(state: .degraded, reason: "coordinator warm_up requested")
             try await sendStateUpdate(state: .ready, reason: "warm_up complete")
@@ -169,6 +184,8 @@ actor CoordinatorClient {
     }
 
     func drainAndExit(reason: String, exitCode: Int32 = 0) async {
+        // Used by SIGTERM signal handler — drain in-flight buyer requests,
+        // notify coordinator, then exit the whole process.
         try? await sendStateUpdate(state: .draining, reason: reason)
         try? await sendDrainStatus(phase: "starting")
         try? await sendDrainStatus(phase: "in_progress")
@@ -176,6 +193,23 @@ actor CoordinatorClient {
         try? await sendDrainStatus(phase: "complete")
         webSocket?.cancel(with: .goingAway, reason: nil)
         Darwin.exit(exitCode)
+    }
+
+    /// Handle a coordinator-initiated drain (typically because the coordinator
+    /// is shutting down or restarting). Sends the drain_status sequence,
+    /// closes the WebSocket, but does NOT exit the process — the local buyer
+    /// HTTP server keeps serving direct traffic. The reconnect loop will
+    /// attempt to rejoin the coordinator after a grace period.
+    /// SPEC-001 v1.1.3 § 6.5 distinguishes this from `drainAndExit`.
+    func drainFromCoordinator(reason: String) async throws {
+        try? await sendStateUpdate(state: .draining, reason: reason)
+        try? await sendDrainStatus(phase: "starting")
+        try? await sendDrainStatus(phase: "in_progress")
+        _ = await providerStatus.waitUntilDrained(timeoutSeconds: drainTimeoutSeconds)
+        try? await sendDrainStatus(phase: "complete")
+        webSocket?.cancel(with: .goingAway, reason: nil)
+        heartbeatTask?.cancel()
+        heartbeatTask = nil
     }
 
     private func sendHeartbeat() async throws {
@@ -269,3 +303,7 @@ actor CoordinatorClient {
         return value
     }
 }
+
+/// Signals "coordinator asked us to drain, handle complete, reconnect later
+/// after a grace period." Caught by runReconnectLoop.
+struct CoordinatorDrainComplete: Error {}

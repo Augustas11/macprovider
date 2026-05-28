@@ -1,12 +1,15 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.1.2 (2026-05-28, normative provider_id clarification — see Decision log Entry 13)
-**Revision:** v1.1.1 addressed audit findings from `specs/SPEC-001-audit.md`. v1.1.2 clarifies provider_id semantics to match SPEC-002 v1.0.4 § 7.1.
+**Version:** 1.1.3 (2026-05-28, normative drain semantics — see Decision log Entry 15)
+**Revision:** v1.1.2 added stable provider_id normative text. v1.1.3 clarifies the semantics of a coordinator-initiated drain.
 
-**Change log since v1.1.1:**
+**Change log since v1.1.2:**
+- § 6.5 coordinator `drain` message: now explicitly normative — drain stops coordinator registration only and MUST NOT terminate the provider's local buyer HTTP server. The provider continues serving direct-to-tunnel buyer traffic across coordinator restarts.
+- Implementation fix in phase3-binary v1.1.3: `drainAndExit()` (full process shutdown, used by local SIGTERM) is split from `drainFromCoordinator()` (drop WS, keep HTTP server, reconnect after grace). Bug discovered 2026-05-28 when a coordinator restart drained all connected providers, killing their tunnel-direct buyer traffic.
+
+**Change log v1.1.2:**
 - § 6.5 hello message: `provider_id` field now explicitly normative — it is the operator-issued stable identifier from SPEC-002's static `config.providers[]` map. Example value updated; misleading "uuid-of-this-instance" placeholder removed.
 - § 6.5 added normative paragraph immediately after the hello example explaining the relationship to SPEC-002 Finding F-2 and what happens on mismatch (WS close 4002 `unknown_provider_id`).
-- No FR changes. v1.1.2 is documentation-only — the phase3-binary implementation already gained config/env/CLI support for stable provider_id in the same patch cycle.
 
 ---
 
@@ -969,16 +972,39 @@ Example rejection:
 }
 ```
 
-#### Drain signal (C->P) — coordinator tells provider to stop
+#### Drain signal (C->P) — coordinator tells provider to stop registering
 ```json
 {
   "type": "drain"
 }
 ```
 
-Provider responds by entering the `draining` state (same as SIGTERM
-behavior in FR-12), sends `drain_status` updates, then closes the
-WebSocket cleanly after all in-flight requests complete.
+**Normative (v1.1.3 clarification).** The coordinator-initiated drain
+stops *coordinator registration only*. On receipt the provider MUST:
+
+1. Send `state_update` with `state: "draining"`.
+2. Send the `drain_status` sequence: `starting` → `in_progress` →
+   `complete` (matching the SIGTERM path in FR-12, since the
+   coordinator's accounting is symmetric).
+3. Wait for in-flight coordinator-routed requests to complete (subject
+   to `drain_timeout_s`).
+4. Close the WebSocket cleanly (close code 1000).
+5. Attempt to reconnect to the coordinator after a grace period
+   (recommended: 10–15 s, longer than typical coordinator restart).
+
+The provider MUST NOT terminate its local buyer HTTP server in
+response to this message. The local server continues to serve
+direct-to-tunnel buyer traffic (e.g., `https://m4.streamvc.live/...`)
+across the coordinator's drain/restart cycle. Coordinator drain is
+about pool membership, not provider lifetime.
+
+The local SIGTERM drain (FR-12) is the only path that ends the
+provider process. Implementations MUST keep these two drain paths
+distinct — conflating them (i.e., calling `exit()` on coordinator
+drain) breaks tunnel-direct buyer traffic during every coordinator
+restart and is a critical bug. This was discovered the hard way in
+phase3-binary v1.1.2 during the first coordinator redeploy on
+2026-05-28 (see Decision log Entry 15).
 
 #### Warm-up command (C->P)
 ```json
