@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-augstar/macprovider-poc}"
+GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.streamvc.live"
 INSTALL_DIR="$HOME/macprovider"
@@ -316,7 +316,8 @@ write_checksum_public_key() {
   fi
   cat <<'EOF'
 -----BEGIN PUBLIC KEY-----
-REPLACE_WITH_MACPROVIDER_RELEASE_SIGNING_PUBLIC_KEY
+MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwwd0Vzj35OP8DlZU+0lUa8vI9gHK
+09J48LDizWScsH6rutnZLkKnGQ4X5Q8lT9L5mglF8Ba0DDoUXKrFfSAX4Q==
 -----END PUBLIC KEY-----
 EOF
 }
