@@ -597,7 +597,11 @@ wait_for_local_model() {
   next_progress=$(( start_ts + 30 ))
   port_seen=0
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    models_json="$(curl -sS --max-time 3 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
+    raw_models_json="$(curl -sS --max-time 3 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
+    # The Swift JSON encoder emits forward-slashes as \/ (legal per RFC 8259
+    # but cosmetically ugly). Normalize so grep -Fq "$model" matches whether
+    # the encoder emits / or \/.
+    models_json="$(printf "%s" "$raw_models_json" | sed 's|\\/|/|g')"
     if [ -n "$models_json" ] && [ "$port_seen" -eq 0 ]; then
       port_seen=1
       elapsed=$(( $(date +%s) - start_ts ))
@@ -685,7 +689,7 @@ main() {
   install_plist "$model" "$provider_id" "$coordinator_url"
   start_manual_service "$model" "$provider_id" "$coordinator_url"
 
-  log "Waiting up to 60s for local /v1/models."
+  log "Waiting up to 5 minutes for local /v1/models (first run can be slow if MLX still needs to download weights)."
   if ! wait_for_local_model "$model"; then
     log "Local self-test failed. Check logs: tail -f $LOG_DIR/macprovider.err.log"
     exit 6
