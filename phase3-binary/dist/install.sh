@@ -120,8 +120,9 @@ ensure_port_free() {
   fi
   holding_cmd="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1 " (pid " $2 ")"}')"
   log "ERROR: port $PORT is already in use by ${holding_cmd:-another process}."
-  log "Either stop that process, or set MACPROVIDER_PORT to a free port and re-run:"
-  log "  MACPROVIDER_PORT=18080 curl -fsSL https://get.streamvc.live/install.sh | bash"
+  log "Either stop that process, or set MACPROVIDER_PORT to a free port and re-run."
+  log "Note: env var must be on the bash side of the pipe, not the curl side:"
+  log "  curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_PORT=18080 bash"
   die 6 "port $PORT busy; macprovider-cli cannot bind"
 }
 
@@ -586,12 +587,35 @@ start_manual_service() {
 
 wait_for_local_model() {
   model="$1"
-  deadline=$(( $(date +%s) + 60 ))
+  # First install can take several minutes if MLX has to download the model
+  # (~2 GB) from Hugging Face. Cached installs still pay 30-60s for Metal
+  # kernel JIT + model weight load on first run. 300s covers both cases on
+  # typical residential bandwidth; we log progress every 30s so the user
+  # knows the script is alive.
+  start_ts="$(date +%s)"
+  deadline=$(( start_ts + 300 ))
+  next_progress=$(( start_ts + 30 ))
+  port_seen=0
   while [ "$(date +%s)" -lt "$deadline" ]; do
     models_json="$(curl -sS --max-time 3 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
+    if [ -n "$models_json" ] && [ "$port_seen" -eq 0 ]; then
+      port_seen=1
+      elapsed=$(( $(date +%s) - start_ts ))
+      log "Port ${PORT} is listening (after ${elapsed}s). Waiting for model load..."
+    fi
     if printf "%s" "$models_json" | grep -q '"owned_by"[[:space:]]*:[[:space:]]*"macprovider"' &&
        printf "%s" "$models_json" | grep -Fq "$model"; then
       return 0
+    fi
+    now="$(date +%s)"
+    if [ "$now" -ge "$next_progress" ]; then
+      elapsed=$(( now - start_ts ))
+      if [ "$port_seen" -eq 0 ]; then
+        log "Still waiting for macprovider-cli to bind port ${PORT} (${elapsed}s elapsed)..."
+      else
+        log "Model still loading (${elapsed}s elapsed; first run may download ~2 GB from Hugging Face)..."
+      fi
+      next_progress=$(( now + 30 ))
     fi
     sleep 2
   done
