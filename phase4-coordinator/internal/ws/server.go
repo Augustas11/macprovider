@@ -264,6 +264,9 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 }
 
 func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
+	// Log every WS close at warn level so silent failures (like the v1.1.2
+	// deploy's invalid_token rejection of M4/M1) are visible in the journal.
+	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
 	_ = wsutil.WriteServerMessage(conn, gobwas.OpClose, gobwas.NewCloseFrameBody(code, reason))
 }
 

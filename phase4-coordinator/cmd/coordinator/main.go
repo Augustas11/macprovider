@@ -37,7 +37,14 @@ func main() {
 		os.Exit(1)
 	}
 	defer tokenStore.Close()
-	wsServer := providerws.NewServer(cfg, registry, logger, providerws.WithTokenValidator(tokenStore))
+	wsOpts := []providerws.Option{}
+	if cfg.Auth.RequireProviderTokens {
+		wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
+		logger.Info().Msg("provider WS token validation REQUIRED (auth.require_provider_tokens=true)")
+	} else {
+		logger.Info().Msg("provider WS token validation NOT required (auth.require_provider_tokens=false); pinned providers connect by provider_id match only")
+	}
+	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	buyerServer := buyer.NewServer(
 		registry,
 		logger,
