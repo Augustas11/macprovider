@@ -1,7 +1,12 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.1.2 (2026-05-28, round-2 audit closing fixes)
+**Version:** 1.1.3 (2026-05-28, spec catch-up to coordinator hotfix)
 **Depends on:** SPEC-001 v1.2.1 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.1.3:**
+- § 7.1 / FR-P12: added `auth.require_provider_tokens` provider-authentication mode. Default `false` preserves the v1.1.2 cooperative pinned-provider trust pool; `true` requires pinned providers to present a valid bearer token and rejects missing or invalid tokens with WS close 4005 `invalid_token`.
+- § 6 / § 7.1 close-code semantics: coordinator-initiated provider WebSocket closes MUST be logged at WARN level with close code and reason so production rejections are observable in coordinator logs.
+- § 11 audit category I: added the "always-non-nil gate" anti-pattern from Decision log Entry 19 so future audits check both configured and unconfigured branches for production gates.
 
 **Change log v1.1.2:**
 - § 7.1 FR-P2: validation wording changed from "validates all fields" to "validates all REQUIRED fields"; absent `endpoint_url` normalized to null before § 3 mode resolution (CRITICAL-2.1 fix).
@@ -276,10 +281,11 @@ therefore accepts the WebSocket upgrade with or without an
 `Authorization` header in v1. After upgrade, it awaits the `hello`
 message; trust is enforced by `provider_id` lookup in FR-P12.
 
-If an `Authorization: Bearer <token>` header IS present, the coordinator
-validates it against the token store (FR-P12 path B). This forward-
-compatibility lets the binary opt into auth once SPEC-001 is amended to
-mandate it, without requiring a coordinator change.
+When `auth.require_provider_tokens=true`, pinned providers must present
+a valid `Authorization: Bearer <token>` header; missing, malformed,
+invalid, or revoked tokens close the WebSocket with 4005
+`invalid_token` (FR-P12). When the flag is false, bearer tokens are not
+required for pinned providers.
 
 Authenticated buyer-API and operator endpoints (sections 7.2, 7.4) still
 require their own auth headers; this exemption is provider-side WebSocket
@@ -455,28 +461,42 @@ effects). The `recovery-probe-` prefix is observable only in the
 provider's own logs; the binary still treats it as a normal preflight
 under SPEC-001 § 6.5.
 
-**FR-P12. Identify provider; optional bearer-token check.**
+**FR-P12. Identify provider; configurable bearer-token check.**
 
-Two paths, depending on whether the WebSocket upgrade carried an
-`Authorization: Bearer <token>` header.
+The coordinator supports two provider authentication modes, selected by
+config field `auth.require_provider_tokens` (default: `false`).
 
-**Path A — no Authorization header (v1 default; SPEC-001-strict binary):**
-The coordinator accepts the upgrade and waits for `hello`. On `hello`,
-the coordinator looks up `provider_id` in its static config map. If
-found, the provider is admitted to the pool. If not found, the
-coordinator closes the WebSocket with application close code `4002`
-and reason `"unknown_provider_id: <id>"` (see "Provider rejection via
-WebSocket close codes" above).
+When `auth.require_provider_tokens` is `false`:
+- Pinned providers (those whose `provider_id` matches an entry in
+  `config.providers[]`, see § 7.1 F-2) are admitted on `provider_id`
+  match alone. The bearer token field in the WebSocket handshake is
+  ignored.
+- Provisional providers follow the provisional admission path in
+  FR-P16 and § 7.5.
 
-**Path B — Authorization header present (forward-compatible):**
-Coordinator computes SHA-256 of the bearer token, looks up in
-`provider_tokens`. If found and not revoked, the upgrade proceeds and
-the same `hello`/`provider_id` flow as Path A applies. If the token is
-invalid or revoked, the upgrade is rejected with HTTP 401 and
-`{"error":{"message":"Invalid or revoked provider token","code":"invalid_token"}}`.
+When `auth.require_provider_tokens` is `true`:
+- Pinned providers MUST present a bearer token in the WebSocket
+  handshake matching an operator-issued token registered in the
+  coordinator token store. Mismatch or absence MUST result in WS close
+  4005 `invalid_token`.
+- Provisional providers continue to be admitted without a token. If a
+  provisional provider presents a malformed or invalid bearer header,
+  the coordinator MAY reject it before hello parsing because the tier is
+  not known until after hello.
 
 Tokens (when used) are 32-byte random (64 hex chars), stored as SHA-256
 hashes (no plaintext). See Section 7.3.
+
+The default `false` reflects the v1.1.2 tier-1 cooperative trust pool
+(per § 2): pinned providers are trusted by `provider_id` alone, and the
+token store exists for opt-in hardening. Operators who add a token store
+SHOULD flip `require_provider_tokens` to `true` and re-issue tokens to
+all pinned providers as one deployment step.
+
+**Implementation invariant:** every code path that depends on the token
+validator being configured MUST also handle the case where it is not.
+Failure to do so caused the 2026-05-28 production outage cited in audit
+category I (see § 11).
 
 **v1 security note.** With optional auth, anyone who learns a valid
 `provider_id` and the coordinator's WebSocket URL could attempt to
@@ -646,7 +666,7 @@ binary already handles WebSocket close per SPEC-001 FR-13.
 | `4002` | `unknown_provider_id` | `provider_id` not in coordinator config map | `"unknown_provider_id: <id>"` |
 | `4003` | `tier_unsupported` | `tier != 1` | `"tier_unsupported: tier <n> not supported"` |
 | `4004` | `version_unsupported` | `version != 1` | `"version_unsupported: protocol version <n>"` |
-| `4005` | `invalid_token` | Authorization header present but token invalid/revoked | `"invalid_token"` |
+| `4005` | `invalid_token` | Token validation is required and bearer token is absent, malformed, invalid, or revoked | `"invalid_token"` |
 | `4429` | `pool_full` | Coordinator at configured max provider count | `"pool_full"` |
 | `4007` | `provisional_pool_full` | Provisional provider connects when provisional pool at capacity | `"provisional_pool_full: max <N> provisional providers reached"` |
 | `4008` | `provisional_rate_limited` | Provisional admission rate exceeded | `"provisional_rate_limited: max <N> admissions per hour"` |
@@ -668,6 +688,22 @@ rate limits in FR-P16) or rejected with 4009 if in the
 Codes are mnemonic (4000-range maps to "rejected") and the reason text
 provides operator-visible detail. Provider binaries log the close code
 and reason per SPEC-001 standard logging; no special parsing required.
+
+**WS-close logging requirement (v1.1.3).** The coordinator MUST emit a
+WARN-level log entry for every provider WebSocket close it initiates,
+including the numeric close code (for example `4005`) and a short
+human-readable reason string (for example `"invalid_token"`,
+`"drain_complete"`, or `"heartbeat_timeout"`). This requirement exists
+because silent close paths conceal production-breaking misconfiguration.
+A coordinator-initiated close is, by definition, a decision the
+coordinator made; it MUST be observable in the coordinator's own logs
+without correlating against external proxy logs.
+
+When known at close time, close logs SHOULD also include the provider's
+`provider_id` and remote address. The v1.1.3 hotfix implementation logs
+`close_code` and `reason`; passing provider and remote context into the
+shared close helper is a follow-up hardening item, not required for
+v1.1.3 spec conformance.
 
 ### Buyer-side
 
@@ -1311,6 +1347,40 @@ Provider                         Coordinator
    |                                  | FR-P10: remove from pool
 ```
 
+#### Provider authentication mode (v1.1.3)
+
+The coordinator supports two provider authentication modes, selected by
+the config field `auth.require_provider_tokens` (default: `false`).
+
+When `auth.require_provider_tokens` is `false`:
+- Pinned providers (those whose `provider_id` matches an entry in
+  `config.providers[]`, see § 7.1 F-2) are admitted on `provider_id`
+  match alone. The bearer token field in the WebSocket handshake is
+  ignored.
+- Provisional providers follow the provisional admission path as normal.
+
+When `auth.require_provider_tokens` is `true`:
+- Pinned providers MUST present a bearer token in the WebSocket
+  handshake matching the operator-issued token registered for that
+  `provider_id` in the coordinator's token store. Mismatch or absence
+  MUST result in WS close 4005 `invalid_token`.
+- Provisional providers continue to be admitted without a token; the
+  token requirement applies only to the pinned tier. A malformed or
+  invalid bearer header MAY still be rejected before hello parsing
+  because the coordinator cannot know the provider tier until after
+  hello.
+
+The default `false` reflects v1.1.2's tier-1 cooperative trust pool
+(per § 2): pinned providers are trusted by `provider_id` alone, and the
+token store exists for future expansion. Operators who add a token store
+SHOULD flip `require_provider_tokens` to `true` and re-issue tokens to
+all pinned providers as a single deployment step.
+
+**Implementation invariant:** every code path that depends on the token
+validator being configured MUST also handle the case where it is not.
+Failure to do so caused the 2026-05-28 production outage cited in audit
+category I (see § 11).
+
 #### Message schemas (replicated from SPEC-001 section 6.5)
 
 All messages are JSON objects with a `type` field.
@@ -1723,10 +1793,11 @@ delivers token to provider via secure channel.
 
 #### Token validation (bearer in WebSocket auth header)
 
-Provider connects with `Authorization: Bearer <token>`. Coordinator
-computes SHA-256, looks up in `provider_tokens`, checks
-`revoked_at IS NULL`, updates `last_used_at`. Valid: upgrade proceeds.
-Invalid: HTTP 401.
+When `auth.require_provider_tokens=true`, a pinned provider connects
+with `Authorization: Bearer <token>`. Coordinator computes SHA-256,
+looks up in `provider_tokens`, checks `revoked_at IS NULL`, and updates
+`last_used_at`. Valid: hello processing proceeds. Missing, malformed,
+invalid, or revoked: WS close 4005 `invalid_token`.
 
 #### Token rotation / revocation
 
@@ -2262,6 +2333,23 @@ demultiplexing, SSE reassembly).
 ---
 
 ## 11. Acceptance criteria
+
+### Audit category I — production-config gates
+
+**I.1 "Always-non-nil gate" anti-pattern.** Check for code paths gated
+by a non-nil pointer or a boolean that is set to the gate-open value
+unconditionally in every test setup. A test where the gate is in its
+closed state must exist; if the closed-state behavior cannot be
+exercised in unit tests, an integration test with the gate configured
+closed MUST exist. The 2026-05-28 coordinator hotfix (Decision log Entry
+19) is the reference example: `WithTokenValidator(tokenStore)` was
+called unconditionally, `s.tokenValidator != nil` was therefore always
+true, and no test exercised the "no token validator configured" path.
+The production deployment with `auth.require_provider_tokens=false`
+then caused unconditional pinned-provider rejection that no audit had
+caught. Generalize: every conditional in production code needs at least
+one test case for each branch, including the "this branch only fires
+when the operator chooses the rare config" branch.
 
 **AC-1 through AC-10 must ALL pass for the coordinator to be considered
 build-complete. No partial passes. No operator waivers without an

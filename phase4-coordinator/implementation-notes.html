@@ -688,4 +688,22 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   passed.</p>
 </div>
 </section>
+<section><h2>Resolved in v1.1.3 (spec catch-up)</h2>
+<p class=meta>2026-05-28 SPEC-002 catch-up to commit 47d6433.</p>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p>SPEC-002 now documents the coordinator hotfix behavior shipped in
+  commit <code>47d6433</code>: <code>auth.require_provider_tokens</code>
+  defaults to <code>false</code> so pinned providers can connect by
+  <code>provider_id</code> alone, while operators can opt into strict
+  pinned-provider bearer-token validation with WS close
+  <code>4005 invalid_token</code> on missing or invalid tokens.</p>
+  <p>The spec also makes coordinator-initiated provider WebSocket close
+  logging normative at WARN level with <code>close_code</code> and
+  <code>reason</code>, and names the Entry 19 "always-non-nil gate"
+  anti-pattern in audit category I. The current close helper does not
+  receive <code>provider_id</code> or remote-address context; adding
+  those fields remains a future hardening follow-up.</p>
+</div>
+</section>
 </body></html>
