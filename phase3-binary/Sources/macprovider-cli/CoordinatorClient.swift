@@ -6,6 +6,7 @@ actor CoordinatorClient {
     private let coordinatorURL: URL
     private let providerStatus: ProviderStatus
     private let drainTimeoutSeconds: Int
+    private let providerID: String
     private var webSocket: URLSessionWebSocketTask?
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
@@ -17,6 +18,11 @@ actor CoordinatorClient {
         self.coordinatorURL = url
         self.providerStatus = providerStatus
         self.drainTimeoutSeconds = config.drainTimeoutSeconds
+        // SPEC-001 v1.1.2 / SPEC-002 v1.0.4 F-2: provider_id is the operator-issued
+        // stable identifier matching coordinator's config.providers[] map. If unset,
+        // we fall back to a per-instance UUID (dev/test only — production coordinators
+        // will reject with close code 4002 unknown_provider_id).
+        self.providerID = config.providerID ?? UUID().uuidString
     }
 
     func start() {
@@ -238,7 +244,7 @@ actor CoordinatorClient {
             "type": "hello",
             "version": 1,
             "tier": 1,
-            "provider_id": UUID().uuidString,
+            "provider_id": providerID,
             "hostname": Host.current().localizedName ?? "unknown",
             "model_id": snapshot.modelID ?? "",
             "model_params_b": snapshot.capacity.modelParamsB(modelID: snapshot.modelID),

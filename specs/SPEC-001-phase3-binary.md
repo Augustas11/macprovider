@@ -1,7 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.1.1 (2026-05-27, post-re-audit patches)
-**Revision:** Addresses audit findings from `specs/SPEC-001-audit.md`.
+**Version:** 1.1.2 (2026-05-28, normative provider_id clarification — see Decision log Entry 13)
+**Revision:** v1.1.1 addressed audit findings from `specs/SPEC-001-audit.md`. v1.1.2 clarifies provider_id semantics to match SPEC-002 v1.0.4 § 7.1.
+
+**Change log since v1.1.1:**
+- § 6.5 hello message: `provider_id` field now explicitly normative — it is the operator-issued stable identifier from SPEC-002's static `config.providers[]` map. Example value updated; misleading "uuid-of-this-instance" placeholder removed.
+- § 6.5 added normative paragraph immediately after the hello example explaining the relationship to SPEC-002 Finding F-2 and what happens on mismatch (WS close 4002 `unknown_provider_id`).
+- No FR changes. v1.1.2 is documentation-only — the phase3-binary implementation already gained config/env/CLI support for stable provider_id in the same patch cycle.
 
 ---
 
@@ -816,7 +821,7 @@ provider) or P->C (provider to coordinator).
   "type": "hello",
   "version": 1,
   "tier": 1,
-  "provider_id": "uuid-of-this-instance",
+  "provider_id": "m4-anon",
   "hostname": "Johns-MacBook-Pro.local",
   "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
   "model_params_b": 7.0,
@@ -828,6 +833,26 @@ provider) or P->C (provider to coordinator).
   "attestation": null
 }
 ```
+
+**`provider_id` is normative and stable (v1.1.2 clarification).** It is
+the operator-issued identifier that the coordinator looks up in its
+static `config.providers[]` map (SPEC-002 v1.0.4 § 7.1, Finding F-2).
+The same `provider_id` MUST be reused across reconnects, restarts, and
+binary upgrades — it represents the persistent identity of this
+provider in the trust pool, not the lifetime of the current process.
+
+Concretely, the phase3-binary obtains `provider_id` from (in priority
+order):
+1. `--provider-id` CLI flag
+2. `MACPROVIDER_PROVIDER_ID` environment variable
+3. `provider_id` field in the YAML config file
+
+If none are set, the binary generates a per-instance UUID as a fallback
+suitable for development and local testing only. Production
+coordinators will reject any unrecognized `provider_id` with WebSocket
+close code **4002 `unknown_provider_id`** (per § 6.5 close codes and
+SPEC-002 FR-P13), so dev-fallback UUIDs cannot connect to a production
+pool without first being enumerated in the coordinator config.
 
 `attestation` is `null` in Tier 1. Tier 2 populates it with the
 `AttestationProvider` hook output.

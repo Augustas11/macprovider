@@ -20,6 +20,9 @@ struct MacProviderCLI: AsyncParsableCommand {
     @Option(help: "Coordinator WebSocket URL. Overrides MACPROVIDER_COORDINATOR_URL and config file coordinator_url.")
     var coordinator: String?
 
+    @Option(help: "Stable provider identifier sent in the coordinator hello message. Must match the coordinator's config.providers[] entry. Overrides MACPROVIDER_PROVIDER_ID and config file provider_id. If unset, a per-instance UUID is generated (suitable for dev/test only).")
+    var providerID: String?
+
     @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG. Defaults to ~/.config/macprovider/config.yaml.")
     var config: String?
 
@@ -32,6 +35,7 @@ struct MacProviderCLI: AsyncParsableCommand {
                 port: port,
                 model: model,
                 coordinatorURL: coordinator,
+                providerID: providerID,
                 configPath: config,
                 logLevel: logLevel
             )
@@ -87,6 +91,7 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  port: \(config.port)")
     print("  model: \(config.model ?? "<unset>")")
     print("  coordinator_url: \(config.coordinatorURL ?? "<unset>")")
+    print("  provider_id: \(config.providerID ?? "<unset, will use per-instance UUID>")")
     print("  config: \(config.configPath)")
     print("  log_level: \(config.logLevel.rawValue)")
     print("  log_format: \(config.logFormat.rawValue)")
