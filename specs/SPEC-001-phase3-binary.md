@@ -1,7 +1,12 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.2.1 (2026-05-28, absorb WS-tunneled inference wire protocol from SPEC-003 v0.1)
-**Revision:** v1.2.1 resolves audit findings C3, M6, M7, m2.
+**Version:** 1.2.2 (2026-05-28, reconnect lifecycle, model casing, JSON slash tolerance)
+**Revision:** v1.2.2 resolves Entry 19 reconnect lifecycle and Entry 20 model casing / JSON escape tolerance.
+
+**Change log v1.2.2:**
+- § 6.5 coordinator `drain` message: post-drain reconnect is now explicitly normative. After `drain_status: complete` and WS close, the provider MUST re-enter the startup reconnect loop; first reconnect attempt MUST occur within 15 seconds; three consecutive reconnect failures MUST log WARN with attempt count and last error; the process MUST NOT exit.
+- § 6.2 `/v1/chat/completions`: model identifier comparison is ASCII case-insensitive. This matches legacy `mlx_lm.server` behavior and prevents buyer-visible 404 storms from harmless casing differences.
+- § 6.1 `/v1/models`: the `id` field may contain `/` or the RFC 8259 `\/` escape; consumers MUST tolerate both. Producers SHOULD prefer unescaped `/` for readability.
 
 **Change log v1.2:**
 - § 6.5 hello message: added OPTIONAL `endpoint_url` field (string or null). Absence or null means "route inference through this WebSocket" (WS-tunneled mode). Non-empty string means "I am reachable at this HTTPS URL" (HTTP-forwarding mode). Existing v1.1.x binaries do not send this field; the coordinator falls back to its static `config.providers[]` map.
@@ -735,6 +740,32 @@ Do not change the HTTP status code mid-stream.
 model's HuggingFace identifier as passed in config. `owned_by` is
 always `"macprovider"`.
 
+The `id` field MAY contain forward-slash characters in either
+unescaped (`/`) or escaped (`\/`) form. Both are legal JSON per
+RFC 8259 § 7. Consumers MUST tolerate both encodings. Producers SHOULD
+prefer the unescaped form (`/`) for human readability but are not
+required to. Example response (with `\/`):
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "mlx-community\/Llama-3.2-3B-Instruct-4bit",
+      "object": "model",
+      "owned_by": "macprovider",
+      "created": 0
+    }
+  ]
+}
+```
+
+Note: phase3-binary v1.2.1/v1.2.2 emitted the escaped form by the
+Foundation JSON encoder default. A future revision MAY switch to the
+unescaped form by setting `withoutEscapingSlashes`; this is a
+non-breaking change because all conforming consumers already tolerate
+both.
+
 **Response (503):** Returned if model is not loaded.
 ```json
 {
@@ -754,7 +785,7 @@ always `"macprovider"`.
 
 | Field | Type | Constraint |
 |---|---|---|
-| `model` | string | Must match the loaded model's id. Mismatch returns 404. |
+| `model` | string | Must match the loaded model's id using ASCII case-insensitive comparison. Mismatch returns 404. |
 | `messages` | array | Non-empty array of message objects. |
 
 **Optional fields:**
@@ -778,6 +809,15 @@ always `"macprovider"`.
 
 Unknown top-level fields are silently ignored (forward-compatible) and
 logged at DEBUG level.
+
+The `model` field in `/v1/chat/completions` requests and the `id`
+field returned by `/v1/models` are compared case-insensitively in
+ASCII by the provider. A request for `Mlx-Community/Llama-...` against
+a provider hosting `mlx-community/Llama-...` MUST be served, not
+404'd. This matches `mlx_lm.server` behavior and mirrors the existing
+case-insensitivity of HTTP header field names (RFC 9110 § 5.1).
+Non-ASCII code points in model identifiers are out of scope; provider
+behavior with such identifiers is undefined.
 
 #### Per-message validation
 
@@ -822,7 +862,7 @@ failure short-circuits:
 | 3 | Field types and ranges (temperature, top_p, n, etc.) | 400 `invalid_request` |
 | 4 | Per-message role and content validation | 400 `invalid_request` |
 | 5 | Tool/tool_call shape validation (if present) | 400 `invalid_tools` |
-| 6 | Model match (`model` field vs loaded model) | 404 `model_not_found` |
+| 6 | Model match (`model` field vs loaded model, ASCII case-insensitive) | 404 `model_not_found` |
 | 7 | Stage 1 pre-flight (envelope bytes) | 413 `context_length_exceeded` |
 | 8 | Stage 2 pre-flight (token count) | 413 `context_length_exceeded` |
 | 9 | Queue admission | 429 `rate_limit_exceeded` |
@@ -1154,6 +1194,22 @@ stops *coordinator registration only*. On receipt the provider MUST:
 4. Close the WebSocket cleanly (close code 1000).
 5. Attempt to reconnect to the coordinator after a grace period
    (recommended: 10–15 s, longer than typical coordinator restart).
+
+After sending `drain_status: complete` and closing the WebSocket, the
+provider MUST re-enter the same reconnect loop used at process start.
+The first reconnect attempt MUST occur within 15 seconds of the WS
+close (matching the coordinator-side grace period defined in SPEC-002
+§ 6). If the first three reconnect attempts fail in a row, the provider
+MUST log at WARN level with the attempt count and the last error; it
+MUST NOT exit the process. The reconnect cadence follows the same
+backoff as the initial-connect path.
+
+This requirement exists because conflating drain with process exit was
+the bug fixed in v1.1.3 (Entry 18); v1.1.3/v1.1.4 then exposed a second
+bug where reconnect was structurally enabled but not exercised
+post-drain. The implementation MUST treat post-drain reconnect as a
+first-class path with its own test coverage, not a side effect of the
+connect loop's natural retry.
 
 The provider MUST NOT terminate its local buyer HTTP server in
 response to this message. The local server continues to serve
@@ -1735,6 +1791,22 @@ binary responds with `nak code=unknown_message_type` per § 6.5 nak
 semantics. The binary remains healthy and continues heartbeating.
 
 **Run by:** `phase3-binary/scripts/test-ws-nak-fallback.sh`
+
+**AC-16. Post-drain reconnect.**
+With the binary running and joined to a local coordinator at
+`state: ready`, the operator sends a drain directive (for example,
+`POST /admin/drain?provider_id=<id>` on the coordinator's provider
+port). The binary MUST:
+
+1. Reply `drain_status: complete` per § 6.5.
+2. Close the WS.
+3. Within 30 seconds of the close, send a fresh `hello` over a new WS.
+4. Reach `state: ready` again in the coordinator pool within 60 seconds
+   total elapsed from drain initiation.
+
+**Run by:** Tail both the binary log (look for `reconnect attempt 1`)
+and the coordinator's `/poolz` endpoint while issuing the drain
+directive.
 
 ---
 

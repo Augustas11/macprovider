@@ -71,10 +71,41 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(snapshot.activeRequestIDCount, 0)
     }
 
+    func testPostDrainReconnectLoopReentersConnectPath() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let attempts = ReconnectAttemptRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            reconnectGraceNanoseconds: 1_000_000,
+            connectAndRunOverride: {
+                let attempt = await attempts.recordAttempt()
+                if attempt == 1 {
+                    throw CoordinatorDrainComplete()
+                }
+                throw CancellationError()
+            }
+        )
+
+        await client.start()
+        try await Task.sleep(nanoseconds: 100_000_000)
+        await client.stop()
+
+        let attemptCount = await attempts.currentCount()
+        XCTAssertEqual(attemptCount, 2)
+    }
+
     private func makeClient(
         status: ProviderStatus,
         recorder: CoordinatorFrameRecorder,
-        drainTimeoutSeconds: Int = 1
+        drainTimeoutSeconds: Int = 1,
+        reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
+        connectAndRunOverride: (() async throws -> Void)? = nil
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
@@ -88,7 +119,9 @@ final class CoordinatorClientTests: XCTestCase {
             providerStatus: status,
             sendOverride: { frame in
                 await recorder.append(frame)
-            }
+            },
+            reconnectGraceNanoseconds: reconnectGraceNanoseconds,
+            connectAndRunOverride: connectAndRunOverride
         ))
     }
 }
@@ -98,5 +131,18 @@ private actor CoordinatorFrameRecorder {
 
     func append(_ frame: [String: Any]) {
         frames.append(frame)
+    }
+}
+
+private actor ReconnectAttemptRecorder {
+    private var count = 0
+
+    func recordAttempt() -> Int {
+        count += 1
+        return count
+    }
+
+    func currentCount() -> Int {
+        count
     }
 }

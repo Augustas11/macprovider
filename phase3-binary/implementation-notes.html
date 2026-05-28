@@ -846,4 +846,32 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   </ul>
 </div>
 </section>
+<section><h2>Resolved in v1.2.3</h2>
+<div class="entry">
+  <time>2026-05-28</time>
+  <ul>
+    <li><strong>Finding A:</strong> post-drain reconnect now re-enters the
+    stored coordinator reconnect loop, schedules attempt 1 within the
+    SPEC-001 v1.2.2 window, and emits WARN after repeated reconnect
+    failures instead of exiting.</li>
+    <li><strong>Finding B:</strong> loaded-model matching for
+    <code>/v1/chat/completions</code> is ASCII case-insensitive, matching
+    legacy <code>mlx_lm.server</code> behavior while preserving exact-match
+    callers.</li>
+    <li><strong>Finding C:</strong> HTTP and WS JSON serialization now requests
+    <code>withoutEscapingSlashes</code>, so <code>/v1/models</code> prefers
+    readable <code>mlx-community/...</code> ids while conforming consumers must
+    still tolerate <code>\/</code>.</li>
+    <li>The manual <code>relaunch-m4.sh</code> and
+    <code>relaunch-m1.sh</code> scripts remain in tree for v1.1.x binaries
+    already in the field; v1.2.3+ should not need them for coordinator-side
+    drain recovery.</li>
+    <li><strong>Verification:</strong> <code>swift test</code> passed 11
+    XCTest cases; <code>swift build -c release</code> passed; release binary
+    <code>--version</code> printed <code>1.2.3</code>. Real hardware
+    drain-reconnect verification was not available in this session, so no
+    v1.2.3 tag was created.</li>
+  </ul>
+</div>
+</section>
 </body></html>

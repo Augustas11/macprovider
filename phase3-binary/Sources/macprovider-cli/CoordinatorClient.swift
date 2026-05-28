@@ -3,7 +3,7 @@ import MacProviderCore
 import Darwin
 
 actor CoordinatorClient {
-    static let binaryVersion = "1.2.1"
+    static let binaryVersion = "1.2.3"
 
     private let coordinatorURL: URL
     private let providerStatus: ProviderStatus
@@ -15,6 +15,8 @@ actor CoordinatorClient {
     private let loadedModelID: String?
     private let maxBodyBytes: Int
     private let maxActiveRequests: Int
+    private let reconnectGraceNanoseconds: UInt64
+    private let connectAndRunOverride: (() async throws -> Void)?
     private var inferenceRelay: InferenceRelay?
     private var webSocket: URLSessionWebSocketTask?
     private var runTask: Task<Void, Never>?
@@ -25,7 +27,9 @@ actor CoordinatorClient {
         config: AppConfig,
         modelRuntime: ModelRuntime,
         providerStatus: ProviderStatus,
-        sendOverride: (([String: Any]) async throws -> Void)? = nil
+        sendOverride: (([String: Any]) async throws -> Void)? = nil,
+        reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
+        connectAndRunOverride: (() async throws -> Void)? = nil
     ) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
             return nil
@@ -44,6 +48,8 @@ actor CoordinatorClient {
         self.loadedModelID = config.model
         self.maxBodyBytes = config.maxRequestBodyBytes
         self.maxActiveRequests = 1
+        self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
+        self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
     }
 
@@ -67,11 +73,13 @@ actor CoordinatorClient {
 
     private func runReconnectLoop() async {
         var backoffSeconds: UInt64 = 1
+        var failedAttempts = 0
         while !Task.isCancelled {
             do {
-                try await connectAndRun()
+                try await connectAndRunOnce()
                 await cleanupConnection()
                 backoffSeconds = 1
+                failedAttempts = 0
             } catch is CancellationError {
                 await cleanupConnection()
                 return
@@ -81,14 +89,28 @@ actor CoordinatorClient {
                 // Wait a grace period so the coordinator has time to come back
                 // before we try to reconnect, then loop.
                 await cleanupConnection()
-                try? await Task.sleep(nanoseconds: 15 * 1_000_000_000)
+                print("coordinator reconnect attempt 1 scheduled after drain")
+                try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
                 backoffSeconds = 1
+                failedAttempts = 0
             } catch {
                 await cleanupConnection()
+                failedAttempts += 1
+                if failedAttempts >= 3 {
+                    print("WARN coordinator reconnect failed attempt_count=\(failedAttempts) last_error=\(error)")
+                }
                 try? await Task.sleep(nanoseconds: backoffSeconds * 1_000_000_000)
                 backoffSeconds = min(backoffSeconds * 2, 60)
             }
         }
+    }
+
+    private func connectAndRunOnce() async throws {
+        if let connectAndRunOverride {
+            try await connectAndRunOverride()
+            return
+        }
+        try await connectAndRun()
     }
 
     private func connectAndRun() async throws {
@@ -406,7 +428,7 @@ actor CoordinatorClient {
     }
 
     private static func send(_ payload: [String: Any], to webSocket: URLSessionWebSocketTask) async throws {
-        let data = try JSONSerialization.data(withJSONObject: payload)
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
         let text = String(decoding: data, as: UTF8.self)
         try await webSocket.send(.string(text))
     }

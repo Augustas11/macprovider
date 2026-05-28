@@ -437,7 +437,7 @@ private final class RouterHandler: ChannelInboundHandler {
 
     private func writeJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, body: Any) {
         do {
-            let data = try JSONSerialization.data(withJSONObject: body)
+            let data = try encodeJSONObject(body)
             var headers = HTTPHeaders()
             headers.add(name: "content-type", value: "application/json")
             headers.add(name: "content-length", value: "\(data.count)")
@@ -466,7 +466,7 @@ private struct ResponseWriter: @unchecked Sendable {
 
     func writeJSON(status: HTTPResponseStatus, body: Any) {
         do {
-            let data = try JSONSerialization.data(withJSONObject: body)
+            let data = try encodeJSONObject(body)
             context.eventLoop.execute {
                 writeRawJSON(context: context, status: status, data: data)
             }
@@ -489,7 +489,7 @@ private struct ResponseWriter: @unchecked Sendable {
 
     func writeSSEJSON(_ body: Any) {
         do {
-            let data = try JSONSerialization.data(withJSONObject: body)
+            let data = try encodeJSONObject(body)
             let payload = String(decoding: data, as: UTF8.self)
             writeSSEData(payload)
         } catch {
@@ -545,4 +545,8 @@ private func writeRawSSEData(context: ChannelHandlerContext, payload: String) {
     var buffer = context.channel.allocator.buffer(capacity: line.utf8.count)
     buffer.writeString(line)
     context.writeAndFlush(NIOAny(HTTPServerResponsePart.body(.byteBuffer(buffer))), promise: nil)
+}
+
+private func encodeJSONObject(_ body: Any) throws -> Data {
+    try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
 }

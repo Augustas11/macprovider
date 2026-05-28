@@ -102,9 +102,21 @@ public struct ChatCompletionRequest: Sendable {
         guard let loadedModel else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
-        guard model == loadedModel else {
+        guard Self.asciiCaseInsensitiveEquals(model, loadedModel) else {
             throw APIError(status: 404, message: "Model not found", code: "model_not_found")
         }
+    }
+
+    private static func asciiCaseInsensitiveEquals(_ lhs: String, _ rhs: String) -> Bool {
+        guard lhs.utf8.count == rhs.utf8.count else { return false }
+        return zip(lhs.utf8, rhs.utf8).allSatisfy { asciiFold($0) == asciiFold($1) }
+    }
+
+    private static func asciiFold(_ byte: UInt8) -> UInt8 {
+        if byte >= 65, byte <= 90 {
+            return byte + 32
+        }
+        return byte
     }
 }
 
