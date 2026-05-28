@@ -1,6 +1,7 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.1 (2026-05-28, absorbs SPEC-003 v0.1 Part B — dynamic admission + WS-tunneled relay)
+**Version:** 1.1.1 (2026-05-28, absorbs SPEC-003 v0.1 Part B — dynamic admission + WS-tunneled relay)
+v1.1.1 resolves audit findings C1, C2, C3, M1, M2, M3, M5, M6, Q1.
 **Depends on:** SPEC-001 v1.2 (Phase 3 binary wire protocol, locked)
 
 **Change log v1.1 (absorbs SPEC-003 v0.1 Part B — dynamic admission + WS-tunneled relay):**
@@ -15,6 +16,17 @@
 - § 11 AC-11 through AC-14: admission tier acceptance criteria.
 - § 12 OQ-6 through OQ-10: redistributed open questions.
 - No change to buyer-facing HTTP API (§ 7.2). POST /v1/chat/completions, GET /v1/models, GET /healthz are unchanged in observable behavior.
+
+**Change log v1.1.1:**
+- § 3 mode resolution: provisional providers with self-reported endpoint_url are forced to WS-tunneled mode (Q1 operator decision — anti-abuse).
+- § 5 routing pseudocode: case-insensitive model_id comparison via `model_id_equal()` helper (M2 fix); provisional request quota integrated into routing paths (M1 fix).
+- § 7.1 wire schemas: hello and hello_ack JSON examples updated to match SPEC-001 v1.2.1 § 6.5 (C1 fix); provider_id example corrected to stable operator-issued ID.
+- § 7.1: special-case nak handling for § 6.6 routing-mode fallback (M5 fix).
+- FR-P14: restored status-to-buyer-HTTP mapping table from SPEC-003 v0.1 FR-A8 (C2 fix).
+- § 6.6 request_id lifecycle: unknown/duplicate/cleanup rules added (C3 fix, cross-ref to SPEC-001 v1.2.1 § 6.6).
+- OQ-6, OQ-8, OQ-9: restored full rationale paragraphs (M6 fix).
+- OQ-10: scoped to coordinator-side buffer only, distinct from SPEC-001 OQ-5 (M3 fix).
+- AC-15: coordinator marks provider http_forwarding_only after § 6.6 nak (M5 fix).
 
 **Change log since v1.0.3:**
 - § 5 Tie-breaking: added "Operator-visible behavior" note on order-sticky routing under equal metrics (Finding F-1).
@@ -206,8 +218,15 @@ if provider_id in config.providers[]:
 else:
     tier = provisional  (subject to admission rate limits, FR-P16)
     if hello.endpoint_url is present and non-empty:
-        inference_path = HTTP_FORWARDING(hello.endpoint_url)
-        # coordinator MUST verify reachability before first route
+        # Q1 OPERATOR DECISION (v1.1.1): Provisional providers operate
+        # EXCLUSIVELY in WS-tunneled mode. Self-reported endpoint_url
+        # from unknown provider_ids is IGNORED to prevent abuse (a Sybil
+        # attacker could register N provisional providers each pointing
+        # endpoint_url at a target server to amplify traffic via the
+        # coordinator). The coordinator logs at warn level:
+        # "provisional provider <id> sent endpoint_url <url>; ignored,
+        # forcing WS-tunneled mode."
+        inference_path = WS_TUNNELED
     else:
         inference_path = WS_TUNNELED
 ```
@@ -478,6 +497,31 @@ single HTTP response. The coordinator MUST NOT buffer streaming
 chunks — each is relayed as it arrives to preserve time-to-first-token
 fidelity.
 
+**FR-P14.1. Status-to-buyer-HTTP mapping for WS-tunneled responses.**
+When a WS-tunneled provider sends `inference_response_end`, the
+coordinator maps the `status` field to buyer-facing behavior:
+
+| `inference_response_end.status` | Coordinator buyer-facing behavior |
+|---|---|
+| `"complete"` | Relay final response to buyer with HTTP 200 |
+| `"cancelled"` | Close buyer connection cleanly (buyer already disconnected) |
+| `"error_model_not_loaded"` | Return HTTP 503 to buyer; do NOT try next provider |
+| `"error_context_exceeded"` | Return HTTP 413 to buyer |
+| `"error_queue_full"` | Return HTTP 503 to buyer; try next provider in candidates list |
+| `"error_internal"` | Return HTTP 502 to buyer; do NOT try next provider |
+| (no message received within `request_timeout_s`) | Return HTTP 504 to buyer |
+
+**Provider-internal error messages MUST NOT appear in the buyer-facing
+response body.** The coordinator uses generic error descriptions from
+the standard OpenAI error envelope (§ 7.2). The `error` field in
+`inference_response_end` is logged at the coordinator but not forwarded.
+
+**`error_queue_full` is the only status that triggers re-routing.**
+On receiving `error_queue_full`, the coordinator treats this provider
+as temporarily full and continues iterating through the § 5 candidate
+list. All other error statuses result in an immediate error response
+to the buyer per FR-B7 (no silent retry in v1).
+
 **FR-P15. Admission tier assignment.**
 The coordinator recognizes three admission tiers:
 
@@ -538,6 +582,28 @@ coordinator detects the broken connection within 1 second, sends
 request slot on `inference_response_end` or after 10 seconds (whichever
 first). The coordinator MUST NOT close the WebSocket or mark the
 provider unhealthy due to a slow cancellation.
+
+**FR-P18.1. Request ID lifecycle (coordinator-side).**
+The coordinator maintains an active request_id map per provider WS
+connection. The following rules are normative:
+
+1. **Unknown request_id.** If the coordinator receives an
+   `inference_response_chunk` or `inference_response_end` with a
+   `request_id` it did not issue (or that has already been cleaned up),
+   the coordinator MUST log at warn level and discard the frame. MUST
+   NOT propagate to any buyer. MUST NOT close the WebSocket.
+
+2. **Duplicate active request_id.** The coordinator MUST NEVER reuse
+   a `request_id` while the prior request with that ID is still
+   in-flight. The UUID format of `request_id` makes accidental
+   collision negligible.
+
+3. **Cleanup.** The coordinator removes a `request_id` from its active
+   map after receiving `inference_response_end` OR after
+   `routing.request_timeout_s` expires (default 300 s).
+
+See also SPEC-001 v1.2.1 § 6.6 "Request ID lifecycle and error
+handling" for the provider-side rules.
 
 **FR-P19. WS-tunneled backpressure — coordinator write buffer.**
 Bounded write buffer of 64 messages per provider WebSocket. If full,
@@ -956,6 +1022,11 @@ function route(request, pool, headers) -> provider | error:
     model = request.model
     estimated_tokens = estimate_tokens(request.messages)
 
+    # v1.1.1 helper: case-insensitive model match (D9 fix)
+    function model_id_equal(a: string, b: string) -> bool:
+        return casefold(a) == casefold(b)
+    # Canonical casing preserved in /poolz and /v1/models for display.
+
     # Step 1: Provider pinning (X-MacProvider-Session takes precedence)
     if headers["X-MacProvider-Session"] is set:
         provider = pool.get_by_assigned_id(headers["X-MacProvider-Session"])
@@ -968,14 +1039,17 @@ function route(request, pool, headers) -> provider | error:
     if provider is set:
         if provider.state != "ready" or provider.slots_free <= 0:
             return error(503, "Pinned provider not available")
-        if provider.model_id != model:
+        if not model_id_equal(provider.model_id, model):
             return error(404, "Pinned provider serves different model")
+        # v1.1.1: check provisional quota even for pinned-by-header requests
+        if not check_provisional_quota(provider):
+            return error(429, "Pinned provisional provider is over request quota")
         return provider
 
     # Step 2: Filter candidates
     candidates = []
     for p in pool:
-        if p.model_id != model:
+        if not model_id_equal(p.model_id, model):
             continue
         if p.state != "ready":
             continue
@@ -986,6 +1060,22 @@ function route(request, pool, headers) -> provider | error:
         candidates.append(p)
 
     if len(candidates) == 0:
+        return error(503, "No provider available for model " + model)
+
+    # Step 2.3: Provisional request quota check (v1.1.1)
+    function check_provisional_quota(provider) -> bool:
+        if provider.tier == "pinned":
+            return true  # pinned providers have no request quota
+        quota = COUNT(requests where provider_id == provider.id
+                      AND ts > now() - 1 hour)
+        return quota < admission.provisional_request_quota_per_hour  # default 100
+
+    candidates = [c for c in candidates if check_provisional_quota(c)]
+
+    if len(candidates) == 0:
+        if all_filtered_by_quota:
+            return error(429, "code=provisional_quota_exceeded",
+                         "Retry-After: 3600")
         return error(503, "No provider available for model " + model)
 
     # Step 2.5: Apply admission-tier weight (v1.1)
@@ -1216,7 +1306,7 @@ All messages are JSON objects with a `type` field.
   "type": "hello",
   "version": 1,
   "tier": 1,
-  "provider_id": "uuid-of-this-instance",
+  "provider_id": "m4-anon",
   "hostname": "Johns-MacBook-Pro.local",
   "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
   "model_params_b": 7.0,
@@ -1224,10 +1314,13 @@ All messages are JSON objects with a `type` field.
   "max_context_tokens": 50000,
   "max_concurrency": 2,
   "throughput_tps_estimate": 19.8,
-  "binary_version": "0.1.0",
-  "attestation": null
+  "binary_version": "1.2.0",
+  "attestation": null,
+  "endpoint_url": null
 }
 ```
+
+These schemas mirror SPEC-001 v1.2.1 § 6.5; SPEC-001 is the authoritative source.
 
 Coordinator behavior:
 - Validates all fields present and correctly typed (FR-P2).
@@ -1242,7 +1335,9 @@ Coordinator behavior:
   "type": "hello_ack",
   "coordinator_version": 1,
   "assigned_id": "provider-pool-id",
-  "heartbeat_interval_s": 30
+  "heartbeat_interval_s": 30,
+  "tier": "pinned",
+  "recommended_binary_version": "1.2.0"
 }
 ```
 
@@ -1419,6 +1514,22 @@ Coordinator behavior when receiving nak from provider:
 - Do NOT disconnect the provider. A nak is informational — the
   provider does not understand a specific message but is otherwise
   healthy.
+
+**Special case: nak `unknown_message_type` in response to § 6.6
+message dispatch (v1.1.1, M5 fix).** When the coordinator dispatches
+an `inference_request` (or other SPEC-001 v1.2 § 6.6 message) and the
+provider replies with `nak code=unknown_message_type`, this indicates
+a routing-mode resolution bug: the coordinator believed the provider
+supported WS-tunneled mode when it does not. The coordinator MUST:
+1. Mark the provider's effective routing mode as
+   `http_forwarding_only` for the remainder of this WS session (until
+   the provider reconnects with a fresh hello).
+2. MUST NOT retry the failed request via § 6.6.
+3. SHOULD return HTTP 503 to the buyer for this request.
+4. Log at warn level: "routing-mode resolution bug: provider <id>
+   does not support § 6.6; marking http_forwarding_only."
+
+See SPEC-001 v1.2.1 backward-compat statement for the design rationale.
 
 **Coordinator does NOT send `nak` to providers.** Coordinator-initiated
 rejection (invalid hello, unknown provider_id, tier mismatch, version
@@ -2310,6 +2421,15 @@ Provider receives drain. WS closes. `provider_id` in
 
 Run by: `phase4-coordinator/scripts/test-reject.sh`
 
+**AC-15. Routing-mode fallback on nak.**
+Coordinator dispatches `inference_request` to a mock provider that
+responds `nak code=unknown_message_type`. Coordinator marks provider
+routing mode `http_forwarding_only`, returns HTTP 503 to buyer.
+Subsequent requests to that provider's model are NOT dispatched via
+§ 6.6 for the remainder of the WS session.
+
+Run by: `phase4-coordinator/scripts/test-nak-fallback.sh`
+
 ---
 
 ## 12. Open questions for operator
@@ -2335,11 +2455,17 @@ normative requirements (see FR-P11 for the HTTP 530 handling that was
 previously OQ-1).
 
 **OQ-6. How to surface tier=provisional to buyers.**
-Current design: tier is invisible to buyers. Should the coordinator
-add an `X-MacProvider-Tier` response header? Current position: Do NOT
-surface tier in v1. Buyers should not care — routing weight handles
-QoS. If a buyer wants to avoid provisional providers, they pin via
-`X-MacProvider-Provider`.
+Current design: the tier is invisible to buyers. A buyer cannot
+distinguish a response from a pinned provider vs a provisional
+provider. Should the coordinator add an `X-MacProvider-Tier` response
+header?
+
+**Current position:** Do NOT surface tier to buyers in v1. Buyers
+should not need to care — the coordinator's routing weight handles
+quality-of-service differentiation. If a buyer wants to avoid
+provisional providers, they can pin to a specific provider via
+`X-MacProvider-Provider`. Adding a tier header creates an implicit
+SLA promise that is premature for v1.
 
 **OQ-7. Version enforcement for provisional providers.**
 Should the coordinator refuse to route to providers running versions
@@ -2348,23 +2474,47 @@ enforcement in v1 — the nudge is informational. Enforcement risks
 rejecting all provisional providers simultaneously on version bump.
 
 **OQ-8. Automatic persistence of promotions.**
-FR-P15's `POST /admin/promote` is runtime-only. Should the coordinator
-auto-append to `coordinator.yaml`? Current position: no auto-edit of
-config files in v1. Config files are operator-owned and may be
-version-controlled.
+`POST /admin/promote` (§ 7.5) is runtime-only — the operator must
+also edit `coordinator.yaml`. Should the coordinator automatically
+append to `coordinator.yaml`?
+
+**Current position:** No auto-edit of config files in v1. Config
+files are operator-owned and may be version-controlled. The
+coordinator should not mutate them. The operator adds promoted
+providers to `coordinator.yaml` manually (same workflow as today's
+pinned provider onboarding, but only for the subset the operator
+chooses to promote). A future version may add a `coordinator-cli
+promote --persist` flag that appends to the config file.
 
 **OQ-9. Provisional provider identity verification.**
-Provisional providers self-report `provider_id` (UUID from
-install.sh). Nothing prevents impersonation. Current position:
-self-reported UUIDs are sufficient for v1 because (a) UUID collision
-probability is negligible, (b) duplicate ID closes older connection,
-(c) provisional weight + quotas limit impact. Stronger verification
-is Tier 2.
+A provisional provider self-reports its `provider_id`. Nothing prevents
+a malicious actor from impersonating another provider's ID. In the
+pinned tier, the operator controls ID assignment. In the provisional
+tier, the provider generates its own ID (UUID from `install.sh`).
 
-**OQ-10. Per-provider WS write buffer sizing.**
-FR-P19 specifies 64 messages. This is ~60× expected steady-state
-depth. Tune based on production telemetry. Consider adding
-per-provider write buffer depth to `/poolz` for visibility.
+**Current position:** For v1, self-reported UUIDs are sufficient
+because: (a) UUIDs are 128-bit random — collision probability is
+negligible, (b) the coordinator tracks `provider_id` → WS connection,
+so a duplicate ID would close the older connection (same as FR-P2
+step 4), (c) provisional providers have reduced routing weight and
+request quotas, limiting the impact of impersonation. Stronger
+identity verification (e.g., device attestation) is a Tier 2 concern.
+
+**OQ-10. Coordinator-side WS write buffer sizing.**
+FR-P19 specifies 64 messages as the coordinator-side write buffer per
+provider. This is a starting estimate. In practice, the buffer should
+rarely fill because the coordinator only sends `inference_request` (at
+most N concurrent, where N = `max_concurrency`, typically 1) and
+`cancel_request` (at most one per outstanding request). The 64-message
+buffer is ~60× the expected steady-state depth.
+
+**Scope:** This OQ concerns the **coordinator-side** buffer only
+(per-provider outbound message queue in the Go coordinator). The
+provider-side write buffer sizing is SPEC-001 v1.2.1 OQ-5.
+
+**Current position:** 64 is a conservative default. Tune based on
+production telemetry. Add a `/poolz` field showing per-provider
+write buffer depth for operator visibility.
 
 ---
 

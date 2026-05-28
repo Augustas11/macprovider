@@ -1,7 +1,7 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.2 (2026-05-28, absorb WS-tunneled inference wire protocol from SPEC-003 v0.1)
-**Revision:** v1.2 adds WS-tunneled inference message types (§ 6.6), hello/hello_ack field extensions, and FR-21–FR-32 / AC-11–AC-15 / OQ-4–OQ-5.
+**Version:** 1.2.1 (2026-05-28, absorb WS-tunneled inference wire protocol from SPEC-003 v0.1)
+**Revision:** v1.2.1 resolves audit findings C3, M6, M7, m2.
 
 **Change log v1.2:**
 - § 6.5 hello message: added OPTIONAL `endpoint_url` field (string or null). Absence or null means "route inference through this WebSocket" (WS-tunneled mode). Non-empty string means "I am reachable at this HTTPS URL" (HTTP-forwarding mode). Existing v1.1.x binaries do not send this field; the coordinator falls back to its static `config.providers[]` map.
@@ -10,6 +10,12 @@
 - Added FR-21 through FR-32 covering WS-tunneled inference handling.
 - Added AC-11 through AC-15 covering WS-tunneled inference acceptance.
 - Added OQ-4 (WS frame size limits) and OQ-5 (per-provider WS write buffer high-water mark).
+
+**Change log v1.2.1:**
+- § 6.6: restored request_id demux error handling from SPEC-003 v0.1 FR-A4 (C3 fix): unknown request_id → warn + discard; duplicate active request_id → nak `duplicate_request_id`; completed request_id cleanup rules.
+- OQ-3: closed as resolved by SPEC-003 v0.3 FR-C1/FR-C2 (M7 fix).
+- OQ-4, OQ-5: restored full rationale paragraphs from SPEC-003 v0.1 (M6 fix).
+- § 6.5: clarified endpoint_url absence text to reference SPEC-002 v1.1.1 § 3 for final mode resolution (m2 fix).
 
 > **Backward compatibility.** Phase 3 binaries implementing SPEC-001
 > v1.1.4 (or earlier v1.1.x patches v1.1.2, v1.1.3) remain FULLY
@@ -993,11 +999,13 @@ endpoint_url, but now self-reported by the provider). When absent or
 null, the provider operates in WS-tunneled mode and receives inference
 traffic via § 6.6 messages over this WebSocket.
 
-Existing v1.1.x binaries do not send `endpoint_url`. The coordinator
-treats absence as null (WS-tunneled). But because v1.1.x binaries are
-in `config.providers[]` (pinned), the coordinator falls back to
-`config.providers[].endpoint_url`. Net: zero binary changes required
-for existing providers.
+When `endpoint_url` is absent or null in hello, this is the provider-
+side signal for WS-tunneled mode. The coordinator's final mode
+determination uses BOTH the hello field AND the static
+`config.providers[]` map; see SPEC-002 v1.1.1 § 3 for the complete
+mode resolution rule. Existing v1.1.x binaries do not send
+`endpoint_url`; the coordinator resolves their mode via the static
+config map. Net: zero binary changes required for existing providers.
 
 #### Handshake acknowledgement (C->P)
 ```json
@@ -1324,6 +1332,34 @@ times out.
 3. If the `request_id` is in the provider's request queue (not yet
    started): remove from queue, send `inference_response_end` with
    `status: "cancelled"` and `chunks_sent: 0`.
+
+#### Request ID lifecycle and error handling
+
+**Unknown request_id (coordinator-side).** If the coordinator receives
+an `inference_response_chunk` or `inference_response_end` with a
+`request_id` it did not issue (or that has already been cleaned up),
+the coordinator MUST log at warn level and discard the frame. The
+coordinator MUST NOT propagate unknown-`request_id` data to any buyer.
+The coordinator MUST NOT close the WebSocket — the stale frame may be
+from a request that completed or timed out moments ago.
+
+**Duplicate active request_id (provider-side).** The coordinator MUST
+NEVER reuse a `request_id` while the prior request with that ID is
+still in-flight (i.e., no `inference_response_end` received and no
+coordinator-side timeout expired). If a provider receives an
+`inference_request` with a `request_id` that is already in its active
+map, this is a coordinator protocol error. The provider MUST send
+`nak` with `code: "duplicate_request_id"` and the original request
+continues unaffected. The provider MUST NOT start a second inference
+for the duplicate ID.
+
+**Completed request_id cleanup.**
+- **Coordinator:** Removes a `request_id` from its active map after
+  receiving `inference_response_end` OR after the coordinator-side
+  timeout expires (SPEC-002 `routing.request_timeout_s`, default 300 s).
+- **Provider:** Removes a `request_id` from its active map upon
+  sending `inference_response_end` OR upon receiving `cancel_request`
+  and sending the acknowledging `inference_response_end`.
 
 #### Ordering guarantees
 
@@ -1718,27 +1754,41 @@ FR-14 sends `tier: 1` as an integer. Should this be a version string
 to allow for tier 1.5 or partial upgrades? The spec picks integer for
 simplicity. Tier 2 SPEC can revisit if needed.
 
-**OQ-3. Binary distribution method.**
-NFR-6 specifies code signing. How does the binary reach contributors?
-Options: GitHub Releases download, Homebrew tap, direct link from
-operator. The spec does not specify distribution — that's an operational
-decision. Homebrew tap would be the smoothest contributor experience.
+**OQ-3. Binary distribution method.** RESOLVED in SPEC-003 v0.3
+FR-C1, FR-C2. Distribution channel is GitHub Releases via
+`https://get.streamvc.live/install.sh`. No longer an open question.
 
 **OQ-4. WS frame size limit for large completions.**
-A 32K-token streaming response generates ~32,000 `inference_response_chunk`
-messages (one per token). Each chunk is small (~200-500 bytes including
-envelope). At 30 tok/s, that's 30 WS frames/s — well within typical WS
-capacity. A non-streaming response for a 32K completion would be a single
-chunk with a ~200 KB `data` field, fitting in one WS text frame.
+A 32K-token streaming response at ~5 bytes/token generates ~160 KB of
+SSE data, split across ~32,000 `inference_response_chunk` messages
+(one per token). Each chunk is small (~200-500 bytes including
+envelope). The concern is not individual frame size but total message
+count and WS throughput. At 30 tok/s, that's 30 WS frames/s — well
+within typical WS capacity. But a non-streaming response for a 32K
+completion would be a single `inference_response_chunk` with a ~200 KB
+`data` field, which fits in one WS text frame (gobwas/ws default max:
+unbounded; network MTU handles fragmentation).
 
-Current position: No explicit frame size limit beyond the 16 MB
-coordinator-side `inference_request` limit. Monitor during AC-12 testing.
+**Current position:** No explicit frame size limit in the protocol.
+The 16 MB coordinator-side limit on `inference_request` (§ 6.6) is
+sufficient. Non-streaming responses are bounded by `max_tokens`
+(provider-enforced) and should not exceed a few MB. Monitor during
+AC-12 testing. If WS throughput is a bottleneck, consider chunking
+non-streaming responses.
 
-**OQ-5. Per-provider WS write buffer high-water mark.**
-FR-28 specifies 256 chunks per request as the provider-side write buffer.
-This is a starting estimate — 256 absorbs ~8.5 seconds of WS write latency
-at 30 tok/s. In practice the buffer should rarely fill because WS writes
-are fast on local networks. Tune based on production telemetry.
+**OQ-5. Provider-side WS write buffer sizing.**
+FR-28 specifies 256 chunks per request as the provider-side write
+buffer (§ 6.6 "Backpressure — provider-side write buffer"). This is a
+starting estimate — 256 absorbs ~8.5 seconds of WS write latency at
+30 tok/s. In practice the buffer should rarely fill because WS writes
+are fast on local networks.
+
+**Scope:** This OQ concerns the **provider-side** buffer only
+(gobwas/ws or URLSessionWebSocketTask config on the binary). The
+coordinator-side write buffer sizing is SPEC-002 v1.1.1 OQ-10.
+
+**Current position:** 256 is a conservative default. Tune based on
+production telemetry.
 
 ---
 
