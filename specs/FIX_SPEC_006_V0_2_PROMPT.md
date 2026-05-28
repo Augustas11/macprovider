@@ -117,18 +117,32 @@ to § 6.8.
 
 **Lock:** For streaming requests, the gateway MUST reserve
 `max_tokens` (or the per-request cap, whichever is smaller) against
-the daily quota before forwarding. On successful completion, the
-reservation is settled to actual usage. On 502/504/cancellation:
+the daily quota before forwarding. Settlement on terminal outcome
+follows the provider-reached-vs-not distinction:
 
-- Zero completion tokens generated → reservation refunded in full;
-  no daily quota debited.
-- Partial completion → reservation settled to actual tokens
-  generated.
+- **200 success** → debit prompt + actual completion tokens (as
+  reported by provider).
+- **503 (no provider reached, request never forwarded)** → no quota
+  debited; reservation refunded in full. The buyer is not charged
+  for our pool's transient unavailability.
+- **502 / 504 with 0 completion tokens** → debit prompt tokens only.
+  The provider was reached and processed the prompt before failing
+  or timing out; the work was done.
+- **502 / 504 with partial completion** → debit prompt + actual
+  completion tokens generated up to the failure point.
+- **Client disconnect mid-stream** → debit prompt + actual
+  completion tokens generated up to disconnect.
 
-Prompt tokens count regardless of outcome (the provider performed
-work). Add this to § 7.2 and reflect in § 17.4-17.7. The operator's
+The single guiding rule: quota is debited only for work the provider
+actually performed. The reservation pattern ensures concurrent
+requests cannot oversubscribe quota during the gap between
+reservation and settlement.
+
+Add this to § 7.2 and reflect in § 17.4-17.7. The operator's
 rationale: a free-tier service with "real Macs, sometimes asleep"
-SHOULD NOT punish buyers for our pool's transient unavailability.
+SHOULD NOT punish buyers for our pool's transient unavailability,
+but SHOULD charge for genuine provider work even when the buyer's
+session was cut short.
 
 ## Findings to fix — by cluster
 
@@ -248,6 +262,20 @@ within 65s returns 401.
 
 Reconcile § 11.3 widget contract: the widget call MUST set `scope`
 explicitly.
+
+**Authentication for each scope:**
+- `"request"`, `"session"`, `"account"` → bearer token required
+  (authenticated API users). Reject with 401 if no valid `mp_*`
+  bearer.
+- `"playground"` → demo token required in `X-Demo-Token` header
+  (per D2 mechanism). Reject with 401 if no valid demo token.
+  Playground feedback events store the demo token's IP hash and
+  expire from the queryable feedback summary after 30 days
+  (anonymous feedback is informative but not load-bearing for
+  iteration triggers).
+
+The two auth paths SHOULD be checked in order: bearer first, then
+demo token. A request with neither returns 401.
 
 ### F-M12 (M12 / M2-12): `/admin/feedback-summary` response shape.
 
@@ -417,15 +445,15 @@ Per Decision D2 above. Add full normative spec to § 6.8 including:
 
 Per Decision D3 above. Add to § 17.4-17.7 explicit refund matrix:
 
-| Status | Completion tokens | Quota debited |
-|--------|-------------------|---------------|
-| 200 | as reported | prompt + completion |
-| 502 | 0 | prompt only |
-| 502 | >0 (partial stream) | prompt + actual completion |
-| 503 | 0 | prompt only (note: 503 should generally be 0 since no provider was reached) |
-| 504 | 0 | prompt only |
-| 504 | >0 (partial stream) | prompt + actual completion |
-| Client disconnect | >=0 | prompt + actual completion at disconnect |
+| Status | Completion tokens | Quota debited | Rationale |
+|--------|-------------------|---------------|-----------|
+| 200 | as reported | prompt + completion | Successful work performed |
+| 503 | 0 | **none** | No provider was reached; request never forwarded |
+| 502 | 0 | prompt only | Provider was reached, processed prompt, then failed |
+| 502 | >0 (partial stream) | prompt + actual completion | Provider performed partial work |
+| 504 | 0 | prompt only | Provider was reached, processed prompt, then timed out |
+| 504 | >0 (partial stream) | prompt + actual completion | Provider performed partial work |
+| Client disconnect | >=0 | prompt + actual completion at disconnect | Provider performed work; buyer left early |
 
 ### Cluster 3 — Verification and operations
 
@@ -676,9 +704,13 @@ expected outcome, verification command.
 - [ ] `phase5-gateway/implementation-notes.html` has "Resolved in
       v0.2" section.
 
-If your edits exceed ~600 added lines in SPEC-006 or you find yourself
+If your edits exceed ~800 added lines in SPEC-006 (22 findings × ~30
+lines each plus 12 new ACs is the budget) or you find yourself
 adding "improvements" beyond the audit findings, STOP — those are
-scope creep. Defer to v0.3.
+scope creep. Defer to v0.3. The 800-line budget includes the new
+ACs as first-class deliverables; do NOT shortcut them. Each new AC
+MUST have precondition, action, expected outcome, AND verification
+command.
 
 When done, print a 200-word handback summary:
 - Findings closed by cluster (CRITICAL: 1, Cluster 1: N, Cluster 2: N,
