@@ -35,8 +35,14 @@ logging:
   format: "json"
 
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that
-# may connect MUST be listed here).
+# may connect MUST be listed here). Edit this list locally — DO NOT
+# add providers by SSHing to the VPS and appending to /opt/macprovider/
+# coordinator.yaml, because the next deploy run will overwrite your
+# changes from this file. (Lesson learned 2026-05-28.)
 providers:
   - provider_id: "m4-anon"
     endpoint_url: "https://m4.streamvc.live"
     display_name: "M4 partner (Qwen 7B)"
+  - provider_id: "m1-anon"
+    endpoint_url: "https://m1.streamvc.live"
+    display_name: "M1 partner (Llama 3.2 3B)"
