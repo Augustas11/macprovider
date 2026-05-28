@@ -6,31 +6,31 @@
 **Restructure note (v0.2).** SPEC-003 v0.1 contained four parts in a
 single document. v0.2 redistributes them to avoid cross-spec drift:
 - **Part A** (WS-tunneled inference wire protocol) → SPEC-001 v1.2.1 § 6.6
-- **Part B** (dynamic admission + routing weight) → SPEC-002 v1.1.1
+- **Part B** (dynamic admission + routing weight) → SPEC-002 v1.1.2
   § 3/§ 5/§ 7.1/§ 7.5
 - **Part C** (distribution + lifecycle) → this document (SPEC-003 v0.2 § 4)
 - **Part D** (onboarding UX) → this document (SPEC-003 v0.2 § 5)
 
 SPEC-003 v0.2 also provides the **integration narrative** (§ 3) that
-explains how SPEC-001 v1.2.1, SPEC-002 v1.1.1, and this spec compose into
+explains how SPEC-001 v1.2.1, SPEC-002 v1.1.2, and this spec compose into
 the "stranger downloads and joins" experience.
 
 **Change log v0.3:** Resolves audit findings C4, M4, M3, m1, m3.
 - AC-1: restored `coordinator connection succeeds` as mandatory pass condition (C4 fix). Added AC-1a for degraded-mode install.
 - § 7.3: fixed SPEC-001 clean-room cross-reference from § 8.2 to § 7.2 (M4 fix).
 - OQ note: updated for v0.1 OQ-2 split between SPEC-001 OQ-5 (provider-side) and SPEC-002 OQ-10 (coordinator-side) (M3 fix).
-- § 8 D8 reference: broadened to SPEC-002 v1.1.1 § 10 D8 + SPEC-001 v1.2.1 FR-30 (m1 fix).
+- § 8 D8 reference: broadened to SPEC-002 v1.1.2 § 10 D8 + SPEC-001 v1.2.1 FR-30 (m1 fix).
 - Added line-count justification note (m3 fix).
 
 **Change log v0.4:** Resolves round-2 audit finding MAJOR-2.2.
-- § 2 and § 9: SPEC-002 companion AC range updated from "AC-11 through AC-15" to "AC-11 through AC-15" to include the nak routing-mode fallback test.
+- § 2 and § 9: SPEC-002 companion AC range updated from "AC-11 through AC-14" to "AC-11 through AC-15" to include the nak routing-mode fallback test.
 - Build-complete label updated to v0.4.
 
 **Line-count note (v0.3).** v0.2 final length (752 lines) is below
 the 1200-1500 target from the redistribution prompt. Justification:
 Parts C (distribution) and D (onboarding) are genuinely smaller than
 the WS protocol (Part A) and admission tier (Part B) content that
-moved to SPEC-001 v1.2.1 § 6.6 and SPEC-002 v1.1.1 § 3/§ 5/§ 7. The
+moved to SPEC-001 v1.2.1 § 6.6 and SPEC-002 v1.1.2 § 3/§ 5/§ 7. The
 integration narrative in § 3 adds cross-spec context without inflating
 to artificial length.
 
@@ -61,7 +61,7 @@ the spec:
 The Mac Provider network works — two providers, two models, real
 multi-model routing, ~2.5 s end-to-end inference. SPEC-001 v1.2.1 adds
 WS-tunneled inference so providers need zero inbound network.
-SPEC-002 v1.1.1 adds dynamic admission so the coordinator accepts
+SPEC-002 v1.1.2 adds dynamic admission so the coordinator accepts
 strangers automatically.
 
 But these protocol and coordinator changes are invisible without a
@@ -123,7 +123,7 @@ network works, the product doesn't yet exist."
 - **SPEC-001 v1.2.1** — Part A: WS-tunneled inference wire protocol
   (§ 6.6 inference message types, FR-21 through FR-32, AC-11 through
   AC-15).
-- **SPEC-002 v1.1.1** — Part B: Dynamic admission and WS-tunneled relay
+- **SPEC-002 v1.1.2** — Part B: Dynamic admission and WS-tunneled relay
   (three-tier admission, routing weight, provisional rate limits,
   operator endpoints, FR-P14 through FR-P21, AC-11 through AC-15).
 
@@ -149,7 +149,7 @@ still requires source builds.
 
 ## 3. Integration narrative
 
-This section describes how SPEC-001 v1.2.1 (Part A), SPEC-002 v1.1.1
+This section describes how SPEC-001 v1.2.1 (Part A), SPEC-002 v1.1.2
 (Part B), and SPEC-003 v0.2 (Parts C + D) compose into the
 "stranger downloads and joins" experience.
 
@@ -182,7 +182,7 @@ Stranger's Mac                    get.streamvc.live    GitHub Releases
       │                           Coordinator                 │
       │  WSS hello ──────────────────────>│                   │
       │  (provider_id not in config)      │                   │
-      │                                   │ SPEC-002 v1.1.1     │
+      │                                   │ SPEC-002 v1.1.2     │
       │                                   │ FR-P15: tier =    │
       │                                   │   provisional     │
       │                                   │ FR-P16: rate      │
@@ -193,7 +193,7 @@ Stranger's Mac                    get.streamvc.live    GitHub Releases
       │  heartbeat (every 30s) ──────────>│                   │
       │                                   │                   │
       │              Buyer sends request  │                   │
-      │                                   │ SPEC-002 v1.1.1     │
+      │                                   │ SPEC-002 v1.1.2     │
       │                                   │ § 3: mode =       │
       │                                   │   WS_TUNNELED     │
       │  <── inference_request ──────────│                   │
@@ -215,9 +215,9 @@ Stranger's Mac                    get.streamvc.live    GitHub Releases
 | Config generation | SPEC-003 v0.2 | FR-C2 (install.sh) |
 | launchd plist | SPEC-003 v0.2 | FR-C5 |
 | Self-test inference | SPEC-001 v1.2.1 | FR-20 |
-| WS hello + admission | SPEC-002 v1.1.1 | FR-P2, FR-P15, FR-P16 |
+| WS hello + admission | SPEC-002 v1.1.2 | FR-P2, FR-P15, FR-P16 |
 | WS-tunneled inference | SPEC-001 v1.2.1 | § 6.6, FR-21–FR-32 |
-| Routing with tier weight | SPEC-002 v1.1.1 | § 5 (tier weight) |
+| Routing with tier weight | SPEC-002 v1.1.2 | § 5 (tier weight) |
 | Self-update | SPEC-003 v0.2 | FR-C3 |
 | Status check | SPEC-003 v0.2 | FR-C4 |
 | Uninstall | SPEC-003 v0.2 | FR-C6 |
@@ -627,7 +627,7 @@ plist is a static file written by `install.sh`, not by the binary.
 ### 7.3. Clean-room hygiene
 
 SPEC-003 v0.2 inherits the strict clean-room policy from SPEC-001
-v1.2.1 § 7.2 and SPEC-002 v1.1.1 § 8.2. No d-inference source files were
+v1.2.1 § 7.2 and SPEC-002 v1.1.2 § 8.2. No d-inference source files were
 read during spec writing. `cloudflared` is NOT a hard dependency for
 SPEC-003 — WS-tunneled providers (SPEC-001 v1.2.1 § 6.6) need only
 outbound WSS.
@@ -636,15 +636,15 @@ outbound WSS.
 
 ## 8. Phase 4 findings encoded in SPEC-003 v0.2
 
-Findings D7-D10 are documented in SPEC-002 v1.1.1 § 10 (where they
+Findings D7-D10 are documented in SPEC-002 v1.1.2 § 10 (where they
 belong, since they concern coordinator behavior). This section
 cross-references them for completeness:
 
-- **D7** (static config-map relaxed) → SPEC-002 v1.1.1 FR-P15, FR-P16,
+- **D7** (static config-map relaxed) → SPEC-002 v1.1.2 FR-P15, FR-P16,
   § 7.1 F-2 amendment, § 7.5
-- **D8** (drain conflation) → SPEC-002 v1.1.1 § 10 D8 + SPEC-001 v1.2.1 FR-30
-- **D9** (model_id case-sensitivity) → SPEC-002 v1.1.1 § 5
-- **D10** (coordinator overhead) → SPEC-002 v1.1.1 FR-P14 validation
+- **D8** (drain conflation) → SPEC-002 v1.1.2 § 10 D8 + SPEC-001 v1.2.1 FR-30
+- **D9** (model_id case-sensitivity) → SPEC-002 v1.1.2 § 5
+- **D10** (coordinator overhead) → SPEC-002 v1.1.2 FR-P14 validation
   method
 
 ---
@@ -653,7 +653,7 @@ cross-references them for completeness:
 
 **AC-1 through AC-3 must ALL pass for SPEC-003 v0.4 to be considered
 build-complete. Companion ACs in SPEC-001 v1.2.1 (AC-11 through AC-15)
-and SPEC-002 v1.1.1 (AC-11 through AC-15) must also pass.**
+and SPEC-002 v1.1.2 (AC-11 through AC-15) must also pass.**
 
 ---
 
@@ -755,12 +755,12 @@ ID signing is a Phase 6+ concern.
 redistributed to the specs that own the questions:
 - OQ-1 (WS frame size) → SPEC-001 v1.2.1 OQ-4
 - OQ-2 (WS write buffer) → split: provider-side → SPEC-001 v1.2.1
-  OQ-5; coordinator-side → SPEC-002 v1.1.1 OQ-10. The split reflects
+  OQ-5; coordinator-side → SPEC-002 v1.1.2 OQ-10. The split reflects
   different tuning constraints for the two buffers.
-- OQ-3 (tier visibility to buyers) → SPEC-002 v1.1.1 OQ-6
-- OQ-4 (version enforcement) → SPEC-002 v1.1.1 OQ-7
-- OQ-6 (promotion persistence) → SPEC-002 v1.1.1 OQ-8
-- OQ-7 (provisional identity) → SPEC-002 v1.1.1 OQ-9
+- OQ-3 (tier visibility to buyers) → SPEC-002 v1.1.2 OQ-6
+- OQ-4 (version enforcement) → SPEC-002 v1.1.2 OQ-7
+- OQ-6 (promotion persistence) → SPEC-002 v1.1.2 OQ-8
+- OQ-7 (provisional identity) → SPEC-002 v1.1.2 OQ-9
 
 ---
 
@@ -772,7 +772,7 @@ corresponding to the three spec updates that ship together:
 | Build prompt | Spec | Scope |
 |---|---|---|
 | `BUILD_SPEC_001_V1_2_PROMPT.md` | SPEC-001 v1.2.1 | phase3-binary v1.2: WS inference handlers, hello endpoint_url, new subcommands (update, status, uninstall, self-test), log rotation |
-| `BUILD_SPEC_002_V1_1_PROMPT.md` | SPEC-002 v1.1.1 | coordinator v0.2: WS-tunneled relay, admission tiers, provisional rate limits, new admin endpoints, tier-weighted routing, case-insensitive model match |
+| `BUILD_SPEC_002_V1_1_PROMPT.md` | SPEC-002 v1.1.2 | coordinator v0.2: WS-tunneled relay, admission tiers, provisional rate limits, new admin endpoints, tier-weighted routing, case-insensitive model match |
 | `BUILD_SPEC_003_V0_2_PROMPT.md` | SPEC-003 v0.2 | install.sh, get.streamvc.live hosting, GitHub Releases automation |
 
 These build prompts are authored separately by the operator after the

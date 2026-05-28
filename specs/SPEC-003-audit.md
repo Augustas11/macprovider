@@ -481,3 +481,77 @@ Do not start implementation from v0.3 as-is. Issue a narrow v0.4 patch with exac
 4. Update SPEC-002's dependency line to SPEC-001 v1.2.1.
 
 After those edits, the corpus should be ready for build planning without another full redistribution audit; a targeted regression check against this Round-2 section should be sufficient.
+
+---
+
+# Round 3 (v0.4) Regression Check Report
+
+Auditor: Codex
+Specs checked at commit 71a4fad:
+- SPEC-001 v1.2.1 (expected: untouched since 74cf00b)
+- SPEC-002 v1.1.2
+- SPEC-003 v0.4
+Reference: Round-2 report above + `specs/FIX_SPEC_003_V0_3_PROMPT.md`
+Check completed: 2026-05-28T06:12:06Z
+
+## TL;DR verdict
+
+**READY TO BUILD**.
+
+The four prescribed v0.4 fixes are closed. SPEC-001 has no diff from 74cf00b to 71a4fad, SPEC-002's changes stay within the validation/dependency/quota fixes, and SPEC-003's changes stay within the AC range/version-gate fix. Two cosmetic issues remain in SPEC-003: the known self-referencing v0.4 changelog typo, and two AC-gate labels that still say SPEC-002 v1.1.1 while the corpus now depends on SPEC-002 v1.1.2. Neither changes normative behavior or blocks build planning.
+
+## Fix closure (round-2 findings)
+
+| ID | Round-2 issue | Round-3 verdict |
+| --- | --- | --- |
+| CRITICAL-2.1 | § 7.1 optional field validation | **CLOSED** — SPEC-002 now validates required hello fields separately, validates optional `attestation` / `endpoint_url` only when present, and normalizes absent `endpoint_url` to null before § 3 mode resolution. |
+| MAJOR-2.1 | quota pseudocode undefined | **CLOSED** — `pre_quota_candidates` and `quota_blocked_candidates` are defined, `all_filtered_by_quota` is removed, and 429 is used only when all otherwise-eligible candidates are quota-blocked. |
+| MAJOR-2.2 | SPEC-003 AC range omits AC-15 | **CLOSED** — SPEC-003 § 2 and § 9 now reference SPEC-002 AC-11 through AC-15, and the build-complete label is v0.4. |
+| MINOR-2.1 | dependency line stale | **CLOSED** — SPEC-002 now depends on SPEC-001 v1.2.1. |
+
+## Diff scope verification
+
+- SPEC-001 v1.2.1 untouched: **YES** (`git diff 74cf00b..71a4fad specs/SPEC-001-phase3-binary.md` is empty).
+- SPEC-002 diff stays within V.1/V.2/V.4 + change-log: **YES**.
+- SPEC-003 diff stays within V.3 + change-log: **YES**.
+
+## New findings
+
+### CRITICAL (0)
+
+None.
+
+### MAJOR (0)
+
+None.
+
+### MINOR (2)
+
+**MINOR-3.1 — SPEC-003 v0.4 changelog has a self-referencing AC range typo.**
+
+Spec ref: `specs/SPEC-003-open-onboarding.md` change log v0.4
+
+Evidence: the changelog says the SPEC-002 companion AC range was updated from "AC-11 through AC-15" to "AC-11 through AC-15." The "from" value should be "AC-11 through AC-14."
+
+Impact: cosmetic only. The normative § 2 and § 9 references are correct.
+
+**MINOR-3.2 — SPEC-003 AC-gate labels still name SPEC-002 v1.1.1.**
+
+Spec refs: `specs/SPEC-003-open-onboarding.md` § 2 companion summary and § 9 build-complete gate
+
+Evidence: the SPEC-003 header depends on SPEC-002 v1.1.2, but the companion summary and build-complete gate still label the companion as SPEC-002 v1.1.1 while referencing AC-11 through AC-15.
+
+Impact: cosmetic/readability. It does not reopen MAJOR-2.2 because the AC range itself is corrected and AC-15 exists, but the labels should be aligned to v1.1.2 during the next low-risk cleanup.
+
+### QUESTIONS (0)
+
+None.
+
+## Recommendation
+
+Proceed to build-prompt drafting:
+- `BUILD_SPEC_001_V1_2_1_PROMPT.md`
+- `BUILD_SPEC_002_V1_1_2_PROMPT.md`
+- `BUILD_SPEC_003_V0_4_PROMPT.md`
+
+The audit cycle is complete for build planning. The two minor SPEC-003 text cleanups can be folded into the build-prompt preparation pass or a tiny editorial cleanup; they do not require a v0.5 patch or another regression audit.
