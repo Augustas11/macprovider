@@ -366,3 +366,118 @@ Answerable from SPEC-003 v0.2 FR-C1/FR-C2. It should not remain open.
 4. Resolve OQ hygiene: remove duplicate OQ-10 or explicitly split it, close stale SPEC-001 OQ-3, and restore OQ rationale paragraphs.
 5. Fix cross-references and low-friction drift: SPEC-003 clean-room reference, D8 reference, and SPEC-001 endpoint_url wording.
 6. Add or revise ACs for coordinator-side backward compatibility: observe `nak unknown_message_type` after an accidental § 6.6 dispatch and mark the session HTTP-forwarding-only / do not retry.
+
+---
+
+# Round 2 (v0.3) Audit Report
+
+Auditor: Codex
+Specs audited at commit 74cf00b:
+- SPEC-001 v1.2.1
+- SPEC-002 v1.1.1
+- SPEC-003 v0.3
+Reference: Round-1 audit in this file plus `specs/FIX_SPEC_003_V0_2_PROMPT.md`
+Audit completed: 2026-05-28T05:54:29Z
+
+## TL;DR
+
+Verdict: **NEEDS REVISION**.
+
+Round-2 closure rate: **12/15** round-1 findings fully closed.
+
+The v0.3 patch fixed most redistribution losses: the status-to-HTTP mapping is back, request-id lifecycle rules are restored, `model_id_equal` is case-insensitive, Q1 is answered, and SPEC-003 AC-1 again requires a successful coordinator path. However, one load-bearing wire-compat problem remains in SPEC-002 § 7.1: the hello schema now includes optional `endpoint_url`, but coordinator behavior still says it validates "all fields present." That conflicts with the intended v1.1.x compatibility rule that absence of `endpoint_url` is accepted as null. Two major gaps also remain: routing quota pseudocode references undefined state, and SPEC-003's build-complete gate omits the newly added SPEC-002 AC-15.
+
+## Round-1 Closure Matrix
+
+| ID | Round-1 issue | Round-2 disposition |
+| --- | --- | --- |
+| C1 | SPEC-002 § 7.1 hello / hello_ack schemas stale | **PARTIAL** — schemas now mirror SPEC-001, but § 7.1 validation still says all fields must be present, conflicting with optional `endpoint_url`. |
+| C2 | FR-A8 status-to-buyer-HTTP mapping lost | **CLOSED** — SPEC-002 FR-P14.1 restores all six SPEC-001 end statuses and buyer behavior. |
+| C3 | request_id demux / duplicate / cleanup weakened | **CLOSED** — SPEC-001 § 6.6 and SPEC-002 FR-P18.1 restore unknown, duplicate, and cleanup semantics. |
+| C4 | SPEC-003 AC-1 weakened coordinator success to warn | **CLOSED** — AC-1 requires successful coordinator execution; degraded mode is isolated as non-build-complete AC-1a. |
+| M1 | provisional quota not integrated into routing | **PARTIAL** — quota checks were inserted, but the all-quota-blocked branch depends on undefined `all_filtered_by_quota`. |
+| M2 | case-sensitive model comparison in pseudocode | **CLOSED** — `model_id_equal` uses casefold comparison and is used in pinning and candidate filtering. |
+| M3 | OQ-2 split duplicated unclearly | **CLOSED** — SPEC-003 now explicitly splits provider-side OQ-2a and coordinator-side OQ-2b. |
+| M4 | broken clean-room xref to SPEC-001 § 8.2 | **CLOSED** — SPEC-003 references SPEC-001 § 7.2 and SPEC-002 § 8.2. |
+| M5 | `nak unknown_message_type` contradicted fallback | **PARTIAL** — SPEC-002 behavior and AC-15 are present, but SPEC-003's companion AC gate omits AC-15. |
+| M6 | OQ rationales shortened | **CLOSED** — SPEC-001 OQ-4 and OQ-5 rationales restore the original rationale content and scope. |
+| M7 | SPEC-001 OQ-3 stale / decidable | **CLOSED** — SPEC-001 OQ-3 is marked resolved by SPEC-003 FR-C1 / FR-C2. |
+| m1 | D8 xref too narrow | **CLOSED** — SPEC-003 maps D8 to SPEC-002 § 10 D8 and SPEC-001 FR-30. |
+| m2 | endpoint_url wording confusing | **CLOSED** — SPEC-001 says absence/null is the provider-side WS-tunneled signal and points to coordinator mode resolution. |
+| m3 | line-count target lacked justification | **CLOSED** — SPEC-003 explains the line-count goal as maintainability guidance, not a correctness gate. |
+| Q1 | unknown provisional providers self-reporting endpoint_url | **CLOSED** — SPEC-002 forces provisional unknown providers to WS-tunneled mode and ignores self-reported `endpoint_url` with a warning. |
+
+## Findings
+
+### CRITICAL-2.1 — SPEC-002 § 7.1 still requires optional `endpoint_url` to be present
+
+Spec refs: `specs/SPEC-001-phase3-binary.md` § 6.5; `specs/SPEC-002-coordinator.md` § 3 and § 7.1
+
+Evidence:
+- SPEC-001 v1.2.1 says `endpoint_url` is optional and existing v1.1.x binaries do not send it.
+- SPEC-002 § 3 says existing v1.1.x binaries do not send `endpoint_url`; the coordinator treats absence as null.
+- SPEC-002 § 7.1 now shows the correct v1.2.1 hello shape, but coordinator behavior still says it "Validates all fields present and correctly typed."
+
+Why this matters: if implementers follow § 7.1 literally, legacy v1.1.x providers without `endpoint_url` fail registration, violating the backward-compatibility invariant and leaving C1 only partially fixed.
+
+Required fix: change § 7.1 validation to validate required fields plus optional fields when present. Explicitly say absent `endpoint_url` is accepted and normalized to null before § 3 mode resolution.
+
+### MAJOR-2.1 — Quota-only routing failure branch is not implementable
+
+Spec ref: `specs/SPEC-002-coordinator.md` § 5 routing pseudocode
+
+Evidence: candidate filtering applies `check_provisional_quota`, then checks `if all_filtered_by_quota`, but the pseudocode never defines or assigns `all_filtered_by_quota`.
+
+Why this matters: M1 intended a deterministic buyer response when every otherwise-eligible provider is quota-blocked: HTTP 429 with `Retry-After: 3600`. The text encodes that outcome, but the algorithm as written cannot compute it.
+
+Required fix: preserve the pre-quota candidate set or build a `quota_blocked_candidates` list, then use that explicit state to choose 429 vs 503.
+
+### MAJOR-2.2 — SPEC-003 build-complete gate omits SPEC-002 AC-15
+
+Spec refs: `specs/SPEC-003-open-onboarding.md` § 2.2 and § 9; `specs/SPEC-002-coordinator.md` AC-15
+
+Evidence:
+- SPEC-002 v1.1.1 now adds AC-15 for `nak unknown_message_type` routing-mode fallback.
+- SPEC-003 companion spec summary still lists SPEC-002 "AC-11 through AC-14."
+- SPEC-003 § 9 still says SPEC-003 v0.2 is build-complete only when SPEC-002 AC-11 through AC-14 pass.
+
+Why this matters: the M5 fix adds the right acceptance criterion, but the aggregate SPEC-003 build gate does not require it. A build could claim completion without testing the backward-compat fallback.
+
+Required fix: update SPEC-003 companion summary and § 9 to reference SPEC-002 AC-11 through AC-15, and update the stale "SPEC-003 v0.2" wording to v0.3.
+
+### MINOR-2.1 — SPEC-002 dependency line still names SPEC-001 v1.2
+
+Spec ref: `specs/SPEC-002-coordinator.md` header
+
+Evidence: SPEC-002 v1.1.1 says it depends on "SPEC-001 v1.2" even though the audited corpus and internal schema references rely on SPEC-001 v1.2.1.
+
+Why this matters: not behavior-breaking, but it makes the version contract less precise in the highest-visibility location.
+
+Required fix: update the dependency line to SPEC-001 v1.2.1.
+
+## Focused Checks Requested By Round 2
+
+Backward compatibility:
+- **SPEC-001 statement:** present and substantively preserved.
+- **§ 6.6 scope:** still limited to WS-tunneled providers; HTTP-forwarding providers must not receive § 6.6 messages.
+- **SPEC-002 mode resolution:** accepts missing `endpoint_url` as null in § 3, ignores self-reported `endpoint_url` from unknown provisional providers, and special-cases `nak unknown_message_type`.
+- **Remaining risk:** § 7.1 validation wording conflicts with the optional-field rule and must be fixed before build start.
+
+Status mapping:
+- `complete`, `cancelled`, `error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, and `error_internal` are all mapped in SPEC-002 FR-P14.1.
+- Only `error_queue_full` permits try-next-provider rerouting; provider-internal error details are not exposed to buyers.
+
+Open questions:
+- OQ-3 in SPEC-001 is resolved, Q1 is resolved, and the old OQ-2 split is explicit.
+- No new blocking question is needed for v0.4; the remaining items are edits, not decisions.
+
+## Recommendation
+
+Do not start implementation from v0.3 as-is. Issue a narrow v0.4 patch with exactly these corrections:
+
+1. Fix SPEC-002 § 7.1 validation wording for optional `endpoint_url`.
+2. Define quota-filter state in SPEC-002 § 5 routing pseudocode.
+3. Update SPEC-003 companion AC references to include SPEC-002 AC-15 and change the stale v0.2 build-complete label to v0.3.
+4. Update SPEC-002's dependency line to SPEC-001 v1.2.1.
+
+After those edits, the corpus should be ready for build planning without another full redistribution audit; a targeted regression check against this Round-2 section should be sufficient.
