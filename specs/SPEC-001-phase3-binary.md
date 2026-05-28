@@ -1,7 +1,35 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.1.4 (2026-05-28, post-drain state reset — see Decision log Entry 17)
-**Revision:** v1.1.3 separated coord-drain from process-exit. v1.1.4 closes the half-finished state-machine transition the v1.1.3 patch left behind.
+**Version:** 1.2 (2026-05-28, absorb WS-tunneled inference wire protocol from SPEC-003 v0.1)
+**Revision:** v1.2 adds WS-tunneled inference message types (§ 6.6), hello/hello_ack field extensions, and FR-21–FR-32 / AC-11–AC-15 / OQ-4–OQ-5.
+
+**Change log v1.2:**
+- § 6.5 hello message: added OPTIONAL `endpoint_url` field (string or null). Absence or null means "route inference through this WebSocket" (WS-tunneled mode). Non-empty string means "I am reachable at this HTTPS URL" (HTTP-forwarding mode). Existing v1.1.x binaries do not send this field; the coordinator falls back to its static `config.providers[]` map.
+- § 6.5 hello_ack message: added OPTIONAL `tier` field ("pinned" or "provisional") and OPTIONAL `recommended_binary_version` field (string). Both informational.
+- Added § 6.6 "Inference message types" — four new WS message types (`inference_request`, `inference_response_chunk`, `inference_response_end`, `cancel_request`) for WS-tunneled mode. These are NORMATIVELY SCOPED to providers operating in WS-tunneled mode only.
+- Added FR-21 through FR-32 covering WS-tunneled inference handling.
+- Added AC-11 through AC-15 covering WS-tunneled inference acceptance.
+- Added OQ-4 (WS frame size limits) and OQ-5 (per-provider WS write buffer high-water mark).
+
+> **Backward compatibility.** Phase 3 binaries implementing SPEC-001
+> v1.1.4 (or earlier v1.1.x patches v1.1.2, v1.1.3) remain FULLY
+> COMPLIANT with the MANDATORY portion of SPEC-001 v1.2 without any
+> code change, recompile, or reinstall. The new § 6.6 (Inference
+> message types) is NORMATIVELY SCOPED to providers operating in
+> WS-tunneled mode, signalled by the absence of `endpoint_url` in
+> their `hello` message AND the absence of a corresponding
+> `endpoint_url` in the coordinator's `config.providers[]` entry for
+> their `provider_id`. Operator-configured pinned providers (e.g.,
+> M4 and M1 as of 2026-05-28, both running v1.1.x binaries with
+> coordinator-side static endpoint_url entries) operate in HTTP-
+> forwarding mode and MUST NEVER receive § 6.6 messages from the
+> coordinator. Coordinators (SPEC-002 v1.1) MUST verify routing mode
+> via § 3 mode resolution before dispatching any § 6.6 message.
+> v1.1.x binaries that receive an unexpected § 6.6 message SHOULD
+> respond with `nak code=unknown_message_type` per § 6.5 nak
+> semantics; coordinators that observe such a nak MUST mark the
+> routing-mode resolution buggy and not retry, treating the provider
+> as HTTP-forwarding-only for that session.
 
 **Change log since v1.1.3:**
 - § 6.5 coordinator `drain` message: after `drain_status: complete` and WS close, the provider's internal state machine MUST reset to `ready` (assuming the local HTTP server is healthy, which is the only path that reaches `drainFromCoordinator`). The coordinator has no implicit `draining → ready` transition; if the provider's status field carries over from the previous session into the first heartbeat of the next session, the provider stays excluded from routing indefinitely.
@@ -457,6 +485,98 @@ The coordinator MAY use these fields to route by actual measured
 performance rather than assumed hardware capability. The binary's
 responsibility ends at sending accurate values.
 
+### WS-tunneled inference (v1.2)
+
+**Normative scope.** FR-21 through FR-32 apply ONLY to providers
+operating in WS-tunneled mode. Providers in HTTP-forwarding mode
+are not affected by these requirements.
+
+**FR-21. Inference request handling.**
+On receiving `inference_request` (§ 6.6), the provider:
+1. Parses the embedded `body` field through the existing request
+   validation pipeline (§ 6.2).
+2. Runs inference through the existing pipeline (validation,
+   pre-flight, queue, inference engine, response formatter) but
+   captures output internally instead of writing to an HTTP response.
+3. For streaming requests: emits each SSE chunk as an
+   `inference_response_chunk` WS message.
+4. For non-streaming requests: emits the complete response as a single
+   `inference_response_chunk` followed by `inference_response_end`.
+5. On completion or error, sends `inference_response_end` with the
+   appropriate status.
+
+**FR-22. Streaming response emission.**
+For `stream: true` inference requests, the provider emits one
+`inference_response_chunk` per SSE event. Each chunk's `data` field
+contains the SSE event line (including `data: ` prefix and `\n\n`
+terminator). The `seq` field increments from 0. The final chunk
+contains `data: [DONE]\n\n`, followed by `inference_response_end`.
+
+**FR-23. Non-streaming response emission.**
+For `stream: false` inference requests, the provider emits a single
+`inference_response_chunk` with `seq: 0` containing the complete JSON
+response body, followed by `inference_response_end`.
+
+**FR-24. Request ID correlation.**
+Every `inference_response_chunk` and `inference_response_end` MUST
+carry the `request_id` from the originating `inference_request`. The
+provider MUST NOT reuse or reassign `request_id` values.
+
+**FR-25. Multiplexing.**
+The provider handles up to `max_concurrency` concurrent
+`inference_request` messages on a single WebSocket. Each concurrent
+request is tracked by its `request_id`. The provider's `slots_free`
+heartbeat field reflects WS-tunneled requests as well as local HTTP
+requests.
+
+**FR-26. Cancellation handling.**
+On receiving `cancel_request` (§ 6.6), the provider aborts the
+in-flight inference for the specified `request_id` within 5 seconds.
+The provider sends `inference_response_end` with `status: "cancelled"`
+to acknowledge. If the `request_id` is unknown or already completed,
+the provider sends `inference_response_end` with
+`status: "cancelled"` and `chunks_sent: 0` (idempotent).
+
+**FR-27. Error mapping.**
+Inference errors map to `status` values in `inference_response_end`:
+
+| Error condition | `status` value |
+|---|---|
+| Successful completion | `"complete"` |
+| Client cancelled | `"cancelled"` |
+| Model not loaded | `"error_model_not_loaded"` |
+| Context length exceeded | `"error_context_exceeded"` |
+| Queue full | `"error_queue_full"` |
+| Internal inference error | `"error_internal"` |
+
+**FR-28. Provider-side write buffer backpressure.**
+Per § 6.6 "Backpressure — provider-side write buffer": 256-chunk
+buffer per request, pause generation on full, resume at 50%.
+
+**FR-29. Local HTTP server coexistence.**
+The provider's local HTTP server (§ 6.0–6.4) continues to run
+alongside WS-tunneled inference. WS-tunneled inference is an
+additional code path, not a replacement. The local HTTP server is
+used for `GET /v1/health` diagnostics and for direct-tunnel buyer
+traffic (if the provider also has a public URL).
+
+**FR-30. Drain interaction.**
+Coordinator-initiated drain (§ 6.5 drain message) MUST NOT terminate
+WS-tunneled inference for in-flight requests. The provider completes
+all outstanding `inference_request` responses before closing the
+WebSocket. This composes with the v1.1.3 `drainFromCoordinator()` path
+(drop WS, keep HTTP, reconnect after grace).
+
+**FR-31. Endpoint URL in hello.**
+The provider sends `endpoint_url` in hello per § 6.5 if it has a
+configured public URL. If omitted or null, the coordinator treats
+this provider as WS-tunneled. See § 6.5 for field semantics.
+
+**FR-32. Hello_ack tier and version fields.**
+The provider parses `tier` and `recommended_binary_version` from
+hello_ack per § 6.5. Logs the tier on connection. Warns if
+binary_version < recommended_binary_version.
+
 ### Operations
 
 **FR-18. Health endpoint.**
@@ -837,7 +957,8 @@ provider) or P->C (provider to coordinator).
   "max_concurrency": 2,
   "throughput_tps_estimate": 19.8,
   "binary_version": "0.1.0",
-  "attestation": null
+  "attestation": null,
+  "endpoint_url": null
 }
 ```
 
@@ -864,17 +985,47 @@ pool without first being enumerated in the coordinator config.
 `attestation` is `null` in Tier 1. Tier 2 populates it with the
 `AttestationProvider` hook output.
 
+**`endpoint_url` determines inference routing mode (v1.2 addition).**
+This field is OPTIONAL (may be absent or null). When present and
+non-empty, it declares the provider's HTTPS endpoint for HTTP-
+forwarding mode (same as SPEC-002 v1.0.4's static `config.providers[]`
+endpoint_url, but now self-reported by the provider). When absent or
+null, the provider operates in WS-tunneled mode and receives inference
+traffic via § 6.6 messages over this WebSocket.
+
+Existing v1.1.x binaries do not send `endpoint_url`. The coordinator
+treats absence as null (WS-tunneled). But because v1.1.x binaries are
+in `config.providers[]` (pinned), the coordinator falls back to
+`config.providers[].endpoint_url`. Net: zero binary changes required
+for existing providers.
+
 #### Handshake acknowledgement (C->P)
 ```json
 {
   "type": "hello_ack",
   "coordinator_version": 1,
   "assigned_id": "provider-pool-id",
-  "heartbeat_interval_s": 30
+  "heartbeat_interval_s": 30,
+  "tier": "pinned",
+  "recommended_binary_version": "1.2.0"
 }
 ```
 
 The coordinator may override the heartbeat interval.
+
+**`tier` and `recommended_binary_version` (v1.2 addition).** Both
+fields are OPTIONAL and informational.
+
+`tier` is `"pinned"` or `"provisional"` (see SPEC-002 v1.1 § 7.5 for
+admission tier semantics). The provider uses this for display purposes
+(e.g., `macprovider-cli status` output) and MUST NOT change its
+inference behavior based on tier.
+
+`recommended_binary_version` is a semver string. If the provider's
+`binary_version` (from hello) is older than this value, the provider
+SHOULD log a warning: "A newer version is available (vX.Y.Z). Run
+'macprovider-cli update' to upgrade." The coordinator does NOT enforce
+the version — providers running older binaries continue to function.
 
 #### Capacity heartbeat (P->C) — sent every `heartbeat_interval_s`
 ```json
@@ -1034,6 +1185,192 @@ Provider runs the warm-up inference (FR-16) and responds with a
 
 Sent when the binary receives a malformed or unrecognized coordinator
 message. The binary continues operating; a `nak` is informational.
+
+### 6.6. Inference message types (WS-tunneled mode)
+
+**Normative scope.** This section applies ONLY to providers operating
+in WS-tunneled mode (determined by the absence of `endpoint_url` in
+their `hello` AND the absence of a corresponding `endpoint_url` in the
+coordinator's `config.providers[]` entry). Providers operating in
+HTTP-forwarding mode MUST NEVER receive these messages from the
+coordinator. If an HTTP-forwarding provider receives an
+`inference_request`, it SHOULD respond with
+`nak code=unknown_message_type` per § 6.5 nak semantics.
+
+Four message types enable the coordinator to deliver buyer inference
+requests to providers over the existing WebSocket connection, receive
+streamed responses, and propagate cancellations.
+
+#### inference_request (C→P)
+
+Sent by the coordinator when routing a buyer request to a WS-tunneled
+provider.
+
+```json
+{
+  "type": "inference_request",
+  "request_id": "req-550e8400-e29b-41d4-a716-446655440000",
+  "stream": true,
+  "body": "{\"model\":\"mlx-community/Qwen2.5-7B-Instruct-4bit\",\"messages\":[{\"role\":\"user\",\"content\":\"Hello\"}],\"max_tokens\":100,\"stream\":true}"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | string | Yes | Always `"inference_request"` |
+| `request_id` | string | Yes | UUID assigned by coordinator. Format: `req-{uuid}`. Used for response correlation and cancellation. |
+| `stream` | boolean | Yes | Whether the buyer requested streaming. Determines whether the provider sends `inference_response_chunk` per token (true) or a single chunk with the full response (false). |
+| `body` | string | Yes | The buyer's original request body, JSON-serialized as a string. The provider parses this as if it were a `POST /v1/chat/completions` request body per § 6.2. |
+
+**Why `body` is a string, not an embedded object:** The buyer's
+request may contain fields the coordinator does not parse
+(forward-compat). Serializing as a string preserves the exact byte
+sequence, avoiding any JSON round-trip lossy-ness (e.g., floating-point
+precision, key ordering). The provider parses `body` through its
+existing request validation pipeline (§ 6.2).
+
+**Size limit:** The coordinator MUST NOT send an `inference_request`
+whose total WS frame size exceeds 16 MB. This accommodates the largest
+legal request body (10 MB per FR-8 Stage 1) plus envelope overhead.
+
+#### inference_response_chunk (P→C)
+
+Sent by the provider for each SSE chunk (streaming) or for the
+complete response (non-streaming).
+
+```json
+{
+  "type": "inference_response_chunk",
+  "request_id": "req-550e8400-e29b-41d4-a716-446655440000",
+  "seq": 0,
+  "data": "data: {\"id\":\"chatcmpl-abc123\",\"object\":\"chat.completion.chunk\",\"created\":1716768000,\"model\":\"mlx-community/Qwen2.5-7B-Instruct-4bit\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}]}\n\n"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | string | Yes | Always `"inference_response_chunk"` |
+| `request_id` | string | Yes | Matches the `inference_request.request_id` |
+| `seq` | integer | Yes | Zero-based monotonically increasing sequence number within this `request_id`. Used for gap detection and debugging. |
+| `data` | string | Yes | For streaming: one SSE event line (including `data: ` prefix and trailing `\n\n`). For non-streaming: the complete JSON response body (no SSE framing). |
+
+**Streaming (`stream: true`):** The provider emits one
+`inference_response_chunk` per SSE event that it would have written
+to an HTTP response. This includes the `data: [DONE]\n\n` event,
+sent as the final chunk before `inference_response_end`.
+
+**Non-streaming (`stream: false`):** The provider emits a single
+`inference_response_chunk` with `seq: 0` containing the complete JSON
+response body (same shape as § 6.2 non-streaming response). The `data`
+field contains the raw JSON string (no `data: ` prefix, no SSE framing).
+
+#### inference_response_end (P→C)
+
+Sent by the provider when inference is complete, cancelled, or failed.
+
+```json
+{
+  "type": "inference_response_end",
+  "request_id": "req-550e8400-e29b-41d4-a716-446655440000",
+  "status": "complete",
+  "chunks_sent": 47,
+  "usage": {
+    "prompt_tokens": 25,
+    "completion_tokens": 46,
+    "total_tokens": 71
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | string | Yes | Always `"inference_response_end"` |
+| `request_id` | string | Yes | Matches the `inference_request.request_id` |
+| `status` | string | Yes | One of: `"complete"`, `"cancelled"`, `"error_model_not_loaded"`, `"error_context_exceeded"`, `"error_queue_full"`, `"error_internal"` |
+| `chunks_sent` | integer | Yes | Total `inference_response_chunk` messages sent for this request. Coordinator verifies it received all chunks. |
+| `usage` | object | No | Token usage. Present when `status` is `"complete"`. Contains `prompt_tokens`, `completion_tokens`, `total_tokens`. |
+| `error` | string | No | Human-readable error message. Present when `status` starts with `"error_"`. |
+
+**Invariant:** After sending `inference_response_end`, the provider
+MUST NOT send any more `inference_response_chunk` messages for that
+`request_id`.
+
+#### cancel_request (C→P)
+
+Sent by the coordinator when the buyer disconnects or the request
+times out.
+
+```json
+{
+  "type": "cancel_request",
+  "request_id": "req-550e8400-e29b-41d4-a716-446655440000",
+  "reason": "buyer_disconnected"
+}
+```
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `type` | string | Yes | Always `"cancel_request"` |
+| `request_id` | string | Yes | The `request_id` of the inference to cancel |
+| `reason` | string | Yes | One of: `"buyer_disconnected"`, `"timeout"`, `"coordinator_shutdown"` |
+
+**Provider behavior on receipt:**
+1. If the `request_id` is currently being processed: abort inference,
+   release the slot, send `inference_response_end` with
+   `status: "cancelled"`.
+2. If the `request_id` is unknown (already completed or never
+   received): send `inference_response_end` with
+   `status: "cancelled"` and `chunks_sent: 0`. This is idempotent.
+3. If the `request_id` is in the provider's request queue (not yet
+   started): remove from queue, send `inference_response_end` with
+   `status: "cancelled"` and `chunks_sent: 0`.
+
+#### Ordering guarantees
+
+**Within a single `request_id`:** The provider MUST send
+`inference_response_chunk` messages in `seq` order (0, 1, 2, ...).
+The coordinator MUST relay them to the buyer in `seq` order. If a
+chunk arrives out of order, the coordinator buffers it for up to 5
+seconds waiting for the missing chunk. If the gap is not filled, the
+coordinator treats it as a provider error, sends `cancel_request`, and
+returns HTTP 502 to the buyer.
+
+**Across `request_id` values:** No ordering guarantee. Chunks from
+different requests may interleave freely. The `request_id` is the
+demultiplexing key.
+
+#### Multiplexing
+
+A single provider WebSocket carries up to N concurrent inference
+requests, where N is the provider's advertised `max_concurrency` (from
+`hello`/`heartbeat`). The coordinator MUST NOT send more than N
+concurrent `inference_request` messages. Each WS text frame is one
+complete JSON message — no multi-frame messages, no application-layer
+fragmentation.
+
+#### Retransmission policy
+
+**No retransmission at the application layer.** If the WS connection
+drops, all outstanding requests on that connection are failed. TCP
+guarantees in-order delivery on an established connection. WS frame
+loss only happens on connection failure, at which point all in-flight
+state is lost. Application-layer retransmission adds complexity without
+benefit for the v1 single-WS architecture.
+
+#### Backpressure — provider-side write buffer
+
+The provider maintains a bounded write buffer for outgoing
+`inference_response_chunk` messages per active `request_id`:
+
+- **Buffer size:** 256 chunks per request. At 30 tok/s, this absorbs
+  ~8.5 seconds of WS write latency.
+- **High-water behavior:** If the per-request buffer fills, the
+  provider pauses token generation for that request. The provider
+  MUST NOT drop chunks — every generated token must be delivered or
+  the response is corrupt.
+- **Buffer drain:** The provider resumes generation when the buffer
+  drops below 50% capacity (128 chunks). This hysteresis prevents
+  rapid pause/resume oscillation.
 
 ---
 
@@ -1321,6 +1658,48 @@ prints diagnostic to stderr, no HTTP server starts, no partial state.
 
 **Run by:** `macprovider-cli --model /nonexistent/path 2>&1; echo "exit: $?"`
 
+**AC-11. WS-tunneled inference (non-streaming).**
+A mock coordinator sends `inference_request` with `stream: false` over
+the WebSocket. The binary processes it through the existing inference
+pipeline, returns `inference_response_chunk` with the complete response
+and `inference_response_end` with `status: "complete"`.
+
+**Run by:** `phase3-binary/scripts/test-ws-inference.sh`
+
+**AC-12. WS-tunneled inference (streaming).**
+A mock coordinator sends `inference_request` with `stream: true`. The
+binary returns multiple `inference_response_chunk` messages (one per
+SSE event) with monotonically increasing `seq` values, followed by
+`inference_response_end`. Time-to-first-chunk is within 100 ms of the
+local HTTP streaming baseline.
+
+**Run by:** `phase3-binary/scripts/test-ws-streaming.sh`
+
+**AC-13. Cancellation acknowledgement.**
+A mock coordinator sends `inference_request` then `cancel_request`
+after 2 chunks are received. The binary aborts inference and sends
+`inference_response_end` with `status: "cancelled"` within 5 seconds.
+The request slot is freed (verifiable via `/v1/health`).
+
+**Run by:** `phase3-binary/scripts/test-ws-cancellation.sh`
+
+**AC-14. Concurrent multiplexing.**
+A mock coordinator sends 3 concurrent `inference_request` messages
+(the binary advertises `max_concurrency: 3` or adjusts for the test).
+All 3 produce interleaved `inference_response_chunk` messages on the
+same WebSocket. All 3 complete successfully with correct `request_id`
+correlation.
+
+**Run by:** `phase3-binary/scripts/test-ws-multiplexing.sh`
+
+**AC-15. Backward compatibility — unknown message type.**
+A mock coordinator sends `{"type": "inference_request", ...}` to a
+binary running in HTTP-forwarding mode (or a v1.1.x binary). The
+binary responds with `nak code=unknown_message_type` per § 6.5 nak
+semantics. The binary remains healthy and continues heartbeating.
+
+**Run by:** `phase3-binary/scripts/test-ws-nak-fallback.sh`
+
 ---
 
 ## 10. Open questions for operator
@@ -1344,6 +1723,22 @@ NFR-6 specifies code signing. How does the binary reach contributors?
 Options: GitHub Releases download, Homebrew tap, direct link from
 operator. The spec does not specify distribution — that's an operational
 decision. Homebrew tap would be the smoothest contributor experience.
+
+**OQ-4. WS frame size limit for large completions.**
+A 32K-token streaming response generates ~32,000 `inference_response_chunk`
+messages (one per token). Each chunk is small (~200-500 bytes including
+envelope). At 30 tok/s, that's 30 WS frames/s — well within typical WS
+capacity. A non-streaming response for a 32K completion would be a single
+chunk with a ~200 KB `data` field, fitting in one WS text frame.
+
+Current position: No explicit frame size limit beyond the 16 MB
+coordinator-side `inference_request` limit. Monitor during AC-12 testing.
+
+**OQ-5. Per-provider WS write buffer high-water mark.**
+FR-28 specifies 256 chunks per request as the provider-side write buffer.
+This is a starting estimate — 256 absorbs ~8.5 seconds of WS write latency
+at 30 tok/s. In practice the buffer should rarely fill because WS writes
+are fast on local networks. Tune based on production telemetry.
 
 ---
 

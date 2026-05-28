@@ -1,7 +1,20 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.0.4 (2026-05-28, post-Phase-4-local-acceptance findings — see Decision log Entry 12)
-**Depends on:** SPEC-001 v1.1.1 (Phase 3 binary wire protocol, locked)
+**Version:** 1.1 (2026-05-28, absorbs SPEC-003 v0.1 Part B — dynamic admission + WS-tunneled relay)
+**Depends on:** SPEC-001 v1.2 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.1 (absorbs SPEC-003 v0.1 Part B — dynamic admission + WS-tunneled relay):**
+- § 3 Request forwarding model: added two-path mode resolution. HTTP-forwarding (legacy, for providers with `endpoint_url` via hello or config) and WS-tunneled (new default, for providers without `endpoint_url`). Mode determined at registration time.
+- § 4 FR-P14 through FR-P21: new FRs for WS-tunneled inference relay, admission tiers, provisional rate limits.
+- § 5 Routing algorithm: added admission-tier weight multiplier (pinned 1.0, provisional 0.3 configurable). Applied to `effective_throughput`.
+- § 5 model_id matching: amended from exact string equality to case-insensitive comparison (D9 fix).
+- § 7.1 Close codes: added 4007 `provisional_pool_full`, 4008 `provisional_rate_limited`, 4009 `banned`. Close code 4002 `unknown_provider_id` retired for v1.1+ coordinators.
+- § 7.1 F-2 amendment: relaxed from "every provider_id must be in config.providers[]" to three-tier admission (pinned / provisional / rejected).
+- § 7.5 (new): Admission state and operator endpoints — `GET /admin/provisional`, `POST /admin/promote/{provider_id}`, `POST /admin/reject/{provider_id}`.
+- § 10 D7-D10: four new findings from Phase 4 deploy.
+- § 11 AC-11 through AC-14: admission tier acceptance criteria.
+- § 12 OQ-6 through OQ-10: redistributed open questions.
+- No change to buyer-facing HTTP API (§ 7.2). POST /v1/chat/completions, GET /v1/models, GET /healthz are unchanged in observable behavior.
 
 **Change log since v1.0.3:**
 - § 5 Tie-breaking: added "Operator-visible behavior" note on order-sticky routing under equal metrics (Finding F-1).
@@ -157,25 +170,58 @@ insertion points for each. See Section 3 for hook-point locations.
          (M1 8GB)            (M4 16GB)
 ```
 
-### Request forwarding model
+### Request forwarding model (v1.1 — two paths)
 
-The WebSocket is control plane only (registration, heartbeats, state,
-preflight, commands). Inference requests are forwarded as standard HTTP
-to the provider's reachable endpoint (Cloudflare tunnel URL or direct
-IP). This avoids multiplexing inference over the WebSocket.
+The coordinator supports two inference forwarding paths, selected
+per-provider at registration time:
 
-**Endpoint discovery (v1 resolution).** SPEC-001 section 6.5 `hello`
-intentionally does not include `endpoint_url`. The coordinator obtains
-the provider's HTTP endpoint from a **static configuration map** keyed by
-`provider_id` (the same identifier the provider sends in `hello`). The
-operator maintains this map in the coordinator's config file. If a
-provider connects whose `provider_id` is not in the map, the coordinator
-closes the WebSocket using a standard application close code (see
-"Provider rejection via WebSocket close codes" later in this section).
+**Path A — HTTP-forwarding (legacy).** The coordinator sends the buyer's
+request as a standard HTTP POST to the provider's reachable endpoint
+(Cloudflare tunnel URL or direct IP). The WebSocket carries control
+plane only (registration, heartbeats, state, preflight, commands).
+This is the v1.0.x behavior, preserved for pinned providers with
+operator-managed tunnels.
 
-This preserves SPEC-001 v1.1.1 wire compatibility exactly. Future
-revisions may add `endpoint_url` to `hello` via SPEC-001 amendment, but
-that is out of scope for v1.
+**Path B — WS-tunneled (v1.1 default for new providers).** The
+coordinator sends the buyer's request as an `inference_request` message
+over the provider's existing WebSocket (SPEC-001 v1.2 § 6.6). The
+provider returns response chunks over the same WebSocket. No inbound
+network required — provider needs only outbound WSS to the
+coordinator. Works behind any NAT, firewall, or hotspot.
+
+#### Mode resolution (normative)
+
+The coordinator determines the forwarding mode at provider registration
+time (on `hello`) using the following resolution:
+
+```
+if provider_id in config.providers[]:
+    tier = pinned
+    if hello.endpoint_url is present and non-empty:
+        inference_path = HTTP_FORWARDING(hello.endpoint_url)
+    elif config.providers[provider_id].endpoint_url is present:
+        inference_path = HTTP_FORWARDING(config.providers[provider_id].endpoint_url)
+    else:
+        inference_path = WS_TUNNELED
+else:
+    tier = provisional  (subject to admission rate limits, FR-P16)
+    if hello.endpoint_url is present and non-empty:
+        inference_path = HTTP_FORWARDING(hello.endpoint_url)
+        # coordinator MUST verify reachability before first route
+    else:
+        inference_path = WS_TUNNELED
+```
+
+**`endpoint_url` in hello (SPEC-001 v1.2 § 6.5).** The `hello`
+message gains an OPTIONAL `endpoint_url` field. Existing v1.1.x
+binaries do not send it; the coordinator treats absence as null and
+falls back to the static `config.providers[]` map. Net: zero binary
+changes required for existing providers.
+
+**Endpoint discovery (v1.1 resolution, supersedes v1.0.x).** The
+static `config.providers[]` map remains the mechanism for pinned-tier
+admission and endpoint_url fallback. It is no longer the sole admission
+mechanism — see § 7.5 for provisional admission.
 
 ### Tier 2 hook points summary
 
@@ -421,6 +467,98 @@ code `4003` and reason `"tier_unsupported: coordinator v1 supports tier 1 only"`
 This is a clean rejection — the provider should not retry until
 upgraded. The coordinator logs the rejection at info level.
 
+**FR-P14. WS-tunneled inference relay.**
+When routing a buyer request to a WS-tunneled provider (mode
+resolution: § 3), the coordinator sends an `inference_request` message
+(SPEC-001 v1.2 § 6.6) over the provider's WebSocket. For streaming:
+each `inference_response_chunk` is translated into one SSE `data:`
+line and flushed to the buyer immediately. For non-streaming: chunks
+are accumulated until `inference_response_end`, then assembled into a
+single HTTP response. The coordinator MUST NOT buffer streaming
+chunks — each is relayed as it arrives to preserve time-to-first-token
+fidelity.
+
+**FR-P15. Admission tier assignment.**
+The coordinator recognizes three admission tiers:
+
+| Tier | Source | Admission | Routing weight |
+|---|---|---|---|
+| Pinned | `config.providers[]` | Operator pre-approved | 1.0 |
+| Provisional | Unknown `provider_id` | Auto on hello, rate-limited | 0.3 (configurable) |
+| Rejected | `rejected_providers` table | Never. WS close 4009. | N/A |
+
+**FR-P16. Provisional admission rate limits.**
+- Per-hour admission rate: max 10 new provisional providers per hour
+  (sliding window). 11th → WS close 4008. Rationale: 10/hr allows
+  ~240/day; at 40 KB per-connection state, 240 = ~9.6 MB on the
+  3.8 GB Pearl VPS. Config: `admission.provisional_rate_per_hour`.
+- Total provisional pool size: max 100 simultaneous. 101st → WS close
+  4007. Rationale: 100 × 40 KB = 4 MB. Config:
+  `admission.max_provisional_providers`.
+- Per-provisional-provider request quota: max 100 buyer requests per
+  hour. Over quota → skip provider in routing (invisible to buyer).
+  Rationale: 100 req/hr at ~2.5 s each = ~4 min active inference,
+  ~7% utilization. Config:
+  `admission.provisional_request_quota_per_hour`.
+
+**FR-P17. Provisional admission persistence.**
+Provisional admissions are persisted to SQLite:
+
+```sql
+CREATE TABLE provisional_providers (
+    provider_id TEXT PRIMARY KEY,
+    first_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    last_seen_at TEXT NOT NULL,
+    hostname TEXT,
+    model_id TEXT,
+    binary_version TEXT,
+    total_requests_served INTEGER NOT NULL DEFAULT 0,
+    total_tokens_served INTEGER NOT NULL DEFAULT 0,
+    promoted_at TEXT DEFAULT NULL,
+    notes TEXT DEFAULT NULL
+);
+
+CREATE TABLE rejected_providers (
+    provider_id TEXT PRIMARY KEY,
+    rejected_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    reason TEXT,
+    rejected_by TEXT NOT NULL DEFAULT 'operator'
+);
+```
+
+On restart, providers with `last_seen_at` older than 30 days are not
+pre-loaded (configurable: `admission.provisional_retention_days`).
+`rejected_providers` is always loaded — bans are permanent until
+operator removes the row.
+
+**FR-P18. WS-tunneled cancellation propagation.**
+When a buyer disconnects mid-stream for a WS-tunneled request, the
+coordinator detects the broken connection within 1 second, sends
+`cancel_request` (SPEC-001 v1.2 § 6.6) to the provider, and frees the
+request slot on `inference_response_end` or after 10 seconds (whichever
+first). The coordinator MUST NOT close the WebSocket or mark the
+provider unhealthy due to a slow cancellation.
+
+**FR-P19. WS-tunneled backpressure — coordinator write buffer.**
+Bounded write buffer of 64 messages per provider WebSocket. If full,
+return HTTP 503 to buyer. Do NOT block the buyer goroutine. Do NOT
+mark provider degraded. Config: `ws.write_buffer_size`.
+
+Rationale: 64 messages at ~100 KB avg = ~6.4 MB, within coordinator
+memory budget. Buffer absorbs brief TCP congestion.
+
+**FR-P20. WS-tunneled response timeout.**
+Per outstanding `inference_request`, coordinator starts a timer of
+`routing.request_timeout_s` (default 300 s). On timeout: send
+`cancel_request`, return HTTP 504 to buyer, free slot. After 3
+consecutive timeouts without any successful response, mark provider
+`degraded` and initiate recovery preflight (FR-P11).
+
+**FR-P21. Tier visibility in /poolz.**
+The `/poolz` response (FR-O2) gains `tier` (`"pinned"` or
+`"provisional"`) and `inference_path` (`"http_forwarding"` or
+`"ws_tunneled"`) fields per provider entry.
+
 ### Provider rejection via WebSocket close codes
 
 Because SPEC-001 § 6.5 does not define a coordinator-to-provider `nak`
@@ -436,6 +574,22 @@ binary already handles WebSocket close per SPEC-001 FR-13.
 | `4004` | `version_unsupported` | `version != 1` | `"version_unsupported: protocol version <n>"` |
 | `4005` | `invalid_token` | Authorization header present but token invalid/revoked | `"invalid_token"` |
 | `4429` | `pool_full` | Coordinator at configured max provider count | `"pool_full"` |
+| `4007` | `provisional_pool_full` | Provisional provider connects when provisional pool at capacity | `"provisional_pool_full: max <N> provisional providers reached"` |
+| `4008` | `provisional_rate_limited` | Provisional admission rate exceeded | `"provisional_rate_limited: max <N> admissions per hour"` |
+| `4009` | `banned` | Provider's `provider_id` in `rejected_providers` table | `"banned: provider <id> has been rejected by operator"` |
+
+**v1.1 amendment — close code 4002 retired.** In v1.0.x, close code
+4002 `unknown_provider_id` rejected any `provider_id` not in
+`config.providers[]`. In v1.1, unknown `provider_id` values are
+admitted as provisional (subject to rate limits) or rejected with 4009
+if banned. Close code 4002 is no longer sent by v1.1+ coordinators.
+
+**F-2 amendment (v1.1, from SPEC-003 v0.1 § 6.4).** The original F-2
+("every provider_id must be in config.providers[]") is relaxed:
+`config.providers[]` remains the mechanism for pinned tier admission.
+Unknown `provider_id` values are accepted as provisional (subject to
+rate limits in FR-P16) or rejected with 4009 if in the
+`rejected_providers` table.
 
 Codes are mnemonic (4000-range maps to "rejected") and the reason text
 provides operator-visible detail. Provider binaries log the close code
@@ -834,12 +988,17 @@ function route(request, pool, headers) -> provider | error:
     if len(candidates) == 0:
         return error(503, "No provider available for model " + model)
 
+    # Step 2.5: Apply admission-tier weight (v1.1)
+    for candidate in candidates:
+        candidate.effective_throughput = candidate.throughput_tps_estimate * tier_weight(candidate.tier)
+    # where tier_weight(pinned) = 1.0, tier_weight(provisional) = 0.3 (configurable)
+
     # Step 3: Apply buyer preference
     pref = headers.get("X-MacProvider-Pref", "")
 
     if pref == "fast":
         # Sort by throughput descending, break ties by slots_free ascending
-        sort(candidates, key=(-throughput_tps_estimate, slots_free))
+        sort(candidates, key=(-effective_throughput, slots_free))
     elif pref == "accurate":
         # Sort by model_params_b descending, break ties by slots_free ascending
         sort(candidates, key=(-model_params_b, slots_free))
@@ -847,7 +1006,7 @@ function route(request, pool, headers) -> provider | error:
         # Default: utilization-favoring
         # Prefer lowest positive slots_free (concentrate load)
         # Break ties by throughput descending
-        sort(candidates, key=(slots_free, -throughput_tps_estimate))
+        sort(candidates, key=(slots_free, -effective_throughput))
 
     # Step 4: Select and preflight
     for provider in candidates:
@@ -871,7 +1030,7 @@ function route(request, pool, headers) -> provider | error:
    requests a specific provider, no other provider is considered. This
    enables A/B testing and debugging.
 
-2. **Model match** is exact string equality on `model_id`. No fuzzy
+2. Model match is **case-insensitive** string comparison on `model_id` (v1.1 amendment, per D9). The canonical form (as sent by the provider in hello) is preserved in storage and returned in `GET /v1/models`. No fuzzy
    matching, no aliases in v1. The model ID is the HuggingFace
    identifier (e.g., `mlx-community/Qwen2.5-7B-Instruct-4bit`).
 
@@ -1597,6 +1756,87 @@ the entry is gone. AC-10 asserts this two-phase observable behavior
 (not "removed immediately" — that would conflict with FR-P6's normal
 disconnect-then-remove flow).
 
+### 7.5. Admission state and operator endpoints (v1.1)
+
+All endpoints in this section are mounted on `listen.provider_port`
+(default 8444) per Finding F-3. All require
+`Authorization: Bearer <operator-key>`.
+
+#### GET /admin/provisional
+
+Returns all current and historical provisional providers.
+
+**Response (200):**
+```json
+{
+  "provisional": [
+    {
+      "provider_id": "stranger-mac-001",
+      "hostname": "Strangers-MacBook.local",
+      "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+      "binary_version": "1.2.0",
+      "first_seen_at": "2026-06-01T10:00:00Z",
+      "last_seen_at": "2026-06-01T12:30:00Z",
+      "total_requests_served": 42,
+      "total_tokens_served": 8400,
+      "currently_connected": true,
+      "promoted_at": null
+    }
+  ],
+  "summary": {
+    "total_provisional": 3,
+    "currently_connected": 2,
+    "promoted": 1
+  }
+}
+```
+
+#### POST /admin/promote/{provider_id}
+
+Promotes a provisional provider to pinned tier (runtime only — operator
+must also add to `coordinator.yaml` for persistence across restarts).
+
+**Response (200):**
+```json
+{
+  "provider_id": "stranger-mac-001",
+  "previous_tier": "provisional",
+  "new_tier": "pinned",
+  "note": "Runtime promotion only. Add to coordinator.yaml for persistence across restarts."
+}
+```
+
+**Response (404):** `{"error": {"code": "provider_not_found", "message": "..."}}`
+**Response (409):** `{"error": {"code": "already_pinned", "message": "..."}}`
+
+#### POST /admin/reject/{provider_id}
+
+Rejects a provider (any tier). Adds to `rejected_providers` and
+disconnects.
+
+**Request body (optional):**
+```json
+{"reason": "Suspected bad actor"}
+```
+
+**Response (200):**
+```json
+{
+  "provider_id": "stranger-mac-001",
+  "status": "rejected",
+  "drain_sent": true,
+  "note": "Future connections rejected with close code 4009."
+}
+```
+
+**Tier state transitions:**
+- Provisional → Pinned: `POST /admin/promote/{id}`. Updates routing
+  weight to 1.0 immediately.
+- Provisional → Rejected: `POST /admin/reject/{id}`. Sends drain,
+  adds to `rejected_providers`, closes WS with 4009.
+- Rejected → Provisional: Operator removes row from
+  `rejected_providers` (SQL). Provider can reconnect.
+
 ---
 
 ## 8. Dependencies and references
@@ -1847,6 +2087,52 @@ to make the operator-visible behavior explicit in the user-facing
 section (§ 5, § 7.4) even when it is a derived consequence of normative
 text elsewhere.
 
+### D7 — Static config-map relaxed to provisional tier (v1.1, from SPEC-003 v0.1)
+
+**Source:** SPEC-002 v1.0.4 Finding F-2 + Decision log Entry 18.
+
+**Finding:** F-2's "every provider_id must be in config.providers[]"
+blocks supply-side growth beyond operator-vetted partners.
+
+**SPEC-002 v1.1 encoding:**
+- FR-P15 (three admission tiers): pinned / provisional / rejected.
+- FR-P16 (rate limits): Prevents abuse of relaxed admission.
+- § 7.1 (F-2 amendment): Formal relaxation.
+- § 7.5 (operator endpoints): promote, reject.
+
+### D8 — Coordinator drain MUST NOT terminate WS-tunneled inference
+
+**Source:** Decision log Entry 15. phase3-binary v1.1.2 called exit()
+on coordinator drain. Fixed in v1.1.3.
+
+**SPEC-002 v1.1 encoding:**
+- FR-P14 (WS relay): WS-tunneled providers complete in-flight
+  inference before closing. Coordinator drain → provider finishes
+  responses → WS close → reconnect.
+- This is now load-bearing: WS-tunneled providers have no fallback
+  path during coordinator drain (unlike pinned providers who serve
+  via tunnel).
+
+### D9 — model_id case-insensitive comparison
+
+**Source:** Decision log Entry 18. M1 cron 404 storm from
+case-sensitive model_id comparison.
+
+**SPEC-002 v1.1 encoding:**
+- § 5 routing algorithm: model match amended from exact string
+  equality to case-insensitive comparison. Canonical form preserved
+  in storage and GET /v1/models.
+
+### D10 — Coordinator overhead for WS-tunneled path
+
+**Source:** Decision log Entry 14. HTTP-forwarding adds <100 ms. WS-
+tunneled adds estimated 10-50 ms on top (JSON serialization,
+demultiplexing, SSE reassembly).
+
+**SPEC-002 v1.1 encoding:**
+- FR-P14 (WS relay): Validation method in AC-11 measures TTFT for
+  WS-tunneled vs HTTP-forwarding. Delta SHOULD be <100 ms.
+
 ---
 
 ## 11. Acceptance criteria
@@ -1994,6 +2280,36 @@ Run by: `phase4-coordinator/scripts/test-routing-preference.sh`
 
 Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh`
 
+**AC-11. Provisional admission.**
+Connect a mock provider with `provider_id` NOT in `config.providers[]`
+and NOT in `rejected_providers`. Coordinator responds with `hello_ack`
+containing `tier: "provisional"`. `GET /poolz` shows the provider with
+`tier: "provisional"`. Buyer requests are routed to it (with reduced
+weight).
+
+Run by: `phase4-coordinator/scripts/test-provisional.sh`
+
+**AC-12. Provisional rate limit.**
+Configure `admission.provisional_rate_per_hour: 10`. Connect 11
+provisional providers within 60 seconds. First 10 get `hello_ack`.
+11th gets WS close code 4008.
+
+Run by: `phase4-coordinator/scripts/test-rate-limit.sh`
+
+**AC-13. admin/promote.**
+Connect a provisional provider. `POST /admin/promote/{provider_id}`.
+Provider's tier changes to pinned in `/poolz`. Routing weight upgrades
+to 1.0 immediately.
+
+Run by: `phase4-coordinator/scripts/test-promote.sh`
+
+**AC-14. admin/reject.**
+Connect a provisional provider. `POST /admin/reject/{provider_id}`.
+Provider receives drain. WS closes. `provider_id` in
+`rejected_providers`. Subsequent hello → WS close 4009.
+
+Run by: `phase4-coordinator/scripts/test-reject.sh`
+
 ---
 
 ## 12. Open questions for operator
@@ -2014,9 +2330,41 @@ Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh`
 - **Buyer auth in v1:** none; trust delegated to Antseed seller
   integration (SPEC-003). Buyer API keys are SPEC-006 scope.
 
-No open questions remain. v1.0.2 resolved all prior open items into
+No open questions remain from v1.0.x. v1.0.2 resolved all prior open items into
 normative requirements (see FR-P11 for the HTTP 530 handling that was
 previously OQ-1).
+
+**OQ-6. How to surface tier=provisional to buyers.**
+Current design: tier is invisible to buyers. Should the coordinator
+add an `X-MacProvider-Tier` response header? Current position: Do NOT
+surface tier in v1. Buyers should not care — routing weight handles
+QoS. If a buyer wants to avoid provisional providers, they pin via
+`X-MacProvider-Provider`.
+
+**OQ-7. Version enforcement for provisional providers.**
+Should the coordinator refuse to route to providers running versions
+older than `recommended_binary_version`? Current position: no
+enforcement in v1 — the nudge is informational. Enforcement risks
+rejecting all provisional providers simultaneously on version bump.
+
+**OQ-8. Automatic persistence of promotions.**
+FR-P15's `POST /admin/promote` is runtime-only. Should the coordinator
+auto-append to `coordinator.yaml`? Current position: no auto-edit of
+config files in v1. Config files are operator-owned and may be
+version-controlled.
+
+**OQ-9. Provisional provider identity verification.**
+Provisional providers self-report `provider_id` (UUID from
+install.sh). Nothing prevents impersonation. Current position:
+self-reported UUIDs are sufficient for v1 because (a) UUID collision
+probability is negligible, (b) duplicate ID closes older connection,
+(c) provisional weight + quotas limit impact. Stronger verification
+is Tier 2.
+
+**OQ-10. Per-provider WS write buffer sizing.**
+FR-P19 specifies 64 messages. This is ~60× expected steady-state
+depth. Tune based on production telemetry. Consider adding
+per-provider write buffer depth to `/poolz` for visibility.
 
 ---
 
