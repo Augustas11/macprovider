@@ -14,22 +14,30 @@
 #     7B 16GB) at 18:00 — heavier model, 4-hour gap from M1.
 
 # ─── cooperative (every 15 min during 9am-10pm) ─────────────────────────
-*/15 9-22 * * *  /Users/augstar/macprovider-poc/beta/scripts/m4-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
-7-59/15 9-22 * * *  /Users/augstar/macprovider-poc/beta/scripts/m1-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+#
+# 2026-05-28: direct-to-tunnel cron lanes (m4-cooperative, m1-cooperative)
+# retired now that the coordinator is live + pool reached N=2 ready.
+# The coord path is the production-realistic buyer experience and gives
+# us per-provider liveness via /poolz heartbeats (more granular than
+# 15-min curl). Direct lanes also become impossible under the planned
+# SPEC-001 v1.2 / SPEC-002 v1.1 architecture where providers have no
+# public URL. Kept commented for archaeology; uncomment to revive.
+#
+# */15 9-22 * * *  /Users/augstar/macprovider-poc/beta/scripts/m4-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+# 7-59/15 9-22 * * *  /Users/augstar/macprovider-poc/beta/scripts/m1-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
 
-# Coordinator path (Phase 4) — enabled 2026-05-28 after pool reached N=2 ready.
-# Exercises buyer -> nginx -> coordinator -> provider chain alongside the
-# direct baselines. Offset 11 min from m4 / 4 min from m1 keeps the three
-# SQLite writers from piling up on the same minute.
-11-59/15 9-22 * * *  /Users/augstar/macprovider-poc/beta/scripts/coord-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+# Coordinator path — the only active cooperative lane. Every 15 min,
+# fires the cooperative batch through https://coordinator.streamvc.live.
+*/15 9-22 * * *  /Users/augstar/macprovider-poc/beta/scripts/coord-cooperative.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
 
-# ─── adversarial (daily, staggered) ─────────────────────────────────────
-0 14 * * * /Users/augstar/macprovider-poc/beta/scripts/m1-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
-0 18 * * * /Users/augstar/macprovider-poc/beta/scripts/m4-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
-
-# Coordinator adversarial — disabled by default. 16:00 sits between m1
-# (14:00) and m4 (18:00) so no two adversarial bursts overlap.
-# 0 16 * * * /Users/augstar/macprovider-poc/beta/scripts/coord-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+# ─── adversarial (daily) ───────────────────────────────────────────────
+#
+# Direct-to-tunnel adversarial cron retired with the cooperative ones.
+# 0 14 * * * /Users/augstar/macprovider-poc/beta/scripts/m1-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+# 0 18 * * * /Users/augstar/macprovider-poc/beta/scripts/m4-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
+#
+# Coord adversarial daily at 16:00 UTC.
+0 16 * * * /Users/augstar/macprovider-poc/beta/scripts/coord-adversarial.sh >>/Users/augstar/macprovider-poc/beta/cron.log 2>&1
 
 # ─── tips ───────────────────────────────────────────────────────────────
 # • Watch first day: `tail -f /Users/augstar/macprovider-poc/beta/cron.log`
