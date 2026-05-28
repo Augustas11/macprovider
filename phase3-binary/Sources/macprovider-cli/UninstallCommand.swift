@@ -8,46 +8,52 @@ struct UninstallCommand: ParsableCommand {
         abstract: "Stop macprovider-cli and remove installed artifacts."
     )
 
-    @Flag(help: "Remove config and logs without prompting.")
+    @Flag(help: "Accepted for compatibility; support files and logs are always removed.")
     var removeConfigAndLogs = false
 
-    @Flag(help: "Do not prompt before keeping or removing config and logs.")
+    @Flag(help: "Accepted for compatibility; uninstall is non-interactive.")
     var yes = false
 
     func run() throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         var warnings: [String] = []
-        let plist = home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+        let paths = Self.artifactPaths(home: home)
+        let plist = paths.plist
         if FileManager.default.fileExists(atPath: plist.path) {
             try runProcess("/bin/launchctl", arguments: ["bootout", "gui/\(getuid())", "live.streamvc.macprovider"], allowFailure: true)
             removeIfPresent(plist, warnings: &warnings)
         }
 
-        let binary = home.appendingPathComponent(".local/bin/macprovider-cli")
-        removeIfPresent(binary, warnings: &warnings)
-
-        let shouldRemoveState: Bool
-        if removeConfigAndLogs {
-            shouldRemoveState = true
-        } else if yes {
-            shouldRemoveState = false
-        } else {
-            print("Remove configuration and logs? [y/N] ", terminator: "")
-            let answer = readLine()?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            shouldRemoveState = answer == "y" || answer == "yes"
-        }
-
-        if shouldRemoveState {
-            removeIfPresent(home.appendingPathComponent(".config/macprovider"), warnings: &warnings)
-            removeIfPresent(home.appendingPathComponent(".local/share/macprovider"), warnings: &warnings)
-            removeIfPresent(home.appendingPathComponent("Library/Logs/macprovider"), warnings: &warnings)
-        }
+        removeIfPresent(paths.binary, warnings: &warnings)
+        removeIfPresent(paths.supportDirectory, warnings: &warnings)
+        removeIfPresent(paths.logsDirectory, warnings: &warnings)
 
         try removePathMarker(from: home.appendingPathComponent(".zshrc"))
+        if FileManager.default.fileExists(atPath: paths.cacheDirectory.path) {
+            warnings.append("left cache directory in place: \(paths.cacheDirectory.path)")
+        }
         for warning in warnings {
             print("warning: \(warning)")
         }
         print("macprovider-cli has been uninstalled.")
+    }
+
+    struct ArtifactPaths: Equatable {
+        let binary: URL
+        let supportDirectory: URL
+        let logsDirectory: URL
+        let plist: URL
+        let cacheDirectory: URL
+    }
+
+    static func artifactPaths(home: URL) -> ArtifactPaths {
+        ArtifactPaths(
+            binary: home.appendingPathComponent(".local/bin/macprovider-cli"),
+            supportDirectory: home.appendingPathComponent("macprovider"),
+            logsDirectory: home.appendingPathComponent("Library/Logs/macprovider"),
+            plist: home.appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist"),
+            cacheDirectory: home.appendingPathComponent(".cache/macprovider")
+        )
     }
 
     private func removeIfPresent(_ url: URL, warnings: inout [String]) {

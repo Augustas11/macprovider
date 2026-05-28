@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sort"
 	"strings"
@@ -36,6 +37,7 @@ type Server struct {
 	requestTimeout     time.Duration
 	provisionalWeight  float64
 	recovering         sync.Map
+	poolCheckLast      sync.Map
 }
 
 type PreflightResult struct {
@@ -127,9 +129,114 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 
 func (s *Server) Handler() http.Handler {
 	r := chi.NewRouter()
+	r.Get("/healthz", s.handleHealthz)
 	r.Get("/v1/models", s.handleModels)
+	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Post("/v1/chat/completions", s.handleChatCompletions)
 	return r
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	providers := s.pool.Snapshot()
+	resp := struct {
+		Status          string `json:"status"`
+		UptimeS         int64  `json:"uptime_s"`
+		PoolSize        int    `json:"pool_size"`
+		PoolReady       int    `json:"pool_ready"`
+		PoolDegraded    int    `json:"pool_degraded"`
+		PoolDraining    int    `json:"pool_draining"`
+		PoolUnavailable int    `json:"pool_unavailable"`
+		RequestsTotal   int    `json:"requests_total"`
+		RequestsActive  int    `json:"requests_active"`
+		Version         string `json:"version"`
+	}{
+		Status:   "ok",
+		UptimeS:  int64(time.Since(time.Unix(s.createdAt, 0)).Seconds()),
+		PoolSize: len(providers),
+		Version:  "0.1.0",
+	}
+	for _, p := range providers {
+		switch p.State {
+		case pool.StateReady:
+			resp.PoolReady++
+		case pool.StateDegraded, pool.StateBusy:
+			resp.PoolDegraded++
+		case pool.StateDraining:
+			resp.PoolDraining++
+		case pool.StateUnavailable:
+			resp.PoolUnavailable++
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.log.Warn().Err(err).Msg("write healthz response failed")
+	}
+}
+
+type poolCheckResponse struct {
+	ProviderID string     `json:"provider_id"`
+	Tier       pool.Tier  `json:"tier"`
+	State      pool.State `json:"state"`
+}
+
+func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
+	if !s.allowPoolCheck(r) {
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Pool check rate limit exceeded")
+		return
+	}
+	providerID := strings.TrimSpace(r.URL.Query().Get("provider_id"))
+	if providerID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Missing provider_id")
+		return
+	}
+	for _, p := range s.pool.Snapshot() {
+		if p.ProviderID != providerID {
+			continue
+		}
+		state := p.State
+		if state == pool.StateBusy {
+			state = pool.StateDegraded
+		}
+		s.log.Info().Str("provider_id", providerID).Str("state", string(state)).Msg("pool check hit")
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(poolCheckResponse{ProviderID: p.ProviderID, Tier: p.Tier, State: state}); err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("write pool check response failed")
+		}
+		return
+	}
+	s.log.Info().Str("provider_id", providerID).Msg("pool check miss")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusNotFound)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error":       "provider_not_found",
+		"provider_id": providerID,
+	})
+}
+
+func (s *Server) allowPoolCheck(r *http.Request) bool {
+	ip := clientIP(r)
+	now := time.Now()
+	if prevAny, ok := s.poolCheckLast.Load(ip); ok {
+		if now.Sub(prevAny.(time.Time)) < time.Second {
+			return false
+		}
+	}
+	s.poolCheckLast.Store(ip, now)
+	return true
+}
+
+func clientIP(r *http.Request) string {
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
+		if i := strings.IndexByte(forwarded, ','); i >= 0 {
+			return strings.TrimSpace(forwarded[:i])
+		}
+		return forwarded
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil || host == "" {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 type modelsResponse struct {
@@ -862,6 +969,9 @@ func estimateTokens(raw json.RawMessage) int {
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
+	if status == http.StatusTooManyRequests && code == "provisional_quota_exceeded" {
+		w.Header().Set("Retry-After", "3600")
+	}
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{

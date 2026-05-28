@@ -4,8 +4,11 @@
 set -euo pipefail
 
 INSTALL_DIR="$HOME/macprovider"
+BIN_DIR="$HOME/.local/bin"
+BINARY_PATH="$BIN_DIR/macprovider-cli"
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
+CACHE_DIR="$HOME/.cache/macprovider"
 DRY_RUN=0
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 
@@ -43,10 +46,11 @@ confirm() {
   cat <<EOF
 This will remove:
   $PLIST_PATH
+  $BINARY_PATH
   $INSTALL_DIR
   $LOG_DIR
 
-It will not remove Hugging Face caches or other files outside these paths.
+It will not remove $CACHE_DIR, Hugging Face caches, or other files outside these paths.
 EOF
   printf "Uninstall Mac Provider? [y/N] "
   read_line
@@ -86,7 +90,8 @@ guard_safe_path() {
 }
 
 main() {
-  guard_safe_path "install" "$INSTALL_DIR" "$HOME/macprovider"
+  guard_safe_path "binary" "$BINARY_PATH" "$HOME/.local/bin/macprovider-cli"
+  guard_safe_path "support" "$INSTALL_DIR" "$HOME/macprovider"
   guard_safe_path "log" "$LOG_DIR" "$HOME/Library/Logs/macprovider"
 
   if ! confirm; then
@@ -101,6 +106,10 @@ main() {
     log "No launchd plist found at $PLIST_PATH."
   fi
 
+  if [ -f "$BINARY_PATH" ]; then
+    run rm -f "$BINARY_PATH"
+  fi
+
   if [ -d "$INSTALL_DIR" ]; then
     run rm -rf "$INSTALL_DIR"
   fi
@@ -110,6 +119,9 @@ main() {
   fi
 
   log "macprovider-cli has been uninstalled."
+  if [ -d "$CACHE_DIR" ]; then
+    log "Left cache directory in place: $CACHE_DIR"
+  fi
   log "If you want to fully uninstall MLX-cached models from ~/.cache/huggingface/, do that manually."
 }
 

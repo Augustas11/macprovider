@@ -6,17 +6,26 @@ struct SelfUpdate {
     private let currentVersion: String
     private let releasesAPIURL: String
     private let session: URLSession
+    private let drainBeforeReplace: (() async throws -> Void)?
+    private let replaceBinary: ((URL) throws -> Void)?
+    private let restartLaunchd: (() throws -> Void)?
 
     init(
         currentVersion: String,
         releasesAPIURL: String?,
-        session: URLSession = .shared
+        session: URLSession = .shared,
+        drainBeforeReplace: (() async throws -> Void)? = nil,
+        replaceBinary: ((URL) throws -> Void)? = nil,
+        restartLaunchd: (() throws -> Void)? = nil
     ) {
         self.currentVersion = currentVersion
         self.releasesAPIURL = releasesAPIURL
             ?? ProcessInfo.processInfo.environment["MACPROVIDER_RELEASES_API_URL"]
             ?? "https://api.github.com/repos/augstar/macprovider-poc/releases/latest"
         self.session = session
+        self.drainBeforeReplace = drainBeforeReplace
+        self.replaceBinary = replaceBinary
+        self.restartLaunchd = restartLaunchd
     }
 
     func run(checkOnly: Bool) async throws {
@@ -66,9 +75,12 @@ struct SelfUpdate {
         let newBinary = try Self.findBinary(in: extractDir)
 
         try runProcess(newBinary.path, arguments: ["self-test"])
-        try replaceCurrentBinary(with: newBinary)
-        try restartLaunchdIfInstalled()
+        try await applyValidatedUpdate(newBinary: newBinary)
         print("Update complete. Restart macprovider-cli to use v\(latest).")
+    }
+
+    func applyValidatedUpdateForTest(newBinary: URL) async throws {
+        try await applyValidatedUpdate(newBinary: newBinary)
     }
 
     func latestVersionCached() async throws -> String {
@@ -143,6 +155,34 @@ struct SelfUpdate {
             try? FileManager.default.removeItem(at: staged)
             throw UpdateError.renameFailed(errnoValue)
         }
+    }
+
+    private func applyValidatedUpdate(newBinary: URL) async throws {
+        if let drainBeforeReplace {
+            try await drainBeforeReplace()
+        } else {
+            try drainLaunchdIfInstalled()
+        }
+        if let replaceBinary {
+            try replaceBinary(newBinary)
+        } else {
+            try replaceCurrentBinary(with: newBinary)
+        }
+        if let restartLaunchd {
+            try restartLaunchd()
+        } else {
+            try restartLaunchdIfInstalled()
+        }
+    }
+
+    private func drainLaunchdIfInstalled() throws {
+        let plist = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            return
+        }
+        let domain = "gui/\(getuid())"
+        try runProcess("/bin/launchctl", arguments: ["bootout", domain, "live.streamvc.macprovider"], allowFailure: true)
     }
 
     private func restartLaunchdIfInstalled() throws {

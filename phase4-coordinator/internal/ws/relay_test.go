@@ -228,7 +228,7 @@ func TestRelayNAKFallbackMarksHTTPForwardingOnly(t *testing.T) {
 	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
 		t.Fatalf("read inference_request: %v", err)
 	}
-	s.handleNAK("p1", "s1", mustJSON(NAK{Type: "nak", RequestID: "req-nak", Code: "unknown_message_type"}))
+	s.handleNAK("p1", "s1", []byte(`{"type":"nak","in_reply_to":"req-nak","error":{"code":"unknown_message_type","message":"mock reject-nak"}}`))
 
 	select {
 	case err := <-relay.Errors:

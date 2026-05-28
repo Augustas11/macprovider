@@ -668,4 +668,24 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   <code>scripts/test-ac15-nak-fallback.sh</code>; all passed locally.</p>
 </div>
 </section>
+<section><h2>Integration audit patch - Go stream</h2>
+<p class=meta>2026-05-28 cross-stream audit fixes.</p>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p>Aligned <code>nak</code> parsing with SPEC-001's nested
+  <code>error.code</code> and <code>in_reply_to</code> wire shape, and
+  updated the AC-15 fallback test plus mockprovider NAK emitter to use
+  that shape. <code>ParseHeartbeat</code> now preserves the three
+  rolling metrics fields sent by Swift.</p>
+  <p>Added public buyer-port <code>GET /v1/pool/check</code> for
+  installer onboarding, mounted <code>/healthz</code> on the buyer
+  handler as defense in depth, and added <code>Retry-After: 3600</code>
+  on provisional quota 429 responses.</p>
+  <p><strong>Verification:</strong> ran <code>go test ./...</code>,
+  <code>go vet ./...</code>, <code>scripts/test-ac15-nak-fallback.sh</code>,
+  and <code>scripts/test-pool-check.sh</code> with
+  <code>GOCACHE=/private/tmp/macprovider-go-build-cache</code>; all
+  passed.</p>
+</div>
+</section>
 </body></html>

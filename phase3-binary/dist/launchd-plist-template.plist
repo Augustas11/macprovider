@@ -42,7 +42,7 @@
     <key>HOME</key>
     <string>__USER_HOME__</string>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__USER_HOME__/macprovider</string>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__USER_HOME__/.local/bin</string>
   </dict>
 
   <key>ThrottleInterval</key>

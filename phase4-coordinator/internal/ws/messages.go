@@ -100,11 +100,16 @@ type CancelRequest struct {
 	Reason    string `json:"reason"`
 }
 
-type NAK struct {
-	Type      string `json:"type"`
-	RequestID string `json:"request_id,omitempty"`
-	Code      string `json:"code"`
-	Message   string `json:"message,omitempty"`
+type NakError struct {
+	Code    string                 `json:"code"`
+	Message string                 `json:"message,omitempty"`
+	Details map[string]interface{} `json:"details,omitempty"`
+}
+
+type Nak struct {
+	Type      string   `json:"type"`
+	InReplyTo string   `json:"in_reply_to"`
+	Error     NakError `json:"error"`
 }
 
 var preflightRejectionReasons = map[string]struct{}{
@@ -261,6 +266,15 @@ func ParseHeartbeat(payload []byte) (Heartbeat, string, error) {
 	if err := requireFloat(raw, "throughput_tps_estimate", &hb.ThroughputTPSEstimate); err != nil {
 		return Heartbeat{}, err.Field, err
 	}
+	if err := requireInt(raw, "requests_served_since_last", &hb.RequestsServedSinceLast); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireFloat(raw, "avg_latency_ms_since_last", &hb.AvgLatencyMSSinceLast); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
+	if err := requireFloat(raw, "throughput_tps_since_last", &hb.ThroughputTPSSinceLast); err != nil {
+		return Heartbeat{}, err.Field, err
+	}
 	return hb, "", nil
 }
 
@@ -332,4 +346,21 @@ func ParseDrainStatus(payload []byte) (DrainStatus, string, error) {
 		return DrainStatus{}, "estimated_drain_seconds", fieldError{Field: "invalid estimated_drain_seconds"}
 	}
 	return status, "", nil
+}
+
+func ParseNak(payload []byte) (Nak, string, error) {
+	var nak Nak
+	if err := json.Unmarshal(payload, &nak); err != nil {
+		return Nak{}, "json", err
+	}
+	if nak.Type != "nak" {
+		return Nak{}, "type", fmt.Errorf("expected nak, got %q", nak.Type)
+	}
+	if nak.InReplyTo == "" {
+		return Nak{}, "in_reply_to", fieldError{Field: "missing in_reply_to"}
+	}
+	if nak.Error.Code == "" {
+		return Nak{}, "error.code", fieldError{Field: "missing error.code"}
+	}
+	return nak, "", nil
 }

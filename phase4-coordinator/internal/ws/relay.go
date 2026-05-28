@@ -273,27 +273,27 @@ func (s *Server) handleInferenceEnd(providerID string, payload []byte) {
 }
 
 func (s *Server) handleNAK(providerID, assignedID string, payload []byte) {
-	var nak NAK
-	if err := json.Unmarshal(payload, &nak); err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid nak")
+	nak, field, err := ParseNak(payload)
+	if err != nil {
+		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid nak")
 		return
 	}
-	if nak.Code != "unknown_message_type" && nak.Code != "duplicate_request_id" {
-		s.log.Warn().Str("provider_id", providerID).Str("code", nak.Code).Msg("provider nak")
+	if nak.Error.Code != "unknown_message_type" && nak.Error.Code != "duplicate_request_id" {
+		s.log.Warn().Str("provider_id", providerID).Str("code", nak.Error.Code).Msg("provider nak")
 		return
 	}
 	session, ok := s.sessionFor(providerID, assignedID)
-	if ok && nak.Code == "unknown_message_type" {
+	if ok && nak.Error.Code == "unknown_message_type" {
 		session.activeMu.Lock()
 		session.httpOnly = true
 		session.activeMu.Unlock()
 		s.pool.MarkHTTPForwardingOnly(providerID, assignedID)
 	}
-	if ok && nak.RequestID != "" {
-		if active, found := session.removeActive(nak.RequestID); found {
+	if ok && nak.InReplyTo != "" {
+		if active, found := session.removeActive(nak.InReplyTo); found {
 			active.errs <- ErrRelayNAKFallback
 			close(active.chunks)
 		}
 	}
-	s.log.Warn().Str("provider_id", providerID).Str("request_id", nak.RequestID).Str("code", nak.Code).Msg("provider nak processed")
+	s.log.Warn().Str("provider_id", providerID).Str("in_reply_to", nak.InReplyTo).Str("code", nak.Error.Code).Msg("provider nak processed")
 }

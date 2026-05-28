@@ -823,4 +823,27 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   </ul>
 </div>
 </section>
+<section><h2>Integration audit patch - Swift stream</h2>
+<div class="entry">
+  <time>2026-05-28</time>
+  <ul>
+    <li>Kept the canonical binary path at
+    <code>~/.local/bin/macprovider-cli</code> and reconciled uninstall
+    targets with the public shell uninstaller: binary, support directory,
+    logs, and launchd plist are removed; <code>~/.cache/macprovider</code>
+    is reported but left in place.</li>
+    <li>Added coordinator-message test coverage for preflight
+    <code>request_id</code> correlation and coordinator drain behavior,
+    including no-in-flight drain, in-flight wait, and ready-state reset
+    after drain completion.</li>
+    <li>Added a self-update application hook that performs graceful drain
+    before binary replacement and launchd bootstrap, with a unit test that
+    proves the ordering.</li>
+    <li><strong>Verification:</strong> <code>swift build</code> passed.
+    <code>swift test</code> passed 8 XCTest cases after rerunning
+    unrestricted because SwiftPM manifest/module-cache sandboxing failed
+    under the Codex app sandbox.</li>
+  </ul>
+</div>
+</section>
 </body></html>

@@ -439,10 +439,12 @@ func handleInbound(cfg config, logger *log.Logger, drainer *drainController,
 	case "inference_request":
 		if cfg.rejectNAK {
 			b, _ := json.Marshal(map[string]any{
-				"type":       "nak",
-				"request_id": envelope.RequestID,
-				"code":       "unknown_message_type",
-				"message":    "mock reject-nak",
+				"type":        "nak",
+				"in_reply_to": envelope.RequestID,
+				"error": map[string]any{
+					"code":    "unknown_message_type",
+					"message": "mock reject-nak",
+				},
 			})
 			_ = writeText(b)
 			return

@@ -3,7 +3,7 @@
 #
 # Launchd template substitutions performed by this script:
 #   __USER_HOME__       -> absolute installing user's HOME
-#   __BINARY_PATH__     -> absolute ~/macprovider/macprovider-cli path
+#   __BINARY_PATH__     -> absolute ~/.local/bin/macprovider-cli path
 #   __PROVIDER_ID__     -> sanitized provider handle
 #   __COORDINATOR_URL__ -> WSS coordinator URL
 #   __LOG_DIR__         -> absolute ~/Library/Logs/macprovider path
@@ -13,9 +13,10 @@ set -euo pipefail
 
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-augstar/macprovider-poc}"
 COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
-COORDINATOR_MODELS_URL="https://coordinator.streamvc.live/v1/models"
+COORDINATOR_BASE_DEFAULT="https://coordinator.streamvc.live"
 INSTALL_DIR="$HOME/macprovider"
-BINARY_PATH="$INSTALL_DIR/macprovider-cli"
+BIN_DIR="$HOME/.local/bin"
+BINARY_PATH="$BIN_DIR/macprovider-cli"
 CONFIG_DIR="$HOME/.config/macprovider"
 CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
@@ -136,6 +137,29 @@ yaml_escape() {
   printf "%s" "$1" | sed \
     -e 's/\\/\\\\/g' \
     -e 's/"/\\"/g'
+}
+
+urlencode() {
+  local input="$1"
+  local output=""
+  local i char hex
+  for ((i = 0; i < ${#input}; i++)); do
+    char="${input:i:1}"
+    case "$char" in
+      [a-zA-Z0-9.~_-]) output="${output}${char}" ;;
+      *) printf -v hex '%%%02X' "'$char"; output="${output}${hex}" ;;
+    esac
+  done
+  printf "%s" "$output"
+}
+
+coordinator_http_base() {
+  coordinator_url="$1"
+  case "$coordinator_url" in
+    wss://coordinator.streamvc.live/ws/provider) printf "%s" "$COORDINATOR_BASE_DEFAULT" ;;
+    wss://*) printf "https://%s" "${coordinator_url#wss://}" | sed -E 's#/ws/provider/?$##' ;;
+    *) die 7 "coordinator URL must start with wss://" ;;
+  esac
 }
 
 detect_platform() {
@@ -366,20 +390,28 @@ EOF
 }
 
 install_binary() {
-  run mkdir -p "$INSTALL_DIR"
+  run mkdir -p "$BIN_DIR" "$INSTALL_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "Would extract verified release tarball into $INSTALL_DIR"
+    log "Would install macprovider-cli to $BINARY_PATH"
+    log "Would keep release support files in $INSTALL_DIR"
     return
   fi
   staging_dir="$TMPDIR_PATH/staging"
   rm -rf "$staging_dir"
   mkdir -p "$staging_dir"
   tar xzf "$tarball_path" -C "$staging_dir" || die 5 "failed to extract release tarball"
-  rm -rf "$INSTALL_DIR"
-  mkdir -p "$INSTALL_DIR"
-  cp -R "$staging_dir"/. "$INSTALL_DIR"/
-  [ -x "$BINARY_PATH" ] || chmod +x "$BINARY_PATH" 2>/dev/null || true
+  cp "$staging_dir/macprovider-cli" "$BINARY_PATH"
+  chmod +x "$BINARY_PATH" 2>/dev/null || true
+  find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec rm -rf {} +
+  find "$staging_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$INSTALL_DIR"/ \;
   [ -x "$BINARY_PATH" ] || die 5 "macprovider-cli was not installed at $BINARY_PATH"
+}
+
+check_path_hint() {
+  case ":$PATH:" in
+    *":$BIN_DIR:"*) ;;
+    *) log "$BIN_DIR is not in PATH; use $BINARY_PATH directly or add ~/.local/bin to PATH." ;;
+  esac
 }
 
 clear_quarantine() {
@@ -388,7 +420,8 @@ clear_quarantine() {
     return
   fi
   log "The current release is unsigned. Clearing com.apple.quarantine lets macOS run it."
-  if prompt_yes_no "Clear quarantine attribute on $INSTALL_DIR? [Y/n]" "Y"; then
+  if prompt_yes_no "Clear quarantine attribute on $BINARY_PATH and $INSTALL_DIR? [Y/n]" "Y"; then
+    run xattr -dr com.apple.quarantine "$BINARY_PATH"
     run xattr -dr com.apple.quarantine "$INSTALL_DIR"
   else
     die 7 "user declined quarantine cleanup"
@@ -465,7 +498,7 @@ render_plist() {
     <key>HOME</key>
     <string>$user_home</string>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$user_home/macprovider</string>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$user_home/.local/bin</string>
   </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>
@@ -513,10 +546,11 @@ wait_for_local_model() {
 
 wait_for_coordinator() {
   provider_id="$1"
+  coordinator_base="$2"
   deadline=$(( $(date +%s) + 30 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
-    coord_json="$(curl -sS --max-time 5 "$COORDINATOR_MODELS_URL" 2>/dev/null || true)"
-    if printf "%s" "$coord_json" | grep -Fq "$provider_id"; then
+    response="$(curl -fsS --max-time 5 "$coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")" 2>/dev/null || true)"
+    if printf "%s" "$response" | grep -q '"state"[[:space:]]*:[[:space:]]*"ready"'; then
       return 0
     fi
     sleep 2
@@ -534,7 +568,7 @@ print_pid() {
 
 main() {
   detect_platform
-  for tool in curl tar shasum grep sed awk date hostname mktemp openssl; do
+  for tool in curl tar shasum grep sed awk date hostname mktemp openssl find; do
     require_tool "$tool"
   done
 
@@ -542,16 +576,20 @@ main() {
   model="$(choose_model "$ram_gb")"
   provider_id="$(choose_provider_id)"
   coordinator_url="$(choose_coordinator_url)"
+  coordinator_base="$(coordinator_http_base "$coordinator_url")"
   validate_inputs "$model" "$provider_id" "$coordinator_url"
   log "Target model: $model"
   log "Provider ID: $provider_id"
   log "Coordinator: $coordinator_url"
-  log "Install dir: $INSTALL_DIR"
+  log "Binary path: $BINARY_PATH"
+  log "Support dir: $INSTALL_DIR"
 
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Dry run: would query latest release for $GITHUB_REPO, download, verify, install, and self-test."
     write_config "$model" "$provider_id" "$coordinator_url"
+    install_binary
     install_plist "$model" "$provider_id" "$coordinator_url"
+    check_path_hint
     exit 0
   fi
 
@@ -562,6 +600,7 @@ main() {
   verify_sha256
   validate_tarball
   install_binary
+  check_path_hint
   clear_quarantine
   write_config "$model" "$provider_id" "$coordinator_url"
   install_plist "$model" "$provider_id" "$coordinator_url"
@@ -574,7 +613,7 @@ main() {
   fi
 
   log "Waiting up to 30s for coordinator pool visibility."
-  if ! wait_for_coordinator "$provider_id"; then
+  if ! wait_for_coordinator "$provider_id" "$coordinator_base"; then
     log "Installed locally. Coordinator connection failed; provider will join the pool when connectivity and provisional admission are available."
     log "This is AC-1a degraded mode, not AC-1 build-complete success."
     exit 6
@@ -584,7 +623,7 @@ main() {
   log "Ready to serve."
   log "PID: ${pid:-unknown}"
   log "Logs: tail -f $LOG_DIR/macprovider.out.log $LOG_DIR/macprovider.err.log"
-  log "Coordinator pool: $COORDINATOR_MODELS_URL"
+  log "Coordinator pool check: $coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")"
   log "Uninstall: bash <(curl -fsSL https://get.streamvc.live/uninstall.sh)"
 }
 

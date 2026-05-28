@@ -19,8 +19,14 @@ actor CoordinatorClient {
     private var webSocket: URLSessionWebSocketTask?
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private let sendOverride: (([String: Any]) async throws -> Void)?
 
-    init?(config: AppConfig, modelRuntime: ModelRuntime, providerStatus: ProviderStatus) {
+    init?(
+        config: AppConfig,
+        modelRuntime: ModelRuntime,
+        providerStatus: ProviderStatus,
+        sendOverride: (([String: Any]) async throws -> Void)? = nil
+    ) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
             return nil
         }
@@ -38,6 +44,7 @@ actor CoordinatorClient {
         self.loadedModelID = config.model
         self.maxBodyBytes = config.maxRequestBodyBytes
         self.maxActiveRequests = 1
+        self.sendOverride = sendOverride
     }
 
     func start() {
@@ -200,6 +207,11 @@ actor CoordinatorClient {
                 message: "Unrecognized message type: '\(type)'"
             )
         }
+    }
+
+    func handleCoordinatorPayloadForTest(_ payload: [String: Any]) async throws {
+        let data = try JSONSerialization.data(withJSONObject: payload)
+        try await handle(.string(String(decoding: data, as: UTF8.self)))
     }
 
     private func startHeartbeat(intervalSeconds: Int) {
@@ -385,6 +397,10 @@ actor CoordinatorClient {
     }
 
     private func send(_ payload: [String: Any]) async throws {
+        if let sendOverride {
+            try await sendOverride(payload)
+            return
+        }
         guard let webSocket else { throw CancellationError() }
         try await Self.send(payload, to: webSocket)
     }

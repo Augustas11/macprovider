@@ -97,6 +97,69 @@ func TestModelsReturnsEmptyListWhenNoReadyProviders(t *testing.T) {
 	}
 }
 
+func TestHealthzMountedOnBuyerHandler(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"status":"ok"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_ready":1`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+	req.Header.Set("X-Forwarded-For", "192.0.2.1")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"provider_id":"p1"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"state":"ready"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+
+	missingReq := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=missing", nil)
+	missingReq.Header.Set("X-Forwarded-For", "192.0.2.2")
+	missing := httptest.NewRecorder()
+	server.Handler().ServeHTTP(missing, missingReq)
+
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing status = %d, body=%s", missing.Code, missing.Body.String())
+	}
+	if !bytes.Contains(missing.Body.Bytes(), []byte(`"error":"provider_not_found"`)) {
+		t.Fatalf("missing body = %s", missing.Body.String())
+	}
+}
+
+func TestPoolCheckRateLimitsPerIP(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+		req.Header.Set("X-Forwarded-For", "192.0.2.3")
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		if rr.Code != want {
+			t.Fatalf("request %d status = %d, want %d body=%s", i+1, rr.Code, want, rr.Body.String())
+		}
+	}
+}
+
 func TestChatCompletionsRoutesNonStreamingRequest(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v1/chat/completions" {
@@ -471,6 +534,9 @@ func TestChatCompletionsProvisionalQuotaReturns429(t *testing.T) {
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provisional_quota_exceeded"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
+	}
+	if rr.Header().Get("Retry-After") != "3600" {
+		t.Fatalf("Retry-After = %q, want 3600", rr.Header().Get("Retry-After"))
 	}
 }
 

@@ -100,4 +100,36 @@ modified by this stream.</p>
 </ul>
 </section>
 
+<section class=entry>
+<h2>Integration audit patch - distribution stream</h2>
+<time datetime="2026-05-28">2026-05-28</time>
+
+<h3>Changes</h3>
+<ul>
+  <li><code>install.sh</code> now installs the executable at
+  <code>~/.local/bin/macprovider-cli</code>, keeps release support files
+  under <code>~/macprovider</code>, points launchd
+  <code>ProgramArguments</code> at the canonical binary path, and warns
+  when <code>~/.local/bin</code> is not in <code>PATH</code>.</li>
+  <li>The coordinator visibility check now polls
+  <code>/v1/pool/check?provider_id=...</code> and requires
+  <code>state:"ready"</code>, instead of grepping <code>/v1/models</code>
+  for a provider ID that is not part of that response.</li>
+  <li><code>uninstall.sh</code> removes the same artifact set as
+  <code>macprovider-cli uninstall</code>: canonical binary, support
+  directory, logs, and launchd plist. It leaves
+  <code>~/.cache/macprovider</code> in place and reports that decision.</li>
+</ul>
+
+<h3>Validation</h3>
+<ul>
+  <li><code>bash -n phase3-binary/dist/install.sh</code>: PASS.</li>
+  <li><code>bash -n phase3-binary/dist/uninstall.sh</code>: PASS.</li>
+  <li><code>MACPROVIDER_NO_PROMPT=1 MACPROVIDER_NO_LAUNCHD=1 bash phase3-binary/dist/install.sh --dry-run</code>:
+  PASS.</li>
+  <li><code>MACPROVIDER_NO_PROMPT=1 bash phase3-binary/dist/uninstall.sh --dry-run</code>:
+  PASS.</li>
+</ul>
+</section>
+
 </body></html>
