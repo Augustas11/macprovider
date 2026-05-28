@@ -3,15 +3,19 @@ package buyer
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
@@ -27,6 +31,10 @@ type Server struct {
 	recoveryBackoff    time.Duration
 	recoveryMaxRetries int
 	recoveryProbe      bool
+	relay              RelayFunc
+	admission          *providerws.AdmissionManager
+	requestTimeout     time.Duration
+	provisionalWeight  float64
 	recovering         sync.Map
 }
 
@@ -36,8 +44,20 @@ type PreflightResult struct {
 }
 
 type PreflightFunc func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (PreflightResult, bool, error)
+type RelayFunc func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error)
 
 type Option func(*Server)
+
+type wsForwardResult string
+
+const (
+	wsForwardComplete    wsForwardResult = "complete"
+	wsForwardFailed      wsForwardResult = "failed"
+	wsForwardQueueFull   wsForwardResult = "queue_full"
+	wsForwardTimedOut    wsForwardResult = "timed_out"
+	wsForwardCancelled   wsForwardResult = "cancelled"
+	wsForwardUnavailable wsForwardResult = "unavailable"
+)
 
 func WithPreflight(fn PreflightFunc) Option {
 	return func(s *Server) {
@@ -68,6 +88,24 @@ func WithRecoveryConfig(backoff time.Duration, maxRetries int, enabled bool) Opt
 	}
 }
 
+func WithRelay(fn RelayFunc, timeout time.Duration) Option {
+	return func(s *Server) {
+		s.relay = fn
+		if timeout > 0 {
+			s.requestTimeout = timeout
+		}
+	}
+}
+
+func WithAdmission(admission *providerws.AdmissionManager, provisionalWeight float64) Option {
+	return func(s *Server) {
+		s.admission = admission
+		if provisionalWeight > 0 {
+			s.provisionalWeight = provisionalWeight
+		}
+	}
+}
+
 func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Time, opts ...Option) *Server {
 	s := &Server{
 		pool:               registry,
@@ -78,6 +116,8 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		recoveryBackoff:    30 * time.Second,
 		recoveryMaxRetries: 3,
 		recoveryProbe:      true,
+		requestTimeout:     300 * time.Second,
+		provisionalWeight:  0.3,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -181,8 +221,31 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Stream {
-		s.forwardStreaming(w, r, requestID, body, provider)
+		if provider.IsWSTunneled() {
+			s.forwardWS(w, r, requestID, body, provider, true)
+		} else {
+			s.forwardStreaming(w, r, requestID, body, provider)
+		}
 		return
+	}
+	if provider.IsWSTunneled() {
+		excluded := map[string]struct{}{}
+		for {
+			result := s.forwardWS(w, r, requestID, body, provider, false)
+			if result != wsForwardQueueFull {
+				return
+			}
+			s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateBusy)
+			excluded[routeKey(provider)] = struct{}{}
+			provider, routeErr = s.selectProviderExcluding(requestID, req, r.Header, excluded)
+			if routeErr != nil {
+				writeError(w, routeErr.status, routeErr.code, routeErr.message)
+				return
+			}
+			if !provider.IsWSTunneled() {
+				break
+			}
+		}
 	}
 	upstreamURL := provider.EndpointURL + "/v1/chat/completions"
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
@@ -213,6 +276,144 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, resp.Body)
+}
+
+func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider, stream bool) wsForwardResult {
+	if s.relay == nil {
+		writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
+		return wsForwardUnavailable
+	}
+	reserved := false
+	if s.admission != nil {
+		if !s.admission.TryReserveRequest(provider) {
+			writeError(w, http.StatusTooManyRequests, "provisional_quota_exceeded", "Selected provisional provider is over request quota")
+			return wsForwardFailed
+		}
+		reserved = provider.Tier == pool.TierProvisional
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
+	defer cancel()
+	relay, err := s.relay(ctx, provider, requestID, body, stream)
+	if err != nil {
+		if reserved {
+			s.admission.RefundRequest(provider)
+		}
+		if errors.Is(err, providerws.ErrRelayBackpressure) || errors.Is(err, providerws.ErrRelayNAKFallback) {
+			writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
+			return wsForwardUnavailable
+		}
+		writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
+		return wsForwardFailed
+	}
+	if stream {
+		s.forwardWSStreaming(w, r, requestID, provider, relay)
+		return wsForwardComplete
+	}
+	result := s.forwardWSNonStreaming(w, requestID, provider, relay)
+	if reserved && result == wsForwardQueueFull {
+		s.admission.RefundRequest(provider)
+	}
+	return result
+}
+
+func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, requestID string, provider pool.Provider, relay *providerws.RelayStream) wsForwardResult {
+	var body bytes.Buffer
+	chunks := relay.Chunks
+	for {
+		select {
+		case chunk, ok := <-chunks:
+			if ok {
+				body.WriteString(chunk.Data)
+			} else {
+				chunks = nil
+			}
+		case end := <-relay.Done:
+			for chunks != nil {
+				select {
+				case chunk, ok := <-chunks:
+					if !ok {
+						chunks = nil
+						continue
+					}
+					body.WriteString(chunk.Data)
+				default:
+					chunks = nil
+				}
+			}
+			if end.Status != "complete" {
+				if end.Status == "error_queue_full" {
+					return wsForwardQueueFull
+				}
+				writeWSEndError(w, end)
+				return wsForwardFailed
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(body.Bytes())
+			return wsForwardComplete
+		case err := <-relay.Errors:
+			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws relay failed")
+			if errors.Is(err, providerws.ErrRelayTimeout) {
+				writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
+				return wsForwardTimedOut
+			} else if errors.Is(err, providerws.ErrRelayNAKFallback) {
+				writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
+			} else {
+				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
+			}
+			return wsForwardFailed
+		}
+	}
+}
+
+func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requestID string, provider pool.Provider, relay *providerws.RelayStream) {
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+	w.WriteHeader(http.StatusOK)
+	flusher, _ := w.(http.Flusher)
+	chunks := relay.Chunks
+	for {
+		select {
+		case <-r.Context().Done():
+			relay.Cancel("buyer_disconnected")
+			return
+		case chunk, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			if _, err := w.Write([]byte(chunk.Data)); err != nil {
+				relay.Cancel("buyer_disconnected")
+				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		case end := <-relay.Done:
+			if end.Status != "complete" && end.Status != "cancelled" {
+				_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"Provider failed during streaming\",\"type\":\"server_error\",\"code\":\"provider_error\"}}\n\n"))
+				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		case err := <-relay.Errors:
+			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws streaming relay failed")
+			_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"Provider failed during streaming\",\"type\":\"server_error\",\"code\":\"provider_error\"}}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return
+		}
+	}
 }
 
 func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider) {
@@ -438,6 +639,10 @@ type routeError struct {
 }
 
 func (s *Server) selectProvider(requestID string, req chatRequest, headers http.Header) (pool.Provider, *routeError) {
+	return s.selectProviderExcluding(requestID, req, headers, nil)
+}
+
+func (s *Server) selectProviderExcluding(requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}) (pool.Provider, *routeError) {
 	providers := s.pool.Snapshot()
 	estimatedTokens := estimateTokens(req.raw)
 	if session := headers.Get("X-MacProvider-Session"); session != "" {
@@ -446,6 +651,9 @@ func (s *Server) selectProvider(requestID string, req chatRequest, headers http.
 				provider, routeErr := validatePinnedProvider(p, req.Model, estimatedTokens, "Pinned session not available")
 				if routeErr != nil {
 					return provider, routeErr
+				}
+				if !s.checkQuota(provider) {
+					return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "Pinned provisional provider is over request quota"}
 				}
 				return s.preflightCandidate(provider, requestID, estimatedTokens)
 			}
@@ -459,6 +667,9 @@ func (s *Server) selectProvider(requestID string, req chatRequest, headers http.
 				if routeErr != nil {
 					return provider, routeErr
 				}
+				if !s.checkQuota(provider) {
+					return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "Pinned provisional provider is over request quota"}
+				}
 				return s.preflightCandidate(provider, requestID, estimatedTokens)
 			}
 		}
@@ -468,7 +679,10 @@ func (s *Server) selectProvider(requestID string, req chatRequest, headers http.
 	candidates := make([]pool.Provider, 0, len(providers))
 	hasRoutableContextMiss := false
 	for _, p := range providers {
-		if p.ModelID != req.Model || !p.RoutingEligible() {
+		if _, skip := excluded[routeKey(p)]; skip {
+			continue
+		}
+		if !modelIDEqual(p.ModelID, req.Model) || !p.RoutingEligible() {
 			continue
 		}
 		if p.MaxContextTokens < estimatedTokens {
@@ -483,13 +697,28 @@ func (s *Server) selectProvider(requestID string, req chatRequest, headers http.
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 	}
+	preQuotaCandidates := candidates
+	candidates = candidates[:0]
+	quotaBlocked := 0
+	for _, candidate := range preQuotaCandidates {
+		if s.checkQuota(candidate) {
+			candidates = append(candidates, candidate)
+		} else {
+			quotaBlocked++
+		}
+	}
+	if len(candidates) == 0 && quotaBlocked > 0 && quotaBlocked == len(preQuotaCandidates) {
+		return pool.Provider{}, &routeError{status: http.StatusTooManyRequests, code: "provisional_quota_exceeded", message: "All otherwise eligible provisional providers are over request quota"}
+	}
 	switch headers.Get("X-MacProvider-Pref") {
 	case "fast":
 		sort.SliceStable(candidates, func(i, j int) bool {
-			if candidates[i].ThroughputTPSEstimate == candidates[j].ThroughputTPSEstimate {
+			ti := s.effectiveThroughput(candidates[i])
+			tj := s.effectiveThroughput(candidates[j])
+			if ti == tj {
 				return candidates[i].SlotsFree < candidates[j].SlotsFree
 			}
-			return candidates[i].ThroughputTPSEstimate > candidates[j].ThroughputTPSEstimate
+			return ti > tj
 		})
 	case "accurate":
 		sort.SliceStable(candidates, func(i, j int) bool {
@@ -501,7 +730,7 @@ func (s *Server) selectProvider(requestID string, req chatRequest, headers http.
 	default:
 		sort.SliceStable(candidates, func(i, j int) bool {
 			if candidates[i].SlotsFree == candidates[j].SlotsFree {
-				return candidates[i].ThroughputTPSEstimate > candidates[j].ThroughputTPSEstimate
+				return s.effectiveThroughput(candidates[i]) > s.effectiveThroughput(candidates[j])
 			}
 			return candidates[i].SlotsFree < candidates[j].SlotsFree
 		})
@@ -513,6 +742,10 @@ func (s *Server) selectProvider(requestID string, req chatRequest, headers http.
 		}
 	}
 	return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "preflight_rejected", message: "All providers rejected the request"}
+}
+
+func routeKey(provider pool.Provider) string {
+	return provider.ProviderID + "/" + provider.AssignedID
 }
 
 func (s *Server) preflightCandidate(provider pool.Provider, requestID string, estimatedTokens int) (pool.Provider, *routeError) {
@@ -534,7 +767,7 @@ func (s *Server) preflightCandidate(provider pool.Provider, requestID string, es
 }
 
 func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, unavailableMessage string) (pool.Provider, *routeError) {
-	if p.ModelID != model {
+	if !modelIDEqual(p.ModelID, model) {
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
 	if p.MaxContextTokens < estimatedTokens {
@@ -544,6 +777,35 @@ func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, 
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
 	return p, nil
+}
+
+func (s *Server) checkQuota(provider pool.Provider) bool {
+	return s.admission == nil || s.admission.CheckQuota(provider)
+}
+
+func (s *Server) effectiveThroughput(provider pool.Provider) float64 {
+	weight := 1.0
+	if provider.Tier == pool.TierProvisional {
+		weight = s.provisionalWeight
+	}
+	return provider.ThroughputTPSEstimate * weight
+}
+
+func modelIDEqual(a, b string) bool {
+	return strings.EqualFold(a, b)
+}
+
+func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd) {
+	switch end.Status {
+	case "error_context_exceeded":
+		writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", "Request exceeds provider context capacity")
+	case "error_model_not_loaded", "error_queue_full":
+		writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
+	case "cancelled":
+		return
+	default:
+		writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
+	}
 }
 
 func (s *Server) handleProviderFailure(provider pool.Provider, status int) {
@@ -619,6 +881,8 @@ func errorType(status int) string {
 		return "invalid_request_error"
 	case http.StatusRequestEntityTooLarge:
 		return "invalid_request_error"
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
 	case http.StatusServiceUnavailable:
 		return "service_unavailable"
 	default:

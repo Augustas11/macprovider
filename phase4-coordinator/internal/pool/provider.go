@@ -3,6 +3,7 @@ package pool
 import (
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,6 +11,8 @@ import (
 )
 
 type State string
+type Tier string
+type InferencePath string
 
 const (
 	StateReady       State = "ready"
@@ -17,31 +20,46 @@ const (
 	StateDegraded    State = "degraded"
 	StateDraining    State = "draining"
 	StateUnavailable State = "unavailable"
+
+	TierPinned      Tier = "pinned"
+	TierProvisional Tier = "provisional"
+	TierRejected    Tier = "rejected"
+
+	InferencePathHTTPForwarding InferencePath = "http_forwarding"
+	InferencePathWSTunneled     InferencePath = "ws_tunneled"
 )
 
 type Provider struct {
-	ProviderID            string    `json:"provider_id"`
-	AssignedID            string    `json:"assigned_id"`
-	Hostname              string    `json:"hostname"`
-	ModelID               string    `json:"model_id"`
-	ModelParamsB          float64   `json:"model_params_b"`
-	RAMGB                 int       `json:"ram_gb"`
-	MaxContextTokens      int       `json:"max_context_tokens"`
-	MaxConcurrency        int       `json:"max_concurrency"`
-	SlotsFree             int       `json:"slots_free"`
-	SlotsTotal            int       `json:"slots_total"`
-	ThroughputTPSEstimate float64   `json:"throughput_tps_estimate"`
-	EndpointURL           string    `json:"endpoint_url"`
-	State                 State     `json:"state"`
-	LastHeartbeatAt       time.Time `json:"last_heartbeat_at"`
-	ConnectedAt           time.Time `json:"connected_at"`
-	BinaryVersion         string    `json:"binary_version"`
+	ProviderID            string        `json:"provider_id"`
+	AssignedID            string        `json:"assigned_id"`
+	Hostname              string        `json:"hostname"`
+	ModelID               string        `json:"model_id"`
+	ModelParamsB          float64       `json:"model_params_b"`
+	RAMGB                 int           `json:"ram_gb"`
+	MaxContextTokens      int           `json:"max_context_tokens"`
+	MaxConcurrency        int           `json:"max_concurrency"`
+	SlotsFree             int           `json:"slots_free"`
+	SlotsTotal            int           `json:"slots_total"`
+	ThroughputTPSEstimate float64       `json:"throughput_tps_estimate"`
+	EndpointURL           string        `json:"endpoint_url"`
+	Tier                  Tier          `json:"tier"`
+	InferencePath         InferencePath `json:"inference_path"`
+	AdmittedAt            time.Time     `json:"admitted_at"`
+	HTTPForwardingOnly    bool          `json:"http_forwarding_only,omitempty"`
+	State                 State         `json:"state"`
+	LastHeartbeatAt       time.Time     `json:"last_heartbeat_at"`
+	ConnectedAt           time.Time     `json:"connected_at"`
+	BinaryVersion         string        `json:"binary_version"`
 
 	conn net.Conn
 }
 
 func (p Provider) RoutingEligible() bool {
 	return p.State == StateReady && p.SlotsFree > 0
+}
+
+func (p Provider) IsWSTunneled() bool {
+	return p.InferencePath == InferencePathWSTunneled && !p.HTTPForwardingOnly
 }
 
 type Registry struct {
@@ -81,10 +99,44 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 		delete(r.sessions, existing.AssignedID)
 	}
 	p.conn = conn
+	if p.Tier == "" {
+		p.Tier = TierPinned
+	}
+	if p.InferencePath == "" {
+		if p.EndpointURL != "" {
+			p.InferencePath = InferencePathHTTPForwarding
+		} else {
+			p.InferencePath = InferencePathWSTunneled
+		}
+	}
 	r.providers[p.ProviderID] = p
 	r.sessions[p.AssignedID] = p
 	r.seenModels[p.ModelID] = struct{}{}
 	return old
+}
+
+func (r *Registry) SetTier(providerID string, tier Tier) (Provider, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil {
+		return Provider{}, false
+	}
+	p.Tier = tier
+	cp := *p
+	cp.conn = nil
+	return cp, true
+}
+
+func (r *Registry) MarkHTTPForwardingOnly(providerID, assignedID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	p.HTTPForwardingOnly = true
+	return true
 }
 
 func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
@@ -149,11 +201,13 @@ func (r *Registry) ApplyHeartbeat(providerID string, hb HeartbeatUpdate) (*Provi
 func (r *Registry) ModelKnown(modelID string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if _, ok := r.seenModels[modelID]; ok {
-		return true
-	}
 	for _, p := range r.providers {
-		if p.ModelID == modelID {
+		if strings.EqualFold(p.ModelID, modelID) {
+			return true
+		}
+	}
+	for seen := range r.seenModels {
+		if strings.EqualFold(seen, modelID) {
 			return true
 		}
 	}

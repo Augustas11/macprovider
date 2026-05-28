@@ -714,4 +714,113 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   </ul>
 </div>
 </section>
+<section><h2>Swift stream build — SPEC-001 v1.2.1 / SPEC-003 v0.4</h2>
+<div class="entry">
+  <time>2026-05-28</time>
+  <ul>
+    <li>Added optional config fields <code>endpoint_url</code>,
+    <code>ws_tunneled_mode</code>, and <code>auto_update_enabled</code>.
+    The hello message now includes <code>endpoint_url</code> only when
+    configured; absence keeps the v1.2 WS-tunneled signal without changing
+    v1.1.x static-config fallback semantics.</li>
+    <li>Added <code>InferenceRelay</code> for SPEC-001 § 6.6 message handling:
+    request_id active map, duplicate request NAK, idempotent cancel ack,
+    response chunk/end frames, and a 256-entry per-request streaming write
+    buffer that blocks generation callbacks until the writer drains.</li>
+    <li>Cancellation is cooperative. <code>ModelRuntime</code> now checks task
+    cancellation before generation and inside token callbacks, so
+    <code>cancel_request</code> stops at the next generation callback boundary.
+    The existing MLX runtime semaphore remains serialized; WS request state is
+    multiplexed, but actual generation is not made concurrently unsafe.</li>
+    <li>Coordinator drain policy: wait up to <code>drain_timeout_s</code> for
+    all HTTP and WS-routed requests. If still active, cancel relay tasks, wait
+    briefly for cancellation acknowledgements, send
+    <code>drain_status complete</code>, close WS, and reset local state to
+    <code>ready</code> for the v1.1.4 reconnect fix.</li>
+    <li>Added <code>/v1/status</code> and <code>macprovider-cli status</code>.
+    Status reports binary version, local capacity and counters, active
+    request_id count, coordinator connection/session/tier, and recommended
+    binary version from <code>hello_ack</code>.</li>
+    <li>Added <code>macprovider-cli update</code> and
+    <code>update --check</code> using URLSession against GitHub Releases,
+    checksum verification with SHA-256, archive extraction, self-test command
+    probe, atomic binary replacement, and launchd restart if the plist exists.
+    No new Swift package dependency was added.</li>
+    <li>Added <code>macprovider-cli uninstall</code> for the while-binary-
+    still-running path: launchd bootout, plist/binary removal, optional config
+    and log removal, and zshrc marker cleanup.</li>
+    <li>Added a mock-coordinator harness under
+    <code>tools/mock-coordinator/</code> and AC entrypoint scripts
+    <code>test-ac11.sh</code> through <code>test-ac15.sh</code>. The harness
+    requires Python's <code>websockets</code> package and a cached MLX model
+    for AC-11 through AC-14.</li>
+    <li>Verification: <code>swift build</code> passed. <code>swift test</code>
+    passed 3 XCTest cases covering relay invalid/cancel behavior and self-
+    update semver comparison. Existing smokes
+    <code>test-config-precedence.sh</code>, <code>test-startup-failure.sh</code>,
+    <code>test-health.sh</code>, <code>test-coordinator.sh</code>, and
+    <code>test-warm-up.sh</code> passed. AC-11 through AC-15 were invoked and
+    skipped with exit 77 because the local Python environment lacks
+    <code>websockets</code>.</li>
+    <li>Open question: production-grade multiplexing beyond request_id state
+    requires deciding whether MLX generation is safe above the current process-
+    local semaphore of one. This build preserves existing runtime safety and
+    advertises existing capacity behavior rather than forcing parallel MLX
+    calls.</li>
+  </ul>
+</div>
+</section>
+<section><h2>Swift stream post-audit fixes (2026-05-28)</h2>
+<div class="entry">
+  <time>2026-05-28</time>
+  <ul>
+    <li>Made WS relay ownership connection-scoped. Each reconnect now builds a
+    fresh <code>InferenceRelay</code> whose send closure is bound to that
+    connection's socket; reconnect cleanup cancels active relay work, clears the
+    relay, closes the socket, and marks the coordinator session disconnected.</li>
+    <li>Made cancellation unblock waiters. <code>AsyncSemaphore</code> removes
+    cancelled waiters and resumes them with <code>CancellationError</code>;
+    relay request state also owns its stream buffer so a
+    <code>cancel_request</code> can unblock a producer that is waiting for the
+    outbound writer.</li>
+    <li>Added provider-side relay limits: duplicate request IDs are rejected,
+    active WS-routed requests are bounded, request body byte size is bounded,
+    and terminal response frames are de-duplicated per request.</li>
+    <li>Made the stream contract authoritative from the coordinator envelope.
+    Relay dispatch now uses the envelope <code>stream</code> flag only instead
+    of treating a nested OpenAI request <code>stream</code> flag as a second
+    source of truth.</li>
+    <li>Resolved endpoint-mode ambiguity. A configured
+    <code>endpoint_url</code> always disables § 6.6 WS-tunneled inference for
+    that process, even if config also contains <code>ws_tunneled_mode</code>.</li>
+    <li>Made advertised concurrency honest. Because MLX generation is still
+    guarded by a runtime semaphore of one, hello/status capacity now advertises
+    <code>max_concurrency=1</code> until parallel generation is explicitly
+    designed and proven safe.</li>
+    <li>Hardened self-update: release asset URLs must be trusted HTTPS GitHub
+    URLs, checksum lines must contain exactly one SHA-256 for the selected
+    archive, tar entries are rejected if absolute or path-traversing, binary
+    selection requires exactly one regular executable non-symlink
+    <code>macprovider-cli</code>, the downloaded binary must pass
+    <code>self-test</code>, replacement is staged in the target directory and
+    completed with POSIX <code>rename</code>, and launchd bootstrap failure is
+    no longer hidden.</li>
+    <li>Improved local status and uninstall behavior. <code>status</code> uses
+    a one-hour cached latest-release value when the network is unavailable, and
+    uninstall now reports removal warnings and only removes the exact installer
+    PATH marker from <code>.zshrc</code>.</li>
+    <li>Corrected acceptance entrypoints to match SPEC-001 numbering:
+    <code>test-ac13.sh</code> now runs cancellation and
+    <code>test-ac14.sh</code> now runs multiplexing.</li>
+    <li>Verification after fixes: <code>swift build</code> passed,
+    <code>swift test</code> passed 3 tests, <code>macprovider-cli --version</code>
+    printed <code>1.2.1</code>, <code>test-config-precedence.sh</code>,
+    <code>test-startup-failure.sh</code>, <code>test-health.sh</code>,
+    <code>test-coordinator.sh</code>, and <code>test-warm-up.sh</code> passed.
+    <code>test-ac11.sh</code> through <code>test-ac15.sh</code> were invoked and
+    skipped with exit 77 because Python <code>websockets</code> is not installed
+    locally.</li>
+  </ul>
+</div>
+</section>
 </body></html>

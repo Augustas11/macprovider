@@ -42,6 +42,7 @@ type hello struct {
 	ThroughputTPSEstimate float64         `json:"throughput_tps_estimate"`
 	BinaryVersion         string          `json:"binary_version"`
 	Attestation           json.RawMessage `json:"attestation"`
+	EndpointURL           *string         `json:"endpoint_url,omitempty"`
 }
 
 type helloAck struct {
@@ -49,6 +50,7 @@ type helloAck struct {
 	CoordinatorVersion int    `json:"coordinator_version"`
 	AssignedID         string `json:"assigned_id"`
 	HeartbeatIntervalS int    `json:"heartbeat_interval_s"`
+	Tier               string `json:"tier"`
 }
 
 type heartbeat struct {
@@ -96,6 +98,34 @@ type drainStatus struct {
 	EstimatedDrainSeconds int    `json:"estimated_drain_seconds"`
 }
 
+type inferenceRequest struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Stream    bool   `json:"stream"`
+	Body      string `json:"body"`
+}
+
+type inferenceResponseChunk struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Seq       int    `json:"seq"`
+	Data      string `json:"data"`
+}
+
+type inferenceResponseEnd struct {
+	Type       string `json:"type"`
+	RequestID  string `json:"request_id"`
+	Status     string `json:"status"`
+	ChunksSent int    `json:"chunks_sent"`
+	Error      string `json:"error,omitempty"`
+}
+
+type cancelRequest struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Reason    string `json:"reason"`
+}
+
 type config struct {
 	coordURL        string
 	providerID      string
@@ -107,6 +137,9 @@ type config struct {
 	httpPort        int
 	streamDelayMS   int
 	rejectPreflight string
+	rejectNAK       bool
+	omitEndpointURL bool
+	endpointURL     string
 	drainDelayS     int
 	hbOverride      int
 }
@@ -123,6 +156,9 @@ func parseFlags() config {
 	flag.IntVar(&c.httpPort, "http-port", 9001, "HTTP port for the OpenAI-compatible endpoint")
 	flag.IntVar(&c.streamDelayMS, "stream-delay-ms", 100, "delay between SSE tokens in ms")
 	flag.StringVar(&c.rejectPreflight, "reject-preflight", "", "if non-empty, reply preflight_ack accepted=false reason=<flag>")
+	flag.BoolVar(&c.rejectNAK, "reject-nak", false, "reply nak unknown_message_type to inference_request")
+	flag.BoolVar(&c.omitEndpointURL, "omit-endpoint-url", false, "omit endpoint_url from hello to request WS-tunneled mode")
+	flag.StringVar(&c.endpointURL, "endpoint-url", "", "endpoint_url to advertise in hello; default uses http-port unless omitted")
 	flag.IntVar(&c.drainDelayS, "drain-delay-s", 2, "delay between drain phases in seconds")
 	flag.IntVar(&c.hbOverride, "hb", 0, "heartbeat interval override (seconds); 0 = use coordinator value")
 	flag.Parse()
@@ -201,6 +237,13 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 		BinaryVersion:         "mockprovider-0.1.0",
 		Attestation:           json.RawMessage(`{}`),
 	}
+	if !cfg.omitEndpointURL {
+		endpoint := cfg.endpointURL
+		if endpoint == "" {
+			endpoint = fmt.Sprintf("http://127.0.0.1:%d", cfg.httpPort)
+		}
+		h.EndpointURL = &endpoint
+	}
 	helloBytes, _ := json.Marshal(h)
 	if err := wsutil.WriteClientText(conn, helloBytes); err != nil {
 		return fmt.Errorf("write hello: %w", err)
@@ -263,6 +306,7 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 		defer writeMu.Unlock()
 		return wsutil.WriteClientText(conn, b)
 	}
+	var active sync.Map
 	go func() {
 		t := time.NewTicker(hbInterval)
 		defer t.Stop()
@@ -333,7 +377,7 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 		if op != gobwas.OpText {
 			continue
 		}
-		handleInbound(cfg, logger, drainer, writeText, payload, func() {
+		handleInbound(cfg, logger, drainer, writeText, &active, payload, func() {
 			close(stopHB)
 			_ = conn.Close()
 		})
@@ -341,7 +385,7 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 }
 
 func handleInbound(cfg config, logger *log.Logger, drainer *drainController,
-	writeText func([]byte) error, payload []byte, shutdown func()) {
+	writeText func([]byte) error, active *sync.Map, payload []byte, shutdown func()) {
 
 	var envelope struct {
 		Type      string `json:"type"`
@@ -392,9 +436,99 @@ func handleInbound(cfg config, logger *log.Logger, drainer *drainController,
 			runDrain(cfg, logger, drainer, writeText)
 			shutdown()
 		}()
+	case "inference_request":
+		if cfg.rejectNAK {
+			b, _ := json.Marshal(map[string]any{
+				"type":       "nak",
+				"request_id": envelope.RequestID,
+				"code":       "unknown_message_type",
+				"message":    "mock reject-nak",
+			})
+			_ = writeText(b)
+			return
+		}
+		var req inferenceRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			logger.Printf("invalid inference_request: %v", err)
+			return
+		}
+		cancel := make(chan struct{})
+		active.Store(req.RequestID, cancel)
+		go func() {
+			defer active.Delete(req.RequestID)
+			runWSInference(cfg, logger, drainer, writeText, req, cancel)
+		}()
+	case "cancel_request":
+		var req cancelRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			logger.Printf("invalid cancel_request: %v", err)
+			return
+		}
+		if v, ok := active.Load(req.RequestID); ok {
+			close(v.(chan struct{}))
+			active.Delete(req.RequestID)
+		}
 	default:
 		logger.Printf("unknown inbound type=%q", envelope.Type)
 	}
+}
+
+func runWSInference(cfg config, logger *log.Logger, drainer *drainController, writeText func([]byte) error, req inferenceRequest, cancel <-chan struct{}) {
+	drainer.incInflight()
+	defer drainer.decInflight()
+	if req.Stream {
+		chunks := []string{"hello", " from", " ", cfg.providerID, " ", "with", " ws", " streaming", "."}
+		for i, chunk := range chunks {
+			select {
+			case <-cancel:
+				sendInferenceEnd(writeText, req.RequestID, "cancelled", i, "")
+				return
+			default:
+			}
+			event := map[string]any{
+				"id":      fmt.Sprintf("chatcmpl-%s-%d", cfg.providerID, time.Now().UnixNano()),
+				"object":  "chat.completion.chunk",
+				"created": time.Now().Unix(),
+				"model":   cfg.model,
+				"choices": []map[string]any{{"index": 0, "delta": map[string]any{"content": chunk}, "finish_reason": nil}},
+			}
+			b, _ := json.Marshal(event)
+			frame, _ := json.Marshal(inferenceResponseChunk{Type: "inference_response_chunk", RequestID: req.RequestID, Seq: i, Data: "data: " + string(b) + "\n\n"})
+			if err := writeText(frame); err != nil {
+				logger.Printf("inference chunk write failed: %v", err)
+				return
+			}
+			time.Sleep(time.Duration(cfg.streamDelayMS) * time.Millisecond)
+		}
+		done, _ := json.Marshal(inferenceResponseChunk{Type: "inference_response_chunk", RequestID: req.RequestID, Seq: len(chunks), Data: "data: [DONE]\n\n"})
+		_ = writeText(done)
+		sendInferenceEnd(writeText, req.RequestID, "complete", len(chunks)+1, "")
+		return
+	}
+	var chat struct {
+		Model string `json:"model"`
+	}
+	_ = json.Unmarshal([]byte(req.Body), &chat)
+	resp := map[string]any{
+		"id":      fmt.Sprintf("chatcmpl-%s-%d", cfg.providerID, time.Now().UnixNano()),
+		"object":  "chat.completion",
+		"created": time.Now().Unix(),
+		"model":   chat.Model,
+		"choices": []map[string]any{{"index": 0, "message": map[string]any{"role": "assistant", "content": "hello from " + cfg.providerID}, "finish_reason": "stop"}},
+		"usage":   map[string]any{"prompt_tokens": len(req.Body) / 4, "completion_tokens": 4, "total_tokens": len(req.Body)/4 + 4},
+	}
+	b, _ := json.Marshal(resp)
+	chunk, _ := json.Marshal(inferenceResponseChunk{Type: "inference_response_chunk", RequestID: req.RequestID, Seq: 0, Data: string(b)})
+	if err := writeText(chunk); err != nil {
+		logger.Printf("inference response write failed: %v", err)
+		return
+	}
+	sendInferenceEnd(writeText, req.RequestID, "complete", 1, "")
+}
+
+func sendInferenceEnd(writeText func([]byte) error, requestID, status string, chunks int, msg string) {
+	b, _ := json.Marshal(inferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: status, ChunksSent: chunks, Error: msg})
+	_ = writeText(b)
 }
 
 func runDrain(cfg config, logger *log.Logger, drainer *drainController,

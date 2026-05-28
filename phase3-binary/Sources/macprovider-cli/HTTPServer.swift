@@ -22,6 +22,7 @@ struct HTTPServer {
                     channel.pipeline.addHandler(
                         RouterHandler(
                             modelID: config.model,
+                            coordinatorURL: config.coordinatorURL,
                             modelRuntime: modelRuntime,
                             providerStatus: providerStatus,
                             maxBodyBytes: config.maxRequestBodyBytes
@@ -42,6 +43,7 @@ private final class RouterHandler: ChannelInboundHandler {
     typealias OutboundOut = HTTPServerResponsePart
 
     private let modelID: String?
+    private let coordinatorURL: String?
     private let modelRuntime: ModelRuntime
     private let providerStatus: ProviderStatus
     private let maxBodyBytes: Int
@@ -49,8 +51,9 @@ private final class RouterHandler: ChannelInboundHandler {
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
 
-    init(modelID: String?, modelRuntime: ModelRuntime, providerStatus: ProviderStatus, maxBodyBytes: Int) {
+    init(modelID: String?, coordinatorURL: String?, modelRuntime: ModelRuntime, providerStatus: ProviderStatus, maxBodyBytes: Int) {
         self.modelID = modelID
+        self.coordinatorURL = coordinatorURL
         self.modelRuntime = modelRuntime
         self.providerStatus = providerStatus
         self.maxBodyBytes = maxBodyBytes
@@ -109,6 +112,10 @@ private final class RouterHandler: ChannelInboundHandler {
             handleHealth(context: context)
         case (_, "/v1/health"):
             writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
+        case (.GET, "/v1/status"):
+            handleStatus(context: context)
+        case (_, "/v1/status"):
+            writeError(context: context, status: .methodNotAllowed, message: "method not allowed", code: "invalid_request")
         case (.POST, "/v1/chat/completions"):
             handleChatCompletions(context: context)
         case (_, "/v1/chat/completions"):
@@ -157,6 +164,16 @@ private final class RouterHandler: ChannelInboundHandler {
                 status = .serviceUnavailable
             }
             writer.writeJSON(status: status, body: Self.healthResponse(snapshot))
+        }
+    }
+
+    private func handleStatus(context: ChannelHandlerContext) {
+        let writer = ResponseWriter(context: context)
+        let providerStatus = providerStatus
+        let coordinatorURL = coordinatorURL
+        Task.detached { @Sendable [providerStatus, writer, coordinatorURL] in
+            let snapshot = await providerStatus.snapshot()
+            writer.writeJSON(status: .ok, body: Self.statusResponse(snapshot, coordinatorURL: coordinatorURL))
         }
     }
 
@@ -346,6 +363,39 @@ private final class RouterHandler: ChannelInboundHandler {
                 "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
             ],
         ]
+    }
+
+    private static func statusResponse(_ snapshot: ProviderSnapshot, coordinatorURL: String?) -> [String: Any] {
+        [
+            "binary_version": CoordinatorClient.binaryVersion,
+            "status": snapshot.status.rawValue,
+            "model": snapshot.modelID ?? NSNull(),
+            "model_loaded": snapshot.modelLoaded,
+            "uptime_s": snapshot.uptimeSeconds,
+            "requests_total": snapshot.requestsTotal,
+            "requests_in_flight": snapshot.requestsInFlight,
+            "active_request_id_count": snapshot.activeRequestIDCount,
+            "errors_total": snapshot.errorsTotal,
+            "memory_rss_mb": snapshot.memoryRSSMB,
+            "capacity": [
+                "ram_gb": snapshot.capacity.ramGB,
+                "ram_tier": snapshot.capacity.ramTier,
+                "max_context_tokens": snapshot.capacity.maxContextTokens,
+                "max_concurrency": snapshot.capacity.maxConcurrency,
+                "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
+            ],
+            "coordinator": [
+                "url": jsonNullable(coordinatorURL),
+                "connected": snapshot.coordinatorConnected,
+                "session": jsonNullable(snapshot.coordinatorAssignedID),
+                "tier": jsonNullable(snapshot.coordinatorTier),
+                "recommended_binary_version": jsonNullable(snapshot.recommendedBinaryVersion),
+            ],
+        ]
+    }
+
+    private static func jsonNullable(_ value: String?) -> Any {
+        value ?? NSNull()
     }
 
     private static func chatCompletionChunk(

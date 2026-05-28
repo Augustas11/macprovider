@@ -2,6 +2,7 @@ package buyer_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
 )
 
@@ -349,6 +351,129 @@ func TestChatCompletionsContextLengthRoutesOrReturns413(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsWSTunneledNonStreaming(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","choices":[{"message":{"content":"ok"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p1" {
+		t.Fatalf("provider header = %q", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"id":"ws"`)) {
+		t.Fatalf("body not relayed: %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsWSTunneledTimeoutReturns504(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error, 1)
+			errs <- providerws.ErrRelayTimeout
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusGatewayTimeout {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_timeout"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsWSTunneledQueueFullFallsBackToNextProvider(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 2, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	var calls []string
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			calls = append(calls, provider.ProviderID)
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			if provider.ProviderID == "p1" {
+				done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "error_queue_full"}
+				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+			}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"fallback","choices":[{"message":{"content":"ok"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Join(calls, ",") != "p1,p2" {
+		t.Fatalf("relay calls = %v", calls)
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
+		t.Fatalf("provider = %q, want p2", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy {
+		t.Fatalf("p1 = %#v ok=%v, want busy", p1, ok)
+	}
+}
+
+func TestChatCompletionsProvisionalQuotaReturns429(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	adm := providerws.NewAdmissionManager(config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 10,
+		ProvisionalPoolMax:              10,
+		ProvisionalQuotaPerHour:         1,
+		ProvisionalTierWeight:           0.3,
+	}, time.Now)
+	adm.RecordRequest(pool.Provider{ProviderID: "p1", Tier: pool.TierProvisional})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithAdmission(adm, 0.3),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provisional_quota_exceeded"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
 func TestChatCompletionsValidationPrecedesModelLookup(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
@@ -469,6 +594,10 @@ func register(registry *pool.Registry, providerID, assignedID, modelID string, s
 }
 
 func registerWithEndpoint(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64) {
+	registerWithPath(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, pool.TierPinned, pool.InferencePathHTTPForwarding)
+}
+
+func registerWithPath(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, tier pool.Tier, path pool.InferencePath) {
 	registry.Register(&pool.Provider{
 		ProviderID:            providerID,
 		AssignedID:            assignedID,
@@ -482,6 +611,8 @@ func registerWithEndpoint(registry *pool.Registry, providerID, assignedID, model
 		SlotsTotal:            slotsTotal,
 		ThroughputTPSEstimate: throughput,
 		EndpointURL:           endpointURL,
+		Tier:                  tier,
+		InferencePath:         path,
 		State:                 state,
 		LastHeartbeatAt:       time.Now().UTC(),
 		ConnectedAt:           time.Now().UTC(),

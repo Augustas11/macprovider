@@ -13,13 +13,16 @@ import (
 var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 
 type Config struct {
-	Listen    ListenConfig     `yaml:"listen"`
-	Pool      PoolConfig       `yaml:"pool"`
-	Routing   RoutingConfig    `yaml:"routing"`
-	Auth      AuthConfig       `yaml:"auth"`
-	Storage   StorageConfig    `yaml:"storage"`
-	Logging   LoggingConfig    `yaml:"logging"`
-	Providers []ProviderConfig `yaml:"providers"`
+	Listen                       ListenConfig                 `yaml:"listen"`
+	Pool                         PoolConfig                   `yaml:"pool"`
+	Routing                      RoutingConfig                `yaml:"routing"`
+	WS                           WSConfig                     `yaml:"ws"`
+	Admission                    AdmissionConfig              `yaml:"admission"`
+	CoordinatorAdvertisedVersion CoordinatorAdvertisedVersion `yaml:"coordinator_advertised_version"`
+	Auth                         AuthConfig                   `yaml:"auth"`
+	Storage                      StorageConfig                `yaml:"storage"`
+	Logging                      LoggingConfig                `yaml:"logging"`
+	Providers                    []ProviderConfig             `yaml:"providers"`
 }
 
 type ListenConfig struct {
@@ -41,6 +44,24 @@ type RoutingConfig struct {
 	PreflightThresholdTokens int `yaml:"preflight_threshold_tokens"`
 	PreflightTimeoutS        int `yaml:"preflight_timeout_s"`
 	RequestTimeoutS          int `yaml:"request_timeout_s"`
+}
+
+type WSConfig struct {
+	WriteBufferSize int `yaml:"write_buffer_size"`
+}
+
+type AdmissionConfig struct {
+	PinnedOnly                      bool    `yaml:"pinned_only"`
+	ProvisionalAdmissionRatePerHour int     `yaml:"provisional_admission_rate_per_hour"`
+	ProvisionalPoolMax              int     `yaml:"provisional_pool_max"`
+	ProvisionalQuotaPerHour         int     `yaml:"provisional_quota_per_hour"`
+	ProvisionalTierWeight           float64 `yaml:"provisional_tier_weight"`
+	ProvisionalRetentionDays        int     `yaml:"provisional_retention_days"`
+}
+
+type CoordinatorAdvertisedVersion struct {
+	LatestBinaryVersion   string `yaml:"latest_binary_version"`
+	RequiredBinaryVersion string `yaml:"required_binary_version"`
 }
 
 type AuthConfig struct {
@@ -82,6 +103,17 @@ func Default() Config {
 			PreflightThresholdTokens: 4096,
 			PreflightTimeoutS:        5,
 			RequestTimeoutS:          300,
+		},
+		WS: WSConfig{
+			WriteBufferSize: 64,
+		},
+		Admission: AdmissionConfig{
+			PinnedOnly:                      false,
+			ProvisionalAdmissionRatePerHour: 10,
+			ProvisionalPoolMax:              100,
+			ProvisionalQuotaPerHour:         100,
+			ProvisionalTierWeight:           0.3,
+			ProvisionalRetentionDays:        30,
 		},
 		Storage: StorageConfig{
 			DBPath:            "coordinator.db",
@@ -126,11 +158,23 @@ func (c Config) ProviderByID() map[string]ProviderConfig {
 }
 
 func (c Config) Validate() error {
-	if len(c.Providers) == 0 {
-		return fmt.Errorf("providers must be non-empty")
-	}
 	if c.Auth.OperatorKey == "" {
 		return fmt.Errorf("auth.operator_key must be set")
+	}
+	if c.WS.WriteBufferSize <= 0 {
+		return fmt.Errorf("ws.write_buffer_size must be > 0")
+	}
+	if c.Admission.ProvisionalAdmissionRatePerHour <= 0 {
+		return fmt.Errorf("admission.provisional_admission_rate_per_hour must be > 0")
+	}
+	if c.Admission.ProvisionalPoolMax <= 0 {
+		return fmt.Errorf("admission.provisional_pool_max must be > 0")
+	}
+	if c.Admission.ProvisionalQuotaPerHour <= 0 {
+		return fmt.Errorf("admission.provisional_quota_per_hour must be > 0")
+	}
+	if c.Admission.ProvisionalTierWeight <= 0 {
+		return fmt.Errorf("admission.provisional_tier_weight must be > 0")
 	}
 	seen := map[string]struct{}{}
 	for _, p := range c.Providers {
@@ -141,14 +185,23 @@ func (c Config) Validate() error {
 			return fmt.Errorf("duplicate provider_id %q", p.ProviderID)
 		}
 		seen[p.ProviderID] = struct{}{}
-		u, err := url.Parse(p.EndpointURL)
-		if err != nil || u.Host == "" {
-			return fmt.Errorf("provider %q endpoint_url must be a valid URL", p.ProviderID)
+		if p.EndpointURL != "" {
+			if err := ValidateEndpointURL(p.EndpointURL); err != nil {
+				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
+			}
 		}
-		isLocal := u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost"
-		if u.Scheme != "https" && !(u.Scheme == "http" && isLocal) {
-			return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
-		}
+	}
+	return nil
+}
+
+func ValidateEndpointURL(endpoint string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("endpoint_url must be a valid URL")
+	}
+	isLocal := u.Hostname() == "127.0.0.1" || u.Hostname() == "localhost"
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLocal) {
+		return fmt.Errorf("endpoint_url must be a valid https URL")
 	}
 	return nil
 }

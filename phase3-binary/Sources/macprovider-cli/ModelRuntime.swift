@@ -49,7 +49,7 @@ actor ModelRuntime {
 
         let maxContextTokens = maxContextTokens
         try await inferenceGate.withPermit {
-            try await container.perform { context in
+            return try await container.perform { context in
                 let input = UserInput(chat: request.messages.map { $0.mlxMessage })
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
@@ -65,7 +65,9 @@ actor ModelRuntime {
 
         let maxContextTokens = maxContextTokens
         return try await inferenceGate.withPermit {
-            try await container.perform { context in
+            try Task.checkCancellation()
+            return try await container.perform { context in
+                try Task.checkCancellation()
                 let input = UserInput(chat: request.messages.map { $0.mlxMessage })
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
@@ -75,8 +77,12 @@ actor ModelRuntime {
                     topP: Float(request.topP)
                 )
                 let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
-                    GenerateDisposition.more
+                    if Task.isCancelled {
+                        return GenerateDisposition.stop
+                    }
+                    return GenerateDisposition.more
                 }
+                try Task.checkCancellation()
 
                 let filtered = Self.applyOutputFilters(
                     result.output,
@@ -112,7 +118,9 @@ actor ModelRuntime {
 
         let maxContextTokens = maxContextTokens
         return try await inferenceGate.withPermit {
-            try await container.perform { context in
+            try Task.checkCancellation()
+            return try await container.perform { context in
+                try Task.checkCancellation()
                 let input = UserInput(chat: request.messages.map { $0.mlxMessage })
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
@@ -126,6 +134,9 @@ actor ModelRuntime {
                 var stoppedByRequestStop = false
 
                 let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
+                    if Task.isCancelled {
+                        return .stop
+                    }
                     let decoded = context.tokenizer.decode(tokens: tokens)
                     let candidate = Self.streamingSafePrefix(
                         decoded,
@@ -145,6 +156,7 @@ actor ModelRuntime {
                     }
                     return .more
                 }
+                try Task.checkCancellation()
 
                 let final = Self.applyOutputFilters(
                     result.output,

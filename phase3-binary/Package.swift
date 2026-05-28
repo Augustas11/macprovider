@@ -68,7 +68,7 @@ let package = Package(
         ),
         .testTarget(
             name: "macprovider-cliTests",
-            dependencies: ["MacProviderCore"],
+            dependencies: ["MacProviderCore", "macprovider-cli"],
             path: "Tests/macprovider-cliTests"
         )
     ]

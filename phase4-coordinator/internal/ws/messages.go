@@ -19,13 +19,16 @@ type Hello struct {
 	ThroughputTPSEstimate float64         `json:"throughput_tps_estimate"`
 	BinaryVersion         string          `json:"binary_version"`
 	Attestation           json.RawMessage `json:"attestation"`
+	EndpointURL           *string         `json:"endpoint_url,omitempty"`
 }
 
 type HelloAck struct {
-	Type               string `json:"type"`
-	CoordinatorVersion int    `json:"coordinator_version"`
-	AssignedID         string `json:"assigned_id"`
-	HeartbeatIntervalS int    `json:"heartbeat_interval_s"`
+	Type                     string `json:"type"`
+	CoordinatorVersion       int    `json:"coordinator_version"`
+	AssignedID               string `json:"assigned_id"`
+	HeartbeatIntervalS       int    `json:"heartbeat_interval_s"`
+	Tier                     string `json:"tier,omitempty"`
+	RecommendedBinaryVersion string `json:"recommended_binary_version,omitempty"`
 }
 
 type Heartbeat struct {
@@ -66,6 +69,42 @@ type DrainStatus struct {
 	Phase                 string `json:"phase"`
 	InflightRequests      int    `json:"inflight_requests"`
 	EstimatedDrainSeconds int    `json:"estimated_drain_seconds"`
+}
+
+type InferenceRequest struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Stream    bool   `json:"stream"`
+	Body      string `json:"body"`
+}
+
+type InferenceResponseChunk struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Seq       int    `json:"seq"`
+	Data      string `json:"data"`
+}
+
+type InferenceResponseEnd struct {
+	Type       string          `json:"type"`
+	RequestID  string          `json:"request_id"`
+	Status     string          `json:"status"`
+	ChunksSent int             `json:"chunks_sent"`
+	Usage      json.RawMessage `json:"usage,omitempty"`
+	Error      string          `json:"error,omitempty"`
+}
+
+type CancelRequest struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id"`
+	Reason    string `json:"reason"`
+}
+
+type NAK struct {
+	Type      string `json:"type"`
+	RequestID string `json:"request_id,omitempty"`
+	Code      string `json:"code"`
+	Message   string `json:"message,omitempty"`
 }
 
 var preflightRejectionReasons = map[string]struct{}{
@@ -129,10 +168,16 @@ func ParseHello(payload []byte) (Hello, string, error) {
 		return Hello{}, err.Field, err
 	}
 	attestation, ok := raw["attestation"]
-	if !ok {
-		return Hello{}, "missing attestation", fieldError{Field: "missing attestation"}
+	if ok {
+		h.Attestation = attestation
 	}
-	h.Attestation = attestation
+	if v, ok := raw["endpoint_url"]; ok && string(v) != "null" {
+		var endpoint string
+		if err := json.Unmarshal(v, &endpoint); err != nil {
+			return Hello{}, "endpoint_url", err
+		}
+		h.EndpointURL = &endpoint
+	}
 	return h, "", nil
 }
 

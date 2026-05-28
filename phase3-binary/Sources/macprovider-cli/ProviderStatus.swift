@@ -82,6 +82,11 @@ struct ProviderSnapshot: Sendable {
     let requestsServedSinceLast: Int
     let avgLatencyMSSinceLast: Double?
     let throughputTPSSinceLast: Double?
+    let coordinatorConnected: Bool
+    let coordinatorAssignedID: String?
+    let coordinatorTier: String?
+    let recommendedBinaryVersion: String?
+    let activeRequestIDCount: Int
 
     var slotsFree: Int {
         max(0, capacity.maxConcurrency - requestsInFlight)
@@ -106,6 +111,11 @@ actor ProviderStatus {
     private var windowLatencyMS = 0.0
     private var windowCompletionTokens = 0
     private var windowGenerationSeconds = 0.0
+    private var coordinatorConnected = false
+    private var coordinatorAssignedID: String?
+    private var coordinatorTier: String?
+    private var recommendedBinaryVersion: String?
+    private var activeRequestIDs = Set<String>()
 
     init(modelID: String?, modelLoaded: Bool, capacity: ProviderCapacity) {
         self.modelID = modelID
@@ -114,14 +124,20 @@ actor ProviderStatus {
         self.status = modelLoaded ? .ready : .unavailable
     }
 
-    func beginRequest() -> Date {
+    func beginRequest(requestID: String? = nil) -> Date {
         requestsInFlight += 1
+        if let requestID {
+            activeRequestIDs.insert(requestID)
+        }
         refreshAvailabilityState()
         return Date()
     }
 
-    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool) {
+    func finishRequest(startedAt: Date, completion: CompletionResult?, failed: Bool, requestID: String? = nil) {
         requestsInFlight = max(0, requestsInFlight - 1)
+        if let requestID {
+            activeRequestIDs.remove(requestID)
+        }
         requestsTotal += 1
         if failed {
             errorsTotal += 1
@@ -145,6 +161,19 @@ actor ProviderStatus {
         status = newState
     }
 
+    func setCoordinatorSession(connected: Bool, assignedID: String? = nil, tier: String? = nil, recommendedBinaryVersion: String? = nil) {
+        coordinatorConnected = connected
+        if let assignedID {
+            coordinatorAssignedID = assignedID
+        }
+        if let tier {
+            coordinatorTier = tier
+        }
+        if let recommendedBinaryVersion {
+            self.recommendedBinaryVersion = recommendedBinaryVersion
+        }
+    }
+
     func snapshot(resetWindow: Bool = false) -> ProviderSnapshot {
         let avgLatency = windowRequests > 0 ? windowLatencyMS / Double(windowRequests) : nil
         let throughput = windowGenerationSeconds > 0 ? Double(windowCompletionTokens) / windowGenerationSeconds : nil
@@ -161,7 +190,12 @@ actor ProviderStatus {
             capacity: capacity,
             requestsServedSinceLast: windowRequests,
             avgLatencyMSSinceLast: avgLatency,
-            throughputTPSSinceLast: throughput
+            throughputTPSSinceLast: throughput,
+            coordinatorConnected: coordinatorConnected,
+            coordinatorAssignedID: coordinatorAssignedID,
+            coordinatorTier: coordinatorTier,
+            recommendedBinaryVersion: recommendedBinaryVersion,
+            activeRequestIDCount: activeRequestIDs.count
         )
         if resetWindow {
             windowRequests = 0

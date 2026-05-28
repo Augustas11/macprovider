@@ -16,6 +16,21 @@ routing:
   preflight_timeout_s: 5
   request_timeout_s: 300
 
+ws:
+  write_buffer_size: 64
+
+admission:
+  pinned_only: false
+  provisional_admission_rate_per_hour: 10
+  provisional_pool_max: 100
+  provisional_quota_per_hour: 100
+  provisional_tier_weight: 0.3
+  provisional_retention_days: 30
+
+coordinator_advertised_version:
+  latest_binary_version: "1.2.0"
+  required_binary_version: ""
+
 auth:
   operator_key: "change-me"
 

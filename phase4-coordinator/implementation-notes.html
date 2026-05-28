@@ -640,4 +640,32 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 <p class=meta>External resources read during implementation, with
 what was taken. d-inference is strictly prohibited per Section 8.2.</p>
 </section>
+<section><h2>Coordinator stream build - SPEC-002 v1.1.2</h2>
+<p class=meta>2026-05-28 coordinator-side implementation pass.</p>
+<div class="entry">
+  <time>2026-05-28</time>
+  <p><strong>Design choices:</strong> the implementation keeps pinned
+  providers on the existing HTTP-forwarding path whenever a static or
+  hello-provided <code>endpoint_url</code> is available. Unknown
+  providers are admitted as provisional and forced to
+  <code>ws_tunneled</code>; any provisional self-reported endpoint is
+  logged and ignored. WS writes are serialized through a bounded
+  per-session buffer, and relay responses are demultiplexed by
+  <code>request_id</code>.</p>
+  <p><strong>Deviations:</strong> provisional and rejected admission
+  state is in-memory in this pass rather than persisted to SQLite. The
+  admin endpoints and quota behavior are live for the running process,
+  but restart persistence still needs a storage follow-up before
+  production hardening. The AC scripts are repeatable local Go-test
+  wrappers, not long-running coordinator/mockprovider shell harnesses.</p>
+  <p><strong>Verification:</strong> ran <code>go build ./...</code> and
+  <code>go test ./...</code> from <code>phase4-coordinator/</code> with
+  <code>GOCACHE=/private/tmp/macprovider-go-build-cache</code>. Ran
+  <code>scripts/test-ac11-admission.sh</code>,
+  <code>scripts/test-ac12-quota.sh</code>,
+  <code>scripts/test-ac13-ws-relay.sh</code>,
+  <code>scripts/test-ac14-cancellation.sh</code>, and
+  <code>scripts/test-ac15-nak-fallback.sh</code>; all passed locally.</p>
+</div>
+</section>
 </body></html>

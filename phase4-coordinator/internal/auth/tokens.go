@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"time"
@@ -25,6 +26,10 @@ type TokenRecord struct {
 	CreatedAt    string
 	RevokedAt    sql.NullString
 	LastUsedAt   sql.NullString
+}
+
+func AuthorizedBearer(r *http.Request, expected string) bool {
+	return expected == "" || r.Header.Get("Authorization") == "Bearer "+expected
 }
 
 func OpenStore(path string) (*Store, error) {

@@ -1,0 +1,381 @@
+import CryptoKit
+import Darwin
+import Foundation
+
+struct SelfUpdate {
+    private let currentVersion: String
+    private let releasesAPIURL: String
+    private let session: URLSession
+
+    init(
+        currentVersion: String,
+        releasesAPIURL: String?,
+        session: URLSession = .shared
+    ) {
+        self.currentVersion = currentVersion
+        self.releasesAPIURL = releasesAPIURL
+            ?? ProcessInfo.processInfo.environment["MACPROVIDER_RELEASES_API_URL"]
+            ?? "https://api.github.com/repos/augstar/macprovider-poc/releases/latest"
+        self.session = session
+    }
+
+    func run(checkOnly: Bool) async throws {
+        let release = try await latestRelease()
+        let latest = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        let comparison = Self.compareSemver(currentVersion, latest)
+
+        if comparison != .orderedAscending {
+            print("Already up to date (v\(currentVersion))")
+            return
+        }
+
+        if checkOnly {
+            print("Update available: v\(currentVersion) -> v\(latest)")
+            return
+        }
+
+        guard let tarball = release.assets.first(where: { $0.name.hasSuffix("darwin-arm64.tar.gz") }),
+              let checksums = release.assets.first(where: { $0.name == "checksums.txt" })
+        else {
+            throw UpdateError.missingAsset
+        }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("macprovider-update-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer {
+            try? FileManager.default.removeItem(at: tempDir)
+        }
+
+        try validateDownloadURL(tarball.browserDownloadURL)
+        try validateDownloadURL(checksums.browserDownloadURL)
+
+        let tarballURL = tempDir.appendingPathComponent(tarball.name)
+        let checksumsText = try await fetchText(from: checksums.browserDownloadURL)
+        let expectedSHA = try Self.expectedSHA256(for: tarball.name, in: checksumsText)
+        try await download(from: tarball.browserDownloadURL, to: tarballURL)
+        let actualSHA = try Self.sha256(file: tarballURL)
+        guard actualSHA.lowercased() == expectedSHA.lowercased() else {
+            throw UpdateError.checksumMismatch(expected: expectedSHA, actual: actualSHA)
+        }
+
+        let extractDir = tempDir.appendingPathComponent("extract", isDirectory: true)
+        try FileManager.default.createDirectory(at: extractDir, withIntermediateDirectories: true)
+        try validateTarball(tarballURL)
+        try runProcess("/usr/bin/tar", arguments: ["-xzf", tarballURL.path, "-C", extractDir.path])
+        let newBinary = try Self.findBinary(in: extractDir)
+
+        try runProcess(newBinary.path, arguments: ["self-test"])
+        try replaceCurrentBinary(with: newBinary)
+        try restartLaunchdIfInstalled()
+        print("Update complete. Restart macprovider-cli to use v\(latest).")
+    }
+
+    func latestVersionCached() async throws -> String {
+        let cacheURL = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/macprovider/latest-release.json")
+        if let cached = try? Data(contentsOf: cacheURL),
+           let object = try? JSONSerialization.jsonObject(with: cached) as? [String: Any],
+           let fetchedAt = object["fetched_at"] as? TimeInterval,
+           Date().timeIntervalSince1970 - fetchedAt < 3600,
+           let version = object["version"] as? String
+        {
+            return version
+        }
+
+        let release = try await latestRelease()
+        let version = release.tagName.trimmingCharacters(in: CharacterSet(charactersIn: "vV"))
+        try? FileManager.default.createDirectory(
+            at: cacheURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        let payload: [String: Any] = [
+            "fetched_at": Date().timeIntervalSince1970,
+            "version": version,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: payload) {
+            try? data.write(to: cacheURL, options: .atomic)
+        }
+        return version
+    }
+
+    private func latestRelease() async throws -> GitHubRelease {
+        guard let url = URL(string: releasesAPIURL) else {
+            throw UpdateError.invalidURL(releasesAPIURL)
+        }
+        var request = URLRequest(url: url)
+        request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
+        request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
+        let (data, response) = try await session.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        return try JSONDecoder().decode(GitHubRelease.self, from: data)
+    }
+
+    private func fetchText(from url: URL) async throws -> String {
+        let (data, response) = try await session.data(from: url)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func download(from url: URL, to destination: URL) async throws {
+        let (downloaded, response) = try await session.download(from: url)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        try FileManager.default.moveItem(at: downloaded, to: destination)
+    }
+
+    private func replaceCurrentBinary(with newBinary: URL) throws {
+        guard let current = Bundle.main.executableURL else {
+            throw UpdateError.currentBinaryUnknown
+        }
+        let staged = current.deletingLastPathComponent()
+            .appendingPathComponent(".\(current.lastPathComponent).update-\(UUID().uuidString)")
+        try? FileManager.default.removeItem(at: staged)
+        try FileManager.default.copyItem(at: newBinary, to: staged)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: staged.path)
+        if rename(staged.path, current.path) != 0 {
+            let errnoValue = errno
+            try? FileManager.default.removeItem(at: staged)
+            throw UpdateError.renameFailed(errnoValue)
+        }
+    }
+
+    private func restartLaunchdIfInstalled() throws {
+        let plist = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/LaunchAgents/live.streamvc.macprovider.plist")
+        guard FileManager.default.fileExists(atPath: plist.path) else {
+            return
+        }
+        let domain = "gui/\(getuid())"
+        try runProcess("/bin/launchctl", arguments: ["bootout", domain, "live.streamvc.macprovider"], allowFailure: true)
+        try runProcess("/bin/launchctl", arguments: ["bootstrap", domain, plist.path])
+    }
+
+    private func runProcess(_ executable: String, arguments: [String], allowFailure: Bool = false) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        try process.run()
+        process.waitUntilExit()
+        if !allowFailure, process.terminationStatus != 0 {
+            throw UpdateError.processFailed(executable, process.terminationStatus)
+        }
+    }
+
+    private func validateDownloadURL(_ url: URL) throws {
+        guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased() else {
+            throw UpdateError.untrustedDownloadURL(url.absoluteString)
+        }
+        guard host == "github.com" || host.hasSuffix(".github.com") || host == "objects.githubusercontent.com" else {
+            throw UpdateError.untrustedDownloadURL(url.absoluteString)
+        }
+    }
+
+    private func validateTarball(_ url: URL) throws {
+        let listing = try processOutput("/usr/bin/tar", arguments: ["-tzf", url.path])
+        for rawEntry in listing.split(separator: "\n").map(String.init) {
+            let entry = rawEntry.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !entry.isEmpty else { continue }
+            if entry.hasPrefix("/") || entry == ".." || entry.hasPrefix("../") || entry.contains("/../") {
+                throw UpdateError.unsafeArchiveEntry(entry)
+            }
+        }
+    }
+
+    private func processOutput(_ executable: String, arguments: [String]) throws -> String {
+        let process = Process()
+        let pipe = Pipe()
+        process.executableURL = URL(fileURLWithPath: executable)
+        process.arguments = arguments
+        process.standardOutput = pipe
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            throw UpdateError.processFailed(executable, process.terminationStatus)
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    static func compareSemver(_ lhs: String, _ rhs: String) -> ComparisonResult {
+        let left = lhs.trimmingCharacters(in: CharacterSet(charactersIn: "vV")).split(separator: ".").map { Int($0) ?? 0 }
+        let right = rhs.trimmingCharacters(in: CharacterSet(charactersIn: "vV")).split(separator: ".").map { Int($0) ?? 0 }
+        for index in 0 ..< max(left.count, right.count) {
+            let l = index < left.count ? left[index] : 0
+            let r = index < right.count ? right[index] : 0
+            if l < r { return .orderedAscending }
+            if l > r { return .orderedDescending }
+        }
+        return .orderedSame
+    }
+
+    private static func expectedSHA256(for filename: String, in text: String) throws -> String {
+        for line in text.split(separator: "\n") {
+            let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
+            if parts.count >= 2, parts[1] == filename, parts[0].range(of: #"^[0-9a-fA-F]{64}$"#, options: .regularExpression) != nil {
+                return parts[0]
+            }
+        }
+        throw UpdateError.checksumMissing(filename)
+    }
+
+    private static func sha256(file: URL) throws -> String {
+        let data = try Data(contentsOf: file)
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func findBinary(in directory: URL) throws -> URL {
+        guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isExecutableKey]) else {
+            throw UpdateError.missingExtractedBinary
+        }
+        var matches: [URL] = []
+        for case let url as URL in enumerator where url.lastPathComponent == "macprovider-cli" {
+            let values = try url.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .isExecutableKey])
+            if values.isSymbolicLink == false, values.isRegularFile == true, values.isExecutable == true {
+                matches.append(url)
+            }
+        }
+        guard matches.count == 1, let match = matches.first else {
+            throw UpdateError.missingExtractedBinary
+        }
+        return match
+    }
+}
+
+private struct GitHubRelease: Decodable {
+    let tagName: String
+    let assets: [GitHubAsset]
+
+    enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
+        case assets
+    }
+}
+
+private struct GitHubAsset: Decodable {
+    let name: String
+    let browserDownloadURL: URL
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case browserDownloadURL = "browser_download_url"
+    }
+}
+
+enum UpdateError: Error, CustomStringConvertible {
+    case invalidURL(String)
+    case httpStatus(Int)
+    case missingAsset
+    case checksumMissing(String)
+    case checksumMismatch(expected: String, actual: String)
+    case missingExtractedBinary
+    case currentBinaryUnknown
+    case processFailed(String, Int32)
+    case renameFailed(Int32)
+    case untrustedDownloadURL(String)
+    case unsafeArchiveEntry(String)
+
+    var description: String {
+        switch self {
+        case .invalidURL(let url):
+            return "Invalid release API URL: \(url)"
+        case .httpStatus(let status):
+            return "GitHub API returned HTTP \(status)"
+        case .missingAsset:
+            return "Release is missing darwin-arm64 tarball or checksums.txt"
+        case .checksumMissing(let filename):
+            return "checksums.txt does not contain \(filename)"
+        case let .checksumMismatch(expected, actual):
+            return "Checksum mismatch: expected \(expected), got \(actual)"
+        case .missingExtractedBinary:
+            return "Downloaded archive does not contain macprovider-cli"
+        case .currentBinaryUnknown:
+            return "Unable to locate the running binary path"
+        case let .processFailed(executable, status):
+            return "\(executable) exited with status \(status)"
+        case .renameFailed(let errnoValue):
+            return "Atomic binary replacement failed with errno \(errnoValue)"
+        case .untrustedDownloadURL(let url):
+            return "Untrusted release asset URL: \(url)"
+        case .unsafeArchiveEntry(let entry):
+            return "Release archive contains unsafe entry: \(entry)"
+        }
+    }
+}
+
+struct LocalStatusClient {
+    static func fetch(port: Int) async throws -> [String: Any] {
+        let url = URL(string: "http://127.0.0.1:\(port)/v1/status")!
+        let (data, response) = try await URLSession.shared.data(from: url)
+        if let http = response as? HTTPURLResponse, !(200 ..< 300).contains(http.statusCode) {
+            throw UpdateError.httpStatus(http.statusCode)
+        }
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw UpdateError.processFailed("status-json", 1)
+        }
+        return object
+    }
+}
+
+struct LocalStatusFormatter {
+    static func format(_ status: [String: Any], latestVersion: String? = nil) -> String {
+        let capacity = status["capacity"] as? [String: Any] ?? [:]
+        let coordinator = status["coordinator"] as? [String: Any] ?? [:]
+        let version = status["binary_version"] as? String ?? CoordinatorClient.binaryVersion
+        let uptime = humanDuration(status["uptime_s"] as? Int ?? 0)
+        let connected = (coordinator["connected"] as? Bool) == true ? "yes" : "no"
+        let latestLine: String
+        if let latestVersion {
+            let comparison = SelfUpdate.compareSemver(version, latestVersion)
+            latestLine = comparison == .orderedAscending
+                ? "v\(latestVersion) (run 'macprovider-cli update' to upgrade)"
+                : "v\(latestVersion)"
+        } else {
+            latestLine = "unknown (run 'macprovider-cli update --check')"
+        }
+
+        return """
+        macprovider-cli v\(version)
+
+        Local:
+          Model:       \(string(status["model"]))
+          Status:      \(string(status["status"]))
+          Uptime:      \(uptime)
+          Requests:    \(status["requests_total"] ?? 0) served, \(status["errors_total"] ?? 0) errors
+          Active WS:   \(status["active_request_id_count"] ?? 0) request_ids
+          RAM:         \(capacity["ram_gb"] ?? 0) GB (\(string(capacity["ram_tier"])))
+          Context cap: \(capacity["max_context_tokens"] ?? 0) tokens
+
+        Coordinator:
+          URL:         \(string(coordinator["url"]))
+          Connected:   \(connected)
+          Session:     \(string(coordinator["session"]))
+          Tier:        \(string(coordinator["tier"]))
+          Recommended: \(string(coordinator["recommended_binary_version"]))
+
+        Update:
+          Current:     v\(version)
+          Latest:      \(latestLine)
+        """
+    }
+
+    private static func string(_ value: Any?) -> String {
+        guard let value, !(value is NSNull) else { return "<unknown>" }
+        return String(describing: value)
+    }
+
+    private static func humanDuration(_ seconds: Int) -> String {
+        let hours = seconds / 3600
+        let minutes = (seconds % 3600) / 60
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        return "\(minutes)m \(seconds % 60)s"
+    }
+}

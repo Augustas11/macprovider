@@ -94,6 +94,21 @@ func TestProviderTokenAuthFlow(t *testing.T) {
 	}
 }
 
+func TestPinnedProviderRequiresTokenWhenValidatorConfigured(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	h := newProviderHarnessWithTokenValidator(t, store)
+	defer h.HTTP.Close()
+
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, validHello("m4-anon"))
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
+}
+
 func TestHeartbeatUpdatesPoolz(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()
@@ -491,6 +506,61 @@ func TestOperatorEndpointsBlacklistTwoPhaseDrain(t *testing.T) {
 	}
 }
 
+func TestOperatorRejectClosesProviderWithBannedCode(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL+"/admin/reject/m4-anon", bytes.NewReader(mustJSON(map[string]string{"reason": "test reject"})))
+	if err != nil {
+		t.Fatalf("reject request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer test-operator-key")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("reject: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("reject status=%d body=%s", resp.StatusCode, body)
+	}
+
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read drain: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text drain", op)
+	}
+	var drain map[string]string
+	if err := json.Unmarshal(payload, &drain); err != nil {
+		t.Fatalf("drain json: %v", err)
+	}
+	if drain["type"] != "drain" {
+		t.Fatalf("drain = %#v", drain)
+	}
+
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read close: %v", err)
+	}
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close", frame.Header.OpCode)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseBanned || !strings.Contains(reason, "has been rejected by operator") {
+		t.Fatalf("close = %d %q", code, reason)
+	}
+}
+
 func TestDrainAllSendsDrainAndMarksDraining(t *testing.T) {
 	h := newProviderHarness(t)
 	defer h.HTTP.Close()
@@ -555,15 +625,82 @@ func assertHelloAck(t *testing.T, conn net.Conn) string {
 	return ack.AssignedID
 }
 
-func TestProviderHelloRejectsUnknownProvider(t *testing.T) {
+func TestProviderHelloAdmitsUnknownProviderAsProvisional(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()
 
-	code, reason := sendHelloExpectClose(t, ts.URL, validHello("unknown"))
-	if code != providerws.CloseUnknownProviderID {
-		t.Fatalf("code = %d, want %d", code, providerws.CloseUnknownProviderID)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
 	}
-	if reason != "unknown_provider_id: unknown" {
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("unknown"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack.Tier != "provisional" {
+		t.Fatalf("tier = %q, want provisional", ack.Tier)
+	}
+	eventually(t, func() bool {
+		got := fetchPoolz(t, ts.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ProviderID == "unknown" && got.Pool[0].Tier == "provisional" && got.Pool[0].InferencePath == "ws_tunneled"
+	})
+}
+
+func TestProviderHelloPinnedStaticEndpointIgnoresHelloOverride(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	h := validHello("m4-anon")
+	h["endpoint_url"] = "https://evil.example"
+	if err := wsutil.WriteClientText(conn, mustJSON(h)); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack.Type != "hello_ack" {
+		t.Fatalf("ack = %#v", ack)
+	}
+	eventually(t, func() bool {
+		got := fetchPoolz(t, ts.URL)
+		return len(got.Pool) == 1 && got.Pool[0].Endpoint == "https://m4.streamvc.live"
+	})
+}
+
+func TestProviderHelloRejectsUnsafePinnedHelloEndpoint(t *testing.T) {
+	ts := newProviderServer(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer ts.Close()
+
+	h := validHello("m4-anon")
+	h["endpoint_url"] = "http://169.254.169.254/latest/meta-data"
+	code, reason := sendHelloExpectClose(t, ts.URL, h)
+	if code != providerws.CloseInvalidHello {
+		t.Fatalf("code = %d, want %d", code, providerws.CloseInvalidHello)
+	}
+	if reason != "invalid_hello: endpoint_url" {
 		t.Fatalf("reason = %q", reason)
 	}
 }
@@ -610,11 +747,13 @@ func TestProviderHelloRejectsUnsupportedVersionAndTier(t *testing.T) {
 
 type poolzResponse struct {
 	Pool []struct {
-		ProviderID string `json:"provider_id"`
-		State      string `json:"state"`
-		SlotsFree  int    `json:"slots_free"`
-		SlotsTotal int    `json:"slots_total"`
-		Endpoint   string `json:"endpoint_url"`
+		ProviderID    string `json:"provider_id"`
+		State         string `json:"state"`
+		SlotsFree     int    `json:"slots_free"`
+		SlotsTotal    int    `json:"slots_total"`
+		Endpoint      string `json:"endpoint_url"`
+		Tier          string `json:"tier"`
+		InferencePath string `json:"inference_path"`
 	} `json:"pool"`
 	Summary struct {
 		TotalProviders int `json:"total_providers"`

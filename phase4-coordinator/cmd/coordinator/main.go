@@ -44,6 +44,8 @@ func main() {
 		startedAt,
 		buyer.WithPreflightConfig(cfg.Routing.PreflightThresholdTokens, time.Duration(cfg.Routing.PreflightTimeoutS)*time.Second),
 		buyer.WithRecoveryConfig(time.Duration(cfg.Pool.DegradedBackoffS)*time.Second, cfg.Pool.DegradedMaxRetries, cfg.Pool.DegradedProbeAfter502),
+		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
+		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
 			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err

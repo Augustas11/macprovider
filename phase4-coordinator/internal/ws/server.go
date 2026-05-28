@@ -18,28 +18,37 @@ import (
 )
 
 const (
-	CloseInvalidHello       gobwas.StatusCode = 4001
-	CloseUnknownProviderID  gobwas.StatusCode = 4002
-	CloseTierUnsupported    gobwas.StatusCode = 4003
-	CloseVersionUnsupported gobwas.StatusCode = 4004
-	CloseInvalidToken       gobwas.StatusCode = 4005
-	ClosePoolFull           gobwas.StatusCode = 4429
+	CloseInvalidHello           gobwas.StatusCode = 4001
+	CloseUnknownProviderID      gobwas.StatusCode = 4002
+	CloseTierUnsupported        gobwas.StatusCode = 4003
+	CloseVersionUnsupported     gobwas.StatusCode = 4004
+	CloseInvalidToken           gobwas.StatusCode = 4005
+	CloseProvisionalPoolFull    gobwas.StatusCode = 4007
+	CloseProvisionalRateLimited gobwas.StatusCode = 4008
+	CloseBanned                 gobwas.StatusCode = 4009
+	ClosePoolFull               gobwas.StatusCode = 4429
 )
 
 type Server struct {
-	cfg     config.Config
-	pool    *pool.Registry
-	log     zerolog.Logger
-	now     func() time.Time
-	newUUID func() string
-	timers  sync.Map
-	pending sync.Map
-	tokens  TokenValidator
-	started time.Time
+	cfg       config.Config
+	pool      *pool.Registry
+	log       zerolog.Logger
+	now       func() time.Time
+	newUUID   func() string
+	timers    sync.Map
+	pending   sync.Map
+	tokens    TokenValidator
+	admission *AdmissionManager
+	sessions  sync.Map
+	started   time.Time
 }
 
 type TokenValidator interface {
 	ValidateToken(context.Context, string) (bool, error)
+}
+
+type providerAuth struct {
+	validated bool
 }
 
 type Option func(*Server)
@@ -64,10 +73,15 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		newUUID: func() string { return uuid.NewString() },
 		started: time.Now().UTC(),
 	}
+	s.admission = NewAdmissionManager(cfg.Admission, s.now)
 	for _, opt := range opts {
 		opt(s)
 	}
 	return s
+}
+
+func (s *Server) Admission() *AdmissionManager {
+	return s.admission
 }
 
 func (s *Server) Handler() http.Handler {
@@ -76,6 +90,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/poolz", s.handlePoolz)
 	mux.HandleFunc("/admin/blacklist", s.handleBlacklist)
+	mux.HandleFunc("/admin/provisional", s.handleAdminProvisional)
+	mux.HandleFunc("/admin/promote/", s.handleAdminPromote)
+	mux.HandleFunc("/admin/reject/", s.handleAdminReject)
 	return mux
 }
 
@@ -85,35 +102,36 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn().Err(err).Msg("provider websocket upgrade failed")
 		return
 	}
-	if !s.validateProviderToken(r) {
+	auth, ok := s.validateProviderToken(r)
+	if !ok {
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
 		return
 	}
-	go s.handleConn(conn)
+	go s.handleConn(conn, auth)
 }
 
-func (s *Server) validateProviderToken(r *http.Request) bool {
+func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 	authz := r.Header.Get("Authorization")
 	if authz == "" {
-		return true
+		return providerAuth{}, true
 	}
 	if s.tokens == nil {
-		return true
+		return providerAuth{}, true
 	}
 	const prefix = "Bearer "
 	if !strings.HasPrefix(authz, prefix) {
-		return false
+		return providerAuth{}, false
 	}
 	ok, err := s.tokens.ValidateToken(r.Context(), strings.TrimSpace(strings.TrimPrefix(authz, prefix)))
 	if err != nil {
 		s.log.Warn().Err(err).Msg("provider token validation failed")
-		return false
+		return providerAuth{}, false
 	}
-	return ok
+	return providerAuth{validated: ok}, ok
 }
 
-func (s *Server) handleConn(conn net.Conn) {
+func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 	defer conn.Close()
 	var providerID string
 	var assignedID string
@@ -146,10 +164,40 @@ func (s *Server) handleConn(conn net.Conn) {
 		s.close(conn, CloseTierUnsupported, "tier_unsupported: tier "+itoa(hello.Tier)+" not supported")
 		return
 	}
-	providerCfg, ok := s.pool.Endpoint(hello.ProviderID)
-	if !ok {
-		s.close(conn, CloseUnknownProviderID, "unknown_provider_id: "+hello.ProviderID)
+	providerCfg, pinned := s.pool.Endpoint(hello.ProviderID)
+	if pinned && s.tokens != nil && !auth.validated {
+		s.close(conn, CloseInvalidToken, "invalid_token")
 		return
+	}
+	tier, closeCode, closeReason := s.admission.Admit(hello, pinned, s.connectedProvisional())
+	if closeCode != 0 {
+		s.close(conn, closeCode, closeReason)
+		return
+	}
+	endpointURL := ""
+	inferencePath := pool.InferencePathWSTunneled
+	if pinned {
+		if providerCfg.EndpointURL != "" {
+			endpointURL = providerCfg.EndpointURL
+			if hello.EndpointURL != nil && strings.TrimSpace(*hello.EndpointURL) != "" && strings.TrimSpace(*hello.EndpointURL) != providerCfg.EndpointURL {
+				s.log.Warn().
+					Str("provider_id", hello.ProviderID).
+					Str("configured_endpoint_url", providerCfg.EndpointURL).
+					Str("hello_endpoint_url", strings.TrimSpace(*hello.EndpointURL)).
+					Msg("pinned provider endpoint_url override ignored")
+			}
+		} else if hello.EndpointURL != nil && strings.TrimSpace(*hello.EndpointURL) != "" {
+			endpointURL = strings.TrimSpace(*hello.EndpointURL)
+			if err := config.ValidateEndpointURL(endpointURL); err != nil {
+				s.close(conn, CloseInvalidHello, "invalid_hello: endpoint_url")
+				return
+			}
+		}
+		if endpointURL != "" {
+			inferencePath = pool.InferencePathHTTPForwarding
+		}
+	} else if hello.EndpointURL != nil && strings.TrimSpace(*hello.EndpointURL) != "" {
+		s.log.Warn().Str("provider_id", hello.ProviderID).Str("endpoint_url", *hello.EndpointURL).Msg("provisional provider sent endpoint_url; ignoring and forcing ws-tunneled mode")
 	}
 
 	assignedID = s.newUUID()
@@ -167,7 +215,10 @@ func (s *Server) handleConn(conn net.Conn) {
 		SlotsFree:             hello.MaxConcurrency,
 		SlotsTotal:            hello.MaxConcurrency,
 		ThroughputTPSEstimate: hello.ThroughputTPSEstimate,
-		EndpointURL:           providerCfg.EndpointURL,
+		EndpointURL:           endpointURL,
+		Tier:                  tier,
+		InferencePath:         inferencePath,
+		AdmittedAt:            now,
 		State:                 pool.StateReady,
 		LastHeartbeatAt:       now,
 		ConnectedAt:           now,
@@ -176,19 +227,24 @@ func (s *Server) handleConn(conn net.Conn) {
 	if old := s.pool.Register(entry, conn); old != nil {
 		_ = old.Close()
 	}
+	session := newProviderSession(providerID, assignedID, conn, s.cfg.WS.WriteBufferSize)
+	s.sessions.Store(sessionKey(providerID, assignedID), session)
+	go session.runWriter()
 
 	ack := HelloAck{
-		Type:               "hello_ack",
-		CoordinatorVersion: 1,
-		AssignedID:         assignedID,
-		HeartbeatIntervalS: int(s.cfg.HeartbeatInterval().Seconds()),
+		Type:                     "hello_ack",
+		CoordinatorVersion:       1,
+		AssignedID:               assignedID,
+		HeartbeatIntervalS:       int(s.cfg.HeartbeatInterval().Seconds()),
+		Tier:                     string(tier),
+		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 	}
 	b, err := json.Marshal(ack)
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_hello: ack")
 		return
 	}
-	if err := wsutil.WriteServerText(conn, b); err != nil {
+	if err := session.send(b); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
 		return
 	}
@@ -211,6 +267,39 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 	_ = wsutil.WriteServerMessage(conn, gobwas.OpClose, gobwas.NewCloseFrameBody(code, reason))
 }
 
+func sessionKey(providerID, assignedID string) string {
+	return providerID + "/" + assignedID
+}
+
+func (s *Server) sessionFor(providerID, assignedID string) (*providerSession, bool) {
+	v, ok := s.sessions.Load(sessionKey(providerID, assignedID))
+	if !ok {
+		return nil, false
+	}
+	session, ok := v.(*providerSession)
+	return session, ok
+}
+
+func (s *Server) sessionByProvider(providerID string) (*providerSession, bool) {
+	for _, p := range s.pool.Snapshot() {
+		if p.ProviderID != providerID {
+			continue
+		}
+		return s.sessionFor(p.ProviderID, p.AssignedID)
+	}
+	return nil, false
+}
+
+func (s *Server) connectedProvisional() int {
+	n := 0
+	for _, p := range s.pool.Snapshot() {
+		if p.Tier == pool.TierProvisional {
+			n++
+		}
+	}
+	return n
+}
+
 func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, payload []byte) {
 	var envelope struct {
 		Type string `json:"type"`
@@ -226,6 +315,12 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.handleStateUpdate(providerID, payload)
 	case "preflight_ack":
 		s.handlePreflightAck(providerID, payload)
+	case "inference_response_chunk":
+		s.handleInferenceChunk(providerID, payload)
+	case "inference_response_end":
+		s.handleInferenceEnd(providerID, payload)
+	case "nak":
+		s.handleNAK(providerID, assignedID, payload)
 	case "drain_status":
 		s.handleDrainStatus(conn, providerID, assignedID, payload)
 	default:
@@ -254,9 +349,9 @@ func (s *Server) handleDrainStatus(conn net.Conn, providerID, assignedID string,
 }
 
 func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (PreflightAck, bool, error) {
-	conn, err := s.pool.Conn(provider.ProviderID, provider.AssignedID)
-	if err != nil {
-		return PreflightAck{}, false, err
+	session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)
+	if !ok {
+		return PreflightAck{}, false, ErrRelayClosed
 	}
 	ch := make(chan PreflightAck, 1)
 	s.pending.Store(requestID, pendingPreflight{providerID: provider.ProviderID, ch: ch})
@@ -270,7 +365,7 @@ func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTo
 	if err != nil {
 		return PreflightAck{}, false, err
 	}
-	if err := wsutil.WriteServerText(conn, payload); err != nil {
+	if err := session.send(payload); err != nil {
 		return PreflightAck{}, false, err
 	}
 	timer := time.NewTimer(timeout)
@@ -285,11 +380,11 @@ func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTo
 
 func (s *Server) DrainAll(reason string) {
 	for _, provider := range s.pool.Snapshot() {
-		conn, err := s.pool.Conn(provider.ProviderID, provider.AssignedID)
-		if err != nil {
+		session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)
+		if !ok {
 			continue
 		}
-		if err := wsutil.WriteServerText(conn, []byte(`{"type":"drain"}`)); err != nil {
+		if err := session.send([]byte(`{"type":"drain"}`)); err != nil {
 			s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Str("reason", reason).Msg("drain write failed")
 			continue
 		}
@@ -353,7 +448,11 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	if gap > s.wakeGapThreshold() {
 		s.log.Info().Str("provider_id", providerID).Dur("gap", gap).Msg("provider wake detected")
 		s.markDegradedForWarmup(providerID, assignedID)
-		if err := wsutil.WriteServerText(conn, []byte(`{"type":"warm_up"}`)); err != nil {
+		session, ok := s.sessionFor(providerID, assignedID)
+		if !ok {
+			return
+		}
+		if err := session.send([]byte(`{"type":"warm_up"}`)); err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("warm_up write failed")
 		}
 	} else {
@@ -414,6 +513,10 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 }
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
+	if session, ok := s.sessionFor(providerID, assignedID); ok {
+		session.close()
+		s.sessions.Delete(sessionKey(providerID, assignedID))
+	}
 	if s.pool.RemoveIfSessionState(providerID, assignedID, pool.StateDraining) {
 		s.log.Info().Str("provider_id", providerID).Msg("draining provider removed after websocket close")
 		return
@@ -571,19 +674,19 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "provider " + id + " not in pool", "code": "provider_not_found"}})
 		return
 	}
-	conn, err := s.pool.Conn(provider.ProviderID, provider.AssignedID)
-	if err != nil {
+	session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)
+	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]any{"message": "provider " + provider.ProviderID + " not in pool", "code": "provider_not_found"}})
 		return
 	}
 	drainSent := true
-	if err := wsutil.WriteServerText(conn, []byte(`{"type":"drain"}`)); err != nil {
+	if err := session.send([]byte(`{"type":"drain"}`)); err != nil {
 		drainSent = false
 		s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Msg("drain write failed during blacklist")
 	}
 	s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateDraining)
 	time.AfterFunc(time.Minute, func() {
-		_ = conn.Close()
+		_ = session.conn.Close()
 	})
 	s.log.Warn().Str("provider_id", provider.ProviderID).Str("assigned_id", provider.AssignedID).Str("reason", req.Reason).Msg("provider blacklisted")
 	writeJSON(w, http.StatusOK, map[string]any{

@@ -21,6 +21,9 @@ public struct AppConfig: Equatable, Sendable {
     public var model: String?
     public var coordinatorURL: String?
     public var providerID: String?
+    public var endpointURL: String?
+    public var wsTunneledMode: Bool?
+    public var autoUpdateEnabled: Bool?
     public var configPath: String
     public var logLevel: LogLevel
     public var logFormat: LogFormat
@@ -39,6 +42,9 @@ public struct AppConfig: Equatable, Sendable {
             model: nil,
             coordinatorURL: nil,
             providerID: nil,
+            endpointURL: nil,
+            wsTunneledMode: nil,
+            autoUpdateEnabled: nil,
             configPath: configPath,
             logLevel: .info,
             logFormat: .json,
@@ -57,6 +63,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var model: String?
     public var coordinatorURL: String?
     public var providerID: String?
+    public var endpointURL: String?
     public var configPath: String?
     public var logLevel: String?
 
@@ -65,6 +72,7 @@ public struct CLIOverrides: Equatable, Sendable {
         model: String? = nil,
         coordinatorURL: String? = nil,
         providerID: String? = nil,
+        endpointURL: String? = nil,
         configPath: String? = nil,
         logLevel: String? = nil
     ) {
@@ -72,6 +80,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.model = model
         self.coordinatorURL = coordinatorURL
         self.providerID = providerID
+        self.endpointURL = endpointURL
         self.configPath = configPath
         self.logLevel = logLevel
     }
@@ -158,6 +167,9 @@ public enum ConfigLoader {
         try assign(&config.model, from: dict, key: "model", expected: "string")
         try assign(&config.coordinatorURL, from: dict, key: "coordinator_url", expected: "string")
         try assign(&config.providerID, from: dict, key: "provider_id", expected: "string")
+        try assign(&config.endpointURL, from: dict, key: "endpoint_url", expected: "string")
+        try assign(&config.wsTunneledMode, from: dict, key: "ws_tunneled_mode", expected: "boolean")
+        try assign(&config.autoUpdateEnabled, from: dict, key: "auto_update_enabled", expected: "boolean")
         try assign(&config.logFormat, from: dict, key: "log_format", expected: "json or text")
         try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
         try assign(&config.maxContextOverride, from: dict, key: "max_context_override", expected: "integer")
@@ -177,6 +189,9 @@ public enum ConfigLoader {
         try assign(&config.model, from: environment, env: "MACPROVIDER_MODEL", expected: "string")
         try assign(&config.coordinatorURL, from: environment, env: "MACPROVIDER_COORDINATOR_URL", expected: "string")
         try assign(&config.providerID, from: environment, env: "MACPROVIDER_PROVIDER_ID", expected: "string")
+        try assign(&config.endpointURL, from: environment, env: "MACPROVIDER_ENDPOINT_URL", expected: "string")
+        try assign(&config.wsTunneledMode, from: environment, env: "MACPROVIDER_WS_TUNNELED_MODE", expected: "boolean")
+        try assign(&config.autoUpdateEnabled, from: environment, env: "MACPROVIDER_AUTO_UPDATE_ENABLED", expected: "boolean")
         try assign(&config.logLevel, from: environment, env: "MACPROVIDER_LOG_LEVEL", expected: "valid log level")
         try assign(&config.logFormat, from: environment, env: "MACPROVIDER_LOG_FORMAT", expected: "json or text")
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
@@ -201,6 +216,9 @@ public enum ConfigLoader {
         }
         if let providerID = cli.providerID {
             config.providerID = providerID
+        }
+        if let endpointURL = cli.endpointURL {
+            config.endpointURL = endpointURL
         }
         if let logLevel = cli.logLevel {
             guard let value = LogLevel(rawValue: logLevel.lowercased()) else {
@@ -258,6 +276,19 @@ public enum ConfigLoader {
         throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
     }
 
+    private static func assign(_ field: inout Bool?, from dict: [String: Any], key: String, expected: String) throws {
+        guard let value = dict[key], !(value is NSNull) else { return }
+        if let bool = value as? Bool {
+            field = bool
+            return
+        }
+        if let string = value as? String, let bool = parseBool(string) {
+            field = bool
+            return
+        }
+        throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
+    }
+
     private static func assign(_ field: inout LogFormat, from dict: [String: Any], key: String, expected: String) throws {
         guard let value = dict[key], !(value is NSNull) else { return }
         guard let string = value as? String, let format = LogFormat(rawValue: string.lowercased()) else {
@@ -288,6 +319,14 @@ public enum ConfigLoader {
     }
 
     private static func assign(_ field: inout Bool, from env: [String: String], env key: String, expected: String) throws {
+        guard let value = env[key] else { return }
+        guard let bool = parseBool(value) else {
+            throw ConfigError.invalidValue(key: key, value: value, expected: expected)
+        }
+        field = bool
+    }
+
+    private static func assign(_ field: inout Bool?, from env: [String: String], env key: String, expected: String) throws {
         guard let value = env[key] else { return }
         guard let bool = parseBool(value) else {
             throw ConfigError.invalidValue(key: key, value: value, expected: expected)
