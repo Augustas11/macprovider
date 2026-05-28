@@ -17,7 +17,7 @@ permissions:
 jobs:
   release:
     name: Build and publish darwin-arm64 release
-    runs-on: macos-14
+    runs-on: macos-15  # Xcode 16+ default. macos-14 ships Xcode 15.x (Swift 5.10); swift-jinja 2.0.0 needs tools v6.0.0.
     steps:
       - name: Checkout
         # Pinned to actions/checkout v4.2.2. Re-resolve deliberately
