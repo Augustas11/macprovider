@@ -1,6 +1,6 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.4 (2026-05-28, round-2 audit closing fixes)
+**Version:** 0.5 (2026-05-28, installer diagnostics and distribution-channel invariants)
 **Depends on:** SPEC-001 v1.2.1, SPEC-002 v1.1.2
 
 **Restructure note (v0.2).** SPEC-003 v0.1 contained four parts in a
@@ -25,6 +25,17 @@ the "stranger downloads and joins" experience.
 **Change log v0.4:** Resolves round-2 audit finding MAJOR-2.2.
 - § 2 and § 9: SPEC-002 companion AC range updated from "AC-11 through AC-14" to "AC-11 through AC-15" to include the nak routing-mode fallback test.
 - Build-complete label updated to v0.4.
+
+**Change log v0.5:** Resolves Day-3 distribution follow-ups from
+Decision log Entry 20.
+- § 5: local self-test failures in `install.sh` MUST print the first
+  200 bytes of the raw `/v1/models` response, or the stderr path and
+  last 200 stderr bytes when the endpoint returns nothing.
+- § 4: distribution-channel decoupling is now explicit:
+  `install.sh` is served from `main` via `get.streamvc.live` and is
+  NOT bundled into the release tarball.
+- § 10: new audit category requires integration tests, not code-review
+  approval alone, for shell-script paths touching real OS resources.
 
 **Line-count note (v0.3).** v0.2 final length (752 lines) is below
 the 1200-1500 target from the redistribution prompt. Justification:
@@ -242,6 +253,25 @@ Release shape:
 - **Release notes:** Markdown body with: version, date, summary of
   changes, breaking changes (if any), link to spec version this release
   implements.
+
+**FR-C1a. Distribution channel decoupling.**
+`install.sh` is served from `main` via the `get.streamvc.live` ->
+`raw.githubusercontent.com/<owner>/<repo>/main/phase3-binary/dist/install.sh`
+redirect. It is NOT bundled into the release tarball. This is an
+intentional architecture property:
+
+- Installer bugs (parse errors, sed quoting, environment-handling) can
+  be fixed by a one-line commit to `main`; the next `curl ... | bash`
+  carries the fix in seconds.
+- Binary releases are tagged, signed, and immutable; an installer patch
+  does not require re-running the GitHub Action or re-signing release
+  artifacts.
+- Strangers running `curl get.streamvc.live/install.sh | bash` always
+  get the latest installer, but the installer fetches a specific signed
+  binary release tag and verifies it.
+
+The release tarball MUST NOT contain `install.sh`. Re-bundling it would
+reintroduce the slow-iterate path and is explicitly out of scope.
 
 **FR-C2. install.sh contract.**
 The install script at `https://get.streamvc.live/install.sh` is the
@@ -537,6 +567,22 @@ binary:
        -> Verify coordinator URL: wss://coordinator.streamvc.live/ws/provider
    ```
 
+**FR-D3a. Installer self-test failure diagnostics.**
+When `install.sh`'s local self-test (`wait_for_local_model`) fails, the
+script MUST print the first 200 bytes of the actual `/v1/models`
+response in addition to the generic failure message, labelled clearly
+as "raw response". This requirement exists because wire-format
+mismatches between the installer's grep patterns and the binary's JSON
+encoder are the dominant failure mode for self-test false negatives
+(see Decision log Entry 20 Bug D). The 200-byte cap avoids dumping
+multi-kilobyte responses while reliably exposing the JSON structure that
+the grep is checking.
+
+If the `/v1/models` endpoint returned no response (port unbound), the
+script MUST instead print the binary's stderr log path and the last 200
+bytes of stderr if non-empty. This ensures every failure mode produces
+a self-diagnosing message.
+
 **FR-D4. Status check.**
 See FR-C4 for the full `macprovider-cli status` output format. The
 status subcommand is the primary diagnostic tool for contributors. It
@@ -651,7 +697,7 @@ cross-references them for completeness:
 
 ## 9. Acceptance criteria
 
-**AC-1 through AC-3 must ALL pass for SPEC-003 v0.4 to be considered
+**AC-1 through AC-4 must ALL pass for SPEC-003 v0.5 to be considered
 build-complete. Companion ACs in SPEC-001 v1.2.1 (AC-11 through AC-15)
 and SPEC-002 v1.1.2 (AC-11 through AC-15) must also pass.**
 
@@ -735,7 +781,63 @@ bootstrap` to simulate).
 
 ---
 
-## 10. Open questions
+**AC-4. Installer self-test diagnostic output.**
+
+**Setup:** A Mac with `macprovider-cli` installed by `install.sh`, but
+with the local self-test forced to fail after the binary binds its local
+HTTP port. During testing, this can be done by temporarily changing the
+model string expected by `wait_for_local_model` to a non-existent model
+and reverting the edit after the check.
+
+**Action:** Run
+`curl -fsSL https://get.streamvc.live/install.sh | MACPROVIDER_PORT=18080 MACPROVIDER_NO_PROMPT=1 bash`.
+
+**Expected:**
+1. `install.sh` exits with code 6.
+2. The failure log includes `Local self-test failed.`
+3. If `/v1/models` returned bytes, the log includes
+   `Raw /v1/models response (first 200 bytes):` followed by the capped
+   raw response.
+4. If `/v1/models` returned nothing, the log includes the stderr log
+   path and the last 200 bytes of stderr if the file is non-empty.
+5. The normal green install path does not print the raw-response
+   diagnostic.
+
+**How to verify:** Manual curl-pipe-bash failure injection plus a normal
+green install retest.
+
+---
+
+## 10. Audit categories for SPEC-003+ revisions
+
+**Audit category A: Shell-script paths that touch real OS resources
+require integration tests, not code review.**
+
+Any shell-script path in the installer or related tooling that touches a
+real OS resource MUST have an integration test that actually exercises
+the resource. "Real OS resource" includes but is not limited to:
+
+- Controlling tty (`/dev/tty`, `read -p`, prompt redirection)
+- File descriptor manipulation (`exec 4</dev/tty`, fd inheritance across
+  subshells, `<&-`)
+- Port binding (`lsof -iTCP`, `nc -l`, launchd `Sockets`)
+- Filesystem layout assumptions (binary-adjacent resource loading,
+  bundle co-location, symlink behavior under `cp -L` / `tar -h`)
+- JSON parsing over loopback (RFC 8259 escape choices that vary by
+  producer)
+- Pipe-environment semantics (`A=1 cmd1 | cmd2` environment scoping)
+- macOS-specific behavior (`com.apple.quarantine`, launchd plist
+  bootstrap, codesign verification)
+
+Audit findings that say "this line looks correct" without an
+accompanying integration-test step MUST be downgraded to "needs
+integration test" rather than "approved." Reference: Decision log Entry
+20 Bugs A/B/C/D, all four of which were independently code-review-clean
+and all four of which broke on first stranger-shaped execution.
+
+---
+
+## 11. Open questions
 
 **OQ-1. Code signing strategy.**
 Apple Developer ID signing ($99/yr) vs `xattr -d com.apple.quarantine`
@@ -764,7 +866,7 @@ redistributed to the specs that own the questions:
 
 ---
 
-## 11. Build steps
+## 12. Build steps
 
 SPEC-003 v0.2 implementation is split across three build prompts,
 corresponding to the three spec updates that ship together:

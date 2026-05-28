@@ -132,4 +132,37 @@ modified by this stream.</p>
 </ul>
 </section>
 
+<section class=entry>
+<h2>Resolved in v0.5</h2>
+<time datetime="2026-05-28">2026-05-28</time>
+
+<h3>A. Self-test failure diagnostics</h3>
+<p>SPEC-003 now requires installer self-test failures to print the
+first 200 bytes of the raw <code>/v1/models</code> response, or the
+stderr log path plus the last 200 stderr bytes if the endpoint returns
+nothing. This encodes the Entry 20 Bug D lesson directly in the
+onboarding UX contract.</p>
+
+<h3>B. Distribution-channel decoupling</h3>
+<p>SPEC-003 now states that <code>install.sh</code> is served from
+<code>main</code> via <code>get.streamvc.live</code> and is not bundled
+into the signed release tarball. Installer patches can land by commit
+without re-running the release workflow or changing immutable binary
+assets.</p>
+
+<h3>C. Shell-script OS-resource audit category</h3>
+<p>A new SPEC-003+ audit category requires integration tests for
+installer paths that touch real OS resources: tty, file descriptors,
+ports, filesystem layout, loopback JSON, pipe environment scoping, and
+macOS-specific launch/signing behavior. Code review alone is no longer
+an approval signal for this bug class.</p>
+
+<h3>D. install.sh diagnostic polish</h3>
+<p>The local self-test failure path now emits the raw
+<code>/v1/models</code> bytes before exit 6 when the endpoint responds.
+If it does not respond, the script points at
+<code>macprovider.err.log</code> and prints a capped stderr tail when
+available. The success path and exit semantics are unchanged.</p>
+</section>
+
 </body></html>

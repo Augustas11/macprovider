@@ -626,6 +626,22 @@ wait_for_local_model() {
   return 1
 }
 
+print_local_self_test_diagnostics() {
+  raw_response="$(curl -sS --max-time 3 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
+  if [ -n "$raw_response" ]; then
+    log "Raw /v1/models response (first 200 bytes):"
+    printf "  %.200s\n" "$raw_response"
+    return
+  fi
+
+  log "/v1/models did not respond. Binary may not have bound port ${PORT}."
+  log "stderr log path: $LOG_DIR/macprovider.err.log"
+  if [ -s "$LOG_DIR/macprovider.err.log" ]; then
+    log "Last 200 bytes of macprovider.err.log:"
+    tail -c 200 "$LOG_DIR/macprovider.err.log" | sed 's/^/  /'
+  fi
+}
+
 wait_for_coordinator() {
   provider_id="$1"
   coordinator_base="$2"
@@ -691,7 +707,9 @@ main() {
 
   log "Waiting up to 5 minutes for local /v1/models (first run can be slow if MLX still needs to download weights)."
   if ! wait_for_local_model "$model"; then
-    log "Local self-test failed. Check logs: tail -f $LOG_DIR/macprovider.err.log"
+    log "Local self-test failed."
+    print_local_self_test_diagnostics
+    log "Full logs: tail -f $LOG_DIR/macprovider.err.log"
     exit 6
   fi
 
