@@ -1,7 +1,9 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.5 (2026-05-28, installer diagnostics and distribution-channel invariants)
-**Depends on:** SPEC-001 v1.2.1, SPEC-002 v1.1.2
+**Version:** 0.6 (2026-05-29, cross-spec coherence fix pass)
+**Depends on:** SPEC-001 v1.2.2, SPEC-002 v1.1.4
+
+**Change log v0.6:** Resolves cross-spec findings F-603-1 and F-603-2 from `specs/SPEC-CROSS-006-audit.md`: the installer visibility self-test now references SPEC-002 v1.1.4's coordinator-owned `GET /v1/pool/check`, and dependencies align to SPEC-001 v1.2.2 + SPEC-002 v1.1.4.
 
 **Restructure note (v0.2).** SPEC-003 v0.1 contained four parts in a
 single document. v0.2 redistributes them to avoid cross-spec drift:
@@ -546,10 +548,11 @@ step and is NOT included in the "2 minutes to pool" target.
 On first run (or when invoked via `macprovider-cli self-test`), the
 binary:
 1. Loads the model (this is the slowest step).
-2. Runs the SPEC-001 v1.2.1 FR-20 self-test (short inference, verify
+2. Runs the SPEC-001 v1.2.2 FR-20 self-test (short inference, verify
    output).
 3. Connects to the coordinator, sends `hello`, waits for `hello_ack`.
-4. Prints results:
+4. Calls `https://coordinator.streamvc.live/v1/pool/check?provider_id=<sanitized>` after WebSocket connect. This is the canonical post-SPEC-006-deployment verification path defined in SPEC-002 v1.1.4 § 7.4: `/v1/pool/check` stays on coordinator's public operator/health surface, not behind the gateway. The installer MUST NOT attempt to reach this endpoint via `api.streamvc.live`; the gateway does not proxy `/v1/pool/check`.
+5. Prints results:
    ```
    Self-test results:
      Model loaded:     OK (mlx-community/Qwen2.5-7B-Instruct-4bit)
@@ -557,7 +560,7 @@ binary:
      Coordinator:      OK (connected as provisional, session abc-123)
      Ready to serve!
    ```
-5. If any step fails, prints the failure with a suggested fix:
+6. If any step fails, prints the failure with a suggested fix:
    ```
    Self-test results:
      Model loaded:     OK
@@ -697,9 +700,9 @@ cross-references them for completeness:
 
 ## 9. Acceptance criteria
 
-**AC-1 through AC-4 must ALL pass for SPEC-003 v0.5 to be considered
-build-complete. Companion ACs in SPEC-001 v1.2.1 (AC-11 through AC-15)
-and SPEC-002 v1.1.2 (AC-11 through AC-15) must also pass.**
+**AC-1 through AC-4 must ALL pass for SPEC-003 v0.6 to be considered
+build-complete. Companion ACs in SPEC-001 v1.2.2 (AC-11 through AC-15)
+and SPEC-002 v1.1.4 (AC-11 through AC-15) must also pass.**
 
 ---
 

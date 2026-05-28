@@ -62,6 +62,15 @@
     <li><strong>F-m2-9:</strong> Made SSE <code>data: {json}\n\n</code> framing explicit.</li>
     <li><strong>F-M15 acceptance gap:</strong> Added AC-26 through AC-37 for the new security, lifecycle, feedback, capacity, header-stripping, demo-token, and quota-settlement cases.</li>
   </ul>
+  <h2>Resolved in v0.3 cross-spec</h2>
+  <ul>
+    <li><strong>F-606-1:</strong> Added explicit outbound stripping for <code>X-MacProvider-Provider</code>, <code>X-MacProvider-Route</code>, and undocumented <code>X-MacProvider-*</code> response headers.</li>
+    <li><strong>F-606-2:</strong> Streaming disconnect settlement now uses <code>ceil(bytes_emitted_so_far / 4)</code> gateway estimation until provider-reported partial usage lands in a future SPEC-001 cycle.</li>
+    <li><strong>F-606-3/F-606-5:</strong> Gateway status and error behavior now references SPEC-002 v1.1.4 for per-model <code>degraded</code> and normalizes 502 to <code>upstream_provider_error</code>.</li>
+    <li><strong>F-606-4:</strong> Gateway config now includes coordinator operator URL/key and <code>/poolz</code> polling cadence with startup validation.</li>
+    <li><strong>F-606-6/F-606-7/F-606-8:</strong> Audit categories, cross-spec governance, and status-cache staleness are documented for the coordinated release set.</li>
+    <li><strong>Regression ACs:</strong> AC-26 through AC-37 now include status codes, body shapes, and curl plus Go-test verification commands.</li>
+  </ul>
   <h2>Open questions for implementation</h2>
   <ul>
     <li>Whether v1 email magic link has a low enough operator cost to ship alongside GitHub OAuth.</li>

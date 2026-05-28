@@ -1,7 +1,11 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.2 (2026-05-29, audit closing fix pass)
-**Depends on:** SPEC-001 v1.2.2, SPEC-002 v1.1.3, SPEC-003 v0.5
+**Version:** 0.3 (2026-05-29, cross-spec coherence fix pass)
+**Depends on:** SPEC-001 v1.2.2, SPEC-002 v1.1.4, SPEC-003 v0.6
+
+**Change log v0.3:**
+- Closes SPEC-006 cross-spec findings F-606-1 through F-606-8 from `specs/SPEC-CROSS-006-audit.md`: outbound coordinator header scrubbing, streaming disconnect estimation, per-model degraded cross-reference, `/poolz` gateway config, 502 error normalization, SPEC-003 audit-category inheritance, cross-spec governance wording, and status cache staleness.
+- Encodes D-CROSS-1, D-CROSS-2, D-CROSS-3, D-CROSS-4, D-CROSS-5, and D-CROSS-6 for the coordinated release set, and folds in the narrow `specs/SPEC-006-v0-2-audit.md` AC fixes: AC-26 uses `GET`, AC-27 proves the 60-second bound, and AC-26 through AC-37 state status codes, response bodies, and verification commands.
 
 **Change log v0.2:**
 - Closes the cross-model audit in `specs/SPEC-006-audit.md`: 1 CRITICAL, 21 MAJOR, 9 MINOR findings, and 2 operator questions.
@@ -147,7 +151,7 @@ SPEC-006 MAY add stricter public gateway limits before forwarding, including `ma
 
 SPEC-002 defines the Phase 4 coordinator.
 
-SPEC-006 layers on top of SPEC-002 v1.1.3.
+SPEC-006 layers on top of SPEC-002 v1.1.4.
 
 SPEC-006 MUST preserve SPEC-002's router-only charter.
 
@@ -158,6 +162,10 @@ SPEC-006 MUST require the coordinator buyer listener to be reachable only from l
 SPEC-006 MUST require the gateway to use a configurable coordinator backend list.
 
 SPEC-006 MUST NOT expose SPEC-002 operator endpoints at `api.streamvc.live`.
+
+SPEC-006 normatively cannot mutate SPEC-001 or SPEC-002 during SPEC-006-only implementation or fix cycles.
+
+Cross-spec audit cycles MAY propose coordinated patches across multiple specs. When those patches land, all affected specs bump versions in lockstep; the cross-spec FIX prompt is the governance vehicle, not unilateral SPEC-006 edits.
 
 ### 1.6 Relationship to SPEC-003
 
@@ -181,13 +189,13 @@ SPEC-006 MUST NOT create buyer-visible payout, earning, donation, or payment pro
 
 ### 1.8 Critical constraints
 
-SPEC-001 and SPEC-002 are locked and unchanged.
+SPEC-001 and SPEC-002 are locked and unchanged during SPEC-006-only implementation and fix passes.
 
-SPEC-006 layers on top of SPEC-002 v1.1.3's coordinator.
+SPEC-006 layers on top of SPEC-002 v1.1.4's coordinator.
 
 Cross-spec dependencies are read-only references.
 
-SPEC-006 MUST NOT propose changes to SPEC-001 or SPEC-002.
+SPEC-006 MUST NOT propose unilateral changes to SPEC-001 or SPEC-002 outside a coordinated cross-spec audit/fix cycle.
 
 OpenAI compatibility is normative.
 
@@ -541,6 +549,7 @@ The gateway MUST be restartable independently of the coordinator.
 
 - `/admin/*`
 - `/poolz`
+- `/v1/pool/check`
 - `/healthz`
 - `/ws/provider`
 - Coordinator debug paths.
@@ -556,6 +565,7 @@ The gateway MUST be restartable independently of the coordinator.
 - Operator endpoints.
 - Provider WebSocket endpoint.
 - Coordinator health and pool operations.
+- `GET /v1/pool/check` provider registration verification, owned by SPEC-002 v1.1.4 and used by SPEC-003 v0.6 installers.
 
 ### 4.3 Coordinator listener migration
 
@@ -782,7 +792,11 @@ X-Request-ID
 
 on all responses.
 
-The gateway MUST accept an inbound `X-Request-ID` only if it matches a safe bounded identifier pattern; otherwise it MUST generate its own.
+The gateway MUST generate a UUID v4 `X-Request-ID` per buyer-incoming request and use it as the row key in `usage_events` and `audit_events`.
+
+The gateway MUST forward `X-Request-ID: <uuid>` to the coordinator on every forwarded buyer request. SPEC-002 v1.1.4 requires the coordinator to honor that ID in `request_log`; this is the cross-service join key for gateway usage/audit events and coordinator routing diagnostics.
+
+The gateway MAY accept an inbound `X-Request-ID` only if it is a UUID v4 in 8-4-4-4-12 lowercase or uppercase hex format; otherwise it MUST generate its own.
 
 `X-RateLimit-Remaining` MUST reflect post-decision remaining quota after admission, rejection, or reservation.
 
@@ -808,6 +822,7 @@ The `type` field MUST be one of:
 - `authentication_error`
 - `permission_error`
 - `rate_limit_exceeded`
+- `api_error`
 - `server_error`
 - `service_unavailable`
 - `upstream_error`
@@ -915,7 +930,7 @@ Supported request fields:
 
 `user` is accepted as opaque diagnostics, stored in usage events, and MUST NOT be exposed in buyer-visible responses.
 
-`logprobs` is accepted syntactically. Behavior is model-dependent, and the provider MAY ignore it.
+`logprobs` is accepted syntactically and forwarded to the provider as part of the request body. SPEC-001 v1.2.2 § 6.4 specifies unknown-field tolerance, so the provider MAY ignore unknown OpenAI-compatible fields including `logprobs`. Behavior is model-dependent; the gateway MUST NOT enforce `logprobs`-specific semantics.
 
 Gateway request caps:
 
@@ -938,6 +953,12 @@ The gateway MAY emit an audit event when an inbound request carried these header
 The gateway MUST forward the request to the selected coordinator backend without adding buyer-visible provider preference headers.
 
 The gateway MUST NOT expose coordinator route headers to the buyer.
+
+The gateway MUST strip these upstream coordinator response headers before returning to the buyer:
+
+- `X-MacProvider-Provider`
+- `X-MacProvider-Route`
+- any response header starting with `X-MacProvider-` that is not on a documented response-pass-through allowlist
 
 The gateway MUST reject immediately with 503 when no provider slot is immediately available.
 
@@ -1062,6 +1083,8 @@ Allowed top-level `status` values:
 
 The network-wide degraded flag MUST be true if ready providers are below the configured threshold.
 
+Per-model `degraded` is defined normatively in SPEC-002 v1.1.4 § 7.5. The gateway MUST compute it from `/poolz` aggregation using the same rules: a model is degraded if all providers for that model are `unavailable` or `draining`, if fewer than 50% of registered providers for that model are `ready`, or if all `slots_free` values for that model equal 0.
+
 The endpoint MUST NOT expose:
 
 - individual provider hostnames.
@@ -1078,7 +1101,9 @@ Gateway-internal coordinator status bridge:
 - The gateway MUST redact `provider_id`, `assigned_id`, `hostname`, endpoint URLs, per-provider RAM/CPU specs, and operator identity metadata.
 - The gateway MAY aggregate counts for ready, degraded, draining, unavailable providers, per-model slot totals, and degraded-state booleans.
 - Cache TTL for `/poolz` polling is 10 seconds.
-- If the coordinator's `/poolz` shape is insufficient for these aggregation rules, file a SPEC-002 v1.1.4 follow-up; do not extend SPEC-002 in this fix pass.
+- The status cache MAY serve stale data for up to 10 seconds during coordinator restart after coordinator returns.
+- The gateway MUST flush cached `/poolz` data when `/poolz` is not reachable or returns an HTTP error.
+- SPEC-002 v1.1.4 defines the `/poolz` summary fields consumed by the gateway for these aggregation rules.
 
 ### 5.7 `POST /v1/feedback`
 
@@ -1410,13 +1435,15 @@ For streaming requests (`stream: true`), the gateway MUST reserve `max_tokens` o
 
 On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider.
 
-On client disconnect, the gateway MUST cancel the upstream request and settle to actual tokens generated up to disconnect.
+On client disconnect, the gateway MUST cancel the upstream request and estimate completion tokens using `ceil(bytes_emitted_so_far / 4)`, where `bytes_emitted_so_far` counts SSE chunk bytes excluding framing sent to the buyer up to disconnect. This is gateway-side estimation until a future SPEC-001 v1.2.3 candidate requires provider-reported partial usage on cancellation.
 
 On 502 or 504 from the provider, Section 17's refund matrix applies.
 
 On 503 where no provider was reached and the request was never forwarded, the reservation MUST be refunded in full.
 
 The guiding rule is that quota is debited only for work the provider actually performed.
+
+Disconnect estimation is a coarse approximation for English-leaning content. The gateway MUST record in the usage event that completion tokens were gateway-estimated rather than provider-reported.
 
 ### 7.3 Daily windows
 
@@ -1521,6 +1548,12 @@ Buyers MUST NOT be able to influence provider selection through these headers.
 The current coordinator may emit route headers such as provider or route identifiers.
 
 The gateway MUST remove any upstream header that discloses provider identity before returning the response to buyers.
+
+The explicit outbound strip list is:
+
+- `X-MacProvider-Provider`
+- `X-MacProvider-Route`
+- any other `X-MacProvider-*` response header not on a documented response-pass-through allowlist
 
 The gateway MAY expose a public request ID.
 
@@ -1700,6 +1733,8 @@ Capacity signals MUST be recorded as append-only events.
 Tier changes MUST be recorded as audit events.
 
 The gateway MUST expose enough operator-only data to explain which signal triggered the tier.
+
+SPEC-006 gateway capacity-burst tiers (Tier 0/1/2/3) are independent from SPEC-002 coordinator admission tiers (`pinned`, `provisional`, `rejected`). SPEC-006 capacity tiers control buyer-side admission, quotas, signup state, and kill switches at the gateway. SPEC-002 admission tiers control provider-side admission at the coordinator. A SPEC-006 Tier 3 hard pause MUST NOT mutate SPEC-002 admission state. SPEC-002 provider exhaustion MUST NOT trigger SPEC-006 tier escalation directly; SPEC-006 observes provider-availability signals through `/poolz` and escalates only under its own thresholds.
 
 ---
 
@@ -1949,7 +1984,7 @@ Docs MUST map:
 - 403 to revoked or blocked key.
 - 404 to unknown model.
 - 429 to quota or concurrency limit.
-- 502 to provider failed; retry.
+- 502 to upstream provider error (`upstream_provider_error`); retry.
 - 503 to no provider/capacity/beta paused.
 - 504 to provider timeout; retry later.
 
@@ -2015,6 +2050,8 @@ The `audit_events` table MUST record:
 - every capacity tier transition, including signal state and audit-event chain.
 - every budget cap mutation.
 
+`usage_events` and `audit_events` MUST use the gateway `X-Request-ID` UUID v4 as the request row key for request-scoped entries. All request-scoped log surfaces that flow through the gateway MUST include the same `X-Request-ID`.
+
 Events are append-only, immutable, and queryable through `/admin/audit-log` with operator-key authentication.
 
 v0.2 records append-only audit events; v0.3 SHOULD add hash-chain tamper evidence if attack surface grows.
@@ -2076,6 +2113,16 @@ coordinators:
     weight: 1
     enabled: true
 
+coordinator:
+  # Buyer-facing coordinator URL for inference forwarding in single-host deploys.
+  buyer_url: http://127.0.0.1:8443
+  # Provider/operator listener for /poolz, /healthz, and /admin/* consumption.
+  operator_url: http://127.0.0.1:8444
+  # Operator key for /poolz authentication; value comes from env, not YAML.
+  operator_key: env:COORDINATOR_OPERATOR_KEY
+  # /poolz polling cadence.
+  poolz_poll_interval_s: 10
+
 storage:
   driver: sqlite
   db_path: gateway.db
@@ -2117,6 +2164,12 @@ timeouts:
   coordinator_request_seconds: 300
   streaming_cancel_ms: 500
 ```
+
+The gateway MUST authenticate `/poolz` requests with `coordinator.operator_key`.
+
+If `coordinator.operator_url` or `coordinator.operator_key` is missing, gateway startup MUST fail with an explicit configuration error.
+
+`coordinators[].base_url` remains the inference forwarding backend list. `coordinator.operator_url` is the operator/control-plane URL used for `/poolz` and MUST NOT be exposed to buyers.
 
 ### 15.3 Runtime reload
 
@@ -2261,8 +2314,12 @@ If the selected provider fails mid-request, return 502 before response headers a
 Code:
 
 ```text
-provider_failed
+upstream_provider_error
 ```
+
+HTTP 502 means the upstream coordinator returned an error from the selected provider. The gateway MUST forward an OpenAI-shaped error envelope with `type: "api_error"` and `code: "upstream_provider_error"`.
+
+If the coordinator returns SPEC-002 v1.1.4 `provider_error`, the gateway MUST normalize it to SPEC-006 `upstream_provider_error`. This matches SPEC-002 v1.1.4 provider-failure close-code semantics while keeping buyer-facing gateway terminology stable.
 
 If failure occurs after streaming headers are sent, emit an SSE error frame and `[DONE]`.
 
@@ -2300,9 +2357,11 @@ The gateway MUST reserve quota before forwarding as defined in Section 7.2 and s
 | 502 | >0 partial stream | prompt + actual completion | Provider performed partial work |
 | 504 | 0 | prompt only | Provider was reached, processed prompt, then timed out |
 | 504 | >0 partial stream | prompt + actual completion | Provider performed partial work |
-| Client disconnect | >=0 | prompt + actual completion at disconnect | Provider performed work; buyer left early |
+| Client disconnect | estimated | prompt + `ceil(bytes_emitted_so_far / 4)` completion | Provider performed work; buyer left early; completion count is gateway-estimated |
 
 The gateway MUST debit only work the provider actually performed.
+
+The client-disconnect row intentionally uses deterministic estimation in v0.3. A future SPEC-001 v1.2.3 candidate would let the provider include actual partial usage in cancellation response; once that lands, SPEC-006 can replace this estimate with provider-reported actuals.
 
 ### 17.8 Kill-switch failure mode
 
@@ -2654,17 +2713,18 @@ Precondition:
 
 Action:
 
-1. POST or simulate a GitHub OAuth callback with a mismatched `redirect_uri`.
-2. Repeat with the exact allowlisted callback URL.
+1. Send `GET /auth/github/callback?code=fake&state=<valid>&redirect_uri=https://evil.example/callback`.
+2. Repeat with `redirect_uri=https://api.streamvc.live/auth/github/callback`.
 
 Expected outcome:
 
-- The mismatched callback is rejected before account or key issuance.
-- The exact callback proceeds to normal state/code validation.
+- Mismatched callback returns HTTP 400 or 403 with JSON `{"error":{"type":"invalid_request_error","code":"oauth_callback_not_allowed"}}` and no account or key issuance.
+- Exact callback reaches normal state/code validation and returns the status/body for that stage, not the allowlist error.
 
 Verification command:
 
 ```text
+curl -i "https://api.streamvc.live/auth/github/callback?code=fake&state=<valid>&redirect_uri=https://evil.example/callback"
 go test ./phase5-gateway/... -run TestOAuthCallbackAllowlist
 ```
 
@@ -2677,15 +2737,17 @@ Precondition:
 Action:
 
 1. Revoke the key.
-2. Retry an authenticated request with the same key within 65 seconds.
+2. Poll `GET /v1/models` every 5 seconds starting at T+0 with the same key.
 
 Expected outcome:
 
-- The request returns 403 for revoked key within the revocation latency bound.
+- The first revoked-key response MUST arrive by T+60s. A first 403 at T+65s fails this AC.
+- Revoked-key response is HTTP 403 with JSON `{"error":{"type":"permission_error","code":"api_key_revoked"}}`.
 
 Verification command:
 
 ```text
+curl -i -H "Authorization: Bearer <revoked-key>" https://api.streamvc.live/v1/models
 go test ./phase5-gateway/... -run TestKeyRevocationLatency
 ```
 
@@ -2703,11 +2765,13 @@ Action:
 
 Expected outcome:
 
-- The restarted gateway reads the persisted kill-switch state and returns 503 beta-paused.
+- The restarted gateway reads the persisted kill-switch state.
+- Chat returns HTTP 503 with OpenAI error envelope `type: "server_error"` and `code: "public_api_paused"`.
 
 Verification command:
 
 ```text
+curl -i -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/chat/completions
 go test ./phase5-gateway/... -run TestKillSwitchPersistsAcrossRestart
 ```
 
@@ -2724,12 +2788,13 @@ Action:
 
 Expected outcome:
 
-- Forged state is rejected and no account is created.
-- Valid session-bound state reaches code exchange.
+- Forged state returns HTTP 400 with JSON `{"error":{"type":"invalid_request_error","code":"oauth_state_invalid"}}` and no account is created.
+- Valid session-bound state reaches code exchange and does not return `oauth_state_invalid`.
 
 Verification command:
 
 ```text
+curl -i "https://api.streamvc.live/auth/github/callback?code=fake&state=<forged>"
 go test ./phase5-gateway/... -run TestOAuthStateCSRF
 ```
 
@@ -2746,12 +2811,13 @@ Action:
 
 Expected outcome:
 
-- Allowed scope proceeds.
-- Elevated scope is rejected and audited.
+- Allowed `read:user` scope reaches account/key issuance or the next OAuth validation stage and does not return a scope error.
+- Elevated scope returns HTTP 403 with JSON `{"error":{"type":"permission_error","code":"oauth_scope_forbidden"}}` and emits an audit event with `event_type: "oauth_scope_rejected"`.
 
 Verification command:
 
 ```text
+curl -i "https://api.streamvc.live/auth/github/callback?code=fake&state=<valid>"
 go test ./phase5-gateway/... -run TestOAuthScopeMinimization
 ```
 
@@ -2770,12 +2836,14 @@ Action:
 Expected outcome:
 
 - Usage, quota, and feedback history remain associated with the account.
-- Old key is invalid.
-- New key works.
+- Old key returns HTTP 403 with JSON `{"error":{"type":"permission_error","code":"api_key_revoked"}}`.
+- New key returns HTTP 200 from `/v1/usage` with `account_id`, `quota`, `keys`, `models`, and `rating` fields.
 
 Verification command:
 
 ```text
+curl -i -H "Authorization: Bearer <old-key>" https://api.streamvc.live/v1/usage
+curl -i -H "Authorization: Bearer <new-key>" https://api.streamvc.live/v1/usage
 go test ./phase5-gateway/... -run TestKeyRotationPreservesHistory
 ```
 
@@ -2793,11 +2861,13 @@ Action:
 
 Expected outcome:
 
-- The tier de-escalates to the previous tier and an audit event records signal state and elapsed time.
+- Operator job response is HTTP 200 with JSON containing `previous_tier`, `new_tier`, and `signals_below_threshold: true`.
+- An audit event records `event_type: "capacity_tier_deescalated"`, signal state, and elapsed time.
 
 Verification command:
 
 ```text
+curl -i -H "Authorization: Bearer <operator-key>" -X POST http://127.0.0.1:9443/admin/capacity-tier/evaluate
 go test ./phase5-gateway/... -run TestCapacityTierDeescalation
 ```
 
@@ -2814,13 +2884,15 @@ Action:
 
 Expected outcome:
 
-- Responses match the Section 11.5 schema.
+- Authorized responses return HTTP 200 and match the Section 11.5 schema.
 - Duplicate request ratings count only the most recent event.
 - Comment samples contain at most 20 recent non-empty comments.
+- Missing or invalid operator auth returns HTTP 401 with JSON `{"error":{"type":"authentication_error","code":"invalid_operator_token"}}`.
 
 Verification command:
 
 ```text
+curl -i -H "Authorization: Bearer <operator-key>" "http://127.0.0.1:9443/admin/feedback-summary?window=7d"
 go test ./phase5-gateway/... -run TestFeedbackSummaryAggregation
 ```
 
@@ -2838,11 +2910,13 @@ Action:
 Expected outcome:
 
 - The forwarded request contains none of the buyer-supplied provider-pinning headers.
-- Buyer-visible response contains no provider or route identifiers.
+- Buyer-visible successful response returns HTTP 200 with OpenAI chat completion or SSE body and no `X-MacProvider-Provider`, `X-MacProvider-Route`, or undocumented `X-MacProvider-*` response headers.
+- Error-path response, if the mock upstream fails, still uses an OpenAI error envelope and contains no provider or route identifiers.
 
 Verification command:
 
 ```text
+curl -i -H "Authorization: Bearer <key>" -H "X-MacProvider-Provider: pinned" -H "X-MacProvider-Session: pinned" -H "X-MacProvider-Pref: fast" https://api.streamvc.live/v1/chat/completions
 go test ./phase5-gateway/... -run TestProviderPinningHeadersStripped
 ```
 
@@ -2860,12 +2934,13 @@ Action:
 
 Expected outcome:
 
-- The valid token works within its IP binding and TTL.
-- Forged, cross-IP, and expired tokens return 401.
+- Valid token returns HTTP 200 on allowed demo request or HTTP 201 from `POST /auth/demo-session` with JSON containing `demo_token` and `expires_at`.
+- Forged, cross-IP, and expired tokens return HTTP 401 with JSON `{"error":{"type":"authentication_error","code":"invalid_demo_token"}}`.
 
 Verification command:
 
 ```text
+curl -i -X POST https://api.streamvc.live/auth/demo-session
 go test ./phase5-gateway/... -run TestDemoTokenValidation
 ```
 
@@ -2882,12 +2957,13 @@ Action:
 
 Expected outcome:
 
-- The reservation settles to prompt tokens only.
-- Completion tokens are not debited.
+- Timeout response is HTTP 504 with OpenAI error envelope `type: "api_error"` and `code: "provider_timeout"`.
+- `/v1/usage` returns HTTP 200 and shows prompt tokens debited, completion tokens unchanged, and reservation released.
 
 Verification command:
 
 ```text
+curl -i -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/usage
 go test ./phase5-gateway/... -run TestQuotaSettlement504ZeroCompletion
 ```
 
@@ -2907,12 +2983,14 @@ Action:
 Expected outcome:
 
 - Concurrent requests cannot oversubscribe the daily quota during the stream.
-- Successful stream settles to provider-reported usage.
-- Disconnect settles to prompt plus actual completion tokens generated before disconnect.
+- Successful stream returns HTTP 200 with `Content-Type: text/event-stream; charset=utf-8`, emits `data: {json}\n\n` chunks followed by `data: [DONE]`, and settles to provider-reported usage.
+- Client disconnect releases concurrency and settles to prompt plus estimated completion `ceil(bytes_emitted_so_far / 4)`, with usage source marked gateway-estimated.
+- `/v1/usage` returns HTTP 200 with reservation released and daily token fields reflecting settlement.
 
 Verification command:
 
 ```text
+curl -i -N -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/chat/completions
 go test ./phase5-gateway/... -run TestStreamingQuotaReservationSettlement
 ```
 
@@ -2944,10 +3022,11 @@ Required audit categories:
 - R: no payment/donation leakage.
 - S: coordinator charter preservation.
 - T: integration tests for real user-shaped web/API paths.
+- U: SPEC-003 v0.6 shell-script integration category inheritance: shell-script paths that touch real OS resources such as tty, file descriptors, ports, filesystem layout, or JSON over loopback need integration tests that actually exercise them, not code review alone. This applies to gateway operational scripts for deployment, backup, and kill-switch toggling via shell.
 
 Audits MUST explicitly check configured and unconfigured branches for production gates.
 
-This inherits the SPEC-002 v1.1.3 anti-pattern lesson: an always-non-nil gate can look tested while the configured branch is broken.
+This inherits the SPEC-002 v1.1.4 anti-pattern lesson: an always-non-nil gate can look tested while the configured branch is broken.
 
 ---
 

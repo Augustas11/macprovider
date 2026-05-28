@@ -1,7 +1,10 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.1.3 (2026-05-28, spec catch-up to coordinator hotfix)
-**Depends on:** SPEC-001 v1.2.1 (Phase 3 binary wire protocol, locked)
+**Version:** 1.1.4 (2026-05-29, cross-spec coherence fix pass)
+**Depends on:** SPEC-001 v1.2.2 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.1.4:**
+- Closes F-602-1 through F-602-6 from `specs/SPEC-CROSS-006-audit.md`: X-Request-ID correlation, public coordinator-owned `GET /v1/pool/check`, nginx route split, per-model `degraded`, `/poolz` gateway summary fields, SPEC-001 v1.2.2 dependency, and SPEC-006 gateway buyer-port rebind notes.
 
 **Change log v1.1.3:**
 - § 7.1 / FR-P12: added `auth.require_provider_tokens` provider-authentication mode. Default `false` preserves the v1.1.2 cooperative pinned-provider trust pool; `true` requires pinned providers to present a valid bearer token and rejects missing or invalid tokens with WS close 4005 `invalid_token`.
@@ -630,7 +633,7 @@ connection. The following rules are normative:
    map after receiving `inference_response_end` OR after
    `routing.request_timeout_s` expires (default 300 s).
 
-See also SPEC-001 v1.2.1 § 6.6 "Request ID lifecycle and error
+See also SPEC-001 v1.2.2 § 6.6 "Request ID lifecycle and error
 handling" for the provider-side rules.
 
 **FR-P19. WS-tunneled backpressure — coordinator write buffer.**
@@ -724,7 +727,8 @@ models endpoint:
       "owned_by": "macprovider",
       "provider_count": 2,
       "max_context_tokens": 50000,
-      "total_slots": 4
+      "total_slots": 4,
+      "degraded": false
     },
     {
       "id": "mlx-community/Llama-3.2-3B-Instruct-4bit",
@@ -733,15 +737,26 @@ models endpoint:
       "owned_by": "macprovider",
       "provider_count": 1,
       "max_context_tokens": 20000,
-      "total_slots": 1
+      "total_slots": 1,
+      "degraded": true
     }
   ]
 }
 ```
 
 The `provider_count`, `max_context_tokens` (maximum across providers
-for that model), and `total_slots` (sum across providers) are
-non-standard extensions. Standard OpenAI clients will ignore them.
+for that model), `total_slots` (sum across providers), and `degraded`
+fields are non-standard extensions. Standard OpenAI clients will ignore
+them.
+
+A model is `degraded: true` if any of:
+
+- all providers for this model are state `unavailable` or `draining`.
+- fewer than 50% of registered providers for this model are `ready`.
+- all providers' `slots_free` for this model equal 0.
+
+Otherwise the model is `degraded: false`. SPEC-006 v0.3 gateway status
+aggregation MUST use these same rules.
 
 `created` is the coordinator's start time as a Unix timestamp.
 
@@ -861,7 +876,7 @@ Every buyer request is logged to the `request_log` table in SQLite:
 |---|---|---|
 | `id` | INTEGER PK | Auto-increment |
 | `ts_utc` | TEXT | ISO 8601 timestamp |
-| `request_id` | TEXT | UUID assigned by coordinator |
+| `request_id` | TEXT | UUID v4 from inbound `X-Request-ID` when present, otherwise UUID assigned by coordinator |
 | `model` | TEXT | Requested model |
 | `provider_assigned_id` | TEXT | Pool ID of serving provider (null if 503) |
 | `prompt_tokens` | INTEGER | From provider response usage (null if failed) |
@@ -879,6 +894,8 @@ Every buyer request is logged to the `request_log` table in SQLite:
 
 Token counts are extracted from the provider's response `usage` field.
 For streaming responses, they come from the usage chunk (SPEC-001 FR-7).
+
+`request_id` MUST be indexed. Any service in the request path that fails to propagate `X-Request-ID` degrades cross-layer debuggability; new buyer/request log surfaces MUST include X-Request-ID propagation.
 
 ### Routing logic
 
@@ -1003,12 +1020,24 @@ Response:
   "summary": {
     "total_providers": 2,
     "ready": 2,
+    "draining": 0,
+    "unavailable": 0,
     "total_slots": 4,
     "free_slots": 3,
-    "models": ["mlx-community/Qwen2.5-7B-Instruct-4bit"]
+    "models": ["mlx-community/Qwen2.5-7B-Instruct-4bit"],
+    "by_model": {
+      "mlx-community/Qwen2.5-7B-Instruct-4bit": {
+        "providers": 2,
+        "ready": 2,
+        "slots_free_total": 3,
+        "slots_total": 4
+      }
+    }
   }
 }
 ```
+
+The `summary` block is the SPEC-006 v0.3 gateway input for `/v1/status`; the detailed `pool` array is operator-only and MUST NOT be exposed to buyers by the gateway.
 
 Returns HTTP 401 if the operator key is missing or invalid.
 
@@ -1405,7 +1434,7 @@ All messages are JSON objects with a `type` field.
 }
 ```
 
-These schemas mirror SPEC-001 v1.2.1 § 6.5; SPEC-001 is the authoritative source.
+These schemas mirror SPEC-001 v1.2.2 § 6.5; SPEC-001 is the authoritative source.
 
 Coordinator behavior:
 - Validates all REQUIRED fields present and correctly typed; validates OPTIONAL fields (`attestation`, `endpoint_url`) when present. Absent `endpoint_url` normalized to null (FR-P2).
@@ -1614,7 +1643,7 @@ supported WS-tunneled mode when it does not. The coordinator MUST:
 4. Log at warn level: "routing-mode resolution bug: provider <id>
    does not support § 6.6; marking http_forwarding_only."
 
-See SPEC-001 v1.2.1 backward-compat statement for the design rationale.
+See SPEC-001 v1.2.2 backward-compat statement for the design rationale.
 
 **Coordinator does NOT send `nak` to providers.** Coordinator-initiated
 rejection (invalid hello, unknown provider_id, tier mismatch, version
@@ -1630,6 +1659,12 @@ WebSocket close handling per SPEC-001 FR-13 is sufficient.
 
 Wire-compatible with SPEC-001 section 6.2. The harness (`beta/harness.py`)
 is the first buyer and generates SPEC-001-shaped requests.
+
+Coordinator MUST honor any inbound `X-Request-ID` header on buyer-facing `/v1/*` requests and include it in the `request_log` row. If absent, coordinator MAY generate its own UUID v4. The `request_log` schema includes an indexed `request_id` field for this cross-service correlation key.
+
+When forwarding work to a provider over the SPEC-001 § 6.6 `inference_request` message, coordinator MUST preserve the request ID it recorded for the buyer request. Providers MAY echo `X-Request-ID` back in usage reporting; this is OPTIONAL under SPEC-001 v1.2.2 and is filed as a SPEC-001 v1.2.3 candidate.
+
+Gateway-originated traffic from SPEC-006 v0.3 uses `X-Request-ID` as the join key between gateway `usage_events`, gateway `audit_events`, and coordinator `request_log`. Direct legacy buyer traffic without this header remains supported.
 
 #### GET /v1/models
 
@@ -1843,18 +1878,16 @@ stored for display and revocation convenience only.
 
 ### 7.4. Operator endpoints
 
-**Port placement (v1.0.4 clarification, Finding F-3).** All operator
-endpoints — `/healthz`, `/poolz`, `/admin/*` — are mounted on
-`listen.provider_port` (default **8444**), the same listener that serves
-provider WebSocket upgrades at `/ws/provider`. They are NOT on
-`listen.buyer_port` (default 8443). Rationale: operator endpoints are an
-administrative concern co-located with the control plane, and exposing
-them on the buyer port would force buyer-port firewall rules to also
-account for admin auth surface. Operators behind the VPS firewall should
-bind `provider_port` to the loopback or a tunnel and reach `/admin/*`
-through the same secured channel as provider WebSockets — never via the
-public buyer port. Runbook entries that previously implied "use the
-buyer URL" should reference the provider-port URL for admin actions.
+**Port placement (v1.1.4 clarification, cross-spec F-602-2).** Operator
+endpoints `/poolz` and `/admin/*` are mounted on `listen.provider_port`
+(default **8444**), the same listener that serves provider WebSocket
+upgrades at `/ws/provider`. `/healthz` MAY be exposed on the coordinator
+health surface. `GET /v1/pool/check` is a public operator/health
+surface for installer verification and is intentionally mounted behind
+`coordinator.streamvc.live`, not behind SPEC-006 gateway. Runbook
+entries that previously implied "use the buyer URL" should distinguish
+the public coordinator health surface from authenticated provider-port
+admin actions.
 
 #### GET /healthz
 
@@ -1898,6 +1931,49 @@ Requires `Authorization: Bearer <operator-key>`. Returns full pool
 state (FR-O2). See FR-O2 for response schema.
 
 **401 Unauthorized** if operator key missing or invalid.
+
+#### GET /v1/pool/check
+
+**Path:** `/v1/pool/check?provider_id=<provider_id>`
+
+**Auth:** none. This is a publicly accessible operator/health surface,
+not a buyer API surface.
+
+**Response (200 OK):**
+
+```json
+{
+  "provider_id": "<id>",
+  "tier": "pinned",
+  "state": "ready"
+}
+```
+
+`tier` MUST be `"pinned"` or `"provisional"`. `state` MUST be one of
+`"ready"`, `"draining"`, `"unavailable"`, or `"unknown"`.
+
+Unknown providers return the same 200 shape with `"state": "unknown"`.
+
+**Response (400 Bad Request):**
+
+```json
+{"error":{"code":"invalid_request","message":"provider_id is required"}}
+```
+
+**Response (429 Too Many Requests):**
+
+```json
+{"error":{"code":"rate_limited","message":"Pool check rate limit exceeded"}}
+```
+
+Purpose: SPEC-003 v0.6 `install.sh` self-test calls this endpoint after
+first WebSocket connect to confirm that a freshly installed provider has
+registered with the coordinator. It is also a generic provider-registered
+health check.
+
+This endpoint stays publicly accessible at `coordinator.streamvc.live`.
+nginx routes `/v1/pool/check` to the coordinator directly, not to the
+SPEC-006 gateway. SPEC-006 v0.3 gateway MUST NOT intercept this path.
 
 #### POST /admin/blacklist
 
@@ -2033,6 +2109,33 @@ disconnects.
   adds to `rejected_providers`, closes WS with 4009.
 - Rejected → Provisional: Operator removes row from
   `rejected_providers` (SQL). Provider can reconnect.
+
+### 7.6. SPEC-006 gateway deployment routing
+
+When deployed alongside SPEC-006 v0.3 gateway, coordinator's buyer port
+(8443) MUST be rebound from `0.0.0.0` to `127.0.0.1`. Public TLS
+termination happens at nginx and the gateway. The provider port (8444)
+MAY remain externally reachable if `coordinator.streamvc.live` serves
+`/admin/*`, `/poolz`, `/healthz`, and `/ws/provider` directly with the
+required auth controls.
+
+The public route split is:
+
+```nginx
+# api.streamvc.live -> gateway (buyer surface)
+location /v1/chat/completions { proxy_pass http://127.0.0.1:9443; }
+location /v1/models { proxy_pass http://127.0.0.1:9443; }
+location /v1/usage { proxy_pass http://127.0.0.1:9443; }
+location /v1/feedback { proxy_pass http://127.0.0.1:9443; }
+location /v1/status { proxy_pass http://127.0.0.1:9443; }
+
+# coordinator.streamvc.live -> coordinator (operator + legacy buyer surface)
+location /v1/pool/check { proxy_pass http://127.0.0.1:8443; }
+location /healthz { proxy_pass http://127.0.0.1:8443; }
+location /poolz { proxy_pass http://127.0.0.1:8444; }
+location /admin/ { proxy_pass http://127.0.0.1:8444; }
+location /ws/provider { proxy_pass http://127.0.0.1:8444; }
+```
 
 ---
 
@@ -2330,6 +2433,16 @@ demultiplexing, SSE reassembly).
 - FR-P14 (WS relay): Validation method in AC-11 measures TTFT for
   WS-tunneled vs HTTP-forwarding. Delta SHOULD be <100 ms.
 
+### D11 — Cross-service request correlation
+
+**Source:** `specs/SPEC-CROSS-006-audit.md`, D-CROSS-3.
+
+**SPEC-002 v1.1.4 encoding:**
+Coordinator honors inbound `X-Request-ID` on buyer `/v1/*` requests,
+records it in `request_log`, forwards it as the provider
+`inference_request.request_id`, MAY generate a UUID v4 for legacy direct
+traffic, and treats propagation gaps as audit findings.
+
 ---
 
 ## 11. Acceptance criteria
@@ -2613,7 +2726,7 @@ buffer is ~60× the expected steady-state depth.
 
 **Scope:** This OQ concerns the **coordinator-side** buffer only
 (per-provider outbound message queue in the Go coordinator). The
-provider-side write buffer sizing is SPEC-001 v1.2.1 OQ-5.
+provider-side write buffer sizing is SPEC-001 v1.2.2 OQ-5.
 
 **Current position:** 64 is a conservative default. Tune based on
 production telemetry. Add a `/poolz` field showing per-provider

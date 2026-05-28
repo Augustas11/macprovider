@@ -706,4 +706,21 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   those fields remains a future hardening follow-up.</p>
 </div>
 </section>
+<section><h2>Resolved in v1.1.4 cross-spec</h2>
+<p class=meta>2026-05-29 SPEC-CROSS-006 coherence patch.</p>
+<div class="entry">
+  <time>2026-05-29</time>
+  <p>SPEC-002 now owns public coordinator health endpoint
+  <code>GET /v1/pool/check</code> for SPEC-003 installer verification,
+  while SPEC-006 gateway owns buyer paths at <code>api.streamvc.live</code>.
+  The documented nginx split routes <code>/v1/pool/check</code>,
+  <code>/healthz</code>, <code>/poolz</code>, <code>/admin/*</code>, and
+  <code>/ws/provider</code> to coordinator surfaces.</p>
+  <p>Request correlation is now explicit: inbound
+  <code>X-Request-ID</code> is recorded in <code>request_log</code> and
+  forwarded as the provider inference request ID. <code>/poolz</code>
+  summary documentation includes per-state and per-model counts consumed
+  by SPEC-006 status aggregation.</p>
+</div>
+</section>
 </body></html>
