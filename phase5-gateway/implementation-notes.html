@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Phase 5 Gateway Implementation Notes</title>
+</head>
+<body>
+  <h1>Phase 5 Gateway Implementation Notes</h1>
+  <p><strong>Created:</strong> 2026-05-28 during SPEC-006 v0.1 drafting.</p>
+  <h2>Design decisions captured by SPEC-006</h2>
+  <ul>
+    <li>Gateway is a separate Go service under <code>phase5-gateway/</code>, not code folded into the coordinator.</li>
+    <li>Coordinator remains router-only; public buyer traffic moves to <code>https://api.streamvc.live</code>.</li>
+    <li>Coordinator buyer listener must be rebound to <code>127.0.0.1:8443</code> for the gateway migration.</li>
+    <li>SQLite is the concrete v1 storage target, behind interfaces that can later move to D1, PostgreSQL, or Workers KV.</li>
+    <li>GitHub OAuth is primary identity; email magic link is secondary only if a practical free tier is available.</li>
+  </ul>
+  <h2>Known implementation constraints</h2>
+  <ul>
+    <li>No in-process quota, session, or rate-limit authority.</li>
+    <li>Usage, feedback, audit, and capacity signal history must be append-only.</li>
+    <li>Bearer-token validation must be an indexed single-key lookup with sub-ms p95 as a launch gate.</li>
+    <li>Provider IDs, route IDs, hostnames, endpoint URLs, and operator identity must be scrubbed from buyer-visible responses.</li>
+    <li>Gateway must cancel upstream coordinator streaming requests within 500 ms after buyer disconnect.</li>
+  </ul>
+  <h2>Deviations</h2>
+  <p>None. This run wrote the normative spec only and did not implement gateway code.</p>
+  <h2>Open questions for implementation</h2>
+  <ul>
+    <li>Whether v1 email magic link has a low enough operator cost to ship alongside GitHub OAuth.</li>
+    <li>Whether the account page is gateway-rendered or front-door-rendered over gateway JSON endpoints.</li>
+    <li>Which runtime reload mechanism is simplest for kill switches and quota tightening.</li>
+    <li>Which deterministic token-estimation method is acceptable when provider usage fields are absent.</li>
+  </ul>
+</body>
+</html>
