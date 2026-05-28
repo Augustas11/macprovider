@@ -1,7 +1,7 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.3 (2026-05-28, redistributed from v0.1)
-**Depends on:** SPEC-001 v1.2.1, SPEC-002 v1.1.1
+**Version:** 0.4 (2026-05-28, round-2 audit closing fixes)
+**Depends on:** SPEC-001 v1.2.1, SPEC-002 v1.1.2
 
 **Restructure note (v0.2).** SPEC-003 v0.1 contained four parts in a
 single document. v0.2 redistributes them to avoid cross-spec drift:
@@ -21,6 +21,10 @@ the "stranger downloads and joins" experience.
 - OQ note: updated for v0.1 OQ-2 split between SPEC-001 OQ-5 (provider-side) and SPEC-002 OQ-10 (coordinator-side) (M3 fix).
 - § 8 D8 reference: broadened to SPEC-002 v1.1.1 § 10 D8 + SPEC-001 v1.2.1 FR-30 (m1 fix).
 - Added line-count justification note (m3 fix).
+
+**Change log v0.4:** Resolves round-2 audit finding MAJOR-2.2.
+- § 2 and § 9: SPEC-002 companion AC range updated from "AC-11 through AC-15" to "AC-11 through AC-15" to include the nak routing-mode fallback test.
+- Build-complete label updated to v0.4.
 
 **Line-count note (v0.3).** v0.2 final length (752 lines) is below
 the 1200-1500 target from the redistribution prompt. Justification:
@@ -121,7 +125,7 @@ network works, the product doesn't yet exist."
   AC-15).
 - **SPEC-002 v1.1.1** — Part B: Dynamic admission and WS-tunneled relay
   (three-tier admission, routing weight, provisional rate limits,
-  operator endpoints, FR-P14 through FR-P21, AC-11 through AC-14).
+  operator endpoints, FR-P14 through FR-P21, AC-11 through AC-15).
 
 All four parts MUST ship together because each fails without the
 others: distribution without WS-tunneled inference still requires
@@ -647,9 +651,9 @@ cross-references them for completeness:
 
 ## 9. Acceptance criteria
 
-**AC-1 through AC-3 must ALL pass for SPEC-003 v0.2 to be considered
+**AC-1 through AC-3 must ALL pass for SPEC-003 v0.4 to be considered
 build-complete. Companion ACs in SPEC-001 v1.2.1 (AC-11 through AC-15)
-and SPEC-002 v1.1.1 (AC-11 through AC-14) must also pass.**
+and SPEC-002 v1.1.1 (AC-11 through AC-15) must also pass.**
 
 ---
 

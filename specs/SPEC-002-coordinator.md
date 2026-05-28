@@ -1,8 +1,12 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.1.1 (2026-05-28, absorbs SPEC-003 v0.1 Part B — dynamic admission + WS-tunneled relay)
-v1.1.1 resolves audit findings C1, C2, C3, M1, M2, M3, M5, M6, Q1.
-**Depends on:** SPEC-001 v1.2 (Phase 3 binary wire protocol, locked)
+**Version:** 1.1.2 (2026-05-28, round-2 audit closing fixes)
+**Depends on:** SPEC-001 v1.2.1 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.1.2:**
+- § 7.1 FR-P2: validation wording changed from "validates all fields" to "validates all REQUIRED fields"; absent `endpoint_url` normalized to null before § 3 mode resolution (CRITICAL-2.1 fix).
+- § 5 routing pseudocode: replaced undefined `all_filtered_by_quota` with explicit `quota_blocked_candidates` list for 429 vs 503 disambiguation (MAJOR-2.1 fix).
+- `**Depends on:**` line corrected to SPEC-001 v1.2.1 (MINOR-2.1 fix).
 
 **Change log v1.1 (absorbs SPEC-003 v0.1 Part B — dynamic admission + WS-tunneled relay):**
 - § 3 Request forwarding model: added two-path mode resolution. HTTP-forwarding (legacy, for providers with `endpoint_url` via hello or config) and WS-tunneled (new default, for providers without `endpoint_url`). Mode determined at registration time.
@@ -283,10 +287,14 @@ only.
 
 **FR-P2. Validate hello message; respond hello_ack.**
 On receiving a `hello` message (SPEC-001 section 6.5), the coordinator:
-1. Validates that all required fields are present and correctly typed:
+1. Validates that all REQUIRED fields are present and correctly typed:
    `type`, `version`, `tier`, `provider_id`, `hostname`, `model_id`,
    `model_params_b`, `ram_gb`, `max_context_tokens`, `max_concurrency`,
-   `throughput_tps_estimate`, `binary_version`, `attestation`.
+   `throughput_tps_estimate`, `binary_version`.
+   OPTIONAL fields (`attestation`, `endpoint_url`) are validated when
+   present. Absent `endpoint_url` MUST be normalized to null before
+   passing to § 3 mode resolution; this preserves backward compatibility
+   with v1.1.x binaries that do not include the field.
 2. Checks `version` is 1 (the only supported protocol version).
 3. Checks `tier` is 1 (FR-P13 rejects Tier 2 in v1).
 4. Checks `provider_id` is not already registered in the active pool
@@ -1070,13 +1078,20 @@ function route(request, pool, headers) -> provider | error:
                       AND ts > now() - 1 hour)
         return quota < admission.provisional_request_quota_per_hour  # default 100
 
-    candidates = [c for c in candidates if check_provisional_quota(c)]
+    pre_quota_candidates = candidates
+    quota_blocked_candidates = [c for c in pre_quota_candidates
+                                if not check_provisional_quota(c)]
+    candidates = [c for c in pre_quota_candidates
+                  if check_provisional_quota(c)]
 
     if len(candidates) == 0:
-        if all_filtered_by_quota:
-            return error(429, "code=provisional_quota_exceeded",
-                         "Retry-After: 3600")
-        return error(503, "No provider available for model " + model)
+        if len(quota_blocked_candidates) > 0 and len(pre_quota_candidates) == len(quota_blocked_candidates):
+            # All otherwise-eligible candidates are quota-blocked
+            return error(429, code="provisional_quota_exceeded",
+                         headers={"Retry-After": "3600"})
+        else:
+            # No eligible candidates for other reasons
+            return error(503, "No provider available for model " + model)
 
     # Step 2.5: Apply admission-tier weight (v1.1)
     for candidate in candidates:
@@ -1323,7 +1338,7 @@ All messages are JSON objects with a `type` field.
 These schemas mirror SPEC-001 v1.2.1 § 6.5; SPEC-001 is the authoritative source.
 
 Coordinator behavior:
-- Validates all fields present and correctly typed (FR-P2).
+- Validates all REQUIRED fields present and correctly typed; validates OPTIONAL fields (`attestation`, `endpoint_url`) when present. Absent `endpoint_url` normalized to null (FR-P2).
 - Rejects `tier != 1` by closing the WebSocket with application close code 4003 `tier_unsupported` (FR-P13).
 - Rejects duplicate `provider_id` by closing the older connection.
 - Registers provider in pool with state `ready`.
