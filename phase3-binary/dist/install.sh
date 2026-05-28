@@ -82,11 +82,47 @@ require_tool() {
 
 read_line() {
   REPLY=""
-  if [ -r /dev/tty ]; then
-    IFS= read -r REPLY < /dev/tty || REPLY=""
+  # In curl-pipe-bash invocations, /dev/tty often exists as a character
+  # device but `read < /dev/tty` fails with "Device not configured" and
+  # prints noise to stderr. Suppress that noise + fall through to empty
+  # REPLY (callers use defaults via $NO_PROMPT or prompt_yes_no's default
+  # arg). v1.2.1 install.sh's `[ -r /dev/tty ]` check passed when the
+  # device existed but the read still failed; v1.2.2 silences the
+  # failure path.
+  # Try to open /dev/tty via fd 4; the { exec ...; } 2>/dev/null pattern
+  # is necessary because bash's input-redirection failure on `< /dev/tty`
+  # prints to stderr BEFORE the `2>/dev/null` on the read line takes
+  # effect. By opening explicitly here and silencing stderr on the exec,
+  # we cleanly detect "is /dev/tty actually usable" without noise.
+  if [ -c /dev/tty ] && { exec 4</dev/tty; } 2>/dev/null; then
+    IFS= read -r REPLY <&4 2>/dev/null || REPLY=""
+    exec 4<&-
   else
-    IFS= read -r REPLY || REPLY=""
+    IFS= read -r REPLY 2>/dev/null || REPLY=""
   fi
+}
+
+# v1.2.2: pre-flight port collision detection. Without this, install
+# proceeds, launchd loads, the binary crashes on bind, and the only
+# evidence is "Local self-test failed" 60s later. Surface the real
+# problem early with a clear fix path.
+ensure_port_free() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    return
+  fi
+  if ! command -v lsof >/dev/null 2>&1; then
+    log "lsof not found; skipping port-collision check (rare on macOS)."
+    return
+  fi
+  holding_pids="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null || true)"
+  if [ -z "$holding_pids" ]; then
+    return
+  fi
+  holding_cmd="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1 " (pid " $2 ")"}')"
+  log "ERROR: port $PORT is already in use by ${holding_cmd:-another process}."
+  log "Either stop that process, or set MACPROVIDER_PORT to a free port and re-run:"
+  log "  MACPROVIDER_PORT=18080 curl -fsSL https://get.streamvc.live/install.sh | bash"
+  die 6 "port $PORT busy; macprovider-cli cannot bind"
 }
 
 prompt_yes_no() {
@@ -401,11 +437,28 @@ install_binary() {
   rm -rf "$staging_dir"
   mkdir -p "$staging_dir"
   tar xzf "$tarball_path" -C "$staging_dir" || die 5 "failed to extract release tarball"
-  cp "$staging_dir/macprovider-cli" "$BINARY_PATH"
-  chmod +x "$BINARY_PATH" 2>/dev/null || true
+
+  # CRITICAL: mlx-swift loads Metal kernels from .bundle directories
+  # adjacent to the binary. We install the REAL binary into $INSTALL_DIR
+  # alongside the bundles, then place a symlink at $BINARY_PATH so PATH
+  # users + the launchd plist still find it via the canonical
+  # SPEC-003 FR-C2 location (~/.local/bin/macprovider-cli).
+  # Prior v1.2.1 install separated them and Metal failed with
+  # "library not found" at runtime.
+  real_binary="$INSTALL_DIR/macprovider-cli"
+  cp "$staging_dir/macprovider-cli" "$real_binary"
+  chmod +x "$real_binary" 2>/dev/null || true
+
+  # Bundles live alongside the real binary (where mlx-swift looks).
   find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec rm -rf {} +
   find "$staging_dir" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$INSTALL_DIR"/ \;
-  [ -x "$BINARY_PATH" ] || die 5 "macprovider-cli was not installed at $BINARY_PATH"
+
+  # Atomic symlink swap at the canonical path.
+  rm -f "$BINARY_PATH"
+  ln -s "$real_binary" "$BINARY_PATH"
+
+  [ -x "$real_binary" ] || die 5 "macprovider-cli was not installed at $real_binary"
+  [ -L "$BINARY_PATH" ] || die 5 "symlink not created at $BINARY_PATH"
 }
 
 check_path_hint() {
@@ -603,6 +656,7 @@ main() {
   install_binary
   check_path_hint
   clear_quarantine
+  ensure_port_free
   write_config "$model" "$provider_id" "$coordinator_url"
   install_plist "$model" "$provider_id" "$coordinator_url"
   start_manual_service "$model" "$provider_id" "$coordinator_url"

@@ -106,7 +106,10 @@ main() {
     log "No launchd plist found at $PLIST_PATH."
   fi
 
-  if [ -f "$BINARY_PATH" ]; then
+  # v1.2.2+: BINARY_PATH is a symlink to $INSTALL_DIR/macprovider-cli.
+  # Use -e/-L tests so both the symlink case and any legacy direct-file
+  # install from older v1.2.1 are handled.
+  if [ -e "$BINARY_PATH" ] || [ -L "$BINARY_PATH" ]; then
     run rm -f "$BINARY_PATH"
   fi
 
