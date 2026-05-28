@@ -1,11 +1,15 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.1.3 (2026-05-28, normative drain semantics — see Decision log Entry 15)
-**Revision:** v1.1.2 added stable provider_id normative text. v1.1.3 clarifies the semantics of a coordinator-initiated drain.
+**Version:** 1.1.4 (2026-05-28, post-drain state reset — see Decision log Entry 17)
+**Revision:** v1.1.3 separated coord-drain from process-exit. v1.1.4 closes the half-finished state-machine transition the v1.1.3 patch left behind.
 
-**Change log since v1.1.2:**
+**Change log since v1.1.3:**
+- § 6.5 coordinator `drain` message: after `drain_status: complete` and WS close, the provider's internal state machine MUST reset to `ready` (assuming the local HTTP server is healthy, which is the only path that reaches `drainFromCoordinator`). The coordinator has no implicit `draining → ready` transition; if the provider's status field carries over from the previous session into the first heartbeat of the next session, the provider stays excluded from routing indefinitely.
+- Implementation fix in phase3-binary v1.1.4: `drainFromCoordinator()` calls `providerStatus.setState(.ready)` after the WS close. Bug surfaced same day as v1.1.3 ship when the first FORCE_RESTART of the coordinator left M4 stuck at `state=draining` post-reconnect.
+
+**Change log v1.1.3:**
 - § 6.5 coordinator `drain` message: now explicitly normative — drain stops coordinator registration only and MUST NOT terminate the provider's local buyer HTTP server. The provider continues serving direct-to-tunnel buyer traffic across coordinator restarts.
-- Implementation fix in phase3-binary v1.1.3: `drainAndExit()` (full process shutdown, used by local SIGTERM) is split from `drainFromCoordinator()` (drop WS, keep HTTP server, reconnect after grace). Bug discovered 2026-05-28 when a coordinator restart drained all connected providers, killing their tunnel-direct buyer traffic.
+- Implementation fix in phase3-binary v1.1.3: `drainAndExit()` (full process shutdown, used by local SIGTERM) is split from `drainFromCoordinator()` (drop WS, keep HTTP server, reconnect after grace).
 
 **Change log v1.1.2:**
 - § 6.5 hello message: `provider_id` field now explicitly normative — it is the operator-issued stable identifier from SPEC-002's static `config.providers[]` map. Example value updated; misleading "uuid-of-this-instance" placeholder removed.

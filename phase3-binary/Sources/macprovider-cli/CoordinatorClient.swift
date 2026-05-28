@@ -200,7 +200,12 @@ actor CoordinatorClient {
     /// closes the WebSocket, but does NOT exit the process — the local buyer
     /// HTTP server keeps serving direct traffic. The reconnect loop will
     /// attempt to rejoin the coordinator after a grace period.
-    /// SPEC-001 v1.1.3 § 6.5 distinguishes this from `drainAndExit`.
+    /// SPEC-001 v1.1.4 § 6.5: after drain_status=complete, the provider's
+    /// internal state machine MUST be reset back to .ready before the next
+    /// hello, since hello starts a fresh coordinator session and any
+    /// `draining` status carried over from the previous session would be
+    /// reported in the very first heartbeat and stick (the coordinator
+    /// has no implicit "draining → ready" transition).
     func drainFromCoordinator(reason: String) async throws {
         try? await sendStateUpdate(state: .draining, reason: reason)
         try? await sendDrainStatus(phase: "starting")
@@ -210,6 +215,9 @@ actor CoordinatorClient {
         webSocket?.cancel(with: .goingAway, reason: nil)
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        // v1.1.4: reset local state for the next coordinator session.
+        // Local HTTP server kept serving throughout drain; provider is ready.
+        await providerStatus.setState(.ready)
     }
 
     private func sendHeartbeat() async throws {
