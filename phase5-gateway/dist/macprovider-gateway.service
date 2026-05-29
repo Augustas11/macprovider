@@ -1,6 +1,6 @@
 [Unit]
 Description=Mac Provider Buyer API Gateway (Phase 5)
-Documentation=https://github.com/augstar/macprovider-poc specs/SPEC-006-buyer-api.md
+Documentation=https://github.com/Augustas11/macprovider/blob/main/specs/SPEC-006-buyer-api.md
 After=network-online.target macprovider-coordinator.service
 Wants=network-online.target
 
