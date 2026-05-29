@@ -76,12 +76,17 @@
     <li><strong>F-606-V2-1:</strong> SPEC-006 now cites SPEC-002 v1.1.4 Section 4, FR-B1 for per-model <code>degraded</code> and no longer repeats the rule locally.</li>
     <li><strong>F-606-V2-2:</strong> AC-26, AC-29, AC-30, and AC-34 now define both branches with explicit status, body shape, and verification commands.</li>
   </ul>
+  <h2>Resolved in v0.5</h2>
+  <ul>
+    <li><strong>F-606-V3-1:</strong> Streaming cancellation quota settlement now prefers provider-reported cancel <code>usage</code> actuals and falls back to byte estimation when usage is absent.</li>
+    <li><strong>F-606-V3-2:</strong> AC-37 now covers both the v1.2.4+ actuals path and the pre-v1.2.4 fallback-estimation path.</li>
+  </ul>
   <h2>Open questions for implementation</h2>
   <ul>
     <li>Whether v1 email magic link has a low enough operator cost to ship alongside GitHub OAuth.</li>
     <li>Whether the account page is gateway-rendered or front-door-rendered over gateway JSON endpoints.</li>
     <li>Which runtime reload mechanism is simplest for kill switches and quota tightening.</li>
-    <li>Which deterministic token-estimation method is acceptable when provider usage fields are absent.</li>
+    <li>When all production-active providers run v1.2.4 or later, whether to remove the fallback token-estimation path.</li>
   </ul>
 </body>
 </html>

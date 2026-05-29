@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.4 (2026-05-29, cross-spec regression closing fix pass)
-**Depends on:** SPEC-001 v1.2.2, SPEC-002 v1.1.4, SPEC-003 v0.6
+**Version:** 0.5 (2026-05-29, cancel-usage actuals follow-up)
+**Depends on:** SPEC-001 v1.2.3, SPEC-002 v1.1.4, SPEC-003 v0.6
+
+**Change log v0.5:**
+- Closes F-606-V3-1 and F-606-V3-2 from `specs/FIX_SPEC_006_V0_5_PROMPT.md`, the SPEC-006 follow-up filed by `specs/FIX_SPEC_001_V1_2_3_PROMPT.md`: streaming cancellation settlement now prefers SPEC-001 v1.2.3 provider-reported cancel `usage` from phase3-binary v1.2.4 (commit c94da11, tag v1.2.4) and falls back to byte estimation for pre-v1.2.4 providers; AC-37 now covers both actuals and fallback branches.
 
 **Change log v0.4:**
 - Closes SPEC-006-only regression findings F-606-V2-1 and F-606-V2-2 from `specs/SPEC-CROSS-006-v2-audit.md`: per-model degraded now cites SPEC-002 v1.1.4 § 4, FR-B1 without restating the rule, and AC-26, AC-29, AC-30, and AC-34 now spell out both branches with status, body shape, and verification commands.
@@ -1438,7 +1441,13 @@ For streaming requests (`stream: true`), the gateway MUST reserve `max_tokens` o
 
 On SSE completion after a provider `[DONE]` chunk, settlement MUST adjust the reservation to actual usage as reported by the provider.
 
-On client disconnect, the gateway MUST cancel the upstream request and estimate completion tokens using `ceil(bytes_emitted_so_far / 4)`, where `bytes_emitted_so_far` counts SSE chunk bytes excluding framing sent to the buyer up to disconnect. This is gateway-side estimation until a future SPEC-001 v1.2.3 candidate requires provider-reported partial usage on cancellation.
+For streaming requests where the buyer disconnects mid-stream, the gateway settles the daily-quota reservation as follows:
+
+1. The gateway sends a `cancel_request` to the coordinator, which forwards it to the provider, per the existing cancellation path.
+2. The provider responds with `inference_response_end` carrying a `usage` field per SPEC-001 v1.2.3 § 6.6. The gateway MUST settle the reservation to `usage.prompt_tokens + usage.completion_tokens`, the exact tokens the provider actually consumed and emitted.
+3. If the provider's `inference_response_end` omits the `usage` field, the gateway MUST fall back to `estimated_completion_tokens = ceil(bytes_emitted_so_far / 4)` plus the original prompt-token reservation. This fallback covers pre-v1.2.4 phase3-binaries, including v1.2.0 through v1.2.3, which do not guarantee usage on cancel. The 4-bytes-per-token constant remains the documented coarse approximation for English-leaning content.
+
+Once all production-active providers run phase3-binary v1.2.4 or later, the estimation fallback path becomes unreachable in practice. A future SPEC-006 patch, v0.6 candidate, may remove the fallback when the operator confirms no pre-v1.2.4 binaries remain in the pool.
 
 On 502 or 504 from the provider, Section 17's refund matrix applies.
 
@@ -1446,7 +1455,7 @@ On 503 where no provider was reached and the request was never forwarded, the re
 
 The guiding rule is that quota is debited only for work the provider actually performed.
 
-Disconnect estimation is a coarse approximation for English-leaning content. The gateway MUST record in the usage event that completion tokens were gateway-estimated rather than provider-reported.
+Disconnect fallback estimation is a coarse approximation for English-leaning content. The gateway MUST record in the usage event whether completion tokens were provider-reported or gateway-estimated.
 
 ### 7.3 Daily windows
 
@@ -2362,11 +2371,12 @@ The gateway MUST reserve quota before forwarding as defined in Section 7.2 and s
 | 502 | >0 partial stream | prompt + actual completion | Provider performed partial work |
 | 504 | 0 | prompt only | Provider was reached, processed prompt, then timed out |
 | 504 | >0 partial stream | prompt + actual completion | Provider performed partial work |
-| Client disconnect | estimated | prompt + `ceil(bytes_emitted_so_far / 4)` completion | Provider performed work; buyer left early; completion count is gateway-estimated |
+| Client disconnect (v1.2.4+ provider) | provider-reported actual | prompt + actual completion, exact from `usage` field | Provider performed exactly this much work; report is normative per SPEC-001 v1.2.3 |
+| Client disconnect (pre-v1.2.4 provider, usage absent) | byte-estimated | prompt + `ceil(bytes_emitted_so_far / 4)` completion, estimated with +/-5 tokens typical | Fallback when usage is not yet normatively guaranteed |
 
 The gateway MUST debit only work the provider actually performed.
 
-The client-disconnect row intentionally uses deterministic estimation in v0.3. A future SPEC-001 v1.2.3 candidate would let the provider include actual partial usage in cancellation response; once that lands, SPEC-006 can replace this estimate with provider-reported actuals.
+The client-disconnect rows intentionally prefer provider-reported actuals and preserve deterministic estimation as a backward-compatibility fallback for pre-v1.2.4 providers.
 
 ### 17.8 Kill-switch failure mode
 
@@ -2959,26 +2969,37 @@ go test ./phase5-gateway/... -run TestQuotaSettlement504ZeroCompletion
 
 Precondition:
 
-- Account quota is configured near the request limit and streaming provider usage can be simulated.
+- Gateway is running with the default 100,000-token daily quota.
+- One v1.2.4+ provider and one pre-v1.2.4 provider are available in the pool, or both provider behaviors can be simulated deterministically.
 
 Action:
 
-1. Start a streaming request with `max_tokens`.
+1. Start a streaming request with `stream=true` and `max_tokens=200`.
 2. Verify quota reservation before first upstream byte.
 3. Complete the stream with provider-reported actual usage.
-4. Repeat with client disconnect after partial generation.
+
+Branches:
+
+- Branch A, v1.2.4+ provider actuals:
+  - Action: route the same streaming call to the v1.2.4+ provider; buyer disconnects after receiving about 30 completion tokens, about 120 bytes.
+  - Expected: buyer stream starts with HTTP 200 and `Content-Type: text/event-stream; charset=utf-8`; gateway sends `cancel_request`; provider `inference_response_end` has `status:"cancelled"` and `usage={prompt_tokens:N, completion_tokens:30, total_tokens:N+30}`; `/v1/usage` returns HTTP 200 with daily quota decremented by exactly `N+30`.
+  - Verification: `curl -i -N -X POST -H "Authorization: Bearer <key>" -H "Content-Type: application/json" -d '{"model":"<model>","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}' https://api.streamvc.live/v1/chat/completions & sleep 2 && kill %1; curl -s -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/usage | jq -e '.daily_used == <expected_exact>'`
+- Branch B, pre-v1.2.4 provider fallback estimation:
+  - Action: route the same streaming call to the pre-v1.2.4 provider; buyer disconnects after about 120 bytes of SSE chunk content.
+  - Expected: buyer stream starts with HTTP 200 and `Content-Type: text/event-stream; charset=utf-8`; gateway sends `cancel_request`; provider `inference_response_end` has `status:"cancelled"` and omits `usage`; gateway estimates `ceil(120/4) = 30` completion tokens; `/v1/usage` returns HTTP 200 with daily quota decremented by `N+30`, with +/-5 token tolerance acknowledged for real text.
+  - Verification: `curl -i -N -X POST -H "Authorization: Bearer <key>" -H "Content-Type: application/json" -d '{"model":"<model>","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}' https://api.streamvc.live/v1/chat/completions & sleep 2 && kill %1; curl -s -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/usage | jq -e '.daily_used >= <expected_estimated_minus_5> and .daily_used <= <expected_estimated_plus_5>'`
 
 Expected outcome:
 
 - Concurrent requests cannot oversubscribe the daily quota during the stream.
 - Successful stream returns HTTP 200 with `Content-Type: text/event-stream; charset=utf-8`, emits `data: {json}\n\n` chunks followed by `data: [DONE]`, and settles to provider-reported usage.
-- Client disconnect releases concurrency and settles to prompt plus estimated completion `ceil(bytes_emitted_so_far / 4)`, with usage source marked gateway-estimated.
+- Branch A releases concurrency and records usage source as provider-reported.
+- Branch B releases concurrency and records usage source as gateway-estimated.
 - `/v1/usage` returns HTTP 200 with reservation released and daily token fields reflecting settlement.
 
 Verification command:
 
 ```text
-curl -i -N -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/chat/completions
 go test ./phase5-gateway/... -run TestStreamingQuotaReservationSettlement
 ```
 
