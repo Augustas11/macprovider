@@ -76,12 +76,23 @@ func TestProviderTokenAuthFlow(t *testing.T) {
 	if _, err := store.RevokeToken(context.Background(), record.TokenPrefix); err != nil {
 		t.Fatalf("revoke token: %v", err)
 	}
-	revoked, _, _, err := bearerDialer(token).Dial(context.Background(), wsURL(h.HTTP.URL))
+	revoked, br, _, err := bearerDialer(token).Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
 		t.Fatalf("dial with revoked token: %v", err)
 	}
 	defer revoked.Close()
-	frame, err := gobwas.ReadFrame(revoked)
+	// The server rejects an invalid token immediately after the WebSocket
+	// handshake, so its close frame can race the client's handshake read: when
+	// it arrives fast enough, gobwas slurps it into the bufio.Reader that Dial
+	// returns rather than leaving it on the raw conn. Read from that reader
+	// (which falls through to the conn once its buffer drains) instead of the
+	// bare conn, otherwise ReadFrame misses the buffered frame and blocks until
+	// the socket closes — surfacing as a flaky "unexpected EOF".
+	var src io.Reader = revoked
+	if br != nil {
+		src = br
+	}
+	frame, err := gobwas.ReadFrame(src)
 	if err != nil {
 		t.Fatalf("read invalid token close: %v", err)
 	}
