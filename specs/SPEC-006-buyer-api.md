@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.6 (2026-05-29, audit response, Tier 1 disclosure language + production launch gate)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.1.5, SPEC-003 v0.7
+**Version:** 0.7 (2026-05-30, sleep-tolerant idle status semantics)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.2.0, SPEC-003 v0.7
+
+**Change log v0.7:**
+- Adds sleep-tolerant `/v1/status` semantics for Phase 7 P1: coordinator reachable with zero ready providers is `status: "idle"`, not `down`; `down` is reserved for coordinator/control-plane unreachability. Per-model status rows now include `ready_provider_count`, `available`, and `availability` so front doors can distinguish "available", "no awake provider", and "no free slots" without deriving competing rules. Front-door copy MUST render `idle` as a friendly no-awake-provider state, not as an outage.
 
 **Change log v0.6:**
 - Closes H-001 (privacy claims exceed enforcement), H-004 (model integrity is provider-reported), and H-006 (sticky caching forward-looking guard) from the 2026-05-29 independent security audit. Six additions: § 1.6 plaintext-to-provider disclosure (4 normative properties); § 5.3.1 `/v1/models` extension with `tier1_disclosure` block; § 5.3 model identity provider-reported note; § 1.3 sticky-caching guard; § 19 expectation-drift audit category; § 22 production launch gate checklist (8 items adapted from audit recommendations). Sibling patches (SPEC-001 v1.2.4 + SPEC-002 v1.1.5) close H-002 and H-003. H-005 (billing settlement) is largely already covered by D-CROSS-1 (refund matrix) + SPEC-001 v1.2.3 cancel-usage normative; verification deferred to BUILD_PHASE5 Phase C end-to-end test. No code changes; v0.6 implementation contract for BUILD_PHASE5 expanded by these additions.
@@ -1132,10 +1135,13 @@ Response shape:
     {
       "id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
       "provider_count": 2,
+      "ready_provider_count": 2,
       "total_slots": 3,
       "slots_free": 2,
       "max_context_tokens": 8192,
-      "degraded": false
+      "degraded": false,
+      "available": true,
+      "availability": "available"
     }
   ]
 }
@@ -1145,11 +1151,26 @@ Allowed top-level `status` values:
 
 - `up`
 - `degraded`
+- `idle`
 - `down`
 
-The network-wide degraded flag MUST be true if ready providers are below the configured threshold.
+`down` is reserved for coordinator/control-plane unreachability: `/poolz` is unreachable, returns a non-2xx response, or cannot be decoded. A reachable coordinator with zero ready providers MUST NOT produce `down`.
+
+`idle` means the coordinator is reachable but no provider is currently ready for buyer routing. This is a normal sleep-tolerant capacity state and MUST be rendered by front doors as non-alarming "no providers awake right now" copy.
+
+`degraded` means the coordinator is reachable and at least one provider is ready, but ready providers are below the configured threshold.
+
+The network-wide degraded flag MUST be true only for the `degraded` status. It MUST be false for `up`, `idle`, and `down`.
 
 Per-model `degraded` is defined normatively in SPEC-002 v1.1.4 § 4, FR-B1. The gateway MUST compute per-model degraded values from `/poolz` aggregation using SPEC-002's rules.
+
+Per-model rows MUST include:
+
+- `ready_provider_count`: ready providers currently serving that model.
+- `available`: true only when at least one ready provider has an immediately routable free slot.
+- `availability`: one of `available`, `no_awake_provider`, or `no_free_slots`.
+
+A model with `availability: "no_awake_provider"` is known to the coordinator but currently has no awake ready provider. A model with `availability: "no_free_slots"` has at least one ready provider but no immediate free slot. Front doors MUST use these fields rather than deriving availability from top-level status alone.
 
 The endpoint MUST NOT expose:
 
@@ -1165,7 +1186,7 @@ Gateway-internal coordinator status bridge:
 - `/poolz` requires the coordinator operator bearer key when `auth.operator_key` is configured.
 - This is an internal contract; the gateway MUST NOT proxy raw `/poolz` content to buyers.
 - The gateway MUST redact `provider_id`, `assigned_id`, `hostname`, endpoint URLs, per-provider RAM/CPU specs, and operator identity metadata.
-- The gateway MAY aggregate counts for ready, degraded, draining, unavailable providers, per-model slot totals, and degraded-state booleans.
+- The gateway MAY aggregate counts for ready, degraded, draining, unavailable providers, per-model slot totals, degraded-state booleans, and per-model availability fields.
 - Cache TTL for `/poolz` polling is 10 seconds.
 - The status cache MAY serve stale data for up to 10 seconds during coordinator restart after coordinator returns.
 - The gateway MUST flush cached `/poolz` data when `/poolz` is not reachable or returns an HTTP error.
@@ -1944,6 +1965,8 @@ The front door MUST be able to consume:
 
 For status-panel model rows, per-model `degraded` is defined normatively in SPEC-002 v1.1.4 § 4, FR-B1. The front door consumes the gateway's computed field and MUST NOT derive a competing definition.
 
+The front door MUST render top-level `status: "idle"` as friendly no-awake-provider copy. It MUST NOT present `idle` as a hard outage, red infrastructure error, or coordinator-down condition. When model rows are present, the front door SHOULD display per-model `availability` detail so buyers can distinguish "no provider awake for this model" from "provider busy".
+
 ### 12.3 Demo token contract
 
 The front door MUST create or obtain a demo session token.
@@ -2655,6 +2678,8 @@ Verification:
 Pass condition:
 
 - Response reports aggregate counts and model slot counts without provider identity.
+- Coordinator reachable with zero ready providers returns `status: "idle"` and `degraded: false`.
+- Coordinator unreachable returns `status: "down"`.
 
 ### AC-14: demo-only kill switch
 

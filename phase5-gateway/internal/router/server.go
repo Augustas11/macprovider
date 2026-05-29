@@ -452,7 +452,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	resp, err := s.statusFromPoolz(r.Context())
 	if err != nil {
 		writeJSON(w, http.StatusOK, statusResponse{
-			Status: "down", Degraded: true,
+			Status: "down", Degraded: false,
 			Coordinator: coordinatorStatus{Status: "down", CheckedAt: s.now().Format(time.RFC3339)},
 		})
 		return
@@ -1010,12 +1010,15 @@ type statusPool struct {
 }
 
 type statusModel struct {
-	ID               string `json:"id"`
-	ProviderCount    int    `json:"provider_count"`
-	TotalSlots       int    `json:"total_slots"`
-	SlotsFree        int    `json:"slots_free"`
-	MaxContextTokens int    `json:"max_context_tokens"`
-	Degraded         bool   `json:"degraded"`
+	ID                 string `json:"id"`
+	ProviderCount      int    `json:"provider_count"`
+	ReadyProviderCount int    `json:"ready_provider_count"`
+	TotalSlots         int    `json:"total_slots"`
+	SlotsFree          int    `json:"slots_free"`
+	MaxContextTokens   int    `json:"max_context_tokens"`
+	Degraded           bool   `json:"degraded"`
+	Available          bool   `json:"available"`
+	Availability       string `json:"availability"`
 }
 
 type poolzResponse struct {
@@ -1138,6 +1141,9 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		m.ProviderCount++
 		m.TotalSlots += p.SlotsTotal
 		m.SlotsFree += p.SlotsFree
+		if p.State == "ready" {
+			m.ReadyProviderCount++
+		}
 		if p.MaxContextTokens > m.MaxContextTokens {
 			m.MaxContextTokens = p.MaxContextTokens
 		}
@@ -1147,6 +1153,7 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		st.SlotsFreeTotal += p.SlotsFree
 		if p.State == "ready" {
 			st.Ready++
+			st.ReadySlotsFree += p.SlotsFree
 		}
 		if p.State == "unavailable" || p.State == "draining" {
 			st.UnavailableOrDraining++
@@ -1157,14 +1164,16 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		out.Pool.TotalProviders = poolz.Summary.TotalProviders
 		out.Pool.Ready = poolz.Summary.Ready
 	}
-	out.Degraded = out.Pool.Ready < readyThreshold
 	if out.Pool.Ready == 0 {
-		out.Status = "down"
-	} else if out.Degraded {
+		out.Status = "idle"
+		out.Degraded = false
+	} else if out.Pool.Ready < readyThreshold {
 		out.Status = "degraded"
+		out.Degraded = true
 	}
 	for _, model := range models {
 		model.Degraded = computeDegraded(stats[model.ID])
+		model.Available, model.Availability = computeAvailability(stats[model.ID])
 		out.Models = append(out.Models, model)
 	}
 	sort.Slice(out.Models, func(i, j int) bool { return out.Models[i].ID < out.Models[j].ID })
@@ -1176,6 +1185,7 @@ type poolzModelStats struct {
 	UnavailableOrDraining int
 	Ready                 int
 	SlotsFreeTotal        int
+	ReadySlotsFree        int
 }
 
 func computeDegraded(modelStats poolzModelStats) bool {
@@ -1192,6 +1202,16 @@ func computeDegraded(modelStats poolzModelStats) bool {
 		return true
 	}
 	return false
+}
+
+func computeAvailability(modelStats poolzModelStats) (bool, string) {
+	if modelStats.Ready == 0 {
+		return false, "no_awake_provider"
+	}
+	if modelStats.ReadySlotsFree == 0 {
+		return false, "no_free_slots"
+	}
+	return true, "available"
 }
 
 func buildFeedbackSummary(events []storage.FeedbackSummaryEvent, start, end time.Time) map[string]any {

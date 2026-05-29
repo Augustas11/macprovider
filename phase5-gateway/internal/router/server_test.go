@@ -342,6 +342,78 @@ func TestStatusRedactionAndPoolzCacheFlush(t *testing.T) {
 	}
 }
 
+func TestAggregateStatusIdleWhenCoordinatorReachableWithNoReadyProviders(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"unavailable","slots_free":0,"slots_total":1,"max_context_tokens":4096}
+		],
+		"summary":{"total_providers":1,"ready":0,"total_slots":1,"free_slots":0}
+	}`), 1, fixedNow())
+
+	if out.Status != "idle" || out.Degraded {
+		t.Fatalf("status=%q degraded=%t, want idle and not degraded", out.Status, out.Degraded)
+	}
+	if len(out.Models) != 1 {
+		t.Fatalf("models=%+v, want one model", out.Models)
+	}
+	model := out.Models[0]
+	if model.Available || model.Availability != "no_awake_provider" || model.ReadyProviderCount != 0 {
+		t.Fatalf("model availability = %+v, want no awake provider", model)
+	}
+}
+
+func TestAggregateStatusPartialCapacityRemainsDegraded(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"ready","slots_free":1,"slots_total":2,"max_context_tokens":8192},
+			{"model_id":"llama","state":"unavailable","slots_free":0,"slots_total":1,"max_context_tokens":4096}
+		],
+		"summary":{"total_providers":2,"ready":1,"total_slots":3,"free_slots":1}
+	}`), 2, fixedNow())
+
+	if out.Status != "degraded" || !out.Degraded {
+		t.Fatalf("status=%q degraded=%t, want degraded", out.Status, out.Degraded)
+	}
+	if len(out.Models) != 1 || !out.Models[0].Available || out.Models[0].Availability != "available" {
+		t.Fatalf("models=%+v, want available model", out.Models)
+	}
+}
+
+func TestAggregateStatusNoFreeSlotsIsModelUnavailableNotSystemIdle(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"ready","slots_free":0,"slots_total":1,"max_context_tokens":4096}
+		],
+		"summary":{"total_providers":1,"ready":1,"total_slots":1,"free_slots":0}
+	}`), 1, fixedNow())
+
+	if out.Status != "up" || out.Degraded {
+		t.Fatalf("status=%q degraded=%t, want up and not degraded", out.Status, out.Degraded)
+	}
+	if len(out.Models) != 1 || out.Models[0].Available || out.Models[0].Availability != "no_free_slots" {
+		t.Fatalf("models=%+v, want no_free_slots", out.Models)
+	}
+}
+
+func TestStatusCoordinatorUnreachableRemainsDown(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, errors.New("coordinator unavailable")
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+
+	resp := assertStatus(t, h, http.MethodGet, "/v1/status", "", "", "", http.StatusOK)
+
+	var parsed statusResponse
+	if err := json.Unmarshal(resp.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("status json: %v", err)
+	}
+	if parsed.Status != "down" || parsed.Degraded || parsed.Coordinator.Status != "down" {
+		t.Fatalf("status parsed = %+v, want coordinator down", parsed)
+	}
+}
+
 func TestDegradedCalculationMatchesFRB1(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -907,6 +979,15 @@ func readQuota(t *testing.T, resp *httptest.ResponseRecorder) map[string]any {
 		t.Fatalf("quota missing: %v", body)
 	}
 	return quota
+}
+
+func decodePoolz(t *testing.T, raw string) poolzResponse {
+	t.Helper()
+	var poolz poolzResponse
+	if err := json.Unmarshal([]byte(raw), &poolz); err != nil {
+		t.Fatalf("poolz json: %v", err)
+	}
+	return poolz
 }
 
 func submitFeedback(t *testing.T, h http.Handler, bearer, demoToken, body string) {
