@@ -1,7 +1,10 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.1.7 (2026-05-29, activity-based liveness hotfix)
+**Version:** 1.2.0 (2026-05-30, provider circuit-breaker for in-flight faults)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.2.0:**
+- Adds **FR-P11a**: a provider **circuit-breaker** for in-flight inference faults. Until now only HTTP 502/504 (HTTP-forwarding path) degraded a provider; in WS-tunneled mode a dead-WS-mid-inference, a relay timeout, or a zero-token completion only failed the individual request (fast-fail/failover per F-4) while the faulting provider stayed `ready` and kept receiving buyer traffic (observed live: an undersized provider that fast-failed every non-trivial request). v1.2.0 makes a provider that accumulates `pool.breaker_failure_threshold` (default 2) qualifying in-flight faults within a rolling `pool.breaker_window_s` (default 120) window transition to `degraded` and run the existing FR-P11 recovery-preflight cycle before returning to `ready`. Buyer-initiated cancellation / client hangup (buyer context cancelled) is EXPLICITLY EXCLUDED and never counts against a provider. Also wires the previously-inert `pool.degraded_backoff_s` and `pool.degraded_max_retries` keys (defined since v1.1, never read) into that recovery cycle, and adds `pool.breaker_*` plus the v1.1.7 `pool.heartbeat_miss_threshold_s` to the config schema block (both were previously only described in prose). Per independent review: FR-P11a **supersedes** FR-P20's former "3 consecutive timeouts → degraded" clause (single source of truth); zero-token only counts when `finish_reason` is abnormal (a clean empty `stop` is valid); a *streaming* buyer-cancel that arrives with zero received chunks after routing is attributed to the provider (resolves the 300s=300s cancel/timeout race), while non-streaming buyer-cancels are excluded — single-chunk delivery means chunk count carries no progress signal, so unfit non-streaming providers are caught by the relay-timeout instead; and a provider that re-trips the breaker within the window after recovering is marked `unavailable` to bound flapping (recovery preflight cannot prove token production until the warm-up gate lands). No wire-protocol change; SPEC-001 v1.2.4 unaffected; provider binaries need no update. (The proactive half of provider fitness — an admission warm-up capability gate — is a separate Phase 7 change.)
 
 **Change log v1.1.7:**
 - Hotfix to F-4 liveness detection. The v1.1.6 missed-heartbeat monitor closed a provider WebSocket after `heartbeat_interval_s + routing.failover_timeout_s` (35s with production defaults) measured from the last *heartbeat*. A provider doing single-threaded MLX inference cannot emit heartbeats while its one slot is busy, so any generation longer than ~35s was killed mid-request (observed live on Pearl: a Llama-3.2-3B provider at ~0.6 tps fast-failed every non-trivial completion). Fix: (1) the liveness monitor now measures staleness from the last inbound frame of ANY type — in-flight `inference_response_chunk` frames count as activity and keep a busy provider alive; (2) the threshold is a new dedicated key `pool.heartbeat_miss_threshold_s` (default 90s), decoupled from `routing.failover_timeout_s`. In-flight observed close/write failures are unchanged (still bounded by `routing.failover_timeout_s`). No wire-protocol change; provider binaries need no update.
@@ -429,14 +432,21 @@ Informed by Phase 2 D1 (502 vs 530):
 | WS disconnect (530-equivalent) | WS close, no prior drain | `unavailable`, grace period | Reconnects with new hello |
 | dead-WS-graceful | Provider-initiated close frame while no drain is active | Active relays receive `provider_disconnected`; provider marked `unavailable` | Reconnects with new hello |
 | dead-WS-abnormal | Read/write failure, or no inbound frame of any type for `pool.heartbeat_miss_threshold_s` (default 90s; in-flight response chunks count as activity) | Coordinator closes the session; active relays receive `provider_disconnected` | Reconnects with new hello |
-| dead-WS-mid-inference | WS dies after `inference_request` was routed and before `inference_response_end` | Cancel the in-flight relay and either fail over once or return HTTP 502 `provider_disconnected` per F-4 | Buyer receives one response or one clean OpenAI-envelope error; no gateway-timeout hang |
+| dead-WS-mid-inference | WS dies after `inference_request` was routed and before `inference_response_end` | Cancel the in-flight relay and either fail over once or return HTTP 502 `provider_disconnected` per F-4 | Buyer receives one response or one clean OpenAI-envelope error; no gateway-timeout hang. Counts toward the FR-P11a circuit-breaker. |
+| relay-timeout-mid-inference | `routing.request_timeout_s` elapses with no `inference_response_end` (and no buyer cancel) | Cancel the relay; fail the request | Counts toward the FR-P11a circuit-breaker |
+| zero-token-completion (qualified) | `inference_response_end` with `usage.completion_tokens == 0` AND `finish_reason` not in {`stop`,`length`} (abnormal). A clean empty `stop` does NOT count. | Return the result/error for this request | Counts toward the FR-P11a circuit-breaker |
 | HTTP 502 (MLX down) | Provider returns 502 on routed buyer request | `degraded`, 30s backoff | Recovery preflight after 30s |
 | HTTP 504 (timeout) | No response in time | `degraded`, 30s backoff | Same as 502 |
 | **HTTP 530 (Cloudflare tunnel daemon disconnected)** | Provider endpoint returns literal HTTP 530 on routed buyer request | `unavailable` immediately; log `state_update.reason = "http_530_observed"`; trigger WebSocket liveness probe (ping with 5s ack timeout) | Removed from pool until WebSocket reconnects with fresh hello, OR if WS is still alive, until next heartbeat confirms `state: ready` |
 
-On 502/504 degraded: after 30s backoff, send a **recovery preflight**.
-If accepted, mark `ready`. If rejected/timeout, extend to 60s and retry.
-After 3 consecutive failures, mark `unavailable`.
+On degraded — whether from 502/504 or from the FR-P11a circuit-breaker —
+after `pool.degraded_backoff_s` (default 30s) backoff, send a **recovery
+preflight**. If accepted, mark `ready`. If rejected/timeout, extend the
+backoff and retry up to `pool.degraded_max_retries` (default 3); after
+that, mark `unavailable`. (`pool.degraded_backoff_s` and
+`pool.degraded_max_retries` were defined since v1.1 but only wired into
+this recovery cycle in v1.2.0; before that the backoff/retry counts were
+hardcoded.)
 
 **Literal HTTP 530 is normative in v1.** Phase 2 observed the M4
 provider's Cloudflare tunnel emit HTTP 530 to a routed buyer request
@@ -475,6 +485,98 @@ respond exactly as it would for any preflight (capacity check, no side
 effects). The `recovery-probe-` prefix is observable only in the
 provider's own logs; the binary still treats it as a normal preflight
 under SPEC-001 § 6.5.
+
+**FR-P11a. Provider circuit-breaker for in-flight inference faults.**
+FR-P11's degrade/recover cycle originally fired only on HTTP 502/504 from
+the HTTP-forwarding path. In WS-tunneled mode a provider can repeatedly
+**fail in-flight requests** without ever returning a 502/504, so it stays
+`ready` and keeps receiving buyer traffic. The coordinator MUST trip a
+circuit-breaker so a persistently-faulting provider is removed from buyer
+routing. **FR-P11a is the single source of truth for fault-driven
+degradation in WS-tunneled mode** and supersedes FR-P20's former
+"3 consecutive timeouts → degraded" clause.
+
+- **Qualifying faults (count toward the breaker):**
+  - *dead-WS-mid-inference* (F-4): provider WS dies after `inference_request`
+    was routed and before `inference_response_end`.
+  - *relay-timeout-mid-inference*: `routing.request_timeout_s` elapses with
+    no `inference_response_end`, attributed to the provider per the
+    attribution rule below.
+  - *zero-token-completion (qualified)*: relay reaches `inference_response_end`
+    with `usage.completion_tokens == 0` **AND** a `finish_reason` that is NOT
+    a clean terminal value (`stop` or `length`). A clean empty completion
+    (`finish_reason: "stop"`, zero tokens) is a VALID response and MUST NOT
+    count.
+- **Fault attribution (who is charged):** each qualifying fault is charged to
+  exactly the provider whose relay produced it. F-4 may fail a request over
+  once (A → B); that creates a *new* relay to B, so B's outcome is charged to
+  B independently. A single dead-WS on A charges A exactly once — never
+  twice, never B.
+- **Excluded (MUST NOT count):** preflight rejection/timeout (FR-P7),
+  graceful drain, and genuine buyer cancellation / client hangup.
+  **Cancel-vs-timeout race rule (C2):** because the gateway's
+  `coordinator_request_seconds` and the coordinator's `request_timeout_s` may
+  be equal (both default 300s), a buyer-side context cancellation can race
+  the relay timeout. The disambiguation depends on streaming mode, because
+  chunk count only carries a progress signal when streaming:
+  - **Streaming requests:** a buyer-context cancellation arriving AFTER
+    `inference_request` was routed AND with ZERO `inference_response_chunk`
+    frames received is attributed to the **provider** (it produced nothing)
+    and counts; a cancellation after ≥1 chunk is a genuine buyer cancel and
+    does NOT count (provider was making progress).
+  - **Non-streaming requests:** SPEC-001 delivers the entire body as a single
+    `inference_response_chunk` immediately before `inference_response_end`, so
+    chunk count is zero for the whole generation and CANNOT distinguish a
+    stalled provider from a healthy one mid-generation. A buyer cancellation
+    before `inference_response_end` therefore MUST be treated as a genuine
+    buyer cancel and EXCLUDED (never charged to the provider — this preserves
+    FR-P18's "MUST NOT mark a provider unhealthy due to a slow cancellation").
+    An unfit non-streaming provider is instead caught by the
+    `relay-timeout-mid-inference` fault (it never reaches
+    `inference_response_end`), not by cancel attribution.
+  Because the non-streaming path relies on the relay timeout for fault
+  detection, operators SHOULD set the coordinator `request_timeout_s` strictly
+  below the gateway `coordinator_request_seconds` so the coordinator's
+  relay-timeout fires first and is unambiguously provider-attributable; with
+  equal timers a gateway-initiated cancel can pre-empt the coordinator's
+  timeout and an unfit non-streaming provider may escape detection until a
+  non-cancelled request times out.
+- **Trip condition:** when a provider accumulates
+  `pool.breaker_failure_threshold` (default 2) qualifying faults within a
+  rolling `pool.breaker_window_s` (default 120s), the coordinator marks it
+  `degraded` (routing-ineligible per FR-P5), logs
+  `state_update.reason = "breaker_tripped"` with fault type and count, and
+  runs the FR-P11 recovery cycle. The counter is per provider (a provider
+  serves a single model). Simultaneous faults across a multi-slot provider
+  from one wedge event each count, intentionally tripping immediately. The
+  breaker applies to all tiers (pinned and provisional). Transition to
+  `draining`/`unavailable` (any cause) clears the counter; a successful
+  recovery to `ready` resets it to zero.
+- **No flapping on a single blip:** the threshold + window are REQUIRED so a
+  single transient fault does not degrade an otherwise-healthy provider — it
+  fails only its own request (F-4) and leaves the provider `ready`.
+- **Recovery is best-effort until the warm-up gate lands (M2).** The FR-P11
+  recovery preflight proves WS liveness + capacity, NOT token production — a
+  provider degraded for zero-token/timeout faults may pass it and return to
+  `ready` while still broken. To bound the resulting flap: the coordinator
+  MUST record the timestamp of each return to `ready`; a breaker trip whose
+  triggering fault occurs within `pool.breaker_window_s` of that recovery
+  timestamp is a **re-trip** and MUST mark the provider `unavailable` (removed
+  until it reconnects with a fresh hello) instead of degrade-and-retry again.
+  (This re-trip guard uses a distinct post-recovery anchor; it is not the same
+  measurement as the rolling fault-count window, though both are sized by
+  `pool.breaker_window_s`.) The proactive warm-up
+  capability gate (separate Phase 7 change) will later replace the recovery
+  preflight with a token-producing probe and remove this limitation.
+- **No new wire messages:** routing exclusion, recovery preflight, and the
+  observable fields it relies on (`usage.completion_tokens`, `finish_reason`,
+  `inference_response_chunk` count) all already exist in SPEC-001 v1.2.4. The
+  provider binary needs no change.
+
+This is the runtime (reactive) half of provider fitness. The proactive half —
+an admission-time warm-up capability gate that withholds `ready` until a
+provider proves it can produce a token — is a separate Phase 7 change and is
+not specified here.
 
 **FR-P12. Identify provider; configurable bearer-token check.**
 
@@ -659,9 +761,11 @@ memory budget. Buffer absorbs brief TCP congestion.
 **FR-P20. WS-tunneled response timeout.**
 Per outstanding `inference_request`, coordinator starts a timer of
 `routing.request_timeout_s` (default 300 s). On timeout: send
-`cancel_request`, return HTTP 504 to buyer, free slot. After 3
-consecutive timeouts without any successful response, mark provider
-`degraded` and initiate recovery preflight (FR-P11).
+`cancel_request`, return HTTP 504 to buyer, free slot. The timeout counts
+as a `relay-timeout-mid-inference` fault toward the **FR-P11a** circuit-breaker,
+which (as of v1.2.0) is the single source of truth for timeout-driven
+degradation and **supersedes** the former "3 consecutive timeouts → degraded"
+rule.
 
 **FR-P21. Tier visibility in /poolz.**
 The `/poolz` response (FR-O2) gains `tier` (`"pinned"` or
@@ -3062,11 +3166,15 @@ listen:
 pool:
   heartbeat_interval_s: 30
   disconnect_grace_period_s: 30
+  heartbeat_miss_threshold_s: 90   # (v1.1.7) Close WS after no inbound frame of ANY type for this long;
+                                    # in-flight response chunks count as activity (F-4 liveness)
   wake_gap_threshold_s: 120
-  degraded_backoff_s: 30      # Initial backoff after 502/504
+  degraded_backoff_s: 30      # Initial recovery backoff after 502/504 OR a breaker trip (FR-P11a)
   degraded_max_retries: 3     # After N consecutive failed recovery preflights, mark unavailable
   degraded_probe_after_502: true   # Send recovery preflight after 502/504 backoff (default true)
                                     # Set to false to skip auto-recovery probing for debug
+  breaker_failure_threshold: 2     # (v1.2.0 FR-P11a) Qualifying in-flight faults within the window that trip the breaker
+  breaker_window_s: 120            # (v1.2.0 FR-P11a) Rolling window for the fault count; also the re-trip→unavailable guard
 
 routing:
   preflight_threshold_tokens: 4096   # Skip preflight for prompts under this size
