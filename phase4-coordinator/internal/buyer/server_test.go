@@ -508,6 +508,25 @@ func TestCircuitBreakerTripsAfterRepeatedDeadWSAndRecovers(t *testing.T) {
 	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
 		t.Fatalf("p1 after breaker trip = %#v ok=%v, want degraded", p1, ok)
 	}
+	registry.ApplyHeartbeat("p1", pool.HeartbeatUpdate{
+		Status:                pool.StateReady,
+		ModelID:               "model-a",
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		At:                    time.Now().UTC(),
+	})
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
+		t.Fatalf("p1 after ready heartbeat during breaker hold = %#v ok=%v, want degraded", p1, ok)
+	}
+	registry.ApplyStateUpdate("p1", pool.StateUpdate{State: pool.StateReady})
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
+		t.Fatalf("p1 after ready state_update during breaker hold = %#v ok=%v, want degraded", p1, ok)
+	}
 
 	blocked := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
 	if blocked.Code != http.StatusServiceUnavailable {
@@ -577,7 +596,7 @@ func TestCircuitBreakerExcludesNonStreamingBuyerCancel(t *testing.T) {
 	}
 }
 
-func TestCircuitBreakerCountsStreamingBuyerCancelBeforeFirstChunk(t *testing.T) {
+func TestCircuitBreakerExcludesStreamingBuyerCancelBeforeFirstChunk(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
 	relayStarted := make(chan struct{})
@@ -618,8 +637,8 @@ func TestCircuitBreakerCountsStreamingBuyerCancelBeforeFirstChunk(t *testing.T) 
 	case <-time.After(time.Second):
 		t.Fatal("handler did not return after buyer cancel")
 	}
-	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
-		t.Fatalf("p1 after zero-chunk streaming cancel = %#v ok=%v, want degraded", p1, ok)
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateReady {
+		t.Fatalf("p1 after zero-chunk streaming cancel = %#v ok=%v, want ready", p1, ok)
 	}
 }
 
@@ -675,8 +694,8 @@ func TestCircuitBreakerCountsOnlyQualifiedZeroTokenCompletion(t *testing.T) {
 func TestCircuitBreakerRetripAfterRecoveryMarksUnavailable(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
-	registry.MarkState("p1", "s1", pool.StateDegraded)
-	registry.MarkState("p1", "s1", pool.StateReady)
+	registry.MarkDegradedForRecovery("p1", "s1", pool.RecoveryReasonBreaker)
+	registry.MarkRecovered("p1", "s1", time.Now().UTC())
 	server := buyer.NewServer(
 		registry,
 		zerolog.Nop(),
@@ -693,6 +712,30 @@ func TestCircuitBreakerRetripAfterRecoveryMarksUnavailable(t *testing.T) {
 	}
 	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateUnavailable {
 		t.Fatalf("p1 after re-trip = %#v ok=%v, want unavailable", p1, ok)
+	}
+}
+
+func TestCircuitBreakerGenericReadyReturnDoesNotCountAsRecovery(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registry.MarkState("p1", "s1", pool.StateDegraded)
+	registry.MarkState("p1", "s1", pool.StateReady)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithFailoverConfig(false, 50*time.Millisecond),
+		buyer.WithBreakerConfig(1, time.Second),
+		buyer.WithRelay(deadMidInferenceRelay, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
+		t.Fatalf("p1 after generic ready then breaker trip = %#v ok=%v, want degraded", p1, ok)
 	}
 }
 

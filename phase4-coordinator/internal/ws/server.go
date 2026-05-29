@@ -1,8 +1,10 @@
 package ws
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -447,20 +449,32 @@ func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool 
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), s.warmupGateTimeout())
 	defer cancel()
+	if !provider.IsWSTunneled() {
+		return s.runHTTPWarmupGateAttempt(ctx, provider, body)
+	}
+	return s.runWSWarmupGateAttempt(ctx, provider, attempt, body)
+}
+
+func (s *Server) runWSWarmupGateAttempt(ctx context.Context, provider pool.Provider, attempt int, body []byte) bool {
 	requestID := "warmup-gate-" + provider.AssignedID + "-" + itoa(attempt)
 	relay, err := s.DispatchInference(ctx, provider, requestID, body, false)
 	if err != nil {
 		return false
 	}
 	chunks := relay.Chunks
+	observedOutput := false
 	for {
 		select {
-		case _, ok := <-chunks:
+		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
+				continue
+			}
+			if warmupChunkHasOutput(chunk.Data) {
+				observedOutput = true
 			}
 		case end := <-relay.Done:
-			return warmupGatePassed(end)
+			return warmupGatePassed(end, observedOutput)
 		case <-relay.Errors:
 			return false
 		case <-ctx.Done():
@@ -469,20 +483,138 @@ func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool 
 	}
 }
 
-func warmupGatePassed(end InferenceResponseEnd) bool {
+func (s *Server) runHTTPWarmupGateAttempt(ctx context.Context, provider pool.Provider, body []byte) bool {
+	endpoint := strings.TrimRight(strings.TrimSpace(provider.EndpointURL), "/")
+	if endpoint == "" {
+		return false
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return false
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return false
+	}
+	return warmupPayloadHasOutput(raw) && warmupCompletionUsagePassed(raw)
+}
+
+func warmupGatePassed(end InferenceResponseEnd, observedOutput bool) bool {
 	if end.Status != "complete" {
 		return false
 	}
-	if len(end.Usage) == 0 {
+	if !observedOutput {
+		return false
+	}
+	return warmupUsagePassed(end.Usage)
+}
+
+func warmupUsagePassed(raw json.RawMessage) bool {
+	if len(raw) == 0 {
 		return false
 	}
 	var usage struct {
 		CompletionTokens int `json:"completion_tokens"`
 	}
-	if err := json.Unmarshal(end.Usage, &usage); err != nil {
+	if err := json.Unmarshal(raw, &usage); err != nil {
 		return false
 	}
 	return usage.CompletionTokens > 0
+}
+
+func warmupCompletionUsagePassed(raw []byte) bool {
+	var resp struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false
+	}
+	return warmupUsagePassed(resp.Usage)
+}
+
+func warmupChunkHasOutput(data string) bool {
+	hasDataLines := false
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		hasDataLines = true
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if warmupPayloadHasOutput([]byte(payload)) {
+			return true
+		}
+	}
+	if hasDataLines {
+		return false
+	}
+	return warmupPayloadHasOutput([]byte(data))
+}
+
+func warmupPayloadHasOutput(raw []byte) bool {
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+			Delta struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"delta"`
+			Text json.RawMessage `json:"text"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return false
+	}
+	for _, choice := range resp.Choices {
+		if rawJSONHasText(choice.Message.Content) || rawJSONHasText(choice.Delta.Content) || rawJSONHasText(choice.Text) {
+			return true
+		}
+	}
+	return false
+}
+
+func rawJSONHasText(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return false
+	}
+	return valueHasText(value)
+}
+
+func valueHasText(value any) bool {
+	switch v := value.(type) {
+	case string:
+		return strings.TrimSpace(v) != ""
+	case []any:
+		for _, item := range v {
+			if valueHasText(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, key := range []string{"text", "content"} {
+			if valueHasText(v[key]) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) warmupGateCurrent(providerID, assignedID string) bool {

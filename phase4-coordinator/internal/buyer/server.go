@@ -74,7 +74,6 @@ const (
 	breakerFaultDeadWS              breakerFault = "dead_ws_mid_inference"
 	breakerFaultRelayTimeout        breakerFault = "relay_timeout_mid_inference"
 	breakerFaultZeroTokenCompletion breakerFault = "zero_token_completion"
-	breakerFaultStreamingCancelZero breakerFault = "streaming_cancel_zero_chunks"
 )
 
 func WithPreflight(fn PreflightFunc) Option {
@@ -595,7 +594,6 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	flusher, _ := w.(http.Flusher)
 	chunks := relay.Chunks
 	committed := false
-	chunksReceived := 0
 	finishReason := ""
 	commit := func() {
 		if committed {
@@ -613,16 +611,12 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		select {
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
-			if chunksReceived == 0 {
-				s.recordBreakerFault(provider, breakerFaultStreamingCancelZero, requestID)
-			}
 			return wsForwardCancelled
 		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
 				continue
 			}
-			chunksReceived++
 			if reason := finishReasonFromSSE(chunk.Data); reason != "" {
 				finishReason = reason
 			}
@@ -643,7 +637,6 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 						chunks = nil
 						continue
 					}
-					chunksReceived++
 					if reason := finishReasonFromSSE(chunk.Data); reason != "" {
 						finishReason = reason
 					}
@@ -672,9 +665,6 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws streaming relay failed")
 			if errors.Is(err, providerws.ErrRelayClosed) {
 				if r.Context().Err() != nil {
-					if chunksReceived == 0 {
-						s.recordBreakerFault(provider, breakerFaultStreamingCancelZero, requestID)
-					}
 					return wsForwardCancelled
 				}
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
@@ -1216,7 +1206,7 @@ func writeSSEError(w http.ResponseWriter, message, code string) {
 func (s *Server) handleProviderFailure(provider pool.Provider, status int) {
 	switch status {
 	case http.StatusBadGateway, http.StatusGatewayTimeout:
-		if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateDegraded) {
+		if s.pool.MarkDegradedForRecovery(provider.ProviderID, provider.AssignedID, pool.RecoveryReasonProviderFailure) {
 			s.log.Warn().Str("provider_id", provider.ProviderID).Int("status", status).Msg("provider marked degraded after upstream failure")
 			s.startRecoveryProbe(provider)
 		}
@@ -1243,7 +1233,7 @@ func (s *Server) startRecoveryProbe(provider pool.Provider) {
 			requestID := fmt.Sprintf("recovery-probe-%s-%d", provider.AssignedID, attempt)
 			result, ok, err := s.preflight(provider, requestID, 128, s.preflightTimeout)
 			if err == nil && ok && result.Accepted {
-				if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateReady) {
+				if s.pool.MarkRecovered(provider.ProviderID, provider.AssignedID, s.now()) {
 					s.log.Info().Str("provider_id", provider.ProviderID).Str("request_id", requestID).Msg("provider recovery preflight accepted")
 				}
 				return

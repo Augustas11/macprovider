@@ -13,6 +13,7 @@ import (
 type State string
 type Tier string
 type InferencePath string
+type RecoveryReason string
 
 const (
 	StateReady       State = "ready"
@@ -27,6 +28,9 @@ const (
 
 	InferencePathHTTPForwarding InferencePath = "http_forwarding"
 	InferencePathWSTunneled     InferencePath = "ws_tunneled"
+
+	RecoveryReasonBreaker         RecoveryReason = "breaker"
+	RecoveryReasonProviderFailure RecoveryReason = "provider_failure"
 )
 
 type Provider struct {
@@ -69,14 +73,20 @@ func (p Provider) IsWSTunneled() bool {
 }
 
 type Registry struct {
-	mu               sync.RWMutex
-	providers        map[string]*Provider
-	sessions         map[string]*Provider
-	endpoints        map[string]config.ProviderConfig
-	seenModels       map[string]struct{}
-	breakerFaults    map[string][]time.Time
-	lastReadyReturns map[string]time.Time
-	maxProvider      int
+	mu                    sync.RWMutex
+	providers             map[string]*Provider
+	sessions              map[string]*Provider
+	endpoints             map[string]config.ProviderConfig
+	seenModels            map[string]struct{}
+	breakerFaults         map[string][]time.Time
+	recoveryHolds         map[string]recoveryHold
+	lastBreakerRecoveries map[string]time.Time
+	maxProvider           int
+}
+
+type recoveryHold struct {
+	assignedID string
+	reason     RecoveryReason
 }
 
 func NewRegistry(providers []config.ProviderConfig) *Registry {
@@ -85,12 +95,13 @@ func NewRegistry(providers []config.ProviderConfig) *Registry {
 		endpoints[p.ProviderID] = p
 	}
 	return &Registry{
-		providers:        map[string]*Provider{},
-		sessions:         map[string]*Provider{},
-		endpoints:        endpoints,
-		seenModels:       map[string]struct{}{},
-		breakerFaults:    map[string][]time.Time{},
-		lastReadyReturns: map[string]time.Time{},
+		providers:             map[string]*Provider{},
+		sessions:              map[string]*Provider{},
+		endpoints:             endpoints,
+		seenModels:            map[string]struct{}{},
+		breakerFaults:         map[string][]time.Time{},
+		recoveryHolds:         map[string]recoveryHold{},
+		lastBreakerRecoveries: map[string]time.Time{},
 	}
 }
 
@@ -123,7 +134,8 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 	r.sessions[p.AssignedID] = p
 	r.seenModels[p.ModelID] = struct{}{}
 	delete(r.breakerFaults, p.ProviderID)
-	delete(r.lastReadyReturns, p.ProviderID)
+	delete(r.recoveryHolds, p.ProviderID)
+	delete(r.lastBreakerRecoveries, p.ProviderID)
 	return old
 }
 
@@ -158,9 +170,45 @@ func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
-	previous := p.State
-	p.State = state
-	r.applyBreakerStateTransitionLocked(providerID, previous, state, time.Now().UTC())
+	if !r.canSetCoordinatorStateLocked(p, state) {
+		return false
+	}
+	r.setStateLocked(p, state)
+	return true
+}
+
+func (r *Registry) MarkDegradedForRecovery(providerID, assignedID string, reason RecoveryReason) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	r.setStateLocked(p, StateDegraded)
+	r.recoveryHolds[providerID] = recoveryHold{assignedID: assignedID, reason: reason}
+	return true
+}
+
+func (r *Registry) MarkRecovered(providerID, assignedID string, at time.Time) bool {
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return false
+	}
+	hold, held := r.recoveryHolds[providerID]
+	if !held || hold.assignedID != assignedID {
+		return false
+	}
+	r.setStateLocked(p, StateReady)
+	delete(r.breakerFaults, providerID)
+	delete(r.recoveryHolds, providerID)
+	if hold.reason == RecoveryReasonBreaker {
+		r.lastBreakerRecoveries[providerID] = at
+	}
 	return true
 }
 
@@ -211,30 +259,50 @@ func (r *Registry) RecordBreakerFault(providerID, assignedID string, at time.Tim
 	if result.Count < threshold {
 		return result
 	}
-	if recoveredAt := r.lastReadyReturns[providerID]; !recoveredAt.IsZero() && at.Sub(recoveredAt) <= window {
-		previous := p.State
-		p.State = StateUnavailable
-		r.applyBreakerStateTransitionLocked(providerID, previous, StateUnavailable, at)
+	if recoveredAt := r.lastBreakerRecoveries[providerID]; !recoveredAt.IsZero() && at.Sub(recoveredAt) <= window {
+		r.setStateLocked(p, StateUnavailable)
 		result.Tripped = BreakerTripUnavailable
 		return result
 	}
-	previous := p.State
-	p.State = StateDegraded
-	r.applyBreakerStateTransitionLocked(providerID, previous, StateDegraded, at)
+	r.setStateLocked(p, StateDegraded)
+	r.recoveryHolds[providerID] = recoveryHold{assignedID: assignedID, reason: RecoveryReasonBreaker}
 	result.Tripped = BreakerTripDegraded
 	return result
 }
 
-func (r *Registry) applyBreakerStateTransitionLocked(providerID string, previous, next State, at time.Time) {
+func (r *Registry) canSetCoordinatorStateLocked(p *Provider, next State) bool {
+	if next != StateReady {
+		return true
+	}
+	if hold, ok := r.recoveryHolds[p.ProviderID]; ok && hold.assignedID == p.AssignedID {
+		return false
+	}
+	return p.State != StateUnavailable
+}
+
+func (r *Registry) canApplyProviderStateLocked(p *Provider, next State) bool {
+	if next != StateReady {
+		return true
+	}
+	if hold, ok := r.recoveryHolds[p.ProviderID]; ok && hold.assignedID == p.AssignedID {
+		return false
+	}
+	return p.State != StateUnavailable
+}
+
+func (r *Registry) setStateLocked(p *Provider, next State) {
+	p.State = next
+	r.applyStateCleanupLocked(p.ProviderID, next)
+}
+
+func (r *Registry) applyStateCleanupLocked(providerID string, next State) {
 	switch next {
 	case StateReady:
 		delete(r.breakerFaults, providerID)
-		if previous != StateReady {
-			r.lastReadyReturns[providerID] = at
-		}
 	case StateDraining, StateUnavailable:
 		delete(r.breakerFaults, providerID)
-		delete(r.lastReadyReturns, providerID)
+		delete(r.recoveryHolds, providerID)
+		delete(r.lastBreakerRecoveries, providerID)
 	}
 }
 
@@ -276,7 +344,9 @@ func (r *Registry) ApplyHeartbeat(providerID string, hb HeartbeatUpdate) (*Provi
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
 	r.seenModels[hb.ModelID] = struct{}{}
 	if hb.Status != "" && hb.Status != p.State {
-		p.State = hb.Status
+		if r.canApplyProviderStateLocked(p, hb.Status) {
+			r.setStateLocked(p, hb.Status)
+		}
 	}
 	cp := *p
 	var gap time.Duration
@@ -333,7 +403,9 @@ func (r *Registry) ApplyStateUpdate(providerID string, update StateUpdate) (*Pro
 	if p == nil {
 		return nil, false
 	}
-	p.State = update.State
+	if r.canApplyProviderStateLocked(p, update.State) {
+		r.setStateLocked(p, update.State)
+	}
 	if update.SlotsFree != nil {
 		p.SlotsFree = *update.SlotsFree
 	}

@@ -1,13 +1,17 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.3.0 (2026-05-30, warm-up capability gate)
+**Version:** 1.3.1 (2026-05-30, Phase 7 P1 audit fixes)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
 
+**Change log v1.3.1:**
+- Tightens **FR-P8a** after audit: WS-tunneled providers are probed with the SPEC-001 `inference_request` path, while HTTP-forwarding providers are probed through their configured `/v1/chat/completions` HTTP endpoint and MUST NOT receive WS `inference_request` probes. A warm-up pass now requires both observed non-empty output and `usage.completion_tokens > 0`.
+- Tightens **FR-P11a** after audit: provider-reported heartbeat/state `ready` cannot clear coordinator-owned breaker/recovery holds, buyer-initiated streaming cancellations are excluded from breaker accounting, and only a successful breaker recovery records the re-trip anchor. Generic `ready` transitions such as warm-up admission do not make the next breaker trip immediately fatal.
+
 **Change log v1.3.0:**
-- Adds **FR-P8a**: an admission-time warm-up capability gate. When enabled (`pool.warmup_gate_enabled`, default true), a newly connected provider is registered as `degraded` and is not buyer-routable until the coordinator sends a tiny `inference_request` over the provider WebSocket and observes a successful token-producing completion within `pool.warmup_gate_timeout_s` (default 90s, `pool.warmup_gate_max_tokens` default 2). The gate is an actual inference, not self-reported throughput. Failure/timeout retries on degraded backoff up to `pool.degraded_max_retries`; after exhaustion the provider becomes `unavailable` with reason `warmup_failed`. Existing wake-from-sleep `warm_up` fallback is now config-driven by `pool.warmup_fallback_s` (default 60s). No SPEC-001 / phase3-binary wire change: the gate reuses `inference_request`, `inference_response_chunk`, and `inference_response_end`.
+- Adds **FR-P8a**: an admission-time warm-up capability gate. When enabled (`pool.warmup_gate_enabled`, default true), a newly connected provider is registered as `degraded` and is not buyer-routable until the coordinator runs a tiny inference probe and observes a successful token-producing completion within `pool.warmup_gate_timeout_s` (default 90s, `pool.warmup_gate_max_tokens` default 2). WS-tunneled providers are probed over WebSocket; HTTP-forwarding providers are probed through their configured HTTP endpoint. The gate is an actual inference, not self-reported throughput. Failure/timeout retries on degraded backoff up to `pool.degraded_max_retries`; after exhaustion the provider becomes `unavailable` with reason `warmup_failed`. Existing wake-from-sleep `warm_up` fallback is now config-driven by `pool.warmup_fallback_s` (default 60s). No SPEC-001 / phase3-binary wire change: WS-tunneled probing reuses `inference_request`, `inference_response_chunk`, and `inference_response_end`.
 
 **Change log v1.2.0:**
-- Adds **FR-P11a**: a provider **circuit-breaker** for in-flight inference faults. Until now only HTTP 502/504 (HTTP-forwarding path) degraded a provider; in WS-tunneled mode a dead-WS-mid-inference, a relay timeout, or a zero-token completion only failed the individual request (fast-fail/failover per F-4) while the faulting provider stayed `ready` and kept receiving buyer traffic (observed live: an undersized provider that fast-failed every non-trivial request). v1.2.0 makes a provider that accumulates `pool.breaker_failure_threshold` (default 2) qualifying in-flight faults within a rolling `pool.breaker_window_s` (default 120) window transition to `degraded` and run the existing FR-P11 recovery-preflight cycle before returning to `ready`. Buyer-initiated cancellation / client hangup (buyer context cancelled) is EXPLICITLY EXCLUDED and never counts against a provider. Also wires the previously-inert `pool.degraded_backoff_s` and `pool.degraded_max_retries` keys (defined since v1.1, never read) into that recovery cycle, and adds `pool.breaker_*` plus the v1.1.7 `pool.heartbeat_miss_threshold_s` to the config schema block (both were previously only described in prose). Per independent review: FR-P11a **supersedes** FR-P20's former "3 consecutive timeouts → degraded" clause (single source of truth); zero-token only counts when `finish_reason` is abnormal (a clean empty `stop` is valid); a *streaming* buyer-cancel that arrives with zero received chunks after routing is attributed to the provider (resolves the 300s=300s cancel/timeout race), while non-streaming buyer-cancels are excluded — single-chunk delivery means chunk count carries no progress signal, so unfit non-streaming providers are caught by the relay-timeout instead; and a provider that re-trips the breaker within the window after recovering is marked `unavailable` to bound flapping (recovery preflight cannot prove token production until the warm-up gate lands). No wire-protocol change; SPEC-001 v1.2.4 unaffected; provider binaries need no update. (The proactive half of provider fitness — an admission warm-up capability gate — is a separate Phase 7 change.)
+- Adds **FR-P11a**: a provider **circuit-breaker** for in-flight inference faults. Until now only HTTP 502/504 (HTTP-forwarding path) degraded a provider; in WS-tunneled mode a dead-WS-mid-inference, a relay timeout, or a zero-token completion only failed the individual request (fast-fail/failover per F-4) while the faulting provider stayed `ready` and kept receiving buyer traffic (observed live: an undersized provider that fast-failed every non-trivial request). v1.2.0 makes a provider that accumulates `pool.breaker_failure_threshold` (default 2) qualifying in-flight faults within a rolling `pool.breaker_window_s` (default 120) window transition to `degraded` and run the existing FR-P11 recovery-preflight cycle before returning to `ready`. Buyer-initiated cancellation / client hangup (buyer context cancelled) is EXPLICITLY EXCLUDED and never counts against a provider. Also wires the previously-inert `pool.degraded_backoff_s` and `pool.degraded_max_retries` keys (defined since v1.1, never read) into that recovery cycle, and adds `pool.breaker_*` plus the v1.1.7 `pool.heartbeat_miss_threshold_s` to the config schema block (both were previously only described in prose). Per independent review: FR-P11a **supersedes** FR-P20's former "3 consecutive timeouts → degraded" clause (single source of truth); zero-token only counts when `finish_reason` is abnormal (a clean empty `stop` is valid); buyer-cancels are excluded in both streaming and non-streaming paths; and a provider that re-trips the breaker within the window after breaker recovery is marked `unavailable` to bound flapping. No wire-protocol change; SPEC-001 v1.2.4 unaffected; provider binaries need no update. (The proactive half of provider fitness is FR-P8a's admission warm-up capability gate.)
 
 **Change log v1.1.7:**
 - Hotfix to F-4 liveness detection. The v1.1.6 missed-heartbeat monitor closed a provider WebSocket after `heartbeat_interval_s + routing.failover_timeout_s` (35s with production defaults) measured from the last *heartbeat*. A provider doing single-threaded MLX inference cannot emit heartbeats while its one slot is busy, so any generation longer than ~35s was killed mid-request (observed live on Pearl: a Llama-3.2-3B provider at ~0.6 tps fast-failed every non-trivial completion). Fix: (1) the liveness monitor now measures staleness from the last inbound frame of ANY type — in-flight `inference_response_chunk` frames count as activity and keep a busy provider alive; (2) the threshold is a new dedicated key `pool.heartbeat_miss_threshold_s` (default 90s), decoupled from `routing.failover_timeout_s`. In-flight observed close/write failures are unchanged (still bounded by `routing.failover_timeout_s`). No wire-protocol change; provider binaries need no update.
@@ -415,20 +419,33 @@ anyway.
 If `pool.warmup_gate_enabled` is true (default), a newly connected
 provider MUST NOT be buyer-routable immediately after `hello`. The
 coordinator registers it as `degraded`, sends `hello_ack`, then starts a
-capability probe by sending a minimal `inference_request` over the
-provider WebSocket:
+capability probe. Probe transport follows the provider's forwarding
+mode:
+
+- WS-tunneled providers: send a minimal SPEC-001 `inference_request`
+  over the provider WebSocket.
+- HTTP-forwarding providers: send the same minimal OpenAI-compatible
+  request as `POST {endpoint_url}/v1/chat/completions`. The coordinator
+  MUST NOT send `inference_request` over the WebSocket to an
+  HTTP-forwarding provider.
+
+Probe payload:
 
 - model: the `hello.model_id`.
 - prompt: a small deterministic self-test prompt.
 - `max_tokens`: `pool.warmup_gate_max_tokens` (default 2).
 - non-streaming mode.
 
-The provider passes only if the probe reaches `inference_response_end`
-with `status: "complete"` and `usage.completion_tokens > 0` within
-`pool.warmup_gate_timeout_s` (default 90s). A self-reported
-`throughput_tps_estimate` is never sufficient. A provider that reports
-`ready` through heartbeat or `state_update` while the gate is pending
-MUST remain non-routable until the token-producing probe passes.
+The provider passes only if the probe observes non-empty assistant
+output and positive token usage (`usage.completion_tokens > 0`) within
+`pool.warmup_gate_timeout_s` (default 90s). For WS-tunneled providers,
+the terminal frame must be `inference_response_end` with
+`status: "complete"`; for HTTP-forwarding providers, the HTTP response
+must be 200 with an OpenAI-compatible response body. A self-reported
+`throughput_tps_estimate`, a `ready` heartbeat/state update, or usage
+metadata without observed output is never sufficient. A provider that
+reports `ready` through heartbeat or `state_update` while the gate is
+pending MUST remain non-routable until the token-producing probe passes.
 
 On pass, coordinator marks the provider `ready` and buyer routing may
 select it. On failure, timeout, provider disconnect, or zero-token
@@ -553,30 +570,15 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
   **Cancel-vs-timeout race rule (C2):** because the gateway's
   `coordinator_request_seconds` and the coordinator's `request_timeout_s` may
   be equal (both default 300s), a buyer-side context cancellation can race
-  the relay timeout. The disambiguation depends on streaming mode, because
-  chunk count only carries a progress signal when streaming:
-  - **Streaming requests:** a buyer-context cancellation arriving AFTER
-    `inference_request` was routed AND with ZERO `inference_response_chunk`
-    frames received is attributed to the **provider** (it produced nothing)
-    and counts; a cancellation after ≥1 chunk is a genuine buyer cancel and
-    does NOT count (provider was making progress).
-  - **Non-streaming requests:** SPEC-001 delivers the entire body as a single
-    `inference_response_chunk` immediately before `inference_response_end`, so
-    chunk count is zero for the whole generation and CANNOT distinguish a
-    stalled provider from a healthy one mid-generation. A buyer cancellation
-    before `inference_response_end` therefore MUST be treated as a genuine
-    buyer cancel and EXCLUDED (never charged to the provider — this preserves
-    FR-P18's "MUST NOT mark a provider unhealthy due to a slow cancellation").
-    An unfit non-streaming provider is instead caught by the
-    `relay-timeout-mid-inference` fault (it never reaches
-    `inference_response_end`), not by cancel attribution.
-  Because the non-streaming path relies on the relay timeout for fault
-  detection, operators SHOULD set the coordinator `request_timeout_s` strictly
-  below the gateway `coordinator_request_seconds` so the coordinator's
-  relay-timeout fires first and is unambiguously provider-attributable; with
-  equal timers a gateway-initiated cancel can pre-empt the coordinator's
-  timeout and an unfit non-streaming provider may escape detection until a
-  non-cancelled request times out.
+  the relay timeout. The coordinator MUST use the observed relay error to
+  disambiguate: a provider-side `relay-timeout-mid-inference` counts, while a
+  buyer-context cancellation is excluded in both streaming and non-streaming
+  paths, even if no chunks have been received yet. Operators SHOULD set the
+  coordinator `request_timeout_s` strictly below the gateway
+  `coordinator_request_seconds` so the coordinator's relay-timeout fires
+  first and is unambiguously provider-attributable; with equal timers a
+  gateway-initiated cancel can pre-empt the coordinator's timeout and an
+  unfit provider may escape detection until a non-cancelled request times out.
 - **Trip condition:** when a provider accumulates
   `pool.breaker_failure_threshold` (default 2) qualifying faults within a
   rolling `pool.breaker_window_s` (default 120s), the coordinator marks it
@@ -591,19 +593,19 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
 - **No flapping on a single blip:** the threshold + window are REQUIRED so a
   single transient fault does not degrade an otherwise-healthy provider — it
   fails only its own request (F-4) and leaves the provider `ready`.
-- **Recovery is best-effort until the warm-up gate lands (M2).** The FR-P11
-  recovery preflight proves WS liveness + capacity, NOT token production — a
-  provider degraded for zero-token/timeout faults may pass it and return to
-  `ready` while still broken. To bound the resulting flap: the coordinator
-  MUST record the timestamp of each return to `ready`; a breaker trip whose
-  triggering fault occurs within `pool.breaker_window_s` of that recovery
-  timestamp is a **re-trip** and MUST mark the provider `unavailable` (removed
-  until it reconnects with a fresh hello) instead of degrade-and-retry again.
-  (This re-trip guard uses a distinct post-recovery anchor; it is not the same
-  measurement as the rolling fault-count window, though both are sized by
-  `pool.breaker_window_s`.) The proactive warm-up
-  capability gate (separate Phase 7 change) will later replace the recovery
-  preflight with a token-producing probe and remove this limitation.
+- **Recovery preflight is liveness/capacity only.** The FR-P11 recovery
+  preflight proves WS liveness + capacity, NOT token production — a provider
+  degraded for zero-token/timeout faults may pass it and return to `ready`
+  while still broken. To bound the resulting flap: the coordinator MUST
+  record the timestamp of each successful breaker recovery to `ready`; a
+  breaker trip whose triggering fault occurs within `pool.breaker_window_s` of
+  that breaker-recovery timestamp is a **re-trip** and MUST mark the provider
+  `unavailable` (removed until it reconnects with a fresh hello) instead of
+  degrade-and-retry again. Generic `ready` transitions, including warm-up
+  admission success and HTTP 502/504 recovery, MUST NOT create a breaker
+  re-trip anchor. Provider-originated heartbeat/state `ready` updates MUST NOT
+  clear a coordinator-owned breaker hold; only the coordinator recovery path
+  may return a held provider to `ready`.
 - **No new wire messages:** routing exclusion, recovery preflight, and the
   observable fields it relies on (`usage.completion_tokens`, `finish_reason`,
   `inference_response_chunk` count) all already exist in SPEC-001 v1.2.4. The
@@ -3224,6 +3226,7 @@ routing:
 
 auth:
   operator_key: "<required>"   # Bearer token for /poolz and /admin/blacklist
+  require_provider_tokens: false # Set true before exposing provider WS publicly
 
 storage:
   db_path: "coordinator.db"

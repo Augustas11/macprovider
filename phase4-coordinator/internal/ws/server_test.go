@@ -41,6 +41,7 @@ func TestWarmupGateHoldsProviderUntilTokenProducingProbe(t *testing.T) {
 		cfg.Pool.WarmupGateTimeoutS = 2
 		cfg.Pool.WarmupGateMaxTokens = 2
 		cfg.Pool.DegradedMaxRetries = 1
+		cfg.Providers[0].EndpointURL = ""
 	})
 	defer h.HTTP.Close()
 
@@ -93,6 +94,7 @@ func TestWarmupGateTimeoutMarksProviderUnavailable(t *testing.T) {
 		cfg.Pool.WarmupGateEnabled = true
 		cfg.Pool.WarmupGateTimeoutS = 1
 		cfg.Pool.DegradedMaxRetries = 1
+		cfg.Providers[0].EndpointURL = ""
 	})
 	defer h.HTTP.Close()
 
@@ -111,6 +113,16 @@ func TestWarmupGateTimeoutMarksProviderUnavailable(t *testing.T) {
 		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
 		return ok && provider.State == pool.StateUnavailable
 	})
+	hb := heartbeat()
+	hb["status"] = "ready"
+	hb["slots_free"] = 0
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write ready heartbeat after warmup failure: %v", err)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateUnavailable && provider.SlotsFree == 0
+	})
 }
 
 func TestWarmupGateRejectsZeroTokenCompletion(t *testing.T) {
@@ -118,6 +130,7 @@ func TestWarmupGateRejectsZeroTokenCompletion(t *testing.T) {
 		cfg.Pool.WarmupGateEnabled = true
 		cfg.Pool.WarmupGateTimeoutS = 2
 		cfg.Pool.DegradedMaxRetries = 1
+		cfg.Providers[0].EndpointURL = ""
 	})
 	defer h.HTTP.Close()
 
@@ -136,12 +149,102 @@ func TestWarmupGateRejectsZeroTokenCompletion(t *testing.T) {
 	})
 }
 
+func TestWarmupGateRejectsUsageWithoutObservedOutput(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.WarmupGateEnabled = true
+		cfg.Pool.WarmupGateTimeoutS = 2
+		cfg.Pool.DegradedMaxRetries = 1
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+	req := readInferenceRequest(t, conn)
+
+	if err := wsutil.WriteClientText(conn, mustJSON(providerws.InferenceResponseEnd{
+		Type:       "inference_response_end",
+		RequestID:  req.RequestID,
+		Status:     "complete",
+		ChunksSent: 0,
+		Usage: json.RawMessage(mustJSON(map[string]any{
+			"prompt_tokens":     4,
+			"completion_tokens": 1,
+			"total_tokens":      5,
+		})),
+	})); err != nil {
+		t.Fatalf("write warmup end: %v", err)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateUnavailable
+	})
+}
+
+func TestWarmupGateUsesHTTPForHTTPForwardingProvider(t *testing.T) {
+	requestSeen := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/chat/completions" {
+			t.Fatalf("warmup request = %s %s, want POST /v1/chat/completions", r.Method, r.URL.Path)
+		}
+		var body struct {
+			Model     string `json:"model"`
+			MaxTokens int    `json:"max_tokens"`
+			Stream    bool   `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("warmup body json: %v", err)
+		}
+		if body.Model != "mlx-community/Qwen2.5-7B-Instruct-4bit" || body.MaxTokens != 2 || body.Stream {
+			t.Fatalf("warmup body = %#v", body)
+		}
+		select {
+		case requestSeen <- struct{}{}:
+		default:
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"warmup-http","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.WarmupGateEnabled = true
+		cfg.Pool.WarmupGateTimeoutS = 2
+		cfg.Pool.WarmupGateMaxTokens = 2
+		cfg.Pool.DegradedMaxRetries = 1
+		cfg.Providers[0].EndpointURL = upstream.URL
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	select {
+	case <-requestSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("HTTP warmup request did not reach upstream")
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateReady && provider.InferencePath == pool.InferencePathHTTPForwarding
+	})
+}
+
 func TestWarmupGateSuppressesReadyProviderUpdates(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.WarmupGateEnabled = true
 		cfg.Pool.WarmupGateTimeoutS = 2
 		cfg.Pool.WarmupGateMaxTokens = 2
 		cfg.Pool.DegradedMaxRetries = 1
+		cfg.Providers[0].EndpointURL = ""
 	})
 	defer h.HTTP.Close()
 
