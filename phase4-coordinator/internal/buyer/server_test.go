@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -470,6 +471,231 @@ func TestChatCompletionsWSTunneledTimeoutReturns504(t *testing.T) {
 	}
 }
 
+func TestCircuitBreakerTripsAfterRepeatedDeadWSAndRecovers(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	recoveryIDs := make(chan string, 1)
+	relayCalls := 0
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithFailoverConfig(false, 50*time.Millisecond),
+		buyer.WithBreakerConfig(2, time.Second),
+		buyer.WithRecoveryConfig(100*time.Millisecond, 1, true),
+		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
+			recoveryIDs <- requestID
+			return buyer.PreflightResult{Accepted: true}, true, nil
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			relayCalls++
+			return deadMidInferenceRelay(ctx, provider, requestID, body, stream)
+		}, time.Second),
+	)
+
+	first := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if first.Code != http.StatusBadGateway {
+		t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateReady {
+		t.Fatalf("p1 after first fault = %#v ok=%v, want ready", p1, ok)
+	}
+
+	second := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if second.Code != http.StatusBadGateway {
+		t.Fatalf("second status=%d body=%s", second.Code, second.Body.String())
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
+		t.Fatalf("p1 after breaker trip = %#v ok=%v, want degraded", p1, ok)
+	}
+
+	blocked := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if blocked.Code != http.StatusServiceUnavailable {
+		t.Fatalf("blocked status=%d body=%s", blocked.Code, blocked.Body.String())
+	}
+	if relayCalls != 2 {
+		t.Fatalf("relayCalls = %d, want 2 before recovery", relayCalls)
+	}
+
+	select {
+	case requestID := <-recoveryIDs:
+		if !strings.HasPrefix(requestID, "recovery-probe-") {
+			t.Fatalf("requestID = %q", requestID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("recovery preflight did not run")
+	}
+	eventually(t, func() bool {
+		p1, ok := registry.Resolve("p1", "")
+		return ok && p1.State == pool.StateReady
+	})
+}
+
+func TestCircuitBreakerExcludesNonStreamingBuyerCancel(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	relayStarted := make(chan struct{})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithBreakerConfig(1, time.Second),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error, 1)
+			close(relayStarted)
+			go func() {
+				<-ctx.Done()
+				errs <- providerws.ErrRelayClosed
+			}()
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`))).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.Handler().ServeHTTP(rr, req)
+		close(done)
+	}()
+	select {
+	case <-relayStarted:
+	case <-time.After(time.Second):
+		t.Fatal("relay did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return after buyer cancel")
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateReady {
+		t.Fatalf("p1 after buyer cancel = %#v ok=%v, want ready", p1, ok)
+	}
+}
+
+func TestCircuitBreakerCountsStreamingBuyerCancelBeforeFirstChunk(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	relayStarted := make(chan struct{})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithBreakerConfig(1, time.Second),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error, 1)
+			close(relayStarted)
+			go func() {
+				<-ctx.Done()
+				errs <- providerws.ErrRelayClosed
+			}()
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`))).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.Handler().ServeHTTP(rr, req)
+		close(done)
+	}()
+	select {
+	case <-relayStarted:
+	case <-time.After(time.Second):
+		t.Fatal("relay did not start")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return after buyer cancel")
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
+		t.Fatalf("p1 after zero-chunk streaming cancel = %#v ok=%v, want degraded", p1, ok)
+	}
+}
+
+func TestCircuitBreakerCountsOnlyQualifiedZeroTokenCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		finishReason string
+		wantState    pool.State
+	}{
+		{name: "clean stop", finishReason: "stop", wantState: pool.StateReady},
+		{name: "abnormal", finishReason: "content_filter", wantState: pool.StateDegraded},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithBreakerConfig(1, time.Second),
+				buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+					chunks := make(chan providerws.InferenceResponseChunk, 1)
+					done := make(chan providerws.InferenceResponseEnd, 1)
+					errs := make(chan error, 1)
+					chunks <- providerws.InferenceResponseChunk{
+						Type:      "inference_response_chunk",
+						RequestID: requestID,
+						Seq:       0,
+						Data:      fmt.Sprintf(`{"id":"zero","choices":[{"message":{"content":""},"finish_reason":%q}]}`, tc.finishReason),
+					}
+					done <- providerws.InferenceResponseEnd{
+						Type:       "inference_response_end",
+						RequestID:  requestID,
+						Status:     "complete",
+						ChunksSent: 1,
+						Usage:      json.RawMessage(`{"prompt_tokens":4,"completion_tokens":0,"total_tokens":4}`),
+					}
+					return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+				}, time.Second),
+			)
+
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != tc.wantState {
+				t.Fatalf("p1 = %#v ok=%v, want %s", p1, ok, tc.wantState)
+			}
+		})
+	}
+}
+
+func TestCircuitBreakerRetripAfterRecoveryMarksUnavailable(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registry.MarkState("p1", "s1", pool.StateDegraded)
+	registry.MarkState("p1", "s1", pool.StateReady)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithFailoverConfig(false, 50*time.Millisecond),
+		buyer.WithBreakerConfig(1, time.Second),
+		buyer.WithRelay(deadMidInferenceRelay, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateUnavailable {
+		t.Fatalf("p1 after re-trip = %#v ok=%v, want unavailable", p1, ok)
+	}
+}
+
 func TestChatCompletionsWSTunneledQueueFullFallsBackToNextProvider(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
@@ -534,8 +760,8 @@ func TestChatCompletionsWSTunneledDeadProviderFastFails(t *testing.T) {
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_disconnected"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
 	}
-	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateUnavailable {
-		t.Fatalf("p1 = %#v ok=%v, want unavailable", p1, ok)
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateReady {
+		t.Fatalf("p1 = %#v ok=%v, want ready after one breaker fault", p1, ok)
 	}
 }
 
@@ -578,8 +804,8 @@ func TestChatCompletionsWSTunneledDeadProviderFailover(t *testing.T) {
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"id":"failover"`)) {
 		t.Fatalf("body not relayed: %s", rr.Body.String())
 	}
-	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateUnavailable {
-		t.Fatalf("p1 = %#v ok=%v, want unavailable", p1, ok)
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateReady {
+		t.Fatalf("p1 = %#v ok=%v, want ready after one breaker fault", p1, ok)
 	}
 }
 
@@ -734,8 +960,8 @@ func TestChatCompletionsWSTunneledStreamingDeadProviderAfterFirstByteTerminatesS
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_disconnected"`)) {
 		t.Fatalf("body missing provider_disconnected: %s", rr.Body.String())
 	}
-	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateUnavailable {
-		t.Fatalf("p1 = %#v ok=%v, want unavailable", p1, ok)
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateReady {
+		t.Fatalf("p1 = %#v ok=%v, want ready after one breaker fault", p1, ok)
 	}
 }
 

@@ -69,12 +69,14 @@ func (p Provider) IsWSTunneled() bool {
 }
 
 type Registry struct {
-	mu          sync.RWMutex
-	providers   map[string]*Provider
-	sessions    map[string]*Provider
-	endpoints   map[string]config.ProviderConfig
-	seenModels  map[string]struct{}
-	maxProvider int
+	mu               sync.RWMutex
+	providers        map[string]*Provider
+	sessions         map[string]*Provider
+	endpoints        map[string]config.ProviderConfig
+	seenModels       map[string]struct{}
+	breakerFaults    map[string][]time.Time
+	lastReadyReturns map[string]time.Time
+	maxProvider      int
 }
 
 func NewRegistry(providers []config.ProviderConfig) *Registry {
@@ -83,10 +85,12 @@ func NewRegistry(providers []config.ProviderConfig) *Registry {
 		endpoints[p.ProviderID] = p
 	}
 	return &Registry{
-		providers:  map[string]*Provider{},
-		sessions:   map[string]*Provider{},
-		endpoints:  endpoints,
-		seenModels: map[string]struct{}{},
+		providers:        map[string]*Provider{},
+		sessions:         map[string]*Provider{},
+		endpoints:        endpoints,
+		seenModels:       map[string]struct{}{},
+		breakerFaults:    map[string][]time.Time{},
+		lastReadyReturns: map[string]time.Time{},
 	}
 }
 
@@ -118,6 +122,8 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 	r.providers[p.ProviderID] = p
 	r.sessions[p.AssignedID] = p
 	r.seenModels[p.ModelID] = struct{}{}
+	delete(r.breakerFaults, p.ProviderID)
+	delete(r.lastReadyReturns, p.ProviderID)
 	return old
 }
 
@@ -152,8 +158,84 @@ func (r *Registry) MarkState(providerID, assignedID string, state State) bool {
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
+	previous := p.State
 	p.State = state
+	r.applyBreakerStateTransitionLocked(providerID, previous, state, time.Now().UTC())
 	return true
+}
+
+type BreakerTripState string
+
+const (
+	BreakerTripNone        BreakerTripState = ""
+	BreakerTripDegraded    BreakerTripState = "degraded"
+	BreakerTripUnavailable BreakerTripState = "unavailable"
+)
+
+type BreakerFaultResult struct {
+	Count     int
+	Threshold int
+	Tripped   BreakerTripState
+}
+
+func (r *Registry) RecordBreakerFault(providerID, assignedID string, at time.Time, threshold int, window time.Duration) BreakerFaultResult {
+	if threshold <= 0 {
+		threshold = 2
+	}
+	if window <= 0 {
+		window = 120 * time.Second
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return BreakerFaultResult{Threshold: threshold}
+	}
+	if p.State != StateReady && p.State != StateBusy {
+		return BreakerFaultResult{Threshold: threshold}
+	}
+	cutoff := at.Add(-window)
+	faults := r.breakerFaults[providerID]
+	kept := faults[:0]
+	for _, faultAt := range faults {
+		if !faultAt.Before(cutoff) {
+			kept = append(kept, faultAt)
+		}
+	}
+	kept = append(kept, at)
+	r.breakerFaults[providerID] = kept
+	result := BreakerFaultResult{Count: len(kept), Threshold: threshold}
+	if result.Count < threshold {
+		return result
+	}
+	if recoveredAt := r.lastReadyReturns[providerID]; !recoveredAt.IsZero() && at.Sub(recoveredAt) <= window {
+		previous := p.State
+		p.State = StateUnavailable
+		r.applyBreakerStateTransitionLocked(providerID, previous, StateUnavailable, at)
+		result.Tripped = BreakerTripUnavailable
+		return result
+	}
+	previous := p.State
+	p.State = StateDegraded
+	r.applyBreakerStateTransitionLocked(providerID, previous, StateDegraded, at)
+	result.Tripped = BreakerTripDegraded
+	return result
+}
+
+func (r *Registry) applyBreakerStateTransitionLocked(providerID string, previous, next State, at time.Time) {
+	switch next {
+	case StateReady:
+		delete(r.breakerFaults, providerID)
+		if previous != StateReady {
+			r.lastReadyReturns[providerID] = at
+		}
+	case StateDraining, StateUnavailable:
+		delete(r.breakerFaults, providerID)
+		delete(r.lastReadyReturns, providerID)
+	}
 }
 
 func (r *Registry) Count() int {

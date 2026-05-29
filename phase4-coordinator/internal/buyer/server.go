@@ -32,6 +32,8 @@ type Server struct {
 	recoveryBackoff    time.Duration
 	recoveryMaxRetries int
 	recoveryProbe      bool
+	breakerThreshold   int
+	breakerWindow      time.Duration
 	relay              RelayFunc
 	admission          *providerws.AdmissionManager
 	requestTimeout     time.Duration
@@ -40,6 +42,7 @@ type Server struct {
 	provisionalWeight  float64
 	recovering         sync.Map
 	poolCheckLast      sync.Map
+	now                func() time.Time
 }
 
 type PreflightResult struct {
@@ -63,6 +66,15 @@ const (
 	wsForwardUnavailable                   wsForwardResult = "unavailable"
 	wsForwardProviderDisconnected          wsForwardResult = "provider_disconnected"
 	wsForwardProviderDisconnectedCommitted wsForwardResult = "provider_disconnected_committed"
+)
+
+type breakerFault string
+
+const (
+	breakerFaultDeadWS              breakerFault = "dead_ws_mid_inference"
+	breakerFaultRelayTimeout        breakerFault = "relay_timeout_mid_inference"
+	breakerFaultZeroTokenCompletion breakerFault = "zero_token_completion"
+	breakerFaultStreamingCancelZero breakerFault = "streaming_cancel_zero_chunks"
 )
 
 func WithPreflight(fn PreflightFunc) Option {
@@ -91,6 +103,17 @@ func WithRecoveryConfig(backoff time.Duration, maxRetries int, enabled bool) Opt
 			s.recoveryMaxRetries = maxRetries
 		}
 		s.recoveryProbe = enabled
+	}
+}
+
+func WithBreakerConfig(threshold int, window time.Duration) Option {
+	return func(s *Server) {
+		if threshold > 0 {
+			s.breakerThreshold = threshold
+		}
+		if window > 0 {
+			s.breakerWindow = window
+		}
 	}
 }
 
@@ -131,10 +154,13 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		recoveryBackoff:    30 * time.Second,
 		recoveryMaxRetries: 3,
 		recoveryProbe:      true,
+		breakerThreshold:   2,
+		breakerWindow:      120 * time.Second,
 		requestTimeout:     300 * time.Second,
 		failoverEnabled:    true,
 		failoverTimeout:    5 * time.Second,
 		provisionalWeight:  0.3,
+		now:                func() time.Time { return time.Now().UTC() },
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -351,14 +377,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			for {
 				result := s.forwardWS(w, r, requestID, body, provider, true)
 				if result == wsForwardProviderDisconnectedCommitted {
-					s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable)
 					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "stream_terminal", "")
 					return
 				}
 				if result != wsForwardProviderDisconnected {
 					return
 				}
-				s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable)
 				excluded[routeKey(provider)] = struct{}{}
 				if failoverAttempted || hasPinnedRoute(r.Header) {
 					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
@@ -391,11 +415,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		failoverAttempted := false
 		for {
 			result := s.forwardWS(w, r, requestID, body, provider, false)
-			if result == wsForwardComplete || result == wsForwardFailed || result == wsForwardTimedOut || result == wsForwardUnavailable {
+			if result == wsForwardComplete || result == wsForwardFailed || result == wsForwardTimedOut || result == wsForwardUnavailable || result == wsForwardCancelled {
 				return
 			}
 			if result == wsForwardProviderDisconnected {
-				s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable)
 				excluded[routeKey(provider)] = struct{}{}
 				if failoverAttempted || hasPinnedRoute(r.Header) {
 					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
@@ -499,14 +522,14 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		}
 		return result
 	}
-	result := s.forwardWSNonStreaming(w, requestID, provider, relay)
+	result := s.forwardWSNonStreaming(w, r, requestID, provider, relay)
 	if reserved && (result == wsForwardQueueFull || result == wsForwardProviderDisconnected) {
 		s.admission.RefundRequest(provider)
 	}
 	return result
 }
 
-func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, requestID string, provider pool.Provider, relay *providerws.RelayStream) wsForwardResult {
+func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, requestID string, provider pool.Provider, relay *providerws.RelayStream) wsForwardResult {
 	var body bytes.Buffer
 	chunks := relay.Chunks
 	for {
@@ -537,6 +560,9 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, requestID string, 
 				writeWSEndError(w, end)
 				return wsForwardFailed
 			}
+			if s.zeroTokenFault(end, finishReasonFromChatResponse(body.Bytes())) {
+				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
@@ -546,9 +572,14 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, requestID string, 
 		case err := <-relay.Errors:
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws relay failed")
 			if errors.Is(err, providerws.ErrRelayTimeout) {
+				s.recordBreakerFault(provider, breakerFaultRelayTimeout, requestID)
 				writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
 				return wsForwardTimedOut
 			} else if errors.Is(err, providerws.ErrRelayClosed) {
+				if r.Context().Err() != nil {
+					return wsForwardCancelled
+				}
+				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				return wsForwardProviderDisconnected
 			} else if errors.Is(err, providerws.ErrRelayNAKFallback) {
 				writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
@@ -564,6 +595,8 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	flusher, _ := w.(http.Flusher)
 	chunks := relay.Chunks
 	committed := false
+	chunksReceived := 0
+	finishReason := ""
 	commit := func() {
 		if committed {
 			return
@@ -580,11 +613,18 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		select {
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
+			if chunksReceived == 0 {
+				s.recordBreakerFault(provider, breakerFaultStreamingCancelZero, requestID)
+			}
 			return wsForwardCancelled
 		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
 				continue
+			}
+			chunksReceived++
+			if reason := finishReasonFromSSE(chunk.Data); reason != "" {
+				finishReason = reason
 			}
 			commit()
 			if _, err := w.Write([]byte(chunk.Data)); err != nil {
@@ -603,6 +643,10 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 						chunks = nil
 						continue
 					}
+					chunksReceived++
+					if reason := finishReasonFromSSE(chunk.Data); reason != "" {
+						finishReason = reason
+					}
 					commit()
 					if _, err := w.Write([]byte(chunk.Data)); err != nil {
 						relay.Cancel("buyer_disconnected")
@@ -614,6 +658,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				}
 			}
 			commit()
+			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
+				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
+			}
 			if end.Status != "complete" && end.Status != "cancelled" {
 				writeSSEError(w, "Provider failed during streaming", "provider_error")
 			}
@@ -624,6 +671,13 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		case err := <-relay.Errors:
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws streaming relay failed")
 			if errors.Is(err, providerws.ErrRelayClosed) {
+				if r.Context().Err() != nil {
+					if chunksReceived == 0 {
+						s.recordBreakerFault(provider, breakerFaultStreamingCancelZero, requestID)
+					}
+					return wsForwardCancelled
+				}
+				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				if !committed {
 					return wsForwardProviderDisconnected
 				}
@@ -632,6 +686,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 					flusher.Flush()
 				}
 				return wsForwardProviderDisconnectedCommitted
+			}
+			if errors.Is(err, providerws.ErrRelayTimeout) {
+				s.recordBreakerFault(provider, breakerFaultRelayTimeout, requestID)
 			}
 			commit()
 			writeSSEError(w, "Provider failed during streaming", "provider_error")
@@ -904,6 +961,27 @@ func (s *Server) logWSDeadMidRequest(originalRequestID, requestID, externalReque
 		Msg("provider websocket died during in-flight request")
 }
 
+func (s *Server) recordBreakerFault(provider pool.Provider, fault breakerFault, requestID string) {
+	result := s.pool.RecordBreakerFault(provider.ProviderID, provider.AssignedID, s.now(), s.breakerThreshold, s.breakerWindow)
+	event := s.log.Warn().
+		Str("event", "provider_breaker_fault").
+		Str("provider_id", provider.ProviderID).
+		Str("assigned_id", provider.AssignedID).
+		Str("request_id", requestID).
+		Str("fault", string(fault)).
+		Int("count", result.Count).
+		Int("threshold", result.Threshold)
+	switch result.Tripped {
+	case pool.BreakerTripDegraded:
+		event.Str("reason", "breaker_tripped").Msg("provider circuit breaker tripped")
+		s.startRecoveryProbe(provider)
+	case pool.BreakerTripUnavailable:
+		event.Str("reason", "breaker_retrip").Msg("provider marked unavailable after breaker re-trip")
+	default:
+		event.Msg("provider circuit breaker fault recorded")
+	}
+}
+
 func (s *Server) selectProviderExcluding(requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}) (pool.Provider, *routeError) {
 	providers := s.pool.Snapshot()
 	estimatedTokens := estimateTokens(req.raw)
@@ -1055,6 +1133,66 @@ func (s *Server) effectiveThroughput(provider pool.Provider) float64 {
 
 func modelIDEqual(a, b string) bool {
 	return strings.EqualFold(a, b)
+}
+
+func (s *Server) zeroTokenFault(end providerws.InferenceResponseEnd, finishReason string) bool {
+	completionTokens, ok := completionTokens(end.Usage)
+	if !ok || completionTokens != 0 {
+		return false
+	}
+	switch finishReason {
+	case "stop", "length":
+		return false
+	default:
+		return true
+	}
+}
+
+func completionTokens(raw json.RawMessage) (int, bool) {
+	if len(raw) == 0 {
+		return 0, false
+	}
+	var usage struct {
+		CompletionTokens *int `json:"completion_tokens"`
+	}
+	if err := json.Unmarshal(raw, &usage); err != nil || usage.CompletionTokens == nil {
+		return 0, false
+	}
+	return *usage.CompletionTokens, true
+}
+
+func finishReasonFromChatResponse(body []byte) string {
+	var resp struct {
+		Choices []struct {
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return ""
+	}
+	for _, choice := range resp.Choices {
+		if choice.FinishReason != nil {
+			return *choice.FinishReason
+		}
+	}
+	return ""
+}
+
+func finishReasonFromSSE(data string) string {
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		if reason := finishReasonFromChatResponse([]byte(payload)); reason != "" {
+			return reason
+		}
+	}
+	return ""
 }
 
 func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd) {

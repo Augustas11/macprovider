@@ -47,6 +47,8 @@ type PoolConfig struct {
 	DegradedBackoffS        int  `yaml:"degraded_backoff_s"`
 	DegradedMaxRetries      int  `yaml:"degraded_max_retries"`
 	DegradedProbeAfter502   bool `yaml:"degraded_probe_after_502"`
+	BreakerFailureThreshold int  `yaml:"breaker_failure_threshold"`
+	BreakerWindowS          int  `yaml:"breaker_window_s"`
 }
 
 type RoutingConfig struct {
@@ -119,6 +121,8 @@ func Default() Config {
 			DegradedBackoffS:        30,
 			DegradedMaxRetries:      3,
 			DegradedProbeAfter502:   true,
+			BreakerFailureThreshold: 2,
+			BreakerWindowS:          120,
 		},
 		Routing: RoutingConfig{
 			PreflightThresholdTokens: 4096,
@@ -207,6 +211,12 @@ func (c Config) Validate() error {
 	}
 	if c.Routing.PreflightTimeoutS <= 0 || c.Routing.RequestTimeoutS <= 0 || c.Routing.FailoverTimeoutS <= 0 {
 		return fmt.Errorf("routing timeouts must be > 0")
+	}
+	if c.Pool.DegradedBackoffS <= 0 || c.Pool.DegradedMaxRetries <= 0 {
+		return fmt.Errorf("pool degraded recovery settings must be > 0")
+	}
+	if c.Pool.BreakerFailureThreshold <= 0 || c.Pool.BreakerWindowS <= 0 {
+		return fmt.Errorf("pool breaker settings must be > 0")
 	}
 	if c.Admission.ProvisionalAdmissionRatePerHour <= 0 {
 		return fmt.Errorf("admission.provisional_admission_rate_per_hour must be > 0")
