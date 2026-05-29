@@ -4,7 +4,7 @@
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
 
 **Change log v1.1.6:**
-- Adds F-3: in-flight buyer requests routed over provider WebSocket MUST finish, fail over once to another ready same-model provider, or return `provider_disconnected` when the provider WebSocket dies mid-inference. Observed close/write failures are bounded by `routing.failover_timeout_s` plus small scheduler overhead; silent missed-heartbeat failures are bounded by `heartbeat_interval_s + routing.failover_timeout_s`. Streaming requests may fail over only before response bytes are committed; after commit they terminate the SSE stream with `provider_disconnected`. Explicit provider/session pins do not fail over. Adds `routing.failover_enabled` and `routing.failover_timeout_s` config keys. Adds explicit failure-mode rows for graceful WS close, abnormal WS death, and dead-WS-mid-inference.
+- Adds F-4: in-flight buyer requests routed over provider WebSocket MUST finish, fail over once to another ready same-model provider, or return `provider_disconnected` when the provider WebSocket dies mid-inference. Observed close/write failures are bounded by `routing.failover_timeout_s` plus small scheduler overhead; silent missed-heartbeat failures are bounded by `heartbeat_interval_s + routing.failover_timeout_s`. Streaming requests may fail over only before response bytes are committed; after commit they terminate the SSE stream with `provider_disconnected`. Explicit provider/session pins do not fail over. Adds `routing.failover_enabled` and `routing.failover_timeout_s` config keys. Adds explicit failure-mode rows for graceful WS close, abnormal WS death, and dead-WS-mid-inference.
 
 **Change log v1.1.5:**
 - Adds normative production gates (§ 7.7 PG-1 through PG-5) for the transition from Tier 1 cooperative-trust deployment to public-buyer launch (H-002 from the 2026-05-29 independent security audit). nginx routing block expanded with pre-WS-upgrade rate-limit and connection-cap directives. Audit category I.2 added for the "default-permissive flag in production deployment" anti-pattern. No code change required. Current Tier 1 deployment configuration remains valid; the patch documents the gate, not the migration timing.
@@ -426,7 +426,7 @@ Informed by Phase 2 D1 (502 vs 530):
 | WS disconnect (530-equivalent) | WS close, no prior drain | `unavailable`, grace period | Reconnects with new hello |
 | dead-WS-graceful | Provider-initiated close frame while no drain is active | Active relays receive `provider_disconnected`; provider marked `unavailable` | Reconnects with new hello |
 | dead-WS-abnormal | Read/write failure or missed heartbeat (`heartbeat_interval_s + failover_timeout_s`) | Coordinator closes the session; active relays receive `provider_disconnected` | Reconnects with new hello |
-| dead-WS-mid-inference | WS dies after `inference_request` was routed and before `inference_response_end` | Cancel the in-flight relay and either fail over once or return HTTP 502 `provider_disconnected` per F-3 | Buyer receives one response or one clean OpenAI-envelope error; no gateway-timeout hang |
+| dead-WS-mid-inference | WS dies after `inference_request` was routed and before `inference_response_end` | Cancel the in-flight relay and either fail over once or return HTTP 502 `provider_disconnected` per F-4 | Buyer receives one response or one clean OpenAI-envelope error; no gateway-timeout hang |
 | HTTP 502 (MLX down) | Provider returns 502 on routed buyer request | `degraded`, 30s backoff | Recovery preflight after 30s |
 | HTTP 504 (timeout) | No response in time | `degraded`, 30s backoff | Same as 502 |
 | **HTTP 530 (Cloudflare tunnel daemon disconnected)** | Provider endpoint returns literal HTTP 530 on routed buyer request | `unavailable` immediately; log `state_update.reason = "http_530_observed"`; trigger WebSocket liveness probe (ping with 5s ack timeout) | Removed from pool until WebSocket reconnects with fresh hello, OR if WS is still alive, until next heartbeat confirms `state: ready` |
@@ -697,7 +697,7 @@ Unknown `provider_id` values are accepted as provisional (subject to
 rate limits in FR-P16) or rejected with 4009 if in the
 `rejected_providers` table.
 
-**F-3 — Dead provider WebSocket during in-flight inference MUST
+**F-4 — Dead provider WebSocket during in-flight inference MUST
 fast-fail or fail over.** If a provider WebSocket transitions to dead
 while a buyer request is in flight, the coordinator MUST detect the
 condition within `routing.failover_timeout_s` for observed close/write
