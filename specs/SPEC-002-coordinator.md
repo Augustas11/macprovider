@@ -1,10 +1,13 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.1.4 (2026-05-29, cross-spec coherence fix pass)
-**Depends on:** SPEC-001 v1.2.2 (Phase 3 binary wire protocol, locked)
+**Version:** 1.1.5 (2026-05-29, audit response, public-pool production invariants)
+**Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.1.5:**
+- Adds normative production gates (§ 7.7 PG-1 through PG-5) for the transition from Tier 1 cooperative-trust deployment to public-buyer launch (H-002 from the 2026-05-29 independent security audit). nginx routing block expanded with pre-WS-upgrade rate-limit and connection-cap directives. Audit category I.2 added for the "default-permissive flag in production deployment" anti-pattern. No code change required. Current Tier 1 deployment configuration remains valid; the patch documents the gate, not the migration timing.
 
 **Change log v1.1.4:**
-- Closes F-602-1 through F-602-6 from `specs/SPEC-CROSS-006-audit.md`: X-Request-ID correlation, public coordinator-owned `GET /v1/pool/check`, nginx route split, per-model `degraded`, `/poolz` gateway summary fields, SPEC-001 v1.2.2 dependency, and SPEC-006 gateway buyer-port rebind notes.
+- Closes F-602-1 through F-602-6 from `specs/SPEC-CROSS-006-audit.md`: X-Request-ID correlation, public coordinator-owned `GET /v1/pool/check`, nginx route split, per-model `degraded`, `/poolz` gateway summary fields, SPEC-001 v1.2.4 dependency, and SPEC-006 gateway buyer-port rebind notes.
 
 **Change log v1.1.3:**
 - § 7.1 / FR-P12: added `auth.require_provider_tokens` provider-authentication mode. Default `false` preserves the v1.1.2 cooperative pinned-provider trust pool; `true` requires pinned providers to present a valid bearer token and rejects missing or invalid tokens with WS close 4005 `invalid_token`.
@@ -633,7 +636,7 @@ connection. The following rules are normative:
    map after receiving `inference_response_end` OR after
    `routing.request_timeout_s` expires (default 300 s).
 
-See also SPEC-001 v1.2.2 § 6.6 "Request ID lifecycle and error
+See also SPEC-001 v1.2.4 § 6.6 "Request ID lifecycle and error
 handling" for the provider-side rules.
 
 **FR-P19. WS-tunneled backpressure — coordinator write buffer.**
@@ -1434,7 +1437,7 @@ All messages are JSON objects with a `type` field.
 }
 ```
 
-These schemas mirror SPEC-001 v1.2.2 § 6.5; SPEC-001 is the authoritative source.
+These schemas mirror SPEC-001 v1.2.4 § 6.5; SPEC-001 is the authoritative source.
 
 Coordinator behavior:
 - Validates all REQUIRED fields present and correctly typed; validates OPTIONAL fields (`attestation`, `endpoint_url`) when present. Absent `endpoint_url` normalized to null (FR-P2).
@@ -1643,7 +1646,7 @@ supported WS-tunneled mode when it does not. The coordinator MUST:
 4. Log at warn level: "routing-mode resolution bug: provider <id>
    does not support § 6.6; marking http_forwarding_only."
 
-See SPEC-001 v1.2.2 backward-compat statement for the design rationale.
+See SPEC-001 v1.2.4 backward-compat statement for the design rationale.
 
 **Coordinator does NOT send `nak` to providers.** Coordinator-initiated
 rejection (invalid hello, unknown provider_id, tier mismatch, version
@@ -1662,7 +1665,7 @@ is the first buyer and generates SPEC-001-shaped requests.
 
 Coordinator MUST honor any inbound `X-Request-ID` header on buyer-facing `/v1/*` requests and include it in the `request_log` row. If absent, coordinator MAY generate its own UUID v4. The `request_log` schema includes an indexed `request_id` field for this cross-service correlation key.
 
-When forwarding work to a provider over the SPEC-001 § 6.6 `inference_request` message, coordinator MUST preserve the request ID it recorded for the buyer request. Providers MAY echo `X-Request-ID` back in usage reporting; this is OPTIONAL under SPEC-001 v1.2.2 and is filed as a SPEC-001 v1.2.3 candidate.
+When forwarding work to a provider over the SPEC-001 § 6.6 `inference_request` message, coordinator MUST preserve the request ID it recorded for the buyer request. Providers MAY echo `X-Request-ID` back in usage reporting; this is OPTIONAL under SPEC-001 v1.2.4 and is filed as a SPEC-001 v1.2.3 candidate.
 
 Gateway-originated traffic from SPEC-006 v0.3 uses `X-Request-ID` as the join key between gateway `usage_events`, gateway `audit_events`, and coordinator `request_log`. Direct legacy buyer traffic without this header remains supported.
 
@@ -2122,6 +2125,13 @@ required auth controls.
 The public route split is:
 
 ```nginx
+# Rate limit and connection cap for /ws/provider (PG-2).
+# Values are recommended defaults; operators MAY tune them, but the
+# controls MUST run at the proxy before the coordinator performs the
+# WebSocket upgrade.
+limit_req_zone $binary_remote_addr zone=ws_provider_rate:10m rate=10r/m;
+limit_conn_zone $binary_remote_addr zone=ws_provider_conn:10m;
+
 # api.streamvc.live -> gateway (buyer surface)
 location /v1/chat/completions { proxy_pass http://127.0.0.1:9443; }
 location /v1/models { proxy_pass http://127.0.0.1:9443; }
@@ -2134,8 +2144,67 @@ location /v1/pool/check { proxy_pass http://127.0.0.1:8443; }
 location /healthz { proxy_pass http://127.0.0.1:8443; }
 location /poolz { proxy_pass http://127.0.0.1:8444; }
 location /admin/ { proxy_pass http://127.0.0.1:8444; }
-location /ws/provider { proxy_pass http://127.0.0.1:8444; }
+
+# Provider WS - production invariants per § 7.7 PG-1 and PG-2.
+location /ws/provider {
+    limit_req zone=ws_provider_rate burst=5 nodelay;
+    limit_conn ws_provider_conn 5;
+    proxy_pass http://127.0.0.1:8444;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "Upgrade";
+    proxy_read_timeout 86400;
+}
 ```
+
+### 7.7. Production invariants (public-launch gate)
+
+The following invariants MUST be true before the coordinator is exposed
+to public buyer traffic through any SPEC-006-style buyer-API gateway.
+They are documented here as normative gates, not as v1.1.5 mandatory
+defaults. Operators may continue to run the Tier 1 cooperative-trust
+configuration for non-public deployments.
+
+**PG-1: Provider authentication MUST be required.** Before any
+public-buyer-facing service forwards requests to this coordinator,
+`auth.require_provider_tokens` MUST be set to `true` in
+`coordinator.yaml`. All pinned providers MUST have valid bearer tokens
+issued and registered in the token store. Provisional providers MAY
+continue without tokens per the provisional admission tier, but pinned
+providers serving public traffic MUST be token-authenticated.
+
+**PG-2: Pre-WS-upgrade rate limits MUST be enforced at the proxy
+layer.** The nginx or equivalent reverse proxy in front of the
+coordinator MUST enforce:
+- Per-IP connection rate limit on `/ws/provider` before upgrade
+  (recommended: 10/min).
+- Per-IP concurrent connection cap on `/ws/provider` before upgrade
+  (recommended: 5).
+- Both controls MUST apply before the WebSocket upgrade handshake
+  reaches the coordinator process.
+
+**PG-3: Provisional admission MUST be rate-limited.** The coordinator's
+existing `admission.provisional_admission_rate_per_hour` control (per
+§ 7.1 F-2) provides this gate. The production value MUST be
+conservative (recommended: 10/hour).
+
+**PG-4: Unknown provider_id rejection MUST be aggressive in pinned-only
+production mode.** When a hello includes an unknown `provider_id` and
+`pinned_only=true`, the coordinator MUST close immediately and MUST NOT
+fall through to provisional admission. For v1.1+ coordinators this uses
+WS close 4009 `banned`; close 4002 `unknown_provider_id` remains retired
+per § 7.1.
+
+**PG-5: Provisional-admission spike alerting MUST be operator-facing.**
+The coordinator MUST emit an operator-readable WARN log line, and MAY
+also emit a webhook alert, when provisional admissions exceed 50% of
+`admission.provisional_admission_rate_per_hour` in any rolling
+10-minute window. The WARN event name MUST be
+`provisional_admission_pressure`, with fields for the rolling-window
+count, configured hourly limit, and threshold. This is the canary signal
+for Sybil pressure.
+
+Each invariant has an associated acceptance criterion in § 11.
 
 ---
 
@@ -2464,6 +2533,24 @@ caught. Generalize: every conditional in production code needs at least
 one test case for each branch, including the "this branch only fires
 when the operator chooses the rare config" branch.
 
+**I.2 "Default-permissive flag in production deployment" anti-pattern.**
+Some configuration flags are correctly default-permissive for developer
+convenience or backward-compatibility but MUST be set to the restrictive
+value for any public production deployment. The flag's default is the
+development or cooperative-trust setting; production deployment of
+services exposing public interfaces MUST flip these flags as part of
+the deployment runbook.
+
+Reference example: `auth.require_provider_tokens` defaults `false` for
+the Tier 1 cooperative pool but is a production invariant `true` per
+§ 7.7 PG-1.
+
+Auditors of future specs MUST identify default-permissive flags that
+need production-invariant counterparts. If a flag's default differs
+from its production-correct value, the spec MUST document the
+production invariant explicitly using the § 7.7 pattern introduced in
+v1.1.5.
+
 **AC-1 through AC-10 must ALL pass for the coordinator to be considered
 build-complete. No partial passes. No operator waivers without an
 explicit waiver entry in `implementation-notes.html`.**
@@ -2646,6 +2733,80 @@ Subsequent requests to that provider's model are NOT dispatched via
 
 Run by: `phase4-coordinator/scripts/test-nak-fallback.sh`
 
+**AC-X1 (PG-1). Public-launch provider token gate.**
+Deploy the coordinator with `auth.require_provider_tokens=true`.
+A pinned provider WebSocket connection without a valid bearer token MUST
+receive WS close 4005 `invalid_token` within 2s of upgrade.
+
+Run by:
+```
+wscat -c wss://coordinator.streamvc.live/ws/provider \
+  --execute 'hello-with-pinned-provider-id.json'
+```
+
+Expected result: close code 4005 before `hello_ack`. Repeat with
+`-H 'Authorization: Bearer <valid-token>'` and the same pinned
+`provider_id`; expected result is `hello_ack`.
+
+**AC-X2 (PG-2). Pre-WS-upgrade proxy controls.**
+With the § 7.6 proxy limits configured, more than 10 WebSocket upgrade
+attempts per minute from one source IP MUST receive HTTP 429 from the
+proxy before the request reaches the coordinator process.
+
+Run by:
+```
+for i in $(seq 1 16); do
+  curl -sk -o /dev/null -w '%{http_code}\n' \
+    -H 'Connection: Upgrade' -H 'Upgrade: websocket' \
+    https://coordinator.streamvc.live/ws/provider
+done
+```
+
+Expected result: at least one `429` after the configured burst is
+exhausted, and coordinator logs contain no matching provider-upgrade
+attempt for the rate-limited requests.
+
+**AC-X3 (PG-3). Provisional admission rate limit.**
+With `admission.provisional_admission_rate_per_hour=10`, the 11th new
+provisional provider admission in one hour MUST be rejected with WS
+close 4008 `provisional_rate_limited`.
+
+Run by: `phase4-coordinator/scripts/test-rate-limit.sh`
+
+Expected result: first 10 unknown provider IDs get `hello_ack`; the
+11th gets close code 4008.
+
+**AC-X4 (PG-4). Pinned-only unknown-provider rejection.**
+With `admission.pinned_only=true`, a hello with an unknown `provider_id`
+MUST receive WS close 4009 `banned` within 2s. Provisional admission
+MUST NOT fire, and no provisional record may be created.
+
+Run by:
+```
+phase4-coordinator/scripts/test-provisional.sh \
+  --pinned-only --expect-close-code 4009 --expect-no-record
+```
+
+Expected result: close code 4009 and no new row in the provisional
+provider listing.
+
+**AC-X5 (PG-5). Provisional-admission pressure alert.**
+When provisional admissions exceed 50% of
+`admission.provisional_admission_rate_per_hour` in any rolling
+10-minute window, the coordinator MUST emit a WARN log line with event
+name `provisional_admission_pressure`.
+
+Run by:
+```
+phase4-coordinator/scripts/test-rate-limit.sh --count 6 --limit 10
+journalctl -u macprovider-coordinator --since -10m \
+  | grep 'provisional_admission_pressure'
+```
+
+Expected result: a WARN-level log line containing
+`provisional_admission_pressure`, `rolling_10m_count`, `limit_per_hour`,
+and `threshold_count`.
+
 ---
 
 ## 12. Open questions for operator
@@ -2726,7 +2887,7 @@ buffer is ~60× the expected steady-state depth.
 
 **Scope:** This OQ concerns the **coordinator-side** buffer only
 (per-provider outbound message queue in the Go coordinator). The
-provider-side write buffer sizing is SPEC-001 v1.2.2 OQ-5.
+provider-side write buffer sizing is SPEC-001 v1.2.4 OQ-5.
 
 **Current position:** 64 is a conservative default. Tune based on
 production telemetry. Add a `/poolz` field showing per-provider

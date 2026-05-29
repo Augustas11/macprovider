@@ -1,7 +1,10 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.2.3 (2026-05-29, cancel usage, producer-side unescaped slashes)
-**Revision:** v1.2.3 resolves Entry 21 producer-side unescaped-slash discipline and Entry 22 cancel-usage reporting.
+**Version:** 1.2.4 (2026-05-29, audit response, concurrency reality alignment)
+**Revision:** v1.2.4 resolves H-003 by aligning advertised RAM-tier concurrency with the Swift runtime's enforced semaphore-of-1 behavior.
+
+**Change log v1.2.4:**
+- **v1.2.4 (2026-05-29, audit response, concurrency reality alignment):** Aligns the RAM-tier max_concurrency documentation to the Swift runtime's enforced semaphore-of-1 reality (H-003 from the 2026-05-29 independent security audit). Spec previously documented per-tier defaults >1; runtime always overrode to 1. No code change required. Future parallel generation deferred to a SPEC-001 v1.3 candidate pending runtime validation.
 
 **Change log v1.2.3:**
 - § 6.1 `/v1/models`: producers MUST emit model `id` values with unescaped forward slashes (`/`) by suppressing the legal-but-cosmetic `\/` JSON escape. Consumers MUST continue to tolerate both encodings for backward compatibility.
@@ -385,20 +388,38 @@ if it might exceed capacity.
 
 **FR-9. Per-RAM-tier capacity advertisement.**
 At startup, the binary reads `hw.memsize` (via `sysctl`), determines the
-hardware tier, and computes a safe maximum context length and concurrency
-limit. Starting estimates (refined by runtime measurement):
+hardware tier, and computes a safe maximum context length and advertised
+concurrency limit. Starting context estimates are refined by runtime
+measurement; default concurrency is locked to the runtime-safe value:
 
 | RAM tier | Max context (tokens) | Max concurrency | Rationale |
 |---|---|---|---|
 | 8 GB | 20,000 | 1 | Phase 1: OOM at ~26K on M1 8GB; 20K with headroom |
-| 16 GB | 50,000 | 2 | Proportional from 8 GB data; KV cache scales linearly |
-| 32 GB | 120,000 | 4 | Conservative for large models |
-| 64 GB+ | 200,000 | 8 | Upper bound; model-dependent |
+| 16 GB | 50,000 | 1 | Context capacity scales with RAM; generation remains serialized |
+| 32 GB | 120,000 | 1 | Conservative context capacity for large models; generation remains serialized |
+| 64 GB+ | 200,000 | 1 | Upper context bound; generation remains serialized |
 
-These values are defaults. The config file can override them per tier.
-If the binary detects available memory at startup is significantly less
-than expected for the tier (e.g., heavy background apps), it logs a
-warning and reduces the advertised capacity proportionally.
+Until provider runtime parallel generation is proven safe under MLX
+(catalog reasoning, memory pressure analysis, stability validation),
+advertised `max_concurrency` MUST be 1 for all RAM tiers. The provider
+runtime enforces this via a process-local semaphore of 1 around MLX
+generation calls. Operators MAY set `max_concurrency_override` in
+`~/.config/macprovider/config.yaml` (or via
+`MACPROVIDER_MAX_CONCURRENCY_OVERRIDE` env) for experimental use, but
+the default and recommended value is 1.
+
+This is a deliberate safety floor, not an architectural ceiling. A
+future SPEC-001 revision MAY raise the default when parallel generation
+has been validated under concurrent buyer load without quality, latency,
+or memory regressions. Until then, consumers (coordinator routing,
+buyer-API gateways, capacity reporting) MUST treat advertised values >1
+as opt-in operator overrides, not normative defaults.
+
+The context values are defaults. `max_context_override` can override the
+context limit. If the binary detects available memory at startup is
+significantly less than expected for the tier (e.g., heavy background
+apps), it logs a warning and reduces the advertised context capacity
+proportionally.
 
 **FR-10. Mid-stream disconnect cleanup.**
 When a client disconnects during a streaming response, the binary
@@ -410,12 +431,13 @@ found `mlx_lm.server` handles this via `BrokenPipeError`; the binary
 must do at least as well, without leaking long-running generation.
 
 **FR-11. Concurrent request handling with bounded queue.**
-The binary accepts multiple simultaneous requests up to the concurrency
-limit for the hardware tier (FR-9). Requests beyond the limit are
-queued. If the queue exceeds a configurable depth (default: 2x
-concurrency limit), new requests are rejected with HTTP 429 and a
-`Retry-After` header estimating when a slot may free up. The queue
-is FIFO with no time-based eviction in v1. Queued requests that are
+The binary accepts simultaneous requests up to advertised
+`max_concurrency` (FR-9). The normative default is 1; values >1 are
+operator overrides for experimental use. Requests beyond the advertised
+limit are queued. If the queue exceeds a configurable depth (default:
+2x concurrency limit), new requests are rejected with HTTP 429 and a
+`Retry-After` header estimating when a slot may free up. The queue is
+FIFO with no time-based eviction in v1. Queued requests that are
 cancelled by the client before reaching the inference engine are
 silently removed from the queue.
 
@@ -490,7 +512,7 @@ must include:
 - `model_id`: the loaded model's HuggingFace identifier
 - `model_params_b`: approximate parameter count in billions
 - `max_context_tokens`: computed from FR-9
-- `max_concurrency`: computed from FR-9
+- `max_concurrency`: computed from FR-9 (1 by default; higher only by operator override)
 - `slots_free`: real-time availability (matches heartbeat schema in § 6.5)
 - `slots_total`: total inference slots configured for this provider
 - `throughput_tps_estimate`: measured tok/s from the startup self-test
@@ -539,10 +561,11 @@ provider MUST NOT reuse or reassign `request_id` values.
 
 **FR-25. Multiplexing.**
 The provider handles up to `max_concurrency` concurrent
-`inference_request` messages on a single WebSocket. Each concurrent
-request is tracked by its `request_id`. The provider's `slots_free`
-heartbeat field reflects WS-tunneled requests as well as local HTTP
-requests.
+`inference_request` messages on a single WebSocket. By default this is
+1; higher values are experimental operator overrides per FR-9. Each
+concurrent request is tracked by its `request_id`. The provider's
+`slots_free` heartbeat field reflects WS-tunneled requests as well as
+local HTTP requests.
 
 **FR-26. Cancellation handling.**
 On receiving `cancel_request` (§ 6.6), the provider aborts the
@@ -984,7 +1007,7 @@ No blank `data:` lines between events.
     "ram_gb": 16,
     "ram_tier": "16GB",
     "max_context_tokens": 50000,
-    "max_concurrency": 2,
+    "max_concurrency": 1,
     "throughput_tps_estimate": 19.8
   }
 }
@@ -1010,7 +1033,7 @@ provider) or P->C (provider to coordinator).
   "model_params_b": 7.0,
   "ram_gb": 16,
   "max_context_tokens": 50000,
-  "max_concurrency": 2,
+  "max_concurrency": 1,
   "throughput_tps_estimate": 19.8,
   "binary_version": "0.1.0",
   "attestation": null,
@@ -1094,9 +1117,9 @@ the version — providers running older binaries continue to function.
   "model_params_b": 7.0,
   "ram_gb": 16,
   "max_context_tokens": 50000,
-  "max_concurrency": 2,
+  "max_concurrency": 1,
   "slots_free": 1,
-  "slots_total": 2,
+  "slots_total": 1,
   "throughput_tps_estimate": 19.8,
   "requests_served_since_last": 12,
   "avg_latency_ms_since_last": 450.0,
@@ -1117,8 +1140,8 @@ handshake.
   "reason": "post-wake warm-up in progress",
   "since": "2026-05-27T14:30:00Z",
   "metrics_snapshot": {
-    "slots_free": 2,
-    "slots_total": 2,
+    "slots_free": 1,
+    "slots_total": 1,
     "requests_served_since_last": 0,
     "avg_latency_ms_since_last": null,
     "throughput_tps_since_last": null
@@ -1465,7 +1488,8 @@ demultiplexing key.
 
 A single provider WebSocket carries up to N concurrent inference
 requests, where N is the provider's advertised `max_concurrency` (from
-`hello`/`heartbeat`). The coordinator MUST NOT send more than N
+`hello`/`heartbeat`). By default N is 1; higher values are explicit
+operator overrides. The coordinator MUST NOT send more than N
 concurrent `inference_request` messages. Each WS text frame is one
 complete JSON message — no multi-frame messages, no application-layer
 fragmentation.
@@ -1587,6 +1611,16 @@ This section maps every decision log entry from
 | D3 — Stop-token leakage status | Fully covered | FR-6 | Defensive; may be no-op if upstream clean |
 | D4 — Cross-provider throughput inversion | Fully covered (binary scope) | FR-17, FR-20 | Buyer-facing model choice is coordinator-side; deferred to SPEC-002 |
 | D5 — Timeline compression | Process-only | — | No binary behavior; accelerated Phase 3 timeline by 11 days |
+
+### v1.2.4 audit lesson — advertised vs enforced capability
+
+Advertised provider capability MUST match enforced runtime capability.
+Spec values that the code never realizes are a drift class equivalent to
+Entry 18's SIGTERM=drain conflation and Entry 19's WithTokenValidator
+always-on: both produce silent failures of the form "the system
+describes a capability that does not exist in practice." Future spec
+revisions documenting capacity MUST cite the code path that realizes
+them.
 
 ### D1 — 502 vs 530 routing distinction
 
@@ -1807,7 +1841,7 @@ The request slot is freed (verifiable via `/v1/health`).
 
 **AC-14. Concurrent multiplexing.**
 A mock coordinator sends 3 concurrent `inference_request` messages
-(the binary advertises `max_concurrency: 3` or adjusts for the test).
+(the binary sets `max_concurrency_override: 3` for the test).
 All 3 produce interleaved `inference_response_chunk` messages on the
 same WebSocket. All 3 complete successfully with correct `request_id`
 correlation.

@@ -1,7 +1,7 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
 **Version:** 0.7 (2026-05-29, install.sh partner-upgrade hardening)
-**Depends on:** SPEC-001 v1.2.3, SPEC-002 v1.1.4
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.1.5
 
 **Change log v0.6:** Resolves cross-spec findings F-603-1 and F-603-2 from `specs/SPEC-CROSS-006-audit.md`: the installer visibility self-test now references SPEC-002 v1.1.4's coordinator-owned `GET /v1/pool/check`, and dependencies align to SPEC-001 v1.2.2 + SPEC-002 v1.1.4.
 

@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.5 (2026-05-29, cancel-usage actuals follow-up)
-**Depends on:** SPEC-001 v1.2.3, SPEC-002 v1.1.4, SPEC-003 v0.6
+**Version:** 0.6 (2026-05-29, audit response, Tier 1 disclosure language + production launch gate)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.1.5, SPEC-003 v0.7
+
+**Change log v0.6:**
+- Closes H-001 (privacy claims exceed enforcement), H-004 (model integrity is provider-reported), and H-006 (sticky caching forward-looking guard) from the 2026-05-29 independent security audit. Six additions: § 1.6 plaintext-to-provider disclosure (4 normative properties); § 5.3.1 `/v1/models` extension with `tier1_disclosure` block; § 5.3 model identity provider-reported note; § 1.3 sticky-caching guard; § 19 expectation-drift audit category; § 22 production launch gate checklist (8 items adapted from audit recommendations). Sibling patches (SPEC-001 v1.2.4 + SPEC-002 v1.1.5) close H-002 and H-003. H-005 (billing settlement) is largely already covered by D-CROSS-1 (refund matrix) + SPEC-001 v1.2.3 cancel-usage normative; verification deferred to BUILD_PHASE5 Phase C end-to-end test. No code changes; v0.6 implementation contract for BUILD_PHASE5 expanded by these additions.
 
 **Change log v0.5:**
 - Closes F-606-V3-1 and F-606-V3-2 from `specs/FIX_SPEC_006_V0_5_PROMPT.md`, the SPEC-006 follow-up filed by `specs/FIX_SPEC_001_V1_2_3_PROMPT.md`: streaming cancellation settlement now prefers SPEC-001 v1.2.3 provider-reported cancel `usage` from phase3-binary v1.2.4 (commit c94da11, tag v1.2.4) and falls back to byte estimation for pre-v1.2.4 providers; AC-37 now covers both actuals and fallback branches.
@@ -136,6 +139,16 @@ SPEC-006 v1 explicitly does not specify:
 
 These items belong to v0.2, SPEC-005, SPEC-007, or later specs.
 
+**No provider-side caching of any kind in v0.6.** Sticky single-tenant caching, prompt-result cache, KV cache reuse across requests, or any other form of provider-side request state retention is OUT OF SCOPE for v0.6. A future revision MAY introduce caching only if all of the following are true:
+
+- The cache is buyer-owned, single-tenant, non-transferable across buyers.
+- The cache has explicit lifecycle: creation, eviction, and buyer-triggered deletion.
+- Tenant isolation is cryptographically enforced; cache keys include account ID plus per-request entropy.
+- Buyer-facing disclosure explicitly states cache existence and retention semantics.
+- The cache survives the Tier 1 to Tier 2 transition with privacy guarantees that match Tier 2 trust controls.
+
+Any partial implementation of caching that does not meet ALL of the above MUST NOT ship. This is a forward-looking guard against the H-006 audit finding.
+
 ### 1.4 Relationship to SPEC-001
 
 SPEC-001 defines the provider-side Phase 3 binary and the local OpenAI-compatible inference shape.
@@ -157,7 +170,7 @@ SPEC-006 MAY add stricter public gateway limits before forwarding, including `ma
 
 SPEC-002 defines the Phase 4 coordinator.
 
-SPEC-006 layers on top of SPEC-002 v1.1.4.
+SPEC-006 layers on top of SPEC-002 v1.1.5.
 
 SPEC-006 MUST preserve SPEC-002's router-only charter.
 
@@ -173,7 +186,25 @@ SPEC-006 normatively cannot mutate SPEC-001 or SPEC-002 during SPEC-006-only imp
 
 Cross-spec audit cycles MAY propose coordinated patches across multiple specs. When those patches land, all affected specs bump versions in lockstep; the cross-spec FIX prompt is the governance vehicle, not unilateral SPEC-006 edits.
 
-### 1.6 Relationship to SPEC-003
+### 1.6 Tier 1 disclosure: plaintext cooperative inference
+
+SPEC-006 v0.6 is a Tier 1 cooperative inference product. The following properties hold:
+
+1. **Buyer prompts and provider responses are processed as plaintext on provider hardware.** Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.
+2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.6 does NOT cryptographically verify this.
+3. **Model identity is provider-reported.** When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.6 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.
+4. **The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-3.
+
+These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in v0.6 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all four limitations are normative and MUST be preserved in product language.
+
+Production gate: this disclosure MUST appear in substantively equivalent language in:
+
+- The front-door signup flow before the user receives an API key: one prominent paragraph.
+- The single-page docs: the curl plus SDK examples page.
+- The `/v1/models` response as a top-level `tier1_disclosure` field with the same plaintext-to-provider wording.
+- The README.md of any client SDK distributed by the operator.
+
+### 1.7 Relationship to SPEC-003
 
 SPEC-003 made provider onboarding easy through distribution and lifecycle tooling.
 
@@ -181,7 +212,7 @@ SPEC-006 makes buyer onboarding easy through web identity, immediate key issuanc
 
 SPEC-006 inherits SPEC-003's lesson that the actual user-shaped path must be integration-tested, not only code-reviewed.
 
-### 1.7 Relationship to SPEC-004, SPEC-005, and SPEC-007
+### 1.8 Relationship to SPEC-004, SPEC-005, and SPEC-007
 
 SPEC-004 smart routing remains out of scope.
 
@@ -193,11 +224,11 @@ SPEC-006 MAY record data that later specs use, such as provider contribution cou
 
 SPEC-006 MUST NOT create buyer-visible payout, earning, donation, or payment promises.
 
-### 1.8 Critical constraints
+### 1.9 Critical constraints
 
 SPEC-001 and SPEC-002 are locked and unchanged during SPEC-006-only implementation and fix passes.
 
-SPEC-006 layers on top of SPEC-002 v1.1.4's coordinator.
+SPEC-006 layers on top of SPEC-002 v1.1.5's coordinator.
 
 Cross-spec dependencies are read-only references.
 
@@ -571,7 +602,7 @@ The gateway MUST be restartable independently of the coordinator.
 - Operator endpoints.
 - Provider WebSocket endpoint.
 - Coordinator health and pool operations.
-- `GET /v1/pool/check` provider registration verification, owned by SPEC-002 v1.1.4 and used by SPEC-003 v0.6 installers.
+- `GET /v1/pool/check` provider registration verification, owned by SPEC-002 v1.1.4 and used by SPEC-003 v0.7 installers.
 
 ### 4.3 Coordinator listener migration
 
@@ -861,6 +892,13 @@ Response shape:
 ```json
 {
   "object": "list",
+  "tier1_disclosure": {
+    "version": "v0.6",
+    "plaintext_to_provider": true,
+    "model_identity": "provider_reported",
+    "hardware_attestation": "none",
+    "tier2_milestone": "future"
+  },
   "data": [
     {
       "id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
@@ -880,6 +918,8 @@ The gateway MUST aggregate providers by case-insensitive model identifier.
 
 The gateway MUST preserve the canonical model ID spelling returned by the coordinator.
 
+The `id` field returned by `/v1/models` reflects the model identifier as advertised by the serving provider binary. The coordinator does NOT cryptographically verify the loaded model weights against a catalog of expected artifact hashes. Buyers SHOULD treat `id` as provider-reported and NOT as a verified integrity claim. A future SPEC-006 or SPEC-008 Tier 2 revision MAY introduce coordinator-managed model catalog plus verified hash policy; until then, model identity verification is out of scope.
+
 The gateway MUST tolerate `/` and `\/` escaped model IDs.
 
 The gateway MUST NOT return individual provider rows.
@@ -895,6 +935,26 @@ The gateway MUST NOT forward or synthesize:
 - RAM GB
 - CPU details
 - operator identity
+
+#### 5.3.1 Tier 1 disclosure surface: `/v1/models` extension
+
+The `/v1/models` response MUST include a top-level field:
+
+```json
+"tier1_disclosure": {
+  "version": "v0.6",
+  "plaintext_to_provider": true,
+  "model_identity": "provider_reported",
+  "hardware_attestation": "none",
+  "tier2_milestone": "future"
+}
+```
+
+Buyers consuming this field SHOULD display its content in human-readable form before sending sensitive prompts.
+
+Gateway implementations MUST set this field automatically.
+
+Operator override is forbidden; there MUST be no config opt-out.
 
 ### 5.4 `POST /v1/chat/completions`
 
@@ -1923,9 +1983,25 @@ Docs MUST include curl, Python, and JavaScript examples.
 
 Docs MUST explain that this is a live Mac pool and occasional 503s are expected.
 
+Docs MUST include the Tier 1 plaintext-to-provider disclosure from Section 1.6.
+
+Docs MUST include the model identity caveat from Section 13.5.
+
 Docs MUST avoid premium inference positioning.
 
 Docs MUST not include donation or payment links.
+
+### 12.6 Signup disclosure contract
+
+The front-door signup flow MUST show a prominent Tier 1 disclosure before the user receives an API key.
+
+The disclosure MUST state, in substantively equivalent language:
+
+> MacProvider Tier 1 is cooperative inference. Buyer prompts and provider responses are processed as plaintext on provider hardware, so providers can technically observe prompts and outputs routed through their machine. Model identity is provider-reported, provider hardware is not attested, and MacProvider Tier 1 does not claim private inference, malicious-provider resistance, or verified model integrity.
+
+The signup flow MUST require this disclosure to be visible before key issuance.
+
+The signup flow MUST NOT describe Tier 1 as provider-private, attested, encrypted-to-provider, malicious-provider-resistant, or model-integrity-verified.
 
 ---
 
@@ -1948,6 +2024,8 @@ The single-page docs MUST include:
 - quota explanation.
 - reset behavior.
 - live Mac pool caveat.
+- Tier 1 plaintext-to-provider disclosure.
+- model identity caveat.
 - `POST /v1/feedback` example.
 
 ### 13.2 OpenAI Python example
@@ -2001,6 +2079,16 @@ Docs MUST map:
 - 502 to upstream provider error (`upstream_provider_error`); retry.
 - 503 to no provider/capacity/beta paused.
 - 504 to provider timeout; retry later.
+
+### 13.5 Tier 1 and model identity caveats
+
+The single-page docs MUST include a "Tier 1 disclosure" subsection explaining that buyer prompts and provider responses are processed as plaintext on provider hardware; providers can technically observe prompts and outputs routed through their machine; hardware attestation is not performed; and Tier 1 makes no privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.
+
+The single-page docs MUST include a "Model identity caveat" subsection explaining that model `id` is provider-reported, not cryptographically verified.
+
+The single-page docs MUST avoid wording that invites buyers to infer provider-private prompts from statements about avoiding AWS, GCP, Azure, or other hyperscalers.
+
+Any README.md for an operator-distributed client SDK MUST include the same Tier 1 disclosure and model identity caveat before its first sensitive-prompt example.
 
 ---
 
@@ -3031,7 +3119,18 @@ Required audit categories:
 - R: no payment/donation leakage.
 - S: coordinator charter preservation.
 - T: integration tests for real user-shaped web/API paths.
-- U: SPEC-003 v0.6 shell-script integration category inheritance: shell-script paths that touch real OS resources such as tty, file descriptors, ports, filesystem layout, or JSON over loopback need integration tests that actually exercise them, not code review alone. This applies to gateway operational scripts for deployment, backup, and kill-switch toggling via shell.
+- U: SPEC-003 v0.7 shell-script integration category inheritance: shell-script paths that touch real OS resources such as tty, file descriptors, ports, filesystem layout, or JSON over loopback need integration tests that actually exercise them, not code review alone. This applies to gateway operational scripts for deployment, backup, and kill-switch toggling via shell.
+- Y: expectation drift between roadmap and current enforcement.
+
+Category Y means SPEC-006 documents future Tier 2 capabilities, including hardware attestation, encrypted provider execution, and model catalog enforcement, as roadmap targets. Audit cycles MUST verify that spec text, front-door copy, API docs, error messages, and external positioning material do NOT promise these capabilities as currently shipping.
+
+The discipline is:
+
+- Tier 1 properties are normative.
+- Tier 2 properties are roadmap: out of scope, but discussable as future.
+- Anything that conflates the two is a MAJOR finding.
+
+Reference: 2026-05-29 independent security audit H-001. The language "Your prompts never touch AWS, GCP, or Azure" is technically true but invites buyers to infer providers cannot see prompts. Both Tier 1 and Tier 2 statements must hold simultaneously; either-or framing is the drift class to catch.
 
 Audits MUST explicitly check configured and unconfigured branches for production gates.
 
@@ -3054,3 +3153,22 @@ The following implementation details remain genuinely open:
 These questions do not block the normative architecture.
 
 They MUST NOT reopen the locked decisions in Section 2.
+
+---
+
+## 22. Production launch gate checklist
+
+Adapted from the 2026-05-29 independent security audit's "Production Gate Recommendations" section.
+
+The operator MUST execute all 8 items before SPEC-006 v0.6 is deployed to production with public buyer access at `api.streamvc.live`.
+
+1. Provider tokens MUST be mandatory in production. [SPEC-002 v1.1.5 § 7.X PG-1]
+2. Provider WebSocket endpoints MUST be shielded by proxy-level rate limits and connection caps. [SPEC-002 v1.1.5 § 7.X PG-2]
+3. The public gateway MUST expose only buyer API endpoints; it MUST NOT expose coordinator internals. [SPEC-002 v1.1.4 § 7 nginx routing block]
+4. Advertised provider concurrency MUST equal enforced runtime concurrency. [SPEC-001 v1.2.4]
+5. Model identity MUST be either cryptographically verified or clearly labeled as provider-reported. [§ 5.3 above]
+6. Buyer disconnect, provider disconnect, timeout, and cancellation MUST produce exactly one accounting outcome. [§ 7.2 + § 17 in v0.5; SPEC-001 v1.2.3 § 6.6 cancel-usage]
+7. Tier 1 documentation MUST clearly state that provider-side prompts are plaintext to the provider runtime. [§ 1.6 above]
+8. Any privacy, attestation, or hardware-trust claim MUST be blocked until Tier 2 enforcement is live. [§ 1.6 above]
+
+This checklist is the operator-side counterpart to SPEC-006 v0.6's spec-side disclosure language. Together they implement the audit's recommendation: keep Tier 1 narrow, explicit, and operationally hardened, while treating provider-private prompts, attestation, model integrity, and marketplace-grade settlement as separate Tier 2 launch gates.
