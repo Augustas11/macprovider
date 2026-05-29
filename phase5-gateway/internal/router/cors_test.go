@@ -22,8 +22,22 @@ func TestCORSAllowedOriginHeaders(t *testing.T) {
 	if got := resp.Header().Get("Access-Control-Allow-Credentials"); got != "false" {
 		t.Fatalf("allow-credentials=%q", got)
 	}
+	if got := resp.Header().Get("Access-Control-Expose-Headers"); got != "X-Request-ID" {
+		t.Fatalf("expose-headers=%q", got)
+	}
 	if !strings.Contains(resp.Header().Get("Vary"), "Origin") {
 		t.Fatalf("vary missing Origin: %q", resp.Header().Get("Vary"))
+	}
+}
+
+func TestCORSApexOriginIsIntentionalFirstPartyOrigin(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(modelsOKClient()))
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req.Header.Set("Origin", "https://streamvc.live")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if got := resp.Header().Get("Access-Control-Allow-Origin"); got != "https://streamvc.live" {
+		t.Fatalf("apex allow-origin=%q", got)
 	}
 }
 

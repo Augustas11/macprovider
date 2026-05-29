@@ -300,6 +300,7 @@ func (s *Server) handleDemoSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error", "demo_session_record_failed", "Could not record demo session")
 		return
 	}
+	setNoStoreHeaders(w.Header())
 	writeJSON(w, http.StatusCreated, map[string]any{"demo_token": token, "expires_at": expires.Format(time.RFC3339)})
 }
 
@@ -321,6 +322,7 @@ func (s *Server) handleAPIKeys(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error", "api_key_rotation_failed", "Could not rotate API key")
 		return
 	}
+	setNoStoreHeaders(w.Header())
 	writeJSON(w, http.StatusCreated, map[string]any{"api_key": fullKey, "key_id": key.KeyID, "key_prefix": key.KeyHashPrefix})
 }
 

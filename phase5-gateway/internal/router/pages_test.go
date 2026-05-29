@@ -36,6 +36,14 @@ func TestAccountTemplateDisplaysKeyAndSnippets(t *testing.T) {
 			t.Fatalf("account body missing %q", want)
 		}
 	}
+	disclosureIndex := strings.Index(body, `<details class="disclosure-panel" open>`)
+	keyIndex := strings.Index(body, `<code class="key" id="api-key">`+fullKey+`</code>`)
+	if disclosureIndex < 0 {
+		t.Fatalf("account disclosure is not visibly open before key")
+	}
+	if keyIndex < 0 || disclosureIndex > keyIndex {
+		t.Fatalf("account disclosure must render before one-shot key")
+	}
 	if findCookie(resp, "mp_new_api_key") != "" {
 		t.Fatalf("one-shot cookie was not unset")
 	}
@@ -57,10 +65,21 @@ func TestDocsRouteRendersMarkdown(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{})
 	resp := assertStatus(t, h, http.MethodGet, "/docs", "", "", "", http.StatusOK)
 	body := resp.Body.String()
-	for _, want := range []string{`<h1 id="getting-started">Getting started</h1>`, `id="disclosures"`, `id="quotas-and-limits"`} {
+	for _, want := range []string{
+		`<h1 id="getting-started">Getting started</h1>`,
+		`id="api-reference"`,
+		`id="disclosures"`,
+		`id="quotas-and-limits"`,
+		`/v1/feedback`,
+		`Chat completions`,
+		`deployment-configured`,
+	} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("docs body missing %q", want)
 		}
+	}
+	if strings.Contains(body, "120s") {
+		t.Fatalf("docs body hard-codes stale timeout: %s", body)
 	}
 }
 
@@ -81,6 +100,46 @@ func TestTier1DisclosureMatchesSpecSection16(t *testing.T) {
 	for _, item := range tier1DisclosureText {
 		if !strings.Contains(normalizeDisclosureText(rendered), normalizeDisclosureText(item.Text)) {
 			t.Fatalf("%s disclosure missing from rendered account page", item.Key)
+		}
+	}
+
+	docsRaw, err := pageFS.ReadFile("templates/docs.md")
+	if err != nil {
+		t.Fatalf("read docs markdown: %v", err)
+	}
+	consoleRaw, err := os.ReadFile(filepath.Join("..", "..", "..", "frontdoor", "console", "index.html"))
+	if err != nil {
+		t.Fatalf("read console html: %v", err)
+	}
+	for _, surface := range []struct {
+		name string
+		text string
+	}{
+		{name: "docs", text: string(docsRaw)},
+		{name: "console", text: string(consoleRaw)},
+	} {
+		normalized := normalizeDisclosureText(surface.text)
+		for _, item := range tier1DisclosureText {
+			if !strings.Contains(normalized, normalizeDisclosureText(item.Text)) {
+				t.Fatalf("%s disclosure missing from %s surface", item.Key, surface.name)
+			}
+		}
+	}
+}
+
+func TestConsoleStaticContracts(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "frontdoor", "console", "index.html"))
+	if err != nil {
+		t.Fatalf("read console html: %v", err)
+	}
+	html := string(raw)
+	for _, want := range []string{
+		`docs#api-reference`,
+		`r.headers.get("X-Request-ID")`,
+		`minting=null;throw e`,
+	} {
+		if !strings.Contains(html, want) {
+			t.Fatalf("console missing %q", want)
 		}
 	}
 }

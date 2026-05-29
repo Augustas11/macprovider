@@ -8,7 +8,7 @@ Implemented the buyer-facing front door for `console.streamvc.live` and the scop
 
 - New static console in `frontdoor/console/`
 - Endpoint-scoped CORS for the four demo/browser endpoints
-- Embedded `/account` template with one-shot key UX, copy button, save checkbox, snippets, and Tier 1 disclosures
+- Embedded `/account` template with one-shot key UX, copy button, save checkbox, snippets, and Tier 1 disclosures before key presentation
 - Embedded `/docs` markdown page rendered by the gateway with `goldmark`
 - nginx vhost for `console.streamvc.live`
 - Decision log Entry 28
@@ -74,6 +74,7 @@ No locked spec files were modified.
 - O-6c-2 resolved as specified: suggested prompts only fill the textarea.
 - O-6c-3 resolved as specified: quota copy says `1000 tokens/IP/day` and mentions shared NATs.
 - Deployment ACs remain manual because DNS, certbot, nginx enablement, and live Lighthouse runs are operator-side infrastructure steps.
+- The Phase 6 `/account` page is a one-shot key handoff surface. A full buyer dashboard remains a Phase 7 backlog item and is not claimed by this build.
 
 ## Audit focus
 

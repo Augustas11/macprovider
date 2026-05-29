@@ -44,5 +44,6 @@ func (s *Server) corsOriginAllowed(origin string) bool {
 func setCORSHeaders(h http.Header, origin string) {
 	h.Set("Access-Control-Allow-Origin", origin)
 	h.Set("Access-Control-Allow-Credentials", "false")
+	h.Set("Access-Control-Expose-Headers", "X-Request-ID")
 	h.Add("Vary", "Origin")
 }

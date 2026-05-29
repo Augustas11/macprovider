@@ -83,6 +83,23 @@ Primary buyer endpoints:
 | `GET` | `/v1/models` | Bearer API key or demo token |
 | `GET` | `/v1/status` | Public |
 | `GET` | `/v1/usage` | Bearer API key |
+| `POST` | `/v1/feedback` | Bearer API key or demo token |
+
+### Chat completions
+
+`POST /v1/chat/completions` accepts OpenAI-compatible chat completion requests. Set `stream:true` for server-sent events or omit it for a single JSON response.
+
+### Models
+
+`GET /v1/models` returns the current provider-reported model list.
+
+### Usage
+
+`GET /v1/usage` returns account quota, key, model, and rating summary fields for signed-in API-key users.
+
+### Feedback
+
+`POST /v1/feedback` records a request rating for operator review.
 
 ## Quotas and limits
 
@@ -93,7 +110,7 @@ Primary buyer endpoints:
 
 ## Streaming vs non-streaming
 
-Both streaming and non-streaming chat completions are supported. Non-streaming requests have a 120s operational upper bound. Streaming chunks can take up to 120s end-to-end.
+Both streaming and non-streaming chat completions are supported. Request timeouts are deployment-configured and enforced by the gateway/coordinator path rather than promised as a fixed product SLA.
 
 ## Disclosures
 

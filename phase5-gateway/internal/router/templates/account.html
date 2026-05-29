@@ -6,7 +6,7 @@
 <title>Mac Provider account</title>
 <style>
 :root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;--ok:#3fb950}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}main{max-width:960px;margin:0 auto;padding:48px 20px}.panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:28px}h1{margin:0 0 8px;color:#f0f6fc;font-size:34px;line-height:1.15}p{margin:0 0 18px}.muted{color:var(--muted)}a{color:var(--accent)}.key-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:stretch;margin:20px 0}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}code.key{display:block;overflow:auto;white-space:nowrap;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;color:#f0f6fc}.btn{border:1px solid var(--border);background:#21262d;color:#f0f6fc;border-radius:8px;padding:10px 14px;font-weight:650;cursor:pointer}.btn:hover:not(:disabled){border-color:var(--accent)}.btn:disabled{opacity:.45;cursor:not-allowed}.saved{display:flex;gap:10px;align-items:flex-start;margin:16px 0 20px}.saved input{margin-top:4px}.tabs{margin-top:24px}.tabbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}.tab{border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:8px;padding:8px 12px;cursor:pointer}.tab[aria-selected=true]{border-color:var(--accent);color:#fff}.snippet{display:none}.snippet.active{display:block}pre{overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;margin:0}details{margin-top:24px;border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--bg)}summary{cursor:pointer;color:#f0f6fc;font-weight:700}.disclosure{margin:12px 0 0;padding-left:20px}.disclosure li{margin:10px 0}.footer{display:flex;gap:16px;flex-wrap:wrap;margin-top:24px;color:var(--muted)}.ok{color:var(--ok)}@media(max-width:720px){main{padding:24px 14px}.panel{padding:20px}.key-row{grid-template-columns:1fr}h1{font-size:28px}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}main{max-width:960px;margin:0 auto;padding:48px 20px}.panel{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:28px}h1{margin:0 0 8px;color:#f0f6fc;font-size:34px;line-height:1.15}p{margin:0 0 18px}.muted{color:var(--muted)}a{color:var(--accent)}.key-row{display:grid;grid-template-columns:1fr auto;gap:12px;align-items:stretch;margin:20px 0}code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}code.key{display:block;overflow:auto;white-space:nowrap;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:14px;color:#f0f6fc}.btn{border:1px solid var(--border);background:#21262d;color:#f0f6fc;border-radius:8px;padding:10px 14px;font-weight:650;cursor:pointer}.btn:hover:not(:disabled){border-color:var(--accent)}.btn:disabled{opacity:.45;cursor:not-allowed}.saved{display:flex;gap:10px;align-items:flex-start;margin:16px 0 20px}.saved input{margin-top:4px}.tabs{margin-top:24px}.tabbar{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px}.tab{border:1px solid var(--border);background:var(--bg);color:var(--text);border-radius:8px;padding:8px 12px;cursor:pointer}.tab[aria-selected=true]{border-color:var(--accent);color:#fff}.snippet{display:none}.snippet.active{display:block}pre{overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:16px;margin:0}details{margin-top:24px;border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--bg)}details.disclosure-panel{margin:18px 0}summary{cursor:pointer;color:#f0f6fc;font-weight:700}.disclosure{margin:12px 0 0;padding-left:20px}.disclosure li{margin:10px 0}.footer{display:flex;gap:16px;flex-wrap:wrap;margin-top:24px;color:var(--muted)}.ok{color:var(--ok)}@media(max-width:720px){main{padding:24px 14px}.panel{padding:20px}.key-row{grid-template-columns:1fr}h1{font-size:28px}}
 </style>
 </head>
 <body>
@@ -15,6 +15,12 @@
 {{if .HasAPIKey}}
 <h1>Welcome to Mac Provider</h1>
 <p class="muted">Your API key is shown once. Save it now.</p>
+<details class="disclosure-panel" open>
+<summary>Privacy notes</summary>
+<ol class="disclosure">
+{{range .Disclosures}}<li><strong>{{.Key}}</strong>: {{.Text}}</li>{{end}}
+</ol>
+</details>
 <div class="key-row">
 <code class="key" id="api-key">{{.APIKey}}</code>
 <button class="btn" id="copy" type="button">Copy to clipboard</button>
@@ -59,13 +65,13 @@ console.log(resp.choices[0].message.content);</code></pre>
 {{else}}
 <h1>Mac Provider account</h1>
 <p>No new API key to display. If you have lost your key, you can mint a new one by signing in again. <a href="/auth/github/start">Sign in with GitHub</a>.</p>
-{{end}}
-<details>
+<details class="disclosure-panel">
 <summary>Privacy notes</summary>
 <ol class="disclosure">
 {{range .Disclosures}}<li><strong>{{.Key}}</strong>: {{.Text}}</li>{{end}}
 </ol>
 </details>
+{{end}}
 <nav class="footer" aria-label="Account links">
 <a href="/docs">Documentation</a>
 <a href="/v1/status" target="_blank" rel="noreferrer">Status</a>
