@@ -1,7 +1,10 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.2.0 (2026-05-30, provider circuit-breaker for in-flight faults)
+**Version:** 1.3.0 (2026-05-30, warm-up capability gate)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.3.0:**
+- Adds **FR-P8a**: an admission-time warm-up capability gate. When enabled (`pool.warmup_gate_enabled`, default true), a newly connected provider is registered as `degraded` and is not buyer-routable until the coordinator sends a tiny `inference_request` over the provider WebSocket and observes a successful token-producing completion within `pool.warmup_gate_timeout_s` (default 90s, `pool.warmup_gate_max_tokens` default 2). The gate is an actual inference, not self-reported throughput. Failure/timeout retries on degraded backoff up to `pool.degraded_max_retries`; after exhaustion the provider becomes `unavailable` with reason `warmup_failed`. Existing wake-from-sleep `warm_up` fallback is now config-driven by `pool.warmup_fallback_s` (default 60s). No SPEC-001 / phase3-binary wire change: the gate reuses `inference_request`, `inference_response_chunk`, and `inference_response_end`.
 
 **Change log v1.2.0:**
 - Adds **FR-P11a**: a provider **circuit-breaker** for in-flight inference faults. Until now only HTTP 502/504 (HTTP-forwarding path) degraded a provider; in WS-tunneled mode a dead-WS-mid-inference, a relay timeout, or a zero-token completion only failed the individual request (fast-fail/failover per F-4) while the faulting provider stayed `ready` and kept receiving buyer traffic (observed live: an undersized provider that fast-failed every non-trivial request). v1.2.0 makes a provider that accumulates `pool.breaker_failure_threshold` (default 2) qualifying in-flight faults within a rolling `pool.breaker_window_s` (default 120) window transition to `degraded` and run the existing FR-P11 recovery-preflight cycle before returning to `ready`. Buyer-initiated cancellation / client hangup (buyer context cancelled) is EXPLICITLY EXCLUDED and never counts against a provider. Also wires the previously-inert `pool.degraded_backoff_s` and `pool.degraded_max_retries` keys (defined since v1.1, never read) into that recovery cycle, and adds `pool.breaker_*` plus the v1.1.7 `pool.heartbeat_miss_threshold_s` to the config schema block (both were previously only described in prose). Per independent review: FR-P11a **supersedes** FR-P20's former "3 consecutive timeouts → degraded" clause (single source of truth); zero-token only counts when `finish_reason` is abnormal (a clean empty `stop` is valid); a *streaming* buyer-cancel that arrives with zero received chunks after routing is attributed to the provider (resolves the 300s=300s cancel/timeout race), while non-streaming buyer-cancels are excluded — single-chunk delivery means chunk count carries no progress signal, so unfit non-streaming providers are caught by the relay-timeout instead; and a provider that re-trips the breaker within the window after recovering is marked `unavailable` to bound flapping (recovery preflight cannot prove token production until the warm-up gate lands). No wire-protocol change; SPEC-001 v1.2.4 unaffected; provider binaries need no update. (The proactive half of provider fitness — an admission warm-up capability gate — is a separate Phase 7 change.)
@@ -404,8 +407,41 @@ The coordinator detects wake events by monitoring heartbeat gaps. If
 coordinator sends `{"type": "warm_up"}`, marks the provider `degraded`
 (overriding the heartbeat's `ready` — Phase 2 D2 found -12% throughput
 on first post-wake request), and waits for a `state_update` to `ready`
-before routing. If no `state_update` arrives within 60s, log a warning
-and allow routing anyway.
+before routing. If no `state_update` arrives within
+`pool.warmup_fallback_s` (default 60s), log a warning and allow routing
+anyway.
+
+**FR-P8a. Admission warm-up capability gate.**
+If `pool.warmup_gate_enabled` is true (default), a newly connected
+provider MUST NOT be buyer-routable immediately after `hello`. The
+coordinator registers it as `degraded`, sends `hello_ack`, then starts a
+capability probe by sending a minimal `inference_request` over the
+provider WebSocket:
+
+- model: the `hello.model_id`.
+- prompt: a small deterministic self-test prompt.
+- `max_tokens`: `pool.warmup_gate_max_tokens` (default 2).
+- non-streaming mode.
+
+The provider passes only if the probe reaches `inference_response_end`
+with `status: "complete"` and `usage.completion_tokens > 0` within
+`pool.warmup_gate_timeout_s` (default 90s). A self-reported
+`throughput_tps_estimate` is never sufficient. A provider that reports
+`ready` through heartbeat or `state_update` while the gate is pending
+MUST remain non-routable until the token-producing probe passes.
+
+On pass, coordinator marks the provider `ready` and buyer routing may
+select it. On failure, timeout, provider disconnect, or zero-token
+completion, coordinator logs `reason = "warmup_failed"`, leaves the
+provider non-routable, and retries after `pool.degraded_backoff_s`,
+doubling backoff between attempts up to `pool.degraded_max_retries`.
+After all attempts fail, coordinator marks the provider `unavailable`.
+
+If `pool.warmup_gate_enabled` is false, the coordinator preserves the
+pre-v1.3.0 behavior: valid `hello` registers the provider as `ready`.
+Operators MAY disable the gate only for trusted/pinned providers or
+debug sessions where admission latency is more harmful than a false
+ready signal.
 
 **FR-P9. Send drain command on shutdown / blacklisting.**
 The coordinator sends `{"type": "drain"}` when: (1) coordinator SIGTERM
@@ -573,10 +609,9 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
   `inference_response_chunk` count) all already exist in SPEC-001 v1.2.4. The
   provider binary needs no change.
 
-This is the runtime (reactive) half of provider fitness. The proactive half —
-an admission-time warm-up capability gate that withholds `ready` until a
-provider proves it can produce a token — is a separate Phase 7 change and is
-not specified here.
+This is the runtime (reactive) half of provider fitness. The proactive half is
+FR-P8a's admission-time warm-up capability gate, which withholds `ready` until
+a provider proves it can produce a token.
 
 **FR-P12. Identify provider; configurable bearer-token check.**
 
@@ -1751,7 +1786,7 @@ When coordinator sends this:
   (FR-P8).
 - Coordinator marks provider as `degraded` in pool.
 - Coordinator waits for `state_update` with `state: "ready"` before
-  routing to this provider.
+  routing to this provider, or falls back after `pool.warmup_fallback_s`.
 
 **nak (P->C only)** — per SPEC-001 § 6.5, `nak` is provider-to-coordinator
 only. Protocol error from provider:
@@ -3169,6 +3204,10 @@ pool:
   heartbeat_miss_threshold_s: 90   # (v1.1.7) Close WS after no inbound frame of ANY type for this long;
                                     # in-flight response chunks count as activity (F-4 liveness)
   wake_gap_threshold_s: 120
+  warmup_fallback_s: 60          # Wake warm_up fallback before allowing routing if provider sends no ready state_update
+  warmup_gate_enabled: true      # (v1.3.0 FR-P8a) Gate new connections on a token-producing self-test
+  warmup_gate_timeout_s: 90      # Max seconds for each warm-up gate inference attempt
+  warmup_gate_max_tokens: 2      # Max tokens requested by the warm-up gate self-test
   degraded_backoff_s: 30      # Initial recovery backoff after 502/504 OR a breaker trip (FR-P11a)
   degraded_max_retries: 3     # After N consecutive failed recovery preflights, mark unavailable
   degraded_probe_after_502: true   # Send recovery preflight after 502/504 backoff (default true)

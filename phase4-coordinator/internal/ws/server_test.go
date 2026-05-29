@@ -35,6 +35,159 @@ func TestProviderHelloReceivesAck(t *testing.T) {
 	assertHelloAck(t, conn)
 }
 
+func TestWarmupGateHoldsProviderUntilTokenProducingProbe(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.WarmupGateEnabled = true
+		cfg.Pool.WarmupGateTimeoutS = 2
+		cfg.Pool.WarmupGateMaxTokens = 2
+		cfg.Pool.DegradedMaxRetries = 1
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateDegraded
+	})
+
+	req := readInferenceRequest(t, conn)
+	if !strings.HasPrefix(req.RequestID, "req-warmup-gate-"+assignedID+"-1") {
+		t.Fatalf("request_id = %q, want warmup gate prefix for assigned_id %q", req.RequestID, assignedID)
+	}
+	if req.Stream {
+		t.Fatal("warmup gate request stream = true, want false")
+	}
+	var body struct {
+		Model     string `json:"model"`
+		MaxTokens int    `json:"max_tokens"`
+		Stream    bool   `json:"stream"`
+	}
+	if err := json.Unmarshal([]byte(req.Body), &body); err != nil {
+		t.Fatalf("warmup body json: %v", err)
+	}
+	if body.Model != "mlx-community/Qwen2.5-7B-Instruct-4bit" {
+		t.Fatalf("warmup model = %q", body.Model)
+	}
+	if body.MaxTokens != 2 {
+		t.Fatalf("warmup max_tokens = %d, want 2", body.MaxTokens)
+	}
+	if body.Stream {
+		t.Fatal("warmup body stream = true, want false")
+	}
+
+	writeWarmupCompletion(t, conn, req.RequestID, 1)
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateReady
+	})
+}
+
+func TestWarmupGateTimeoutMarksProviderUnavailable(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.WarmupGateEnabled = true
+		cfg.Pool.WarmupGateTimeoutS = 1
+		cfg.Pool.DegradedMaxRetries = 1
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+	req := readInferenceRequest(t, conn)
+	if req.RequestID == "" {
+		t.Fatal("warmup request_id is empty")
+	}
+
+	eventuallyWithin(t, 4*time.Second, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateUnavailable
+	})
+}
+
+func TestWarmupGateRejectsZeroTokenCompletion(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.WarmupGateEnabled = true
+		cfg.Pool.WarmupGateTimeoutS = 2
+		cfg.Pool.DegradedMaxRetries = 1
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+	req := readInferenceRequest(t, conn)
+
+	writeWarmupCompletion(t, conn, req.RequestID, 0)
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateUnavailable
+	})
+}
+
+func TestWarmupGateSuppressesReadyProviderUpdates(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.WarmupGateEnabled = true
+		cfg.Pool.WarmupGateTimeoutS = 2
+		cfg.Pool.WarmupGateMaxTokens = 2
+		cfg.Pool.DegradedMaxRetries = 1
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+	req := readInferenceRequest(t, conn)
+
+	hb := heartbeat()
+	hb["status"] = "ready"
+	hb["slots_free"] = 0
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write heartbeat: %v", err)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateDegraded && provider.SlotsFree == 0
+	})
+
+	if err := wsutil.WriteClientText(conn, mustJSON(map[string]any{
+		"type":   "state_update",
+		"state":  "ready",
+		"reason": "provider says ready while gate is pending",
+		"since":  "2026-05-30T00:00:00Z",
+		"metrics_snapshot": map[string]any{
+			"slots_free":  1,
+			"slots_total": 1,
+		},
+	})); err != nil {
+		t.Fatalf("write state_update: %v", err)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateDegraded && provider.SlotsFree == 1
+	})
+
+	writeWarmupCompletion(t, conn, req.RequestID, 1)
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateReady
+	})
+}
+
 func TestProviderHelloAcceptsAuthorizationHeaderInStep2(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()
@@ -769,6 +922,54 @@ func assertHelloAck(t *testing.T, conn net.Conn) string {
 	return ack.AssignedID
 }
 
+func readInferenceRequest(t *testing.T, conn net.Conn) providerws.InferenceRequest {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	defer conn.SetReadDeadline(time.Time{})
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read inference_request: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+	var req providerws.InferenceRequest
+	if err := json.Unmarshal(payload, &req); err != nil {
+		t.Fatalf("inference_request json: %v", err)
+	}
+	if req.Type != "inference_request" {
+		t.Fatalf("message type = %q, want inference_request", req.Type)
+	}
+	return req
+}
+
+func writeWarmupCompletion(t *testing.T, conn net.Conn, requestID string, completionTokens int) {
+	t.Helper()
+	if err := wsutil.WriteClientText(conn, mustJSON(providerws.InferenceResponseChunk{
+		Type:      "inference_response_chunk",
+		RequestID: requestID,
+		Seq:       0,
+		Data:      `{"id":"warmup","choices":[{"message":{"content":"ok"},"finish_reason":"stop"}]}`,
+	})); err != nil {
+		t.Fatalf("write warmup chunk: %v", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(providerws.InferenceResponseEnd{
+		Type:       "inference_response_end",
+		RequestID:  requestID,
+		Status:     "complete",
+		ChunksSent: 1,
+		Usage: json.RawMessage(mustJSON(map[string]any{
+			"prompt_tokens":     4,
+			"completion_tokens": completionTokens,
+			"total_tokens":      4 + completionTokens,
+		})),
+	})); err != nil {
+		t.Fatalf("write warmup end: %v", err)
+	}
+}
+
 func TestProviderHelloAdmitsUnknownProviderAsProvisional(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()
@@ -954,6 +1155,7 @@ func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValid
 	t.Helper()
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
+	cfg.Pool.WarmupGateEnabled = false
 	cfg.Providers = []config.ProviderConfig{
 		{
 			ProviderID:  "m4-anon",
@@ -1043,7 +1245,12 @@ func heartbeat() map[string]any {
 
 func eventually(t *testing.T, f func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	eventuallyWithin(t, 2*time.Second, f)
+}
+
+func eventuallyWithin(t *testing.T, timeout time.Duration, f func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for {
 		if f() {
 			return

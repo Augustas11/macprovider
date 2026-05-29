@@ -44,6 +44,10 @@ type PoolConfig struct {
 	// liveness). Defaults to 90s (3x the 30s heartbeat interval).
 	HeartbeatMissThresholdS int  `yaml:"heartbeat_miss_threshold_s"`
 	WakeGapThresholdS       int  `yaml:"wake_gap_threshold_s"`
+	WarmupFallbackS         int  `yaml:"warmup_fallback_s"`
+	WarmupGateEnabled       bool `yaml:"warmup_gate_enabled"`
+	WarmupGateTimeoutS      int  `yaml:"warmup_gate_timeout_s"`
+	WarmupGateMaxTokens     int  `yaml:"warmup_gate_max_tokens"`
 	DegradedBackoffS        int  `yaml:"degraded_backoff_s"`
 	DegradedMaxRetries      int  `yaml:"degraded_max_retries"`
 	DegradedProbeAfter502   bool `yaml:"degraded_probe_after_502"`
@@ -118,6 +122,10 @@ func Default() Config {
 			DisconnectGracePeriodS:  30,
 			HeartbeatMissThresholdS: 90,
 			WakeGapThresholdS:       120,
+			WarmupFallbackS:         60,
+			WarmupGateEnabled:       true,
+			WarmupGateTimeoutS:      90,
+			WarmupGateMaxTokens:     2,
 			DegradedBackoffS:        30,
 			DegradedMaxRetries:      3,
 			DegradedProbeAfter502:   true,
@@ -214,6 +222,12 @@ func (c Config) Validate() error {
 	}
 	if c.Pool.DegradedBackoffS <= 0 || c.Pool.DegradedMaxRetries <= 0 {
 		return fmt.Errorf("pool degraded recovery settings must be > 0")
+	}
+	if c.Pool.WarmupFallbackS <= 0 {
+		return fmt.Errorf("pool warmup_fallback_s must be > 0")
+	}
+	if c.Pool.WarmupGateEnabled && (c.Pool.WarmupGateTimeoutS <= 0 || c.Pool.WarmupGateMaxTokens <= 0) {
+		return fmt.Errorf("pool warmup gate settings must be > 0 when enabled")
 	}
 	if c.Pool.BreakerFailureThreshold <= 0 || c.Pool.BreakerWindowS <= 0 {
 		return fmt.Errorf("pool breaker settings must be > 0")

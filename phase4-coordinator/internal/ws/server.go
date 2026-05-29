@@ -37,6 +37,7 @@ type Server struct {
 	newUUID   func() string
 	timers    sync.Map
 	pending   sync.Map
+	warmups   sync.Map
 	tokens    TokenValidator
 	admission *AdmissionManager
 	sessions  sync.Map
@@ -203,6 +204,10 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 	assignedID = s.newUUID()
 	providerID = hello.ProviderID
 	now := s.now()
+	initialState := pool.StateReady
+	if s.cfg.Pool.WarmupGateEnabled {
+		initialState = pool.StateDegraded
+	}
 	entry := &pool.Provider{
 		ProviderID:            hello.ProviderID,
 		AssignedID:            assignedID,
@@ -219,7 +224,7 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		Tier:                  tier,
 		InferencePath:         inferencePath,
 		AdmittedAt:            now,
-		State:                 pool.StateReady,
+		State:                 initialState,
 		LastHeartbeatAt:       now,
 		LastActivityAt:        now,
 		ConnectedAt:           now,
@@ -249,6 +254,9 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 	if err := session.send(b); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
 		return
+	}
+	if s.cfg.Pool.WarmupGateEnabled {
+		s.startWarmupGate(*entry)
 	}
 
 	for {
@@ -390,6 +398,110 @@ func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTo
 	}
 }
 
+func (s *Server) startWarmupGate(provider pool.Provider) {
+	s.warmups.Store(provider.ProviderID, provider.AssignedID)
+	go s.runWarmupGate(provider)
+}
+
+func (s *Server) runWarmupGate(provider pool.Provider) {
+	defer s.clearWarmupGate(provider.ProviderID, provider.AssignedID)
+	attempts := s.cfg.Pool.DegradedMaxRetries
+	if attempts <= 0 {
+		attempts = config.Default().Pool.DegradedMaxRetries
+	}
+	delay := s.degradedBackoff()
+	for attempt := 1; attempt <= attempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(delay)
+			delay *= 2
+		}
+		if !s.warmupGateCurrent(provider.ProviderID, provider.AssignedID) {
+			return
+		}
+		if s.runWarmupGateAttempt(provider, attempt) {
+			s.clearWarmupGate(provider.ProviderID, provider.AssignedID)
+			if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateReady) {
+				s.log.Info().Str("provider_id", provider.ProviderID).Int("attempt", attempt).Msg("warmup gate passed")
+			}
+			return
+		}
+		s.log.Warn().Str("provider_id", provider.ProviderID).Int("attempt", attempt).Str("reason", "warmup_failed").Msg("warmup gate attempt failed")
+	}
+	if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable) {
+		s.log.Warn().Str("provider_id", provider.ProviderID).Str("reason", "warmup_failed").Msg("provider marked unavailable after warmup gate failures")
+	}
+}
+
+func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool {
+	body, err := json.Marshal(map[string]any{
+		"model": provider.ModelID,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": "Reply with ok.",
+		}},
+		"max_tokens": s.warmupGateMaxTokens(),
+		"stream":     false,
+	})
+	if err != nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.warmupGateTimeout())
+	defer cancel()
+	requestID := "warmup-gate-" + provider.AssignedID + "-" + itoa(attempt)
+	relay, err := s.DispatchInference(ctx, provider, requestID, body, false)
+	if err != nil {
+		return false
+	}
+	chunks := relay.Chunks
+	for {
+		select {
+		case _, ok := <-chunks:
+			if !ok {
+				chunks = nil
+			}
+		case end := <-relay.Done:
+			return warmupGatePassed(end)
+		case <-relay.Errors:
+			return false
+		case <-ctx.Done():
+			return false
+		}
+	}
+}
+
+func warmupGatePassed(end InferenceResponseEnd) bool {
+	if end.Status != "complete" {
+		return false
+	}
+	if len(end.Usage) == 0 {
+		return false
+	}
+	var usage struct {
+		CompletionTokens int `json:"completion_tokens"`
+	}
+	if err := json.Unmarshal(end.Usage, &usage); err != nil {
+		return false
+	}
+	return usage.CompletionTokens > 0
+}
+
+func (s *Server) warmupGateCurrent(providerID, assignedID string) bool {
+	value, ok := s.warmups.Load(providerID)
+	return ok && value.(string) == assignedID
+}
+
+func (s *Server) warmupGatePending(providerID string) bool {
+	_, ok := s.warmups.Load(providerID)
+	return ok
+}
+
+func (s *Server) clearWarmupGate(providerID, assignedID string) {
+	value, ok := s.warmups.Load(providerID)
+	if ok && value.(string) == assignedID {
+		s.warmups.Delete(providerID)
+	}
+}
+
 func (s *Server) DrainAll(reason string) {
 	for _, provider := range s.pool.Snapshot() {
 		session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)
@@ -437,6 +549,9 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		s.log.Warn().Str("state", hb.Status).Str("provider_id", providerID).Msg("invalid heartbeat state")
 		return
 	}
+	if state == pool.StateReady && s.warmupGatePending(providerID) {
+		state = pool.StateDegraded
+	}
 	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, pool.HeartbeatUpdate{
 		Status:                state,
 		ModelID:               hb.ModelID,
@@ -457,7 +572,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	if gap > threshold {
 		s.log.Warn().Str("provider_id", providerID).Dur("gap", gap).Dur("threshold", threshold).Msg("provider heartbeat stale")
 	}
-	if gap > s.wakeGapThreshold() {
+	if gap > s.wakeGapThreshold() && !s.warmupGatePending(providerID) {
 		s.log.Info().Str("provider_id", providerID).Dur("gap", gap).Msg("provider wake detected")
 		s.markDegradedForWarmup(providerID, assignedID)
 		session, ok := s.sessionFor(providerID, assignedID)
@@ -488,6 +603,9 @@ func (s *Server) handleStateUpdate(providerID string, payload []byte) {
 		s.log.Warn().Str("state", update.State).Str("provider_id", providerID).Msg("invalid provider state")
 		return
 	}
+	if state == pool.StateReady && s.warmupGatePending(providerID) {
+		state = pool.StateDegraded
+	}
 	entry, ok := s.pool.ApplyStateUpdate(providerID, pool.StateUpdate{
 		State:      state,
 		SlotsFree:  update.MetricsSnapshot.SlotsFree,
@@ -516,6 +634,10 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 		timer.(*time.Timer).Stop()
 	}
 	timer := time.AfterFunc(s.warmupFallback(), func() {
+		if s.warmupGatePending(providerID) {
+			s.timers.Delete(providerID)
+			return
+		}
 		if s.pool.MarkState(providerID, assignedID, pool.StateReady) {
 			s.log.Warn().Str("provider_id", providerID).Dur("timeout", s.warmupFallback()).Msg("warm_up timed out; allowing routing")
 		}
@@ -525,6 +647,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 }
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
+	s.clearWarmupGate(providerID, assignedID)
 	if session, ok := s.sessionFor(providerID, assignedID); ok {
 		session.close()
 		s.sessions.Delete(sessionKey(providerID, assignedID))
@@ -601,13 +724,41 @@ func (s *Server) wakeGapThreshold() time.Duration {
 }
 
 func (s *Server) warmupFallback() time.Duration {
-	return 60 * time.Second
+	seconds := s.cfg.Pool.WarmupFallbackS
+	if seconds <= 0 {
+		seconds = config.Default().Pool.WarmupFallbackS
+	}
+	return time.Duration(seconds) * time.Second
 }
 
 func (s *Server) disconnectGracePeriod() time.Duration {
 	seconds := s.cfg.Pool.DisconnectGracePeriodS
 	if seconds <= 0 {
 		seconds = config.Default().Pool.DisconnectGracePeriodS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Server) warmupGateTimeout() time.Duration {
+	seconds := s.cfg.Pool.WarmupGateTimeoutS
+	if seconds <= 0 {
+		seconds = config.Default().Pool.WarmupGateTimeoutS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Server) warmupGateMaxTokens() int {
+	tokens := s.cfg.Pool.WarmupGateMaxTokens
+	if tokens <= 0 {
+		tokens = config.Default().Pool.WarmupGateMaxTokens
+	}
+	return tokens
+}
+
+func (s *Server) degradedBackoff() time.Duration {
+	seconds := s.cfg.Pool.DegradedBackoffS
+	if seconds <= 0 {
+		seconds = config.Default().Pool.DegradedBackoffS
 	}
 	return time.Duration(seconds) * time.Second
 }
