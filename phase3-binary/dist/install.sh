@@ -14,7 +14,7 @@ set -euo pipefail
 GITHUB_REPO="${MACPROVIDER_GITHUB_REPO:-Augustas11/macprovider}"
 COORDINATOR_URL_DEFAULT="wss://coordinator.streamvc.live/ws/provider"
 COORDINATOR_BASE_DEFAULT="https://coordinator.streamvc.live"
-INSTALL_DIR="$HOME/macprovider"
+INSTALL_DIR="${MACPROVIDER_INSTALL_DIR:-$HOME/macprovider}"
 BIN_DIR="$HOME/.local/bin"
 BINARY_PATH="$BIN_DIR/macprovider-cli"
 CONFIG_DIR="$HOME/.config/macprovider"
@@ -22,7 +22,6 @@ CONFIG_PATH="$CONFIG_DIR/config.yaml"
 PROVIDER_ID_PATH="$CONFIG_DIR/provider_id"
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
-PORT="${MACPROVIDER_PORT:-8080}"
 DRY_RUN=0
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 NO_LAUNCHD="${MACPROVIDER_NO_LAUNCHD:-0}"
@@ -38,6 +37,24 @@ die() {
   exit "$code"
 }
 
+detect_existing_port() {
+  if [ -f "$CONFIG_PATH" ]; then
+    awk -F: '/^port:/ {gsub(/ /, "", $2); print $2; exit}' "$CONFIG_PATH" 2>/dev/null
+  fi
+}
+
+# F-603-V7-1: upgrade-in-place must preserve the prior configured port
+# unless the operator explicitly overrides it. Otherwise existing installs
+# on 18080 regress to the default 8080 and collide with unrelated services.
+if [ -n "${MACPROVIDER_PORT:-}" ]; then
+  PORT="$MACPROVIDER_PORT"
+elif EXISTING_PORT="$(detect_existing_port)" && [ -n "$EXISTING_PORT" ]; then
+  PORT="$EXISTING_PORT"
+  log "Detected existing config port: $PORT (override with MACPROVIDER_PORT=N)"
+else
+  PORT="8080"
+fi
+
 usage() {
   cat <<'USAGE'
 Usage: bash install.sh [--dry-run]
@@ -46,6 +63,8 @@ Environment overrides:
   MACPROVIDER_GITHUB_REPO        owner/repo for GitHub Releases
   MACPROVIDER_MODEL              model id to install
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
+  MACPROVIDER_PORT               local HTTP port
+  MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
   MACPROVIDER_NO_PROMPT=1        use defaults without interactive prompts
   MACPROVIDER_NO_LAUNCHD=1       skip launchd service install
 USAGE
@@ -103,9 +122,8 @@ read_line() {
 }
 
 # v1.2.2: pre-flight port collision detection. Without this, install
-# proceeds, launchd loads, the binary crashes on bind, and the only
-# evidence is "Local self-test failed" 60s later. Surface the real
-# problem early with a clear fix path.
+# proceeds, launchd loads, the binary crashes on bind, and the timeout
+# path hides the real cause. Surface the collision early with a clear fix.
 ensure_port_free() {
   if [ "$DRY_RUN" -eq 1 ]; then
     return
@@ -119,6 +137,30 @@ ensure_port_free() {
     return
   fi
   holding_cmd="$(lsof -nP -iTCP:"$PORT" -sTCP:LISTEN 2>/dev/null | awk 'NR==2 {print $1 " (pid " $2 ")"}')"
+
+  # F-603-V7-2: an existing macprovider-cli on this port is the normal
+  # upgrade-in-place case. Stop that service and continue; only foreign
+  # holders should block the install.
+  if pgrep -lf 'macprovider-cli.*--port' 2>/dev/null | awk -v pids="$holding_pids" '
+    BEGIN { n = split(pids, pid_list, "\n"); for (i = 1; i <= n; i++) wanted[pid_list[i]] = 1 }
+    wanted[$1] { found = 1 }
+    END { exit found ? 0 : 1 }
+  '; then
+    log "Existing macprovider-cli holding port $PORT; stopping it for upgrade-in-place."
+    launchctl bootout "gui/$UID" "$PLIST_PATH" 2>/dev/null || true
+    sleep 2
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
+      log "Port $PORT still held after launchctl bootout; trying pkill of own-service PID."
+      kill -TERM $holding_pids 2>/dev/null || true
+      sleep 2
+    fi
+    if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN -t 2>/dev/null | grep -q .; then
+      die 6 "could not stop existing macprovider-cli on port $PORT; please stop manually and retry"
+    fi
+    log "Port $PORT freed; proceeding with upgrade."
+    return
+  fi
+
   log "ERROR: port $PORT is already in use by ${holding_cmd:-another process}."
   log "Either stop that process, or set MACPROVIDER_PORT to a free port and re-run."
   log "Note: env var must be on the bash side of the pipe, not the curl side:"
@@ -462,6 +504,26 @@ install_binary() {
   [ -L "$BINARY_PATH" ] || die 5 "symlink not created at $BINARY_PATH"
 }
 
+check_install_dir_clean() {
+  if [ ! -d "$INSTALL_DIR" ]; then
+    return 0
+  fi
+  local entries
+  # F-603-V7-7: warn on mixed-state directories such as leftover Python
+  # virtualenvs, but do not block an otherwise valid partner upgrade.
+  entries=$(ls -A "$INSTALL_DIR" 2>/dev/null | grep -vE '^(macprovider-cli(\.v[0-9.]+\.bak)?|.*\.bundle)$' | head -20 || true)
+  if [ -n "$entries" ]; then
+    log "WARNING: $INSTALL_DIR contains non-macprovider entries:"
+    while IFS= read -r entry; do
+      log "  - $entry"
+    done <<EOF
+$entries
+EOF
+    log "These will not be modified by install.sh, but you may want"
+    log "to clean up the directory after the upgrade. Continuing..."
+  fi
+}
+
 check_path_hint() {
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
@@ -513,7 +575,9 @@ render_plist() {
   provider_id="$(xml_escape "$2")"
   coordinator_url="$(xml_escape "$3")"
   user_home="$(xml_escape "$HOME")"
-  binary_path="$(xml_escape "$BINARY_PATH")"
+  # F-603-V7-4: launchd must invoke the real binary path, not the
+  # ~/.local/bin symlink, so Swift Bundle resolution finds adjacent bundles.
+  binary_path="$(xml_escape "$INSTALL_DIR/macprovider-cli")"
   log_dir="$(xml_escape "$LOG_DIR")"
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -573,7 +637,9 @@ start_manual_service() {
   mkdir -p "$LOG_DIR"
   (
     cd "$INSTALL_DIR"
-    nohup "$BINARY_PATH" \
+    # F-603-V7-4: direct background self-test also invokes the real binary
+    # so Bundle resolution sees the adjacent .bundle directories.
+    nohup "$INSTALL_DIR/macprovider-cli" \
       --port "$PORT" \
       --model "$model" \
       --provider-id "$provider_id" \
@@ -587,14 +653,20 @@ start_manual_service() {
 
 wait_for_local_model() {
   model="$1"
-  # First install can take several minutes if MLX has to download the model
-  # (~2 GB) from Hugging Face. Cached installs still pay 30-60s for Metal
-  # kernel JIT + model weight load on first run. 300s covers both cases on
-  # typical residential bandwidth; we log progress every 30s so the user
-  # knows the script is alive.
+  # F-603-V7-5: first install can take much longer if MLX has to download a
+  # multi-GB model. Keep warm-cache installs at 5 minutes; allow cold-cache
+  # installs 20 minutes with visible progress.
+  local cache_check="$HOME/.cache/huggingface/hub/models--${model//\//--}"
   start_ts="$(date +%s)"
-  deadline=$(( start_ts + 300 ))
-  next_progress=$(( start_ts + 30 ))
+  if [ -d "$cache_check" ]; then
+    deadline=$(( start_ts + 300 ))
+    next_progress=$(( start_ts + 30 ))
+    log "Waiting up to 5 min for local /v1/models (model cache detected)."
+  else
+    deadline=$(( start_ts + 1200 ))
+    next_progress=$(( start_ts + 60 ))
+    log "Waiting up to 20 min for local /v1/models (first-time install; downloading ${model} ~4-5GB)."
+  fi
   port_seen=0
   while [ "$(date +%s)" -lt "$deadline" ]; do
     raw_models_json="$(curl -sS --max-time 3 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
@@ -617,9 +689,13 @@ wait_for_local_model() {
       if [ "$port_seen" -eq 0 ]; then
         log "Still waiting for macprovider-cli to bind port ${PORT} (${elapsed}s elapsed)..."
       else
-        log "Model still loading (${elapsed}s elapsed; first run may download ~2 GB from Hugging Face)..."
+        log "Model still loading (${elapsed}s elapsed; first run may still be downloading from Hugging Face)..."
       fi
-      next_progress=$(( now + 30 ))
+      if [ -d "$cache_check" ]; then
+        next_progress=$(( now + 30 ))
+      else
+        next_progress=$(( now + 60 ))
+      fi
     fi
     sleep 2
   done
@@ -627,6 +703,29 @@ wait_for_local_model() {
 }
 
 print_local_self_test_diagnostics() {
+  # F-603-V7-6: distinguish a timeout from a proven binary failure and leave
+  # the user with concrete checks for process, download, and stderr state.
+  log ""
+  log "==========================================================="
+  log "Self-test timeout reached. THIS DOES NOT NECESSARILY MEAN"
+  log "THE BINARY FAILED. macprovider-cli is likely still loading"
+  log "the model in the background."
+  log ""
+  log "To check if the binary is alive:"
+  log "  ps aux | grep macprovider-cli | grep -v grep"
+  log ""
+  log "To check if the model is still downloading:"
+  log "  du -sh ~/.cache/huggingface/hub/"
+  log "  (run twice 30s apart; growing = downloading)"
+  log ""
+  log "To check for errors:"
+  log "  tail -30 $LOG_DIR/macprovider.err.log"
+  log ""
+  log "Once the binary fully loads, it joins the pool. You can"
+  log "verify from the coordinator side via /v1/pool/check (see docs)."
+  log "==========================================================="
+  log ""
+
   raw_response="$(curl -sS --max-time 3 "http://127.0.0.1:${PORT}/v1/models" 2>/dev/null || true)"
   if [ -n "$raw_response" ]; then
     log "Raw /v1/models response (first 200 bytes):"
@@ -697,6 +796,7 @@ main() {
   verify_checksum_signature
   verify_sha256
   validate_tarball
+  check_install_dir_clean
   install_binary
   check_path_hint
   clear_quarantine
@@ -705,11 +805,8 @@ main() {
   install_plist "$model" "$provider_id" "$coordinator_url"
   start_manual_service "$model" "$provider_id" "$coordinator_url"
 
-  log "Waiting up to 5 minutes for local /v1/models (first run can be slow if MLX still needs to download weights)."
   if ! wait_for_local_model "$model"; then
-    log "Local self-test failed."
     print_local_self_test_diagnostics
-    log "Full logs: tail -f $LOG_DIR/macprovider.err.log"
     exit 6
   fi
 

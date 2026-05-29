@@ -1,9 +1,11 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.6 (2026-05-29, cross-spec coherence fix pass)
-**Depends on:** SPEC-001 v1.2.2, SPEC-002 v1.1.4
+**Version:** 0.7 (2026-05-29, install.sh partner-upgrade hardening)
+**Depends on:** SPEC-001 v1.2.3, SPEC-002 v1.1.4
 
 **Change log v0.6:** Resolves cross-spec findings F-603-1 and F-603-2 from `specs/SPEC-CROSS-006-audit.md`: the installer visibility self-test now references SPEC-002 v1.1.4's coordinator-owned `GET /v1/pool/check`, and dependencies align to SPEC-001 v1.2.2 + SPEC-002 v1.1.4.
+
+**Change log v0.7:** Resolves six v1.2.4 partner-upgrade follow-ups from Decision log Entry 22, building on the Entry 20 install.sh bug class: F-603-V7-1 existing config port detection, F-603-V7-2 own-service port holder stop, F-603-V7-4 real binary path in launchd plist for Swift Bundle resolution, F-603-V7-5 cold-cache 20-minute wait, F-603-V7-6 diagnostic self-test timeout messaging, and F-603-V7-7 mixed-state install-dir warning. F-603-V7-3 and F-603-V7-8 were retracted and are not part of v0.7.
 
 **Restructure note (v0.2).** SPEC-003 v0.1 contained four parts in a
 single document. v0.2 redistributes them to avoid cross-spec drift:
@@ -277,8 +279,8 @@ reintroduce the slow-iterate path and is explicitly out of scope.
 
 **FR-C2. install.sh contract.**
 The install script at `https://get.streamvc.live/install.sh` is the
-primary distribution mechanism for new providers. It is a POSIX-
-compatible shell script (no bashisms) that:
+primary distribution mechanism for new providers. It is a Bash script
+that:
 
 1. Detects the platform (`uname -s`, `uname -m`). Exits with error if
    not `Darwin` + `arm64`.
@@ -287,8 +289,7 @@ compatible shell script (no bashisms) that:
    (`GET /repos/{owner}/{repo}/releases/latest`).
 4. Downloads the binary tarball and `checksums.txt`.
 5. Verifies the SHA-256 checksum. Exits with error on mismatch.
-6. Extracts the binary to `~/.local/bin/macprovider-cli` (creates
-   directory if needed).
+6. Extracts the real binary and adjacent `.bundle` directories to `~/macprovider/`, then creates `~/.local/bin/macprovider-cli` as a symlink for PATH discoverability.
 7. Adds `~/.local/bin` to `$PATH` in `~/.zshrc` (if not already
    present) with a comment marker: `# Added by macprovider-cli`.
 8. Prompts the user for model selection (FR-D2).
@@ -322,11 +323,12 @@ compatible shell script (no bashisms) that:
 
 | Path | Purpose |
 |---|---|
-| `~/.local/bin/macprovider-cli` | Binary |
+| `~/macprovider/macprovider-cli` | Real binary, adjacent to Swift/MLX `.bundle` directories |
+| `~/.local/bin/macprovider-cli` | Symlink for PATH discoverability |
 | `~/.config/macprovider/config.yaml` | Configuration |
 | `~/.config/macprovider/provider_id` | Stable identity |
 | `~/Library/LaunchAgents/live.streamvc.macprovider.plist` | launchd plist (if opted in) |
-| `~/.local/share/macprovider/logs/` | Log directory (created by binary on first run) |
+| `~/Library/Logs/macprovider/` | launchd stdout/stderr logs |
 
 **Environment variables (override defaults):**
 
@@ -334,7 +336,8 @@ compatible shell script (no bashisms) that:
 |---|---|
 | `MACPROVIDER_MODEL` | Skip model selection prompt |
 | `MACPROVIDER_COORDINATOR_URL` | Skip coordinator URL prompt |
-| `MACPROVIDER_INSTALL_DIR` | Override `~/.local/bin` |
+| `MACPROVIDER_PORT` | Override local HTTP port; otherwise reuses existing config port when present, falling back to 8080 |
+| `MACPROVIDER_INSTALL_DIR` | Override `~/macprovider` support directory |
 | `MACPROVIDER_NO_LAUNCHD` | Skip launchd prompt (no plist) |
 | `MACPROVIDER_NO_PROMPT` | Non-interactive mode (uses all defaults) |
 
@@ -407,10 +410,15 @@ crash:
   <string>live.streamvc.macprovider</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$HOME/.local/bin/macprovider-cli</string>
-    <string>serve</string>
-    <string>--config</string>
-    <string>$HOME/.config/macprovider/config.yaml</string>
+    <string>$HOME/macprovider/macprovider-cli</string>
+    <string>--port</string>
+    <string>8080</string>
+    <string>--model</string>
+    <string>mlx-community/Qwen2.5-7B-Instruct-4bit</string>
+    <string>--provider-id</string>
+    <string>example-provider</string>
+    <string>--coordinator</string>
+    <string>wss://coordinator.streamvc.live/ws/provider</string>
   </array>
   <key>RunAtLoad</key>
   <true/>
@@ -420,15 +428,17 @@ crash:
     <false/>
   </dict>
   <key>StandardOutPath</key>
-  <string>$HOME/.local/share/macprovider/logs/stdout.log</string>
+  <string>$HOME/Library/Logs/macprovider/macprovider.out.log</string>
   <key>StandardErrorPath</key>
-  <string>$HOME/.local/share/macprovider/logs/stderr.log</string>
+  <string>$HOME/Library/Logs/macprovider/macprovider.err.log</string>
+  <key>WorkingDirectory</key>
+  <string>$HOME/macprovider</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>HOME</key>
     <string>$HOME</string>
     <key>PATH</key>
-    <string>/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin</string>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin</string>
   </dict>
   <key>ThrottleInterval</key>
   <integer>10</integer>
@@ -441,6 +451,10 @@ crash:
 Notes:
 - `$HOME` is expanded at install time by `install.sh`, not by launchd.
   The plist contains literal absolute paths.
+- The plist invokes `$HOME/macprovider/macprovider-cli`, not the
+  `~/.local/bin/macprovider-cli` symlink. The symlink remains for shell
+  use, but launchd must use the real path so Swift Bundle resolution
+  finds adjacent `.bundle` directories.
 - `KeepAlive.SuccessfulExit = false` means launchd restarts the binary
   only on crash (non-zero exit), not on clean SIGTERM shutdown.
 - `ThrottleInterval = 10` prevents restart storms.
@@ -548,7 +562,7 @@ step and is NOT included in the "2 minutes to pool" target.
 On first run (or when invoked via `macprovider-cli self-test`), the
 binary:
 1. Loads the model (this is the slowest step).
-2. Runs the SPEC-001 v1.2.2 FR-20 self-test (short inference, verify
+2. Runs the SPEC-001 v1.2.3 FR-20 self-test (short inference, verify
    output).
 3. Connects to the coordinator, sends `hello`, waits for `hello_ack`.
 4. Calls `https://coordinator.streamvc.live/v1/pool/check?provider_id=<sanitized>` after WebSocket connect. This is the canonical post-SPEC-006-deployment verification path defined in SPEC-002 v1.1.4 § 7.4: `/v1/pool/check` stays on coordinator's public operator/health surface, not behind the gateway. The installer MUST NOT attempt to reach this endpoint via `api.streamvc.live`; the gateway does not proxy `/v1/pool/check`.
@@ -571,20 +585,28 @@ binary:
    ```
 
 **FR-D3a. Installer self-test failure diagnostics.**
-When `install.sh`'s local self-test (`wait_for_local_model`) fails, the
-script MUST print the first 200 bytes of the actual `/v1/models`
-response in addition to the generic failure message, labelled clearly
-as "raw response". This requirement exists because wire-format
-mismatches between the installer's grep patterns and the binary's JSON
-encoder are the dominant failure mode for self-test false negatives
-(see Decision log Entry 20 Bug D). The 200-byte cap avoids dumping
-multi-kilobyte responses while reliably exposing the JSON structure that
-the grep is checking.
+When `install.sh`'s local self-test (`wait_for_local_model`) times out, the script MUST print a diagnostic block that distinguishes "deadline reached" from "binary failed" and includes commands to check process liveness, Hugging Face cache growth, and stderr logs. This exists because first-time Qwen 7B downloads can exceed 5 minutes and the prior "Local self-test failed" message caused partners to conclude the install was broken while the binary was still loading.
+
+The timeout path MUST also print the first 200 bytes of the actual `/v1/models` response when bytes are available, labelled clearly as "raw response". This requirement exists because wire-format mismatches between the installer's grep patterns and the binary's JSON encoder are the dominant failure mode for self-test false negatives (see Decision log Entry 20 Bug D). The 200-byte cap avoids dumping multi-kilobyte responses while reliably exposing the JSON structure that the grep is checking.
 
 If the `/v1/models` endpoint returned no response (port unbound), the
 script MUST instead print the binary's stderr log path and the last 200
 bytes of stderr if non-empty. This ensures every failure mode produces
 a self-diagnosing message.
+
+**§ 5.X v1.2.4 partner-upgrade lessons.**
+Install.sh upgrade-in-place was exercised at scale for the first time during the v1.2.4 partner upgrade, triggered by the SPEC-006 v0.5 launch path and tracked as Decision log Entry 22 follow-ups. Six findings surfaced from operator self-canary plus M4 partner reproduction, all closed in v0.7 (F-603-V7-1 through F-603-V7-7, excluding retracted F-603-V7-3 and F-603-V7-8). The findings clustered around three classes:
+
+1. **Existing-state detection** — install.sh assumed fresh install
+   paths; upgrade-in-place required reading prior config (port) and
+   stopping the prior service (launchctl bootout).
+2. **Swift Bundle resolution edge case** — launchd plist invoked the
+   symlink path, which Swift's Bundle.main resolved incorrectly on some
+   macOS environments. Fixed by invoking the real binary path from the
+   plist.
+3. **User-facing failure clarity** — "Local self-test failed" alarmed
+   users when the binary was still loading. Diagnostic-rich timeout
+   messaging plus cold-cache deadline extension shipped.
 
 **FR-D4. Status check.**
 See FR-C4 for the full `macprovider-cli status` output format. The
@@ -700,8 +722,8 @@ cross-references them for completeness:
 
 ## 9. Acceptance criteria
 
-**AC-1 through AC-4 must ALL pass for SPEC-003 v0.6 to be considered
-build-complete. Companion ACs in SPEC-001 v1.2.2 (AC-11 through AC-15)
+**AC-1 through AC-5 must ALL pass for SPEC-003 v0.7 to be considered
+build-complete. Companion ACs in SPEC-001 v1.2.3 (AC-11 through AC-15)
 and SPEC-002 v1.1.4 (AC-11 through AC-15) must also pass.**
 
 ---
@@ -797,7 +819,8 @@ and reverting the edit after the check.
 
 **Expected:**
 1. `install.sh` exits with code 6.
-2. The failure log includes `Local self-test failed.`
+2. The failure log includes `Self-test timeout reached. THIS DOES NOT
+   NECESSARILY MEAN THE BINARY FAILED.`
 3. If `/v1/models` returned bytes, the log includes
    `Raw /v1/models response (first 200 bytes):` followed by the capped
    raw response.
@@ -808,6 +831,16 @@ and reverting the edit after the check.
 
 **How to verify:** Manual curl-pipe-bash failure injection plus a normal
 green install retest.
+
+---
+
+**AC-5. Upgrade-in-place installer hardening.**
+
+**Setup/action:** Re-run `install.sh` on an existing v1.2.3+ install, then run a mixed-state directory simulation via `MACPROVIDER_INSTALL_DIR`.
+
+**Expected:** Existing config port is reused; own `macprovider-cli` port holders are stopped while foreign holders still exit 6; launchd invokes the real binary path; warm-cache waits remain 5 minutes; cold-cache waits are 20 minutes with progress; mixed-state directories warn and continue.
+
+**How to verify:** Manual upgrade on existing partner-shaped install plus local mixed-directory simulation.
 
 ---
 
@@ -837,6 +870,12 @@ accompanying integration-test step MUST be downgraded to "needs
 integration test" rather than "approved." Reference: Decision log Entry
 20 Bugs A/B/C/D, all four of which were independently code-review-clean
 and all four of which broke on first stranger-shaped execution.
+
+This category inherits and reinforces the v0.5 rule that shell-script
+paths touching real OS resources need integration tests, not code
+review. v0.7 specifically adds: **upgrade-in-place paths exercise
+different OS-resource interactions than fresh installs and require
+their own integration testing.**
 
 ---
 
