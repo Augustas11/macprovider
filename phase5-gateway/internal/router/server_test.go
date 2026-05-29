@@ -538,25 +538,16 @@ func TestQuotaSettlement504ZeroCompletion(t *testing.T) {
 	}
 }
 
-func TestStreamingQuotaReservationAndSettlement(t *testing.T) {
-	runStreamingSettlementBranch(t, "acct_stream_actuals", `{"prompt_tokens":9,"completion_tokens":30,"total_tokens":39}`, 39)
+func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}`
-	runStreamingSettlementBranch(t, "acct_stream_estimated", "", float64(estimatePromptTokens([]byte(body))+30))
-}
-
-func runStreamingSettlementBranch(t *testing.T, accountID, finalCancelUsage string, wantUsed float64) {
-	t.Helper()
+	accountID := "acct_stream_estimated"
 	var store *sqlite.Store
 	var reservedAtFirstByte int64
 	firstByte := make(chan struct{})
 	cancelSeen := make(chan struct{})
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		if r.URL.Path == "/v1/chat/completions/cancel" {
-			close(cancelSeen)
-			if finalCancelUsage != "" {
-				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, fmt.Sprintf(`{"usage":%s}`, finalCancelUsage)), nil
-			}
-			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{}`), nil
+			t.Fatalf("gateway called non-spec cancel endpoint")
 		}
 		used, reserved, err := store.DailyUsage(context.Background(), accountID, "2026-05-29")
 		if err != nil {
@@ -570,7 +561,8 @@ func runStreamingSettlementBranch(t *testing.T, accountID, finalCancelUsage stri
 		go func() {
 			_, _ = fmt.Fprintf(pw, "data: %s\n\n", strings.Repeat("x", 120))
 			close(firstByte)
-			<-cancelSeen
+			<-r.Context().Done()
+			close(cancelSeen)
 			_ = pw.Close()
 		}()
 		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
@@ -581,7 +573,6 @@ func runStreamingSettlementBranch(t *testing.T, accountID, finalCancelUsage stri
 	}, WithHTTPClient(client))
 	store = createdStore
 	fullKey := createAccountAndKey(t, store, cfg, accountID)
-	body := `{"model":"llama","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}`
 	ctx, cancel := context.WithCancel(context.Background())
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
 	req.Header.Set("Authorization", "Bearer "+fullKey)
@@ -620,6 +611,7 @@ func runStreamingSettlementBranch(t *testing.T, accountID, finalCancelUsage stri
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
+	wantUsed := float64(estimatePromptTokens([]byte(body)) + 30)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
 	}

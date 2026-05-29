@@ -777,10 +777,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	window := s.now().UTC().Format("2006-01-02")
+	reservationMaxAge := time.Duration(s.cfg.Quotas.ReservationMaxAgeHours) * time.Hour
 	decision, err := s.store.ReserveQuota(r.Context(), storage.ReservationRequest{
 		AccountID: subject.AccountID, RequestID: requestID(r), WindowDate: window,
 		RequestedTokens: maxTokens, DailyQuota: dailyQuota,
-		CreatedAt: s.now(), ExpiresAt: s.now().Add(24 * time.Hour),
+		CreatedAt: s.now(), ExpiresAt: s.now().Add(reservationMaxAge),
 	})
 	if errors.Is(err, storage.ErrQuotaExceeded) {
 		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
@@ -835,7 +836,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	promptEstimate := estimatePromptTokens(body)
 	if chat.Stream {
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, cancelUpstream)
 		return
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate)
@@ -878,7 +879,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	_, _ = w.Write(body)
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate int64) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate int64, cancelUpstream func()) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "provider_unavailable", "No provider available")
@@ -903,18 +904,15 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	var cancelOnce sync.Once
-	var cancelUsage tokenUsage
-	var cancelUsageOK bool
-	sendCancel := func() (tokenUsage, bool) {
-		cancelOnce.Do(func() { cancelUsage, cancelUsageOK = s.sendCancelRequest(r) })
-		return cancelUsage, cancelUsageOK
+	cancelCoordinator := func() {
+		cancelOnce.Do(cancelUpstream)
 	}
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
 		select {
 		case <-r.Context().Done():
-			_, _ = sendCancel()
+			cancelCoordinator()
 		case <-done:
 		}
 	}()
@@ -927,7 +925,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "client_disconnect")
 				return
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, scanner, sendCancel)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, cancelCoordinator)
 			return
 		default:
 		}
@@ -951,7 +949,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "client_disconnect")
 			return
 		}
-		s.settleCancelledStream(r, subject, promptEstimate, emitted, scanner, sendCancel)
+		s.settleCancelledStream(r, subject, promptEstimate, emitted, cancelCoordinator)
 		return
 	}
 	if reported != nil {
@@ -961,73 +959,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "ok")
 }
 
-func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted int64, scanner *bufio.Scanner, sendCancel func() (tokenUsage, bool)) {
-	if cancelUsage, ok := sendCancel(); ok {
-		_ = s.settleRequest(r, subject, cancelUsage.PromptTokens, cancelUsage.CompletionTokens, "provider_reported", "client_disconnect")
-		return
-	}
-	if usage, ok := waitForCancelUsage(scanner, time.Duration(s.cfg.Timeouts.StreamingCancelMS)*time.Millisecond); ok {
-		_ = s.settleRequest(r, subject, usage.PromptTokens, usage.CompletionTokens, "provider_reported", "client_disconnect")
-		return
-	}
+func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted int64, cancelCoordinator func()) {
+	cancelCoordinator()
 	_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "client_disconnect")
-}
-
-func (s *Server) sendCancelRequest(r *http.Request) (tokenUsage, bool) {
-	timeout := time.Duration(s.cfg.Timeouts.StreamingCancelMS) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 500 * time.Millisecond
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	body, _ := json.Marshal(map[string]string{"request_id": requestID(r)})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/chat/completions/cancel", bytes.NewReader(body))
-	if err != nil {
-		return tokenUsage{}, false
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Request-ID", requestID(r))
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return tokenUsage{}, false
-	}
-	defer resp.Body.Close()
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-	if err != nil {
-		return tokenUsage{}, false
-	}
-	return usageFromJSON(respBody)
-}
-
-func waitForCancelUsage(scanner *bufio.Scanner, timeout time.Duration) (tokenUsage, bool) {
-	if timeout <= 0 {
-		timeout = 500 * time.Millisecond
-	}
-	type result struct {
-		usage tokenUsage
-		ok    bool
-	}
-	ch := make(chan result, 1)
-	go func() {
-		for scanner.Scan() {
-			line := scanner.Text()
-			if !strings.HasPrefix(line, "data: ") {
-				continue
-			}
-			data := strings.TrimPrefix(line, "data: ")
-			if usage, ok := usageFromJSON([]byte(data)); ok {
-				ch <- result{usage: usage, ok: true}
-				return
-			}
-		}
-		ch <- result{}
-	}()
-	select {
-	case res := <-ch:
-		return res.usage, res.ok
-	case <-time.After(timeout):
-		return tokenUsage{}, false
-	}
 }
 
 func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, completion int64, source, outcome string) error {

@@ -47,6 +47,8 @@ quotas:
   demo_sessions_per_ip_per_hour: 10
   account_concurrency: 2
   signup_accounts_per_ip_per_day: 3
+  reaper_interval_hours: 1
+  reservation_max_age_hours: 24
 
 limits:
   max_tokens_per_request: 4096

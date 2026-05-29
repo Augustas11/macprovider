@@ -46,7 +46,7 @@ func main() {
 		return
 	}
 
-	go runReservationReaper(ctx, store)
+	go runReservationReaper(ctx, store, time.Duration(cfg.Quotas.ReaperIntervalHours)*time.Hour)
 
 	upstreamClient := &http.Client{Timeout: cfg.CoordinatorTimeout()}
 	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, upstreamClient)
@@ -76,7 +76,10 @@ type reservationReaper interface {
 	ReapExpiredReservations(context.Context, time.Time) (int64, error)
 }
 
-func runReservationReaper(ctx context.Context, store reservationReaper) {
+func runReservationReaper(ctx context.Context, store reservationReaper, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Hour
+	}
 	reap := func() {
 		n, err := store.ReapExpiredReservations(ctx, time.Now().UTC())
 		if err != nil {
@@ -88,7 +91,7 @@ func runReservationReaper(ctx context.Context, store reservationReaper) {
 		}
 	}
 	reap()
-	ticker := time.NewTicker(time.Hour)
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {

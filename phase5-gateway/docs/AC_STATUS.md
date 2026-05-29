@@ -10,7 +10,7 @@ Phase E local status as of 2026-05-29. "Automated" means covered by Go tests in 
 | AC-4 GitHub OAuth signup | Partial | Mock OAuth end-to-end issues one-time key with normal callback `code` + `state` only; live GitHub app not tested. |
 | AC-5 key hash storage | Pass | `TestKeyHashStorage`. |
 | AC-6 OpenAI SDK compatibility | Partial | OpenAI-shaped mock chat flow passes; Python/JS SDK smoke not run. |
-| AC-7 streaming | Pass | `TestStreamingQuotaReservationAndSettlement` covers real cancel-request usage settlement and byte-estimation fallback. |
+| AC-7 streaming | Partial | Streaming relay and reservation behavior are covered; `TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation` covers the v1 disconnect byte-estimation fallback. Provider-reported cancel actuals require coordinator relay support tracked in AC-37. |
 | AC-8 quota enforcement | Pass | `TestQuotaExhaustionReturns429`. |
 | AC-9 demo quota | Pass | Demo token issuance/forgery/rate limiting plus chat-token quota: `TestDemoChatQuotaExhaustionIsSeparateFromAccountQuota`. |
 | AC-10 concurrency cap | Pass | Storage-backed per-account active request reservations: `TestAccountConcurrencyCap`, `TestConcurrencyReservationCapAndRelease`. |
@@ -40,6 +40,6 @@ Phase E local status as of 2026-05-29. "Automated" means covered by Go tests in 
 | AC-34 provider-pinning header strip | Pass | `TestProviderPinningHeadersStripped`. |
 | AC-35 demo token forgery rejected | Pass | `TestDemoTokenValidation`. |
 | AC-36 quota refund on 504 zero completion | Pass | `TestQuotaSettlement504ZeroCompletion`. |
-| AC-37 streaming quota reservation and settlement | Pass | `TestStreamingQuotaReservationAndSettlement` now exercises the real cancel-request usage path and the no-usage byte-estimation fallback. |
+| AC-37 streaming quota reservation and settlement | Partial | `TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation` verifies reservation-before-first-byte, prompt plus `ceil(bytes/4)` settlement, and upstream coordinator request cancellation on buyer disconnect. Real WS-tunneled `inference_response_end` carrying cancel `usage` is not relayed to the gateway in v1, so exact cancel actuals remain a coordinator integration follow-up. |
 
 Known launch blockers before production: live GitHub OAuth, live OpenAI SDK smoke, Pearl nginx/systemd verification, and front-door migration/docs checks.

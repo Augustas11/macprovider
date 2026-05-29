@@ -10,6 +10,7 @@ This is an operator runbook draft. Do not deploy from the build session without 
    - `GITHUB_OAUTH_CLIENT_ID`
    - `GITHUB_OAUTH_CLIENT_SECRET`
 3. Ensure coordinator buyer URL is loopback: `http://127.0.0.1:8443`.
+   - Keep quota reaper defaults unless intentionally changing them: `quotas.reaper_interval_hours: 1`, `quotas.reservation_max_age_hours: 24`.
 4. Install `dist/macprovider-gateway.service` as `/etc/systemd/system/macprovider-gateway.service`.
 5. Install `dist/nginx-api.streamvc.live.conf` as `/etc/nginx/sites-available/api.streamvc.live` and enable it from `sites-enabled`.
    - Keep the SPEC-002 PG-2 `limit_req_zone` / `limit_conn_zone` directives and the `/ws/provider` `limit_req` / `limit_conn` location controls in place before launch.

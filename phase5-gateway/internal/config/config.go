@@ -86,6 +86,8 @@ type QuotasConfig struct {
 	DemoSessionsPerIPPerHour  int   `yaml:"demo_sessions_per_ip_per_hour"`
 	AccountConcurrency        int   `yaml:"account_concurrency"`
 	SignupAccountsPerIPPerDay int   `yaml:"signup_accounts_per_ip_per_day"`
+	ReaperIntervalHours       uint  `yaml:"reaper_interval_hours"`
+	ReservationMaxAgeHours    uint  `yaml:"reservation_max_age_hours"`
 }
 
 type LimitsConfig struct {
@@ -142,6 +144,8 @@ func Default() Config {
 			DemoSessionsPerIPPerHour:  10,
 			AccountConcurrency:        2,
 			SignupAccountsPerIPPerDay: 3,
+			ReaperIntervalHours:       1,
+			ReservationMaxAgeHours:    24,
 		},
 		Limits: LimitsConfig{
 			MaxTokensPerRequest:     4096,
@@ -277,6 +281,12 @@ func (c Config) Validate() error {
 	}
 	if c.Quotas.DemoSessionsPerIPPerHour <= 0 || c.Quotas.AccountConcurrency <= 0 || c.Quotas.SignupAccountsPerIPPerDay <= 0 {
 		return fmt.Errorf("quota counters must be positive")
+	}
+	if c.Quotas.ReaperIntervalHours < 1 {
+		return fmt.Errorf("quotas.reaper_interval_hours must be >= 1")
+	}
+	if c.Quotas.ReservationMaxAgeHours < 2 {
+		return fmt.Errorf("quotas.reservation_max_age_hours must be >= 2")
 	}
 	if c.Limits.MaxTokensPerRequest <= 0 || c.Limits.DemoMaxTokensPerRequest <= 0 || c.Limits.RequestBodyBytes <= 0 {
 		return fmt.Errorf("limits must be positive")

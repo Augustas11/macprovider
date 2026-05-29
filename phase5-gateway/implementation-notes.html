@@ -78,8 +78,8 @@
   </ul>
   <h2>Resolved in v0.5</h2>
   <ul>
-    <li><strong>F-606-V3-1:</strong> Streaming cancellation quota settlement now prefers provider-reported cancel <code>usage</code> actuals and falls back to byte estimation when usage is absent.</li>
-    <li><strong>F-606-V3-2:</strong> AC-37 now covers both the v1.2.4+ actuals path and the pre-v1.2.4 fallback-estimation path.</li>
+    <li><strong>F-606-V3-1 follow-up:</strong> Gateway v1 cancels the upstream coordinator stream on buyer disconnect and settles with byte estimation. Exact provider-reported cancel <code>usage</code> requires the coordinator buyer stream to relay the WS-tunneled <code>inference_response_end</code> usage back to the gateway.</li>
+    <li><strong>F-606-V3-2 follow-up:</strong> AC-37 is partial until the coordinator relay exposes cancel actuals on the same stream; current gateway tests cover the fallback-estimation path only.</li>
   </ul>
   <h2>Open questions for implementation</h2>
   <ul>
