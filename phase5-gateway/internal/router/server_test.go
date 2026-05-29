@@ -538,6 +538,85 @@ func TestQuotaSettlement504ZeroCompletion(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsCoordinatorTimeoutAppliesToStreamAndNonStream(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.CoordinatorRequestSeconds = 1
+	}, WithHTTPClient(client))
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "non_stream", body: `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}],"stream":false}`},
+		{name: "stream", body: `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}],"stream":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fullKey := createAccountAndKey(t, store, cfg, "acct_timeout_"+tc.name)
+			start := time.Now()
+			resp := postChat(t, h, fullKey, tc.body, nil)
+			elapsed := time.Since(start)
+			if resp.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if elapsed > 2500*time.Millisecond {
+				t.Fatalf("elapsed=%s, want <=2.5s", elapsed)
+			}
+			assertErrorCode(t, resp.Body.String(), "coordinator_unavailable")
+		})
+	}
+}
+
+func TestChatCompletionsCoordinatorRequestCancelsWithBuyerContext(t *testing.T) {
+	entered := make(chan struct{})
+	cancelled := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		close(entered)
+		<-r.Context().Done()
+		close(cancelled)
+		return nil, r.Context().Err()
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Timeouts.CoordinatorRequestSeconds = 60
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_cancel")
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		h.ServeHTTP(resp, req)
+		close(done)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("coordinator transport was not entered")
+	}
+	cancel()
+	select {
+	case <-cancelled:
+	case <-time.After(time.Second):
+		t.Fatal("coordinator request did not observe buyer cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handler did not return after buyer cancellation")
+	}
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "coordinator_unavailable")
+}
+
 func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}`
 	accountID := "acct_stream_estimated"

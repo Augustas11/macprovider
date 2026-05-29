@@ -193,7 +193,7 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     <code>X-MacProvider-Route</code>.</p>
     <p><strong>Mid-stream errors:</strong> if provider body reads fail
     after headers are sent, the coordinator emits the SPEC-002 streaming
-    error event with <code>provider_disconnect</code>, then
+    error event with <code>provider_disconnected</code>, then
     <code>data: [DONE]</code>. Clean provider EOF ends the relay normally.</p>
     <p><strong>Verification:</strong> <code>gofmt -w ... &amp;&amp;
     GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>

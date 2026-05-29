@@ -381,6 +381,46 @@ func TestDisconnectMarksUnavailableThenRemovesAfterGrace(t *testing.T) {
 	})
 }
 
+func TestMissedHeartbeatClosesProviderWebSocketAndMarksUnavailable(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.HeartbeatIntervalS = 1
+		cfg.Routing.FailoverTimeoutS = 1
+		cfg.Pool.DisconnectGracePeriodS = 5
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("m4-anon"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack.Type != "hello_ack" || ack.HeartbeatIntervalS != 1 {
+		t.Fatalf("ack = %#v", ack)
+	}
+
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", "")
+		return ok && provider.State == pool.StateUnavailable
+	})
+	if _, err := gobwas.ReadFrame(conn); err == nil {
+		t.Fatal("expected stale heartbeat monitor to close provider websocket")
+	}
+}
+
 func TestPoolzRequiresOperatorKey(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()

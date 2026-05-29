@@ -41,9 +41,11 @@ type PoolConfig struct {
 }
 
 type RoutingConfig struct {
-	PreflightThresholdTokens int `yaml:"preflight_threshold_tokens"`
-	PreflightTimeoutS        int `yaml:"preflight_timeout_s"`
-	RequestTimeoutS          int `yaml:"request_timeout_s"`
+	PreflightThresholdTokens int  `yaml:"preflight_threshold_tokens"`
+	PreflightTimeoutS        int  `yaml:"preflight_timeout_s"`
+	RequestTimeoutS          int  `yaml:"request_timeout_s"`
+	FailoverEnabled          bool `yaml:"failover_enabled"`
+	FailoverTimeoutS         int  `yaml:"failover_timeout_s"`
 }
 
 type WSConfig struct {
@@ -112,6 +114,8 @@ func Default() Config {
 			PreflightThresholdTokens: 4096,
 			PreflightTimeoutS:        5,
 			RequestTimeoutS:          300,
+			FailoverEnabled:          true,
+			FailoverTimeoutS:         5,
 		},
 		WS: WSConfig{
 			WriteBufferSize: 64,
@@ -158,6 +162,14 @@ func (c Config) HeartbeatInterval() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func (c Config) FailoverTimeout() time.Duration {
+	seconds := c.Routing.FailoverTimeoutS
+	if seconds <= 0 {
+		seconds = Default().Routing.FailoverTimeoutS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
 func (c Config) ProviderByID() map[string]ProviderConfig {
 	out := make(map[string]ProviderConfig, len(c.Providers))
 	for _, p := range c.Providers {
@@ -172,6 +184,9 @@ func (c Config) Validate() error {
 	}
 	if c.WS.WriteBufferSize <= 0 {
 		return fmt.Errorf("ws.write_buffer_size must be > 0")
+	}
+	if c.Routing.PreflightTimeoutS <= 0 || c.Routing.RequestTimeoutS <= 0 || c.Routing.FailoverTimeoutS <= 0 {
+		return fmt.Errorf("routing timeouts must be > 0")
 	}
 	if c.Admission.ProvisionalAdmissionRatePerHour <= 0 {
 		return fmt.Errorf("admission.provisional_admission_rate_per_hour must be > 0")

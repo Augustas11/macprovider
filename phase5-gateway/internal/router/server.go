@@ -813,12 +813,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	upCtx := r.Context()
-	cancelUpstream := func() {}
-	if chat.Stream {
-		upCtx, cancelUpstream = context.WithTimeout(context.Background(), s.cfg.CoordinatorTimeout())
-		defer cancelUpstream()
-	}
+	upCtx, cancelUpstream := context.WithTimeout(r.Context(), s.cfg.CoordinatorTimeout())
+	defer cancelUpstream()
 	upReq, err := http.NewRequestWithContext(upCtx, http.MethodPost, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())

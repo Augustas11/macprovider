@@ -35,6 +35,8 @@ type Server struct {
 	relay              RelayFunc
 	admission          *providerws.AdmissionManager
 	requestTimeout     time.Duration
+	failoverEnabled    bool
+	failoverTimeout    time.Duration
 	provisionalWeight  float64
 	recovering         sync.Map
 	poolCheckLast      sync.Map
@@ -53,12 +55,14 @@ type Option func(*Server)
 type wsForwardResult string
 
 const (
-	wsForwardComplete    wsForwardResult = "complete"
-	wsForwardFailed      wsForwardResult = "failed"
-	wsForwardQueueFull   wsForwardResult = "queue_full"
-	wsForwardTimedOut    wsForwardResult = "timed_out"
-	wsForwardCancelled   wsForwardResult = "cancelled"
-	wsForwardUnavailable wsForwardResult = "unavailable"
+	wsForwardComplete                      wsForwardResult = "complete"
+	wsForwardFailed                        wsForwardResult = "failed"
+	wsForwardQueueFull                     wsForwardResult = "queue_full"
+	wsForwardTimedOut                      wsForwardResult = "timed_out"
+	wsForwardCancelled                     wsForwardResult = "cancelled"
+	wsForwardUnavailable                   wsForwardResult = "unavailable"
+	wsForwardProviderDisconnected          wsForwardResult = "provider_disconnected"
+	wsForwardProviderDisconnectedCommitted wsForwardResult = "provider_disconnected_committed"
 )
 
 func WithPreflight(fn PreflightFunc) Option {
@@ -87,6 +91,15 @@ func WithRecoveryConfig(backoff time.Duration, maxRetries int, enabled bool) Opt
 			s.recoveryMaxRetries = maxRetries
 		}
 		s.recoveryProbe = enabled
+	}
+}
+
+func WithFailoverConfig(enabled bool, timeout time.Duration) Option {
+	return func(s *Server) {
+		s.failoverEnabled = enabled
+		if timeout > 0 {
+			s.failoverTimeout = timeout
+		}
 	}
 }
 
@@ -119,6 +132,8 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		recoveryMaxRetries: 3,
 		recoveryProbe:      true,
 		requestTimeout:     300 * time.Second,
+		failoverEnabled:    true,
+		failoverTimeout:    5 * time.Second,
 		provisionalWeight:  0.3,
 	}
 	for _, opt := range opts {
@@ -327,9 +342,45 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, routeErr.status, routeErr.code, routeErr.message)
 		return
 	}
+	originalRequestID := requestID
+	externalRequestID := r.Header.Get("X-Request-ID")
 	if req.Stream {
 		if provider.IsWSTunneled() {
-			s.forwardWS(w, r, requestID, body, provider, true)
+			failoverAttempted := false
+			excluded := map[string]struct{}{}
+			for {
+				result := s.forwardWS(w, r, requestID, body, provider, true)
+				if result == wsForwardProviderDisconnectedCommitted {
+					s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable)
+					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "stream_terminal", "")
+					return
+				}
+				if result != wsForwardProviderDisconnected {
+					return
+				}
+				s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable)
+				excluded[routeKey(provider)] = struct{}{}
+				if failoverAttempted || hasPinnedRoute(r.Header) {
+					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
+					writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
+					return
+				}
+				next, nextRequestID, ok := s.failoverCandidate(req, r.Header, provider, excluded)
+				if !ok {
+					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
+					writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
+					return
+				}
+				s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "failover", next.ProviderID)
+				failoverAttempted = true
+				provider = next
+				requestID = nextRequestID
+				if provider.IsWSTunneled() {
+					continue
+				}
+				s.forwardStreaming(w, r, requestID, body, provider)
+				return
+			}
 		} else {
 			s.forwardStreaming(w, r, requestID, body, provider)
 		}
@@ -337,13 +388,39 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	if provider.IsWSTunneled() {
 		excluded := map[string]struct{}{}
+		failoverAttempted := false
 		for {
 			result := s.forwardWS(w, r, requestID, body, provider, false)
-			if result != wsForwardQueueFull {
+			if result == wsForwardComplete || result == wsForwardFailed || result == wsForwardTimedOut || result == wsForwardUnavailable {
 				return
 			}
-			s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateBusy)
-			excluded[routeKey(provider)] = struct{}{}
+			if result == wsForwardProviderDisconnected {
+				s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable)
+				excluded[routeKey(provider)] = struct{}{}
+				if failoverAttempted || hasPinnedRoute(r.Header) {
+					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
+					writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
+					return
+				}
+				next, nextRequestID, ok := s.failoverCandidate(req, r.Header, provider, excluded)
+				if !ok {
+					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
+					writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
+					return
+				}
+				s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "failover", next.ProviderID)
+				failoverAttempted = true
+				provider = next
+				requestID = nextRequestID
+				if provider.IsWSTunneled() {
+					continue
+				}
+				break
+			}
+			if result == wsForwardQueueFull {
+				s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateBusy)
+				excluded[routeKey(provider)] = struct{}{}
+			}
 			provider, routeErr = s.selectProviderExcluding(requestID, req, r.Header, excluded)
 			if routeErr != nil {
 				writeError(w, routeErr.status, routeErr.code, routeErr.message)
@@ -405,6 +482,9 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		if reserved {
 			s.admission.RefundRequest(provider)
 		}
+		if errors.Is(err, providerws.ErrRelayClosed) {
+			return wsForwardProviderDisconnected
+		}
 		if errors.Is(err, providerws.ErrRelayBackpressure) || errors.Is(err, providerws.ErrRelayNAKFallback) {
 			writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
 			return wsForwardUnavailable
@@ -413,11 +493,14 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		return wsForwardFailed
 	}
 	if stream {
-		s.forwardWSStreaming(w, r, requestID, provider, relay)
-		return wsForwardComplete
+		result := s.forwardWSStreaming(w, r, requestID, provider, relay)
+		if reserved && result == wsForwardProviderDisconnected {
+			s.admission.RefundRequest(provider)
+		}
+		return result
 	}
 	result := s.forwardWSNonStreaming(w, requestID, provider, relay)
-	if reserved && result == wsForwardQueueFull {
+	if reserved && (result == wsForwardQueueFull || result == wsForwardProviderDisconnected) {
 		s.admission.RefundRequest(provider)
 	}
 	return result
@@ -465,6 +548,8 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, requestID string, 
 			if errors.Is(err, providerws.ErrRelayTimeout) {
 				writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
 				return wsForwardTimedOut
+			} else if errors.Is(err, providerws.ErrRelayClosed) {
+				return wsForwardProviderDisconnected
 			} else if errors.Is(err, providerws.ErrRelayNAKFallback) {
 				writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
 			} else {
@@ -475,50 +560,85 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, requestID string, 
 	}
 }
 
-func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requestID string, provider pool.Provider, relay *providerws.RelayStream) {
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
-	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
-	w.WriteHeader(http.StatusOK)
+func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requestID string, provider pool.Provider, relay *providerws.RelayStream) wsForwardResult {
 	flusher, _ := w.(http.Flusher)
 	chunks := relay.Chunks
+	committed := false
+	commit := func() {
+		if committed {
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+		w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+		w.WriteHeader(http.StatusOK)
+		committed = true
+	}
 	for {
 		select {
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
-			return
+			return wsForwardCancelled
 		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
 				continue
 			}
+			commit()
 			if _, err := w.Write([]byte(chunk.Data)); err != nil {
 				relay.Cancel("buyer_disconnected")
 				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
-				return
+				return wsForwardCancelled
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
 		case end := <-relay.Done:
+			for chunks != nil {
+				select {
+				case chunk, ok := <-chunks:
+					if !ok {
+						chunks = nil
+						continue
+					}
+					commit()
+					if _, err := w.Write([]byte(chunk.Data)); err != nil {
+						relay.Cancel("buyer_disconnected")
+						s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
+						return wsForwardCancelled
+					}
+				default:
+					chunks = nil
+				}
+			}
+			commit()
 			if end.Status != "complete" && end.Status != "cancelled" {
-				_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"Provider failed during streaming\",\"type\":\"server_error\",\"code\":\"provider_error\"}}\n\n"))
-				_, _ = w.Write([]byte("data: [DONE]\n\n"))
+				writeSSEError(w, "Provider failed during streaming", "provider_error")
 			}
 			if flusher != nil {
 				flusher.Flush()
 			}
-			return
+			return wsForwardComplete
 		case err := <-relay.Errors:
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws streaming relay failed")
-			_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"Provider failed during streaming\",\"type\":\"server_error\",\"code\":\"provider_error\"}}\n\n"))
-			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			if errors.Is(err, providerws.ErrRelayClosed) {
+				if !committed {
+					return wsForwardProviderDisconnected
+				}
+				writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return wsForwardProviderDisconnectedCommitted
+			}
+			commit()
+			writeSSEError(w, "Provider failed during streaming", "provider_error")
 			if flusher != nil {
 				flusher.Flush()
 			}
-			return
+			return wsForwardFailed
 		}
 	}
 }
@@ -572,8 +692,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			return
 		}
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
-		_, _ = w.Write([]byte("data: {\"error\":{\"message\":\"Provider disconnected during streaming\",\"type\":\"server_error\",\"code\":\"provider_disconnect\"}}\n\n"))
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -749,6 +868,42 @@ func (s *Server) selectProvider(requestID string, req chatRequest, headers http.
 	return s.selectProviderExcluding(requestID, req, headers, nil)
 }
 
+func (s *Server) failoverCandidate(req chatRequest, headers http.Header, failed pool.Provider, excluded map[string]struct{}) (pool.Provider, string, bool) {
+	if !s.failoverEnabled || hasPinnedRoute(headers) {
+		return pool.Provider{}, "", false
+	}
+	if excluded == nil {
+		excluded = map[string]struct{}{}
+	}
+	excluded[routeKey(failed)] = struct{}{}
+	nextRequestID := uuid.NewString()
+	failoverHeaders := headers.Clone()
+	failoverHeaders.Del("X-MacProvider-Provider")
+	failoverHeaders.Del("X-MacProvider-Session")
+	next, routeErr := s.selectProviderExcluding(nextRequestID, req, failoverHeaders, excluded)
+	if routeErr != nil {
+		return pool.Provider{}, "", false
+	}
+	return next, nextRequestID, true
+}
+
+func hasPinnedRoute(headers http.Header) bool {
+	return headers.Get("X-MacProvider-Provider") != "" || headers.Get("X-MacProvider-Session") != ""
+}
+
+func (s *Server) logWSDeadMidRequest(originalRequestID, requestID, externalRequestID string, provider pool.Provider, action, targetProviderID string) {
+	s.log.Warn().
+		Str("event", "ws_dead_mid_request").
+		Str("original_request_id", originalRequestID).
+		Str("request_id", requestID).
+		Str("external_request_id", externalRequestID).
+		Str("provider_id", provider.ProviderID).
+		Str("action", action).
+		Str("target_provider_id", targetProviderID).
+		Dur("failover_timeout", s.failoverTimeout).
+		Msg("provider websocket died during in-flight request")
+}
+
 func (s *Server) selectProviderExcluding(requestID string, req chatRequest, headers http.Header, excluded map[string]struct{}) (pool.Provider, *routeError) {
 	providers := s.pool.Snapshot()
 	estimatedTokens := estimateTokens(req.raw)
@@ -913,6 +1068,11 @@ func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd)
 	default:
 		writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
 	}
+}
+
+func writeSSEError(w http.ResponseWriter, message, code string) {
+	_, _ = fmt.Fprintf(w, "data: {\"error\":{\"message\":%q,\"type\":\"server_error\",\"code\":%q}}\n\n", message, code)
+	_, _ = w.Write([]byte("data: [DONE]\n\n"))
 }
 
 func (s *Server) handleProviderFailure(provider pool.Provider, status int) {

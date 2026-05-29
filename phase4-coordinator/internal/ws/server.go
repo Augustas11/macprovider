@@ -230,6 +230,7 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 	session := newProviderSession(providerID, assignedID, conn, s.cfg.WS.WriteBufferSize)
 	s.sessions.Store(sessionKey(providerID, assignedID), session)
 	go session.runWriter()
+	go s.monitorHeartbeat(providerID, assignedID, conn)
 
 	ack := HelloAck{
 		Type:                     "hello_ack",
@@ -534,6 +535,35 @@ func (s *Server) handleDisconnect(providerID, assignedID string) {
 			s.log.Warn().Str("provider_id", providerID).Msg("provider removed after disconnect grace period")
 		}
 	})
+}
+
+func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) {
+	tick := s.cfg.FailoverTimeout() / 2
+	if tick <= 0 {
+		tick = time.Second
+	}
+	if tick > time.Second {
+		tick = time.Second
+	}
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
+	threshold := s.cfg.HeartbeatInterval() + s.cfg.FailoverTimeout()
+	for range ticker.C {
+		provider, ok := s.pool.Resolve(providerID, assignedID)
+		if !ok {
+			return
+		}
+		if s.now().Sub(provider.LastHeartbeatAt) <= threshold {
+			continue
+		}
+		s.log.Warn().
+			Str("provider_id", providerID).
+			Dur("gap", s.now().Sub(provider.LastHeartbeatAt)).
+			Dur("threshold", threshold).
+			Msg("provider heartbeat missed; closing websocket")
+		_ = conn.Close()
+		return
+	}
 }
 
 func validState(state pool.State) bool {

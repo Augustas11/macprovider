@@ -4,6 +4,7 @@ import Darwin
 
 actor CoordinatorClient {
     static let binaryVersion = "1.2.4"
+    private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
     private let providerStatus: ProviderStatus
@@ -117,6 +118,7 @@ actor CoordinatorClient {
         let socket = URLSession.shared.webSocketTask(with: coordinatorURL)
         webSocket = socket
         socket.resume()
+        Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL))")
         if wsTunneledMode {
             inferenceRelay = InferenceRelay(
                 modelRuntime: modelRuntime,
@@ -135,7 +137,13 @@ actor CoordinatorClient {
         try await send(await helloMessage())
 
         while !Task.isCancelled {
-            let message = try await socket.receive()
+            let message: URLSessionWebSocketTask.Message
+            do {
+                message = try await socket.receive()
+            } catch {
+                Self.keepaliveDebug("ws_receive_error error=\(error)")
+                throw error
+            }
             try await handle(message)
         }
     }
@@ -170,6 +178,7 @@ actor CoordinatorClient {
             try await sendNAK(inReplyTo: "unknown", code: "invalid_json", message: "Coordinator message must be a JSON object")
             return
         }
+        Self.keepaliveDebug("ws_recv type=\(type) bytes=\(text.utf8.count)")
 
         switch type {
         case "hello_ack":
@@ -238,6 +247,7 @@ actor CoordinatorClient {
 
     private func startHeartbeat(intervalSeconds: Int) {
         heartbeatTask?.cancel()
+        Self.keepaliveDebug("heartbeat_start interval_s=\(intervalSeconds)")
         heartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(intervalSeconds) * 1_000_000_000)
@@ -430,7 +440,25 @@ actor CoordinatorClient {
     private static func send(_ payload: [String: Any], to webSocket: URLSessionWebSocketTask) async throws {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
         let text = String(decoding: data, as: UTF8.self)
+        if let type = payload["type"] as? String {
+            keepaliveDebug("ws_send type=\(type) bytes=\(text.utf8.count)")
+        }
         try await webSocket.send(.string(text))
+    }
+
+    private static func keepaliveDebug(_ message: String) {
+        guard keepaliveDebugEnabled else { return }
+        let timestamp = String(format: "%.2f", Date().timeIntervalSince1970)
+        FileHandle.standardError.write(Data("[keepalive \(timestamp)] \(message)\n".utf8))
+    }
+
+    private static func redactedURL(_ url: URL) -> String {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.user = nil
+        components?.password = nil
+        components?.query = nil
+        components?.fragment = nil
+        return components?.string ?? "\(url.scheme ?? "wss")://\(url.host ?? "unknown")"
     }
 
     private func nullableNumber(_ value: Double?) -> Any {

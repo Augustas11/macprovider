@@ -510,6 +510,235 @@ func TestChatCompletionsWSTunneledQueueFullFallsBackToNextProvider(t *testing.T)
 	}
 }
 
+func TestChatCompletionsWSTunneledDeadProviderFastFails(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithFailoverConfig(false, 50*time.Millisecond),
+		buyer.WithRelay(deadMidInferenceRelay, time.Second),
+	)
+
+	start := time.Now()
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	elapsed := time.Since(start)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if elapsed > time.Second {
+		t.Fatalf("fast-fail took %s, want <1s", elapsed)
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_disconnected"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateUnavailable {
+		t.Fatalf("p1 = %#v ok=%v, want unavailable", p1, ok)
+	}
+}
+
+func TestChatCompletionsWSTunneledDeadProviderFailover(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 2, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	var calls []string
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithFailoverConfig(true, 50*time.Millisecond),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			calls = append(calls, provider.ProviderID)
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			if provider.ProviderID == "p1" {
+				errs <- providerws.ErrRelayClosed
+				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+			}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"failover","choices":[{"message":{"content":"ok"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Join(calls, ",") != "p1,p2" {
+		t.Fatalf("relay calls = %v", calls)
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
+		t.Fatalf("provider = %q, want p2", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"id":"failover"`)) {
+		t.Fatalf("body not relayed: %s", rr.Body.String())
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateUnavailable {
+		t.Fatalf("p1 = %#v ok=%v, want unavailable", p1, ok)
+	}
+}
+
+func TestChatCompletionsWSTunneledDeadProviderFailoverOnlyOnce(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p3", "s3", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	var calls []string
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithFailoverConfig(true, 50*time.Millisecond),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			calls = append(calls, provider.ProviderID)
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			if provider.ProviderID == "p1" || provider.ProviderID == "p2" {
+				errs <- providerws.ErrRelayClosed
+				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+			}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"should-not-run"}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Join(calls, ",") != "p1,p2" {
+		t.Fatalf("relay calls = %v, want p1,p2", calls)
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_disconnected"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsWSTunneledPinnedDeadProviderDoesNotFailover(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		headers http.Header
+	}{
+		{name: "provider", headers: http.Header{"X-MacProvider-Provider": []string{"p1"}}},
+		{name: "session", headers: http.Header{"X-MacProvider-Session": []string{"s1"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
+			registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+			var calls []string
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithFailoverConfig(true, 50*time.Millisecond),
+				buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+					calls = append(calls, provider.ProviderID)
+					return deadMidInferenceRelay(ctx, provider, requestID, body, stream)
+				}, time.Second),
+			)
+
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), tc.headers)
+
+			if rr.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if strings.Join(calls, ",") != "p1" {
+				t.Fatalf("relay calls = %v, want p1", calls)
+			}
+			if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_disconnected"`)) {
+				t.Fatalf("body = %s", rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestChatCompletionsWSTunneledStreamingDeadProviderFailoverBeforeFirstByte(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	var calls []string
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithFailoverConfig(true, 50*time.Millisecond),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			calls = append(calls, provider.ProviderID)
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			if provider.ProviderID == "p1" {
+				errs <- providerws.ErrRelayClosed
+				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+			}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: "data: ok\n\n"}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Join(calls, ",") != "p1,p2" {
+		t.Fatalf("relay calls = %v", calls)
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
+		t.Fatalf("provider = %q, want p2", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("data: ok")) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsWSTunneledStreamingDeadProviderAfterFirstByteTerminatesSSE(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithFailoverConfig(true, 50*time.Millisecond),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: "data: partial\n\n"}
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				errs <- providerws.ErrRelayClosed
+			}()
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("data: partial")) {
+		t.Fatalf("body missing partial chunk: %s", rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_disconnected"`)) {
+		t.Fatalf("body missing provider_disconnected: %s", rr.Body.String())
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateUnavailable {
+		t.Fatalf("p1 = %#v ok=%v, want unavailable", p1, ok)
+	}
+}
+
 func TestChatCompletionsProvisionalQuotaReturns429(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
@@ -698,6 +927,20 @@ func postChat(t *testing.T, server *buyer.Server, body []byte, headers http.Head
 	server.Handler().ServeHTTP(rr, req)
 	_, _ = io.Copy(io.Discard, rr.Result().Body)
 	return rr
+}
+
+func deadMidInferenceRelay(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+	chunks := make(chan providerws.InferenceResponseChunk, 1)
+	done := make(chan providerws.InferenceResponseEnd)
+	errs := make(chan error, 1)
+	chunks <- providerws.InferenceResponseChunk{
+		Type:      "inference_response_chunk",
+		RequestID: requestID,
+		Seq:       0,
+		Data:      `{"partial":true}`,
+	}
+	errs <- providerws.ErrRelayClosed
+	return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
 }
 
 func chatBodyWithContent(model, content string) []byte {
