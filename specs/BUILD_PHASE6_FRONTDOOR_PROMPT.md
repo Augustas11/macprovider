@@ -257,15 +257,73 @@ leakage via error message.
 
 ### Scope
 
-New repo subdir:
+The existing Phase 2 Vercel demo source already lives in repo at
+`beta/web/` (verified May 29):
+
+  beta/web/index.html        — 296 lines, dark theme, chat UI
+  beta/web/api/chat.js       — Vercel edge function proxying SSE
+  beta/web/api/providers.js  — Vercel edge function returning M1/M4
+  beta/web/vercel.json       — Vercel config
+  beta/web/DEPLOY.md         — operator deploy notes
+  beta/web/.vercel/          — Vercel project linkage
+
+Phase 6c is therefore a **fork-and-repoint** task, not a build-from-
+scratch:
 
   /Users/augstar/macprovider-poc/frontdoor/console/
-    index.html
-    dist/nginx-console.streamvc.live.conf
-    README.md
+    index.html                            (forked from beta/web/index.html)
+    dist/nginx-console.streamvc.live.conf (new)
+    README.md                             (new — deploy + iteration notes)
 
-`index.html` is a single self-contained file (HTML + inline CSS +
-inline JS). Total < 30KB.
+The two Vercel edge functions (`beta/web/api/chat.js`,
+`beta/web/api/providers.js`) are **explicitly not migrated** under
+the Bδ architecture: Bδ removes the proxy hop, so the browser calls
+`api.streamvc.live` directly via CORS. The edge functions remain in
+`beta/web/` as the Phase 2 fallback while the new console.streamvc.live
+deployment soaks.
+
+`index.html` after the fork is a single self-contained file (HTML +
+inline CSS + inline JS). Target weight < 30KB. The fork starts at
+~9.5KB so there is room to add the Tier 1 disclosure trust banner
+and the demo-token mint flow.
+
+### Migration delta from beta/web/index.html → frontdoor/console/index.html
+
+The starting file already has the chat UI, dark theme, and prompt /
+response flow. The delta to apply:
+
+1. **Replace `fetch('/api/providers')`** (line ~177 in current
+   beta/web/index.html) with `fetch('https://api.streamvc.live/v1/status')`
+   and adapt the response parsing (provider list becomes the
+   `models` array; the sidebar shows model names + slots_free
+   instead of M1/M4 tunnel hostnames).
+2. **Replace `fetch('/api/chat', {body: JSON.stringify({provider,
+   prompt, max_tokens: 384})})`** (line ~226) with a two-step flow:
+   first mint a demo token via `POST https://api.streamvc.live/auth/demo-session`
+   (deferred until first user input event per AC-14), then POST to
+   `https://api.streamvc.live/v1/chat/completions` with the
+   `X-Demo-Token` header and OpenAI-shape body.
+3. **Replace SSE parsing**: the current demo expects a custom
+   newline-delimited stream from the edge function. Replace with
+   standard OpenAI SSE parsing (`data: {...}\n\n` chunks, `[DONE]`
+   sentinel).
+4. **Replace tunnel-hostname attestation note** (line ~163,
+   `bound to the model weights — only attested by the tunnel
+   hostname.`) with the four Tier 1 disclosure properties from
+   SPEC-006 v0.6 § 1.6, rendered in the sidebar as a collapsible
+   "Privacy notes" section per Critical Constraint 7.
+5. **Remove all references** to M1, M4, Cloudflare tunnel, tunnel
+   hostnames. The new mental model is "a pooled Apple Silicon
+   inference network" — provider identity is intentionally hidden
+   per SPEC-006 v0.6 § 8 redaction.
+6. **Add the "Sign in" CTA** in the header pointing to
+   `https://api.streamvc.live/auth/github/start`.
+7. **Add suggested-prompt pills** above the textarea (3 pills:
+   translation, summarization, code generation) per O-6c-2 (fill-
+   but-don't-send).
+8. **Update page title and meta description** to drop "PoC" and
+   "seeing is believing" framing; new title:
+   `Mac Provider — OpenAI-compatible API on Apple Silicon`.
 
 ### Page content (anonymous state — no signed-in dashboard in this phase)
 
