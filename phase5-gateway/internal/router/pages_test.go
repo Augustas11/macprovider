@@ -1,0 +1,107 @@
+package router
+
+import (
+	"html"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"testing"
+)
+
+func TestAccountTemplateDisplaysKeyAndSnippets(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{})
+	fullKey := "mp_test_key_once"
+	req := httptest.NewRequest(http.MethodGet, "/account", nil)
+	req.AddCookie(&http.Cookie{Name: "mp_new_api_key", Value: fullKey, Path: "/account"})
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	for _, want := range []string{
+		`<code class="key" id="api-key">` + fullKey + `</code>`,
+		`type="checkbox" id="saved" required`,
+		`id="tab-curl"`,
+		`id="tab-python"`,
+		`id="tab-node"`,
+		`curl https://api.streamvc.live/v1/chat/completions`,
+		`OpenAI(`,
+		`new OpenAI`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("account body missing %q", want)
+		}
+	}
+	if findCookie(resp, "mp_new_api_key") != "" {
+		t.Fatalf("one-shot cookie was not unset")
+	}
+}
+
+func TestAccountTemplateWithoutCookieDoesNotLeakKey(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{})
+	resp := assertStatus(t, h, http.MethodGet, "/account", "", "", "", http.StatusOK)
+	body := resp.Body.String()
+	if !strings.Contains(body, "No new API key to display") {
+		t.Fatalf("state B body missing copy: %s", body)
+	}
+	if strings.Contains(body, "mp_") || strings.Contains(body, "mp_test_key_once") {
+		t.Fatalf("state B leaked key-looking text: %s", body)
+	}
+}
+
+func TestDocsRouteRendersMarkdown(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{})
+	resp := assertStatus(t, h, http.MethodGet, "/docs", "", "", "", http.StatusOK)
+	body := resp.Body.String()
+	for _, want := range []string{`<h1 id="getting-started">Getting started</h1>`, `id="disclosures"`, `id="quotas-and-limits"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("docs body missing %q", want)
+		}
+	}
+}
+
+func TestTier1DisclosureMatchesSpecSection16(t *testing.T) {
+	specPath := filepath.Join("..", "..", "..", "specs", "SPEC-006-buyer-api.md")
+	raw, err := os.ReadFile(specPath)
+	if err != nil {
+		t.Fatalf("read spec: %v", err)
+	}
+	spec := normalizeDisclosureText(string(raw))
+	for _, item := range tier1DisclosureText {
+		if !strings.Contains(spec, normalizeDisclosureText(item.Text)) {
+			t.Fatalf("%s disclosure drifted from SPEC-006 section 1.6", item.Key)
+		}
+	}
+
+	rendered := renderAccountForDisclosureTest(t)
+	for _, item := range tier1DisclosureText {
+		if !strings.Contains(normalizeDisclosureText(rendered), normalizeDisclosureText(item.Text)) {
+			t.Fatalf("%s disclosure missing from rendered account page", item.Key)
+		}
+	}
+}
+
+func renderAccountForDisclosureTest(t *testing.T) string {
+	t.Helper()
+	h, _, _, _ := newTestHarness(t, fakeOAuth{})
+	req := httptest.NewRequest(http.MethodGet, "/account", nil)
+	req.AddCookie(&http.Cookie{Name: "mp_new_api_key", Value: "mp_test_key_once", Path: "/account"})
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("account status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	re := regexp.MustCompile(`<[^>]+>`)
+	text := re.ReplaceAllString(resp.Body.String(), "")
+	return html.UnescapeString(text)
+}
+
+func normalizeDisclosureText(text string) string {
+	text = strings.ReplaceAll(text, "`", "")
+	text = strings.ReplaceAll(text, "**", "")
+	return strings.Join(strings.Fields(text), " ")
+}

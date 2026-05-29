@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mac Provider</title>
+<style>
+:root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--panel2:#0f1620;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}header{position:sticky;top:0;z-index:2;background:rgba(13,17,23,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}.bar{max-width:1180px;margin:0 auto;padding:13px 18px;display:flex;align-items:center;justify-content:space-between;gap:14px}.brand{font-weight:800;color:#f0f6fc;font-size:18px}.right{display:flex;gap:14px;align-items:center}.status{color:var(--muted)}.dot{color:var(--warn)}.dot.up{color:var(--ok)}.btn{border:1px solid var(--border);background:#21262d;color:#f0f6fc;border-radius:8px;padding:9px 13px;font-weight:700;cursor:pointer}.btn:hover:not(:disabled){border-color:var(--accent);text-decoration:none}.btn:disabled{opacity:.55;cursor:not-allowed}.wrap{max-width:1180px;margin:0 auto;padding:28px 18px 44px;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px}.chat,.side section{background:var(--panel);border:1px solid var(--border);border-radius:8px}.chat{min-height:70vh;padding:18px}.suggestions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.pill{border:1px solid var(--border);background:var(--panel2);color:var(--text);border-radius:999px;padding:7px 11px;cursor:pointer}.pill:hover{border-color:var(--accent)}textarea{width:100%;min-height:118px;resize:vertical;background:#0b1017;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:13px;font:15px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.actions{display:flex;justify-content:space-between;align-items:center;gap:14px;margin:12px 0}.hint{color:var(--muted);font-size:13px}.response{min-height:260px;background:#0b1017;border:1px solid var(--border);border-radius:8px;padding:16px;white-space:pre-wrap;overflow:auto;font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.meta{margin-top:10px;color:var(--muted);font-size:13px;display:flex;gap:14px;flex-wrap:wrap}.side{display:flex;flex-direction:column;gap:14px}.side section{padding:16px}h2{font-size:15px;margin:0 0 10px;color:#f0f6fc}.privacy{padding-left:19px;margin:0}.privacy li{margin:9px 0}.kv{display:grid;grid-template-columns:1fr auto;gap:8px;margin:7px 0;color:var(--muted)}.kv strong{color:var(--text);font-weight:650}.cta{display:block;text-align:center;margin-top:12px}.footer{max-width:1180px;margin:0 auto;padding:0 18px 30px;display:flex;gap:16px;flex-wrap:wrap;color:var(--muted)}@media(max-width:720px){.wrap{grid-template-columns:1fr;padding:18px 12px}.bar{padding:12px}.right{gap:8px}.status{display:none}.chat{min-height:auto}.side{grid-row:auto}.footer{padding:0 12px 24px}.btn{padding:8px 10px}}
+</style>
+</head>
+<body>
+<header><div class="bar"><div class="brand">Mac Provider</div><div class="right"><span class="status">Status: <span class="dot" id="dot">&#9679;</span> <span id="statusText">checking</span></span><a class="btn" href="https://api.streamvc.live/auth/github/start">Sign in</a></div></div></header>
+<main class="wrap">
+<section class="chat" aria-label="Try Mac Provider">
+<div class="suggestions" aria-label="Suggested prompts">
+<button class="pill" type="button">Translate this into concise Indonesian: The model is running on a contributor Mac.</button>
+<button class="pill" type="button">Summarize why strict CORS matters for browser API demos in three bullets.</button>
+<button class="pill" type="button">Write a tiny Go function that validates an origin against an allowlist.</button>
+</div>
+<textarea id="prompt" placeholder="Ask a question or try a suggested prompt"></textarea>
+<div class="actions"><span class="hint">Cmd-Enter to send</span><button class="btn" id="send" type="button">Send</button></div>
+<div class="response" id="response" aria-live="polite">Ready.</div>
+<div class="meta"><span>model: <strong id="model">unknown</strong></span><span>tokens: <strong id="tokens">0</strong></span><span>wall time: <strong id="wall">0ms</strong></span><span id="request"></span></div>
+</section>
+<aside class="side">
+<section><h2>Privacy notes</h2><ol class="privacy">
+<li><strong>plaintext_to_provider</strong>: Buyer prompts and provider responses are processed as plaintext on provider hardware. Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.</li>
+<li><strong>hardware_attestation</strong>: There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.6 does NOT cryptographically verify this.</li>
+<li><strong>model_identity</strong>: Model identity is provider-reported. When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.6 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.</li>
+<li><strong>tier2_milestone</strong>: The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-3.</li>
+</ol></section>
+<section><h2>Beta quota</h2><p>Free during beta - 1000 tokens/IP/day for this browser demo. Shared NATs count as one IP.</p><a class="btn cta" href="https://api.streamvc.live/auth/github/start">Like this? Get an API key &rarr;</a></section>
+<section><h2>Status</h2><div class="kv"><span>Pool size</span><strong id="pool">unknown</strong></div><div class="kv"><span>Models</span><strong id="models">loading</strong></div><div class="kv"><span>Refreshed</span><strong id="refreshed">never</strong></div></section>
+</aside>
+</main>
+<nav class="footer" aria-label="Footer links"><a href="https://api.streamvc.live/docs">Documentation</a><a href="https://api.streamvc.live/v1/status">Status</a><a href="https://api.streamvc.live/docs#api">API reference</a><a href="https://api.streamvc.live/docs#disclosures">Disclosures</a></nav>
+<script>
+const API="https://api.streamvc.live",promptEl=document.getElementById("prompt"),sendEl=document.getElementById("send"),respEl=document.getElementById("response"),modelEl=document.getElementById("model"),tokensEl=document.getElementById("tokens"),wallEl=document.getElementById("wall"),reqEl=document.getElementById("request");let demoToken="",model="mlx-community/Llama-3.2-3B-Instruct-4bit",minting=null;
+function text(el,v){el.textContent=v}
+async function status(){try{const r=await fetch(API+"/v1/status");const j=await r.json();document.getElementById("dot").classList.toggle("up",j.status==="up");text(document.getElementById("statusText"),j.status||"unknown");text(document.getElementById("pool"),String((j.pool&&j.pool.ready)||0)+" ready");if(j.models&&j.models.length){model=j.models[0].id;text(document.getElementById("models"),j.models.map(m=>m.id).join(", "))}else{text(document.getElementById("models"),"none")}text(document.getElementById("refreshed"),new Date().toLocaleTimeString())}catch(e){text(document.getElementById("statusText"),"down");text(document.getElementById("models"),"unavailable")}}
+function ensureDemo(){if(demoToken)return Promise.resolve(demoToken);if(!minting){minting=fetch(API+"/auth/demo-session",{method:"POST"}).then(async r=>{const j=await r.json();if(!r.ok)throw new Error((j.error&&j.error.message)||"Could not start demo session");demoToken=j.demo_token;return demoToken})}return minting}
+document.querySelectorAll(".pill").forEach(b=>b.addEventListener("click",()=>{promptEl.value=b.textContent;promptEl.focus()}));
+promptEl.addEventListener("input",()=>{ensureDemo().catch(()=>{})},{once:true});
+promptEl.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")send()});
+sendEl.addEventListener("click",send);
+async function send(){const content=promptEl.value.trim();if(!content)return;sendEl.disabled=true;text(respEl,"");text(tokensEl,"0");text(modelEl,model);text(reqEl,"");const started=performance.now();try{const token=await ensureDemo();const r=await fetch(API+"/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json","Accept":"text/event-stream","X-Demo-Token":token},body:JSON.stringify({model,messages:[{role:"user",content}],max_tokens:256,stream:true})});const requestID=r.headers.get("X-Request-ID");if(requestID)text(reqEl,"request_id: "+requestID);if(!r.ok){let j={};try{j=await r.json()}catch(e){}throw new Error((j.error&&j.error.message)||("Request failed: "+r.status))}const reader=r.body.getReader(),dec=new TextDecoder();let buf="",total=0;for(;;){const {value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});let cut;while((cut=buf.indexOf("\n\n"))>=0){const event=buf.slice(0,cut);buf=buf.slice(cut+2);for(const line of event.split("\n")){if(!line.startsWith("data:"))continue;const data=line.slice(5).trim();if(data==="[DONE]")continue;try{const j=JSON.parse(data);if(j.model){model=j.model;text(modelEl,model)}const delta=j.choices&&j.choices[0]&&j.choices[0].delta&&j.choices[0].delta.content;if(delta){respEl.append(document.createTextNode(delta))}if(j.usage){total=j.usage.total_tokens||total;text(tokensEl,String(total))}}catch(e){}}}}}catch(e){text(respEl,e.message)}finally{text(wallEl,Math.round(performance.now()-started)+"ms");sendEl.disabled=false}}
+status();
+</script>
+</body>
+</html>

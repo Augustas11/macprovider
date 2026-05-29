@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"io"
 	"log/slog"
 	"math"
@@ -99,14 +98,15 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/github/start", s.handleGitHubStart)
 	mux.HandleFunc("/auth/github/callback", s.handleGitHubCallback)
-	mux.HandleFunc("/auth/demo-session", s.handleDemoSession)
+	mux.Handle("/auth/demo-session", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleDemoSession)))
 	mux.HandleFunc("/auth/api-keys", s.handleAPIKeys)
 	mux.HandleFunc("/auth/api-keys/", s.handleAPIKeyAction)
 	mux.HandleFunc("/account", s.handleAccount)
-	mux.HandleFunc("/v1/models", s.handleModels)
+	mux.HandleFunc("/docs", s.handleDocs)
+	mux.Handle("/v1/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleModels)))
 	mux.HandleFunc("/v1/usage", s.handleUsage)
-	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
-	mux.HandleFunc("/v1/status", s.handleStatus)
+	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
+	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
 	mux.HandleFunc("/v1/feedback", s.handleFeedback)
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/admin/feedback-summary", s.handleFeedbackSummary)
@@ -348,29 +348,6 @@ func (s *Server) handleAPIKeyAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "revoked", "key_id": keyID})
-}
-
-func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
-		return
-	}
-	apiKey := ""
-	if cookie, err := r.Cookie("mp_new_api_key"); err == nil {
-		apiKey = cookie.Value
-		http.SetCookie(w, &http.Cookie{Name: "mp_new_api_key", Value: "", Path: "/account", HttpOnly: true, Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: -1})
-	}
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	if apiKey == "" {
-		w.WriteHeader(http.StatusOK)
-		_, _ = io.WriteString(w, `<!doctype html><html><body><h1>Mac Provider account</h1><p>No new API key to display.</p></body></html>`)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, `<!doctype html><html><body><h1>Mac Provider account</h1><p>Your new API key is shown once.</p><pre>`)
-	_, _ = io.WriteString(w, html.EscapeString(apiKey))
-	_, _ = io.WriteString(w, `</pre></body></html>`)
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {

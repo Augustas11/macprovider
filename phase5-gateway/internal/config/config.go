@@ -22,6 +22,7 @@ type Config struct {
 	KillSwitch   KillSwitchConfig    `yaml:"kill_switch"`
 	Capacity     CapacityConfig      `yaml:"capacity"`
 	Timeouts     TimeoutsConfig      `yaml:"timeouts"`
+	CORS         CORSConfig          `yaml:"cors"`
 }
 
 type ListenConfig struct {
@@ -114,6 +115,10 @@ type TimeoutsConfig struct {
 	StreamingCancelMS         int `yaml:"streaming_cancel_ms"`
 }
 
+type CORSConfig struct {
+	AllowedOrigins []string `yaml:"allowed_origins"`
+}
+
 func Default() Config {
 	return Config{
 		Listen: ListenConfig{BindAddress: "127.0.0.1", Port: 9443},
@@ -157,6 +162,7 @@ func Default() Config {
 			MonthlyBudgetUSD: 500, ReadyProviderDegradedThreshold: 1, ProjectedCostTier1Percent: 80, TierCooldownSeconds: 3600,
 		},
 		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, StreamingCancelMS: 500},
+		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
 	}
 }
 
@@ -299,6 +305,15 @@ func (c Config) Validate() error {
 	}
 	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 {
 		return fmt.Errorf("timeouts must be positive")
+	}
+	for i, origin := range c.CORS.AllowedOrigins {
+		if origin == "*" || origin == "null" {
+			return fmt.Errorf("cors.allowed_origins[%d] must not be wildcard or null", i)
+		}
+		u, err := url.Parse(origin)
+		if err != nil || u.Scheme == "" || u.Host == "" || u.Path != "" || u.RawQuery != "" || u.Fragment != "" {
+			return fmt.Errorf("cors.allowed_origins[%d] must be an exact origin", i)
+		}
 	}
 	return nil
 }

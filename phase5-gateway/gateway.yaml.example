@@ -69,3 +69,8 @@ capacity:
 timeouts:
   coordinator_request_seconds: 300
   streaming_cancel_ms: 500
+
+cors:
+  allowed_origins:
+    - https://console.streamvc.live
+    - https://streamvc.live
