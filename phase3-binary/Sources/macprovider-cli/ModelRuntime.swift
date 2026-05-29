@@ -3,7 +3,25 @@ import MLXLLM
 import MLXLMCommon
 import MacProviderCore
 
-actor ModelRuntime {
+protocol ModelRuntimeServing: Sendable {
+    func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult
+    func stream(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (String) -> Void) async throws -> CompletionResult
+}
+
+extension ModelRuntimeServing {
+    func complete(_ request: ChatCompletionRequest) async throws -> CompletionResult {
+        try await complete(request, shouldCancel: { false })
+    }
+
+    func stream(
+        _ request: ChatCompletionRequest,
+        onChunk: @escaping @Sendable (String) -> Void
+    ) async throws -> CompletionResult {
+        try await stream(request, shouldCancel: { false }, onChunk: onChunk)
+    }
+}
+
+actor ModelRuntime: ModelRuntimeServing {
     private let modelID: String?
     private let container: ModelContainer?
     private let stopTokenFilter: StopTokenFilter
@@ -57,7 +75,10 @@ actor ModelRuntime {
         }
     }
 
-    func complete(_ request: ChatCompletionRequest) async throws -> CompletionResult {
+    func complete(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) async throws -> CompletionResult {
         try request.validateModelMatches(modelID)
         guard let container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -77,7 +98,7 @@ actor ModelRuntime {
                     topP: Float(request.topP)
                 )
                 let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
-                    if Task.isCancelled {
+                    if Task.isCancelled || shouldCancel() {
                         return GenerateDisposition.stop
                     }
                     return GenerateDisposition.more
@@ -109,6 +130,7 @@ actor ModelRuntime {
 
     func stream(
         _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (String) -> Void
     ) async throws -> CompletionResult {
         try request.validateModelMatches(modelID)
@@ -134,7 +156,7 @@ actor ModelRuntime {
                 var stoppedByRequestStop = false
 
                 let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
-                    if Task.isCancelled {
+                    if Task.isCancelled || shouldCancel() {
                         return .stop
                     }
                     let decoded = context.tokenizer.decode(tokens: tokens)

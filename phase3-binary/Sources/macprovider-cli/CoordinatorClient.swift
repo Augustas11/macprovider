@@ -3,7 +3,7 @@ import MacProviderCore
 import Darwin
 
 actor CoordinatorClient {
-    static let binaryVersion = "1.2.3"
+    static let binaryVersion = "1.2.4"
 
     private let coordinatorURL: URL
     private let providerStatus: ProviderStatus

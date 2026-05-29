@@ -9,7 +9,7 @@ actor InferenceRelay {
         let state: RelayRequestState
     }
 
-    private let modelRuntime: ModelRuntime
+    private let modelRuntime: any ModelRuntimeServing
     private let providerStatus: ProviderStatus
     private let loadedModelID: String?
     private let maxActiveRequests: Int
@@ -18,7 +18,7 @@ actor InferenceRelay {
     private var active: [String: ActiveRequest] = [:]
 
     init(
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         loadedModelID: String?,
         maxActiveRequests: Int,
@@ -98,20 +98,12 @@ actor InferenceRelay {
                 "request_id": requestID,
                 "status": "cancelled",
                 "chunks_sent": 0,
+                "usage": Self.zeroUsage(),
             ])
             return
         }
 
         request.state.cancel()
-        request.task.cancel()
-        if request.state.markTerminalSent() {
-            try await sendFrame([
-                "type": "inference_response_end",
-                "request_id": requestID,
-                "status": "cancelled",
-                "chunks_sent": request.state.chunksSent,
-            ])
-        }
     }
 
     func cancelAll() {
@@ -157,7 +149,7 @@ actor InferenceRelay {
         body: String,
         stream: Bool,
         state: RelayRequestState,
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         loadedModelID: String?,
         sendFrame: @escaping SendFrame
@@ -195,6 +187,7 @@ actor InferenceRelay {
                     "request_id": requestID,
                     "status": "cancelled",
                     "chunks_sent": state.chunksSent,
+                    "usage": state.usage ?? zeroUsage(),
                 ])
             }
         } catch let error as APIError {
@@ -226,10 +219,23 @@ actor InferenceRelay {
         requestID: String,
         request: ChatCompletionRequest,
         state: RelayRequestState,
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
-        let completion = try await modelRuntime.complete(request)
+        let completion = try await modelRuntime.complete(request, shouldCancel: { state.isCancelled })
+        state.setUsage(completion)
+        if state.isCancelled {
+            if state.markTerminalSent() {
+                try await sendFrame([
+                    "type": "inference_response_end",
+                    "request_id": requestID,
+                    "status": "cancelled",
+                    "chunks_sent": state.chunksSent,
+                    "usage": usage(completion),
+                ])
+            }
+            return completion
+        }
         guard !state.terminalSent else {
             return completion
         }
@@ -257,7 +263,7 @@ actor InferenceRelay {
         requestID: String,
         request: ChatCompletionRequest,
         state: RelayRequestState,
-        modelRuntime: ModelRuntime,
+        modelRuntime: any ModelRuntimeServing,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
         let created = Int(Date().timeIntervalSince1970)
@@ -291,7 +297,7 @@ actor InferenceRelay {
                 finishReason: NSNull()
             )))
 
-            let completion = try await modelRuntime.stream(request) { chunk in
+            let completion = try await modelRuntime.stream(request, shouldCancel: { state.isCancelled }) { chunk in
                 _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                     id: id,
                     created: created,
@@ -299,6 +305,23 @@ actor InferenceRelay {
                     delta: ["content": chunk],
                     finishReason: NSNull()
                 )))
+            }
+
+            state.setUsage(completion)
+            if state.isCancelled {
+                buffer.cancel()
+                consumer.cancel()
+                let chunksSent = (try? await consumer.value) ?? state.chunksSent
+                if state.markTerminalSent() {
+                    try await sendFrame([
+                        "type": "inference_response_end",
+                        "request_id": requestID,
+                        "status": "cancelled",
+                        "chunks_sent": chunksSent,
+                        "usage": usage(completion),
+                    ])
+                }
+                return completion
             }
 
             _ = buffer.enqueue(sseEvent(chatCompletionChunk(
@@ -341,6 +364,7 @@ actor InferenceRelay {
                         "request_id": requestID,
                         "status": "cancelled",
                         "chunks_sent": chunksSent,
+                        "usage": state.usage ?? zeroUsage(),
                     ])
                 }
                 throw RelayCancellationAcknowledged()
@@ -421,6 +445,14 @@ actor InferenceRelay {
         ]
     }
 
+    private static func zeroUsage() -> [String: Any] {
+        [
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        ]
+    }
+
     private static func sseEvent(_ body: Any) -> String {
         do {
             return "data: \(try jsonString(body))\n\n"
@@ -430,7 +462,7 @@ actor InferenceRelay {
     }
 
     private static func jsonString(_ body: Any) throws -> String {
-        let data = try JSONSerialization.data(withJSONObject: body)
+        let data = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
         return String(decoding: data, as: UTF8.self)
     }
 }
@@ -442,6 +474,8 @@ private final class RelayRequestState: @unchecked Sendable {
     private var buffer: BlockingChunkBuffer?
     private var terminal = false
     private var sentChunks = 0
+    private var cancelled = false
+    private var currentUsage: [String: Any]?
 
     var terminalSent: Bool {
         lock.lock()
@@ -453,6 +487,28 @@ private final class RelayRequestState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return sentChunks
+    }
+
+    var isCancelled: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return cancelled
+    }
+
+    var usage: [String: Any]? {
+        lock.lock()
+        defer { lock.unlock() }
+        return currentUsage
+    }
+
+    func setUsage(_ completion: CompletionResult) {
+        lock.lock()
+        currentUsage = [
+            "prompt_tokens": completion.promptTokens,
+            "completion_tokens": completion.completionTokens,
+            "total_tokens": completion.promptTokens + completion.completionTokens,
+        ]
+        lock.unlock()
     }
 
     func setBuffer(_ buffer: BlockingChunkBuffer) {
@@ -467,6 +523,7 @@ private final class RelayRequestState: @unchecked Sendable {
 
     func cancel() {
         lock.lock()
+        cancelled = true
         let buffer = buffer
         lock.unlock()
         buffer?.cancel()

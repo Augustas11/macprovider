@@ -846,6 +846,32 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   </ul>
 </div>
 </section>
+<section><h2>Resolved in v1.2.4</h2>
+<div class="entry">
+  <time>2026-05-29</time>
+  <ul>
+    <li><strong>Finding A:</strong> active WS <code>cancel_request</code>
+    now lets the generation path produce the terminal
+    <code>inference_response_end</code>, so cancelled streams include
+    actual <code>prompt_tokens</code>, <code>completion_tokens</code>, and
+    <code>total_tokens</code> instead of an immediate usage-less
+    acknowledgement.</li>
+    <li><strong>Finding B:</strong> SPEC-001 now requires producer-side
+    unescaped slashes in <code>/v1/models</code> ids; the binary already
+    serializes HTTP and WS JSON with <code>withoutEscapingSlashes</code>.</li>
+    <li><strong>Verification:</strong> targeted
+    <code>swift test --filter InferenceRelayTests</code> passed 3 XCTest
+    cases; full <code>swift test</code> passed 12 XCTest cases;
+    <code>swift build -c release</code> passed; release binary
+    <code>--version</code> printed <code>1.2.4</code>. Local phase4
+    coordinator cancel test captured provider
+    <code>inference_response_end</code> with <code>status=cancelled</code>,
+    <code>chunks_sent=26</code>, <code>prompt_tokens=56</code>,
+    <code>completion_tokens=26</code>, and
+    <code>total_tokens=82</code>.</li>
+  </ul>
+</div>
+</section>
 <section><h2>Resolved in v1.2.3</h2>
 <div class="entry">
   <time>2026-05-28</time>

@@ -1,7 +1,11 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.2.2 (2026-05-28, reconnect lifecycle, model casing, JSON slash tolerance)
-**Revision:** v1.2.2 resolves Entry 19 reconnect lifecycle and Entry 20 model casing / JSON escape tolerance.
+**Version:** 1.2.3 (2026-05-29, cancel usage, producer-side unescaped slashes)
+**Revision:** v1.2.3 resolves Entry 21 producer-side unescaped-slash discipline and Entry 22 cancel-usage reporting.
+
+**Change log v1.2.3:**
+- § 6.1 `/v1/models`: producers MUST emit model `id` values with unescaped forward slashes (`/`) by suppressing the legal-but-cosmetic `\/` JSON escape. Consumers MUST continue to tolerate both encodings for backward compatibility.
+- § 6.6 `inference_response_end`: when sent in response to `cancel_request`, providers MUST include actual token usage so downstream gateways, accounting systems, and billing infrastructure can settle cancellation usage exactly instead of estimating.
 
 **Change log v1.2.2:**
 - § 6.5 coordinator `drain` message: post-drain reconnect is now explicitly normative. After `drain_status: complete` and WS close, the provider MUST re-enter the startup reconnect loop; first reconnect attempt MUST occur within 15 seconds; three consecutive reconnect failures MUST log WARN with attempt count and last error; the process MUST NOT exit.
@@ -740,11 +744,23 @@ Do not change the HTTP status code mid-stream.
 model's HuggingFace identifier as passed in config. `owned_by` is
 always `"macprovider"`.
 
-The `id` field MAY contain forward-slash characters in either
-unescaped (`/`) or escaped (`\/`) form. Both are legal JSON per
-RFC 8259 § 7. Consumers MUST tolerate both encodings. Producers SHOULD
-prefer the unescaped form (`/`) for human readability but are not
-required to. Example response (with `\/`):
+The `id` field returned by `/v1/models` MUST be emitted with
+unescaped forward-slash characters (`/`). Producers MUST set their JSON
+encoder to suppress the legal-but-cosmetic `\/` escape — for Swift
+`JSONEncoder`, this means
+`outputFormatting.formUnion(.withoutEscapingSlashes)`.
+
+Consumers MUST tolerate the escaped form `\/` for backward compatibility
+with pre-v1.2.4 phase3-binaries (the v1.2.0..v1.2.2 series may emit
+either form depending on encoder defaults). RFC 8259 § 7 permits both,
+so consumer tolerance is required by spec.
+
+The producer-side MUST applies to v1.2.4 and later. v1.2.3 binary
+happens to already comply but was not specifically required to; this
+clause catches the spec up to v1.2.3's behavior and locks it for
+v1.2.4+.
+
+Example legacy response (with `\/`), which consumers MUST still tolerate:
 
 ```json
 {
@@ -759,12 +775,6 @@ required to. Example response (with `\/`):
   ]
 }
 ```
-
-Note: phase3-binary v1.2.1/v1.2.2 emitted the escaped form by the
-Foundation JSON encoder default. A future revision MAY switch to the
-unescaped form by setting `withoutEscapingSlashes`; this is a
-non-breaking change because all conforming consumers already tolerate
-both.
 
 **Response (503):** Returned if model is not loaded.
 ```json
@@ -1352,8 +1362,28 @@ Sent by the provider when inference is complete, cancelled, or failed.
 | `request_id` | string | Yes | Matches the `inference_request.request_id` |
 | `status` | string | Yes | One of: `"complete"`, `"cancelled"`, `"error_model_not_loaded"`, `"error_context_exceeded"`, `"error_queue_full"`, `"error_internal"` |
 | `chunks_sent` | integer | Yes | Total `inference_response_chunk` messages sent for this request. Coordinator verifies it received all chunks. |
-| `usage` | object | No | Token usage. Present when `status` is `"complete"`. Contains `prompt_tokens`, `completion_tokens`, `total_tokens`. |
+| `usage` | object | No | Token usage. Present when `status` is `"complete"` and when `status` is `"cancelled"` in response to `cancel_request`. Contains `prompt_tokens`, `completion_tokens`, `total_tokens`. |
 | `error` | string | No | Human-readable error message. Present when `status` starts with `"error_"`. |
+
+When `inference_response_end` is sent in response to a `cancel_request`
+(per § 6.6's cancel handling), the provider MUST include a `usage` field
+in the `inference_response_end` message with:
+
+- `prompt_tokens`: the tokens consumed for the input prompt.
+- `completion_tokens`: the actual number of tokens generated before
+  cancellation was honored (may be 0 if cancel arrived before generation
+  started).
+- `total_tokens`: `prompt_tokens + completion_tokens`.
+
+This requirement enables downstream consumers (gateways per SPEC-006,
+accounting systems, billing infrastructure) to settle usage exactly
+rather than estimating. Estimation produces small but consistent under-
+or over-counts that compound across high-volume cancellation scenarios.
+
+Pre-v1.2.4 phase3-binaries (v1.2.3 and earlier) MAY omit the `usage`
+field in cancel-response `inference_response_end`. Consumers SHOULD
+fall back to estimation when usage is absent (gateway example:
+`ceil(bytes_emitted_so_far / 4)` per SPEC-006 v0.4 D-CROSS-1).
 
 **Invariant:** After sending `inference_response_end`, the provider
 MUST NOT send any more `inference_response_chunk` messages for that
@@ -1807,6 +1837,18 @@ port). The binary MUST:
 **Run by:** Tail both the binary log (look for `reconnect attempt 1`)
 and the coordinator's `/poolz` endpoint while issuing the drain
 directive.
+
+**AC-17. Cancel-usage normative reporting.**
+With the binary running and joined to a local coordinator, the
+coordinator sends a `cancel_request` mid-stream after `N` tokens of
+generated output. The binary MUST: (1) honor the cancel within the
+existing cancellation latency budget; (2) send `inference_response_end`
+with `usage.prompt_tokens` > 0, `usage.completion_tokens` == `N` (the
+actual generated count), and `usage.total_tokens` ==
+`prompt_tokens + N`.
+
+**Run by:** Mock coordinator unit test plus hardware integration test
+against a local coordinator.
 
 ---
 

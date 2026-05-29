@@ -1,7 +1,64 @@
 import XCTest
+import MacProviderCore
 @testable import macprovider_cli
 
 final class InferenceRelayTests: XCTestCase {
+    func testCancelActiveStreamingRequestReportsUsage() async throws {
+        let runtime = FakeStreamingRuntime()
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":true}"#
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-cancel-usage",
+            "stream": true,
+            "body": body,
+        ])
+
+        try await waitUntil {
+            let chunks = await recorder.frames.filter { $0["type"] as? String == "inference_response_chunk" }
+            return chunks.count == 2
+        }
+
+        try await relay.handleCancelRequest([
+            "type": "cancel_request",
+            "request_id": "req-cancel-usage",
+            "reason": "buyer_disconnected",
+        ])
+
+        let frames = try await waitForFrames { frames in
+            frames.contains {
+                $0["type"] as? String == "inference_response_end" &&
+                    $0["status"] as? String == "cancelled"
+            }
+        } from: {
+            await recorder.frames
+        }
+        let end = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(end["request_id"] as? String, "req-cancel-usage")
+        XCTAssertEqual(end["status"] as? String, "cancelled")
+        XCTAssertEqual(end["chunks_sent"] as? Int, 2)
+        let usage = try XCTUnwrap(end["usage"] as? [String: Any])
+        XCTAssertEqual(usage["prompt_tokens"] as? Int, 7)
+        XCTAssertEqual(usage["completion_tokens"] as? Int, 2)
+        XCTAssertEqual(usage["total_tokens"] as? Int, 9)
+    }
+
     func testUnknownCancelIsIdempotent() async throws {
         let runtime = try await ModelRuntime(modelID: nil)
         let status = ProviderStatus(
@@ -33,6 +90,10 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(frames[0]["request_id"] as? String, "req-missing")
         XCTAssertEqual(frames[0]["status"] as? String, "cancelled")
         XCTAssertEqual(frames[0]["chunks_sent"] as? Int, 0)
+        let usage = try XCTUnwrap(frames[0]["usage"] as? [String: Any])
+        XCTAssertEqual(usage["prompt_tokens"] as? Int, 0)
+        XCTAssertEqual(usage["completion_tokens"] as? Int, 0)
+        XCTAssertEqual(usage["total_tokens"] as? Int, 0)
     }
 
     func testInvalidInferenceRequestSendsNak() async throws {
@@ -74,4 +135,58 @@ private actor FrameRecorder {
     func append(_ frame: [String: Any]) {
         frames.append(frame)
     }
+}
+
+private actor FakeStreamingRuntime: ModelRuntimeServing {
+    func complete(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> CompletionResult {
+        CompletionResult(content: "", finishReason: "stop", promptTokens: 7, completionTokens: 0)
+    }
+
+    func stream(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        onChunk: @escaping @Sendable (String) -> Void
+    ) async throws -> CompletionResult {
+        onChunk("one")
+        try await Task.sleep(nanoseconds: 20_000_000)
+        onChunk("two")
+        while !shouldCancel() {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        return CompletionResult(content: "onetwo", finishReason: "stop", promptTokens: 7, completionTokens: 2)
+    }
+}
+
+private func waitUntil(
+    timeoutNanoseconds: UInt64 = 2_000_000_000,
+    _ predicate: () async -> Bool
+) async throws {
+    let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+    while DispatchTime.now().uptimeNanoseconds < deadline {
+        if await predicate() {
+            return
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTFail("Timed out waiting for condition")
+}
+
+private func waitForFrames(
+    timeoutNanoseconds: UInt64 = 2_000_000_000,
+    _ predicate: ([[String: Any]]) -> Bool,
+    from read: () async -> [[String: Any]]
+) async throws -> [[String: Any]] {
+    let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+    while DispatchTime.now().uptimeNanoseconds < deadline {
+        let frames = await read()
+        if predicate(frames) {
+            return frames
+        }
+        try await Task.sleep(nanoseconds: 10_000_000)
+    }
+    XCTFail("Timed out waiting for frames")
+    return await read()
 }
