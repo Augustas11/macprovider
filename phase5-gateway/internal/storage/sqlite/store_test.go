@@ -210,10 +210,14 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState: %v", err)
 	}
-	if err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", "https://api.streamvc.live/auth/github/callback", now.Add(time.Minute)); err != nil {
+	redirectURI, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(time.Minute))
+	if err != nil {
 		t.Fatalf("ConsumeOAuthState: %v", err)
 	}
-	if err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", "https://api.streamvc.live/auth/github/callback", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if redirectURI != "https://api.streamvc.live/auth/github/callback" {
+		t.Fatalf("redirectURI=%q", redirectURI)
+	}
+	if _, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState replay err=%v, want ErrNotFound", err)
 	}
 
@@ -224,7 +228,7 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState expired: %v", err)
 	}
-	if err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", "https://api.streamvc.live/auth/github/callback", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if _, err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState expired err=%v, want ErrNotFound", err)
 	}
 
@@ -320,6 +324,46 @@ func TestQuotaReservationLedgerSemantics(t *testing.T) {
 	}
 	if used != 72 || reserved != 0 {
 		t.Fatalf("usage after refund used=%d reserved=%d", used, reserved)
+	}
+}
+
+func TestExpiredReservationsReclaimedAfter24h(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_expired_reap")
+	created := fixedTime().Add(-25 * time.Hour)
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_expired_reap", RequestID: "req_expired", WindowDate: "2026-05-29",
+		RequestedTokens: 90, DailyQuota: 100, CreatedAt: created, ExpiresAt: created.Add(24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota expired fixture: %v", err)
+	}
+	used, reserved, err := store.DailyUsage(ctx, "acct_expired_reap", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage before reap: %v", err)
+	}
+	if used != 0 || reserved != 90 {
+		t.Fatalf("before reap used=%d reserved=%d", used, reserved)
+	}
+	reaped, err := store.ReapExpiredReservations(ctx, fixedTime())
+	if err != nil {
+		t.Fatalf("ReapExpiredReservations: %v", err)
+	}
+	if reaped != 1 {
+		t.Fatalf("reaped=%d want 1", reaped)
+	}
+	used, reserved, err = store.DailyUsage(ctx, "acct_expired_reap", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage after reap: %v", err)
+	}
+	if used != 0 || reserved != 0 {
+		t.Fatalf("after reap used=%d reserved=%d", used, reserved)
+	}
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_expired_reap", RequestID: "req_new", WindowDate: "2026-05-29",
+		RequestedTokens: 100, DailyQuota: 100, CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("ReserveQuota after reap: %v", err)
 	}
 }
 

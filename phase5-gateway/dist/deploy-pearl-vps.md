@@ -12,6 +12,8 @@ This is an operator runbook draft. Do not deploy from the build session without 
 3. Ensure coordinator buyer URL is loopback: `http://127.0.0.1:8443`.
 4. Install `dist/macprovider-gateway.service` as `/etc/systemd/system/macprovider-gateway.service`.
 5. Install `dist/nginx-api.streamvc.live.conf` as `/etc/nginx/sites-available/api.streamvc.live` and enable it from `sites-enabled`.
+   - Keep the SPEC-002 PG-2 `limit_req_zone` / `limit_conn_zone` directives and the `/ws/provider` `limit_req` / `limit_conn` location controls in place before launch.
+   - Keep nginx overwriting `X-Forwarded-For` and setting `X-Real-IP`; the gateway ignores raw buyer-supplied XFF.
 6. Run dry checks:
    - `systemd-analyze verify /etc/systemd/system/macprovider-gateway.service`
    - `nginx -t`
@@ -22,6 +24,7 @@ This is an operator runbook draft. Do not deploy from the build session without 
    - `systemctl reload nginx`
 8. Smoke checks:
    - `curl -i https://api.streamvc.live/v1/status`
+   - `curl -i https://api.streamvc.live/healthz`
    - `curl -i -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/models`
    - OpenAI SDK chat call with `base_url=https://api.streamvc.live/v1`.
 

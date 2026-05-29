@@ -12,11 +12,13 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log/slog"
 	"math"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +49,7 @@ type Store interface {
 	storage.AuditStore
 	storage.FeedbackStore
 	storage.CapacityStore
+	storage.HealthStore
 }
 
 type Option func(*Server)
@@ -105,10 +108,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/v1/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("/v1/status", s.handleStatus)
 	mux.HandleFunc("/v1/feedback", s.handleFeedback)
+	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/admin/feedback-summary", s.handleFeedbackSummary)
 	mux.HandleFunc("/admin/kill-switch", s.handleKillSwitch)
 	mux.HandleFunc("/admin/capacity-signal", s.handleCapacitySignal)
 	mux.HandleFunc("/admin/capacity-tier/evaluate", s.handleCapacityEvaluate)
+	mux.HandleFunc("/", s.handleNotFound)
 	return s.middleware(mux)
 }
 
@@ -126,7 +131,8 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), requestIDKey{}, requestID)
 		defer func() {
-			if recover() != nil {
+			if recovered := recover(); recovered != nil {
+				slog.Error("panic recovered", "panic", recovered, "request_id", requestID, "path", r.URL.Path, "stack", string(debug.Stack()))
 				writeError(w, http.StatusInternalServerError, "server_error", "internal_error", "Internal server error")
 			}
 		}()
@@ -177,11 +183,6 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
 	}
-	redirectURI := r.URL.Query().Get("redirect_uri")
-	if !s.callbackAllowed(redirectURI) {
-		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_callback_not_allowed", "OAuth callback URL is not allowed")
-		return
-	}
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
 	cookie, err := r.Cookie("mp_oauth_session")
@@ -189,8 +190,13 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_state_invalid", "OAuth state is invalid")
 		return
 	}
-	if err := s.store.ConsumeOAuthState(r.Context(), auth.StateHash(state), cookie.Value, redirectURI, s.now()); err != nil {
+	redirectURI, err := s.store.ConsumeOAuthState(r.Context(), auth.StateHash(state), cookie.Value, s.now())
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_state_invalid", "OAuth state is invalid")
+		return
+	}
+	if !s.callbackAllowed(redirectURI) {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_callback_not_allowed", "OAuth callback URL is not allowed")
 		return
 	}
 	identity, err := s.oauth.Exchange(r.Context(), code, redirectURI)
@@ -387,10 +393,36 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		writeError(w, http.StatusBadGateway, "api_error", "coordinator_models_error", "Coordinator models error")
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadGateway, "api_error", "coordinator_models_error", "Coordinator models error")
+		return
+	}
+	body["tier1_disclosure"] = s.makeTier1Disclosure()
 	copyCleanHeaders(w.Header(), resp.Header)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+	writeJSON(w, http.StatusOK, body)
+}
+
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+	defer cancel()
+	if err := s.store.Ping(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+}
+
+func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {
+	writeError(w, http.StatusNotFound, "invalid_request_error", "not_found", "Not Found")
 }
 
 func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
@@ -677,6 +709,24 @@ type tokenUsage struct {
 	TotalTokens      int64 `json:"total_tokens"`
 }
 
+type tier1Disclosure struct {
+	Version             string `json:"version"`
+	PlaintextToProvider bool   `json:"plaintext_to_provider"`
+	ModelIdentity       string `json:"model_identity"`
+	HardwareAttestation string `json:"hardware_attestation"`
+	Tier2Milestone      string `json:"tier2_milestone"`
+}
+
+func (s *Server) makeTier1Disclosure() tier1Disclosure {
+	return tier1Disclosure{
+		Version:             "v0.6",
+		PlaintextToProvider: true,
+		ModelIdentity:       "provider_reported",
+		HardwareAttestation: "none",
+		Tier2Milestone:      "future",
+	}
+}
+
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
@@ -760,7 +810,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/chat/completions", bytes.NewReader(body))
+	upCtx := r.Context()
+	cancelUpstream := func() {}
+	if chat.Stream {
+		upCtx, cancelUpstream = context.WithTimeout(context.Background(), s.cfg.CoordinatorTimeout())
+		defer cancelUpstream()
+	}
+	upReq, err := http.NewRequestWithContext(upCtx, http.MethodPost, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/chat/completions", bytes.NewReader(body))
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -844,9 +900,24 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
-	cancelUsage, cancelUsageOK := cancelUsageFromHeader(resp.Header)
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var cancelOnce sync.Once
+	var cancelUsage tokenUsage
+	var cancelUsageOK bool
+	sendCancel := func() (tokenUsage, bool) {
+		cancelOnce.Do(func() { cancelUsage, cancelUsageOK = s.sendCancelRequest(r) })
+		return cancelUsage, cancelUsageOK
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-r.Context().Done():
+			_, _ = sendCancel()
+		case <-done:
+		}
+	}()
 	var emitted int64
 	var reported *tokenUsage
 	for scanner.Scan() {
@@ -856,7 +927,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "client_disconnect")
 				return
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, cancelUsage, cancelUsageOK)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, scanner, sendCancel)
 			return
 		default:
 		}
@@ -880,26 +951,83 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "client_disconnect")
 			return
 		}
-		s.settleCancelledStream(r, subject, promptEstimate, emitted, cancelUsage, cancelUsageOK)
+		s.settleCancelledStream(r, subject, promptEstimate, emitted, scanner, sendCancel)
 		return
 	}
 	if reported != nil {
 		_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "ok")
 		return
 	}
-	if cancelUsageOK {
-		_ = s.settleRequest(r, subject, cancelUsage.PromptTokens, cancelUsage.CompletionTokens, "provider_reported", "client_disconnect")
-		return
-	}
 	_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "ok")
 }
 
-func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted int64, usage tokenUsage, hasUsage bool) {
-	if hasUsage {
+func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted int64, scanner *bufio.Scanner, sendCancel func() (tokenUsage, bool)) {
+	if cancelUsage, ok := sendCancel(); ok {
+		_ = s.settleRequest(r, subject, cancelUsage.PromptTokens, cancelUsage.CompletionTokens, "provider_reported", "client_disconnect")
+		return
+	}
+	if usage, ok := waitForCancelUsage(scanner, time.Duration(s.cfg.Timeouts.StreamingCancelMS)*time.Millisecond); ok {
 		_ = s.settleRequest(r, subject, usage.PromptTokens, usage.CompletionTokens, "provider_reported", "client_disconnect")
 		return
 	}
 	_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "client_disconnect")
+}
+
+func (s *Server) sendCancelRequest(r *http.Request) (tokenUsage, bool) {
+	timeout := time.Duration(s.cfg.Timeouts.StreamingCancelMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 500 * time.Millisecond
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	body, _ := json.Marshal(map[string]string{"request_id": requestID(r)})
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/v1/chat/completions/cancel", bytes.NewReader(body))
+	if err != nil {
+		return tokenUsage{}, false
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Request-ID", requestID(r))
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return tokenUsage{}, false
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		return tokenUsage{}, false
+	}
+	return usageFromJSON(respBody)
+}
+
+func waitForCancelUsage(scanner *bufio.Scanner, timeout time.Duration) (tokenUsage, bool) {
+	if timeout <= 0 {
+		timeout = 500 * time.Millisecond
+	}
+	type result struct {
+		usage tokenUsage
+		ok    bool
+	}
+	ch := make(chan result, 1)
+	go func() {
+		for scanner.Scan() {
+			line := scanner.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			data := strings.TrimPrefix(line, "data: ")
+			if usage, ok := usageFromJSON([]byte(data)); ok {
+				ch <- result{usage: usage, ok: true}
+				return
+			}
+		}
+		ch <- result{}
+	}()
+	select {
+	case res := <-ch:
+		return res.usage, res.ok
+	case <-time.After(timeout):
+		return tokenUsage{}, false
+	}
 }
 
 func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, completion int64, source, outcome string) error {
@@ -1053,6 +1181,7 @@ func (s *Server) flushStatusCache() {
 
 func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) statusResponse {
 	models := map[string]statusModel{}
+	stats := map[string]poolzModelStats{}
 	out := statusResponse{
 		Status:      "up",
 		Coordinator: coordinatorStatus{Status: "up", CheckedAt: now.Format(time.RFC3339)},
@@ -1074,15 +1203,23 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		}
 		m := models[p.ModelID]
 		m.ID = p.ModelID
-		if p.State == "ready" {
-			m.ProviderCount++
-			m.TotalSlots += p.SlotsTotal
-			m.SlotsFree += p.SlotsFree
-		}
+		m.ProviderCount++
+		m.TotalSlots += p.SlotsTotal
+		m.SlotsFree += p.SlotsFree
 		if p.MaxContextTokens > m.MaxContextTokens {
 			m.MaxContextTokens = p.MaxContextTokens
 		}
 		models[p.ModelID] = m
+		st := stats[p.ModelID]
+		st.TotalProviders++
+		st.SlotsFreeTotal += p.SlotsFree
+		if p.State == "ready" {
+			st.Ready++
+		}
+		if p.State == "unavailable" || p.State == "draining" {
+			st.UnavailableOrDraining++
+		}
+		stats[p.ModelID] = st
 	}
 	if out.Pool.TotalProviders == 0 && poolz.Summary.TotalProviders > 0 {
 		out.Pool.TotalProviders = poolz.Summary.TotalProviders
@@ -1095,11 +1232,34 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		out.Status = "degraded"
 	}
 	for _, model := range models {
-		model.Degraded = model.ProviderCount == 0 || model.SlotsFree == 0
+		model.Degraded = computeDegraded(stats[model.ID])
 		out.Models = append(out.Models, model)
 	}
 	sort.Slice(out.Models, func(i, j int) bool { return out.Models[i].ID < out.Models[j].ID })
 	return out
+}
+
+type poolzModelStats struct {
+	TotalProviders        int
+	UnavailableOrDraining int
+	Ready                 int
+	SlotsFreeTotal        int
+}
+
+func computeDegraded(modelStats poolzModelStats) bool {
+	if modelStats.TotalProviders == 0 {
+		return true
+	}
+	if modelStats.UnavailableOrDraining == modelStats.TotalProviders {
+		return true
+	}
+	if (2 * modelStats.Ready) < modelStats.TotalProviders {
+		return true
+	}
+	if modelStats.SlotsFreeTotal == 0 {
+		return true
+	}
+	return false
 }
 
 func buildFeedbackSummary(events []storage.FeedbackSummaryEvent, start, end time.Time) map[string]any {
@@ -1192,7 +1352,7 @@ func (s *Server) operatorAuthorized(w http.ResponseWriter, r *http.Request) bool
 }
 
 func (s *Server) publicPaused(path string) bool {
-	if strings.HasPrefix(path, "/admin/") || path == "/v1/status" {
+	if strings.HasPrefix(path, "/admin/") || path == "/v1/status" || path == "/healthz" {
 		return false
 	}
 	s.mu.RLock()
@@ -1347,9 +1507,6 @@ func clientIP(r *http.Request) string {
 	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
 		return realIP
 	}
-	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
-		return strings.TrimSpace(strings.Split(forwarded, ",")[0])
-	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err == nil {
 		return host
@@ -1394,21 +1551,6 @@ func usageFromJSON(body []byte) (tokenUsage, bool) {
 	return *envelope.Usage, true
 }
 
-func cancelUsageFromHeader(header http.Header) (tokenUsage, bool) {
-	raw := header.Get("X-MacProvider-Cancel-Usage")
-	if raw == "" {
-		return tokenUsage{}, false
-	}
-	var usage tokenUsage
-	if err := json.Unmarshal([]byte(raw), &usage); err != nil {
-		return tokenUsage{}, false
-	}
-	if usage.TotalTokens == 0 {
-		usage.TotalTokens = usage.PromptTokens + usage.CompletionTokens
-	}
-	return usage, true
-}
-
 func completionFromHeader(header http.Header) int64 {
 	raw := header.Get("X-MacProvider-Completion-Tokens")
 	if raw == "" {
@@ -1441,7 +1583,7 @@ func copyForwardHeaders(dst, src http.Header) {
 
 func copyCleanHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if isMacProviderHeader(key) {
+		if isMacProviderHeader(key) || strings.EqualFold(key, "Content-Length") {
 			continue
 		}
 		for _, value := range values {
@@ -1516,5 +1658,9 @@ func isUUIDLike(v string) bool {
 			return false
 		}
 	}
-	return true
+	if v[14] != '4' {
+		return false
+	}
+	variant := v[19]
+	return variant == '8' || variant == '9' || variant == 'a' || variant == 'b' || variant == 'A' || variant == 'B'
 }

@@ -46,6 +46,8 @@ func main() {
 		return
 	}
 
+	go runReservationReaper(ctx, store)
+
 	upstreamClient := &http.Client{Timeout: cfg.CoordinatorTimeout()}
 	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, upstreamClient)
 	httpServer := &http.Server{
@@ -68,4 +70,32 @@ func main() {
 		slog.Warn("gateway shutdown error", "error", err)
 	}
 	slog.Info("gateway shutdown complete")
+}
+
+type reservationReaper interface {
+	ReapExpiredReservations(context.Context, time.Time) (int64, error)
+}
+
+func runReservationReaper(ctx context.Context, store reservationReaper) {
+	reap := func() {
+		n, err := store.ReapExpiredReservations(ctx, time.Now().UTC())
+		if err != nil {
+			slog.Warn("quota reservation reaper failed", "error", err)
+			return
+		}
+		if n > 0 {
+			slog.Info("expired quota reservations reaped", "count", n)
+		}
+	}
+	reap()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			reap()
+		}
+	}
 }

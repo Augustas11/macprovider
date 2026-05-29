@@ -1,12 +1,14 @@
 package router
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -34,19 +36,17 @@ func (f fakeOAuth) Exchange(context.Context, string, string) (auth.OAuthIdentity
 
 func TestOAuthCallbackAllowlist(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "42", Scopes: []string{"read:user"}}})
-	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state)+"&redirect_uri=https://evil.example/callback", nil)
-	req.AddCookie(cookie)
+	req := httptest.NewRequest(http.MethodGet, "/auth/github/start?redirect_uri="+url.QueryEscape("https://evil.example/callback"), nil)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
 	if resp.Code != http.StatusBadRequest {
-		t.Fatalf("mismatched callback status=%d body=%s", resp.Code, resp.Body.String())
+		t.Fatalf("evil start status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	assertErrorCode(t, resp.Body.String(), "oauth_callback_not_allowed")
 
-	state, cookie = startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
-	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state)+"&redirect_uri=https://api.streamvc.live/auth/github/callback", nil)
+	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
+	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp = httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -62,7 +62,7 @@ func TestOAuthStateCSRF(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "43", Scopes: []string{"read:user"}}})
 	_, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
 
-	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state=forged&redirect_uri=https://api.streamvc.live/auth/github/callback", nil)
+	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state=forged", nil)
 	req.AddCookie(cookie)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -72,7 +72,7 @@ func TestOAuthStateCSRF(t *testing.T) {
 	assertErrorCode(t, resp.Body.String(), "oauth_state_invalid")
 
 	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
-	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state)+"&redirect_uri=https://api.streamvc.live/auth/github/callback", nil)
+	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp = httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -84,7 +84,7 @@ func TestOAuthStateCSRF(t *testing.T) {
 func TestOAuthScopeMinimization(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "44", Scopes: []string{"read:user"}}})
 	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
-	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state)+"&redirect_uri=https://api.streamvc.live/auth/github/callback", nil)
+	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -94,7 +94,7 @@ func TestOAuthScopeMinimization(t *testing.T) {
 
 	h, _, dbPath, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "45", Scopes: []string{"repo"}}})
 	state, cookie = startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
-	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=bad&state="+url.QueryEscape(state)+"&redirect_uri=https://api.streamvc.live/auth/github/callback", nil)
+	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=bad&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp = httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -108,7 +108,7 @@ func TestOAuthScopeMinimization(t *testing.T) {
 
 	h, _, _, _ = newTestHarness(t, fakeOAuth{err: auth.ErrForbiddenScope})
 	state, cookie = startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
-	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=bad&state="+url.QueryEscape(state)+"&redirect_uri=https://api.streamvc.live/auth/github/callback", nil)
+	req = httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=bad&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp = httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -131,6 +131,34 @@ func TestKeyRevocationLatency(t *testing.T) {
 	}
 	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusForbidden)
 	assertErrorCode(t, resp.Body.String(), "api_key_revoked")
+}
+
+func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"object":"list",
+			"data":[],
+			"provider_count":2,
+			"total_slots":4,
+			"tier1_disclosure":{"version":"evil","plaintext_to_provider":false,"model_identity":"claimed","hardware_attestation":"claimed","tier2_milestone":"now"}
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Public.BaseURL = "https://operator.example"
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_disclosure")
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+	var body struct {
+		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	want := (&Server{}).makeTier1Disclosure()
+	if body.Tier1Disclosure != want {
+		t.Fatalf("tier1_disclosure=%+v want %+v", body.Tier1Disclosure, want)
+	}
 }
 
 func TestKeyRotationPreservesHistory(t *testing.T) {
@@ -188,7 +216,7 @@ func TestDemoTokenValidation(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithNow(func() time.Time { return current }), WithHTTPClient(modelsOKClient()))
 
 	req := httptest.NewRequest(http.MethodPost, "/auth/demo-session", nil)
-	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	req.Header.Set("X-Real-IP", "1.2.3.4")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
 	if resp.Code != http.StatusCreated {
@@ -311,6 +339,27 @@ func TestStatusRedactionAndPoolzCacheFlush(t *testing.T) {
 	_ = assertStatus(t, h, http.MethodGet, "/v1/status", "", "", "", http.StatusOK)
 	if calls != 1 {
 		t.Fatalf("poolz calls=%d want cache hit with 1", calls)
+	}
+}
+
+func TestDegradedCalculationMatchesFRB1(t *testing.T) {
+	cases := []struct {
+		name  string
+		stats poolzModelStats
+		want  bool
+	}{
+		{name: "no providers", stats: poolzModelStats{}, want: true},
+		{name: "all unavailable", stats: poolzModelStats{TotalProviders: 2, UnavailableOrDraining: 2, Ready: 0, SlotsFreeTotal: 2}, want: true},
+		{name: "less than half ready", stats: poolzModelStats{TotalProviders: 3, UnavailableOrDraining: 1, Ready: 1, SlotsFreeTotal: 2}, want: true},
+		{name: "no free slots", stats: poolzModelStats{TotalProviders: 2, Ready: 2, SlotsFreeTotal: 0}, want: true},
+		{name: "healthy", stats: poolzModelStats{TotalProviders: 2, Ready: 1, SlotsFreeTotal: 1}, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := computeDegraded(tc.stats); got != tc.want {
+				t.Fatalf("computeDegraded(%+v)=%t want %t", tc.stats, got, tc.want)
+			}
+		})
 	}
 }
 
@@ -495,13 +544,20 @@ func TestStreamingQuotaReservationAndSettlement(t *testing.T) {
 	runStreamingSettlementBranch(t, "acct_stream_estimated", "", float64(estimatePromptTokens([]byte(body))+30))
 }
 
-func runStreamingSettlementBranch(t *testing.T, accountID, cancelUsageHeader string, wantUsed float64) {
+func runStreamingSettlementBranch(t *testing.T, accountID, finalCancelUsage string, wantUsed float64) {
 	t.Helper()
 	var store *sqlite.Store
 	var reservedAtFirstByte int64
 	firstByte := make(chan struct{})
 	cancelSeen := make(chan struct{})
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/chat/completions/cancel" {
+			close(cancelSeen)
+			if finalCancelUsage != "" {
+				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, fmt.Sprintf(`{"usage":%s}`, finalCancelUsage)), nil
+			}
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{}`), nil
+		}
 		used, reserved, err := store.DailyUsage(context.Background(), accountID, "2026-05-29")
 		if err != nil {
 			t.Errorf("DailyUsage from upstream: %v", err)
@@ -512,23 +568,12 @@ func runStreamingSettlementBranch(t *testing.T, accountID, cancelUsageHeader str
 		reservedAtFirstByte = reserved
 		pr, pw := io.Pipe()
 		go func() {
-			if cancelUsageHeader != "" {
-				_, _ = fmt.Fprintf(pw, "data: {\"usage\":%s}\n\n", cancelUsageHeader)
-			} else {
-				_, _ = fmt.Fprintf(pw, "data: %s\n\n", strings.Repeat("x", 120))
-			}
+			_, _ = fmt.Fprintf(pw, "data: %s\n\n", strings.Repeat("x", 120))
 			close(firstByte)
-			<-r.Context().Done()
-			close(cancelSeen)
+			<-cancelSeen
 			_ = pw.Close()
 		}()
 		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
-		if cancelUsageHeader != "" {
-			header.Set("X-MacProvider-Cancel-Usage", cancelUsageHeader)
-			if header.Get("X-MacProvider-Cancel-Usage") == "" {
-				t.Fatalf("test failed to set cancel usage header")
-			}
-		}
 		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: pr}, nil
 	})}
 	h, createdStore, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
@@ -580,6 +625,97 @@ func runStreamingSettlementBranch(t *testing.T, accountID, cancelUsageHeader str
 	}
 	if quota["daily_tokens_reserved"].(float64) != 0 {
 		t.Fatalf("daily_tokens_reserved=%v want 0", quota["daily_tokens_reserved"])
+	}
+}
+
+func TestNotFoundReturnsOpenAIEnvelope(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
+	resp := assertStatus(t, h, http.MethodGet, "/v1/does-not-exist", "", "", "", http.StatusNotFound)
+	assertErrorCode(t, resp.Body.String(), "not_found")
+}
+
+func TestXRequestIDValidationRejectsNonV4(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
+	for _, id := range []string{
+		"6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+		"6ba7b810-9dad-31d1-80b4-00c04fd430c8",
+		"6ba7b810-9dad-51d1-80b4-00c04fd430c8",
+		"not-a-uuid",
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+		req.Header.Set("X-Request-ID", id)
+		resp := httptest.NewRecorder()
+		h.ServeHTTP(resp, req)
+		got := resp.Header().Get("X-Request-ID")
+		if got == id {
+			t.Fatalf("accepted non-v4 request id %q", id)
+		}
+		if !isUUIDLike(got) {
+			t.Fatalf("generated request id %q is not v4", got)
+		}
+	}
+	valid := "6ba7b810-9dad-41d1-80b4-00c04fd430c8"
+	req := httptest.NewRequest(http.MethodGet, "/v1/status", nil)
+	req.Header.Set("X-Request-ID", valid)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if got := resp.Header().Get("X-Request-ID"); got != valid {
+		t.Fatalf("valid v4 request id got %q want %q", got, valid)
+	}
+}
+
+func TestPanicRecoveryLogsPanicAndReturnsEnvelope(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	s := &Server{}
+	h := s.middleware(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/panic", nil)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("panic status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "internal_error")
+	logs := buf.String()
+	if !strings.Contains(logs, "boom") || !strings.Contains(logs, "goroutine") {
+		t.Fatalf("panic log missing value or stack: %s", logs)
+	}
+}
+
+func TestHealthzReturnsOK(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
+	resp := assertStatus(t, h, http.MethodGet, "/healthz", "", "", "", http.StatusOK)
+	var body map[string]string
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("health json: %v", err)
+	}
+	if body["status"] != "ok" {
+		t.Fatalf("health status=%v", body)
+	}
+}
+
+type failingPingStore struct {
+	*sqlite.Store
+}
+
+func (f failingPingStore) Ping(context.Context) error {
+	return errors.New("db down")
+}
+
+func TestHealthzReturns503WhenDBUnreachable(t *testing.T) {
+	_, store, _, cfg := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
+	h := New(cfg, failingPingStore{Store: store}, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient())).Handler()
+	resp := assertStatus(t, h, http.MethodGet, "/healthz", "", "", "", http.StatusServiceUnavailable)
+	var body map[string]string
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("health json: %v", err)
+	}
+	if body["status"] != "unavailable" {
+		t.Fatalf("health status=%v", body)
 	}
 }
 
@@ -666,7 +802,7 @@ func assertStatus(t *testing.T, h http.Handler, method, path, bearer, demoToken,
 		req.Header.Set("X-Demo-Token", demoToken)
 	}
 	if ip != "" {
-		req.Header.Set("X-Forwarded-For", ip)
+		req.Header.Set("X-Real-IP", ip)
 	}
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -714,7 +850,7 @@ func postFeedback(t *testing.T, h http.Handler, bearer, demoToken, body string) 
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/feedback", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	req.Header.Set("X-Real-IP", "1.2.3.4")
 	if bearer != "" {
 		req.Header.Set("Authorization", "Bearer "+bearer)
 	}
@@ -729,7 +865,7 @@ func postFeedback(t *testing.T, h http.Handler, bearer, demoToken, body string) 
 func issueDemoToken(t *testing.T, h http.Handler, ip string) string {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/auth/demo-session", nil)
-	req.Header.Set("X-Forwarded-For", ip)
+	req.Header.Set("X-Real-IP", ip)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
 	if resp.Code != http.StatusCreated {

@@ -8,15 +8,15 @@ Phase 5 gateway implementation for SPEC-006 v0.5. The gateway is intentionally s
 - `gateway.yaml` schema and `gateway.yaml.example`.
 - Storage interfaces in `internal/storage` for auth, accounts, keys, usage/quota, feedback, audit, and capacity.
 - SQLite v1 backend with WAL mode, lookup indexes, append-only triggers, and transactional quota reservation via `BEGIN IMMEDIATE`.
-- GitHub OAuth start/callback with stored state, callback allowlist, scope minimization, signup rate limit, Tier 1 signup closure, and one-time API key issuance.
+- GitHub OAuth start/callback with stored state-bound redirect URI, callback allowlist at OAuth start, scope minimization, signup rate limit, Tier 1 signup closure, and one-time API key issuance.
 - Minimal `/account` handoff page that displays a newly issued key once and clears the handoff cookie.
 - HMAC/SHA API key generation, hash-only storage, validation, rotation, revocation, and account-history preservation.
 - HMAC demo-session token issuance/validation with per-IP issuance limits and demo-only kill switch.
-- `/v1/models`, `/v1/usage`, `/v1/chat/completions`, `/v1/status`, `/v1/feedback`.
+- `/v1/models`, `/v1/usage`, `/v1/chat/completions`, `/v1/status`, `/v1/feedback`, `/healthz`.
 - OpenAI-shaped chat forwarding to `coordinator.buyer_url`, including SSE pass-through and buyer disconnect cancellation.
 - Quota reservation/settlement for success, 503 refund, 502/504 prompt-only or partial usage, demo chat usage, provider-reported streaming actuals, and byte-estimation fallback.
 - Storage-backed per-account concurrency caps.
-- Inbound and outbound `X-MacProvider-*` stripping plus `X-Request-ID` generation/forwarding.
+- Inbound and outbound `X-MacProvider-*` stripping plus UUID-v4 `X-Request-ID` generation/forwarding.
 - Buyer-safe `/v1/status` from coordinator `/poolz` with redaction and 10-second cache.
 - Operator endpoints for feedback summary, kill-switch toggles, capacity signals, Tier 2 quota reduction, Tier 3 public pause, and capacity-tier de-escalation.
 - Deployment templates in `dist/` and AC status matrix in `docs/AC_STATUS.md`.
@@ -87,13 +87,15 @@ nginx -t
 curl -i https://api.streamvc.live/v1/status
 ```
 
-The API nginx site proxies public `/v1/*`, `/auth/*`, and `/account` to `127.0.0.1:9443`, except `/v1/pool/check` returns 404. Operator `/admin/*` endpoints stay off the public API nginx site and should be reached only through a trusted operator path such as loopback or a private tunnel. Coordinator `/poolz`, `/healthz`, and `/ws/provider` are not exposed on `api.streamvc.live`.
+The API nginx site proxies public `/v1/*`, `/auth/*`, `/account`, and `/healthz` to `127.0.0.1:9443`, except `/v1/pool/check` returns a JSON 404 envelope. Operator `/admin/*` endpoints stay off the public API nginx site and should be reached only through a trusted operator path such as loopback or a private tunnel. Coordinator `/poolz` is not exposed on `api.streamvc.live`. The `/ws/provider` route is present only with SPEC-002 PG-2 nginx `limit_req` and `limit_conn` controls before the WebSocket upgrade.
+
+The gateway trusts only nginx-set `X-Real-IP` for buyer identity and rate-limit binding. The nginx site must overwrite `X-Forwarded-For` and set `X-Real-IP`; if the gateway is reached directly or nginx is misconfigured, raw buyer-supplied `X-Forwarded-For` is ignored and the TCP remote address is used.
 
 ## Storage And Quota
 
 SQLite is the v1 storage backend for the single-gateway-instance Pearl VPS deployment. Handler packages depend on `internal/storage` interfaces only; future PostgreSQL, Cloudflare D1, or Workers KV migrations should stay behind those interfaces.
 
-Usage, feedback, audit, demo usage, API-key event, and capacity signal tables are append-only at the database trigger layer. Quota reservation is storage-backed and settled after upstream completion or cancellation.
+Usage, feedback, audit, demo usage, API-key event, and capacity signal tables are append-only at the database trigger layer. Quota reservation is storage-backed and settled after upstream completion or cancellation. Active quota reservations expire after 24 hours; the gateway reclaims expired reservations before new quota admission and runs a background reaper every hour.
 
 When provider usage is absent, the gateway estimates prompt or emitted completion tokens with `ceil(bytes / 4)` and records the source as `gateway_estimated`.
 
@@ -117,9 +119,9 @@ go build ./...
 go test ./...
 go test ./internal/storage/... -cover
 go test ./internal/router -run 'TestStrangerKeyOpenAIChatUsageFlow|TestQuotaExhaustionReturns429|TestProviderUnavailableReturns503AndRefunds|TestCapacityTierOneClosesSignupButExistingKeyWorks|TestDemoOnlyKillSwitchPausesDemoOnly|TestPublicEndpointAllowlistDoesNotExposeCoordinatorInternals'
-go test ./internal/router -run 'TestOAuthCallbackAllowlist|TestOAuthStateCSRF|TestOAuthScopeMinimization|TestKeyRevocationLatency|TestKeyRotationPreservesHistory|TestDemoTokenValidation|TestProviderPinningHeadersStripped|TestQuotaSettlement504ZeroCompletion|TestStreamingQuotaReservationAndSettlement'
+go test ./internal/router -run 'TestOAuthCallbackAllowlist|TestOAuthStateCSRF|TestOAuthScopeMinimization|TestKeyRevocationLatency|TestKeyRotationPreservesHistory|TestDemoTokenValidation|TestProviderPinningHeadersStripped|TestQuotaSettlement504ZeroCompletion|TestStreamingQuotaReservationAndSettlement|TestModelsResponseIncludesTier1Disclosure'
 go test ./internal/router -run 'TestKillSwitchPersistsAcrossRestart|TestStatusRedactionAndPoolzCacheFlush|TestFeedbackSummaryAggregation|TestCapacityTierDeescalation'
-go test ./internal/router -run 'TestCrossAccountKeyRevocationRejected|TestDemoChatQuotaExhaustionIsSeparateFromAccountQuota|TestAccountConcurrencyCap|TestModelsCoordinatorUnavailableReturns503|TestCapacityTierTwoHalvesQuotaAndTierThreePauses|TestDemoOnlyKillSwitchPausesPlaygroundFeedback|TestRealIPTakesPrecedenceOverSpoofedForwardedFor'
+go test ./internal/router -run 'TestCrossAccountKeyRevocationRejected|TestDemoChatQuotaExhaustionIsSeparateFromAccountQuota|TestAccountConcurrencyCap|TestModelsCoordinatorUnavailableReturns503|TestCapacityTierTwoHalvesQuotaAndTierThreePauses|TestDemoOnlyKillSwitchPausesPlaygroundFeedback|TestClientIPDetectionRejectsForgedXFF|TestNotFoundReturnsOpenAIEnvelope|TestXRequestIDValidationRejectsNonV4|TestPanicRecoveryLogsPanicAndReturnsEnvelope|TestHealthzReturnsOK|TestHealthzReturns503WhenDBUnreachable'
 ```
 
 The storage tests include a 10,000-key auth lookup fixture and fail if p95 validation latency is not below 1 ms on local SQLite.

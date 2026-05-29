@@ -17,7 +17,7 @@ type AuthStore interface {
 	RevokeAPIKeyForAccount(ctx context.Context, accountID, keyID, actor, requestID string) error
 	RotateAPIKey(ctx context.Context, oldKeyID, accountID string, newKey APIKey, actor, requestID string) error
 	StoreOAuthState(ctx context.Context, state OAuthState) error
-	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID, redirectURI string, now time.Time) error
+	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI string, err error)
 	RecordSignupEvent(ctx context.Context, event SignupEvent) error
 	CountSignupEventsSince(ctx context.Context, clientIP string, since time.Time) (int, error)
 	RecordDemoSessionEvent(ctx context.Context, event DemoSessionEvent) error
@@ -44,7 +44,7 @@ type KeyStore interface {
 
 type OAuthStateStore interface {
 	StoreOAuthState(ctx context.Context, state OAuthState) error
-	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID, redirectURI string, now time.Time) error
+	ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (redirectURI string, err error)
 }
 
 type DemoSessionStore interface {
@@ -59,8 +59,13 @@ type UsageStore interface {
 	RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error
 	DailyUsage(ctx context.Context, accountID, windowDate string) (usedTokens, activeReservedTokens int64, err error)
+	ReapExpiredReservations(ctx context.Context, now time.Time) (int64, error)
 	AcquireConcurrency(ctx context.Context, req ConcurrencyRequest) (ConcurrencyDecision, error)
 	ReleaseConcurrency(ctx context.Context, accountID, requestID string, releasedAt time.Time) error
+}
+
+type HealthStore interface {
+	Ping(ctx context.Context) error
 }
 
 type FeedbackStore interface {

@@ -44,7 +44,7 @@ func TestStrangerKeyOpenAIChatUsageFlow(t *testing.T) {
 	}, WithHTTPClient(client))
 
 	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
-	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state)+"&redirect_uri=https://api.streamvc.live/auth/github/callback", nil)
+	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -84,7 +84,7 @@ func TestStrangerKeyOpenAIChatUsageFlow(t *testing.T) {
 func TestAccountPageDisplaysNewKeyOnce(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{ProviderUserID: "account-once", Scopes: []string{"read:user"}}})
 	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
-	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state)+"&redirect_uri=https://api.streamvc.live/auth/github/callback", nil)
+	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -187,11 +187,11 @@ func TestDemoChatQuotaExhaustionIsSeparateFromAccountQuota(t *testing.T) {
 	}, WithHTTPClient(client))
 	demo := issueDemoToken(t, h, "1.2.3.4")
 	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
-	first := postChat(t, h, "", body, map[string]string{"X-Demo-Token": demo, "X-Forwarded-For": "1.2.3.4"})
+	first := postChat(t, h, "", body, map[string]string{"X-Demo-Token": demo, "X-Real-IP": "1.2.3.4"})
 	if first.Code != http.StatusOK {
 		t.Fatalf("first demo status=%d body=%s", first.Code, first.Body.String())
 	}
-	second := postChat(t, h, "", body, map[string]string{"X-Demo-Token": demo, "X-Forwarded-For": "1.2.3.4"})
+	second := postChat(t, h, "", body, map[string]string{"X-Demo-Token": demo, "X-Real-IP": "1.2.3.4"})
 	if second.Code != http.StatusTooManyRequests {
 		t.Fatalf("second demo status=%d body=%s", second.Code, second.Body.String())
 	}
@@ -296,7 +296,7 @@ func TestCapacityTierOneClosesSignupButExistingKeyWorks(t *testing.T) {
 
 	postAdminJSON(t, h, "/admin/capacity-signal", `{"signal":"projected_cost","value":80,"threshold":80,"firing":true}`)
 	state, cookie := startOAuth(t, h, "https://api.streamvc.live/auth/github/callback")
-	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state)+"&redirect_uri=https://api.streamvc.live/auth/github/callback", nil)
+	req := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
 	req.AddCookie(cookie)
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
@@ -391,7 +391,7 @@ func TestDemoOnlyKillSwitchPausesPlaygroundFeedback(t *testing.T) {
 	assertErrorCode(t, resp.Body.String(), "demo_paused")
 }
 
-func TestRealIPTakesPrecedenceOverSpoofedForwardedFor(t *testing.T) {
+func TestClientIPDetectionRejectsForgedXFF(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(modelsOKClient()))
 	req := httptest.NewRequest(http.MethodPost, "/auth/demo-session", nil)
 	req.Header.Set("X-Real-IP", "1.2.3.4")
@@ -407,7 +407,6 @@ func TestRealIPTakesPrecedenceOverSpoofedForwardedFor(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("demo json: %v", err)
 	}
-	assertStatus(t, h, http.MethodGet, "/v1/models", "", body.DemoToken, "9.9.9.9", http.StatusUnauthorized)
 	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("X-Demo-Token", body.DemoToken)
 	req.Header.Set("X-Real-IP", "1.2.3.4")
@@ -417,11 +416,30 @@ func TestRealIPTakesPrecedenceOverSpoofedForwardedFor(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("real ip auth status=%d body=%s", resp.Code, resp.Body.String())
 	}
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "5.6.7.8:1234"
+	req.Header.Set("X-Demo-Token", body.DemoToken)
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	resp = httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("forged xff auth status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "invalid_demo_token")
+
+	req = httptest.NewRequest(http.MethodPost, "/auth/demo-session", nil)
+	req.RemoteAddr = "5.6.7.8:5678"
+	resp = httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusCreated {
+		t.Fatalf("remote addr demo status=%d body=%s", resp.Code, resp.Body.String())
+	}
 }
 
 func TestPublicEndpointAllowlistDoesNotExposeCoordinatorInternals(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
-	for _, path := range []string{"/admin/foo", "/poolz", "/healthz", "/ws/provider"} {
+	for _, path := range []string{"/admin/foo", "/poolz", "/ws/provider"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		resp := httptest.NewRecorder()
 		h.ServeHTTP(resp, req)

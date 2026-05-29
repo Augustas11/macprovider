@@ -51,6 +51,10 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+func (s *Store) Ping(ctx context.Context) error {
+	return s.db.PingContext(ctx)
+}
+
 func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return err
@@ -281,32 +285,33 @@ func (s *Store) StoreOAuthState(ctx context.Context, state storage.OAuthState) e
 	return err
 }
 
-func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID, redirectURI string, now time.Time) error {
+func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (string, error) {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer tx.Rollback()
+	var redirectURI string
 	var expiresAt string
 	var consumedAt string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT expires_at, consumed_at
+		SELECT redirect_uri, expires_at, consumed_at
 		FROM oauth_states
-		WHERE state_hash = ? AND session_id = ? AND redirect_uri = ?`,
-		stateHash, sessionID, redirectURI).Scan(&expiresAt, &consumedAt); err != nil {
+		WHERE state_hash = ? AND session_id = ?`,
+		stateHash, sessionID).Scan(&redirectURI, &expiresAt, &consumedAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return storage.ErrNotFound
+			return "", storage.ErrNotFound
 		}
-		return err
+		return "", err
 	}
 	if consumedAt != "" || !now.Before(decodeTime(expiresAt)) {
-		return storage.ErrNotFound
+		return "", storage.ErrNotFound
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE oauth_states SET consumed_at = ? WHERE state_hash = ?`, encodeTime(now.UTC()), stateHash)
 	if err != nil {
-		return err
+		return "", err
 	}
-	return tx.Commit()
+	return redirectURI, tx.Commit()
 }
 
 func (s *Store) RecordSignupEvent(ctx context.Context, event storage.SignupEvent) error {
@@ -351,6 +356,12 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 		return storage.QuotaDecision{}, err
 	}
 	defer tx.Rollback()
+	if req.CreatedAt.IsZero() {
+		req.CreatedAt = time.Now().UTC()
+	}
+	if _, err := reapExpiredReservationsTx(ctx, tx, req.CreatedAt); err != nil {
+		return storage.QuotaDecision{}, err
+	}
 	used, reserved, err := dailyUsageTx(ctx, tx, req.AccountID, req.WindowDate)
 	if err != nil {
 		return storage.QuotaDecision{}, err
@@ -365,9 +376,6 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 			return storage.QuotaDecision{}, err
 		}
 		return decision, storage.ErrQuotaExceeded
-	}
-	if req.CreatedAt.IsZero() {
-		req.CreatedAt = time.Now().UTC()
 	}
 	if req.ExpiresAt.IsZero() {
 		req.ExpiresAt = req.CreatedAt.Add(24 * time.Hour)
@@ -591,6 +599,19 @@ func (s *Store) DailyUsage(ctx context.Context, accountID, windowDate string) (i
 	return dailyUsageTx(ctx, s.db, accountID, windowDate)
 }
 
+func (s *Store) ReapExpiredReservations(ctx context.Context, now time.Time) (int64, error) {
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	n, err := reapExpiredReservationsTx(ctx, tx, now)
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
 func (s *Store) InsertFeedbackEvent(ctx context.Context, event storage.FeedbackEvent) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
@@ -713,6 +734,25 @@ func (s *Store) InsertCapacitySignalEvent(ctx context.Context, event storage.Cap
 
 type queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+type execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func reapExpiredReservationsTx(ctx context.Context, q execer, now time.Time) (int64, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	res, err := q.ExecContext(ctx, `
+		UPDATE quota_reservations
+		SET status = 'expired', settled_tokens = 0, settled_at = ?
+		WHERE status = 'active' AND expires_at <= ?`,
+		encodeTime(now), encodeTime(now))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func dailyUsageTx(ctx context.Context, q queryer, accountID, windowDate string) (int64, int64, error) {
