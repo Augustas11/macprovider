@@ -385,6 +385,7 @@ func TestMissedHeartbeatClosesProviderWebSocketAndMarksUnavailable(t *testing.T)
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.HeartbeatIntervalS = 1
 		cfg.Routing.FailoverTimeoutS = 1
+		cfg.Pool.HeartbeatMissThresholdS = 1
 		cfg.Pool.DisconnectGracePeriodS = 5
 	})
 	defer h.HTTP.Close()
@@ -419,6 +420,98 @@ func TestMissedHeartbeatClosesProviderWebSocketAndMarksUnavailable(t *testing.T)
 	if _, err := gobwas.ReadFrame(conn); err == nil {
 		t.Fatal("expected stale heartbeat monitor to close provider websocket")
 	}
+}
+
+func TestActiveProviderWithoutHeartbeatStaysConnected(t *testing.T) {
+	// Regression (Phase 6 hotfix): a provider streaming inference response
+	// chunks but NOT sending heartbeats — because its single inference slot
+	// is busy generating — must not be closed by the liveness monitor. The
+	// monitor keys off last inbound activity of any kind, not heartbeats.
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.HeartbeatIntervalS = 1
+		cfg.Routing.FailoverTimeoutS = 1
+		cfg.Pool.HeartbeatMissThresholdS = 1 // 1s — trivially exceeded if only heartbeats counted
+		cfg.Pool.DisconnectGracePeriodS = 5
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("busy-provider"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(conn); err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+
+	// Stream non-heartbeat activity for ~3x the miss threshold without ever
+	// sending a heartbeat.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		chunk := map[string]any{
+			"type":       "inference_response_chunk",
+			"request_id": "no-such-request",
+			"seq":        0,
+			"data":       "tok",
+		}
+		if err := wsutil.WriteClientText(conn, mustJSON(chunk)); err != nil {
+			t.Fatalf("write chunk: %v", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	provider, ok := h.Registry.Resolve("busy-provider", "")
+	if !ok {
+		t.Fatal("provider was removed despite continuous activity")
+	}
+	if provider.State == pool.StateUnavailable {
+		t.Fatalf("provider marked unavailable despite continuous activity; state=%s", provider.State)
+	}
+}
+
+func TestProviderClosedAfterActivityStops(t *testing.T) {
+	// Regression boundary: a provider that WAS active (streaming chunks) and
+	// then goes silent must be closed ~heartbeat_miss_threshold_s after its
+	// LAST inbound frame — proving liveness is keyed off activity staleness,
+	// not merely total absence of frames. Guards against a future revert to
+	// LastHeartbeatAt-only checking.
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.HeartbeatIntervalS = 1
+		cfg.Routing.FailoverTimeoutS = 1
+		cfg.Pool.HeartbeatMissThresholdS = 1
+		cfg.Pool.DisconnectGracePeriodS = 5
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("then-silent"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(conn); err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+
+	// A burst of activity, then go silent.
+	for i := 0; i < 3; i++ {
+		chunk := map[string]any{"type": "inference_response_chunk", "request_id": "no-such-request", "seq": i, "data": "tok"}
+		if err := wsutil.WriteClientText(conn, mustJSON(chunk)); err != nil {
+			t.Fatalf("write chunk: %v", err)
+		}
+		time.Sleep(150 * time.Millisecond)
+	}
+
+	// After silence exceeds the 1s threshold, the monitor must close + reap.
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("then-silent", "")
+		return ok && provider.State == pool.StateUnavailable
+	})
 }
 
 func TestPoolzRequiresOperatorKey(t *testing.T) {

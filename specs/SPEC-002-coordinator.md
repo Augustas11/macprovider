@@ -1,7 +1,10 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.1.6 (2026-05-29, engineering robustness, dead-WS fast-fail)
+**Version:** 1.1.7 (2026-05-29, activity-based liveness hotfix)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.1.7:**
+- Hotfix to F-4 liveness detection. The v1.1.6 missed-heartbeat monitor closed a provider WebSocket after `heartbeat_interval_s + routing.failover_timeout_s` (35s with production defaults) measured from the last *heartbeat*. A provider doing single-threaded MLX inference cannot emit heartbeats while its one slot is busy, so any generation longer than ~35s was killed mid-request (observed live on Pearl: a Llama-3.2-3B provider at ~0.6 tps fast-failed every non-trivial completion). Fix: (1) the liveness monitor now measures staleness from the last inbound frame of ANY type — in-flight `inference_response_chunk` frames count as activity and keep a busy provider alive; (2) the threshold is a new dedicated key `pool.heartbeat_miss_threshold_s` (default 90s), decoupled from `routing.failover_timeout_s`. In-flight observed close/write failures are unchanged (still bounded by `routing.failover_timeout_s`). No wire-protocol change; provider binaries need no update.
 
 **Change log v1.1.6:**
 - Adds F-4: in-flight buyer requests routed over provider WebSocket MUST finish, fail over once to another ready same-model provider, or return `provider_disconnected` when the provider WebSocket dies mid-inference. Observed close/write failures are bounded by `routing.failover_timeout_s` plus small scheduler overhead; silent missed-heartbeat failures are bounded by `heartbeat_interval_s + routing.failover_timeout_s`. Streaming requests may fail over only before response bytes are committed; after commit they terminate the SSE stream with `provider_disconnected`. Explicit provider/session pins do not fail over. Adds `routing.failover_enabled` and `routing.failover_timeout_s` config keys. Adds explicit failure-mode rows for graceful WS close, abnormal WS death, and dead-WS-mid-inference.
@@ -425,7 +428,7 @@ Informed by Phase 2 D1 (502 vs 530):
 |---|---|---|---|
 | WS disconnect (530-equivalent) | WS close, no prior drain | `unavailable`, grace period | Reconnects with new hello |
 | dead-WS-graceful | Provider-initiated close frame while no drain is active | Active relays receive `provider_disconnected`; provider marked `unavailable` | Reconnects with new hello |
-| dead-WS-abnormal | Read/write failure or missed heartbeat (`heartbeat_interval_s + failover_timeout_s`) | Coordinator closes the session; active relays receive `provider_disconnected` | Reconnects with new hello |
+| dead-WS-abnormal | Read/write failure, or no inbound frame of any type for `pool.heartbeat_miss_threshold_s` (default 90s; in-flight response chunks count as activity) | Coordinator closes the session; active relays receive `provider_disconnected` | Reconnects with new hello |
 | dead-WS-mid-inference | WS dies after `inference_request` was routed and before `inference_response_end` | Cancel the in-flight relay and either fail over once or return HTTP 502 `provider_disconnected` per F-4 | Buyer receives one response or one clean OpenAI-envelope error; no gateway-timeout hang |
 | HTTP 502 (MLX down) | Provider returns 502 on routed buyer request | `degraded`, 30s backoff | Recovery preflight after 30s |
 | HTTP 504 (timeout) | No response in time | `degraded`, 30s backoff | Same as 502 |
@@ -701,8 +704,16 @@ rate limits in FR-P16) or rejected with 4009 if in the
 fast-fail or fail over.** If a provider WebSocket transitions to dead
 while a buyer request is in flight, the coordinator MUST detect the
 condition within `routing.failover_timeout_s` for observed close/write
-failures, or within `heartbeat_interval_s + routing.failover_timeout_s`
-for missed-heartbeat failures. It MUST then either reroute the request
+failures, or within `pool.heartbeat_miss_threshold_s` for silent
+(half-open) sockets that stop producing inbound frames. The liveness
+monitor MUST measure staleness from the last inbound frame of ANY type
+(heartbeat OR in-flight inference response), not heartbeats alone: a
+provider actively streaming a long single-slot generation is alive even
+though it cannot emit heartbeats while its slot is busy, and MUST NOT be
+closed for "missed" heartbeats. `pool.heartbeat_miss_threshold_s`
+(default 90s) MUST be generous relative to `pool.heartbeat_interval_s`
+and is independent of `routing.failover_timeout_s` (which governs
+replacement selection, not liveness). It MUST then either reroute the request
 once to a different ready provider running the same model when
 `routing.failover_enabled` is true and such a provider has free slots,
 or return HTTP 502 with error code `provider_disconnected` and the

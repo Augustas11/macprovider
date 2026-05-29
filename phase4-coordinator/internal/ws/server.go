@@ -221,6 +221,7 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		AdmittedAt:            now,
 		State:                 pool.StateReady,
 		LastHeartbeatAt:       now,
+		LastActivityAt:        now,
 		ConnectedAt:           now,
 		BinaryVersion:         hello.BinaryVersion,
 	}
@@ -312,6 +313,13 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid provider message json")
 		return
 	}
+	// Any well-formed inbound frame (heartbeat OR in-flight inference response)
+	// proves the provider is alive and following protocol — record activity so
+	// the liveness monitor does not close a provider that cannot heartbeat
+	// while its single slot is busy streaming a long generation. Unparseable
+	// or non-text frames deliberately do NOT count, so a malfunctioning
+	// provider emitting garbage is still reaped after the threshold.
+	s.pool.Touch(providerID, assignedID, s.now())
 	switch envelope.Type {
 	case "heartbeat":
 		s.handleHeartbeat(conn, providerID, assignedID, payload)
@@ -547,20 +555,29 @@ func (s *Server) monitorHeartbeat(providerID, assignedID string, conn net.Conn) 
 	}
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
-	threshold := s.cfg.HeartbeatInterval() + s.cfg.FailoverTimeout()
+	threshold := s.cfg.HeartbeatMissThreshold()
 	for range ticker.C {
 		provider, ok := s.pool.Resolve(providerID, assignedID)
 		if !ok {
 			return
 		}
-		if s.now().Sub(provider.LastHeartbeatAt) <= threshold {
+		// Liveness is measured from the last inbound frame of ANY type, not
+		// just heartbeats: a provider streaming a long inference response is
+		// demonstrably alive even though it cannot emit heartbeats while its
+		// single slot is busy. Fall back to LastHeartbeatAt for safety if a
+		// provider predates activity tracking.
+		last := provider.LastActivityAt
+		if last.IsZero() {
+			last = provider.LastHeartbeatAt
+		}
+		if s.now().Sub(last) <= threshold {
 			continue
 		}
 		s.log.Warn().
 			Str("provider_id", providerID).
-			Dur("gap", s.now().Sub(provider.LastHeartbeatAt)).
+			Dur("gap", s.now().Sub(last)).
 			Dur("threshold", threshold).
-			Msg("provider heartbeat missed; closing websocket")
+			Msg("provider inactive past threshold; closing websocket")
 		_ = conn.Close()
 		return
 	}

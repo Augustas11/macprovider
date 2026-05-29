@@ -1,6 +1,41 @@
 # Phase 3 Binary Keepalive Root Cause
 
-Status: investigation staged; partner observation pending.
+Status: **RESOLVED 2026-05-29 — the disconnects were server-side, not a
+phase3-binary keepalive defect. No client (v1.2.5) change was required.**
+
+## Resolution (2026-05-29, post-Pearl-deploy live investigation)
+
+After deploying the Phase 6 coordinator + gateway to Pearl and exercising
+the live money path, the "provider disconnects / failed inference" symptom
+was root-caused to **two independent server-side causes**, both fixed
+without any partner binary update:
+
+1. **Coordinator 35s heartbeat-miss kill (Phase 6 regression).** The Phase 6
+   `monitorHeartbeat` closed a provider WebSocket when no *heartbeat* arrived
+   within `heartbeat_interval_s + failover_timeout_s` (= 35s). A provider
+   doing single-threaded MLX inference cannot heartbeat while its one slot is
+   busy generating, so any generation longer than ~35s was killed mid-request.
+   **Fixed** (SPEC-002 v1.1.7): liveness is now measured from the last inbound
+   frame of ANY type (in-flight `inference_response_chunk` frames count as
+   activity), and the threshold is a dedicated `pool.heartbeat_miss_threshold_s`
+   (default 90s) decoupled from `failover_timeout_s`. Verified live: a healthy
+   provider (air5, Qwen-7B) completed an 800-token / 40.5s streaming generation
+   cleanly (HTTP 200) where pre-fix it would have died at 35s.
+
+2. **Gateway 120s upstream timeout (config drift).** The deployed
+   `gateway.yaml` had `timeouts.coordinator_request_seconds: 120`, while the
+   template and the coordinator's `routing.request_timeout_s` are both 300.
+   The gateway's upstream HTTP client to the coordinator therefore aborted at
+   exactly 120s (observed `wall_ms=120096`, error `coordinator_unavailable`),
+   tearing down the in-flight relay. Affected slow providers whose full
+   non-streaming response exceeded 120s (e.g. the 8GB augustass box at
+   ~0.59 tps + cold model load). **Fix: realign live gateway.yaml to 300s.**
+
+The original NAT-idle hypothesis was disproven: idle providers (air5)
+stayed connected for hours; the failures occurred only during/after long
+inference, consistent with the two server-side timeouts above.
+
+## Original investigation notes (superseded)
 
 ## Local Evidence
 

@@ -48,8 +48,14 @@ type Provider struct {
 	HTTPForwardingOnly    bool          `json:"http_forwarding_only,omitempty"`
 	State                 State         `json:"state"`
 	LastHeartbeatAt       time.Time     `json:"last_heartbeat_at"`
-	ConnectedAt           time.Time     `json:"connected_at"`
-	BinaryVersion         string        `json:"binary_version"`
+	// LastActivityAt is the timestamp of the most recent inbound frame of any
+	// kind (heartbeat OR in-flight inference response). The liveness monitor
+	// uses this — not LastHeartbeatAt — so a provider actively streaming a
+	// long generation is not closed for "missing" heartbeats it cannot send
+	// while its single inference slot is busy.
+	LastActivityAt time.Time `json:"last_activity_at"`
+	ConnectedAt    time.Time `json:"connected_at"`
+	BinaryVersion  string    `json:"binary_version"`
 
 	conn net.Conn
 }
@@ -196,6 +202,24 @@ func (r *Registry) ApplyHeartbeat(providerID string, hb HeartbeatUpdate) (*Provi
 		gap = hb.At.Sub(prev)
 	}
 	return &cp, gap, true
+}
+
+// Touch records that an inbound frame was received from the provider,
+// resetting its liveness clock. Called for every frame (any type) so that
+// in-flight inference response chunks keep an otherwise-heartbeat-silent
+// provider alive. Safe to call for an unregistered provider (no-op).
+func (r *Registry) Touch(providerID, assignedID string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var p *Provider
+	if providerID != "" {
+		p = r.providers[providerID]
+	} else if assignedID != "" {
+		p = r.sessions[assignedID]
+	}
+	if p != nil {
+		p.LastActivityAt = at
+	}
 }
 
 func (r *Registry) ModelKnown(modelID string) bool {

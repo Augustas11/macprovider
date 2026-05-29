@@ -32,12 +32,21 @@ type ListenConfig struct {
 }
 
 type PoolConfig struct {
-	HeartbeatIntervalS     int  `yaml:"heartbeat_interval_s"`
-	DisconnectGracePeriodS int  `yaml:"disconnect_grace_period_s"`
-	WakeGapThresholdS      int  `yaml:"wake_gap_threshold_s"`
-	DegradedBackoffS       int  `yaml:"degraded_backoff_s"`
-	DegradedMaxRetries     int  `yaml:"degraded_max_retries"`
-	DegradedProbeAfter502  bool `yaml:"degraded_probe_after_502"`
+	HeartbeatIntervalS     int `yaml:"heartbeat_interval_s"`
+	DisconnectGracePeriodS int `yaml:"disconnect_grace_period_s"`
+	// HeartbeatMissThresholdS bounds how long a provider may go without ANY
+	// inbound frame (heartbeat OR in-flight inference response) before the
+	// liveness monitor closes its WebSocket. It MUST be generous relative to
+	// HeartbeatIntervalS: a provider doing single-threaded MLX inference may
+	// not emit a heartbeat for the duration of a generation, but its response
+	// chunks count as activity and keep the socket alive. Decoupled from
+	// routing.failover_timeout_s (which governs replacement selection, not
+	// liveness). Defaults to 90s (3x the 30s heartbeat interval).
+	HeartbeatMissThresholdS int  `yaml:"heartbeat_miss_threshold_s"`
+	WakeGapThresholdS       int  `yaml:"wake_gap_threshold_s"`
+	DegradedBackoffS        int  `yaml:"degraded_backoff_s"`
+	DegradedMaxRetries      int  `yaml:"degraded_max_retries"`
+	DegradedProbeAfter502   bool `yaml:"degraded_probe_after_502"`
 }
 
 type RoutingConfig struct {
@@ -103,12 +112,13 @@ func Default() Config {
 			BindAddress:  "127.0.0.1",
 		},
 		Pool: PoolConfig{
-			HeartbeatIntervalS:     30,
-			DisconnectGracePeriodS: 30,
-			WakeGapThresholdS:      120,
-			DegradedBackoffS:       30,
-			DegradedMaxRetries:     3,
-			DegradedProbeAfter502:  true,
+			HeartbeatIntervalS:      30,
+			DisconnectGracePeriodS:  30,
+			HeartbeatMissThresholdS: 90,
+			WakeGapThresholdS:       120,
+			DegradedBackoffS:        30,
+			DegradedMaxRetries:      3,
+			DegradedProbeAfter502:   true,
 		},
 		Routing: RoutingConfig{
 			PreflightThresholdTokens: 4096,
@@ -166,6 +176,16 @@ func (c Config) FailoverTimeout() time.Duration {
 	seconds := c.Routing.FailoverTimeoutS
 	if seconds <= 0 {
 		seconds = Default().Routing.FailoverTimeoutS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// HeartbeatMissThreshold is how long a provider may go without any inbound
+// frame before the liveness monitor closes its WebSocket. See PoolConfig.
+func (c Config) HeartbeatMissThreshold() time.Duration {
+	seconds := c.Pool.HeartbeatMissThresholdS
+	if seconds <= 0 {
+		seconds = Default().Pool.HeartbeatMissThresholdS
 	}
 	return time.Duration(seconds) * time.Second
 }

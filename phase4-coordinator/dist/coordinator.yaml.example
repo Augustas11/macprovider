@@ -12,6 +12,11 @@ listen:
 pool:
   heartbeat_interval_s: 30
   disconnect_grace_period_s: 30
+  # Max seconds without ANY inbound frame (heartbeat OR in-flight inference
+  # response) before the liveness monitor closes the provider WS. Keep well
+  # above heartbeat_interval_s: a provider busy with a long single-slot
+  # generation cannot heartbeat, but its response chunks count as activity.
+  heartbeat_miss_threshold_s: 90
   wake_gap_threshold_s: 120
   degraded_backoff_s: 30
   degraded_max_retries: 3
