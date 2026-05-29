@@ -1,0 +1,69 @@
+listen:
+  bind_address: 127.0.0.1
+  port: 9443
+
+public:
+  base_url: https://api.streamvc.live
+  account_path: /account
+
+coordinators:
+  - name: pearl-local
+    base_url: http://127.0.0.1:8443
+    weight: 1
+    enabled: true
+
+coordinator:
+  buyer_url: http://127.0.0.1:8443
+  operator_url: http://127.0.0.1:8444
+  operator_key: env:COORDINATOR_OPERATOR_KEY
+  poolz_poll_interval_s: 10
+
+storage:
+  driver: sqlite
+  db_path: gateway.db
+
+auth:
+  key_prefix: mp_
+  key_hash: hmac_sha256
+  key_hash_secret: env:MACPROVIDER_KEY_HASH_SECRET
+  github_oauth_enabled: true
+  email_magic_link_enabled: false
+  oauth:
+    callback_allowlist:
+      - https://api.streamvc.live/auth/github/callback
+      - http://localhost:9443/auth/github/callback
+    github:
+      client_id: env:GITHUB_OAUTH_CLIENT_ID
+      client_secret: env:GITHUB_OAUTH_CLIENT_SECRET
+      authorize_url: https://github.com/login/oauth/authorize
+      token_url: https://github.com/login/oauth/access_token
+      user_url: https://api.github.com/user
+  demo:
+    signing_secret: env:MACPROVIDER_DEMO_SIGNING_SECRET
+
+quotas:
+  account_daily_tokens: 100000
+  demo_daily_tokens_per_ip: 1000
+  demo_sessions_per_ip_per_hour: 10
+  account_concurrency: 2
+  signup_accounts_per_ip_per_day: 3
+
+limits:
+  max_tokens_per_request: 4096
+  demo_max_tokens_per_request: 512
+  max_feedback_comment_bytes: 2000
+  request_body_bytes: 1048576
+
+kill_switch:
+  demo_only: false
+  all_public_api: false
+
+capacity:
+  monthly_budget_usd: 500
+  ready_provider_degraded_threshold: 1
+  projected_cost_tier1_percent: 80
+  tier_cooldown_seconds: 3600
+
+timeouts:
+  coordinator_request_seconds: 300
+  streaming_cancel_ms: 500

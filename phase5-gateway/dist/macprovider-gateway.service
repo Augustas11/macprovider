@@ -1,0 +1,43 @@
+[Unit]
+Description=Mac Provider Buyer API Gateway (Phase 5)
+Documentation=https://github.com/augstar/macprovider-poc specs/SPEC-006-buyer-api.md
+After=network-online.target macprovider-coordinator.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=macprovider
+Group=macprovider
+WorkingDirectory=/opt/macprovider
+EnvironmentFile=-/etc/macprovider/gateway.env
+
+# Gateway owns buyer auth, quota, usage, feedback, status shaping, and kill switches.
+# Coordinator remains router-only and is reached on loopback.
+ExecStart=/opt/macprovider/gateway --config /opt/macprovider/gateway.yaml
+
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=5
+
+# Security hardening. SQLite and mutable gateway.yaml live in writable paths.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/opt/macprovider /var/lib/macprovider /var/log/macprovider
+
+# Gateway should stay modest on Pearl; large requests are streamed through.
+MemoryMax=384M
+TasksMax=256
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=macprovider-gateway
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,651 @@
+package sqlite
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"sort"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/augstar/macprovider-gateway/internal/storage"
+)
+
+func TestMigrateAndAuthCRUD(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	account := storage.Account{
+		AccountID: "acct_1", Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: fixedTime(),
+	}
+	if err := store.CreateAccount(ctx, account); err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+	if err := store.AddAccountIdentity(ctx, storage.AccountIdentity{
+		AccountID: "acct_1", Provider: "github", ProviderUserID: "42", Email: "dev@example.test", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("AddAccountIdentity: %v", err)
+	}
+	gotAccount, err := store.LookupAccountByIdentity(ctx, "github", "42")
+	if err != nil {
+		t.Fatalf("LookupAccountByIdentity: %v", err)
+	}
+	if gotAccount.AccountID != "acct_1" || gotAccount.Status != "active" {
+		t.Fatalf("account = %+v", gotAccount)
+	}
+
+	hash := keyHash("secret-key")
+	if err := store.CreateAPIKey(ctx, storage.APIKey{
+		KeyID: "key_1", AccountID: "acct_1", KeyHash: hash[:], KeyHashPrefix: "mp_abcd", Status: "active", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("CreateAPIKey: %v", err)
+	}
+	validation, err := store.ValidateAPIKeyHash(ctx, hash[:])
+	if err != nil {
+		t.Fatalf("ValidateAPIKeyHash: %v", err)
+	}
+	if !validation.Active || validation.AccountID != "acct_1" || validation.KeyHashPrefix != "mp_abcd" {
+		t.Fatalf("validation = %+v", validation)
+	}
+	missing := keyHash("missing")
+	if _, err := store.ValidateAPIKeyHash(ctx, missing[:]); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("missing key err = %v, want ErrNotFound", err)
+	}
+
+	if err := store.RevokeAPIKey(ctx, "key_1", "operator", "req_revoke"); err != nil {
+		t.Fatalf("RevokeAPIKey: %v", err)
+	}
+	validation, err = store.ValidateAPIKeyHash(ctx, hash[:])
+	if err != nil {
+		t.Fatalf("ValidateAPIKeyHash after revoke: %v", err)
+	}
+	if validation.Active || validation.KeyStatus != "revoked" {
+		t.Fatalf("revoked validation = %+v", validation)
+	}
+}
+
+func TestAccountScopedRevocationAndRotation(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_a")
+	createAccount(t, store, "acct_b")
+	hashA := keyHash("key-a")
+	hashB := keyHash("key-b")
+	if err := store.CreateAPIKey(ctx, storage.APIKey{KeyID: "key_a", AccountID: "acct_a", KeyHash: hashA[:], KeyHashPrefix: "mp_a", Status: "active", CreatedAt: fixedTime()}); err != nil {
+		t.Fatalf("CreateAPIKey A: %v", err)
+	}
+	if err := store.CreateAPIKey(ctx, storage.APIKey{KeyID: "key_b", AccountID: "acct_b", KeyHash: hashB[:], KeyHashPrefix: "mp_b", Status: "active", CreatedAt: fixedTime()}); err != nil {
+		t.Fatalf("CreateAPIKey B: %v", err)
+	}
+	if err := store.RevokeAPIKeyForAccount(ctx, "acct_a", "key_b", "account", "req_cross"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("cross-account revoke err=%v, want ErrNotFound", err)
+	}
+	validation, err := store.ValidateAPIKeyHash(ctx, hashB[:])
+	if err != nil {
+		t.Fatalf("Validate B: %v", err)
+	}
+	if validation.KeyStatus != "active" {
+		t.Fatalf("cross-account revoke changed B: %+v", validation)
+	}
+
+	newHash := keyHash("key-a-new")
+	if err := store.RotateAPIKey(ctx, "key_a", "acct_a", storage.APIKey{
+		KeyID: "key_a_new", AccountID: "acct_a", KeyHash: newHash[:], KeyHashPrefix: "mp_new", Status: "active", CreatedAt: fixedTime(),
+	}, "account", "req_rotate"); err != nil {
+		t.Fatalf("RotateAPIKey: %v", err)
+	}
+	oldValidation, err := store.ValidateAPIKeyHash(ctx, hashA[:])
+	if err != nil {
+		t.Fatalf("Validate old: %v", err)
+	}
+	if oldValidation.KeyStatus != "revoked" {
+		t.Fatalf("old key status=%s want revoked", oldValidation.KeyStatus)
+	}
+	newValidation, err := store.ValidateAPIKeyHash(ctx, newHash[:])
+	if err != nil {
+		t.Fatalf("Validate new: %v", err)
+	}
+	if !newValidation.Active || newValidation.AccountID != "acct_a" {
+		t.Fatalf("new validation=%+v", newValidation)
+	}
+}
+
+func TestAppendOnlyEventTablesRejectMutation(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_append")
+
+	if err := store.InsertUsageEvent(ctx, storage.UsageEvent{
+		RequestID: "req_usage", AccountID: "acct_append", WindowDate: "2026-05-29",
+		PromptTokens: 1, CompletionTokens: 2, TokenSource: "provider_reported", Outcome: "ok", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("InsertUsageEvent: %v", err)
+	}
+	if err := store.InsertFeedbackEvent(ctx, storage.FeedbackEvent{
+		EventID: "fb_1", RequestID: "req_usage", AccountID: "acct_append", Scope: "request", Rating: 4, Comment: "ok", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("InsertFeedbackEvent: %v", err)
+	}
+	if err := store.InsertAuditEvent(ctx, storage.AuditEvent{
+		EventID: "audit_1", RequestID: "req_usage", AccountID: "acct_append", Actor: "test", Type: "quota_change", Payload: "{}", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("InsertAuditEvent: %v", err)
+	}
+	if err := store.InsertCapacitySignalEvent(ctx, storage.CapacitySignalEvent{
+		EventID: "cap_1", Signal: "cpu", Value: 71, Threshold: 70, Firing: true, CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("InsertCapacitySignalEvent: %v", err)
+	}
+
+	assertSQLFails(t, store, `UPDATE usage_events SET total_tokens = 99 WHERE request_id = 'req_usage'`)
+	assertSQLFails(t, store, `DELETE FROM feedback_events WHERE event_id = 'fb_1'`)
+	assertSQLFails(t, store, `UPDATE audit_events SET payload_json = '{"bad":true}' WHERE event_id = 'audit_1'`)
+	assertSQLFails(t, store, `DELETE FROM capacity_signal_events WHERE event_id = 'cap_1'`)
+}
+
+func TestDefaultValuesAndNotFoundErrors(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	if _, err := Open(ctx, ""); err == nil {
+		t.Fatal("Open with empty path unexpectedly succeeded")
+	}
+	if err := store.CreateAccount(ctx, storage.Account{AccountID: "acct_defaults"}); err != nil {
+		t.Fatalf("CreateAccount defaults: %v", err)
+	}
+	gotAccount, err := store.LookupAccount(ctx, "acct_defaults")
+	if err != nil {
+		t.Fatalf("LookupAccount: %v", err)
+	}
+	if gotAccount.AccountID != "acct_defaults" || gotAccount.Status != "active" {
+		t.Fatalf("LookupAccount = %+v", gotAccount)
+	}
+	if _, err := store.LookupAccount(ctx, "missing"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("LookupAccount missing err=%v, want ErrNotFound", err)
+	}
+	account, err := store.LookupAccountByIdentity(ctx, "github", "missing")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("LookupAccountByIdentity missing account=%+v err=%v, want ErrNotFound", account, err)
+	}
+
+	hash := keyHash("default-status-key")
+	if err := store.CreateAPIKey(ctx, storage.APIKey{
+		KeyID: "key_defaults", AccountID: "acct_defaults", KeyHash: hash[:], KeyHashPrefix: "mp_default",
+	}); err != nil {
+		t.Fatalf("CreateAPIKey defaults: %v", err)
+	}
+	validation, err := store.ValidateAPIKeyHash(ctx, hash[:])
+	if err != nil {
+		t.Fatalf("ValidateAPIKeyHash defaults: %v", err)
+	}
+	if !validation.Active || validation.QuotaClass != "default" || validation.ConcurrencyClass != "default" {
+		t.Fatalf("validation defaults = %+v", validation)
+	}
+	keys, err := store.ListAPIKeys(ctx, "acct_defaults")
+	if err != nil {
+		t.Fatalf("ListAPIKeys: %v", err)
+	}
+	if len(keys) != 1 || keys[0].KeyID != "key_defaults" || keys[0].Status != "active" {
+		t.Fatalf("keys = %+v", keys)
+	}
+	if err := store.RevokeAPIKey(ctx, "missing_key", "operator", "req_missing"); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("RevokeAPIKey missing err=%v, want ErrNotFound", err)
+	}
+}
+
+func TestOAuthStateAndRateLimitStores(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	now := fixedTime()
+
+	stateHash := keyHash("oauth-state")
+	if err := store.StoreOAuthState(ctx, storage.OAuthState{
+		StateHash: stateHash[:], SessionID: "session_1", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("StoreOAuthState: %v", err)
+	}
+	if err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", "https://api.streamvc.live/auth/github/callback", now.Add(time.Minute)); err != nil {
+		t.Fatalf("ConsumeOAuthState: %v", err)
+	}
+	if err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", "https://api.streamvc.live/auth/github/callback", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("ConsumeOAuthState replay err=%v, want ErrNotFound", err)
+	}
+
+	expiredHash := keyHash("expired-oauth-state")
+	if err := store.StoreOAuthState(ctx, storage.OAuthState{
+		StateHash: expiredHash[:], SessionID: "session_2", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("StoreOAuthState expired: %v", err)
+	}
+	if err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", "https://api.streamvc.live/auth/github/callback", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("ConsumeOAuthState expired err=%v, want ErrNotFound", err)
+	}
+
+	if err := store.RecordSignupEvent(ctx, storage.SignupEvent{
+		EventID: "signup_1", AccountID: "acct_signup", ClientIP: "1.2.3.4", Provider: "github", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordSignupEvent: %v", err)
+	}
+	signups, err := store.CountSignupEventsSince(ctx, "1.2.3.4", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CountSignupEventsSince: %v", err)
+	}
+	if signups != 1 {
+		t.Fatalf("signups=%d, want 1", signups)
+	}
+	if err := store.RecordDemoSessionEvent(ctx, storage.DemoSessionEvent{
+		EventID: "demo_1", ClientIP: "1.2.3.4", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("RecordDemoSessionEvent: %v", err)
+	}
+	demos, err := store.CountDemoSessionEventsSince(ctx, "1.2.3.4", now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("CountDemoSessionEventsSince: %v", err)
+	}
+	if demos != 1 {
+		t.Fatalf("demos=%d, want 1", demos)
+	}
+
+	assertSQLFails(t, store, `UPDATE signup_events SET provider = 'email' WHERE event_id = 'signup_1'`)
+	assertSQLFails(t, store, `DELETE FROM demo_session_events WHERE event_id = 'demo_1'`)
+}
+
+func TestQuotaReservationLedgerSemantics(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_quota")
+	if err := store.InsertUsageEvent(ctx, storage.UsageEvent{
+		RequestID: "req_existing", AccountID: "acct_quota", WindowDate: "2026-05-29",
+		PromptTokens: 20, CompletionTokens: 40, TokenSource: "manual_fixture", Outcome: "ok", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("InsertUsageEvent: %v", err)
+	}
+
+	decision, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_quota", RequestID: "req_1", WindowDate: "2026-05-29",
+		RequestedTokens: 30, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("ReserveQuota req_1: %v", err)
+	}
+	if !decision.Admitted || decision.RemainingTokens != 10 {
+		t.Fatalf("decision req_1 = %+v", decision)
+	}
+
+	_, err = store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_quota", RequestID: "req_2", WindowDate: "2026-05-29",
+		RequestedTokens: 20, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	})
+	if !errors.Is(err, storage.ErrQuotaExceeded) {
+		t.Fatalf("ReserveQuota req_2 err = %v, want ErrQuotaExceeded", err)
+	}
+
+	if err := store.SettleReservation(ctx, storage.ReservationSettlement{
+		AccountID: "acct_quota", RequestID: "req_1", PromptTokens: 5, CompletionTokens: 7,
+		TokenSource: "provider_reported", Outcome: "ok", SettledAt: fixedTime().Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("SettleReservation: %v", err)
+	}
+	used, reserved, err := store.DailyUsage(ctx, "acct_quota", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage: %v", err)
+	}
+	if used != 72 || reserved != 0 {
+		t.Fatalf("usage after settle used=%d reserved=%d", used, reserved)
+	}
+
+	decision, err = store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_quota", RequestID: "req_3", WindowDate: "2026-05-29",
+		RequestedTokens: 20, DailyQuota: 100, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("ReserveQuota req_3: %v", err)
+	}
+	if decision.RemainingTokens != 8 {
+		t.Fatalf("decision req_3 = %+v", decision)
+	}
+	if err := store.RefundReservation(ctx, "acct_quota", "req_3", fixedTime().Unix()); err != nil {
+		t.Fatalf("RefundReservation: %v", err)
+	}
+	used, reserved, err = store.DailyUsage(ctx, "acct_quota", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage after refund: %v", err)
+	}
+	if used != 72 || reserved != 0 {
+		t.Fatalf("usage after refund used=%d reserved=%d", used, reserved)
+	}
+}
+
+func TestConcurrentQuotaReservationsNoOverspend(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_concurrent")
+	var admitted int64
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			decision, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+				AccountID: "acct_concurrent", RequestID: fmt.Sprintf("req_concurrent_%02d", i),
+				WindowDate: "2026-05-29", RequestedTokens: 20, DailyQuota: 100,
+				CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+			})
+			if err == nil && decision.Admitted {
+				atomic.AddInt64(&admitted, 1)
+				return
+			}
+			if !errors.Is(err, storage.ErrQuotaExceeded) {
+				t.Errorf("ReserveQuota %d err=%v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if admitted != 5 {
+		t.Fatalf("admitted=%d, want exactly 5", admitted)
+	}
+	used, reserved, err := store.DailyUsage(ctx, "acct_concurrent", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage: %v", err)
+	}
+	if used != 0 || reserved != 100 {
+		t.Fatalf("used=%d reserved=%d, want 0/100", used, reserved)
+	}
+}
+
+func TestConcurrencyReservationCapAndRelease(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_concurrency")
+	for i := 0; i < 2; i++ {
+		decision, err := store.AcquireConcurrency(ctx, storage.ConcurrencyRequest{
+			AccountID: "acct_concurrency", RequestID: fmt.Sprintf("req_%d", i), Limit: 2,
+			CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+		})
+		if err != nil {
+			t.Fatalf("AcquireConcurrency %d: %v", i, err)
+		}
+		if !decision.Admitted {
+			t.Fatalf("decision %d = %+v", i, decision)
+		}
+	}
+	if _, err := store.AcquireConcurrency(ctx, storage.ConcurrencyRequest{
+		AccountID: "acct_concurrency", RequestID: "req_3", Limit: 2,
+		CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	}); !errors.Is(err, storage.ErrQuotaExceeded) {
+		t.Fatalf("AcquireConcurrency over cap err=%v, want ErrQuotaExceeded", err)
+	}
+	if err := store.ReleaseConcurrency(ctx, "acct_concurrency", "req_0", fixedTime().Add(time.Minute)); err != nil {
+		t.Fatalf("ReleaseConcurrency: %v", err)
+	}
+	decision, err := store.AcquireConcurrency(ctx, storage.ConcurrencyRequest{
+		AccountID: "acct_concurrency", RequestID: "req_4", Limit: 2,
+		CreatedAt: fixedTime().Add(2 * time.Minute), ExpiresAt: fixedTime().Add(time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("AcquireConcurrency after release: %v", err)
+	}
+	if !decision.Admitted {
+		t.Fatalf("decision after release = %+v", decision)
+	}
+}
+
+func TestDemoReservationSettlesUsageAndDemoEvent(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "demo:1.2.3.4", RequestID: "req_demo", WindowDate: "2026-05-29",
+		RequestedTokens: 10, DailyQuota: 20, CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota demo: %v", err)
+	}
+	if err := store.SettleDemoReservation(ctx, storage.ReservationSettlement{
+		AccountID: "demo:1.2.3.4", RequestID: "req_demo", PromptTokens: 3, CompletionTokens: 4,
+		TokenSource: "provider_reported", Outcome: "ok", SettledAt: fixedTime().Add(time.Minute),
+	}, storage.DemoUsageEvent{
+		RequestID: "req_demo", ClientIP: "1.2.3.4", DemoTokenHash: "hash", CreatedAt: fixedTime().Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("SettleDemoReservation: %v", err)
+	}
+	used, reserved, err := store.DailyUsage(ctx, "demo:1.2.3.4", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage demo: %v", err)
+	}
+	if used != 7 || reserved != 0 {
+		t.Fatalf("demo usage used=%d reserved=%d", used, reserved)
+	}
+	var demoCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM demo_usage_events WHERE request_id = 'req_demo' AND total_tokens = 7`).Scan(&demoCount); err != nil {
+		t.Fatalf("count demo usage: %v", err)
+	}
+	if demoCount != 1 {
+		t.Fatalf("demo usage events=%d want 1", demoCount)
+	}
+}
+
+func TestReservationErrorBranches(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_reservation_errors")
+
+	err := store.SettleReservation(ctx, storage.ReservationSettlement{
+		AccountID: "acct_reservation_errors", RequestID: "missing", PromptTokens: 1,
+		TokenSource: "provider_reported", Outcome: "ok",
+	})
+	if !errors.Is(err, storage.ErrReservationNotFound) {
+		t.Fatalf("SettleReservation missing err=%v, want ErrReservationNotFound", err)
+	}
+	if err := store.RefundReservation(ctx, "acct_reservation_errors", "missing", fixedTime().Unix()); !errors.Is(err, storage.ErrReservationNotFound) {
+		t.Fatalf("RefundReservation missing err=%v, want ErrReservationNotFound", err)
+	}
+
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_reservation_errors", RequestID: "req_refund_then_settle", WindowDate: "bad-date",
+		RequestedTokens: 5, DailyQuota: 100,
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
+	}
+	if err := store.RefundReservation(ctx, "acct_reservation_errors", "req_refund_then_settle", fixedTime().Unix()); err != nil {
+		t.Fatalf("RefundReservation: %v", err)
+	}
+	err = store.SettleReservation(ctx, storage.ReservationSettlement{
+		AccountID: "acct_reservation_errors", RequestID: "req_refund_then_settle", PromptTokens: 1,
+		TokenSource: "provider_reported", Outcome: "ok",
+	})
+	if err == nil {
+		t.Fatal("SettleReservation on refunded reservation unexpectedly succeeded")
+	}
+}
+
+func TestEventInsertDefaults(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_event_defaults")
+
+	if err := store.InsertUsageEvent(ctx, storage.UsageEvent{
+		RequestID: "req_usage_defaults", AccountID: "acct_event_defaults", WindowDate: "2026-05-29",
+		PromptTokens: 3, CompletionTokens: 4, TokenSource: "gateway_estimated", Outcome: "ok",
+	}); err != nil {
+		t.Fatalf("InsertUsageEvent defaults: %v", err)
+	}
+	used, reserved, err := store.DailyUsage(ctx, "acct_event_defaults", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage defaults: %v", err)
+	}
+	if used != 7 || reserved != 0 {
+		t.Fatalf("DailyUsage defaults used=%d reserved=%d", used, reserved)
+	}
+	if err := store.InsertFeedbackEvent(ctx, storage.FeedbackEvent{
+		EventID: "fb_defaults", RequestID: "req_usage_defaults", AccountID: "acct_event_defaults", Scope: "request", Rating: 3,
+	}); err != nil {
+		t.Fatalf("InsertFeedbackEvent defaults: %v", err)
+	}
+	if err := store.InsertAuditEvent(ctx, storage.AuditEvent{
+		EventID: "audit_defaults", RequestID: "req_usage_defaults", Actor: "test", Type: "key_revoked", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("InsertAuditEvent defaults: %v", err)
+	}
+	if err := store.InsertCapacitySignalEvent(ctx, storage.CapacitySignalEvent{
+		EventID: "cap_defaults", Signal: "bandwidth", Value: 10, Threshold: 70,
+	}); err != nil {
+		t.Fatalf("InsertCapacitySignalEvent defaults: %v", err)
+	}
+}
+
+func TestFeedbackSummaryAndCapacityStores(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_summary")
+	old := fixedTime().Add(-48 * time.Hour)
+	now := fixedTime()
+	if err := store.InsertFeedbackEvent(ctx, storage.FeedbackEvent{
+		EventID: "fb_old", RequestID: "req_old", AccountID: "acct_summary", Scope: "request", Rating: 1, Comment: "old", CreatedAt: old,
+	}); err != nil {
+		t.Fatalf("InsertFeedbackEvent old: %v", err)
+	}
+	if err := store.InsertFeedbackEvent(ctx, storage.FeedbackEvent{
+		EventID: "fb_new", RequestID: "req_new", AccountID: "acct_summary", Scope: "account", Rating: 4, Comment: "new", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertFeedbackEvent new: %v", err)
+	}
+	events, err := store.ListFeedbackEventsSince(ctx, now.Add(-time.Hour))
+	if err != nil {
+		t.Fatalf("ListFeedbackEventsSince: %v", err)
+	}
+	if len(events) != 1 || events[0].EventID != "fb_new" {
+		t.Fatalf("events = %+v", events)
+	}
+
+	if err := store.InsertCapacitySignalEvent(ctx, storage.CapacitySignalEvent{
+		EventID: "cap_cpu_1", Signal: "cpu", Value: 80, Threshold: 70, Firing: true, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertCapacitySignalEvent cpu firing: %v", err)
+	}
+	if err := store.InsertCapacitySignalEvent(ctx, storage.CapacitySignalEvent{
+		EventID: "cap_cpu_2", Signal: "cpu", Value: 50, Threshold: 70, Firing: false, CreatedAt: now.Add(time.Minute),
+	}); err != nil {
+		t.Fatalf("InsertCapacitySignalEvent cpu clear: %v", err)
+	}
+	if err := store.InsertCapacitySignalEvent(ctx, storage.CapacitySignalEvent{
+		EventID: "cap_mem_1", Signal: "memory", Value: 90, Threshold: 80, Firing: true, CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertCapacitySignalEvent memory: %v", err)
+	}
+	signals, err := store.LatestCapacitySignals(ctx)
+	if err != nil {
+		t.Fatalf("LatestCapacitySignals: %v", err)
+	}
+	if len(signals) != 2 {
+		t.Fatalf("signals len=%d want 2: %+v", len(signals), signals)
+	}
+	bySignal := map[string]storage.CapacitySignalEvent{}
+	for _, signal := range signals {
+		bySignal[signal.Signal] = signal
+	}
+	if bySignal["cpu"].Firing || !bySignal["memory"].Firing {
+		t.Fatalf("signals = %+v", signals)
+	}
+
+	tier, err := store.GetCapacityTier(ctx)
+	if err != nil {
+		t.Fatalf("GetCapacityTier default: %v", err)
+	}
+	if tier.Tier != 0 {
+		t.Fatalf("default tier=%d want 0", tier.Tier)
+	}
+	if err := store.SetCapacityTier(ctx, storage.CapacityTier{Tier: 2, Signals: "cpu", UpdatedAt: now}); err != nil {
+		t.Fatalf("SetCapacityTier: %v", err)
+	}
+	tier, err = store.GetCapacityTier(ctx)
+	if err != nil {
+		t.Fatalf("GetCapacityTier: %v", err)
+	}
+	if tier.Tier != 2 || tier.Signals != "cpu" || !tier.UpdatedAt.Equal(now) {
+		t.Fatalf("tier = %+v", tier)
+	}
+}
+
+func TestAuthLookupP95UnderOneMillisecondWith10KKeys(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_bench")
+
+	targetHash := keyHash("fixture-9999")
+	for i := 0; i < 10000; i++ {
+		hash := keyHash(fmt.Sprintf("fixture-%04d", i))
+		if err := store.CreateAPIKey(ctx, storage.APIKey{
+			KeyID: fmt.Sprintf("key_%04d", i), AccountID: "acct_bench", KeyHash: hash[:],
+			KeyHashPrefix: fmt.Sprintf("mp_%04d", i), Status: "active", CreatedAt: fixedTime(),
+		}); err != nil {
+			t.Fatalf("CreateAPIKey %d: %v", i, err)
+		}
+	}
+
+	durations := make([]time.Duration, 1000)
+	for i := range durations {
+		start := time.Now()
+		validation, err := store.ValidateAPIKeyHash(ctx, targetHash[:])
+		durations[i] = time.Since(start)
+		if err != nil {
+			t.Fatalf("ValidateAPIKeyHash: %v", err)
+		}
+		if validation.KeyID != "key_9999" {
+			t.Fatalf("validation key = %s", validation.KeyID)
+		}
+	}
+	sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
+	p95 := durations[int(float64(len(durations))*0.95)]
+	if p95 >= time.Millisecond {
+		t.Fatalf("auth lookup p95 = %s, want < 1ms", p95)
+	}
+	t.Logf("auth lookup p95 against 10K keys: %s", p95)
+}
+
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	store, err := Open(context.Background(), filepath.Join(t.TempDir(), "gateway.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+	return store
+}
+
+func createAccount(t *testing.T, store *Store, accountID string) {
+	t.Helper()
+	if err := store.CreateAccount(context.Background(), storage.Account{
+		AccountID: accountID, Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("CreateAccount: %v", err)
+	}
+}
+
+func assertSQLFails(t *testing.T, store *Store, stmt string) {
+	t.Helper()
+	if _, err := store.db.Exec(stmt); err == nil {
+		t.Fatalf("statement unexpectedly succeeded: %s", stmt)
+	}
+}
+
+func fixedTime() time.Time {
+	return time.Date(2026, 5, 29, 0, 0, 0, 0, time.UTC)
+}
+
+func keyHash(s string) [32]byte {
+	sum := sha256.Sum256([]byte(s))
+	if bytes.Equal(sum[:], make([]byte, 32)) {
+		panic("unreachable")
+	}
+	return sum
+}
