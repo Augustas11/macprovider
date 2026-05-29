@@ -728,6 +728,26 @@ func (s *Server) makeTier1Disclosure() tier1Disclosure {
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	// G3: capture per-request observability. status, wall_ms, model, stream
+	// mode, and account_id are logged on every chat completion regardless of
+	// outcome, so the flaky-provider failure mode can be diagnosed without
+	// re-instrumenting the binary.
+	start := s.now()
+	sw := &statusWriter{ResponseWriter: w, statusCode: 0}
+	w = sw
+	var accountID, model string
+	var streamMode bool
+	defer func() {
+		slog.Info("chat completion",
+			"request_id", requestID(r),
+			"account_id", accountID,
+			"model", model,
+			"stream", streamMode,
+			"wall_ms", s.now().Sub(start).Milliseconds(),
+			"status", sw.statusCode,
+		)
+	}()
+
 	if r.Method != http.MethodPost {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
@@ -750,6 +770,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		subject = usageSubject{AccountID: authn.Bearer.AccountID}
 	}
+	accountID = subject.AccountID
 	body, err := io.ReadAll(io.LimitReader(r.Body, s.cfg.Limits.RequestBodyBytes+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request_body", "Could not read request body")
@@ -764,6 +785,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_request", err.Error())
 		return
 	}
+	model = chat.Model
+	streamMode = chat.Stream
 	if chat.N != nil && *chat.N != 1 {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "n_must_be_1", "n must be 1")
 		return
@@ -1429,6 +1452,39 @@ func (s *Server) githubAuthURL(redirectURI, state string) string {
 }
 
 type requestIDKey struct{}
+
+// statusWriter wraps http.ResponseWriter to capture the HTTP status code that
+// was written. handleChatCompletions uses it for an end-of-request log line
+// (G3 — operator observability for the flaky-provider failure mode).
+type statusWriter struct {
+	http.ResponseWriter
+	statusCode int
+	flushed    bool
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	if !sw.flushed {
+		sw.statusCode = code
+		sw.flushed = true
+	}
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *statusWriter) Write(b []byte) (int, error) {
+	if !sw.flushed {
+		sw.statusCode = http.StatusOK
+		sw.flushed = true
+	}
+	return sw.ResponseWriter.Write(b)
+}
+
+// Flush satisfies http.Flusher so SSE streaming through this wrapper still
+// flushes chunks to the buyer in real time.
+func (sw *statusWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
 
 func requestID(r *http.Request) string {
 	if v, ok := r.Context().Value(requestIDKey{}).(string); ok {
