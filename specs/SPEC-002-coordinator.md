@@ -6,6 +6,7 @@
 **Change log v1.3.1:**
 - Tightens **FR-P8a** after audit: WS-tunneled providers are probed with the SPEC-001 `inference_request` path, while HTTP-forwarding providers are probed through their configured `/v1/chat/completions` HTTP endpoint and MUST NOT receive WS `inference_request` probes. A warm-up pass now requires both observed non-empty output and `usage.completion_tokens > 0`.
 - Tightens **FR-P11a** after audit: provider-reported heartbeat/state `ready` cannot clear coordinator-owned breaker/recovery holds, buyer-initiated streaming cancellations are excluded from breaker accounting, and only a successful breaker recovery records the re-trip anchor. Generic `ready` transitions such as warm-up admission do not make the next breaker trip immediately fatal.
+- Closes follow-up security/architecture audit gaps: provider-supplied `hello.endpoint_url` no longer enables HTTP-forwarding for pinned providers, provider HTTP calls MUST NOT follow redirects, generic `ready` transitions MUST NOT clear sub-threshold breaker fault counters, and HTTP 530 `unavailable` recovery is documented as reconnect-only.
 
 **Change log v1.3.0:**
 - Adds **FR-P8a**: an admission-time warm-up capability gate. When enabled (`pool.warmup_gate_enabled`, default true), a newly connected provider is registered as `degraded` and is not buyer-routable until the coordinator runs a tiny inference probe and observes a successful token-producing completion within `pool.warmup_gate_timeout_s` (default 90s, `pool.warmup_gate_max_tokens` default 2). WS-tunneled providers are probed over WebSocket; HTTP-forwarding providers are probed through their configured HTTP endpoint. The gate is an actual inference, not self-reported throughput. Failure/timeout retries on degraded backoff up to `pool.degraded_max_retries`; after exhaustion the provider becomes `unavailable` with reason `warmup_failed`. Existing wake-from-sleep `warm_up` fallback is now config-driven by `pool.warmup_fallback_s` (default 60s). No SPEC-001 / phase3-binary wire change: WS-tunneled probing reuses `inference_request`, `inference_response_chunk`, and `inference_response_end`.
@@ -240,11 +241,11 @@ time (on `hello`) using the following resolution:
 ```
 if provider_id in config.providers[]:
     tier = pinned
-    if hello.endpoint_url is present and non-empty:
-        inference_path = HTTP_FORWARDING(hello.endpoint_url)
-    elif config.providers[provider_id].endpoint_url is present:
+    if config.providers[provider_id].endpoint_url is present:
         inference_path = HTTP_FORWARDING(config.providers[provider_id].endpoint_url)
     else:
+        # Provider-supplied endpoint_url is ignored for pinned providers.
+        # Only operator-configured endpoints may enable HTTP-forwarding.
         inference_path = WS_TUNNELED
 else:
     tier = provisional  (subject to admission rate limits, FR-P16)
@@ -265,8 +266,11 @@ else:
 **`endpoint_url` in hello (SPEC-001 v1.2 § 6.5).** The `hello`
 message gains an OPTIONAL `endpoint_url` field. Existing v1.1.x
 binaries do not send it; the coordinator treats absence as null and
-falls back to the static `config.providers[]` map. Net: zero binary
-changes required for existing providers.
+falls back to the static `config.providers[]` map. For pinned providers,
+`endpoint_url` from `hello` is never trusted as an HTTP-forwarding
+destination; only operator-configured `config.providers[].endpoint_url`
+can select HTTP-forwarding. Net: zero binary changes required for
+existing providers.
 
 **Endpoint discovery (v1.1 resolution, supersedes v1.0.x).** The
 static `config.providers[]` map remains the mechanism for pinned-tier
@@ -490,7 +494,7 @@ Informed by Phase 2 D1 (502 vs 530):
 | zero-token-completion (qualified) | `inference_response_end` with `usage.completion_tokens == 0` AND `finish_reason` not in {`stop`,`length`} (abnormal). A clean empty `stop` does NOT count. | Return the result/error for this request | Counts toward the FR-P11a circuit-breaker |
 | HTTP 502 (MLX down) | Provider returns 502 on routed buyer request | `degraded`, 30s backoff | Recovery preflight after 30s |
 | HTTP 504 (timeout) | No response in time | `degraded`, 30s backoff | Same as 502 |
-| **HTTP 530 (Cloudflare tunnel daemon disconnected)** | Provider endpoint returns literal HTTP 530 on routed buyer request | `unavailable` immediately; log `state_update.reason = "http_530_observed"`; trigger WebSocket liveness probe (ping with 5s ack timeout) | Removed from pool until WebSocket reconnects with fresh hello, OR if WS is still alive, until next heartbeat confirms `state: ready` |
+| **HTTP 530 (Cloudflare tunnel daemon disconnected)** | Provider endpoint returns literal HTTP 530 on routed buyer request | `unavailable` immediately; log `state_update.reason = "http_530_observed"` | Removed from pool until WebSocket reconnects with fresh hello; provider-originated `ready` heartbeat/state updates MUST NOT restore this session |
 
 On degraded — whether from 502/504 or from the FR-P11a circuit-breaker —
 after `pool.degraded_backoff_s` (default 30s) backoff, send a **recovery

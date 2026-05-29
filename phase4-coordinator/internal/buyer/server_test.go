@@ -205,6 +205,30 @@ func TestChatCompletionsRoutesNonStreamingRequest(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsDoesNotFollowProviderRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"redirected"}`))
+	}))
+	defer target.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/v1/chat/completions", http.StatusTemporaryRedirect)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(`redirected`)) {
+		t.Fatalf("redirect target response was relayed: %s", rr.Body.String())
+	}
+}
+
 func TestChatCompletionsRelaysStreamingSSE(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req map[string]any
@@ -500,6 +524,7 @@ func TestCircuitBreakerTripsAfterRepeatedDeadWSAndRecovers(t *testing.T) {
 	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateReady {
 		t.Fatalf("p1 after first fault = %#v ok=%v, want ready", p1, ok)
 	}
+	registry.ApplyStateUpdate("p1", pool.StateUpdate{State: pool.StateReady})
 
 	second := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
 	if second.Code != http.StatusBadGateway {

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -460,7 +461,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(upReq)
+	resp, err := providerhttp.Client.Do(upReq)
 	if err != nil {
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider request failed")
 		writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
@@ -698,7 +699,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		return
 	}
 	upReq.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(upReq)
+	resp, err := providerhttp.Client.Do(upReq)
 	if err != nil {
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider request failed")
 		writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")

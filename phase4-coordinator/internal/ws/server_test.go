@@ -238,6 +238,37 @@ func TestWarmupGateUsesHTTPForHTTPForwardingProvider(t *testing.T) {
 	})
 }
 
+func TestWarmupGateDoesNotFollowHTTPForwardingRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"redirected","choices":[{"message":{"content":"ok"}}],"usage":{"completion_tokens":1}}`))
+	}))
+	defer target.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/v1/chat/completions", http.StatusTemporaryRedirect)
+	}))
+	defer upstream.Close()
+
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.WarmupGateEnabled = true
+		cfg.Pool.WarmupGateTimeoutS = 2
+		cfg.Pool.DegradedMaxRetries = 1
+		cfg.Providers[0].EndpointURL = upstream.URL
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateUnavailable
+	})
+}
+
 func TestWarmupGateSuppressesReadyProviderUpdates(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.WarmupGateEnabled = true
@@ -1136,7 +1167,7 @@ func TestProviderHelloPinnedStaticEndpointIgnoresHelloOverride(t *testing.T) {
 	})
 }
 
-func TestProviderHelloRejectsUnsafePinnedHelloEndpoint(t *testing.T) {
+func TestProviderHelloIgnoresPinnedHelloEndpointWithoutConfiguredEndpoint(t *testing.T) {
 	ts := newProviderServer(t, func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""
 	})
@@ -1144,13 +1175,29 @@ func TestProviderHelloRejectsUnsafePinnedHelloEndpoint(t *testing.T) {
 
 	h := validHello("m4-anon")
 	h["endpoint_url"] = "http://169.254.169.254/latest/meta-data"
-	code, reason := sendHelloExpectClose(t, ts.URL, h)
-	if code != providerws.CloseInvalidHello {
-		t.Fatalf("code = %d, want %d", code, providerws.CloseInvalidHello)
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
 	}
-	if reason != "invalid_hello: endpoint_url" {
-		t.Fatalf("reason = %q", reason)
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(h)); err != nil {
+		t.Fatalf("write hello: %v", err)
 	}
+	payload, _, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read ack: %v", err)
+	}
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack.Type != "hello_ack" {
+		t.Fatalf("ack = %#v", ack)
+	}
+	eventually(t, func() bool {
+		got := fetchPoolz(t, ts.URL)
+		return len(got.Pool) == 1 && got.Pool[0].Endpoint == "" && got.Pool[0].InferencePath == "ws_tunneled"
+	})
 }
 
 func TestProviderHelloRejectsMalformedHello(t *testing.T) {

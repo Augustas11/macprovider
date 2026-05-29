@@ -13,6 +13,7 @@ import (
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/google/uuid"
@@ -190,11 +191,10 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 					Msg("pinned provider endpoint_url override ignored")
 			}
 		} else if hello.EndpointURL != nil && strings.TrimSpace(*hello.EndpointURL) != "" {
-			endpointURL = strings.TrimSpace(*hello.EndpointURL)
-			if err := config.ValidateEndpointURL(endpointURL); err != nil {
-				s.close(conn, CloseInvalidHello, "invalid_hello: endpoint_url")
-				return
-			}
+			s.log.Warn().
+				Str("provider_id", hello.ProviderID).
+				Str("hello_endpoint_url", strings.TrimSpace(*hello.EndpointURL)).
+				Msg("pinned provider endpoint_url ignored because no configured endpoint_url exists")
 		}
 		if endpointURL != "" {
 			inferencePath = pool.InferencePathHTTPForwarding
@@ -493,7 +493,7 @@ func (s *Server) runHTTPWarmupGateAttempt(ctx context.Context, provider pool.Pro
 		return false
 	}
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := providerhttp.Client.Do(req)
 	if err != nil {
 		return false
 	}

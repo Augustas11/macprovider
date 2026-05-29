@@ -297,8 +297,6 @@ func (r *Registry) setStateLocked(p *Provider, next State) {
 
 func (r *Registry) applyStateCleanupLocked(providerID string, next State) {
 	switch next {
-	case StateReady:
-		delete(r.breakerFaults, providerID)
 	case StateDraining, StateUnavailable:
 		delete(r.breakerFaults, providerID)
 		delete(r.recoveryHolds, providerID)
