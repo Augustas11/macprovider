@@ -1,7 +1,10 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.3.2 (2026-05-30, independent-audit fixes: breaker self-clear + token-reissue gate)
+**Version:** 1.3.3 (2026-05-30, process hardening: audit category J + deploy config-drift check)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.3.3:**
+- Adds **audit category J — operational-threshold realism** (§ 11): J.1 requires every timeout/threshold/window to be validated against the slowest realistic provider/workload (the v1.1.6 35s heartbeat-miss kill is the reference: it passed the audit "as coded" but was below one normal MLX completion); J.2 requires cross-component timer relations to be checked for ORDERING (the coordinator vs gateway 300s=300s C2 race). Pairs with a new deploy-time assertion `phase4-coordinator/dist/check-deploy-config.sh` (placeholder-key, threshold-sanity, and C2 timer-ordering checks; wired as step 0 of `deploy-pearl-vps.sh`). No code or wire change.
 
 **Change log v1.3.2:**
 - Closes a HIGH finding from the independent Claude audit of the Phase 7 P1 set. The v1.3.1 hold rule only forbade a held provider from self-reporting `ready`, but a breaker/recovery-held provider could still escape by self-reporting `draining` (which cleared the hold via state cleanup) and then `ready`. FR-P11a now forbids a held provider's self-reported state from taking ANY value other than re-affirming `degraded`; only a fresh session (reconnect) or the coordinator recovery path clears a hold. Added a pool-layer regression test (`TestProviderCannotEscapeBreakerHoldViaDrainingLaundering`) that fails against the pre-fix code. The provider-path and coordinator-path state guards are now intentionally distinct (the coordinator may still drain a held provider).
@@ -2779,6 +2782,33 @@ need production-invariant counterparts. If a flag's default differs
 from its production-correct value, the spec MUST document the
 production invariant explicitly using the § 7.7 pattern introduced in
 v1.1.5.
+
+### Audit category J — operational-threshold realism
+
+**J.1 Thresholds and timeouts MUST be validated against the slowest
+realistic provider/workload, not merely "works as coded."** Confirming a
+timeout/threshold fires correctly is necessary but not sufficient; the audit
+MUST also ask whether the value is operationally viable for the real fleet.
+Reference example: the v1.1.6 missed-heartbeat monitor closed a provider
+WebSocket after `heartbeat_interval_s + failover_timeout_s` (35s). The audit
+verified the close fired as coded, but 35s was below a single normal
+completion on a single-slot MLX provider (a ~0.6 tps box hit it on ~20
+tokens), so every non-trivial inference was killed mid-request in production —
+a HIGH-severity functional regression the audit passed. (Fixed in v1.1.7 by
+activity-based liveness under `pool.heartbeat_miss_threshold_s`.) Generalize:
+for every timeout, threshold, retry count, and window, the auditor MUST state
+the slowest realistic provider/workload it is measured against and confirm
+adequate margin.
+
+**J.2 Cross-component timer relations MUST be checked for ORDERING, not just
+presence.** When two components each enforce a timeout on the same operation,
+verify the intended ordering, not merely that both are "set." Reference
+example: coordinator `routing.request_timeout_s` and gateway
+`timeouts.coordinator_request_seconds` were both 300s; equal timers let a
+gateway-initiated cancel race the coordinator relay-timeout, so a slow
+non-streaming provider could escape FR-P11a breaker attribution (the C2
+finding). The coordinator value SHOULD be strictly below the gateway value.
+A deploy-time assertion (`dist/check-deploy-config.sh`) now flags this.
 
 **AC-1 through AC-10 must ALL pass for the coordinator to be considered
 build-complete. No partial passes. No operator waivers without an

@@ -43,6 +43,14 @@ SCP="scp -i $SSH_KEY -P 22"
 
 log() { printf "\n[deploy] %s\n" "$*"; }
 
+log "step 0/9: pre-deploy config-drift + sanity check"
+# Fail closed before touching the VPS if the config to be deployed has a
+# placeholder operator_key, an unsafe threshold, etc. (see check-deploy-config.sh).
+# Catches the sanitized-config hazard that would otherwise break prod auth.
+bash "$DIST_DIR/check-deploy-config.sh" "$CONFIG" || {
+  echo "aborting deploy: config-drift check failed" >&2; exit 5;
+}
+
 log "step 1/9: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
 dig +short "$DOMAIN" | grep -q "$VPS_HOST" || { echo "DNS for $DOMAIN does not resolve to $VPS_HOST yet" >&2; exit 1; }
