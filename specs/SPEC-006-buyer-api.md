@@ -1,7 +1,17 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.7 (2026-05-30, sleep-tolerant idle status semantics)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.2.0, SPEC-003 v0.7
+**Version:** 0.8.1 (2026-05-30, audit-driven fixes to v0.8)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.3, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.8.1:**
+- Audit-driven patch closing findings from the independent v0.8 audit. (A1, MAJOR) Restored the v0.7 "**before authentication**" header-strip rule that v0.8 had inadvertently weakened to "before coordinator forwarding"; added a normative WARN audit event on observed buyer-supplied `X-MacProvider-Internal-Conv`. (M1) Replaced the "ignore or reject" ambiguity with a normative **silent ignore** when `sticky_enabled: false`, so portable buyer SDKs that always include the header don't break against operators on the default-off posture. (M2) Constrained the HMAC secret-rotation overlap window to `DELETE /v1/sticky` lookups only; routing-time sticky-key derivation MUST use only the current secret (closes a silent TTL-extension path during rotation). (A2) Operationalized the F-1.5 Tier-2 survivability clause with four concrete invariants a future SPEC-008 audit MUST verify. No new wire-contract changes; no SPEC-001 movement.
+
+**Change log v0.8:**
+- Enables SPEC-004 v0.2 Pillar A by satisfying the § 1.3 sticky-caching guard for coordinator-internal sticky affinity: single-account ownership, explicit lifecycle, HMAC-SHA256 account-scoped key derivation, conditional buyer disclosure, and Tier-2 survivability are now normative requirements.
+- Chooses `X-MacProvider-Conversation` as the buyer-supplied opaque conversation tag, derives `routing_internal.conversation_key` in the reserved `conv:` namespace, and transports it only on the gateway-to-coordinator hop as `X-MacProvider-Internal-Conv` with external nginx/header-stripping requirements.
+- Refreshes the Tier 1 disclosure surfaces in § 1.6 and § 5.3.1 so sticky affinity disclosure is conditional on `routing.sticky_enabled: true`, while the default `sticky_enabled: false` posture preserves v0.7 buyer-visible behavior.
+- Adds PG-9 to the production launch gate checklist for sticky disclosure parity across signup, docs, `/v1/models`, and SDK README surfaces before production operators enable sticky affinity.
+- Adds the SPEC-004 v0.2 sibling relationship note: SPEC-004 owns routing-side sticky behavior, while SPEC-006 v0.8 owns gateway derivation, transport, disclosure, and satisfaction of the v0.7 preconditions.
 
 **Change log v0.7:**
 - Adds sleep-tolerant `/v1/status` semantics for Phase 7 P1: coordinator reachable with zero ready providers is `status: "idle"`, not `down`; `down` is reserved for coordinator/control-plane unreachability. Per-model status rows now include `ready_provider_count`, `available`, and `availability` so front doors can distinguish "available", "no awake provider", and "no free slots" without deriving competing rules. Front-door copy MUST render `idle` as a friendly no-awake-provider state, not as an outage.
@@ -142,13 +152,28 @@ SPEC-006 v1 explicitly does not specify:
 
 These items belong to v0.2, SPEC-005, SPEC-007, or later specs.
 
-**No provider-side caching of any kind in v0.6.** Sticky single-tenant caching, prompt-result cache, KV cache reuse across requests, or any other form of provider-side request state retention is OUT OF SCOPE for v0.6. A future revision MAY introduce caching only if all of the following are true:
+**Provider-side caching remains guarded.** Prompt-result cache, arbitrary provider-side request state retention, or any cache not explicitly covered by this section remains OUT OF SCOPE for v0.8. SPEC-006 v0.8 permits only SPEC-004 v0.2 coordinator-internal sticky affinity, using a gateway-derived `routing_internal.conversation_key` in the reserved `conv:` namespace. Sticky affinity is disabled by default (`routing.sticky_enabled: false`) and MUST NOT change buyer-visible behavior unless an operator explicitly enables it.
+
+The § 1.3 guard is satisfied for SPEC-004 v0.2 Pillar A only if all of the following remain true:
 
 - The cache is buyer-owned, single-tenant, non-transferable across buyers.
+  - v0.8 satisfaction: `routing_internal.conversation_key` MUST be scoped to exactly one authenticated `account_id`. The gateway MUST refuse to derive or forward a conversation key when the request cannot be attributed to one account or when any input attempts to bind the key to more than one account. Cross-account spoofing MUST be structurally impossible at the gateway by deriving the `conv:` value from the authenticated `account_id`, not from buyer-trusted account claims.
 - The cache has explicit lifecycle: creation, eviction, and buyer-triggered deletion.
+  - v0.8 satisfaction: the gateway MUST create a conversation key on an authenticated buyer request that includes a valid `X-MacProvider-Conversation` tag when `routing.sticky_enabled: true`, and MUST NOT create one otherwise. Coordinator eviction is governed by SPEC-004 v0.2 `routing.sticky_ttl_s`, `routing.sticky_max_entries`, TTL expiry, and LRU behavior; the gateway MUST cite that coordinator TTL as the authoritative sticky retention window in buyer-facing disclosure. Buyers MUST be able to trigger account-scoped deletion with `DELETE /v1/sticky`, which is authenticated, idempotent, purges all sticky entries for the caller's account, and returns `{ "purged": true, "entries": N }`.
 - Tenant isolation is cryptographically enforced; cache keys include account ID plus per-request entropy.
+  - v0.8 satisfaction: the gateway MUST derive the opaque suffix with HMAC-SHA256 over the authenticated `account_id` and buyer-supplied conversation tag; the tag is the buyer-provided per-request entropy for this guard. Two gateway instances MUST derive byte-identical keys for identical inputs and different keys across accounts. The normative algorithm is:
+    1. Authenticate the request and obtain canonical `account_id`.
+    2. Read the buyer tag from `X-MacProvider-Conversation`.
+    3. Reject tags shorter than 1 byte, longer than 128 bytes after trimming ASCII whitespace, or containing characters outside `[A-Za-z0-9._:-]`.
+    4. Construct `scope = "spec006-v0.8-sticky-conversation-v1"`.
+    5. Construct `message = scope || "\n" || account_id || "\n" || buyer_tag`.
+    6. Compute `digest = HMAC-SHA256(MACPROVIDER_KEY_HASH_SECRET, message)`.
+    7. Encode the digest with unpadded base64url and emit `routing_internal.conversation_key = "conv:" || encoded_digest`.
+    `MACPROVIDER_KEY_HASH_SECRET` rotation MUST follow the existing gateway key-hash secret rotation cadence. During rotation, implementations MAY accept the previous secret for `DELETE /v1/sticky` lookups only (so a buyer can purge keys derived under the prior secret), provided single-account scope is preserved; **routing-time sticky-key derivation MUST use only the current secret** so the rotation overlap window cannot silently extend the effective sticky TTL. The raw buyer tag and raw account ID MUST NOT appear in coordinator logs as the opaque suffix. Because `account_id` is inside the HMAC message and the secret is gateway-held, a tag collision between account A and account B cannot create the same `conv:` value by construction.
 - Buyer-facing disclosure explicitly states cache existence and retention semantics.
+  - v0.8 satisfaction: when and only when `routing.sticky_enabled: true`, the § 1.6 production disclosure, `/v1/models tier1_disclosure.sticky_affinity`, single-page docs, signup flow, and operator-distributed SDK READMEs MUST disclose sticky affinity, the `sticky_ttl_s` retention window, and the privacy tradeoff that related requests are preferentially routed to one provider during that window.
 - The cache survives the Tier 1 to Tier 2 transition with privacy guarantees that match Tier 2 trust controls.
+  - v0.8 satisfaction: sticky semantics MUST NOT depend on plaintext-only provider assumptions. A future SPEC-008 Tier-2 attestation/encryption regime MUST preserve account scoping, TTL expiry, buyer-triggered deletion, and the `conv:` namespace without exposing raw buyer tags or account IDs to providers. Concrete invariants a Tier-2 audit MUST verify survive: (a) `account_id` remains inside the HMAC message and cross-account `conv:` collision remains structurally impossible; (b) the `conv:` value is NOT derivable by the provider from any observable traffic; (c) `DELETE /v1/sticky` remains account-scoped and authenticated; (d) TTL expiry remains coordinator-enforced (not provider-self-reported). Tier-2 work MAY change provider-leg confidentiality, but it MUST NOT weaken any of (a)–(d).
 
 Any partial implementation of caching that does not meet ALL of the above MUST NOT ship. This is a forward-looking guard against the H-006 audit finding.
 
@@ -191,14 +216,15 @@ Cross-spec audit cycles MAY propose coordinated patches across multiple specs. W
 
 ### 1.6 Tier 1 disclosure: plaintext cooperative inference
 
-SPEC-006 v0.6 is a Tier 1 cooperative inference product. The following properties hold:
+SPEC-006 v0.8 is a Tier 1 cooperative inference product. The following properties hold:
 
 1. **Buyer prompts and provider responses are processed as plaintext on provider hardware.** Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.
-2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.6 does NOT cryptographically verify this.
-3. **Model identity is provider-reported.** When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.6 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.
+2. **There is no hardware attestation or runtime integrity check on providers.** The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.
+3. **Model identity is provider-reported.** When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.
 4. **The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.** Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-3.
+5. **When sticky affinity is enabled for an account, related requests are preferentially routed to one provider for up to `routing.sticky_ttl_s`.** That provider can observe and correlate more of the buyer's traffic than under default round-robin routing. This disclosure is required only when `routing.sticky_enabled: true`; with the default `routing.sticky_enabled: false`, there is no sticky routing and no new sticky-specific privacy posture beyond properties 1-4.
 
-These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in v0.6 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all four limitations are normative and MUST be preserved in product language.
+These limitations are deliberate. Tier 2, a future SPEC-008 milestone and not in v0.8 scope, would add hardware attestation, provider-leg encryption, model catalog enforcement, and untrusted-provider safety. Until Tier 2 ships, all five limitations are normative and MUST be preserved in product language, with property 5 conditional on `routing.sticky_enabled: true`.
 
 Production gate: this disclosure MUST appear in substantively equivalent language in:
 
@@ -206,6 +232,8 @@ Production gate: this disclosure MUST appear in substantively equivalent languag
 - The single-page docs: the curl plus SDK examples page.
 - The `/v1/models` response as a top-level `tier1_disclosure` field with the same plaintext-to-provider wording.
 - The README.md of any client SDK distributed by the operator.
+
+When `routing.sticky_enabled: true`, the same appearance points MUST also include the sticky affinity disclosure in property 5. When `routing.sticky_enabled: false`, operators are not required to surface sticky-specific disclosure language beyond `/v1/models tier1_disclosure.sticky_affinity.enabled: false`.
 
 ### 1.7 Relationship to SPEC-003
 
@@ -217,7 +245,7 @@ SPEC-006 inherits SPEC-003's lesson that the actual user-shaped path must be int
 
 ### 1.8 Relationship to SPEC-004, SPEC-005, and SPEC-007
 
-SPEC-004 smart routing remains out of scope.
+SPEC-004 v0.2 defines the routing-side contract for smart routing and sticky affinity, including `routing_internal.conversation_key`, the reserved `conv:` namespace, ε-cohort sticky promotion, breaker composition, sticky TTL, and the rule that sticky keys MUST NOT be accepted from direct buyer traffic. SPEC-006 v0.8 fulfills the gateway side of that contract: deriving the account-scoped conversation key, transporting it to the coordinator, disclosing the privacy posture, and satisfying the v0.7 § 1.3 sticky-caching preconditions. Pillar A implementation may proceed only when SPEC-004 v0.2 and SPEC-006 v0.8 are both audited ACCEPT and a SPEC-004 build prompt for Pillars B/C/D/A is run.
 
 SPEC-005 rewards, payouts, provider contribution economics, and any payment-adjacent flows remain out of scope.
 
@@ -896,11 +924,16 @@ Response shape:
 {
   "object": "list",
   "tier1_disclosure": {
-    "version": "v0.6",
+    "version": "v0.8",
     "plaintext_to_provider": true,
     "model_identity": "provider_reported",
     "hardware_attestation": "none",
-    "tier2_milestone": "future"
+    "tier2_milestone": "future",
+    "sticky_affinity": {
+      "enabled": false,
+      "ttl_seconds": 0,
+      "description": "Sticky affinity is disabled; related requests are not preferentially routed to the same provider."
+    }
   },
   "data": [
     {
@@ -945,11 +978,16 @@ The `/v1/models` response MUST include a top-level field:
 
 ```json
 "tier1_disclosure": {
-  "version": "v0.6",
+  "version": "v0.8",
   "plaintext_to_provider": true,
   "model_identity": "provider_reported",
   "hardware_attestation": "none",
-  "tier2_milestone": "future"
+  "tier2_milestone": "future",
+  "sticky_affinity": {
+    "enabled": false,
+    "ttl_seconds": 0,
+    "description": "Sticky affinity is disabled; related requests are not preferentially routed to the same provider."
+  }
 }
 ```
 
@@ -958,6 +996,8 @@ Buyers consuming this field SHOULD display its content in human-readable form be
 Gateway implementations MUST set this field automatically.
 
 Operator override is forbidden; there MUST be no config opt-out.
+
+The `sticky_affinity` sub-object MUST be present. When `routing.sticky_enabled: false`, implementations MUST return `enabled: false`, `ttl_seconds: 0`, and a description that states no sticky routing is active. When `routing.sticky_enabled: true`, implementations MUST return `enabled: true`, `ttl_seconds` equal to the coordinator's effective SPEC-004 v0.2 `routing.sticky_ttl_s`, and this plain-language privacy tradeoff in substantively equivalent form: "Related requests with the same conversation tag are preferentially routed to one provider for up to this many seconds, so that provider can observe and correlate more of your traffic than under default routing."
 
 ### 5.4 `POST /v1/chat/completions`
 
@@ -1015,11 +1055,18 @@ The gateway MUST strip these inbound buyer request headers before forwarding to 
 - `X-MacProvider-Session`
 - any header starting with `X-MacProvider-` that is not on a documented allowlist
 
-Stripping MUST occur before authentication so a malicious buyer cannot influence provider selection by header injection.
+The documented buyer request allowlist is:
+
+- `X-MacProvider-Conversation`, consumed only by the gateway for sticky conversation-key derivation.
+- `X-MacProvider-Retry`, if SPEC-004 retry exposure is enabled by the operator.
+
+Stripping MUST occur **before authentication** so a malicious buyer cannot influence provider selection or any pre-forwarding decision (auth, rate-limit, routing) by header injection. The gateway MUST emit an audit event at WARN level when a buyer-supplied `X-MacProvider-Internal-Conv` is observed and stripped; attempted injection is a high-signal security event. `X-MacProvider-Conversation` MUST NOT be forwarded to the coordinator as a buyer header; it is gateway input only.
 
 The gateway MAY emit an audit event when an inbound request carried these headers.
 
-The gateway MUST forward the request to the selected coordinator backend without adding buyer-visible provider preference headers.
+The gateway MUST forward the request to the selected coordinator backend without adding buyer-visible provider preference headers. When `routing.sticky_enabled: true` and the request includes a valid `X-MacProvider-Conversation` value, the gateway MUST derive `routing_internal.conversation_key` per § 1.3 and transport it on the gateway-to-coordinator hop using `X-MacProvider-Internal-Conv: conv:<opaque-id>`.
+
+`X-MacProvider-Internal-Conv` is an internal deployment header, not a buyer API header. The coordinator's externally reachable nginx vhost, proxy layer, or equivalent edge boundary MUST strip `X-MacProvider-Internal-Conv` and any other `X-MacProvider-Internal-*` header from every path that could be reached outside the gateway. The coordinator MUST treat `X-MacProvider-Internal-Conv` as valid only on authenticated or network-restricted gateway-originated traffic; it MUST NEVER accept this header from direct buyer traffic. A deployment where buyer-reachable requests can supply or preserve this header is non-compliant with SPEC-006 v0.8 and SPEC-004 v0.2.
 
 The gateway MUST NOT expose coordinator route headers to the buyer.
 
@@ -1047,6 +1094,40 @@ Streaming success response:
 - MUST flush chunks promptly.
 - MUST cancel upstream request within 500 ms after buyer disconnect.
 - MUST append a usage event when usage can be measured or estimated.
+
+#### 5.4.1 Sticky affinity buyer controls and internal transport
+
+Sticky affinity is an operator-enabled extension and MUST default to disabled through `routing.sticky_enabled: false`.
+
+Buyer opt-in source:
+
+- Buyers MAY send `X-MacProvider-Conversation: <opaque-tag>` on `POST /v1/chat/completions`.
+- The tag is buyer-chosen and opaque. It is not an account identifier, provider identifier, session ID, or security credential.
+- The gateway MUST trim ASCII whitespace, reject empty tags, reject tags longer than 128 bytes, and reject tags containing characters outside `[A-Za-z0-9._:-]` with HTTP 400, `type: "invalid_request_error"`, and `code: "invalid_conversation_tag"`.
+- The gateway MUST silently ignore the tag when `routing.sticky_enabled: false` (200 OK, no error); it MUST NOT derive or forward a sticky key in the default config. Silent ignore (rather than rejection) lets portable buyer SDKs always include the header without breaking against operators running the default-off posture.
+- The gateway MUST derive the internal `conv:` value with the HMAC-SHA256 algorithm in § 1.3. Gateway-managed deterministic request-shape hashing and gateway-managed sticky cookies are intentionally rejected for v0.8 because they are less explicit, harder to audit, and broaden the auth/session surface.
+
+Gateway-to-coordinator transport:
+
+- The gateway MUST send the derived value to the coordinator only as `X-MacProvider-Internal-Conv: conv:<opaque-id>`.
+- The gateway MUST NOT forward raw `X-MacProvider-Conversation`.
+- The gateway MUST NOT accept a buyer-supplied `X-MacProvider-Internal-Conv`; inbound buyer copies of that header MUST be stripped before auth/routing and SHOULD generate an audit event.
+- The coordinator boundary MUST strip `X-MacProvider-Internal-*` headers on buyer-reachable paths and MUST reject or ignore values outside the `conv:` namespace for sticky purposes, matching SPEC-004 v0.2.
+
+Buyer-triggered deletion:
+
+- `DELETE /v1/sticky` is authenticated with the same bearer-token account identity as normal API traffic.
+- The operation is account-scoped and idempotent. It MUST purge all sticky entries attributable to the caller's `account_id` and MUST NOT affect other accounts.
+- Success MUST return HTTP 200 and:
+
+```json
+{
+  "purged": true,
+  "entries": 0
+}
+```
+
+`entries` is the number of account-scoped sticky entries deleted. A repeated request after prior deletion MUST still return `purged: true` and MAY return `entries: 0`.
 
 ### 5.5 `GET /v1/usage`
 
@@ -2008,6 +2089,8 @@ Docs MUST explain that this is a live Mac pool and occasional 503s are expected.
 
 Docs MUST include the Tier 1 plaintext-to-provider disclosure from Section 1.6.
 
+When `routing.sticky_enabled: true`, docs MUST include the sticky affinity disclosure from Section 1.6 before the first example that uses `X-MacProvider-Conversation`.
+
 Docs MUST include the model identity caveat from Section 13.5.
 
 Docs MUST avoid premium inference positioning.
@@ -2023,6 +2106,8 @@ The disclosure MUST state, in substantively equivalent language:
 > MacProvider Tier 1 is cooperative inference. Buyer prompts and provider responses are processed as plaintext on provider hardware, so providers can technically observe prompts and outputs routed through their machine. Model identity is provider-reported, provider hardware is not attested, and MacProvider Tier 1 does not claim private inference, malicious-provider resistance, or verified model integrity.
 
 The signup flow MUST require this disclosure to be visible before key issuance.
+
+When `routing.sticky_enabled: true`, the signup flow MUST also state, in substantively equivalent language: "If you use a conversation tag, related requests may be routed to the same provider for up to the configured sticky TTL, so that provider can observe and correlate more of your traffic than under default routing." Operators running the default `routing.sticky_enabled: false` posture MUST NOT be required to show sticky-specific language.
 
 The signup flow MUST NOT describe Tier 1 as provider-private, attested, encrypted-to-provider, malicious-provider-resistant, or model-integrity-verified.
 
@@ -2048,6 +2133,7 @@ The single-page docs MUST include:
 - reset behavior.
 - live Mac pool caveat.
 - Tier 1 plaintext-to-provider disclosure.
+- conditional sticky affinity disclosure when `routing.sticky_enabled: true`.
 - model identity caveat.
 - `POST /v1/feedback` example.
 
@@ -2107,11 +2193,13 @@ Docs MUST map:
 
 The single-page docs MUST include a "Tier 1 disclosure" subsection explaining that buyer prompts and provider responses are processed as plaintext on provider hardware; providers can technically observe prompts and outputs routed through their machine; hardware attestation is not performed; and Tier 1 makes no privacy, attestation, integrity, untrusted-provider, or malicious-provider claims.
 
+When `routing.sticky_enabled: true`, the single-page docs MUST include a "Sticky affinity" subsection explaining `X-MacProvider-Conversation`, `DELETE /v1/sticky`, the configured `sticky_ttl_s`, and the privacy tradeoff that related requests may be preferentially routed to the same provider during the TTL. When `routing.sticky_enabled: false`, this subsection is optional and, if present, MUST clearly state sticky affinity is disabled.
+
 The single-page docs MUST include a "Model identity caveat" subsection explaining that model `id` is provider-reported, not cryptographically verified.
 
 The single-page docs MUST avoid wording that invites buyers to infer provider-private prompts from statements about avoiding AWS, GCP, Azure, or other hyperscalers.
 
-Any README.md for an operator-distributed client SDK MUST include the same Tier 1 disclosure and model identity caveat before its first sensitive-prompt example.
+Any README.md for an operator-distributed client SDK MUST include the same Tier 1 disclosure and model identity caveat before its first sensitive-prompt example. When `routing.sticky_enabled: true`, that README MUST also include the sticky affinity disclosure before its first `X-MacProvider-Conversation` example.
 
 ---
 
@@ -3145,6 +3233,7 @@ Required audit categories:
 - S: coordinator charter preservation.
 - T: integration tests for real user-shaped web/API paths.
 - U: SPEC-003 v0.7 shell-script integration category inheritance: shell-script paths that touch real OS resources such as tty, file descriptors, ports, filesystem layout, or JSON over loopback need integration tests that actually exercise them, not code review alone. This applies to gateway operational scripts for deployment, backup, and kill-switch toggling via shell.
+- V: sticky affinity account isolation, lifecycle, and disclosure parity when `routing.sticky_enabled: true`.
 - Y: expectation drift between roadmap and current enforcement.
 
 Category Y means SPEC-006 documents future Tier 2 capabilities, including hardware attestation, encrypted provider execution, and model catalog enforcement, as roadmap targets. Audit cycles MUST verify that spec text, front-door copy, API docs, error messages, and external positioning material do NOT promise these capabilities as currently shipping.
@@ -3160,6 +3249,8 @@ Reference: 2026-05-29 independent security audit H-001. The language "Your promp
 Audits MUST explicitly check configured and unconfigured branches for production gates.
 
 This inherits the SPEC-002 v1.1.4 anti-pattern lesson: an always-non-nil gate can look tested while the configured branch is broken.
+
+When `routing.sticky_enabled: true`, audits MUST verify sticky disclosure parity everywhere the § 1.6 disclosure appears: the signup flow, single-page docs, `/v1/models tier1_disclosure.sticky_affinity`, and any operator-distributed SDK README. Audits MUST also verify the default branch: with `routing.sticky_enabled: false`, no sticky key is derived or forwarded, no sticky-specific buyer-visible privacy posture is implied, and v0.7 buyer-visible behavior is preserved.
 
 ---
 
@@ -3185,7 +3276,7 @@ They MUST NOT reopen the locked decisions in Section 2.
 
 Adapted from the 2026-05-29 independent security audit's "Production Gate Recommendations" section.
 
-The operator MUST execute all 8 items before SPEC-006 v0.6 is deployed to production with public buyer access at `api.streamvc.live`.
+The operator MUST execute all 9 items before SPEC-006 v0.8 is deployed to production with public buyer access at `api.streamvc.live`. PG-9 is conditional and applies before, not after, flipping `routing.sticky_enabled: true` in production.
 
 1. Provider tokens MUST be mandatory in production. [SPEC-002 v1.1.5 § 7.X PG-1]
 2. Provider WebSocket endpoints MUST be shielded by proxy-level rate limits and connection caps. [SPEC-002 v1.1.5 § 7.X PG-2]
@@ -3195,5 +3286,6 @@ The operator MUST execute all 8 items before SPEC-006 v0.6 is deployed to produc
 6. Buyer disconnect, provider disconnect, timeout, and cancellation MUST produce exactly one accounting outcome. [§ 7.2 + § 17 in v0.5; SPEC-001 v1.2.3 § 6.6 cancel-usage]
 7. Tier 1 documentation MUST clearly state that provider-side prompts are plaintext to the provider runtime. [§ 1.6 above]
 8. Any privacy, attestation, or hardware-trust claim MUST be blocked until Tier 2 enforcement is live. [§ 1.6 above]
+9. Sticky affinity disclosure parity MUST be complete before `routing.sticky_enabled` is set to `true` in production: the v0.8 § 1.6 and § 5.3.1 sticky disclosure language MUST appear in (a) the signup flow, (b) the single-page docs, (c) `/v1/models tier1_disclosure.sticky_affinity`, and (d) any SDK README the operator distributes. Operators who keep `routing.sticky_enabled: false` do NOT need to surface sticky-specific language. [§ 1.6 + § 5.3.1 above]
 
-This checklist is the operator-side counterpart to SPEC-006 v0.6's spec-side disclosure language. Together they implement the audit's recommendation: keep Tier 1 narrow, explicit, and operationally hardened, while treating provider-private prompts, attestation, model integrity, and marketplace-grade settlement as separate Tier 2 launch gates.
+This checklist is the operator-side counterpart to SPEC-006 v0.8's spec-side disclosure language. Together they implement the audit's recommendation: keep Tier 1 narrow, explicit, and operationally hardened, while treating provider-private prompts, attestation, model integrity, sticky privacy disclosure, and marketplace-grade settlement as separate launch gates.
