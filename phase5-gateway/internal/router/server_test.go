@@ -1417,24 +1417,40 @@ func responseWithBody(status int, header http.Header, body string) *http.Respons
 // collision guarantee: account A with tag T MUST derive a different conv:
 // than account B with the same tag T. Regression-locks the SPEC-006 v0.8.1
 // §1.3 HMAC account-scoping property (audit MED-3 / code-review MAJOR).
-// Without account_id inside the HMAC message, this property would fail
-// silently — a future "simplification" would route account B's sticky
-// traffic to account A's pinned provider.
+//
+// CRITICAL: this test must call the PRODUCTION `deriveConversationKey`,
+// not the test helper `expectedConversationKey`. The re-verify audit (a
+// prior version of this test was a tautology) flagged that asserting
+// "test helper has the property" doesn't pin "production has the
+// property" — a regression dropping `accountID` from production's HMAC
+// would silently allow cross-account routing of sticky traffic.
 func TestConversationKeyIsAccountScoped(t *testing.T) {
-	secret := "test-key-hash-secret"
+	// Build a minimal Server purely to reach the production method; no
+	// handler/store/auth plumbing is required — deriveConversationKey only
+	// reads s.cfg.Auth.KeyHashSecret.
+	cfg := config.Config{}
+	cfg.Auth.KeyHashSecret = "test-key-hash-secret"
+	s := &Server{cfg: cfg}
+
 	tag := "thread-1"
-	a := expectedConversationKey(secret, "acct_alpha", tag)
-	b := expectedConversationKey(secret, "acct_beta", tag)
+	a := s.deriveConversationKey("acct_alpha", tag)
+	b := s.deriveConversationKey("acct_beta", tag)
 	if a == b {
-		t.Fatalf("cross-account collision: acct_alpha and acct_beta produce same conv key %q — account_id missing from HMAC msg?", a)
+		t.Fatalf("cross-account collision: acct_alpha and acct_beta produce same production conv key %q — account_id missing from HMAC msg?", a)
 	}
-	// Also verify same account + same tag → deterministic (sanity, not the regression).
-	if expectedConversationKey(secret, "acct_alpha", tag) != a {
-		t.Fatal("same inputs produced different keys — derivation is non-deterministic")
+	// Same account + same tag → deterministic (sanity).
+	if s.deriveConversationKey("acct_alpha", tag) != a {
+		t.Fatal("same inputs produced different production keys — derivation is non-deterministic")
 	}
-	// And different tag on same account → different key.
-	if expectedConversationKey(secret, "acct_alpha", "thread-2") == a {
-		t.Fatal("different tag on same account produced same key — tag missing from HMAC msg?")
+	// Different tag on same account → different key (tag in HMAC msg).
+	if s.deriveConversationKey("acct_alpha", "thread-2") == a {
+		t.Fatal("different tag on same account produced same production key — tag missing from HMAC msg?")
+	}
+	// Cross-check: production output matches the test helper's expectation
+	// (so a regression in production's HMAC scheme breaks BOTH this test
+	// AND TestStickyConversationDerivesInternalHeaderAndStripsInjection).
+	if a != expectedConversationKey("test-key-hash-secret", "acct_alpha", tag) {
+		t.Fatalf("production deriveConversationKey diverged from expectedConversationKey helper — scheme drift")
 	}
 }
 

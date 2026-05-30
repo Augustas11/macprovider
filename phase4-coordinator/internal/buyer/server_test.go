@@ -1881,6 +1881,96 @@ func TestSessionHardPinReturns503EvenWithStickyEnabled(t *testing.T) {
 	}
 }
 
+// TestStickyWritesOnHTTPStreamingCleanEOF pins the behavioral change from
+// the SPEC-004 audit fix: HTTP-streaming forwardStreaming defers the sticky
+// write to the io.EOF branch (clean stream completion) instead of writing
+// it upfront before bytes flow. This test sends a clean-EOF SSE stream
+// with a conv: header, then issues a second sticky-eligible request to the
+// same conv: tag and asserts it routes back to the same provider. Without
+// the sticky write happening on EOF, the second request would not get a
+// sticky hit — proving the deferred store actually fires on success.
+//
+// This is the POSITIVE-case assertion the re-verify audit flagged as
+// missing: a regression deleting the s.stickyStore() call in the io.EOF
+// branch would not be caught by structural inspection alone; this test
+// catches it end-to-end.
+func TestStickyWritesOnHTTPStreamingCleanEOF(t *testing.T) {
+	var calls []string
+	upstream1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "p1")
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		// Clean close → bufio.ReadBytes returns io.EOF, which is the
+		// branch where sticky_store now fires.
+	}))
+	defer upstream1.Close()
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, "p2")
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		flusher := w.(http.Flusher)
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"))
+		flusher.Flush()
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer upstream2.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: upstream1.URL},
+		{ProviderID: "p2", EndpointURL: upstream2.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream1.URL, 20)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, upstream2.URL, 20)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:    true,
+			StickyTTLS:       1800,
+			StickyMaxEntries: 10000,
+			TiebreakEpsilon:  0.10,
+		}),
+	)
+	headers := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:eof-write-pinned"},
+		"X-MacProvider-Account":       []string{"acct_test"},
+	}
+
+	// First streaming request: clean EOF → MUST write sticky on completion.
+	rr := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("seed stream status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("[DONE]")) {
+		t.Fatalf("seed stream missing [DONE]: %s", rr.Body.String())
+	}
+	seedProvider := rr.Header().Get("X-MacProvider-Provider")
+	if seedProvider == "" {
+		t.Fatal("seed stream did not set X-MacProvider-Provider")
+	}
+
+	// Second streaming request with same conv: tag — sticky_hit MUST route
+	// to the SAME provider. If the EOF-branch stickyStore is missing, this
+	// fails because the second request lands on whichever provider the
+	// default sort picks (which may differ from the first).
+	rr = postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hi"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("followup stream status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != seedProvider {
+		t.Fatalf("sticky did NOT write on HTTP-streaming clean EOF: seed routed to %q, follow-up routed to %q (expected sticky_hit to same provider)", seedProvider, got)
+	}
+	// Sanity: both requests genuinely went through SOME provider's upstream.
+	if len(calls) < 2 {
+		t.Fatalf("expected 2 upstream calls, got %d (%v)", len(calls), calls)
+	}
+}
+
 // TestStickyMissesGracefullyWhenProviderIsBreakerHeld pins SPEC-004 §9
 // composition: a sticky hit on a breaker-degraded provider MUST gracefully
 // miss (RoutingEligible filters it out of the candidate set; applySticky
