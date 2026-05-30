@@ -1006,6 +1006,19 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusGatewayTimeout, "api_error", "provider_timeout", "Provider timed out")
 		return
 	}
+	// Coordinator-issued 404 means the request was structurally rejected
+	// (e.g. model_not_found — no provider has advertised the requested model).
+	// No provider was reached → no prompt-token settlement; refund the
+	// reservation and pass the OpenAI-shaped error body through verbatim so
+	// the buyer sees an actionable 404 instead of an opaque 502.
+	if resp.StatusCode == http.StatusNotFound {
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		copyCleanHeaders(w.Header(), resp.Header)
+		w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write(body)
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		completion := completionFromHeader(resp.Header)
 		_ = s.settleRequest(r, subject, promptEstimate, completion, "gateway_estimated", "upstream_error")
@@ -1036,6 +1049,19 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if resp.StatusCode == http.StatusGatewayTimeout {
 			_ = s.settleRequest(r, subject, promptEstimate, 0, "gateway_estimated", "provider_timeout")
 			writeError(w, http.StatusGatewayTimeout, "api_error", "provider_timeout", "Provider timed out")
+			return
+		}
+		// Coordinator 404 = structural rejection (model_not_found, etc.);
+		// no provider reached, no charge. Pass through the OpenAI-shaped body
+		// verbatim so the buyer sees a clean 404 instead of an opaque 502.
+		// See forwardNonStreamingChat for the matching non-stream branch.
+		if resp.StatusCode == http.StatusNotFound {
+			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+			body, _ := io.ReadAll(resp.Body)
+			copyCleanHeaders(w.Header(), resp.Header)
+			w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write(body)
 			return
 		}
 		_ = s.settleRequest(r, subject, promptEstimate, completionFromHeader(resp.Header), "gateway_estimated", "upstream_error")

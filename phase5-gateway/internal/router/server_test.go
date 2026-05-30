@@ -1413,6 +1413,75 @@ func responseWithBody(status int, header http.Header, body string) *http.Respons
 	}
 }
 
+// TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota pins
+// the audit-driven UX fix: when the coordinator returns 404 model_not_found
+// (no provider has advertised the requested model — no provider was reached),
+// the gateway MUST:
+//   (a) return 404 with the coord's OpenAI-shaped error body verbatim,
+//       NOT map to 502 upstream_provider_error (a typo on the buyer side
+//       should not look like a server-side outage);
+//   (b) refund the quota reservation (zero buyer-quota charge), since no
+//       provider work was done — settling prompt-tokens on this path used
+//       to silently burn ~2.5 tokens per typo'd request.
+//
+// Regression-locks the bug surfaced by the SPEC-004 stress test (Layer 4
+// quota race + Layer 3 single-shot 502 with bearer). Verified via
+// fix-stash test on stage as well.
+func TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		name := "non_stream"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			// Mock coord returns the OpenAI-shaped 404 we observed live.
+			coordBody := `{"error":{"code":"model_not_found","message":"No provider has advertised model nope-model","param":null,"type":"invalid_request_error"}}`
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return responseWithBody(http.StatusNotFound, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, "acct_typo_"+name)
+
+			body := `{"model":"nope-model","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+			if stream {
+				body = `{"model":"nope-model","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+			}
+			resp := postChat(t, h, fullKey, body, nil)
+
+			// (a) Status MUST be 404, not 502.
+			if resp.Code != http.StatusNotFound {
+				t.Fatalf("status=%d body=%s — coord 404 must pass through, NOT map to 502", resp.Code, resp.Body.String())
+			}
+			// Body MUST be the OpenAI-shaped error from the coord, verbatim
+			// (preserves the actionable "No provider has advertised model X"
+			// message that lets buyers fix their typo).
+			if !strings.Contains(resp.Body.String(), `"code":"model_not_found"`) {
+				t.Fatalf("body=%s — expected coord's model_not_found body to pass through verbatim", resp.Body.String())
+			}
+			if !strings.Contains(resp.Body.String(), `"type":"invalid_request_error"`) {
+				t.Fatalf("body=%s — body must preserve OpenAI-shaped error type=invalid_request_error", resp.Body.String())
+			}
+			// Must NOT contain the old upstream_provider_error wording.
+			if strings.Contains(resp.Body.String(), "upstream_provider_error") {
+				t.Fatalf("body=%s — must NOT use upstream_provider_error wording on a coord 404", resp.Body.String())
+			}
+
+			// (b) Quota MUST be unchanged — no prompt-token settlement on the
+			// no-provider-reached path. Previously: ~2.5 tokens/request burn.
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			if used := quota["daily_tokens_used"].(float64); used != 0 {
+				t.Fatalf("daily_tokens_used=%v, want 0 — coord 404 must not charge quota (no provider reached)", used)
+			}
+			if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+				t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded on coord 404", reserved)
+			}
+		})
+	}
+}
+
 // TestConversationKeyIsAccountScoped pins the structural cross-account
 // collision guarantee: account A with tag T MUST derive a different conv:
 // than account B with the same tag T. Regression-locks the SPEC-006 v0.8.1
