@@ -1,6 +1,6 @@
 # SPEC-004 — Smart Router
 
-**Version:** 0.3 (2026-05-30, dispatch-rewrite audit fix)
+**Version:** 0.3.1 (2026-05-30, independent-audit follow-up: 1 MiB ingress cap + test-discipline coverage)
 **Extends:** SPEC-002 v1.3.3 § 5 (routing algorithm)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.7 (Pillar A gated on SPEC-006 v0.8)
 
@@ -10,6 +10,23 @@ deterministic equal-metric tie-breaking, one-shot F-4 failover only, exact
 model ID routing, and no sticky affinity.
 
 ## Changelog
+
+### v0.3.1 (2026-05-30)
+
+- Independent multi-lens audit follow-up on the v0.3 dispatch-rewrite work:
+  - Adds **FR-SR-7c** documenting the new 1 MiB coordinator chat-request
+    body cap that v0.3's implementation introduced (audit MAJOR-2: the cap
+    landed in code as `maxChatRequestBodyBytes` but was undocumented in
+    any spec, and the value is hardcoded). This entry records the cap as
+    normative for v1, the 413 error shape, and flags the configurable-knob
+    work as a tracked followup so a future operator override matches the
+    gateway's `Limits.RequestBodyBytes` precedent.
+  - Closes the FR-SR-7a test-discipline MUST against three pre-existing
+    class-alias tests that were ignoring the dispatched body's `model`
+    field (audit MAJOR-1). The tests now use the `assertForwardedModel`
+    helper Codex introduced and are proven as genuine regression locks
+    via fix-stash-test (revert server.go → all three FAIL with exact
+    alias-leak diagnostic; restore → all PASS).
 
 ### v0.3 (2026-05-30)
 
@@ -291,6 +308,35 @@ MUST be rejected before routing with `400 invalid_request`; for example,
 requests containing both `model` and `Model` are invalid. This prevents the
 coordinator from selecting on one parsed model while a provider or proxy with
 different JSON member handling observes another.
+
+**FR-SR-7c. Coordinator chat-request body ingress cap.**
+To bound pre-parse allocation at the coordinator buyer ingress (the same
+defense the gateway already applies upstream), the coordinator MUST cap the
+size of `POST /v1/chat/completions` request bodies and reject oversized
+bodies with `HTTP 413 request_too_large` (OpenAI-shaped
+`{"error":{"type":"invalid_request_error","code":"request_too_large",
+"message":"..."}}`). The cap MUST be implemented as a streaming
+`io.LimitReader`-style check (not "read it all then measure"), so a buyer
+posting an infinitely-large body is never fully materialized in coordinator
+memory. For v1 the cap is **1 MiB (1 048 576 bytes)** to mirror the
+gateway's `Limits.RequestBodyBytes` default; the rationale is symmetry
+(traffic via the gateway is already capped upstream, so no legitimate
+traffic exceeds this) and a defensive ceiling against direct loopback /
+operator-key admin traffic that bypasses the gateway. The buyer-facing
+nginx vhost in front of the gateway uses `client_max_body_size 8M`; the
+coordinator is the second, tighter ceiling.
+
+**Implementation gap (tracked as a followup).** The v0.3.1 implementation
+hardcodes the cap as a Go `const` in `internal/buyer/server.go` with no
+operator override. The gateway exposes its equivalent as
+`Limits.RequestBodyBytes` in `gateway.yaml` (configurable with > 0
+validation). The coordinator SHOULD mirror this pattern in a future revision
+(e.g. SPEC-002 `pool.request_body_bytes` or SPEC-004 `routing.request_body_bytes`)
+so the cap is operator-tunable without a code rebuild. This matters because
+real-world LLM requests with large `tools` arrays or long contexts can
+exceed 1 MiB (≈200 tool schemas alone reaches the ceiling). Production
+deployments that flip `model_classes` on for power users should track this
+followup before scaling.
 
 **FR-SR-8. Model-class objectives.**
 Each class MUST define:

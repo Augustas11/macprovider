@@ -95,8 +95,6 @@ const (
 	wsForwardProviderDisconnectedCommitted wsForwardResult = "provider_disconnected_committed"
 )
 
-const maxChatRequestBodyBytes int64 = 1 << 20
-
 type breakerFault string
 
 const (
@@ -472,13 +470,9 @@ type chatMessage struct {
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	requestID := uuid.NewString()
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxChatRequestBodyBytes+1))
+	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "Could not read request body")
-		return
-	}
-	if int64(len(body)) > maxChatRequestBodyBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
 		return
 	}
 	req, status, code, msg := validateChatRequest(body)
@@ -506,13 +500,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		failoverAttempted := false
 		excluded := map[string]struct{}{}
 		for {
-			dispatchBody, err := dispatchBodyForProvider(req, provider)
-			if err != nil {
-				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
-				return
-			}
 			if provider.IsWSTunneled() {
-				result := s.forwardWS(w, r, requestID, dispatchBody, provider, true, s.attemptTimeout(r))
+				result := s.forwardWS(w, r, requestID, body, provider, true, s.attemptTimeout(r))
 				if result == wsForwardProviderDisconnectedCommitted {
 					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "stream_terminal", "")
 					return
@@ -557,7 +546,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				s.logRoutingDecision(requestID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
 				continue
 			}
-			result, status := s.forwardStreaming(w, r, requestID, dispatchBody, provider, req.Model, s.attemptTimeout(r))
+			result, status := s.forwardStreaming(w, r, requestID, body, provider, req.Model, s.attemptTimeout(r))
 			if result == wsForwardComplete {
 				return
 			}
@@ -587,12 +576,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		excluded := map[string]struct{}{}
 		failoverAttempted := false
 		for {
-			dispatchBody, err := dispatchBodyForProvider(req, provider)
-			if err != nil {
-				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
-				return
-			}
-			result := s.forwardWS(w, r, requestID, dispatchBody, provider, false, s.attemptTimeout(r))
+			result := s.forwardWS(w, r, requestID, body, provider, false, s.attemptTimeout(r))
 			if result == wsForwardComplete {
 				s.stickyStore(r.Header, provider, req.Model)
 				return
@@ -666,11 +650,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	excluded[routeKey(provider)] = struct{}{}
 	for {
-		dispatchBody, err := dispatchBodyForProvider(req, provider)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
-			return
-		}
 		upstreamURL := provider.EndpointURL + "/v1/chat/completions"
 		attemptCtx := r.Context()
 		cancelAttempt := func() {}
@@ -678,7 +657,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if retryRequested && s.retryPerAttemptTimeout > 0 {
 			attemptCtx, cancelAttempt = context.WithTimeout(r.Context(), s.retryPerAttemptTimeout)
 		}
-		upReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, bytes.NewReader(dispatchBody))
+		upReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 		if err != nil {
 			cancelAttempt()
 			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
@@ -1068,13 +1047,6 @@ func validateChatRequest(body []byte) (chatRequest, int, string, string) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return chatRequest{}, http.StatusBadRequest, "invalid_json", "Invalid JSON in request body"
 	}
-	modelCount, nonCanonicalModel, err := countTopLevelField(body, "model")
-	if err != nil {
-		return chatRequest{}, http.StatusBadRequest, "invalid_json", "Invalid JSON in request body"
-	}
-	if nonCanonicalModel || modelCount > 1 {
-		return chatRequest{}, http.StatusBadRequest, "invalid_request", "Duplicate model field"
-	}
 	var req chatRequest
 	req.raw = append(req.raw, body...)
 	modelRaw, ok := raw["model"]
@@ -1106,124 +1078,6 @@ func validateChatRequest(body []byte) (chatRequest, int, string, string) {
 		}
 	}
 	return req, 0, "", ""
-}
-
-func countTopLevelField(body []byte, field string) (int, bool, error) {
-	dec := json.NewDecoder(bytes.NewReader(body))
-	token, err := dec.Token()
-	if err != nil {
-		return 0, false, err
-	}
-	if delim, ok := token.(json.Delim); !ok || delim != '{' {
-		return 0, false, errors.New("request body is not a JSON object")
-	}
-	count := 0
-	nonCanonical := false
-	for dec.More() {
-		keyToken, err := dec.Token()
-		if err != nil {
-			return 0, false, err
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return 0, false, errors.New("request body contains a non-string object key")
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return 0, false, err
-		}
-		if key == field {
-			count++
-		} else if strings.EqualFold(key, field) {
-			nonCanonical = true
-		}
-	}
-	if _, err := dec.Token(); err != nil {
-		return 0, false, err
-	}
-	return count, nonCanonical, nil
-}
-
-func dispatchBodyForProvider(req chatRequest, provider pool.Provider) ([]byte, error) {
-	if modelIDEqual(req.Model, provider.ModelID) {
-		return append([]byte(nil), req.raw...), nil
-	}
-
-	dec := json.NewDecoder(bytes.NewReader(req.raw))
-	token, err := dec.Token()
-	if err != nil {
-		return nil, err
-	}
-	if delim, ok := token.(json.Delim); !ok || delim != '{' {
-		return nil, errors.New("chat request body is not a JSON object")
-	}
-	type replacement struct {
-		start int
-		end   int
-	}
-	var replacements []replacement
-	for dec.More() {
-		keyToken, err := dec.Token()
-		if err != nil {
-			return nil, err
-		}
-		key, ok := keyToken.(string)
-		if !ok {
-			return nil, errors.New("chat request body contains a non-string object key")
-		}
-		keyEnd := int(dec.InputOffset())
-		valueStart, err := jsonValueStart(req.raw, keyEnd)
-		if err != nil {
-			return nil, err
-		}
-		var value json.RawMessage
-		if err := dec.Decode(&value); err != nil {
-			return nil, err
-		}
-		if key == "model" {
-			replacements = append(replacements, replacement{start: valueStart, end: int(dec.InputOffset())})
-		} else if strings.EqualFold(key, "model") {
-			return nil, errors.New("chat request body contains non-canonical model field")
-		}
-	}
-	if _, err := dec.Token(); err != nil {
-		return nil, err
-	}
-	if len(replacements) == 0 {
-		return nil, errors.New("chat request body missing model field")
-	}
-	if len(replacements) > 1 {
-		return nil, errors.New("chat request body contains duplicate model fields")
-	}
-	model, err := json.Marshal(provider.ModelID)
-	if err != nil {
-		return nil, err
-	}
-	out := append([]byte(nil), req.raw...)
-	r := replacements[0]
-	next := make([]byte, 0, len(out)-(r.end-r.start)+len(model))
-	next = append(next, out[:r.start]...)
-	next = append(next, model...)
-	next = append(next, out[r.end:]...)
-	return next, nil
-}
-
-func jsonValueStart(raw []byte, keyEnd int) (int, error) {
-	i := keyEnd
-	for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\r' || raw[i] == '\t') {
-		i++
-	}
-	if i >= len(raw) || raw[i] != ':' {
-		return 0, errors.New("chat request body object key missing colon")
-	}
-	i++
-	for i < len(raw) && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\r' || raw[i] == '\t') {
-		i++
-	}
-	if i >= len(raw) {
-		return 0, errors.New("chat request body object key missing value")
-	}
-	return i, nil
 }
 
 func validateOptionalFields(raw map[string]json.RawMessage) (int, string, string) {

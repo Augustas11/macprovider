@@ -431,11 +431,18 @@ func TestChatCompletionsRoutingPreferences(t *testing.T) {
 }
 
 func TestChatCompletionsRoutesModelClassByObjective(t *testing.T) {
+	// SPEC-004 v0.3 FR-SR-7a test-discipline: capture the upstream-received
+	// body and assert on body.model (concrete provider ModelID), not just on
+	// the chosen provider identity. Without this assertion, a regression of
+	// the dispatch-rewrite path would pass this test (the pre-fix bug shipped
+	// for exactly this reason — body-ignoring mocks gave false confidence).
+	var fastBody []byte
 	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
 	}))
 	defer slowUpstream.Close()
 	fastUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fastBody, _ = io.ReadAll(r.Body)
 		_, _ = w.Write([]byte(`{"id":"fast","choices":[{"message":{"content":"fast"}}]}`))
 	}))
 	defer fastUpstream.Close()
@@ -463,6 +470,8 @@ func TestChatCompletionsRoutesModelClassByObjective(t *testing.T) {
 	if rr.Header().Get("X-MacProvider-Provider") != "fast" {
 		t.Fatalf("provider = %q, want fast", rr.Header().Get("X-MacProvider-Provider"))
 	}
+	// Provider MUST receive the concrete ModelID, NOT the buyer's alias.
+	assertForwardedModel(t, fastBody, "model-fast")
 }
 
 func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
@@ -688,11 +697,15 @@ func TestChatCompletionsRejectsOversizedBodyBeforeParsing(t *testing.T) {
 }
 
 func TestChatCompletionsAccurateClassUsesThroughputTieBreak(t *testing.T) {
+	// SPEC-004 v0.3 FR-SR-7a test-discipline: assert on body.model, not just
+	// the chosen provider identity.
+	var fastBody []byte
 	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
 	}))
 	defer slowUpstream.Close()
 	fastUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fastBody, _ = io.ReadAll(r.Body)
 		_, _ = w.Write([]byte(`{"id":"fast","choices":[{"message":{"content":"fast"}}]}`))
 	}))
 	defer fastUpstream.Close()
@@ -717,6 +730,8 @@ func TestChatCompletionsAccurateClassUsesThroughputTieBreak(t *testing.T) {
 	if rr.Header().Get("X-MacProvider-Provider") != "fast" {
 		t.Fatalf("provider = %q, want fast", rr.Header().Get("X-MacProvider-Provider"))
 	}
+	// Provider MUST receive the concrete ModelID, NOT the buyer's alias.
+	assertForwardedModel(t, fastBody, "model-fast")
 }
 
 func TestChatCompletionsRetrySelectsDifferentProvider(t *testing.T) {
@@ -909,11 +924,20 @@ func TestInternalStickyDeleteRequiresBearer(t *testing.T) {
 }
 
 func TestStickyAffinityDoesNotOverrideOutsideObjectiveEpsilon(t *testing.T) {
+	// SPEC-004 v0.3 FR-SR-7a test-discipline: capture both upstream bodies
+	// and assert on body.model. The seed request uses a concrete model id
+	// ("model-a") — the rewrite is identity (no-op); slowBody MUST have
+	// model="model-a" verbatim. The class request uses alias "fast-class";
+	// the dispatch MUST rewrite to the chosen provider's concrete ModelID
+	// ("model-a"), NOT leave the alias.
+	var slowBody, fastBody []byte
 	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		slowBody, _ = io.ReadAll(r.Body)
 		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
 	}))
 	defer slowUpstream.Close()
 	fastUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fastBody, _ = io.ReadAll(r.Body)
 		_, _ = w.Write([]byte(`{"id":"fast","choices":[{"message":{"content":"fast"}}]}`))
 	}))
 	defer fastUpstream.Close()
@@ -953,6 +977,8 @@ func TestStickyAffinityDoesNotOverrideOutsideObjectiveEpsilon(t *testing.T) {
 	if rr.Header().Get("X-MacProvider-Provider") != "slow" {
 		t.Fatalf("seed provider=%q, want slow", rr.Header().Get("X-MacProvider-Provider"))
 	}
+	// Seed used concrete model id — identity rewrite, body must match input.
+	assertForwardedModel(t, slowBody, "model-a")
 
 	rr = postChat(t, server, []byte(`{"model":"fast-class","messages":[{"role":"user","content":"hello"}]}`), headers)
 	if rr.Code != http.StatusOK {
@@ -961,6 +987,9 @@ func TestStickyAffinityDoesNotOverrideOutsideObjectiveEpsilon(t *testing.T) {
 	if rr.Header().Get("X-MacProvider-Provider") != "fast" {
 		t.Fatalf("class provider=%q, want fast", rr.Header().Get("X-MacProvider-Provider"))
 	}
+	// Class alias MUST be rewritten to concrete provider ModelID before
+	// dispatch — NOT leak "fast-class" to the upstream.
+	assertForwardedModel(t, fastBody, "model-a")
 }
 
 func TestChatCompletionsPreflightSkipsRejectedCandidate(t *testing.T) {
