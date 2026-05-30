@@ -1,5 +1,12 @@
 # Build prompt — SPEC-004 Pillar A implementation after SPEC-006 v0.8
 
+> **SUPERSEDED — do NOT execute.** This A-only build prompt was written
+> before the operator chose to implement all four SPEC-004 pillars as one
+> integrated build. Use `specs/BUILD_SPEC_004_IMPL_PROMPT.md` instead,
+> which covers Pillars A + B + C + D with the staged-deploy and per-pillar
+> commit discipline. This file is retained as historical context for the
+> Pillar A scope/AC; the combined prompt incorporates it.
+
 Operator-paste prompt to implement SPEC-004 v0.2 Pillar A now that
 SPEC-006 v0.8 defines the gateway-derived conversation key, internal
 transport, disclosure, and sticky-caching guard satisfaction.
