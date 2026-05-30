@@ -64,7 +64,10 @@ func main() {
 	)
 	providerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
-	providerHTTP := &http.Server{Addr: providerAddr, Handler: wsServer.Handler()}
+	providerMux := http.NewServeMux()
+	providerMux.Handle("/", wsServer.Handler())
+	providerMux.Handle("/internal/", buyerServer.InternalHandler())
+	providerHTTP := &http.Server{Addr: providerAddr, Handler: providerMux}
 	buyerHTTP := &http.Server{Addr: buyerAddr, Handler: buyerServer.Handler()}
 	errs := make(chan error, 2)
 
