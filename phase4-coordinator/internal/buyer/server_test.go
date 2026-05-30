@@ -465,6 +465,228 @@ func TestChatCompletionsRoutesModelClassByObjective(t *testing.T) {
 	}
 }
 
+func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
+	const concreteModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
+	const otherModel = "mlx-community/Other-7B-Instruct-4bit"
+	bodyFor := func(stream bool) []byte {
+		streamField := ""
+		if stream {
+			streamField = `,"stream":true`
+		}
+		return []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}],"max_tokens":8,"response_format":{"type":"json_object"},"metadata":{"trace":"preserve-me"}` + streamField + `}`)
+	}
+	assertForwardedBody := func(t *testing.T, body []byte) {
+		t.Helper()
+		var got map[string]json.RawMessage
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("forwarded body json: %v; body=%s", err, string(body))
+		}
+		var model string
+		if err := json.Unmarshal(got["model"], &model); err != nil {
+			t.Fatalf("forwarded model json: %v; body=%s", err, string(body))
+		}
+		if model != concreteModel {
+			t.Fatalf("forwarded model = %q, want concrete %q", model, concreteModel)
+		}
+		if string(got["response_format"]) != `{"type":"json_object"}` {
+			t.Fatalf("response_format not preserved: %s", string(got["response_format"]))
+		}
+		if string(got["metadata"]) != `{"trace":"preserve-me"}` {
+			t.Fatalf("metadata not preserved: %s", string(got["metadata"]))
+		}
+	}
+
+	tests := []struct {
+		name   string
+		path   pool.InferencePath
+		stream bool
+	}{
+		{name: "ws_non_streaming", path: pool.InferencePathWSTunneled},
+		{name: "ws_streaming", path: pool.InferencePathWSTunneled, stream: true},
+		{name: "http_non_streaming", path: pool.InferencePathHTTPForwarding},
+		{name: "http_streaming", path: pool.InferencePathHTTPForwarding, stream: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedBody []byte
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var err error
+				capturedBody, err = io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("read upstream body: %v", err)
+				}
+				assertForwardedBody(t, capturedBody)
+				if tc.stream {
+					w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+					_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+					_, _ = w.Write([]byte("data: [DONE]\n\n"))
+					return
+				}
+				_, _ = w.Write([]byte(`{"id":"http","model":"` + concreteModel + `","choices":[{"message":{"content":"ok"}}]}`))
+			}))
+			defer upstream.Close()
+
+			registry := pool.NewRegistry([]config.ProviderConfig{
+				{ProviderID: "qwen", EndpointURL: upstream.URL},
+				{ProviderID: "other", EndpointURL: "https://other.example"},
+			})
+			registerWithPath(registry, "qwen", "s1", concreteModel, pool.StateReady, 20000, 1, upstream.URL, 30, pool.TierPinned, tc.path)
+			registerWithEndpoint(registry, "other", "s2", otherModel, pool.StateReady, 20000, 1, "https://other.example", 20)
+			opts := []buyer.Option{
+				buyer.WithRoutingConfig(config.RoutingConfig{
+					ModelClasses: map[string]config.ModelClassConfig{
+						"mlx-accurate": {Models: []string{concreteModel}, Objective: "accurate"},
+					},
+				}),
+			}
+			if tc.path == pool.InferencePathWSTunneled {
+				opts = append(opts, buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+					capturedBody = append([]byte(nil), body...)
+					assertForwardedBody(t, capturedBody)
+					chunks := make(chan providerws.InferenceResponseChunk, 1)
+					done := make(chan providerws.InferenceResponseEnd, 1)
+					errs := make(chan error, 1)
+					if stream {
+						chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"}
+					} else {
+						chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","model":"` + concreteModel + `","choices":[{"message":{"content":"ok"}}]}`}
+					}
+					done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+					return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+				}, time.Second))
+			}
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), opts...)
+
+			rr := postChat(t, server, bodyFor(tc.stream), nil)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if rr.Header().Get("X-MacProvider-Provider") != "qwen" {
+				t.Fatalf("provider = %q, want qwen", rr.Header().Get("X-MacProvider-Provider"))
+			}
+			if len(capturedBody) == 0 {
+				t.Fatal("provider did not receive request body")
+			}
+		})
+	}
+}
+
+func TestConcreteModelIDDispatchesUnchanged(t *testing.T) {
+	const concreteModel = "mlx-community/Qwen2.5-7B-Instruct-4bit"
+	requestBody := []byte("{\n  \"model\":\"" + concreteModel + "\",\n  \"messages\":[{\"role\":\"user\",\"content\":\"hello\"}],\n  \"max_tokens\":8,\n  \"metadata\":{\"trace\":\"identity\"}\n}")
+	var capturedBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		capturedBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read upstream body: %v", err)
+		}
+		_, _ = w.Write([]byte(`{"id":"http","model":"` + concreteModel + `","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "qwen", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "qwen", "s1", concreteModel, pool.StateReady, 20000, 1, upstream.URL, 30)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		ModelClasses: map[string]config.ModelClassConfig{
+			"mlx-accurate": {Models: []string{concreteModel}, Objective: "accurate"},
+		},
+	}))
+
+	rr := postChat(t, server, requestBody, nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Equal(capturedBody, requestBody) {
+		t.Fatalf("forwarded body changed for concrete model:\ngot:  %s\nwant: %s", string(capturedBody), string(requestBody))
+	}
+}
+
+func TestChatCompletionsRejectsDuplicateTopLevelModel(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		ModelClasses: map[string]config.ModelClassConfig{
+			"mlx-class": {Models: []string{"model-a"}, Objective: "fast"},
+		},
+	}))
+
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{
+			name: "hidden before accepted concrete",
+			body: []byte(`{"model":"hidden-model","messages":[{"role":"user","content":"hello"}],"model":"model-a"}`),
+		},
+		{
+			name: "accepted before hidden concrete",
+			body: []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"model":"hidden-model"}`),
+		},
+		{
+			name: "class alias duplicate",
+			body: []byte(`{"model":"mlx-class","messages":[{"role":"user","content":"hello"}],"model":"model-a"}`),
+		},
+		{
+			name: "case variant after canonical",
+			body: []byte(`{"model":"mlx-class","messages":[{"role":"user","content":"hello"}],"Model":"model-a"}`),
+		},
+		{
+			name: "upper variant after canonical",
+			body: []byte(`{"model":"mlx-class","messages":[{"role":"user","content":"hello"}],"MODEL":"model-a"}`),
+		},
+		{
+			name: "escaped case variant after canonical",
+			body: []byte(`{"model":"mlx-class","messages":[{"role":"user","content":"hello"}],"\u004dodel":"model-a"}`),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := postChat(t, server, tc.body, nil)
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"invalid_request"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`Duplicate model field`)) {
+				t.Fatalf("body = %s", rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestChatCompletionsRejectsOversizedBodyBeforeParsing(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		MaxRetries: 1,
+		ModelClasses: map[string]config.ModelClassConfig{
+			"mlx-class": {Models: []string{"model-a"}, Objective: "fast"},
+		},
+	}))
+
+	oversizedInvalid := bytes.Repeat([]byte("{"), 1<<20+1)
+	rr := postChat(t, server, oversizedInvalid, nil)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized invalid status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"request_too_large"`)) {
+		t.Fatalf("oversized invalid body=%s", rr.Body.String())
+	}
+
+	oversizedUnknown := []byte(`{"model":"unknown-model","messages":[{"role":"user","content":"` + strings.Repeat("x", 1<<20) + `"}]}`)
+	rr = postChat(t, server, oversizedUnknown, nil)
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized unknown status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	oversizedClassRetry := []byte(`{"model":"mlx-class","messages":[{"role":"user","content":"` + strings.Repeat("x", 1<<20) + `"}]}`)
+	rr = postChat(t, server, oversizedClassRetry, http.Header{"X-MacProvider-Retry": []string{"1"}})
+	if rr.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized class retry status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestChatCompletionsAccurateClassUsesThroughputTieBreak(t *testing.T) {
 	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
@@ -531,6 +753,53 @@ func TestChatCompletionsRetrySelectsDifferentProvider(t *testing.T) {
 	if rr.Header().Get("X-MacProvider-Retried") != "" {
 		t.Fatalf("retry count leaked to buyer response: %q", rr.Header().Get("X-MacProvider-Retried"))
 	}
+}
+
+func TestModelClassAliasRewrittenPerHTTPRetryProvider(t *testing.T) {
+	bodies := map[string][]byte{}
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read fail body: %v", err)
+		}
+		bodies["fail"] = body
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer failUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Fatalf("read ok body: %v", err)
+		}
+		bodies["ok"] = body
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer okUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-b", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		MaxRetries:              1,
+		RetryPerAttemptTimeoutS: 1,
+		ModelClasses: map[string]config.ModelClassConfig{
+			"mlx-class": {Models: []string{"model-a", "model-b"}, Objective: "fast"},
+		},
+	}))
+
+	rr := postChat(t, server, []byte(`{"model":"mlx-class","messages":[{"role":"user","content":"hello"}]}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider = %q, want ok", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	assertForwardedModel(t, bodies["fail"], "model-a")
+	assertForwardedModel(t, bodies["ok"], "model-b")
 }
 
 func TestChatCompletionsDefaultOffUsesRequestTimeoutNotRetryTimeout(t *testing.T) {
@@ -1382,6 +1651,53 @@ func TestChatCompletionsWSTunneledDeadProviderFailover(t *testing.T) {
 	}
 }
 
+func TestModelClassAliasRewrittenPerWSFailoverProvider(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-b", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	bodies := map[string][]byte{}
+	var calls []string
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithFailoverConfig(true, 50*time.Millisecond),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			ModelClasses: map[string]config.ModelClassConfig{
+				"mlx-class": {Models: []string{"model-a", "model-b"}, Objective: "fast"},
+			},
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			calls = append(calls, provider.ProviderID)
+			bodies[provider.ProviderID] = append([]byte(nil), body...)
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			if provider.ProviderID == "p1" {
+				errs <- providerws.ErrRelayClosed
+				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+			}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"failover","choices":[{"message":{"content":"ok"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"mlx-class","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if strings.Join(calls, ",") != "p1,p2" {
+		t.Fatalf("relay calls = %v", calls)
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
+		t.Fatalf("provider = %q, want p2", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	assertForwardedModel(t, bodies["p1"], "model-a")
+	assertForwardedModel(t, bodies["p2"], "model-b")
+}
+
 func TestChatCompletionsWSTunneledDeadProviderFailoverOnlyOnce(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
@@ -1758,6 +2074,22 @@ func postChat(t *testing.T, server *buyer.Server, body []byte, headers http.Head
 	return rr
 }
 
+func assertForwardedModel(t *testing.T, body []byte, want string) {
+	t.Helper()
+	if len(body) == 0 {
+		t.Fatalf("provider did not receive body; want model %q", want)
+	}
+	var got struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("forwarded body json: %v; body=%s", err, string(body))
+	}
+	if got.Model != want {
+		t.Fatalf("forwarded model = %q, want %q; body=%s", got.Model, want, string(body))
+	}
+}
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
@@ -1857,12 +2189,12 @@ func TestSessionHardPinReturns503EvenWithStickyEnabled(t *testing.T) {
 			)
 
 			headers := http.Header{
-				"Authorization":          []string{"Bearer operator-key"},
-				"X-MacProvider-Session":  []string{"nonexistent-session-id"},
+				"Authorization":         []string{"Bearer operator-key"},
+				"X-MacProvider-Session": []string{"nonexistent-session-id"},
 				// Even with a valid-looking conv: present, sticky must NOT activate
 				// when a hard-pin header is set. This is the C-1 regression vector.
 				"X-MacProvider-Internal-Conv": []string{"conv:should-not-be-used"},
-				"X-MacProvider-Account":  []string{"acct_test"},
+				"X-MacProvider-Account":       []string{"acct_test"},
 			}
 			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), headers)
 

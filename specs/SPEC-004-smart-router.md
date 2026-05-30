@@ -1,6 +1,6 @@
 # SPEC-004 — Smart Router
 
-**Version:** 0.2 (2026-05-30, audit-driven revision)
+**Version:** 0.3 (2026-05-30, dispatch-rewrite audit fix)
 **Extends:** SPEC-002 v1.3.3 § 5 (routing algorithm)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked), SPEC-003 v0.7, SPEC-006 v0.7 (Pillar A gated on SPEC-006 v0.8)
 
@@ -10,6 +10,12 @@ deterministic equal-metric tie-breaking, one-shot F-4 failover only, exact
 model ID routing, and no sticky affinity.
 
 ## Changelog
+
+### v0.3 (2026-05-30)
+
+- Adds FR-SR-7a after live deploy testing showed model-class aliases were
+  selected correctly but forwarded unchanged to providers instead of being
+  rewritten to the chosen provider's concrete model ID at dispatch time.
 
 ### v0.2 (2026-05-30)
 
@@ -260,6 +266,31 @@ unchanged and take precedence over class matching if an operator accidentally
 defines a class alias identical to a currently advertised concrete model ID.
 Operators SHOULD avoid such collisions; config validation SHOULD reject them
 when the concrete model is known at startup or first observed.
+
+**FR-SR-7a. Dispatch-time model field rewrite.** When a model-class alias
+resolves to a chosen provider (FR-SR-7 + FR-SR-8 selection), the coordinator
+MUST rewrite the `model` field of the request body forwarded to the provider
+from the buyer-supplied alias to the chosen provider's actual
+`pool.Provider.ModelID`. The provider never sees the alias — only concrete
+model IDs it has loaded. This MUST apply to every dispatch path (WS-tunneled
+streaming, WS-tunneled non-streaming, HTTP-forwarded streaming,
+HTTP-forwarded non-streaming). Exact concrete model ID requests are
+identity-rewritten (no-op when `req.Model == provider.ModelID`). The rewrite
+MUST preserve all other body fields verbatim (messages, max_tokens,
+temperature, stream, tools, anything else). It MUST happen AFTER selection
+(so failover/retry attempts to a different provider get the new chosen
+provider's concrete ID), NOT once at request entry.
+
+Test discipline: any test verifying class-alias routing MUST assert on the
+exact `model` field in the body delivered to the provider — not just the
+chosen provider identity. Inline mock relays that ignore the body field MUST
+NOT be the sole coverage. (See 2026-05-30 audit-gap notes.)
+
+Duplicate or non-canonical case variants of the top-level `model` member
+MUST be rejected before routing with `400 invalid_request`; for example,
+requests containing both `model` and `Model` are invalid. This prevents the
+coordinator from selecting on one parsed model while a provider or proxy with
+different JSON member handling observes another.
 
 **FR-SR-8. Model-class objectives.**
 Each class MUST define:
@@ -678,6 +709,9 @@ effective throughput and provider `B` has higher parameter count. A request for
 `model: "mlx-fast"` selects `A`; a request for `model: "mlx-accurate"` selects
 `B`; a request for the exact concrete model still uses SPEC-002 exact-ID
 routing and ignores class aliases.
+
+Class-alias routing tests MUST also assert that the body delivered to the
+provider contains the chosen provider's concrete model ID, not the alias.
 
 Configure `mlx-balanced` over a candidate set with known throughput, parameter
 count, context, and slot ratios. The test MUST compute the v0.2 normalized
