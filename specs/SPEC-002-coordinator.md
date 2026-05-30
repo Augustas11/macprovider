@@ -1,7 +1,11 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.3.1 (2026-05-30, Phase 7 P1 audit fixes)
+**Version:** 1.3.2 (2026-05-30, independent-audit fixes: breaker self-clear + token-reissue gate)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.3.2:**
+- Closes a HIGH finding from the independent Claude audit of the Phase 7 P1 set. The v1.3.1 hold rule only forbade a held provider from self-reporting `ready`, but a breaker/recovery-held provider could still escape by self-reporting `draining` (which cleared the hold via state cleanup) and then `ready`. FR-P11a now forbids a held provider's self-reported state from taking ANY value other than re-affirming `degraded`; only a fresh session (reconnect) or the coordinator recovery path clears a hold. Added a pool-layer regression test (`TestProviderCannotEscapeBreakerHoldViaDrainingLaundering`) that fails against the pre-fix code. The provider-path and coordinator-path state guards are now intentionally distinct (the coordinator may still drain a held provider).
+- Hardens **FR-P12 / PG-1** with a production launch gate: because v1.3.1 binds tokens to a `provider_id` subject and rejects empty-subject tokens, every token issued before v1.3.1 is invalid and MUST be re-issued (with `--provider-id`) before `require_provider_tokens` is flipped to `true` — otherwise pinned providers are silently rejected with `4005` (the 2026-05-28 audit-category-I outage class). No code change for this item; SPEC-001 v1.2.4 unaffected.
 
 **Change log v1.3.1:**
 - Tightens **FR-P8a** after audit: WS-tunneled providers are probed with the SPEC-001 `inference_request` path, while HTTP-forwarding providers are probed through their configured `/v1/chat/completions` HTTP endpoint and MUST NOT receive WS `inference_request` probes. A warm-up pass now requires both observed non-empty output and `usage.completion_tokens > 0`.
@@ -618,9 +622,15 @@ degradation in WS-tunneled mode** and supersedes FR-P20's former
   `unavailable` (removed until it reconnects with a fresh hello) instead of
   degrade-and-retry again. Generic `ready` transitions, including warm-up
   admission success and HTTP 502/504 recovery, MUST NOT create a breaker
-  re-trip anchor. Provider-originated heartbeat/state `ready` updates MUST NOT
-  clear a coordinator-owned breaker hold; only the coordinator recovery path
-  may return a held provider to `ready`.
+  re-trip anchor. Provider-originated state changes (heartbeat status or
+  `state_update`) MUST NOT clear or escape a coordinator-owned hold by ANY
+  value: while a hold for the active session is live, a provider's
+  self-reported state may only re-affirm `degraded`. In particular a held
+  provider MUST NOT be able to launder back to routable by self-reporting
+  `draining` (which would otherwise clear the hold) and then `ready`. Only a
+  fresh session (reconnect, which starts a new admission warm-up) or the
+  coordinator recovery path may clear a hold and return a held provider to
+  `ready`.
 - **No new wire messages:** routing exclusion, recovery preflight, and the
   observable fields it relies on (`usage.completion_tokens`, `finish_reason`,
   `inference_response_chunk` count) all already exist in SPEC-001 v1.2.4. The
@@ -662,6 +672,17 @@ The default `false` reflects the v1.1.2 tier-1 cooperative trust pool
 token store exists for opt-in hardening. Operators who add a token store
 SHOULD flip `require_provider_tokens` to `true` and re-issue tokens to
 all pinned providers as one deployment step.
+
+**Token re-issuance after `provider_id` binding (v1.3.1) — production
+gate.** As of v1.3.1 tokens carry a `provider_id` subject and validation
+MUST reject any token whose stored `provider_id` is empty. The schema
+migration backfills every pre-binding token with an empty `provider_id`,
+so **every token issued before v1.3.1 is now invalid and MUST be re-issued
+(with `--provider-id`) before `require_provider_tokens` is set to `true`.**
+Skipping this re-issuance reproduces the 2026-05-28 silent-`4005`
+`invalid_token` outage (audit category I): pinned providers are rejected
+at the WS handshake with no buyer-visible cause. Treat token re-issuance
+as a hard pre-flip launch gate (§ 7.7).
 
 **Implementation invariant:** every code path that depends on the token
 validator being configured MUST also handle the case where it is not.
@@ -2373,6 +2394,13 @@ public-buyer-facing service forwards requests to this coordinator,
 issued and registered in the token store. Provisional providers MAY
 continue without tokens per the provisional admission tier, but pinned
 providers serving public traffic MUST be token-authenticated.
+Those bearer tokens MUST be issued (or re-issued) **after** the v1.3.1
+`provider_id`-binding migration — any token created before v1.3.1 has an
+empty `provider_id` subject and will fail validation, so flipping the flag
+without re-issuance silently rejects every pinned provider with `4005`
+`invalid_token` (FR-P12; the 2026-05-28 audit-category-I outage class).
+Verify each pinned token authenticates a live WS handshake before exposing
+public buyer traffic.
 
 **PG-2: Pre-WS-upgrade rate limits MUST be enforced at the proxy
 layer.** The nginx or equivalent reverse proxy in front of the

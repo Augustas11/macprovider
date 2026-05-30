@@ -270,6 +270,12 @@ func (r *Registry) RecordBreakerFault(providerID, assignedID string, at time.Tim
 	return result
 }
 
+// canSetCoordinatorStateLocked guards COORDINATOR-initiated state changes
+// (admin drain/blacklist, warm-up, recovery). It is deliberately more
+// permissive than canApplyProviderStateLocked: the coordinator is trusted to
+// drain a held provider (the provider is then leaving the pool), so only the
+// `ready` promotion is gated by an active hold. Keep these two guards separate
+// — the provider-path one must stay strict (see canApplyProviderStateLocked).
 func (r *Registry) canSetCoordinatorStateLocked(p *Provider, next State) bool {
 	if next != StateReady {
 		return true
@@ -280,12 +286,25 @@ func (r *Registry) canSetCoordinatorStateLocked(p *Provider, next State) bool {
 	return p.State != StateUnavailable
 }
 
+// canApplyProviderStateLocked guards PROVIDER-originated state changes
+// (heartbeat status + state_update). It is intentionally STRICTER than the
+// coordinator-path guard (canSetCoordinatorStateLocked): while a
+// coordinator-owned recovery/breaker hold is live for this session, the
+// provider's own telemetry may ONLY re-affirm `degraded`. It must not be able
+// to launder itself back to routable by self-reporting an intermediate state.
+// Specifically, without this a faulting, breaker-held provider could escape
+// degradation by reporting `draining` and then `ready`. A hold is cleared only
+// by a fresh session (Register), a coordinator recovery (MarkRecovered), or the
+// provider becoming terminally `unavailable` / removed — never by a reversible
+// provider-reported transition such as `draining`. (drain_status routes through
+// the coordinator MarkState path; applyStateCleanupLocked no longer clears a
+// hold on `draining`, so that vector is closed at the cleanup boundary too.)
 func (r *Registry) canApplyProviderStateLocked(p *Provider, next State) bool {
+	if hold, ok := r.recoveryHolds[p.ProviderID]; ok && hold.assignedID == p.AssignedID {
+		return next == StateDegraded
+	}
 	if next != StateReady {
 		return true
-	}
-	if hold, ok := r.recoveryHolds[p.ProviderID]; ok && hold.assignedID == p.AssignedID {
-		return false
 	}
 	return p.State != StateUnavailable
 }
@@ -296,12 +315,23 @@ func (r *Registry) setStateLocked(p *Provider, next State) {
 }
 
 func (r *Registry) applyStateCleanupLocked(providerID string, next State) {
-	switch next {
-	case StateDraining, StateUnavailable:
-		delete(r.breakerFaults, providerID)
-		delete(r.recoveryHolds, providerID)
-		delete(r.lastBreakerRecoveries, providerID)
+	// Only a TERMINAL transition clears a coordinator-owned breaker/recovery
+	// hold. `draining` is deliberately NOT included: it is reversible and
+	// reachable from provider-controlled messages (state_update, heartbeat, and
+	// — via the coordinator path — drain_status), so clearing a hold on
+	// `draining` would let a faulting, held provider launder itself back to
+	// routable (draining clears the hold, then `ready`). A held provider that
+	// genuinely shuts down does so by disconnecting, which removes it (and its
+	// hold) via RemoveIfSession / RemoveIfSessionState below.
+	if next == StateUnavailable {
+		r.clearBreakerStateLocked(providerID)
 	}
+}
+
+func (r *Registry) clearBreakerStateLocked(providerID string) {
+	delete(r.breakerFaults, providerID)
+	delete(r.recoveryHolds, providerID)
+	delete(r.lastBreakerRecoveries, providerID)
 }
 
 func (r *Registry) Count() int {
@@ -423,6 +453,7 @@ func (r *Registry) RemoveIfSession(providerID, assignedID string) bool {
 	}
 	delete(r.providers, providerID)
 	delete(r.sessions, assignedID)
+	r.clearBreakerStateLocked(providerID)
 	return true
 }
 
@@ -435,6 +466,7 @@ func (r *Registry) RemoveIfSessionState(providerID, assignedID string, state Sta
 	}
 	delete(r.providers, providerID)
 	delete(r.sessions, assignedID)
+	r.clearBreakerStateLocked(providerID)
 	return true
 }
 
