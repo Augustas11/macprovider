@@ -458,26 +458,18 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return
 	}
-	authn, ok := s.authenticateAny(w, r)
+	authn, ok := s.requireBearer(w, r)
 	if !ok {
 		return
 	}
-	accountID := ""
-	if authn.Demo {
-		accountID = "demo:" + authn.DemoPayload.IP
-	} else {
-		accountID = authn.Bearer.AccountID
-	}
-	if !s.cfg.Routing.StickyEnabled {
-		writeJSON(w, http.StatusOK, map[string]any{"purged": true, "entries": 0})
-		return
-	}
+	accountID := authn.AccountID
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
 	upReq.Header.Set("X-Request-ID", requestID(r))
+	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
 	resp, err := s.client.Do(upReq)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -746,7 +738,7 @@ type tier1Disclosure struct {
 	ModelIdentity       string                    `json:"model_identity"`
 	HardwareAttestation string                    `json:"hardware_attestation"`
 	Tier2Milestone      string                    `json:"tier2_milestone"`
-	StickyAffinity      *stickyAffinityDisclosure `json:"sticky_affinity,omitempty"`
+	StickyAffinity      *stickyAffinityDisclosure `json:"sticky_affinity"`
 }
 
 type stickyAffinityDisclosure struct {
@@ -762,11 +754,15 @@ func (s *Server) makeTier1Disclosure() tier1Disclosure {
 		ModelIdentity:       "provider_reported",
 		HardwareAttestation: "none",
 		Tier2Milestone:      "future",
+		StickyAffinity: &stickyAffinityDisclosure{
+			Enabled: false, TTLSeconds: 0,
+			Description: "Sticky routing is not active.",
+		},
 	}
 	if s.cfg.Routing.StickyEnabled {
 		disclosure.StickyAffinity = &stickyAffinityDisclosure{
 			Enabled: true, TTLSeconds: s.cfg.Routing.StickyTTLS,
-			Description: "Authenticated conversation tags may be mapped to an internal coordinator affinity key.",
+			Description: "Related requests with the same conversation tag are preferentially routed to one provider for up to this many seconds, so that provider can observe and correlate more of your traffic than under default routing.",
 		}
 	}
 	return disclosure
@@ -890,16 +886,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	copyForwardHeaders(upReq.Header, r.Header)
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("X-Request-ID", requestID(r))
-	upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
-	if s.cfg.Routing.StickyEnabled {
+	if s.cfg.Routing.StickyEnabled && !authn.Demo {
 		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
 			if !validConversationTag(tag) {
 				_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
 				writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
 				return
 			}
+			upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
+			upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
 			upReq.Header.Set("X-MacProvider-Internal-Conv", s.deriveConversationKey(subject.AccountID, tag))
-			upReq.Header.Set("X-MacProvider-Internal-Source", "gateway")
 		}
 	}
 	resp, err := s.client.Do(upReq)
@@ -1059,11 +1055,12 @@ func validConversationTag(tag string) bool {
 }
 
 func (s *Server) deriveConversationKey(accountID, tag string) string {
+	const scope = "spec006-v0.8-sticky-conversation-v1"
 	mac := hmac.New(sha256.New, []byte(s.cfg.Auth.KeyHashSecret))
-	_, _ = mac.Write([]byte("sticky-v1"))
-	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(scope))
+	_, _ = mac.Write([]byte("\n"))
 	_, _ = mac.Write([]byte(accountID))
-	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte("\n"))
 	_, _ = mac.Write([]byte(tag))
 	return "conv:" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
@@ -1663,7 +1660,7 @@ func estimatePromptTokens(body []byte) int64 {
 
 func copyForwardHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if strings.EqualFold(key, "Authorization") || isBlockedBuyerForwardHeader(key) {
+		if isBlockedBuyerForwardHeader(key) {
 			continue
 		}
 		for _, value := range values {
@@ -1705,14 +1702,15 @@ func isInternalMacProviderHeader(key string) bool {
 }
 
 func isBlockedBuyerForwardHeader(key string) bool {
-	if isInternalMacProviderHeader(key) {
-		return true
+	lower := strings.ToLower(key)
+	if lower == "x-macprovider-retry" {
+		return false
 	}
-	switch strings.ToLower(key) {
-	case "x-macprovider-provider", "x-macprovider-session", "x-macprovider-pref", "x-macprovider-route", "x-macprovider-conversation":
+	switch lower {
+	case "authorization", "proxy-authorization", "cookie", "x-demo-token":
 		return true
 	default:
-		return false
+		return strings.HasPrefix(lower, "x-macprovider-")
 	}
 }
 

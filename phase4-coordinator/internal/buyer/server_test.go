@@ -318,6 +318,44 @@ func TestChatCompletionsRelaysStreamingSSE(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsRetrySelectsDifferentStreamingProviderBeforeCommit(t *testing.T) {
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer failUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer okUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 10)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 2, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		MaxRetries:              1,
+		RetryPerAttemptTimeoutS: 1,
+		StickyTTLS:              1800,
+		StickyMaxEntries:        10000,
+	}))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider=%q, want ok", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"ok"`)) {
+		t.Fatalf("body=%s", rr.Body.String())
+	}
+}
+
 func TestChatCompletionsRoutingPreferences(t *testing.T) {
 	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
@@ -412,7 +450,7 @@ func TestChatCompletionsRetrySelectsDifferentProvider(t *testing.T) {
 		StickyMaxEntries:        10000,
 	}))
 
-	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{"X-MacProvider-Retry": []string{"true"}})
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
@@ -420,8 +458,162 @@ func TestChatCompletionsRetrySelectsDifferentProvider(t *testing.T) {
 	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
 		t.Fatalf("provider = %q, want ok", rr.Header().Get("X-MacProvider-Provider"))
 	}
-	if rr.Header().Get("X-MacProvider-Retried") != "1" {
-		t.Fatalf("retried = %q, want 1", rr.Header().Get("X-MacProvider-Retried"))
+	if rr.Header().Get("X-MacProvider-Retried") != "" {
+		t.Fatalf("retry count leaked to buyer response: %q", rr.Header().Get("X-MacProvider-Retried"))
+	}
+}
+
+func TestChatCompletionsDefaultOffUsesRequestTimeoutNotRetryTimeout(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(1100 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"id":"slow-ok","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		MaxRetries:              0,
+		RetryPerAttemptTimeoutS: 1,
+		StickyTTLS:              1800,
+		StickyMaxEntries:        10000,
+	}))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestChatCompletionsDefaultOffKeepsProvider504ErrorShape(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusGatewayTimeout)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		MaxRetries:              0,
+		RetryPerAttemptTimeoutS: 1,
+		StickyTTLS:              1800,
+		StickyMaxEntries:        10000,
+	}))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_error"`)) {
+		t.Fatalf("body=%s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsRejectsSpoofedInternalRoutingHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+	)
+
+	headers := http.Header{
+		"X-MacProvider-Internal-Conv": []string{"conv:attacker"},
+		"X-MacProvider-Account":       []string{"acct_attacker"},
+	}
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), headers)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	headers.Set("Authorization", "Bearer operator-key")
+	rr = postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("authorized status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestInternalStickyDeleteRequiresBearer(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithInternalAuthKey("operator-key"))
+
+	req := httptest.NewRequest(http.MethodDelete, "/internal/sticky?account_id=acct_1", nil)
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/internal/sticky?account_id=acct_1", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	rr = httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("authorized status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestStickyAffinityDoesNotOverrideOutsideObjectiveEpsilon(t *testing.T) {
+	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
+	}))
+	defer slowUpstream.Close()
+	fastUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"fast","choices":[{"message":{"content":"fast"}}]}`))
+	}))
+	defer fastUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "slow", EndpointURL: slowUpstream.URL},
+		{ProviderID: "fast", EndpointURL: fastUpstream.URL},
+	})
+	registerWithEndpoint(registry, "slow", "s1", "model-a", pool.StateReady, 20000, 1, slowUpstream.URL, 10)
+	registerWithEndpoint(registry, "fast", "s2", "model-a", pool.StateReady, 20000, 2, fastUpstream.URL, 100)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:           true,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+			TiebreakEpsilon:         0.10,
+			RetryPerAttemptTimeoutS: 1,
+			ModelClasses: map[string]config.ModelClassConfig{
+				"fast-class": {Models: []string{"model-a"}, Objective: "fast"},
+			},
+		}),
+	)
+	headers := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:sticky-epsilon"},
+		"X-MacProvider-Account":       []string{"acct_1"},
+	}
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("seed status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "slow" {
+		t.Fatalf("seed provider=%q, want slow", rr.Header().Get("X-MacProvider-Provider"))
+	}
+
+	rr = postChat(t, server, []byte(`{"model":"fast-class","messages":[{"role":"user","content":"hello"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("class status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "fast" {
+		t.Fatalf("class provider=%q, want fast", rr.Header().Get("X-MacProvider-Provider"))
 	}
 }
 
@@ -604,6 +796,87 @@ func TestChatCompletionsWSTunneledTimeoutReturns504(t *testing.T) {
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_timeout"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsRetryMovesOffTimedOutWSTunnel(t *testing.T) {
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer okUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "ok", EndpointURL: okUpstream.URL}})
+	registerWithPath(registry, "ws", "s1", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 2, okUpstream.URL, 20)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error, 1)
+			errs <- providerws.ErrRelayTimeout
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, 5*time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider=%q, want ok", rr.Header().Get("X-MacProvider-Provider"))
+	}
+}
+
+func TestChatCompletionsRetryMovesOffTimedOutStreamingWSTunnel(t *testing.T) {
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer okUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "ok", EndpointURL: okUpstream.URL}})
+	registerWithPath(registry, "ws", "s1", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 2, okUpstream.URL, 20)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error, 1)
+			errs <- providerws.ErrRelayTimeout
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, 5*time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider=%q, want ok", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"ok"`)) {
+		t.Fatalf("body=%s", rr.Body.String())
 	}
 }
 

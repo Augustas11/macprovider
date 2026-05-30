@@ -74,6 +74,7 @@ type RoutingConfig struct {
 
 type ModelClassConfig struct {
 	Members   []string `yaml:"members"`
+	Models    []string `yaml:"models"`
 	Objective string   `yaml:"objective"`
 }
 
@@ -149,7 +150,7 @@ func Default() Config {
 		Routing: RoutingConfig{
 			PreflightThresholdTokens:      4096,
 			PreflightTimeoutS:             5,
-			RequestTimeoutS:               300,
+			RequestTimeoutS:               280,
 			FailoverEnabled:               true,
 			FailoverTimeoutS:              5,
 			TiebreakRandomize:             false,
@@ -267,8 +268,11 @@ func (c Config) Validate() error {
 		default:
 			return fmt.Errorf("routing.model_classes.%s.objective must be fast, balanced, or accurate", name)
 		}
-		if len(class.Members) == 0 {
-			return fmt.Errorf("routing.model_classes.%s.members must not be empty", name)
+		if len(class.Members) == 0 && len(class.Models) == 0 {
+			return fmt.Errorf("routing.model_classes.%s.models must not be empty", name)
+		}
+		if len(class.Members) > 0 && len(class.Models) > 0 {
+			return fmt.Errorf("routing.model_classes.%s must not set both members and models", name)
 		}
 	}
 	if c.Pool.DegradedBackoffS <= 0 || c.Pool.DegradedMaxRetries <= 0 {

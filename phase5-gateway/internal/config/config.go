@@ -264,6 +264,9 @@ func (c Config) Validate() error {
 	if c.Auth.KeyHash == "hmac_sha256" && c.Auth.KeyHashSecret == "" {
 		return fmt.Errorf("auth.key_hash_secret must be set when auth.key_hash is hmac_sha256")
 	}
+	if c.Routing.StickyEnabled && c.Auth.KeyHashSecret == "" {
+		return fmt.Errorf("auth.key_hash_secret must be set when routing.sticky_enabled is true")
+	}
 	if c.Auth.Demo.SigningSecret == "" {
 		return fmt.Errorf("auth.demo.signing_secret must be set")
 	}
