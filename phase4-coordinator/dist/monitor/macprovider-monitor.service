@@ -1,0 +1,10 @@
+[Unit]
+Description=Mac Provider observability monitor (Phase 7 P2)
+After=network-online.target macprovider-coordinator.service
+Documentation=https://github.com/Augustas11/macprovider/blob/main/specs/PHASE7_HARDENING_PLAN.md
+
+[Service]
+Type=oneshot
+User=root
+Nice=10
+ExecStart=/usr/bin/python3 /opt/macprovider/monitor.py

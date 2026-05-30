@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+"""macprovider-monitor — lightweight Pearl-side observability (Phase 7 P2).
+
+Polls the coordinator + gateway loopback endpoints and emits an alert on
+STATE TRANSITIONS only (not every poll), so automated provider-removal
+(circuit-breaker degrade, warm-up-gate failure) and pool-empty / service-down
+conditions surface without a human SSHing into journals.
+
+Zero provider load: it reads /healthz, /poolz, /v1/status only — it does NOT
+send inference. (A synthetic canary can be added later if desired.)
+
+Alerts go to stdout (captured by journald) ALWAYS, and to email if
+/etc/macprovider/monitor.env provides Gmail submission creds. Run on a
+systemd timer (see macprovider-monitor.timer), e.g. every 3 minutes.
+
+Config (/etc/macprovider/monitor.env, optional, KEY=VALUE lines):
+  ALERT_EMAIL=augstar@gmail.com
+  GMAIL_USER=augstar@gmail.com
+  GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx   # 16-char Google app password (2FA)
+"""
+
+import json
+import os
+import re
+import smtplib
+import socket
+import sys
+import urllib.request
+from email.message import EmailMessage
+
+COORD_YAML = "/opt/macprovider/coordinator.yaml"
+ENV_FILE = "/etc/macprovider/monitor.env"
+STATE_FILE = "/var/lib/macprovider/monitor-state.json"
+HEALTHZ = "http://127.0.0.1:8444/healthz"
+POOLZ = "http://127.0.0.1:8444/poolz"
+GW_STATUS = "http://127.0.0.1:9443/v1/status"
+TIMEOUT = 8
+HOST = socket.gethostname()
+
+
+def load_env(path):
+    env = {}
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                env[k.strip()] = v.strip()
+    except FileNotFoundError:
+        pass
+    return env
+
+
+def operator_key():
+    try:
+        with open(COORD_YAML) as f:
+            m = re.search(r'operator_key:\s*"?([^"\n]+)', f.read())
+            return m.group(1).strip() if m else ""
+    except FileNotFoundError:
+        return ""
+
+
+def get_json(url, bearer=None):
+    req = urllib.request.Request(url)
+    if bearer:
+        req.add_header("Authorization", "Bearer " + bearer)
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
+        return json.load(r)
+
+
+def load_state():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def save_state(state):
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f)
+    os.replace(tmp, STATE_FILE)
+
+
+def main():
+    env = load_env(ENV_FILE)
+    alerts = []  # (severity, message)
+
+    # --- coordinator health + pool ---
+    coord_up = True
+    pool = {}
+    try:
+        h = get_json(HEALTHZ)
+        ready = h.get("pool_ready", 0)
+    except Exception as e:  # noqa: BLE001
+        coord_up = False
+        alerts.append(("CRITICAL", f"coordinator /healthz unreachable: {e}"))
+        ready = None
+
+    if coord_up:
+        try:
+            pz = get_json(POOLZ, bearer=operator_key())
+            for p in pz.get("pool", []):
+                pool[p["provider_id"]] = p.get("state", "?")
+            ready = pz.get("summary", {}).get("ready", ready)
+        except Exception as e:  # noqa: BLE001
+            alerts.append(("WARN", f"/poolz read failed: {e}"))
+
+    # --- gateway status ---
+    gw_up = True
+    gw_status = None
+    try:
+        s = get_json(GW_STATUS)
+        gw_status = s.get("status")
+    except Exception as e:  # noqa: BLE001
+        gw_up = False
+        alerts.append(("CRITICAL", f"gateway /v1/status unreachable: {e}"))
+
+    # --- transition detection vs last poll ---
+    prev = load_state()
+    prev_pool = prev.get("pool", {})
+    prev_ready = prev.get("ready")
+    prev_coord_up = prev.get("coord_up", True)
+    prev_gw_status = prev.get("gw_status")
+
+    # pool emptied (idle)
+    if coord_up and ready == 0 and prev_ready != 0:
+        alerts.append(("CRITICAL", "pool has 0 ready providers (idle) — no buyer capacity"))
+    elif coord_up and ready and prev_ready == 0:
+        alerts.append(("INFO", f"pool recovered: {ready} ready provider(s)"))
+
+    # per-provider state transitions (breaker / warm-up-gate / disconnect)
+    for pid, st in pool.items():
+        was = prev_pool.get(pid)
+        if was == st:
+            continue
+        if st == "unavailable":
+            alerts.append(("WARN", f"provider {pid} -> unavailable (breaker re-trip / warmup_failed / removed)"))
+        elif st == "degraded":
+            alerts.append(("WARN", f"provider {pid} -> degraded (breaker trip / warm-up hold / recovery)"))
+        elif st == "ready" and was in ("degraded", "unavailable"):
+            alerts.append(("INFO", f"provider {pid} recovered -> ready"))
+    for pid, was in prev_pool.items():
+        if pid not in pool and was != "unavailable":
+            alerts.append(("WARN", f"provider {pid} dropped from pool (was {was})"))
+
+    # service up/down transitions
+    if not coord_up and prev_coord_up:
+        pass  # already alerted above
+    elif coord_up and not prev_coord_up:
+        alerts.append(("INFO", "coordinator recovered"))
+    if gw_up and gw_status != prev_gw_status and gw_status in ("idle", "degraded", "down"):
+        alerts.append(("WARN", f"gateway status -> {gw_status}"))
+
+    # --- emit alerts ---
+    for sev, msg in alerts:
+        print(f"[{sev}] {msg}", flush=True)
+    if alerts:
+        send_email(env, alerts)
+
+    save_state({
+        "pool": pool,
+        "ready": ready,
+        "coord_up": coord_up,
+        "gw_status": gw_status,
+    })
+    return 0
+
+
+def send_email(env, alerts):
+    user = env.get("GMAIL_USER")
+    pw = env.get("GMAIL_APP_PASSWORD")
+    to = env.get("ALERT_EMAIL")
+    if not (user and pw and to):
+        print("[INFO] email not configured (set GMAIL_* in /etc/macprovider/monitor.env) — journal-only", flush=True)
+        return
+    worst = "CRITICAL" if any(s == "CRITICAL" for s, _ in alerts) else "WARN"
+    body = "\n".join(f"[{s}] {m}" for s, m in alerts)
+    msg = EmailMessage()
+    msg["From"] = user
+    msg["To"] = to
+    msg["Subject"] = f"[macprovider {worst}] {HOST}: {alerts[0][1][:60]}"
+    msg.set_content(f"macprovider monitor on {HOST}\n\n{body}\n")
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=TIMEOUT) as smtp:
+            smtp.starttls()
+            smtp.login(user, pw)
+            smtp.send_message(msg)
+        print(f"[INFO] emailed {len(alerts)} alert(s) to {to}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[WARN] email send failed: {e}", flush=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
