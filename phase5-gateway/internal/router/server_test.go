@@ -582,6 +582,67 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	}
 }
 
+func TestStickyConversationDerivesInternalHeaderAndStripsInjection(t *testing.T) {
+	var captured http.Header
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		captured = r.Header.Clone()
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Routing.StickyEnabled = true
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_sticky")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-MacProvider-Conversation", "thread-1")
+	req.Header.Set("X-MacProvider-Internal-Conv", "conv:attacker")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	got := captured.Get("X-MacProvider-Internal-Conv")
+	if !strings.HasPrefix(got, "conv:") || got == "conv:attacker" {
+		t.Fatalf("internal conversation key = %q", got)
+	}
+	if captured.Get("X-MacProvider-Internal-Source") != "gateway" {
+		t.Fatalf("internal source = %q, want gateway", captured.Get("X-MacProvider-Internal-Source"))
+	}
+	if countAuditEvents(t, dbPath, "internal_header_injection_stripped") != 1 {
+		t.Fatalf("internal header injection audit missing")
+	}
+}
+
+func TestStickyConversationIgnoredWhenDisabled(t *testing.T) {
+	var captured http.Header
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		captured = r.Header.Clone()
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Routing.StickyEnabled = false
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_sticky_disabled")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("X-MacProvider-Conversation", "bad tag with spaces")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := captured.Get("X-MacProvider-Internal-Conv"); got != "" {
+		t.Fatalf("internal conversation forwarded while disabled: %q", got)
+	}
+}
+
 func TestQuotaSettlement504ZeroCompletion(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return responseWithBody(http.StatusGatewayTimeout, http.Header{

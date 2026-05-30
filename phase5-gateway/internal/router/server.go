@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -106,6 +108,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/models", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleModels)))
 	mux.HandleFunc("/v1/usage", s.handleUsage)
 	mux.Handle("/v1/chat/completions", s.withCORS(http.MethodPost, http.HandlerFunc(s.handleChatCompletions)))
+	mux.Handle("/v1/sticky", s.withCORS(http.MethodDelete, http.HandlerFunc(s.handleStickyDelete)))
 	mux.Handle("/v1/status", s.withCORS(http.MethodGet, http.HandlerFunc(s.handleStatus)))
 	mux.HandleFunc("/v1/feedback", s.handleFeedback)
 	mux.HandleFunc("/healthz", s.handleHealthz)
@@ -123,7 +126,13 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		if !isUUIDLike(requestID) {
 			requestID = newUUID()
 		}
-		stripMacProviderHeaders(r.Header)
+		if stripped := stripInternalMacProviderHeaders(r.Header); len(stripped) > 0 {
+			slog.Warn("internal header injection stripped", "request_id", requestID, "headers", stripped)
+			_ = s.store.InsertAuditEvent(context.Background(), storage.AuditEvent{
+				EventID: mustID("audit"), RequestID: requestID, Actor: "public_ingress", Type: "internal_header_injection_stripped",
+				Payload: fmt.Sprintf(`{"headers":%q}`, strings.Join(stripped, ",")), CreatedAt: s.now(),
+			})
+		}
 		w.Header().Set("X-Request-ID", requestID)
 		if s.publicPaused(r.URL.Path) {
 			writeError(w, http.StatusServiceUnavailable, "server_error", "public_api_paused", "Mac Provider beta is paused while capacity catches up. Please retry later.")
@@ -444,6 +453,49 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodDelete {
+		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
+		return
+	}
+	authn, ok := s.authenticateAny(w, r)
+	if !ok {
+		return
+	}
+	accountID := ""
+	if authn.Demo {
+		accountID = "demo:" + authn.DemoPayload.IP
+	} else {
+		accountID = authn.Bearer.AccountID
+	}
+	if !s.cfg.Routing.StickyEnabled {
+		writeJSON(w, http.StatusOK, map[string]any{"purged": true, "entries": 0})
+		return
+	}
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
+		return
+	}
+	upReq.Header.Set("X-Request-ID", requestID(r))
+	resp, err := s.client.Do(upReq)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		writeError(w, http.StatusBadGateway, "api_error", "coordinator_sticky_error", "Coordinator sticky purge error")
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		writeError(w, http.StatusBadGateway, "api_error", "coordinator_sticky_error", "Coordinator sticky purge error")
+		return
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
@@ -689,21 +741,35 @@ type tokenUsage struct {
 }
 
 type tier1Disclosure struct {
-	Version             string `json:"version"`
-	PlaintextToProvider bool   `json:"plaintext_to_provider"`
-	ModelIdentity       string `json:"model_identity"`
-	HardwareAttestation string `json:"hardware_attestation"`
-	Tier2Milestone      string `json:"tier2_milestone"`
+	Version             string                    `json:"version"`
+	PlaintextToProvider bool                      `json:"plaintext_to_provider"`
+	ModelIdentity       string                    `json:"model_identity"`
+	HardwareAttestation string                    `json:"hardware_attestation"`
+	Tier2Milestone      string                    `json:"tier2_milestone"`
+	StickyAffinity      *stickyAffinityDisclosure `json:"sticky_affinity,omitempty"`
+}
+
+type stickyAffinityDisclosure struct {
+	Enabled     bool   `json:"enabled"`
+	TTLSeconds  int    `json:"ttl_seconds"`
+	Description string `json:"description"`
 }
 
 func (s *Server) makeTier1Disclosure() tier1Disclosure {
-	return tier1Disclosure{
+	disclosure := tier1Disclosure{
 		Version:             "v0.6",
 		PlaintextToProvider: true,
 		ModelIdentity:       "provider_reported",
 		HardwareAttestation: "none",
 		Tier2Milestone:      "future",
 	}
+	if s.cfg.Routing.StickyEnabled {
+		disclosure.StickyAffinity = &stickyAffinityDisclosure{
+			Enabled: true, TTLSeconds: s.cfg.Routing.StickyTTLS,
+			Description: "Authenticated conversation tags may be mapped to an internal coordinator affinity key.",
+		}
+	}
+	return disclosure
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -824,6 +890,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	copyForwardHeaders(upReq.Header, r.Header)
 	upReq.Header.Set("Content-Type", "application/json")
 	upReq.Header.Set("X-Request-ID", requestID(r))
+	upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
+	if s.cfg.Routing.StickyEnabled {
+		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
+			if !validConversationTag(tag) {
+				_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+				writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
+				return
+			}
+			upReq.Header.Set("X-MacProvider-Internal-Conv", s.deriveConversationKey(subject.AccountID, tag))
+			upReq.Header.Set("X-MacProvider-Internal-Source", "gateway")
+		}
+	}
 	resp, err := s.client.Do(upReq)
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
@@ -960,6 +1038,34 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted int64, cancelCoordinator func()) {
 	cancelCoordinator()
 	_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "client_disconnect")
+}
+
+func validConversationTag(tag string) bool {
+	if len(tag) < 1 || len(tag) > 128 || strings.TrimSpace(tag) != tag {
+		return false
+	}
+	for _, r := range tag {
+		if r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '.', '_', ':', '-':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) deriveConversationKey(accountID, tag string) string {
+	mac := hmac.New(sha256.New, []byte(s.cfg.Auth.KeyHashSecret))
+	_, _ = mac.Write([]byte("sticky-v1"))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(accountID))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(tag))
+	return "conv:" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
 func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, completion int64, source, outcome string) error {
@@ -1557,7 +1663,7 @@ func estimatePromptTokens(body []byte) int64 {
 
 func copyForwardHeaders(dst, src http.Header) {
 	for key, values := range src {
-		if strings.EqualFold(key, "Authorization") || isMacProviderHeader(key) {
+		if strings.EqualFold(key, "Authorization") || isBlockedBuyerForwardHeader(key) {
 			continue
 		}
 		for _, value := range values {
@@ -1577,16 +1683,37 @@ func copyCleanHeaders(dst, src http.Header) {
 	}
 }
 
-func stripMacProviderHeaders(header http.Header) {
+func stripInternalMacProviderHeaders(header http.Header) []string {
+	var stripped []string
 	for key := range header {
-		if isMacProviderHeader(key) {
+		if isInternalMacProviderHeader(key) {
+			stripped = append(stripped, key)
 			header.Del(key)
 		}
 	}
+	sort.Strings(stripped)
+	return stripped
 }
 
 func isMacProviderHeader(key string) bool {
 	return strings.HasPrefix(strings.ToLower(key), "x-macprovider-")
+}
+
+func isInternalMacProviderHeader(key string) bool {
+	lower := strings.ToLower(key)
+	return lower == "x-macprovider-internal-conv" || strings.HasPrefix(lower, "x-macprovider-internal-")
+}
+
+func isBlockedBuyerForwardHeader(key string) bool {
+	if isInternalMacProviderHeader(key) {
+		return true
+	}
+	switch strings.ToLower(key) {
+	case "x-macprovider-provider", "x-macprovider-session", "x-macprovider-pref", "x-macprovider-route", "x-macprovider-conversation":
+		return true
+	default:
+		return false
+	}
 }
 
 func contentTypeOrJSON(header http.Header) string {

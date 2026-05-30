@@ -734,4 +734,30 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   by SPEC-006 status aggregation.</p>
 </div>
 </section>
+<section><h2>SPEC-004 Smart Router Implementation</h2>
+<p class=meta>2026-05-30 default-off coordinator routing extensions.</p>
+<div class="entry">
+  <time>2026-05-30</time>
+  <p>Added default-off SPEC-004 routing controls for randomized
+  epsilon tie-breaks, model-class aliases, coordinator-managed retries,
+  and sticky affinity. Exact model routing remains the default path when
+  <code>routing.model_classes</code> is empty,
+  <code>routing.max_retries</code> is zero,
+  <code>routing.tiebreak_randomize</code> is false, and
+  <code>routing.sticky_enabled</code> is false.</p>
+  <p>Pillar A purge is exposed as
+  <code>DELETE /internal/sticky?account_id=&lt;id&gt;</code> on the
+  coordinator HTTP handler and is loopback-gated. The gateway's
+  authenticated <code>DELETE /v1/sticky</code> is account-scoped and
+  calls that endpoint. Sticky entries are in-memory, TTL-bound, guarded by
+  a mutex, capped by LRU-style eviction, and updated only after an HTTP
+  coordinator request commits successfully to the final provider.</p>
+  <p>Gateway-derived conversation keys use the existing
+  <code>auth.key_hash_secret</code> material with an HMAC-SHA256
+  namespace over sticky scope, account ID, and buyer tag. Buyer-supplied
+  <code>X-MacProvider-Internal-*</code> headers are stripped before auth
+  and audit-logged; the gateway forwards only its derived
+  <code>X-MacProvider-Internal-Conv</code> plus an internal source marker.</p>
+</div>
+</section>
 </body></html>

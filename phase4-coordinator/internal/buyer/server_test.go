@@ -354,6 +354,77 @@ func TestChatCompletionsRoutingPreferences(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsRoutesModelClassByObjective(t *testing.T) {
+	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
+	}))
+	defer slowUpstream.Close()
+	fastUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"fast","choices":[{"message":{"content":"fast"}}]}`))
+	}))
+	defer fastUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "slow", EndpointURL: slowUpstream.URL},
+		{ProviderID: "fast", EndpointURL: fastUpstream.URL},
+	})
+	registerWithEndpoint(registry, "slow", "s1", "model-slow", pool.StateReady, 20000, 1, slowUpstream.URL, 10)
+	registerWithEndpoint(registry, "fast", "s2", "model-fast", pool.StateReady, 20000, 1, fastUpstream.URL, 30)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		RetryPerAttemptTimeoutS: 60,
+		StickyTTLS:              1800,
+		StickyMaxEntries:        10000,
+		ModelClasses: map[string]config.ModelClassConfig{
+			"mlx-fast": {Members: []string{"model-slow", "model-fast"}, Objective: "fast"},
+		},
+	}))
+
+	rr := postChat(t, server, []byte(`{"model":"mlx-fast","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "fast" {
+		t.Fatalf("provider = %q, want fast", rr.Header().Get("X-MacProvider-Provider"))
+	}
+}
+
+func TestChatCompletionsRetrySelectsDifferentProvider(t *testing.T) {
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer failUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer okUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 20)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		MaxRetries:              1,
+		RetryPerAttemptTimeoutS: 1,
+		StickyTTLS:              1800,
+		StickyMaxEntries:        10000,
+	}))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{"X-MacProvider-Retry": []string{"true"}})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider = %q, want ok", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if rr.Header().Get("X-MacProvider-Retried") != "1" {
+		t.Fatalf("retried = %q, want 1", rr.Header().Get("X-MacProvider-Retried"))
+	}
+}
+
 func TestChatCompletionsPreflightSkipsRejectedCandidate(t *testing.T) {
 	rejectedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Fatal("rejected provider should not receive request")

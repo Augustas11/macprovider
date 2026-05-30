@@ -38,6 +38,15 @@ routing:
   request_timeout_s: 280
   failover_enabled: true
   failover_timeout_s: 5
+  tiebreak_randomize: false
+  tiebreak_epsilon: 0.0
+  max_retries: 0
+  retry_per_attempt_timeout_s: 60
+  max_providers_faulted_per_request: 0
+  sticky_enabled: false
+  sticky_ttl_s: 1800
+  sticky_max_entries: 10000
+  model_classes: {}
 
 auth:
   # 64 hex chars (256 bits). Generated with: openssl rand -hex 32
