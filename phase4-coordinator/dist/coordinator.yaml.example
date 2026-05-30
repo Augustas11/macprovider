@@ -31,7 +31,11 @@ pool:
 routing:
   preflight_threshold_tokens: 4096
   preflight_timeout_s: 5
-  request_timeout_s: 300
+  # C2 (SPEC-002 FR-P11a): keep STRICTLY BELOW the gateway's
+  # timeouts.coordinator_request_seconds (default 300) so the coordinator's
+  # relay-timeout fires first and is provider-attributable. check-deploy-config.sh
+  # warns if this ordering is violated.
+  request_timeout_s: 280
   failover_enabled: true
   failover_timeout_s: 5
 
