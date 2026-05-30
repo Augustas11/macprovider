@@ -25,9 +25,19 @@ pool:
 routing:
   preflight_threshold_tokens: 4096
   preflight_timeout_s: 5
-  request_timeout_s: 300
+  request_timeout_s: 280
   failover_enabled: true
   failover_timeout_s: 5
+  tiebreak_randomize: false
+  tiebreak_epsilon: 0.0
+  max_retries: 0
+  retry_per_attempt_timeout_s: 60
+  # 0 = auto-derive at runtime: min(2, max_retries). NOT "unbounded".
+  max_providers_faulted_per_request: 0
+  sticky_enabled: false
+  sticky_ttl_s: 1800
+  sticky_max_entries: 10000
+  model_classes: {}
 
 ws:
   write_buffer_size: 64

@@ -40,6 +40,18 @@ func TestQuotaReaperConfigValidation(t *testing.T) {
 	}
 }
 
+func TestStickyRequiresKeyHashSecret(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Auth.KeyHash = "sha256"
+	cfg.Auth.KeyHashSecret = ""
+	cfg.Routing.StickyEnabled = true
+
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "auth.key_hash_secret must be set when routing.sticky_enabled is true") {
+		t.Fatalf("Validate error=%v", err)
+	}
+}
+
 func validTestConfig() Config {
 	cfg := Default()
 	cfg.Coordinator.OperatorKey = "operator-key"

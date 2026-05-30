@@ -56,11 +56,26 @@ type PoolConfig struct {
 }
 
 type RoutingConfig struct {
-	PreflightThresholdTokens int  `yaml:"preflight_threshold_tokens"`
-	PreflightTimeoutS        int  `yaml:"preflight_timeout_s"`
-	RequestTimeoutS          int  `yaml:"request_timeout_s"`
-	FailoverEnabled          bool `yaml:"failover_enabled"`
-	FailoverTimeoutS         int  `yaml:"failover_timeout_s"`
+	PreflightThresholdTokens      int                         `yaml:"preflight_threshold_tokens"`
+	PreflightTimeoutS             int                         `yaml:"preflight_timeout_s"`
+	RequestTimeoutS               int                         `yaml:"request_timeout_s"`
+	FailoverEnabled               bool                        `yaml:"failover_enabled"`
+	FailoverTimeoutS              int                         `yaml:"failover_timeout_s"`
+	TiebreakRandomize             bool                        `yaml:"tiebreak_randomize"`
+	TiebreakEpsilon               float64                     `yaml:"tiebreak_epsilon"`
+	MaxRetries                    int                         `yaml:"max_retries"`
+	RetryPerAttemptTimeoutS       int                         `yaml:"retry_per_attempt_timeout_s"`
+	MaxProvidersFaultedPerRequest int                         `yaml:"max_providers_faulted_per_request"`
+	StickyEnabled                 bool                        `yaml:"sticky_enabled"`
+	StickyTTLS                    int                         `yaml:"sticky_ttl_s"`
+	StickyMaxEntries              int                         `yaml:"sticky_max_entries"`
+	ModelClasses                  map[string]ModelClassConfig `yaml:"model_classes"`
+}
+
+type ModelClassConfig struct {
+	Members   []string `yaml:"members"`
+	Models    []string `yaml:"models"`
+	Objective string   `yaml:"objective"`
 }
 
 type WSConfig struct {
@@ -133,11 +148,20 @@ func Default() Config {
 			BreakerWindowS:          120,
 		},
 		Routing: RoutingConfig{
-			PreflightThresholdTokens: 4096,
-			PreflightTimeoutS:        5,
-			RequestTimeoutS:          300,
-			FailoverEnabled:          true,
-			FailoverTimeoutS:         5,
+			PreflightThresholdTokens:      4096,
+			PreflightTimeoutS:             5,
+			RequestTimeoutS:               280,
+			FailoverEnabled:               true,
+			FailoverTimeoutS:              5,
+			TiebreakRandomize:             false,
+			TiebreakEpsilon:               0,
+			MaxRetries:                    0,
+			RetryPerAttemptTimeoutS:       60,
+			MaxProvidersFaultedPerRequest: 0,
+			StickyEnabled:                 false,
+			StickyTTLS:                    1800,
+			StickyMaxEntries:              10000,
+			ModelClasses:                  map[string]ModelClassConfig{},
 		},
 		WS: WSConfig{
 			WriteBufferSize: 64,
@@ -219,6 +243,37 @@ func (c Config) Validate() error {
 	}
 	if c.Routing.PreflightTimeoutS <= 0 || c.Routing.RequestTimeoutS <= 0 || c.Routing.FailoverTimeoutS <= 0 {
 		return fmt.Errorf("routing timeouts must be > 0")
+	}
+	if c.Routing.TiebreakEpsilon < 0 {
+		return fmt.Errorf("routing.tiebreak_epsilon must be >= 0")
+	}
+	if c.Routing.MaxRetries < 0 {
+		return fmt.Errorf("routing.max_retries must be >= 0")
+	}
+	if c.Routing.RetryPerAttemptTimeoutS <= 0 {
+		return fmt.Errorf("routing.retry_per_attempt_timeout_s must be > 0")
+	}
+	if c.Routing.MaxProvidersFaultedPerRequest < 0 {
+		return fmt.Errorf("routing.max_providers_faulted_per_request must be >= 0")
+	}
+	if c.Routing.StickyTTLS <= 0 || c.Routing.StickyMaxEntries <= 0 {
+		return fmt.Errorf("routing sticky settings must be > 0")
+	}
+	for name, class := range c.Routing.ModelClasses {
+		if name == "" {
+			return fmt.Errorf("routing.model_classes name must not be empty")
+		}
+		switch class.Objective {
+		case "fast", "balanced", "accurate":
+		default:
+			return fmt.Errorf("routing.model_classes.%s.objective must be fast, balanced, or accurate", name)
+		}
+		if len(class.Members) == 0 && len(class.Models) == 0 {
+			return fmt.Errorf("routing.model_classes.%s.models must not be empty", name)
+		}
+		if len(class.Members) > 0 && len(class.Models) > 0 {
+			return fmt.Errorf("routing.model_classes.%s must not set both members and models", name)
+		}
 	}
 	if c.Pool.DegradedBackoffS <= 0 || c.Pool.DegradedMaxRetries <= 0 {
 		return fmt.Errorf("pool degraded recovery settings must be > 0")

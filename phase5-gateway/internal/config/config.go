@@ -23,6 +23,7 @@ type Config struct {
 	Capacity     CapacityConfig      `yaml:"capacity"`
 	Timeouts     TimeoutsConfig      `yaml:"timeouts"`
 	CORS         CORSConfig          `yaml:"cors"`
+	Routing      RoutingConfig       `yaml:"routing"`
 }
 
 type ListenConfig struct {
@@ -119,6 +120,11 @@ type CORSConfig struct {
 	AllowedOrigins []string `yaml:"allowed_origins"`
 }
 
+type RoutingConfig struct {
+	StickyEnabled bool `yaml:"sticky_enabled"`
+	StickyTTLS    int  `yaml:"sticky_ttl_s"`
+}
+
 func Default() Config {
 	return Config{
 		Listen: ListenConfig{BindAddress: "127.0.0.1", Port: 9443},
@@ -163,6 +169,7 @@ func Default() Config {
 		},
 		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, StreamingCancelMS: 500},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
+		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
 	}
 }
 
@@ -257,6 +264,9 @@ func (c Config) Validate() error {
 	if c.Auth.KeyHash == "hmac_sha256" && c.Auth.KeyHashSecret == "" {
 		return fmt.Errorf("auth.key_hash_secret must be set when auth.key_hash is hmac_sha256")
 	}
+	if c.Routing.StickyEnabled && c.Auth.KeyHashSecret == "" {
+		return fmt.Errorf("auth.key_hash_secret must be set when routing.sticky_enabled is true")
+	}
 	if c.Auth.Demo.SigningSecret == "" {
 		return fmt.Errorf("auth.demo.signing_secret must be set")
 	}
@@ -305,6 +315,9 @@ func (c Config) Validate() error {
 	}
 	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 {
 		return fmt.Errorf("timeouts must be positive")
+	}
+	if c.Routing.StickyTTLS <= 0 {
+		return fmt.Errorf("routing.sticky_ttl_s must be > 0")
 	}
 	for i, origin := range c.CORS.AllowedOrigins {
 		if origin == "*" || origin == "null" {

@@ -174,8 +174,12 @@ log "step 8/9: verify public endpoints"
 sleep 2
 echo "  GET https://$DOMAIN/healthz"
 curl -fsS --max-time 10 "https://$DOMAIN/healthz" | python3 -m json.tool || { echo "healthz failed"; exit 1; }
-echo "  GET https://$DOMAIN/v1/models"
-curl -fsS --max-time 10 "https://$DOMAIN/v1/models" | python3 -m json.tool || { echo "models failed"; exit 1; }
+echo "  GET https://$DOMAIN/v1/models -> expect 404 (buyer API is gateway-only)"
+STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/v1/models")
+if [ "$STATUS" != "404" ]; then
+  echo "coordinator /v1/models exposure check failed: status=$STATUS" >&2
+  exit 1
+fi
 
 log "step 9/9: tail the coordinator journal for sanity"
 $SSH 'journalctl -u macprovider-coordinator --no-pager -n 20'

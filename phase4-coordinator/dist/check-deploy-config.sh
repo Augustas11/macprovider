@@ -38,10 +38,10 @@ def ok(m):   print(f"  ok:   {m}")
 key = g(coord, "operator_key")
 if not key:
     hard("coordinator operator_key missing")
-elif re.search(r"REPLACE_ME|change-me|<required>|placeholder|xxx", key, re.I):
+elif re.search(r"REPLACE|change-me|<required>|placeholder|xxx", key, re.I):
     hard(f"coordinator operator_key is a PLACEHOLDER -> would break /poolz + /admin auth")
 elif not re.fullmatch(r"[0-9a-fA-F]{64}", key):
-    warn(f"operator_key is not 64-hex (len {len(key)}); expected `openssl rand -hex 32`")
+    hard(f"operator_key is not 64-hex (len {len(key)}); expected `openssl rand -hex 32`")
 else:
     ok("operator_key present (64-hex, non-placeholder)")
 

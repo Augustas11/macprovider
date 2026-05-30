@@ -38,6 +38,23 @@ routing:
   request_timeout_s: 280
   failover_enabled: true
   failover_timeout_s: 5
+  tiebreak_randomize: false
+  tiebreak_epsilon: 0.0
+  max_retries: 0
+  retry_per_attempt_timeout_s: 60
+  # 0 = auto-derive at runtime: min(2, max_retries). NOT "unbounded".
+  # Set explicitly to a positive integer to cap the number of distinct
+  # providers a single buyer request may push toward breaker degradation.
+  # Set ≥ max_retries to effectively disable the cap.
+  max_providers_faulted_per_request: 0
+  sticky_enabled: false
+  sticky_ttl_s: 1800
+  sticky_max_entries: 10000
+  # Class schema: <alias>: {models: [<model_id>, ...], objective: fast|balanced|accurate}
+  # Examples (commented; uncomment + edit to enable):
+  #   mlx-fast:    {models: ["mlx-community/Llama-3.2-3B-Instruct-4bit"], objective: fast}
+  #   mlx-accurate:{models: ["mlx-community/Qwen2.5-7B-Instruct-4bit"], objective: accurate}
+  model_classes: {}
 
 auth:
   # 64 hex chars (256 bits). Generated with: openssl rand -hex 32
