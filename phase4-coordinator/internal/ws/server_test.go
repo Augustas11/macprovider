@@ -346,7 +346,7 @@ func TestProviderTokenAuthFlow(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
-	record, token, err := store.IssueToken(context.Background(), "M4 test provider")
+	record, token, err := store.IssueToken(context.Background(), "m4-anon", "M4 test provider")
 	if err != nil {
 		t.Fatalf("issue token: %v", err)
 	}
@@ -359,6 +359,13 @@ func TestProviderTokenAuthFlow(t *testing.T) {
 	}
 	assertHelloAck(t, conn)
 	_ = conn.Close()
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens after valid auth: %v", err)
+	}
+	if len(records) != 1 || !records[0].LastUsedAt.Valid {
+		t.Fatalf("records after valid auth = %#v, want last_used_at set", records)
+	}
 
 	if _, err := store.RevokeToken(context.Background(), record.TokenPrefix); err != nil {
 		t.Fatalf("revoke token: %v", err)
@@ -389,6 +396,51 @@ func TestProviderTokenAuthFlow(t *testing.T) {
 	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
 	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
 		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
+}
+
+func TestProviderTokenMustMatchHelloProviderID(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	_, token, err := store.IssueToken(context.Background(), "other-provider", "Other provider")
+	if err != nil {
+		t.Fatalf("issue token: %v", err)
+	}
+	h := newProviderHarnessWithTokenValidator(t, store)
+	defer h.HTTP.Close()
+
+	conn, br, _, err := bearerDialer(token).Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial with mismatched token: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("m4-anon"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	src := io.Reader(conn)
+	if br != nil {
+		src = br
+	}
+	frame, err := gobwas.ReadFrame(src)
+	if err != nil {
+		t.Fatalf("read mismatched token close: %v", err)
+	}
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close", frame.Header.OpCode)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens after mismatch: %v", err)
+	}
+	if len(records) != 1 || records[0].LastUsedAt.Valid {
+		t.Fatalf("records after mismatched auth = %#v, want last_used_at unset", records)
 	}
 }
 

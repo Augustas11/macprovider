@@ -86,26 +86,34 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     <time>2026-05-27</time>
     <p><strong>Implemented:</strong> SQLite-backed
     <code>provider_tokens</code> storage with WAL mode, SHA-256 token
-    hashes, plaintext token display only at issuance, token prefixes for
-    operator lookup, revocation timestamps, and
-    <code>last_used_at</code> updates on successful validation.</p>
-    <p><strong>CLI:</strong> <code>coordinator-cli issue-token</code>,
-    <code>revoke-token</code>, <code>list-tokens</code>, and
+    hashes, authorized <code>provider_id</code> subjects, plaintext token
+    display only at issuance, token prefixes for operator lookup,
+    revocation timestamps, and
+    <code>last_used_at</code> updates only after the token subject matches
+    <code>hello.provider_id</code>.</p>
+    <p><strong>CLI:</strong> <code>coordinator-cli issue-token
+    --provider-id &lt;provider_id&gt;</code>, <code>revoke-token</code>,
+    <code>list-tokens</code>, and
     <code>revoke-and-kick</code> now operate on the configured SQLite DB.
     <code>revoke-and-kick</code> revokes locally and calls
     <code>/admin/blacklist</code>; the endpoint itself is completed in
-    Step 10.</p>
+    Step 10. Current tokens carry <code>provider_id</code>, so
+    <code>revoke-and-kick</code> derives the kick target from the token row
+    and rejects mismatched overrides.</p>
     <p><strong>WebSocket auth:</strong> provider connections without an
     <code>Authorization</code> header remain admitted by static
     <code>provider_id</code> config matching. When a bearer token is
     present and the coordinator has a token store, the upgrade validates
-    it before reading <code>hello</code>; invalid or revoked tokens receive
-    WebSocket close <code>4005 invalid_token</code>.</p>
+    it before reading <code>hello</code> and requires the token subject to
+    match <code>hello.provider_id</code>; invalid, revoked, or
+    mismatched-provider tokens receive WebSocket close
+    <code>4005 invalid_token</code>.</p>
     <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
     passes with token issue/validate/revoke/list coverage and WebSocket
-    auth flow coverage for issued-token success plus revoked-token
+    auth flow coverage for issued-token success, provider-token mismatch,
+    plus revoked-token
     close 4005. <code>GOCACHE=/private/tmp/macprovider-go-build-cache go build ./...</code>
-    passes. CLI smoke: <code>go run ./cmd/coordinator-cli issue-token</code>,
+    passes. CLI smoke: <code>go run ./cmd/coordinator-cli issue-token --provider-id ...</code>,
     <code>list-tokens</code>, and <code>revoke-token</code> succeeded
     against a temp SQLite DB under <code>/private/tmp</code>.</p>
   </div>
@@ -140,7 +148,8 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     marks the same session <code>ready</code>; repeated failures mark it
     <code>unavailable</code>. Literal HTTP 530 marks the provider
     <code>unavailable</code> immediately with
-    <code>http_530_observed</code> in the log.</p>
+    <code>http_530_observed</code> in the log and closes the active
+    provider WebSocket so only a fresh hello can restore routing.</p>
     <p><strong>Verification:</strong> <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
     passes with tests for rejected-candidate fallback, pinned preflight
     rejection without fallback, context route-or-413 behavior, recovery
@@ -444,8 +453,9 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     <li><strong>M-J4 + Q-J1 (HTTP 530 open question):</strong>
     Promoted to normative FR-P11 row. Literal HTTP 530 on a routed
     buyer request → <code>unavailable</code>, log
-    <code>state_update.reason = "http_530_observed"</code>, trigger
-    WebSocket liveness probe with 5s ack timeout. OQ-1 deleted from
+    <code>state_update.reason = "http_530_observed"</code>, close the
+    active provider WebSocket, and require reconnect with fresh hello.
+    OQ-1 deleted from
     § 12; § 12 now has zero open questions.</li>
 
     <li><strong>M-J5 (static endpoint YAML schema):</strong> § 13
@@ -524,8 +534,9 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     providers in v1. Buyer receives clean 502/streaming-error; SPEC-004
     / SPEC-006 may add visible retry policies later.</li>
     <li><strong>Q1 HTTP 530:</strong> distinct signal logged as
-    <code>state_update.reason = "http_530_observed"</code>; same pool
-    behavior as WS disconnect but distinguishable in logs.</li>
+    <code>state_update.reason = "http_530_observed"</code>; provider is
+    marked <code>unavailable</code>, the active WebSocket is closed, and
+    recovery requires reconnect with fresh hello.</li>
   </ul>
 
   <h3>MAJOR findings addressed</h3>

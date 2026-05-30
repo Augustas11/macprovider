@@ -1215,6 +1215,24 @@ func (s *Server) handleProviderFailure(provider pool.Provider, status int) {
 		if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable) {
 			s.log.Warn().Str("provider_id", provider.ProviderID).Int("status", status).Str("reason", "http_530_observed").Msg("provider marked unavailable after HTTP 530")
 		}
+		s.closeProviderConn(provider, "http_530_observed")
+	default:
+		if status >= 300 && status < 400 {
+			if s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateUnavailable) {
+				s.log.Warn().Str("provider_id", provider.ProviderID).Int("status", status).Str("reason", "provider_redirect_observed").Msg("provider marked unavailable after HTTP redirect")
+			}
+			s.closeProviderConn(provider, "provider_redirect_observed")
+		}
+	}
+}
+
+func (s *Server) closeProviderConn(provider pool.Provider, reason string) {
+	conn, err := s.pool.Conn(provider.ProviderID, provider.AssignedID)
+	if err != nil {
+		return
+	}
+	if err := conn.Close(); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", provider.ProviderID).Str("reason", reason).Msg("provider websocket close after terminal HTTP failure failed")
 	}
 }
 

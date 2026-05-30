@@ -223,13 +223,13 @@ func (s *Server) DispatchInference(ctx context.Context, provider pool.Provider, 
 	}, nil
 }
 
-func (s *Server) handleInferenceChunk(providerID string, payload []byte) {
+func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []byte) {
 	var chunk InferenceResponseChunk
 	if err := json.Unmarshal(payload, &chunk); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid inference_response_chunk")
 		return
 	}
-	session, ok := s.sessionByProvider(providerID)
+	session, ok := s.sessionFor(providerID, assignedID)
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", chunk.RequestID).Msg("chunk from unknown provider session")
 		return
@@ -252,13 +252,13 @@ func (s *Server) handleInferenceChunk(providerID string, payload []byte) {
 	}
 }
 
-func (s *Server) handleInferenceEnd(providerID string, payload []byte) {
+func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byte) {
 	var end InferenceResponseEnd
 	if err := json.Unmarshal(payload, &end); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid inference_response_end")
 		return
 	}
-	session, ok := s.sessionByProvider(providerID)
+	session, ok := s.sessionFor(providerID, assignedID)
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Str("request_id", end.RequestID).Msg("end from unknown provider session")
 		return

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -216,7 +217,10 @@ func TestChatCompletionsDoesNotFollowProviderRedirects(t *testing.T) {
 	defer upstream.Close()
 
 	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
-	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	serverConn, providerConn := net.Pipe()
+	defer serverConn.Close()
+	defer providerConn.Close()
+	registerWithEndpointConn(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, serverConn)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
@@ -227,6 +231,43 @@ func TestChatCompletionsDoesNotFollowProviderRedirects(t *testing.T) {
 	if bytes.Contains(rr.Body.Bytes(), []byte(`redirected`)) {
 		t.Fatalf("redirect target response was relayed: %s", rr.Body.String())
 	}
+	providers := registry.Snapshot()
+	if len(providers) != 1 || providers[0].State != pool.StateUnavailable {
+		t.Fatalf("providers = %#v, want unavailable after redirect", providers)
+	}
+	assertConnClosed(t, providerConn)
+}
+
+func TestStreamingChatCompletionsDoesNotFollowProviderRedirects(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("data: redirected\n\n"))
+	}))
+	defer target.Close()
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/v1/chat/completions", http.StatusTemporaryRedirect)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	serverConn, providerConn := net.Pipe()
+	defer serverConn.Close()
+	defer providerConn.Close()
+	registerWithEndpointConn(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, serverConn)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(`redirected`)) {
+		t.Fatalf("redirect target response was relayed: %s", rr.Body.String())
+	}
+	providers := registry.Snapshot()
+	if len(providers) != 1 || providers[0].State != pool.StateUnavailable {
+		t.Fatalf("providers = %#v, want unavailable after redirect", providers)
+	}
+	assertConnClosed(t, providerConn)
 }
 
 func TestChatCompletionsRelaysStreamingSSE(t *testing.T) {
@@ -524,7 +565,7 @@ func TestCircuitBreakerTripsAfterRepeatedDeadWSAndRecovers(t *testing.T) {
 	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateReady {
 		t.Fatalf("p1 after first fault = %#v ok=%v, want ready", p1, ok)
 	}
-	registry.ApplyStateUpdate("p1", pool.StateUpdate{State: pool.StateReady})
+	registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateReady})
 
 	second := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
 	if second.Code != http.StatusBadGateway {
@@ -533,7 +574,7 @@ func TestCircuitBreakerTripsAfterRepeatedDeadWSAndRecovers(t *testing.T) {
 	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
 		t.Fatalf("p1 after breaker trip = %#v ok=%v, want degraded", p1, ok)
 	}
-	registry.ApplyHeartbeat("p1", pool.HeartbeatUpdate{
+	registry.ApplyHeartbeat("p1", "s1", pool.HeartbeatUpdate{
 		Status:                pool.StateReady,
 		ModelID:               "model-a",
 		ModelParamsB:          7,
@@ -548,7 +589,7 @@ func TestCircuitBreakerTripsAfterRepeatedDeadWSAndRecovers(t *testing.T) {
 	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
 		t.Fatalf("p1 after ready heartbeat during breaker hold = %#v ok=%v, want degraded", p1, ok)
 	}
-	registry.ApplyStateUpdate("p1", pool.StateUpdate{State: pool.StateReady})
+	registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateReady})
 	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateDegraded {
 		t.Fatalf("p1 after ready state_update during breaker hold = %#v ok=%v, want degraded", p1, ok)
 	}
@@ -1127,7 +1168,10 @@ func TestProviderHTTP530MarksUnavailable(t *testing.T) {
 	defer upstream.Close()
 
 	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
-	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	serverConn, providerConn := net.Pipe()
+	defer serverConn.Close()
+	defer providerConn.Close()
+	registerWithEndpointConn(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, serverConn)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
@@ -1139,6 +1183,7 @@ func TestProviderHTTP530MarksUnavailable(t *testing.T) {
 	if len(providers) != 1 || providers[0].State != pool.StateUnavailable {
 		t.Fatalf("providers = %#v", providers)
 	}
+	assertConnClosed(t, providerConn)
 }
 
 func TestChatCompletionsSplitsUnknownModelAndUnavailableProvider(t *testing.T) {
@@ -1183,10 +1228,18 @@ func register(registry *pool.Registry, providerID, assignedID, modelID string, s
 }
 
 func registerWithEndpoint(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64) {
-	registerWithPath(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, pool.TierPinned, pool.InferencePathHTTPForwarding)
+	registerWithEndpointConn(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, nil)
+}
+
+func registerWithEndpointConn(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, conn net.Conn) {
+	registerWithPathConn(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, pool.TierPinned, pool.InferencePathHTTPForwarding, conn)
 }
 
 func registerWithPath(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, tier pool.Tier, path pool.InferencePath) {
+	registerWithPathConn(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, tier, path, nil)
+}
+
+func registerWithPathConn(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, tier pool.Tier, path pool.InferencePath, conn net.Conn) {
 	registry.Register(&pool.Provider{
 		ProviderID:            providerID,
 		AssignedID:            assignedID,
@@ -1206,7 +1259,25 @@ func registerWithPath(registry *pool.Registry, providerID, assignedID, modelID s
 		LastHeartbeatAt:       time.Now().UTC(),
 		ConnectedAt:           time.Now().UTC(),
 		BinaryVersion:         "0.1.0",
-	}, nil)
+	}, conn)
+}
+
+func assertConnClosed(t *testing.T, conn net.Conn) {
+	t.Helper()
+	closed := make(chan error, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, err := conn.Read(buf)
+		closed <- err
+	}()
+	select {
+	case err := <-closed:
+		if err == nil {
+			t.Fatal("connection read succeeded, want closed connection")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("provider connection was not closed")
+	}
 }
 
 func postChat(t *testing.T, server *buyer.Server, body []byte, headers http.Header) *httptest.ResponseRecorder {

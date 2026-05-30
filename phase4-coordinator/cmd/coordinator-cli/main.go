@@ -41,6 +41,7 @@ func main() {
 func issueToken(args []string) error {
 	fs := flag.NewFlagSet("issue-token", flag.ExitOnError)
 	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	providerID := fs.String("provider-id", "", "stable provider_id this token may authenticate")
 	providerName := fs.String("provider-name", "", "provider display name")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -50,12 +51,13 @@ func issueToken(args []string) error {
 		return err
 	}
 	defer store.Close()
-	record, token, err := store.IssueToken(context.Background(), *providerName)
+	record, token, err := store.IssueToken(context.Background(), *providerID, *providerName)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("token=%s\n", token)
 	fmt.Printf("token_prefix=%s\n", record.TokenPrefix)
+	fmt.Printf("provider_id=%s\n", record.ProviderID)
 	fmt.Printf("provider_name=%s\n", record.ProviderName)
 	return nil
 }
@@ -104,7 +106,7 @@ func listTokens(args []string) error {
 		if record.LastUsedAt.Valid {
 			lastUsed = record.LastUsedAt.String
 		}
-		fmt.Printf("%d\t%s\t%s\t%s\t%s\t%s\n", record.ID, record.TokenPrefix, record.ProviderName, record.CreatedAt, status, lastUsed)
+		fmt.Printf("%d\t%s\t%s\t%s\t%s\t%s\t%s\n", record.ID, record.TokenPrefix, record.ProviderID, record.ProviderName, record.CreatedAt, status, lastUsed)
 	}
 	return nil
 }
@@ -115,13 +117,13 @@ func revokeAndKick(args []string) error {
 	prefix := fs.String("token-prefix", "", "token prefix printed at issuance")
 	adminURL := fs.String("admin-url", "", "coordinator operator base URL")
 	operatorKey := fs.String("operator-key", "", "operator bearer token")
-	providerID := fs.String("provider-id", "", "stable provider ID to blacklist")
+	providerID := fs.String("provider-id", "", "optional stable provider ID override for legacy tokens without provider_id")
 	reason := fs.String("reason", "provider token revoked", "blacklist reason")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *adminURL == "" || *operatorKey == "" || *providerID == "" {
-		return fmt.Errorf("revoke-and-kick requires --admin-url, --operator-key, and --provider-id")
+	if *adminURL == "" || *operatorKey == "" {
+		return fmt.Errorf("revoke-and-kick requires --admin-url and --operator-key")
 	}
 	store, err := auth.OpenStore(*dbPath)
 	if err != nil {
@@ -132,10 +134,20 @@ func revokeAndKick(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := kickProvider(*adminURL, *operatorKey, *providerID, *reason); err != nil {
+	targetProviderID := record.ProviderID
+	if *providerID != "" {
+		if targetProviderID != "" && *providerID != targetProviderID {
+			return fmt.Errorf("token belongs to provider_id %s, refusing to kick %s", targetProviderID, *providerID)
+		}
+		targetProviderID = *providerID
+	}
+	if targetProviderID == "" {
+		return fmt.Errorf("revoked token has no provider_id; pass --provider-id for legacy token")
+	}
+	if err := kickProvider(*adminURL, *operatorKey, targetProviderID, *reason); err != nil {
 		return err
 	}
-	fmt.Printf("revoked token_prefix=%s provider_name=%s kicked provider_id=%s\n", record.TokenPrefix, record.ProviderName, *providerID)
+	fmt.Printf("revoked token_prefix=%s provider_id=%s provider_name=%s kicked provider_id=%s\n", record.TokenPrefix, record.ProviderID, record.ProviderName, targetProviderID)
 	return nil
 }
 

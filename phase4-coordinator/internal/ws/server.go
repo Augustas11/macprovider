@@ -48,11 +48,14 @@ type Server struct {
 }
 
 type TokenValidator interface {
-	ValidateToken(context.Context, string) (bool, error)
+	ValidateToken(context.Context, string) (string, bool, error)
+	MarkTokenUsed(context.Context, string) error
 }
 
 type providerAuth struct {
-	validated bool
+	validated  bool
+	providerID string
+	token      string
 }
 
 type Option func(*Server)
@@ -65,6 +68,7 @@ func WithTokenValidator(tokens TokenValidator) Option {
 
 type pendingPreflight struct {
 	providerID string
+	assignedID string
 	ch         chan PreflightAck
 }
 
@@ -127,12 +131,13 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 	if !strings.HasPrefix(authz, prefix) {
 		return providerAuth{}, false
 	}
-	ok, err := s.tokens.ValidateToken(r.Context(), strings.TrimSpace(strings.TrimPrefix(authz, prefix)))
+	token := strings.TrimSpace(strings.TrimPrefix(authz, prefix))
+	providerID, ok, err := s.tokens.ValidateToken(r.Context(), token)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("provider token validation failed")
 		return providerAuth{}, false
 	}
-	return providerAuth{validated: ok}, ok
+	return providerAuth{validated: ok, providerID: providerID, token: token}, ok
 }
 
 func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
@@ -169,9 +174,22 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		return
 	}
 	providerCfg, pinned := s.pool.Endpoint(hello.ProviderID)
-	if pinned && s.tokens != nil && !auth.validated {
-		s.close(conn, CloseInvalidToken, "invalid_token")
-		return
+	if s.tokens != nil {
+		if auth.validated && auth.providerID != hello.ProviderID {
+			s.close(conn, CloseInvalidToken, "invalid_token")
+			return
+		}
+		if pinned && !auth.validated {
+			s.close(conn, CloseInvalidToken, "invalid_token")
+			return
+		}
+		if auth.validated {
+			if err := s.tokens.MarkTokenUsed(context.Background(), auth.token); err != nil {
+				s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("provider token usage update failed")
+				s.close(conn, CloseInvalidToken, "invalid_token")
+				return
+			}
+		}
 	}
 	tier, closeCode, closeReason := s.admission.Admit(hello, pinned, s.connectedProvisional())
 	if closeCode != 0 {
@@ -286,7 +304,7 @@ func sessionKey(providerID, assignedID string) string {
 	return providerID + "/" + assignedID
 }
 
-func (s *Server) sessionFor(providerID, assignedID string) (*providerSession, bool) {
+func (s *Server) storedSessionFor(providerID, assignedID string) (*providerSession, bool) {
 	v, ok := s.sessions.Load(sessionKey(providerID, assignedID))
 	if !ok {
 		return nil, false
@@ -295,14 +313,11 @@ func (s *Server) sessionFor(providerID, assignedID string) (*providerSession, bo
 	return session, ok
 }
 
-func (s *Server) sessionByProvider(providerID string) (*providerSession, bool) {
-	for _, p := range s.pool.Snapshot() {
-		if p.ProviderID != providerID {
-			continue
-		}
-		return s.sessionFor(p.ProviderID, p.AssignedID)
+func (s *Server) sessionFor(providerID, assignedID string) (*providerSession, bool) {
+	if _, ok := s.pool.Resolve(providerID, assignedID); !ok {
+		return nil, false
 	}
-	return nil, false
+	return s.storedSessionFor(providerID, assignedID)
 }
 
 func (s *Server) connectedProvisional() int {
@@ -334,13 +349,13 @@ func (s *Server) handleMessage(conn net.Conn, providerID, assignedID string, pay
 	case "heartbeat":
 		s.handleHeartbeat(conn, providerID, assignedID, payload)
 	case "state_update":
-		s.handleStateUpdate(providerID, payload)
+		s.handleStateUpdate(providerID, assignedID, payload)
 	case "preflight_ack":
-		s.handlePreflightAck(providerID, payload)
+		s.handlePreflightAck(providerID, assignedID, payload)
 	case "inference_response_chunk":
-		s.handleInferenceChunk(providerID, payload)
+		s.handleInferenceChunk(providerID, assignedID, payload)
 	case "inference_response_end":
-		s.handleInferenceEnd(providerID, payload)
+		s.handleInferenceEnd(providerID, assignedID, payload)
 	case "nak":
 		s.handleNAK(providerID, assignedID, payload)
 	case "drain_status":
@@ -376,7 +391,7 @@ func (s *Server) Preflight(provider pool.Provider, requestID string, estimatedTo
 		return PreflightAck{}, false, ErrRelayClosed
 	}
 	ch := make(chan PreflightAck, 1)
-	s.pending.Store(requestID, pendingPreflight{providerID: provider.ProviderID, ch: ch})
+	s.pending.Store(requestID, pendingPreflight{providerID: provider.ProviderID, assignedID: provider.AssignedID, ch: ch})
 	defer s.pending.Delete(requestID)
 	msg := map[string]any{
 		"type":             "preflight",
@@ -649,7 +664,7 @@ func (s *Server) DrainAll(reason string) {
 	}
 }
 
-func (s *Server) handlePreflightAck(providerID string, payload []byte) {
+func (s *Server) handlePreflightAck(providerID, assignedID string, payload []byte) {
 	ack, field, err := ParsePreflightAck(payload)
 	if err != nil {
 		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid preflight_ack")
@@ -657,8 +672,12 @@ func (s *Server) handlePreflightAck(providerID string, payload []byte) {
 	}
 	if pending, ok := s.pending.Load(ack.RequestID); ok {
 		pf := pending.(pendingPreflight)
-		if pf.providerID != providerID {
+		if pf.providerID != providerID || pf.assignedID != assignedID {
 			s.log.Warn().Str("provider_id", providerID).Str("expected_provider_id", pf.providerID).Str("request_id", ack.RequestID).Msg("preflight_ack from wrong provider")
+			return
+		}
+		if _, ok := s.sessionFor(providerID, assignedID); !ok {
+			s.log.Warn().Str("provider_id", providerID).Str("assigned_id", assignedID).Str("request_id", ack.RequestID).Msg("preflight_ack from stale provider session")
 			return
 		}
 		select {
@@ -684,7 +703,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	if state == pool.StateReady && s.warmupGatePending(providerID) {
 		state = pool.StateDegraded
 	}
-	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, pool.HeartbeatUpdate{
+	entry, gap, ok := s.pool.ApplyHeartbeat(providerID, assignedID, pool.HeartbeatUpdate{
 		Status:                state,
 		ModelID:               hb.ModelID,
 		ModelParamsB:          hb.ModelParamsB,
@@ -724,7 +743,7 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 	}
 }
 
-func (s *Server) handleStateUpdate(providerID string, payload []byte) {
+func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte) {
 	update, field, err := ParseStateUpdate(payload)
 	if err != nil {
 		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid state_update")
@@ -738,7 +757,7 @@ func (s *Server) handleStateUpdate(providerID string, payload []byte) {
 	if state == pool.StateReady && s.warmupGatePending(providerID) {
 		state = pool.StateDegraded
 	}
-	entry, ok := s.pool.ApplyStateUpdate(providerID, pool.StateUpdate{
+	entry, ok := s.pool.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{
 		State:      state,
 		SlotsFree:  update.MetricsSnapshot.SlotsFree,
 		SlotsTotal: update.MetricsSnapshot.SlotsTotal,
@@ -780,7 +799,7 @@ func (s *Server) markDegradedForWarmup(providerID, assignedID string) {
 
 func (s *Server) handleDisconnect(providerID, assignedID string) {
 	s.clearWarmupGate(providerID, assignedID)
-	if session, ok := s.sessionFor(providerID, assignedID); ok {
+	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
 		session.close()
 		s.sessions.Delete(sessionKey(providerID, assignedID))
 	}

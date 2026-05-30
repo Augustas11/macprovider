@@ -323,11 +323,11 @@ type HeartbeatUpdate struct {
 	At                    time.Time
 }
 
-func (r *Registry) ApplyHeartbeat(providerID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
+func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
-	if p == nil {
+	if p == nil || p.AssignedID != assignedID {
 		return nil, 0, false
 	}
 	prev := p.LastHeartbeatAt
@@ -367,7 +367,7 @@ func (r *Registry) Touch(providerID, assignedID string, at time.Time) {
 	} else if assignedID != "" {
 		p = r.sessions[assignedID]
 	}
-	if p != nil {
+	if p != nil && (assignedID == "" || p.AssignedID == assignedID) {
 		p.LastActivityAt = at
 	}
 }
@@ -394,11 +394,11 @@ type StateUpdate struct {
 	SlotsTotal *int
 }
 
-func (r *Registry) ApplyStateUpdate(providerID string, update StateUpdate) (*Provider, bool) {
+func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateUpdate) (*Provider, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
-	if p == nil {
+	if p == nil || p.AssignedID != assignedID {
 		return nil, false
 	}
 	if r.canApplyProviderStateLocked(p, update.State) {
@@ -447,7 +447,7 @@ func (r *Registry) Resolve(providerID, assignedID string) (Provider, bool) {
 	} else if assignedID != "" {
 		p = r.sessions[assignedID]
 	}
-	if p == nil {
+	if p == nil || (assignedID != "" && p.AssignedID != assignedID) {
 		return Provider{}, false
 	}
 	cp := *p

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -22,6 +23,7 @@ type Store struct {
 type TokenRecord struct {
 	ID           int64
 	TokenPrefix  string
+	ProviderID   string
 	ProviderName string
 	CreatedAt    string
 	RevokedAt    sql.NullString
@@ -69,6 +71,7 @@ CREATE TABLE IF NOT EXISTS provider_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_hash TEXT NOT NULL UNIQUE,
     token_prefix TEXT NOT NULL,
+    provider_id TEXT NOT NULL DEFAULT '',
     provider_name TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     revoked_at TEXT DEFAULT NULL,
@@ -76,10 +79,48 @@ CREATE TABLE IF NOT EXISTS provider_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_token_hash ON provider_tokens(token_hash);
 `)
+	if err != nil {
+		return err
+	}
+	return s.ensureProviderIDColumn(ctx)
+}
+
+func (s *Store) ensureProviderIDColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(provider_tokens)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasProviderID := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "provider_id" {
+			hasProviderID = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasProviderID {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE provider_tokens ADD COLUMN provider_id TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
-func (s *Store) IssueToken(ctx context.Context, providerName string) (TokenRecord, string, error) {
+func (s *Store) IssueToken(ctx context.Context, providerID, providerName string) (TokenRecord, string, error) {
+	providerID = strings.TrimSpace(providerID)
+	providerName = strings.TrimSpace(providerName)
+	if providerID == "" {
+		return TokenRecord{}, "", fmt.Errorf("provider id is required")
+	}
 	if providerName == "" {
 		return TokenRecord{}, "", fmt.Errorf("provider name is required")
 	}
@@ -91,7 +132,7 @@ func (s *Store) IssueToken(ctx context.Context, providerName string) (TokenRecor
 	hash := tokenHash(token)
 	prefix := token[:6]
 	createdAt := nowString()
-	res, err := s.db.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_name, created_at) VALUES (?, ?, ?, ?)`, hash, prefix, providerName, createdAt)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, createdAt)
 	if err != nil {
 		return TokenRecord{}, "", err
 	}
@@ -99,27 +140,44 @@ func (s *Store) IssueToken(ctx context.Context, providerName string) (TokenRecor
 	if err != nil {
 		return TokenRecord{}, "", err
 	}
-	return TokenRecord{ID: id, TokenPrefix: prefix, ProviderName: providerName, CreatedAt: createdAt}, token, nil
+	return TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: createdAt}, token, nil
 }
 
-func (s *Store) ValidateToken(ctx context.Context, token string) (bool, error) {
+func (s *Store) ValidateToken(ctx context.Context, token string) (string, bool, error) {
 	if token == "" {
-		return false, nil
+		return "", false, nil
 	}
 	hash := tokenHash(token)
-	var id int64
-	err := s.db.QueryRowContext(ctx, `SELECT id FROM provider_tokens WHERE token_hash = ? AND revoked_at IS NULL`, hash).Scan(&id)
+	var providerID string
+	err := s.db.QueryRowContext(ctx, `SELECT provider_id FROM provider_tokens WHERE token_hash = ? AND revoked_at IS NULL`, hash).Scan(&providerID)
 	if err == sql.ErrNoRows {
-		return false, nil
+		return "", false, nil
 	}
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE provider_tokens SET last_used_at = ? WHERE id = ?`, nowString(), id)
+	if providerID == "" {
+		return "", false, nil
+	}
+	return providerID, true, nil
+}
+
+func (s *Store) MarkTokenUsed(ctx context.Context, token string) error {
+	if token == "" {
+		return fmt.Errorf("token is required")
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE provider_tokens SET last_used_at = ? WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''`, nowString(), tokenHash(token))
 	if err != nil {
-		return false, err
+		return err
 	}
-	return true, nil
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("no active token found")
+	}
+	return nil
 }
 
 func (s *Store) RevokeToken(ctx context.Context, tokenPrefix string) (TokenRecord, error) {
@@ -143,7 +201,7 @@ func (s *Store) RevokeToken(ctx context.Context, tokenPrefix string) (TokenRecor
 }
 
 func (s *Store) ListTokens(ctx context.Context) ([]TokenRecord, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id, token_prefix, provider_name, created_at, revoked_at, last_used_at FROM provider_tokens ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id, token_prefix, provider_id, provider_name, created_at, revoked_at, last_used_at FROM provider_tokens ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -151,7 +209,7 @@ func (s *Store) ListTokens(ctx context.Context) ([]TokenRecord, error) {
 	var records []TokenRecord
 	for rows.Next() {
 		var r TokenRecord
-		if err := rows.Scan(&r.ID, &r.TokenPrefix, &r.ProviderName, &r.CreatedAt, &r.RevokedAt, &r.LastUsedAt); err != nil {
+		if err := rows.Scan(&r.ID, &r.TokenPrefix, &r.ProviderID, &r.ProviderName, &r.CreatedAt, &r.RevokedAt, &r.LastUsedAt); err != nil {
 			return nil, err
 		}
 		records = append(records, r)
@@ -161,8 +219,8 @@ func (s *Store) ListTokens(ctx context.Context) ([]TokenRecord, error) {
 
 func (s *Store) tokenByPrefix(ctx context.Context, prefix string) (TokenRecord, error) {
 	var r TokenRecord
-	err := s.db.QueryRowContext(ctx, `SELECT id, token_prefix, provider_name, created_at, revoked_at, last_used_at FROM provider_tokens WHERE token_prefix = ? ORDER BY id DESC LIMIT 1`, prefix).
-		Scan(&r.ID, &r.TokenPrefix, &r.ProviderName, &r.CreatedAt, &r.RevokedAt, &r.LastUsedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT id, token_prefix, provider_id, provider_name, created_at, revoked_at, last_used_at FROM provider_tokens WHERE token_prefix = ? ORDER BY id DESC LIMIT 1`, prefix).
+		Scan(&r.ID, &r.TokenPrefix, &r.ProviderID, &r.ProviderName, &r.CreatedAt, &r.RevokedAt, &r.LastUsedAt)
 	return r, err
 }
 

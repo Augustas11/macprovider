@@ -6,7 +6,7 @@
 **Change log v1.3.1:**
 - Tightens **FR-P8a** after audit: WS-tunneled providers are probed with the SPEC-001 `inference_request` path, while HTTP-forwarding providers are probed through their configured `/v1/chat/completions` HTTP endpoint and MUST NOT receive WS `inference_request` probes. A warm-up pass now requires both observed non-empty output and `usage.completion_tokens > 0`.
 - Tightens **FR-P11a** after audit: provider-reported heartbeat/state `ready` cannot clear coordinator-owned breaker/recovery holds, buyer-initiated streaming cancellations are excluded from breaker accounting, and only a successful breaker recovery records the re-trip anchor. Generic `ready` transitions such as warm-up admission do not make the next breaker trip immediately fatal.
-- Closes follow-up security/architecture audit gaps: provider-supplied `hello.endpoint_url` no longer enables HTTP-forwarding for pinned providers, provider HTTP calls MUST NOT follow redirects, generic `ready` transitions MUST NOT clear sub-threshold breaker fault counters, and HTTP 530 `unavailable` recovery is documented as reconnect-only.
+- Closes follow-up security/architecture audit gaps: provider-supplied `hello.endpoint_url` no longer enables HTTP-forwarding for pinned providers, provider HTTP calls MUST NOT follow redirects, HTTP 3xx redirects and literal HTTP 530 are terminal provider failures that close the active provider WebSocket and require reconnect, generic `ready` transitions MUST NOT clear sub-threshold breaker fault counters, provider bearer tokens are bound to `provider_id`, and provider-originated control frames are accepted only from the active `assigned_id` session.
 
 **Change log v1.3.0:**
 - Adds **FR-P8a**: an admission-time warm-up capability gate. When enabled (`pool.warmup_gate_enabled`, default true), a newly connected provider is registered as `degraded` and is not buyer-routable until the coordinator runs a tiny inference probe and observes a successful token-producing completion within `pool.warmup_gate_timeout_s` (default 90s, `pool.warmup_gate_max_tokens` default 2). WS-tunneled providers are probed over WebSocket; HTTP-forwarding providers are probed through their configured HTTP endpoint. The gate is an actual inference, not self-reported throughput. Failure/timeout retries on degraded backoff up to `pool.degraded_max_retries`; after exhaustion the provider becomes `unavailable` with reason `warmup_failed`. Existing wake-from-sleep `warm_up` fallback is now config-driven by `pool.warmup_fallback_s` (default 60s). No SPEC-001 / phase3-binary wire change: WS-tunneled probing reuses `inference_request`, `inference_response_chunk`, and `inference_response_end`.
@@ -131,8 +131,8 @@ intelligence.
 - Graceful SIGTERM drain of in-flight buyer requests
 - SQLite persistence for provider auth, request log, pool state
 - Structured JSON logging to stdout
-- Coordinator CLI: `coordinator-cli issue-token`, `coordinator-cli
-  revoke-token`, `coordinator-cli list-tokens`
+- Coordinator CLI: `coordinator-cli issue-token --provider-id ...`,
+  `coordinator-cli revoke-token`, `coordinator-cli list-tokens`
 
 ### In Tier 2 roadmap scope (designed-in but not implemented)
 
@@ -346,6 +346,14 @@ On receiving a `hello` message (SPEC-001 section 6.5), the coordinator:
    is the binary's self-assigned ID). The `heartbeat_interval_s` is
    configurable (default: 30 seconds).
 
+After `hello_ack`, every provider-originated control/data frame is
+authorized against the WebSocket session's `assigned_id`. If a stale
+replaced socket later sends `heartbeat`, `state_update`,
+`preflight_ack`, `inference_response_chunk`, or
+`inference_response_end`, the coordinator MUST ignore it unless the
+session `assigned_id` still matches the active pool entry for that
+`provider_id`.
+
 If any validation fails, the coordinator closes the WebSocket using a
 standard application close code with a human-readable reason. SPEC-001
 § 6.5 defines `nak` as provider-to-coordinator only; the coordinator
@@ -364,8 +372,9 @@ Each provider pool entry tracks: `provider_id`, `assigned_id`,
 `throughput_tps_estimate`, `endpoint_url` (looked up from coordinator
 static config keyed by `provider_id`; not from hello),
 `last_heartbeat_at`, `connected_at`, `binary_version`. Updated on every
-heartbeat and state_update. Removed on WebSocket disconnect (after
-grace period) or operator blacklisting.
+heartbeat and state_update from the active `assigned_id` session.
+Removed on WebSocket disconnect (after grace period) or operator
+blacklisting.
 
 **FR-P4. Process heartbeat messages, update capacity state.**
 On receiving a `heartbeat`, update `last_heartbeat_at`, dynamic fields
@@ -494,7 +503,8 @@ Informed by Phase 2 D1 (502 vs 530):
 | zero-token-completion (qualified) | `inference_response_end` with `usage.completion_tokens == 0` AND `finish_reason` not in {`stop`,`length`} (abnormal). A clean empty `stop` does NOT count. | Return the result/error for this request | Counts toward the FR-P11a circuit-breaker |
 | HTTP 502 (MLX down) | Provider returns 502 on routed buyer request | `degraded`, 30s backoff | Recovery preflight after 30s |
 | HTTP 504 (timeout) | No response in time | `degraded`, 30s backoff | Same as 502 |
-| **HTTP 530 (Cloudflare tunnel daemon disconnected)** | Provider endpoint returns literal HTTP 530 on routed buyer request | `unavailable` immediately; log `state_update.reason = "http_530_observed"` | Removed from pool until WebSocket reconnects with fresh hello; provider-originated `ready` heartbeat/state updates MUST NOT restore this session |
+| **HTTP 530 (Cloudflare tunnel daemon disconnected)** | Provider endpoint returns literal HTTP 530 on routed buyer request | `unavailable` immediately; log `state_update.reason = "http_530_observed"`; close the active provider WebSocket | Removed from pool until WebSocket reconnects with fresh hello; provider-originated `ready` heartbeat/state updates MUST NOT restore this session |
+| **HTTP 3xx redirect from provider endpoint** | Provider endpoint returns any 3xx response on a routed buyer request | Do not follow the redirect; mark `unavailable`; close the active provider WebSocket | Removed from pool until WebSocket reconnects with fresh hello after operator endpoint correction |
 
 On degraded — whether from 502/504 or from the FR-P11a circuit-breaker —
 after `pool.degraded_backoff_s` (default 30s) backoff, send a **recovery
@@ -511,9 +521,10 @@ while the WebSocket control plane briefly remained connected (mac
 sleeping, cloudflared partially alive). The coordinator must treat this
 as a stronger signal than 502: 502 is "mlx down, tunnel up, retry soon";
 530 is "tunnel daemon itself disconnected, this provider is not
-reachable until tunnel reconnects." The WebSocket liveness probe in this
-row catches the case where the WS appears alive but cannot deliver
-control messages.
+reachable until tunnel reconnects." The coordinator closes the active
+provider WebSocket after marking the provider unavailable so stale
+heartbeats or state updates cannot restore the old session; only a fresh
+hello can re-admit the provider.
 
 **Recovery preflight shape (SPEC-001-legal health probe):**
 ```json
@@ -634,9 +645,10 @@ When `auth.require_provider_tokens` is `false`:
 
 When `auth.require_provider_tokens` is `true`:
 - Pinned providers MUST present a bearer token in the WebSocket
-  handshake matching an operator-issued token registered in the
-  coordinator token store. Mismatch or absence MUST result in WS close
-  4005 `invalid_token`.
+  handshake matching an operator-issued token registered for the same
+  `provider_id` in the coordinator token store. A valid token issued for
+  any other `provider_id`, or any missing/malformed/revoked token, MUST
+  result in WS close 4005 `invalid_token`.
 - Provisional providers continue to be admitted without a token. If a
   provisional provider presents a malformed or invalid bearer header,
   the coordinator MAY reject it before hello parsing because the tier is
@@ -826,7 +838,7 @@ binary already handles WebSocket close per SPEC-001 FR-13.
 | `4002` | `unknown_provider_id` | `provider_id` not in coordinator config map | `"unknown_provider_id: <id>"` |
 | `4003` | `tier_unsupported` | `tier != 1` | `"tier_unsupported: tier <n> not supported"` |
 | `4004` | `version_unsupported` | `version != 1` | `"version_unsupported: protocol version <n>"` |
-| `4005` | `invalid_token` | Token validation is required and bearer token is absent, malformed, invalid, or revoked | `"invalid_token"` |
+| `4005` | `invalid_token` | Token validation is required and bearer token is absent, malformed, invalid, revoked, or valid for a different `provider_id` | `"invalid_token"` |
 | `4429` | `pool_full` | Coordinator at configured max provider count | `"pool_full"` |
 | `4007` | `provisional_pool_full` | Provisional provider connects when provisional pool at capacity | `"provisional_pool_full: max <N> provisional providers reached"` |
 | `4008` | `provisional_rate_limited` | Provisional admission rate exceeded | `"provisional_rate_limited: max <N> admissions per hour"` |
@@ -1234,12 +1246,14 @@ SQLite WAL, exit 0. On SIGINT, same with 5s timeout.
 **FR-O4. Provider auth token CLI.**
 The coordinator ships with a `coordinator-cli` tool:
 
-- `issue-token --provider-name "Name"` — generates 32-byte random
-  token (64 hex chars), stores SHA-256 hash in SQLite, prints
-  plaintext once (not recoverable).
+- `issue-token --provider-id <provider_id> --provider-name "Name"` —
+  generates 32-byte random token (64 hex chars), stores SHA-256 hash
+  and authorized `provider_id` in SQLite, prints plaintext once (not
+  recoverable).
 - `revoke-token --token-prefix <prefix>` — sets `revoked_at` on
   matching token. Provider disconnected on next reconnection attempt.
-- `list-tokens` — shows ID, prefix, name, created, revoked status.
+- `list-tokens` — shows ID, prefix, provider ID, name, created,
+  revoked status.
 
 Token storage schema: see Section 7.3.
 
@@ -2005,18 +2019,21 @@ All error responses use the OpenAI error envelope:
 
 #### Token issuance flow (offline, CLI)
 
-Operator runs `coordinator-cli issue-token`. CLI generates 32 random
-bytes (hex-encoded, 64 chars), stores SHA-256 hash in
-`provider_tokens`, prints plaintext once (not recoverable). Operator
-delivers token to provider via secure channel.
+Operator runs `coordinator-cli issue-token --provider-id <provider_id>
+--provider-name <display name>`. CLI generates 32 random bytes
+(hex-encoded, 64 chars), stores SHA-256 hash plus the authorized
+`provider_id` in `provider_tokens`, prints plaintext once (not
+recoverable). Operator delivers token to provider via secure channel.
 
 #### Token validation (bearer in WebSocket auth header)
 
 When `auth.require_provider_tokens=true`, a pinned provider connects
 with `Authorization: Bearer <token>`. Coordinator computes SHA-256,
-looks up in `provider_tokens`, checks `revoked_at IS NULL`, and updates
+looks up in `provider_tokens`, checks `revoked_at IS NULL`, checks the
+token row's `provider_id` equals `hello.provider_id`, and updates
 `last_used_at`. Valid: hello processing proceeds. Missing, malformed,
-invalid, or revoked: WS close 4005 `invalid_token`.
+invalid, revoked, or valid-for-a-different-provider: WS close 4005
+`invalid_token`.
 
 #### Token rotation / revocation
 
@@ -2037,7 +2054,9 @@ synchronously. The two operations are deliberately separate:
 
 Combined: to fully terminate a leaked-token provider, the operator runs
 revoke + blacklist. The CLI command `coordinator-cli revoke-and-kick
---token-prefix <prefix>` performs both in one call.
+--token-prefix <prefix>` performs both in one call by kicking the
+`provider_id` stored on the revoked token row; any explicit
+`--provider-id` override MUST match the token row.
 
 Rotation: issue new, deliver to provider, revoke old. No atomic rotation
 in v1.
@@ -2049,6 +2068,7 @@ CREATE TABLE provider_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     token_hash TEXT NOT NULL UNIQUE,
     token_prefix TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
     provider_name TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     revoked_at TEXT DEFAULT NULL,
@@ -2534,10 +2554,10 @@ buyer-visible failure.
 - **Literal HTTP 530** (Cloudflare-edge "tunnel daemon disconnected" code,
   observed directly on a routed buyer request) is treated as a distinct
   normative signal per FR-P11: mark `unavailable` immediately, log
-  `state_update.reason = "http_530_observed"`, trigger a WebSocket
-  liveness probe (5s ack timeout). Removed from pool until the
-  WebSocket reconnects with fresh hello. This was previously open
-  question OQ-1; resolved as normative in v1.0.2.
+  `state_update.reason = "http_530_observed"`, and close the active
+  provider WebSocket. Removed from pool until the WebSocket reconnects
+  with fresh hello. This was previously open question OQ-1; resolved as
+  normative in v1.0.2.
 
 ### D2 — Post-wake throughput dip
 
@@ -2781,11 +2801,14 @@ The coordinator remains healthy.
 Run by: `phase4-coordinator/scripts/test-provider-disconnect.sh`
 
 **AC-5. Auth flow.**
-1. Issue a token via `coordinator-cli issue-token`.
+1. Issue a token via `coordinator-cli issue-token --provider-id <provider_id>`.
 2. Connect a mock provider with the issued token — succeeds.
 3. Revoke the token via `coordinator-cli revoke-token`.
 4. Disconnect and reconnect the mock provider with the revoked token —
-   rejected with 401.
+   rejected with WS close 4005 `invalid_token`.
+5. Issue a token for a different `provider_id`; connect with that token
+   while sending the original provider's `hello.provider_id` — rejected
+   with WS close 4005 `invalid_token`.
 
 Run by: `phase4-coordinator/scripts/test-auth-flow.sh`
 
@@ -3128,8 +3151,11 @@ preference headers route as expected.
 
 **Step 9. Auth (token issuance CLI + validation).**
 Implement `coordinator-cli` subcommands: `issue-token`, `revoke-token`,
-`list-tokens`. Implement bearer token validation on WebSocket upgrade.
-Deliverable: token issued, used to connect, revoked, connection
+`list-tokens`. `issue-token` requires `--provider-id` and records the
+authorized provider subject. Implement bearer token validation on
+WebSocket upgrade and require the token subject to match
+`hello.provider_id`. Deliverable: token issued, used to connect,
+revoked, connection rejected, and mismatched provider-token pairing
 rejected.
 
 **Step 10. Operator endpoints (/healthz, /poolz, /admin/blacklist).**
