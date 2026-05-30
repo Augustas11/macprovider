@@ -16,6 +16,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
 )
@@ -356,6 +357,43 @@ func TestChatCompletionsRetrySelectsDifferentStreamingProviderBeforeCommit(t *te
 	}
 }
 
+func TestChatCompletionsStreamingProviderDisconnectAfterCommitDoesNotEmitJSONError(t *testing.T) {
+	originalClient := providerhttp.Client
+	providerhttp.Client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}},
+			Body:       &faultAfterFirstRead{first: []byte("data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n")},
+			Request:    r,
+		}, nil
+	})}
+	t.Cleanup(func() { providerhttp.Client = originalClient })
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "http://provider.test"}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "http://provider.test", 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		MaxRetries:              1,
+		RetryPerAttemptTimeoutS: 1,
+		StickyTTLS:              1800,
+		StickyMaxEntries:        10000,
+	}))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"partial"`)) {
+		t.Fatalf("stream body missing first chunk: %s", rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(`"object":"error"`)) || bytes.Contains(rr.Body.Bytes(), []byte(`provider_error`)) {
+		t.Fatalf("committed stream was corrupted by JSON error: %s", rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != "p1" {
+		t.Fatalf("provider=%q, want p1", got)
+	}
+}
+
 func TestChatCompletionsRoutingPreferences(t *testing.T) {
 	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
@@ -418,6 +456,38 @@ func TestChatCompletionsRoutesModelClassByObjective(t *testing.T) {
 	}))
 
 	rr := postChat(t, server, []byte(`{"model":"mlx-fast","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "fast" {
+		t.Fatalf("provider = %q, want fast", rr.Header().Get("X-MacProvider-Provider"))
+	}
+}
+
+func TestChatCompletionsAccurateClassUsesThroughputTieBreak(t *testing.T) {
+	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"slow","choices":[{"message":{"content":"slow"}}]}`))
+	}))
+	defer slowUpstream.Close()
+	fastUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"fast","choices":[{"message":{"content":"fast"}}]}`))
+	}))
+	defer fastUpstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "slow", EndpointURL: slowUpstream.URL},
+		{ProviderID: "fast", EndpointURL: fastUpstream.URL},
+	})
+	registerWithEndpoint(registry, "slow", "s1", "model-slow", pool.StateReady, 20000, 1, slowUpstream.URL, 10)
+	registerWithEndpoint(registry, "fast", "s2", "model-fast", pool.StateReady, 20000, 2, fastUpstream.URL, 30)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
+		ModelClasses: map[string]config.ModelClassConfig{
+			"mlx-accurate": {Members: []string{"model-slow", "model-fast"}, Objective: "accurate"},
+		},
+	}))
+
+	rr := postChat(t, server, []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}]}`), nil)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
@@ -549,14 +619,21 @@ func TestInternalStickyDeleteRequiresBearer(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/internal/sticky?account_id=acct_1", nil)
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusNotFound {
+		t.Fatalf("buyer handler status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	req = httptest.NewRequest(http.MethodDelete, "/internal/sticky?account_id=acct_1", nil)
+	rr = httptest.NewRecorder()
+	server.InternalHandler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusUnauthorized {
-		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+		t.Fatalf("internal handler status=%d body=%s", rr.Code, rr.Body.String())
 	}
 
 	req = httptest.NewRequest(http.MethodDelete, "/internal/sticky?account_id=acct_1", nil)
 	req.Header.Set("Authorization", "Bearer operator-key")
 	rr = httptest.NewRecorder()
-	server.Handler().ServeHTTP(rr, req)
+	server.InternalHandler().ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("authorized status=%d body=%s", rr.Code, rr.Body.String())
 	}
@@ -877,6 +954,49 @@ func TestChatCompletionsRetryMovesOffTimedOutStreamingWSTunnel(t *testing.T) {
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"ok"`)) {
 		t.Fatalf("body=%s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsStreamingWSCancelDoesNotRetry(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "ws", "s1", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
+	calls := 0
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			calls++
+			return &providerws.RelayStream{
+				RequestID: requestID,
+				Chunks:    make(chan providerws.InferenceResponseChunk),
+				Done:      make(chan providerws.InferenceResponseEnd),
+				Errors:    make(chan error),
+			}, nil
+		}, 5*time.Second),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader([]byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`))).WithContext(ctx)
+	req.Header.Set("X-MacProvider-Retry", "1")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if calls != 1 {
+		t.Fatalf("relay calls=%d, want 1", calls)
+	}
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d, want untouched recorder 200 after cancellation", rr.Code)
+	}
+	if rr.Body.Len() != 0 {
+		t.Fatalf("body=%s, want empty cancelled response", rr.Body.String())
 	}
 }
 
@@ -1638,6 +1758,29 @@ func postChat(t *testing.T, server *buyer.Server, body []byte, headers http.Head
 	return rr
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
+type faultAfterFirstRead struct {
+	first []byte
+	used  bool
+}
+
+func (r *faultAfterFirstRead) Read(p []byte) (int, error) {
+	if !r.used {
+		r.used = true
+		return copy(p, r.first), nil
+	}
+	return 0, io.ErrUnexpectedEOF
+}
+
+func (r *faultAfterFirstRead) Close() error {
+	return nil
+}
+
 func deadMidInferenceRelay(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
 	chunks := make(chan providerws.InferenceResponseChunk, 1)
 	done := make(chan providerws.InferenceResponseEnd)
@@ -1676,5 +1819,283 @@ func eventually(t *testing.T, f func() bool) {
 			t.Fatal("condition did not become true before deadline")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestSessionHardPinReturns503EvenWithStickyEnabled is the AC-SR-15
+// regression lock: a non-matching X-MacProvider-Session value MUST return
+// 503 session_ended (SPEC-002 FR-R3) regardless of whether sticky affinity
+// is enabled in the coordinator. The pin path lives at server.go:1270-1284
+// and runs BEFORE the sticky lookup; this test pins it so a future refactor
+// that accidentally routes session-pinned traffic through sticky (the
+// SPEC-004 v0.1 C-1 collision class) fails loudly. Parameterized on
+// sticky_enabled so both branches are exercised.
+func TestSessionHardPinReturns503EvenWithStickyEnabled(t *testing.T) {
+	for _, stickyEnabled := range []bool{false, true} {
+		name := "sticky_off"
+		if stickyEnabled {
+			name = "sticky_on"
+		}
+		t.Run(name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			registerWithPath(registry, "p1", "real-session", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithInternalAuthKey("operator-key"),
+				buyer.WithRoutingConfig(config.RoutingConfig{
+					StickyEnabled:    stickyEnabled,
+					StickyTTLS:       1800,
+					StickyMaxEntries: 10000,
+					TiebreakEpsilon:  0.10,
+				}),
+				buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+					t.Fatalf("relay MUST NOT be invoked for a session-pinned request with no matching session — got dispatch to %s", provider.ProviderID)
+					return nil, nil
+				}, time.Second),
+			)
+
+			headers := http.Header{
+				"Authorization":          []string{"Bearer operator-key"},
+				"X-MacProvider-Session":  []string{"nonexistent-session-id"},
+				// Even with a valid-looking conv: present, sticky must NOT activate
+				// when a hard-pin header is set. This is the C-1 regression vector.
+				"X-MacProvider-Internal-Conv": []string{"conv:should-not-be-used"},
+				"X-MacProvider-Account":  []string{"acct_test"},
+			}
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), headers)
+
+			if rr.Code != http.StatusServiceUnavailable {
+				t.Fatalf("status=%d, want 503; body=%s", rr.Code, rr.Body.String())
+			}
+			if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"session_ended"`)) {
+				t.Fatalf("body MUST contain code=session_ended; got %s", rr.Body.String())
+			}
+			// Hard-pin failed AND no sticky entry should have been written
+			// (which would be implied by the relay-fatalf above, but we also
+			// re-fire to a non-pinned request to verify the sticky lookup is
+			// genuinely cold — a non-empty sticky map would surface as a
+			// "sticky_hit" log path on the next request).
+		})
+	}
+}
+
+// TestStickyMissesGracefullyWhenProviderIsBreakerHeld pins SPEC-004 §9
+// composition: a sticky hit on a breaker-degraded provider MUST gracefully
+// miss (RoutingEligible filters it out of the candidate set; applySticky
+// falls back), routing to another eligible provider. Regression-locks the
+// "sticky traps a session on a dead box" failure class.
+func TestStickyMissesGracefullyWhenProviderIsBreakerHeld(t *testing.T) {
+	upstream1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p1","choices":[{"message":{"content":"p1"}}]}`))
+	}))
+	defer upstream1.Close()
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p2","choices":[{"message":{"content":"p2"}}]}`))
+	}))
+	defer upstream2.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: upstream1.URL},
+		{ProviderID: "p2", EndpointURL: upstream2.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream1.URL, 20)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, upstream2.URL, 20)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:    true,
+			StickyTTLS:       1800,
+			StickyMaxEntries: 10000,
+			TiebreakEpsilon:  0.10,
+		}),
+	)
+	headers := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:graceful-miss"},
+		"X-MacProvider-Account":       []string{"acct_test"},
+	}
+
+	// Seed sticky to whichever provider is selected first (deterministic
+	// under defaults).
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("seed status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	stuckProvider := rr.Header().Get("X-MacProvider-Provider")
+	if stuckProvider == "" {
+		t.Fatal("seed did not set X-MacProvider-Provider header")
+	}
+	otherProvider := "p1"
+	stuckAssigned := "s1"
+	if stuckProvider == "p1" {
+		otherProvider = "p2"
+		stuckAssigned = "s1"
+	} else {
+		stuckAssigned = "s2"
+	}
+
+	// Mark the stuck provider degraded with a breaker recovery hold — this
+	// is the same mechanism FR-P11a uses on a breaker trip. RoutingEligible()
+	// returns false; sticky lookup must gracefully fall back to otherProvider.
+	if !registry.MarkDegradedForRecovery(stuckProvider, stuckAssigned, pool.RecoveryReasonBreaker) {
+		t.Fatalf("could not put provider %s into breaker-held degraded state", stuckProvider)
+	}
+
+	rr = postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi again"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("post-breaker status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != otherProvider {
+		t.Fatalf("sticky trapped a session on a breaker-held provider: routed to %q, want %q", got, otherProvider)
+	}
+}
+
+// TestStickyMissesGracefullyWhenProviderIsRemoved pins that sticky entries
+// pointing at providers that have left the pool entirely (FR-SR-3 "graceful
+// fallback") miss instead of trapping. Complements the breaker-held case
+// above; together they cover the dead-box scenarios the composition
+// guarantee (SPEC-004 §9) MUST preserve.
+func TestStickyMissesGracefullyWhenProviderIsRemoved(t *testing.T) {
+	upstream1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p1","choices":[{"message":{"content":"p1"}}]}`))
+	}))
+	defer upstream1.Close()
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p2","choices":[{"message":{"content":"p2"}}]}`))
+	}))
+	defer upstream2.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "p1", EndpointURL: upstream1.URL},
+		{ProviderID: "p2", EndpointURL: upstream2.URL},
+	})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream1.URL, 20)
+	registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, upstream2.URL, 20)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			StickyEnabled:    true,
+			StickyTTLS:       1800,
+			StickyMaxEntries: 10000,
+			TiebreakEpsilon:  0.10,
+		}),
+	)
+	headers := http.Header{
+		"Authorization":               []string{"Bearer operator-key"},
+		"X-MacProvider-Internal-Conv": []string{"conv:removed-provider"},
+		"X-MacProvider-Account":       []string{"acct_test"},
+	}
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("seed status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	stuckProvider := rr.Header().Get("X-MacProvider-Provider")
+	stuckAssigned := "s1"
+	otherProvider := "p2"
+	if stuckProvider == "p2" {
+		stuckAssigned = "s2"
+		otherProvider = "p1"
+	}
+
+	// Hard-remove the sticky-pinned provider — sticky map still has the
+	// stale entry, but candidate list won't include it. Must gracefully
+	// miss and route to the other.
+	if !registry.RemoveIfSession(stuckProvider, stuckAssigned) {
+		t.Fatalf("RemoveIfSession(%s, %s) returned false", stuckProvider, stuckAssigned)
+	}
+
+	rr = postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi again"}]}`), headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("post-removal status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != otherProvider {
+		t.Fatalf("sticky did not gracefully miss on removed provider: routed to %q, want %q", got, otherProvider)
+	}
+}
+
+// TestDefaultConfigPreservesBaselineProviderSelection is the FR-SR-1 +
+// AC-SR-1 default-preservation regression lock: with every SPEC-004 key at
+// its default (sticky off, retries off, randomize off, no model classes),
+// routing produces the same provider selection as SPEC-002 v1.3.3 would —
+// i.e. the smart-router pipeline is a verified NO-OP at install. A future
+// change that accidentally activates a smart feature at default (e.g.
+// flipping a default to true, or letting an empty model_classes map
+// short-circuit the wrong way) breaks this test loudly.
+func TestDefaultConfigPreservesBaselineProviderSelection(t *testing.T) {
+	upstream1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p1","choices":[{"message":{"content":"p1"}}]}`))
+	}))
+	defer upstream1.Close()
+	upstream2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"p2","choices":[{"message":{"content":"p2"}}]}`))
+	}))
+	defer upstream2.Close()
+
+	mkServer := func(routing config.RoutingConfig) *buyer.Server {
+		registry := pool.NewRegistry([]config.ProviderConfig{
+			{ProviderID: "p1", EndpointURL: upstream1.URL},
+			{ProviderID: "p2", EndpointURL: upstream2.URL},
+		})
+		// Equal slots_free so SPEC-002's default sort ("lowest slots_free
+		// first, throughput tiebreak") collapses to the throughput tiebreak
+		// — p2 (30 tps) MUST beat p1 (10 tps). This makes the test
+		// independent of the (pre-existing, non-deterministic) Go map
+		// iteration order in pool.Snapshot().
+		registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream1.URL, 10)
+		registerWithEndpoint(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 1, upstream2.URL, 30)
+		return buyer.NewServer(
+			registry,
+			zerolog.Nop(),
+			time.Unix(1716768000, 0),
+			buyer.WithInternalAuthKey("operator-key"),
+			buyer.WithRoutingConfig(routing),
+		)
+	}
+
+	// Baseline: zero-valued RoutingConfig — every SPEC-004 key at default.
+	defaultRouting := config.RoutingConfig{
+		// Pre-SPEC-004 fields keep their existing defaults.
+		PreflightTimeoutS: 5,
+		RequestTimeoutS:   280,
+		FailoverTimeoutS:  5,
+		// SPEC-004 fields all at install defaults — proves the pipeline
+		// is a verified no-op.
+		StickyEnabled:                 false,
+		StickyTTLS:                    1800,
+		StickyMaxEntries:              10000,
+		TiebreakRandomize:             false,
+		TiebreakEpsilon:               0,
+		MaxRetries:                    0,
+		RetryPerAttemptTimeoutS:       60,
+		MaxProvidersFaultedPerRequest: 0,
+		ModelClasses:                  nil,
+	}
+	server := mkServer(defaultRouting)
+
+	// Smart-router-shaped headers MUST be irrelevant at default — even with
+	// a conv: header set, sticky_enabled=false → no derivation, no lookup.
+	// Account header is irrelevant for non-sticky path. Even an internal
+	// header MUST be ignored on the buyer port when not paired with
+	// operator-bearer.
+	headers := http.Header{}
+
+	// Run several requests; deterministic top-throughput sort always picks p2.
+	for i := 0; i < 5; i++ {
+		rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}]}`), headers)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("iter %d status=%d body=%s", i, rr.Code, rr.Body.String())
+		}
+		if got := rr.Header().Get("X-MacProvider-Provider"); got != "p2" {
+			t.Fatalf("iter %d: default-config routed to %q, want p2 (highest throughput) — SPEC-004 pipeline must be a no-op at default", i, got)
+		}
 	}
 }

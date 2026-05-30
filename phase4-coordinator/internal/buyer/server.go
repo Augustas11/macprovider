@@ -234,8 +234,33 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Post("/v1/chat/completions", s.handleChatCompletions)
-	r.Delete("/internal/sticky", s.handleInternalStickyDelete)
 	return r
+}
+
+func (s *Server) InternalHandler() http.Handler {
+	r := chi.NewRouter()
+	r.Delete("/internal/sticky", s.handleInternalStickyDelete)
+	r.Get("/internal/routing", s.handleInternalRouting)
+	return r
+}
+
+func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
+	if !s.internalBearerAuthorized(r.Header) {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal routing metadata requires coordinator authorization")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"sticky": map[string]any{
+			"enabled":     s.stickyEnabled,
+			"ttl_seconds": int(s.stickyTTL.Seconds()),
+		},
+		"retry": map[string]any{
+			"max_retries":                   s.maxRetries,
+			"retry_per_attempt_timeout_s":   int(s.retryPerAttemptTimeout.Seconds()),
+			"max_providers_faulted_request": s.maxFaultedPerRequest,
+		},
+	})
 }
 
 func (s *Server) handleInternalStickyDelete(w http.ResponseWriter, r *http.Request) {
@@ -476,7 +501,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		excluded := map[string]struct{}{}
 		for {
 			if provider.IsWSTunneled() {
-				result := s.forwardWS(w, r, requestID, body, provider, true)
+				result := s.forwardWS(w, r, requestID, body, provider, true, s.attemptTimeout(r))
 				if result == wsForwardProviderDisconnectedCommitted {
 					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "stream_terminal", "")
 					return
@@ -486,6 +511,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				excluded[routeKey(provider)] = struct{}{}
+				faultedRoutes[routeKey(provider)] = struct{}{}
+				if result == wsForwardCancelled {
+					return
+				}
 				if result == wsForwardProviderDisconnected {
 					if !failoverAttempted && !hasPinnedRoute(r.Header) {
 						next, nextRequestID, ok := s.failoverCandidate(req, r.Header, provider, excluded)
@@ -517,8 +546,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				s.logRoutingDecision(requestID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
 				continue
 			}
-			result, status := s.forwardStreaming(w, r, requestID, body, provider, req.Model)
+			result, status := s.forwardStreaming(w, r, requestID, body, provider, req.Model, s.attemptTimeout(r))
 			if result == wsForwardComplete {
+				return
+			}
+			if result == wsForwardProviderDisconnectedCommitted || result == wsForwardCancelled {
 				return
 			}
 			excluded[routeKey(provider)] = struct{}{}
@@ -544,7 +576,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		excluded := map[string]struct{}{}
 		failoverAttempted := false
 		for {
-			result := s.forwardWS(w, r, requestID, body, provider, false)
+			result := s.forwardWS(w, r, requestID, body, provider, false, s.attemptTimeout(r))
 			if result == wsForwardComplete {
 				s.stickyStore(r.Header, provider, req.Model)
 				return
@@ -577,6 +609,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			if result == wsForwardProviderDisconnected {
 				excluded[routeKey(provider)] = struct{}{}
+				faultedRoutes[routeKey(provider)] = struct{}{}
 				if failoverAttempted || hasPinnedRoute(r.Header) {
 					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
 					writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
@@ -679,7 +712,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider, stream bool) wsForwardResult {
+func (s *Server) attemptTimeout(r *http.Request) time.Duration {
+	if s.maxRetries > 0 && retryHeaderLimit(r.Header.Get("X-MacProvider-Retry")) > 0 && s.retryPerAttemptTimeout > 0 {
+		return s.retryPerAttemptTimeout
+	}
+	return s.requestTimeout
+}
+
+func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider, stream bool, timeout time.Duration) wsForwardResult {
 	if s.relay == nil {
 		writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
 		return wsForwardUnavailable
@@ -692,7 +732,10 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 		}
 		reserved = provider.Tier == pool.TierProvisional
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), s.requestTimeout)
+	if timeout <= 0 {
+		timeout = s.requestTimeout
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	relay, err := s.relay(ctx, provider, requestID, body, stream)
 	if err != nil {
@@ -899,9 +942,15 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	}
 }
 
-func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider, modelScope string) (wsForwardResult, int) {
+func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider, modelScope string, timeout time.Duration) (wsForwardResult, int) {
 	upstreamURL := provider.EndpointURL + "/v1/chat/completions"
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, upstreamURL, bytes.NewReader(body))
+	attemptCtx := r.Context()
+	cancelAttempt := func() {}
+	if timeout > 0 {
+		attemptCtx, cancelAttempt = context.WithTimeout(r.Context(), timeout)
+	}
+	defer cancelAttempt()
+	upReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		return wsForwardFailed, http.StatusBadGateway
 	}
@@ -930,7 +979,13 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 	w.WriteHeader(http.StatusOK)
-	s.stickyStore(r.Header, provider, modelScope)
+	// NOTE: HTTP-streaming sticky write is deferred to after io.EOF (clean
+	// stream completion), per the SPEC-004 v0.2 audit. Storing affinity
+	// upfront would pin the conversation to a provider that may disconnect
+	// mid-stream, leaving the sticky entry pointing at a degraded route.
+	// The store call now lives in the io.EOF branch below; the
+	// wsForwardProviderDisconnectedCommitted branch intentionally does NOT
+	// write sticky (the provider failed mid-flight).
 	flusher, _ := w.(http.Flusher)
 
 	reader := bufio.NewReader(resp.Body)
@@ -949,6 +1004,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			continue
 		}
 		if err == io.EOF {
+			s.stickyStore(r.Header, provider, modelScope)
 			return wsForwardComplete, http.StatusOK
 		}
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
@@ -979,7 +1035,7 @@ func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult) {
 		writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
 	case wsForwardProviderDisconnected:
 		writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
-	case wsForwardCancelled:
+	case wsForwardCancelled, wsForwardProviderDisconnectedCommitted:
 		return
 	default:
 		writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
@@ -1362,6 +1418,11 @@ func (s *Server) sortCandidates(candidates []pool.Provider, objective string) {
 	case "accurate":
 		sort.SliceStable(candidates, func(i, j int) bool {
 			if candidates[i].ModelParamsB == candidates[j].ModelParamsB {
+				ti := s.effectiveThroughput(candidates[i])
+				tj := s.effectiveThroughput(candidates[j])
+				if ti != tj {
+					return ti > tj
+				}
 				return candidates[i].SlotsFree < candidates[j].SlotsFree
 			}
 			return candidates[i].ModelParamsB > candidates[j].ModelParamsB
@@ -1458,9 +1519,9 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 	if !strings.HasPrefix(key, "conv:") {
 		return candidates
 	}
-	entry, ok := s.stickyLookup(key)
+	entry, ok, reason := s.stickyLookup(key)
 	if !ok {
-		s.logRoutingDecision(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss", "")
+		s.logRoutingDecision(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_"+reason, "")
 		return candidates
 	}
 	for i, candidate := range candidates {
@@ -1478,25 +1539,25 @@ func (s *Server) applySticky(requestID string, headers http.Header, model string
 		s.logRoutingDecision(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_hit", candidate.ProviderID)
 		return candidates
 	}
-	s.logRoutingDecision(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss", "")
+	s.logRoutingDecision(requestID, candidates, s.objectiveForRequest(headers, class), 0, 0, "sticky_miss_provider_not_candidate", "")
 	return candidates
 }
 
-func (s *Server) stickyLookup(key string) (stickyEntry, bool) {
+func (s *Server) stickyLookup(key string) (stickyEntry, bool, string) {
 	s.stickyMu.Lock()
 	defer s.stickyMu.Unlock()
 	entry, ok := s.sticky[key]
 	if !ok {
-		return stickyEntry{}, false
+		return stickyEntry{}, false, "not_found"
 	}
 	now := s.now()
 	if now.Sub(entry.LastUsedAt) > s.stickyTTL {
 		delete(s.sticky, key)
-		return stickyEntry{}, false
+		return stickyEntry{}, false, "expired"
 	}
 	entry.LastUsedAt = now
 	s.sticky[key] = entry
-	return entry, true
+	return entry, true, ""
 }
 
 func (s *Server) stickyStore(headers http.Header, provider pool.Provider, modelScope string) {
@@ -1552,7 +1613,7 @@ func (s *Server) shouldRetry(r *http.Request, startedAt time.Time, explicitRetri
 	if s.maxRetries <= 0 || requestedRetries <= 0 || hasPinnedRoute(r.Header) {
 		return false
 	}
-	if err != nil && r.Context().Err() != nil {
+	if r.Context().Err() != nil {
 		return false
 	}
 	if explicitRetries >= min(s.maxRetries, requestedRetries) {
@@ -1680,7 +1741,18 @@ func modelClassMembers(class *config.ModelClassConfig) []string {
 }
 
 func hasInternalRoutingHeader(headers http.Header) bool {
-	return strings.TrimSpace(headers.Get("X-MacProvider-Internal-Conv")) != "" || strings.TrimSpace(headers.Get("X-MacProvider-Account")) != ""
+	for key, values := range headers {
+		lowerKey := strings.ToLower(key)
+		if lowerKey != "x-macprovider-account" && !strings.HasPrefix(lowerKey, "x-macprovider-internal-") {
+			continue
+		}
+		for _, value := range values {
+			if strings.TrimSpace(value) != "" {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (s *Server) internalBearerAuthorized(headers http.Header) bool {

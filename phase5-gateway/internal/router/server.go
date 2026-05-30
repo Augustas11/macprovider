@@ -42,6 +42,19 @@ type Server struct {
 	client  *http.Client
 	mu      sync.RWMutex
 	poolz   statusCache
+	// routingMeta is a small TTL cache for /internal/routing probes. Without
+	// it, every sticky-eligible chat-completion AND every /v1/models request
+	// fires a coordinator roundtrip (the SPEC-004 audit's HIGH perf finding).
+	// 5s TTL — coordinator config only changes on reload, so staleness is
+	// harmless; cap on bursts.
+	routingMeta routingMetaCache
+}
+
+type routingMetaCache struct {
+	mu        sync.Mutex
+	value     coordinatorRoutingMetadata
+	ok        bool
+	fetchedAt time.Time
 }
 
 type Store interface {
@@ -390,7 +403,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_models_error", "Coordinator models error")
 		return
 	}
-	body["tier1_disclosure"] = s.makeTier1Disclosure()
+	body["tier1_disclosure"] = s.makeTier1Disclosure(r.Context())
 	copyCleanHeaders(w.Header(), resp.Header)
 	writeJSON(w, http.StatusOK, body)
 }
@@ -463,7 +476,7 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	accountID := authn.AccountID
-	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, strings.TrimRight(s.coordinatorBuyerURL(), "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
+	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodDelete, strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")+"/internal/sticky?account_id="+url.QueryEscape(accountID), nil)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
@@ -747,7 +760,7 @@ type stickyAffinityDisclosure struct {
 	Description string `json:"description"`
 }
 
-func (s *Server) makeTier1Disclosure() tier1Disclosure {
+func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 	disclosure := tier1Disclosure{
 		Version:             "v0.6",
 		PlaintextToProvider: true,
@@ -760,12 +773,72 @@ func (s *Server) makeTier1Disclosure() tier1Disclosure {
 		},
 	}
 	if s.cfg.Routing.StickyEnabled {
+		ctx := context.Background()
+		if len(ctxs) > 0 && ctxs[0] != nil {
+			ctx = ctxs[0]
+		}
+		metadata, ok := s.coordinatorRoutingMetadata(ctx)
+		if !ok || !metadata.Sticky.Enabled || metadata.Sticky.TTLSeconds != s.cfg.Routing.StickyTTLS {
+			return disclosure
+		}
 		disclosure.StickyAffinity = &stickyAffinityDisclosure{
-			Enabled: true, TTLSeconds: s.cfg.Routing.StickyTTLS,
+			Enabled: true, TTLSeconds: metadata.Sticky.TTLSeconds,
 			Description: "Related requests with the same conversation tag are preferentially routed to one provider for up to this many seconds, so that provider can observe and correlate more of your traffic than under default routing.",
 		}
 	}
 	return disclosure
+}
+
+type coordinatorRoutingMetadata struct {
+	Sticky struct {
+		Enabled    bool `json:"enabled"`
+		TTLSeconds int  `json:"ttl_seconds"`
+	} `json:"sticky"`
+}
+
+const routingMetaTTL = 5 * time.Second
+
+func (s *Server) coordinatorRoutingMetadata(ctx context.Context) (coordinatorRoutingMetadata, bool) {
+	// Per-request roundtrip cost is bad at scale (audit HIGH). 5s TTL is
+	// safe because coordinator routing config only changes on reload, and
+	// the consumers (sticky header injection + /v1/models disclosure)
+	// degrade gracefully on staleness — staleness only takes effect on the
+	// NEXT request anyway.
+	s.routingMeta.mu.Lock()
+	if s.routingMeta.ok && s.now().Sub(s.routingMeta.fetchedAt) < routingMetaTTL {
+		v, ok := s.routingMeta.value, s.routingMeta.ok
+		s.routingMeta.mu.Unlock()
+		return v, ok
+	}
+	s.routingMeta.mu.Unlock()
+
+	var metadata coordinatorRoutingMetadata
+	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, strings.TrimRight(s.cfg.Coordinator.OperatorURL, "/")+"/internal/routing", nil)
+	if err != nil {
+		return metadata, false
+	}
+	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return metadata, false
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return metadata, false
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
+		slog.Warn("coordinator routing metadata decode failed", "error", err.Error())
+		return metadata, false
+	}
+
+	s.routingMeta.mu.Lock()
+	s.routingMeta.value = metadata
+	s.routingMeta.ok = true
+	s.routingMeta.fetchedAt = s.now()
+	s.routingMeta.mu.Unlock()
+	return metadata, true
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
@@ -893,9 +966,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "invalid_request_error", "invalid_conversation_tag", "Invalid conversation tag")
 				return
 			}
-			upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
-			upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
-			upReq.Header.Set("X-MacProvider-Internal-Conv", s.deriveConversationKey(subject.AccountID, tag))
+			if metadata, ok := s.coordinatorRoutingMetadata(upCtx); ok && metadata.Sticky.Enabled && metadata.Sticky.TTLSeconds == s.cfg.Routing.StickyTTLS {
+				upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
+				upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
+				upReq.Header.Set("X-MacProvider-Internal-Conv", s.deriveConversationKey(subject.AccountID, tag))
+			}
 		}
 	}
 	resp, err := s.client.Do(upReq)
@@ -1659,13 +1734,11 @@ func estimatePromptTokens(body []byte) int64 {
 }
 
 func copyForwardHeaders(dst, src http.Header) {
-	for key, values := range src {
-		if isBlockedBuyerForwardHeader(key) {
-			continue
-		}
-		for _, value := range values {
-			dst.Add(key, value)
-		}
+	if accept := strings.TrimSpace(src.Get("Accept")); accept != "" {
+		dst.Set("Accept", accept)
+	}
+	if retry := strings.TrimSpace(src.Get("X-MacProvider-Retry")); retry != "" {
+		dst.Set("X-MacProvider-Retry", retry)
 	}
 }
 
@@ -1699,19 +1772,6 @@ func isMacProviderHeader(key string) bool {
 func isInternalMacProviderHeader(key string) bool {
 	lower := strings.ToLower(key)
 	return lower == "x-macprovider-internal-conv" || strings.HasPrefix(lower, "x-macprovider-internal-")
-}
-
-func isBlockedBuyerForwardHeader(key string) bool {
-	lower := strings.ToLower(key)
-	if lower == "x-macprovider-retry" {
-		return false
-	}
-	switch lower {
-	case "authorization", "proxy-authorization", "cookie", "x-demo-token":
-		return true
-	default:
-		return strings.HasPrefix(lower, "x-macprovider-")
-	}
 }
 
 func contentTypeOrJSON(header http.Header) string {

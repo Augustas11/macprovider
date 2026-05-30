@@ -32,6 +32,7 @@ routing:
   tiebreak_epsilon: 0.0
   max_retries: 0
   retry_per_attempt_timeout_s: 60
+  # 0 = auto-derive at runtime: min(2, max_retries). NOT "unbounded".
   max_providers_faulted_per_request: 0
   sticky_enabled: false
   sticky_ttl_s: 1800

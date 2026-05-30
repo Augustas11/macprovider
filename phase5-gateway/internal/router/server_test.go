@@ -165,6 +165,43 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	}
 }
 
+func TestModelsStickyDisclosureUsesCoordinatorRoutingMetadata(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"object":"list","data":[]}`), nil
+		case "/internal/routing":
+			if got := r.Header.Get("Authorization"); got != "Bearer operator-key" {
+				t.Fatalf("operator auth = %q", got)
+			}
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"sticky":{"enabled":true,"ttl_seconds":1800}}`), nil
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Routing.StickyEnabled = true
+		cfg.Routing.StickyTTLS = 1800
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_sticky_disclosure")
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+	var body struct {
+		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	if body.Tier1Disclosure.StickyAffinity == nil || !body.Tier1Disclosure.StickyAffinity.Enabled {
+		t.Fatalf("sticky disclosure not enabled: %+v", body.Tier1Disclosure.StickyAffinity)
+	}
+	if body.Tier1Disclosure.StickyAffinity.TTLSeconds != 1800 {
+		t.Fatalf("sticky ttl=%d, want 1800", body.Tier1Disclosure.StickyAffinity.TTLSeconds)
+	}
+}
+
 func TestKeyRotationPreservesHistory(t *testing.T) {
 	h, store, _, cfg := newTestHarness(t, fakeOAuth{})
 	fullKey := createAccountAndKey(t, store, cfg, "acct_rotate")
@@ -543,6 +580,7 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	req.Header.Set("X-MacProvider-Foo", "attacker")
 	req.Header.Set("Cookie", "session=secret")
 	req.Header.Set("Proxy-Authorization", "Basic secret")
+	req.Header.Set("X-Custom-Control", "attacker")
 	resp := httptest.NewRecorder()
 	h.ServeHTTP(resp, req)
 	if resp.Code != http.StatusOK {
@@ -572,6 +610,9 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 		if got := captured.Get(header); got != "" {
 			t.Fatalf("forwarded credential header %s=%q", header, got)
 		}
+	}
+	if got := captured.Get("X-Custom-Control"); got != "" {
+		t.Fatalf("forwarded non-allowlisted header = %q", got)
 	}
 
 	failing = true
@@ -604,11 +645,15 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 func TestStickyConversationDerivesInternalHeaderAndStripsInjection(t *testing.T) {
 	var captured http.Header
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/internal/routing" {
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"sticky":{"enabled":true,"ttl_seconds":1800}}`), nil
+		}
 		captured = r.Header.Clone()
 		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
 	})}
 	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
 		cfg.Routing.StickyEnabled = true
 	}, WithHTTPClient(client))
 	fullKey := createAccountAndKey(t, store, cfg, "acct_sticky")
@@ -683,6 +728,7 @@ func TestStickyDeleteRequiresBearerAndAuthorizesCoordinator(t *testing.T) {
 	})}
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
 		cfg.Routing.StickyEnabled = true
 	}, WithHTTPClient(client))
 	fullKey := createAccountAndKey(t, store, cfg, "acct_sticky_delete")
@@ -706,6 +752,9 @@ func TestStickyDeleteRequiresBearerAndAuthorizesCoordinator(t *testing.T) {
 	}
 	if got := captured.URL.Query().Get("account_id"); got != "acct_sticky_delete" {
 		t.Fatalf("account_id = %q", got)
+	}
+	if got := captured.URL.Scheme + "://" + captured.URL.Host; got != "http://operator.test" {
+		t.Fatalf("coordinator sticky URL host = %q", got)
 	}
 	if got := captured.Header.Get("Authorization"); got != "Bearer operator-key" {
 		t.Fatalf("coordinator authorization = %q", got)
@@ -1361,5 +1410,99 @@ func responseWithBody(status int, header http.Header, body string) *http.Respons
 		StatusCode: status,
 		Header:     header,
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+// TestConversationKeyIsAccountScoped pins the structural cross-account
+// collision guarantee: account A with tag T MUST derive a different conv:
+// than account B with the same tag T. Regression-locks the SPEC-006 v0.8.1
+// §1.3 HMAC account-scoping property (audit MED-3 / code-review MAJOR).
+// Without account_id inside the HMAC message, this property would fail
+// silently — a future "simplification" would route account B's sticky
+// traffic to account A's pinned provider.
+func TestConversationKeyIsAccountScoped(t *testing.T) {
+	secret := "test-key-hash-secret"
+	tag := "thread-1"
+	a := expectedConversationKey(secret, "acct_alpha", tag)
+	b := expectedConversationKey(secret, "acct_beta", tag)
+	if a == b {
+		t.Fatalf("cross-account collision: acct_alpha and acct_beta produce same conv key %q — account_id missing from HMAC msg?", a)
+	}
+	// Also verify same account + same tag → deterministic (sanity, not the regression).
+	if expectedConversationKey(secret, "acct_alpha", tag) != a {
+		t.Fatal("same inputs produced different keys — derivation is non-deterministic")
+	}
+	// And different tag on same account → different key.
+	if expectedConversationKey(secret, "acct_alpha", "thread-2") == a {
+		t.Fatal("different tag on same account produced same key — tag missing from HMAC msg?")
+	}
+}
+
+// TestStickyDeleteIsAccountScopedRegardlessOfQueryParam pins that DELETE
+// /v1/sticky purges ONLY the authenticated caller's account, even if the
+// caller smuggles an `?account_id=<other>` query param (which the
+// coordinator-internal /internal/sticky endpoint accepts). The gateway MUST
+// pin scoping to the authenticated subject, not the buyer-supplied query.
+// Regression-locks the code-review MAJOR (cross-account purge scope).
+func TestStickyDeleteIsAccountScopedRegardlessOfQueryParam(t *testing.T) {
+	var captured *http.Request
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		captured = r
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"purged":true,"entries":0}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Routing.StickyEnabled = true
+	}, WithHTTPClient(client))
+	bobKey := createAccountAndKey(t, store, cfg, "acct_bob")
+
+	// Bob attempts to purge alice's entries via query-param smuggling.
+	req := httptest.NewRequest(http.MethodDelete, "/v1/sticky?account_id=acct_alice", nil)
+	req.Header.Set("Authorization", "Bearer "+bobKey)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("coordinator request not captured")
+	}
+	// The coordinator-bound request MUST carry Bob's account_id, not Alice's.
+	if got := captured.URL.Query().Get("account_id"); got != "acct_bob" {
+		t.Fatalf("smuggled account_id leaked to coordinator: got %q, want acct_bob (Bob cannot purge Alice's entries)", got)
+	}
+}
+
+// TestInternalHeaderStripAndAuditEventOnUnauthenticatedRequest pins that
+// the strip-before-auth middleware fires AND audit-logs a buyer-supplied
+// X-MacProvider-Internal-Conv even when the request is unauthenticated
+// (no bearer at all). The strip MUST run before auth so a 401-returning
+// path is still audited; otherwise an attacker can probe the gateway with
+// throwaway tokens or no tokens and the injection attempt goes unlogged.
+// Regression-locks the code-review MAJOR (strip-on-unauthenticated path).
+func TestInternalHeaderStripAndAuditEventOnUnauthenticatedRequest(t *testing.T) {
+	h, _, dbPath, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Routing.StickyEnabled = true
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","messages":[{"role":"user","content":"hi"}]}`))
+	// Deliberately NO Authorization header — attacker probing without creds.
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-MacProvider-Internal-Conv", "conv:attacker")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	// Auth-required path must reject.
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 for missing bearer, got %d body=%s", resp.Code, resp.Body.String())
+	}
+	// Strip-before-auth must STILL have fired and audited; otherwise an
+	// attacker can probe injection without ever appearing in audit logs.
+	if got := countAuditEvents(t, dbPath, "internal_header_injection_stripped"); got != 1 {
+		t.Fatalf("audit event count = %d, want 1 (strip MUST run before auth and emit audit on 401 path)", got)
 	}
 }
