@@ -120,13 +120,13 @@ type Tier2Config struct {
 	AttestationFormats []string `yaml:"attestation_formats"`
 
 	BehavioralSafetyEnabled    bool    `yaml:"behavioral_safety_enabled"`
-	OutputSizeCapBytes         int     `yaml:"output_size_cap_bytes"`
+	OutputSizeCapBytes         int64   `yaml:"output_size_cap_bytes"`
 	OutputBytesPerTokenCeiling int     `yaml:"output_bytes_per_token_ceiling"`
-	DefaultOutputSizeCapBytes  int     `yaml:"default_output_size_cap_bytes"`
+	DefaultOutputSizeCapBytes  int64   `yaml:"default_output_size_cap_bytes"`
 	EncodingValidationEnabled  bool    `yaml:"encoding_validation_enabled"`
 	ResponseTimeAnomalyEnabled bool    `yaml:"response_time_anomaly_enabled"`
 	ResponseTimeAnomalyFactor  float64 `yaml:"response_time_anomaly_factor"`
-	ResponseTimeAnomalyMinMS   int     `yaml:"response_time_anomaly_min_ms"`
+	ResponseTimeAnomalyMinMS   int64   `yaml:"response_time_anomaly_min_ms"`
 }
 
 type CoordinatorAdvertisedVersion struct {
@@ -380,11 +380,8 @@ func (c Config) Validate() error {
 	if c.Tier2.RequireHashVerified && (c.Tier2.CatalogPath == "" || c.Tier2.CatalogPublicKey == "") {
 		return fmt.Errorf("tier2.require_hash_verified requires a valid signed catalog configuration")
 	}
-	if c.Tier2.RequireEncryptedLeg && c.Tier2.EncryptedLegAEAD != "A256GCM" {
+	if c.Tier2.EncryptedLegAEAD != "A256GCM" {
 		return fmt.Errorf("tier2.encrypted_leg_aead must be A256GCM")
-	}
-	if c.Tier2.RequireEncryptedLeg {
-		return fmt.Errorf("tier2.require_encrypted_leg is not implemented in SPEC-008 Phase 1")
 	}
 	if c.Tier2.EncryptedLegRekeyAfterRequests <= 0 {
 		return fmt.Errorf("tier2.encrypted_leg_rekey_after_requests must be > 0")
@@ -392,29 +389,20 @@ func (c Config) Validate() error {
 	if c.Tier2.EncryptedLegRekeyAfterSeconds <= 0 {
 		return fmt.Errorf("tier2.encrypted_leg_rekey_after_seconds must be > 0")
 	}
-	if c.Tier2.RequireAttestation {
-		return fmt.Errorf("tier2.require_attestation is not implemented in SPEC-008 Phase 1")
+	if c.Tier2.RequireAttestation && len(c.Tier2.AttestationRoots) == 0 {
+		return fmt.Errorf("tier2.require_attestation requires at least one attestation root")
 	}
 	if c.Tier2.AttestationMaxAgeS <= 0 {
 		return fmt.Errorf("tier2.attestation_max_age_s must be > 0")
+	}
+	if c.Tier2.OutputSizeCapBytes < 0 {
+		return fmt.Errorf("tier2.output_size_cap_bytes must be >= 0")
 	}
 	if c.Tier2.OutputBytesPerTokenCeiling <= 0 {
 		return fmt.Errorf("tier2.output_bytes_per_token_ceiling must be > 0")
 	}
 	if c.Tier2.DefaultOutputSizeCapBytes <= 0 {
 		return fmt.Errorf("tier2.default_output_size_cap_bytes must be > 0")
-	}
-	if c.Tier2.BehavioralSafetyEnabled {
-		return fmt.Errorf("tier2.behavioral_safety_enabled is not implemented in SPEC-008 Phase 1")
-	}
-	if c.Tier2.EncodingValidationEnabled {
-		return fmt.Errorf("tier2.encoding_validation_enabled is not implemented in SPEC-008 Phase 1")
-	}
-	if c.Tier2.ResponseTimeAnomalyEnabled {
-		return fmt.Errorf("tier2.response_time_anomaly_enabled is not implemented in SPEC-008 Phase 1")
-	}
-	if c.Tier2.BehavioralSafetyEnabled && c.Tier2.EncodingValidationEnabled && c.Tier2.OutputSizeCapBytes < 0 {
-		return fmt.Errorf("tier2.output_size_cap_bytes must be >= 0 when behavioral safety and encoding validation are enabled")
 	}
 	if c.Tier2.ResponseTimeAnomalyFactor <= 1.0 {
 		return fmt.Errorf("tier2.response_time_anomaly_factor must be > 1.0")

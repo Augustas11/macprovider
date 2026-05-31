@@ -1,6 +1,8 @@
 package pool
 
 import (
+	"bytes"
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -9,6 +11,9 @@ func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
 	base := Provider{State: StateReady, SlotsFree: 1}
 	if !base.RoutingEligible() {
 		t.Fatal("zero hash status should preserve default routing eligibility")
+	}
+	if base.AttestationStatus != "" {
+		t.Fatalf("zero provider attestation status = %q, want empty legacy default", base.AttestationStatus)
 	}
 	mismatch := base
 	mismatch.HashStatus = HashStatusMismatch
@@ -19,6 +24,39 @@ func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
 	invalid.HashStatus = HashStatusInvalid
 	if invalid.RoutingEligible() {
 		t.Fatal("hash_invalid provider should not be routing eligible")
+	}
+}
+
+func TestProviderTier2SessionIsNotSerialized(t *testing.T) {
+	provider := Provider{
+		ProviderID:            "provider-a",
+		AssignedID:            "session-a",
+		ModelID:               "model-a",
+		State:                 StateReady,
+		SlotsFree:             1,
+		EncryptedLeg:          true,
+		AttestationStatus:     AttestationStatusAttested,
+		MaxConcurrency:        1,
+		MaxContextTokens:      20000,
+		ThroughputTPSEstimate: 20,
+		Tier2Session: &Tier2Session{
+			AEADSuite: "A256GCM",
+			C2PKey:    []byte("secret-c2p-key-material"),
+			P2CKey:    []byte("secret-p2c-key-material"),
+			KeyID:     "kid-1",
+			StartedAt: time.Unix(1716768000, 0).UTC(),
+		},
+	}
+
+	raw, err := json.Marshal(provider)
+	if err != nil {
+		t.Fatalf("marshal provider: %v", err)
+	}
+	if !bytes.Contains(raw, []byte(`"encrypted_leg":true`)) || !bytes.Contains(raw, []byte(`"attestation_status":"attested"`)) {
+		t.Fatalf("tier2 public metadata missing from provider JSON: %s", string(raw))
+	}
+	if bytes.Contains(raw, []byte("secret-")) || bytes.Contains(raw, []byte("Tier2Session")) || bytes.Contains(raw, []byte("kid-1")) {
+		t.Fatalf("tier2 session material leaked in provider JSON: %s", string(raw))
 	}
 }
 

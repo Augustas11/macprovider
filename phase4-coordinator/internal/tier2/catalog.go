@@ -113,9 +113,7 @@ func ConfigActive(cfg config.Tier2Config) bool {
 	return ModelHashActive(cfg) ||
 		cfg.RequireEncryptedLeg ||
 		cfg.RequireAttestation ||
-		cfg.BehavioralSafetyEnabled ||
-		cfg.EncodingValidationEnabled ||
-		cfg.ResponseTimeAnomalyEnabled
+		BehavioralSafetyActive(cfg)
 }
 
 func ModelHashActive(cfg config.Tier2Config) bool {
@@ -133,7 +131,7 @@ func PhaseForConfigWithModelHashEvidence(cfg config.Tier2Config, observedModelHa
 		cfg.RequireHashVerified ||
 		(cfg.ObserveEnabled && observedModelHash)
 	pillarBC := cfg.RequireEncryptedLeg || cfg.RequireAttestation
-	pillarD := cfg.BehavioralSafetyEnabled || cfg.EncodingValidationEnabled || cfg.ResponseTimeAnomalyEnabled
+	pillarD := BehavioralSafetyActive(cfg)
 	switch {
 	case pillarD && pillarBC:
 		return 3
@@ -172,6 +170,7 @@ func LoadCatalog(path, publicKey string, logger zerolog.Logger) (*Catalog, error
 		logCatalogEvent(logger, event, "MAJOR", catalogIDFromRaw(raw), "reject", reason)
 		return nil, err
 	}
+	logCatalogLoaded(logger, catalog)
 	return catalog, nil
 }
 
@@ -487,6 +486,32 @@ func logCatalogEvent(logger zerolog.Logger, event, severity, catalogID, decision
 		Str("config_flag", "tier2.catalog_path").
 		Str("ts", time.Now().UTC().Format(time.RFC3339Nano)).
 		Msg("tier2 catalog event")
+}
+
+func logCatalogLoaded(logger zerolog.Logger, catalog *Catalog) {
+	if catalog == nil {
+		return
+	}
+	logger.Info().
+		Str("event", "catalog_loaded").
+		Str("category", "T2.A").
+		Str("severity", "INFO").
+		Str("request_id", "").
+		Str("provider_id", "").
+		Str("assigned_id", "").
+		Str("model_id", "").
+		Int("tier2_phase", 1).
+		Str("pillar", "A").
+		Str("reported_hash_prefix", "").
+		Str("expected_hash_prefix", "").
+		Str("catalog_id", catalog.CatalogID).
+		Int("model_count", len(catalog.Models)).
+		Time("expires_at", catalog.ExpiresAt).
+		Str("decision", "allow").
+		Str("reason", "catalog_loaded").
+		Str("config_flag", "tier2.catalog_path").
+		Str("ts", time.Now().UTC().Format(time.RFC3339Nano)).
+		Msg("tier2 catalog loaded")
 }
 
 func levelForSeverity(severity string) zerolog.Level {

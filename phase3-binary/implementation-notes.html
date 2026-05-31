@@ -17,6 +17,99 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 <p class=meta>Status: <strong>3h local soak PASS · M4 parity validation pending</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
+<section id="spec008-phase2-provider-b6">
+  <h2>SPEC-008 Phase 2 provider B6 encrypted-leg support (2026-05-31)</h2>
+  <div class="entry">
+    <time>2026-05-31</time>
+    <p><strong>Implemented locally:</strong> added Swift provider-side Tier-2
+    session support for X25519 key agreement, transcript-bound HKDF key
+    derivation, A256GCM request decryption and response-chunk encryption, and
+    directional sequence counters. The tunneled WebSocket coordinator client
+    now sends v2 <code>auth_request</code> initial/proof messages, derives the
+    session from the coordinator <code>auth_challenge</code>, verifies the
+    returned encrypted-leg <code>kid</code>, and starts the inference relay
+    with that session. If a WS-tunneled v2 attempt fails before the coordinator
+    returns an <code>auth_challenge</code>, the provider closes that socket and
+    reconnects once with the legacy v1 <code>hello</code> path, keeping
+    cleartext tunneled relay available for C3-only coordinators during a mixed
+    rollout.</p>
+    <p><strong>Relay behavior:</strong> encrypted
+    <code>inference_request</code> frames are authenticated and decrypted before
+    normal request parsing. Nonstreaming and streaming response chunks are
+    sealed as encrypted <code>inference_response_chunk</code> frames without a
+    plaintext <code>data</code> field when a Tier-2 session is active. AEAD AAD
+    is emitted in the same field order as the Go coordinator's
+    <code>AEADFrameAAD</code> marshal output so byte-for-byte AAD validation is
+    compatible across Swift and Go.</p>
+    <p><strong>Attestation token envelope:</strong> added an injectable
+    Tier-2 attestation generator. The default generator now reports
+    Managed Device Attestation as unsupported and sends
+    <code>attestation_token: null</code> unless
+    <code>tier2_mda_artifact_path</code> /
+    <code>MACPROVIDER_TIER2_MDA_ARTIFACT_PATH</code> points at an
+    operator-provided MDA artifact containing
+    <code>certificate_chain</code> / <code>x5c</code> and signed
+    <code>certificate_signing_request</code> evidence. The configured evidence
+    is decoded as base64 DER or PEM and must have a top-level ASN.1 sequence
+    shape before the provider emits it. This avoids wrapping an unrelated
+    <code>DeviceCheck</code> token or obvious garbage in an MDA-labeled
+    envelope. The envelope builder remains covered and binds the coordinator
+    challenge, provider ID, binary version, model metadata, RAM claim, and
+    provider ECDH public key.</p>
+    <p><strong>Artifact status:</strong> packaged a local
+    <code>phase3-binary/dist/phase3-binary-m4-v1.2.6.tar.gz</code> artifact
+    with SHA-256
+    <code>d096ecb82863275478e919a4c0741750c272beb4a0ba5e5c3e778cba159184e2</code>;
+    the extracted binary reports <code>1.2.6</code>. Added
+    <code>scripts/check-tier2-provider-artifact.sh</code> as the non-mutating
+    B6 provider artifact preflight; it verifies the tarball checksum, extracted
+    version, release-binary Tier-2 v2/encrypted-leg surface strings, and MDA
+    artifact-source strings before publication. The GitHub Actions release workflow now runs this preflight
+    before publishing v1.2.6+ assets while skipping pre-B6 tags. Added
+    <code>scripts/verify-tier2-provider-release.sh</code> as the
+    post-publication verifier for the GitHub Release asset set: it downloads
+    the release tarball, <code>checksums.txt</code>, and
+    <code>checksums.txt.sig</code>, verifies the signed checksum manifest using
+    the installer public key, verifies the tarball SHA-256, and then re-runs
+    the provider artifact preflight against the downloaded tarball. The release
+    workflow now runs this check after publishing v1.2.6+ tags with bounded
+    download retries. The
+    artifact has not been published to GitHub Releases or rolled out to live
+    providers.</p>
+    <p><strong>Not activated:</strong> no live C4
+    <code>require_encrypted_leg</code> or <code>require_attestation</code>
+    enforcement was performed. Provider artifact publication, encrypted live
+    pool rollout, and the production ACME/MDM MDA artifact producer remain open
+    before B6 can support production C4.</p>
+    <p><strong>Verification:</strong> <code>swift test</code> passes with 30
+    tests. New coverage includes v2 auth initial/proof payloads, provider AEAD
+    round trip, deterministic unsupported MDA fallback, configured MDA artifact
+    ingestion, DER/PEM evidence-shape validation, invalid evidence fallback,
+    config/env artifact path precedence, injected attestation-envelope binding,
+    v2-to-legacy hello fallback before <code>auth_challenge</code>,
+    replay/sequence rejection, Go-compatible AAD ordering and string escaping,
+    and encrypted tunneled inference
+    request/response behavior. <code>swift build -c release</code> also
+    passes. Existing Swift 6 concurrency warnings remain in send/relay
+    paths. <code>bash -n scripts/check-tier2-provider-artifact.sh</code> and
+    <code>scripts/check-tier2-provider-artifact.sh</code> both pass against the
+    local v1.2.6 tarball. <code>scripts/test-tier2-provider-artifact.sh</code>
+    also passes with fake tarballs covering pinned SHA success, dynamic SHA
+    success, version mismatch failure, SHA mismatch failure, missing Tier-2
+    surface failure, optional string-surface bypass, forbidden
+    <code>DeviceCheck</code> string rejection, and optional forbidden-string
+    bypass. <code>bash -n scripts/verify-tier2-provider-release.sh</code>,
+    <code>bash -n scripts/test-tier2-provider-release.sh</code>, and
+    <code>scripts/test-tier2-provider-release.sh</code> pass for the
+    post-publication release verifier, covering signed success, bad signature
+    refusal, tarball checksum mismatch, missing Tier-2 surface refusal, and
+    invalid retry configuration refusal. A
+    live read-only <code>scripts/verify-tier2-provider-release.sh --tag
+    v1.2.6</code> run currently returns GitHub HTTP 404 for the release
+    tarball, so publication remains open.</p>
+  </div>
+</section>
+
 <section id="3h-soak-result">
   <h2>3-hour local soak result (2026-05-27 07:13–10:13 UTC)</h2>
   <p class=meta>Operator-side smoke soak on M1 (8GB), Llama 3.2 3B 4-bit,

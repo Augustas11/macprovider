@@ -3,6 +3,7 @@ package ws_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -16,6 +17,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -33,6 +35,173 @@ func TestProviderHelloReceivesAck(t *testing.T) {
 	defer conn.Close()
 
 	assertHelloAck(t, conn)
+}
+
+func TestProviderAuthV2RegistersEncryptedSession(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	providerPrivate, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["model_load_time_ms"] = int64(1234)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	if challenge.AssignedID == "" || challenge.AuthAttemptID == "" || challenge.SelectedAEADSuite != tier2.PillarBAEADA256GCM || challenge.KeyID == "" {
+		t.Fatalf("bad auth_challenge: %+v", challenge)
+	}
+	coordinatorPublic, coordinatorPublicRaw, err := tier2.ParseX25519PublicKey(challenge.CoordinatorECDHPublicKey)
+	if err != nil {
+		t.Fatalf("coordinator public key: %v", err)
+	}
+	shared, err := providerPrivate.ECDH(coordinatorPublic)
+	if err != nil {
+		t.Fatalf("provider ECDH: %v", err)
+	}
+	derived, err := tier2.DerivePillarBKeysFromSharedSecret(shared, "m4-anon", challenge.AssignedID, providerPublicRaw, coordinatorPublicRaw, challenge.SelectedAEADSuite)
+	if err != nil {
+		t.Fatalf("derive provider-side keys: %v", err)
+	}
+	if derived.KeyID != challenge.KeyID {
+		t.Fatalf("challenge key_id=%q want derived %q", challenge.KeyID, derived.KeyID)
+	}
+
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.AssignedID != challenge.AssignedID {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	if response.Tier2Session == nil || !response.Tier2Session.EncryptedLeg.Enabled || response.Tier2Session.EncryptedLeg.KID != challenge.KeyID || response.Tier2Session.Attestation.Status != string(pool.AttestationStatusUnsupported) {
+		t.Fatalf("tier2 auth_response session = %+v", response.Tier2Session)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
+		return ok &&
+			provider.EncryptedLeg &&
+			provider.AttestationStatus == pool.AttestationStatusUnsupported &&
+			provider.ModelLoadTimeMs == 1234 &&
+			provider.Tier2Session != nil &&
+			provider.Tier2Session.KeyID == challenge.KeyID &&
+			len(provider.Tier2Session.C2PKey) == 32 &&
+			provider.InferencePath == pool.InferencePathWSTunneled
+	})
+}
+
+func TestProviderAuthV2AcceptsMockAttestationToken(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+		cfg.Tier2.RequireAttestation = true
+		cfg.Tier2.AttestationRoots = []string{"mock-root"}
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	providerPublic := base64.RawURLEncoding.EncodeToString(providerPublicRaw)
+	if err := wsutil.WriteClientText(conn, mustJSON(validAuthInitial("m4-anon", providerPublic))); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	challengeBytes, err := base64.RawURLEncoding.DecodeString(challenge.AttestationChallenge)
+	if err != nil {
+		t.Fatalf("challenge decode: %v", err)
+	}
+	token := tier2.BuildMockAttestationToken(challenge.AttestationFormats[0], challengeBytes, "m4-anon", providerPublic, time.Now().Add(-time.Minute), time.Now().Add(time.Minute))
+
+	writeAuthProof(t, conn, challenge, "m4-anon", token)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" || response.Tier2Session == nil || response.Tier2Session.Attestation.Status != string(pool.AttestationStatusAttested) {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
+		return ok && provider.EncryptedLeg && provider.AttestationStatus == pool.AttestationStatusAttested
+	})
+}
+
+func TestProviderAuthV2RejectsMissingRequiredAttestation(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+		cfg.Tier2.RequireAttestation = true
+		cfg.Tier2.AttestationRoots = []string{"mock-root"}
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw)))); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != string(pool.AttestationStatusFailed) {
+		t.Fatalf("rejection auth_response = %+v", response)
+	}
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read close: %v", err)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseTier2AttestationFailed || reason != "tier2_attestation_failed" {
+		t.Fatalf("close = (%d, %q)", code, reason)
+	}
+	if _, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID); ok {
+		t.Fatal("rejected v2 provider was registered")
+	}
+}
+
+func TestProviderAuthV2RejectsNoCommonAEADSuite(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["tier2_capabilities"] = map[string]any{
+		"encrypted_leg": true,
+		"attestation":   true,
+		"aead_suites":   []string{"CHACHA20-POLY1305"},
+	}
+	code, reason := sendHelloExpectClose(t, ts.URL, initial)
+	if code != providerws.CloseInvalidHello || reason != "no_common_aead_suite" {
+		t.Fatalf("close = (%d, %q)", code, reason)
+	}
+}
+
+func TestProviderAuthFirstMessageDispatchRejectsUnknown(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+	code, reason := sendHelloExpectClose(t, ts.URL, map[string]any{
+		"type":    "capabilities",
+		"version": 1,
+	})
+	if code != providerws.CloseUnrecognizedAuthMessage || reason != "unrecognized auth message" {
+		t.Fatalf("close = (%d, %q)", code, reason)
+	}
 }
 
 func TestWarmupGateHoldsProviderUntilTokenProducingProbe(t *testing.T) {
@@ -1313,10 +1482,10 @@ func TestProviderHelloRejectsUnsupportedVersionAndTier(t *testing.T) {
 	versionHello := validHello("m4-anon")
 	versionHello["version"] = 2
 	code, reason := sendHelloExpectClose(t, ts.URL, versionHello)
-	if code != providerws.CloseVersionUnsupported {
-		t.Fatalf("version code = %d, want %d", code, providerws.CloseVersionUnsupported)
+	if code != providerws.CloseUnrecognizedAuthMessage {
+		t.Fatalf("version code = %d, want %d", code, providerws.CloseUnrecognizedAuthMessage)
 	}
-	if reason != "version_unsupported: protocol version 2" {
+	if reason != "unrecognized auth message" {
 		t.Fatalf("version reason = %q", reason)
 	}
 
@@ -1464,6 +1633,75 @@ func validHello(providerID string) map[string]any {
 		"binary_version":          "0.1.0",
 		"attestation":             nil,
 	}
+}
+
+func validAuthInitial(providerID, providerPublic string) map[string]any {
+	h := validHello(providerID)
+	h["type"] = "auth_request"
+	h["version"] = 2
+	h["stage"] = "initial"
+	delete(h, "tier")
+	delete(h, "attestation")
+	h["provider_ecdh_public_key"] = providerPublic
+	h["tier2_capabilities"] = map[string]any{
+		"encrypted_leg": true,
+		"attestation":   true,
+		"aead_suites":   []string{tier2.PillarBAEADA256GCM},
+	}
+	return h
+}
+
+func readAuthChallenge(t *testing.T, conn net.Conn) providerws.AuthChallenge {
+	t.Helper()
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read auth_challenge: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("auth_challenge op = %v, want text", op)
+	}
+	var challenge providerws.AuthChallenge
+	if err := json.Unmarshal(payload, &challenge); err != nil {
+		t.Fatalf("auth_challenge json: %v", err)
+	}
+	if challenge.Type != "auth_challenge" || challenge.Version != 2 {
+		t.Fatalf("auth_challenge envelope = %+v", challenge)
+	}
+	return challenge
+}
+
+func writeAuthProof(t *testing.T, conn net.Conn, challenge providerws.AuthChallenge, providerID string, token json.RawMessage) {
+	t.Helper()
+	proof := map[string]any{
+		"type":              "auth_request",
+		"version":           2,
+		"stage":             "proof",
+		"auth_attempt_id":   challenge.AuthAttemptID,
+		"provider_id":       providerID,
+		"attestation_token": token,
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(proof)); err != nil {
+		t.Fatalf("write auth proof: %v", err)
+	}
+}
+
+func readAuthResponse(t *testing.T, conn net.Conn) providerws.AuthResponse {
+	t.Helper()
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read auth_response: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("auth_response op = %v, want text", op)
+	}
+	var response providerws.AuthResponse
+	if err := json.Unmarshal(payload, &response); err != nil {
+		t.Fatalf("auth_response json: %v", err)
+	}
+	if response.Type != "auth_response" || response.Version != 2 {
+		t.Fatalf("auth_response envelope = %+v", response)
+	}
+	return response
 }
 
 func heartbeat() map[string]any {

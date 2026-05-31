@@ -78,7 +78,7 @@ admission:
 #   attestation_formats:
 #     - "apple-managed-device-attestation-acme-v1"
 #
-#   # SPEC-008 §11.1 — Pillar D keys; present for forward compatibility only in Phase 1.
+#   # SPEC-008 §11.1 — Pillar D relay controls; disabled by default to preserve Tier-1 behavior.
 #   behavioral_safety_enabled: false
 #   output_size_cap_bytes: 0
 #   output_bytes_per_token_ceiling: 16
@@ -89,7 +89,7 @@ admission:
 #   response_time_anomaly_min_ms: 10000
 
 coordinator_advertised_version:
-  latest_binary_version: "1.2.0"
+  latest_binary_version: "1.2.6"
   required_binary_version: ""
 
 auth:

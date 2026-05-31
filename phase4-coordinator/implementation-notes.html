@@ -17,6 +17,217 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 <p class=meta>Status: <strong>Step 11 acceptance entrypoints partial</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
 
+<section id="spec008-phase2-pillars-b-c-foundation">
+  <h2>SPEC-008 Phase 2 Pillars B/C foundation (2026-05-31)</h2>
+  <div class="entry">
+    <time>2026-05-31</time>
+    <p><strong>Implemented locally:</strong> added disabled-by-default
+    Pillar B support for X25519 public-key parsing, transcript-bound HKDF
+    derivation, A256GCM request/response envelope sealing and opening, and
+    <code>T2.B</code> audit logging when
+    <code>tier2.require_encrypted_leg</code> excludes an unencrypted
+    provider. The AEAD envelope uses base64url deterministic AAD, explicit
+    <code>alg</code>/<code>kid</code>/<code>seq</code> metadata, and separate
+    directional counters for coordinator-to-provider and
+    provider-to-coordinator frames. Provider pool entries now carry public
+    <code>encrypted_leg</code> and <code>attestation_status</code> metadata,
+    plus non-serialized <code>Tier2Session</code> key material for relay
+    integration.</p>
+    <p><strong>Pillar C surface:</strong> added a structural attestation
+    validator for the Phase 2 handshake path. It enforces token size,
+    configured format, provider binding, challenge binding, ECDH key binding,
+    issued/expires freshness, max age, and configured roots before returning
+    <code>attested</code>, <code>unsupported</code>,
+    <code>attestation_stale</code>, or <code>attestation_failed</code>. Full
+    Apple Managed Device Attestation certificate-chain/ACME verification
+    remains behind this surface for the complete production integration.
+    The verifier now enforces the SPEC-008 16 KiB token cap, accepts only
+    base64url raw-token or three-segment compact-JWS token encodings, and never
+    marks a token as <code>attested</code> when no operator trust roots are
+    configured. Positive mock attestation is limited to the explicit test-only
+    <code>mock-root</code> and mock token; non-mock roots fail closed as
+    <code>attestation_failed</code> when required or
+    <code>unsupported</code> when optional until production Apple MDA
+    verification is implemented. The production-root path now understands the
+    forward-compatible MDA certificate-chain shape: it accepts
+    <code>certificate_chain</code> / <code>x5c</code> envelope fields, extracts
+    <code>x5c</code> from compact-JWS headers, parses PEM or base64 DER root
+    certificates, and runs an x509 chain verification step. Even a trusted
+    chain now becomes a positive <code>attested</code> signal only after the
+    signed CSR public key exactly matches the MDA leaf public key. Missing CSR
+    evidence remains <code>unsupported</code> when optional or fail-closed when
+    required. The local prerequisite path also validates the freshness OID
+    against the SHA-256 hash of the
+    <code>device-attest-01</code> token, requires an EC P-256 or P-384 leaf
+    public key, requires at least one recognized nonblank Apple MDA
+    device-property OID, and enforces the current Apple-Silicon hardware-family
+    policy.</p>
+    <p><strong>Coordinator v2 auth:</strong> the provider WebSocket now
+    dispatches the first frame by protocol family: <code>hello</code> v1 keeps
+    the existing path, <code>auth_request</code> v2 runs the new Phase 2
+    handshake, and unknown first frames close with <code>4000</code>
+    <code>unrecognized auth message</code>. The v2 path negotiates
+    <code>A256GCM</code>, sends an <code>auth_challenge</code> with coordinator
+    X25519 public key, attestation challenge, formats, selected AEAD, and
+    <code>key_id</code>, validates the proof/attestation token, registers
+    <code>encrypted_leg</code> session metadata, and returns an
+    <code>auth_response</code> with rekey parameters.</p>
+    <p><strong>Coordinator AEAD relay:</strong> encrypted provider sessions now
+    send <code>inference_request</code> frames with the plaintext
+    <code>body</code> omitted and encrypted under the session
+    <code>c2p</code> key. Incoming encrypted
+    <code>inference_response_chunk</code> frames are authenticated against
+    <code>p2c</code> AAD, decrypted before buyer delivery and before Pillar D
+    validation, and tamper failures close the provider session, emit
+    <code>T2.B</code> AEAD failure/session-close logs, and surface
+    <code>tier2_aead_decrypt_failed</code> to buyers before or after SSE
+    commit as appropriate. The coordinator also tracks encrypted requests per
+    session and session age; when the configured rekey request or age
+    threshold is reached, it removes the provider session, marks the provider
+    unavailable, closes the connection so the provider reconnects with a fresh
+    v2 handshake, and emits a <code>T2.B</code> <code>aead_rekey</code>
+    audit event. If another dispatch arrives while an active encrypted request
+    is still draining after the threshold was reached, the coordinator
+    backpressures the new dispatch and defers the close until the active
+    request completes.</p>
+    <p><strong>Routing and disclosure:</strong> buyer routing now honors
+    <code>require_encrypted_leg</code> and
+    <code>require_attestation</code> in the same candidate-filtering path as
+    model-hash enforcement. <code>/internal/routing</code> exposes
+    encrypted-leg and attestation coverage counts, and the gateway maps those
+    fields into <code>provider_leg_encryption</code>,
+    <code>hardware_attestation</code>, and nested Tier-2 disclosure fields.
+    Added <code>scripts/activate-tier2-encrypted-leg.sh</code> as guarded C4a
+    activation tooling. Its default <code>--plan</code> mode is non-mutating;
+    the apply path requires the <code>--b6-ready</code> live verifier, proves live
+    <code>provider_leg_encryption: all</code> readiness and a ready v1.2.6+
+    encrypted provider from
+    <code>/v1/models</code> and <code>/poolz</code>, changes only
+    <code>tier2.require_encrypted_leg</code>, SIGHUPs the coordinator, checks
+    reload journal evidence, re-verifies encrypted-leg disclosure, and restores
+    the config backup on failure. Added
+    <code>scripts/activate-tier2-attestation.sh</code> as guarded C4b
+    activation tooling. Its apply path requires the
+    <code>--attested</code> live verifier,
+    proves live <code>provider_leg_encryption: all</code> and
+    <code>hardware_attestation: all</code> readiness with a ready v1.2.6+
+    encrypted+attested provider from
+    <code>/v1/models</code> and <code>/poolz</code>, requires C4a already
+    active in the live config, requires non-empty
+    <code>attestation_roots</code>, changes only
+    <code>tier2.require_attestation</code>, SIGHUPs the coordinator, checks
+    reload journal evidence, re-verifies hardware-attestation disclosure, and
+    restores the config backup on failure. Extended
+    <code>scripts/verify-tier2-live.sh</code> with read-only
+    <code>--b6-ready</code>, <code>--encrypted-leg</code>, and
+    <code>--attested</code> modes so the pre-C4a B6 rollout gate,
+    pre-C4b attestation readiness gate, and C4a/C4b post-apply claims can be
+    verified independently of the activation scripts against gateway
+    disclosure and operator <code>/poolz</code>
+    metadata. The B6-ready mode requires C2 enforced hash state,
+    <code>provider_leg_encryption: all</code>, no currently routable
+    unencrypted provider, and at least one currently routable v1.2.6+
+    encrypted provider.</p>
+    <p><strong>Not activated:</strong> no production
+    <code>require_encrypted_leg</code> or <code>require_attestation</code>
+    flip was performed. B5, C4a activation tooling, and C4b activation
+    tooling are locally built but not activated. B6
+    provider-side v2 auth, AEAD frame handling, and configured MDA
+    certificate-chain/CSR artifact ingestion with DER/PEM shape validation are now tracked in
+    <code>phase3-binary</code>; provider artifact release, encrypted live pool
+    rollout, and live production ACME/MDM issuance remain pending.
+    <code>scripts/verify-tier2-provider-release.sh</code> is available as the
+    read-only post-publication GitHub Release verifier for the B6 provider
+    artifact set; the release workflow runs it after publishing v1.2.6+ tags
+    with bounded download retries. Added
+    <code>phase4-coordinator/cmd/tier2-mda-artifact</code> plus
+    <code>scripts/make-tier2-mda-artifact.sh</code> and
+    <code>scripts/check-tier2-mda-artifact.sh</code> as local tooling for
+    the MDA artifact boundary: the make path packages operator-provided
+    Apple MDA certificate-chain/CSR evidence into the JSON consumed by
+    <code>MACPROVIDER_TIER2_MDA_ARTIFACT_PATH</code>, and the check path can
+    run the coordinator Pillar-C verifier with supplied roots, challenge,
+    provider ID, and provider ECDH key before any C4b readiness claim. This
+    tooling does not perform Apple ACME/MDM enrollment or mutate
+    production.</p>
+    <p><strong>Verification:</strong>
+    <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./internal/ws -run 'TestProviderAuthV2|TestProviderAuthFirstMessageDispatch|TestProviderHelloRejectsUnsupportedVersionAndTier'</code>
+    passes under local <code>httptest</code> listener permission and covers v2
+    challenge/response, transcript-matched <code>key_id</code> derivation,
+    encrypted session registration, mock-attested acceptance, required
+    attestation rejection, unsupported AEAD rejection, and first-message
+    dispatch. The same auth/tier2 coverage now rejects malformed attestation
+    token encodings and rootless tokens.
+    <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./internal/tier2 ./internal/ws ./internal/buyer -run 'TestPillarB|TestEncryptedRelay|TestRelayDispatchRoutesChunkAndEndByRequestID|TestChatCompletionsWSTunneledAEADFailure|TestChatCompletionsStreamingWSTunneledAEADFailure'</code>
+    passes and covers encrypted request frames with no plaintext
+    <code>body</code>, response chunk decryption, tamper rejection, and
+    buyer-facing AEAD failure mapping.
+    <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test -race ./internal/ws -run 'TestEncryptedRelay'</code>
+    also passes for the touched relay path.
+    The same focused run now covers request-threshold and age-threshold rekey
+    closure, active-request drain protection before rekey close, provider
+    state transition to <code>unavailable</code>, session removal, and
+    <code>aead_rekey</code> audit logging.
+    <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./internal/tier2 ./internal/config ./internal/pool ./internal/buyer</code>
+    passes under local <code>httptest</code> listener permission. Broader
+    <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    passes in both <code>phase4-coordinator</code> and
+    <code>phase5-gateway</code>. Coverage includes AEAD round trip and tamper
+    rejection, deterministic key derivation, attestation success/stale/failed
+    states, encrypted-leg and attestation routing predicates, gateway B/C
+    disclosure, and JSON non-serialization of session keys. After adding the
+    MDA certificate-chain / Apple-prerequisite parser, <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./internal/tier2 -run TestVerifyAttestationToken</code>,
+    <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./internal/tier2 ./internal/ws ./internal/config ./internal/pool ./internal/buyer</code>,
+    and full <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./...</code>
+    pass in <code>phase4-coordinator</code>. New coverage rejects malformed
+    production certificate chains, extracts compact-JWS <code>x5c</code>,
+    rejects missing or mismatched MDA freshness, rejects missing or blank
+    device-property OIDs, rejects unsupported leaf public keys, rejects
+    malformed CSRs, rejects CSR public-key mismatches, rejects hardware-family
+    policy mismatches, proves missing CSR evidence remains unsupported or
+    fail-closed, and proves a synthetically trusted chain with a matching CSR
+    can now return <code>attested</code>.
+    <code>bash -n scripts/activate-tier2-encrypted-leg.sh</code>,
+    <code>bash -n scripts/test-tier2-encrypted-leg-safety.sh</code>,
+    <code>scripts/activate-tier2-encrypted-leg.sh --plan</code>, and
+    <code>scripts/test-tier2-encrypted-leg-safety.sh</code> pass for the C4a
+    activation surface, covering success, preflight refusal, readiness refusal
+    before remote mutation, journal rollback, disclosure rollback, and plan
+    output.
+    <code>bash -n scripts/verify-tier2-live.sh</code> and
+    <code>scripts/test-tier2-live-verifier.sh</code> pass for the read-only C4
+    verifier modes, covering C2 enforced success, B6-ready success,
+    B6-ready disclosure failure, B6-ready old-provider failure, C4a
+    encrypted-leg success, C4a disclosure failure, C4a <code>/poolz</code>
+    failure, C4b attested success, C4b disclosure failure, and C4b
+    <code>/poolz</code> failure.
+    <code>bash -n scripts/make-tier2-mda-artifact.sh</code>,
+    <code>bash -n scripts/check-tier2-mda-artifact.sh</code>,
+    <code>bash -n scripts/test-tier2-mda-artifact.sh</code>,
+    <code>GOCACHE=/private/tmp/macprovider-go-build-cache go test ./cmd/tier2-mda-artifact</code>,
+    and <code>scripts/test-tier2-mda-artifact.sh</code> pass for the MDA
+    artifact pack/check surface, covering contract-only validation,
+    coordinator-verified synthetic MDA attestation, and mismatched-freshness
+    rejection.
+    <code>bash -n scripts/verify-tier2-provider-release.sh</code>,
+    <code>bash -n scripts/test-tier2-provider-release.sh</code>, and
+    <code>scripts/test-tier2-provider-release.sh</code> pass for the B6
+    post-publication GitHub Release verifier, covering signed success, bad
+    signature refusal, tarball checksum mismatch, and missing Tier-2 release
+    surface refusal plus invalid retry configuration refusal. A live read-only
+    <code>scripts/verify-tier2-provider-release.sh --tag v1.2.6</code> check
+    returns GitHub HTTP 404, so provider publication remains open.
+    <code>bash -n scripts/activate-tier2-attestation.sh</code>,
+    <code>bash -n scripts/test-tier2-attestation-safety.sh</code>,
+    <code>scripts/activate-tier2-attestation.sh --plan</code>, and
+    <code>scripts/test-tier2-attestation-safety.sh</code> pass for the C4b
+    activation surface, covering success, preflight refusal, readiness refusal
+    before remote mutation, journal rollback, disclosure rollback, and plan
+    output. No production <code>require_encrypted_leg</code> or
+    <code>require_attestation</code> activation was performed.</p>
+  </div>
+</section>
+
 <section id="spec008-phase1-pillar-a">
   <h2>SPEC-008 Phase 1 Pillar A (2026-05-31)</h2>
   <div class="entry">
@@ -793,6 +1004,272 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   <code>X-MacProvider-Internal-*</code> headers are stripped before auth
   and audit-logged; the gateway forwards only its derived
   <code>X-MacProvider-Internal-Conv</code> plus an internal source marker.</p>
+</div>
+</section>
+<section><h2>SPEC-008 Phase 1 Activation</h2>
+<p class=meta>2026-05-31 Pillar A catalog activation and provider hash reporting.</p>
+<div class="entry">
+  <time>2026-05-31</time>
+  <p>Added operator tooling under <code>scripts/</code>:
+  <code>hash-model-weights.go</code> builds the SPEC-008
+  <code>artifact_manifest</code> hash from snapshot
+  <code>.safetensors</code> files, following Hugging Face snapshot
+  symlinks for both byte size and content; <code>sign-catalog.go</code>
+  generates Ed25519 keypairs and signs canonical catalog bodies using the
+  same field order as the coordinator verifier.</p>
+  <p>The provider now computes the same artifact-manifest hash after MLX
+  model load, stores it in <code>ProviderStatus</code>, and includes
+  <code>model_hash</code> in the coordinator <code>hello</code> only when
+  a hash is available. Missing or unhashable weights still omit the field
+  so Tier-1 behavior is preserved. The hash-capable provider build reports
+  <code>binary_version</code> <code>1.2.5</code>.</p>
+  <p>A local ignored keypair and signed observe-mode catalog were created
+  in <code>.omc/tier2/</code>. The Llama hash was verified against the
+  local Hugging Face cache; the Qwen hash was derived from public
+  Hugging Face LFS metadata because the live provider pool was empty at
+  collection time. Live provider-collected hashes remain the stronger
+  operator evidence before enforcement.</p>
+  <p>Added guarded activation helper
+  <code>scripts/activate-tier2-observe.sh</code>. It defaults to
+  plan-only validation, checks that the local coordinator artifact contains
+  the <code>tier2 catalog loaded</code> acceptance log string, verifies the
+  signed catalog with the same coordinator-compatible signature/body verifier
+  used by the artifact preflight, uploads the
+  signed catalog and rebuilt coordinator binary in apply mode,
+  backs up and merges only the live top-level <code>tier2:</code> block,
+  backs up an existing remote catalog, and rolls back config, binary, and
+  catalog backups if upload, config merge, restart, or acceptance verification
+  fails. For first-time
+  catalog activation with no previous remote catalog, rollback removes the
+  newly created catalog file instead of leaving partial state behind. It
+  refuses to restart a connected provider pool unless
+  <code>FORCE_RESTART=1</code> is set, fails closed if provider-count health
+  parsing fails without that override, and verifies recent Tier-2 journal
+  evidence plus <code>/v1/models</code>
+  <code>tier2.model_hash.state</code> by default. First-time <code>catalog_path</code> /
+  <code>catalog_public_key</code> activation is documented as restart-only
+  per SPEC-008 lifecycle rules.</p>
+  <p>Added read-only verifier <code>scripts/verify-tier2-live.sh</code>.
+  <code>--catalog-only</code> proves observe-mode catalog disclosure after
+  C1, <code>--full</code> also checks operator <code>/poolz</code>
+  for at least one <code>binary_version</code> <code>1.2.5</code> or newer
+  provider with <code>hash_status</code> <code>hash_verified</code>, and
+  <code>--enforced</code> verifies the C2 post-apply state with
+  <code>require_verified:true</code> and <code>model_hash_state</code>
+  <code>all</code>.</p>
+  <p>Added guarded C2 helper <code>scripts/enforce-tier2-hash.sh</code>. Its
+  default <code>--plan</code> mode is non-mutating; <code>--apply</code> runs
+  the full verifier before mutation, backs up the live coordinator config,
+  changes only <code>tier2.require_hash_verified</code>, sends
+  <code>SIGHUP</code>, checks for recent <code>tier2 config reloaded</code>
+  journal evidence, runs the enforced verifier, and restores the config backup
+  plus sends another <code>SIGHUP</code> if reload or verification fails.</p>
+  <p>Added non-mutating activation bundle preflight
+  <code>scripts/check-tier2-release-artifacts.sh</code>. It verifies the
+  provider artifact checksum and extracted version, coordinator binary checksum
+  and catalog-loaded log string, expected public key, and signed catalog
+  signature/body using the same timestamp, model-entry, and hash-format
+  rejection rules as the coordinator before any production apply is attempted.
+  Its extraction directory now honors <code>TMPDIR</code> or <code>/tmp</code>
+  and only removes its own <code>tier2-artifacts.*</code> directory.</p>
+  <p>Added hermetic activation safety harness
+  <code>scripts/test-tier2-activation-safety.sh</code>. It shadows
+  <code>ssh</code>, <code>scp</code>, and <code>curl</code> with local fakes
+  and verifies that apply mode refuses connected-pool restarts before remote
+  commands, fails closed on unparseable health JSON without
+  <code>FORCE_RESTART=1</code>, restores config and binary backups plus removes
+  a newly created catalog after config-merge failure, rolls back after gateway
+  disclosure failure, and reaches health, journal, and gateway checks on a fake
+  success path.</p>
+  <p>Added hermetic C2 safety harness
+  <code>scripts/test-tier2-enforcement-safety.sh</code>. It shadows
+  <code>ssh</code> and the live verifier, proving that enforcement apply reaches
+  reload plus enforced verification on success, refuses remote mutation when the
+  full preflight verifier fails, and restores the config backup when enforced
+  verification fails.</p>
+  <p>Live observe activation exposed a gateway compatibility gap: the gateway
+  was replacing <code>tier1_disclosure</code> correctly but also deleting the
+  coordinator's top-level <code>tier2</code> block. The gateway now preserves
+  <code>tier2</code> on <code>/v1/models</code> while continuing to overwrite
+  upstream <code>tier1_disclosure</code> with gateway-owned text. The deployed
+  Linux amd64 gateway artifact hash is
+  <code>4e529f0f9c6ef242eb27c70d5ec6827bd7b5b6ec2f00ffbd16efa9b72dc3090d</code>;
+  the previous live binary was backed up at
+  <code>/opt/macprovider/gateway.bak-spec008-20260531064346</code>.</p>
+  <p>The failed first activation attempt also hardened rollback: restored config
+  backups now preserve the original owner/mode, and binary rollback stops the
+  coordinator before replacing the executable to avoid Linux
+  <code>Text file busy</code> failures.</p>
+  <p>The coordinator now logs successful catalog loads as
+  <code>event="catalog_loaded"</code> with <code>model_count</code>,
+  <code>catalog_id</code>, and message
+  <code>tier2 catalog loaded</code>, giving the C1 acceptance check direct
+  post-restart evidence.</p>
+  <p><strong>Verification:</strong> ran <code>swift test</code> and
+  <code>swift build -c release</code> in <code>phase3-binary</code>;
+  both passed. Packaged <code>phase3-binary/dist/phase3-binary-m4-v1.2.5.tar.gz</code>
+  with SHA-256
+  <code>e0aad8ea77dc3958041bc7df6681fac7a59a527c0e0ece4649a9cc192bcd17a1</code>
+  and verified the extracted binary reports <code>1.2.5</code>. Also ran
+  <code>go test ./internal/tier2</code> and later <code>go test ./...</code>
+  in <code>phase4-coordinator</code>; reran <code>go test ./...</code>
+  after adding catalog-loaded logging. Rebuilt
+  <code>phase4-coordinator/dist/coordinator-linux-amd64</code> with SHA-256
+  <code>8b8bbb58f1062e504d414aaec3712660bf4c98b53a8d49a7554a2288687b1a91</code>.
+  <code>scripts/check-tier2-release-artifacts.sh</code> passed, including
+  Ed25519 verification of the signed catalog with key id
+  <code>catalog-key-2026q2</code>. A negative smoke with a temporary invalid
+  SHA-256 catalog failed as expected under the local verifier, and activation
+  plan mode also rejected a temporary invalid-signature catalog before printing
+  any plan. The artifact preflight passed with default temp settings,
+  <code>TMPDIR=/tmp</code>, and <code>TMPDIR=/private/tmp</code>, with no
+  leftover extraction directories.
+  <code>scripts/test-tier2-activation-safety.sh</code> passed, covering the
+  connected-provider restart guard, unparseable-health fail-closed path,
+  config-merge rollback, gateway-verification rollback, and fake success path.
+  After rollback hardening, the harness also asserts that binary restore paths
+  stop <code>macprovider-coordinator</code> before copying the previous
+  executable.
+  <code>scripts/activate-tier2-observe.sh --plan</code>
+  validated the signed catalog/public key, validated the coordinator binary,
+  and printed the non-mutating activation plan. Fixture-backed
+  <code>scripts/verify-tier2-live.sh --full</code> and
+  <code>--catalog-only</code> checks passed. Live observe activation then
+  succeeded: <code>scripts/activate-tier2-observe.sh --apply</code> uploaded
+  the catalog, deployed coordinator hash
+  <code>8b8bbb58f1062e504d414aaec3712660bf4c98b53a8d49a7554a2288687b1a91</code>,
+  merged observe-mode <code>tier2:</code>, restarted the coordinator, found the
+  <code>tier2 catalog loaded</code> journal event at
+  <code>2026-05-31T06:44:38Z</code>, and verified gateway
+  <code>/v1/models</code> with phase <code>1</code>, model-hash state
+  <code>none</code>, <code>require_verified:false</code>, and
+  <code>catalog_available:true</code>. The standalone
+  <code>scripts/verify-tier2-live.sh --catalog-only</code> check also passed.
+  Full verification passed at <code>2026-05-31T07:30:05Z</code> after both
+  live providers upgraded to <code>binary_version</code> <code>1.2.5</code>
+  with <code>hash_status</code> <code>hash_verified</code> and
+  <code>model_hash_state</code> <code>all</code>. C2 enforcement then passed:
+  <code>scripts/enforce-tier2-hash.sh --apply</code> backed up the live config
+  to <code>/opt/macprovider/coordinator.yaml.bak-c2-20260531074241</code>,
+  changed only <code>tier2.require_hash_verified</code> to
+  <code>true</code>, sent <code>SIGHUP</code>, observed
+  <code>tier2 config reloaded</code> at
+  <code>2026-05-31T07:42:45Z</code>, and
+  <code>scripts/verify-tier2-live.sh --enforced</code> passed with
+  <code>require_verified:true</code>, <code>model_hash_state</code>
+  <code>all</code>, and two verified v1.2.5 providers. Release build still emits
+  existing Swift 6 concurrency warnings in unrelated send/relay paths.</p>
+</div>
+</section>
+<section><h2>SPEC-008 Phase 3 Pillar D Behavioral Safety</h2>
+<p class=meta>2026-05-31 coordinator-internal relay controls; live C3 activated.</p>
+<div class="entry">
+  <time>2026-05-31</time>
+  <p>Added <code>phase4-coordinator/internal/tier2/pillar_d.go</code> as the
+  Pillar D relay guard. The guard is inert unless
+  <code>tier2.behavioral_safety_enabled</code> is true, so the default Tier-1
+  and Phase-1-enforced behavior remains unchanged. With the flag enabled, it
+  can cap completion output bytes, validate streaming SSE and JSON completion
+  encoding, reject forbidden completion control characters, and log response
+  time anomalies when a provider baseline is present.</p>
+  <p>WSTunneled nonstreaming responses now pass through the guard before the
+  HTTP response commits. WSTunneled streaming chunks pass through before each
+  write: invalid output before commit returns a 502 JSON error, invalid output
+  after commit emits an SSE error frame plus <code>[DONE]</code>, and truncated
+  streaming output appends <code>[DONE]</code> and cancels the provider relay
+  for that request. All rejection/truncation/anomaly logs use category
+  <code>T2.D</code>, pillar <code>D</code>, request/provider/model evidence,
+  and the relevant <code>tier2.*</code> config flag.</p>
+  <p>Coordinator config validation no longer rejects the Phase 3 behavioral
+  flags, while negative output caps remain invalid. The coordinator internal
+  routing metadata now reports <code>behavioral_safety</code> state and enabled
+  sub-controls using the SPEC-008 matrix:
+  <code>none</code>, <code>partial</code>, or <code>enforced</code>. The gateway
+  consumes that metadata for
+  <code>tier1_disclosure.tier2.behavioral_safety</code> and reports
+  <code>untrusted_provider_safety</code> as <code>partial</code> or
+  <code>enforced</code> only when Pillar D metadata is active.</p>
+  <p>Added the guarded C3 activation surface:
+  <code>scripts/activate-tier2-behavioral-safety.sh</code>. It defaults to
+  <code>--plan</code>, requires <code>scripts/verify-tier2-live.sh
+  --enforced</code> before any mutation, updates only Pillar D
+  <code>tier2:</code> keys, preserves <code>catalog_path</code>,
+  <code>catalog_public_key</code>, and <code>require_hash_verified:true</code>,
+  reloads the coordinator with <code>SIGHUP</code>, verifies gateway
+  <code>/v1/models</code> behavioral disclosure, and restores the config backup
+  on reload, journal, or disclosure failure.</p>
+  <p>Live C3 rollout deployed B3-capable Linux amd64 artifacts with backups:
+  coordinator SHA-256
+  <code>0434d09322ac5ae6351998234382273816d317bda74f978dc5a186e562bfc287</code>
+  backed up the previous binary to
+  <code>/opt/macprovider/coordinator.bak-c3-20260531082235</code>, and gateway
+  SHA-256
+  <code>cfa9ec22125dc3eec66cbec26596d8b271d12d57f7e6442035acc245271208c3</code>
+  backed up the previous binary to
+  <code>/opt/macprovider/gateway.bak-c3-20260531082235</code>. The guarded
+  config apply backed up the live config to
+  <code>/opt/macprovider/coordinator.yaml.bak-c3-20260531082623</code>, set
+  <code>behavioral_safety_enabled:true</code>,
+  <code>output_size_cap_bytes:1048576</code>,
+  <code>encoding_validation_enabled:true</code>, and
+  <code>response_time_anomaly_enabled:true</code>, then observed
+  <code>tier2 config reloaded</code> at
+  <code>2026-05-31T08:26:26Z</code>.</p>
+  <p><strong>Verification:</strong> ran <code>go test ./internal/tier2
+  ./internal/config ./internal/buyer</code>, <code>go build ./...</code>,
+  <code>go test ./...</code>, and
+  <code>go test -race ./... -run TestPillarD</code> in
+  <code>phase4-coordinator</code>; all passed. Ran
+  <code>go test ./internal/router</code> and <code>go test ./...</code> in
+  <code>phase5-gateway</code>; both passed. Ran <code>git diff --check</code>;
+  it passed. Coverage includes AC-D-1 exact 32-byte ASCII streaming cap from
+  64 bytes, AC-D-2 UTF-8-safe truncation with configured and emitted byte logs,
+  AC-D-3 invalid UTF-8 rejection, AC-D-4 decoded forbidden-control rejection,
+  AC-D-5 TTFT anomaly logging without response rejection, inactive byte
+  preservation, JSON-valid nonstreaming truncation, WSTunneled pre/post-commit
+  invalid-output handling, streaming cap stop behavior, coordinator behavioral
+  metadata, and gateway <code>partial</code>/<code>enforced</code> behavioral
+  disclosure. Ran <code>bash -n scripts/activate-tier2-behavioral-safety.sh</code>,
+  <code>bash -n scripts/test-tier2-behavioral-safety.sh</code>,
+  <code>scripts/test-tier2-behavioral-safety.sh</code>,
+  <code>scripts/activate-tier2-behavioral-safety.sh --plan</code>, and
+  <code>git diff --check</code>; all passed. The C3 safety harness uses fake
+  <code>ssh</code>, verifier, and <code>curl</code> commands to prove the
+  success path, preflight failure with no remote mutation, and rollback after
+  journal or disclosure failure. Live post-apply verification passed:
+  <code>scripts/verify-tier2-live.sh --enforced</code> still reports
+  <code>require_verified:true</code>, <code>model_hash_state:all</code>, and
+  two verified providers; public <code>/v1/status</code> is up; coordinator
+  <code>/healthz</code> is ok with <code>pool_ready:2</code>; and gateway
+  <code>/v1/models</code> reports <code>behavioral_safety.state</code>
+  <code>enforced</code> with <code>size_cap</code>,
+  <code>encoding_validation</code>, and <code>ttft_anomaly_logging</code> all
+  true plus <code>untrusted_provider_safety: enforced</code>. On the later
+  authorized C3 production run at <code>2026-05-31T10:30:22Z</code>, the
+  correct action was a read-only no-op: after a transient empty-pool read and
+  provider reconnect window, gateway <code>/v1/status</code> was up with
+  <code>pool.ready:1</code>, coordinator <code>/healthz</code> was ok with
+  <code>pool_ready:1</code>, and fresh demo-token <code>/v1/models</code>
+  reported <code>model_hash_state:all</code>, <code>require_verified:true</code>,
+  <code>behavioral_safety.state:enforced</code>, all three behavioral booleans
+  true, <code>model_hash_verified:all</code>, and
+  <code>untrusted_provider_safety:enforced</code>; the C3 apply script was not
+  rerun, so no config rewrite or <code>SIGHUP</code> was performed. A later
+  authorized C3 production apply re-run at
+  <code>2026-05-31T10:55:11Z</code> executed the guarded script again with a
+  fresh demo token and production operator key. The enforced C2 preflight
+  passed with <code>require_verified:true</code>,
+  <code>model_hash_state:all</code>, and one hash-verified
+  <code>air8gb</code> provider; the patch phase reported
+  <code>already_behavioral_safety=1</code>, so no config rewrite or backup was
+  needed; the script sent <code>SIGHUP</code>, observed fresh
+  <code>tier2 config reloaded</code> journal evidence, and verified
+  <code>behavioral_safety.state:enforced</code> plus
+  <code>untrusted_provider_safety:enforced</code>. A post-run
+  <code>scripts/verify-tier2-live.sh --enforced</code> check also passed, and
+  the live <code>tier2:</code> block still preserves
+  <code>catalog_path</code>, <code>catalog_public_key</code>,
+  <code>require_hash_verified:true</code>, and all Pillar D controls.</p>
 </div>
 </section>
 </body></html>

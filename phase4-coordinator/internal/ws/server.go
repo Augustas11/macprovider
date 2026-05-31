@@ -3,6 +3,8 @@ package ws
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net"
@@ -22,15 +24,18 @@ import (
 )
 
 const (
-	CloseInvalidHello           gobwas.StatusCode = 4001
-	CloseUnknownProviderID      gobwas.StatusCode = 4002
-	CloseTierUnsupported        gobwas.StatusCode = 4003
-	CloseVersionUnsupported     gobwas.StatusCode = 4004
-	CloseInvalidToken           gobwas.StatusCode = 4005
-	CloseProvisionalPoolFull    gobwas.StatusCode = 4007
-	CloseProvisionalRateLimited gobwas.StatusCode = 4008
-	CloseBanned                 gobwas.StatusCode = 4009
-	ClosePoolFull               gobwas.StatusCode = 4429
+	CloseUnrecognizedAuthMessage gobwas.StatusCode = 4000
+	CloseInvalidHello            gobwas.StatusCode = 4001
+	CloseUnknownProviderID       gobwas.StatusCode = 4002
+	CloseTierUnsupported         gobwas.StatusCode = 4003
+	CloseVersionUnsupported      gobwas.StatusCode = 4004
+	CloseInvalidToken            gobwas.StatusCode = 4005
+	CloseProvisionalPoolFull     gobwas.StatusCode = 4007
+	CloseProvisionalRateLimited  gobwas.StatusCode = 4008
+	CloseBanned                  gobwas.StatusCode = 4009
+	CloseTier2AttestationFailed  gobwas.StatusCode = 4012
+	CloseTier2KeyExchangeFailed  gobwas.StatusCode = 4013
+	ClosePoolFull                gobwas.StatusCode = 4429
 )
 
 type Server struct {
@@ -191,45 +196,237 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		return
 	}
 	if op != gobwas.OpText {
-		s.close(conn, CloseInvalidHello, "invalid_hello: type")
+		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return
 	}
 
+	typ, version, err := ParseFirstAuthMessage(payload)
+	if err != nil {
+		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
+		return
+	}
+	switch {
+	case typ == "hello" && version == 1:
+		providerID, assignedID = s.handleV1Conn(conn, auth, payload)
+	case typ == "auth_request" && version == 2:
+		providerID, assignedID = s.handleV2Conn(conn, auth, payload)
+	default:
+		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
+	}
+}
+
+func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte) (string, string) {
 	hello, badField, err := ParseHello(payload)
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_hello: "+badField)
-		return
+		return "", ""
 	}
 	if hello.Version != 1 {
 		s.close(conn, CloseVersionUnsupported, "version_unsupported: protocol version "+itoa(hello.Version))
-		return
+		return "", ""
 	}
 	if hello.Tier != 1 {
 		s.close(conn, CloseTierUnsupported, "tier_unsupported: tier "+itoa(hello.Tier)+" not supported")
-		return
+		return "", ""
 	}
+	entry, ok := s.prepareProviderAdmission(conn, auth, hello)
+	if !ok {
+		return "", ""
+	}
+	session := s.registerProviderSession(conn, entry)
+
+	ack := HelloAck{
+		Type:                     "hello_ack",
+		CoordinatorVersion:       1,
+		AssignedID:               entry.AssignedID,
+		HeartbeatIntervalS:       int(s.cfg.HeartbeatInterval().Seconds()),
+		Tier:                     string(entry.Tier),
+		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+	}
+	b, err := json.Marshal(ack)
+	if err != nil {
+		s.close(conn, CloseInvalidHello, "invalid_hello: ack")
+		return "", ""
+	}
+	if err := session.send(b); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
+		return "", ""
+	}
+	if s.cfg.Pool.WarmupGateEnabled {
+		s.startWarmupGate(*entry)
+	}
+	s.readProviderLoop(conn, entry.ProviderID, entry.AssignedID)
+	return entry.ProviderID, entry.AssignedID
+}
+
+func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte) (string, string) {
+	initial, badField, err := ParseAuthRequest(payload)
+	if err != nil || initial.Stage != "initial" {
+		if badField == "" {
+			badField = "stage"
+		}
+		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
+		return "", ""
+	}
+	tier2Cfg := s.tier2Config()
+	selectedAEAD, ok := negotiateAEAD(initial.Tier2Capabilities.AEADSuites, tier2Cfg)
+	if !ok || !initial.Tier2Capabilities.EncryptedLeg {
+		s.close(conn, CloseInvalidHello, "no_common_aead_suite")
+		return "", ""
+	}
+	providerPublic, _, err := tier2.ParseX25519PublicKey(initial.ProviderECDHPublicKey)
+	if err != nil {
+		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_key_exchange_failed")
+		return "", ""
+	}
+	entry, ok := s.prepareProviderAdmission(conn, auth, initial.Hello())
+	if !ok {
+		return "", ""
+	}
+	coordinatorPrivate, coordinatorPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_key_exchange_failed")
+		return "", ""
+	}
+	keys, err := tier2.DerivePillarBKeys(coordinatorPrivate, providerPublic, initial.ProviderID, entry.AssignedID, selectedAEAD)
+	if err != nil {
+		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_key_exchange_failed")
+		return "", ""
+	}
+	challengeBytes, err := randomBytes(32)
+	if err != nil {
+		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_key_exchange_failed")
+		return "", ""
+	}
+	authAttemptID := "auth-" + s.newUUID()
+	challengeExpiresAt := s.now().Add(10 * time.Minute).UTC()
+	challenge := AuthChallenge{
+		Type:                     "auth_challenge",
+		Version:                  2,
+		AuthAttemptID:            authAttemptID,
+		AssignedID:               entry.AssignedID,
+		AttestationChallenge:     base64.RawURLEncoding.EncodeToString(challengeBytes),
+		AttestationFormats:       append([]string(nil), tier2Cfg.AttestationFormats...),
+		CoordinatorECDHPublicKey: base64.RawURLEncoding.EncodeToString(coordinatorPublicRaw),
+		SelectedAEADSuite:        selectedAEAD,
+		SelectedAEAD:             selectedAEAD,
+		KeyID:                    keys.KeyID,
+		ExpiresAt:                challengeExpiresAt.Format(time.RFC3339),
+	}
+	rawChallenge, err := json.Marshal(challenge)
+	if err != nil {
+		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_key_exchange_failed")
+		return "", ""
+	}
+	if err := wsutil.WriteServerText(conn, rawChallenge); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_challenge write failed")
+		return "", ""
+	}
+
+	proofPayload, op, err := wsutil.ReadClientData(conn)
+	if err != nil {
+		s.close(conn, CloseInvalidHello, "invalid_auth_request: read")
+		return "", ""
+	}
+	if op != gobwas.OpText {
+		s.close(conn, CloseInvalidHello, "invalid_auth_request: type")
+		return "", ""
+	}
+	proof, badField, err := ParseAuthRequest(proofPayload)
+	if err != nil || proof.Stage != "proof" {
+		if badField == "" {
+			badField = "stage"
+		}
+		s.sendAuthRejection(conn, "invalid_auth_request", "invalid auth_request")
+		s.close(conn, CloseInvalidHello, "invalid_auth_request: "+badField)
+		return "", ""
+	}
+	if proof.AuthAttemptID != authAttemptID || proof.ProviderID != initial.ProviderID || s.now().After(challengeExpiresAt) {
+		s.sendAuthRejection(conn, "attestation_failed", "attestation failed")
+		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
+		return "", ""
+	}
+	attestationStatus := tier2.VerifyAttestationToken(proof.AttestationToken, tier2Cfg, challengeBytes, initial.ProviderID, initial.ProviderECDHPublicKey, s.now(), s.log)
+	if tier2Cfg.RequireAttestation && attestationStatus != pool.AttestationStatusAttested {
+		s.sendAuthRejection(conn, string(attestationStatus), string(attestationStatus))
+		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
+		return "", ""
+	}
+
+	entry.EncryptedLeg = true
+	entry.AttestationStatus = attestationStatus
+	entry.Tier2Session = &pool.Tier2Session{
+		AEADSuite:    selectedAEAD,
+		C2PKey:       keys.C2PKey,
+		P2CKey:       keys.P2CKey,
+		C2PNonceBase: keys.C2PNonceBase,
+		P2CNonceBase: keys.P2CNonceBase,
+		KeyID:        keys.KeyID,
+		StartedAt:    s.now(),
+	}
+	session := s.registerProviderSession(conn, entry)
+	response := AuthResponse{
+		Type:                     "auth_response",
+		Version:                  2,
+		Status:                   "accepted",
+		AssignedID:               entry.AssignedID,
+		HeartbeatIntervalS:       int(s.cfg.HeartbeatInterval().Seconds()),
+		Tier:                     string(entry.Tier),
+		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		Tier2Session: &AuthTier2Session{
+			EncryptedLeg: AuthEncryptedLegSession{
+				Enabled:            true,
+				Alg:                selectedAEAD,
+				KID:                keys.KeyID,
+				RekeyAfterRequests: tier2Cfg.EncryptedLegRekeyAfterRequests,
+				RekeyAfterSeconds:  tier2Cfg.EncryptedLegRekeyAfterSeconds,
+			},
+			Attestation: AuthAttestationSession{
+				Status:          string(attestationStatus),
+				RAMTierAttested: false,
+			},
+			ModelHash: AuthModelHashSession{Status: string(entry.HashStatus)},
+		},
+	}
+	rawResponse, err := json.Marshal(response)
+	if err != nil {
+		s.close(conn, CloseInvalidHello, "invalid_auth_response")
+		return "", ""
+	}
+	if err := session.send(rawResponse); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_response write failed")
+		return "", ""
+	}
+	if s.cfg.Pool.WarmupGateEnabled {
+		s.startWarmupGate(*entry)
+	}
+	s.readProviderLoop(conn, entry.ProviderID, entry.AssignedID)
+	return entry.ProviderID, entry.AssignedID
+}
+
+func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
 	providerCfg, pinned := s.pool.Endpoint(hello.ProviderID)
 	if s.tokens != nil {
 		if auth.validated && auth.providerID != hello.ProviderID {
 			s.close(conn, CloseInvalidToken, "invalid_token")
-			return
+			return nil, false
 		}
 		if pinned && !auth.validated {
 			s.close(conn, CloseInvalidToken, "invalid_token")
-			return
+			return nil, false
 		}
 		if auth.validated {
 			if err := s.tokens.MarkTokenUsed(context.Background(), auth.token); err != nil {
 				s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("provider token usage update failed")
 				s.close(conn, CloseInvalidToken, "invalid_token")
-				return
+				return nil, false
 			}
 		}
 	}
 	tier, closeCode, closeReason := s.admission.Admit(hello, pinned, s.connectedProvisional())
 	if closeCode != 0 {
 		s.close(conn, closeCode, closeReason)
-		return
+		return nil, false
 	}
 	endpointURL := ""
 	inferencePath := pool.InferencePathWSTunneled
@@ -256,11 +453,9 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		s.log.Warn().Str("provider_id", hello.ProviderID).Str("endpoint_url", *hello.EndpointURL).Msg("provisional provider sent endpoint_url; ignoring and forcing ws-tunneled mode")
 	}
 
-	assignedID = s.newUUID()
-	providerID = hello.ProviderID
+	assignedID := s.newUUID()
 	now := s.now()
 	hashStatus := pool.HashStatus("")
-	modelHash := hello.ModelHash
 	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
 		hashStatus = tier2.VerifyProviderHash(hello.ModelID, hello.ModelHash)
@@ -273,7 +468,7 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 	if s.cfg.Pool.WarmupGateEnabled {
 		initialState = pool.StateDegraded
 	}
-	entry := &pool.Provider{
+	return &pool.Provider{
 		ProviderID:            hello.ProviderID,
 		AssignedID:            assignedID,
 		Hostname:              hello.Hostname,
@@ -285,6 +480,7 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		SlotsFree:             hello.MaxConcurrency,
 		SlotsTotal:            hello.MaxConcurrency,
 		ThroughputTPSEstimate: hello.ThroughputTPSEstimate,
+		ModelLoadTimeMs:       hello.ModelLoadTimeMs,
 		EndpointURL:           endpointURL,
 		Tier:                  tier,
 		InferencePath:         inferencePath,
@@ -294,50 +490,73 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		LastActivityAt:        now,
 		ConnectedAt:           now,
 		BinaryVersion:         hello.BinaryVersion,
-		ModelHash:             modelHash,
+		ModelHash:             hello.ModelHash,
 		HashStatus:            hashStatus,
-	}
+	}, true
+}
+
+func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *providerSession {
 	if old := s.pool.Register(entry, conn); old != nil {
 		_ = old.Close()
 	}
-	session := newProviderSession(providerID, assignedID, conn, s.cfg.WS.WriteBufferSize)
-	s.sessions.Store(sessionKey(providerID, assignedID), session)
+	session := newProviderSession(entry.ProviderID, entry.AssignedID, conn, s.cfg.WS.WriteBufferSize)
+	session.useTier2Session(entry.Tier2Session)
+	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
 	go session.runWriter()
-	go s.monitorHeartbeat(providerID, assignedID, conn)
+	go s.monitorHeartbeat(entry.ProviderID, entry.AssignedID, conn)
+	return session
+}
 
-	ack := HelloAck{
-		Type:                     "hello_ack",
-		CoordinatorVersion:       1,
-		AssignedID:               assignedID,
-		HeartbeatIntervalS:       int(s.cfg.HeartbeatInterval().Seconds()),
-		Tier:                     string(tier),
-		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
-	}
-	b, err := json.Marshal(ack)
-	if err != nil {
-		s.close(conn, CloseInvalidHello, "invalid_hello: ack")
-		return
-	}
-	if err := session.send(b); err != nil {
-		s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("hello_ack write failed")
-		return
-	}
-	if s.cfg.Pool.WarmupGateEnabled {
-		s.startWarmupGate(*entry)
-	}
-
+func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) {
 	for {
 		payload, op, err := wsutil.ReadClientData(conn)
 		if err != nil {
-			s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("provider websocket read failed")
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider websocket read failed")
 			return
 		}
 		if op != gobwas.OpText {
-			s.log.Warn().Str("provider_id", hello.ProviderID).Uint8("op", uint8(op)).Msg("ignoring non-text provider frame")
+			s.log.Warn().Str("provider_id", providerID).Uint8("op", uint8(op)).Msg("ignoring non-text provider frame")
 			continue
 		}
-		s.handleMessage(conn, hello.ProviderID, assignedID, payload)
+		s.handleMessage(conn, providerID, assignedID, payload)
 	}
+}
+
+func negotiateAEAD(suites []string, cfg config.Tier2Config) (string, bool) {
+	supported := strings.TrimSpace(cfg.EncryptedLegAEAD)
+	if supported == "" {
+		supported = tier2.PillarBAEADA256GCM
+	}
+	if supported != tier2.PillarBAEADA256GCM {
+		return "", false
+	}
+	for _, suite := range suites {
+		if suite == tier2.PillarBAEADA256GCM {
+			return tier2.PillarBAEADA256GCM, true
+		}
+	}
+	return "", false
+}
+
+func randomBytes(n int) ([]byte, error) {
+	b := make([]byte, n)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func (s *Server) sendAuthRejection(conn net.Conn, code, message string) {
+	raw, err := json.Marshal(AuthResponse{
+		Type:    "auth_response",
+		Version: 2,
+		Status:  "rejected",
+		Error:   &AuthResponseError{Code: code, Message: message},
+	})
+	if err != nil {
+		return
+	}
+	_ = wsutil.WriteServerText(conn, raw)
 }
 
 func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {

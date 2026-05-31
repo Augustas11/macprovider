@@ -72,9 +72,15 @@ struct ServeCommand: AsyncParsableCommand {
         let providerStatus = ProviderStatus(
             modelID: resolved.model,
             modelLoaded: await modelRuntime.isLoaded,
-            capacity: capacityDefaults.withThroughputEstimate(throughputEstimate)
+            capacity: capacityDefaults.withThroughputEstimate(throughputEstimate),
+            modelHash: await modelRuntime.loadedModelHash
         )
-        let coordinatorClient = CoordinatorClient(config: resolved, modelRuntime: modelRuntime, providerStatus: providerStatus)
+        let coordinatorClient = CoordinatorClient(
+            config: resolved,
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
+        )
         await coordinatorClient?.start()
         let server = HTTPServer(config: resolved, modelRuntime: modelRuntime, providerStatus: providerStatus)
         let terminationHandler = installTerminationHandler(coordinatorClient: coordinatorClient)
@@ -152,7 +158,7 @@ struct UpdateCommand: AsyncParsableCommand {
     @Flag(help: "Check for updates without downloading or replacing the binary.")
     var check = false
 
-    @Option(help: "GitHub latest-release API URL. Defaults to the public macprovider-poc repository.")
+    @Option(help: "GitHub latest-release API URL. Defaults to the public macprovider release repository.")
     var releasesAPIURL: String?
 
     func run() async throws {
@@ -186,4 +192,5 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  config: \(config.configPath)")
     print("  log_level: \(config.logLevel.rawValue)")
     print("  log_format: \(config.logFormat.rawValue)")
+    print("  tier2_mda_artifact_path: \(config.tier2MDAArtifactPath ?? "<unset>")")
 }

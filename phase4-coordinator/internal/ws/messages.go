@@ -18,6 +18,7 @@ type Hello struct {
 	MaxContextTokens      int             `json:"max_context_tokens"`
 	MaxConcurrency        int             `json:"max_concurrency"`
 	ThroughputTPSEstimate float64         `json:"throughput_tps_estimate"`
+	ModelLoadTimeMs       int64           `json:"model_load_time_ms,omitempty"`
 	BinaryVersion         string          `json:"binary_version"`
 	Attestation           json.RawMessage `json:"attestation"`
 	EndpointURL           *string         `json:"endpoint_url,omitempty"`
@@ -30,6 +31,89 @@ type HelloAck struct {
 	HeartbeatIntervalS       int    `json:"heartbeat_interval_s"`
 	Tier                     string `json:"tier,omitempty"`
 	RecommendedBinaryVersion string `json:"recommended_binary_version,omitempty"`
+}
+
+type AuthRequest struct {
+	Type                  string          `json:"type"`
+	Version               int             `json:"version"`
+	Stage                 string          `json:"stage"`
+	AuthAttemptID         string          `json:"auth_attempt_id,omitempty"`
+	ProviderID            string          `json:"provider_id"`
+	Hostname              string          `json:"hostname,omitempty"`
+	ModelID               string          `json:"model_id,omitempty"`
+	ModelHash             string          `json:"model_hash,omitempty"`
+	ModelParamsB          float64         `json:"model_params_b,omitempty"`
+	RAMGB                 int             `json:"ram_gb,omitempty"`
+	MaxContextTokens      int             `json:"max_context_tokens,omitempty"`
+	MaxConcurrency        int             `json:"max_concurrency,omitempty"`
+	ThroughputTPSEstimate float64         `json:"throughput_tps_estimate,omitempty"`
+	ModelLoadTimeMs       int64           `json:"model_load_time_ms,omitempty"`
+	BinaryVersion         string          `json:"binary_version,omitempty"`
+	EndpointURL           *string         `json:"endpoint_url,omitempty"`
+	ProviderECDHPublicKey string          `json:"provider_ecdh_public_key,omitempty"`
+	Tier2Capabilities     Tier2Caps       `json:"tier2_capabilities,omitempty"`
+	AttestationToken      json.RawMessage `json:"attestation_token,omitempty"`
+}
+
+type Tier2Caps struct {
+	EncryptedLeg bool     `json:"encrypted_leg"`
+	Attestation  bool     `json:"attestation"`
+	AEADSuites   []string `json:"aead_suites"`
+}
+
+type AuthChallenge struct {
+	Type                     string   `json:"type"`
+	Version                  int      `json:"version"`
+	AuthAttemptID            string   `json:"auth_attempt_id"`
+	AssignedID               string   `json:"assigned_id"`
+	AttestationChallenge     string   `json:"attestation_challenge"`
+	AttestationFormats       []string `json:"attestation_formats"`
+	CoordinatorECDHPublicKey string   `json:"coordinator_ecdh_public_key"`
+	SelectedAEADSuite        string   `json:"selected_aead_suite"`
+	SelectedAEAD             string   `json:"selected_aead,omitempty"`
+	KeyID                    string   `json:"key_id,omitempty"`
+	ExpiresAt                string   `json:"expires_at"`
+}
+
+type AuthResponse struct {
+	Type                     string             `json:"type"`
+	Version                  int                `json:"version"`
+	Status                   string             `json:"status"`
+	AssignedID               string             `json:"assigned_id,omitempty"`
+	HeartbeatIntervalS       int                `json:"heartbeat_interval_s,omitempty"`
+	Tier                     string             `json:"tier,omitempty"`
+	RecommendedBinaryVersion string             `json:"recommended_binary_version,omitempty"`
+	Tier2Session             *AuthTier2Session  `json:"tier2_session,omitempty"`
+	Error                    *AuthResponseError `json:"error,omitempty"`
+}
+
+type AuthResponseError struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type AuthTier2Session struct {
+	EncryptedLeg AuthEncryptedLegSession `json:"encrypted_leg"`
+	Attestation  AuthAttestationSession  `json:"attestation"`
+	ModelHash    AuthModelHashSession    `json:"model_hash"`
+}
+
+type AuthEncryptedLegSession struct {
+	Enabled            bool   `json:"enabled"`
+	Alg                string `json:"alg"`
+	KID                string `json:"kid"`
+	RekeyAfterRequests int    `json:"rekey_after_requests"`
+	RekeyAfterSeconds  int    `json:"rekey_after_seconds"`
+}
+
+type AuthAttestationSession struct {
+	Status          string `json:"status"`
+	Format          string `json:"format,omitempty"`
+	RAMTierAttested bool   `json:"ram_tier_attested"`
+}
+
+type AuthModelHashSession struct {
+	Status string `json:"status,omitempty"`
 }
 
 type Heartbeat struct {
@@ -175,6 +259,11 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	if err := requireFloat(raw, "throughput_tps_estimate", &h.ThroughputTPSEstimate); err != nil {
 		return Hello{}, err.Field, err
 	}
+	if v, ok := raw["model_load_time_ms"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &h.ModelLoadTimeMs); err != nil {
+			return Hello{}, "model_load_time_ms", err
+		}
+	}
 	if err := requireString(raw, "binary_version", &h.BinaryVersion); err != nil {
 		return Hello{}, err.Field, err
 	}
@@ -190,6 +279,144 @@ func ParseHello(payload []byte) (Hello, string, error) {
 		h.EndpointURL = &endpoint
 	}
 	return h, "", nil
+}
+
+func ParseFirstAuthMessage(payload []byte) (string, int, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return "", 0, err
+	}
+	var typ string
+	if err := requireString(raw, "type", &typ); err != nil {
+		return "", 0, err
+	}
+	var version int
+	if err := requireInt(raw, "version", &version); err != nil {
+		return "", 0, err
+	}
+	return typ, version, nil
+}
+
+func ParseAuthRequest(payload []byte) (AuthRequest, string, error) {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		return AuthRequest{}, "json", err
+	}
+	var req AuthRequest
+	if err := requireString(raw, "type", &req.Type); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if req.Type != "auth_request" {
+		return AuthRequest{}, "type", fmt.Errorf("expected auth_request, got %q", req.Type)
+	}
+	if err := requireInt(raw, "version", &req.Version); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if req.Version != 2 {
+		return AuthRequest{}, "version", fmt.Errorf("unsupported auth_request version %d", req.Version)
+	}
+	if err := requireString(raw, "stage", &req.Stage); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	switch req.Stage {
+	case "initial":
+		return parseAuthInitial(raw, req)
+	case "proof":
+		return parseAuthProof(raw, req)
+	default:
+		return AuthRequest{}, "stage", fmt.Errorf("unsupported auth_request stage %q", req.Stage)
+	}
+}
+
+func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequest, string, error) {
+	if err := requireString(raw, "provider_id", &req.ProviderID); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if err := requireString(raw, "hostname", &req.Hostname); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if err := requireString(raw, "model_id", &req.ModelID); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ModelHash); err != nil {
+			return AuthRequest{}, "model_hash", err
+		}
+	}
+	if err := requireFloat(raw, "model_params_b", &req.ModelParamsB); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if err := requireInt(raw, "ram_gb", &req.RAMGB); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if err := requireInt(raw, "max_context_tokens", &req.MaxContextTokens); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if err := requireInt(raw, "max_concurrency", &req.MaxConcurrency); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if err := requireFloat(raw, "throughput_tps_estimate", &req.ThroughputTPSEstimate); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if v, ok := raw["model_load_time_ms"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ModelLoadTimeMs); err != nil {
+			return AuthRequest{}, "model_load_time_ms", err
+		}
+	}
+	if err := requireString(raw, "binary_version", &req.BinaryVersion); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if v, ok := raw["endpoint_url"]; ok && string(v) != "null" {
+		var endpoint string
+		if err := json.Unmarshal(v, &endpoint); err != nil {
+			return AuthRequest{}, "endpoint_url", err
+		}
+		req.EndpointURL = &endpoint
+	}
+	if err := requireString(raw, "provider_ecdh_public_key", &req.ProviderECDHPublicKey); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	capsRaw, ok := raw["tier2_capabilities"]
+	if !ok {
+		return AuthRequest{}, "missing tier2_capabilities", fieldError{Field: "missing tier2_capabilities"}
+	}
+	if err := json.Unmarshal(capsRaw, &req.Tier2Capabilities); err != nil {
+		return AuthRequest{}, "tier2_capabilities", err
+	}
+	return req, "", nil
+}
+
+func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthRequest, string, error) {
+	if err := requireString(raw, "auth_attempt_id", &req.AuthAttemptID); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if err := requireString(raw, "provider_id", &req.ProviderID); err != nil {
+		return AuthRequest{}, err.Field, err
+	}
+	if token, ok := raw["attestation_token"]; ok {
+		req.AttestationToken = token
+	}
+	return req, "", nil
+}
+
+func (r AuthRequest) Hello() Hello {
+	return Hello{
+		Type:                  "hello",
+		Version:               1,
+		Tier:                  1,
+		ProviderID:            r.ProviderID,
+		Hostname:              r.Hostname,
+		ModelID:               r.ModelID,
+		ModelHash:             r.ModelHash,
+		ModelParamsB:          r.ModelParamsB,
+		RAMGB:                 r.RAMGB,
+		MaxContextTokens:      r.MaxContextTokens,
+		MaxConcurrency:        r.MaxConcurrency,
+		ThroughputTPSEstimate: r.ThroughputTPSEstimate,
+		ModelLoadTimeMs:       r.ModelLoadTimeMs,
+		BinaryVersion:         r.BinaryVersion,
+		EndpointURL:           r.EndpointURL,
+	}
 }
 
 type fieldError struct {

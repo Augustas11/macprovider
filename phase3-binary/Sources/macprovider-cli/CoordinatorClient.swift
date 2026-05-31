@@ -2,8 +2,17 @@ import Foundation
 import MacProviderCore
 import Darwin
 
+protocol ProviderWebSocketTask: AnyObject, Sendable {
+    func resume()
+    func send(_ message: URLSessionWebSocketTask.Message) async throws
+    func receive() async throws -> URLSessionWebSocketTask.Message
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
+}
+
+extension URLSessionWebSocketTask: ProviderWebSocketTask {}
+
 actor CoordinatorClient {
-    static let binaryVersion = "1.2.4"
+    static let binaryVersion = "1.2.6"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -18,8 +27,11 @@ actor CoordinatorClient {
     private let maxActiveRequests: Int
     private let reconnectGraceNanoseconds: UInt64
     private let connectAndRunOverride: (() async throws -> Void)?
+    private let attestationGenerator: Tier2AttestationTokenGenerating
+    private let webSocketFactory: (URL) -> ProviderWebSocketTask
     private var inferenceRelay: InferenceRelay?
-    private var webSocket: URLSessionWebSocketTask?
+    private var tier2Session: Tier2ProviderSession?
+    private var webSocket: ProviderWebSocketTask?
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
     private let sendOverride: (([String: Any]) async throws -> Void)?
@@ -30,6 +42,8 @@ actor CoordinatorClient {
         providerStatus: ProviderStatus,
         sendOverride: (([String: Any]) async throws -> Void)? = nil,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
+        attestationGenerator: Tier2AttestationTokenGenerating = ManagedDeviceAttestationGenerator(),
+        webSocketFactory: @escaping @Sendable (URL) -> ProviderWebSocketTask = { URLSession.shared.webSocketTask(with: $0) },
         connectAndRunOverride: (() async throws -> Void)? = nil
     ) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
@@ -50,6 +64,8 @@ actor CoordinatorClient {
         self.maxBodyBytes = config.maxRequestBodyBytes
         self.maxActiveRequests = 1
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
+        self.attestationGenerator = attestationGenerator
+        self.webSocketFactory = webSocketFactory
         self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
     }
@@ -65,6 +81,8 @@ actor CoordinatorClient {
         runTask?.cancel()
         heartbeatTask?.cancel()
         await inferenceRelay?.cancelAllAndClear()
+        inferenceRelay = nil
+        tier2Session = nil
         webSocket?.cancel(with: .goingAway, reason: nil)
         await providerStatus.setCoordinatorSession(connected: false)
         runTask = nil
@@ -114,11 +132,65 @@ actor CoordinatorClient {
         try await connectAndRun()
     }
 
+    func connectAndRunOnceForTest() async throws {
+        try await connectAndRunOnce()
+    }
+
     private func connectAndRun() async throws {
-        let socket = URLSession.shared.webSocketTask(with: coordinatorURL)
+        if wsTunneledMode {
+            let socket = openWebSocket()
+            do {
+                try await connectAndRunTier2(socket: socket)
+            } catch let error as Tier2ChallengeFailure {
+                Self.keepaliveDebug("tier2_challenge_failed_fallback_to_legacy error=\(error)")
+                socket.cancel(with: .normalClosure, reason: nil)
+                inferenceRelay = nil
+                tier2Session = nil
+                try await connectAndRunLegacy(socket: openWebSocket())
+            }
+        } else {
+            try await connectAndRunLegacy(socket: openWebSocket())
+        }
+    }
+
+    private func openWebSocket() -> ProviderWebSocketTask {
+        let socket = webSocketFactory(coordinatorURL)
         webSocket = socket
         socket.resume()
         Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL))")
+        return socket
+    }
+
+    private func connectAndRunTier2(socket: ProviderWebSocketTask) async throws {
+        let authAttempt = Tier2AuthAttempt()
+        try await send(await authInitialMessage(attempt: authAttempt))
+        let challenge: [String: Any]
+        do {
+            challenge = try await receiveAuthChallenge(from: socket)
+        } catch {
+            throw Tier2ChallengeFailure(error)
+        }
+        let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
+        try await send(try await authProofMessage(challenge: challenge, attempt: authAttempt))
+        let response = try await receiveAuthResponse(from: socket)
+        try await acceptAuthResponse(response, session: session)
+        tier2Session = session
+        inferenceRelay = InferenceRelay(
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            loadedModelID: loadedModelID,
+            maxActiveRequests: maxActiveRequests,
+            maxBodyBytes: maxBodyBytes,
+            tier2Session: session,
+            sendFrame: { payload in
+                try await Self.send(payload, to: socket)
+            }
+        )
+        try await receiveLoop(socket)
+    }
+
+    private func connectAndRunLegacy(socket: ProviderWebSocketTask) async throws {
+        tier2Session = nil
         if wsTunneledMode {
             inferenceRelay = InferenceRelay(
                 modelRuntime: modelRuntime,
@@ -133,9 +205,11 @@ actor CoordinatorClient {
         } else {
             inferenceRelay = nil
         }
-
         try await send(await helloMessage())
+        try await receiveLoop(socket)
+    }
 
+    private func receiveLoop(_ socket: ProviderWebSocketTask) async throws {
         while !Task.isCancelled {
             let message: URLSessionWebSocketTask.Message
             do {
@@ -153,6 +227,7 @@ actor CoordinatorClient {
         heartbeatTask = nil
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
+        tier2Session = nil
         webSocket?.cancel(with: .goingAway, reason: nil)
         webSocket = nil
         await providerStatus.setCoordinatorSession(connected: false)
@@ -182,23 +257,7 @@ actor CoordinatorClient {
 
         switch type {
         case "hello_ack":
-            let interval = max((dict["heartbeat_interval_s"] as? Int) ?? 30, 1)
-            await providerStatus.setCoordinatorSession(
-                connected: true,
-                assignedID: dict["assigned_id"] as? String,
-                tier: dict["tier"] as? String,
-                recommendedBinaryVersion: dict["recommended_binary_version"] as? String
-            )
-            if let tier = dict["tier"] as? String {
-                print("Coordinator tier: \(tier)")
-            }
-            if let recommended = dict["recommended_binary_version"] as? String,
-               Self.compareSemver(Self.binaryVersion, recommended) == .orderedAscending
-            {
-                print("A newer version is available (v\(recommended)). Run 'macprovider-cli update' to upgrade.")
-            }
-            startHeartbeat(intervalSeconds: interval)
-            try await sendStateUpdate(state: nil, reason: "coordinator hello_ack received")
+            try await acceptCoordinatorSession(dict, reason: "coordinator hello_ack received")
         case "preflight":
             try await handlePreflight(dict)
         case "inference_request":
@@ -243,6 +302,108 @@ actor CoordinatorClient {
     func handleCoordinatorPayloadForTest(_ payload: [String: Any]) async throws {
         let data = try JSONSerialization.data(withJSONObject: payload)
         try await handle(.string(String(decoding: data, as: UTF8.self)))
+    }
+
+    private func receiveAuthChallenge(from socket: ProviderWebSocketTask) async throws -> [String: Any] {
+        let challenge = try await Self.receiveJSONObject(from: socket)
+        guard challenge["type"] as? String == "auth_challenge",
+              Self.intValue(challenge["version"]) == 2
+        else {
+            throw CoordinatorAuthError.invalidMessage("Expected auth_challenge v2")
+        }
+        return challenge
+    }
+
+    private func receiveAuthResponse(from socket: ProviderWebSocketTask) async throws -> [String: Any] {
+        let response = try await Self.receiveJSONObject(from: socket)
+        guard response["type"] as? String == "auth_response",
+              Self.intValue(response["version"]) == 2
+        else {
+            throw CoordinatorAuthError.invalidMessage("Expected auth_response v2")
+        }
+        return response
+    }
+
+    private func makeTier2Session(attempt: Tier2AuthAttempt, challenge: [String: Any]) throws -> Tier2ProviderSession {
+        guard let assignedID = challenge["assigned_id"] as? String,
+              let coordinatorPublicKey = challenge["coordinator_ecdh_public_key"] as? String
+        else {
+            throw CoordinatorAuthError.invalidMessage("auth_challenge missing assigned_id or coordinator_ecdh_public_key")
+        }
+        let selectedAEAD = (challenge["selected_aead_suite"] as? String) ?? (challenge["selected_aead"] as? String) ?? ""
+        guard !selectedAEAD.isEmpty else {
+            throw CoordinatorAuthError.invalidMessage("auth_challenge missing selected_aead_suite")
+        }
+        return try Tier2ProviderSession(
+            attempt: attempt,
+            providerID: providerID,
+            assignedID: assignedID,
+            coordinatorPublicKeyBase64URL: coordinatorPublicKey,
+            selectedAEAD: selectedAEAD,
+            expectedKeyID: challenge["key_id"] as? String
+        )
+    }
+
+    func authProofMessage(challenge: [String: Any], attempt: Tier2AuthAttempt) async throws -> [String: Any] {
+        guard let attemptID = challenge["auth_attempt_id"] as? String, !attemptID.isEmpty else {
+            throw CoordinatorAuthError.invalidMessage("auth_challenge missing auth_attempt_id")
+        }
+        let snapshot = await providerStatus.snapshot()
+        let token = await attestationGenerator.makeAttestationToken(
+            challengeBase64URL: challenge["attestation_challenge"] as? String,
+            providerID: providerID,
+            binaryVersion: Self.binaryVersion,
+            snapshot: snapshot,
+            providerECDHPublicKey: attempt.publicKeyBase64URL
+        )
+        var proof: [String: Any] = [
+            "type": "auth_request",
+            "version": 2,
+            "stage": "proof",
+            "auth_attempt_id": attemptID,
+            "provider_id": providerID,
+        ]
+        proof["attestation_token"] = token ?? NSNull()
+        return proof
+    }
+
+    private func acceptAuthResponse(_ response: [String: Any], session: Tier2ProviderSession) async throws {
+        guard response["status"] as? String == "accepted" else {
+            let error = response["error"] as? [String: Any]
+            throw CoordinatorAuthError.rejected(
+                code: error?["code"] as? String ?? "auth_rejected",
+                message: error?["message"] as? String ?? "Coordinator rejected auth_response"
+            )
+        }
+        guard let tier2 = response["tier2_session"] as? [String: Any],
+              let encryptedLeg = tier2["encrypted_leg"] as? [String: Any],
+              encryptedLeg["enabled"] as? Bool == true,
+              encryptedLeg["alg"] as? String == session.selectedAEAD,
+              encryptedLeg["kid"] as? String == session.keyID
+        else {
+            throw CoordinatorAuthError.invalidMessage("auth_response missing matching encrypted_leg session")
+        }
+        try await acceptCoordinatorSession(response, reason: "coordinator auth_response accepted")
+    }
+
+    private func acceptCoordinatorSession(_ payload: [String: Any], reason: String) async throws {
+        let interval = max(Self.intValue(payload["heartbeat_interval_s"]) ?? 30, 1)
+        await providerStatus.setCoordinatorSession(
+            connected: true,
+            assignedID: payload["assigned_id"] as? String,
+            tier: payload["tier"] as? String,
+            recommendedBinaryVersion: payload["recommended_binary_version"] as? String
+        )
+        if let tier = payload["tier"] as? String {
+            print("Coordinator tier: \(tier)")
+        }
+        if let recommended = payload["recommended_binary_version"] as? String,
+           Self.compareSemver(Self.binaryVersion, recommended) == .orderedAscending
+        {
+            print("A newer version is available (v\(recommended)). Run 'macprovider-cli update' to upgrade.")
+        }
+        startHeartbeat(intervalSeconds: interval)
+        try await sendStateUpdate(state: nil, reason: reason)
     }
 
     private func startHeartbeat(intervalSeconds: Int) {
@@ -405,7 +566,38 @@ actor CoordinatorClient {
         ])
     }
 
-    private func helloMessage() async -> [String: Any] {
+    func authInitialMessage(attempt: Tier2AuthAttempt) async -> [String: Any] {
+        let snapshot = await providerStatus.snapshot()
+        var message: [String: Any] = [
+            "type": "auth_request",
+            "version": 2,
+            "stage": "initial",
+            "provider_id": providerID,
+            "hostname": Host.current().localizedName ?? "unknown",
+            "model_id": snapshot.modelID ?? "",
+            "model_params_b": snapshot.capacity.modelParamsB(modelID: snapshot.modelID),
+            "ram_gb": snapshot.capacity.ramGB,
+            "max_context_tokens": snapshot.capacity.maxContextTokens,
+            "max_concurrency": snapshot.capacity.maxConcurrency,
+            "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
+            "binary_version": Self.binaryVersion,
+            "provider_ecdh_public_key": attempt.publicKeyBase64URL,
+            "tier2_capabilities": [
+                "encrypted_leg": true,
+                "attestation": true,
+                "aead_suites": [Tier2ProviderSession.aeadSuite],
+            ],
+        ]
+        if let endpointURL {
+            message["endpoint_url"] = endpointURL
+        }
+        if let modelHash = snapshot.modelHash {
+            message["model_hash"] = modelHash
+        }
+        return message
+    }
+
+    func helloMessage() async -> [String: Any] {
         let snapshot = await providerStatus.snapshot()
         var message: [String: Any] = [
             "type": "hello",
@@ -425,6 +617,9 @@ actor CoordinatorClient {
         if let endpointURL {
             message["endpoint_url"] = endpointURL
         }
+        if let modelHash = snapshot.modelHash {
+            message["model_hash"] = modelHash
+        }
         return message
     }
 
@@ -437,13 +632,47 @@ actor CoordinatorClient {
         try await Self.send(payload, to: webSocket)
     }
 
-    private static func send(_ payload: [String: Any], to webSocket: URLSessionWebSocketTask) async throws {
+    private static func send(_ payload: [String: Any], to webSocket: ProviderWebSocketTask) async throws {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
         let text = String(decoding: data, as: UTF8.self)
         if let type = payload["type"] as? String {
             keepaliveDebug("ws_send type=\(type) bytes=\(text.utf8.count)")
         }
         try await webSocket.send(.string(text))
+    }
+
+    private static func receiveJSONObject(from webSocket: ProviderWebSocketTask) async throws -> [String: Any] {
+        let message = try await webSocket.receive()
+        let text: String
+        switch message {
+        case .string(let value):
+            text = value
+        case .data(let data):
+            text = String(decoding: data, as: UTF8.self)
+        @unknown default:
+            throw CoordinatorAuthError.invalidMessage("Unsupported WebSocket frame")
+        }
+        guard let data = text.data(using: .utf8),
+              let raw = try? JSONSerialization.jsonObject(with: data),
+              let dict = raw as? [String: Any]
+        else {
+            throw CoordinatorAuthError.invalidMessage("Coordinator message must be a JSON object")
+        }
+        if let type = dict["type"] as? String {
+            keepaliveDebug("ws_recv type=\(type) bytes=\(text.utf8.count)")
+        }
+        return dict
+    }
+
+    private static func intValue(_ value: Any?) -> Int? {
+        switch value {
+        case let value as Int:
+            return value
+        case let value as NSNumber:
+            return value.intValue
+        default:
+            return nil
+        }
     }
 
     private static func keepaliveDebug(_ message: String) {
@@ -482,3 +711,29 @@ actor CoordinatorClient {
 /// Signals "coordinator asked us to drain, handle complete, reconnect later
 /// after a grace period." Caught by runReconnectLoop.
 struct CoordinatorDrainComplete: Error {}
+
+struct Tier2ChallengeFailure: Error, CustomStringConvertible {
+    let underlying: Error
+
+    init(_ underlying: Error) {
+        self.underlying = underlying
+    }
+
+    var description: String {
+        "tier2 challenge failed before coordinator advertised v2 support: \(underlying)"
+    }
+}
+
+enum CoordinatorAuthError: Error, Equatable, CustomStringConvertible {
+    case invalidMessage(String)
+    case rejected(code: String, message: String)
+
+    var description: String {
+        switch self {
+        case .invalidMessage(let message):
+            return message
+        case .rejected(let code, let message):
+            return "\(code): \(message)"
+        }
+    }
+}

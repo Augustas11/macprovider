@@ -408,7 +408,6 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "tier2_metadata_unavailable", "Coordinator Tier-2 metadata unavailable")
 		return
 	}
-	delete(body, "tier2")
 	body["tier1_disclosure"] = disclosure
 	copyCleanHeaders(w.Header(), resp.Header)
 	writeJSON(w, http.StatusOK, body)
@@ -857,7 +856,7 @@ func (s *Server) tier1DisclosureForModels(body map[string]any, ctxs ...context.C
 		} else {
 			return disclosure, !bodyMetadataActive
 		}
-	} else if !metadata.Tier2.ModelHash.Active {
+	} else if !metadata.Tier2.ModelHash.Active && !metadata.Tier2.EncryptedLeg.active() && !metadata.Tier2.Attestation.active() && !metadata.Tier2.BehavioralSafety.active() {
 		return disclosure, !(bodyActive || bodyMetadataActive)
 	} else {
 		phase = tier2PhaseFromMetadata(metadata.Tier2.Phase)
@@ -867,8 +866,9 @@ func (s *Server) tier1DisclosureForModels(body map[string]any, ctxs ...context.C
 	}
 	disclosure.Version = "v0.8+tier2-v0.2"
 	disclosure.ModelHashVerified = state
-	disclosure.ProviderLegEncryption = "none"
-	disclosure.UntrustedProviderSafety = "none"
+	disclosure.ProviderLegEncryption = metadata.Tier2.EncryptedLeg.disclosureState()
+	disclosure.HardwareAttestation = metadata.Tier2.Attestation.disclosureState()
+	disclosure.UntrustedProviderSafety = metadata.Tier2.BehavioralSafety.disclosureState()
 	disclosure.Tier2 = &tier2Disclosure{
 		Phase: phase,
 		ModelHash: modelHashDisclosure{
@@ -877,16 +877,9 @@ func (s *Server) tier1DisclosureForModels(body map[string]any, ctxs ...context.C
 			UncataloguedProviderCount: uncatalogued,
 			Mixed:                     state == "partial",
 		},
-		EncryptedLeg: encryptedLegDisclosure{
-			State: "none",
-			Scope: "coordinator_to_provider_only",
-		},
-		Attestation: attestationDisclosure{
-			State: "none",
-		},
-		BehavioralSafety: behavioralSafetyDisclosure{
-			State: "none",
-		},
+		EncryptedLeg:     metadata.Tier2.EncryptedLeg.toDisclosure(),
+		Attestation:      metadata.Tier2.Attestation.toDisclosure(),
+		BehavioralSafety: metadata.Tier2.BehavioralSafety.toDisclosure(),
 	}
 	return disclosure, true
 }
@@ -898,7 +891,22 @@ func tier2BodyMetadataActive(body map[string]any) bool {
 	}
 	modelHash, _ := tier2Raw["model_hash"].(map[string]any)
 	active, _ := modelHash["active"].(bool)
-	return active
+	if active {
+		return true
+	}
+	encryptedLeg, _ := tier2Raw["encrypted_leg"].(map[string]any)
+	state, _ := encryptedLeg["state"].(string)
+	if state != "" && state != "none" {
+		return true
+	}
+	attestation, _ := tier2Raw["attestation"].(map[string]any)
+	state, _ = attestation["state"].(string)
+	if state != "" && state != "none" {
+		return true
+	}
+	behavioralSafety, _ := tier2Raw["behavioral_safety"].(map[string]any)
+	state, _ = behavioralSafety["state"].(string)
+	return state != "" && state != "none"
 }
 
 func disclosureStateFromMetadata(state string) string {
@@ -1004,7 +1012,114 @@ type coordinatorRoutingMetadata struct {
 			Active bool   `json:"active"`
 			State  string `json:"state"`
 		} `json:"model_hash"`
+		EncryptedLeg     coordinatorEncryptedLegMetadata     `json:"encrypted_leg"`
+		Attestation      coordinatorAttestationMetadata      `json:"attestation"`
+		BehavioralSafety coordinatorBehavioralSafetyMetadata `json:"behavioral_safety"`
 	} `json:"tier2"`
+}
+
+type coordinatorEncryptedLegMetadata struct {
+	State                    string `json:"state"`
+	EncryptedProviderCount   int    `json:"encrypted_provider_count"`
+	UnencryptedProviderCount int    `json:"unencrypted_provider_count"`
+	Mixed                    bool   `json:"mixed"`
+	Scope                    string `json:"scope"`
+}
+
+func (m coordinatorEncryptedLegMetadata) active() bool {
+	return m.State != "" && m.State != "none"
+}
+
+func (m coordinatorEncryptedLegMetadata) disclosureState() string {
+	if !m.active() {
+		return "none"
+	}
+	if m.State == "all" {
+		return "all"
+	}
+	return "partial"
+}
+
+func (m coordinatorEncryptedLegMetadata) toDisclosure() encryptedLegDisclosure {
+	if !m.active() {
+		return encryptedLegDisclosure{State: "none", Scope: "coordinator_to_provider_only"}
+	}
+	scope := m.Scope
+	if scope == "" {
+		scope = "coordinator_to_provider_only"
+	}
+	return encryptedLegDisclosure{
+		State:                    m.State,
+		EncryptedProviderCount:   m.EncryptedProviderCount,
+		UnencryptedProviderCount: m.UnencryptedProviderCount,
+		Mixed:                    m.Mixed || m.State == "partial",
+		Scope:                    scope,
+	}
+}
+
+type coordinatorAttestationMetadata struct {
+	State                    string `json:"state"`
+	AttestedProviderCount    int    `json:"attested_provider_count"`
+	UnsupportedProviderCount int    `json:"unsupported_provider_count"`
+	Mixed                    bool   `json:"mixed"`
+}
+
+func (m coordinatorAttestationMetadata) active() bool {
+	return m.State != "" && m.State != "none"
+}
+
+func (m coordinatorAttestationMetadata) disclosureState() string {
+	switch m.State {
+	case "all", "partial", "unsupported":
+		return m.State
+	default:
+		return "none"
+	}
+}
+
+func (m coordinatorAttestationMetadata) toDisclosure() attestationDisclosure {
+	if !m.active() {
+		return attestationDisclosure{State: "none"}
+	}
+	return attestationDisclosure{
+		State:                    m.State,
+		AttestedProviderCount:    m.AttestedProviderCount,
+		UnsupportedProviderCount: m.UnsupportedProviderCount,
+		Mixed:                    m.Mixed || m.State == "partial",
+	}
+}
+
+type coordinatorBehavioralSafetyMetadata struct {
+	State              string `json:"state"`
+	SizeCap            bool   `json:"size_cap"`
+	EncodingValidation bool   `json:"encoding_validation"`
+	TTFTAnomalyLogging bool   `json:"ttft_anomaly_logging"`
+}
+
+func (m coordinatorBehavioralSafetyMetadata) active() bool {
+	return m.State != "" && m.State != "none"
+}
+
+func (m coordinatorBehavioralSafetyMetadata) disclosureState() string {
+	if !m.active() {
+		return "none"
+	}
+	if m.State == "enforced" {
+		return "enforced"
+	}
+	return "partial"
+}
+
+func (m coordinatorBehavioralSafetyMetadata) toDisclosure() behavioralSafetyDisclosure {
+	if !m.active() {
+		return behavioralSafetyDisclosure{State: "none"}
+	}
+	return behavioralSafetyDisclosure{
+		State:              m.State,
+		SizeCap:            m.SizeCap,
+		EncodingValidation: m.EncodingValidation,
+		TTFTAnomalyLogging: m.TTFTAnomalyLogging,
+	}
 }
 
 const routingMetaTTL = 5 * time.Second

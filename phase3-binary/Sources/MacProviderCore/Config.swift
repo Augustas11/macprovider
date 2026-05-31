@@ -33,6 +33,7 @@ public struct AppConfig: Equatable, Sendable {
     public var drainTimeoutSeconds: Int
     public var warmupEnabled: Bool
     public var maxRequestBodyBytes: Int
+    public var tier2MDAArtifactPath: String?
 
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
@@ -53,7 +54,8 @@ public struct AppConfig: Equatable, Sendable {
             maxConcurrencyOverride: nil,
             drainTimeoutSeconds: 30,
             warmupEnabled: true,
-            maxRequestBodyBytes: 10 * 1024 * 1024
+            maxRequestBodyBytes: 10 * 1024 * 1024,
+            tier2MDAArtifactPath: nil
         )
     }
 }
@@ -177,6 +179,7 @@ public enum ConfigLoader {
         try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
         try assign(&config.warmupEnabled, from: dict, key: "warmup_enabled", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: dict, key: "max_request_body_bytes", expected: "integer")
+        try assign(&config.tier2MDAArtifactPath, from: dict, key: "tier2_mda_artifact_path", expected: "string")
         return config
     }
 
@@ -200,6 +203,7 @@ public enum ConfigLoader {
         try assign(&config.drainTimeoutSeconds, from: environment, env: "MACPROVIDER_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.warmupEnabled, from: environment, env: "MACPROVIDER_WARMUP_ENABLED", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: environment, env: "MACPROVIDER_MAX_REQUEST_BODY_BYTES", expected: "integer")
+        try assign(&config.tier2MDAArtifactPath, from: environment, env: "MACPROVIDER_TIER2_MDA_ARTIFACT_PATH", expected: "string")
         return config
     }
 

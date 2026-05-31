@@ -42,14 +42,6 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 	cfg = Default()
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Tier2.EncryptedLegAEAD = "unknown"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("unsupported AEAD without enforcement should remain inert in Phase 1: %v", err)
-	}
-
-	cfg = Default()
-	cfg.Auth.OperatorKey = "operator-key"
-	cfg.Tier2.RequireEncryptedLeg = true
-	cfg.Tier2.EncryptedLegAEAD = "unknown"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "encrypted_leg_aead") {
 		t.Fatalf("unsupported AEAD err=%v", err)
 	}
@@ -57,22 +49,39 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 	cfg = Default()
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Tier2.RequireEncryptedLeg = true
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_encrypted_leg") {
-		t.Fatalf("phase 1 encrypted leg enforcement err=%v", err)
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("phase 2 encrypted leg enforcement should validate with default A256GCM: %v", err)
 	}
 
 	cfg = Default()
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Tier2.RequireAttestation = true
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_attestation") {
-		t.Fatalf("phase 1 attestation enforcement err=%v", err)
+		t.Fatalf("attestation without roots err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Tier2.RequireAttestation = true
+	cfg.Tier2.AttestationRoots = []string{"mock-root"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("phase 2 attestation enforcement should validate with roots: %v", err)
 	}
 
 	cfg = Default()
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Tier2.BehavioralSafetyEnabled = true
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "behavioral_safety_enabled") {
-		t.Fatalf("phase 1 behavioral safety err=%v", err)
+	cfg.Tier2.EncodingValidationEnabled = true
+	cfg.Tier2.ResponseTimeAnomalyEnabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("phase 3 behavioral safety flags should validate: %v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Tier2.OutputSizeCapBytes = -1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "output_size_cap_bytes") {
+		t.Fatalf("negative output size cap err=%v", err)
 	}
 
 	cfg = Default()

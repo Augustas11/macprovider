@@ -161,8 +161,11 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("models json: %v", err)
 	}
-	if body.Tier2 != nil {
-		t.Fatalf("gateway leaked coordinator tier2 metadata: %s", resp.Body.String())
+	if body.Tier2 == nil {
+		t.Fatalf("gateway stripped coordinator tier2 metadata: %s", resp.Body.String())
+	}
+	if body.Tier2["phase"].(float64) != 0 {
+		t.Fatalf("tier2 phase=%v want 0", body.Tier2["phase"])
 	}
 	want := (&Server{}).makeTier1Disclosure()
 	if !reflect.DeepEqual(body.Tier1Disclosure, want) {
@@ -225,7 +228,8 @@ func TestModelsDisclosureReflectsTier2HashState(t *testing.T) {
 						"invalid_provider_count":0,
 						"catalogued":true
 					}
-				}]
+				}],
+				"tier2":{"phase":1,"model_hash":{"active":true,"state":"partial","require_verified":false,"catalog_available":true}}
 			}`), nil
 		case "/internal/routing":
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
@@ -250,8 +254,12 @@ func TestModelsDisclosureReflectsTier2HashState(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("models json: %v", err)
 	}
-	if body.Tier2 != nil {
-		t.Fatalf("gateway leaked coordinator tier2 metadata: %s", resp.Body.String())
+	if body.Tier2 == nil {
+		t.Fatalf("gateway stripped coordinator tier2 metadata: %s", resp.Body.String())
+	}
+	modelHash, _ := body.Tier2["model_hash"].(map[string]any)
+	if modelHash == nil || modelHash["state"] != "partial" || modelHash["require_verified"] != false {
+		t.Fatalf("tier2 model_hash wrong: %+v body=%s", modelHash, resp.Body.String())
 	}
 	disclosure := body.Tier1Disclosure
 	if disclosure.Version != "v0.8+tier2-v0.2" {
@@ -307,6 +315,129 @@ func TestModelsDisclosureUsesTier2MetadataWhenNoHashRows(t *testing.T) {
 	}
 	if disclosure.Tier2 == nil || disclosure.Tier2.Phase != "mixed" || disclosure.Tier2.ModelHash.VerifiedProviderCount != 0 || disclosure.Tier2.ModelHash.UncataloguedProviderCount != 0 {
 		t.Fatalf("tier2 detail wrong: %+v", disclosure.Tier2)
+	}
+}
+
+func TestModelsDisclosureIncludesBehavioralSafetyMetadata(t *testing.T) {
+	cases := []struct {
+		name       string
+		metadata   string
+		wantSafety string
+		wantCap    bool
+		wantEncode bool
+		wantTTFT   bool
+	}{
+		{
+			name: "enforced",
+			metadata: `{
+				"sticky":{"enabled":false,"ttl_seconds":1800},
+				"tier2":{
+					"phase":"mixed",
+					"model_hash":{"active":false,"state":"none"},
+					"behavioral_safety":{"state":"enforced","size_cap":true,"encoding_validation":true,"ttft_anomaly_logging":true}
+				}
+			}`,
+			wantSafety: "enforced",
+			wantCap:    true,
+			wantEncode: true,
+			wantTTFT:   true,
+		},
+		{
+			name: "partial",
+			metadata: `{
+				"sticky":{"enabled":false,"ttl_seconds":1800},
+				"tier2":{
+					"phase":"mixed",
+					"model_hash":{"active":false,"state":"none"},
+					"behavioral_safety":{"state":"partial","size_cap":true,"encoding_validation":false,"ttft_anomaly_logging":false}
+				}
+			}`,
+			wantSafety: "partial",
+			wantCap:    true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.Path {
+				case "/v1/models":
+					return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"object":"list","data":[]}`), nil
+				case "/internal/routing":
+					return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, tc.metadata), nil
+				default:
+					t.Fatalf("unexpected request path %s", r.URL.Path)
+					return nil, nil
+				}
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				cfg.Coordinator.OperatorURL = "http://operator.test"
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, "acct_models_tier2_behavioral_"+tc.name)
+			resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+			var body struct {
+				Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+			}
+			if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+				t.Fatalf("models json: %v", err)
+			}
+			disclosure := body.Tier1Disclosure
+			if disclosure.UntrustedProviderSafety != tc.wantSafety {
+				t.Fatalf("untrusted_provider_safety=%q want %q disclosure=%+v", disclosure.UntrustedProviderSafety, tc.wantSafety, disclosure)
+			}
+			if disclosure.Tier2 == nil || disclosure.Tier2.BehavioralSafety.State != tc.wantSafety || disclosure.Tier2.BehavioralSafety.SizeCap != tc.wantCap || disclosure.Tier2.BehavioralSafety.EncodingValidation != tc.wantEncode || disclosure.Tier2.BehavioralSafety.TTFTAnomalyLogging != tc.wantTTFT {
+				t.Fatalf("behavioral safety disclosure wrong: %+v", disclosure.Tier2)
+			}
+		})
+	}
+}
+
+func TestModelsDisclosureIncludesEncryptedLegAndAttestationMetadata(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"object":"list","data":[]}`), nil
+		case "/internal/routing":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"sticky":{"enabled":false,"ttl_seconds":1800},
+				"tier2":{
+					"phase":"mixed",
+					"model_hash":{"active":false,"state":"none"},
+					"encrypted_leg":{"state":"partial","encrypted_provider_count":1,"unencrypted_provider_count":1,"mixed":true,"scope":"coordinator_to_provider_only"},
+					"attestation":{"state":"unsupported","attested_provider_count":0,"unsupported_provider_count":2,"mixed":false}
+				}
+			}`), nil
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_tier2_bc_metadata")
+
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+
+	var body struct {
+		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	disclosure := body.Tier1Disclosure
+	if disclosure.ProviderLegEncryption != "partial" || disclosure.HardwareAttestation != "unsupported" {
+		t.Fatalf("tier1 encrypted/attestation disclosure wrong: %+v", disclosure)
+	}
+	if disclosure.Tier2 == nil {
+		t.Fatalf("tier2 disclosure missing: %+v", disclosure)
+	}
+	if disclosure.Tier2.EncryptedLeg.State != "partial" || disclosure.Tier2.EncryptedLeg.EncryptedProviderCount != 1 || disclosure.Tier2.EncryptedLeg.UnencryptedProviderCount != 1 || !disclosure.Tier2.EncryptedLeg.Mixed || disclosure.Tier2.EncryptedLeg.Scope != "coordinator_to_provider_only" {
+		t.Fatalf("encrypted leg disclosure wrong: %+v", disclosure.Tier2.EncryptedLeg)
+	}
+	if disclosure.Tier2.Attestation.State != "unsupported" || disclosure.Tier2.Attestation.AttestedProviderCount != 0 || disclosure.Tier2.Attestation.UnsupportedProviderCount != 2 || disclosure.Tier2.Attestation.Mixed {
+		t.Fatalf("attestation disclosure wrong: %+v", disclosure.Tier2.Attestation)
 	}
 }
 

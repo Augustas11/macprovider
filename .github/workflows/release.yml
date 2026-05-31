@@ -60,6 +60,22 @@ jobs:
           cd phase3-binary/dist
           ./package.sh "${{ steps.version.outputs.tag }}"
 
+      - name: Tier-2 provider artifact preflight
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          case "$tag" in
+            v0.*|v1.0.*|v1.1.*|v1.2.[0-5])
+              echo "Skipping Tier-2 provider artifact preflight for pre-B6 tag $tag"
+              exit 0
+              ;;
+          esac
+          PROVIDER_ARTIFACT="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" \
+            PROVIDER_VERSION="${tag#v}" \
+            PROVIDER_SHA256="" \
+            scripts/check-tier2-provider-artifact.sh
+
       - name: Prepare release assets
         id: assets
         shell: bash
@@ -116,3 +132,19 @@ jobs:
             --title "macprovider-cli $tag" \
             --notes-file release-notes.md \
             --latest
+
+      - name: Verify published Tier-2 Release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          case "$tag" in
+            v0.*|v1.0.*|v1.1.*|v1.2.[0-5])
+              echo "Skipping Tier-2 published release verifier for pre-B6 tag $tag"
+              exit 0
+              ;;
+          esac
+          GITHUB_REPO="${{ github.repository }}" \
+            DOWNLOAD_ATTEMPTS=6 \
+            DOWNLOAD_RETRY_SLEEP=5 \
+            scripts/verify-tier2-provider-release.sh --tag "$tag"

@@ -467,6 +467,95 @@ func TestInternalRoutingExposesTier2ActivationMetadata(t *testing.T) {
 	}
 }
 
+func TestInternalRoutingExposesTier2BehavioralSafetyMetadata(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	tier2Cfg := config.Default().Tier2
+	tier2Cfg.BehavioralSafetyEnabled = true
+	tier2Cfg.OutputSizeCapBytes = 1024
+	tier2Cfg.EncodingValidationEnabled = true
+	tier2Cfg.ResponseTimeAnomalyEnabled = true
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithTier2Config(tier2Cfg),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	rr := httptest.NewRecorder()
+
+	server.InternalHandler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Tier2 struct {
+			Phase            any `json:"phase"`
+			BehavioralSafety struct {
+				State              string `json:"state"`
+				SizeCap            bool   `json:"size_cap"`
+				EncodingValidation bool   `json:"encoding_validation"`
+				TTFTAnomalyLogging bool   `json:"ttft_anomaly_logging"`
+			} `json:"behavioral_safety"`
+		} `json:"tier2"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if got.Tier2.Phase != "mixed" || got.Tier2.BehavioralSafety.State != "enforced" || !got.Tier2.BehavioralSafety.SizeCap || !got.Tier2.BehavioralSafety.EncodingValidation || !got.Tier2.BehavioralSafety.TTFTAnomalyLogging {
+		t.Fatalf("tier2 behavioral metadata = %+v body=%s", got.Tier2, rr.Body.String())
+	}
+}
+
+func TestInternalRoutingExposesEncryptedLegAndAttestationMetadata(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerTier2Provider(registry, "encrypted", "session-encrypted", "model-a", "https://encrypted.example", true, pool.AttestationStatusAttested)
+	registerTier2Provider(registry, "plain", "session-plain", "model-a", "https://plain.example", false, pool.AttestationStatusUnsupported)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	rr := httptest.NewRecorder()
+
+	server.InternalHandler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Tier2 struct {
+			EncryptedLeg struct {
+				State                    string `json:"state"`
+				EncryptedProviderCount   int    `json:"encrypted_provider_count"`
+				UnencryptedProviderCount int    `json:"unencrypted_provider_count"`
+				Mixed                    bool   `json:"mixed"`
+				Scope                    string `json:"scope"`
+			} `json:"encrypted_leg"`
+			Attestation struct {
+				State                    string `json:"state"`
+				AttestedProviderCount    int    `json:"attested_provider_count"`
+				UnsupportedProviderCount int    `json:"unsupported_provider_count"`
+				Mixed                    bool   `json:"mixed"`
+			} `json:"attestation"`
+		} `json:"tier2"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if got.Tier2.EncryptedLeg.State != "partial" || got.Tier2.EncryptedLeg.EncryptedProviderCount != 1 || got.Tier2.EncryptedLeg.UnencryptedProviderCount != 1 || !got.Tier2.EncryptedLeg.Mixed || got.Tier2.EncryptedLeg.Scope != "coordinator_to_provider_only" {
+		t.Fatalf("encrypted leg metadata = %+v body=%s", got.Tier2.EncryptedLeg, rr.Body.String())
+	}
+	if got.Tier2.Attestation.State != "partial" || got.Tier2.Attestation.AttestedProviderCount != 1 || got.Tier2.Attestation.UnsupportedProviderCount != 1 || !got.Tier2.Attestation.Mixed {
+		t.Fatalf("attestation metadata = %+v body=%s", got.Tier2.Attestation, rr.Body.String())
+	}
+}
+
 func TestInternalRoutingReflectsActualHashCoverage(t *testing.T) {
 	tier2.ResetForTest()
 	defer tier2.ResetForTest()
@@ -1702,6 +1791,104 @@ func TestChatCompletionsWSTunneledNonStreaming(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsWSTunneledTier2RejectsInvalidNonStreamingOutput(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	tier2Cfg := config.Default().Tier2
+	tier2Cfg.BehavioralSafetyEnabled = true
+	tier2Cfg.EncodingValidationEnabled = true
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(tier2Cfg),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","choices":[{"message":{"content":"bad\u0000"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_output_encoding_invalid"`)) {
+		t.Fatalf("body missing tier2 output error: %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsWSTunneledTier2StreamingInvalidAfterCommitEmitsSSEError(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	tier2Cfg := config.Default().Tier2
+	tier2Cfg.BehavioralSafetyEnabled = true
+	tier2Cfg.EncodingValidationEnabled = true
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(tier2Cfg),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 2)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 1, Data: "data: {\"choices\":[{\"delta\":{\"content\":\"bad\\u0000\"}}]}\n\n"}
+			close(chunks)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 2}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"ok"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_output_encoding_invalid"`)) {
+		t.Fatalf("streaming body missing valid chunk or tier2 SSE error: %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsWSTunneledTier2StreamingSizeCapTruncatesAndStops(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	tier2Cfg := config.Default().Tier2
+	tier2Cfg.BehavioralSafetyEnabled = true
+	tier2Cfg.OutputSizeCapBytes = 2
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(tier2Cfg),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"he"`)) || !bytes.Contains(rr.Body.Bytes(), []byte("data: [DONE]\n\n")) {
+		t.Fatalf("streaming body missing truncation or done: %s", rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte(`hello`)) {
+		t.Fatalf("streaming body was not capped: %s", rr.Body.String())
+	}
+}
+
 func TestChatCompletionsWSTunneledTimeoutReturns504(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
@@ -1724,6 +1911,62 @@ func TestChatCompletionsWSTunneledTimeoutReturns504(t *testing.T) {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_timeout"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsWSTunneledAEADFailureReturnsTier2Error(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error, 1)
+			errs <- providerws.ErrRelayAEADFailed
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_aead_decrypt_failed"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestChatCompletionsStreamingWSTunneledAEADFailureAfterCommitSendsSSEError(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"}
+			go func() {
+				time.Sleep(10 * time.Millisecond)
+				errs <- providerws.ErrRelayAEADFailed
+			}()
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"hello"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_aead_decrypt_failed"`)) {
 		t.Fatalf("body = %s", rr.Body.String())
 	}
 }
@@ -2516,6 +2759,110 @@ func TestTier2RequireHashVerifiedUncataloguedReturns503(t *testing.T) {
 	}
 }
 
+func TestTier2RequireEncryptedLegRoutesOnlyEncryptedProvider(t *testing.T) {
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("unencrypted provider should not receive request")
+	}))
+	defer plain.Close()
+	encrypted := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"encrypted","choices":[{"message":{"content":"encrypted"}}]}`))
+	}))
+	defer encrypted.Close()
+	registry := pool.NewRegistry(nil)
+	registerTier2Provider(registry, "plain", "session-plain", "model-a", plain.URL, false, pool.AttestationStatusUnsupported)
+	registerTier2Provider(registry, "encrypted", "session-encrypted", "model-a", encrypted.URL, true, pool.AttestationStatusUnsupported)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(config.Tier2Config{RequireEncryptedLeg: true}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "encrypted" || !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"encrypted"`)) {
+		t.Fatalf("encrypted route not selected: provider=%q body=%s", rr.Header().Get("X-MacProvider-Provider"), rr.Body.String())
+	}
+}
+
+func TestTier2RequireEncryptedLegUnavailableReturns503(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("unencrypted provider should not receive request")
+	}))
+	defer upstream.Close()
+	var logs bytes.Buffer
+	registry := pool.NewRegistry(nil)
+	registerTier2Provider(registry, "plain", "session-plain", "model-a", upstream.URL, false, pool.AttestationStatusUnsupported)
+	server := buyer.NewServer(
+		registry,
+		zerolog.New(&logs),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(config.Tier2Config{RequireEncryptedLeg: true}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusServiceUnavailable || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_encrypted_leg_required"`)) {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !strings.Contains(logs.String(), `"event":"encrypted_leg_required_missing"`) || !strings.Contains(logs.String(), `"provider_id":"plain"`) {
+		t.Fatalf("missing encrypted leg exclusion log: %s", logs.String())
+	}
+}
+
+func TestTier2RequireAttestationRoutesOnlyAttestedProvider(t *testing.T) {
+	unsupported := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("unattested provider should not receive request")
+	}))
+	defer unsupported.Close()
+	attested := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"attested","choices":[{"message":{"content":"attested"}}]}`))
+	}))
+	defer attested.Close()
+	registry := pool.NewRegistry(nil)
+	registerTier2Provider(registry, "unsupported", "session-unsupported", "model-a", unsupported.URL, true, pool.AttestationStatusUnsupported)
+	registerTier2Provider(registry, "attested", "session-attested", "model-a", attested.URL, true, pool.AttestationStatusAttested)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(config.Tier2Config{RequireAttestation: true, AttestationRoots: []string{"mock-root"}}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "attested" || !bytes.Contains(rr.Body.Bytes(), []byte(`"content":"attested"`)) {
+		t.Fatalf("attested route not selected: provider=%q body=%s", rr.Header().Get("X-MacProvider-Provider"), rr.Body.String())
+	}
+}
+
+func TestTier2RequireAttestationUnavailableReturns503(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("unattested provider should not receive request")
+	}))
+	defer upstream.Close()
+	registry := pool.NewRegistry(nil)
+	registerTier2Provider(registry, "unsupported", "session-unsupported", "model-a", upstream.URL, true, pool.AttestationStatusUnsupported)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(config.Tier2Config{RequireAttestation: true, AttestationRoots: []string{"mock-root"}}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusServiceUnavailable || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_attestation_required"`)) {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
 func TestTier2RequireHashVerifiedCatalogUnavailableLogsExclusion(t *testing.T) {
 	defer tier2.ResetForTest()
 	if err := tier2.Configure(config.Tier2Config{CatalogPath: "/missing/catalog.json", CatalogPublicKey: "unused"}, zerolog.Nop()); err != nil {
@@ -2850,6 +3197,33 @@ func register(registry *pool.Registry, providerID, assignedID, modelID string, s
 
 func registerWithHashStatus(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, hashStatus pool.HashStatus) {
 	registerWithHashStatusEndpoint(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, "https://"+providerID+".example", hashStatus)
+}
+
+func registerTier2Provider(registry *pool.Registry, providerID, assignedID, modelID, endpointURL string, encrypted bool, attestation pool.AttestationStatus) {
+	now := time.Now().UTC()
+	registry.Register(&pool.Provider{
+		ProviderID:            providerID,
+		AssignedID:            assignedID,
+		Hostname:              providerID + ".local",
+		ModelID:               modelID,
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		EndpointURL:           endpointURL,
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       now,
+		LastActivityAt:        now,
+		ConnectedAt:           now,
+		BinaryVersion:         "0.1.0",
+		EncryptedLeg:          encrypted,
+		AttestationStatus:     attestation,
+	}, nil)
 }
 
 func registerWithHashStatusEndpoint(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, hashStatus pool.HashStatus) {

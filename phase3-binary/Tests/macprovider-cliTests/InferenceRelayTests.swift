@@ -127,6 +127,60 @@ final class InferenceRelayTests: XCTestCase {
         let error = try XCTUnwrap(frames[0]["error"] as? [String: Any])
         XCTAssertEqual(error["code"] as? String, "invalid_message")
     }
+
+    func testEncryptedInferenceRequestDecryptsAndEncryptsResponseChunk() async throws {
+        let runtime = FakeCompletionRuntime()
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let session = try testTier2Session()
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            tier2Session: session,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        let body = #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}],"max_tokens":20,"stream":false}"#
+        let encrypted = try Tier2ProviderSession.sealRequestForTest(
+            session: session,
+            requestID: "req-encrypted",
+            stream: false,
+            plaintext: body
+        )
+        try await relay.handleInferenceRequest(encrypted)
+
+        let frames = try await waitForFrames { frames in
+            frames.contains { $0["type"] as? String == "inference_response_end" }
+        } from: {
+            await recorder.frames
+        }
+
+        let chunk = try XCTUnwrap(frames.first { $0["type"] as? String == "inference_response_chunk" })
+        XCTAssertEqual(chunk["request_id"] as? String, "req-encrypted")
+        XCTAssertEqual(chunk["encrypted"] as? Bool, true)
+        XCTAssertNil(chunk["data"])
+        let plaintext = try Tier2ProviderSession.openResponseChunkForTest(
+            session: session,
+            frame: chunk,
+            requestID: "req-encrypted",
+            stream: false
+        )
+        XCTAssertTrue(plaintext.contains("encrypted answer"))
+
+        let end = try XCTUnwrap(frames.first { $0["type"] as? String == "inference_response_end" })
+        XCTAssertEqual(end["request_id"] as? String, "req-encrypted")
+        XCTAssertEqual(end["status"] as? String, "complete")
+        XCTAssertEqual(end["chunks_sent"] as? Int, 1)
+    }
 }
 
 private actor FrameRecorder {
@@ -158,6 +212,37 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
         }
         return CompletionResult(content: "onetwo", finishReason: "stop", promptTokens: 7, completionTokens: 2)
     }
+}
+
+private actor FakeCompletionRuntime: ModelRuntimeServing {
+    func complete(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> CompletionResult {
+        CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
+    }
+
+    func stream(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool,
+        onChunk: @escaping @Sendable (String) -> Void
+    ) async throws -> CompletionResult {
+        onChunk("encrypted answer")
+        return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
+    }
+}
+
+private func testTier2Session() throws -> Tier2ProviderSession {
+    try Tier2ProviderSession(
+        providerID: "provider-test",
+        assignedID: "assigned-test",
+        selectedAEAD: Tier2ProviderSession.aeadSuite,
+        keyID: "kid-test",
+        c2pKey: Data(repeating: 0x11, count: 32),
+        p2cKey: Data(repeating: 0x22, count: 32),
+        c2pNonceBase: Data([0x01, 0x02, 0x03, 0x04]),
+        p2cNonceBase: Data([0x05, 0x06, 0x07, 0x08])
+    )
 }
 
 private func waitUntil(

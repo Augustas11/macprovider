@@ -15,6 +15,7 @@ actor InferenceRelay {
     private let maxActiveRequests: Int
     private let maxBodyBytes: Int
     private let sendFrame: SendFrame
+    private let tier2Session: Tier2ProviderSession?
     private var active: [String: ActiveRequest] = [:]
 
     init(
@@ -23,6 +24,7 @@ actor InferenceRelay {
         loadedModelID: String?,
         maxActiveRequests: Int,
         maxBodyBytes: Int,
+        tier2Session: Tier2ProviderSession? = nil,
         sendFrame: @escaping SendFrame
     ) {
         self.modelRuntime = modelRuntime
@@ -30,14 +32,28 @@ actor InferenceRelay {
         self.loadedModelID = loadedModelID
         self.maxActiveRequests = max(1, maxActiveRequests)
         self.maxBodyBytes = max(1, maxBodyBytes)
+        self.tier2Session = tier2Session
         self.sendFrame = sendFrame
     }
 
     func handleInferenceRequest(_ message: [String: Any]) async throws {
         guard let requestID = message["request_id"] as? String, !requestID.isEmpty,
-              let stream = message["stream"] as? Bool,
-              let body = message["body"] as? String
+              let stream = message["stream"] as? Bool
         else {
+            try await sendNAK(inReplyTo: "inference_request", code: "invalid_message", message: "inference_request requires request_id, stream, and body")
+            return
+        }
+        let body: String
+        if let tier2Session, message["encrypted"] as? Bool == true {
+            do {
+                body = try tier2Session.openRequestBody(message: message, requestID: requestID, stream: stream)
+            } catch {
+                try await sendNAK(inReplyTo: "inference_request", code: "tier2_aead_decrypt_failed", message: "Encrypted inference_request failed authentication")
+                return
+            }
+        } else if let cleartextBody = message["body"] as? String {
+            body = cleartextBody
+        } else {
             try await sendNAK(inReplyTo: "inference_request", code: "invalid_message", message: "inference_request requires request_id, stream, and body")
             return
         }
@@ -70,7 +86,7 @@ actor InferenceRelay {
         }
 
         let state = RelayRequestState()
-        let task = Task { [modelRuntime, providerStatus, loadedModelID, sendFrame, state] in
+        let task = Task { [modelRuntime, providerStatus, loadedModelID, sendFrame, tier2Session, state] in
             await Self.process(
                 requestID: requestID,
                 body: body,
@@ -79,6 +95,7 @@ actor InferenceRelay {
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
                 loadedModelID: loadedModelID,
+                tier2Session: tier2Session,
                 sendFrame: sendFrame
             )
             await self.removeActive(requestID)
@@ -152,6 +169,7 @@ actor InferenceRelay {
         modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         loadedModelID: String?,
+        tier2Session: Tier2ProviderSession?,
         sendFrame: @escaping SendFrame
     ) async {
         let startedAt = await providerStatus.beginRequest(requestID: requestID)
@@ -168,6 +186,7 @@ actor InferenceRelay {
                     request: request,
                     state: state,
                     modelRuntime: modelRuntime,
+                    tier2Session: tier2Session,
                     sendFrame: sendFrame
                 )
             } else {
@@ -176,6 +195,7 @@ actor InferenceRelay {
                     request: request,
                     state: state,
                     modelRuntime: modelRuntime,
+                    tier2Session: tier2Session,
                     sendFrame: sendFrame
                 )
             }
@@ -220,6 +240,7 @@ actor InferenceRelay {
         request: ChatCompletionRequest,
         state: RelayRequestState,
         modelRuntime: any ModelRuntimeServing,
+        tier2Session: Tier2ProviderSession?,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
         let completion = try await modelRuntime.complete(request, shouldCancel: { state.isCancelled })
@@ -240,13 +261,8 @@ actor InferenceRelay {
             return completion
         }
         let response = try jsonString(chatCompletionResponse(request: request, completion: completion))
-        _ = state.nextSeq()
-        try await sendFrame([
-            "type": "inference_response_chunk",
-            "request_id": requestID,
-            "seq": 0,
-            "data": response,
-        ])
+        let seq = state.nextSeq()
+        try await sendChunk(requestID: requestID, stream: false, seq: seq, data: response, tier2Session: tier2Session, sendFrame: sendFrame)
         if state.markTerminalSent() {
             try await sendFrame([
                 "type": "inference_response_end",
@@ -264,6 +280,7 @@ actor InferenceRelay {
         request: ChatCompletionRequest,
         state: RelayRequestState,
         modelRuntime: any ModelRuntimeServing,
+        tier2Session: Tier2ProviderSession?,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
         let created = Int(Date().timeIntervalSince1970)
@@ -278,12 +295,7 @@ actor InferenceRelay {
                     continue
                 }
                 let seq = state.nextSeq()
-                try await sendFrame([
-                    "type": "inference_response_chunk",
-                    "request_id": requestID,
-                    "seq": seq,
-                    "data": data,
-                ])
+                try await sendChunk(requestID: requestID, stream: true, seq: seq, data: data, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return state.chunksSent
         }
@@ -392,6 +404,26 @@ actor InferenceRelay {
             "chunks_sent": chunksSent,
             "error": error.message,
         ]
+    }
+
+    private static func sendChunk(
+        requestID: String,
+        stream: Bool,
+        seq: Int,
+        data: String,
+        tier2Session: Tier2ProviderSession?,
+        sendFrame: @escaping SendFrame
+    ) async throws {
+        if let tier2Session {
+            try await sendFrame(tier2Session.sealResponseChunk(requestID: requestID, stream: stream, plaintext: data))
+            return
+        }
+        try await sendFrame([
+            "type": "inference_response_chunk",
+            "request_id": requestID,
+            "seq": seq,
+            "data": data,
+        ])
     }
 
     private static func chatCompletionResponse(request: ChatCompletionRequest, completion: CompletionResult) -> [String: Any] {

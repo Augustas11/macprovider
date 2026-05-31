@@ -330,6 +330,9 @@ func (s *Server) internalTier2Metadata() map[string]any {
 			modelHashState = "none"
 		}
 	}
+	providers := s.pool.Snapshot()
+	encryptedLeg := encryptedLegStateForProviders(providers)
+	attestation := attestationStateForProviders(providers)
 	return map[string]any{
 		"phase": tier2.PhaseForConfigWithModelHashEvidence(cfg, observedModelHash),
 		"model_hash": map[string]any{
@@ -341,15 +344,91 @@ func (s *Server) internalTier2Metadata() map[string]any {
 			"catalog_load_failed": tier2.LoadFailed(),
 		},
 		"encrypted_leg": map[string]any{
-			"state": "none",
+			"state":                      encryptedLeg.state,
+			"encrypted_provider_count":   encryptedLeg.positive,
+			"unencrypted_provider_count": encryptedLeg.negative,
+			"mixed":                      encryptedLeg.state == "partial",
+			"scope":                      "coordinator_to_provider_only",
 		},
 		"attestation": map[string]any{
-			"state": "none",
+			"state":                      attestation.state,
+			"attested_provider_count":    attestation.positive,
+			"unsupported_provider_count": attestation.negative,
+			"mixed":                      attestation.state == "partial",
 		},
 		"behavioral_safety": map[string]any{
-			"state": "none",
+			"state":                behavioralSafetyState(cfg),
+			"size_cap":             cfg.BehavioralSafetyEnabled && cfg.OutputSizeCapBytes > 0,
+			"encoding_validation":  cfg.BehavioralSafetyEnabled && cfg.EncodingValidationEnabled,
+			"ttft_anomaly_logging": cfg.BehavioralSafetyEnabled && cfg.ResponseTimeAnomalyEnabled,
 		},
 	}
+}
+
+type tier2PredicateState struct {
+	state    string
+	positive int
+	negative int
+}
+
+func encryptedLegStateForProviders(providers []pool.Provider) tier2PredicateState {
+	var encrypted, unencrypted int
+	for _, p := range providers {
+		if !baseRoutingEligible(p) {
+			continue
+		}
+		if p.EncryptedLeg {
+			encrypted++
+		} else {
+			unencrypted++
+		}
+	}
+	total := encrypted + unencrypted
+	state := "none"
+	switch {
+	case total == 0:
+		state = "none"
+	case encrypted == total:
+		state = "all"
+	case encrypted > 0:
+		state = "partial"
+	default:
+		state = "none"
+	}
+	return tier2PredicateState{state: state, positive: encrypted, negative: unencrypted}
+}
+
+func attestationStateForProviders(providers []pool.Provider) tier2PredicateState {
+	var attested, unsupported, total int
+	for _, p := range providers {
+		if !baseRoutingEligible(p) {
+			continue
+		}
+		total++
+		if p.AttestationStatus == pool.AttestationStatusAttested {
+			attested++
+		} else {
+			unsupported++
+		}
+	}
+	state := "none"
+	switch {
+	case total == 0:
+		state = "none"
+	case attested == total:
+		state = "all"
+	case attested > 0:
+		state = "partial"
+	case unsupported == total:
+		state = "unsupported"
+	default:
+		state = "none"
+	}
+	return tier2PredicateState{state: state, positive: attested, negative: unsupported}
+}
+
+func behavioralSafetyState(cfg config.Tier2Config) string {
+	return tier2.BehavioralSafetyState(cfg)
 }
 
 func (s *Server) observedModelHashEvidence() bool {
@@ -551,8 +630,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if !baseRoutingEligible(p) {
 			continue
 		}
-		status := s.effectiveHashStatus(p, cfg)
-		excluded := s.tier2ProviderExcludedStatus(status, cfg)
+		excluded := s.tier2ProviderExcludedForConfig(p, cfg)
 		entry := models[p.ModelID]
 		if entry.ID == "" {
 			entry = modelEntry{
@@ -971,6 +1049,13 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 			writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
 			return wsForwardUnavailable
 		}
+		if errors.Is(err, providerws.ErrRelayAEADFailed) {
+			if stream {
+				return wsForwardFailed
+			}
+			writeError(w, http.StatusBadGateway, "tier2_aead_decrypt_failed", "Provider encrypted response failed authentication")
+			return wsForwardFailed
+		}
 		if stream {
 			return wsForwardFailed
 		}
@@ -993,11 +1078,22 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 
 func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, requestID string, provider pool.Provider, relay *providerws.RelayStream) wsForwardResult {
 	var body bytes.Buffer
+	guard := tier2.NewPillarDGuard(s.tier2Config(), requestID, provider, s.log)
+	started := time.Now()
+	ttftLogged := false
+	observeTTFT := func() {
+		if ttftLogged {
+			return
+		}
+		ttftLogged = true
+		guard.LogTTFT(time.Since(started))
+	}
 	chunks := relay.Chunks
 	for {
 		select {
 		case chunk, ok := <-chunks:
 			if ok {
+				observeTTFT()
 				body.WriteString(chunk.Data)
 			} else {
 				chunks = nil
@@ -1010,6 +1106,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 						chunks = nil
 						continue
 					}
+					observeTTFT()
 					body.WriteString(chunk.Data)
 				default:
 					chunks = nil
@@ -1025,11 +1122,16 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if s.zeroTokenFault(end, finishReasonFromChatResponse(body.Bytes())) {
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
 			}
+			checkedBody, err := guard.CheckNonStreamingBody(body.Bytes())
+			if err != nil {
+				writeError(w, http.StatusBadGateway, "tier2_output_encoding_invalid", "Provider returned invalid Tier2 output encoding")
+				return wsForwardFailed
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
 			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(body.Bytes())
+			_, _ = w.Write(checkedBody)
 			return wsForwardComplete
 		case err := <-relay.Errors:
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws relay failed")
@@ -1042,6 +1144,8 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				}
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				return wsForwardProviderDisconnected
+			} else if errors.Is(err, providerws.ErrRelayAEADFailed) {
+				writeError(w, http.StatusBadGateway, "tier2_aead_decrypt_failed", "Provider encrypted response failed authentication")
 			} else if errors.Is(err, providerws.ErrRelayNAKFallback) {
 				writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
 			} else {
@@ -1054,6 +1158,9 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 
 func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requestID string, provider pool.Provider, relay *providerws.RelayStream) wsForwardResult {
 	flusher, _ := w.(http.Flusher)
+	guard := tier2.NewPillarDGuard(s.tier2Config(), requestID, provider, s.log)
+	started := time.Now()
+	ttftLogged := false
 	chunks := relay.Chunks
 	committed := false
 	finishReason := ""
@@ -1069,6 +1176,42 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		w.WriteHeader(http.StatusOK)
 		committed = true
 	}
+	writeChunk := func(data string) (bool, wsForwardResult) {
+		if !ttftLogged {
+			ttftLogged = true
+			guard.LogTTFT(time.Since(started))
+		}
+		checked, stop, err := guard.CheckStreamingChunk(data)
+		if err != nil {
+			relay.Cancel("tier2_encoding_invalid")
+			if !committed {
+				writeError(w, http.StatusBadGateway, "tier2_output_encoding_invalid", "Provider returned invalid Tier2 output encoding")
+				return true, wsForwardFailed
+			}
+			writeSSEError(w, "Provider returned invalid Tier2 output encoding", "tier2_output_encoding_invalid")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return true, wsForwardFailed
+		}
+		if reason := finishReasonFromSSE(checked); reason != "" {
+			finishReason = reason
+		}
+		commit()
+		if _, err := w.Write([]byte(checked)); err != nil {
+			relay.Cancel("buyer_disconnected")
+			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
+			return true, wsForwardCancelled
+		}
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if stop {
+			relay.Cancel("tier2_output_truncated")
+			return true, wsForwardComplete
+		}
+		return false, ""
+	}
 	for {
 		select {
 		case <-r.Context().Done():
@@ -1079,17 +1222,8 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				chunks = nil
 				continue
 			}
-			if reason := finishReasonFromSSE(chunk.Data); reason != "" {
-				finishReason = reason
-			}
-			commit()
-			if _, err := w.Write([]byte(chunk.Data)); err != nil {
-				relay.Cancel("buyer_disconnected")
-				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
-				return wsForwardCancelled
-			}
-			if flusher != nil {
-				flusher.Flush()
+			if done, result := writeChunk(chunk.Data); done {
+				return result
 			}
 		case end := <-relay.Done:
 			for chunks != nil {
@@ -1099,14 +1233,8 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 						chunks = nil
 						continue
 					}
-					if reason := finishReasonFromSSE(chunk.Data); reason != "" {
-						finishReason = reason
-					}
-					commit()
-					if _, err := w.Write([]byte(chunk.Data)); err != nil {
-						relay.Cancel("buyer_disconnected")
-						s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
-						return wsForwardCancelled
+					if done, result := writeChunk(chunk.Data); done {
+						return result
 					}
 				default:
 					chunks = nil
@@ -1150,6 +1278,17 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				if !committed {
 					return wsForwardTimedOut
 				}
+			}
+			if errors.Is(err, providerws.ErrRelayAEADFailed) {
+				if !committed {
+					writeError(w, http.StatusBadGateway, "tier2_aead_decrypt_failed", "Provider encrypted response failed authentication")
+					return wsForwardFailed
+				}
+				writeSSEError(w, "Provider encrypted response failed authentication", "tier2_aead_decrypt_failed")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return wsForwardFailed
 			}
 			commit()
 			writeSSEError(w, "Provider failed during streaming", "provider_error")
@@ -1655,6 +1794,8 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 	hasRoutableContextMiss := false
 	tier2HashRequiredExcluded := 0
 	tier2HashMismatchExcluded := []pool.Provider{}
+	tier2EncryptedLegExcluded := 0
+	tier2AttestationExcluded := 0
 	for _, p := range providers {
 		if _, skip := excluded[routeKey(p)]; skip {
 			continue
@@ -1679,6 +1820,15 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 			}
 			continue
 		}
+		if tier2Cfg.RequireEncryptedLeg && !p.EncryptedLeg {
+			tier2.LogEncryptedLegRequiredMissing(s.log, p.ProviderID, p.AssignedID, p.ModelID)
+			tier2EncryptedLegExcluded++
+			continue
+		}
+		if tier2Cfg.RequireAttestation && p.AttestationStatus != pool.AttestationStatusAttested {
+			tier2AttestationExcluded++
+			continue
+		}
 		candidates = append(candidates, p)
 	}
 	if len(candidates) == 0 {
@@ -1691,6 +1841,12 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 		if len(tier2HashMismatchExcluded) > 0 {
 			providerID := tier2HashMismatchExcluded[0].ProviderID
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_mismatch", message: "Provider `" + providerID + "` hash verification failed; excluded from pool.", typ: "server_error"}
+		}
+		if tier2EncryptedLegExcluded > 0 {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_encrypted_leg_required", message: "No encrypted provider leg available for model `" + req.Model + "`.", typ: "server_error"}
+		}
+		if tier2AttestationExcluded > 0 {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_attestation_required", message: "No attested provider available for model `" + req.Model + "`.", typ: "server_error"}
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 	}
@@ -2202,7 +2358,20 @@ func baseRoutingEligible(p pool.Provider) bool {
 
 func (s *Server) tier2ProviderExcluded(p pool.Provider) bool {
 	cfg := s.tier2Config()
-	return s.tier2ProviderExcludedStatus(s.effectiveHashStatus(p, cfg), cfg)
+	return s.tier2ProviderExcludedForConfig(p, cfg)
+}
+
+func (s *Server) tier2ProviderExcludedForConfig(p pool.Provider, cfg config.Tier2Config) bool {
+	if s.tier2ProviderExcludedStatus(s.effectiveHashStatus(p, cfg), cfg) {
+		return true
+	}
+	if cfg.RequireEncryptedLeg && !p.EncryptedLeg {
+		return true
+	}
+	if cfg.RequireAttestation && p.AttestationStatus != pool.AttestationStatusAttested {
+		return true
+	}
+	return false
 }
 
 func (s *Server) tier2ProviderExcludedStatus(status pool.HashStatus, cfg config.Tier2Config) bool {

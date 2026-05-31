@@ -15,6 +15,7 @@ type Tier string
 type InferencePath string
 type RecoveryReason string
 type HashStatus string
+type AttestationStatus string
 
 const (
 	StateReady       State = "ready"
@@ -38,6 +39,12 @@ const (
 	HashStatusInvalid            HashStatus = "hash_invalid"
 	HashStatusUncatalogued       HashStatus = "uncatalogued"
 	HashStatusCatalogUnavailable HashStatus = "catalog_unavailable"
+
+	AttestationStatusAttested    AttestationStatus = "attested"
+	AttestationStatusFailed      AttestationStatus = "attestation_failed"
+	AttestationStatusStale       AttestationStatus = "attestation_stale"
+	AttestationStatusUnsupported AttestationStatus = "unsupported"
+	AttestationStatusNotRequired AttestationStatus = "not_required"
 )
 
 type Provider struct {
@@ -52,6 +59,7 @@ type Provider struct {
 	SlotsFree             int           `json:"slots_free"`
 	SlotsTotal            int           `json:"slots_total"`
 	ThroughputTPSEstimate float64       `json:"throughput_tps_estimate"`
+	ModelLoadTimeMs       int64         `json:"model_load_time_ms,omitempty"`
 	EndpointURL           string        `json:"endpoint_url"`
 	Tier                  Tier          `json:"tier"`
 	InferencePath         InferencePath `json:"inference_path"`
@@ -69,8 +77,27 @@ type Provider struct {
 	BinaryVersion  string     `json:"binary_version"`
 	ModelHash      string     `json:"model_hash,omitempty"`
 	HashStatus     HashStatus `json:"hash_status,omitempty"`
+	EncryptedLeg   bool       `json:"encrypted_leg,omitempty"`
+	// AttestationStatus is informational unless tier2.require_attestation is
+	// enabled. The zero value represents a legacy provider with no claim.
+	AttestationStatus AttestationStatus `json:"attestation_status,omitempty"`
+
+	Tier2Session *Tier2Session `json:"-"`
 
 	conn net.Conn
+}
+
+type Tier2Session struct {
+	AEADSuite          string
+	C2PKey             []byte
+	P2CKey             []byte
+	C2PNonceBase       []byte
+	P2CNonceBase       []byte
+	C2PCounter         uint64
+	P2CCounter         uint64
+	RequestsDispatched uint64
+	KeyID              string
+	StartedAt          time.Time
 }
 
 func (p Provider) RoutingEligible() bool {
