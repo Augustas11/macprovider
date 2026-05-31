@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.8.2 (2026-05-31, SPEC-005 v0.3 quota-settlement cross-spec patch)
+**Version:** 0.8.3 (2026-05-31, context-cancel reservation refund invariant)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.4, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.8.3:**
+- Enumerates the § 17.7 context-cancel refund invariant already enforced by gateway code: cancelled or timed-out buyer connections at quota or concurrency reservation gates MUST refund reservations before return and MUST NOT write a 500 to the dead connection.
 
 **Change log v0.8.2:**
 - Adds the SPEC-005 v0.3 X-1 quota-settlement row for SPEC-001 null-usage errors (`error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, `error_internal`): buyer quota debit is none, matching SPEC-005 zero provider credit and preserving H-005 zero-delta. Adds AC-NULL-USAGE-REFUND.
@@ -2569,6 +2572,8 @@ The gateway MUST reserve quota before forwarding as defined in Section 7.2 and s
 |---|---:|---|---|
 | 200 | as reported | prompt + completion | Successful work performed |
 | 503 | 0 | none | No provider was reached; request never forwarded |
+| Context cancelled (buyer disconnects mid-reservation) | n/a | none; reservation refunded before return | Gateway MUST exit silently without writing a 500 to the dead connection |
+| Context cancelled (buyer disconnects at concurrency gate) | n/a | none; quota reservation refunded before return | Same as above |
 | SPEC-001 null-usage error (`error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, `error_internal`) | 0 (NULL) | **none** | Provider was reached but performed no countable work; no buyer debit |
 | 502 | 0 | prompt only | Provider was reached, processed prompt, then failed |
 | 502 | >0 partial stream | prompt + actual completion | Provider performed partial work |
