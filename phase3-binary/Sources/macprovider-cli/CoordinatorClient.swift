@@ -3,7 +3,7 @@ import MacProviderCore
 import Darwin
 
 actor CoordinatorClient {
-    static let binaryVersion = "1.2.4"
+    static let binaryVersion = "1.2.5"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -405,7 +405,7 @@ actor CoordinatorClient {
         ])
     }
 
-    private func helloMessage() async -> [String: Any] {
+    func helloMessage() async -> [String: Any] {
         let snapshot = await providerStatus.snapshot()
         var message: [String: Any] = [
             "type": "hello",
@@ -424,6 +424,9 @@ actor CoordinatorClient {
         ]
         if let endpointURL {
             message["endpoint_url"] = endpointURL
+        }
+        if let modelHash = snapshot.modelHash {
+            message["model_hash"] = modelHash
         }
         return message
     }

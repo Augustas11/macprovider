@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import MLXLLM
 import MLXLMCommon
 import MacProviderCore
@@ -25,11 +26,16 @@ actor ModelRuntime: ModelRuntimeServing {
     private let modelID: String?
     private let container: ModelContainer?
     private let stopTokenFilter: StopTokenFilter
+    private let modelHash: String?
     private let maxContextTokens: Int
     private let inferenceGate = AsyncSemaphore(value: 1)
 
     var loadedModelID: String? {
         modelID
+    }
+
+    var loadedModelHash: String? {
+        modelHash
     }
 
     var isLoaded: Bool {
@@ -43,6 +49,7 @@ actor ModelRuntime: ModelRuntimeServing {
         guard let modelID else {
             self.container = nil
             self.stopTokenFilter = StopTokenFilter(tokens: [])
+            self.modelHash = nil
             return
         }
 
@@ -57,6 +64,7 @@ actor ModelRuntime: ModelRuntimeServing {
         } else {
             self.stopTokenFilter = StopTokenFilter(tokens: [])
         }
+        self.modelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
     }
 
     func preflight(_ request: ChatCompletionRequest) async throws {
@@ -283,6 +291,56 @@ actor ModelRuntime: ModelRuntimeServing {
         return snapshot
     }
 
+    static func modelWeightArtifactManifestHash(in directory: URL) throws -> String? {
+        let fileManager = FileManager.default
+        let fileURLs = try fileManager.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )
+        .filter { url in
+            guard url.pathExtension == "safetensors" else { return false }
+            var isDirectory: ObjCBool = false
+            return fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) && !isDirectory.boolValue
+        }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+
+        guard !fileURLs.isEmpty else { return nil }
+
+        let files = try fileURLs.map { url in
+            let contentURL = url.resolvingSymlinksInPath()
+            let attributes = try FileManager.default.attributesOfItem(atPath: contentURL.path)
+            let size = (attributes[.size] as? NSNumber)?.uint64Value ?? 0
+            return ModelWeightManifestFile(
+                name: url.lastPathComponent,
+                sha256: try sha256Hex(ofFileAt: contentURL),
+                size: size
+            )
+        }
+        let manifest = ModelWeightManifest(files: files)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        let data = try encoder.encode(manifest)
+        return hexString(SHA256.hash(data: data))
+    }
+
+    private static func sha256Hex(ofFileAt url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        while true {
+            let chunk = try handle.read(upToCount: 1024 * 1024) ?? Data()
+            guard !chunk.isEmpty else { break }
+            hasher.update(data: chunk)
+        }
+        return hexString(hasher.finalize())
+    }
+
+    private static func hexString<S: Sequence>(_ bytes: S) -> String where S.Element == UInt8 {
+        bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
     private static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
@@ -344,6 +402,16 @@ actor ModelRuntime: ModelRuntimeServing {
         guard current.hasPrefix(emitted) else { return "" }
         return String(current.dropFirst(emitted.count))
     }
+}
+
+private struct ModelWeightManifest: Encodable {
+    let files: [ModelWeightManifestFile]
+}
+
+private struct ModelWeightManifestFile: Encodable {
+    let name: String
+    let sha256: String
+    let size: UInt64
 }
 
 struct CompletionResult {

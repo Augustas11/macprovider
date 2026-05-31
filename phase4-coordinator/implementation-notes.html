@@ -795,4 +795,133 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   <code>X-MacProvider-Internal-Conv</code> plus an internal source marker.</p>
 </div>
 </section>
+<section><h2>SPEC-008 Phase 1 Activation</h2>
+<p class=meta>2026-05-31 Pillar A catalog activation and provider hash reporting.</p>
+<div class="entry">
+  <time>2026-05-31</time>
+  <p>Added operator tooling under <code>scripts/</code>:
+  <code>hash-model-weights.go</code> builds the SPEC-008
+  <code>artifact_manifest</code> hash from snapshot
+  <code>.safetensors</code> files, following Hugging Face snapshot
+  symlinks for both byte size and content; <code>sign-catalog.go</code>
+  generates Ed25519 keypairs and signs canonical catalog bodies using the
+  same field order as the coordinator verifier.</p>
+  <p>The provider now computes the same artifact-manifest hash after MLX
+  model load, stores it in <code>ProviderStatus</code>, and includes
+  <code>model_hash</code> in the coordinator <code>hello</code> only when
+  a hash is available. Missing or unhashable weights still omit the field
+  so Tier-1 behavior is preserved. The hash-capable provider build reports
+  <code>binary_version</code> <code>1.2.5</code>.</p>
+  <p>A local ignored keypair and signed observe-mode catalog were created
+  in <code>.omc/tier2/</code>. The Llama hash was verified against the
+  local Hugging Face cache; the Qwen hash was derived from public
+  Hugging Face LFS metadata because the live provider pool was empty at
+  collection time. Live provider-collected hashes remain the stronger
+  operator evidence before enforcement.</p>
+  <p>Added guarded activation helper
+  <code>scripts/activate-tier2-observe.sh</code>. It defaults to
+  plan-only validation, checks that the local coordinator artifact contains
+  the <code>tier2 catalog loaded</code> acceptance log string, verifies the
+  signed catalog with the same coordinator-compatible signature/body verifier
+  used by the artifact preflight, uploads the
+  signed catalog and rebuilt coordinator binary in apply mode,
+  backs up and merges only the live top-level <code>tier2:</code> block,
+  backs up an existing remote catalog, and rolls back config, binary, and
+  catalog backups if upload, config merge, restart, or acceptance verification
+  fails. For first-time
+  catalog activation with no previous remote catalog, rollback removes the
+  newly created catalog file instead of leaving partial state behind. It
+  refuses to restart a connected provider pool unless
+  <code>FORCE_RESTART=1</code> is set, fails closed if provider-count health
+  parsing fails without that override, and verifies recent Tier-2 journal
+  evidence plus <code>/v1/models</code>
+  <code>tier2.model_hash.state</code> by default. First-time <code>catalog_path</code> /
+  <code>catalog_public_key</code> activation is documented as restart-only
+  per SPEC-008 lifecycle rules.</p>
+  <p>Added read-only verifier <code>scripts/verify-tier2-live.sh</code>.
+  <code>--catalog-only</code> proves observe-mode catalog disclosure after
+  C1, while <code>--full</code> also checks operator <code>/poolz</code>
+  for at least one <code>binary_version</code> <code>1.2.5</code> or newer
+  provider with <code>hash_status</code> <code>hash_verified</code>.</p>
+  <p>Added non-mutating activation bundle preflight
+  <code>scripts/check-tier2-release-artifacts.sh</code>. It verifies the
+  provider artifact checksum and extracted version, coordinator binary checksum
+  and catalog-loaded log string, expected public key, and signed catalog
+  signature/body using the same timestamp, model-entry, and hash-format
+  rejection rules as the coordinator before any production apply is attempted.
+  Its extraction directory now honors <code>TMPDIR</code> or <code>/tmp</code>
+  and only removes its own <code>tier2-artifacts.*</code> directory.</p>
+  <p>Added hermetic activation safety harness
+  <code>scripts/test-tier2-activation-safety.sh</code>. It shadows
+  <code>ssh</code>, <code>scp</code>, and <code>curl</code> with local fakes
+  and verifies that apply mode refuses connected-pool restarts before remote
+  commands, fails closed on unparseable health JSON without
+  <code>FORCE_RESTART=1</code>, restores config and binary backups plus removes
+  a newly created catalog after config-merge failure, rolls back after gateway
+  disclosure failure, and reaches health, journal, and gateway checks on a fake
+  success path.</p>
+  <p>Live observe activation exposed a gateway compatibility gap: the gateway
+  was replacing <code>tier1_disclosure</code> correctly but also deleting the
+  coordinator's top-level <code>tier2</code> block. The gateway now preserves
+  <code>tier2</code> on <code>/v1/models</code> while continuing to overwrite
+  upstream <code>tier1_disclosure</code> with gateway-owned text. The deployed
+  Linux amd64 gateway artifact hash is
+  <code>4e529f0f9c6ef242eb27c70d5ec6827bd7b5b6ec2f00ffbd16efa9b72dc3090d</code>;
+  the previous live binary was backed up at
+  <code>/opt/macprovider/gateway.bak-spec008-20260531064346</code>.</p>
+  <p>The failed first activation attempt also hardened rollback: restored config
+  backups now preserve the original owner/mode, and binary rollback stops the
+  coordinator before replacing the executable to avoid Linux
+  <code>Text file busy</code> failures.</p>
+  <p>The coordinator now logs successful catalog loads as
+  <code>event="catalog_loaded"</code> with <code>model_count</code>,
+  <code>catalog_id</code>, and message
+  <code>tier2 catalog loaded</code>, giving the C1 acceptance check direct
+  post-restart evidence.</p>
+  <p><strong>Verification:</strong> ran <code>swift test</code> and
+  <code>swift build -c release</code> in <code>phase3-binary</code>;
+  both passed. Packaged <code>phase3-binary/dist/phase3-binary-m4-v1.2.5.tar.gz</code>
+  with SHA-256
+  <code>e0aad8ea77dc3958041bc7df6681fac7a59a527c0e0ece4649a9cc192bcd17a1</code>
+  and verified the extracted binary reports <code>1.2.5</code>. Also ran
+  <code>go test ./internal/tier2</code> and later <code>go test ./...</code>
+  in <code>phase4-coordinator</code>; reran <code>go test ./...</code>
+  after adding catalog-loaded logging. Rebuilt
+  <code>phase4-coordinator/dist/coordinator-linux-amd64</code> with SHA-256
+  <code>8b8bbb58f1062e504d414aaec3712660bf4c98b53a8d49a7554a2288687b1a91</code>.
+  <code>scripts/check-tier2-release-artifacts.sh</code> passed, including
+  Ed25519 verification of the signed catalog with key id
+  <code>catalog-key-2026q2</code>. A negative smoke with a temporary invalid
+  SHA-256 catalog failed as expected under the local verifier, and activation
+  plan mode also rejected a temporary invalid-signature catalog before printing
+  any plan. The artifact preflight passed with default temp settings,
+  <code>TMPDIR=/tmp</code>, and <code>TMPDIR=/private/tmp</code>, with no
+  leftover extraction directories.
+  <code>scripts/test-tier2-activation-safety.sh</code> passed, covering the
+  connected-provider restart guard, unparseable-health fail-closed path,
+  config-merge rollback, gateway-verification rollback, and fake success path.
+  After rollback hardening, the harness also asserts that binary restore paths
+  stop <code>macprovider-coordinator</code> before copying the previous
+  executable.
+  <code>scripts/activate-tier2-observe.sh --plan</code>
+  validated the signed catalog/public key, validated the coordinator binary,
+  and printed the non-mutating activation plan. Fixture-backed
+  <code>scripts/verify-tier2-live.sh --full</code> and
+  <code>--catalog-only</code> checks passed. Live observe activation then
+  succeeded: <code>scripts/activate-tier2-observe.sh --apply</code> uploaded
+  the catalog, deployed coordinator hash
+  <code>8b8bbb58f1062e504d414aaec3712660bf4c98b53a8d49a7554a2288687b1a91</code>,
+  merged observe-mode <code>tier2:</code>, restarted the coordinator, found the
+  <code>tier2 catalog loaded</code> journal event at
+  <code>2026-05-31T06:44:38Z</code>, and verified gateway
+  <code>/v1/models</code> with phase <code>1</code>, model-hash state
+  <code>none</code>, <code>require_verified:false</code>, and
+  <code>catalog_available:true</code>. The standalone
+  <code>scripts/verify-tier2-live.sh --catalog-only</code> check also passed.
+  Full verification remains pending because both live providers are still on
+  <code>binary_version</code> <code>1.2.4</code> with
+  <code>hash_status</code> <code>uncatalogued</code>. Release build still emits
+  existing Swift 6 concurrency warnings in unrelated send/relay paths.</p>
+</div>
+</section>
 </body></html>

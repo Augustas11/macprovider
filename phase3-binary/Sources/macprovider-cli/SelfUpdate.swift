@@ -3,6 +3,8 @@ import Darwin
 import Foundation
 
 struct SelfUpdate {
+    static let defaultReleasesAPIURL = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
+
     private let currentVersion: String
     private let releasesAPIURL: String
     private let session: URLSession
@@ -21,7 +23,7 @@ struct SelfUpdate {
         self.currentVersion = currentVersion
         self.releasesAPIURL = releasesAPIURL
             ?? ProcessInfo.processInfo.environment["MACPROVIDER_RELEASES_API_URL"]
-            ?? "https://api.github.com/repos/augstar/macprovider-poc/releases/latest"
+            ?? Self.defaultReleasesAPIURL
         self.session = session
         self.drainBeforeReplace = drainBeforeReplace
         self.replaceBinary = replaceBinary

@@ -35,6 +35,31 @@ func TestLoadCatalogVerifiesKnownGoodFixture(t *testing.T) {
 	}
 }
 
+func TestLoadCatalogLogsSuccessfulActivation(t *testing.T) {
+	defer ResetForTest()
+	raw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
+	path := writeTempCatalog(t, raw)
+	var logs bytes.Buffer
+
+	if _, err := LoadCatalog(path, publicKey, zerolog.New(&logs)); err != nil {
+		t.Fatalf("LoadCatalog: %v", err)
+	}
+
+	rawLog := logs.String()
+	for _, want := range []string{
+		`"event":"catalog_loaded"`,
+		`"category":"T2.A"`,
+		`"severity":"INFO"`,
+		`"catalog_id":"test-catalog"`,
+		`"model_count":1`,
+		`"message":"tier2 catalog loaded"`,
+	} {
+		if !strings.Contains(rawLog, want) {
+			t.Fatalf("catalog load log missing %s: %s", want, rawLog)
+		}
+	}
+}
+
 func TestLoadCatalogRejectsCorruptedBodyAndLogsSignatureInvalid(t *testing.T) {
 	defer ResetForTest()
 	raw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)

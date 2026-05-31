@@ -161,8 +161,11 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("models json: %v", err)
 	}
-	if body.Tier2 != nil {
-		t.Fatalf("gateway leaked coordinator tier2 metadata: %s", resp.Body.String())
+	if body.Tier2 == nil {
+		t.Fatalf("gateway stripped coordinator tier2 metadata: %s", resp.Body.String())
+	}
+	if body.Tier2["phase"].(float64) != 0 {
+		t.Fatalf("tier2 phase=%v want 0", body.Tier2["phase"])
 	}
 	want := (&Server{}).makeTier1Disclosure()
 	if !reflect.DeepEqual(body.Tier1Disclosure, want) {
@@ -225,7 +228,8 @@ func TestModelsDisclosureReflectsTier2HashState(t *testing.T) {
 						"invalid_provider_count":0,
 						"catalogued":true
 					}
-				}]
+				}],
+				"tier2":{"phase":1,"model_hash":{"active":true,"state":"partial","require_verified":false,"catalog_available":true}}
 			}`), nil
 		case "/internal/routing":
 			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
@@ -250,8 +254,12 @@ func TestModelsDisclosureReflectsTier2HashState(t *testing.T) {
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("models json: %v", err)
 	}
-	if body.Tier2 != nil {
-		t.Fatalf("gateway leaked coordinator tier2 metadata: %s", resp.Body.String())
+	if body.Tier2 == nil {
+		t.Fatalf("gateway stripped coordinator tier2 metadata: %s", resp.Body.String())
+	}
+	modelHash, _ := body.Tier2["model_hash"].(map[string]any)
+	if modelHash == nil || modelHash["state"] != "partial" || modelHash["require_verified"] != false {
+		t.Fatalf("tier2 model_hash wrong: %+v body=%s", modelHash, resp.Body.String())
 	}
 	disclosure := body.Tier1Disclosure
 	if disclosure.Version != "v0.8+tier2-v0.2" {

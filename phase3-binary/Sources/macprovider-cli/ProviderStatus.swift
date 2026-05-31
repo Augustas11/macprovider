@@ -71,6 +71,7 @@ struct ProviderCapacity: Sendable {
 struct ProviderSnapshot: Sendable {
     let status: ProviderHealthState
     let modelID: String?
+    let modelHash: String?
     let modelLoaded: Bool
     let uptimeSeconds: Int
     let requestsTotal: Int
@@ -100,6 +101,7 @@ struct ProviderSnapshot: Sendable {
 actor ProviderStatus {
     private let startedAt = Date()
     private let modelID: String?
+    private let modelHash: String?
     private let modelLoaded: Bool
     private var capacity: ProviderCapacity
     private var status: ProviderHealthState
@@ -117,8 +119,9 @@ actor ProviderStatus {
     private var recommendedBinaryVersion: String?
     private var activeRequestIDs = Set<String>()
 
-    init(modelID: String?, modelLoaded: Bool, capacity: ProviderCapacity) {
+    init(modelID: String?, modelLoaded: Bool, capacity: ProviderCapacity, modelHash: String? = nil) {
         self.modelID = modelID
+        self.modelHash = modelHash
         self.modelLoaded = modelLoaded
         self.capacity = capacity
         self.status = modelLoaded ? .ready : .unavailable
@@ -180,6 +183,7 @@ actor ProviderStatus {
         let snapshot = ProviderSnapshot(
             status: status,
             modelID: modelID,
+            modelHash: modelHash,
             modelLoaded: modelLoaded,
             uptimeSeconds: Int(Date().timeIntervalSince(startedAt)),
             requestsTotal: requestsTotal,

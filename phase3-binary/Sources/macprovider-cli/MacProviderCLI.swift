@@ -72,7 +72,8 @@ struct ServeCommand: AsyncParsableCommand {
         let providerStatus = ProviderStatus(
             modelID: resolved.model,
             modelLoaded: await modelRuntime.isLoaded,
-            capacity: capacityDefaults.withThroughputEstimate(throughputEstimate)
+            capacity: capacityDefaults.withThroughputEstimate(throughputEstimate),
+            modelHash: await modelRuntime.loadedModelHash
         )
         let coordinatorClient = CoordinatorClient(config: resolved, modelRuntime: modelRuntime, providerStatus: providerStatus)
         await coordinatorClient?.start()
@@ -152,7 +153,7 @@ struct UpdateCommand: AsyncParsableCommand {
     @Flag(help: "Check for updates without downloading or replacing the binary.")
     var check = false
 
-    @Option(help: "GitHub latest-release API URL. Defaults to the public macprovider-poc repository.")
+    @Option(help: "GitHub latest-release API URL. Defaults to the public macprovider release repository.")
     var releasesAPIURL: String?
 
     func run() async throws {

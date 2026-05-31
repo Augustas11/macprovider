@@ -100,6 +100,36 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(attemptCount, 2)
     }
 
+    func testHelloIncludesModelHashWhenAvailable() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let modelHash = String(repeating: "a", count: 64)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: modelHash
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        let hello = await client.helloMessage()
+
+        XCTAssertEqual(hello["model_hash"] as? String, modelHash)
+    }
+
+    func testHelloOmitsModelHashWhenUnavailable() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        let hello = await client.helloMessage()
+
+        XCTAssertNil(hello["model_hash"])
+    }
+
     private func makeClient(
         status: ProviderStatus,
         recorder: CoordinatorFrameRecorder,

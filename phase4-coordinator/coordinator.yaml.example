@@ -83,7 +83,7 @@ admission:
 #   response_time_anomaly_min_ms: 10000
 
 coordinator_advertised_version:
-  latest_binary_version: "1.2.0"
+  latest_binary_version: "1.2.5"
   required_binary_version: ""
 
 auth:

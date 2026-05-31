@@ -408,7 +408,6 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "tier2_metadata_unavailable", "Coordinator Tier-2 metadata unavailable")
 		return
 	}
-	delete(body, "tier2")
 	body["tier1_disclosure"] = disclosure
 	copyCleanHeaders(w.Header(), resp.Header)
 	writeJSON(w, http.StatusOK, body)
