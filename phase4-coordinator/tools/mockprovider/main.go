@@ -113,11 +113,12 @@ type inferenceResponseChunk struct {
 }
 
 type inferenceResponseEnd struct {
-	Type       string `json:"type"`
-	RequestID  string `json:"request_id"`
-	Status     string `json:"status"`
-	ChunksSent int    `json:"chunks_sent"`
-	Error      string `json:"error,omitempty"`
+	Type       string          `json:"type"`
+	RequestID  string          `json:"request_id"`
+	Status     string          `json:"status"`
+	ChunksSent int             `json:"chunks_sent"`
+	Error      string          `json:"error,omitempty"`
+	Usage      json.RawMessage `json:"usage,omitempty"` // required by Phase 7 warmup gate
 }
 
 type cancelRequest struct {
@@ -483,7 +484,7 @@ func runWSInference(cfg config, logger *log.Logger, drainer *drainController, wr
 		for i, chunk := range chunks {
 			select {
 			case <-cancel:
-				sendInferenceEnd(writeText, req.RequestID, "cancelled", i, "")
+				sendInferenceEnd(writeText, req.RequestID, "cancelled", i, "", nil)
 				return
 			default:
 			}
@@ -504,7 +505,7 @@ func runWSInference(cfg config, logger *log.Logger, drainer *drainController, wr
 		}
 		done, _ := json.Marshal(inferenceResponseChunk{Type: "inference_response_chunk", RequestID: req.RequestID, Seq: len(chunks), Data: "data: [DONE]\n\n"})
 		_ = writeText(done)
-		sendInferenceEnd(writeText, req.RequestID, "complete", len(chunks)+1, "")
+		sendInferenceEnd(writeText, req.RequestID, "complete", len(chunks)+1, "", mockUsage)
 		return
 	}
 	var chat struct {
@@ -525,13 +526,16 @@ func runWSInference(cfg config, logger *log.Logger, drainer *drainController, wr
 		logger.Printf("inference response write failed: %v", err)
 		return
 	}
-	sendInferenceEnd(writeText, req.RequestID, "complete", 1, "")
+	sendInferenceEnd(writeText, req.RequestID, "complete", 1, "", mockUsage)
 }
 
-func sendInferenceEnd(writeText func([]byte) error, requestID, status string, chunks int, msg string) {
-	b, _ := json.Marshal(inferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: status, ChunksSent: chunks, Error: msg})
+func sendInferenceEnd(writeText func([]byte) error, requestID, status string, chunks int, msg string, usage json.RawMessage) {
+	end := inferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: status, ChunksSent: chunks, Error: msg, Usage: usage}
+	b, _ := json.Marshal(end)
 	_ = writeText(b)
 }
+
+var mockUsage = json.RawMessage(`{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}`)
 
 func runDrain(cfg config, logger *log.Logger, drainer *drainController,
 	writeText func([]byte) error) {
