@@ -102,6 +102,7 @@ func TestProviderAuthV2AcceptsMockAttestationToken(t *testing.T) {
 		cfg.Providers[0].EndpointURL = ""
 		cfg.Tier2.RequireAttestation = true
 		cfg.Tier2.AttestationRoots = []string{"mock-root"}
+		cfg.Tier2.AllowMockAttestation = true
 	})
 	defer h.HTTP.Close()
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
@@ -140,6 +141,7 @@ func TestProviderAuthV2RejectsMissingRequiredAttestation(t *testing.T) {
 		cfg.Providers[0].EndpointURL = ""
 		cfg.Tier2.RequireAttestation = true
 		cfg.Tier2.AttestationRoots = []string{"mock-root"}
+		cfg.Tier2.AllowMockAttestation = true
 	})
 	defer h.HTTP.Close()
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
@@ -190,6 +192,36 @@ func TestProviderAuthV2RejectsNoCommonAEADSuite(t *testing.T) {
 	if code != providerws.CloseInvalidHello || reason != "no_common_aead_suite" {
 		t.Fatalf("close = (%d, %q)", code, reason)
 	}
+}
+
+func TestWarmupGateDoesNotProbeProviderMissingRequiredEncryptedLeg(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Pool.WarmupGateEnabled = true
+		cfg.Pool.WarmupGateTimeoutS = 1
+		cfg.Pool.DegradedMaxRetries = 1
+		cfg.Providers[0].EndpointURL = ""
+		cfg.Tier2.RequireEncryptedLeg = true
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assignedID := assertHelloAck(t, conn)
+
+	if err := conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	if payload, _, err := wsutil.ReadServerData(conn); err == nil {
+		t.Fatalf("unexpected warmup probe for unencrypted provider: %s", payload)
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.State == pool.StateUnavailable
+	})
 }
 
 func TestProviderAuthFirstMessageDispatchRejectsUnknown(t *testing.T) {
@@ -1497,6 +1529,23 @@ func TestProviderHelloRejectsUnsupportedVersionAndTier(t *testing.T) {
 	}
 	if reason != "tier_unsupported: tier 2 not supported" {
 		t.Fatalf("tier reason = %q", reason)
+	}
+}
+
+func TestProviderHelloRejectsBelowRequiredBinaryVersion(t *testing.T) {
+	ts := newProviderServer(t, func(cfg *config.Config) {
+		cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion = "1.2.6"
+	})
+	defer ts.Close()
+
+	hello := validHello("m4-anon")
+	hello["binary_version"] = "1.2.5"
+	code, reason := sendHelloExpectClose(t, ts.URL, hello)
+	if code != providerws.CloseVersionUnsupported {
+		t.Fatalf("code = %d, want %d", code, providerws.CloseVersionUnsupported)
+	}
+	if !strings.Contains(reason, "below required 1.2.6") {
+		t.Fatalf("reason = %q", reason)
 	}
 }
 

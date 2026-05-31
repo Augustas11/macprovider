@@ -3,6 +3,7 @@ import Foundation
 protocol Tier2AttestationTokenGenerating: Sendable {
     func makeAttestationToken(
         challengeBase64URL: String?,
+        authAttemptID: String,
         providerID: String,
         binaryVersion: String,
         snapshot: ProviderSnapshot,
@@ -34,6 +35,7 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
 
     func makeAttestationToken(
         challengeBase64URL: String?,
+        authAttemptID _: String,
         providerID: String,
         binaryVersion: String,
         snapshot: ProviderSnapshot,

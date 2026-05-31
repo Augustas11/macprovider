@@ -59,6 +59,24 @@ func TestPillarBKeyDerivationIsDeterministic(t *testing.T) {
 	}
 }
 
+func TestPillarBTranscriptFramesVariableLengthFields(t *testing.T) {
+	shared := bytes.Repeat([]byte{0x11}, 32)
+	providerPub := bytes.Repeat([]byte{0x22}, 32)
+	coordinatorPub := bytes.Repeat([]byte{0x33}, 32)
+
+	first, err := DerivePillarBKeysFromSharedSecret(shared, "a", "bc", providerPub, coordinatorPub, PillarBAEADA256GCM)
+	if err != nil {
+		t.Fatalf("derive first: %v", err)
+	}
+	second, err := DerivePillarBKeysFromSharedSecret(shared, "ab", "c", providerPub, coordinatorPub, PillarBAEADA256GCM)
+	if err != nil {
+		t.Fatalf("derive second: %v", err)
+	}
+	if first.KeyID == second.KeyID || bytes.Equal(first.Transcript, second.Transcript) {
+		t.Fatal("ambiguous provider/session concatenation produced identical transcript")
+	}
+}
+
 func TestPillarBAEADFrameRoundTripAndTamperRejection(t *testing.T) {
 	key := bytes.Repeat([]byte{0x41}, 32)
 	nonceBase := []byte{1, 2, 3, 4}

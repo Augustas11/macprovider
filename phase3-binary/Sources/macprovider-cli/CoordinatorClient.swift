@@ -138,16 +138,7 @@ actor CoordinatorClient {
 
     private func connectAndRun() async throws {
         if wsTunneledMode {
-            let socket = openWebSocket()
-            do {
-                try await connectAndRunTier2(socket: socket)
-            } catch let error as Tier2ChallengeFailure {
-                Self.keepaliveDebug("tier2_challenge_failed_fallback_to_legacy error=\(error)")
-                socket.cancel(with: .normalClosure, reason: nil)
-                inferenceRelay = nil
-                tier2Session = nil
-                try await connectAndRunLegacy(socket: openWebSocket())
-            }
+            try await connectAndRunTier2(socket: openWebSocket())
         } else {
             try await connectAndRunLegacy(socket: openWebSocket())
         }
@@ -167,9 +158,7 @@ actor CoordinatorClient {
         let challenge: [String: Any]
         do {
             challenge = try await receiveAuthChallenge(from: socket)
-        } catch {
-            throw Tier2ChallengeFailure(error)
-        }
+        } catch { throw error }
         let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
         try await send(try await authProofMessage(challenge: challenge, attempt: authAttempt))
         let response = try await receiveAuthResponse(from: socket)
@@ -351,6 +340,7 @@ actor CoordinatorClient {
         let snapshot = await providerStatus.snapshot()
         let token = await attestationGenerator.makeAttestationToken(
             challengeBase64URL: challenge["attestation_challenge"] as? String,
+            authAttemptID: attemptID,
             providerID: providerID,
             binaryVersion: Self.binaryVersion,
             snapshot: snapshot,
@@ -711,18 +701,6 @@ actor CoordinatorClient {
 /// Signals "coordinator asked us to drain, handle complete, reconnect later
 /// after a grace period." Caught by runReconnectLoop.
 struct CoordinatorDrainComplete: Error {}
-
-struct Tier2ChallengeFailure: Error, CustomStringConvertible {
-    let underlying: Error
-
-    init(_ underlying: Error) {
-        self.underlying = underlying
-    }
-
-    var description: String {
-        "tier2 challenge failed before coordinator advertised v2 support: \(underlying)"
-    }
-}
 
 enum CoordinatorAuthError: Error, Equatable, CustomStringConvertible {
     case invalidMessage(String)

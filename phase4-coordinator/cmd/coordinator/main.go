@@ -200,6 +200,7 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 	"EncryptedLegRekeyAfterSeconds":  tier2StartupOnly,
 	"AttestationRoots":               tier2StartupOnly,
 	"AttestationFormats":             tier2StartupOnly,
+	"AllowMockAttestation":           tier2StartupOnly,
 	"RequireEncryptedLeg":            tier2HotReloadable,
 	"RequireAttestation":             tier2HotReloadable,
 	"AttestationMaxAgeS":             tier2HotReloadable,

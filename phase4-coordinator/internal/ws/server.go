@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -242,6 +243,7 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte) 
 		HeartbeatIntervalS:       int(s.cfg.HeartbeatInterval().Seconds()),
 		Tier:                     string(entry.Tier),
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 	}
 	b, err := json.Marshal(ack)
 	if err != nil {
@@ -346,7 +348,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte) 
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
 		return "", ""
 	}
-	attestationStatus := tier2.VerifyAttestationToken(proof.AttestationToken, tier2Cfg, challengeBytes, initial.ProviderID, initial.ProviderECDHPublicKey, s.now(), s.log)
+	attestationStatus := tier2.VerifyAttestationToken(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, s.now(), s.log)
 	if tier2Cfg.RequireAttestation && attestationStatus != pool.AttestationStatusAttested {
 		s.sendAuthRejection(conn, string(attestationStatus), string(attestationStatus))
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
@@ -373,6 +375,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte) 
 		HeartbeatIntervalS:       int(s.cfg.HeartbeatInterval().Seconds()),
 		Tier:                     string(entry.Tier),
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
+		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 		Tier2Session: &AuthTier2Session{
 			EncryptedLeg: AuthEncryptedLegSession{
 				Enabled:            true,
@@ -405,6 +408,10 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte) 
 }
 
 func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
+	if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" && compareSemver(hello.BinaryVersion, required) < 0 {
+		s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
+		return nil, false
+	}
 	providerCfg, pinned := s.pool.Endpoint(hello.ProviderID)
 	if s.tokens != nil {
 		if auth.validated && auth.providerID != hello.ProviderID {
@@ -493,6 +500,62 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 		ModelHash:             hello.ModelHash,
 		HashStatus:            hashStatus,
 	}, true
+}
+
+func compareSemver(lhs, rhs string) int {
+	left := semverParts(lhs)
+	right := semverParts(rhs)
+	n := len(left)
+	if len(right) > n {
+		n = len(right)
+	}
+	for i := 0; i < n; i++ {
+		var l, r int
+		if i < len(left) {
+			l = left[i]
+		}
+		if i < len(right) {
+			r = right[i]
+		}
+		switch {
+		case l < r:
+			return -1
+		case l > r:
+			return 1
+		}
+	}
+	return 0
+}
+
+func semverParts(value string) []int {
+	value = strings.TrimLeft(strings.TrimSpace(value), "vV")
+	parts := strings.Split(value, ".")
+	out := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			out = append(out, 0)
+			continue
+		}
+		var digits strings.Builder
+		for _, r := range part {
+			if r < '0' || r > '9' {
+				break
+			}
+			digits.WriteRune(r)
+		}
+		if digits.Len() == 0 {
+			out = append(out, 0)
+			continue
+		}
+		n, err := strconv.Atoi(digits.String())
+		if err != nil {
+			out = append(out, 0)
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *providerSession {
@@ -737,6 +800,9 @@ func (s *Server) runWarmupGateAttempt(provider pool.Provider, attempt int) bool 
 }
 
 func (s *Server) runWSWarmupGateAttempt(ctx context.Context, provider pool.Provider, attempt int, body []byte) bool {
+	if s.tier2WarmupExcluded(provider) {
+		return false
+	}
 	requestID := "warmup-gate-" + provider.AssignedID + "-" + itoa(attempt)
 	relay, err := s.DispatchInference(ctx, provider, requestID, body, false)
 	if err != nil {
@@ -762,6 +828,26 @@ func (s *Server) runWSWarmupGateAttempt(ctx context.Context, provider pool.Provi
 			return false
 		}
 	}
+}
+
+func (s *Server) tier2WarmupExcluded(provider pool.Provider) bool {
+	cfg := s.tier2Config()
+	if tier2.ModelHashActive(cfg) {
+		status := provider.HashStatus
+		if status == "" {
+			status = tier2.VerifyProviderHash(provider.ModelID, provider.ModelHash)
+		}
+		if tier2.IsHashPredicateFailure(status, cfg.RequireHashVerified) {
+			return true
+		}
+	}
+	if cfg.RequireEncryptedLeg && !provider.EncryptedLeg {
+		return true
+	}
+	if cfg.RequireAttestation && provider.AttestationStatus != pool.AttestationStatusAttested {
+		return true
+	}
+	return false
 }
 
 func (s *Server) runHTTPWarmupGateAttempt(ctx context.Context, provider pool.Provider, body []byte) bool {

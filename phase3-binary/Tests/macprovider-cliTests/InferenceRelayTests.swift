@@ -181,6 +181,42 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(end["status"] as? String, "complete")
         XCTAssertEqual(end["chunks_sent"] as? Int, 1)
     }
+
+    func testTier2SessionRejectsPlaintextInferenceRequest() async throws {
+        let runtime = FakeCompletionRuntime()
+        let status = ProviderStatus(
+            modelID: "mlx-community/Test-Model",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
+        )
+        let session = try testTier2Session()
+        let recorder = FrameRecorder()
+        let relay = InferenceRelay(
+            modelRuntime: runtime,
+            providerStatus: status,
+            loadedModelID: "mlx-community/Test-Model",
+            maxActiveRequests: 1,
+            maxBodyBytes: 4096,
+            tier2Session: session,
+            sendFrame: { frame in
+                await recorder.append(frame)
+            }
+        )
+
+        try await relay.handleInferenceRequest([
+            "type": "inference_request",
+            "request_id": "req-plaintext",
+            "stream": false,
+            "body": #"{"model":"mlx-community/Test-Model","messages":[{"role":"user","content":"hello"}]}"#,
+        ])
+
+        let frames = await recorder.frames
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertEqual(frames[0]["type"] as? String, "nak")
+        XCTAssertEqual(frames[0]["in_reply_to"] as? String, "req-plaintext")
+        let error = try XCTUnwrap(frames[0]["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? String, "tier2_encrypted_frame_required")
+    }
 }
 
 private actor FrameRecorder {

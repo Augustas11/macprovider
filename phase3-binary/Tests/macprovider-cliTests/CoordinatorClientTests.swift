@@ -159,21 +159,11 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["aead_suites"] as? [String], [Tier2ProviderSession.aeadSuite])
     }
 
-    func testWsTunneledV2ChallengeFailureFallsBackToLegacyHello() async throws {
+    func testWsTunneledV2ChallengeFailureFailsClosed() async throws {
         let firstSocket = FakeProviderWebSocketTask(receiveResults: [
             .failure(CoordinatorAuthError.invalidMessage("unrecognized auth message")),
         ])
-        let secondSocket = FakeProviderWebSocketTask(receiveResults: [
-            .success(.string(Self.jsonString([
-                "type": "hello_ack",
-                "coordinator_version": 1,
-                "assigned_id": "legacy-assigned",
-                "tier": "pinned",
-                "heartbeat_interval_s": 30,
-            ]))),
-            .failure(CancellationError()),
-        ])
-        let factory = FakeProviderWebSocketFactory(sockets: [firstSocket, secondSocket])
+        let factory = FakeProviderWebSocketFactory(sockets: [firstSocket])
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
@@ -195,8 +185,9 @@ final class CoordinatorClientTests: XCTestCase {
 
         do {
             try await client.connectAndRunOnceForTest()
-            XCTFail("connectAndRunOnceForTest should stop on fake socket cancellation")
-        } catch is CancellationError {
+            XCTFail("connectAndRunOnceForTest should fail closed on v2 challenge failure")
+        } catch let CoordinatorAuthError.invalidMessage(message) {
+            XCTAssertEqual(message, "unrecognized auth message")
         }
 
         let firstFrames = firstSocket.sentFrames()
@@ -204,13 +195,6 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(firstFrames[0]["type"] as? String, "auth_request")
         XCTAssertEqual(firstFrames[0]["version"] as? Int, 2)
         XCTAssertEqual(firstFrames[0]["stage"] as? String, "initial")
-
-        let secondFrames = secondSocket.sentFrames()
-        XCTAssertEqual(secondFrames.count, 2)
-        XCTAssertEqual(secondFrames[0]["type"] as? String, "hello")
-        XCTAssertEqual(secondFrames[0]["version"] as? Int, 1)
-        XCTAssertNil(secondFrames[0]["tier2_capabilities"])
-        XCTAssertEqual(secondFrames[1]["type"] as? String, "state_update")
 
         await client.stop()
     }
@@ -341,6 +325,7 @@ final class CoordinatorClientTests: XCTestCase {
 
         guard let token = await generator.makeAttestationToken(
             challengeBase64URL: challenge,
+            authAttemptID: "auth-test",
             providerID: "provider-test",
             binaryVersion: CoordinatorClient.binaryVersion,
             snapshot: snapshot,
@@ -382,6 +367,7 @@ final class CoordinatorClientTests: XCTestCase {
 
         let token = await generator.makeAttestationToken(
             challengeBase64URL: Data(repeating: 0x55, count: 32).base64URLUnpadded(),
+            authAttemptID: "auth-test",
             providerID: "provider-test",
             binaryVersion: CoordinatorClient.binaryVersion,
             snapshot: snapshot,
@@ -411,6 +397,7 @@ final class CoordinatorClientTests: XCTestCase {
 
         let token = await generator.makeAttestationToken(
             challengeBase64URL: Data(repeating: 0x66, count: 32).base64URLUnpadded(),
+            authAttemptID: "auth-test",
             providerID: "provider-test",
             binaryVersion: CoordinatorClient.binaryVersion,
             snapshot: snapshot,
@@ -516,6 +503,7 @@ private struct StaticAttestationGenerator: Tier2AttestationTokenGenerating, @unc
 
     func makeAttestationToken(
         challengeBase64URL: String?,
+        authAttemptID: String,
         providerID: String,
         binaryVersion: String,
         snapshot: ProviderSnapshot,

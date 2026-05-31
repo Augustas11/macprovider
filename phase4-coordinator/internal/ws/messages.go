@@ -31,6 +31,7 @@ type HelloAck struct {
 	HeartbeatIntervalS       int    `json:"heartbeat_interval_s"`
 	Tier                     string `json:"tier,omitempty"`
 	RecommendedBinaryVersion string `json:"recommended_binary_version,omitempty"`
+	RequiredBinaryVersion    string `json:"required_binary_version,omitempty"`
 }
 
 type AuthRequest struct {
@@ -83,6 +84,7 @@ type AuthResponse struct {
 	HeartbeatIntervalS       int                `json:"heartbeat_interval_s,omitempty"`
 	Tier                     string             `json:"tier,omitempty"`
 	RecommendedBinaryVersion string             `json:"recommended_binary_version,omitempty"`
+	RequiredBinaryVersion    string             `json:"required_binary_version,omitempty"`
 	Tier2Session             *AuthTier2Session  `json:"tier2_session,omitempty"`
 	Error                    *AuthResponseError `json:"error,omitempty"`
 }

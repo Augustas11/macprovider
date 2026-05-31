@@ -2829,7 +2829,7 @@ func TestTier2RequireAttestationRoutesOnlyAttestedProvider(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithTier2Config(config.Tier2Config{RequireAttestation: true, AttestationRoots: []string{"mock-root"}}),
+		buyer.WithTier2Config(config.Tier2Config{RequireAttestation: true, AttestationRoots: []string{"mock-root"}, AllowMockAttestation: true}),
 	)
 
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
@@ -2853,7 +2853,7 @@ func TestTier2RequireAttestationUnavailableReturns503(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithTier2Config(config.Tier2Config{RequireAttestation: true, AttestationRoots: []string{"mock-root"}}),
+		buyer.WithTier2Config(config.Tier2Config{RequireAttestation: true, AttestationRoots: []string{"mock-root"}, AllowMockAttestation: true}),
 	)
 
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)

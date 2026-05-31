@@ -298,6 +298,9 @@ while end < len(lines) and not top_level_key.match(lines[end]):
 
 block = lines[start:end]
 
+def strip_yaml_quotes(value):
+    return value.strip().strip(chr(34) + chr(39))
+
 def value_for(key):
     for line in block[1:]:
         stripped = line.strip()
@@ -322,7 +325,7 @@ def list_has_value(key):
         raw_value = raw_value.split('#', 1)[0].strip()
         if raw_value:
             lowered = raw_value.lower()
-            if lowered in ('[]', 'null', '~', '""', "''"):
+            if lowered in ('[]', 'null', '~', chr(34) * 2, chr(39) * 2):
                 return False
             if raw_value.startswith('[') and raw_value.endswith(']'):
                 inner = raw_value[1:-1].strip()
@@ -340,6 +343,37 @@ def list_has_value(key):
         return False
     return False
 
+def list_values(key):
+    for idx in range(start + 1, end):
+        raw = lines[idx]
+        if not raw.startswith('  ') or raw.startswith('    '):
+            continue
+        if ':' not in raw:
+            continue
+        raw_key, raw_value = raw.split(':', 1)
+        if raw_key.strip() != key:
+            continue
+        raw_value = raw_value.split('#', 1)[0].strip()
+        if raw_value.startswith('[') and raw_value.endswith(']'):
+            inner = raw_value[1:-1].strip()
+            if not inner:
+                return []
+            return [strip_yaml_quotes(item) for item in inner.split(',') if item.strip()]
+        if raw_value:
+            return [strip_yaml_quotes(raw_value)]
+        values = []
+        j = idx + 1
+        while j < end:
+            candidate = lines[j]
+            if re.match(r'^  [A-Za-z0-9_-]+:', candidate):
+                break
+            nested = candidate.strip()
+            if nested.startswith('-') and nested[1:].strip():
+                values.append(strip_yaml_quotes(nested[1:].split('#', 1)[0]))
+            j += 1
+        return values
+    return []
+
 if not value_for('catalog_path'):
     raise SystemExit('tier2.catalog_path must be configured before C4b activation')
 if not value_for('catalog_public_key'):
@@ -350,6 +384,8 @@ if value_for('require_encrypted_leg') != 'true':
     raise SystemExit('tier2.require_encrypted_leg must be true before C4b activation')
 if not list_has_value('attestation_roots'):
     raise SystemExit('tier2.attestation_roots must be non-empty before C4b activation')
+if any(value == 'mock-root' for value in list_values('attestation_roots')):
+    raise SystemExit('tier2.attestation_roots must not contain mock-root before C4b activation')
 
 updated_lines = list(lines)
 require_idx = None

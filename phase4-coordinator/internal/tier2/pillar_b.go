@@ -101,11 +101,11 @@ func DerivePillarBKeysFromSharedSecret(sharedSecret []byte, providerID, assigned
 	}
 	transcriptHash := sha256.New()
 	transcriptHash.Write(pillarBTranscriptPrefix)
-	transcriptHash.Write([]byte(providerID))
-	transcriptHash.Write([]byte(assignedID))
-	transcriptHash.Write(providerPublic)
-	transcriptHash.Write(coordinatorPublic)
-	transcriptHash.Write([]byte(selectedAEAD))
+	writeTranscriptField(transcriptHash, "provider_id", []byte(providerID))
+	writeTranscriptField(transcriptHash, "assigned_id", []byte(assignedID))
+	writeTranscriptField(transcriptHash, "provider_public", providerPublic)
+	writeTranscriptField(transcriptHash, "coordinator_public", coordinatorPublic)
+	writeTranscriptField(transcriptHash, "selected_aead", []byte(selectedAEAD))
 	transcript := transcriptHash.Sum(nil)
 	prk := hkdfExtract(transcript, sharedSecret)
 	keyHash := sha256.Sum256(transcript)
@@ -301,6 +301,16 @@ func pillarBNonce(nonceBase []byte, seq uint64) ([]byte, error) {
 	copy(nonce[:4], nonceBase)
 	binary.BigEndian.PutUint64(nonce[4:], seq)
 	return nonce, nil
+}
+
+func writeTranscriptField(w io.Writer, label string, value []byte) {
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(label)))
+	w.Write(lenBuf[:])
+	w.Write([]byte(label))
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(value)))
+	w.Write(lenBuf[:])
+	w.Write(value)
 }
 
 func hkdfExtract(salt, ikm []byte) []byte {

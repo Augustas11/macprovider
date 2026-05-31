@@ -3,6 +3,7 @@ package tier2
 import (
 	"bytes"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
@@ -72,7 +73,12 @@ type AttestationKeyBinding struct {
 	ProviderECDHPublicKey string `json:"provider_ecdh_public_key"`
 }
 
-func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) pool.AttestationStatus {
+type attestationBindingSignature struct {
+	Alg       string `json:"alg"`
+	Signature string `json:"signature"`
+}
+
+func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challenge []byte, authAttemptID, providerID, providerECDHPublicKey string, now time.Time, logger zerolog.Logger) pool.AttestationStatus {
 	if !cfg.RequireAttestation && len(raw) == 0 {
 		return pool.AttestationStatusNotRequired
 	}
@@ -139,7 +145,7 @@ func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challen
 		}
 		return pool.AttestationStatusUnsupported
 	}
-	if hasMockAttestationRoot(cfg.AttestationRoots) {
+	if cfg.AllowMockAttestation && hasMockAttestationRoot(cfg.AttestationRoots) {
 		if validMockAttestationToken(token.Token) {
 			logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mock_attested", "tier2.attestation_roots")
 			return pool.AttestationStatusAttested
@@ -150,7 +156,7 @@ func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challen
 	// Production Apple MDA roots must not become a positive hardware signal
 	// until certificate-chain, freshness-code, public-key, device-property,
 	// and ACME CSR key-binding validation all pass.
-	if status, ok := verifyProductionMDAChainShape(token, cfg, now, providerID, logger); ok {
+	if status, ok := verifyProductionMDAChainShape(token, cfg, now, authAttemptID, providerID, logger); ok {
 		return status
 	}
 	decision := "observe"
@@ -164,7 +170,7 @@ func VerifyAttestationToken(raw json.RawMessage, cfg config.Tier2Config, challen
 	return pool.AttestationStatusUnsupported
 }
 
-func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Config, now time.Time, providerID string, logger zerolog.Logger) (pool.AttestationStatus, bool) {
+func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Config, now time.Time, authAttemptID, providerID string, logger zerolog.Logger) (pool.AttestationStatus, bool) {
 	certs, ok, err := extractAttestationCertificateChain(token)
 	if !ok {
 		return "", false
@@ -193,7 +199,7 @@ func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Confi
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", "mda_leaf_public_key_invalid", "tier2.attestation_roots")
 		return pool.AttestationStatusFailed, true
 	}
-	if reason := verifyMDAFreshness(certs[0], token.Challenge); reason != "" {
+	if reason := verifyMDAFreshness(certs[0], token.Token); reason != "" {
 		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", reason, "tier2.attestation_roots")
 		return pool.AttestationStatusFailed, true
 	}
@@ -216,6 +222,10 @@ func verifyProductionMDAChainShape(token AttestationToken, cfg config.Tier2Confi
 			return pool.AttestationStatusFailed, true
 		}
 		return pool.AttestationStatusUnsupported, true
+	}
+	if reason := verifyAttestationBindingSignature(certs[0], token, authAttemptID); reason != "" {
+		logAttestationEvent(logger, "attestation_failed", "WARN", providerID, "reject", reason, "tier2.require_attestation")
+		return pool.AttestationStatusFailed, true
 	}
 	logAttestationEvent(logger, "attestation_valid", "INFO", providerID, "allow", "mda_attested", "tier2.attestation_roots")
 	return pool.AttestationStatusAttested, true
@@ -295,6 +305,88 @@ func verifyMDACSRKeyBinding(leaf *x509.Certificate, token AttestationToken) (poo
 		return pool.AttestationStatusFailed, "mda_csr_key_mismatch"
 	}
 	return "", ""
+}
+
+func verifyAttestationBindingSignature(leaf *x509.Certificate, token AttestationToken, authAttemptID string) string {
+	sig, ok := parseAttestationBindingSignature(token.Signature)
+	if !ok {
+		return "attestation_binding_signature_missing"
+	}
+	payload, err := attestationBindingPayload(token, authAttemptID)
+	if err != nil {
+		return "attestation_binding_payload_invalid"
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(sig.Signature)
+	if err != nil {
+		return "attestation_binding_signature_invalid"
+	}
+	switch sig.Alg {
+	case "ES256":
+		pub, ok := leaf.PublicKey.(*ecdsa.PublicKey)
+		if !ok {
+			return "attestation_binding_signature_key_invalid"
+		}
+		digest := sha256.Sum256(payload)
+		if !ecdsa.VerifyASN1(pub, digest[:], signature) {
+			return "attestation_binding_signature_mismatch"
+		}
+		return ""
+	case "Ed25519":
+		pub, ok := leaf.PublicKey.(ed25519.PublicKey)
+		if !ok {
+			return "attestation_binding_signature_key_invalid"
+		}
+		if !ed25519.Verify(pub, payload, signature) {
+			return "attestation_binding_signature_mismatch"
+		}
+		return ""
+	default:
+		return "attestation_binding_signature_alg_unsupported"
+	}
+}
+
+func parseAttestationBindingSignature(raw map[string]interface{}) (attestationBindingSignature, bool) {
+	if len(raw) == 0 {
+		return attestationBindingSignature{}, false
+	}
+	alg, _ := raw["alg"].(string)
+	signature, _ := raw["signature"].(string)
+	if strings.TrimSpace(alg) == "" || strings.TrimSpace(signature) == "" {
+		return attestationBindingSignature{}, false
+	}
+	return attestationBindingSignature{Alg: alg, Signature: signature}, true
+}
+
+func attestationBindingPayload(token AttestationToken, authAttemptID string) ([]byte, error) {
+	claimed, err := json.Marshal(token.Claimed)
+	if err != nil {
+		return nil, err
+	}
+	claimedHash := sha256.Sum256(claimed)
+	tokenHash := sha256.Sum256([]byte(token.Token))
+	return json.Marshal(struct {
+		Version               string `json:"version"`
+		ProviderID            string `json:"provider_id"`
+		BinaryVersion         string `json:"binary_version"`
+		Challenge             string `json:"challenge"`
+		AuthAttemptID         string `json:"auth_attempt_id"`
+		ProviderECDHPublicKey string `json:"provider_ecdh_public_key"`
+		IssuedAt              string `json:"issued_at"`
+		ExpiresAt             string `json:"expires_at"`
+		TokenSHA256           string `json:"token_sha256"`
+		ClaimedSHA256         string `json:"claimed_sha256"`
+	}{
+		Version:               "macprovider/spec008/attestation-binding/v1",
+		ProviderID:            token.ProviderID,
+		BinaryVersion:         token.BinaryVersion,
+		Challenge:             token.Challenge,
+		AuthAttemptID:         authAttemptID,
+		ProviderECDHPublicKey: token.KeyBinding.ProviderECDHPublicKey,
+		IssuedAt:              token.IssuedAt.UTC().Format(time.RFC3339),
+		ExpiresAt:             token.ExpiresAt.UTC().Format(time.RFC3339),
+		TokenSHA256:           base64.RawURLEncoding.EncodeToString(tokenHash[:]),
+		ClaimedSHA256:         base64.RawURLEncoding.EncodeToString(claimedHash[:]),
+	})
 }
 
 func extractAttestationCSR(token AttestationToken) (*x509.CertificateRequest, bool, error) {

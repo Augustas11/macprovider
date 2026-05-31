@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
@@ -25,10 +26,11 @@ func TestVerifyAttestationTokenAcceptsValidMockToken(t *testing.T) {
 	cfg := config.Default().Tier2
 	cfg.RequireAttestation = true
 	cfg.AttestationRoots = []string{"mock-root"}
+	cfg.AllowMockAttestation = true
 	challenge := []byte("challenge-1")
 	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], challenge, "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
 
-	got := VerifyAttestationToken(raw, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop())
+	got := VerifyAttestationToken(raw, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop())
 
 	if got != pool.AttestationStatusAttested {
 		t.Fatalf("attestation status=%q want %q", got, pool.AttestationStatusAttested)
@@ -40,15 +42,16 @@ func TestVerifyAttestationTokenRejectsBindingAndReplayFailures(t *testing.T) {
 	cfg := config.Default().Tier2
 	cfg.RequireAttestation = true
 	cfg.AttestationRoots = []string{"mock-root"}
+	cfg.AllowMockAttestation = true
 	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], []byte("challenge-1"), "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
 
-	if got := VerifyAttestationToken(raw, cfg, []byte("different-challenge"), "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusStale {
+	if got := VerifyAttestationToken(raw, cfg, []byte("different-challenge"), "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusStale {
 		t.Fatalf("challenge mismatch status=%q want stale", got)
 	}
-	if got := VerifyAttestationToken(raw, cfg, []byte("challenge-1"), "provider-b", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(raw, cfg, []byte("challenge-1"), "auth-test", "provider-b", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("provider mismatch status=%q want failed", got)
 	}
-	if got := VerifyAttestationToken(raw, cfg, []byte("challenge-1"), "provider-a", "different-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(raw, cfg, []byte("challenge-1"), "auth-test", "provider-a", "different-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("ecdh mismatch status=%q want failed", got)
 	}
 }
@@ -58,6 +61,7 @@ func TestVerifyAttestationTokenRejectsHardwareFamilyPolicyMismatch(t *testing.T)
 	cfg := config.Default().Tier2
 	cfg.RequireAttestation = true
 	cfg.AttestationRoots = []string{"mock-root"}
+	cfg.AllowMockAttestation = true
 	challenge := []byte("challenge-1")
 	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], challenge, "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
 	var token AttestationToken
@@ -70,7 +74,7 @@ func TestVerifyAttestationTokenRejectsHardwareFamilyPolicyMismatch(t *testing.T)
 		t.Fatalf("marshal hardware family mismatch token: %v", err)
 	}
 
-	if got := VerifyAttestationToken(mismatch, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(mismatch, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("hardware family mismatch status=%q want failed", got)
 	}
 }
@@ -78,12 +82,13 @@ func TestVerifyAttestationTokenRejectsHardwareFamilyPolicyMismatch(t *testing.T)
 func TestVerifyAttestationTokenMissingOrInvalidStates(t *testing.T) {
 	now := time.Unix(1716768000, 0).UTC()
 	cfg := config.Default().Tier2
-	if got := VerifyAttestationToken(nil, cfg, nil, "provider-a", "", now, zerolog.Nop()); got != pool.AttestationStatusNotRequired {
+	if got := VerifyAttestationToken(nil, cfg, nil, "auth-test", "provider-a", "", now, zerolog.Nop()); got != pool.AttestationStatusNotRequired {
 		t.Fatalf("default missing token status=%q want not_required", got)
 	}
 	cfg.RequireAttestation = true
 	cfg.AttestationRoots = []string{"mock-root"}
-	if got := VerifyAttestationToken(nil, cfg, nil, "provider-a", "", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	cfg.AllowMockAttestation = true
+	if got := VerifyAttestationToken(nil, cfg, nil, "auth-test", "provider-a", "", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("required missing token status=%q want failed", got)
 	}
 	invalidRaw, err := json.Marshal(AttestationToken{
@@ -96,7 +101,7 @@ func TestVerifyAttestationTokenMissingOrInvalidStates(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshal invalid token: %v", err)
 	}
-	if got := VerifyAttestationToken(invalidRaw, cfg, []byte("challenge-1"), "provider-a", "", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
+	if got := VerifyAttestationToken(invalidRaw, cfg, []byte("challenge-1"), "auth-test", "provider-a", "", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
 		t.Fatalf("unsupported format status=%q want unsupported", got)
 	}
 }
@@ -106,6 +111,7 @@ func TestVerifyAttestationTokenRejectsMalformedTokenEncoding(t *testing.T) {
 	cfg := config.Default().Tier2
 	cfg.RequireAttestation = true
 	cfg.AttestationRoots = []string{"mock-root"}
+	cfg.AllowMockAttestation = true
 	challenge := []byte("challenge-1")
 	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], challenge, "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
 	var token AttestationToken
@@ -118,7 +124,7 @@ func TestVerifyAttestationTokenRejectsMalformedTokenEncoding(t *testing.T) {
 		t.Fatalf("marshal malformed token: %v", err)
 	}
 
-	if got := VerifyAttestationToken(malformed, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(malformed, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("malformed token status=%q want failed", got)
 	}
 }
@@ -128,6 +134,7 @@ func TestVerifyAttestationTokenRejectsNonMockTokenForMockRoot(t *testing.T) {
 	cfg := config.Default().Tier2
 	cfg.RequireAttestation = true
 	cfg.AttestationRoots = []string{"mock-root"}
+	cfg.AllowMockAttestation = true
 	challenge := []byte("challenge-1")
 	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], challenge, "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
 	var token AttestationToken
@@ -142,7 +149,7 @@ func TestVerifyAttestationTokenRejectsNonMockTokenForMockRoot(t *testing.T) {
 		t.Fatalf("marshal compact jws token: %v", err)
 	}
 
-	if got := VerifyAttestationToken(compactJWS, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(compactJWS, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("non-mock token with mock root status=%q want failed", got)
 	}
 }
@@ -155,7 +162,7 @@ func TestVerifyAttestationTokenFailsClosedForProductionRootWithoutVerifier(t *te
 	challenge := []byte("challenge-1")
 	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], challenge, "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
 
-	if got := VerifyAttestationToken(raw, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(raw, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("production root without verifier status=%q want failed", got)
 	}
 }
@@ -167,7 +174,7 @@ func TestVerifyAttestationTokenOptionalProductionRootUnsupportedWithoutVerifier(
 	challenge := []byte("challenge-1")
 	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], challenge, "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
 
-	if got := VerifyAttestationToken(raw, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
+	if got := VerifyAttestationToken(raw, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
 		t.Fatalf("optional production root without verifier status=%q want unsupported", got)
 	}
 }
@@ -190,7 +197,7 @@ func TestVerifyAttestationTokenCompactJWSProductionRootUnsupportedWithoutVerifie
 		t.Fatalf("marshal compact jws token: %v", err)
 	}
 
-	if got := VerifyAttestationToken(compactJWS, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
+	if got := VerifyAttestationToken(compactJWS, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
 		t.Fatalf("compact jws production root status=%q want unsupported", got)
 	}
 }
@@ -211,39 +218,24 @@ func TestVerifyAttestationTokenRejectsMalformedProductionCertificateChain(t *tes
 		t.Fatalf("marshal malformed chain token: %v", err)
 	}
 
-	if got := VerifyAttestationToken(malformed, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(malformed, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("malformed production certificate chain status=%q want failed", got)
 	}
 }
 
 func TestVerifyAttestationTokenValidatesProductionCertificateChainButDoesNotAttestYet(t *testing.T) {
 	now := time.Unix(1716768000, 0).UTC()
-	cfg := config.Default().Tier2
-	challenge := []byte("challenge-1")
-	challengeToken := base64.RawURLEncoding.EncodeToString(challenge)
-	rootDER, leafDER, _ := testAttestationCertificateChain(t, now, testAttestationCertificateOptions{
-		FreshnessToken:        challengeToken,
+	cfg, challenge, withChain := productionChainToken(t, now, testAttestationCertificateOptions{
 		IncludeFreshness:      true,
 		IncludeDeviceProperty: true,
 		LeafKeyType:           "p256",
 	})
-	cfg.AttestationRoots = []string{base64.StdEncoding.EncodeToString(rootDER)}
-	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], challenge, "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
-	var token AttestationToken
-	if err := json.Unmarshal(raw, &token); err != nil {
-		t.Fatalf("unmarshal mock token: %v", err)
-	}
-	token.CertificateChain = []string{base64.StdEncoding.EncodeToString(leafDER)}
-	withChain, err := json.Marshal(token)
-	if err != nil {
-		t.Fatalf("marshal chain token: %v", err)
-	}
 
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
 		t.Fatalf("optional production certificate chain status=%q want unsupported", got)
 	}
 	cfg.RequireAttestation = true
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("required production certificate chain status=%q want failed", got)
 	}
 }
@@ -280,8 +272,8 @@ func TestVerifyAttestationTokenExtractsCompactJWSX5CCertificateChain(t *testing.
 		t.Fatalf("marshal compact jws chain token: %v", err)
 	}
 
-	if got := VerifyAttestationToken(withJWSChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
-		t.Fatalf("compact jws x5c chain status=%q want unsupported", got)
+	if got := VerifyAttestationToken(withJWSChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+		t.Fatalf("compact jws x5c chain status=%q want failed", got)
 	}
 }
 
@@ -296,11 +288,11 @@ func TestVerifyAttestationTokenAttestsProductionChainWithCSRKeyBinding(t *testin
 		LeafKeyType:           "p256",
 	})
 
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusAttested {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusAttested {
 		t.Fatalf("optional production CSR-bound chain status=%q want attested", got)
 	}
 	cfg.RequireAttestation = true
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusAttested {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusAttested {
 		t.Fatalf("required production CSR-bound chain status=%q want attested", got)
 	}
 }
@@ -312,7 +304,7 @@ func TestVerifyAttestationTokenRejectsProductionChainWithMissingFreshness(t *tes
 		LeafKeyType:           "p256",
 	})
 
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("missing MDA freshness status=%q want failed", got)
 	}
 }
@@ -326,7 +318,7 @@ func TestVerifyAttestationTokenRejectsProductionChainWithMismatchedFreshness(t *
 		LeafKeyType:           "p256",
 	})
 
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("mismatched MDA freshness status=%q want failed", got)
 	}
 }
@@ -340,7 +332,7 @@ func TestVerifyAttestationTokenRejectsProductionChainWithMissingDeviceProperty(t
 		LeafKeyType:      "p256",
 	})
 
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("missing MDA device property status=%q want failed", got)
 	}
 }
@@ -356,7 +348,7 @@ func TestVerifyAttestationTokenRejectsProductionChainWithBlankDeviceProperty(t *
 		LeafKeyType:           "p256",
 	})
 
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("blank MDA device property status=%q want failed", got)
 	}
 }
@@ -371,7 +363,7 @@ func TestVerifyAttestationTokenRejectsProductionChainWithUnsupportedLeafKey(t *t
 		LeafKeyType:           "ed25519",
 	})
 
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("unsupported MDA leaf public key status=%q want failed", got)
 	}
 }
@@ -387,7 +379,7 @@ func TestVerifyAttestationTokenRejectsProductionChainWithMalformedCSR(t *testing
 		LeafKeyType:           "p256",
 	})
 
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("malformed MDA CSR status=%q want failed", got)
 	}
 }
@@ -404,8 +396,60 @@ func TestVerifyAttestationTokenRejectsProductionChainWithMismatchedCSRKey(t *tes
 		LeafKeyType:           "p256",
 	})
 
-	if got := VerifyAttestationToken(withChain, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("mismatched MDA CSR key status=%q want failed", got)
+	}
+}
+
+func TestVerifyAttestationTokenRejectsProductionChainWithoutBindingSignature(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	challenge := []byte("challenge-1")
+	cfg, _, withChain := productionChainToken(t, now, testAttestationCertificateOptions{
+		FreshnessToken:          base64.RawURLEncoding.EncodeToString(challenge),
+		IncludeFreshness:        true,
+		IncludeDeviceProperty:   true,
+		IncludeCSR:              true,
+		MissingBindingSignature: true,
+		LeafKeyType:             "p256",
+	})
+
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+		t.Fatalf("missing binding signature status=%q want failed", got)
+	}
+}
+
+func TestVerifyAttestationTokenRejectsProductionChainWithMismatchedBindingSignature(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	challenge := []byte("challenge-1")
+	cfg, _, withChain := productionChainToken(t, now, testAttestationCertificateOptions{
+		FreshnessToken:           base64.RawURLEncoding.EncodeToString(challenge),
+		IncludeFreshness:         true,
+		IncludeDeviceProperty:    true,
+		IncludeCSR:               true,
+		MismatchBindingSignature: true,
+		LeafKeyType:              "p256",
+	})
+
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+		t.Fatalf("mismatched binding signature status=%q want failed", got)
+	}
+}
+
+func TestVerifyAttestationTokenUsesDeviceTokenForMDAFreshness(t *testing.T) {
+	now := time.Unix(1716768000, 0).UTC()
+	challenge := []byte("challenge-1")
+	deviceToken := base64.RawURLEncoding.EncodeToString([]byte("device-attestation-token"))
+	cfg, _, withChain := productionChainToken(t, now, testAttestationCertificateOptions{
+		FreshnessToken:        deviceToken,
+		TokenValue:            deviceToken,
+		IncludeFreshness:      true,
+		IncludeDeviceProperty: true,
+		IncludeCSR:            true,
+		LeafKeyType:           "p256",
+	})
+
+	if got := VerifyAttestationToken(withChain, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusAttested {
+		t.Fatalf("device-token freshness status=%q want attested", got)
 	}
 }
 
@@ -415,24 +459,27 @@ func TestVerifyAttestationTokenWithoutRootsNeverMarksAttested(t *testing.T) {
 	challenge := []byte("challenge-1")
 	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], challenge, "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
 
-	if got := VerifyAttestationToken(raw, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
+	if got := VerifyAttestationToken(raw, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusUnsupported {
 		t.Fatalf("rootless optional token status=%q want unsupported", got)
 	}
 	cfg.RequireAttestation = true
-	if got := VerifyAttestationToken(raw, cfg, challenge, "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
+	if got := VerifyAttestationToken(raw, cfg, challenge, "auth-test", "provider-a", "provider-ecdh", now, zerolog.Nop()); got != pool.AttestationStatusFailed {
 		t.Fatalf("rootless required token status=%q want failed", got)
 	}
 }
 
 type testAttestationCertificateOptions struct {
-	FreshnessToken        string
-	IncludeFreshness      bool
-	IncludeDeviceProperty bool
-	DevicePropertyValue   []byte
-	IncludeCSR            bool
-	MalformedCSR          bool
-	MismatchCSR           bool
-	LeafKeyType           string
+	FreshnessToken           string
+	TokenValue               string
+	IncludeFreshness         bool
+	IncludeDeviceProperty    bool
+	DevicePropertyValue      []byte
+	IncludeCSR               bool
+	MalformedCSR             bool
+	MismatchCSR              bool
+	MissingBindingSignature  bool
+	MismatchBindingSignature bool
+	LeafKeyType              string
 }
 
 func productionChainToken(t *testing.T, now time.Time, opts testAttestationCertificateOptions) (config.Tier2Config, []byte, json.RawMessage) {
@@ -444,11 +491,16 @@ func productionChainToken(t *testing.T, now time.Time, opts testAttestationCerti
 	rootDER, leafDER, leafSigner := testAttestationCertificateChain(t, now, opts)
 	cfg := config.Default().Tier2
 	cfg.AttestationRoots = []string{base64.StdEncoding.EncodeToString(rootDER)}
+	tokenValue := opts.TokenValue
+	if tokenValue == "" {
+		tokenValue = base64.RawURLEncoding.EncodeToString(challenge)
+	}
 	raw := BuildMockAttestationToken(cfg.AttestationFormats[0], challenge, "provider-a", "provider-ecdh", now.Add(-time.Minute), now.Add(time.Minute))
 	var token AttestationToken
 	if err := json.Unmarshal(raw, &token); err != nil {
 		t.Fatalf("unmarshal mock token: %v", err)
 	}
+	token.Token = tokenValue
 	token.CertificateChain = []string{base64.StdEncoding.EncodeToString(leafDER)}
 	switch {
 	case opts.MalformedCSR:
@@ -464,11 +516,41 @@ func productionChainToken(t *testing.T, now time.Time, opts testAttestationCerti
 		}
 		token.CertificateCSR = base64.StdEncoding.EncodeToString(testCertificateSigningRequest(t, csrSigner))
 	}
-	withChain, err := json.Marshal(token)
+	if !opts.MissingBindingSignature {
+		if opts.MismatchBindingSignature {
+			token.BinaryVersion = "1.2.6-before-signature-mutation"
+		}
+		payload, err := attestationBindingPayload(token, "auth-test")
+		if err != nil {
+			t.Fatalf("build attestation binding payload: %v", err)
+		}
+		leafKey, ok := leafSigner.(*ecdsa.PrivateKey)
+		if !ok {
+			return cfg, challenge, mustMarshalAttestationToken(t, token)
+		}
+		digest := sha256.Sum256(payload)
+		signature, err := ecdsa.SignASN1(rand.Reader, leafKey, digest[:])
+		if err != nil {
+			t.Fatalf("sign attestation binding payload: %v", err)
+		}
+		token.Signature = map[string]interface{}{
+			"alg":       "ES256",
+			"signature": base64.RawURLEncoding.EncodeToString(signature),
+		}
+		if opts.MismatchBindingSignature {
+			token.BinaryVersion = "1.2.6-after-signature-mutation"
+		}
+	}
+	return cfg, challenge, mustMarshalAttestationToken(t, token)
+}
+
+func mustMarshalAttestationToken(t *testing.T, token AttestationToken) json.RawMessage {
+	t.Helper()
+	raw, err := json.Marshal(token)
 	if err != nil {
 		t.Fatalf("marshal chain token: %v", err)
 	}
-	return cfg, challenge, withChain
+	return raw
 }
 
 func testAttestationCertificateChain(t *testing.T, now time.Time, opts testAttestationCertificateOptions) ([]byte, []byte, crypto.Signer) {

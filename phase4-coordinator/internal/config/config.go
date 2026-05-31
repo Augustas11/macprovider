@@ -114,10 +114,11 @@ type Tier2Config struct {
 	EncryptedLegRekeyAfterRequests int    `yaml:"encrypted_leg_rekey_after_requests"`
 	EncryptedLegRekeyAfterSeconds  int    `yaml:"encrypted_leg_rekey_after_seconds"`
 
-	RequireAttestation bool     `yaml:"require_attestation"`
-	AttestationRoots   []string `yaml:"attestation_roots"`
-	AttestationMaxAgeS int      `yaml:"attestation_max_age_s"`
-	AttestationFormats []string `yaml:"attestation_formats"`
+	RequireAttestation   bool     `yaml:"require_attestation"`
+	AttestationRoots     []string `yaml:"attestation_roots"`
+	AttestationMaxAgeS   int      `yaml:"attestation_max_age_s"`
+	AttestationFormats   []string `yaml:"attestation_formats"`
+	AllowMockAttestation bool     `yaml:"allow_mock_attestation"`
 
 	BehavioralSafetyEnabled    bool    `yaml:"behavioral_safety_enabled"`
 	OutputSizeCapBytes         int64   `yaml:"output_size_cap_bytes"`
@@ -231,6 +232,7 @@ func Default() Config {
 			AttestationRoots:               []string{},
 			AttestationMaxAgeS:             600,
 			AttestationFormats:             []string{"apple-managed-device-attestation-acme-v1"},
+			AllowMockAttestation:           false,
 			BehavioralSafetyEnabled:        false,
 			OutputSizeCapBytes:             0,
 			OutputBytesPerTokenCeiling:     16,
@@ -391,6 +393,11 @@ func (c Config) Validate() error {
 	}
 	if c.Tier2.RequireAttestation && len(c.Tier2.AttestationRoots) == 0 {
 		return fmt.Errorf("tier2.require_attestation requires at least one attestation root")
+	}
+	for _, root := range c.Tier2.AttestationRoots {
+		if root == "mock-root" && !c.Tier2.AllowMockAttestation {
+			return fmt.Errorf("tier2.attestation_roots must not include mock-root unless tier2.allow_mock_attestation is true")
+		}
 	}
 	if c.Tier2.AttestationMaxAgeS <= 0 {
 		return fmt.Errorf("tier2.attestation_max_age_s must be > 0")

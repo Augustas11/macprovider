@@ -74,6 +74,7 @@ admission:
 #   # SPEC-008 §11.1 — Pillar C keys; present for forward compatibility only in Phase 1.
 #   require_attestation: false
 #   attestation_roots: []
+#   allow_mock_attestation: false
 #   attestation_max_age_s: 600
 #   attestation_formats:
 #     - "apple-managed-device-attestation-acme-v1"

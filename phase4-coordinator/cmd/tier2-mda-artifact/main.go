@@ -566,7 +566,7 @@ func verifyWithCoordinator(artifact mdaArtifact, rootFiles []string, challenge, 
 	if err != nil {
 		return "", err
 	}
-	status := tier2.VerifyAttestationToken(raw, cfg, challengeBytes, providerID, strings.TrimSpace(providerECDH), now, zerolog.Nop())
+	status := tier2.VerifyAttestationToken(raw, cfg, challengeBytes, "artifact-check", providerID, strings.TrimSpace(providerECDH), now, zerolog.Nop())
 	return status, nil
 }
 

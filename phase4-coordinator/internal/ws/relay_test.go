@@ -281,8 +281,70 @@ func TestEncryptedRelayRejectsTamperedResponseChunk(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("aead error timeout")
 	}
-	if _, ok := sessionForTest(s, "p1", "s1").activeFor("req-tampered"); ok {
-		t.Fatal("tampered request still active")
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("tier2 session still stored after tampered response chunk")
+	}
+}
+
+func TestEncryptedRelayRejectsPlaintextResponseChunk(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-plaintext", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	s.handleInferenceChunk("p1", "s1", mustJSON(InferenceResponseChunk{
+		Type:      "inference_response_chunk",
+		RequestID: "req-plaintext",
+		Seq:       0,
+		Data:      `{"ok":true}`,
+	}))
+
+	select {
+	case err := <-relay.Errors:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("err = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("plaintext tier2 error timeout")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("tier2 session still stored after plaintext response chunk")
+	}
+}
+
+func TestEncryptedRelayNAKClosesSessionAndFailsRequest(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-provider-nak", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	s.handleNAK("p1", "s1", []byte(`{"type":"nak","in_reply_to":"req-provider-nak","error":{"code":"tier2_aead_decrypt_failed","message":"bad frame"}}`))
+
+	select {
+	case err := <-relay.Errors:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("err = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("tier2 nak error timeout")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("tier2 session still stored after provider decrypt failure")
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	if got.State != pool.StateUnavailable {
+		t.Fatalf("state = %s, want unavailable", got.State)
 	}
 }
 

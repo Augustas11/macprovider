@@ -253,12 +253,24 @@ final class Tier2ProviderSession: @unchecked Sendable {
 
     private static func transcript(providerID: String, assignedID: String, providerPublicKey: Data, coordinatorPublicKey: Data, selectedAEAD: String) -> Data {
         var data = Data("macprovider/spec008/pillar-b/transcript/v1".utf8)
-        data.append(Data(providerID.utf8))
-        data.append(Data(assignedID.utf8))
-        data.append(providerPublicKey)
-        data.append(coordinatorPublicKey)
-        data.append(Data(selectedAEAD.utf8))
+        appendTranscriptField(label: "provider_id", value: Data(providerID.utf8), to: &data)
+        appendTranscriptField(label: "assigned_id", value: Data(assignedID.utf8), to: &data)
+        appendTranscriptField(label: "provider_public", value: providerPublicKey, to: &data)
+        appendTranscriptField(label: "coordinator_public", value: coordinatorPublicKey, to: &data)
+        appendTranscriptField(label: "selected_aead", value: Data(selectedAEAD.utf8), to: &data)
         return Data(SHA256.hash(data: data))
+    }
+
+    private static func appendTranscriptField(label: String, value: Data, to data: inout Data) {
+        appendUInt32(UInt32(label.utf8.count), to: &data)
+        data.append(Data(label.utf8))
+        appendUInt32(UInt32(value.count), to: &data)
+        data.append(value)
+    }
+
+    private static func appendUInt32(_ value: UInt32, to data: inout Data) {
+        var bigEndian = value.bigEndian
+        withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
     }
 
     private static func uint64Value(_ value: Any?) -> UInt64? {

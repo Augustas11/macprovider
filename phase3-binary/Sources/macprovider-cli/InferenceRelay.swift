@@ -44,11 +44,15 @@ actor InferenceRelay {
             return
         }
         let body: String
-        if let tier2Session, message["encrypted"] as? Bool == true {
+        if let tier2Session {
+            guard message["encrypted"] as? Bool == true else {
+                try await sendNAK(inReplyTo: requestID, code: "tier2_encrypted_frame_required", message: "Tier-2 session requires encrypted inference_request frames")
+                return
+            }
             do {
                 body = try tier2Session.openRequestBody(message: message, requestID: requestID, stream: stream)
             } catch {
-                try await sendNAK(inReplyTo: "inference_request", code: "tier2_aead_decrypt_failed", message: "Encrypted inference_request failed authentication")
+                try await sendNAK(inReplyTo: requestID, code: "tier2_aead_decrypt_failed", message: "Encrypted inference_request failed authentication")
                 return
             }
         } else if let cleartextBody = message["body"] as? String {

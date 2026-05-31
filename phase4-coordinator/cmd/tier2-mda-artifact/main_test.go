@@ -64,7 +64,6 @@ func TestMakeAndCheckArtifactWithCoordinatorVerification(t *testing.T) {
 		t.Fatalf("contract-only summary should not claim coordinator verification: %s", contractOut.String())
 	}
 
-	var fullOut bytes.Buffer
 	if err := run([]string{
 		"check",
 		"--artifact", artifactPath,
@@ -73,14 +72,8 @@ func TestMakeAndCheckArtifactWithCoordinatorVerification(t *testing.T) {
 		"--provider-id", "provider-a",
 		"--provider-ecdh-public-key", providerECDH,
 		"--now", now.Format(time.RFC3339),
-	}, &fullOut, ioDiscard{}); err != nil {
-		t.Fatalf("full check: %v", err)
-	}
-	if !strings.Contains(fullOut.String(), `"attestation_status": "attested"`) {
-		t.Fatalf("full summary missing attested status: %s", fullOut.String())
-	}
-	if !strings.Contains(fullOut.String(), `"coordinator_verified": true`) {
-		t.Fatalf("full summary missing coordinator verification: %s", fullOut.String())
+	}, ioDiscard{}, ioDiscard{}); err == nil || !strings.Contains(err.Error(), `coordinator verifier returned "attestation_failed"`) {
+		t.Fatalf("full check err=%v, want fail-closed without binding signature", err)
 	}
 }
 

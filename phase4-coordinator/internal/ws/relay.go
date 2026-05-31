@@ -167,6 +167,18 @@ func (ps *providerSession) failActive(requestID string, err error) {
 	close(active.chunks)
 }
 
+func (ps *providerSession) failActiveOrAll(requestID string, err error) {
+	if strings.TrimSpace(requestID) == "" {
+		ps.failAll(err)
+		return
+	}
+	if _, ok := ps.activeFor(requestID); !ok {
+		ps.failAll(err)
+		return
+	}
+	ps.failActive(requestID, err)
+}
+
 func (ps *providerSession) cancelActive(requestID string, reason string, err error) {
 	active, ok := ps.removeActive(requestID)
 	if !ok {
@@ -222,6 +234,12 @@ func (ps *providerSession) useTier2Session(session *pool.Tier2Session) {
 		ps.tier2 = session
 	}
 	ps.tier2Mu.Unlock()
+}
+
+func (ps *providerSession) hasTier2Session() bool {
+	ps.tier2Mu.Lock()
+	defer ps.tier2Mu.Unlock()
+	return ps.tier2 != nil
 }
 
 func (ps *providerSession) sealInferenceRequest(provider pool.Provider, requestID string, body []byte, stream bool) ([]byte, error) {
@@ -426,11 +444,26 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		if err != nil {
 			tier2.LogAEADDecryptFailed(s.log, providerID, assignedID, requestID, err.Error())
 			tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, "aead_decrypt_failed")
-			session.failActive(requestID, ErrRelayAEADFailed)
+			session.failActiveOrAll(requestID, ErrRelayAEADFailed)
+			s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
+			s.sessions.Delete(sessionKey(providerID, assignedID))
 			_ = session.conn.Close()
 			session.close()
 			return
 		}
+	} else if session.hasTier2Session() {
+		requestID := envelope.RequestID
+		if requestID == "" {
+			requestID = "unknown"
+		}
+		tier2.LogAEADDecryptFailed(s.log, providerID, assignedID, requestID, "tier2 encrypted response chunk required")
+		tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, "unencrypted_tier2_frame")
+		session.failActiveOrAll(envelope.RequestID, ErrRelayAEADFailed)
+		s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
+		s.sessions.Delete(sessionKey(providerID, assignedID))
+		_ = session.conn.Close()
+		session.close()
+		return
 	} else if err := json.Unmarshal(payload, &chunk); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid inference_response_chunk")
 		return
@@ -482,7 +515,7 @@ func (s *Server) handleNAK(providerID, assignedID string, payload []byte) {
 		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid nak")
 		return
 	}
-	if nak.Error.Code != "unknown_message_type" && nak.Error.Code != "duplicate_request_id" {
+	if nak.Error.Code != "unknown_message_type" && nak.Error.Code != "duplicate_request_id" && nak.Error.Code != "tier2_aead_decrypt_failed" && nak.Error.Code != "tier2_encrypted_frame_required" {
 		s.log.Warn().Str("provider_id", providerID).Str("code", nak.Error.Code).Msg("provider nak")
 		return
 	}
@@ -493,7 +526,14 @@ func (s *Server) handleNAK(providerID, assignedID string, payload []byte) {
 		session.activeMu.Unlock()
 		s.pool.MarkHTTPForwardingOnly(providerID, assignedID)
 	}
-	if ok && nak.InReplyTo != "" {
+	if ok && (nak.Error.Code == "tier2_aead_decrypt_failed" || nak.Error.Code == "tier2_encrypted_frame_required") {
+		session.failActiveOrAll(nak.InReplyTo, ErrRelayAEADFailed)
+		tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, nak.InReplyTo, nak.Error.Code)
+		s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
+		s.sessions.Delete(sessionKey(providerID, assignedID))
+		_ = session.conn.Close()
+		session.close()
+	} else if ok && nak.InReplyTo != "" {
 		if active, found := session.removeActive(nak.InReplyTo); found {
 			active.errs <- ErrRelayNAKFallback
 			close(active.chunks)
