@@ -111,6 +111,13 @@ func (s *Store) Insert(ctx context.Context, row Row) error {
 	return insert(ctx, s.db, row)
 }
 
+func (s *Store) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
+	if s == nil || s.db == nil {
+		return nil, fmt.Errorf("store is closed")
+	}
+	return s.db.BeginTx(ctx, opts)
+}
+
 func (s *Store) InsertTx(ctx context.Context, tx *sql.Tx, row Row) error {
 	if tx == nil {
 		return fmt.Errorf("tx is required")

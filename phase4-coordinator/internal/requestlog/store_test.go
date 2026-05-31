@@ -273,6 +273,37 @@ CREATE TABLE request_log (
 	}
 }
 
+func TestRequestLogInsertTx(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	tx, err := store.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin tx: %v", err)
+	}
+	if err := store.InsertTx(ctx, tx, Row{
+		TSUtc:              time.Now().UTC(),
+		RequestID:          "req-tx",
+		Model:              "model-a",
+		ProviderAssignedID: "session-1",
+		Status:             200,
+		BuyerIP:            "127.0.0.1",
+	}); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("insert tx: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit tx: %v", err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM request_log WHERE request_id = ?`, "req-tx").Scan(&count); err != nil {
+		t.Fatalf("query tx row: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("tx row count = %d, want 1", count)
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))

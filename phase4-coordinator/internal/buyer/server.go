@@ -751,6 +751,7 @@ type chatMessage struct {
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	externalRequestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
 	requestID := requestIDForBuyerRequest(externalRequestID)
+	routingRequestID := uuid.NewString()
 	originalRequestID := requestID
 	startedAt := s.now()
 	routingDone := startedAt
@@ -827,7 +828,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		logRow(provider.AssignedID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, explicitRetries)
 	}
-	provider, routeErr := s.selectProvider(requestID, req, r.Header)
+	provider, routeErr := s.selectProvider(routingRequestID, req, r.Header)
 	if routeErr != nil {
 		routingDone = s.now()
 		logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
@@ -866,12 +867,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				if result == wsForwardProviderDisconnected {
 					if !failoverAttempted && !hasPinnedRoute(r.Header) {
-						next, nextRequestID, ok := s.failoverCandidate(requestID, req, r.Header, provider, excluded)
+						next, ok := s.failoverCandidate(uuid.NewString(), req, r.Header, provider, excluded)
 						if ok {
 							s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "failover", next.ProviderID)
 							failoverAttempted = true
 							provider = next
-							requestID = nextRequestID
 							continue
 						}
 					}
@@ -883,8 +883,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				logAttempt(provider, statusForForwardResult(result), attempt)
-				nextReqID := originalRequestID
-				next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
+				nextRouteID := uuid.NewString()
+				next, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
 				if routeErr != nil {
 					routingDone = s.now()
 					logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
@@ -896,8 +896,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				faultedProviders++
 				provider = next
 				excluded[routeKey(provider)] = struct{}{}
-				requestID = nextReqID
-				s.logRoutingDecision(requestID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
+				s.logRoutingDecision(nextRouteID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
 				continue
 			}
 			result, status, attempt := s.forwardStreaming(w, r, requestID, dispatchBody, provider, req.Model, s.attemptTimeout(r))
@@ -918,8 +917,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			logAttempt(provider, status, attempt)
-			nextReqID := originalRequestID
-			next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
+			nextRouteID := uuid.NewString()
+			next, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
 			if routeErr != nil {
 				routingDone = s.now()
 				logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
@@ -931,8 +930,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			faultedProviders++
 			provider = next
 			excluded[routeKey(provider)] = struct{}{}
-			requestID = nextReqID
-			s.logRoutingDecision(requestID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
+			s.logRoutingDecision(nextRouteID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
 		}
 	}
 	if provider.IsWSTunneled() {
@@ -960,8 +958,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				logAttempt(provider, http.StatusGatewayTimeout, attempt)
-				nextReqID := originalRequestID
-				next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
+				nextRouteID := uuid.NewString()
+				next, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
 				if routeErr != nil {
 					routingDone = s.now()
 					logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
@@ -973,7 +971,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				faultedProviders++
 				provider = next
 				excluded[routeKey(provider)] = struct{}{}
-				requestID = nextReqID
 				if provider.IsWSTunneled() {
 					continue
 				}
@@ -994,7 +991,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
 					return
 				}
-				next, nextRequestID, ok := s.failoverCandidate(requestID, req, r.Header, provider, excluded)
+				next, ok := s.failoverCandidate(uuid.NewString(), req, r.Header, provider, excluded)
 				if !ok {
 					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
 					logAttempt(provider, http.StatusBadGateway, attempt)
@@ -1005,7 +1002,6 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				logAttempt(provider, http.StatusBadGateway, attempt)
 				failoverAttempted = true
 				provider = next
-				requestID = nextRequestID
 				if provider.IsWSTunneled() {
 					continue
 				}
@@ -1016,7 +1012,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				excluded[routeKey(provider)] = struct{}{}
 				logAttempt(provider, http.StatusBadGateway, attempt)
 			}
-			provider, routeErr = s.selectProviderExcluding(requestID, req, r.Header, excluded)
+			provider, routeErr = s.selectProviderExcluding(uuid.NewString(), req, r.Header, excluded)
 			if routeErr != nil {
 				routingDone = s.now()
 				logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
@@ -1113,8 +1109,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			errMsg = err.Error()
 		}
 		logRow(provider.AssignedID, failStatus, nil, nil, errMsg, attempt.ErrorCode, explicitRetries)
-		nextReqID := originalRequestID
-		next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
+		nextRouteID := uuid.NewString()
+		next, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
 		if routeErr != nil {
 			routingDone = s.now()
 			logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
@@ -1126,8 +1122,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		faultedProviders++
 		provider = next
 		excluded[routeKey(provider)] = struct{}{}
-		requestID = nextReqID
-		s.logRoutingDecision(requestID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
+		s.logRoutingDecision(nextRouteID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
 	}
 }
 
@@ -1835,23 +1830,22 @@ func (s *Server) selectProvider(requestID string, req chatRequest, headers http.
 	return s.selectProviderExcluding(requestID, req, headers, nil)
 }
 
-func (s *Server) failoverCandidate(requestID string, req chatRequest, headers http.Header, failed pool.Provider, excluded map[string]struct{}) (pool.Provider, string, bool) {
+func (s *Server) failoverCandidate(requestID string, req chatRequest, headers http.Header, failed pool.Provider, excluded map[string]struct{}) (pool.Provider, bool) {
 	if !s.failoverEnabled || hasPinnedRoute(headers) {
-		return pool.Provider{}, "", false
+		return pool.Provider{}, false
 	}
 	if excluded == nil {
 		excluded = map[string]struct{}{}
 	}
 	excluded[routeKey(failed)] = struct{}{}
-	nextRequestID := requestID
 	failoverHeaders := headers.Clone()
 	failoverHeaders.Del("X-MacProvider-Provider")
 	failoverHeaders.Del("X-MacProvider-Session")
-	next, routeErr := s.selectProviderExcluding(nextRequestID, req, failoverHeaders, excluded)
+	next, routeErr := s.selectProviderExcluding(requestID, req, failoverHeaders, excluded)
 	if routeErr != nil {
-		return pool.Provider{}, "", false
+		return pool.Provider{}, false
 	}
-	return next, nextRequestID, true
+	return next, true
 }
 
 func hasPinnedRoute(headers http.Header) bool {
@@ -2633,7 +2627,7 @@ func spec001EndStatus(status string) string {
 }
 
 func endErrorMessage(end providerws.InferenceResponseEnd) string {
-	if end.Status != "" {
+	if spec001EndStatus(end.Status) != "" {
 		return end.Status
 	}
 	return "Provider failed during inference"
