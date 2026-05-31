@@ -372,9 +372,7 @@ func (s *Store) ReserveQuota(ctx context.Context, req storage.ReservationRequest
 		RemainingTokens: max64(0, remaining), ResetUnix: resetUnix(req.WindowDate),
 	}
 	if req.RequestedTokens > remaining {
-		if err := tx.Commit(); err != nil {
-			return storage.QuotaDecision{}, err
-		}
+		tx.Rollback() // read-only path; rollback is equivalent to commit here
 		return decision, storage.ErrQuotaExceeded
 	}
 	if req.ExpiresAt.IsZero() {

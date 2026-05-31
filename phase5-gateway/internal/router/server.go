@@ -1062,7 +1062,29 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
 		return
 	}
+	if err != nil && decision.Admitted {
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+	}
+	// Belt-and-suspenders: if the store returned an unexpected error but the
+	// decision already shows quota exceeded, surface 429 rather than 500.
+	if err != nil && !decision.Admitted && decision.RemainingTokens == 0 && decision.LimitTokens > 0 {
+		setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
+		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "quota_exhausted", "Quota exhausted")
+		return
+	}
 	if err != nil {
+		// Defensive cleanup: if the reservation INSERT committed before the
+		// context was cancelled (commit-boundary race), this unwinds it.
+		// If no row was written, RefundReservation is a safe no-op
+		// (returns ErrReservationNotFound which we ignore here).
+		if !decision.Admitted {
+			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		}
+		// If the error is a client disconnect, avoid writing a response to a
+		// dead connection — the buyer already gave up.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return
+		}
 		writeError(w, http.StatusInternalServerError, "server_error", "quota_reservation_failed", "Could not reserve quota")
 		return
 	}

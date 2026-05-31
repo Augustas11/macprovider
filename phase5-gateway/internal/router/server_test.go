@@ -946,6 +946,92 @@ func TestChatCompletionsCoordinatorRequestCancelsWithBuyerContext(t *testing.T) 
 	assertErrorCode(t, resp.Body.String(), "coordinator_unavailable")
 }
 
+// Pre-fix diagnostic captured by fix-stash-test:
+// server_test.go:1113: RefundReservation calls=0, want 1 after committed reservation/cancel race
+func TestQuotaReservationLeakOnContextCancel(t *testing.T) {
+	_, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(noopClient()))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_reserve_cancel")
+	ctx, cancel := context.WithCancel(context.Background())
+	reservationInserted := false
+	fakeStore := &quotaReserveFakeStore{
+		Store: store,
+		decision: storage.QuotaDecision{
+			Admitted: true, LimitTokens: cfg.Quotas.AccountDailyTokens, UsedTokens: 0,
+			ReservedTokens: 4096, RemainingTokens: cfg.Quotas.AccountDailyTokens - 4096,
+			ResetUnix: resetUnix(fixedNow().UTC().Format("2006-01-02")),
+		},
+		err: context.Canceled,
+		onReserve: func() {
+			reservationInserted = true
+			cancel()
+		},
+	}
+	h := New(cfg, fakeStore, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient())).Handler()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"llama","max_tokens":4096,"messages":[{"role":"user","content":"hi"}]}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if !reservationInserted {
+		t.Fatal("fake reservation insert side-channel was not set")
+	}
+	if fakeStore.refundCalls != 1 {
+		t.Fatalf("RefundReservation calls=%d, want 1 after committed reservation/cancel race", fakeStore.refundCalls)
+	}
+	if resp.Code == http.StatusInternalServerError || strings.Contains(resp.Body.String(), "quota_reservation_failed") {
+		t.Fatalf("context-cancelled reservation returned status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+// Pre-fix diagnostic captured by fix-stash-test:
+// server_test.go:1139: status=500, want 429 body={"error":{"code":"quota_reservation_failed","message":"Could not reserve quota","type":"server_error"}}
+func TestQuotaExhaustedReturns429Not500(t *testing.T) {
+	_, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(noopClient()))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_quota_opaque_error")
+	fakeStore := &quotaReserveFakeStore{
+		Store: store,
+		decision: storage.QuotaDecision{
+			LimitTokens: 1000, UsedTokens: 1000, RemainingTokens: 0,
+			ResetUnix: resetUnix(fixedNow().UTC().Format("2006-01-02")),
+		},
+		err: errors.New("opaque quota rejection commit error"),
+	}
+	h := New(cfg, fakeStore, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient())).Handler()
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if resp.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d, want 429 body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "quota_exhausted") {
+		t.Fatalf("body missing quota_exhausted: %s", resp.Body.String())
+	}
+}
+
+type quotaReserveFakeStore struct {
+	*sqlite.Store
+	decision    storage.QuotaDecision
+	err         error
+	onReserve   func()
+	refundCalls int
+}
+
+func (f *quotaReserveFakeStore) ReserveQuota(context.Context, storage.ReservationRequest) (storage.QuotaDecision, error) {
+	if f.onReserve != nil {
+		f.onReserve()
+	}
+	return f.decision, f.err
+}
+
+func (f *quotaReserveFakeStore) RefundReservation(context.Context, string, string, int64) error {
+	f.refundCalls++
+	return nil
+}
+
 func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":200,"messages":[{"role":"user","content":"count slowly"}]}`
 	accountID := "acct_stream_estimated"
