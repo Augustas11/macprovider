@@ -25,6 +25,9 @@ type Config struct {
 	Auth                         AuthConfig                   `yaml:"auth"`
 	Storage                      StorageConfig                `yaml:"storage"`
 	Logging                      LoggingConfig                `yaml:"logging"`
+	Rewards                      RewardsConfig                `yaml:"rewards"`
+	Settlement                   SettlementConfig             `yaml:"settlement"`
+	Endpoints                    EndpointsConfig              `yaml:"endpoints"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
 }
 
@@ -158,6 +161,30 @@ type LoggingConfig struct {
 	Format string `yaml:"format"`
 }
 
+type RateCardEntry struct {
+	PromptCreditsPerMtok     int64 `yaml:"prompt_credits_per_mtok"`
+	CompletionCreditsPerMtok int64 `yaml:"completion_credits_per_mtok"`
+}
+
+type RewardsConfig struct {
+	GlobalMultiplier float64                  `yaml:"global_multiplier"`
+	ProviderShare    float64                  `yaml:"provider_share"`
+	RateCard         map[string]RateCardEntry `yaml:"rate_card"`
+}
+
+type SettlementConfig struct {
+	CadenceDays                 int   `yaml:"cadence_days"`
+	MinPayoutCredits            int64 `yaml:"min_payout_credits"`
+	StartupReconcileWindowHours int   `yaml:"startup_reconcile_window_hours"`
+	NightlyReconcileWindowDays  int   `yaml:"nightly_reconcile_window_days"`
+	RecoveryGraceSeconds        int   `yaml:"recovery_grace_seconds"`
+	JobEnabled                  bool  `yaml:"job_enabled"`
+}
+
+type EndpointsConfig struct {
+	ProviderEarningsRateLimitPerMinute int `yaml:"provider_earnings_rate_limit_per_minute"`
+}
+
 type ProviderConfig struct {
 	ProviderID  string `yaml:"provider_id"`
 	EndpointURL string `yaml:"endpoint_url"`
@@ -249,6 +276,27 @@ func Default() Config {
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "json",
+		},
+		Rewards: RewardsConfig{
+			GlobalMultiplier: 1.0,
+			ProviderShare:    0.90,
+			RateCard: map[string]RateCardEntry{
+				"default": {
+					PromptCreditsPerMtok:     500000,
+					CompletionCreditsPerMtok: 1000000,
+				},
+			},
+		},
+		Settlement: SettlementConfig{
+			CadenceDays:                 7,
+			MinPayoutCredits:            500000,
+			StartupReconcileWindowHours: 24,
+			NightlyReconcileWindowDays:  7,
+			RecoveryGraceSeconds:        30,
+			JobEnabled:                  true,
+		},
+		Endpoints: EndpointsConfig{
+			ProviderEarningsRateLimitPerMinute: 60,
 		},
 	}
 }
@@ -419,6 +467,38 @@ func (c Config) Validate() error {
 	}
 	if c.Tier2.ResponseTimeAnomalyMinMS < 0 {
 		return fmt.Errorf("tier2.response_time_anomaly_min_ms must be >= 0")
+	}
+	if c.Rewards.ProviderShare < 0 || c.Rewards.ProviderShare > 1 {
+		return fmt.Errorf("rewards.provider_share must be in [0.0, 1.0]")
+	}
+	if c.Rewards.GlobalMultiplier <= 0 {
+		return fmt.Errorf("rewards.global_multiplier must be > 0")
+	}
+	if c.Settlement.CadenceDays <= 0 {
+		return fmt.Errorf("settlement.cadence_days must be > 0")
+	}
+	if c.Settlement.MinPayoutCredits < 0 {
+		return fmt.Errorf("settlement.min_payout_credits must be >= 0")
+	}
+	if c.Settlement.StartupReconcileWindowHours <= 0 {
+		return fmt.Errorf("settlement.startup_reconcile_window_hours must be > 0")
+	}
+	if c.Settlement.NightlyReconcileWindowDays <= 0 {
+		return fmt.Errorf("settlement.nightly_reconcile_window_days must be > 0")
+	}
+	if c.Settlement.RecoveryGraceSeconds < 0 {
+		return fmt.Errorf("settlement.recovery_grace_seconds must be >= 0")
+	}
+	if c.Endpoints.ProviderEarningsRateLimitPerMinute <= 0 {
+		return fmt.Errorf("endpoints.provider_earnings_rate_limit_per_minute must be > 0")
+	}
+	if _, ok := c.Rewards.RateCard["default"]; !ok {
+		return fmt.Errorf("rewards.rate_card must contain default")
+	}
+	for model, entry := range c.Rewards.RateCard {
+		if entry.PromptCreditsPerMtok < 0 || entry.CompletionCreditsPerMtok < 0 {
+			return fmt.Errorf("rewards.rate_card.%s rates must be >= 0", model)
+		}
 	}
 	seen := map[string]struct{}{}
 	for _, p := range c.Providers {

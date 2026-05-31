@@ -18,6 +18,38 @@ func TestModelClassRejectsMembersAndModelsTogether(t *testing.T) {
 	}
 }
 
+func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	if cfg.Rewards.GlobalMultiplier != 1.0 || cfg.Rewards.ProviderShare != 0.90 {
+		t.Fatalf("unexpected rewards defaults: %+v", cfg.Rewards)
+	}
+	if cfg.Rewards.RateCard["default"].PromptCreditsPerMtok != 500000 ||
+		cfg.Rewards.RateCard["default"].CompletionCreditsPerMtok != 1000000 {
+		t.Fatalf("unexpected default rate card: %+v", cfg.Rewards.RateCard["default"])
+	}
+	if cfg.Settlement.CadenceDays != 7 || cfg.Settlement.MinPayoutCredits != 500000 ||
+		cfg.Settlement.StartupReconcileWindowHours != 24 || cfg.Settlement.NightlyReconcileWindowDays != 7 ||
+		cfg.Settlement.RecoveryGraceSeconds != 30 || !cfg.Settlement.JobEnabled {
+		t.Fatalf("unexpected settlement defaults: %+v", cfg.Settlement)
+	}
+	if cfg.Endpoints.ProviderEarningsRateLimitPerMinute != 60 {
+		t.Fatalf("unexpected endpoints defaults: %+v", cfg.Endpoints)
+	}
+
+	cfg.Rewards.ProviderShare = 1.01
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "provider_share") {
+		t.Fatalf("provider share validation err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	delete(cfg.Rewards.RateCard, "default")
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "rate_card") {
+		t.Fatalf("default rate-card validation err=%v", err)
+	}
+}
+
 func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"

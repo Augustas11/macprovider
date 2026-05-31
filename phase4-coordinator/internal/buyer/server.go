@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
@@ -62,10 +63,14 @@ type Server struct {
 	tier2Mu                sync.RWMutex
 	tier2                  config.Tier2Config
 	reqLog                 requestLogInserter
+	reqLogStore            *requestlog.Store
 	provisionalWeight      float64
 	maxChatBodyBytes       int64
 	recovering             sync.Map
 	poolCheckLast          sync.Map
+	billing                *billing.Store
+	billingCfg             config.RewardsConfig
+	billingSnapshotID      int64
 	now                    func() time.Time
 }
 
@@ -246,7 +251,28 @@ func WithAdmission(admission *providerws.AdmissionManager, provisionalWeight flo
 func WithRequestLog(store requestLogInserter) Option {
 	return func(s *Server) {
 		s.reqLog = store
+		if typed, ok := store.(*requestlog.Store); ok {
+			s.reqLogStore = typed
+		}
 	}
+}
+
+func WithBilling(store *billing.Store, cfg config.RewardsConfig) Option {
+	return func(s *Server) {
+		s.billing = store
+		s.billingCfg = cfg
+	}
+}
+
+func WithBillingSnapshotID(snapshotID int64) Option {
+	return func(s *Server) {
+		s.billingSnapshotID = snapshotID
+	}
+}
+
+func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64) {
+	s.billingCfg = cfg
+	s.billingSnapshotID = snapshotID
 }
 
 func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Time, opts ...Option) *Server {
@@ -788,6 +814,39 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 		defer cancel()
+		if s.billing != nil && s.reqLogStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
+			stableProviderID := ""
+			for _, p := range s.pool.Snapshot() {
+				if p.AssignedID == providerAssignedID {
+					stableProviderID = p.ProviderID
+					break
+				}
+			}
+			if stableProviderID != "" {
+				err := s.billing.WriteHotPath(ctx, s.reqLogStore, row, billing.HotPathInput{
+					RequestID:          row.RequestID,
+					AttemptN:           retried,
+					ProviderAssignedID: providerAssignedID,
+					ProviderID:         stableProviderID,
+					Model:              row.Model,
+					Status:             status,
+					Stream:             row.Stream,
+					TSUtc:              row.TSUtc,
+					PromptTokens:       promptTok,
+					CompletionTokens:   completionTok,
+					ErrorCode:          errCode,
+					FaultFlag:          billing.FaultNone,
+					ConfigSnapshotID:   s.billingSnapshotID,
+					RateEntry:          billing.RateFor(s.billingCfg.RateCard, row.Model),
+					MultiplierPPM:      billing.ParseMultiplierPPM(s.billingCfg.GlobalMultiplier),
+					ProviderShareBps:   billing.ParseShareBps(s.billingCfg.ProviderShare),
+				})
+				if err != nil {
+					s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("billing hot-path insert failed")
+				}
+				return
+			}
+		}
 		if err := s.reqLog.Insert(ctx, row); err != nil {
 			s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("request_log insert failed")
 		}

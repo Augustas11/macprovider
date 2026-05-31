@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -53,6 +54,16 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	billingStore, err := billing.NewStore(reqLogStore.DB())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "billing: %v\n", err)
+		os.Exit(1)
+	}
+	snapshotID, err := billingStore.InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
+		os.Exit(1)
+	}
 	wsOpts := []providerws.Option{}
 	if cfg.Auth.RequireProviderTokens {
 		wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
@@ -76,19 +87,37 @@ func main() {
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithRequestLog(reqLogStore),
+		buyer.WithBilling(billingStore, cfg.Rewards),
+		buyer.WithBillingSnapshotID(snapshotID),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
 			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err
 		}),
 	)
+	shutdownCtx, stopBackground := context.WithCancel(context.Background())
+	defer stopBackground()
 	providerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
+	billingHandler := billingStore.Handlers(
+		cfg.Auth.OperatorKey,
+		tokenStore,
+		cfg.Auth.RequireProviderTokens,
+		cfg.Endpoints.ProviderEarningsRateLimitPerMinute,
+	)
+	providerMux.Handle("/admin/ledger/", billingHandler)
+	providerMux.Handle("/providers/", billingHandler)
 	providerHTTP := &http.Server{Addr: providerAddr, Handler: providerMux}
 	buyerHTTP := &http.Server{Addr: buyerAddr, Handler: buyerServer.Handler()}
 	errs := make(chan error, 2)
+
+	if err := billingStore.StartStartupScan(context.Background(), cfg.Settlement, time.Now().UTC()); err != nil {
+		logger.Warn().Err(err).Msg("billing startup scan failed")
+	}
+	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
+	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
 
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
@@ -105,7 +134,7 @@ func main() {
 		select {
 		case sig := <-signals:
 			if sig == syscall.SIGHUP {
-				reloadTier2Config(*configPath, cfg.Tier2, logger, wsServer, buyerServer)
+				reloadTier2Config(*configPath, cfg.Tier2, logger, wsServer, buyerServer, billingStore)
 				continue
 			}
 			timeout := 30 * time.Second
@@ -113,6 +142,7 @@ func main() {
 				timeout = 5 * time.Second
 			}
 			logger.Info().Str("signal", sig.String()).Dur("timeout", timeout).Msg("coordinator shutdown requested")
+			stopBackground()
 			wsServer.DrainAll("coordinator shutdown")
 			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
@@ -135,7 +165,7 @@ func main() {
 	}
 }
 
-func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server) {
+func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server, billingStores ...*billing.Store) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
@@ -159,6 +189,14 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 	}
 	wsServer.SetTier2Config(cfg.Tier2)
 	buyerServer.SetTier2Config(cfg.Tier2)
+	if len(billingStores) > 0 && billingStores[0] != nil {
+		snapshotID, err := billingStores[0].InsertConfigSnapshot(context.Background(), cfg.Rewards, time.Now().UTC())
+		if err != nil {
+			logger.Error().Err(err).Msg("billing config snapshot reload rejected")
+			return
+		}
+		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID)
+	}
 	updated := wsServer.RefreshTier2HashStatuses()
 	logger.Info().Int("provider_hash_statuses_updated", updated).Msg("tier2 config reloaded")
 }
