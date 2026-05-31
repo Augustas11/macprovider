@@ -35,6 +35,7 @@ const (
 
 type Server struct {
 	cfg       config.Config
+	tier2Mu   sync.RWMutex
 	pool      *pool.Registry
 	log       zerolog.Logger
 	now       func() time.Time
@@ -91,6 +92,37 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 
 func (s *Server) Admission() *AdmissionManager {
 	return s.admission
+}
+
+func (s *Server) SetTier2Config(cfg config.Tier2Config) {
+	s.tier2Mu.Lock()
+	defer s.tier2Mu.Unlock()
+	s.cfg.Tier2 = cfg
+}
+
+func (s *Server) RefreshTier2HashStatuses() int {
+	cfg := s.tier2Config()
+	if !tier2.ModelHashActive(cfg) {
+		return s.pool.UpdateHashStatuses(func(pool.Provider) pool.HashStatus {
+			return ""
+		})
+	}
+	return s.pool.UpdateHashStatuses(func(provider pool.Provider) pool.HashStatus {
+		next := tier2.VerifyProviderHash(provider.ModelID, provider.ModelHash)
+		if next != provider.HashStatus {
+			tier2.LogProviderHashStatus(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
+		}
+		if cfg.RequireHashVerified && (next == pool.HashStatusUncatalogued || next == pool.HashStatusCatalogUnavailable) {
+			tier2.LogHashRequiredProviderExcluded(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
+		}
+		return next
+	})
+}
+
+func (s *Server) tier2Config() config.Tier2Config {
+	s.tier2Mu.RLock()
+	defer s.tier2Mu.RUnlock()
+	return s.cfg.Tier2
 }
 
 func (s *Server) Handler() http.Handler {
@@ -225,10 +257,15 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 	assignedID = s.newUUID()
 	providerID = hello.ProviderID
 	now := s.now()
-	hashStatus := tier2.VerifyProviderHash(hello.ModelID, hello.ModelHash)
-	tier2.LogProviderHashStatus(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
-	if s.cfg.Tier2.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
-		tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
+	hashStatus := pool.HashStatus("")
+	modelHash := hello.ModelHash
+	tier2Cfg := s.tier2Config()
+	if tier2.ModelHashActive(tier2Cfg) {
+		hashStatus = tier2.VerifyProviderHash(hello.ModelID, hello.ModelHash)
+		tier2.LogProviderHashStatus(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
+		if tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
+			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
+		}
 	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
@@ -255,7 +292,7 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		LastActivityAt:        now,
 		ConnectedAt:           now,
 		BinaryVersion:         hello.BinaryVersion,
-		ModelHash:             hello.ModelHash,
+		ModelHash:             modelHash,
 		HashStatus:            hashStatus,
 	}
 	if old := s.pool.Register(entry, conn); old != nil {
@@ -976,6 +1013,16 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	providers := s.pool.Snapshot()
+	if !tier2.ModelHashActive(s.tier2Config()) {
+		for i := range providers {
+			providers[i].ModelHash = ""
+			providers[i].HashStatus = ""
+		}
+	} else {
+		for i := range providers {
+			providers[i].HashStatus = tier2.VerifyProviderHash(providers[i].ModelID, providers[i].ModelHash)
+		}
+	}
 	modelSet := map[string]struct{}{}
 	summary := struct {
 		TotalProviders int      `json:"total_providers"`

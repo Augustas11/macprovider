@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"reflect"
+	"strings"
 	"syscall"
 	"time"
 
@@ -87,29 +89,120 @@ func main() {
 	}()
 
 	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
-	select {
-	case sig := <-signals:
-		timeout := 30 * time.Second
-		if sig == syscall.SIGINT {
-			timeout = 5 * time.Second
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	for {
+		select {
+		case sig := <-signals:
+			if sig == syscall.SIGHUP {
+				reloadTier2Config(*configPath, cfg.Tier2, logger, wsServer, buyerServer)
+				continue
+			}
+			timeout := 30 * time.Second
+			if sig == syscall.SIGINT {
+				timeout = 5 * time.Second
+			}
+			logger.Info().Str("signal", sig.String()).Dur("timeout", timeout).Msg("coordinator shutdown requested")
+			wsServer.DrainAll("coordinator shutdown")
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+			if err := buyerHTTP.Shutdown(ctx); err != nil {
+				logger.Error().Err(err).Msg("buyer http shutdown failed")
+				os.Exit(1)
+			}
+			if err := providerHTTP.Shutdown(ctx); err != nil {
+				logger.Error().Err(err).Msg("provider http shutdown failed")
+				os.Exit(1)
+			}
+			logger.Info().Msg("coordinator shutdown complete")
+			return
+		case err := <-errs:
+			if err != nil && err != http.ErrServerClosed {
+				logger.Fatal().Err(err).Msg("coordinator server stopped")
+			}
+			return
 		}
-		logger.Info().Str("signal", sig.String()).Dur("timeout", timeout).Msg("coordinator shutdown requested")
-		wsServer.DrainAll("coordinator shutdown")
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		if err := buyerHTTP.Shutdown(ctx); err != nil {
-			logger.Error().Err(err).Msg("buyer http shutdown failed")
-			os.Exit(1)
+	}
+}
+
+func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logger zerolog.Logger, wsServer *providerws.Server, buyerServer *buyer.Server) {
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		logger.Error().Err(err).Msg("tier2 config reload rejected")
+		return
+	}
+	if tier2StartupFieldsChanged(startupTier2, cfg.Tier2) {
+		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
+		return
+	}
+	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
+		logger.Error().Err(err).Msg("tier2 config reload rejected")
+		return
+	}
+	if cfg.Tier2.RequireHashVerified && !tier2.Active() {
+		logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires the startup catalog to be active")
+		return
+	}
+	wsServer.SetTier2Config(cfg.Tier2)
+	buyerServer.SetTier2Config(cfg.Tier2)
+	updated := wsServer.RefreshTier2HashStatuses()
+	logger.Info().Int("provider_hash_statuses_updated", updated).Msg("tier2 config reloaded")
+}
+
+func tier2StartupFieldsChanged(startup, next config.Tier2Config) bool {
+	startupValue := reflect.ValueOf(startup)
+	nextValue := reflect.ValueOf(next)
+	fields := reflect.TypeOf(config.Tier2Config{})
+	for i := 0; i < fields.NumField(); i++ {
+		name := fields.Field(i).Name
+		class, ok := tier2ReloadFieldClasses[name]
+		if !ok || class != tier2HotReloadable {
+			if tier2ReloadFieldChanged(name, startupValue.Field(i), nextValue.Field(i)) {
+				return true
+			}
 		}
-		if err := providerHTTP.Shutdown(ctx); err != nil {
-			logger.Error().Err(err).Msg("provider http shutdown failed")
-			os.Exit(1)
-		}
-		logger.Info().Msg("coordinator shutdown complete")
-	case err := <-errs:
-		if err != nil && err != http.ErrServerClosed {
-			logger.Fatal().Err(err).Msg("coordinator server stopped")
-		}
+	}
+	return false
+}
+
+type tier2ReloadFieldClass string
+
+const (
+	tier2HotReloadable tier2ReloadFieldClass = "hot_reloadable"
+	tier2StartupOnly   tier2ReloadFieldClass = "startup_only"
+	tier2Phase1Blocked tier2ReloadFieldClass = "phase1_blocked"
+)
+
+var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
+	"ObserveEnabled":      tier2HotReloadable,
+	"RequireHashVerified": tier2HotReloadable,
+
+	"CatalogPath":                    tier2StartupOnly,
+	"CatalogPublicKey":               tier2StartupOnly,
+	"EncryptedLegAEAD":               tier2StartupOnly,
+	"EncryptedLegRekeyAfterRequests": tier2StartupOnly,
+	"EncryptedLegRekeyAfterSeconds":  tier2StartupOnly,
+	"AttestationRoots":               tier2StartupOnly,
+	"AttestationFormats":             tier2StartupOnly,
+	"RequireEncryptedLeg":            tier2HotReloadable,
+	"RequireAttestation":             tier2HotReloadable,
+	"AttestationMaxAgeS":             tier2HotReloadable,
+	"BehavioralSafetyEnabled":        tier2HotReloadable,
+	"OutputSizeCapBytes":             tier2HotReloadable,
+	"OutputBytesPerTokenCeiling":     tier2HotReloadable,
+	"DefaultOutputSizeCapBytes":      tier2HotReloadable,
+	"EncodingValidationEnabled":      tier2HotReloadable,
+	"ResponseTimeAnomalyEnabled":     tier2HotReloadable,
+	"ResponseTimeAnomalyFactor":      tier2HotReloadable,
+	"ResponseTimeAnomalyMinMS":       tier2HotReloadable,
+}
+
+func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
+	switch name {
+	case "CatalogPath":
+		return startup.String() != next.String()
+	case "CatalogPublicKey":
+		return strings.TrimSpace(startup.String()) != strings.TrimSpace(next.String())
+	default:
+		return !reflect.DeepEqual(startup.Interface(), next.Interface())
 	}
 }

@@ -58,6 +58,7 @@ type Server struct {
 	sticky                 map[string]stickyEntry
 	stickyMu               sync.Mutex
 	internalAuthKey        string
+	tier2Mu                sync.RWMutex
 	tier2                  config.Tier2Config
 	provisionalWeight      float64
 	recovering             sync.Map
@@ -181,8 +182,20 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 
 func WithTier2Config(cfg config.Tier2Config) Option {
 	return func(s *Server) {
-		s.tier2 = cfg
+		s.SetTier2Config(cfg)
 	}
+}
+
+func (s *Server) SetTier2Config(cfg config.Tier2Config) {
+	s.tier2Mu.Lock()
+	defer s.tier2Mu.Unlock()
+	s.tier2 = cfg
+}
+
+func (s *Server) tier2Config() config.Tier2Config {
+	s.tier2Mu.RLock()
+	defer s.tier2Mu.RUnlock()
+	return s.tier2
 }
 
 func WithInternalAuthKey(key string) Option {
@@ -270,7 +283,47 @@ func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
 			"retry_per_attempt_timeout_s":   int(s.retryPerAttemptTimeout.Seconds()),
 			"max_providers_faulted_request": s.maxFaultedPerRequest,
 		},
+		"tier2": s.internalTier2Metadata(),
 	})
+}
+
+func (s *Server) internalTier2Metadata() map[string]any {
+	cfg := s.tier2Config()
+	active := s.pillarAActive()
+	observedModelHash := s.observedModelHashEvidence()
+	modelHashState := "none"
+	if active && cfg.RequireHashVerified {
+		modelHashState = "required"
+	}
+	return map[string]any{
+		"phase": tier2.PhaseForConfigWithModelHashEvidence(cfg, observedModelHash),
+		"model_hash": map[string]any{
+			"active":              active,
+			"state":               modelHashState,
+			"require_verified":    cfg.RequireHashVerified,
+			"catalog_configured":  strings.TrimSpace(cfg.CatalogPath) != "",
+			"catalog_available":   tier2.Active(),
+			"catalog_load_failed": tier2.LoadFailed(),
+		},
+		"encrypted_leg": map[string]any{
+			"state": "none",
+		},
+		"attestation": map[string]any{
+			"state": "none",
+		},
+		"behavioral_safety": map[string]any{
+			"state": "none",
+		},
+	}
+}
+
+func (s *Server) observedModelHashEvidence() bool {
+	for _, p := range s.pool.Snapshot() {
+		if strings.TrimSpace(p.ModelHash) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) handleInternalStickyDelete(w http.ResponseWriter, r *http.Request) {
@@ -405,8 +458,9 @@ func clientIP(r *http.Request) string {
 }
 
 type modelsResponse struct {
-	Object string       `json:"object"`
-	Data   []modelEntry `json:"data"`
+	Object string         `json:"object"`
+	Data   []modelEntry   `json:"data"`
+	Tier2  map[string]any `json:"tier2,omitempty"`
 }
 
 type modelEntry struct {
@@ -434,10 +488,36 @@ type hashVerification struct {
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	models := map[string]modelEntry{}
-	for _, p := range s.pool.Snapshot() {
-		if p.State != pool.StateReady {
+	providers := s.pool.Snapshot()
+	cfg := s.tier2Config()
+	pillarAActive := tier2.ModelHashActive(cfg)
+	for _, p := range providers {
+		if !pillarAActive {
+			if p.State != pool.StateReady {
+				continue
+			}
+			entry := models[p.ModelID]
+			if entry.ID == "" {
+				entry = modelEntry{
+					ID:      p.ModelID,
+					Object:  "model",
+					Created: s.createdAt,
+					OwnedBy: "macprovider",
+				}
+			}
+			entry.ProviderCount++
+			if p.MaxContextTokens > entry.MaxContextTokens {
+				entry.MaxContextTokens = p.MaxContextTokens
+			}
+			entry.TotalSlots += p.SlotsTotal
+			models[p.ModelID] = entry
 			continue
 		}
+		if !baseRoutingEligible(p) {
+			continue
+		}
+		status := s.effectiveHashStatus(p, cfg)
+		excluded := s.tier2ProviderExcludedStatus(status, cfg)
 		entry := models[p.ModelID]
 		if entry.ID == "" {
 			entry = modelEntry{
@@ -447,11 +527,13 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 				OwnedBy: "macprovider",
 			}
 		}
-		entry.ProviderCount++
-		if p.MaxContextTokens > entry.MaxContextTokens {
-			entry.MaxContextTokens = p.MaxContextTokens
+		if !excluded {
+			entry.ProviderCount++
+			if p.MaxContextTokens > entry.MaxContextTokens {
+				entry.MaxContextTokens = p.MaxContextTokens
+			}
+			entry.TotalSlots += p.SlotsTotal
 		}
-		entry.TotalSlots += p.SlotsTotal
 		models[p.ModelID] = entry
 	}
 
@@ -465,13 +547,12 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			Objective: class.Objective, Members: append([]string(nil), modelClassMembers(&class)...),
 		})
 	}
-	if s.pillarAActive() {
-		providers := s.pool.Snapshot()
+	if pillarAActive {
 		for i := range data {
 			if data[i].Objective != "" {
 				continue
 			}
-			s.applyHashVerification(&data[i], providers)
+			s.applyHashVerification(&data[i], providers, cfg)
 		}
 	}
 	sort.Slice(data, func(i, j int) bool {
@@ -479,32 +560,38 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	})
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(modelsResponse{Object: "list", Data: data}); err != nil {
+	resp := modelsResponse{Object: "list", Data: data}
+	if pillarAActive {
+		resp.Tier2 = s.internalTier2Metadata()
+	}
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		s.log.Warn().Err(err).Msg("write models response failed")
 	}
 }
 
 func (s *Server) pillarAActive() bool {
-	return s.tier2.ObserveEnabled || s.tier2.CatalogPath != "" || s.tier2.RequireHashVerified
+	return tier2.ModelHashActive(s.tier2Config())
 }
 
-func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provider) {
+func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provider, cfg config.Tier2Config) {
 	modelProviders := make([]pool.Provider, 0)
 	catalogUnavailable := false
 	for _, p := range providers {
-		if p.State != pool.StateReady || !modelIDEqual(p.ModelID, entry.ID) {
+		if !baseRoutingEligible(p) || !modelIDEqual(p.ModelID, entry.ID) {
 			continue
 		}
-		if p.HashStatus == pool.HashStatusCatalogUnavailable {
+		status := s.effectiveHashStatus(p, cfg)
+		if status == pool.HashStatusCatalogUnavailable {
 			catalogUnavailable = true
 		}
+		p.HashStatus = status
 		modelProviders = append(modelProviders, p)
 	}
 	counts := tier2.CountsForProviders(entry.ID, modelProviders)
 	status := "all_uncatalogued"
 	hashVerified := interface{}("uncatalogued")
 	switch {
-	case catalogUnavailable || tier2.LoadFailed():
+	case catalogUnavailable || tier2.CatalogUnavailable():
 		status = "catalog_unavailable"
 		hashVerified = false
 	case counts.Mismatch > 0 || counts.Invalid > 0:
@@ -1493,6 +1580,7 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 	providers := s.pool.Snapshot()
 	estimatedTokens := estimateTokens(req.raw)
 	class := s.classForRequest(req.Model, providers)
+	tier2Cfg := s.tier2Config()
 	if hasInternalRoutingHeader(headers) && !s.internalBearerAuthorized(headers) {
 		return pool.Provider{}, &routeError{status: http.StatusBadRequest, code: "invalid_request", message: "Internal routing header is not accepted on the buyer port"}
 	}
@@ -1542,10 +1630,15 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 			hasRoutableContextMiss = true
 			continue
 		}
-		if s.tier2ProviderExcluded(p) {
-			if p.HashStatus == pool.HashStatusMismatch || p.HashStatus == pool.HashStatusInvalid {
+		hashStatus := s.effectiveHashStatus(p, tier2Cfg)
+		if s.tier2ProviderExcludedStatus(hashStatus, tier2Cfg) {
+			if hashStatus == pool.HashStatusMismatch || hashStatus == pool.HashStatusInvalid {
+				p.HashStatus = hashStatus
 				tier2HashMismatchExcluded = append(tier2HashMismatchExcluded, p)
 			} else {
+				if tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
+					tier2.LogHashRequiredProviderExcluded(s.log, p.ProviderID, p.AssignedID, p.ModelID, p.ModelHash, hashStatus)
+				}
 				tier2HashRequiredExcluded++
 			}
 			continue
@@ -1556,7 +1649,7 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 		if hasRoutableContextMiss {
 			return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds provider context capacity"}
 		}
-		if s.tier2.RequireHashVerified && (tier2HashRequiredExcluded > 0 || len(tier2HashMismatchExcluded) > 0) {
+		if tier2Cfg.RequireHashVerified && (tier2HashRequiredExcluded > 0 || len(tier2HashMismatchExcluded) > 0) {
 			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_verified_required", message: "No hash-verified provider available for model `" + req.Model + "`.", typ: "server_error"}
 		}
 		if len(tier2HashMismatchExcluded) > 0 {
@@ -2072,7 +2165,25 @@ func baseRoutingEligible(p pool.Provider) bool {
 }
 
 func (s *Server) tier2ProviderExcluded(p pool.Provider) bool {
-	return tier2.IsHashPredicateFailure(p.HashStatus, s.tier2.RequireHashVerified)
+	cfg := s.tier2Config()
+	return s.tier2ProviderExcludedStatus(s.effectiveHashStatus(p, cfg), cfg)
+}
+
+func (s *Server) tier2ProviderExcludedStatus(status pool.HashStatus, cfg config.Tier2Config) bool {
+	if !tier2.ModelHashActive(cfg) {
+		return false
+	}
+	return tier2.IsHashPredicateFailure(status, cfg.RequireHashVerified)
+}
+
+func (s *Server) effectiveHashStatus(p pool.Provider, cfg config.Tier2Config) pool.HashStatus {
+	if !tier2.ModelHashActive(cfg) {
+		return p.HashStatus
+	}
+	if strings.TrimSpace(p.ModelHash) == "" && p.HashStatus != "" && !tier2.CatalogUnavailable() {
+		return p.HashStatus
+	}
+	return tier2.VerifyProviderHash(p.ModelID, p.ModelHash)
 }
 
 func (s *Server) checkQuota(provider pool.Provider) bool {

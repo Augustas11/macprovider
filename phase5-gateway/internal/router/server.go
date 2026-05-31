@@ -403,7 +403,13 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_models_error", "Coordinator models error")
 		return
 	}
-	body["tier1_disclosure"] = s.makeTier1DisclosureForModels(body, r.Context())
+	disclosure, ok := s.tier1DisclosureForModels(body, r.Context())
+	if !ok {
+		writeError(w, http.StatusBadGateway, "api_error", "tier2_metadata_unavailable", "Coordinator Tier-2 metadata unavailable")
+		return
+	}
+	delete(body, "tier2")
+	body["tier1_disclosure"] = disclosure
 	copyCleanHeaders(w.Header(), resp.Header)
 	writeJSON(w, http.StatusOK, body)
 }
@@ -765,7 +771,7 @@ type stickyAffinityDisclosure struct {
 }
 
 type tier2Disclosure struct {
-	Phase            int                        `json:"phase"`
+	Phase            any                        `json:"phase"`
 	ModelHash        modelHashDisclosure        `json:"model_hash"`
 	EncryptedLeg     encryptedLegDisclosure     `json:"encrypted_leg"`
 	Attestation      attestationDisclosure      `json:"attestation"`
@@ -831,17 +837,33 @@ func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 }
 
 func (s *Server) makeTier1DisclosureForModels(body map[string]any, ctxs ...context.Context) tier1Disclosure {
+	disclosure, _ := s.tier1DisclosureForModels(body, ctxs...)
+	return disclosure
+}
+
+func (s *Server) tier1DisclosureForModels(body map[string]any, ctxs ...context.Context) (tier1Disclosure, bool) {
 	disclosure := s.makeTier1Disclosure(ctxs...)
-	active, state, verified, uncatalogued := tier2ModelHashState(body)
-	if !active {
-		return disclosure
+	bodyActive, state, verified, uncatalogued := tier2ModelHashState(body)
+	bodyMetadataActive := tier2BodyMetadataActive(body)
+	phase := any(1)
+	ctx := context.Background()
+	if len(ctxs) > 0 && ctxs[0] != nil {
+		ctx = ctxs[0]
+	}
+	metadata, ok := s.coordinatorRoutingMetadataFresh(ctx)
+	if !ok || !metadata.Tier2.ModelHash.Active {
+		return disclosure, !(bodyActive || bodyMetadataActive)
+	}
+	phase = tier2PhaseFromMetadata(metadata.Tier2.Phase)
+	if !bodyActive {
+		state = disclosureStateFromMetadata(metadata.Tier2.ModelHash.State)
 	}
 	disclosure.Version = "v0.8+tier2-v0.2"
 	disclosure.ModelHashVerified = state
 	disclosure.ProviderLegEncryption = "none"
 	disclosure.UntrustedProviderSafety = "none"
 	disclosure.Tier2 = &tier2Disclosure{
-		Phase: 1,
+		Phase: phase,
 		ModelHash: modelHashDisclosure{
 			State:                     state,
 			VerifiedProviderCount:     verified,
@@ -859,7 +881,49 @@ func (s *Server) makeTier1DisclosureForModels(body map[string]any, ctxs ...conte
 			State: "none",
 		},
 	}
-	return disclosure
+	return disclosure, true
+}
+
+func tier2BodyMetadataActive(body map[string]any) bool {
+	tier2Raw, _ := body["tier2"].(map[string]any)
+	if tier2Raw == nil {
+		return false
+	}
+	modelHash, _ := tier2Raw["model_hash"].(map[string]any)
+	active, _ := modelHash["active"].(bool)
+	return active
+}
+
+func disclosureStateFromMetadata(state string) string {
+	switch state {
+	case "all", "partial", "none":
+		return state
+	default:
+		return "none"
+	}
+}
+
+func tier2PhaseFromMetadata(phase any) any {
+	switch v := phase.(type) {
+	case string:
+		if v == "mixed" {
+			return v
+		}
+	case float64:
+		if v == 0 || v == 1 || v == 2 || v == 3 {
+			return int(v)
+		}
+	case int:
+		if v == 0 || v == 1 || v == 2 || v == 3 {
+			return v
+		}
+	case json.Number:
+		i, err := v.Int64()
+		if err == nil && i >= 0 && i <= 3 {
+			return int(i)
+		}
+	}
+	return 1
 }
 
 func tier2ModelHashState(body map[string]any) (active bool, state string, verified int, uncatalogued int) {
@@ -931,16 +995,22 @@ type coordinatorRoutingMetadata struct {
 		Enabled    bool `json:"enabled"`
 		TTLSeconds int  `json:"ttl_seconds"`
 	} `json:"sticky"`
+	Tier2 struct {
+		Phase     any `json:"phase"`
+		ModelHash struct {
+			Active bool   `json:"active"`
+			State  string `json:"state"`
+		} `json:"model_hash"`
+	} `json:"tier2"`
 }
 
 const routingMetaTTL = 5 * time.Second
 
 func (s *Server) coordinatorRoutingMetadata(ctx context.Context) (coordinatorRoutingMetadata, bool) {
 	// Per-request roundtrip cost is bad at scale (audit HIGH). 5s TTL is
-	// safe because coordinator routing config only changes on reload, and
-	// the consumers (sticky header injection + /v1/models disclosure)
-	// degrade gracefully on staleness — staleness only takes effect on the
-	// NEXT request anyway.
+	// safe for sticky-affinity hints because staleness only affects whether
+	// sticky headers are attempted on the next request. Buyer-visible trust
+	// disclosure uses coordinatorRoutingMetadataFresh instead.
 	s.routingMeta.mu.Lock()
 	if s.routingMeta.ok && s.now().Sub(s.routingMeta.fetchedAt) < routingMetaTTL {
 		v, ok := s.routingMeta.value, s.routingMeta.ok
@@ -949,6 +1019,10 @@ func (s *Server) coordinatorRoutingMetadata(ctx context.Context) (coordinatorRou
 	}
 	s.routingMeta.mu.Unlock()
 
+	return s.coordinatorRoutingMetadataFresh(ctx)
+}
+
+func (s *Server) coordinatorRoutingMetadataFresh(ctx context.Context) (coordinatorRoutingMetadata, bool) {
 	var metadata coordinatorRoutingMetadata
 	reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -1156,6 +1230,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
+		if coordinatorTier2PolicyError(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			return
+		}
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "provider_unavailable", "No provider available")
 		return
@@ -1171,11 +1249,11 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	// reservation and pass the OpenAI-shaped error body through verbatim so
 	// the buyer sees an actionable 404 instead of an opaque 502.
 	if resp.StatusCode == http.StatusNotFound {
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-		copyCleanHeaders(w.Header(), resp.Header)
-		w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write(body)
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+		return
+	}
+	if coordinatorTier2PolicyError(resp.StatusCode, body) {
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1200,6 +1278,11 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 
 func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate int64, cancelUpstream func()) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
+		body, _ := io.ReadAll(resp.Body)
+		if coordinatorTier2PolicyError(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			return
+		}
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "provider_unavailable", "No provider available")
 		return
@@ -1215,12 +1298,13 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// verbatim so the buyer sees a clean 404 instead of an opaque 502.
 		// See forwardNonStreamingChat for the matching non-stream branch.
 		if resp.StatusCode == http.StatusNotFound {
-			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
 			body, _ := io.ReadAll(resp.Body)
-			copyCleanHeaders(w.Header(), resp.Header)
-			w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write(body)
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			return
+		}
+		body, _ := io.ReadAll(resp.Body)
+		if coordinatorTier2PolicyError(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
 		}
 		_ = s.settleRequest(r, subject, promptEstimate, completionFromHeader(resp.Header), "gateway_estimated", "upstream_error")
@@ -1289,6 +1373,38 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 	_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "ok")
+}
+
+func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
+	_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+	copyCleanHeaders(w.Header(), resp.Header)
+	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
+}
+
+func coordinatorTier2PolicyError(status int, body []byte) bool {
+	code := openAIErrorCode(body)
+	switch code {
+	case "tier2_hash_verified_required", "tier2_hash_mismatch":
+		return status == http.StatusServiceUnavailable
+	case "tier2_hard_pin_predicate_failed":
+		return status == http.StatusBadRequest
+	default:
+		return false
+	}
+}
+
+func openAIErrorCode(body []byte) string {
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(envelope.Error.Code)
 }
 
 func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted int64, cancelCoordinator func()) {

@@ -144,6 +144,7 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 			"data":[],
 			"provider_count":2,
 			"total_slots":4,
+			"tier2":{"phase":0,"model_hash":{"active":false,"state":"none"}},
 			"tier1_disclosure":{"version":"evil","plaintext_to_provider":false,"model_identity":"claimed","hardware_attestation":"claimed","tier2_milestone":"now"}
 		}`), nil
 	})}
@@ -155,9 +156,13 @@ func TestModelsResponseIncludesTier1Disclosure(t *testing.T) {
 	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
 	var body struct {
 		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+		Tier2           map[string]any  `json:"tier2"`
 	}
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("models json: %v", err)
+	}
+	if body.Tier2 != nil {
+		t.Fatalf("gateway leaked coordinator tier2 metadata: %s", resp.Body.String())
 	}
 	want := (&Server{}).makeTier1Disclosure()
 	if !reflect.DeepEqual(body.Tier1Disclosure, want) {
@@ -204,33 +209,49 @@ func TestModelsStickyDisclosureUsesCoordinatorRoutingMetadata(t *testing.T) {
 
 func TestModelsDisclosureReflectsTier2HashState(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
-			"object":"list",
-			"data":[{
-				"id":"model-a",
-				"object":"model",
-				"hash_verified":false,
-				"hash_verification":{
-					"status":"partial",
-					"verified_provider_count":1,
-					"uncatalogued_provider_count":1,
-					"mismatch_provider_count":0,
-					"invalid_provider_count":0,
-					"catalogued":true
-				}
-			}]
-		}`), nil
+		switch r.URL.Path {
+		case "/v1/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"object":"list",
+				"data":[{
+					"id":"model-a",
+					"object":"model",
+					"hash_verified":false,
+					"hash_verification":{
+						"status":"partial",
+						"verified_provider_count":1,
+						"uncatalogued_provider_count":1,
+						"mismatch_provider_count":0,
+						"invalid_provider_count":0,
+						"catalogued":true
+					}
+				}]
+			}`), nil
+		case "/internal/routing":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"sticky":{"enabled":false,"ttl_seconds":1800},
+				"tier2":{"phase":1,"model_hash":{"active":true,"state":"partial"}}
+			}`), nil
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+			return nil, nil
+		}
 	})}
 	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
 		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
 	}, WithHTTPClient(client))
 	fullKey := createAccountAndKey(t, store, cfg, "acct_models_tier2_disclosure")
 	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
 	var body struct {
 		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+		Tier2           map[string]any  `json:"tier2"`
 	}
 	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
 		t.Fatalf("models json: %v", err)
+	}
+	if body.Tier2 != nil {
+		t.Fatalf("gateway leaked coordinator tier2 metadata: %s", resp.Body.String())
 	}
 	disclosure := body.Tier1Disclosure
 	if disclosure.Version != "v0.8+tier2-v0.2" {
@@ -242,9 +263,155 @@ func TestModelsDisclosureReflectsTier2HashState(t *testing.T) {
 	if disclosure.ModelHashVerified != "partial" || disclosure.ProviderLegEncryption != "none" || disclosure.UntrustedProviderSafety != "none" {
 		t.Fatalf("tier2 top-level disclosure wrong: %+v", disclosure)
 	}
-	if disclosure.Tier2 == nil || disclosure.Tier2.Phase != 1 || disclosure.Tier2.ModelHash.VerifiedProviderCount != 1 || disclosure.Tier2.ModelHash.UncataloguedProviderCount != 1 || !disclosure.Tier2.ModelHash.Mixed {
+	if disclosure.Tier2 == nil || intFromModelField(disclosure.Tier2.Phase) != 1 || disclosure.Tier2.ModelHash.VerifiedProviderCount != 1 || disclosure.Tier2.ModelHash.UncataloguedProviderCount != 1 || !disclosure.Tier2.ModelHash.Mixed {
 		t.Fatalf("tier2 detail wrong: %+v", disclosure.Tier2)
 	}
+}
+
+func TestModelsDisclosureUsesTier2MetadataWhenNoHashRows(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"object":"list","data":[]}`), nil
+		case "/internal/routing":
+			if got := r.Header.Get("Authorization"); got != "Bearer operator-key" {
+				t.Fatalf("operator auth = %q", got)
+			}
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"sticky":{"enabled":false,"ttl_seconds":1800},
+				"tier2":{
+					"phase":"mixed",
+					"model_hash":{"active":true,"state":"none"}
+				}
+			}`), nil
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_tier2_metadata")
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+	var body struct {
+		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	disclosure := body.Tier1Disclosure
+	if disclosure.Version != "v0.8+tier2-v0.2" || disclosure.ModelHashVerified != "none" {
+		t.Fatalf("tier2 disclosure wrong: %+v", disclosure)
+	}
+	if disclosure.Tier2 == nil || disclosure.Tier2.Phase != "mixed" || disclosure.Tier2.ModelHash.VerifiedProviderCount != 0 || disclosure.Tier2.ModelHash.UncataloguedProviderCount != 0 {
+		t.Fatalf("tier2 detail wrong: %+v", disclosure.Tier2)
+	}
+}
+
+func TestModelsDisclosureDoesNotUseCachedTier2MetadataToUpgrade(t *testing.T) {
+	calls := 0
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path != "/internal/routing" {
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+		}
+		calls++
+		if calls == 1 {
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"sticky":{"enabled":false,"ttl_seconds":1800},
+				"tier2":{"phase":1,"model_hash":{"active":true,"state":"none"}}
+			}`), nil
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"sticky":{"enabled":false,"ttl_seconds":1800},
+			"tier2":{"phase":0,"model_hash":{"active":false,"state":"none"}}
+		}`), nil
+	})}
+	cfg := config.Default()
+	cfg.Coordinator.OperatorURL = "http://operator.test"
+	cfg.Coordinator.OperatorKey = "operator-key"
+	server := &Server{cfg: cfg, client: client, now: fixedNow}
+
+	if _, ok := server.coordinatorRoutingMetadata(context.Background()); !ok {
+		t.Fatal("seed routing metadata cache failed")
+	}
+	disclosure := server.makeTier1DisclosureForModels(map[string]any{"data": []any{}}, context.Background())
+
+	if disclosure.Version != "v0.8" || disclosure.Tier2 != nil || disclosure.ModelHashVerified != "" {
+		t.Fatalf("disclosure used stale cached tier2 metadata: %+v", disclosure)
+	}
+	if calls != 2 {
+		t.Fatalf("routing metadata calls=%d, want 2", calls)
+	}
+}
+
+func TestModelsDisclosureFailsClosedWhenHashRowsLackFreshActiveMetadata(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"object":"list",
+				"data":[{
+					"id":"model-a",
+					"object":"model",
+					"hash_verified":true,
+					"hash_verification":{
+						"status":"all_verified",
+						"verified_provider_count":1,
+						"uncatalogued_provider_count":0,
+						"mismatch_provider_count":0,
+						"invalid_provider_count":0,
+						"catalogued":true
+					}
+				}]
+			}`), nil
+		case "/internal/routing":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"sticky":{"enabled":false,"ttl_seconds":1800},
+				"tier2":{"phase":0,"model_hash":{"active":false,"state":"none"}}
+			}`), nil
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_tier2_fail_closed")
+
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusBadGateway)
+
+	assertErrorCode(t, resp.Body.String(), "tier2_metadata_unavailable")
+}
+
+func TestModelsDisclosureFailsClosedWhenTopLevelTier2ActiveMetadataUnavailable(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"object":"list",
+				"data":[],
+				"tier2":{"phase":1,"model_hash":{"active":true,"state":"none"}}
+			}`), nil
+		case "/internal/routing":
+			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, `{}`), nil
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_tier2_empty_fail_closed")
+
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusBadGateway)
+
+	assertErrorCode(t, resp.Body.String(), "tier2_metadata_unavailable")
 }
 
 func TestKeyRotationPreservesHistory(t *testing.T) {
@@ -1012,6 +1179,35 @@ func TestQuotaExhaustedReturns429Not500(t *testing.T) {
 	}
 }
 
+func TestQuotaAdmittedOpaqueErrorRefundsBefore500(t *testing.T) {
+	_, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(noopClient()))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_quota_admitted_error")
+	fakeStore := &quotaReserveFakeStore{
+		Store: store,
+		decision: storage.QuotaDecision{
+			Admitted: true, LimitTokens: cfg.Quotas.AccountDailyTokens, UsedTokens: 0,
+			ReservedTokens: cfg.Quotas.AccountDailyTokens, RemainingTokens: 0,
+			ResetUnix: resetUnix(fixedNow().UTC().Format("2006-01-02")),
+		},
+		err: errors.New("commit failed after reservation insert"),
+	}
+	h := New(cfg, fakeStore, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient())).Handler()
+
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if fakeStore.refundCalls != 1 {
+		t.Fatalf("RefundReservation calls=%d, want 1", fakeStore.refundCalls)
+	}
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want 500 body=%s", resp.Code, resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), "quota_exhausted") {
+		t.Fatalf("admitted opaque error should not be remapped to quota_exhausted: %s", resp.Body.String())
+	}
+}
+
 type quotaReserveFakeStore struct {
 	*sqlite.Store
 	decision    storage.QuotaDecision
@@ -1611,6 +1807,77 @@ func TestCoordinator404ModelNotFoundPassesThroughAndDoesNotChargeQuota(t *testin
 				t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded on coord 404", reserved)
 			}
 		})
+	}
+}
+
+func TestCoordinatorTier2PolicyErrorsPassThroughAndDoNotChargeQuota(t *testing.T) {
+	cases := []struct {
+		name   string
+		status int
+		code   string
+		typ    string
+	}{
+		{
+			name:   "require_hash_verified",
+			status: http.StatusServiceUnavailable,
+			code:   "tier2_hash_verified_required",
+			typ:    "server_error",
+		},
+		{
+			name:   "hash_mismatch",
+			status: http.StatusServiceUnavailable,
+			code:   "tier2_hash_mismatch",
+			typ:    "server_error",
+		},
+		{
+			name:   "hard_pin_predicate",
+			status: http.StatusBadRequest,
+			code:   "tier2_hard_pin_predicate_failed",
+			typ:    "invalid_request_error",
+		},
+	}
+	for _, tc := range cases {
+		for _, stream := range []bool{false, true} {
+			name := tc.name + "_non_stream"
+			if stream {
+				name = tc.name + "_stream"
+			}
+			t.Run(name, func(t *testing.T) {
+				coordBody := fmt.Sprintf(`{"error":{"code":%q,"message":"tier2 policy rejected request","param":null,"type":%q}}`, tc.code, tc.typ)
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return responseWithBody(tc.status, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
+				})}
+				h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+					cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				}, WithHTTPClient(client))
+				fullKey := createAccountAndKey(t, store, cfg, "acct_"+name)
+
+				body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+				if stream {
+					body = `{"model":"model-a","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+				}
+				resp := postChat(t, h, fullKey, body, nil)
+
+				if resp.Code != tc.status {
+					t.Fatalf("status=%d, want %d body=%s", resp.Code, tc.status, resp.Body.String())
+				}
+				if !strings.Contains(resp.Body.String(), `"code":"`+tc.code+`"`) ||
+					!strings.Contains(resp.Body.String(), `"type":"`+tc.typ+`"`) {
+					t.Fatalf("body did not preserve coordinator error envelope: %s", resp.Body.String())
+				}
+				if strings.Contains(resp.Body.String(), "provider_unavailable") || strings.Contains(resp.Body.String(), "upstream_provider_error") {
+					t.Fatalf("body remapped coordinator Tier-2 policy error: %s", resp.Body.String())
+				}
+				usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+				quota := readQuota(t, usageResp)
+				if used := quota["daily_tokens_used"].(float64); used != 0 {
+					t.Fatalf("daily_tokens_used=%v, want 0", used)
+				}
+				if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+					t.Fatalf("daily_tokens_reserved=%v, want 0", reserved)
+				}
+			})
+		}
 	}
 }
 

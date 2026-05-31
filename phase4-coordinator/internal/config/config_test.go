@@ -41,10 +41,38 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 
 	cfg = Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Tier2.EncryptedLegAEAD = "unknown"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("unsupported AEAD without enforcement should remain inert in Phase 1: %v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Tier2.RequireEncryptedLeg = true
 	cfg.Tier2.EncryptedLegAEAD = "unknown"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "encrypted_leg_aead") {
 		t.Fatalf("unsupported AEAD err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Tier2.RequireEncryptedLeg = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_encrypted_leg") {
+		t.Fatalf("phase 1 encrypted leg enforcement err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Tier2.RequireAttestation = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_attestation") {
+		t.Fatalf("phase 1 attestation enforcement err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Tier2.BehavioralSafetyEnabled = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "behavioral_safety_enabled") {
+		t.Fatalf("phase 1 behavioral safety err=%v", err)
 	}
 
 	cfg = Default()

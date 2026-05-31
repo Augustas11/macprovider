@@ -46,9 +46,9 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     requirement for the current single-model provider shape.</p>
     <p><strong>Open questions:</strong> future SPEC-001 multi-model sessions
     should decide whether hash state is per session, per model, or attached to
-    a provider-advertised model list. Future catalog reload support should
-    define whether active sessions are re-evaluated immediately or only at the
-    next request.</p>
+    a provider-advertised model list. SIGHUP Tier-2 reload updates admission
+    and buyer predicates; active sessions retain their admission-time hash
+    evidence until they reconnect or report a model change.</p>
   </div>
 </section>
 

@@ -63,6 +63,38 @@ func TestLoadCatalogRejectsExpiredCatalog(t *testing.T) {
 	}
 }
 
+func TestActiveCatalogExpiresAtUseTime(t *testing.T) {
+	defer ResetForTest()
+	base := time.Now().UTC()
+	nowUTC = func() time.Time { return base }
+	raw, publicKey := signedCatalogFixture(t, base.Add(time.Hour), testHash)
+	path := writeTempCatalog(t, raw)
+	cfg := config.Default()
+	cfg.Tier2.CatalogPath = path
+	cfg.Tier2.CatalogPublicKey = publicKey
+	if err := Configure(cfg.Tier2, zerolog.Nop()); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if !Active() {
+		t.Fatal("catalog should be active before expiry")
+	}
+
+	nowUTC = func() time.Time { return base.Add(2 * time.Hour) }
+
+	if Active() {
+		t.Fatal("expired catalog should not remain active")
+	}
+	if !CatalogUnavailable() {
+		t.Fatal("expired configured catalog should be unavailable")
+	}
+	if Catalogued("model-a") {
+		t.Fatal("expired catalog should not mark model catalogued")
+	}
+	if got := VerifyProviderHash("model-a", testHash); got != pool.HashStatusCatalogUnavailable {
+		t.Fatalf("VerifyProviderHash after expiry=%q want %q", got, pool.HashStatusCatalogUnavailable)
+	}
+}
+
 func TestVerifyProviderHashStatuses(t *testing.T) {
 	defer ResetForTest()
 	raw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
@@ -95,23 +127,174 @@ func TestVerifyProviderHashStatuses(t *testing.T) {
 	}
 }
 
+func TestVerifyProviderHashUsesCaseInsensitiveModelIDLookup(t *testing.T) {
+	defer ResetForTest()
+	raw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
+	path := writeTempCatalog(t, raw)
+	cfg := config.Default()
+	cfg.Tier2.CatalogPath = path
+	cfg.Tier2.CatalogPublicKey = publicKey
+	if err := Configure(cfg.Tier2, zerolog.Nop()); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	if got := VerifyProviderHash("MODEL-A", otherHash); got != pool.HashStatusMismatch {
+		t.Fatalf("VerifyProviderHash case-only model drift=%q want %q", got, pool.HashStatusMismatch)
+	}
+	if got := VerifyProviderHash("MODEL-A", testHash); got != pool.HashStatusVerified {
+		t.Fatalf("VerifyProviderHash uppercase match=%q want %q", got, pool.HashStatusVerified)
+	}
+}
+
+func TestConfigurePreservesPreviousCatalogOnReloadFailure(t *testing.T) {
+	defer ResetForTest()
+	raw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
+	path := writeTempCatalog(t, raw)
+	cfg := config.Default()
+	cfg.Tier2.CatalogPath = path
+	cfg.Tier2.CatalogPublicKey = publicKey
+	if err := Configure(cfg.Tier2, zerolog.Nop()); err != nil {
+		t.Fatalf("initial Configure: %v", err)
+	}
+
+	cfg.Tier2.CatalogPath = writeTempCatalog(t, bytes.Replace(raw, []byte("model-a"), []byte("model-b"), 1))
+	if err := Configure(cfg.Tier2, zerolog.Nop()); err != nil {
+		t.Fatalf("reload Configure should preserve previous catalog when enforcement is off: %v", err)
+	}
+	if !Active() || CatalogID() != "test-catalog" {
+		t.Fatalf("active catalog not preserved: active=%v catalog_id=%q", Active(), CatalogID())
+	}
+	if CatalogUnavailable() {
+		t.Fatal("preserved active catalog should not be unavailable")
+	}
+	if got := VerifyProviderHash("model-a", testHash); got != pool.HashStatusVerified {
+		t.Fatalf("VerifyProviderHash after failed reload=%q want %q", got, pool.HashStatusVerified)
+	}
+}
+
+func TestParseCatalogRejectsUnknownFieldsDuplicateModelsAndBadSemantics(t *testing.T) {
+	t.Run("unknown top-level field", func(t *testing.T) {
+		raw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
+		var file map[string]any
+		if err := json.Unmarshal(raw, &file); err != nil {
+			t.Fatalf("unmarshal fixture: %v", err)
+		}
+		file["unexpected"] = true
+		withUnknown, err := json.Marshal(file)
+		if err != nil {
+			t.Fatalf("marshal unknown fixture: %v", err)
+		}
+		if _, err := ParseCatalog(withUnknown, publicKey); err == nil || !strings.Contains(err.Error(), "unknown field") {
+			t.Fatalf("ParseCatalog err=%v, want unknown field rejection", err)
+		}
+	})
+
+	t.Run("duplicate model id", func(t *testing.T) {
+		raw, publicKey := signedCatalogFixtureWithModels(t, time.Now().UTC().Add(time.Hour), []ModelEntry{
+			validModelEntry("model-a", testHash),
+			validModelEntry("model-a", otherHash),
+		})
+		if _, err := ParseCatalog(raw, publicKey); err == nil || !strings.Contains(err.Error(), "duplicate catalog model_id") {
+			t.Fatalf("ParseCatalog err=%v, want duplicate model rejection", err)
+		}
+	})
+
+	t.Run("case-insensitive duplicate model id", func(t *testing.T) {
+		raw, publicKey := signedCatalogFixtureWithModels(t, time.Now().UTC().Add(time.Hour), []ModelEntry{
+			validModelEntry("model-a", testHash),
+			validModelEntry("MODEL-A", otherHash),
+		})
+		if _, err := ParseCatalog(raw, publicKey); err == nil || !strings.Contains(err.Error(), "duplicate catalog model_id") {
+			t.Fatalf("ParseCatalog err=%v, want case-insensitive duplicate model rejection", err)
+		}
+	})
+
+	t.Run("unsupported hash scope", func(t *testing.T) {
+		model := validModelEntry("model-a", testHash)
+		model.HashScope = "whole_directory"
+		raw, publicKey := signedCatalogFixtureWithModels(t, time.Now().UTC().Add(time.Hour), []ModelEntry{model})
+		if _, err := ParseCatalog(raw, publicKey); err == nil || !strings.Contains(err.Error(), "hash_scope") {
+			t.Fatalf("ParseCatalog err=%v, want hash_scope rejection", err)
+		}
+	})
+}
+
+func TestTier2AuditEventsIncludeCommonFields(t *testing.T) {
+	var logs bytes.Buffer
+	LogProviderHashStatus(zerolog.New(&logs), "provider-a", "session-a", "model-a", otherHash, pool.HashStatusMismatch)
+	raw := logs.String()
+	for _, want := range []string{
+		`"event":"model_hash_mismatch"`,
+		`"category":"T2.A"`,
+		`"request_id":""`,
+		`"tier2_phase":1`,
+		`"pillar":"A"`,
+		`"decision":"exclude"`,
+		`"config_flag":"tier2.catalog_path"`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("audit log missing %s: %s", want, raw)
+		}
+	}
+}
+
+func TestUncataloguedHashLogsWarnWhenCatalogActive(t *testing.T) {
+	defer ResetForTest()
+	raw, publicKey := signedCatalogFixture(t, time.Now().UTC().Add(time.Hour), testHash)
+	path := writeTempCatalog(t, raw)
+	cfg := config.Default()
+	cfg.Tier2.CatalogPath = path
+	cfg.Tier2.CatalogPublicKey = publicKey
+	if err := Configure(cfg.Tier2, zerolog.Nop()); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	var logs bytes.Buffer
+
+	LogProviderHashStatus(zerolog.New(&logs), "provider-a", "session-a", "unknown-model", testHash, pool.HashStatusUncatalogued)
+
+	rawLog := logs.String()
+	for _, want := range []string{
+		`"event":"model_hash_uncatalogued"`,
+		`"severity":"WARN"`,
+		`"decision":"allow"`,
+		`"reason":"not_catalogued"`,
+	} {
+		if !strings.Contains(rawLog, want) {
+			t.Fatalf("audit log missing %s: %s", want, rawLog)
+		}
+	}
+}
+
 func signedCatalogFixture(t *testing.T, expiresAt time.Time, sha string) ([]byte, string) {
+	t.Helper()
+	return signedCatalogFixtureWithModels(t, expiresAt, []ModelEntry{validModelEntry("model-a", sha)})
+}
+
+func validModelEntry(modelID, sha string) ModelEntry {
+	return ModelEntry{
+		ArtifactKind: "mlx_weight_file",
+		HashScope:    "primary_weight_file",
+		ModelID:      modelID,
+		SHA256:       sha,
+		Source:       "operator-curated",
+	}
+}
+
+func signedCatalogFixtureWithModels(t *testing.T, expiresAt time.Time, models []ModelEntry) ([]byte, string) {
 	t.Helper()
 	seed := bytes.Repeat([]byte{7}, ed25519.SeedSize)
 	privateKey := ed25519.NewKeyFromSeed(seed)
 	publicKey := privateKey.Public().(ed25519.PublicKey)
+	issuedAt := time.Now().UTC().Add(-time.Hour)
+	if !issuedAt.Before(expiresAt) {
+		issuedAt = expiresAt.Add(-time.Hour)
+	}
 	body := canonicalBody{
 		CatalogID: "test-catalog",
 		ExpiresAt: expiresAt.UTC().Format(time.RFC3339),
-		IssuedAt:  time.Now().UTC().Add(-time.Hour).Format(time.RFC3339),
-		Models: []ModelEntry{{
-			ArtifactKind: "mlx_weight_file",
-			HashScope:    "primary_weight_file",
-			ModelID:      "model-a",
-			SHA256:       sha,
-			Source:       "operator-curated",
-		}},
-		Version: 1,
+		IssuedAt:  issuedAt.Format(time.RFC3339),
+		Models:    models,
+		Version:   1,
 	}
 	canonical, err := json.Marshal(body)
 	if err != nil {

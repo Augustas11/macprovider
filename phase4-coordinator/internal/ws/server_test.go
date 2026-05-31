@@ -536,6 +536,45 @@ func TestHeartbeatUpdatesPoolz(t *testing.T) {
 	}
 }
 
+func TestPoolzDefaultOmitsTier2HashFieldsAfterWSAdmission(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+
+	eventually(t, func() bool {
+		req, err := http.NewRequest(http.MethodGet, ts.URL+"/poolz", nil)
+		if err != nil {
+			t.Fatalf("request: %v", err)
+		}
+		req.Header.Set("Authorization", "Bearer test-operator-key")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("poolz: %v", err)
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("read poolz: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("poolz status=%d body=%s", resp.StatusCode, body)
+		}
+		if !bytes.Contains(body, []byte(`"provider_id":"m4-anon"`)) {
+			return false
+		}
+		if bytes.Contains(body, []byte("hash_status")) || bytes.Contains(body, []byte("model_hash")) {
+			t.Fatalf("default /poolz included Tier-2 hash fields: %s", body)
+		}
+		return true
+	})
+}
+
 func TestStateUpdateCyclesProviderState(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()

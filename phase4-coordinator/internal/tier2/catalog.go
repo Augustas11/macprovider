@@ -1,10 +1,12 @@
 package tier2
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -81,6 +83,8 @@ var global = struct {
 	st state
 }{}
 
+var nowUTC = func() time.Time { return time.Now().UTC() }
+
 func Configure(cfg config.Tier2Config, logger zerolog.Logger) error {
 	if strings.TrimSpace(cfg.CatalogPath) == "" {
 		global.mu.Lock()
@@ -97,8 +101,6 @@ func Configure(cfg config.Tier2Config, logger zerolog.Logger) error {
 	global.st.loadFailed = err != nil
 	if err == nil {
 		global.st.active = catalog
-	} else {
-		global.st.active = nil
 	}
 	global.mu.Unlock()
 	if err != nil && cfg.RequireHashVerified {
@@ -107,10 +109,50 @@ func Configure(cfg config.Tier2Config, logger zerolog.Logger) error {
 	return nil
 }
 
+func ConfigActive(cfg config.Tier2Config) bool {
+	return ModelHashActive(cfg) ||
+		cfg.RequireEncryptedLeg ||
+		cfg.RequireAttestation ||
+		cfg.BehavioralSafetyEnabled ||
+		cfg.EncodingValidationEnabled ||
+		cfg.ResponseTimeAnomalyEnabled
+}
+
+func ModelHashActive(cfg config.Tier2Config) bool {
+	return cfg.ObserveEnabled ||
+		strings.TrimSpace(cfg.CatalogPath) != "" ||
+		cfg.RequireHashVerified
+}
+
+func PhaseForConfig(cfg config.Tier2Config) any {
+	return PhaseForConfigWithModelHashEvidence(cfg, false)
+}
+
+func PhaseForConfigWithModelHashEvidence(cfg config.Tier2Config, observedModelHash bool) any {
+	pillarA := strings.TrimSpace(cfg.CatalogPath) != "" ||
+		cfg.RequireHashVerified ||
+		(cfg.ObserveEnabled && observedModelHash)
+	pillarBC := cfg.RequireEncryptedLeg || cfg.RequireAttestation
+	pillarD := cfg.BehavioralSafetyEnabled || cfg.EncodingValidationEnabled || cfg.ResponseTimeAnomalyEnabled
+	switch {
+	case pillarD && pillarBC:
+		return 3
+	case pillarD:
+		return "mixed"
+	case pillarBC:
+		return 2
+	case pillarA:
+		return 1
+	default:
+		return 0
+	}
+}
+
 func ResetForTest() {
 	global.mu.Lock()
 	global.st = state{}
 	global.mu.Unlock()
+	nowUTC = func() time.Time { return time.Now().UTC() }
 }
 
 func LoadCatalog(path, publicKey string, logger zerolog.Logger) (*Catalog, error) {
@@ -135,14 +177,39 @@ func LoadCatalog(path, publicKey string, logger zerolog.Logger) (*Catalog, error
 
 func ParseCatalog(raw []byte, publicKey string) (*Catalog, error) {
 	var file catalogFile
-	if err := json.Unmarshal(raw, &file); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&file); err != nil {
 		return nil, err
+	}
+	var extra struct{}
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("catalog must contain a single JSON object")
 	}
 	if file.Version != 1 {
 		return nil, fmt.Errorf("unsupported catalog version %d", file.Version)
 	}
+	if strings.TrimSpace(file.CatalogID) == "" {
+		return nil, fmt.Errorf("catalog_id must not be empty")
+	}
+	if strings.TrimSpace(file.IssuedAt) == "" {
+		return nil, fmt.Errorf("issued_at must not be empty")
+	}
+	issuedAt, err := time.Parse(time.RFC3339, file.IssuedAt)
+	if err != nil {
+		return nil, fmt.Errorf("invalid issued_at: %w", err)
+	}
+	if len(file.Models) == 0 {
+		return nil, fmt.Errorf("catalog models must not be empty")
+	}
 	if file.Signature.Alg != "Ed25519" {
 		return nil, signatureError("unsupported catalog signature algorithm")
+	}
+	if strings.TrimSpace(file.Signature.KeyID) == "" {
+		return nil, signatureError("catalog signature key_id must not be empty")
+	}
+	if strings.TrimSpace(file.Signature.Sig) == "" {
+		return nil, signatureError("catalog signature sig must not be empty")
 	}
 	pub, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(publicKey))
 	if err != nil {
@@ -176,19 +243,37 @@ func ParseCatalog(raw []byte, publicKey string) (*Catalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid expires_at: %w", err)
 	}
-	if !time.Now().UTC().Before(expiresAt) {
+	if !issuedAt.Before(expiresAt) {
+		return nil, fmt.Errorf("issued_at must be before expires_at")
+	}
+	if !nowUTC().Before(expiresAt) {
 		return nil, fmt.Errorf("catalog expired")
 	}
 	models := make(map[string]ModelEntry, len(file.Models))
 	for _, model := range file.Models {
-		if model.ModelID == "" {
+		modelID := catalogModelKey(model.ModelID)
+		if modelID == "" {
 			return nil, fmt.Errorf("catalog model_id must not be empty")
+		}
+		if _, exists := models[modelID]; exists {
+			return nil, fmt.Errorf("duplicate catalog model_id %q", model.ModelID)
+		}
+		if model.ArtifactKind != "mlx_weight_file" {
+			return nil, fmt.Errorf("catalog artifact_kind for %q must be mlx_weight_file", model.ModelID)
+		}
+		switch model.HashScope {
+		case "primary_weight_file", "artifact_manifest", "coordinator_endorsed_incremental":
+		default:
+			return nil, fmt.Errorf("catalog hash_scope for %q is unsupported", model.ModelID)
+		}
+		if strings.TrimSpace(model.Source) == "" {
+			return nil, fmt.Errorf("catalog source for %q must not be empty", model.ModelID)
 		}
 		if !hashPattern.MatchString(model.SHA256) {
 			return nil, fmt.Errorf("catalog sha256 for %q must be 64 lowercase hex chars", model.ModelID)
 		}
 		model.SHA256 = strings.ToLower(model.SHA256)
-		models[model.ModelID] = model
+		models[modelID] = model
 	}
 	return &Catalog{CatalogID: file.CatalogID, ExpiresAt: expiresAt, Models: models}, nil
 }
@@ -196,7 +281,7 @@ func ParseCatalog(raw []byte, publicKey string) (*Catalog, error) {
 func Active() bool {
 	global.mu.RLock()
 	defer global.mu.RUnlock()
-	return global.st.active != nil
+	return activeCatalogLocked(global.st) != nil
 }
 
 func Configured() bool {
@@ -211,13 +296,20 @@ func LoadFailed() bool {
 	return global.st.loadFailed
 }
 
+func CatalogUnavailable() bool {
+	global.mu.RLock()
+	defer global.mu.RUnlock()
+	return global.st.configured && activeCatalogLocked(global.st) == nil && (global.st.loadFailed || global.st.active != nil)
+}
+
 func Catalogued(modelID string) bool {
 	global.mu.RLock()
 	defer global.mu.RUnlock()
-	if global.st.active == nil {
+	catalog := activeCatalogLocked(global.st)
+	if catalog == nil {
 		return false
 	}
-	_, ok := global.st.active.Models[modelID]
+	_, ok := catalog.Models[catalogModelKey(modelID)]
 	return ok
 }
 
@@ -225,13 +317,14 @@ func VerifyProviderHash(modelID, reportedHash string) pool.HashStatus {
 	global.mu.RLock()
 	st := global.st
 	global.mu.RUnlock()
-	if st.active == nil {
-		if st.configured && st.loadFailed {
+	catalog := activeCatalogLocked(st)
+	if catalog == nil {
+		if st.configured && (st.loadFailed || st.active != nil) {
 			return pool.HashStatusCatalogUnavailable
 		}
 		return pool.HashStatusUncatalogued
 	}
-	model, ok := st.active.Models[modelID]
+	model, ok := catalog.Models[catalogModelKey(modelID)]
 	if !ok || strings.TrimSpace(reportedHash) == "" {
 		return pool.HashStatusUncatalogued
 	}
@@ -249,10 +342,11 @@ func VerifyProviderHash(modelID, reportedHash string) pool.HashStatus {
 func ExpectedHashPrefix(modelID string) string {
 	global.mu.RLock()
 	defer global.mu.RUnlock()
-	if global.st.active == nil {
+	catalog := activeCatalogLocked(global.st)
+	if catalog == nil {
 		return ""
 	}
-	model, ok := global.st.active.Models[modelID]
+	model, ok := catalog.Models[catalogModelKey(modelID)]
 	if !ok {
 		return ""
 	}
@@ -262,10 +356,22 @@ func ExpectedHashPrefix(modelID string) string {
 func CatalogID() string {
 	global.mu.RLock()
 	defer global.mu.RUnlock()
-	if global.st.active == nil {
+	catalog := activeCatalogLocked(global.st)
+	if catalog == nil {
 		return ""
 	}
-	return global.st.active.CatalogID
+	return catalog.CatalogID
+}
+
+func activeCatalogLocked(st state) *Catalog {
+	if st.active == nil || !nowUTC().Before(st.active.ExpiresAt) {
+		return nil
+	}
+	return st.active
+}
+
+func catalogModelKey(modelID string) string {
+	return strings.ToLower(strings.TrimSpace(modelID))
 }
 
 func CountsForProviders(modelID string, providers []pool.Provider) HashCounts {
@@ -295,13 +401,13 @@ func LogProviderHashStatus(logger zerolog.Logger, providerID, assignedID, modelI
 	}
 	logProviderEvent(logger, event, severity, providerEvidence{
 		ProviderID: providerID, AssignedID: assignedID, ModelID: modelID, ReportedHash: reportedHash,
-	}, decision, reason)
+	}, decision, reason, "tier2.catalog_path")
 }
 
 func LogHashRequiredProviderExcluded(logger zerolog.Logger, providerID, assignedID, modelID, reportedHash string, status pool.HashStatus) {
 	logProviderEvent(logger, "hash_required_provider_excluded", "MAJOR", providerEvidence{
 		ProviderID: providerID, AssignedID: assignedID, ModelID: modelID, ReportedHash: reportedHash,
-	}, "exclude", string(status))
+	}, "exclude", string(status), "tier2.require_hash_verified")
 }
 
 func IsHashPredicateFailure(status pool.HashStatus, requireHashVerified bool) bool {
@@ -323,28 +429,35 @@ func providerHashEvent(status pool.HashStatus) (event, severity, decision, reaso
 	switch status {
 	case pool.HashStatusVerified:
 		return "model_hash_verified", "INFO", "allow", "hash_match", true
+	case pool.HashStatusUncatalogued:
+		if Active() {
+			return "model_hash_uncatalogued", "WARN", "allow", "not_catalogued", true
+		}
 	case pool.HashStatusMismatch:
 		return "model_hash_mismatch", "MAJOR", "exclude", "hash_mismatch", true
 	case pool.HashStatusInvalid:
 		return "model_hash_invalid", "MAJOR", "exclude", "hash_invalid", true
-	default:
-		return "", "", "", "", false
 	}
+	return "", "", "", "", false
 }
 
-func logProviderEvent(logger zerolog.Logger, event, severity string, evidence providerEvidence, decision, reason string) {
+func logProviderEvent(logger zerolog.Logger, event, severity string, evidence providerEvidence, decision, reason, configFlag string) {
 	logger.WithLevel(levelForSeverity(severity)).
 		Str("event", event).
 		Str("category", "T2.A").
 		Str("severity", severity).
+		Str("request_id", "").
 		Str("provider_id", evidence.ProviderID).
 		Str("assigned_id", evidence.AssignedID).
 		Str("model_id", evidence.ModelID).
+		Int("tier2_phase", 1).
+		Str("pillar", "A").
 		Str("reported_hash_prefix", hashPrefix(evidence.ReportedHash)).
 		Str("expected_hash_prefix", ExpectedHashPrefix(evidence.ModelID)).
 		Str("catalog_id", CatalogID()).
 		Str("decision", decision).
 		Str("reason", reason).
+		Str("config_flag", configFlag).
 		Str("ts", time.Now().UTC().Format(time.RFC3339Nano)).
 		Msg("tier2 model hash event")
 }
@@ -354,14 +467,18 @@ func logCatalogEvent(logger zerolog.Logger, event, severity, catalogID, decision
 		Str("event", event).
 		Str("category", "T2.A").
 		Str("severity", severity).
+		Str("request_id", "").
 		Str("provider_id", "").
 		Str("assigned_id", "").
 		Str("model_id", "").
+		Int("tier2_phase", 1).
+		Str("pillar", "A").
 		Str("reported_hash_prefix", "").
 		Str("expected_hash_prefix", "").
 		Str("catalog_id", catalogID).
 		Str("decision", decision).
 		Str("reason", reason).
+		Str("config_flag", "tier2.catalog_path").
 		Str("ts", time.Now().UTC().Format(time.RFC3339Nano)).
 		Msg("tier2 catalog event")
 }

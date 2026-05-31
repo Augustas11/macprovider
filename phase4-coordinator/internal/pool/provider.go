@@ -164,6 +164,22 @@ func (r *Registry) SetTier(providerID string, tier Tier) (Provider, bool) {
 	return cp, true
 }
 
+func (r *Registry) UpdateHashStatuses(statusFor func(Provider) HashStatus) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	updated := 0
+	for _, p := range r.providers {
+		cp := *p
+		cp.conn = nil
+		next := statusFor(cp)
+		if p.HashStatus != next {
+			updated++
+		}
+		p.HashStatus = next
+	}
+	return updated
+}
+
 func (r *Registry) MarkHTTPForwardingOnly(providerID, assignedID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
