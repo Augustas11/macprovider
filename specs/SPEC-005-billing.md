@@ -1,7 +1,17 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.1 (2026-05-31, initial draft from locked operator decisions)
+**Version:** 0.2 (2026-05-31, R1 audit fix pass)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.3, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.8.1
+
+**Change log v0.2:**
+- Fixed R1 M-1 by adding D1-D12 normative references outside § 2.
+- Fixed R1 M-2 and GATE 2 Q-2 with `ledger_provider_identity_snapshots`.
+- Fixed R1 M-3 and GATE 2 Q-1 with `ledger_config_snapshots`.
+- Fixed R1 M-4 and GATE 2 Q-3 with deterministic `request_log.id ASC` fallback quarantine.
+- Fixed R1 M-5 by completing § 11 JSON endpoint contracts and rate-limit posture.
+- Fixed R1 M-6 by adding behavior-level deterministic AC-D1 through AC-D12 fixtures.
+- Fixed R1 M-7 by specifying zero-tolerance H-005 gross reconciliation.
+- Fixed R1 M-8 by removing unreachable provider-not-reached usage_source rows.
 
 **Change log v0.1:**
 - Initial draft following `specs/SPEC-005-design.md` and `specs/SPEC-005-operator-decisions.md`.
@@ -52,6 +62,8 @@ It emits `ledger_payout_ready` rows that SPEC-007 may later consume.
 - Slack, email, webhook, or digest notification surfaces.
 - Multi-coordinator or multi-region ledger replication.
 - Buyer-visible donation buttons, tip jars, or payment-adjacent SPEC-006 UI.
+
+This section implements the locked billing and unit decisions (D1)(D6) and the SPEC-007 boundary by keeping SPEC-005 to internal coordinator credits and payout-ready handoff only.
 
 ### 1.4 Cross-spec boundaries
 
@@ -209,8 +221,12 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 SPEC-005 reads request_id, ts_utc, model, provider_assigned_id, prompt_tokens, completion_tokens, total_tokens, status, stream, error, provider_header, and retried.
 SPEC-005 never changes these columns.
 The D10 attempt_n need is a SPEC-002 v1.3.4 cross-spec patch candidate.
-Until attempt_n exists, v0.1 supports at most two attempts from current retried semantics.
-Ambiguous 2+ retry rows MUST be quarantined instead of guessed.
+Until attempt_n exists, v0.2 derives attempt ordinal by sorting same-request_id rows by request_log.id ASC.
+Row 1 becomes attempt_n=0.
+Row 2 becomes attempt_n=1 only when request_log.retried indicates an explicit retry.
+Row 3+ MUST be quarantined until SPEC-002 gains monotonic attempt_n.
+If rows cannot be ordered uniquely, all ambiguous rows MUST be quarantined.
+SPEC-005 resolves stable provider_id through `ledger_provider_identity_snapshots`; it MUST NOT require ALTER request_log.
 
 ### 4.3 Table `ledger_request_credits`
 
@@ -228,7 +244,7 @@ Ambiguous 2+ retry rows MUST be quarantined instead of guessed.
 | `prompt_tokens` | INTEGER | NULL CHECK(prompt_tokens IS NULL OR prompt_tokens >= 0) | prompt tokens | insert only |
 | `completion_tokens` | INTEGER | NULL CHECK(completion_tokens IS NULL OR completion_tokens >= 0) | reported completion tokens | insert only |
 | `estimated_completion_tokens` | INTEGER | NULL CHECK(estimated_completion_tokens IS NULL OR estimated_completion_tokens >= 0) | byte-estimated completion tokens | insert only |
-| `usage_source` | TEXT | NOT NULL CHECK(usage_source IN ('provider_reported','byte_estimated','null_error','provider_not_reached')) | usage source | insert only |
+| `usage_source` | TEXT | NOT NULL CHECK(usage_source IN ('provider_reported','byte_estimated','null_error')) | usage source | insert only |
 | `prompt_rate_per_mtok` | INTEGER | NOT NULL CHECK(prompt_rate_per_mtok >= 0) | rate snapshot | insert only |
 | `completion_rate_per_mtok` | INTEGER | NOT NULL CHECK(completion_rate_per_mtok >= 0) | rate snapshot | insert only |
 | `global_multiplier_ppm` | INTEGER | NOT NULL CHECK(global_multiplier_ppm >= 0) | multiplier snapshot | insert only |
@@ -326,16 +342,62 @@ Indexes and uniqueness constraints:
 - `INDEX idx_lrr_type_started(run_type, started_at_utc)`
 - `INDEX idx_lrr_range(from_utc, to_utc)`
 
-### 4.7 Migration ordering
+### 4.7 Table `ledger_config_snapshots`
+
+| Column | Type | Constraint | Meaning | Update rule |
+|---|---|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | local row id | insert only |
+| `effective_at_utc` | TEXT | NOT NULL | first timestamp covered by this config | insert only |
+| `config_hash` | TEXT | NOT NULL | canonical hash of applied SPEC-005 config | insert only |
+| `provider_share_bps` | INTEGER | NOT NULL CHECK(provider_share_bps BETWEEN 0 AND 10000) | provider share snapshot | insert only |
+| `global_multiplier_ppm` | INTEGER | NOT NULL CHECK(global_multiplier_ppm >= 0) | multiplier snapshot | insert only |
+| `rate_card_json` | TEXT | NOT NULL | canonical rate-card JSON | insert only |
+| `created_at_utc` | TEXT | NOT NULL | creation time | insert only |
+
+Indexes and uniqueness constraints:
+- `UNIQUE(config_hash)`
+- `INDEX idx_lcs_effective_at(effective_at_utc)`
+
+The coordinator MUST insert a config snapshot on startup and whenever a valid SPEC-005 config reload is acknowledged.
+Recovery MUST price historical rows from the latest snapshot whose effective_at_utc is less than or equal to request_log.ts_utc.
+If no snapshot exists for a recoverable row, recovery MUST quarantine instead of pricing with current config.
+
+### 4.8 Table `ledger_provider_identity_snapshots`
+
+| Column | Type | Constraint | Meaning | Update rule |
+|---|---|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | local row id | insert only |
+| `request_id` | TEXT | NOT NULL | joins request_log.request_id | insert only |
+| `attempt_n` | INTEGER | NOT NULL CHECK(attempt_n >= 0) | zero-based attempt ordinal | insert only |
+| `provider_assigned_id` | TEXT | NOT NULL | session-scoped serving provider id | insert only |
+| `provider_id` | TEXT | NOT NULL | stable SPEC-002 FR-R3 provider id | insert only |
+| `resolved_from` | TEXT | NOT NULL CHECK(resolved_from IN ('pool_entry','response_header','admin_recovery')) | identity source | insert only |
+| `pool_session_started_at_utc` | TEXT | NULL | active session start if known | insert only |
+| `created_at_utc` | TEXT | NOT NULL | creation time | insert only |
+
+Indexes and uniqueness constraints:
+- `UNIQUE(request_id, attempt_n, provider_assigned_id)`
+- `INDEX idx_lpis_request(request_id, attempt_n)`
+- `INDEX idx_lpis_provider(provider_id, created_at_utc)`
+
+The hot path MUST write this snapshot in the same SQLite transaction as request_log, ledger_request_credits, and ledger_operator_credits.
+Provider-not-reached rows with provider_assigned_id NULL MUST NOT write an identity snapshot.
+Recovery MUST use this snapshot when request_log lacks stable provider identity.
+
+### 4.9 Migration ordering
 
 - MIG-005-001 creates ledger_request_credits.
 - MIG-005-002 creates ledger_operator_credits.
 - MIG-005-003 creates ledger_payout_ready.
 - MIG-005-004 creates ledger_reconciliation_runs.
-- MIG-005-005 validates request_log columns by read-only introspection.
+- MIG-005-005 creates ledger_config_snapshots.
+- MIG-005-006 creates ledger_provider_identity_snapshots.
+- MIG-005-007 validates request_log columns by read-only introspection.
 - No SPEC-005 migration alters request_log.
 
 ## 5. Units and arithmetic
+
+This section implements the locked formula, split, unit, and failed-request accounting decisions (D3)(D5)(D6)(D8) by defining integer-only request pricing, immutable split arithmetic, and the shared formula used by hot-path, recovery, and reconciliation rows.
 
 ### 5.1 Unit definition
 
@@ -357,7 +419,7 @@ Operator credits equal gross minus provider credits so split sums exactly.
 ```text
 effective_completion_tokens = completion_tokens when usage_source = provider_reported
 effective_completion_tokens = estimated_completion_tokens when usage_source = byte_estimated
-effective_completion_tokens = 0 when usage_source in {null_error, provider_not_reached}
+effective_completion_tokens = 0 when usage_source = null_error
 base_numerator = prompt_tokens * prompt_rate_per_mtok + effective_completion_tokens * completion_rate_per_mtok
 rate_scaled_numerator = base_numerator * global_multiplier_ppm
 gross_credits = round_half_even(rate_scaled_numerator, 1_000_000 * 1_000_000)
@@ -365,6 +427,7 @@ provider_credits = round_half_even(gross_credits * provider_share_bps, 10_000)
 operator_credits = gross_credits - provider_credits
 ```
 Fault and null-error overrides set gross, provider, and operator credits to 0 before split.
+Recovery rows MUST use the `ledger_config_snapshots` row selected by § 10.4; they MUST NOT price historical rows from current coordinator.yaml when a historical snapshot is required.
 
 ### 5.4 Worked examples
 
@@ -378,6 +441,7 @@ Fault and null-error overrides set gross, provider, and operator credits to 0 be
 
 SPEC-006 v0.8.1 § 17.7 is the source of truth for buyer debits.
 SPEC-005 mirrors every row with a provider-credit derivation.
+This section implements the locked failed-request accounting decision (D8) by mirroring the SPEC-006 § 17.7 D3 matrix without editing SPEC-006.
 
 ### 6.1 200 success
 
@@ -393,7 +457,9 @@ SPEC-005 mirrors every row with a provider-credit derivation.
 **Completion-token state:** 0.
 **Buyer debit:** none.
 **SPEC-005 provider-credit rule:** Write no provider or operator ledger row.
-**Closed form:** apply § 5.3 to this row after its token-source selection and overrides.
+**Closed form:** not applicable because no ledger row is written.
+The 503 provider-not-reached path writes zero ledger rows of any kind: no `ledger_request_credits`, no `ledger_operator_credits`, and no `ledger_provider_identity_snapshots`.
+If a reconciliation summary needs to count provider-not-reached requests, it does so via the `request_log` JOIN where provider_assigned_id IS NULL, not via a `usage_source` value.
 
 ### 6.3 502 zero completion
 
@@ -466,6 +532,8 @@ This override takes precedence over prompt-only credit.
 
 ## 7. Settlement
 
+This section implements the locked cadence, threshold, and split decisions (D2)(D4)(D5) by accruing immediately, emitting weekly UTC payout-ready rows, enforcing the configurable minimum threshold, and preserving the provider/operator split.
+
 ### 7.1 Cadence
 
 Weekly cadence is locked by D2.
@@ -504,6 +572,8 @@ No process may update tokens, rates, split snapshots, or credit amounts.
 
 ## 8. Multi-attempt attribution (D10)
 
+This section implements the locked multi-provider attribution decision (D10) by crediting each routed attempt independently using request_id, attempt_n, and stable provider_id.
+
 ### 8.1 Key
 
 Every credit row is keyed by request_id, attempt_n, and provider_id.
@@ -513,8 +583,12 @@ Stable provider_id is the economic identity.
 ### 8.2 Derivation
 
 When SPEC-002 exposes attempt_n, copy it exactly.
-Until then, first attempt uses 0 and one explicit retry uses 1.
-More than two rows for one request before the patch are ambiguous and quarantined.
+Until then, derive the fallback ordinal by sorting rows with the same request_id by request_log.id ASC.
+The first ordered row uses attempt_n=0.
+The second ordered row uses attempt_n=1 only when request_log.retried indicates an explicit retry.
+The third and later ordered rows MUST be quarantined until SPEC-002 gains monotonic attempt_n.
+If request_log.id cannot produce a unique order, all ambiguous rows for that request_id MUST be quarantined.
+Stable provider_id MUST be copied from `ledger_provider_identity_snapshots` when request_log only supplies provider_assigned_id.
 
 ### 8.3 Invariant
 
@@ -530,6 +604,8 @@ SPEC-005 does not apply that patch.
 The operator must gate that patch in audit or v0.2 work.
 
 ## 9. Fraud floor and FR-P11a integration (D12)
+
+This section implements the locked fraud-floor decision (D12) by zero-crediting FR-P11a fault-classified requests and restoring normal earning eligibility only after the recovery preflight returns the provider to ready.
 
 ### 9.1 Fault categories
 
@@ -560,10 +636,12 @@ No extra re-warmup beyond FR-P11a.
 
 ## 10. Crash recovery and reconciliation (D9)
 
+This section implements the locked crash-recovery decision (D9) by keeping hot-path writes in one SQLite transaction and making startup and nightly recovery deterministic without live network calls.
+
 ### 10.1 Transaction contract
 
 Hot path MUST use BEGIN IMMEDIATE; ...; COMMIT.
-request_log, ledger_request_credits, and ledger_operator_credits are written together.
+request_log, ledger_request_credits, ledger_operator_credits, and any provider identity snapshot for the reached provider are written together.
 Crash before COMMIT loses all rows together.
 Crash after COMMIT preserves all rows together.
 No 2PC is used.
@@ -573,6 +651,9 @@ No 2PC is used.
 Startup scans prior 24 hours.
 Creditable request_log rows missing ledger rows get recovery rows.
 Recovery rows set recovery_source=startup_scan.
+Recovery rows use the latest `ledger_config_snapshots` entry whose effective_at_utc is less than or equal to request_log.ts_utc.
+If no such config snapshot exists, the row is quarantined instead of priced with current config.
+Recovery rows use `ledger_provider_identity_snapshots` to resolve provider_assigned_id to stable provider_id.
 The scan is idempotent.
 
 ### 10.3 Nightly reconcile
@@ -582,14 +663,19 @@ It uses the same deterministic classifier as startup.
 It writes ledger_reconciliation_runs.
 It quarantines orphan ledger rows.
 It does not delete rows.
+For a clean range, delta_gross_credits MUST equal 0 when provider gross credits are recomputed from the same § 5.3 formula and historical config snapshot.
+Provider/operator split deltas MUST be checked separately by verifying provider_credits + operator_credits == gross_credits for each row.
+A non-zero gross delta MUST be recorded in `/admin/ledger/reconcile` output and MUST fail AC-H005.
 
 ### 10.4 Deterministic algorithm
 
-Function signature: RecoverLedger(requestLogRows, ledgerRows, configSnapshot, scanWindow).
+Function signature: RecoverLedger(requestLogRows, ledgerRows, configSnapshots, providerIdentitySnapshots, scanWindow).
 Outputs: recoveryRows, quarantineUpdates, reconciliationSummary.
 Same inputs produce byte-identical outputs.
 Time is explicit input.
 No live network call may affect output.
+For each recoverable request_log row, the algorithm selects the latest config snapshot whose effective_at_utc is less than or equal to request_log.ts_utc.
+If no config snapshot or provider identity snapshot can be selected for a provider-reached row, the row is quarantined.
 
 ### 10.5 Quarantine
 
@@ -601,69 +687,167 @@ Quarantined rows are exposed in admin endpoints.
 
 ## 11. Operator and provider endpoints (D11)
 
+This section implements the locked operator-dashboard decision (D11) by defining exactly four JSON visibility endpoints and no charts, HTML dashboards, Slack, email, or digest surface.
+All endpoint errors use this envelope:
+
+```json
+{"error":{"code":"forbidden","message":"operator key required"}}
+```
+
+Admin endpoints share the existing `/admin/*` operator-key protection and rate-limit posture.
+
 ### 11.1 `GET /admin/ledger/summary`
 
-Auth: operator key.
-Purpose: totals, this week, last 4 weeks, pending payouts, quarantined rows.
-Response MUST be JSON.
-Response fields:
-- `total_gross_credits`
-- `total_provider_credits`
-- `total_operator_credits`
-- `current_window_provider_credits`
-- `pending_payout_count`
-- `pending_payout_credits`
-- `quarantined_count`
-- `fault_count`
-- `last_reconciliation_delta_credits`
+**Method and path:** `GET /admin/ledger/summary`.
+**Auth requirement:** operator key.
+**Query parameters:** none.
+**Rate-limit posture:** existing `/admin/*` protection.
+**Purpose:** totals, this week, last 4 weeks, pending payouts, quarantined rows.
+**HTTP 200 JSON example:**
+
+```json
+{
+  "total_gross_credits": 8123456,
+  "total_provider_credits": 7311110,
+  "total_operator_credits": 812346,
+  "current_window_provider_credits": 525000,
+  "pending_payout_count": 2,
+  "pending_payout_credits": 1010000,
+  "quarantined_count": 0,
+  "fault_count": 3,
+  "last_reconciliation_delta_credits": 0
+}
+```
+
+**403 JSON error example:**
+
+```json
+{"error":{"code":"forbidden","message":"operator key required"}}
+```
+
 No HTML, chart markup, Slack payload, or email body is returned.
 
 ### 11.2 `GET /admin/ledger/providers`
 
-Auth: operator key.
-Purpose: per-provider breakdown.
-Response MUST be JSON.
-Response fields:
-- `provider_id`
-- `total_provider_credits`
-- `current_window_credits`
-- `pending_payout_credits`
-- `last_activity_utc`
-- `fault_count`
-- `quarantined_count`
-- `attestation_class`
+**Method and path:** `GET /admin/ledger/providers`.
+**Auth requirement:** operator key.
+**Query parameters:** optional `limit`, `cursor`, and `include_quarantined`.
+**Rate-limit posture:** existing `/admin/*` protection.
+**Purpose:** per-provider breakdown.
+**HTTP 200 JSON example:**
+
+```json
+{
+  "providers": [
+    {
+      "provider_id": "m4-anon",
+      "total_provider_credits": 640000,
+      "current_window_credits": 125000,
+      "pending_payout_credits": 500000,
+      "last_activity_utc": "2026-05-31T08:12:00Z",
+      "fault_count": 1,
+      "quarantined_count": 0,
+      "attestation_class": null
+    }
+  ],
+  "next_cursor": null
+}
+```
+
+**403 JSON error example:**
+
+```json
+{"error":{"code":"forbidden","message":"operator key required"}}
+```
+
 No HTML, chart markup, Slack payload, or email body is returned.
 
 ### 11.3 `GET /admin/ledger/reconcile?from=YYYY-MM-DD&to=YYYY-MM-DD`
 
-Auth: operator key.
-Purpose: H-005 reconciliation report.
-Response MUST be JSON.
-Response fields:
-- `from_utc`
-- `to_utc`
-- `buyer_debit_credits`
-- `provider_gross_credits`
-- `delta_credits`
-- `rows_scanned`
-- `rows_recovered`
-- `rows_quarantined`
+**Method and path:** `GET /admin/ledger/reconcile`.
+**Auth requirement:** operator key.
+**Query parameters:** required `from=YYYY-MM-DD`, required `to=YYYY-MM-DD`.
+**Rate-limit posture:** existing `/admin/*` protection.
+**Purpose:** H-005 reconciliation report.
+**HTTP 200 JSON example:**
+
+```json
+{
+  "from_utc": "2026-05-24T00:00:00Z",
+  "to_utc": "2026-05-31T00:00:00Z",
+  "buyer_debit_credits": 8123456,
+  "provider_gross_credits": 8123456,
+  "delta_gross_credits": 0,
+  "split_delta_rows": 0,
+  "rows_scanned": 128,
+  "rows_recovered": 1,
+  "rows_quarantined": 0
+}
+```
+
+`delta_gross_credits` MUST be 0 for a clean H-005 range.
+Provider/operator split validation is reported separately with `split_delta_rows`.
+A non-zero `delta_gross_credits` MUST be returned in this JSON response and MUST fail AC-H005.
+The reconciliation fixture MUST NOT require live network access.
+
+**403 JSON error example:**
+
+```json
+{"error":{"code":"forbidden","message":"operator key required"}}
+```
+
 No HTML, chart markup, Slack payload, or email body is returned.
 
 ### 11.4 `GET /providers/{provider_id}/earnings`
 
-Auth: FR-P12 provider bearer token.
-Purpose: provider-owned earnings view.
-Response MUST be JSON.
-Response fields:
-- `provider_id`
-- `total_credits`
-- `current_window_credits`
-- `last_payout_ready`
-- `provider_share_bps`
-- `models_served`
-- `rate_card_excerpt`
-- `fault_count`
+**Method and path:** `GET /providers/{provider_id}/earnings`.
+**Auth requirement:** FR-P12 provider bearer token with subject equal to path `provider_id`.
+**Query parameters:** optional `from=YYYY-MM-DD` and `to=YYYY-MM-DD`.
+**Rate-limit posture:** bounded by the per-provider read limit configured at `endpoints.provider_earnings.rate_limit_per_minute`.
+**Purpose:** provider-owned earnings view.
+**HTTP 200 JSON example:**
+
+```json
+{
+  "provider_id": "m4-anon",
+  "total_credits": 640000,
+  "current_window_credits": 125000,
+  "last_payout_ready": {
+    "window_start_utc": "2026-05-18T00:00:00Z",
+    "window_end_utc": "2026-05-25T00:00:00Z",
+    "provider_credits": 515000,
+    "status": "ready"
+  },
+  "provider_share_bps": 9000,
+  "models_served": ["mlx-community/Qwen2.5-7B-Instruct-4bit"],
+  "rate_card_excerpt": {
+    "mlx-community/Qwen2.5-7B-Instruct-4bit": {
+      "prompt_credits_per_mtok": 1000000,
+      "completion_credits_per_mtok": 2000000
+    }
+  },
+  "fault_count": 1
+}
+```
+
+**401 JSON error example:**
+
+```json
+{"error":{"code":"unauthorized","message":"provider bearer token required"}}
+```
+
+**403 JSON error example:**
+
+```json
+{"error":{"code":"forbidden","message":"provider token subject mismatch"}}
+```
+
+**404 JSON error example:**
+
+```json
+{"error":{"code":"not_found","message":"provider not found"}}
+```
+
 No HTML, chart markup, Slack payload, or email body is returned.
 
 ### 11.5 Provider endpoint authorization
@@ -676,6 +860,8 @@ Unknown provider_id returns 404 without enumerating valid providers.
 
 ## 12. Buyer-balance interaction (D7)
 
+This section implements the locked buyer-balance decision (D7) by leaving buyer balance enforcement to SPEC-006 and crediting providers for legitimate completed work regardless of buyer quota state.
+
 SPEC-005 does not enforce buyer quota.
 SPEC-006 gateway quota is authoritative.
 If the gateway forwarded and the provider performed work, provider credit follows § 6.
@@ -684,6 +870,8 @@ overshoot_flag is advisory only.
 Operator recourse is quota tuning, not provider clawback.
 
 ## 13. Configuration
+
+This section implements D2-D6 and D9 config commitments (D2)(D3)(D4)(D5)(D6)(D9) by keeping the cadence, threshold, rate card, multiplier, split, and recovery windows in coordinator.yaml with immutable row snapshots.
 
 All SPEC-005 configuration lives in coordinator.yaml.
 Config changes affect only new request-credit rows.
@@ -701,6 +889,7 @@ Config changes affect only new request-credit rows.
 | `settlement.startup_reconcile_window_hours` | integer | `24` | startup scan window |
 | `settlement.nightly_reconcile_window_days` | integer | `7` | nightly scan window |
 | `settlement.job_enabled` | boolean | `true` | test-disable switch for scheduler only |
+| `endpoints.provider_earnings.rate_limit_per_minute` | integer | `60` | per-provider read limit for earnings endpoint |
 
 ### 13.1 Initial placeholder rate card
 
@@ -714,8 +903,10 @@ Config changes affect only new request-credit rows.
 
 New values apply only after reload acknowledgement.
 Rows snapshot the applied values.
+The coordinator MUST insert a `ledger_config_snapshots` row on startup and after each valid reload acknowledgement.
 Invalid reload keeps prior valid config.
 Cold start without default rate-card row fails.
+Recovery MUST use historical `ledger_config_snapshots`; it MUST NOT price old request_log rows from a newer acknowledged config.
 
 ## 14. Instrumentation and metrics
 
@@ -745,8 +936,9 @@ Set usage_source=byte_estimated.
 
 ### 15.2 attempt_n fallback
 
+Before the SPEC-002 patch, same-request_id rows are ordered by request_log.id ASC.
 No-retry and one explicit retry are supported before SPEC-002 patch.
-Ambiguous 2+ retry rows are quarantined.
+Row 3+, non-explicit retry row 2, and non-unique ordering are quarantined.
 § 20 surfaces the patch.
 
 ### 15.3 Unknown models
@@ -762,6 +954,8 @@ Idempotency key prevents duplicate payout-ready rows.
 All unsettled rows up to window end are included.
 
 ## 16. Security and privacy
+
+This section implements the locked billing, unit, and visibility decisions (D1)(D6)(D11) by keeping SPEC-005 economics internal, authenticated, and credit-denominated.
 
 ### 16.1 Admin auth
 
@@ -795,14 +989,17 @@ Future manual review should append audit events.
 
 ## 17. Failure modes
 
+Endpoint failures MUST return the § 11 JSON error envelope and no ledger data.
+
 | Failure | Surface | Result | Required behavior |
 |---|---|---|---|
-| Admin key invalid | /admin/ledger/* | 403 | no ledger data |
-| Admin key missing | /admin/ledger/* | 403 | no ledger data |
-| Provider token missing | /providers/{provider_id}/earnings | 401 | no provider data |
-| Provider token invalid | /providers/{provider_id}/earnings | 401 | no provider data |
-| Provider token wrong subject | /providers/{provider_id}/earnings | 403 | no provider data |
-| Unknown provider_id | /providers/{provider_id}/earnings | 404 | no enumeration |
+| Admin key invalid | /admin/ledger/* | 403 | JSON envelope; no ledger data |
+| Admin key missing | /admin/ledger/* | 403 | JSON envelope; no ledger data |
+| Provider token missing | /providers/{provider_id}/earnings | 401 | JSON envelope; no provider data |
+| Provider token invalid | /providers/{provider_id}/earnings | 401 | JSON envelope; no provider data |
+| Provider token wrong subject | /providers/{provider_id}/earnings | 403 | JSON envelope; no provider data |
+| Unknown provider_id | /providers/{provider_id}/earnings | 404 | JSON envelope; no enumeration |
+| Provider earnings read limit exceeded | /providers/{provider_id}/earnings | 429 | JSON envelope; no provider data |
 | Settlement crash before payout row | settlement goroutine | retry | source rows remain unsettled |
 | Settlement crash after payout row | settlement goroutine | repair | rerun marks matching source rows |
 | Missing ledger row | startup/nightly | repair | write deterministic recovery row |
@@ -817,92 +1014,104 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### AC-D1: Billing model encoded
 
-**Verification:** Parse § 2 and locate D1; then locate at least one later normative reference.
-**Expected:** D1 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D1; then locate at least one later normative reference.
+**Behavior verification:** Run SPEC-005 migrations in an empty SQLite fixture and inspect tables.
+**Expected:** D1 exists in § 2, is enforced outside § 2, and no buyer revenue, Stripe, checkout, donation, tip-jar, or payment-collection table is created by SPEC-005 migrations.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D2: Settlement cadence encoded
 
-**Verification:** Parse § 2 and locate D2; then locate at least one later normative reference.
-**Expected:** D2 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D2; then locate at least one later normative reference.
+**Behavior verification:** Seed a completed request and run the hot path, then run settlement before and at the UTC Monday boundary.
+**Expected:** D2 exists in § 2, is enforced outside § 2, completed request credits accrue immediately, and payout-ready rows emit only at the weekly boundary.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D3: Provider reward formula encoded
 
-**Verification:** Parse § 2 and locate D3; then locate at least one later normative reference.
-**Expected:** D3 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D3; then locate at least one later normative reference.
+**Behavior verification:** Price one known-model row and one unknown-model row through the § 5.3 formula.
+**Expected:** D3 exists in § 2, is enforced outside § 2, known-model rates are used, unknown model uses the default row, and all selected rates are snapshotted on the credit row.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D4: Minimum payout threshold encoded
 
-**Verification:** Parse § 2 and locate D4; then locate at least one later normative reference.
-**Expected:** D4 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D4; then locate at least one later normative reference.
+**Behavior verification:** Run settlement with provider totals one credit below and exactly at settlement.min_payout_credits.
+**Expected:** D4 exists in § 2, is enforced outside § 2, below-threshold credits roll forward unsettled, and at-threshold credits emit one payout-ready row.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D5: Revenue split encoded
 
-**Verification:** Parse § 2 and locate D5; then locate at least one later normative reference.
-**Expected:** D5 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D5; then locate at least one later normative reference.
+**Behavior verification:** Create one row at provider_share_bps=9000, reload share to 9500, then create a second row.
+**Expected:** D5 exists in § 2, is enforced outside § 2, each row satisfies provider_credits + operator_credits == gross_credits, and the historical row remains immutable after the share change.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D6: Currency / unit encoded
 
-**Verification:** Parse § 2 and locate D6; then locate at least one later normative reference.
-**Expected:** D6 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D6; then locate at least one later normative reference.
+**Behavior verification:** Inspect the SQLite schema and run formula fixtures with half, below-half, and above-half remainders.
+**Expected:** D6 exists in § 2, is enforced outside § 2, economic columns are INTEGER, no REAL/FLOAT economic storage exists, and rounding is exact round half to even.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D7: Buyer balance enforcement encoded
 
-**Verification:** Parse § 2 and locate D7; then locate at least one later normative reference.
-**Expected:** D7 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D7; then locate at least one later normative reference.
+**Behavior verification:** Seed a SPEC-006 over-quota overshoot row that reached a provider with reported usage.
+**Expected:** D7 exists in § 2, is enforced outside § 2, provider credit follows § 6, and overshoot_flag remains advisory without zeroing legitimate completed work.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D8: Failed-request accounting encoded
 
-**Verification:** Parse § 2 and locate D8; then locate at least one later normative reference.
-**Expected:** D8 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D8; then locate at least one later normative reference.
+**Behavior verification:** Run the full SPEC-006 § 17.7 D3 matrix through the § 6 classifier.
+**Expected:** D8 exists in § 2, is enforced outside § 2, every buyer-debit state maps to the matching provider-credit action, null-usage errors produce zero-credit audit rows, and provider-not-reached produces no ledger rows.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D9: Crash recovery policy encoded
 
-**Verification:** Parse § 2 and locate D9; then locate at least one later normative reference.
-**Expected:** D9 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D9; then locate at least one later normative reference.
+**Behavior verification:** Run the same startup recovery input twice, including request_log rows, ledger rows, config snapshots, identity snapshots, and scan window.
+**Expected:** D9 exists in § 2, is enforced outside § 2, output is byte-identical for the same state pair, no live network is called, and missing config or identity snapshots quarantine instead of guessing.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D10: Multi-provider attribution encoded
 
-**Verification:** Parse § 2 and locate D10; then locate at least one later normative reference.
-**Expected:** D10 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D10; then locate at least one later normative reference.
+**Behavior verification:** Seed two same-request_id rows ordered by request_log.id ASC plus matching provider identity snapshots.
+**Expected:** D10 exists in § 2, is enforced outside § 2, rows receive distinct attempt_n/provider_id keys, row 2 is accepted only with explicit retried semantics, and row 3+ or ambiguous ordering is quarantined.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D11: Operator dashboard scope encoded
 
-**Verification:** Parse § 2 and locate D11; then locate at least one later normative reference.
-**Expected:** D11 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D11; then locate at least one later normative reference.
+**Behavior verification:** Invoke all four handlers with fixture stores and with missing or wrong credentials.
+**Expected:** D11 exists in § 2, is enforced outside § 2, each handler returns the documented JSON shape, admin failures use the error envelope, provider subject mismatch returns 403, unknown provider returns 404, and no HTML/charts are emitted.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-D12: Fraud floor for degraded providers encoded
 
-**Verification:** Parse § 2 and locate D12; then locate at least one later normative reference.
-**Expected:** D12 exists in § 2 and is enforced outside § 2.
+**Traceability verification:** Parse § 2 and locate D12; then locate at least one later normative reference.
+**Behavior verification:** Seed an FR-P11a breaker-qualifying fault, a buyer cancel, and a provider that returns ready after recovery preflight.
+**Expected:** D12 exists in § 2, is enforced outside § 2, breaker-qualified work is zero-credit, buyer cancel is not fault-zeroed, degraded/unavailable providers receive no new earning rows, and normal credits resume after recovery preflight.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-H005: H-005 symmetry
 
 **Verification:** Construct all eight SPEC-006 § 17.7 states and run the § 6 credit function.
-**Expected:** Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row.
+**Expected:** Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row; delta_gross_credits equals 0 for a clean range; provider/operator splits satisfy provider_credits + operator_credits == gross_credits per row.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -979,14 +1188,14 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 ### AC-MULTIHOP: Two-attempt attribution
 
 **Verification:** Fixture two providers and one request_id.
-**Expected:** Two rows with distinct attempt_n/provider_id keys; sums match attempt totals.
+**Expected:** Two rows with distinct attempt_n/provider_id keys from identity snapshots; sums match attempt totals.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-ATTEMPT-FALLBACK: retried fallback limit
 
 **Verification:** Fixture three rows before attempt_n patch.
-**Expected:** Ambiguous row is quarantined.
+**Expected:** request_log.id ASC assigns row 1 to attempt_n=0; row 2 becomes attempt_n=1 only with explicit retried semantics; row 3+ is quarantined.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -1000,14 +1209,14 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 ### AC-STARTUP-SCAN: Startup scan recovery
 
 **Verification:** Seed a prior-24h creditable request_log row without ledger row.
-**Expected:** Exactly one startup_scan recovery row.
+**Expected:** Exactly one startup_scan recovery row using the historical config snapshot and provider identity snapshot.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
 ### AC-NIGHTLY: Nightly reconcile recovery
 
 **Verification:** Seed a prior-7d row outside startup window without ledger row.
-**Expected:** Exactly one nightly_reconcile recovery row.
+**Expected:** Exactly one nightly_reconcile recovery row using the historical config snapshot and provider identity snapshot.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -1165,7 +1374,8 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### OQ-1: SPEC-002 attempt_n patch
 
-SPEC-005 v0.1 needs a monotonic attempt_n for full multi-attempt accounting. Current fallback quarantines ambiguity.
+SPEC-005 v0.2 permits the quarantining fallback: same-request_id rows are ordered by request_log.id ASC, row 1 maps to attempt_n=0, row 2 maps to attempt_n=1 only with explicit retried semantics, and row 3+ or ambiguous ordering is quarantined.
+SPEC-002 v1.3.4 monotonic attempt_n remains a cross-spec patch candidate, not a SPEC-005 v0.2 launch blocker.
 
 ### OQ-2: Rounding rule acceptance
 
@@ -1216,12 +1426,12 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 | D2 | § 2.2 | § 7, § 13 | AC-D2 |
 | D3 | § 2.3 | § 5, § 13 | AC-D3 |
 | D4 | § 2.4 | § 7.2, § 13 | AC-D4 |
-| D5 | § 2.5 | § 5.3, § 7.3 | AC-D5 |
-| D6 | § 2.6 | § 5 | AC-D6 |
+| D5 | § 2.5 | § 5.3, § 7.3, § 13 | AC-D5 |
+| D6 | § 2.6 | § 1.3, § 5, § 13, § 16 | AC-D6 |
 | D7 | § 2.7 | § 12 | AC-D7 |
 | D8 | § 2.8 | § 6 | AC-D8 |
-| D9 | § 2.9 | § 10 | AC-D9 |
-| D10 | § 2.10 | § 8 | AC-D10 |
+| D9 | § 2.9 | § 4.7, § 10, § 13 | AC-D9 |
+| D10 | § 2.10 | § 4.8, § 8 | AC-D10 |
 | D11 | § 2.11 | § 11 | AC-D11 |
 | D12 | § 2.12 | § 9 | AC-D12 |
 
@@ -1328,7 +1538,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 #### `ledger_request_credits.usage_source`
 
 - Type: TEXT.
-- Constraint: NOT NULL CHECK(usage_source IN ('provider_reported','byte_estimated','null_error','provider_not_reached')).
+- Constraint: NOT NULL CHECK(usage_source IN ('provider_reported','byte_estimated','null_error')).
 - Meaning: usage source.
 - Update rule: insert only.
 - Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
@@ -1811,8 +2021,8 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 - SPEC-006 status: 503.
 - Completion-token state: 0.
 - Buyer debit basis: none.
-- Provider credit action: Write no provider or operator ledger row.
-- Verification function: pass fixture through the § 5.3 arithmetic after row-specific token selection.
+- Provider credit action: Write no provider, operator, or provider identity ledger row.
+- Verification function: assert no ledger rows are written and count the state only via request_log JOIN where provider_assigned_id IS NULL.
 - Expected network use: none.
 
 ### Fixture: 502 zero completion
@@ -1874,96 +2084,96 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 ### AC-D1 fixture detail
 
 - Claim: Billing model encoded.
-- Setup: Parse § 2 and locate D1; then locate at least one later normative reference.
-- Oracle: D1 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D1 references; run migrations in an empty SQLite fixture.
+- Oracle: D1 exists in § 2, is enforced outside § 2, and no buyer revenue, Stripe, checkout, donation, tip-jar, or payment-collection table exists.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D2 fixture detail
 
 - Claim: Settlement cadence encoded.
-- Setup: Parse § 2 and locate D2; then locate at least one later normative reference.
-- Oracle: D2 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D2 references; seed completed usage and run settlement before and at UTC Monday 00:00.
+- Oracle: D2 exists in § 2, is enforced outside § 2, credits accrue immediately, and payout-ready rows emit only at the weekly boundary.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D3 fixture detail
 
 - Claim: Provider reward formula encoded.
-- Setup: Parse § 2 and locate D3; then locate at least one later normative reference.
-- Oracle: D3 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D3 references; price known-model and unknown-model rows.
+- Oracle: D3 exists in § 2, is enforced outside § 2, known-model rates are used, default fallback applies for unknown model, and rates are snapshotted.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D4 fixture detail
 
 - Claim: Minimum payout threshold encoded.
-- Setup: Parse § 2 and locate D4; then locate at least one later normative reference.
-- Oracle: D4 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D4 references; run settlement one credit below and exactly at the configured threshold.
+- Oracle: D4 exists in § 2, is enforced outside § 2, below-threshold credits roll forward, and at-threshold credits emit one payout-ready row.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D5 fixture detail
 
 - Claim: Revenue split encoded.
-- Setup: Parse § 2 and locate D5; then locate at least one later normative reference.
-- Oracle: D5 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D5 references; create rows before and after a provider_share_bps reload.
+- Oracle: D5 exists in § 2, is enforced outside § 2, split sums to gross per row, and the historical row is immutable after the share change.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D6 fixture detail
 
 - Claim: Currency / unit encoded.
-- Setup: Parse § 2 and locate D6; then locate at least one later normative reference.
-- Oracle: D6 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D6 references; inspect schema and run half/below-half/above-half rounding fixtures.
+- Oracle: D6 exists in § 2, is enforced outside § 2, economic storage is INTEGER only, and round-half-even behavior is exact.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D7 fixture detail
 
 - Claim: Buyer balance enforcement encoded.
-- Setup: Parse § 2 and locate D7; then locate at least one later normative reference.
-- Oracle: D7 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D7 references; seed an over-quota overshoot row that reached a provider with reported usage.
+- Oracle: D7 exists in § 2, is enforced outside § 2, provider credit follows § 6, and overshoot_flag does not zero legitimate completed work.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D8 fixture detail
 
 - Claim: Failed-request accounting encoded.
-- Setup: Parse § 2 and locate D8; then locate at least one later normative reference.
-- Oracle: D8 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D8 references; run all SPEC-006 § 17.7 D3 rows through the § 6 classifier.
+- Oracle: D8 exists in § 2, is enforced outside § 2, each buyer-debit state maps to matching provider-credit action, and provider-not-reached writes no ledger rows.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D9 fixture detail
 
 - Claim: Crash recovery policy encoded.
-- Setup: Parse § 2 and locate D9; then locate at least one later normative reference.
-- Oracle: D9 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D9 references; run the same recovery input twice with request_log rows, ledger rows, config snapshots, identity snapshots, and scan window.
+- Oracle: D9 exists in § 2, is enforced outside § 2, outputs are byte-identical, no live network is called, and missing snapshots quarantine instead of guessing.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D10 fixture detail
 
 - Claim: Multi-provider attribution encoded.
-- Setup: Parse § 2 and locate D10; then locate at least one later normative reference.
-- Oracle: D10 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D10 references; seed same-request_id rows ordered by request_log.id ASC plus identity snapshots.
+- Oracle: D10 exists in § 2, is enforced outside § 2, rows receive distinct attempt_n/provider_id keys, row 2 requires explicit retry semantics, and row 3+ or ambiguous order quarantines.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D11 fixture detail
 
 - Claim: Operator dashboard scope encoded.
-- Setup: Parse § 2 and locate D11; then locate at least one later normative reference.
-- Oracle: D11 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D11 references; invoke all four handlers with fixture stores and missing/wrong credentials.
+- Oracle: D11 exists in § 2, is enforced outside § 2, documented JSON shapes and error envelopes are returned, provider auth scopes hold, and no HTML/charts are emitted.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
 ### AC-D12 fixture detail
 
 - Claim: Fraud floor for degraded providers encoded.
-- Setup: Parse § 2 and locate D12; then locate at least one later normative reference.
-- Oracle: D12 exists in § 2 and is enforced outside § 2.
+- Setup: Parse § 2 and later D12 references; seed a breaker-qualified fault, buyer cancel, and provider recovery preflight.
+- Oracle: D12 exists in § 2, is enforced outside § 2, breaker faults are zero-credit, buyer cancels are not fault-zeroed, and normal credits resume after recovery preflight.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -1971,7 +2181,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 
 - Claim: H-005 symmetry.
 - Setup: Construct all eight SPEC-006 § 17.7 states and run the § 6 credit function.
-- Oracle: Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row.
+- Oracle: Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row; delta_gross_credits is 0 for a clean range; provider/operator split sums to gross per row.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
