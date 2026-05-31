@@ -42,6 +42,9 @@ routing:
 provider_http:
   timeout_s: 300  # 5 min provider HTTP forwarding timeout
 
+limits:
+  max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays
+
 ws:
   write_buffer_size: 64
 

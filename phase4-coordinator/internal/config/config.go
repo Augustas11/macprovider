@@ -17,6 +17,7 @@ type Config struct {
 	Pool                         PoolConfig                   `yaml:"pool"`
 	Routing                      RoutingConfig                `yaml:"routing"`
 	ProviderHTTP                 ProviderHTTPConfig           `yaml:"provider_http"`
+	Limits                       LimitsConfig                 `yaml:"limits"`
 	WS                           WSConfig                     `yaml:"ws"`
 	Admission                    AdmissionConfig              `yaml:"admission"`
 	Tier2                        Tier2Config                  `yaml:"tier2"`
@@ -82,6 +83,10 @@ type ModelClassConfig struct {
 
 type ProviderHTTPConfig struct {
 	TimeoutS int `yaml:"timeout_s"`
+}
+
+type LimitsConfig struct {
+	MaxChatRequestBodyBytes int64 `yaml:"max_chat_request_body_bytes"`
 }
 
 type WSConfig struct {
@@ -198,6 +203,9 @@ func Default() Config {
 		},
 		ProviderHTTP: ProviderHTTPConfig{
 			TimeoutS: 300,
+		},
+		Limits: LimitsConfig{
+			MaxChatRequestBodyBytes: 1 << 20,
 		},
 		WS: WSConfig{
 			WriteBufferSize: 64,
@@ -319,6 +327,12 @@ func (c Config) Validate() error {
 	}
 	if c.ProviderHTTP.TimeoutS <= 0 {
 		return fmt.Errorf("provider_http.timeout_s must be > 0")
+	}
+	if c.Limits.MaxChatRequestBodyBytes <= 0 {
+		return fmt.Errorf("limits.max_chat_request_body_bytes must be > 0")
+	}
+	if c.Limits.MaxChatRequestBodyBytes > 128<<20 {
+		return fmt.Errorf("limits.max_chat_request_body_bytes must be <= 128 MiB")
 	}
 	for name, class := range c.Routing.ModelClasses {
 		if name == "" {

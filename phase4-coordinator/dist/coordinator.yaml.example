@@ -59,6 +59,9 @@ routing:
 provider_http:
   timeout_s: 300  # 5 min provider HTTP forwarding timeout
 
+limits:
+  max_chat_request_body_bytes: 1048576  # 1 MiB default; raise for buyers with large tools arrays
+
 auth:
   # 64 hex chars (256 bits). Generated with: openssl rand -hex 32
   operator_key: "REPLACE_ME_WITH_RANDOM_HEX_64"

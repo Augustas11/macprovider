@@ -64,6 +64,7 @@ func main() {
 		buyer.WithFailoverConfig(cfg.Routing.FailoverEnabled, time.Duration(cfg.Routing.FailoverTimeoutS)*time.Second),
 		buyer.WithRoutingConfig(cfg.Routing),
 		buyer.WithTier2Config(cfg.Tier2),
+		buyer.WithLimitsConfig(cfg.Limits),
 		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),

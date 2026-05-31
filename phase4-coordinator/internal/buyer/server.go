@@ -61,6 +61,7 @@ type Server struct {
 	tier2Mu                sync.RWMutex
 	tier2                  config.Tier2Config
 	provisionalWeight      float64
+	maxChatBodyBytes       int64
 	recovering             sync.Map
 	poolCheckLast          sync.Map
 	now                    func() time.Time
@@ -97,8 +98,6 @@ const (
 	wsForwardProviderDisconnected          wsForwardResult = "provider_disconnected"
 	wsForwardProviderDisconnectedCommitted wsForwardResult = "provider_disconnected_committed"
 )
-
-const maxChatRequestBodyBytes int64 = 1 << 20
 
 type breakerFault string
 
@@ -186,6 +185,14 @@ func WithTier2Config(cfg config.Tier2Config) Option {
 	}
 }
 
+func WithLimitsConfig(cfg config.LimitsConfig) Option {
+	return func(s *Server) {
+		if cfg.MaxChatRequestBodyBytes > 0 {
+			s.maxChatBodyBytes = cfg.MaxChatRequestBodyBytes
+		}
+	}
+}
+
 func (s *Server) SetTier2Config(cfg config.Tier2Config) {
 	s.tier2Mu.Lock()
 	defer s.tier2Mu.Unlock()
@@ -243,6 +250,7 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		sticky:                 map[string]stickyEntry{},
 		modelClasses:           map[string]config.ModelClassConfig{},
 		provisionalWeight:      0.3,
+		maxChatBodyBytes:       config.Default().Limits.MaxChatRequestBodyBytes,
 		now:                    func() time.Time { return time.Now().UTC() },
 	}
 	for _, opt := range opts {
@@ -661,12 +669,13 @@ type chatMessage struct {
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	requestID := uuid.NewString()
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxChatRequestBodyBytes+1))
+	maxBodyBytes := s.maxChatBodyBytes
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request", "Could not read request body")
 		return
 	}
-	if int64(len(body)) > maxChatRequestBodyBytes {
+	if int64(len(body)) > maxBodyBytes {
 		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
 		return
 	}

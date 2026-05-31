@@ -1220,14 +1220,15 @@ func TestChatCompletionsRejectsDuplicateTopLevelModel(t *testing.T) {
 func TestChatCompletionsRejectsOversizedBodyBeforeParsing(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	register(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1)
+	limit := config.Default().Limits.MaxChatRequestBodyBytes
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRoutingConfig(config.RoutingConfig{
 		MaxRetries: 1,
 		ModelClasses: map[string]config.ModelClassConfig{
 			"mlx-class": {Models: []string{"model-a"}, Objective: "fast"},
 		},
-	}))
+	}), buyer.WithLimitsConfig(config.Default().Limits))
 
-	oversizedInvalid := bytes.Repeat([]byte("{"), 1<<20+1)
+	oversizedInvalid := bytes.Repeat([]byte("{"), int(limit)+1)
 	rr := postChat(t, server, oversizedInvalid, nil)
 	if rr.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized invalid status=%d body=%s", rr.Code, rr.Body.String())
@@ -1236,13 +1237,13 @@ func TestChatCompletionsRejectsOversizedBodyBeforeParsing(t *testing.T) {
 		t.Fatalf("oversized invalid body=%s", rr.Body.String())
 	}
 
-	oversizedUnknown := []byte(`{"model":"unknown-model","messages":[{"role":"user","content":"` + strings.Repeat("x", 1<<20) + `"}]}`)
+	oversizedUnknown := []byte(`{"model":"unknown-model","messages":[{"role":"user","content":"` + strings.Repeat("x", int(limit)) + `"}]}`)
 	rr = postChat(t, server, oversizedUnknown, nil)
 	if rr.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized unknown status=%d body=%s", rr.Code, rr.Body.String())
 	}
 
-	oversizedClassRetry := []byte(`{"model":"mlx-class","messages":[{"role":"user","content":"` + strings.Repeat("x", 1<<20) + `"}]}`)
+	oversizedClassRetry := []byte(`{"model":"mlx-class","messages":[{"role":"user","content":"` + strings.Repeat("x", int(limit)) + `"}]}`)
 	rr = postChat(t, server, oversizedClassRetry, http.Header{"X-MacProvider-Retry": []string{"1"}})
 	if rr.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized class retry status=%d body=%s", rr.Code, rr.Body.String())
