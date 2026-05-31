@@ -18,6 +18,7 @@ type Config struct {
 	Routing                      RoutingConfig                `yaml:"routing"`
 	WS                           WSConfig                     `yaml:"ws"`
 	Admission                    AdmissionConfig              `yaml:"admission"`
+	Tier2                        Tier2Config                  `yaml:"tier2"`
 	CoordinatorAdvertisedVersion CoordinatorAdvertisedVersion `yaml:"coordinator_advertised_version"`
 	Auth                         AuthConfig                   `yaml:"auth"`
 	Storage                      StorageConfig                `yaml:"storage"`
@@ -89,6 +90,33 @@ type AdmissionConfig struct {
 	ProvisionalQuotaPerHour         int     `yaml:"provisional_quota_per_hour"`
 	ProvisionalTierWeight           float64 `yaml:"provisional_tier_weight"`
 	ProvisionalRetentionDays        int     `yaml:"provisional_retention_days"`
+}
+
+type Tier2Config struct {
+	ObserveEnabled bool `yaml:"observe_enabled"`
+
+	CatalogPath         string `yaml:"catalog_path"`
+	CatalogPublicKey    string `yaml:"catalog_public_key"`
+	RequireHashVerified bool   `yaml:"require_hash_verified"`
+
+	RequireEncryptedLeg            bool   `yaml:"require_encrypted_leg"`
+	EncryptedLegAEAD               string `yaml:"encrypted_leg_aead"`
+	EncryptedLegRekeyAfterRequests int    `yaml:"encrypted_leg_rekey_after_requests"`
+	EncryptedLegRekeyAfterSeconds  int    `yaml:"encrypted_leg_rekey_after_seconds"`
+
+	RequireAttestation bool     `yaml:"require_attestation"`
+	AttestationRoots   []string `yaml:"attestation_roots"`
+	AttestationMaxAgeS int      `yaml:"attestation_max_age_s"`
+	AttestationFormats []string `yaml:"attestation_formats"`
+
+	BehavioralSafetyEnabled    bool    `yaml:"behavioral_safety_enabled"`
+	OutputSizeCapBytes         int     `yaml:"output_size_cap_bytes"`
+	OutputBytesPerTokenCeiling int     `yaml:"output_bytes_per_token_ceiling"`
+	DefaultOutputSizeCapBytes  int     `yaml:"default_output_size_cap_bytes"`
+	EncodingValidationEnabled  bool    `yaml:"encoding_validation_enabled"`
+	ResponseTimeAnomalyEnabled bool    `yaml:"response_time_anomaly_enabled"`
+	ResponseTimeAnomalyFactor  float64 `yaml:"response_time_anomaly_factor"`
+	ResponseTimeAnomalyMinMS   int     `yaml:"response_time_anomaly_min_ms"`
 }
 
 type CoordinatorAdvertisedVersion struct {
@@ -173,6 +201,28 @@ func Default() Config {
 			ProvisionalQuotaPerHour:         100,
 			ProvisionalTierWeight:           0.3,
 			ProvisionalRetentionDays:        30,
+		},
+		Tier2: Tier2Config{
+			ObserveEnabled:                 false,
+			CatalogPath:                    "",
+			CatalogPublicKey:               "",
+			RequireHashVerified:            false,
+			RequireEncryptedLeg:            false,
+			EncryptedLegAEAD:               "A256GCM",
+			EncryptedLegRekeyAfterRequests: 10000,
+			EncryptedLegRekeyAfterSeconds:  3600,
+			RequireAttestation:             false,
+			AttestationRoots:               []string{},
+			AttestationMaxAgeS:             600,
+			AttestationFormats:             []string{"apple-managed-device-attestation-acme-v1"},
+			BehavioralSafetyEnabled:        false,
+			OutputSizeCapBytes:             0,
+			OutputBytesPerTokenCeiling:     16,
+			DefaultOutputSizeCapBytes:      1048576,
+			EncodingValidationEnabled:      false,
+			ResponseTimeAnomalyEnabled:     false,
+			ResponseTimeAnomalyFactor:      5.0,
+			ResponseTimeAnomalyMinMS:       10000,
 		},
 		Storage: StorageConfig{
 			DBPath:            "coordinator.db",
@@ -298,6 +348,42 @@ func (c Config) Validate() error {
 	}
 	if c.Admission.ProvisionalTierWeight <= 0 {
 		return fmt.Errorf("admission.provisional_tier_weight must be > 0")
+	}
+	if c.Tier2.CatalogPath != "" && c.Tier2.CatalogPublicKey == "" {
+		return fmt.Errorf("tier2.catalog_public_key must be set when tier2.catalog_path is set")
+	}
+	if c.Tier2.RequireHashVerified && (c.Tier2.CatalogPath == "" || c.Tier2.CatalogPublicKey == "") {
+		return fmt.Errorf("tier2.require_hash_verified requires a valid signed catalog configuration")
+	}
+	if c.Tier2.RequireEncryptedLeg && c.Tier2.EncryptedLegAEAD != "A256GCM" {
+		return fmt.Errorf("tier2.encrypted_leg_aead must be A256GCM when tier2.require_encrypted_leg is true")
+	}
+	if c.Tier2.EncryptedLegRekeyAfterRequests <= 0 {
+		return fmt.Errorf("tier2.encrypted_leg_rekey_after_requests must be > 0")
+	}
+	if c.Tier2.EncryptedLegRekeyAfterSeconds <= 0 {
+		return fmt.Errorf("tier2.encrypted_leg_rekey_after_seconds must be > 0")
+	}
+	if c.Tier2.RequireAttestation && len(c.Tier2.AttestationRoots) == 0 {
+		return fmt.Errorf("tier2.attestation_roots must not be empty when tier2.require_attestation is true")
+	}
+	if c.Tier2.AttestationMaxAgeS <= 0 {
+		return fmt.Errorf("tier2.attestation_max_age_s must be > 0")
+	}
+	if c.Tier2.OutputBytesPerTokenCeiling <= 0 {
+		return fmt.Errorf("tier2.output_bytes_per_token_ceiling must be > 0")
+	}
+	if c.Tier2.DefaultOutputSizeCapBytes <= 0 {
+		return fmt.Errorf("tier2.default_output_size_cap_bytes must be > 0")
+	}
+	if c.Tier2.BehavioralSafetyEnabled && c.Tier2.EncodingValidationEnabled && c.Tier2.OutputSizeCapBytes < 0 {
+		return fmt.Errorf("tier2.output_size_cap_bytes must be >= 0 when behavioral safety and encoding validation are enabled")
+	}
+	if c.Tier2.ResponseTimeAnomalyFactor <= 1.0 {
+		return fmt.Errorf("tier2.response_time_anomaly_factor must be > 1.0")
+	}
+	if c.Tier2.ResponseTimeAnomalyMinMS < 0 {
+		return fmt.Errorf("tier2.response_time_anomaly_min_ms must be >= 0")
 	}
 	seen := map[string]struct{}{}
 	for _, p := range c.Providers {

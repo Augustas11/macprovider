@@ -22,6 +22,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
+	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -57,6 +58,7 @@ type Server struct {
 	sticky                 map[string]stickyEntry
 	stickyMu               sync.Mutex
 	internalAuthKey        string
+	tier2                  config.Tier2Config
 	provisionalWeight      float64
 	recovering             sync.Map
 	poolCheckLast          sync.Map
@@ -174,6 +176,12 @@ func WithRoutingConfig(cfg config.RoutingConfig) Option {
 		if cfg.StickyMaxEntries > 0 {
 			s.stickyMaxEntries = cfg.StickyMaxEntries
 		}
+	}
+}
+
+func WithTier2Config(cfg config.Tier2Config) Option {
+	return func(s *Server) {
+		s.tier2 = cfg
 	}
 }
 
@@ -402,15 +410,26 @@ type modelsResponse struct {
 }
 
 type modelEntry struct {
-	ID               string   `json:"id"`
-	Object           string   `json:"object"`
-	Created          int64    `json:"created"`
-	OwnedBy          string   `json:"owned_by"`
-	ProviderCount    int      `json:"provider_count"`
-	MaxContextTokens int      `json:"max_context_tokens"`
-	TotalSlots       int      `json:"total_slots"`
-	Objective        string   `json:"objective,omitempty"`
-	Members          []string `json:"members,omitempty"`
+	ID               string            `json:"id"`
+	Object           string            `json:"object"`
+	Created          int64             `json:"created"`
+	OwnedBy          string            `json:"owned_by"`
+	ProviderCount    int               `json:"provider_count"`
+	MaxContextTokens int               `json:"max_context_tokens"`
+	TotalSlots       int               `json:"total_slots"`
+	Objective        string            `json:"objective,omitempty"`
+	Members          []string          `json:"members,omitempty"`
+	HashVerified     interface{}       `json:"hash_verified,omitempty"`
+	HashVerification *hashVerification `json:"hash_verification,omitempty"`
+}
+
+type hashVerification struct {
+	Status                    string `json:"status"`
+	VerifiedProviderCount     int    `json:"verified_provider_count"`
+	UncataloguedProviderCount int    `json:"uncatalogued_provider_count"`
+	MismatchProviderCount     int    `json:"mismatch_provider_count"`
+	InvalidProviderCount      int    `json:"invalid_provider_count"`
+	Catalogued                bool   `json:"catalogued"`
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
@@ -446,6 +465,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			Objective: class.Objective, Members: append([]string(nil), modelClassMembers(&class)...),
 		})
 	}
+	if s.pillarAActive() {
+		providers := s.pool.Snapshot()
+		for i := range data {
+			if data[i].Objective != "" {
+				continue
+			}
+			s.applyHashVerification(&data[i], providers)
+		}
+	}
 	sort.Slice(data, func(i, j int) bool {
 		return data[i].ID < data[j].ID
 	})
@@ -453,6 +481,53 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(modelsResponse{Object: "list", Data: data}); err != nil {
 		s.log.Warn().Err(err).Msg("write models response failed")
+	}
+}
+
+func (s *Server) pillarAActive() bool {
+	return s.tier2.ObserveEnabled || s.tier2.CatalogPath != "" || s.tier2.RequireHashVerified
+}
+
+func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provider) {
+	modelProviders := make([]pool.Provider, 0)
+	catalogUnavailable := false
+	for _, p := range providers {
+		if p.State != pool.StateReady || !modelIDEqual(p.ModelID, entry.ID) {
+			continue
+		}
+		if p.HashStatus == pool.HashStatusCatalogUnavailable {
+			catalogUnavailable = true
+		}
+		modelProviders = append(modelProviders, p)
+	}
+	counts := tier2.CountsForProviders(entry.ID, modelProviders)
+	status := "all_uncatalogued"
+	hashVerified := interface{}("uncatalogued")
+	switch {
+	case catalogUnavailable || tier2.LoadFailed():
+		status = "catalog_unavailable"
+		hashVerified = false
+	case counts.Mismatch > 0 || counts.Invalid > 0:
+		status = "mismatch"
+		hashVerified = false
+	case counts.Verified > 0 && counts.Uncatalogued == 0:
+		status = "all_verified"
+		hashVerified = true
+	case counts.Verified > 0:
+		status = "partial"
+		hashVerified = false
+	default:
+		status = "all_uncatalogued"
+		hashVerified = "uncatalogued"
+	}
+	entry.HashVerified = hashVerified
+	entry.HashVerification = &hashVerification{
+		Status:                    status,
+		VerifiedProviderCount:     counts.Verified,
+		UncataloguedProviderCount: counts.Uncatalogued,
+		MismatchProviderCount:     counts.Mismatch,
+		InvalidProviderCount:      counts.Invalid,
+		Catalogued:                tier2.Catalogued(entry.ID),
 	}
 }
 
@@ -493,7 +568,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	provider, routeErr := s.selectProvider(requestID, req, r.Header)
 	if routeErr != nil {
-		writeError(w, routeErr.status, routeErr.code, routeErr.message)
+		writeRouteError(w, routeErr)
 		return
 	}
 	originalRequestID := requestID
@@ -546,7 +621,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				nextReqID := uuid.NewString()
 				next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
 				if routeErr != nil {
-					writeError(w, routeErr.status, routeErr.code, routeErr.message)
+					writeRouteError(w, routeErr)
 					return
 				}
 				explicitRetries++
@@ -572,7 +647,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			nextReqID := uuid.NewString()
 			next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
 			if routeErr != nil {
-				writeError(w, routeErr.status, routeErr.code, routeErr.message)
+				writeRouteError(w, routeErr)
 				return
 			}
 			explicitRetries++
@@ -607,7 +682,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				nextReqID := uuid.NewString()
 				next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
 				if routeErr != nil {
-					writeError(w, routeErr.status, routeErr.code, routeErr.message)
+					writeRouteError(w, routeErr)
 					return
 				}
 				explicitRetries++
@@ -652,7 +727,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			provider, routeErr = s.selectProviderExcluding(requestID, req, r.Header, excluded)
 			if routeErr != nil {
-				writeError(w, routeErr.status, routeErr.code, routeErr.message)
+				writeRouteError(w, routeErr)
 				return
 			}
 			if !provider.IsWSTunneled() {
@@ -721,7 +796,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		nextReqID := uuid.NewString()
 		next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
 		if routeErr != nil {
-			writeError(w, routeErr.status, routeErr.code, routeErr.message)
+			writeRouteError(w, routeErr)
 			return
 		}
 		explicitRetries++
@@ -1350,6 +1425,7 @@ type routeError struct {
 	status  int
 	code    string
 	message string
+	typ     string
 }
 
 func (s *Server) selectProvider(requestID string, req chatRequest, headers http.Header) (pool.Provider, *routeError) {
@@ -1453,15 +1529,25 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 
 	candidates := make([]pool.Provider, 0, len(providers))
 	hasRoutableContextMiss := false
+	tier2HashRequiredExcluded := 0
+	tier2HashMismatchExcluded := []pool.Provider{}
 	for _, p := range providers {
 		if _, skip := excluded[routeKey(p)]; skip {
 			continue
 		}
-		if !s.providerMatchesRequest(p, req.Model, class) || !p.RoutingEligible() {
+		if !s.providerMatchesRequest(p, req.Model, class) || !baseRoutingEligible(p) {
 			continue
 		}
 		if p.MaxContextTokens < estimatedTokens {
 			hasRoutableContextMiss = true
+			continue
+		}
+		if s.tier2ProviderExcluded(p) {
+			if p.HashStatus == pool.HashStatusMismatch || p.HashStatus == pool.HashStatusInvalid {
+				tier2HashMismatchExcluded = append(tier2HashMismatchExcluded, p)
+			} else {
+				tier2HashRequiredExcluded++
+			}
 			continue
 		}
 		candidates = append(candidates, p)
@@ -1469,6 +1555,13 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 	if len(candidates) == 0 {
 		if hasRoutableContextMiss {
 			return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds provider context capacity"}
+		}
+		if s.tier2.RequireHashVerified && (tier2HashRequiredExcluded > 0 || len(tier2HashMismatchExcluded) > 0) {
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_verified_required", message: "No hash-verified provider available for model `" + req.Model + "`.", typ: "server_error"}
+		}
+		if len(tier2HashMismatchExcluded) > 0 {
+			providerID := tier2HashMismatchExcluded[0].ProviderID
+			return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "tier2_hash_mismatch", message: "Provider `" + providerID + "` hash verification failed; excluded from pool.", typ: "server_error"}
 		}
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: "No provider available for model " + req.Model}
 	}
@@ -1922,7 +2015,21 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 	if !s.providerMatchesRequest(p, model, class) {
 		return pool.Provider{}, &routeError{status: http.StatusNotFound, code: "model_not_found", message: "Pinned provider serves different model"}
 	}
-	return validatePinnedProvider(p, p.ModelID, estimatedTokens, unavailableMessage)
+	if p.MaxContextTokens < estimatedTokens {
+		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
+	}
+	if !baseRoutingEligible(p) {
+		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
+	}
+	if s.tier2ProviderExcluded(p) {
+		return pool.Provider{}, &routeError{
+			status:  http.StatusBadRequest,
+			code:    "tier2_hard_pin_predicate_failed",
+			message: "Hard-pinned provider `" + p.ProviderID + "` does not satisfy enabled Tier-2 predicates.",
+			typ:     "invalid_request",
+		}
+	}
+	return p, nil
 }
 
 func routeKey(provider pool.Provider) string {
@@ -1958,6 +2065,14 @@ func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, 
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
 	return p, nil
+}
+
+func baseRoutingEligible(p pool.Provider) bool {
+	return p.State == pool.StateReady && p.SlotsFree > 0
+}
+
+func (s *Server) tier2ProviderExcluded(p pool.Provider) bool {
+	return tier2.IsHashPredicateFailure(p.HashStatus, s.tier2.RequireHashVerified)
 }
 
 func (s *Server) checkQuota(provider pool.Provider) bool {
@@ -2125,6 +2240,18 @@ func estimateTokens(raw json.RawMessage) int {
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
+	writeErrorTyped(w, status, errorType(status), code, message)
+}
+
+func writeRouteError(w http.ResponseWriter, err *routeError) {
+	if err.typ != "" {
+		writeErrorTyped(w, err.status, err.typ, err.code, err.message)
+		return
+	}
+	writeError(w, err.status, err.code, err.message)
+}
+
+func writeErrorTyped(w http.ResponseWriter, status int, typ, code, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	if status == http.StatusTooManyRequests && code == "provisional_quota_exceeded" {
 		w.Header().Set("Retry-After", "3600")
@@ -2133,7 +2260,7 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{
 			"message": message,
-			"type":    errorType(status),
+			"type":    typ,
 			"param":   nil,
 			"code":    code,
 		},

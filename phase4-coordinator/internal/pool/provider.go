@@ -14,6 +14,7 @@ type State string
 type Tier string
 type InferencePath string
 type RecoveryReason string
+type HashStatus string
 
 const (
 	StateReady       State = "ready"
@@ -31,6 +32,12 @@ const (
 
 	RecoveryReasonBreaker         RecoveryReason = "breaker"
 	RecoveryReasonProviderFailure RecoveryReason = "provider_failure"
+
+	HashStatusVerified           HashStatus = "hash_verified"
+	HashStatusMismatch           HashStatus = "hash_mismatch"
+	HashStatusInvalid            HashStatus = "hash_invalid"
+	HashStatusUncatalogued       HashStatus = "uncatalogued"
+	HashStatusCatalogUnavailable HashStatus = "catalog_unavailable"
 )
 
 type Provider struct {
@@ -57,14 +64,19 @@ type Provider struct {
 	// uses this — not LastHeartbeatAt — so a provider actively streaming a
 	// long generation is not closed for "missing" heartbeats it cannot send
 	// while its single inference slot is busy.
-	LastActivityAt time.Time `json:"last_activity_at"`
-	ConnectedAt    time.Time `json:"connected_at"`
-	BinaryVersion  string    `json:"binary_version"`
+	LastActivityAt time.Time  `json:"last_activity_at"`
+	ConnectedAt    time.Time  `json:"connected_at"`
+	BinaryVersion  string     `json:"binary_version"`
+	ModelHash      string     `json:"model_hash,omitempty"`
+	HashStatus     HashStatus `json:"hash_status,omitempty"`
 
 	conn net.Conn
 }
 
 func (p Provider) RoutingEligible() bool {
+	if p.HashStatus == HashStatusMismatch || p.HashStatus == HashStatusInvalid {
+		return false
+	}
 	return p.State == StateReady && p.SlotsFree > 0
 }
 
@@ -362,6 +374,10 @@ func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpd
 	}
 	prev := p.LastHeartbeatAt
 	p.LastHeartbeatAt = hb.At
+	if !strings.EqualFold(p.ModelID, hb.ModelID) {
+		p.ModelHash = ""
+		p.HashStatus = HashStatusUncatalogued
+	}
 	p.ModelID = hb.ModelID
 	p.ModelParamsB = hb.ModelParamsB
 	p.RAMGB = hb.RAMGB

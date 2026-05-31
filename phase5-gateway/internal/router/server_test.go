@@ -202,6 +202,51 @@ func TestModelsStickyDisclosureUsesCoordinatorRoutingMetadata(t *testing.T) {
 	}
 }
 
+func TestModelsDisclosureReflectsTier2HashState(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"object":"list",
+			"data":[{
+				"id":"model-a",
+				"object":"model",
+				"hash_verified":false,
+				"hash_verification":{
+					"status":"partial",
+					"verified_provider_count":1,
+					"uncatalogued_provider_count":1,
+					"mismatch_provider_count":0,
+					"invalid_provider_count":0,
+					"catalogued":true
+				}
+			}]
+		}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_tier2_disclosure")
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+	var body struct {
+		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	disclosure := body.Tier1Disclosure
+	if disclosure.Version != "v0.8+tier2-v0.2" {
+		t.Fatalf("version=%q", disclosure.Version)
+	}
+	if disclosure.PlaintextToProvider != true {
+		t.Fatal("plaintext_to_provider should remain true")
+	}
+	if disclosure.ModelHashVerified != "partial" || disclosure.ProviderLegEncryption != "none" || disclosure.UntrustedProviderSafety != "none" {
+		t.Fatalf("tier2 top-level disclosure wrong: %+v", disclosure)
+	}
+	if disclosure.Tier2 == nil || disclosure.Tier2.Phase != 1 || disclosure.Tier2.ModelHash.VerifiedProviderCount != 1 || disclosure.Tier2.ModelHash.UncataloguedProviderCount != 1 || !disclosure.Tier2.ModelHash.Mixed {
+		t.Fatalf("tier2 detail wrong: %+v", disclosure.Tier2)
+	}
+}
+
 func TestKeyRotationPreservesHistory(t *testing.T) {
 	h, store, _, cfg := newTestHarness(t, fakeOAuth{})
 	fullKey := createAccountAndKey(t, store, cfg, "acct_rotate")
@@ -1417,12 +1462,13 @@ func responseWithBody(status int, header http.Header, body string) *http.Respons
 // the audit-driven UX fix: when the coordinator returns 404 model_not_found
 // (no provider has advertised the requested model — no provider was reached),
 // the gateway MUST:
-//   (a) return 404 with the coord's OpenAI-shaped error body verbatim,
-//       NOT map to 502 upstream_provider_error (a typo on the buyer side
-//       should not look like a server-side outage);
-//   (b) refund the quota reservation (zero buyer-quota charge), since no
-//       provider work was done — settling prompt-tokens on this path used
-//       to silently burn ~2.5 tokens per typo'd request.
+//
+//	(a) return 404 with the coord's OpenAI-shaped error body verbatim,
+//	    NOT map to 502 upstream_provider_error (a typo on the buyer side
+//	    should not look like a server-side outage);
+//	(b) refund the quota reservation (zero buyer-quota charge), since no
+//	    provider work was done — settling prompt-tokens on this path used
+//	    to silently burn ~2.5 tokens per typo'd request.
 //
 // Regression-locks the bug surfaced by the SPEC-004 stress test (Layer 4
 // quota race + Layer 3 single-shot 502 with bearer). Verified via

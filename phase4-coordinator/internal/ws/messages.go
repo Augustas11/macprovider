@@ -12,6 +12,7 @@ type Hello struct {
 	ProviderID            string          `json:"provider_id"`
 	Hostname              string          `json:"hostname"`
 	ModelID               string          `json:"model_id"`
+	ModelHash             string          `json:"model_hash,omitempty"`
 	ModelParamsB          float64         `json:"model_params_b"`
 	RAMGB                 int             `json:"ram_gb"`
 	MaxContextTokens      int             `json:"max_context_tokens"`
@@ -153,6 +154,11 @@ func ParseHello(payload []byte) (Hello, string, error) {
 	}
 	if err := requireString(raw, "model_id", &h.ModelID); err != nil {
 		return Hello{}, err.Field, err
+	}
+	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &h.ModelHash); err != nil {
+			return Hello{}, "model_hash", err
+		}
 	}
 	if err := requireFloat(raw, "model_params_b", &h.ModelParamsB); err != nil {
 		return Hello{}, err.Field, err

@@ -100,6 +100,77 @@ func TestModelsReturnsEmptyListWhenNoReadyProviders(t *testing.T) {
 	}
 }
 
+func TestModelsDefaultHasNoTier2HashFields(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "https://p1.example"}})
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var got struct {
+		Data []map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if len(got.Data) != 1 {
+		t.Fatalf("models = %d, want 1", len(got.Data))
+	}
+	for _, forbidden := range []string{"hash_verified", "hash_verification", "tier2"} {
+		if _, ok := got.Data[0][forbidden]; ok {
+			t.Fatalf("default /v1/models included %s: %s", forbidden, rr.Body.String())
+		}
+	}
+}
+
+func TestModelsPillarAReportsMixedHashState(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "verified", EndpointURL: "https://verified.example"},
+		{ProviderID: "old", EndpointURL: "https://old.example"},
+	})
+	registerWithHashStatus(registry, "verified", "session-1", "model-a", pool.StateReady, 20000, 1, pool.HashStatusVerified)
+	registerWithHashStatus(registry, "old", "session-2", "model-a", pool.StateReady, 20000, 1, pool.HashStatusUncatalogued)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(config.Tier2Config{ObserveEnabled: true}),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var got struct {
+		Data []struct {
+			HashVerified     any `json:"hash_verified"`
+			HashVerification struct {
+				Status                    string `json:"status"`
+				VerifiedProviderCount     int    `json:"verified_provider_count"`
+				UncataloguedProviderCount int    `json:"uncatalogued_provider_count"`
+			} `json:"hash_verification"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if got.Data[0].HashVerified != false {
+		t.Fatalf("hash_verified=%v want false body=%s", got.Data[0].HashVerified, rr.Body.String())
+	}
+	hv := got.Data[0].HashVerification
+	if hv.Status != "partial" || hv.VerifiedProviderCount != 1 || hv.UncataloguedProviderCount != 1 {
+		t.Fatalf("hash_verification=%+v body=%s", hv, rr.Body.String())
+	}
+}
+
 func TestHealthzMountedOnBuyerHandler(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
@@ -1930,6 +2001,136 @@ func TestChatCompletionsValidationPrecedesModelLookup(t *testing.T) {
 	}
 }
 
+func TestTier2RequireHashVerifiedUncataloguedReturns503(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("uncatalogued provider should not receive request")
+	}))
+	defer upstream.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(config.Tier2Config{RequireHashVerified: true}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_hash_verified_required"`)) ||
+		!bytes.Contains(rr.Body.Bytes(), []byte(`"type":"server_error"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestTier2MismatchExcludedAndUncataloguedRoutesAtDefault(t *testing.T) {
+	blocked := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("hash-mismatched provider should not receive request")
+	}))
+	defer blocked.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer okUpstream.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "bad", EndpointURL: blocked.URL},
+		{ProviderID: "old", EndpointURL: okUpstream.URL},
+	})
+	registerWithHashStatusEndpoint(registry, "bad", "session-1", "model-a", pool.StateReady, 20000, 1, blocked.URL, pool.HashStatusMismatch)
+	registerWithHashStatusEndpoint(registry, "old", "session-2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, pool.HashStatusUncatalogued)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "old" {
+		t.Fatalf("provider=%q, want old", rr.Header().Get("X-MacProvider-Provider"))
+	}
+}
+
+func TestTier2HashMismatchOnlyReturnsTier2Mismatch(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("hash-mismatched provider should not receive request")
+	}))
+	defer upstream.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "bad", EndpointURL: upstream.URL}})
+	registerWithHashStatusEndpoint(registry, "bad", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, pool.HashStatusMismatch)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_hash_mismatch"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
+func TestTier2RequireHashVerifiedRoutesOnlyVerified(t *testing.T) {
+	oldUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("uncatalogued provider should not receive request")
+	}))
+	defer oldUpstream.Close()
+	verifiedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer verifiedUpstream.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "old", EndpointURL: oldUpstream.URL},
+		{ProviderID: "verified", EndpointURL: verifiedUpstream.URL},
+	})
+	registerWithHashStatusEndpoint(registry, "old", "session-1", "model-a", pool.StateReady, 20000, 1, oldUpstream.URL, pool.HashStatusUncatalogued)
+	registerWithHashStatusEndpoint(registry, "verified", "session-2", "model-a", pool.StateReady, 20000, 1, verifiedUpstream.URL, pool.HashStatusVerified)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(config.Tier2Config{RequireHashVerified: true}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "verified" {
+		t.Fatalf("provider=%q, want verified", rr.Header().Get("X-MacProvider-Provider"))
+	}
+}
+
+func TestTier2HardPinPredicateFailure(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("excluded hard-pinned provider should not receive request")
+	}))
+	defer upstream.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "bad", EndpointURL: upstream.URL}})
+	registerWithHashStatusEndpoint(registry, "bad", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, pool.HashStatusMismatch)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(
+		t,
+		server,
+		[]byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`),
+		http.Header{"X-MacProvider-Provider": []string{"bad"}},
+	)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"tier2_hard_pin_predicate_failed"`)) ||
+		!bytes.Contains(rr.Body.Bytes(), []byte(`"type":"invalid_request"`)) {
+		t.Fatalf("body = %s", rr.Body.String())
+	}
+}
+
 func TestProviderFailureStartsRecoveryPreflight(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
@@ -2034,6 +2235,34 @@ func TestChatCompletionsDoesNotRouteToDegradedProvider(t *testing.T) {
 
 func register(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int) {
 	registerWithEndpoint(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, "https://"+providerID+".example", 20)
+}
+
+func registerWithHashStatus(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, hashStatus pool.HashStatus) {
+	registerWithHashStatusEndpoint(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, "https://"+providerID+".example", hashStatus)
+}
+
+func registerWithHashStatusEndpoint(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, hashStatus pool.HashStatus) {
+	registry.Register(&pool.Provider{
+		ProviderID:            providerID,
+		AssignedID:            assignedID,
+		Hostname:              providerID + ".local",
+		ModelID:               modelID,
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      maxContextTokens,
+		MaxConcurrency:        slotsTotal,
+		SlotsFree:             slotsTotal,
+		SlotsTotal:            slotsTotal,
+		ThroughputTPSEstimate: 20,
+		EndpointURL:           endpointURL,
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 state,
+		LastHeartbeatAt:       time.Now().UTC(),
+		ConnectedAt:           time.Now().UTC(),
+		BinaryVersion:         "0.1.0",
+		HashStatus:            hashStatus,
+	}, nil)
 }
 
 func registerWithEndpoint(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64) {

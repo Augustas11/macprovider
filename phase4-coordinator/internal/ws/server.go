@@ -14,6 +14,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
+	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/google/uuid"
@@ -224,6 +225,11 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 	assignedID = s.newUUID()
 	providerID = hello.ProviderID
 	now := s.now()
+	hashStatus := tier2.VerifyProviderHash(hello.ModelID, hello.ModelHash)
+	tier2.LogProviderHashStatus(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
+	if s.cfg.Tier2.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
+		tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
+	}
 	initialState := pool.StateReady
 	if s.cfg.Pool.WarmupGateEnabled {
 		initialState = pool.StateDegraded
@@ -249,6 +255,8 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		LastActivityAt:        now,
 		ConnectedAt:           now,
 		BinaryVersion:         hello.BinaryVersion,
+		ModelHash:             hello.ModelHash,
+		HashStatus:            hashStatus,
 	}
 	if old := s.pool.Register(entry, conn); old != nil {
 		_ = old.Close()

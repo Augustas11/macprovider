@@ -403,7 +403,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "api_error", "coordinator_models_error", "Coordinator models error")
 		return
 	}
-	body["tier1_disclosure"] = s.makeTier1Disclosure(r.Context())
+	body["tier1_disclosure"] = s.makeTier1DisclosureForModels(body, r.Context())
 	copyCleanHeaders(w.Header(), resp.Header)
 	writeJSON(w, http.StatusOK, body)
 }
@@ -746,12 +746,16 @@ type tokenUsage struct {
 }
 
 type tier1Disclosure struct {
-	Version             string                    `json:"version"`
-	PlaintextToProvider bool                      `json:"plaintext_to_provider"`
-	ModelIdentity       string                    `json:"model_identity"`
-	HardwareAttestation string                    `json:"hardware_attestation"`
-	Tier2Milestone      string                    `json:"tier2_milestone"`
-	StickyAffinity      *stickyAffinityDisclosure `json:"sticky_affinity"`
+	Version                 string                    `json:"version"`
+	PlaintextToProvider     bool                      `json:"plaintext_to_provider"`
+	ModelIdentity           string                    `json:"model_identity"`
+	HardwareAttestation     string                    `json:"hardware_attestation"`
+	Tier2Milestone          string                    `json:"tier2_milestone"`
+	StickyAffinity          *stickyAffinityDisclosure `json:"sticky_affinity"`
+	ModelHashVerified       string                    `json:"model_hash_verified,omitempty"`
+	ProviderLegEncryption   string                    `json:"provider_leg_encryption,omitempty"`
+	UntrustedProviderSafety string                    `json:"untrusted_provider_safety,omitempty"`
+	Tier2                   *tier2Disclosure          `json:"tier2,omitempty"`
 }
 
 type stickyAffinityDisclosure struct {
@@ -760,16 +764,53 @@ type stickyAffinityDisclosure struct {
 	Description string `json:"description"`
 }
 
+type tier2Disclosure struct {
+	Phase            int                        `json:"phase"`
+	ModelHash        modelHashDisclosure        `json:"model_hash"`
+	EncryptedLeg     encryptedLegDisclosure     `json:"encrypted_leg"`
+	Attestation      attestationDisclosure      `json:"attestation"`
+	BehavioralSafety behavioralSafetyDisclosure `json:"behavioral_safety"`
+}
+
+type modelHashDisclosure struct {
+	State                     string `json:"state"`
+	VerifiedProviderCount     int    `json:"verified_provider_count"`
+	UncataloguedProviderCount int    `json:"uncatalogued_provider_count"`
+	Mixed                     bool   `json:"mixed"`
+}
+
+type encryptedLegDisclosure struct {
+	State                    string `json:"state"`
+	EncryptedProviderCount   int    `json:"encrypted_provider_count"`
+	UnencryptedProviderCount int    `json:"unencrypted_provider_count"`
+	Mixed                    bool   `json:"mixed"`
+	Scope                    string `json:"scope"`
+}
+
+type attestationDisclosure struct {
+	State                    string `json:"state"`
+	AttestedProviderCount    int    `json:"attested_provider_count"`
+	UnsupportedProviderCount int    `json:"unsupported_provider_count"`
+	Mixed                    bool   `json:"mixed"`
+}
+
+type behavioralSafetyDisclosure struct {
+	State              string `json:"state"`
+	SizeCap            bool   `json:"size_cap"`
+	EncodingValidation bool   `json:"encoding_validation"`
+	TTFTAnomalyLogging bool   `json:"ttft_anomaly_logging"`
+}
+
 func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 	disclosure := tier1Disclosure{
-		Version:             "v0.6",
+		Version:             "v0.8",
 		PlaintextToProvider: true,
 		ModelIdentity:       "provider_reported",
 		HardwareAttestation: "none",
 		Tier2Milestone:      "future",
 		StickyAffinity: &stickyAffinityDisclosure{
 			Enabled: false, TTLSeconds: 0,
-			Description: "Sticky routing is not active.",
+			Description: "Sticky affinity is disabled; related requests are not preferentially routed to the same provider.",
 		},
 	}
 	if s.cfg.Routing.StickyEnabled {
@@ -787,6 +828,102 @@ func (s *Server) makeTier1Disclosure(ctxs ...context.Context) tier1Disclosure {
 		}
 	}
 	return disclosure
+}
+
+func (s *Server) makeTier1DisclosureForModels(body map[string]any, ctxs ...context.Context) tier1Disclosure {
+	disclosure := s.makeTier1Disclosure(ctxs...)
+	active, state, verified, uncatalogued := tier2ModelHashState(body)
+	if !active {
+		return disclosure
+	}
+	disclosure.Version = "v0.8+tier2-v0.2"
+	disclosure.ModelHashVerified = state
+	disclosure.ProviderLegEncryption = "none"
+	disclosure.UntrustedProviderSafety = "none"
+	disclosure.Tier2 = &tier2Disclosure{
+		Phase: 1,
+		ModelHash: modelHashDisclosure{
+			State:                     state,
+			VerifiedProviderCount:     verified,
+			UncataloguedProviderCount: uncatalogued,
+			Mixed:                     state == "partial",
+		},
+		EncryptedLeg: encryptedLegDisclosure{
+			State: "none",
+			Scope: "coordinator_to_provider_only",
+		},
+		Attestation: attestationDisclosure{
+			State: "none",
+		},
+		BehavioralSafety: behavioralSafetyDisclosure{
+			State: "none",
+		},
+	}
+	return disclosure
+}
+
+func tier2ModelHashState(body map[string]any) (active bool, state string, verified int, uncatalogued int) {
+	state = "none"
+	data, _ := body["data"].([]any)
+	nonVerified := 0
+	for _, item := range data {
+		entry, _ := item.(map[string]any)
+		if entry == nil {
+			continue
+		}
+		hvRaw, hashFieldPresent := entry["hash_verified"]
+		hv, ok := entry["hash_verification"].(map[string]any)
+		if !ok {
+			if hashFieldPresent {
+				active = true
+				if b, ok := hvRaw.(bool); ok && b {
+					verified++
+				} else {
+					nonVerified++
+				}
+			}
+			continue
+		}
+		active = true
+		v := intFromModelField(hv["verified_provider_count"])
+		u := intFromModelField(hv["uncatalogued_provider_count"])
+		m := intFromModelField(hv["mismatch_provider_count"])
+		invalid := intFromModelField(hv["invalid_provider_count"])
+		verified += v
+		uncatalogued += u
+		nonVerified += u + m + invalid
+		if b, ok := hvRaw.(bool); ok && !b && u+m+invalid == 0 {
+			nonVerified++
+		}
+		if s, ok := hv["status"].(string); ok && s == "catalog_unavailable" {
+			nonVerified++
+		}
+	}
+	switch {
+	case !active:
+		return false, "", 0, 0
+	case verified > 0 && nonVerified == 0:
+		state = "all"
+	case verified > 0:
+		state = "partial"
+	default:
+		state = "none"
+	}
+	return active, state, verified, uncatalogued
+}
+
+func intFromModelField(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case int:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return int(i)
+	default:
+		return 0
+	}
 }
 
 type coordinatorRoutingMetadata struct {

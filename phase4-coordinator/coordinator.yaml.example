@@ -50,6 +50,38 @@ admission:
   provisional_tier_weight: 0.3
   provisional_retention_days: 30
 
+# tier2:
+#   # SPEC-008 §4.3 — observation gate; default false preserves Tier-1.
+#   observe_enabled: false
+#
+#   # SPEC-008 §5 — Pillar A model catalog + hash verification.
+#   catalog_path: ""                # path to signed catalog JSON; empty = no catalog
+#   catalog_public_key: ""          # Ed25519 public key, base64url-unpadded; required with catalog_path
+#   require_hash_verified: false    # route only hash_verified providers when true
+#
+#   # SPEC-008 §11.1 — Pillar B keys; present for forward compatibility only in Phase 1.
+#   require_encrypted_leg: false
+#   encrypted_leg_aead: "A256GCM"
+#   encrypted_leg_rekey_after_requests: 10000
+#   encrypted_leg_rekey_after_seconds: 3600
+#
+#   # SPEC-008 §11.1 — Pillar C keys; present for forward compatibility only in Phase 1.
+#   require_attestation: false
+#   attestation_roots: []
+#   attestation_max_age_s: 600
+#   attestation_formats:
+#     - "apple-managed-device-attestation-acme-v1"
+#
+#   # SPEC-008 §11.1 — Pillar D keys; present for forward compatibility only in Phase 1.
+#   behavioral_safety_enabled: false
+#   output_size_cap_bytes: 0
+#   output_bytes_per_token_ceiling: 16
+#   default_output_size_cap_bytes: 1048576
+#   encoding_validation_enabled: false
+#   response_time_anomaly_enabled: false
+#   response_time_anomaly_factor: 5.0
+#   response_time_anomaly_min_ms: 10000
+
 coordinator_advertised_version:
   latest_binary_version: "1.2.0"
   required_binary_version: ""

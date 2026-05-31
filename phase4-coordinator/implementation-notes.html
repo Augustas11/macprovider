@@ -17,6 +17,41 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 <p class=meta>Status: <strong>Step 11 acceptance entrypoints partial</strong> · Spec:
 <a href="../specs/SPEC-002-coordinator.md">SPEC-002 v1.0.3</a></p>
 
+<section id="spec008-phase1-pillar-a">
+  <h2>SPEC-008 Phase 1 Pillar A (2026-05-31)</h2>
+  <div class="entry">
+    <time>2026-05-31</time>
+    <p><strong>Design decisions:</strong> implemented Tier-2 catalog state as
+    a process-level coordinator verifier loaded at startup, with provider
+    <code>model_hash</code> evidence captured during WebSocket admission and
+    immutable per active session. The routing layer applies the hash predicate
+    on every selection path by reusing <code>selectProviderExcluding</code>,
+    including retries, failover, and hard-pin validation.</p>
+    <p><strong>Default preservation:</strong> an empty
+    <code>tier2.catalog_path</code> is treated as no catalog configured, not a
+    catalog outage. Providers are marked <code>uncatalogued</code> without
+    emitting <code>T2.A</code> logs, and <code>/v1/models</code> omits all
+    hash fields unless <code>catalog_path</code>,
+    <code>require_hash_verified</code>, or <code>observe_enabled</code> is set.</p>
+    <p><strong>Deviations:</strong> the spec names a
+    <code>HashCounts(modelID string) HashCounts</code> API, which is not a
+    valid Go identifier pair because a function and type cannot share the same
+    package-level name. The implementation exposes <code>HashCounts</code> as
+    the struct and <code>CountsForProviders</code> as the aggregation helper,
+    fed from the live pool snapshot to avoid stale disclosure counts.</p>
+    <p><strong>Tradeoffs:</strong> hash mismatch and invalid hash evidence
+    remain session metadata rather than provider <code>State</code> values;
+    <code>RoutingEligible()</code> excludes them unconditionally. This keeps
+    the existing state machine small while satisfying the routing exclusion
+    requirement for the current single-model provider shape.</p>
+    <p><strong>Open questions:</strong> future SPEC-001 multi-model sessions
+    should decide whether hash state is per session, per model, or attached to
+    a provider-advertised model list. Future catalog reload support should
+    define whether active sessions are re-evaluated immediately or only at the
+    next request.</p>
+  </div>
+</section>
+
 <section id="step11-acceptance-entrypoints">
   <h2>Step 11 acceptance entrypoints (2026-05-27)</h2>
   <div class="entry">

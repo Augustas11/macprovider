@@ -14,6 +14,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
 )
@@ -29,6 +30,10 @@ func main() {
 	}
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
+	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
+		fmt.Fprintf(os.Stderr, "tier2: %v\n", err)
+		os.Exit(1)
+	}
 	registry := pool.NewRegistry(cfg.Providers)
 	startedAt := time.Now().UTC()
 	tokenStore, err := auth.OpenStore(cfg.Storage.DBPath)
@@ -54,6 +59,7 @@ func main() {
 		buyer.WithBreakerConfig(cfg.Pool.BreakerFailureThreshold, time.Duration(cfg.Pool.BreakerWindowS)*time.Second),
 		buyer.WithFailoverConfig(cfg.Routing.FailoverEnabled, time.Duration(cfg.Routing.FailoverTimeoutS)*time.Second),
 		buyer.WithRoutingConfig(cfg.Routing),
+		buyer.WithTier2Config(cfg.Tier2),
 		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),

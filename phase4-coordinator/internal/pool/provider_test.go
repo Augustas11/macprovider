@@ -5,6 +5,57 @@ import (
 	"time"
 )
 
+func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
+	base := Provider{State: StateReady, SlotsFree: 1}
+	if !base.RoutingEligible() {
+		t.Fatal("zero hash status should preserve default routing eligibility")
+	}
+	mismatch := base
+	mismatch.HashStatus = HashStatusMismatch
+	if mismatch.RoutingEligible() {
+		t.Fatal("hash_mismatch provider should not be routing eligible")
+	}
+	invalid := base
+	invalid.HashStatus = HashStatusInvalid
+	if invalid.RoutingEligible() {
+		t.Fatal("hash_invalid provider should not be routing eligible")
+	}
+}
+
+func TestHeartbeatModelChangeClearsHashEvidence(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "current",
+		ModelID:          "model-a",
+		ModelHash:        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		HashStatus:       HashStatusVerified,
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", HeartbeatUpdate{
+		Status:           StateReady,
+		ModelID:          "model-b",
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		At:               start.Add(time.Minute),
+		MaxContextTokens: 20000,
+	})
+	if !ok {
+		t.Fatal("heartbeat not applied")
+	}
+	if provider.ModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
+		t.Fatalf("hash evidence = (%q, %q), want cleared uncatalogued", provider.ModelHash, provider.HashStatus)
+	}
+}
+
 func TestRegistryRejectsStaleAssignedIDUpdates(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Unix(1716768000, 0).UTC()
