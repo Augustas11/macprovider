@@ -292,8 +292,35 @@ func (s *Server) internalTier2Metadata() map[string]any {
 	active := s.pillarAActive()
 	observedModelHash := s.observedModelHashEvidence()
 	modelHashState := "none"
-	if active && cfg.RequireHashVerified {
-		modelHashState = "required"
+	if active {
+		providers := s.pool.Snapshot()
+		var verified, mismatched, uncatalogued int
+		for _, p := range providers {
+			if !baseRoutingEligible(p) {
+				continue
+			}
+			switch s.effectiveHashStatus(p, cfg) {
+			case pool.HashStatusVerified:
+				verified++
+			case pool.HashStatusMismatch, pool.HashStatusInvalid:
+				mismatched++
+			case pool.HashStatusUncatalogued, pool.HashStatusCatalogUnavailable:
+				uncatalogued++
+			}
+		}
+		total := verified + mismatched + uncatalogued
+		switch {
+		case total == 0:
+			if cfg.RequireHashVerified {
+				modelHashState = "required"
+			}
+		case verified == total:
+			modelHashState = "all"
+		case verified > 0:
+			modelHashState = "partial"
+		default:
+			modelHashState = "none"
+		}
 	}
 	return map[string]any{
 		"phase": tier2.PhaseForConfigWithModelHashEvidence(cfg, observedModelHash),
@@ -319,7 +346,7 @@ func (s *Server) internalTier2Metadata() map[string]any {
 
 func (s *Server) observedModelHashEvidence() bool {
 	for _, p := range s.pool.Snapshot() {
-		if strings.TrimSpace(p.ModelHash) != "" {
+		if strings.TrimSpace(p.ModelHash) != "" && p.HashStatus != "" {
 			return true
 		}
 	}
@@ -2180,7 +2207,10 @@ func (s *Server) effectiveHashStatus(p pool.Provider, cfg config.Tier2Config) po
 	if !tier2.ModelHashActive(cfg) {
 		return p.HashStatus
 	}
-	if strings.TrimSpace(p.ModelHash) == "" && p.HashStatus != "" && !tier2.CatalogUnavailable() {
+	// Prefer pool-stored status: it is set at connect time and refreshed on
+	// SIGHUP by RefreshTier2HashStatuses. Only fall back to live verification
+	// for providers that connected before tier2 was activated.
+	if p.HashStatus != "" {
 		return p.HashStatus
 	}
 	return tier2.VerifyProviderHash(p.ModelID, p.ModelHash)

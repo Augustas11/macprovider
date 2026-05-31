@@ -146,14 +146,14 @@ func TestTier2StartupFieldsChangedAllowsHotReloadableFutureFields(t *testing.T) 
 	}
 }
 
-func TestTier2ReloadFieldClassesCoverTier2Config(t *testing.T) {
+func TestTier2ReloadFieldClassesCoversAllTier2ConfigFields(t *testing.T) {
 	fields := reflect.TypeOf(config.Tier2Config{})
 	seen := map[string]bool{}
 	for i := 0; i < fields.NumField(); i++ {
 		name := fields.Field(i).Name
 		seen[name] = true
 		if _, ok := tier2ReloadFieldClasses[name]; !ok {
-			t.Fatalf("Tier2Config.%s has no reload field class", name)
+			t.Errorf("Tier2Config field %q is not registered in tier2ReloadFieldClasses; add it as tier2HotReloadable or tier2StartupOnly", name)
 		}
 	}
 	for name := range tier2ReloadFieldClasses {

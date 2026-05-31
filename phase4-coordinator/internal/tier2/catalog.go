@@ -299,7 +299,7 @@ func LoadFailed() bool {
 func CatalogUnavailable() bool {
 	global.mu.RLock()
 	defer global.mu.RUnlock()
-	return global.st.configured && activeCatalogLocked(global.st) == nil && (global.st.loadFailed || global.st.active != nil)
+	return catalogUnavailableLocked(global.st)
 }
 
 func Catalogued(modelID string) bool {
@@ -319,7 +319,7 @@ func VerifyProviderHash(modelID, reportedHash string) pool.HashStatus {
 	global.mu.RUnlock()
 	catalog := activeCatalogLocked(st)
 	if catalog == nil {
-		if st.configured && (st.loadFailed || st.active != nil) {
+		if catalogUnavailableLocked(st) {
 			return pool.HashStatusCatalogUnavailable
 		}
 		return pool.HashStatusUncatalogued
@@ -368,6 +368,12 @@ func activeCatalogLocked(st state) *Catalog {
 		return nil
 	}
 	return st.active
+}
+
+// catalogUnavailableLocked returns true when a catalog was configured but is
+// not currently usable (load failed or expired).
+func catalogUnavailableLocked(st state) bool {
+	return st.configured && activeCatalogLocked(st) == nil && (st.loadFailed || st.active != nil)
 }
 
 func catalogModelKey(modelID string) string {

@@ -36,6 +36,7 @@ const (
 type Server struct {
 	cfg       config.Config
 	tier2Mu   sync.RWMutex
+	tier2     config.Tier2Config
 	pool      *pool.Registry
 	log       zerolog.Logger
 	now       func() time.Time
@@ -77,6 +78,7 @@ type pendingPreflight struct {
 func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger, opts ...Option) *Server {
 	s := &Server{
 		cfg:     cfg,
+		tier2:   cfg.Tier2,
 		pool:    registry,
 		log:     logger,
 		now:     func() time.Time { return time.Now().UTC() },
@@ -97,7 +99,7 @@ func (s *Server) Admission() *AdmissionManager {
 func (s *Server) SetTier2Config(cfg config.Tier2Config) {
 	s.tier2Mu.Lock()
 	defer s.tier2Mu.Unlock()
-	s.cfg.Tier2 = cfg
+	s.tier2 = cfg
 }
 
 func (s *Server) RefreshTier2HashStatuses() int {
@@ -122,7 +124,7 @@ func (s *Server) RefreshTier2HashStatuses() int {
 func (s *Server) tier2Config() config.Tier2Config {
 	s.tier2Mu.RLock()
 	defer s.tier2Mu.RUnlock()
-	return s.cfg.Tier2
+	return s.tier2
 }
 
 func (s *Server) Handler() http.Handler {

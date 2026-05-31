@@ -851,12 +851,19 @@ func (s *Server) tier1DisclosureForModels(body map[string]any, ctxs ...context.C
 		ctx = ctxs[0]
 	}
 	metadata, ok := s.coordinatorRoutingMetadataFresh(ctx)
-	if !ok || !metadata.Tier2.ModelHash.Active {
+	if !ok {
+		if bodyActive {
+			phase = 1
+		} else {
+			return disclosure, !bodyMetadataActive
+		}
+	} else if !metadata.Tier2.ModelHash.Active {
 		return disclosure, !(bodyActive || bodyMetadataActive)
-	}
-	phase = tier2PhaseFromMetadata(metadata.Tier2.Phase)
-	if !bodyActive {
-		state = disclosureStateFromMetadata(metadata.Tier2.ModelHash.State)
+	} else {
+		phase = tier2PhaseFromMetadata(metadata.Tier2.Phase)
+		if !bodyActive {
+			state = disclosureStateFromMetadata(metadata.Tier2.ModelHash.State)
+		}
 	}
 	disclosure.Version = "v0.8+tier2-v0.2"
 	disclosure.ModelHashVerified = state
@@ -898,6 +905,8 @@ func disclosureStateFromMetadata(state string) string {
 	switch state {
 	case "all", "partial", "none":
 		return state
+	case "required":
+		return "none"
 	default:
 		return "none"
 	}
@@ -913,17 +922,13 @@ func tier2PhaseFromMetadata(phase any) any {
 		if v == 0 || v == 1 || v == 2 || v == 3 {
 			return int(v)
 		}
-	case int:
-		if v == 0 || v == 1 || v == 2 || v == 3 {
-			return v
-		}
 	case json.Number:
 		i, err := v.Int64()
 		if err == nil && i >= 0 && i <= 3 {
 			return int(i)
 		}
 	}
-	return 1
+	return 0
 }
 
 func tier2ModelHashState(body map[string]any) (active bool, state string, verified int, uncatalogued int) {
@@ -980,8 +985,6 @@ func intFromModelField(v any) int {
 	switch n := v.(type) {
 	case float64:
 		return int(n)
-	case int:
-		return n
 	case json.Number:
 		i, _ := n.Int64()
 		return int(i)

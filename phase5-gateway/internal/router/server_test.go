@@ -387,6 +387,71 @@ func TestModelsDisclosureFailsClosedWhenHashRowsLackFreshActiveMetadata(t *testi
 	assertErrorCode(t, resp.Body.String(), "tier2_metadata_unavailable")
 }
 
+func TestModelsDisclosureUsesPhase1FallbackWhenRoutingUnavailableButBodyHasHashRows(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch r.URL.Path {
+		case "/v1/models":
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"object":"list",
+				"data":[{
+					"id":"model-a",
+					"object":"model",
+					"hash_verified":true,
+					"hash_verification":{
+						"status":"all_verified",
+						"verified_provider_count":1,
+						"uncatalogued_provider_count":0,
+						"mismatch_provider_count":0,
+						"invalid_provider_count":0,
+						"catalogued":true
+					}
+				}]
+			}`), nil
+		case "/internal/routing":
+			return responseWithBody(http.StatusServiceUnavailable, http.Header{"Content-Type": []string{"application/json"}}, `{}`), nil
+		default:
+			t.Fatalf("unexpected request path %s", r.URL.Path)
+			return nil, nil
+		}
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_tier2_phase1_fallback")
+
+	resp := assertStatus(t, h, http.MethodGet, "/v1/models", fullKey, "", "1.2.3.4", http.StatusOK)
+
+	var body struct {
+		Tier1Disclosure tier1Disclosure `json:"tier1_disclosure"`
+	}
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("models json: %v", err)
+	}
+	disclosure := body.Tier1Disclosure
+	if disclosure.Tier2 == nil || intFromModelField(disclosure.Tier2.Phase) != 1 {
+		t.Fatalf("tier2 phase=%v want 1 body=%s", disclosure.Tier2, resp.Body.String())
+	}
+	if disclosure.ModelHashVerified != "all" {
+		t.Fatalf("model_hash_verified=%q want all body=%s", disclosure.ModelHashVerified, resp.Body.String())
+	}
+}
+
+func TestTier2MetadataHelpersAreConservative(t *testing.T) {
+	if got := disclosureStateFromMetadata("required"); got != "none" {
+		t.Fatalf("required metadata state mapped to %q, want none", got)
+	}
+	if got := tier2PhaseFromMetadata(float64(5)); got != 0 {
+		t.Fatalf("unknown float phase mapped to %v, want 0", got)
+	}
+	if got := tier2PhaseFromMetadata(json.Number("5")); got != 0 {
+		t.Fatalf("unknown json.Number phase mapped to %v, want 0", got)
+	}
+	if got := tier2PhaseFromMetadata("mixed"); got != "mixed" {
+		t.Fatalf("mixed phase mapped to %v, want mixed", got)
+	}
+}
+
 func TestModelsDisclosureFailsClosedWhenTopLevelTier2ActiveMetadataUnavailable(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		switch r.URL.Path {

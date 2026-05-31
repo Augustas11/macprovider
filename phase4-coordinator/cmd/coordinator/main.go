@@ -130,7 +130,7 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}
-	if tier2StartupFieldsChanged(startupTier2, cfg.Tier2) {
+	if tier2StartupFieldsChangedWithLogger(startupTier2, cfg.Tier2, logger) {
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
 		return
 	}
@@ -139,7 +139,11 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		return
 	}
 	if cfg.Tier2.RequireHashVerified && !tier2.Active() {
-		logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires the startup catalog to be active")
+		if tier2.Configured() {
+			logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires an active (non-expired) catalog; the current catalog has expired or failed to load")
+		} else {
+			logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires a configured catalog")
+		}
 		return
 	}
 	wsServer.SetTier2Config(cfg.Tier2)
@@ -149,6 +153,10 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 }
 
 func tier2StartupFieldsChanged(startup, next config.Tier2Config) bool {
+	return tier2StartupFieldsChangedWithLogger(startup, next, zerolog.Nop())
+}
+
+func tier2StartupFieldsChangedWithLogger(startup, next config.Tier2Config, logger zerolog.Logger) bool {
 	startupValue := reflect.ValueOf(startup)
 	nextValue := reflect.ValueOf(next)
 	fields := reflect.TypeOf(config.Tier2Config{})
@@ -157,6 +165,7 @@ func tier2StartupFieldsChanged(startup, next config.Tier2Config) bool {
 		class, ok := tier2ReloadFieldClasses[name]
 		if !ok || class != tier2HotReloadable {
 			if tier2ReloadFieldChanged(name, startupValue.Field(i), nextValue.Field(i)) {
+				logger.Error().Str("field", name).Msg("tier2 config reload rejected: startup-only or unregistered tier2 field changed")
 				return true
 			}
 		}
@@ -169,9 +178,14 @@ type tier2ReloadFieldClass string
 const (
 	tier2HotReloadable tier2ReloadFieldClass = "hot_reloadable"
 	tier2StartupOnly   tier2ReloadFieldClass = "startup_only"
-	tier2Phase1Blocked tier2ReloadFieldClass = "phase1_blocked"
 )
 
+// Fields not listed here default to startup-only (SIGHUP rejected if changed).
+// Phase-1-blocked fields (RequireEncryptedLeg, RequireAttestation,
+// BehavioralSafetyEnabled, etc.) are listed as hot-reloadable because
+// config.Load() -> config.Validate() rejects them before reloadTier2Config
+// reaches the field-class check. When Phase 2/3 removes those blocks, update
+// the field class here.
 var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 	"ObserveEnabled":      tier2HotReloadable,
 	"RequireHashVerified": tier2HotReloadable,

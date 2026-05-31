@@ -22,6 +22,9 @@ import (
 	"github.com/rs/zerolog"
 )
 
+const buyerTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const buyerOtherHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+
 func TestModelsAggregatesUniqueReadyProviderModels(t *testing.T) {
 	registry := pool.NewRegistry([]config.ProviderConfig{
 		{ProviderID: "p1", EndpointURL: "https://p1.example"},
@@ -418,6 +421,7 @@ func TestInternalRoutingExposesTier2ActivationMetadata(t *testing.T) {
 		EndpointURL:           "https://provider-a.example",
 		State:                 pool.StateReady,
 		ModelHash:             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		HashStatus:            pool.HashStatusUncatalogued,
 	}, nil)
 	rr = httptest.NewRecorder()
 	server.InternalHandler().ServeHTTP(rr, req)
@@ -460,6 +464,159 @@ func TestInternalRoutingExposesTier2ActivationMetadata(t *testing.T) {
 	}
 	if got.Tier2.Phase != 0 || got.Tier2.ModelHash.Active {
 		t.Fatalf("tier2 metadata after update = %+v body=%s", got.Tier2, rr.Body.String())
+	}
+}
+
+func TestInternalRoutingReflectsActualHashCoverage(t *testing.T) {
+	tier2.ResetForTest()
+	defer tier2.ResetForTest()
+	cases := []struct {
+		name             string
+		cfg              config.Tier2Config
+		providers        []pool.Provider
+		wantState        string
+		wantRequire      bool
+		wantCatalogAvail bool
+	}{
+		{
+			name: "all verified",
+			cfg:  config.Tier2Config{ObserveEnabled: true},
+			providers: []pool.Provider{{
+				ProviderID: "verified", AssignedID: "session-1", ModelID: "model-a",
+				ModelHash: buyerTestHash, HashStatus: pool.HashStatusVerified,
+				State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1,
+			}},
+			wantState: "all",
+		},
+		{
+			name: "partial",
+			cfg:  config.Tier2Config{ObserveEnabled: true},
+			providers: []pool.Provider{
+				{
+					ProviderID: "verified", AssignedID: "session-1", ModelID: "model-a",
+					ModelHash: buyerTestHash, HashStatus: pool.HashStatusVerified,
+					State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1,
+				},
+				{
+					ProviderID: "uncatalogued", AssignedID: "session-2", ModelID: "model-a",
+					ModelHash: buyerOtherHash, HashStatus: pool.HashStatusUncatalogued,
+					State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1,
+				},
+			},
+			wantState: "partial",
+		},
+		{
+			name:        "empty require verified",
+			cfg:         config.Tier2Config{RequireHashVerified: true},
+			wantState:   "required",
+			wantRequire: true,
+		},
+		{
+			name:      "empty observe",
+			cfg:       config.Tier2Config{ObserveEnabled: true},
+			wantState: "none",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			registry := pool.NewRegistry(nil)
+			for i := range tc.providers {
+				p := tc.providers[i]
+				p.MaxContextTokens = 20000
+				p.MaxConcurrency = 1
+				p.ThroughputTPSEstimate = 20
+				p.EndpointURL = "https://" + p.ProviderID + ".example"
+				p.Tier = pool.TierPinned
+				p.InferencePath = pool.InferencePathHTTPForwarding
+				registry.Register(&p, nil)
+			}
+			server := buyer.NewServer(
+				registry,
+				zerolog.Nop(),
+				time.Unix(1716768000, 0),
+				buyer.WithInternalAuthKey("operator-key"),
+				buyer.WithTier2Config(tc.cfg),
+			)
+			req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
+			req.Header.Set("Authorization", "Bearer operator-key")
+			rr := httptest.NewRecorder()
+
+			server.InternalHandler().ServeHTTP(rr, req)
+
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			var got struct {
+				Tier2 struct {
+					ModelHash struct {
+						State            string `json:"state"`
+						RequireVerified  bool   `json:"require_verified"`
+						CatalogAvailable bool   `json:"catalog_available"`
+					} `json:"model_hash"`
+				} `json:"tier2"`
+			}
+			if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+				t.Fatalf("json: %v", err)
+			}
+			if got.Tier2.ModelHash.State != tc.wantState {
+				t.Fatalf("model_hash.state=%q want %q body=%s", got.Tier2.ModelHash.State, tc.wantState, rr.Body.String())
+			}
+			if got.Tier2.ModelHash.RequireVerified != tc.wantRequire {
+				t.Fatalf("require_verified=%t want %t", got.Tier2.ModelHash.RequireVerified, tc.wantRequire)
+			}
+			if got.Tier2.ModelHash.CatalogAvailable != tc.wantCatalogAvail {
+				t.Fatalf("catalog_available=%t want %t", got.Tier2.ModelHash.CatalogAvailable, tc.wantCatalogAvail)
+			}
+		})
+	}
+}
+
+func TestObservedModelHashEvidenceIgnoresPreTier2Hashes(t *testing.T) {
+	tier2.ResetForTest()
+	defer tier2.ResetForTest()
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID:            "provider-a",
+		AssignedID:            "session-a",
+		ModelID:               "model-a",
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		EndpointURL:           "https://provider-a.example",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		ModelHash:             buyerTestHash,
+		HashStatus:            "",
+	}, nil)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithTier2Config(config.Tier2Config{ObserveEnabled: true}),
+	)
+	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
+	req.Header.Set("Authorization", "Bearer operator-key")
+	rr := httptest.NewRecorder()
+
+	server.InternalHandler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var got struct {
+		Tier2 struct {
+			Phase int `json:"phase"`
+		} `json:"tier2"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if got.Tier2.Phase != 0 {
+		t.Fatalf("phase=%d want 0 for pre-tier2 hash evidence body=%s", got.Tier2.Phase, rr.Body.String())
 	}
 }
 
