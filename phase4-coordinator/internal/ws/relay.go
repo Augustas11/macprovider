@@ -75,6 +75,13 @@ type encryptedInferenceResponseChunk struct {
 	Enc       tier2.AEADEnvelopeBody `json:"enc"`
 }
 
+type encryptedInferenceResponseEnd struct {
+	Type      string                 `json:"type"`
+	RequestID string                 `json:"request_id,omitempty"`
+	Encrypted bool                   `json:"encrypted"`
+	Enc       tier2.AEADEnvelopeBody `json:"enc"`
+}
+
 func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize int) *providerSession {
 	if bufferSize <= 0 {
 		bufferSize = 64
@@ -315,6 +322,37 @@ func (ps *providerSession) openInferenceChunk(providerID, assignedID string, act
 	}, nil
 }
 
+func (ps *providerSession) openInferenceEnd(providerID, assignedID string, active *relayActive, envelope tier2.AEADEnvelope) (InferenceResponseEnd, error) {
+	ps.tier2Mu.Lock()
+	defer ps.tier2Mu.Unlock()
+	if ps.tier2 == nil {
+		return InferenceResponseEnd{}, errors.New("encrypted end for provider without tier2 session")
+	}
+	if ps.tier2.P2CCounter == ^uint64(0) {
+		return InferenceResponseEnd{}, errors.New("tier2 p2c frame counter exhausted")
+	}
+	seq := ps.tier2.P2CCounter
+	expectedAAD := tier2.AEADFrameAAD{
+		Type:       "inference_response_end",
+		Direction:  "p2c",
+		RequestID:  active.requestID,
+		Stream:     active.stream,
+		ProviderID: providerID,
+		AssignedID: assignedID,
+		Seq:        seq,
+	}
+	plaintext, err := tier2.OpenPillarBFrame(ps.tier2.P2CKey, ps.tier2.P2CNonceBase, ps.tier2.KeyID, seq, expectedAAD, envelope)
+	if err != nil {
+		return InferenceResponseEnd{}, err
+	}
+	ps.tier2.P2CCounter++
+	var end InferenceResponseEnd
+	if err := json.Unmarshal(plaintext, &end); err != nil {
+		return InferenceResponseEnd{}, err
+	}
+	return end, nil
+}
+
 func (ps *providerSession) markTier2RequestDispatched() {
 	ps.tier2Mu.Lock()
 	defer ps.tier2Mu.Unlock()
@@ -343,6 +381,16 @@ func (ps *providerSession) tier2RekeyReason(now time.Time, cfg config.Tier2Confi
 
 func (s *Server) closeProviderForTier2Rekey(session *providerSession, providerID, assignedID, requestID, reason string) {
 	tier2.LogAEADRekey(s.log, providerID, assignedID, requestID, reason)
+	s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
+	s.sessions.Delete(sessionKey(providerID, assignedID))
+	_ = session.conn.Close()
+	session.close()
+}
+
+func (s *Server) closeProviderForTier2AEADFailure(session *providerSession, providerID, assignedID, requestID, reason string) {
+	tier2.LogAEADDecryptFailed(s.log, providerID, assignedID, requestID, reason)
+	tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, "aead_decrypt_failed")
+	session.failActiveOrAll(requestID, ErrRelayAEADFailed)
 	s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
 	s.sessions.Delete(sessionKey(providerID, assignedID))
 	_ = session.conn.Close()
@@ -422,13 +470,7 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 	if envelope.Encrypted {
 		aad, _, err := tier2.DecodeAEADAAD(envelope.Enc.AAD)
 		if err != nil {
-			tier2.LogAEADDecryptFailed(s.log, providerID, assignedID, envelope.RequestID, err.Error())
-			tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, envelope.RequestID, "aead_decrypt_failed")
-			if envelope.RequestID != "" {
-				session.failActive(envelope.RequestID, ErrRelayAEADFailed)
-			}
-			_ = session.conn.Close()
-			session.close()
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, envelope.RequestID, err.Error())
 			return
 		}
 		requestID := aad.RequestID
@@ -438,17 +480,12 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		active, ok := session.activeFor(requestID)
 		if !ok {
 			s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("unknown encrypted inference_response_chunk request_id")
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown encrypted inference_response_chunk request_id")
 			return
 		}
 		chunk, err = session.openInferenceChunk(providerID, assignedID, active, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
 		if err != nil {
-			tier2.LogAEADDecryptFailed(s.log, providerID, assignedID, requestID, err.Error())
-			tier2.LogEncryptedLegSessionClosed(s.log, providerID, assignedID, requestID, "aead_decrypt_failed")
-			session.failActiveOrAll(requestID, ErrRelayAEADFailed)
-			s.pool.MarkState(providerID, assignedID, pool.StateUnavailable)
-			s.sessions.Delete(sessionKey(providerID, assignedID))
-			_ = session.conn.Close()
-			session.close()
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
 			return
 		}
 	} else if session.hasTier2Session() {
@@ -487,14 +524,48 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 }
 
 func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byte) {
+	session, ok := s.sessionFor(providerID, assignedID)
+	if !ok {
+		s.log.Warn().Str("provider_id", providerID).Msg("end from unknown provider session")
+		return
+	}
+	var envelope encryptedInferenceResponseEnd
 	var end InferenceResponseEnd
-	if err := json.Unmarshal(payload, &end); err != nil {
+	if err := json.Unmarshal(payload, &envelope); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid inference_response_end")
 		return
 	}
-	session, ok := s.sessionFor(providerID, assignedID)
-	if !ok {
-		s.log.Warn().Str("provider_id", providerID).Str("request_id", end.RequestID).Msg("end from unknown provider session")
+	if envelope.Encrypted {
+		aad, _, err := tier2.DecodeAEADAAD(envelope.Enc.AAD)
+		if err != nil {
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, envelope.RequestID, err.Error())
+			return
+		}
+		requestID := aad.RequestID
+		if requestID == "" {
+			requestID = envelope.RequestID
+		}
+		active, ok := session.activeFor(requestID)
+		if !ok {
+			s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("unknown encrypted inference_response_end request_id")
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown encrypted inference_response_end request_id")
+			return
+		}
+		opened, err := session.openInferenceEnd(providerID, assignedID, active, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc})
+		if err != nil {
+			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
+			return
+		}
+		end = opened
+	} else if session.hasTier2Session() {
+		requestID := envelope.RequestID
+		if requestID == "" {
+			requestID = "unknown"
+		}
+		s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "tier2 encrypted response end required")
+		return
+	} else if err := json.Unmarshal(payload, &end); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("invalid inference_response_end")
 		return
 	}
 	active, ok := session.removeActive(end.RequestID)

@@ -150,6 +150,31 @@ func TestEncryptedRelayDecryptsResponseChunk(t *testing.T) {
 	}
 }
 
+func TestEncryptedRelayDecryptsResponseEnd(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-end", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-end", false, 0, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-end", Status: "complete", ChunksSent: 0}))
+
+	select {
+	case end := <-relay.Done:
+		if end.RequestID != "req-end" || end.Status != "complete" {
+			t.Fatalf("decrypted end = %#v", end)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("decrypted end timeout")
+	}
+	if provider.Tier2Session.P2CCounter != 1 {
+		t.Fatalf("p2c counter = %d, want 1", provider.Tier2Session.P2CCounter)
+	}
+}
+
 func TestEncryptedRelayRekeysAfterRequestThreshold(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := config.Default()
@@ -164,7 +189,7 @@ func TestEncryptedRelayRekeysAfterRequestThreshold(t *testing.T) {
 		t.Fatalf("read encrypted inference_request: %v", err)
 	}
 	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-rekey", false, 0, []byte(`{"ok":true}`)))
-	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-rekey", Status: "complete", ChunksSent: 1}))
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-rekey", false, 1, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-rekey", Status: "complete", ChunksSent: 1}))
 
 	select {
 	case end := <-relay.Done:
@@ -211,7 +236,7 @@ func TestEncryptedRelayDefersRekeyCloseUntilActiveCompletes(t *testing.T) {
 	}
 
 	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-rekey-active", false, 0, []byte(`{"ok":true}`)))
-	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-rekey-active", Status: "complete", ChunksSent: 1}))
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-rekey-active", false, 1, InferenceResponseEnd{Type: "inference_response_end", RequestID: "req-rekey-active", Status: "complete", ChunksSent: 1}))
 
 	select {
 	case end := <-relay.Done:
@@ -313,6 +338,35 @@ func TestEncryptedRelayRejectsPlaintextResponseChunk(t *testing.T) {
 	}
 	if _, ok := s.storedSessionFor("p1", "s1"); ok {
 		t.Fatal("tier2 session still stored after plaintext response chunk")
+	}
+}
+
+func TestEncryptedRelayRejectsPlaintextResponseEnd(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-plaintext-end", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+
+	s.handleInferenceEnd("p1", "s1", mustJSON(InferenceResponseEnd{
+		Type:      "inference_response_end",
+		RequestID: "req-plaintext-end",
+		Status:    "complete",
+	}))
+
+	select {
+	case err := <-relay.Errors:
+		if err != ErrRelayAEADFailed {
+			t.Fatalf("err = %v, want ErrRelayAEADFailed", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("plaintext tier2 end error timeout")
+	}
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("tier2 session still stored after plaintext response end")
 	}
 }
 
@@ -718,6 +772,29 @@ func encryptedResponseChunk(t *testing.T, provider *pool.Provider, requestID str
 	}
 	return mustJSON(encryptedInferenceResponseChunk{
 		Type:      "inference_response_chunk",
+		RequestID: requestID,
+		Encrypted: true,
+		Enc:       envelope.Enc,
+	})
+}
+
+func encryptedResponseEnd(t *testing.T, provider *pool.Provider, requestID string, stream bool, seq uint64, end InferenceResponseEnd) []byte {
+	t.Helper()
+	aad := tier2.AEADFrameAAD{
+		Type:       "inference_response_end",
+		Direction:  "p2c",
+		RequestID:  requestID,
+		Stream:     stream,
+		ProviderID: provider.ProviderID,
+		AssignedID: provider.AssignedID,
+		Seq:        seq,
+	}
+	envelope, err := tier2.SealPillarBFrame(provider.Tier2Session.P2CKey, provider.Tier2Session.P2CNonceBase, provider.Tier2Session.KeyID, seq, aad, mustJSON(end))
+	if err != nil {
+		t.Fatalf("seal encrypted response end: %v", err)
+	}
+	return mustJSON(encryptedInferenceResponseEnd{
+		Type:      "inference_response_end",
 		RequestID: requestID,
 		Encrypted: true,
 		Enc:       envelope.Enc,

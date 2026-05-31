@@ -23,10 +23,8 @@ final class Tier2ProviderSessionTests: XCTestCase {
         let requestEnc = try XCTUnwrap(request["enc"] as? [String: Any])
         let requestAAD = try XCTUnwrap(requestEnc["aad"] as? String)
         let requestAADRaw = try Data(base64URLUnpadded: requestAAD)
-        XCTAssertEqual(
-            String(data: requestAADRaw, encoding: .utf8),
-            #"{"type":"inference_request","direction":"c2p","request_id":"req-roundtrip","stream":true,"provider_id":"provider-test","assigned_id":"assigned-test","seq":0}"#
-        )
+        XCTAssertTrue(requestAADRaw.starts(with: Data("macprovider/spec008/pillar-b/aad/v1\0".utf8)))
+        XCTAssertFalse(String(data: requestAADRaw, encoding: .utf8)?.contains(#""request_id""#) ?? true)
 
         XCTAssertEqual(try session.openRequestBody(message: request, requestID: "req-roundtrip", stream: true), "request-body")
         XCTAssertThrowsError(try session.openRequestBody(message: request, requestID: "req-roundtrip", stream: true))
@@ -37,10 +35,8 @@ final class Tier2ProviderSessionTests: XCTestCase {
         let responseEnc = try XCTUnwrap(response["enc"] as? [String: Any])
         let responseAAD = try XCTUnwrap(responseEnc["aad"] as? String)
         let responseAADRaw = try Data(base64URLUnpadded: responseAAD)
-        XCTAssertEqual(
-            String(data: responseAADRaw, encoding: .utf8),
-            #"{"type":"inference_response_chunk","direction":"p2c","request_id":"req-roundtrip","stream":true,"provider_id":"provider-test","assigned_id":"assigned-test","seq":0}"#
-        )
+        XCTAssertTrue(responseAADRaw.starts(with: Data("macprovider/spec008/pillar-b/aad/v1\0".utf8)))
+        XCTAssertFalse(String(data: responseAADRaw, encoding: .utf8)?.contains(#""request_id""#) ?? true)
         XCTAssertEqual(
             try Tier2ProviderSession.openResponseChunkForTest(
                 session: session,
@@ -52,7 +48,7 @@ final class Tier2ProviderSessionTests: XCTestCase {
         )
     }
 
-    func testAADStringEscapingMatchesGoMarshalDefaults() throws {
+    func testAADEncodingIsVersionedBinary() throws {
         let session = try Tier2ProviderSession(
             providerID: "provider<&>",
             assignedID: "assigned-test",
@@ -74,9 +70,8 @@ final class Tier2ProviderSessionTests: XCTestCase {
         let requestAAD = try XCTUnwrap(requestEnc["aad"] as? String)
         let requestAADRaw = try Data(base64URLUnpadded: requestAAD)
 
-        XCTAssertEqual(
-            String(data: requestAADRaw, encoding: .utf8),
-            #"{"type":"inference_request","direction":"c2p","request_id":"req-line\n","stream":false,"provider_id":"provider\u003c\u0026\u003e","assigned_id":"assigned-test","seq":0}"#
-        )
+        XCTAssertTrue(requestAADRaw.starts(with: Data("macprovider/spec008/pillar-b/aad/v1\0".utf8)))
+        XCTAssertFalse(String(data: requestAADRaw, encoding: .utf8)?.contains(#"\u003c"#) ?? true)
+        XCTAssertFalse(String(data: requestAADRaw, encoding: .utf8)?.contains(#""request_id""#) ?? true)
     }
 }

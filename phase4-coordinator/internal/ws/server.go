@@ -162,6 +162,9 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 	authz := r.Header.Get("Authorization")
+	if authz == "" && s.tokens != nil {
+		return providerAuth{}, false
+	}
 	if authz == "" {
 		return providerAuth{}, true
 	}
@@ -228,6 +231,10 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte) 
 	}
 	if hello.Tier != 1 {
 		s.close(conn, CloseTierUnsupported, "tier_unsupported: tier "+itoa(hello.Tier)+" not supported")
+		return "", ""
+	}
+	if s.tier2Config().RequireEncryptedLeg {
+		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_encrypted_leg_required")
 		return "", ""
 	}
 	entry, ok := s.prepareProviderAdmission(conn, auth, hello)
@@ -408,9 +415,12 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte) 
 }
 
 func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hello Hello) (*pool.Provider, bool) {
-	if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" && compareSemver(hello.BinaryVersion, required) < 0 {
-		s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
-		return nil, false
+	if required := strings.TrimSpace(s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion); required != "" {
+		cmp, ok := compareSemver(hello.BinaryVersion, required)
+		if !ok || cmp < 0 {
+			s.close(conn, CloseVersionUnsupported, "version_unsupported: binary_version "+hello.BinaryVersion+" below required "+required)
+			return nil, false
+		}
 	}
 	providerCfg, pinned := s.pool.Endpoint(hello.ProviderID)
 	if s.tokens != nil {
@@ -502,9 +512,12 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	}, true
 }
 
-func compareSemver(lhs, rhs string) int {
-	left := semverParts(lhs)
-	right := semverParts(rhs)
+func compareSemver(lhs, rhs string) (int, bool) {
+	left, okLeft := semverParts(lhs)
+	right, okRight := semverParts(rhs)
+	if !okLeft || !okRight {
+		return 0, false
+	}
 	n := len(left)
 	if len(right) > n {
 		n = len(right)
@@ -519,43 +532,44 @@ func compareSemver(lhs, rhs string) int {
 		}
 		switch {
 		case l < r:
-			return -1
+			return -1, true
 		case l > r:
-			return 1
+			return 1, true
 		}
 	}
-	return 0
+	return 0, true
 }
 
-func semverParts(value string) []int {
+func semverParts(value string) ([]int, bool) {
 	value = strings.TrimLeft(strings.TrimSpace(value), "vV")
+	if value == "" {
+		return nil, false
+	}
 	parts := strings.Split(value, ".")
+	if len(parts) > 3 {
+		return nil, false
+	}
 	out := make([]int, 0, len(parts))
 	for _, part := range parts {
 		part = strings.TrimSpace(part)
 		if part == "" {
-			out = append(out, 0)
-			continue
+			return nil, false
 		}
-		var digits strings.Builder
 		for _, r := range part {
 			if r < '0' || r > '9' {
-				break
+				return nil, false
 			}
-			digits.WriteRune(r)
 		}
-		if digits.Len() == 0 {
-			out = append(out, 0)
-			continue
-		}
-		n, err := strconv.Atoi(digits.String())
+		n, err := strconv.Atoi(part)
 		if err != nil {
-			out = append(out, 0)
-			continue
+			return nil, false
 		}
 		out = append(out, n)
 	}
-	return out
+	for len(out) < 3 {
+		out = append(out, 0)
+	}
+	return out, true
 }
 
 func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *providerSession {
@@ -1281,6 +1295,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		PoolDegraded    int    `json:"pool_degraded"`
 		PoolDraining    int    `json:"pool_draining"`
 		PoolUnavailable int    `json:"pool_unavailable"`
+		PoolPolicyReady int    `json:"pool_policy_ready"`
 		RequestsTotal   int    `json:"requests_total"`
 		RequestsActive  int    `json:"requests_active"`
 		Version         string `json:"version"`
@@ -1294,6 +1309,9 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		switch p.State {
 		case pool.StateReady:
 			resp.PoolReady++
+			if s.providerTier2PolicyEligible(p, s.tier2Config()) {
+				resp.PoolPolicyReady++
+			}
 		case pool.StateDegraded:
 			resp.PoolDegraded++
 		case pool.StateDraining:
@@ -1334,13 +1352,18 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	summary := struct {
 		TotalProviders int      `json:"total_providers"`
 		Ready          int      `json:"ready"`
+		PolicyReady    int      `json:"policy_ready"`
 		TotalSlots     int      `json:"total_slots"`
 		FreeSlots      int      `json:"free_slots"`
 		Models         []string `json:"models"`
 	}{TotalProviders: len(providers)}
+	cfg := s.tier2Config()
 	for _, p := range providers {
 		if p.State == pool.StateReady {
 			summary.Ready++
+			if s.providerTier2PolicyEligible(p, cfg) {
+				summary.PolicyReady++
+			}
 		}
 		summary.TotalSlots += p.SlotsTotal
 		summary.FreeSlots += p.SlotsFree
@@ -1358,6 +1381,25 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		Pool:    providers,
 		Summary: summary,
 	})
+}
+
+func (s *Server) providerTier2PolicyEligible(p pool.Provider, cfg config.Tier2Config) bool {
+	if p.State != pool.StateReady {
+		return false
+	}
+	if !tier2.ConfigActive(cfg) {
+		return true
+	}
+	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(tier2.VerifyProviderHash(p.ModelID, p.ModelHash), cfg.RequireHashVerified) {
+		return false
+	}
+	if cfg.RequireEncryptedLeg && !p.EncryptedLeg {
+		return false
+	}
+	if cfg.RequireAttestation && p.AttestationStatus != pool.AttestationStatusAttested {
+		return false
+	}
+	return true
 }
 
 func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {

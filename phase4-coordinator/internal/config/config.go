@@ -395,6 +395,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("tier2.require_attestation requires at least one attestation root")
 	}
 	for _, root := range c.Tier2.AttestationRoots {
+		if c.Tier2.RequireAttestation && root == "mock-root" {
+			return fmt.Errorf("tier2.attestation_roots must not include mock-root when tier2.require_attestation is true")
+		}
 		if root == "mock-root" && !c.Tier2.AllowMockAttestation {
 			return fmt.Errorf("tier2.attestation_roots must not include mock-root unless tier2.allow_mock_attestation is true")
 		}

@@ -68,24 +68,24 @@ actor InferenceRelay {
         }
 
         guard active.count < maxActiveRequests else {
-            try await sendFrame([
+            try await Self.sendEndFrame([
                 "type": "inference_response_end",
                 "request_id": requestID,
                 "status": "error_queue_full",
                 "chunks_sent": 0,
                 "error": "Provider request queue is full",
-            ])
+            ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             return
         }
 
         guard body.utf8.count <= maxBodyBytes else {
-            try await sendFrame([
+            try await Self.sendEndFrame([
                 "type": "inference_response_end",
                 "request_id": requestID,
                 "status": "error_context_exceeded",
                 "chunks_sent": 0,
                 "error": "Request body exceeds provider limit",
-            ])
+            ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             return
         }
 
@@ -114,6 +114,9 @@ actor InferenceRelay {
         }
 
         guard let request = active[requestID] else {
+            if tier2Session != nil {
+                return
+            }
             try await sendFrame([
                 "type": "inference_response_end",
                 "request_id": requestID,
@@ -206,29 +209,29 @@ actor InferenceRelay {
         } catch is RelayCancellationAcknowledged {
         } catch is CancellationError {
             if state.markTerminalSent() {
-                try? await sendFrame([
+                try? await sendEndFrame([
                     "type": "inference_response_end",
                     "request_id": requestID,
                     "status": "cancelled",
                     "chunks_sent": state.chunksSent,
                     "usage": state.usage ?? zeroUsage(),
-                ])
+                ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         } catch let error as APIError {
             failed = true
             if state.markTerminalSent() {
-                try? await sendFrame(errorEndFrame(requestID: requestID, error: error, chunksSent: state.chunksSent))
+                try? await sendEndFrame(errorEndFrame(requestID: requestID, error: error, chunksSent: state.chunksSent), requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         } catch {
             failed = true
             if state.markTerminalSent() {
-                try? await sendFrame([
+                try? await sendEndFrame([
                     "type": "inference_response_end",
                     "request_id": requestID,
                     "status": "error_internal",
                     "chunks_sent": state.chunksSent,
                     "error": String(describing: error),
-                ])
+                ], requestID: requestID, stream: stream, tier2Session: tier2Session, sendFrame: sendFrame)
             }
         }
         await providerStatus.finishRequest(
@@ -251,13 +254,13 @@ actor InferenceRelay {
         state.setUsage(completion)
         if state.isCancelled {
             if state.markTerminalSent() {
-                try await sendFrame([
+                try await sendEndFrame([
                     "type": "inference_response_end",
                     "request_id": requestID,
                     "status": "cancelled",
                     "chunks_sent": state.chunksSent,
                     "usage": usage(completion),
-                ])
+                ], requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
         }
@@ -268,13 +271,13 @@ actor InferenceRelay {
         let seq = state.nextSeq()
         try await sendChunk(requestID: requestID, stream: false, seq: seq, data: response, tier2Session: tier2Session, sendFrame: sendFrame)
         if state.markTerminalSent() {
-            try await sendFrame([
+            try await sendEndFrame([
                 "type": "inference_response_end",
                 "request_id": requestID,
                 "status": "complete",
                 "chunks_sent": state.chunksSent,
                 "usage": usage(completion),
-            ])
+            ], requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
         }
         return completion
     }
@@ -329,13 +332,13 @@ actor InferenceRelay {
                 consumer.cancel()
                 let chunksSent = (try? await consumer.value) ?? state.chunksSent
                 if state.markTerminalSent() {
-                    try await sendFrame([
+                    try await sendEndFrame([
                         "type": "inference_response_end",
                         "request_id": requestID,
                         "status": "cancelled",
                         "chunks_sent": chunksSent,
                         "usage": usage(completion),
-                    ])
+                    ], requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
                 return completion
             }
@@ -360,13 +363,13 @@ actor InferenceRelay {
 
             let chunksSent = try await consumer.value
             if state.markTerminalSent() {
-                try await sendFrame([
+                try await sendEndFrame([
                     "type": "inference_response_end",
                     "request_id": requestID,
                     "status": "complete",
                     "chunks_sent": chunksSent,
                     "usage": usage(completion),
-                ])
+                ], requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
             }
             return completion
         } catch {
@@ -375,13 +378,13 @@ actor InferenceRelay {
             if error is CancellationError {
                 let chunksSent = (try? await consumer.value) ?? state.chunksSent
                 if state.markTerminalSent() {
-                    try? await sendFrame([
+                    try? await sendEndFrame([
                         "type": "inference_response_end",
                         "request_id": requestID,
                         "status": "cancelled",
                         "chunks_sent": chunksSent,
                         "usage": state.usage ?? zeroUsage(),
-                    ])
+                    ], requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
                 throw RelayCancellationAcknowledged()
             }
@@ -428,6 +431,20 @@ actor InferenceRelay {
             "seq": seq,
             "data": data,
         ])
+    }
+
+    private static func sendEndFrame(
+        _ frame: [String: Any],
+        requestID: String,
+        stream: Bool,
+        tier2Session: Tier2ProviderSession?,
+        sendFrame: @escaping SendFrame
+    ) async throws {
+        if let tier2Session {
+            try await sendFrame(tier2Session.sealResponseEnd(requestID: requestID, stream: stream, payload: frame))
+            return
+        }
+        try await sendFrame(frame)
     }
 
     private static func chatCompletionResponse(request: ChatCompletionRequest, completion: CompletionResult) -> [String: Any] {

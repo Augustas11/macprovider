@@ -232,8 +232,8 @@ func TestReloadTier2PreservesPreviousCatalogOnInvalidSamePathReload(t *testing.T
 	if got := tier2.VerifyProviderHash("model-a", reloadTestHash); got != pool.HashStatusVerified {
 		t.Fatalf("preserved catalog hash status=%q want %q logs=%s", got, pool.HashStatusVerified, logs.String())
 	}
-	if !tier2.LoadFailed() {
-		t.Fatalf("invalid same-path reload should record load failure logs=%s", logs.String())
+	if tier2.LoadFailed() {
+		t.Fatalf("rejected reload mutated tier2 load state logs=%s", logs.String())
 	}
 }
 

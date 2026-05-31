@@ -64,13 +64,13 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Tier2.RequireAttestation = true
 	cfg.Tier2.AttestationRoots = []string{"mock-root"}
-	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "allow_mock_attestation") {
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_attestation") {
 		t.Fatalf("mock attestation root without opt-in err=%v", err)
 	}
 
 	cfg.Tier2.AllowMockAttestation = true
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("mock attestation root should validate only with explicit opt-in: %v", err)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "require_attestation") {
+		t.Fatalf("mock attestation root should not validate with require_attestation: %v", err)
 	}
 
 	cfg = Default()

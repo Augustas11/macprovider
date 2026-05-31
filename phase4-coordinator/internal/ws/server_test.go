@@ -194,7 +194,7 @@ func TestProviderAuthV2RejectsNoCommonAEADSuite(t *testing.T) {
 	}
 }
 
-func TestWarmupGateDoesNotProbeProviderMissingRequiredEncryptedLeg(t *testing.T) {
+func TestProviderHelloRejectsWarmupProviderMissingRequiredEncryptedLeg(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.WarmupGateEnabled = true
 		cfg.Pool.WarmupGateTimeoutS = 1
@@ -204,24 +204,10 @@ func TestWarmupGateDoesNotProbeProviderMissingRequiredEncryptedLeg(t *testing.T)
 	})
 	defer h.HTTP.Close()
 
-	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, validHello("m4-anon"))
+	if code != providerws.CloseTier2KeyExchangeFailed || reason != "tier2_encrypted_leg_required" {
+		t.Fatalf("close = %d %q, want %d tier2_encrypted_leg_required", code, reason, providerws.CloseTier2KeyExchangeFailed)
 	}
-	defer conn.Close()
-	assignedID := assertHelloAck(t, conn)
-
-	if err := conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond)); err != nil {
-		t.Fatalf("set read deadline: %v", err)
-	}
-	if payload, _, err := wsutil.ReadServerData(conn); err == nil {
-		t.Fatalf("unexpected warmup probe for unencrypted provider: %s", payload)
-	}
-	_ = conn.SetReadDeadline(time.Time{})
-	eventually(t, func() bool {
-		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
-		return ok && provider.State == pool.StateUnavailable
-	})
 }
 
 func TestProviderAuthFirstMessageDispatchRejectsUnknown(t *testing.T) {
@@ -655,6 +641,23 @@ func TestPinnedProviderRequiresTokenWhenValidatorConfigured(t *testing.T) {
 	defer h.HTTP.Close()
 
 	code, reason := sendHelloExpectClose(t, h.HTTP.URL, validHello("m4-anon"))
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
+}
+
+func TestProvisionalProviderRequiresTokenWhenValidatorConfigured(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
+		cfg.Providers = nil
+	})
+	defer h.HTTP.Close()
+
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, validHello("m4-provisional"))
 	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
 		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
 	}
@@ -1549,6 +1552,35 @@ func TestProviderHelloRejectsBelowRequiredBinaryVersion(t *testing.T) {
 	}
 }
 
+func TestProviderHelloRejectsSuffixedRequiredBinaryVersion(t *testing.T) {
+	ts := newProviderServer(t, func(cfg *config.Config) {
+		cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion = "1.2.6"
+	})
+	defer ts.Close()
+
+	hello := validHello("m4-anon")
+	hello["binary_version"] = "1.2.6-dev"
+	code, reason := sendHelloExpectClose(t, ts.URL, hello)
+	if code != providerws.CloseVersionUnsupported {
+		t.Fatalf("code = %d, want %d", code, providerws.CloseVersionUnsupported)
+	}
+	if !strings.Contains(reason, "below required 1.2.6") {
+		t.Fatalf("reason = %q", reason)
+	}
+}
+
+func TestProviderHelloRejectsV1WhenEncryptedLegRequired(t *testing.T) {
+	ts := newProviderServer(t, func(cfg *config.Config) {
+		cfg.Tier2.RequireEncryptedLeg = true
+	})
+	defer ts.Close()
+
+	code, reason := sendHelloExpectClose(t, ts.URL, validHello("m4-anon"))
+	if code != providerws.CloseTier2KeyExchangeFailed || reason != "tier2_encrypted_leg_required" {
+		t.Fatalf("close = %d %q, want %d tier2_encrypted_leg_required", code, reason, providerws.CloseTier2KeyExchangeFailed)
+	}
+}
+
 type poolzResponse struct {
 	Pool []struct {
 		ProviderID    string `json:"provider_id"`
@@ -1648,7 +1680,7 @@ func bearerDialer(token string) gobwas.Dialer {
 
 func sendHelloExpectClose(t *testing.T, serverURL string, hello map[string]any) (gobwas.StatusCode, string) {
 	t.Helper()
-	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(serverURL))
+	conn, br, _, err := gobwas.Dial(context.Background(), wsURL(serverURL))
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -1656,7 +1688,11 @@ func sendHelloExpectClose(t *testing.T, serverURL string, hello map[string]any) 
 	if err := wsutil.WriteClientText(conn, mustJSON(hello)); err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
-	frame, err := gobwas.ReadFrame(conn)
+	var src io.Reader = conn
+	if br != nil {
+		src = br
+	}
+	frame, err := gobwas.ReadFrame(src)
 	if err != nil {
 		t.Fatalf("read close: %v", err)
 	}

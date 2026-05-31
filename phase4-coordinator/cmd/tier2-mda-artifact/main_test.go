@@ -31,14 +31,16 @@ func TestMakeAndCheckArtifactWithCoordinatorVerification(t *testing.T) {
 	challenge := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x42}, 32))
 	providerECDH := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x24}, 32))
 
-	rootPEM, leafPEM, csrPEM := testMDAEvidence(t, now, challenge)
+	rootPEM, leafPEM, csrPEM, leafKeyPEM := testMDAEvidence(t, now, challenge)
 	rootPath := filepath.Join(dir, "root.pem")
 	leafPath := filepath.Join(dir, "leaf.pem")
 	csrPath := filepath.Join(dir, "leaf.csr")
+	keyPath := filepath.Join(dir, "leaf-key.pem")
 	artifactPath := filepath.Join(dir, "mda.json")
 	writeTestFile(t, rootPath, rootPEM)
 	writeTestFile(t, leafPath, leafPEM)
 	writeTestFile(t, csrPath, csrPEM)
+	writeTestFile(t, keyPath, leafKeyPEM)
 
 	var makeOut bytes.Buffer
 	if err := run([]string{
@@ -71,9 +73,11 @@ func TestMakeAndCheckArtifactWithCoordinatorVerification(t *testing.T) {
 		"--challenge", challenge,
 		"--provider-id", "provider-a",
 		"--provider-ecdh-public-key", providerECDH,
+		"--auth-attempt-id", "artifact-check",
+		"--binding-signing-key", keyPath,
 		"--now", now.Format(time.RFC3339),
-	}, ioDiscard{}, ioDiscard{}); err == nil || !strings.Contains(err.Error(), `coordinator verifier returned "attestation_failed"`) {
-		t.Fatalf("full check err=%v, want fail-closed without binding signature", err)
+	}, ioDiscard{}, ioDiscard{}); err != nil {
+		t.Fatalf("full check with binding signature: %v", err)
 	}
 }
 
@@ -84,14 +88,16 @@ func TestCheckArtifactRejectsMismatchedFreshnessChallenge(t *testing.T) {
 	wrongChallenge := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x43}, 32))
 	providerECDH := base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{0x24}, 32))
 
-	rootPEM, leafPEM, csrPEM := testMDAEvidence(t, now, challenge)
+	rootPEM, leafPEM, csrPEM, leafKeyPEM := testMDAEvidence(t, now, challenge)
 	rootPath := filepath.Join(dir, "root.pem")
 	leafPath := filepath.Join(dir, "leaf.pem")
 	csrPath := filepath.Join(dir, "leaf.csr")
+	keyPath := filepath.Join(dir, "leaf-key.pem")
 	artifactPath := filepath.Join(dir, "mda.json")
 	writeTestFile(t, rootPath, rootPEM)
 	writeTestFile(t, leafPath, leafPEM)
 	writeTestFile(t, csrPath, csrPEM)
+	writeTestFile(t, keyPath, leafKeyPEM)
 	if err := run([]string{
 		"make",
 		"--cert", leafPath,
@@ -108,6 +114,7 @@ func TestCheckArtifactRejectsMismatchedFreshnessChallenge(t *testing.T) {
 		"--challenge", wrongChallenge,
 		"--provider-id", "provider-a",
 		"--provider-ecdh-public-key", providerECDH,
+		"--binding-signing-key", keyPath,
 		"--now", now.Format(time.RFC3339),
 	}, ioDiscard{}, ioDiscard{})
 	if err == nil {
@@ -122,7 +129,7 @@ type ioDiscard struct{}
 
 func (ioDiscard) Write(p []byte) (int, error) { return len(p), nil }
 
-func testMDAEvidence(t *testing.T, now time.Time, challenge string) ([]byte, []byte, []byte) {
+func testMDAEvidence(t *testing.T, now time.Time, challenge string) ([]byte, []byte, []byte, []byte) {
 	t.Helper()
 	rootPub, rootPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -169,9 +176,14 @@ func testMDAEvidence(t *testing.T, now time.Time, challenge string) ([]byte, []b
 	if err != nil {
 		t.Fatalf("create CSR: %v", err)
 	}
+	leafKeyDER, err := x509.MarshalECPrivateKey(leafPriv)
+	if err != nil {
+		t.Fatalf("marshal leaf key: %v", err)
+	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER}),
 		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leafDER}),
-		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER})
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csrDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: leafKeyDER})
 }
 
 func writeTestFile(t *testing.T, path string, body []byte) {

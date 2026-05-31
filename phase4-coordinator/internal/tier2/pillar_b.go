@@ -21,7 +21,10 @@ const (
 	PillarBAEADA256GCM = "A256GCM"
 )
 
-var pillarBTranscriptPrefix = []byte("macprovider/spec008/pillar-b/transcript/v1")
+var (
+	pillarBTranscriptPrefix = []byte("macprovider/spec008/pillar-b/transcript/v1")
+	pillarBAADPrefix        = []byte("macprovider/spec008/pillar-b/aad/v1\x00")
+)
 
 type PillarBKeyMaterial struct {
 	AEADSuite    string
@@ -121,7 +124,32 @@ func DerivePillarBKeysFromSharedSecret(sharedSecret []byte, providerID, assigned
 }
 
 func MarshalAEADAAD(aad AEADFrameAAD) ([]byte, error) {
-	return json.Marshal(aad)
+	buf := bytes.NewBuffer(make([]byte, 0, len(pillarBAADPrefix)+len(aad.Type)+len(aad.Direction)+len(aad.RequestID)+len(aad.ProviderID)+len(aad.AssignedID)+29))
+	buf.Write(pillarBAADPrefix)
+	if err := writeAADString(buf, aad.Type); err != nil {
+		return nil, err
+	}
+	if err := writeAADString(buf, aad.Direction); err != nil {
+		return nil, err
+	}
+	if err := writeAADString(buf, aad.RequestID); err != nil {
+		return nil, err
+	}
+	if aad.Stream {
+		buf.WriteByte(1)
+	} else {
+		buf.WriteByte(0)
+	}
+	if err := writeAADString(buf, aad.ProviderID); err != nil {
+		return nil, err
+	}
+	if err := writeAADString(buf, aad.AssignedID); err != nil {
+		return nil, err
+	}
+	var seq [8]byte
+	binary.BigEndian.PutUint64(seq[:], aad.Seq)
+	buf.Write(seq[:])
+	return buf.Bytes(), nil
 }
 
 func DecodeAEADAAD(encoded string) (AEADFrameAAD, []byte, error) {
@@ -129,11 +157,90 @@ func DecodeAEADAAD(encoded string) (AEADFrameAAD, []byte, error) {
 	if err != nil {
 		return AEADFrameAAD{}, nil, fmt.Errorf("invalid pillar B AAD: %w", err)
 	}
+	if bytes.HasPrefix(raw, pillarBAADPrefix) {
+		aad, err := parseBinaryAEADAAD(raw)
+		if err != nil {
+			return AEADFrameAAD{}, nil, err
+		}
+		return aad, raw, nil
+	}
 	var aad AEADFrameAAD
 	if err := json.Unmarshal(raw, &aad); err != nil {
 		return AEADFrameAAD{}, nil, fmt.Errorf("invalid pillar B AAD JSON: %w", err)
 	}
 	return aad, raw, nil
+}
+
+func writeAADString(w io.Writer, value string) error {
+	if len(value) > int(^uint32(0)) {
+		return fmt.Errorf("pillar B AAD field too large")
+	}
+	var length [4]byte
+	binary.BigEndian.PutUint32(length[:], uint32(len(value)))
+	if _, err := w.Write(length[:]); err != nil {
+		return err
+	}
+	_, err := io.WriteString(w, value)
+	return err
+}
+
+func parseBinaryAEADAAD(raw []byte) (AEADFrameAAD, error) {
+	reader := bytes.NewReader(raw[len(pillarBAADPrefix):])
+	readString := func(name string) (string, error) {
+		var length uint32
+		if err := binary.Read(reader, binary.BigEndian, &length); err != nil {
+			return "", fmt.Errorf("invalid pillar B AAD %s length: %w", name, err)
+		}
+		if uint64(length) > uint64(reader.Len()) {
+			return "", fmt.Errorf("invalid pillar B AAD %s length", name)
+		}
+		value := make([]byte, length)
+		if _, err := io.ReadFull(reader, value); err != nil {
+			return "", fmt.Errorf("invalid pillar B AAD %s: %w", name, err)
+		}
+		return string(value), nil
+	}
+	var aad AEADFrameAAD
+	var err error
+	if aad.Type, err = readString("type"); err != nil {
+		return AEADFrameAAD{}, err
+	}
+	if aad.Direction, err = readString("direction"); err != nil {
+		return AEADFrameAAD{}, err
+	}
+	if aad.RequestID, err = readString("request_id"); err != nil {
+		return AEADFrameAAD{}, err
+	}
+	streamFlag, err := reader.ReadByte()
+	if err != nil {
+		return AEADFrameAAD{}, fmt.Errorf("invalid pillar B AAD stream: %w", err)
+	}
+	switch streamFlag {
+	case 0:
+		aad.Stream = false
+	case 1:
+		aad.Stream = true
+	default:
+		return AEADFrameAAD{}, fmt.Errorf("invalid pillar B AAD stream flag")
+	}
+	if aad.ProviderID, err = readString("provider_id"); err != nil {
+		return AEADFrameAAD{}, err
+	}
+	if aad.AssignedID, err = readString("assigned_id"); err != nil {
+		return AEADFrameAAD{}, err
+	}
+	if reader.Len() < 8 {
+		return AEADFrameAAD{}, fmt.Errorf("invalid pillar B AAD seq")
+	}
+	var seq [8]byte
+	if _, err := io.ReadFull(reader, seq[:]); err != nil {
+		return AEADFrameAAD{}, fmt.Errorf("invalid pillar B AAD seq: %w", err)
+	}
+	aad.Seq = binary.BigEndian.Uint64(seq[:])
+	if reader.Len() != 0 {
+		return AEADFrameAAD{}, fmt.Errorf("invalid pillar B AAD trailing data")
+	}
+	return aad, nil
 }
 
 func SealPillarBFrame(key, nonceBase []byte, keyID string, seq uint64, aad AEADFrameAAD, plaintext []byte) (AEADEnvelope, error) {
@@ -197,12 +304,14 @@ func OpenPillarBFrame(key, nonceBase []byte, keyID string, expectedSeq uint64, e
 	if err != nil {
 		return nil, err
 	}
-	_, aadRaw, err := DecodeAEADAAD(envelope.Enc.AAD)
+	decodedAAD, aadRaw, err := DecodeAEADAAD(envelope.Enc.AAD)
 	if err != nil {
 		return nil, err
 	}
 	if !bytes.Equal(aadRaw, expectedAADRaw) {
-		return nil, fmt.Errorf("pillar B AAD mismatch")
+		if bytes.HasPrefix(aadRaw, pillarBAADPrefix) || decodedAAD != expectedAAD {
+			return nil, fmt.Errorf("pillar B AAD mismatch")
+		}
 	}
 	ciphertext, err := base64.RawURLEncoding.DecodeString(envelope.Enc.Ciphertext)
 	if err != nil {

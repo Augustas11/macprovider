@@ -374,7 +374,7 @@ type tier2PredicateState struct {
 func encryptedLegStateForProviders(providers []pool.Provider) tier2PredicateState {
 	var encrypted, unencrypted int
 	for _, p := range providers {
-		if !baseRoutingEligible(p) {
+		if p.State != pool.StateReady {
 			continue
 		}
 		if p.EncryptedLeg {
@@ -401,7 +401,7 @@ func encryptedLegStateForProviders(providers []pool.Provider) tier2PredicateStat
 func attestationStateForProviders(providers []pool.Provider) tier2PredicateState {
 	var attested, unsupported, total int
 	for _, p := range providers {
-		if !baseRoutingEligible(p) {
+		if p.State != pool.StateReady {
 			continue
 		}
 		total++
@@ -605,32 +605,15 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	providers := s.pool.Snapshot()
 	cfg := s.tier2Config()
 	pillarAActive := tier2.ModelHashActive(cfg)
+	tier2Active := tier2.ConfigActive(cfg)
 	for _, p := range providers {
-		if !pillarAActive {
-			if p.State != pool.StateReady {
-				continue
-			}
-			entry := models[p.ModelID]
-			if entry.ID == "" {
-				entry = modelEntry{
-					ID:      p.ModelID,
-					Object:  "model",
-					Created: s.createdAt,
-					OwnedBy: "macprovider",
-				}
-			}
-			entry.ProviderCount++
-			if p.MaxContextTokens > entry.MaxContextTokens {
-				entry.MaxContextTokens = p.MaxContextTokens
-			}
-			entry.TotalSlots += p.SlotsTotal
-			models[p.ModelID] = entry
+		if pillarAActive && !baseRoutingEligible(p) {
 			continue
 		}
-		if !baseRoutingEligible(p) {
+		if !pillarAActive && p.State != pool.StateReady {
 			continue
 		}
-		excluded := s.tier2ProviderExcludedForConfig(p, cfg)
+		excluded := tier2Active && s.tier2ProviderExcludedForConfig(p, cfg)
 		entry := models[p.ModelID]
 		if entry.ID == "" {
 			entry = modelEntry{
@@ -674,7 +657,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	resp := modelsResponse{Object: "list", Data: data}
-	if pillarAActive {
+	if tier2Active {
 		resp.Tier2 = s.internalTier2Metadata()
 	}
 	if err := json.NewEncoder(w).Encode(resp); err != nil {

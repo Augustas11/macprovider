@@ -178,8 +178,16 @@ final class InferenceRelayTests: XCTestCase {
 
         let end = try XCTUnwrap(frames.first { $0["type"] as? String == "inference_response_end" })
         XCTAssertEqual(end["request_id"] as? String, "req-encrypted")
-        XCTAssertEqual(end["status"] as? String, "complete")
-        XCTAssertEqual(end["chunks_sent"] as? Int, 1)
+        XCTAssertEqual(end["encrypted"] as? Bool, true)
+        let endPlaintext = try Tier2ProviderSession.openResponseEndForTest(
+            session: session,
+            frame: end,
+            requestID: "req-encrypted",
+            stream: false,
+            seq: 1
+        )
+        XCTAssertEqual(endPlaintext["status"] as? String, "complete")
+        XCTAssertEqual(endPlaintext["chunks_sent"] as? Int, 1)
     }
 
     func testTier2SessionRejectsPlaintextInferenceRequest() async throws {

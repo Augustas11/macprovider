@@ -2,8 +2,10 @@ package tier2
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/x509"
@@ -355,6 +357,36 @@ func parseAttestationBindingSignature(raw map[string]interface{}) (attestationBi
 		return attestationBindingSignature{}, false
 	}
 	return attestationBindingSignature{Alg: alg, Signature: signature}, true
+}
+
+func BuildAttestationBindingSignature(token AttestationToken, authAttemptID string, signer crypto.Signer) (map[string]interface{}, error) {
+	if signer == nil {
+		return nil, fmt.Errorf("missing attestation binding signer")
+	}
+	payload, err := attestationBindingPayload(token, authAttemptID)
+	if err != nil {
+		return nil, err
+	}
+	var alg string
+	var signature []byte
+	switch signer.Public().(type) {
+	case *ecdsa.PublicKey:
+		alg = "ES256"
+		digest := sha256.Sum256(payload)
+		signature, err = signer.Sign(rand.Reader, digest[:], crypto.SHA256)
+	case ed25519.PublicKey:
+		alg = "Ed25519"
+		signature, err = signer.Sign(rand.Reader, payload, crypto.Hash(0))
+	default:
+		return nil, fmt.Errorf("unsupported attestation binding signer key type %T", signer.Public())
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"alg":       alg,
+		"signature": base64.RawURLEncoding.EncodeToString(signature),
+	}, nil
 }
 
 func attestationBindingPayload(token AttestationToken, authAttemptID string) ([]byte, error) {

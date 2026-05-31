@@ -109,6 +109,26 @@ func Configure(cfg config.Tier2Config, logger zerolog.Logger) error {
 	return nil
 }
 
+func ConfigureStrict(cfg config.Tier2Config, logger zerolog.Logger) error {
+	if strings.TrimSpace(cfg.CatalogPath) == "" {
+		if cfg.RequireHashVerified {
+			return fmt.Errorf("tier2.require_hash_verified requires a valid signed catalog")
+		}
+		global.mu.Lock()
+		global.st = state{}
+		global.mu.Unlock()
+		return nil
+	}
+	catalog, err := LoadCatalog(cfg.CatalogPath, cfg.CatalogPublicKey, logger)
+	if err != nil {
+		return fmt.Errorf("tier2 catalog reload rejected: %w", err)
+	}
+	global.mu.Lock()
+	global.st = state{configured: true, active: catalog}
+	global.mu.Unlock()
+	return nil
+}
+
 func ConfigActive(cfg config.Tier2Config) bool {
 	return ModelHashActive(cfg) ||
 		cfg.RequireEncryptedLeg ||

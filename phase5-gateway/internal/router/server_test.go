@@ -2026,6 +2026,18 @@ func TestCoordinatorTier2PolicyErrorsPassThroughAndDoNotChargeQuota(t *testing.T
 			typ:    "server_error",
 		},
 		{
+			name:   "encrypted_leg_required",
+			status: http.StatusServiceUnavailable,
+			code:   "tier2_encrypted_leg_required",
+			typ:    "server_error",
+		},
+		{
+			name:   "attestation_required",
+			status: http.StatusServiceUnavailable,
+			code:   "tier2_attestation_required",
+			typ:    "server_error",
+		},
+		{
 			name:   "hard_pin_predicate",
 			status: http.StatusBadRequest,
 			code:   "tier2_hard_pin_predicate_failed",

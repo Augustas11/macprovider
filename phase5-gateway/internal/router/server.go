@@ -1507,7 +1507,7 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 func coordinatorTier2PolicyError(status int, body []byte) bool {
 	code := openAIErrorCode(body)
 	switch code {
-	case "tier2_hash_verified_required", "tier2_hash_mismatch":
+	case "tier2_hash_verified_required", "tier2_hash_mismatch", "tier2_encrypted_leg_required", "tier2_attestation_required":
 		return status == http.StatusServiceUnavailable
 	case "tier2_hard_pin_predicate_failed":
 		return status == http.StatusBadRequest

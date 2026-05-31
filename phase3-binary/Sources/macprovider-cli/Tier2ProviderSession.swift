@@ -157,6 +157,37 @@ final class Tier2ProviderSession: @unchecked Sendable {
         ]
     }
 
+    func sealResponseEnd(requestID: String, stream: Bool, payload: [String: Any]) throws -> [String: Any] {
+        let plaintext = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys])
+        lock.lock()
+        defer { lock.unlock() }
+        let seq = p2cCounter
+        let aad = Tier2FrameAAD(
+            type: "inference_response_end",
+            direction: "p2c",
+            requestID: requestID,
+            stream: stream,
+            providerID: providerID,
+            assignedID: assignedID,
+            seq: seq
+        )
+        let enc = try Self.sealEnvelope(
+            plaintext,
+            key: p2cKey,
+            nonceBase: p2cNonceBase,
+            keyID: keyID,
+            aad: aad,
+            seq: seq
+        )
+        p2cCounter += 1
+        return [
+            "type": "inference_response_end",
+            "request_id": requestID,
+            "encrypted": true,
+            "enc": enc,
+        ]
+    }
+
     static func sealRequestForTest(session: Tier2ProviderSession, requestID: String, stream: Bool, plaintext: String, seq: UInt64 = 0) throws -> [String: Any] {
         let aad = Tier2FrameAAD(
             type: "inference_request",
@@ -202,6 +233,27 @@ final class Tier2ProviderSession: @unchecked Sendable {
             throw Tier2ProviderError.invalidPlaintext
         }
         return data
+    }
+
+    static func openResponseEndForTest(session: Tier2ProviderSession, frame: [String: Any], requestID: String, stream: Bool, seq: UInt64 = 0) throws -> [String: Any] {
+        guard frame["encrypted"] as? Bool == true, let enc = frame["enc"] as? [String: Any] else {
+            throw Tier2ProviderError.invalidEnvelope
+        }
+        let aad = Tier2FrameAAD(
+            type: "inference_response_end",
+            direction: "p2c",
+            requestID: requestID,
+            stream: stream,
+            providerID: session.providerID,
+            assignedID: session.assignedID,
+            seq: seq
+        )
+        let plaintext = try openEnvelope(enc, key: session.p2cKey, nonceBase: session.p2cNonceBase, keyID: session.keyID, expectedAAD: aad, expectedSeq: seq)
+        let object = try JSONSerialization.jsonObject(with: plaintext)
+        guard let dict = object as? [String: Any] else {
+            throw Tier2ProviderError.invalidPlaintext
+        }
+        return dict
     }
 
     private static func sealEnvelope(_ plaintext: Data, key: Data, nonceBase: Data, keyID: String, aad: Tier2FrameAAD, seq: UInt64) throws -> [String: Any] {
@@ -309,6 +361,8 @@ enum Tier2ProviderError: Error, Equatable {
 }
 
 private struct Tier2FrameAAD: Equatable {
+    private static let prefix = Data("macprovider/spec008/pillar-b/aad/v1\0".utf8)
+
     let type: String
     let direction: String
     let requestID: String
@@ -318,78 +372,42 @@ private struct Tier2FrameAAD: Equatable {
     let seq: UInt64
 
     func encoded() throws -> Data {
-        let orderedFields: [(String, Tier2AADValue)] = [
-            ("type", .string(type)),
-            ("direction", .string(direction)),
-            ("request_id", .string(requestID)),
-            ("stream", .bool(stream)),
-            ("provider_id", .string(providerID)),
-            ("assigned_id", .string(assignedID)),
-            ("seq", .uint(seq)),
-        ]
-        var data = Data("{".utf8)
-        for (index, field) in orderedFields.enumerated() {
-            if index > 0 {
-                data.append(Data(",".utf8))
-            }
-            data.append(Self.goJSONString(field.0))
-            data.append(Data(":".utf8))
-            switch field.1 {
-            case .string(let value):
-                data.append(Self.goJSONString(value))
-            case .bool(let value):
-                data.append(Data((value ? "true" : "false").utf8))
-            case .uint(let value):
-                data.append(Data(String(value).utf8))
-            }
-        }
-        data.append(Data("}".utf8))
-        return data
-    }
-
-    private static func goJSONString(_ value: String) -> Data {
-        var data = Data("\"".utf8)
-        for scalar in value.unicodeScalars {
-            switch scalar.value {
-            case 0x08:
-                data.append(Data(#"\b"#.utf8))
-            case 0x0c:
-                data.append(Data(#"\f"#.utf8))
-            case 0x0a:
-                data.append(Data(#"\n"#.utf8))
-            case 0x0d:
-                data.append(Data(#"\r"#.utf8))
-            case 0x09:
-                data.append(Data(#"\t"#.utf8))
-            case 0x22:
-                data.append(Data(#"\""#.utf8))
-            case 0x5c:
-                data.append(Data(#"\\"#.utf8))
-            case 0x26:
-                data.append(Data(#"\u0026"#.utf8))
-            case 0x3c:
-                data.append(Data(#"\u003c"#.utf8))
-            case 0x3e:
-                data.append(Data(#"\u003e"#.utf8))
-            case 0x2028:
-                data.append(Data(#"\u2028"#.utf8))
-            case 0x2029:
-                data.append(Data(#"\u2029"#.utf8))
-            case 0x00..<0x20:
-                data.append(Data(String(format: #"\u%04x"#, scalar.value).utf8))
-            default:
-                data.append(Data(String(scalar).utf8))
-            }
-        }
-        data.append(Data("\"".utf8))
+        var data = Self.prefix
+        data.appendAADString(type)
+        data.appendAADString(direction)
+        data.appendAADString(requestID)
+        data.append(stream ? 1 : 0)
+        data.appendAADString(providerID)
+        data.appendAADString(assignedID)
+        data.appendUInt64BE(seq)
         return data
     }
 }
 
-private enum Tier2AADValue {
-    case string(String)
-    case bool(Bool)
-    case uint(UInt64)
+private extension Data {
+    mutating func appendAADString(_ value: String) {
+        let bytes = Data(value.utf8)
+        appendUInt32BE(UInt32(bytes.count))
+        append(bytes)
+    }
+
+    mutating func appendUInt32BE(_ value: UInt32) {
+        append(UInt8((value >> 24) & 0xff))
+        append(UInt8((value >> 16) & 0xff))
+        append(UInt8((value >> 8) & 0xff))
+        append(UInt8(value & 0xff))
+    }
+
+    mutating func appendUInt64BE(_ value: UInt64) {
+        append(UInt8((value >> 56) & 0xff))
+        append(UInt8((value >> 48) & 0xff))
+        append(UInt8((value >> 40) & 0xff))
+        append(UInt8((value >> 32) & 0xff))
+        append(UInt8((value >> 24) & 0xff))
+        append(UInt8((value >> 16) & 0xff))
+        append(UInt8((value >> 8) & 0xff))
+        append(UInt8(value & 0xff))
+    }
 }
 
 private extension SharedSecret {

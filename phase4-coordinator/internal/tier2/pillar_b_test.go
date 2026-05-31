@@ -121,3 +121,57 @@ func TestPillarBAEADFrameRoundTripAndTamperRejection(t *testing.T) {
 		t.Fatal("tampered tag accepted")
 	}
 }
+
+func TestPillarBAADUsesVersionedBinaryEncoding(t *testing.T) {
+	aad := AEADFrameAAD{
+		Type:       "inference_request",
+		Direction:  "c2p",
+		RequestID:  "req-line\n",
+		Stream:     false,
+		ProviderID: "provider<&>",
+		AssignedID: "session-a",
+		Seq:        9,
+	}
+
+	raw, err := MarshalAEADAAD(aad)
+	if err != nil {
+		t.Fatalf("marshal AAD: %v", err)
+	}
+	if !bytes.HasPrefix(raw, pillarBAADPrefix) {
+		t.Fatalf("AAD should use versioned binary prefix: %q", string(raw))
+	}
+	if bytes.Contains(raw, []byte(`"request_id"`)) || bytes.Contains(raw, []byte(`\u003c`)) {
+		t.Fatalf("AAD should not depend on JSON field names or escaping: %q", string(raw))
+	}
+	encoded := base64.RawURLEncoding.EncodeToString(raw)
+	decoded, decodedRaw, err := DecodeAEADAAD(encoded)
+	if err != nil {
+		t.Fatalf("decode AAD: %v", err)
+	}
+	if decoded != aad || !bytes.Equal(decodedRaw, raw) {
+		t.Fatalf("decoded AAD mismatch: decoded=%+v raw=%x", decoded, decodedRaw)
+	}
+}
+
+func TestPillarBAADDecodesLegacyJSONForRolloutCompatibility(t *testing.T) {
+	aad := AEADFrameAAD{
+		Type:       "inference_response_chunk",
+		Direction:  "p2c",
+		RequestID:  "req-legacy",
+		Stream:     true,
+		ProviderID: "provider-a",
+		AssignedID: "session-a",
+		Seq:        3,
+	}
+	raw, err := json.Marshal(aad)
+	if err != nil {
+		t.Fatalf("marshal legacy JSON AAD: %v", err)
+	}
+	decoded, decodedRaw, err := DecodeAEADAAD(base64.RawURLEncoding.EncodeToString(raw))
+	if err != nil {
+		t.Fatalf("decode legacy JSON AAD: %v", err)
+	}
+	if decoded != aad || !bytes.Equal(decodedRaw, raw) {
+		t.Fatalf("decoded legacy AAD mismatch: decoded=%+v raw=%s", decoded, decodedRaw)
+	}
+}

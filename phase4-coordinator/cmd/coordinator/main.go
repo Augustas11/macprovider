@@ -137,7 +137,7 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
 		return
 	}
-	if err := tier2.Configure(cfg.Tier2, logger); err != nil {
+	if err := tier2.ConfigureStrict(cfg.Tier2, logger); err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}

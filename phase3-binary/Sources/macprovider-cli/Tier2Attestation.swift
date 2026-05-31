@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Security
 
 protocol Tier2AttestationTokenGenerating: Sendable {
     func makeAttestationToken(
@@ -14,13 +16,16 @@ protocol Tier2AttestationTokenGenerating: Sendable {
 struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
     static let format = "apple-managed-device-attestation-acme-v1"
     static let artifactPathEnvironmentKey = "MACPROVIDER_TIER2_MDA_ARTIFACT_PATH"
+    static let signingKeyPathEnvironmentKey = "MACPROVIDER_TIER2_MDA_SIGNING_KEY_PATH"
 
     private let artifactPath: String?
+    private let signingKeyPath: String?
     private let readFile: @Sendable (String) throws -> Data
     private let now: @Sendable () -> Date
 
     init(
         artifactPath: String? = nil,
+        signingKeyPath: String? = nil,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         readFile: @escaping @Sendable (String) throws -> Data = {
             try Data(contentsOf: URL(fileURLWithPath: $0))
@@ -28,14 +33,16 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         now: @escaping @Sendable () -> Date = { Date() }
     ) {
         let configuredPath = artifactPath ?? environment[Self.artifactPathEnvironmentKey]
+        let configuredSigningKeyPath = signingKeyPath ?? environment[Self.signingKeyPathEnvironmentKey]
         self.artifactPath = configuredPath?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        self.signingKeyPath = configuredSigningKeyPath?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
         self.readFile = readFile
         self.now = now
     }
 
     func makeAttestationToken(
         challengeBase64URL: String?,
-        authAttemptID _: String,
+        authAttemptID: String,
         providerID: String,
         binaryVersion: String,
         snapshot: ProviderSnapshot,
@@ -51,7 +58,7 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         }
         do {
             let artifact = try ManagedDeviceAttestationArtifact.parse(readFile(artifactPath))
-            return Self.tokenEnvelope(
+            var envelope = Self.tokenEnvelope(
                 tokenBase64URL: artifact.tokenBase64URL ?? challengeBase64URL,
                 challengeBase64URL: challengeBase64URL,
                 providerID: providerID,
@@ -60,8 +67,17 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
                 providerECDHPublicKey: providerECDHPublicKey,
                 issuedAt: now(),
                 certificateChain: artifact.certificateChain,
-                certificateSigningRequest: artifact.certificateSigningRequest
+                certificateSigningRequest: artifact.certificateSigningRequest,
+                signature: artifact.signature
             )
+            if envelope["signature"] == nil, let signingKeyPath {
+                envelope["signature"] = try Self.bindingSignature(
+                    envelope: envelope,
+                    authAttemptID: authAttemptID,
+                    privateKeyData: readFile(signingKeyPath)
+                )
+            }
+            return envelope
         } catch {
             print("WARN tier2 attestation unsupported reason=mda_artifact_invalid error=\(error)")
             return nil
@@ -77,7 +93,8 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         providerECDHPublicKey: String,
         issuedAt: Date,
         certificateChain: [String] = [],
-        certificateSigningRequest: String? = nil
+        certificateSigningRequest: String? = nil,
+        signature: [String: Any]? = nil
     ) -> [String: Any] {
         var envelope = baseTokenEnvelope(
             tokenBase64URL: tokenBase64URL,
@@ -93,6 +110,9 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         }
         if let certificateSigningRequest {
             envelope["certificate_signing_request"] = certificateSigningRequest
+        }
+        if let signature {
+            envelope["signature"] = signature
         }
         return envelope
     }
@@ -163,12 +183,136 @@ struct ManagedDeviceAttestationGenerator: Tier2AttestationTokenGenerating {
         formatter.timeZone = TimeZone(secondsFromGMT: 0)
         return formatter.string(from: date)
     }
+
+    private static func bindingSignature(envelope: [String: Any], authAttemptID: String, privateKeyData: Data) throws -> [String: Any] {
+        let payload = try bindingPayload(envelope: envelope, authAttemptID: authAttemptID)
+        let key = try secKey(privateKeyData: privateKeyData)
+        var error: Unmanaged<CFError>?
+        guard let signature = SecKeyCreateSignature(
+            key,
+            SecKeyAlgorithm.ecdsaSignatureMessageX962SHA256,
+            payload as CFData,
+            &error
+        ) as Data? else {
+            throw error?.takeRetainedValue() ?? ManagedDeviceAttestationArtifactError.bindingSignatureFailed
+        }
+        return [
+            "alg": "ES256",
+            "signature": signature.base64URLUnpadded(),
+        ]
+    }
+
+    private static func bindingPayload(envelope: [String: Any], authAttemptID: String) throws -> Data {
+        guard let providerID = envelope["provider_id"] as? String,
+              let binaryVersion = envelope["binary_version"] as? String,
+              let challenge = envelope["challenge"] as? String,
+              let issuedAt = envelope["issued_at"] as? String,
+              let expiresAt = envelope["expires_at"] as? String,
+              let token = envelope["token"] as? String,
+              let keyBinding = envelope["key_binding"] as? [String: Any],
+              let providerECDH = keyBinding["provider_ecdh_public_key"] as? String,
+              let claimed = envelope["claimed"] as? [String: Any]
+        else {
+            throw ManagedDeviceAttestationArtifactError.bindingPayloadInvalid
+        }
+        let claimedData = try JSONSerialization.data(withJSONObject: claimed, options: [.sortedKeys])
+        let claimedHash = Data(SHA256.hash(data: claimedData)).base64URLUnpadded()
+        let tokenHash = Data(SHA256.hash(data: Data(token.utf8))).base64URLUnpadded()
+        let fields: [(String, String)] = [
+            ("version", "macprovider/spec008/attestation-binding/v1"),
+            ("provider_id", providerID),
+            ("binary_version", binaryVersion),
+            ("challenge", challenge),
+            ("auth_attempt_id", authAttemptID),
+            ("provider_ecdh_public_key", providerECDH),
+            ("issued_at", issuedAt),
+            ("expires_at", expiresAt),
+            ("token_sha256", tokenHash),
+            ("claimed_sha256", claimedHash),
+        ]
+        var data = Data("{".utf8)
+        for (index, field) in fields.enumerated() {
+            if index > 0 {
+                data.append(Data(",".utf8))
+            }
+            data.append(goJSONString(field.0))
+            data.append(Data(":".utf8))
+            data.append(goJSONString(field.1))
+        }
+        data.append(Data("}".utf8))
+        return data
+    }
+
+    private static func secKey(privateKeyData: Data) throws -> SecKey {
+        let der = decodePEMIfNeeded(privateKeyData)
+        for bits in [256, 384, 521] {
+            let attributes: [CFString: Any] = [
+                kSecAttrKeyType: kSecAttrKeyTypeECSECPrimeRandom,
+                kSecAttrKeyClass: kSecAttrKeyClassPrivate,
+                kSecAttrKeySizeInBits: bits,
+            ]
+            if let key = SecKeyCreateWithData(der as CFData, attributes as CFDictionary, nil) {
+                return key
+            }
+        }
+        throw ManagedDeviceAttestationArtifactError.bindingPrivateKeyInvalid
+    }
+
+    private static func decodePEMIfNeeded(_ data: Data) -> Data {
+        guard let text = String(data: data, encoding: .utf8), text.contains("-----BEGIN") else {
+            return data
+        }
+        let body = text
+            .split(separator: "\n")
+            .filter { !$0.hasPrefix("-----") }
+            .joined()
+        return Data(base64Encoded: body) ?? data
+    }
+
+    private static func goJSONString(_ value: String) -> Data {
+        var data = Data("\"".utf8)
+        for scalar in value.unicodeScalars {
+            switch scalar.value {
+            case 0x08:
+                data.append(Data(#"\b"#.utf8))
+            case 0x0c:
+                data.append(Data(#"\f"#.utf8))
+            case 0x0a:
+                data.append(Data(#"\n"#.utf8))
+            case 0x0d:
+                data.append(Data(#"\r"#.utf8))
+            case 0x09:
+                data.append(Data(#"\t"#.utf8))
+            case 0x22:
+                data.append(Data(#"\""#.utf8))
+            case 0x5c:
+                data.append(Data(#"\\"#.utf8))
+            case 0x26:
+                data.append(Data(#"\u0026"#.utf8))
+            case 0x3c:
+                data.append(Data(#"\u003c"#.utf8))
+            case 0x3e:
+                data.append(Data(#"\u003e"#.utf8))
+            case 0x2028:
+                data.append(Data(#"\u2028"#.utf8))
+            case 0x2029:
+                data.append(Data(#"\u2029"#.utf8))
+            case 0x00..<0x20:
+                data.append(Data(String(format: #"\u%04x"#, scalar.value).utf8))
+            default:
+                data.append(Data(String(scalar).utf8))
+            }
+        }
+        data.append(Data("\"".utf8))
+        return data
+    }
 }
 
 private struct ManagedDeviceAttestationArtifact {
     let tokenBase64URL: String?
     let certificateChain: [String]
     let certificateSigningRequest: String
+    let signature: [String: Any]?
 
     static func parse(_ data: Data) throws -> ManagedDeviceAttestationArtifact {
         let object = try JSONSerialization.jsonObject(with: data)
@@ -200,7 +344,8 @@ private struct ManagedDeviceAttestationArtifact {
         return ManagedDeviceAttestationArtifact(
             tokenBase64URL: token,
             certificateChain: chain,
-            certificateSigningRequest: csr
+            certificateSigningRequest: csr,
+            signature: dict["signature"] as? [String: Any]
         )
     }
 
@@ -274,6 +419,9 @@ private struct ManagedDeviceAttestationArtifact {
 }
 
 private enum ManagedDeviceAttestationArtifactError: Error, CustomStringConvertible {
+    case bindingPayloadInvalid
+    case bindingPrivateKeyInvalid
+    case bindingSignatureFailed
     case invalidRoot
     case unsupportedFormat(String)
     case missingCertificateChain
@@ -283,6 +431,12 @@ private enum ManagedDeviceAttestationArtifactError: Error, CustomStringConvertib
 
     var description: String {
         switch self {
+        case .bindingPayloadInvalid:
+            return "binding_payload_invalid"
+        case .bindingPrivateKeyInvalid:
+            return "binding_private_key_invalid"
+        case .bindingSignatureFailed:
+            return "binding_signature_failed"
         case .invalidRoot:
             return "invalid_root"
         case let .unsupportedFormat(format):

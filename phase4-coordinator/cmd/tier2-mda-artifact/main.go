@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto"
 	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
@@ -39,26 +40,28 @@ func (l *stringList) Set(value string) error {
 }
 
 type mdaArtifact struct {
-	Format                    string   `json:"format,omitempty"`
-	Token                     string   `json:"token,omitempty"`
-	CertificateChain          []string `json:"certificate_chain,omitempty"`
-	X5C                       []string `json:"x5c,omitempty"`
-	CertificateSigningRequest string   `json:"certificate_signing_request,omitempty"`
-	CSR                       string   `json:"csr,omitempty"`
+	Format                    string                 `json:"format,omitempty"`
+	Token                     string                 `json:"token,omitempty"`
+	CertificateChain          []string               `json:"certificate_chain,omitempty"`
+	X5C                       []string               `json:"x5c,omitempty"`
+	CertificateSigningRequest string                 `json:"certificate_signing_request,omitempty"`
+	CSR                       string                 `json:"csr,omitempty"`
+	Signature                 map[string]interface{} `json:"signature,omitempty"`
 }
 
 type attestationEnvelope struct {
-	Format                    string            `json:"format"`
-	Token                     string            `json:"token"`
-	Challenge                 string            `json:"challenge"`
-	IssuedAt                  time.Time         `json:"issued_at"`
-	ExpiresAt                 time.Time         `json:"expires_at"`
-	ProviderID                string            `json:"provider_id"`
-	BinaryVersion             string            `json:"binary_version"`
-	Claimed                   map[string]any    `json:"claimed"`
-	KeyBinding                map[string]string `json:"key_binding"`
-	CertificateChain          []string          `json:"certificate_chain,omitempty"`
-	CertificateSigningRequest string            `json:"certificate_signing_request,omitempty"`
+	Format                    string                 `json:"format"`
+	Token                     string                 `json:"token"`
+	Challenge                 string                 `json:"challenge"`
+	IssuedAt                  time.Time              `json:"issued_at"`
+	ExpiresAt                 time.Time              `json:"expires_at"`
+	ProviderID                string                 `json:"provider_id"`
+	BinaryVersion             string                 `json:"binary_version"`
+	Claimed                   map[string]any         `json:"claimed"`
+	KeyBinding                map[string]string      `json:"key_binding"`
+	CertificateChain          []string               `json:"certificate_chain,omitempty"`
+	CertificateSigningRequest string                 `json:"certificate_signing_request,omitempty"`
+	Signature                 map[string]interface{} `json:"signature,omitempty"`
 }
 
 func main() {
@@ -90,7 +93,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 func printUsage(w io.Writer) {
 	fmt.Fprintln(w, `usage:
   tier2-mda-artifact make --cert leaf.pem [--cert intermediate.pem] --csr request.csr --out mda.json [--token TOKEN] [--force]
-  tier2-mda-artifact check --artifact mda.json [--root root.pem --challenge BASE64URL --provider-id ID --provider-ecdh-public-key KEY]
+  tier2-mda-artifact check --artifact mda.json [--root root.pem --challenge BASE64URL --provider-id ID --provider-ecdh-public-key KEY --binding-signing-key key.pem]
 
 The make subcommand packages operator-provided Apple MDA certificate-chain and
 CSR evidence into the JSON contract consumed by MACPROVIDER_TIER2_MDA_ARTIFACT_PATH.
@@ -194,6 +197,8 @@ func runCheck(args []string, stdout io.Writer) error {
 	challenge := fs.String("challenge", "", "base64url-unpadded coordinator challenge")
 	providerID := fs.String("provider-id", "provider-a", "provider id used for full verification")
 	providerECDH := fs.String("provider-ecdh-public-key", "", "base64url provider ECDH public key used for full verification")
+	authAttemptID := fs.String("auth-attempt-id", "artifact-check", "auth attempt id covered by full-verification binding signature")
+	bindingSigningKey := fs.String("binding-signing-key", "", "optional PEM/DER ECDSA private key used to sign the full-verification binding payload")
 	binaryVersion := fs.String("binary-version", "1.2.6", "provider binary version claim")
 	modelID := fs.String("model-id", "", "optional model id claim")
 	modelHash := fs.String("model-hash", "", "optional lowercase SHA-256 model hash claim")
@@ -268,7 +273,7 @@ func runCheck(args []string, stdout io.Writer) error {
 		if strings.TrimSpace(*providerECDH) == "" {
 			return fmt.Errorf("full verification requires --provider-ecdh-public-key")
 		}
-		status, err := verifyWithCoordinator(artifact, rootFiles, *challenge, *providerID, *providerECDH, *binaryVersion, *modelID, *modelHash, *ramGB, *maxAge, now)
+		status, err := verifyWithCoordinator(artifact, rootFiles, *challenge, *authAttemptID, *providerID, *providerECDH, *binaryVersion, *modelID, *modelHash, *ramGB, *maxAge, now, *bindingSigningKey)
 		if err != nil {
 			return err
 		}
@@ -504,7 +509,7 @@ func parseEncodedCSR(value string) (*x509.CertificateRequest, error) {
 	return nil, fmt.Errorf("csr is not PEM or base64 DER")
 }
 
-func verifyWithCoordinator(artifact mdaArtifact, rootFiles []string, challenge, providerID, providerECDH, binaryVersion, modelID, modelHash string, ramGB, maxAge int, now time.Time) (pool.AttestationStatus, error) {
+func verifyWithCoordinator(artifact mdaArtifact, rootFiles []string, challenge, authAttemptID, providerID, providerECDH, binaryVersion, modelID, modelHash string, ramGB, maxAge int, now time.Time, bindingSigningKeyPath string) (pool.AttestationStatus, error) {
 	challenge = strings.TrimSpace(challenge)
 	challengeBytes, err := base64.RawURLEncoding.DecodeString(challenge)
 	if err != nil {
@@ -555,6 +560,7 @@ func verifyWithCoordinator(artifact mdaArtifact, rootFiles []string, challenge, 
 		},
 		CertificateChain:          artifact.CertificateChain,
 		CertificateSigningRequest: artifact.CertificateSigningRequest,
+		Signature:                 artifact.Signature,
 	}
 	if len(envelope.CertificateChain) == 0 {
 		envelope.CertificateChain = artifact.X5C
@@ -562,12 +568,57 @@ func verifyWithCoordinator(artifact mdaArtifact, rootFiles []string, challenge, 
 	if strings.TrimSpace(envelope.CertificateSigningRequest) == "" {
 		envelope.CertificateSigningRequest = artifact.CSR
 	}
+	if strings.TrimSpace(bindingSigningKeyPath) != "" {
+		signer, err := readBindingSigningKey(bindingSigningKeyPath)
+		if err != nil {
+			return "", err
+		}
+		tokenForSignature := tier2.AttestationToken{
+			Format:           envelope.Format,
+			Token:            envelope.Token,
+			Challenge:        envelope.Challenge,
+			IssuedAt:         envelope.IssuedAt,
+			ExpiresAt:        envelope.ExpiresAt,
+			ProviderID:       envelope.ProviderID,
+			BinaryVersion:    envelope.BinaryVersion,
+			Claimed:          envelope.Claimed,
+			KeyBinding:       tier2.AttestationKeyBinding{ProviderECDHPublicKey: strings.TrimSpace(providerECDH)},
+			CertificateChain: envelope.CertificateChain,
+			CertificateCSR:   envelope.CertificateSigningRequest,
+		}
+		signature, err := tier2.BuildAttestationBindingSignature(tokenForSignature, authAttemptID, signer)
+		if err != nil {
+			return "", fmt.Errorf("sign attestation binding: %w", err)
+		}
+		envelope.Signature = signature
+	}
 	raw, err := json.Marshal(envelope)
 	if err != nil {
 		return "", err
 	}
-	status := tier2.VerifyAttestationToken(raw, cfg, challengeBytes, "artifact-check", providerID, strings.TrimSpace(providerECDH), now, zerolog.Nop())
+	status := tier2.VerifyAttestationToken(raw, cfg, challengeBytes, authAttemptID, providerID, strings.TrimSpace(providerECDH), now, zerolog.Nop())
 	return status, nil
+}
+
+func readBindingSigningKey(path string) (crypto.Signer, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	der := bytes.TrimSpace(body)
+	if block, _ := pem.Decode(der); block != nil {
+		der = block.Bytes
+	}
+	if key, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		if signer, ok := key.(crypto.Signer); ok {
+			return signer, nil
+		}
+		return nil, fmt.Errorf("binding signing key does not implement crypto.Signer")
+	}
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+	return nil, fmt.Errorf("binding signing key is not a supported EC private key")
 }
 
 func readRootValues(paths []string) ([]string, error) {

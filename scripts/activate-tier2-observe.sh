@@ -186,13 +186,6 @@ public_key = os.environ['PUBLIC_KEY']
 with open(path, 'r', encoding='utf-8') as f:
     original = f.read()
 
-block = '\\n'.join([
-    'tier2:',
-    f'  catalog_path: {catalog_path}',
-    f'  catalog_public_key: {public_key}',
-    '  require_hash_verified: false',
-    '',
-])
 lines = original.splitlines()
 start = None
 for i, line in enumerate(lines):
@@ -201,13 +194,47 @@ for i, line in enumerate(lines):
         break
 
 if start is None:
+    block = '\\n'.join([
+        'tier2:',
+        f'  catalog_path: {catalog_path}',
+        f'  catalog_public_key: {public_key}',
+        '  require_hash_verified: false',
+        '',
+    ])
     updated = original.rstrip() + '\\n\\n' + block
 else:
     end = start + 1
     top_level_key = re.compile(r'^[A-Za-z0-9_-]+:')
     while end < len(lines) and not top_level_key.match(lines[end]):
         end += 1
-    updated_lines = lines[:start] + block.rstrip('\\n').splitlines() + lines[end:]
+    block_lines = lines[start:end]
+
+    def key_for(line):
+        stripped = line.strip()
+        if not stripped or stripped.startswith('#') or ':' not in stripped:
+            return None
+        return stripped.split(':', 1)[0]
+
+    replacements = {
+        'catalog_path': f'  catalog_path: {catalog_path}',
+        'catalog_public_key': f'  catalog_public_key: {public_key}',
+        'require_hash_verified': '  require_hash_verified: false',
+    }
+    seen = set()
+    updated_block = []
+    for line in block_lines:
+        key = key_for(line)
+        if key in replacements:
+            updated_block.append(replacements[key])
+            seen.add(key)
+        else:
+            updated_block.append(line)
+    insert_at = len(updated_block)
+    for key in ('catalog_path', 'catalog_public_key', 'require_hash_verified'):
+        if key not in seen:
+            updated_block.insert(insert_at, replacements[key])
+            insert_at += 1
+    updated_lines = lines[:start] + updated_block + lines[end:]
     updated = '\\n'.join(updated_lines).rstrip() + '\\n'
 
 if updated == original:
