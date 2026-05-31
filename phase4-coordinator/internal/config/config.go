@@ -16,6 +16,7 @@ type Config struct {
 	Listen                       ListenConfig                 `yaml:"listen"`
 	Pool                         PoolConfig                   `yaml:"pool"`
 	Routing                      RoutingConfig                `yaml:"routing"`
+	ProviderHTTP                 ProviderHTTPConfig           `yaml:"provider_http"`
 	WS                           WSConfig                     `yaml:"ws"`
 	Admission                    AdmissionConfig              `yaml:"admission"`
 	Tier2                        Tier2Config                  `yaml:"tier2"`
@@ -77,6 +78,10 @@ type ModelClassConfig struct {
 	Members   []string `yaml:"members"`
 	Models    []string `yaml:"models"`
 	Objective string   `yaml:"objective"`
+}
+
+type ProviderHTTPConfig struct {
+	TimeoutS int `yaml:"timeout_s"`
 }
 
 type WSConfig struct {
@@ -190,6 +195,9 @@ func Default() Config {
 			StickyTTLS:                    1800,
 			StickyMaxEntries:              10000,
 			ModelClasses:                  map[string]ModelClassConfig{},
+		},
+		ProviderHTTP: ProviderHTTPConfig{
+			TimeoutS: 300,
 		},
 		WS: WSConfig{
 			WriteBufferSize: 64,
@@ -308,6 +316,9 @@ func (c Config) Validate() error {
 	}
 	if c.Routing.StickyTTLS <= 0 || c.Routing.StickyMaxEntries <= 0 {
 		return fmt.Errorf("routing sticky settings must be > 0")
+	}
+	if c.ProviderHTTP.TimeoutS <= 0 {
+		return fmt.Errorf("provider_http.timeout_s must be > 0")
 	}
 	for name, class := range c.Routing.ModelClasses {
 		if name == "" {

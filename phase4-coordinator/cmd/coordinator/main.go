@@ -16,6 +16,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
@@ -30,6 +31,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "config: %v\n", err)
 		os.Exit(1)
 	}
+	providerhttp.Init(cfg.ProviderHTTP.TimeoutS)
 
 	logger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 	if err := tier2.Configure(cfg.Tier2, logger); err != nil {

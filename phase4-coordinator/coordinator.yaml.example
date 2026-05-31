@@ -39,6 +39,9 @@ routing:
   sticky_max_entries: 10000
   model_classes: {}
 
+provider_http:
+  timeout_s: 300  # 5 min provider HTTP forwarding timeout
+
 ws:
   write_buffer_size: 64
 
