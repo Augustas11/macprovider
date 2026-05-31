@@ -3,10 +3,12 @@
 This prompt was produced by the Claude R2 audit at
 `specs/SPEC-005-r2-audit.md`. **Do NOT execute until the operator
 reviews this prompt and the underlying audit.** Operator review
-should confirm the three QUESTIONS (R2-Q1, R2-Q2, R2-Q3) are
-pre-locked before the executing session starts, and confirm that
-SPEC-002 v1.3.4 and SPEC-006 v0.8.2 cross-spec patches are either
-landed or accepted as parallel work.
+should confirm the four locks (R2-D1, R2-D2, R2-D3 covering
+R2-Q1/Q2/Q3, plus R2-D4 added during this prompt review to
+pre-lock the F-R2-n2 deployment choice) are encoded before the
+executing session starts, and confirm that SPEC-002 v1.3.4 and
+SPEC-006 v0.8.2 cross-spec patches are either landed or accepted
+as parallel work.
 
 Operator-paste prompt to apply the R2 audit findings to SPEC-005
 v0.2 and produce v0.3, plus the two cross-spec patch files
@@ -149,6 +151,33 @@ one commit:
 
 SPEC-005 v0.3 references the v1.3.4 / v0.8.2 dependencies in its
 header `Depends on:` line and in § 1.4 cross-spec boundaries.
+
+### Decision R2-D4 (operator pre-lock for F-R2-n2): `/providers/{id}/earnings` is route-disabled when `require_provider_tokens = false`.
+
+**Lock:** The "provision separate per-provider tokens OR disable
+the route" choice raised by F-R2-n2 is pre-decided: in the
+`auth.require_provider_tokens = false` deployment mode, the
+`/providers/{provider_id}/earnings` endpoint MUST be disabled at
+the route layer. SPEC-005 v0.3 does NOT specify a side-channel
+per-provider token provisioning scheme; provider economics in this
+mode are available only via the operator-keyed
+`/admin/ledger/providers` endpoint. F-R2-n2 prose below is rewritten
+accordingly — do not surface the "OR provision tokens" branch as a
+deployer choice. This lock matches the SPEC-006 secure-by-default
+posture and avoids inventing a token-distribution surface that no
+other SPEC normatively covers.
+
+### Annotation on D7 (clarification only — not a D7 change)
+
+R2-D1 removes the `overshoot_flag` column and necessarily updates
+the surrounding § 12 D7 prose that referenced it. The D7
+substantive decision — *SPEC-005 does not enforce buyer quota;
+SPEC-006 quota is authoritative; no provider clawback for
+over-quota requests that reached a provider* — is unchanged and
+remains locked. Editing the D7 paragraph to drop `overshoot_flag`
+mentions is explicitly permitted under R2-D1; it is NOT a § 2
+D1-D12 substance change. Any edit that alters D7's no-clawback
+rule itself is rejected.
 
 ## Findings to fix — by cluster
 
@@ -361,16 +390,16 @@ referenced in F-R2-M5; this MINOR is a config-layer mirror.
 
 **Location:** § 11.5.
 
-**Fix:** Add normative:
+**Fix (per R2-D4 lock):** Add normative:
 
 > When SPEC-002 v1.3.4 `auth.require_provider_tokens` is `false`,
-> the operator MUST separately provision per-provider bearer
-> tokens for `/providers/{provider_id}/earnings`, or the endpoint
-> MUST be disabled at the route layer. In the disabled-route
-> configuration, SPEC-005 provider economics are available only
-> via the operator-keyed `/admin/ledger/providers` endpoint.
-> SPEC-005 v0.3 production launch gate adds this as item 9
-> alongside SPEC-006 production launch gate.
+> the `/providers/{provider_id}/earnings` endpoint MUST be disabled
+> at the route layer. SPEC-005 v0.3 does NOT specify a side-channel
+> per-provider bearer-token provisioning scheme; provider
+> economics in this deployment mode are available only via the
+> operator-keyed `/admin/ledger/providers` endpoint. SPEC-005 v0.3
+> production launch gate adds this as item 9 alongside SPEC-006
+> production launch gate.
 
 #### F-R2-n3: Appendix B D5 anchor list.
 
@@ -547,7 +576,7 @@ debits prompt only.
 - [ ] All 10 R2-M findings (R2-M1 through R2-M10) have visible
       resolution text in SPEC-005.
 - [ ] All 5 R2-n MINOR findings applied.
-- [ ] R2-D1, R2-D2, R2-D3 visibly encoded.
+- [ ] R2-D1, R2-D2, R2-D3, R2-D4 visibly encoded.
 - [ ] 3 new SPEC-005 ACs (AC-NULL-PROMPT, AC-WAL,
       AC-SPEC-007-CONTRACT) present in § 18.
 - [ ] No new normative content in SPEC-005 beyond what closes
@@ -567,6 +596,14 @@ debits prompt only.
 (SPEC-005 ~450; SPEC-002 ~80; SPEC-006 ~60). If your edits exceed
 ~800 added lines or you find yourself adding "improvements" beyond
 the R2 audit findings, STOP — those are scope creep. Defer to v0.4.
+
+**On the 500-line split threshold:** the SPEC-005 portion alone
+(~450 lines) is under the 500-line single-pass split criterion;
+the SPEC-002 (~80) and SPEC-006 (~60) cross-spec patches are
+small additive bundles. The three files are bundled per R2-D3
+lock — splitting the cross-spec patches into a separate pass
+would violate R2-D3 (atomic spec bump). Do not attempt to split
+this fix into two passes; respect R2-D3 and the per-file budgets.
 
 When done, print a 200-word handback summary:
 - Findings closed by cluster (Cluster A: 9 [5 MAJOR + 4 MINOR];
@@ -616,9 +653,12 @@ SPEC-006 v0.2 because three files):
    § 17.7 ninth row only (no other edits).
 4. Verify all 10 R2-M findings have visible resolution in
    SPEC-005. Search the diff for each R2-M label.
-5. Verify R2-D1, R2-D2, R2-D3 visibly encoded (overshoot_flag
-   absent; § 10.6 out-of-scope subsection present; three header
-   lines reference each other's v0.3/v1.3.4/v0.8.2).
+5. Verify R2-D1, R2-D2, R2-D3, R2-D4 visibly encoded
+   (overshoot_flag absent; § 10.6 out-of-scope subsection present;
+   three header lines reference each other's v0.3/v1.3.4/v0.8.2;
+   § 11.5 disables `/providers/{id}/earnings` when
+   `require_provider_tokens = false` without a side-channel token
+   surface).
 6. AC count: SPEC-005 § 18 should now have 3 new ACs; SPEC-002 +2;
    SPEC-006 +1. Total +6 across the three specs.
 7. No SPEC-001/003/004/007/008 edits. No § 2 substance changes.
