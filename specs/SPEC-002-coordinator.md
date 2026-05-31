@@ -1,7 +1,10 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.3.3 (2026-05-30, process hardening: audit category J + deploy config-drift check)
+**Version:** 1.3.4 (2026-05-31, SPEC-005 v0.3 cross-spec request_log patch)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.3.4:**
+- Adds the SPEC-005 v0.3 X-2 request_log bundle to FR-B9: `error_code TEXT NULL` for SPEC-001 null-usage errors, `ts_utc` and `(request_id, id)` indexes for reconciliation and attempt fallback, and explicit multi-row-per-request_id semantics for provider retry attempts. Adds deterministic ACs for multi-row request logging and exact error_code population. No SPEC-001 wire change.
 
 **Change log v1.3.3:**
 - Adds **audit category J — operational-threshold realism** (§ 11): J.1 requires every timeout/threshold/window to be validated against the slowest realistic provider/workload (the v1.1.6 35s heartbeat-miss kill is the reference: it passed the audit "as coded" but was below one normal MLX completion); J.2 requires cross-component timer relations to be checked for ORDERING (the coordinator vs gateway 300s=300s C2 race). Pairs with a new deploy-time assertion `phase4-coordinator/dist/check-deploy-config.sh` (placeholder-key, threshold-sanity, and C2 timer-ordering checks; wired as step 0 of `deploy-pearl-vps.sh`). No code or wire change.
@@ -1108,6 +1111,7 @@ Every buyer request is logged to the `request_log` table in SQLite:
 | `stream` | INTEGER | 1 if streaming, 0 if not |
 | `buyer_ip` | TEXT | Buyer's IP (for rate limiting in future) |
 | `error` | TEXT | Error message if failed (null if success) |
+| `error_code` | TEXT | SPEC-001 v1.2.4 status enum on failed responses (`error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, `error_internal`); NULL on success or non-SPEC-001 error paths |
 | `pref_header` | TEXT | Value of X-MacProvider-Pref if present |
 | `provider_header` | TEXT | Value of X-MacProvider-Provider if present |
 | `retried` | INTEGER | Always 0 in v1 (no coordinator-managed retry). Column reserved for SPEC-004 / SPEC-006 retry policies. |
@@ -1115,7 +1119,18 @@ Every buyer request is logged to the `request_log` table in SQLite:
 Token counts are extracted from the provider's response `usage` field.
 For streaming responses, they come from the usage chunk (SPEC-001 FR-7).
 
+Each provider attempt for a given `request_id` MUST produce its own `request_log` row. The only uniqueness constraint is on (`id`). `request_id` MAY recur across rows when SPEC-004 retry logic produces multiple attempts. The `retried` column counts additional explicit-retry attempts beyond the first per SPEC-004 v0.3.1; the row order within a `request_id` is determined by `id ASC`. This contract is load-bearing for SPEC-005 v0.3 multi-attempt attribution.
+
 `request_id` MUST be indexed. Any service in the request path that fails to propagate `X-Request-ID` degrades cross-layer debuggability; new buyer/request log surfaces MUST include X-Request-ID propagation.
+
+```sql
+CREATE INDEX idx_request_log_ts_utc ON request_log(ts_utc);
+CREATE INDEX idx_request_log_request_id_id ON request_log(request_id, id);
+```
+
+The `idx_request_log_ts_utc` index supports SPEC-005 v0.3 reconciliation scans (24h startup, 7d nightly, ad-hoc admin ranges) at 10K-provider scale. The composite `(request_id, id)` index supports the SPEC-005 § 8.2 attempt-ordinal fallback and SPEC-004 multi-attempt log queries.
+
+Migration: existing deployments MUST apply `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL` and create the two indexes above.
 
 ### Routing logic
 
@@ -2955,6 +2970,16 @@ Run by: `phase4-coordinator/scripts/test-routing-preference.sh`
 6. POSTing `/admin/blacklist` with an unknown `provider_id` returns 404.
 
 Run by: `phase4-coordinator/scripts/test-operator-endpoints.sh`
+
+**AC-FR-B9-MULTI. request_log permits one row per provider attempt.**
+A deterministic fixture sends one logical request_id through two SPEC-004 retry attempts. The assertion is two `request_log` rows with the same `request_id`, distinct auto-increment `id` values, provider attribution per attempt, and row order defined by `id ASC`. No uniqueness constraint may reject the repeated `request_id`.
+
+Run by: `go test ./phase4-coordinator/... -run TestRequestLogMultiAttemptRows`
+
+**AC-FR-B9-ERROR-CODE. request_log preserves SPEC-001 null-usage error codes.**
+A deterministic null-usage error fixture returns SPEC-001 `inference_response_end.status="error_model_not_loaded"` with no usage object. The assertion is one `request_log` row whose `error_code` is exactly `error_model_not_loaded`, while success and non-SPEC-001 error paths keep `error_code` NULL.
+
+Run by: `go test ./phase4-coordinator/... -run TestRequestLogErrorCodePopulation`
 
 **AC-11. Provisional admission.**
 Connect a mock provider with `provider_id` NOT in `config.providers[]`

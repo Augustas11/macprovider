@@ -1,7 +1,10 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.8.1 (2026-05-30, audit-driven fixes to v0.8)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.3, SPEC-003 v0.7, SPEC-004 v0.2
+**Version:** 0.8.2 (2026-05-31, SPEC-005 v0.3 quota-settlement cross-spec patch)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.4, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.8.2:**
+- Adds the SPEC-005 v0.3 X-1 quota-settlement row for SPEC-001 null-usage errors (`error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, `error_internal`): buyer quota debit is none, matching SPEC-005 zero provider credit and preserving H-005 zero-delta. Adds AC-NULL-USAGE-REFUND.
 
 **Change log v0.8.1:**
 - Audit-driven patch closing findings from the independent v0.8 audit. (A1, MAJOR) Restored the v0.7 "**before authentication**" header-strip rule that v0.8 had inadvertently weakened to "before coordinator forwarding"; added a normative WARN audit event on observed buyer-supplied `X-MacProvider-Internal-Conv`. (M1) Replaced the "ignore or reject" ambiguity with a normative **silent ignore** when `sticky_enabled: false`, so portable buyer SDKs that always include the header don't break against operators on the default-off posture. (M2) Constrained the HMAC secret-rotation overlap window to `DELETE /v1/sticky` lookups only; routing-time sticky-key derivation MUST use only the current secret (closes a silent TTL-extension path during rotation). (A2) Operationalized the F-1.5 Tier-2 survivability clause with four concrete invariants a future SPEC-008 audit MUST verify. No new wire-contract changes; no SPEC-001 movement.
@@ -2566,6 +2569,7 @@ The gateway MUST reserve quota before forwarding as defined in Section 7.2 and s
 |---|---:|---|---|
 | 200 | as reported | prompt + completion | Successful work performed |
 | 503 | 0 | none | No provider was reached; request never forwarded |
+| SPEC-001 null-usage error (`error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, `error_internal`) | 0 (NULL) | **none** | Provider was reached but performed no countable work; no buyer debit |
 | 502 | 0 | prompt only | Provider was reached, processed prompt, then failed |
 | 502 | >0 partial stream | prompt + actual completion | Provider performed partial work |
 | 504 | 0 | prompt only | Provider was reached, processed prompt, then timed out |
@@ -2574,6 +2578,8 @@ The gateway MUST reserve quota before forwarding as defined in Section 7.2 and s
 | Client disconnect (pre-v1.2.4 provider, usage absent) | byte-estimated | prompt + `ceil(bytes_emitted_so_far / 4)` completion, estimated with +/-5 tokens typical | Fallback when usage is not yet normatively guaranteed |
 
 The gateway MUST debit only work the provider actually performed.
+
+SPEC-001 null-usage errors are distinguished from 502/504 with 0 completion (which DO debit prompt only) because the null-usage error states indicate the provider returned a structured "did not even start work" signal. SPEC-005 v0.3 § 6.9 mirrors this row with zero provider credit. H-005 reconciliation requires both sides to agree: buyer 0, provider 0.
 
 The client-disconnect rows intentionally prefer provider-reported actuals and preserve deterministic estimation as a backward-compatibility fallback for pre-v1.2.4 providers.
 
@@ -3202,6 +3208,30 @@ Verification command:
 
 ```text
 go test ./phase5-gateway/... -run TestStreamingQuotaReservationSettlement
+```
+
+### AC-NULL-USAGE-REFUND: null-usage errors refund full reservation
+
+Precondition:
+
+- Account quota is small and coordinator can simulate both a SPEC-001 null-usage error and a non-null 502/504 zero-completion failure.
+
+Action:
+
+1. Send a request that reserves quota and receives HTTP 502 backed by SPEC-001 `error_model_not_loaded` with NULL usage.
+2. Query `/v1/usage`.
+3. Send a separate 502 zero-completion fixture that is not a SPEC-001 null-usage error.
+4. Query `/v1/usage` again.
+
+Expected outcome:
+
+- The SPEC-001 null-usage error releases the full reservation and debits 0 prompt and 0 completion tokens.
+- The non-null 502 zero-completion fixture debits prompt only per § 17.7.
+
+Verification command:
+
+```text
+go test ./phase5-gateway/... -run TestNullUsageErrorRefundsReservation
 ```
 
 ---

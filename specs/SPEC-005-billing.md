@@ -1,7 +1,15 @@
 # SPEC-005 - Billing, Settlement, and Provider Rewards
 
-**Version:** 0.2 (2026-05-31, R1 audit fix pass)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.3, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.8.1
+**Version:** 0.3 (2026-05-31, Claude R2 + cross-spec FIX pass)
+**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.4, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.8.2
+
+**Change log v0.3:**
+- Fixed the Claude R2 audit at `specs/SPEC-005-r2-audit.md` (0 CRITICAL, 10 MAJOR, 5 MINOR, 3 operator questions) with a narrow v0.3 pass.
+- Encodes R2-D1 by dropping the phantom quota-overshoot column and preserving D7 as a no-clawback rule.
+- Encodes R2-D2 by explicitly disclaiming cross-process gateway crash boundaries in § 10.6.
+- Encodes R2-D3 by bundling SPEC-002 v1.3.4 and SPEC-006 v0.8.2 cross-spec patches.
+- Encodes R2-D4 by disabling `/providers/{provider_id}/earnings` at the route layer when `auth.require_provider_tokens = false`.
+- Adds null-prompt/null-completion guards, WAL-mode and recovery-grace requirements, SPEC-007 consumer contract, byte-estimate formula mirroring, and `buyer_equivalent_credits` reconciliation naming.
 
 **Change log v0.2:**
 - Fixed R1 M-1 by adding D1-D12 normative references outside § 2.
@@ -72,9 +80,12 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - usage object has prompt_tokens, completion_tokens, total_tokens.
 - cancel usage is authoritative for v1.2.4+ providers.
 - SPEC-005 MUST NOT require new provider fields.
-**SPEC-002 v1.3.3:**
+**SPEC-002 v1.3.4:**
 - coordinator owns request_log and provider auth.
 - request_log is read-only to SPEC-005.
+- request_log carries deterministic `error_code` for SPEC-001 null-usage errors.
+- request_log has `ts_utc` and `(request_id, id)` indexes for reconciliation scans and attempt fallback.
+- each provider attempt for a repeated request_id has its own request_log row.
 - FR-P11a supplies fault categories.
 - FR-P12 supplies provider bearer-token auth.
 - FR-R3 distinguishes stable provider_id from assigned_id.
@@ -87,10 +98,11 @@ This section implements the locked billing and unit decisions (D1)(D6) and the S
 - smart-router attempts must preserve accounting.
 - retried is a fallback but not a full attempt ordinal.
 - FR-SR-18 composes routing with FR-P11a and eligibility checks.
-**SPEC-006 v0.8.1:**
+**SPEC-006 v0.8.2:**
 - gateway has no billing state.
 - § 17.7 is the buyer-debit source of truth.
-- SPEC-005 mirrors rather than edits the matrix.
+- § 17.7 includes the SPEC-001 null-usage error row with zero buyer debit.
+- SPEC-005 mirrors the matrix.
 **SPEC-007 future:**
 - owns AntFeed and USDC conversion.
 - consumes payout-ready rows.
@@ -218,10 +230,10 @@ Any change to D1-D12 requires operator review and a reopened SCOPE stage.
 
 ### 4.2 request_log read-only contract
 
-SPEC-005 reads request_id, ts_utc, model, provider_assigned_id, prompt_tokens, completion_tokens, total_tokens, status, stream, error, provider_header, and retried.
+SPEC-005 reads request_id, ts_utc, model, provider_assigned_id, prompt_tokens, completion_tokens, total_tokens, status, stream, error, error_code, provider_header, and retried.
 SPEC-005 never changes these columns.
-The D10 attempt_n need is a SPEC-002 v1.3.4 cross-spec patch candidate.
-Until attempt_n exists, v0.2 derives attempt ordinal by sorting same-request_id rows by request_log.id ASC.
+The D10 attempt_n need remains a future SPEC-002 patch candidate.
+Until attempt_n exists, v0.3 derives attempt ordinal by sorting same-request_id rows by request_log.id ASC.
 Row 1 becomes attempt_n=0.
 Row 2 becomes attempt_n=1 only when request_log.retried indicates an explicit retry.
 Row 3+ MUST be quarantined until SPEC-002 gains monotonic attempt_n.
@@ -251,7 +263,6 @@ SPEC-005 resolves stable provider_id through `ledger_provider_identity_snapshots
 | `gross_credits` | INTEGER | NOT NULL CHECK(gross_credits >= 0) | pre-split credits | insert only |
 | `provider_share_bps` | INTEGER | NOT NULL CHECK(provider_share_bps BETWEEN 0 AND 10000) | share snapshot | insert only |
 | `provider_credits` | INTEGER | NOT NULL CHECK(provider_credits >= 0) | provider net credits | insert only |
-| `overshoot_flag` | INTEGER | NOT NULL DEFAULT 0 CHECK(overshoot_flag IN (0,1)) | quota overshoot advisory | insert only |
 | `fault_flag` | TEXT | NOT NULL DEFAULT 'none' CHECK(fault_flag IN ('none','breaker_qualifying','null_usage_error')) | fault diagnostic | insert only |
 | `attestation_class` | TEXT | NULL | SPEC-008 future-proofing | insert only |
 | `settled` | INTEGER | NOT NULL DEFAULT 0 CHECK(settled IN (0,1)) | settlement marker | 0 to 1 only |
@@ -269,6 +280,8 @@ Indexes and uniqueness constraints:
 - `INDEX idx_lrc_request(request_id)`
 - `INDEX idx_lrc_quarantine(quarantined, ts_utc)`
 - `INDEX idx_lrc_fault(provider_id, fault_flag, ts_utc)`
+
+Table-level CHECK note: when `usage_source = 'null_error'`, `gross_credits` MUST be 0. The hot path and recovery MUST enforce this before the formula in § 5.3 would otherwise evaluate nullable operands.
 
 ### 4.4 Table `ledger_operator_credits`
 
@@ -318,18 +331,53 @@ Indexes and uniqueness constraints:
 - `INDEX idx_lpr_provider_status(provider_id, status, window_end_utc)`
 - `INDEX idx_lpr_status(status, window_end_utc)`
 
+#### 4.5.1 SPEC-007 consumer contract
+
+**Status transition graph:** `ready` -> `consumed` (terminal); `ready` -> `voided` (terminal); no reverse transitions; no transitions out of `consumed` or `voided`. SPEC-005 writes only `ready`; SPEC-007 may write `consumed` or `voided`.
+
+**JSON projection schema** consumed by SPEC-007 readers:
+
+```text
+{
+  "id": int,
+  "provider_id": string,
+  "window_start_utc": ISO8601,
+  "window_end_utc": ISO8601,
+  "provider_credits": int,
+  "min_payout_credits": int,
+  "idempotency_key": string,
+  "status": "ready"|"consumed"|"voided",
+  "payout_currency": string|null,
+  "payout_external_id": string|null
+}
+```
+
+**Claim pattern** (normative, race-safe):
+
+```sql
+UPDATE ledger_payout_ready
+   SET status = 'consumed',
+       payout_external_id = ?,
+       payout_currency = ?
+ WHERE id = ? AND status = 'ready';
+```
+
+SPEC-007 MUST check the affected-row-count: if 0, the claim raced or the row is no longer `ready`; SPEC-007 MUST NOT pay.
+
+**Audit trail:** every status mutation MUST also insert one row into `ledger_reconciliation_runs` with `run_type = 'spec_007_claim'`, populating `from_utc/to_utc` from the payout window and `status = 'complete'` or `'failed'`. The existing CHECK constraint on `ledger_reconciliation_runs.run_type` MUST be extended in MIG-005-008 to include `'spec_007_claim'`.
+
 ### 4.6 Table `ledger_reconciliation_runs`
 
 | Column | Type | Constraint | Meaning | Update rule |
 |---|---|---|---|---|
 | `id` | INTEGER | PRIMARY KEY AUTOINCREMENT | local row id | insert only |
-| `run_type` | TEXT | NOT NULL CHECK(run_type IN ('startup_scan','nightly_reconcile','admin_reconcile')) | caller type | insert only |
+| `run_type` | TEXT | NOT NULL CHECK(run_type IN ('startup_scan','nightly_reconcile','admin_reconcile','spec_007_claim')) | caller type | insert only |
 | `from_utc` | TEXT | NOT NULL | inclusive scan start | insert only |
 | `to_utc` | TEXT | NOT NULL | exclusive scan end | insert only |
 | `request_log_rows_scanned` | INTEGER | NOT NULL CHECK(request_log_rows_scanned >= 0) | source row count | insert only |
 | `missing_credit_rows_created` | INTEGER | NOT NULL CHECK(missing_credit_rows_created >= 0) | recovery count | insert only |
 | `orphan_credit_rows_quarantined` | INTEGER | NOT NULL CHECK(orphan_credit_rows_quarantined >= 0) | quarantine count | insert only |
-| `buyer_debit_credits` | INTEGER | NOT NULL CHECK(buyer_debit_credits >= 0) | derived buyer total | insert only |
+| `buyer_equivalent_credits` | INTEGER | NOT NULL CHECK(buyer_equivalent_credits >= 0) | SPEC-005-internal buyer-equivalent total | insert only |
 | `provider_gross_credits` | INTEGER | NOT NULL CHECK(provider_gross_credits >= 0) | ledger gross total | insert only |
 | `reconciliation_delta_credits` | INTEGER | NOT NULL | provider minus buyer gross | insert only |
 | `started_at_utc` | TEXT | NOT NULL | run start | insert only |
@@ -341,6 +389,8 @@ Indexes and uniqueness constraints:
 Indexes and uniqueness constraints:
 - `INDEX idx_lrr_type_started(run_type, started_at_utc)`
 - `INDEX idx_lrr_range(from_utc, to_utc)`
+
+Legacy `buyer_debit_credits` from v0.2 is deprecated after MIG-005-009. New rows MUST write NULL to the deprecated column when it exists and MUST write `buyer_equivalent_credits`.
 
 ### 4.7 Table `ledger_config_snapshots`
 
@@ -393,6 +443,8 @@ Recovery MUST use this snapshot when request_log lacks stable provider identity.
 - MIG-005-005 creates ledger_config_snapshots.
 - MIG-005-006 creates ledger_provider_identity_snapshots.
 - MIG-005-007 validates request_log columns by read-only introspection.
+- MIG-005-008 extends `ledger_reconciliation_runs.run_type` to include `spec_007_claim`.
+- MIG-005-009 adds `ledger_reconciliation_runs.buyer_equivalent_credits INTEGER`, backfills it from `buyer_debit_credits`, and deprecates `buyer_debit_credits` as write-NULL for new rows.
 - No SPEC-005 migration alters request_log.
 
 ## 5. Units and arithmetic
@@ -426,6 +478,7 @@ gross_credits = round_half_even(rate_scaled_numerator, 1_000_000 * 1_000_000)
 provider_credits = round_half_even(gross_credits * provider_share_bps, 10_000)
 operator_credits = gross_credits - provider_credits
 ```
+When `usage_source = 'null_error'`, both `prompt_tokens` and `completion_tokens` MAY be NULL. The row MUST set `gross_credits = 0`, `provider_credits = 0`, and `operator_credits = 0` before the formula evaluates; the formula MUST NOT be evaluated on NULL operands.
 Fault and null-error overrides set gross, provider, and operator credits to 0 before split.
 Recovery rows MUST use the `ledger_config_snapshots` row selected by § 10.4; they MUST NOT price historical rows from current coordinator.yaml when a historical snapshot is required.
 
@@ -439,9 +492,9 @@ Recovery rows MUST use the `ledger_config_snapshots` row selected by § 10.4; th
 
 ## 6. Credit calculation: D8 mapping
 
-SPEC-006 v0.8.1 § 17.7 is the source of truth for buyer debits.
+SPEC-006 v0.8.2 § 17.7 is the source of truth for buyer debits.
 SPEC-005 mirrors every row with a provider-credit derivation.
-This section implements the locked failed-request accounting decision (D8) by mirroring the SPEC-006 § 17.7 D3 matrix without editing SPEC-006.
+This section implements the locked failed-request accounting decision (D8) by mirroring the SPEC-006 § 17.7 D3 matrix after the coordinated v0.8.2 null-usage row.
 
 ### 6.1 200 success
 
@@ -505,13 +558,15 @@ If a reconciliation summary needs to count provider-not-reached requests, it doe
 
 **SPEC-006 § 17.7 status:** client_disconnect.
 **Completion-token state:** byte estimated.
-**Buyer debit:** prompt + ceil(bytes/4).
+**Buyer debit:** prompt + `ceil(bytes_emitted_so_far / 4)`.
 **SPEC-005 provider-credit rule:** Use the same estimate as buyer debit.
 **Closed form:** apply § 5.3 to this row after its token-source selection and overrides.
+The byte-estimate completion-token formula is exactly `ceil(bytes_emitted_so_far / 4)` per SPEC-006 v0.8.2 § 17.7. SPEC-005 v0.3 mirrors this formula here normatively; any future SPEC-006 byte-estimate change MUST trigger a coordinated SPEC-005 bump.
 
 ### 6.9 Null usage error path
 
-If completion_tokens IS NULL because SPEC-001 returned error_model_not_loaded, error_context_exceeded, error_queue_full, or error_internal, provider credit is 0.
+If SPEC-002 v1.3.4 `request_log.error_code` is `error_model_not_loaded`, `error_context_exceeded`, `error_queue_full`, or `error_internal`, provider credit is 0.
+When `usage_source = 'null_error'`, both `prompt_tokens` and `completion_tokens` MAY be NULL. The row MUST set `gross_credits = 0`, `provider_credits = 0`, and `operator_credits = 0` before the formula evaluates; the formula MUST NOT be evaluated on NULL operands.
 A provider-reached null-error path writes a zero-credit row for audit completeness.
 The row sets usage_source=null_error and fault_flag=null_usage_error unless FR-P11a breaker_qualifying is more specific.
 
@@ -645,6 +700,7 @@ request_log, ledger_request_credits, ledger_operator_credits, and any provider i
 Crash before COMMIT loses all rows together.
 Crash after COMMIT preserves all rows together.
 No 2PC is used.
+The coordinator SQLite database MUST be operated in WAL mode (`PRAGMA journal_mode = WAL`). Recovery scans MUST execute under `BEGIN DEFERRED` to obtain a consistent reader snapshot.
 
 ### 10.2 Startup scan
 
@@ -666,6 +722,7 @@ It does not delete rows.
 For a clean range, delta_gross_credits MUST equal 0 when provider gross credits are recomputed from the same § 5.3 formula and historical config snapshot.
 Provider/operator split deltas MUST be checked separately by verifying provider_credits + operator_credits == gross_credits for each row.
 A non-zero gross delta MUST be recorded in `/admin/ledger/reconcile` output and MUST fail AC-H005.
+`buyer_equivalent_credits` is the SPEC-005-internal buyer-equivalent total computed from `request_log` via the § 6 D8 matrix and the same § 5.3 formula. SPEC-005 does NOT read SPEC-006 usage tables. AC-H005 verifies symmetry of the SPEC-005 model only; cross-process consistency between SPEC-005 and SPEC-006 is a separate H-005-EXT verification owned by the operator outside SPEC-005 v0.3.
 
 ### 10.4 Deterministic algorithm
 
@@ -674,6 +731,8 @@ Outputs: recoveryRows, quarantineUpdates, reconciliationSummary.
 Same inputs produce byte-identical outputs.
 Time is explicit input.
 No live network call may affect output.
+`scanWindow.to_utc` MUST be no closer to wall-clock now than `settlement.recovery_grace_seconds` (default 30s). Rows with `request_log.ts_utc` newer than this cutoff are excluded from the scan to prevent races with in-flight hot-path transactions.
+SPEC-002 v1.3.4 indexes `request_log.ts_utc` and `(request_id, id)` are preconditions for production-scale reconciliation scans; missing indexes in a fixture MAY use a bounded chunked scan, but production startup MUST fail the schema check.
 For each recoverable request_log row, the algorithm selects the latest config snapshot whose effective_at_utc is less than or equal to request_log.ts_utc.
 If no config snapshot or provider identity snapshot can be selected for a provider-reached row, the row is quarantined.
 
@@ -684,6 +743,15 @@ Inconsistent immutable math quarantines ledger rows.
 Ambiguous attempt_n fallback quarantines rows.
 Quarantine is review, not deletion.
 Quarantined rows are exposed in admin endpoints.
+
+### 10.6 Out-of-scope crash boundaries
+
+SPEC-005 owns only coordinator-side crash recovery. The following cross-process states are explicitly OUT OF SCOPE for SPEC-005 v0.3 and remain the responsibility of SPEC-006:
+
+1. Gateway crashes after the buyer-quota debit (SPEC-006 § 7.2 reservation) but before forwarding the request to the coordinator. SPEC-005 sees no `request_log` row; the reservation reaper (SPEC-006 § 7.2 D3 lock) reclaims the reservation within 24h.
+2. Gateway-coordinator network partition during an in-flight SSE stream; SPEC-005 credits based on whatever `request_log` row eventually commits.
+
+AC-H005 explicitly excludes these states; `delta_gross_credits` is computed over the SPEC-005-owned request_log + ledger dataset only.
 
 ## 11. Operator and provider endpoints (D11)
 
@@ -775,7 +843,7 @@ No HTML, chart markup, Slack payload, or email body is returned.
 {
   "from_utc": "2026-05-24T00:00:00Z",
   "to_utc": "2026-05-31T00:00:00Z",
-  "buyer_debit_credits": 8123456,
+  "buyer_equivalent_credits": 8123456,
   "provider_gross_credits": 8123456,
   "delta_gross_credits": 0,
   "split_delta_rows": 0,
@@ -786,6 +854,7 @@ No HTML, chart markup, Slack payload, or email body is returned.
 ```
 
 `delta_gross_credits` MUST be 0 for a clean H-005 range.
+`buyer_equivalent_credits` is computed by SPEC-005 from request_log and the § 6 D8 matrix; it is not read from SPEC-006 usage tables.
 Provider/operator split validation is reported separately with `split_delta_rows`.
 A non-zero `delta_gross_credits` MUST be returned in this JSON response and MUST fail AC-H005.
 The reconciliation fixture MUST NOT require live network access.
@@ -857,6 +926,7 @@ Token subject MUST equal path provider_id.
 Wrong-subject token returns 403.
 Missing token returns 401.
 Unknown provider_id returns 404 without enumerating valid providers.
+When SPEC-002 v1.3.4 `auth.require_provider_tokens` is `false`, the `/providers/{provider_id}/earnings` endpoint MUST be disabled at the route layer. SPEC-005 v0.3 does NOT specify a side-channel per-provider bearer-token provisioning scheme; provider economics in this deployment mode are available only via the operator-keyed `/admin/ledger/providers` endpoint. SPEC-005 v0.3 production launch gate adds this as item 9 alongside the SPEC-006 production launch gate.
 
 ## 12. Buyer-balance interaction (D7)
 
@@ -866,7 +936,6 @@ SPEC-005 does not enforce buyer quota.
 SPEC-006 gateway quota is authoritative.
 If the gateway forwarded and the provider performed work, provider credit follows § 6.
 Over-quota overshoot does not zero provider credit.
-overshoot_flag is advisory only.
 Operator recourse is quota tuning, not provider clawback.
 
 ## 13. Configuration
@@ -888,8 +957,11 @@ Config changes affect only new request-credit rows.
 | `settlement.min_payout_credits` | integer | `500000` | threshold |
 | `settlement.startup_reconcile_window_hours` | integer | `24` | startup scan window |
 | `settlement.nightly_reconcile_window_days` | integer | `7` | nightly scan window |
+| `settlement.recovery_grace_seconds` | integer | `30` | recovery scan grace cutoff |
 | `settlement.job_enabled` | boolean | `true` | test-disable switch for scheduler only |
 | `endpoints.provider_earnings.rate_limit_per_minute` | integer | `60` | per-provider read limit for earnings endpoint |
+
+The coordinator SQLite database MUST run in WAL mode (`journal_mode = WAL`). SPEC-005 behavior is undefined under `journal_mode = DELETE`.
 
 ### 13.1 Initial placeholder rate card
 
@@ -922,7 +994,6 @@ Recovery MUST use historical `ledger_config_snapshots`; it MUST NOT price old re
 - Metric: reconciliation delta. Source: § 11 endpoints. No new metrics surface in v1.
 - Metric: rate-card default fallback count. Source: § 11 endpoints. No new metrics surface in v1.
 - Metric: unknown model count. Source: § 11 endpoints. No new metrics surface in v1.
-- Metric: overshoot flag count. Source: § 11 endpoints. No new metrics surface in v1.
 - Metric: settlement job duration. Source: § 11 endpoints. No new metrics surface in v1.
 - Metric: idempotent settlement replay count. Source: § 11 endpoints. No new metrics surface in v1.
 
@@ -931,7 +1002,7 @@ Recovery MUST use historical `ledger_config_snapshots`; it MUST NOT price old re
 ### 15.1 Pre-v1.2.4 cancel usage
 
 Use byte-estimation fallback only when usage is absent.
-Use the same estimate as SPEC-006 buyer debit.
+Use the same estimate as SPEC-006 v0.8.2 § 17.7 buyer debit: `ceil(bytes_emitted_so_far / 4)`.
 Set usage_source=byte_estimated.
 
 ### 15.2 attempt_n fallback
@@ -998,11 +1069,13 @@ Endpoint failures MUST return the § 11 JSON error envelope and no ledger data.
 | Provider token missing | /providers/{provider_id}/earnings | 401 | JSON envelope; no provider data |
 | Provider token invalid | /providers/{provider_id}/earnings | 401 | JSON envelope; no provider data |
 | Provider token wrong subject | /providers/{provider_id}/earnings | 403 | JSON envelope; no provider data |
+| Provider tokens disabled in deployment | /providers/{provider_id}/earnings | route disabled | provider economics available only through `/admin/ledger/providers` |
 | Unknown provider_id | /providers/{provider_id}/earnings | 404 | JSON envelope; no enumeration |
 | Provider earnings read limit exceeded | /providers/{provider_id}/earnings | 429 | JSON envelope; no provider data |
 | Settlement crash before payout row | settlement goroutine | retry | source rows remain unsettled |
 | Settlement crash after payout row | settlement goroutine | repair | rerun marks matching source rows |
 | Missing ledger row | startup/nightly | repair | write deterministic recovery row |
+| WAL mode missing | coordinator startup | startup failure | fail fast before SPEC-005 ledger work |
 | Orphan ledger row | startup/nightly | quarantine | quarantined=1 |
 | Missing default rate | config load | startup failure | unknown models cannot be priced |
 | Invalid multiplier | config reload | reload failure | keep prior valid config |
@@ -1064,7 +1137,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 **Traceability verification:** Parse § 2 and locate D7; then locate at least one later normative reference.
 **Behavior verification:** Seed a SPEC-006 over-quota overshoot row that reached a provider with reported usage.
-**Expected:** D7 exists in § 2, is enforced outside § 2, provider credit follows § 6, and overshoot_flag remains advisory without zeroing legitimate completed work.
+**Expected:** D7 exists in § 2, is enforced outside § 2, provider credit follows § 6, and provider credit is greater than 0 for legitimate completed work that reached a provider.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -1110,8 +1183,8 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### AC-H005: H-005 symmetry
 
-**Verification:** Construct all eight SPEC-006 § 17.7 states and run the § 6 credit function.
-**Expected:** Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row; delta_gross_credits equals 0 for a clean range; provider/operator splits satisfy provider_credits + operator_credits == gross_credits per row.
+**Verification:** Construct all nine SPEC-006 v0.8.2 § 17.7 states and run the § 6 credit function.
+**Expected:** Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row; null-usage errors write zero-credit rows; cross-process states disclaimed in § 10.6 are excluded; delta_gross_credits equals 0 for a clean SPEC-005-owned range; provider/operator splits satisfy provider_credits + operator_credits == gross_credits per row.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -1167,7 +1240,14 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 ### AC-DISCONNECT-ESTIMATE: Cancel byte estimate
 
 **Verification:** Fixture bytes_emitted=120 prompt=1000 usage absent.
-**Expected:** estimated_completion_tokens=30 and gross includes 30 completion.
+**Expected:** estimated_completion_tokens=30 by SPEC-006 v0.8.2 § 17.7 `ceil(bytes_emitted_so_far / 4)` and gross includes 30 completion.
+**Network:** Not required.
+**State reset:** Fresh fixture database or pure-function input.
+
+### AC-NULL-PROMPT: Null prompt and completion zero credit
+
+**Verification:** Fixture prompt_tokens=NULL, completion_tokens=NULL, and error_code=`error_internal`.
+**Expected:** One ledger row is written with gross_credits=0, provider_credits=0, operator_credits=0, and usage_source=`null_error`; § 5.3 formula is not evaluated on NULL operands.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
 
@@ -1205,6 +1285,13 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 **Expected:** Abort leaves no partial rows; commit leaves request_log plus ledger rows.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
+
+### AC-WAL: WAL mode required
+
+**Verification:** Coordinator startup runs `PRAGMA journal_mode` against the SQLite fixture.
+**Expected:** Startup asserts `journal_mode = WAL` and fails fast otherwise.
+**Network:** Not required.
+**State reset:** Fresh fixture database.
 
 ### AC-STARTUP-SCAN: Startup scan recovery
 
@@ -1247,6 +1334,13 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 **Expected:** Exactly one payout-ready row.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
+
+### AC-SPEC-007-CONTRACT: payout-ready consumer contract
+
+**Verification:** Seed a `ready` payout row, run the § 4.5.1 claim pattern once, then run it a second time and attempt a mutation from a terminal state.
+**Expected:** First claim changes `ready` to `consumed` and appends a `ledger_reconciliation_runs` row with `run_type='spec_007_claim'`; second claim affects 0 rows; `voided` is terminal and cannot transition; SPEC-007 MUST NOT pay on a 0-row claim.
+**Network:** Not required.
+**State reset:** Fresh fixture database.
 
 ### AC-SPLIT: Split immutable
 
@@ -1320,7 +1414,7 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### AC-NO-ONCHAIN: No AntFeed/on-chain
 
-**Verification:** Grep SPEC-005 for AntFeed call, on-chain state, USDC-specific column type.
+**Verification:** Grep implementation prompts, migration files, and implementation code for the machine-checkable prohibited patterns in Appendix G.
 **Expected:** No such requirement.
 **Network:** Not required.
 **State reset:** Fresh fixture database or pure-function input.
@@ -1374,8 +1468,8 @@ Fixtures may use in-memory SQLite, temporary SQLite, or pure functions.
 
 ### OQ-1: SPEC-002 attempt_n patch
 
-SPEC-005 v0.2 permits the quarantining fallback: same-request_id rows are ordered by request_log.id ASC, row 1 maps to attempt_n=0, row 2 maps to attempt_n=1 only with explicit retried semantics, and row 3+ or ambiguous ordering is quarantined.
-SPEC-002 v1.3.4 monotonic attempt_n remains a cross-spec patch candidate, not a SPEC-005 v0.2 launch blocker.
+SPEC-005 v0.3 permits the quarantining fallback: same-request_id rows are ordered by request_log.id ASC, row 1 maps to attempt_n=0, row 2 maps to attempt_n=1 only with explicit retried semantics, and row 3+ or ambiguous ordering is quarantined.
+A future SPEC-002 monotonic attempt_n remains a cross-spec patch candidate, not a SPEC-005 v0.3 launch blocker.
 
 ### OQ-2: Rounding rule acceptance
 
@@ -1413,10 +1507,14 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 - [x] ACs deterministic
 - [x] out-of-scope guards explicit
 - [x] no SPEC-001 change
-- [x] no SPEC-006 change
+- [x] SPEC-006 v0.8.2 dependency pinned
 - [x] no gateway billing state
 - [x] Go coordinator assumed
 - [x] single SQLite deployment assumed
+- [ ] WAL mode required (§ 10.1, § 13)
+- [ ] recovery has explicit grace-window cutoff (§ 10.4)
+- [ ] SPEC-007 consumer interface defined (§ 4.5.1)
+- [ ] cross-process crash boundaries disclaimed (§ 10.6)
 
 ## Appendix B. Decision traceability matrix
 
@@ -1426,7 +1524,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 | D2 | § 2.2 | § 7, § 13 | AC-D2 |
 | D3 | § 2.3 | § 5, § 13 | AC-D3 |
 | D4 | § 2.4 | § 7.2, § 13 | AC-D4 |
-| D5 | § 2.5 | § 5.3, § 7.3, § 13 | AC-D5 |
+| D5 | § 2.5 | § 4.3, § 4.4, § 5.3, § 7.3, § 13 | AC-D5 |
 | D6 | § 2.6 | § 1.3, § 5, § 13, § 16 | AC-D6 |
 | D7 | § 2.7 | § 12 | AC-D7 |
 | D8 | § 2.8 | § 6 | AC-D8 |
@@ -1588,14 +1686,6 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 - Type: INTEGER.
 - Constraint: NOT NULL CHECK(provider_credits >= 0).
 - Meaning: provider net credits.
-- Update rule: insert only.
-- Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
-
-#### `ledger_request_credits.overshoot_flag`
-
-- Type: INTEGER.
-- Constraint: NOT NULL DEFAULT 0 CHECK(overshoot_flag IN (0,1)).
-- Meaning: quota overshoot advisory.
 - Update rule: insert only.
 - Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
 
@@ -1896,7 +1986,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 #### `ledger_reconciliation_runs.run_type`
 
 - Type: TEXT.
-- Constraint: NOT NULL CHECK(run_type IN ('startup_scan','nightly_reconcile','admin_reconcile')).
+- Constraint: NOT NULL CHECK(run_type IN ('startup_scan','nightly_reconcile','admin_reconcile','spec_007_claim')).
 - Meaning: caller type.
 - Update rule: insert only.
 - Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
@@ -1941,13 +2031,21 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 - Update rule: insert only.
 - Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
 
-#### `ledger_reconciliation_runs.buyer_debit_credits`
+#### `ledger_reconciliation_runs.buyer_equivalent_credits`
 
 - Type: INTEGER.
-- Constraint: NOT NULL CHECK(buyer_debit_credits >= 0).
-- Meaning: derived buyer total.
+- Constraint: NOT NULL CHECK(buyer_equivalent_credits >= 0).
+- Meaning: SPEC-005-internal buyer-equivalent total computed from request_log through § 6 and § 5.3.
 - Update rule: insert only.
 - Verification: schema introspection MUST find this exact column contract or a stricter equivalent.
+
+#### `ledger_reconciliation_runs.buyer_debit_credits` (deprecated)
+
+- Type: INTEGER.
+- Constraint: NULL for new rows after MIG-005-009; legacy v0.2 rows may contain NOT NULL values.
+- Meaning: deprecated name for `buyer_equivalent_credits`.
+- Update rule: write NULL for new rows when the legacy column exists.
+- Verification: schema introspection MAY find this legacy column for backward compatibility, but new-row fixtures MUST assert it is NULL.
 
 #### `ledger_reconciliation_runs.provider_gross_credits`
 
@@ -2074,9 +2172,18 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 
 - SPEC-006 status: client_disconnect.
 - Completion-token state: byte estimated.
-- Buyer debit basis: prompt + ceil(bytes/4).
+- Buyer debit basis: prompt + `ceil(bytes_emitted_so_far / 4)`.
 - Provider credit action: Use the same estimate as buyer debit.
 - Verification function: pass fixture through the § 5.3 arithmetic after row-specific token selection.
+- Expected network use: none.
+
+### Fixture: SPEC-001 null-usage error
+
+- SPEC-006 status: SPEC-001 null-usage error.
+- Completion-token state: 0 (NULL).
+- Buyer debit basis: none.
+- Provider credit action: Write a zero-credit audit row with `usage_source='null_error'` and `fault_flag='null_usage_error'` unless FR-P11a is more specific.
+- Verification function: assert prompt_tokens=NULL and completion_tokens=NULL never enter the § 5.3 arithmetic.
 - Expected network use: none.
 
 ## Appendix E. Acceptance criterion fixture details
@@ -2133,7 +2240,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 
 - Claim: Buyer balance enforcement encoded.
 - Setup: Parse § 2 and later D7 references; seed an over-quota overshoot row that reached a provider with reported usage.
-- Oracle: D7 exists in § 2, is enforced outside § 2, provider credit follows § 6, and overshoot_flag does not zero legitimate completed work.
+- Oracle: D7 exists in § 2, is enforced outside § 2, provider credit follows § 6, and legitimate completed work that reached a provider has provider credit greater than 0.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -2180,8 +2287,8 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 ### AC-H005 fixture detail
 
 - Claim: H-005 symmetry.
-- Setup: Construct all eight SPEC-006 § 17.7 states and run the § 6 credit function.
-- Oracle: Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row; delta_gross_credits is 0 for a clean range; provider/operator split sums to gross per row.
+- Setup: Construct all nine SPEC-006 v0.8.2 § 17.7 states and run the § 6 credit function.
+- Oracle: Each buyer-debit state has the specified provider-credit state; provider-not-reached writes no row; null-usage errors write zero-credit rows; § 10.6 cross-process states are excluded; delta_gross_credits is 0 for a clean SPEC-005-owned range; provider/operator split sums to gross per row.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -2245,7 +2352,15 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 
 - Claim: Cancel byte estimate.
 - Setup: Fixture bytes_emitted=120 prompt=1000 usage absent.
-- Oracle: estimated_completion_tokens=30 and gross includes 30 completion.
+- Oracle: estimated_completion_tokens=30 by SPEC-006 v0.8.2 § 17.7 `ceil(bytes_emitted_so_far / 4)` and gross includes 30 completion.
+- Live network: forbidden.
+- Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
+
+### AC-NULL-PROMPT fixture detail
+
+- Claim: Null prompt and completion zero credit.
+- Setup: Fixture prompt_tokens=NULL, completion_tokens=NULL, error_code=error_internal.
+- Oracle: One zero-credit row with gross_credits=0, provider_credits=0, operator_credits=0, usage_source=null_error, and no § 5.3 NULL-operand evaluation.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -2286,6 +2401,14 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 - Claim: ACID crash boundary.
 - Setup: Abort a transaction before COMMIT and commit a second transaction.
 - Oracle: Abort leaves no partial rows; commit leaves request_log plus ledger rows.
+- Live network: forbidden.
+- Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
+
+### AC-WAL fixture detail
+
+- Claim: WAL mode required.
+- Setup: Run coordinator startup against SQLite fixtures with `journal_mode=WAL` and `journal_mode=DELETE`.
+- Oracle: WAL fixture passes; DELETE fixture fails fast before ledger work.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -2334,6 +2457,14 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 - Claim: Settlement rerun safe.
 - Setup: Run same settlement window twice.
 - Oracle: Exactly one payout-ready row.
+- Live network: forbidden.
+- Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
+
+### AC-SPEC-007-CONTRACT fixture detail
+
+- Claim: payout-ready consumer contract.
+- Setup: Seed ready and voided payout rows, run the § 4.5.1 claim update twice, and inspect ledger_reconciliation_runs.
+- Oracle: First ready claim consumes one row and appends run_type=spec_007_claim; second claim affects 0 rows; voided remains terminal; no pay action is allowed on a 0-row claim.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
 
@@ -2420,7 +2551,7 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 ### AC-NO-ONCHAIN fixture detail
 
 - Claim: No AntFeed/on-chain.
-- Setup: Grep SPEC-005 for AntFeed call, on-chain state, USDC-specific column type.
+- Setup: Grep implementation prompts, migration files, and implementation code for the machine-checkable prohibited patterns in Appendix G.
 - Oracle: No such requirement.
 - Live network: forbidden.
 - Failure handling: failing this fixture blocks claiming SPEC-005 implementation complete.
@@ -2469,51 +2600,25 @@ SPEC-005 exposes quarantine but does not define force-credit or force-void admin
 
 ## Appendix G. Out-of-scope guard verification strings
 
-- Guard: AntFeed USDC payment rail.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: On-chain settlement of any kind.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Stripe, checkout, credit cards, fiat invoices, refunds, or buyer revenue.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Billing logic in the Phase 5 gateway.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: SPEC-001 wire-format changes.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Per-provider negotiated splits.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Reputation-weighted reward formulas.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Dynamic market-rate pegging.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Tier 2 attested-provider reward multipliers.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: KYC, 1099, tax, or regulatory paperwork.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Refund or clawback workflows.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Multi-currency ledger entries written by SPEC-005.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Web charts and dashboards.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Slack, email, webhook, or digest notification surfaces.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Multi-coordinator or multi-region ledger replication.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
-- Guard: Buyer-visible donation buttons, tip jars, or payment-adjacent SPEC-006 UI.
-  - Verification: grep implementation prompts and specs for new normative work in this area.
-  - Expected: any such work is rejected or moved to SPEC-007/SPEC-008/later.
+AC-NO-ONCHAIN and related scope checks MUST grep the machine-checkable prohibited pattern column, not the prose-level guard column.
+
+| Prose-level guard | Machine-checkable prohibited pattern |
+|---|---|
+| AntFeed USDC payment rail | `antfeed.Client`, `ANTFEED_`, `antfeed_settlement` |
+| On-chain settlement of any kind | `eth_sendRawTransaction`, `solana_client`, `chain_id`, `wallet_private_key` |
+| Stripe, checkout, credit cards, fiat invoices, refunds, or buyer revenue | `stripe.`, `STRIPE_`, `checkout_session`, `invoice_id`, `refund_id`, `buyer_revenue_cents` |
+| Billing logic in the Phase 5 gateway | `phase5-gateway/internal/billing`, `gateway_ledger_write`, `buyer_invoice` |
+| SPEC-001 wire-format changes | `inference_response_billing`, `provider_payout`, `billing_credits` in SPEC-001 protocol messages |
+| Per-provider negotiated splits | `provider_share_overrides`, `negotiated_share_bps`, `provider_contract_terms` |
+| Reputation-weighted reward formulas | `reputation_multiplier`, `quality_weighted_credits`, `rating_adjusted_payout` |
+| Dynamic market-rate pegging | `market_rate_oracle`, `spot_price_feed`, `dynamic_rate_card` |
+| Tier 2 attested-provider reward multipliers | `attestation_multiplier`, `tier2_reward_bonus`, `attested_provider_bps` |
+| KYC, 1099, tax, or regulatory paperwork | `kyc_status`, `tax_form_1099`, `tin_hash`, `w9_document` |
+| Refund or clawback workflows | `clawback_credits`, `refund_workflow`, `reverse_provider_credit` |
+| Multi-currency ledger entries written by SPEC-005 | `ledger_currency_amount`, `fx_rate_snapshot`, `multi_currency_ledger` |
+| Web charts and dashboards | `ledger_chart`, `dashboard_widget`, `chart_series_provider_credits` |
+| Slack, email, webhook, or digest notification surfaces | `slack_webhook_url`, `earnings_digest_email`, `provider_payout_webhook` |
+| Multi-coordinator or multi-region ledger replication | `ledger_replica_region`, `coordinator_shard_id`, `multi_region_ledger_sync` |
+| Buyer-visible donation buttons, tip jars, or payment-adjacent SPEC-006 UI | `donation_button`, `tip_jar`, `payment_cta`, `buyer_donate_url` |
+
+Expected result: any implementation hit on a prohibited pattern is rejected or moved to SPEC-007/SPEC-008/later unless a future operator-approved spec explicitly changes this boundary.
