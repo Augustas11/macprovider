@@ -1176,6 +1176,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		} else if err != nil {
 			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return
+			}
 			writeError(w, http.StatusInternalServerError, "server_error", "concurrency_reservation_failed", "Could not reserve concurrency")
 			return
 		}
