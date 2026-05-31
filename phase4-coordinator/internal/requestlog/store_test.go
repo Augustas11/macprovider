@@ -211,6 +211,68 @@ func TestRequestLogErrorCodePopulation(t *testing.T) {
 	}
 }
 
+func TestRequestLogMigratesExistingTable(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE request_log (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc               TEXT    NOT NULL,
+    request_id           TEXT    NOT NULL,
+    model                TEXT    NOT NULL,
+    provider_assigned_id TEXT    NULL,
+    prompt_tokens        INTEGER NULL,
+    completion_tokens    INTEGER NULL,
+    total_tokens         INTEGER NULL,
+    latency_ms           REAL    NOT NULL,
+    routing_ms           REAL    NOT NULL,
+    status               INTEGER NOT NULL,
+    stream               INTEGER NOT NULL,
+    buyer_ip             TEXT    NOT NULL DEFAULT '',
+    error                TEXT    NULL,
+    pref_header          TEXT    NULL,
+    provider_header      TEXT    NULL,
+    retried              INTEGER NOT NULL DEFAULT 0
+)`)
+	if err != nil {
+		t.Fatalf("seed old schema: %v", err)
+	}
+	_ = db.Close()
+
+	store, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer store.Close()
+	if err := store.Insert(context.Background(), Row{
+		TSUtc:              time.Now().UTC(),
+		RequestID:          "req-migrated",
+		Model:              "model-a",
+		ProviderAssignedID: "session-1",
+		Status:             502,
+		BuyerIP:            "127.0.0.1",
+		ErrorCode:          "error_internal",
+	}); err != nil {
+		t.Fatalf("insert after migration: %v", err)
+	}
+	var errorCode sql.NullString
+	if err := store.db.QueryRow(`SELECT error_code FROM request_log WHERE request_id = ?`, "req-migrated").Scan(&errorCode); err != nil {
+		t.Fatalf("query migrated row: %v", err)
+	}
+	if !errorCode.Valid || errorCode.String != "error_internal" {
+		t.Fatalf("error_code = %#v, want error_internal", errorCode)
+	}
+	for _, name := range []string{"idx_request_log_ts_utc", "idx_request_log_request_id_id"} {
+		var got string
+		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&got); err != nil {
+			t.Fatalf("index %s missing: %v", name, err)
+		}
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))

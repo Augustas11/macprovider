@@ -61,7 +61,7 @@ type Server struct {
 	internalAuthKey        string
 	tier2Mu                sync.RWMutex
 	tier2                  config.Tier2Config
-	reqLog                 *requestlog.Store
+	reqLog                 requestLogInserter
 	provisionalWeight      float64
 	maxChatBodyBytes       int64
 	recovering             sync.Map
@@ -87,6 +87,10 @@ type PreflightFunc func(provider pool.Provider, requestID string, estimatedToken
 type RelayFunc func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error)
 
 type Option func(*Server)
+
+type requestLogInserter interface {
+	Insert(context.Context, requestlog.Row) error
+}
 
 type wsForwardResult string
 
@@ -239,7 +243,7 @@ func WithAdmission(admission *providerws.AdmissionManager, provisionalWeight flo
 	}
 }
 
-func WithRequestLog(store *requestlog.Store) Option {
+func WithRequestLog(store requestLogInserter) Option {
 	return func(s *Server) {
 		s.reqLog = store
 	}
@@ -745,34 +749,13 @@ type chatMessage struct {
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	requestID := uuid.NewString()
-	externalRequestID := r.Header.Get("X-Request-ID")
+	externalRequestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+	requestID := requestIDForBuyerRequest(externalRequestID)
 	originalRequestID := requestID
-	if externalRequestID != "" {
-		originalRequestID = externalRequestID
-	}
 	startedAt := s.now()
-	maxBodyBytes := s.maxChatBodyBytes
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_request", "Could not read request body")
-		return
-	}
-	if int64(len(body)) > maxBodyBytes {
-		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
-		return
-	}
-	req, status, code, msg := validateChatRequest(body)
-	if status != 0 {
-		writeError(w, status, code, msg)
-		return
-	}
-	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
-		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)
-		return
-	}
-
 	routingDone := startedAt
+	requestLogModel := ""
+	requestLogStream := false
 	explicitRetries := 0
 	logRow := func(
 		providerAssignedID string,
@@ -787,24 +770,55 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		row := requestlog.Row{
 			TSUtc:              startedAt,
 			RequestID:          originalRequestID,
-			Model:              req.Model,
+			Model:              requestLogModel,
 			ProviderAssignedID: providerAssignedID,
 			PromptTokens:       promptTok,
 			CompletionTokens:   completionTok,
 			LatencyMs:          float64(time.Since(startedAt).Milliseconds()),
 			RoutingMs:          float64(routingDone.Sub(startedAt).Milliseconds()),
 			Status:             status,
-			Stream:             req.Stream,
-			BuyerIP:            r.RemoteAddr,
-			Error:              errMsg,
+			Stream:             requestLogStream,
+			BuyerIP:            buyerIP(r.RemoteAddr),
+			Error:              sanitizeRequestLogText(errMsg),
 			ErrorCode:          errCode,
-			PrefHeader:         r.Header.Get("X-MacProvider-Pref"),
-			ProviderHeader:     r.Header.Get("X-MacProvider-Provider"),
+			PrefHeader:         sanitizeRequestLogText(r.Header.Get("X-MacProvider-Pref")),
+			ProviderHeader:     sanitizeRequestLogText(r.Header.Get("X-MacProvider-Provider")),
 			Retried:            retried,
 		}
-		if err := s.reqLog.Insert(r.Context(), row); err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		defer cancel()
+		if err := s.reqLog.Insert(ctx, row); err != nil {
 			s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("request_log insert failed")
 		}
+	}
+	logBuyerFailure := func(status int, msg string) {
+		logRow("", status, nil, nil, msg, "", 0)
+	}
+	maxBodyBytes := s.maxChatBodyBytes
+	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	if err != nil {
+		logBuyerFailure(http.StatusBadRequest, "Could not read request body")
+		writeError(w, http.StatusBadRequest, "invalid_request", "Could not read request body")
+		return
+	}
+	requestLogModel = modelForRequestLog(body)
+	if int64(len(body)) > maxBodyBytes {
+		logBuyerFailure(http.StatusRequestEntityTooLarge, "Request body too large")
+		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
+		return
+	}
+	req, status, code, msg := validateChatRequest(body)
+	if status != 0 {
+		logBuyerFailure(status, msg)
+		writeError(w, status, code, msg)
+		return
+	}
+	requestLogModel = req.Model
+	requestLogStream = req.Stream
+	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
+		logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
+		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)
+		return
 	}
 	logAttempt := func(provider pool.Provider, fallbackStatus int, attempt requestLogAttempt) {
 		status := attempt.Status
@@ -852,7 +866,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				if result == wsForwardProviderDisconnected {
 					if !failoverAttempted && !hasPinnedRoute(r.Header) {
-						next, nextRequestID, ok := s.failoverCandidate(req, r.Header, provider, excluded)
+						next, nextRequestID, ok := s.failoverCandidate(requestID, req, r.Header, provider, excluded)
 						if ok {
 							s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "failover", next.ProviderID)
 							failoverAttempted = true
@@ -869,7 +883,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				logAttempt(provider, statusForForwardResult(result), attempt)
-				nextReqID := uuid.NewString()
+				nextReqID := originalRequestID
 				next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
 				if routeErr != nil {
 					routingDone = s.now()
@@ -904,7 +918,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			logAttempt(provider, status, attempt)
-			nextReqID := uuid.NewString()
+			nextReqID := originalRequestID
 			next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
 			if routeErr != nil {
 				routingDone = s.now()
@@ -946,7 +960,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				logAttempt(provider, http.StatusGatewayTimeout, attempt)
-				nextReqID := uuid.NewString()
+				nextReqID := originalRequestID
 				next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
 				if routeErr != nil {
 					routingDone = s.now()
@@ -980,7 +994,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
 					return
 				}
-				next, nextRequestID, ok := s.failoverCandidate(req, r.Header, provider, excluded)
+				next, nextRequestID, ok := s.failoverCandidate(requestID, req, r.Header, provider, excluded)
 				if !ok {
 					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
 					logAttempt(provider, http.StatusBadGateway, attempt)
@@ -1042,6 +1056,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		upReq.Header.Set("Content-Type", "application/json")
+		upReq.Header.Set("X-Request-ID", originalRequestID)
 		resp, err := providerhttp.Client.Do(upReq)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			respBody, readErr := io.ReadAll(resp.Body)
@@ -1098,7 +1113,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			errMsg = err.Error()
 		}
 		logRow(provider.AssignedID, failStatus, nil, nil, errMsg, attempt.ErrorCode, explicitRetries)
-		nextReqID := uuid.NewString()
+		nextReqID := originalRequestID
 		next, routeErr := s.selectProviderExcluding(nextReqID, req, r.Header, excluded)
 		if routeErr != nil {
 			routingDone = s.now()
@@ -1220,11 +1235,12 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				}
 			}
 			if end.Status != "complete" {
+				status := wsEndHTTPStatus(end.Status)
 				if end.Status == "error_queue_full" {
-					return wsForwardQueueFull, requestLogAttempt{Status: http.StatusBadGateway, Error: endErrorMessage(end), ErrorCode: end.Status}
+					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: end.Status}
 				}
 				writeWSEndError(w, end)
-				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
+				return wsForwardFailed, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
 			}
 			if s.zeroTokenFault(end, finishReasonFromChatResponse(body.Bytes())) {
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
@@ -1354,10 +1370,11 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				}
 			}
 			if !committed && end.Status != "complete" && end.Status != "cancelled" {
+				status := wsEndHTTPStatus(end.Status)
 				if end.Status == "error_queue_full" {
-					return wsForwardQueueFull, requestLogAttempt{Status: http.StatusBadGateway, Error: endErrorMessage(end), ErrorCode: end.Status}
+					return wsForwardQueueFull, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: end.Status}
 				}
-				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
+				return wsForwardFailed, requestLogAttempt{Status: status, Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status)}
 			}
 			commit()
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
@@ -1430,6 +1447,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		return wsForwardFailed, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider failed; buyer should retry"}
 	}
 	upReq.Header.Set("Content-Type", "application/json")
+	upReq.Header.Set("X-Request-ID", requestID)
 	resp, err := providerhttp.Client.Do(upReq)
 	if err != nil {
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider request failed")
@@ -1817,7 +1835,7 @@ func (s *Server) selectProvider(requestID string, req chatRequest, headers http.
 	return s.selectProviderExcluding(requestID, req, headers, nil)
 }
 
-func (s *Server) failoverCandidate(req chatRequest, headers http.Header, failed pool.Provider, excluded map[string]struct{}) (pool.Provider, string, bool) {
+func (s *Server) failoverCandidate(requestID string, req chatRequest, headers http.Header, failed pool.Provider, excluded map[string]struct{}) (pool.Provider, string, bool) {
 	if !s.failoverEnabled || hasPinnedRoute(headers) {
 		return pool.Provider{}, "", false
 	}
@@ -1825,7 +1843,7 @@ func (s *Server) failoverCandidate(req chatRequest, headers http.Header, failed 
 		excluded = map[string]struct{}{}
 	}
 	excluded[routeKey(failed)] = struct{}{}
-	nextRequestID := uuid.NewString()
+	nextRequestID := requestID
 	failoverHeaders := headers.Clone()
 	failoverHeaders.Del("X-MacProvider-Provider")
 	failoverHeaders.Del("X-MacProvider-Session")
@@ -2615,13 +2633,52 @@ func spec001EndStatus(status string) string {
 }
 
 func endErrorMessage(end providerws.InferenceResponseEnd) string {
-	if end.Error != "" {
-		return end.Error
-	}
 	if end.Status != "" {
 		return end.Status
 	}
 	return "Provider failed during inference"
+}
+
+func requestIDForBuyerRequest(headerValue string) string {
+	if headerValue != "" {
+		if parsed, err := uuid.Parse(headerValue); err == nil && parsed.Version() == 4 {
+			return parsed.String()
+		}
+	}
+	return uuid.NewString()
+}
+
+func modelForRequestLog(body []byte) string {
+	var raw struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return ""
+	}
+	return raw.Model
+}
+
+func buyerIP(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
+}
+
+func sanitizeRequestLogText(value string) string {
+	const maxRunes = 256
+	value = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, value)
+	runes := []rune(strings.TrimSpace(value))
+	if len(runes) > maxRunes {
+		runes = runes[:maxRunes]
+	}
+	return string(runes)
 }
 
 func finishReasonFromChatResponse(body []byte) string {
@@ -2661,13 +2718,24 @@ func finishReasonFromSSE(data string) string {
 func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd) {
 	switch end.Status {
 	case "error_context_exceeded":
-		writeError(w, http.StatusRequestEntityTooLarge, "context_exceeds_capacity", "Request exceeds provider context capacity")
+		writeError(w, wsEndHTTPStatus(end.Status), "context_exceeds_capacity", "Request exceeds provider context capacity")
 	case "error_model_not_loaded", "error_queue_full":
-		writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
+		writeError(w, wsEndHTTPStatus(end.Status), "provider_unavailable", "Selected provider is not reachable")
 	case "cancelled":
 		return
 	default:
-		writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
+		writeError(w, wsEndHTTPStatus(end.Status), "provider_error", "Selected provider failed; buyer should retry")
+	}
+}
+
+func wsEndHTTPStatus(status string) int {
+	switch status {
+	case "error_context_exceeded":
+		return http.StatusRequestEntityTooLarge
+	case "error_model_not_loaded", "error_queue_full":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusBadGateway
 	}
 }
 

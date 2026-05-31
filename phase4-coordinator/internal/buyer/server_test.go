@@ -3,12 +3,14 @@ package buyer_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
@@ -867,6 +870,136 @@ func TestRequestLogNilGuard(t *testing.T) {
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRequestLogBuyerMultiAttemptRows(t *testing.T) {
+	const requestID = "11111111-1111-4111-8111-111111111111"
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Request-ID"); got != requestID {
+			t.Fatalf("fail X-Request-ID = %q, want %q", got, requestID)
+		}
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer failUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Request-ID"); got != requestID {
+			t.Fatalf("ok X-Request-ID = %q, want %q", got, requestID)
+		}
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryRequestLogRows(t, dbPath, requestID)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2: %#v", len(rows), rows)
+	}
+	if rows[0].ID >= rows[1].ID {
+		t.Fatalf("ids not increasing: %#v", rows)
+	}
+	if rows[0].ProviderAssignedID.String != "s1" || rows[1].ProviderAssignedID.String != "s2" {
+		t.Fatalf("provider assignments = %#v, want s1 then s2", rows)
+	}
+	if rows[0].Retried != 0 || rows[1].Retried != 1 {
+		t.Fatalf("retried values = %d,%d want 0,1", rows[0].Retried, rows[1].Retried)
+	}
+	if rows[1].PromptTokens.Int64 != 4 || !rows[1].PromptTokens.Valid || rows[1].CompletionTokens.Int64 != 2 || !rows[1].CompletionTokens.Valid {
+		t.Fatalf("success usage not logged: %#v", rows[1])
+	}
+}
+
+func TestRequestLogBuyerErrorCodePopulation(t *testing.T) {
+	const requestID = "22222222-2222-4222-8222-222222222222"
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, gotRequestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			if gotRequestID != requestID {
+				t.Fatalf("relay request_id = %q, want %q", gotRequestID, requestID)
+			}
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: gotRequestID, Status: "error_model_not_loaded"}
+			return &providerws.RelayStream{RequestID: gotRequestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-Request-ID": []string{requestID},
+	})
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryRequestLogRows(t, dbPath, requestID)
+	if len(rows) != 1 {
+		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusServiceUnavailable {
+		t.Fatalf("logged status = %d, want 503", rows[0].Status)
+	}
+	if !rows[0].ErrorCode.Valid || rows[0].ErrorCode.String != "error_model_not_loaded" {
+		t.Fatalf("error_code = %#v, want error_model_not_loaded", rows[0].ErrorCode)
+	}
+	if rows[0].PromptTokens.Valid || rows[0].CompletionTokens.Valid {
+		t.Fatalf("usage tokens = %#v/%#v, want NULL", rows[0].PromptTokens, rows[0].CompletionTokens)
+	}
+}
+
+func TestRequestLogBuyerValidationFailure(t *testing.T) {
+	const requestID = "33333333-3333-4333-8333-333333333333"
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry(nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRequestLog(reqLog))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":"bad"}`), http.Header{"X-Request-ID": []string{requestID}})
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryRequestLogRows(t, dbPath, requestID)
+	if len(rows) != 1 {
+		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
+	}
+	if rows[0].ProviderAssignedID.Valid {
+		t.Fatalf("provider_assigned_id = %#v, want NULL", rows[0].ProviderAssignedID)
+	}
+	if rows[0].Status != http.StatusBadRequest || rows[0].Model != "model-a" {
+		t.Fatalf("row = %#v, want 400/model-a", rows[0])
 	}
 }
 
@@ -3393,6 +3526,69 @@ func deadMidInferenceRelay(ctx context.Context, provider pool.Provider, requestI
 	}
 	errs <- providerws.ErrRelayClosed
 	return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+}
+
+type requestLogTestRow struct {
+	ID                 int64
+	RequestID          string
+	Model              string
+	ProviderAssignedID sql.NullString
+	PromptTokens       sql.NullInt64
+	CompletionTokens   sql.NullInt64
+	Status             int
+	ErrorCode          sql.NullString
+	Retried            int
+}
+
+func openBuyerRequestLog(t *testing.T) (*requestlog.Store, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("open request log: %v", err)
+	}
+	return store, dbPath
+}
+
+func queryRequestLogRows(t *testing.T, dbPath, requestID string) []requestLogTestRow {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open request log db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`
+SELECT id, request_id, model, provider_assigned_id, prompt_tokens,
+       completion_tokens, status, error_code, retried
+FROM request_log
+WHERE request_id = ?
+ORDER BY id ASC`, requestID)
+	if err != nil {
+		t.Fatalf("query request log: %v", err)
+	}
+	defer rows.Close()
+	var got []requestLogTestRow
+	for rows.Next() {
+		var row requestLogTestRow
+		if err := rows.Scan(
+			&row.ID,
+			&row.RequestID,
+			&row.Model,
+			&row.ProviderAssignedID,
+			&row.PromptTokens,
+			&row.CompletionTokens,
+			&row.Status,
+			&row.ErrorCode,
+			&row.Retried,
+		); err != nil {
+			t.Fatalf("scan request log: %v", err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("request log rows: %v", err)
+	}
+	return got
 }
 
 func chatBodyWithContent(model, content string) []byte {

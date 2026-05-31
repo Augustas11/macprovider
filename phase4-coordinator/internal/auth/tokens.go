@@ -66,6 +66,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA busy_timeout=5000`); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS provider_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

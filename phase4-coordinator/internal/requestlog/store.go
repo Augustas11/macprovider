@@ -15,6 +15,10 @@ type Store struct {
 	db *sql.DB
 }
 
+type execer interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
 type Row struct {
 	TSUtc              time.Time
 	RequestID          string
@@ -72,7 +76,7 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `
+	if _, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS request_log (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_utc               TEXT    NOT NULL,
@@ -97,16 +101,29 @@ CREATE INDEX IF NOT EXISTS idx_request_log_ts_utc
     ON request_log(ts_utc);
 CREATE INDEX IF NOT EXISTS idx_request_log_request_id_id
     ON request_log(request_id, id);
-`)
-	return err
+`); err != nil {
+		return err
+	}
+	return s.ensureColumns(ctx)
 }
 
 func (s *Store) Insert(ctx context.Context, row Row) error {
+	return insert(ctx, s.db, row)
+}
+
+func (s *Store) InsertTx(ctx context.Context, tx *sql.Tx, row Row) error {
+	if tx == nil {
+		return fmt.Errorf("tx is required")
+	}
+	return insert(ctx, tx, row)
+}
+
+func insert(ctx context.Context, db execer, row Row) error {
 	var totalTokens sql.NullInt64
 	if row.PromptTokens != nil && row.CompletionTokens != nil {
 		totalTokens = sql.NullInt64{Int64: *row.PromptTokens + *row.CompletionTokens, Valid: true}
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err := db.ExecContext(ctx, `
 INSERT INTO request_log (
     ts_utc,
     request_id,
@@ -145,6 +162,74 @@ INSERT INTO request_log (
 		row.Retried,
 	)
 	return err
+}
+
+func (s *Store) ensureColumns(ctx context.Context) error {
+	cols, err := s.columns(ctx)
+	if err != nil {
+		return err
+	}
+	for _, migration := range []struct {
+		name string
+		sql  string
+	}{
+		{name: "provider_assigned_id", sql: `ALTER TABLE request_log ADD COLUMN provider_assigned_id TEXT NULL`},
+		{name: "prompt_tokens", sql: `ALTER TABLE request_log ADD COLUMN prompt_tokens INTEGER NULL`},
+		{name: "completion_tokens", sql: `ALTER TABLE request_log ADD COLUMN completion_tokens INTEGER NULL`},
+		{name: "total_tokens", sql: `ALTER TABLE request_log ADD COLUMN total_tokens INTEGER NULL`},
+		{name: "latency_ms", sql: `ALTER TABLE request_log ADD COLUMN latency_ms REAL NOT NULL DEFAULT 0`},
+		{name: "routing_ms", sql: `ALTER TABLE request_log ADD COLUMN routing_ms REAL NOT NULL DEFAULT 0`},
+		{name: "status", sql: `ALTER TABLE request_log ADD COLUMN status INTEGER NOT NULL DEFAULT 0`},
+		{name: "stream", sql: `ALTER TABLE request_log ADD COLUMN stream INTEGER NOT NULL DEFAULT 0`},
+		{name: "buyer_ip", sql: `ALTER TABLE request_log ADD COLUMN buyer_ip TEXT NOT NULL DEFAULT ''`},
+		{name: "error", sql: `ALTER TABLE request_log ADD COLUMN error TEXT NULL`},
+		{name: "error_code", sql: `ALTER TABLE request_log ADD COLUMN error_code TEXT NULL`},
+		{name: "pref_header", sql: `ALTER TABLE request_log ADD COLUMN pref_header TEXT NULL`},
+		{name: "provider_header", sql: `ALTER TABLE request_log ADD COLUMN provider_header TEXT NULL`},
+		{name: "retried", sql: `ALTER TABLE request_log ADD COLUMN retried INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if cols[migration.name] {
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, migration.sql); err != nil {
+			return err
+		}
+	}
+	return s.requireColumns(ctx, []string{"id", "ts_utc", "request_id", "model"})
+}
+
+func (s *Store) columns(ctx context.Context) (map[string]bool, error) {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(request_log)`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	cols := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return nil, err
+		}
+		cols[name] = true
+	}
+	return cols, rows.Err()
+}
+
+func (s *Store) requireColumns(ctx context.Context, names []string) error {
+	cols, err := s.columns(ctx)
+	if err != nil {
+		return err
+	}
+	for _, name := range names {
+		if !cols[name] {
+			return fmt.Errorf("request_log missing required column %s", name)
+		}
+	}
+	return nil
 }
 
 func nullString(v string) sql.NullString {
