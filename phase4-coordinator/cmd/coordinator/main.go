@@ -17,6 +17,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
@@ -46,6 +47,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer tokenStore.Close()
+	reqLogStore, err := requestlog.OpenStore(cfg.Storage.DBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "requestlog: %v\n", err)
+		os.Exit(1)
+	}
+	defer reqLogStore.Close()
 	wsOpts := []providerws.Option{}
 	if cfg.Auth.RequireProviderTokens {
 		wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
@@ -68,6 +75,7 @@ func main() {
 		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
+		buyer.WithRequestLog(reqLogStore),
 		buyer.WithPreflight(func(provider pool.Provider, requestID string, estimatedTokens int, timeout time.Duration) (buyer.PreflightResult, bool, error) {
 			ack, ok, err := wsServer.Preflight(provider, requestID, estimatedTokens, timeout)
 			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err
