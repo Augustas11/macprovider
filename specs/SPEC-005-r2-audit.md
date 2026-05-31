@@ -601,3 +601,51 @@ merged, SPEC-005 should be lock-ready for
 `BUILD_PHASE5_SPEC_005_PROMPT.md`. The operator decides whether v0.3
 locks contingent on the SPEC-002/SPEC-006 patches or in parallel
 (R2-Q3).
+
+---
+
+## Regression check on SPEC-005 v0.3 (Codex, 2026-05-31T07:35:01Z)
+
+### Scope
+
+This single-pass regression audit checked only:
+
+1. Whether the v0.3 FIX introduced any new contradiction with locked SPEC-005 § 2 decisions D1-D12.
+2. Whether the bundled SPEC-002 v1.3.4 / SPEC-006 v0.8.2 cross-spec patches introduced a new gap with a spec not covered by the FIX prompt.
+
+Evidence reviewed:
+
+- Phase A commit `39d9d93` changed only `specs/SPEC-005-billing.md`, `specs/SPEC-002-coordinator.md`, and `specs/SPEC-006-buyer-api.md`.
+- `git show --unified=0 HEAD -- specs/SPEC-005-billing.md` shows no edits to SPEC-005 § 2 D1-D12 decision text.
+- SPEC-005 v0.3 now depends on SPEC-002 v1.3.4 and SPEC-006 v0.8.2, matching the bundled cross-spec versions.
+- SPEC-002 v1.3.4 supplies the `request_log.error_code`, `idx_request_log_ts_utc`, `idx_request_log_request_id_id`, and multi-row-per-request_id contracts SPEC-005 v0.3 references.
+- SPEC-006 v0.8.2 supplies the SPEC-001 null-usage error quota-settlement row SPEC-005 v0.3 mirrors.
+
+### Summary
+
+- 0 CRITICAL findings
+- 0 MAJOR findings
+- 0 MINOR findings
+- 0 QUESTIONS
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+None.
+
+### MINOR findings
+
+None.
+
+### Operator questions surfaced
+
+None.
+
+### Verdict
+
+**CLEAN.**
+
+The v0.3 FIX did not alter locked D1-D12 text and did not introduce a new uncovered cross-spec gap. The SPEC-007 consumer contract remains intentionally housed inside SPEC-005 because SPEC-007 does not exist yet; no sibling SPEC-007 patch is available or required in this pass. Proceed to Phase C lock.
