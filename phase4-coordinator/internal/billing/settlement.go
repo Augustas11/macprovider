@@ -45,7 +45,8 @@ ON CONFLICT(idempotency_key) DO UPDATE SET
     source_credit_count = source_credit_count + excluded.source_credit_count,
     gross_credits = gross_credits + excluded.gross_credits,
     provider_credits = provider_credits + excluded.provider_credits,
-    operator_credits = operator_credits + excluded.operator_credits`,
+    operator_credits = operator_credits + excluded.operator_credits
+WHERE ledger_payout_ready.status = 'ready'`,
 			providerID,
 			windowStart.UTC().Format(time.RFC3339Nano),
 			windowEnd.UTC().Format(time.RFC3339Nano),
@@ -61,12 +62,17 @@ ON CONFLICT(idempotency_key) DO UPDATE SET
 		if err != nil {
 			return err
 		}
-		settlementID, _ := res.LastInsertId()
-		if settlementID == 0 {
-			err = tx.QueryRowContext(ctx, `SELECT id FROM ledger_payout_ready WHERE idempotency_key = ?`, key).Scan(&settlementID)
-			if err != nil {
-				return err
-			}
+		var settlementID int64
+		var payoutStatus string
+		err = tx.QueryRowContext(ctx, `SELECT id, status FROM ledger_payout_ready WHERE idempotency_key = ?`, key).Scan(&settlementID, &payoutStatus)
+		if err != nil {
+			return err
+		}
+		if payoutStatus != "ready" {
+			continue
+		}
+		if affected, _ := res.RowsAffected(); affected == 0 {
+			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
@@ -101,6 +107,9 @@ func (s *Store) StartWeeklySettlement(ctx context.Context, cfg SettlementConfig)
 				return
 			case <-timer.C:
 				cfg := s.SettlementConfig(cfg)
+				if !cfg.JobEnabled {
+					continue
+				}
 				end := next
 				start := end.AddDate(0, 0, -cfg.CadenceDays)
 				_ = s.RunSettlement(ctx, cfg, start, end)

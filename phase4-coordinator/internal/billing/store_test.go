@@ -120,7 +120,7 @@ func TestWriteHotPath_NullError_ZeroCredits(t *testing.T) {
 	}
 }
 
-func TestWriteHotPath_DuplicateRequestIDDerivesAttempt(t *testing.T) {
+func TestWriteHotPath_DuplicateRequestIDWithoutRetryQuarantinesAttempt(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
 	row.RequestID = "buyer-controlled-duplicate"
@@ -136,11 +136,36 @@ func TestWriteHotPath_DuplicateRequestIDDerivesAttempt(t *testing.T) {
 	if err := store.WriteHotPath(context.Background(), reqStore, row2, input2); err != nil {
 		t.Fatal(err)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND attempt_n IN (0, 1)`, row.RequestID); got != 2 {
-		t.Fatalf("ledger attempts=%d want 2", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND attempt_n = 1 AND quarantined = 1 AND quarantine_reason = 'ambiguous_attempt_n'`, row.RequestID); got != 1 {
+		t.Fatalf("quarantined duplicate attempts=%d want 1", got)
 	}
-	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_provider_identity_snapshots WHERE request_id = ? AND attempt_n IN (0, 1)`, row.RequestID); got != 2 {
-		t.Fatalf("identity attempts=%d want 2", got)
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_operator_credits WHERE request_id = ? AND attempt_n = 1`, row.RequestID); got != 0 {
+		t.Fatalf("operator rows for ambiguous attempt=%d want 0", got)
+	}
+}
+
+func TestWriteHotPath_DerivedBillingAttemptAllowedWhenAttemptMatches(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "failover-attempt"
+	input.RequestID = row.RequestID
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	input2 := input
+	row2 := row
+	input2.AttemptN = 1
+	input2.ProviderID = "provider-b"
+	input2.ProviderAssignedID = "assigned-b"
+	row2.ProviderAssignedID = "assigned-b"
+	if err := store.WriteHotPath(context.Background(), reqStore, row2, input2); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND attempt_n = 1 AND quarantined = 0`, row.RequestID); got != 1 {
+		t.Fatalf("payable derived attempt rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_operator_credits WHERE request_id = ? AND attempt_n = 1`, row.RequestID); got != 1 {
+		t.Fatalf("operator rows for derived attempt=%d want 1", got)
 	}
 }
 
@@ -209,6 +234,150 @@ func TestRecoverLedger_QuarantinesOrphanLedgerRows(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id = 'orphan-provider' AND quarantined = 1 AND quarantine_reason = 'missing_request_log'`); got != 1 {
 		t.Fatalf("orphan quarantined rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_QuarantinesLedgerRowsWithoutMatchingAttemptProviderEvidence(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	ts := time.Unix(200, 0).UTC()
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "shared-request", Model: "model-a", ProviderAssignedID: "assigned-a",
+		Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	insertCreditWithRequest(t, store.db, "shared-request", "bogus-provider", ts, 500)
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'shared-request' AND provider_id = 'bogus-provider' AND quarantined = 1 AND quarantine_reason = 'missing_request_log'`); got != 1 {
+		t.Fatalf("bogus ledger quarantine rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_QuarantinesInvalidUsageTokens(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	if _, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Unix(200, 0).UTC()
+	prompt, completion := int64(-1), int64(1000)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "invalid-usage", Model: "model-a", ProviderAssignedID: "assigned-a",
+		PromptTokens: &prompt, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO ledger_provider_identity_snapshots (request_id, attempt_n, provider_assigned_id, provider_id, resolved_from, created_at_utc) VALUES ('invalid-usage', 0, 'assigned-a', 'provider-a', 'pool_entry', ?)`, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'invalid-usage' AND quarantined = 1 AND quarantine_reason = 'invalid_usage_tokens'`); got != 1 {
+		t.Fatalf("invalid usage quarantine rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_InvalidUsageQuarantinesExistingActiveRows(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	if _, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Unix(200, 0).UTC()
+	prompt, completion := int64(-1), int64(1000)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "invalid-existing", Model: "model-a", ProviderAssignedID: "assigned-a",
+		PromptTokens: &prompt, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO ledger_provider_identity_snapshots (request_id, attempt_n, provider_assigned_id, provider_id, resolved_from, created_at_utc) VALUES ('invalid-existing', 0, 'assigned-a', 'provider-a', 'pool_entry', ?)`, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	insertCreditWithRequest(t, store.db, "invalid-existing", "provider-a", ts, 500)
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'invalid-existing' AND provider_id = 'provider-a' AND quarantined = 1 AND quarantine_reason = 'invalid_usage_tokens'`); got != 1 {
+		t.Fatalf("existing invalid usage quarantine rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_QuarantinesExistingSplitMismatch(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "split-mismatch"
+	input.RequestID = row.RequestID
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM ledger_operator_credits WHERE request_id = ?`, row.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "nightly_reconcile"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'split-mismatch' AND quarantined = 1 AND quarantine_reason = 'reconciliation_mismatch'`); got != 1 {
+		t.Fatalf("mismatch quarantine rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_QuarantinesExistingContractMismatch(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "contract-mismatch"
+	input.RequestID = row.RequestID
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+UPDATE ledger_request_credits
+   SET usage_source = 'null_error', gross_credits = 0, provider_credits = 0, fault_flag = 'null_usage_error'
+ WHERE request_id = ?`, row.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE ledger_operator_credits SET gross_credits = 0, operator_credits = 0, fault_flag = 'null_usage_error' WHERE request_id = ?`, row.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "nightly_reconcile"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'contract-mismatch' AND quarantined = 1 AND quarantine_reason = 'reconciliation_mismatch'`); got != 1 {
+		t.Fatalf("contract mismatch quarantine rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_AllowsExistingFailoverAttemptWithoutRetriedFlag(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "recover-failover"
+	input.RequestID = row.RequestID
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	input2 := input
+	row2 := row
+	input2.AttemptN = 1
+	input2.ProviderID = "provider-b"
+	input2.ProviderAssignedID = "assigned-b"
+	row2.ProviderAssignedID = "assigned-b"
+	if err := store.WriteHotPath(context.Background(), reqStore, row2, input2); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "nightly_reconcile"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'recover-failover' AND quarantined = 1`); got != 0 {
+		t.Fatalf("quarantined failover rows=%d want 0", got)
 	}
 }
 
@@ -287,6 +456,29 @@ func TestSettlement_RerunAddsLateRowsToExistingPayout(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT source_credit_count FROM ledger_payout_ready WHERE provider_id = 'provider-a'`); got != 2 {
 		t.Fatalf("source count=%d want 2", got)
+	}
+}
+
+func TestSettlement_RerunDoesNotMutateConsumedPayout(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	cfg := SettlementConfig{CadenceDays: 7, MinPayoutCredits: 500}
+	insertCredit(t, store.db, "provider-a", start.Add(time.Hour), 500)
+	if err := store.RunSettlement(context.Background(), cfg, start, start.AddDate(0, 0, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE ledger_payout_ready SET status = 'consumed' WHERE provider_id = 'provider-a'`); err != nil {
+		t.Fatal(err)
+	}
+	insertCredit(t, store.db, "provider-a", start.Add(2*time.Hour), 600)
+	if err := store.RunSettlement(context.Background(), cfg, start, start.AddDate(0, 0, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = 'provider-a'`); got != 500 {
+		t.Fatalf("consumed payout provider credits=%d want 500", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id = 'provider-a' AND settled = 0`); got != 1 {
+		t.Fatalf("unsettled late rows=%d want 1", got)
 	}
 }
 
@@ -409,6 +601,11 @@ func scalar(t *testing.T, db *sql.DB, query string, args ...any) int64 {
 func insertCredit(t *testing.T, db *sql.DB, providerID string, ts time.Time, providerCredits int64) {
 	t.Helper()
 	requestID := providerID + "-" + ts.UTC().Format("20060102150405.000000000") + "-req"
+	insertCreditWithRequest(t, db, requestID, providerID, ts, providerCredits)
+}
+
+func insertCreditWithRequest(t *testing.T, db *sql.DB, requestID, providerID string, ts time.Time, providerCredits int64) {
+	t.Helper()
 	_, err := db.Exec(`
 INSERT INTO ledger_request_credits (
     request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,

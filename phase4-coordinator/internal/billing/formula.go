@@ -134,32 +134,38 @@ func ComputeCredits(
 	}
 	if invalidBillableTokenCount(prompt) || invalidBillableTokenCount(completion) {
 		row.FaultFlag = FaultNullUsageError
+		row.UsageSource = UsageNullError
 		return zeroCredits(row)
 	}
 	promptNumerator, ok := checkedMul(prompt, rateEntry.PromptCreditsPerMtok)
 	if !ok {
 		row.FaultFlag = FaultNullUsageError
+		row.UsageSource = UsageNullError
 		return zeroCredits(row)
 	}
 	completionNumerator, ok := checkedMul(completion, rateEntry.CompletionCreditsPerMtok)
 	if !ok {
 		row.FaultFlag = FaultNullUsageError
+		row.UsageSource = UsageNullError
 		return zeroCredits(row)
 	}
 	baseNumerator, ok := checkedAdd(promptNumerator, completionNumerator)
 	if !ok {
 		row.FaultFlag = FaultNullUsageError
+		row.UsageSource = UsageNullError
 		return zeroCredits(row)
 	}
 	rateScaled, ok := checkedMul(baseNumerator, multiplierPPM)
 	if !ok {
 		row.FaultFlag = FaultNullUsageError
+		row.UsageSource = UsageNullError
 		return zeroCredits(row)
 	}
 	row.GrossCredits = RoundHalfEven(rateScaled, globalMultiplierDenom*tokensPerMillion)
 	providerNumerator, ok := checkedMul(row.GrossCredits, providerShareBps)
 	if !ok {
 		row.FaultFlag = FaultNullUsageError
+		row.UsageSource = UsageNullError
 		return zeroCredits(row)
 	}
 	row.ProviderCredits = RoundHalfEven(providerNumerator, providerShareDenom)
@@ -198,6 +204,11 @@ func zeroCredits(row BilledRow) BilledRow {
 	row.GrossCredits = 0
 	row.ProviderCredits = 0
 	row.OperatorCredits = 0
+	if row.FaultFlag == FaultNullUsageError {
+		row.PromptTokens = nil
+		row.CompletionTokens = nil
+		row.EstimatedCompTokens = nil
+	}
 	return row
 }
 

@@ -206,24 +206,34 @@ INSERT INTO ledger_reconciliation_runs (
 
 func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time) (int64, error) {
 	rows, err := h.store.db.QueryContext(ctx, `
-SELECT ts_utc, model, prompt_tokens, completion_tokens, status, error_code
-  FROM request_log
- WHERE ts_utc >= ? AND ts_utc < ?
- ORDER BY ts_utc, id`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_tokens, rl.status, rl.error_code,
+       COALESCE((
+         SELECT COUNT(*) - 1 FROM request_log prior
+          WHERE prior.request_id = rl.request_id AND prior.id <= rl.id
+       ), 0) AS attempt_n
+  FROM request_log rl
+ WHERE rl.ts_utc >= ? AND rl.ts_utc < ?
+ ORDER BY rl.ts_utc, rl.id`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
 	total := int64(0)
 	for rows.Next() {
-		var tsText, model string
+		var requestID, tsText, model string
 		var prompt, completion sql.NullInt64
-		var status int
+		var status, attemptN int
 		var errorCode sql.NullString
-		if err := rows.Scan(&tsText, &model, &prompt, &completion, &status, &errorCode); err != nil {
+		if err := rows.Scan(&requestID, &tsText, &model, &prompt, &completion, &status, &errorCode, &attemptN); err != nil {
 			return 0, err
 		}
 		if status == http.StatusServiceUnavailable {
+			continue
+		}
+		if gross, ok, err := h.byteEstimatedLedgerGross(ctx, requestID, attemptN); err != nil {
+			return 0, err
+		} else if ok {
+			total += gross
 			continue
 		}
 		ts, err := time.Parse(time.RFC3339Nano, tsText)
@@ -247,6 +257,22 @@ SELECT ts_utc, model, prompt_tokens, completion_tokens, status, error_code
 		total += row.GrossCredits
 	}
 	return total, rows.Err()
+}
+
+func (h *handler) byteEstimatedLedgerGross(ctx context.Context, requestID string, attemptN int) (int64, bool, error) {
+	var gross sql.NullInt64
+	var rows int64
+	err := h.store.db.QueryRowContext(ctx, `
+SELECT SUM(gross_credits), COUNT(*)
+  FROM ledger_request_credits
+ WHERE request_id = ? AND attempt_n = ? AND quarantined = 0 AND usage_source = 'byte_estimated'`, requestID, attemptN).Scan(&gross, &rows)
+	if err != nil {
+		return 0, false, err
+	}
+	if rows != 1 || !gross.Valid {
+		return 0, false, nil
+	}
+	return gross.Int64, true, nil
 }
 
 func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {

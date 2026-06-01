@@ -54,6 +54,33 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	var requestCount int
 	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE request_id = ?`, in.RequestID).Scan(&requestCount); err == nil && requestCount > 0 {
 		if derived := requestCount - 1; derived > in.AttemptN {
+			if in.AttemptN != derived {
+				in.AttemptN = derived
+				if in.TSUtc.IsZero() {
+					in.TSUtc = time.Now().UTC()
+				}
+				if in.FaultFlag == "" {
+					in.FaultFlag = FaultNone
+				}
+				result := ComputeCredits(
+					in.PromptTokens,
+					in.CompletionTokens,
+					in.EstimatedCompTokens,
+					usageFor(in.ErrorCode, in.EstimatedCompTokens),
+					in.FaultFlag,
+					in.RateEntry,
+					in.MultiplierPPM,
+					in.ProviderShareBps,
+				)
+				result = zeroCredits(result)
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, "ambiguous_attempt_n"); err != nil {
+					return err
+				}
+				_, err := conn.ExecContext(ctx, `COMMIT`)
+				committed = err == nil
+				return err
+			}
 			in.AttemptN = derived
 		}
 	}

@@ -801,6 +801,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	requestLogModel := ""
 	requestLogStream := false
 	explicitRetries := 0
+	billingAttemptN := 0
 	logRowWithBilling := func(
 		providerAssignedID string,
 		status int,
@@ -812,6 +813,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	) {
 		if s.reqLog == nil {
 			return
+		}
+		attemptN := billingAttemptN
+		if providerAssignedID != "" && status != http.StatusServiceUnavailable {
+			defer func() {
+				billingAttemptN++
+			}()
 		}
 		row := requestlog.Row{
 			TSUtc:              startedAt,
@@ -848,7 +855,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billing.HotPathInput{
 					RequestID:           row.RequestID,
-					AttemptN:            retried,
+					AttemptN:            attemptN,
 					ProviderAssignedID:  providerAssignedID,
 					ProviderID:          stableProviderID,
 					Model:               row.Model,
@@ -1397,8 +1404,8 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	committed := false
 	finishReason := ""
 	bytesEmitted := 0
-	progressAttempt := func(message string) requestLogAttempt {
-		return requestLogAttempt{Status: http.StatusOK, Error: message, EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted)}
+	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
+		return requestLogAttempt{Status: http.StatusOK, Error: message, EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: faultFlag}
 	}
 	commit := func() {
 		if committed {
@@ -1453,14 +1460,18 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		select {
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
-			return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming")
+			return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
 				continue
 			}
 			if done, result := writeChunk(chunk.Data); done {
-				return result, progressAttempt("")
+				faultFlag := billing.FaultNone
+				if result == wsForwardFailed {
+					faultFlag = billing.FaultBreakerQualifying
+				}
+				return result, progressAttempt("", faultFlag)
 			}
 		case end := <-relay.Done:
 			for chunks != nil {
@@ -1471,7 +1482,11 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 						continue
 					}
 					if done, result := writeChunk(chunk.Data); done {
-						return result, progressAttempt("")
+						faultFlag := billing.FaultNone
+						if result == wsForwardFailed {
+							faultFlag = billing.FaultBreakerQualifying
+						}
+						return result, progressAttempt("", faultFlag)
 					}
 				default:
 					chunks = nil
@@ -1497,6 +1512,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				writeSSEError(w, "Provider failed during streaming", "provider_error")
 				attempt.Error = endErrorMessage(end)
 				attempt.ErrorCode = spec001EndStatus(end.Status)
+				attempt.FaultFlag = billing.FaultBreakerQualifying
 				if attempt.CompletionTokens == nil {
 					attempt.EstimatedCompTokens = estimatedCompletionTokensFromBytes(bytesEmitted)
 				}
@@ -1509,7 +1525,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws streaming relay failed")
 			if errors.Is(err, providerws.ErrRelayClosed) {
 				if r.Context().Err() != nil {
-					return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming")
+					return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 				}
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				if !committed {
@@ -1542,14 +1558,14 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider encrypted response failed authentication", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted)}
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider encrypted response failed authentication", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 			}
 			commit()
 			writeSSEError(w, "Provider failed during streaming", "provider_error")
 			if flusher != nil {
 				flusher.Flush()
 			}
-			return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider failed during streaming", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted)}
+			return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider failed during streaming", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 		}
 	}
 }
@@ -1606,8 +1622,8 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	reader := bufio.NewReader(resp.Body)
 	var promptTok, completionTok *int64
 	bytesEmitted := 0
-	progressAttempt := func(message string) requestLogAttempt {
-		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, Error: message}
+	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
+		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, Error: message, FaultFlag: faultFlag}
 		if completionTok == nil {
 			attempt.EstimatedCompTokens = estimatedCompletionTokensFromBytes(bytesEmitted)
 		}
@@ -1621,7 +1637,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			}
 			if _, writeErr := w.Write(line); writeErr != nil {
 				s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
-				return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming")
+				return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 			}
 			bytesEmitted += len(line)
 			if flusher != nil {
@@ -1640,7 +1656,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if flusher != nil {
 			flusher.Flush()
 		}
-		return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider disconnected during streaming")
+		return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider disconnected during streaming", billing.FaultBreakerQualifying)
 	}
 }
 
@@ -2726,14 +2742,7 @@ func tokenPointersFromUsageObject(raw json.RawMessage) (*int64, *int64) {
 	if err := json.Unmarshal(raw, &usage); err != nil {
 		return nil, nil
 	}
-	if !validRequestLogUsageToken(usage.PromptTokens) || !validRequestLogUsageToken(usage.CompletionTokens) {
-		return nil, nil
-	}
 	return usage.PromptTokens, usage.CompletionTokens
-}
-
-func validRequestLogUsageToken(v *int64) bool {
-	return v == nil || (*v >= 0 && *v <= maxRequestLogUsageTokens)
 }
 
 func estimatedCompletionTokensFromBytes(n int) *int64 {

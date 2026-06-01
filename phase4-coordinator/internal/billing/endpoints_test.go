@@ -136,6 +136,33 @@ func TestReconcileEndpoint_DetectsMissingOperatorSplit(t *testing.T) {
 	}
 }
 
+func TestReconcileEndpoint_DuplicateByteEstimatedRowsDoNotHideDelta(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	ts := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "dup-byte", Model: "model-a", ProviderAssignedID: "assigned-a",
+		Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	insertByteEstimatedCredit(t, store.db, "dup-byte", "provider-a", ts, 100)
+	insertByteEstimatedCredit(t, store.db, "dup-byte", "provider-b", ts, 100)
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from=2026-06-01&to=2026-06-08", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["delta_gross_credits"].(float64) == 0 {
+		t.Fatalf("delta_gross_credits=%v want non-zero", resp["delta_gross_credits"])
+	}
+}
+
 func TestReconcileEndpoint_RejectsOversizedRange(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from=2026-06-01&to=2026-07-15", nil)
@@ -210,3 +237,32 @@ func requestLogRow(in HotPathInput) requestlog.Row {
 }
 
 var _ = sql.ErrNoRows
+
+func insertByteEstimatedCredit(t *testing.T, db *sql.DB, requestID, providerID string, ts time.Time, gross int64) {
+	t.Helper()
+	res, err := db.Exec(`
+INSERT INTO ledger_request_credits (
+    request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
+    status, stream, prompt_tokens, completion_tokens, estimated_completion_tokens,
+    usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+    global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
+    fault_flag, recovery_source, created_at_utc
+) VALUES (?, 0, ?, 'assigned', ?, 'model-a', 200, 1, NULL, NULL, 100,
+          'byte_estimated', 1, 1, 1000000, ?, 9000, ?, 'none', 'hot_path', ?)`,
+		requestID, providerID, ts.Format(time.RFC3339Nano), gross, gross, ts.Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+INSERT INTO ledger_operator_credits (
+    request_credit_id, request_id, attempt_n, provider_id, ts_utc,
+    gross_credits, operator_share_bps, operator_credits, fault_flag, created_at_utc
+) VALUES (?, ?, 0, ?, ?, ?, 1000, 0, 'none', ?)`,
+		id, requestID, providerID, ts.Format(time.RFC3339Nano), gross, ts.Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+}
