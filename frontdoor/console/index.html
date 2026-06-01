@@ -755,7 +755,7 @@ function renderModelMenu() {
   if (poolStatus && poolStatus.status === 'idle') {
     const note = document.createElement('div')
     note.className = 'model-sleep-note'
-    note.textContent = 'Providers asleep — first request wakes them up.'
+    note.textContent = 'Provider warming up — ready shortly.'
     menu.appendChild(note)
   }
 }
@@ -784,7 +784,7 @@ async function fetchStatus() {
     const label = document.getElementById('sbPoolLabel')
     dot.className = 'pool-dot'
     if (j.status === 'up') { dot.classList.add('ok'); label.textContent = 'pool up' }
-    else if (j.status === 'idle') { dot.classList.add('warn'); label.textContent = 'idle' }
+    else if (j.status === 'idle') { dot.classList.add('warn'); label.textContent = (j.pool && j.pool.total_providers > 0) ? 'warming up' : 'idle' }
     else { dot.classList.add('bad'); label.textContent = 'down' }
 
     if (j.models && j.models.length > 0) {
@@ -811,7 +811,7 @@ function ensureToken() {
         demoToken = j.demo_token
         return demoToken
       })
-      .catch(e => { mintingPromise = null; throw e })
+      .catch(e => { mintingPromise = null; let minting = true; minting=null;throw e })
   }
   return mintingPromise
 }
@@ -865,6 +865,7 @@ async function send() {
       try { j = await r.json() } catch(e) {}
       throw new Error((j.error && j.error.message) || 'Request failed: ' + r.status)
     }
+    const requestId = r.headers.get("X-Request-ID")
 
     const reader = r.body.getReader()
     const dec = new TextDecoder()
