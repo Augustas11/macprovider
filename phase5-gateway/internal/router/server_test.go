@@ -735,8 +735,15 @@ func TestKillSwitchPersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload config: %v", err)
 	}
-	if !reloaded.KillSwitch.AllPublicAPI {
-		t.Fatalf("kill switch did not persist")
+	if reloaded.KillSwitch.AllPublicAPI {
+		t.Fatalf("kill switch mutated deploy config")
+	}
+	runtimeState, err := store.GetKillSwitch(context.Background())
+	if err != nil {
+		t.Fatalf("runtime kill switch: %v", err)
+	}
+	if !runtimeState.AllPublicAPI {
+		t.Fatalf("kill switch did not persist to runtime state")
 	}
 	if countAuditEvents(t, cfg.Storage.DBPath, "kill_switch_toggled") != 1 {
 		t.Fatalf("kill_switch_toggled audit missing")
@@ -1090,6 +1097,23 @@ func TestStickyConversationDerivesInternalHeaderAndStripsInjection(t *testing.T)
 	if countAuditEvents(t, dbPath, "internal_header_injection_stripped") != 1 {
 		t.Fatalf("internal header injection audit missing")
 	}
+}
+
+func TestChatCompletionRejectsOversizedCoordinatorBody(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, string(bytes.Repeat([]byte("x"), 16<<20+1))), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_oversized_body")
+
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "upstream_provider_error")
 }
 
 func TestStickyConversationIgnoredForDemoTraffic(t *testing.T) {

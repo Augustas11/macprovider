@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -17,6 +18,8 @@ type AdmissionManager struct {
 	records        map[string]*ProvisionalRecord
 	rejected       map[string]string
 	requestWindows map[string][]time.Time
+	store          AdmissionStateStore
+	onStoreError   func(error)
 }
 
 type ProvisionalRecord struct {
@@ -30,6 +33,33 @@ type ProvisionalRecord struct {
 	TotalTokensServed   int        `json:"total_tokens_served"`
 	PromotedAt          *time.Time `json:"promoted_at"`
 	CurrentlyConnected  bool       `json:"currently_connected"`
+}
+
+func (a *AdmissionManager) SetPersistence(store AdmissionStateStore, onError func(error)) {
+	if store == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.store = store
+	a.onStoreError = onError
+	state, err := store.LoadAdmissionState(context.Background())
+	if err != nil {
+		a.reportStoreErrorLocked(err)
+		return
+	}
+	if len(state.Admissions) > 0 {
+		a.admissions = append([]time.Time(nil), state.Admissions...)
+	}
+	if len(state.Records) > 0 {
+		a.records = state.Records
+	}
+	if len(state.Rejected) > 0 {
+		a.rejected = state.Rejected
+	}
+	if len(state.RequestWindows) > 0 {
+		a.requestWindows = state.RequestWindows
+	}
 }
 
 func NewAdmissionManager(cfg config.AdmissionConfig, now func() time.Time) *AdmissionManager {
@@ -80,6 +110,7 @@ func (a *AdmissionManager) Admit(hello Hello, pinned bool, connectedProvisional 
 	rec.Hostname = hello.Hostname
 	rec.ModelID = hello.ModelID
 	rec.BinaryVersion = hello.BinaryVersion
+	a.persistLocked()
 	return pool.TierProvisional, 0, ""
 }
 
@@ -116,6 +147,7 @@ func (a *AdmissionManager) TryReserveRequest(provider pool.Provider) bool {
 		rec.TotalRequestsServed++
 		rec.LastSeenAt = now
 	}
+	a.persistLocked()
 	return true
 }
 
@@ -132,6 +164,7 @@ func (a *AdmissionManager) RefundRequest(provider pool.Provider) {
 	if rec := a.records[provider.ProviderID]; rec != nil && rec.TotalRequestsServed > 0 {
 		rec.TotalRequestsServed--
 	}
+	a.persistLocked()
 }
 
 func (a *AdmissionManager) Promote(providerID string) (string, bool) {
@@ -143,6 +176,7 @@ func (a *AdmissionManager) Promote(providerID string) (string, bool) {
 	}
 	now := a.now()
 	rec.PromotedAt = &now
+	a.persistLocked()
 	return string(pool.TierProvisional), true
 }
 
@@ -150,6 +184,7 @@ func (a *AdmissionManager) Reject(providerID, reason string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.rejected[providerID] = reason
+	a.persistLocked()
 }
 
 func (a *AdmissionManager) Rejected(providerID string) bool {
@@ -167,6 +202,54 @@ func (a *AdmissionManager) Records(connected map[string]bool) []ProvisionalRecor
 		cp := *rec
 		cp.CurrentlyConnected = connected[rec.ProviderID]
 		out = append(out, cp)
+	}
+	return out
+}
+
+func (a *AdmissionManager) persistLocked() {
+	if a.store == nil {
+		return
+	}
+	if err := a.store.SaveAdmissionState(context.Background(), AdmissionState{
+		Admissions:     append([]time.Time(nil), a.admissions...),
+		Records:        cloneAdmissionRecords(a.records),
+		Rejected:       cloneStringMap(a.rejected),
+		RequestWindows: cloneTimeWindows(a.requestWindows),
+	}); err != nil {
+		a.reportStoreErrorLocked(err)
+	}
+}
+
+func (a *AdmissionManager) reportStoreErrorLocked(err error) {
+	if a.onStoreError != nil {
+		a.onStoreError(err)
+	}
+}
+
+func cloneAdmissionRecords(in map[string]*ProvisionalRecord) map[string]*ProvisionalRecord {
+	out := make(map[string]*ProvisionalRecord, len(in))
+	for k, v := range in {
+		if v == nil {
+			continue
+		}
+		cp := *v
+		out[k] = &cp
+	}
+	return out
+}
+
+func cloneStringMap(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func cloneTimeWindows(in map[string][]time.Time) map[string][]time.Time {
+	out := make(map[string][]time.Time, len(in))
+	for k, v := range in {
+		out[k] = append([]time.Time(nil), v...)
 	}
 	return out
 }

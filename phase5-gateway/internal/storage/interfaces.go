@@ -82,6 +82,8 @@ type CapacityStore interface {
 	LatestCapacitySignals(ctx context.Context) ([]CapacitySignalEvent, error)
 	GetCapacityTier(ctx context.Context) (CapacityTier, error)
 	SetCapacityTier(ctx context.Context, tier CapacityTier) error
+	GetKillSwitch(ctx context.Context) (KillSwitchState, error)
+	SetKillSwitch(ctx context.Context, state KillSwitchState) error
 }
 
 type ExplorerStore interface {

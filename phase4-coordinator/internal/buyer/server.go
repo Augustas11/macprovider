@@ -31,6 +31,8 @@ import (
 	"github.com/rs/zerolog"
 )
 
+var errBodyTooLarge = errors.New("upstream response body too large")
+
 type Server struct {
 	pool                   *pool.Registry
 	log                    zerolog.Logger
@@ -110,7 +112,11 @@ type requestLogAttempt struct {
 	FaultFlag           string
 }
 
-const maxRequestLogUsageTokens = int64(10000000)
+const (
+	maxRequestLogUsageTokens     = int64(10000000)
+	maxUpstreamResponseBodyBytes = int64(16 << 20)
+	requestLogWriteTimeout       = 6 * time.Second
+)
 
 const (
 	wsForwardComplete                      wsForwardResult = "complete"
@@ -811,9 +817,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		retried int,
 		estimatedCompTokens *int64,
 		faultFlag string,
-	) {
+	) error {
 		if s.reqLog == nil {
-			return
+			return nil
 		}
 		attemptN := billingAttemptN
 		if providerAssignedID != "" {
@@ -839,7 +845,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			ProviderHeader:     sanitizeRequestLogText(r.Header.Get("X-MacProvider-Provider")),
 			Retried:            retried,
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+		ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 		defer cancel()
 		billingStore, billingCfg, billingSnapshotID := s.billingState()
 		if billingStore != nil && s.reqLogStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
@@ -854,7 +860,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}
 			if stableProviderID == "" {
 				s.log.Warn().Str("request_id", originalRequestID).Str("provider_assigned_id", providerAssignedID).Msg("billing hot-path skipped without stable provider identity")
-				return
+				return fmt.Errorf("billing hot-path missing stable provider identity")
 			}
 			if faultFlag == "" {
 				faultFlag = billing.FaultNone
@@ -881,15 +887,20 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
 			if err != nil {
 				s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("billing hot-path insert failed")
-				if fallbackErr := billingStore.WriteRequestLogWithIdentity(ctx, s.reqLogStore, row, billingInput); fallbackErr != nil {
+				fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
+				defer fallbackCancel()
+				if fallbackErr := billingStore.WriteRequestLogWithIdentity(fallbackCtx, s.reqLogStore, row, billingInput); fallbackErr != nil {
 					s.log.Warn().Err(fallbackErr).Str("request_id", originalRequestID).Msg("request_log identity fallback insert failed")
+					return fmt.Errorf("billing hot-path insert failed: %w; fallback failed: %v", err, fallbackErr)
 				}
 			}
-			return
+			return nil
 		}
 		if err := s.reqLog.Insert(ctx, row); err != nil {
 			s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("request_log insert failed")
+			return err
 		}
+		return nil
 	}
 	logRow := func(
 		providerAssignedID string,
@@ -898,7 +909,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		errMsg, errCode string,
 		retried int,
 	) {
-		logRowWithBilling(providerAssignedID, "", status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
+		_ = logRowWithBilling(providerAssignedID, "", status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
 	}
 	logBuyerFailure := func(status int, msg string) {
 		logRow("", status, nil, nil, msg, "", 0)
@@ -909,8 +920,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		promptTok, completionTok *int64,
 		errMsg, errCode string,
 		retried int,
-	) {
-		logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
+	) error {
+		return logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
 	}
 	maxBodyBytes := s.maxChatBodyBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
@@ -1182,12 +1193,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		upReq.Header.Set("X-Request-ID", originalRequestID)
 		resp, err := providerhttp.Client.Do(upReq)
 		if err == nil && resp.StatusCode == http.StatusOK {
-			respBody, readErr := io.ReadAll(resp.Body)
+			respBody, readErr := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 			_ = resp.Body.Close()
 			if readErr != nil {
 				cancelAttempt()
 				logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
+				return
+			}
+			promptTok, completionTok := tokenPointersFromChatResponse(respBody)
+			if err := logProviderRow(provider, http.StatusOK, promptTok, completionTok, "", "", explicitRetries); err != nil {
+				cancelAttempt()
+				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
 			}
 			w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
@@ -1200,15 +1217,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			s.stickyStore(r.Header, provider, req.Model)
 			_, _ = w.Write(respBody)
 			cancelAttempt()
-			promptTok, completionTok := tokenPointersFromChatResponse(respBody)
-			logProviderRow(provider, http.StatusOK, promptTok, completionTok, "", "", explicitRetries)
 			return
 		}
 		status := 0
 		attempt := requestLogAttempt{}
 		if resp != nil {
 			status = resp.StatusCode
-			respBody, _ := io.ReadAll(resp.Body)
+			respBody, _ := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 			_ = resp.Body.Close()
 			attempt.ErrorCode = spec001StatusFromBody(respBody)
 		}
@@ -1613,7 +1628,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	if resp.StatusCode != http.StatusOK {
 		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
 		s.handleProviderFailure(provider, resp.StatusCode)
-		respBody, _ := io.ReadAll(resp.Body)
+		respBody, _ := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 		attempt := requestLogAttempt{Status: resp.StatusCode, Error: http.StatusText(resp.StatusCode), ErrorCode: spec001StatusFromBody(respBody)}
 		if resp.StatusCode == http.StatusGatewayTimeout {
 			return wsForwardTimedOut, resp.StatusCode, attempt
@@ -3015,6 +3030,21 @@ func writeErrorTyped(w http.ResponseWriter, status int, typ, code, message strin
 			"code":    code,
 		},
 	})
+}
+
+func readLimitedBody(r io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	lr := &io.LimitedReader{R: r, N: maxBytes + 1}
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, errBodyTooLarge
+	}
+	return body, nil
 }
 
 func errorType(status int) string {

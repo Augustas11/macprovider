@@ -614,6 +614,23 @@ func TestFeedbackSummaryAndCapacityStores(t *testing.T) {
 	if tier.Tier != 2 || tier.Signals != "cpu" || !tier.UpdatedAt.Equal(now) {
 		t.Fatalf("tier = %+v", tier)
 	}
+	kill, err := store.GetKillSwitch(ctx)
+	if err != nil {
+		t.Fatalf("GetKillSwitch default: %v", err)
+	}
+	if !kill.UpdatedAt.IsZero() || kill.DemoOnly || kill.AllPublicAPI {
+		t.Fatalf("default kill switch = %+v", kill)
+	}
+	if err := store.SetKillSwitch(ctx, storage.KillSwitchState{DemoOnly: true, AllPublicAPI: true, UpdatedAt: now}); err != nil {
+		t.Fatalf("SetKillSwitch: %v", err)
+	}
+	kill, err = store.GetKillSwitch(ctx)
+	if err != nil {
+		t.Fatalf("GetKillSwitch: %v", err)
+	}
+	if !kill.DemoOnly || !kill.AllPublicAPI || !kill.UpdatedAt.Equal(now) {
+		t.Fatalf("kill switch = %+v", kill)
+	}
 }
 
 func TestAuthLookupP95UnderOneMillisecondWith10KKeys(t *testing.T) {

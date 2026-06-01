@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -712,6 +713,43 @@ func (s *Store) SetCapacityTier(ctx context.Context, tier storage.CapacityTier) 
 		VALUES('capacity_tier', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
 		value, encodeTime(tier.UpdatedAt))
+	return err
+}
+
+func (s *Store) GetKillSwitch(ctx context.Context) (storage.KillSwitchState, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT value, updated_at FROM runtime_config WHERE key = 'kill_switch'`)
+	var value string
+	var updated string
+	if err := row.Scan(&value, &updated); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return storage.KillSwitchState{}, nil
+		}
+		return storage.KillSwitchState{}, err
+	}
+	var state storage.KillSwitchState
+	if err := json.Unmarshal([]byte(value), &state); err != nil {
+		return storage.KillSwitchState{}, err
+	}
+	state.UpdatedAt = decodeTime(updated)
+	return state, nil
+}
+
+func (s *Store) SetKillSwitch(ctx context.Context, state storage.KillSwitchState) error {
+	if state.UpdatedAt.IsZero() {
+		state.UpdatedAt = time.Now().UTC()
+	}
+	value, err := json.Marshal(struct {
+		DemoOnly     bool `json:"demo_only"`
+		AllPublicAPI bool `json:"all_public_api"`
+	}{DemoOnly: state.DemoOnly, AllPublicAPI: state.AllPublicAPI})
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO runtime_config(key, value, updated_at)
+		VALUES('kill_switch', ?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+		string(value), encodeTime(state.UpdatedAt))
 	return err
 }
 

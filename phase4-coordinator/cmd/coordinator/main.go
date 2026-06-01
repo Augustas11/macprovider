@@ -55,6 +55,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	admissionStore, err := providerws.NewSQLiteAdmissionStore(reqLogStore.DB())
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "admission storage: %v\n", err)
+		os.Exit(1)
+	}
 	billingStore, err := billing.NewStore(reqLogStore.DB())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "billing: %v\n", err)
@@ -66,6 +71,7 @@ func main() {
 		os.Exit(1)
 	}
 	wsOpts := []providerws.Option{}
+	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
 	if cfg.Auth.RequireProviderTokens {
 		wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
 		logger.Info().Msg("provider WS token validation REQUIRED (auth.require_provider_tokens=true)")

@@ -18,7 +18,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"runtime/debug"
 	"sort"
 	"strconv"
@@ -29,8 +28,9 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/auth"
 	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/storage"
-	"gopkg.in/yaml.v3"
 )
+
+const maxUpstreamResponseBodyBytes = int64(16 << 20)
 
 type Server struct {
 	cfg              config.Config
@@ -114,7 +114,21 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.loadRuntimeKillSwitch(context.Background())
 	return s
+}
+
+func (s *Server) loadRuntimeKillSwitch(ctx context.Context) {
+	state, err := s.store.GetKillSwitch(ctx)
+	if err != nil {
+		slog.Warn("runtime kill switch load failed", "error", err)
+		return
+	}
+	if state.UpdatedAt.IsZero() {
+		return
+	}
+	s.cfg.KillSwitch.DemoOnly = state.DemoOnly
+	s.cfg.KillSwitch.AllPublicAPI = state.AllPublicAPI
 }
 
 func (s *Server) Handler() http.Handler {
@@ -661,11 +675,13 @@ func (s *Server) handleKillSwitch(w http.ResponseWriter, r *http.Request) {
 	if req.AllPublicAPI != nil {
 		next.KillSwitch.AllPublicAPI = *req.AllPublicAPI
 	}
-	if s.cfgPath != "" {
-		if err := persistKillSwitch(s.cfgPath, next.KillSwitch); err != nil {
-			writeError(w, http.StatusInternalServerError, "server_error", "kill_switch_persist_failed", "Could not persist kill switch")
-			return
-		}
+	if err := s.store.SetKillSwitch(r.Context(), storage.KillSwitchState{
+		DemoOnly:     next.KillSwitch.DemoOnly,
+		AllPublicAPI: next.KillSwitch.AllPublicAPI,
+		UpdatedAt:    s.now(),
+	}); err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "kill_switch_persist_failed", "Could not persist kill switch")
+		return
 	}
 	s.mu.Lock()
 	s.cfg.KillSwitch = next.KillSwitch
@@ -1362,7 +1378,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate int64) {
-	body, err := io.ReadAll(resp.Body)
+	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
@@ -1970,16 +1986,17 @@ func (s *Server) setAllPublicPaused(ctx context.Context, paused bool, reason str
 	if old == paused {
 		return
 	}
+	if err := s.store.SetKillSwitch(ctx, storage.KillSwitchState{
+		DemoOnly:     s.demoPaused(),
+		AllPublicAPI: paused,
+		UpdatedAt:    s.now(),
+	}); err != nil {
+		slog.Error("kill switch persistence failed", "error", err, "reason", reason)
+	}
 	_ = s.store.InsertAuditEvent(ctx, storage.AuditEvent{
 		EventID: mustID("audit"), RequestID: mustID("req"), Actor: "capacity_monitor", Type: "kill_switch_toggled",
 		Payload: fmt.Sprintf(`{"old_all_public_api":%t,"new_all_public_api":%t,"reason":%q}`, old, paused, reason), CreatedAt: s.now(),
 	})
-	if s.cfgPath != "" {
-		s.mu.RLock()
-		ks := s.cfg.KillSwitch
-		s.mu.RUnlock()
-		_ = persistKillSwitch(s.cfgPath, ks)
-	}
 }
 
 func demoTokenHash(token string) string {
@@ -2004,63 +2021,19 @@ func safeID(v string) bool {
 	return true
 }
 
-func persistKillSwitch(path string, ks config.KillSwitchConfig) error {
-	b, err := os.ReadFile(path)
+func readLimitedBody(r io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	lr := &io.LimitedReader{R: r, N: maxBytes + 1}
+	body, err := io.ReadAll(lr)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	var root yaml.Node
-	if err := yaml.Unmarshal(b, &root); err != nil {
-		return err
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("upstream response body exceeds %d bytes", maxBytes)
 	}
-	doc := &root
-	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
-		doc = root.Content[0]
-	}
-	if doc.Kind != yaml.MappingNode {
-		return fmt.Errorf("gateway config root must be a YAML mapping")
-	}
-	killSwitch := yamlMappingValue(doc, "kill_switch")
-	if killSwitch == nil {
-		killSwitch = &yaml.Node{Kind: yaml.MappingNode}
-		doc.Content = append(doc.Content, yamlScalar("kill_switch"), killSwitch)
-	}
-	if killSwitch.Kind != yaml.MappingNode {
-		return fmt.Errorf("gateway config kill_switch must be a YAML mapping")
-	}
-	setYAMLBool(killSwitch, "demo_only", ks.DemoOnly)
-	setYAMLBool(killSwitch, "all_public_api", ks.AllPublicAPI)
-	out, err := yaml.Marshal(&root)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, out, 0600)
-}
-
-func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		if mapping.Content[i].Value == key {
-			return mapping.Content[i+1]
-		}
-	}
-	return nil
-}
-
-func setYAMLBool(mapping *yaml.Node, key string, value bool) {
-	node := yamlMappingValue(mapping, key)
-	if node == nil {
-		mapping.Content = append(mapping.Content, yamlScalar(key), yamlBool(value))
-		return
-	}
-	*node = *yamlBool(value)
-}
-
-func yamlScalar(value string) *yaml.Node {
-	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
-}
-
-func yamlBool(value bool) *yaml.Node {
-	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: strconv.FormatBool(value)}
+	return body, nil
 }
 
 func (s *Server) requireBearer(w http.ResponseWriter, r *http.Request) (storage.KeyValidation, bool) {

@@ -82,6 +82,14 @@ func WithExplorerHandler(handler http.Handler) Option {
 	}
 }
 
+func WithAdmissionStore(store AdmissionStateStore) Option {
+	return func(s *Server) {
+		s.admission.SetPersistence(store, func(err error) {
+			s.log.Warn().Err(err).Msg("admission state persistence failed")
+		})
+	}
+}
+
 type pendingPreflight struct {
 	providerID string
 	assignedID string

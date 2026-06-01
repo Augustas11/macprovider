@@ -1226,6 +1226,27 @@ func TestChatCompletionsRoutingPreferences(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsRejectsOversizedProviderBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(bytes.Repeat([]byte("x"), 16<<20+1))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 10)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`provider_failed`)) {
+		t.Fatalf("body missing provider_failed: %s", rr.Body.String())
+	}
+}
+
 func TestChatCompletionsRoutesModelClassByObjective(t *testing.T) {
 	// SPEC-004 v0.3 FR-SR-7a test-discipline: capture the upstream-received
 	// body and assert on body.model (concrete provider ModelID), not just on

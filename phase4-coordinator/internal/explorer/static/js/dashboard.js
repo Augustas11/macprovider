@@ -92,6 +92,7 @@ function linkFor(k, v, _row) {
   if (k === "request_id") return action("sessions",    `/admin/explorer/sessions/${encodeURIComponent(v)}`, v);
   if (k === "account_id") return action("buyers",      `/admin/explorer/buyers/${encodeURIComponent(v)}`, v);
   if (k === "provider_id") return action("providers",  `/admin/explorer/providers/${encodeURIComponent(v)}`, v);
+  if (k === "settlement_id") return action("settlements", `/admin/explorer/settlements/${encodeURIComponent(v)}`, v);
   if (k === "link_target" && v.startsWith("session:")) return action("sessions", `/admin/explorer/sessions/${encodeURIComponent(v.slice(8))}`, v);
   if (k === "link_target" && v.startsWith("buyer:"))   return action("buyers",   `/admin/explorer/buyers/${encodeURIComponent(v.slice(6))}`, v);
   return "";

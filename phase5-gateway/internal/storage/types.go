@@ -182,6 +182,12 @@ type CapacityTier struct {
 	UpdatedAt time.Time
 }
 
+type KillSwitchState struct {
+	DemoOnly     bool      `json:"demo_only"`
+	AllPublicAPI bool      `json:"all_public_api"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
 type ExplorerBuyerQuery struct {
 	From             time.Time
 	To               time.Time
