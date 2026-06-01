@@ -83,3 +83,12 @@ type CapacityStore interface {
 	GetCapacityTier(ctx context.Context) (CapacityTier, error)
 	SetCapacityTier(ctx context.Context, tier CapacityTier) error
 }
+
+type ExplorerStore interface {
+	ExplorerListBuyers(ctx context.Context, q ExplorerBuyerQuery) (ExplorerBuyerList, error)
+	ExplorerBuyerDetail(ctx context.Context, accountID string, q ExplorerDetailQuery) (ExplorerBuyerDetail, error)
+	ExplorerListSessions(ctx context.Context, q ExplorerSessionQuery) (ExplorerSessionList, error)
+	ExplorerSessionDetail(ctx context.Context, requestID string) (ExplorerSessionDetail, error)
+	ExplorerActivity(ctx context.Context, q ExplorerActivityQuery) (ExplorerActivityList, error)
+	ExplorerHealth(ctx context.Context, since time.Time) (ExplorerHealth, error)
+}

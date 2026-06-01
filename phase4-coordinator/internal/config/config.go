@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -28,6 +29,7 @@ type Config struct {
 	Rewards                      RewardsConfig                `yaml:"rewards"`
 	Settlement                   SettlementConfig             `yaml:"settlement"`
 	Endpoints                    EndpointsConfig              `yaml:"endpoints"`
+	Explorer                     ExplorerConfig               `yaml:"explorer"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
 }
 
@@ -189,6 +191,26 @@ type EndpointsProviderEarningsConfig struct {
 	RateLimitPerMinute int `yaml:"rate_limit_per_minute"`
 }
 
+type ExplorerConfig struct {
+	Enabled                       bool   `yaml:"enabled"`
+	BindPath                      string `yaml:"bind_path"`
+	GatewayBaseURL                string `yaml:"gateway_base_url"`
+	GatewayTimeoutMs              int    `yaml:"gateway_timeout_ms"`
+	QueryTimeoutMs                int    `yaml:"query_timeout_ms"`
+	PollMinIntervalSeconds        int    `yaml:"poll_min_interval_seconds"`
+	ActivityMaxWindowDays         int    `yaml:"activity_max_window_days"`
+	ActivityDefaultWindowHours    int    `yaml:"activity_default_window_hours"`
+	BuyersMaxWindowDays           int    `yaml:"buyers_max_window_days"`
+	BuyersDefaultWindowHours      int    `yaml:"buyers_default_window_hours"`
+	LedgerMaxWindowDays           int    `yaml:"ledger_max_window_days"`
+	LedgerDefaultWindowHours      int    `yaml:"ledger_default_window_hours"`
+	SessionsMaxWindowDays         int    `yaml:"sessions_max_window_days"`
+	SessionsDefaultWindowHours    int    `yaml:"sessions_default_window_hours"`
+	SettlementsMaxWindowDays      int    `yaml:"settlements_max_window_days"`
+	SettlementsDefaultWindowHours int    `yaml:"settlements_default_window_hours"`
+	RequestsPerMinuteCap          int    `yaml:"requests_per_minute_cap"`
+}
+
 type ProviderConfig struct {
 	ProviderID  string `yaml:"provider_id"`
 	EndpointURL string `yaml:"endpoint_url"`
@@ -303,6 +325,24 @@ func Default() Config {
 			ProviderEarnings: EndpointsProviderEarningsConfig{
 				RateLimitPerMinute: 60,
 			},
+		},
+		Explorer: ExplorerConfig{
+			Enabled:                       false,
+			BindPath:                      "/admin/explorer/",
+			GatewayTimeoutMs:              1500,
+			QueryTimeoutMs:                3000,
+			PollMinIntervalSeconds:        5,
+			ActivityMaxWindowDays:         7,
+			ActivityDefaultWindowHours:    24,
+			BuyersMaxWindowDays:           31,
+			BuyersDefaultWindowHours:      168,
+			LedgerMaxWindowDays:           31,
+			LedgerDefaultWindowHours:      168,
+			SessionsMaxWindowDays:         7,
+			SessionsDefaultWindowHours:    24,
+			SettlementsMaxWindowDays:      180,
+			SettlementsDefaultWindowHours: 720,
+			RequestsPerMinuteCap:          60,
 		},
 	}
 }
@@ -498,6 +538,9 @@ func (c Config) Validate() error {
 	if c.Endpoints.ProviderEarnings.RateLimitPerMinute <= 0 {
 		return fmt.Errorf("endpoints.provider_earnings.rate_limit_per_minute must be > 0")
 	}
+	if err := c.validateExplorer(); err != nil {
+		return err
+	}
 	if _, ok := c.Rewards.RateCard["default"]; !ok {
 		return fmt.Errorf("rewards.rate_card must contain default")
 	}
@@ -520,6 +563,56 @@ func (c Config) Validate() error {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
 		}
+	}
+	return nil
+}
+
+func (c Config) validateExplorer() error {
+	if c.Explorer.Enabled && c.Auth.OperatorKey == "" {
+		return fmt.Errorf("auth.operator_key must be set when explorer.enabled is true")
+	}
+	if !strings.HasPrefix(c.Explorer.BindPath, "/admin/explorer/") || !strings.HasSuffix(c.Explorer.BindPath, "/") {
+		return fmt.Errorf("explorer.bind_path must begin with /admin/explorer/ and end with /")
+	}
+	if err := validateExplorerWindow("explorer.activity", c.Explorer.ActivityMaxWindowDays, c.Explorer.ActivityDefaultWindowHours, 1, 31); err != nil {
+		return err
+	}
+	if err := validateExplorerWindow("explorer.buyers", c.Explorer.BuyersMaxWindowDays, c.Explorer.BuyersDefaultWindowHours, 1, 31); err != nil {
+		return err
+	}
+	if err := validateExplorerWindow("explorer.ledger", c.Explorer.LedgerMaxWindowDays, c.Explorer.LedgerDefaultWindowHours, 1, 31); err != nil {
+		return err
+	}
+	if err := validateExplorerWindow("explorer.sessions", c.Explorer.SessionsMaxWindowDays, c.Explorer.SessionsDefaultWindowHours, 1, 31); err != nil {
+		return err
+	}
+	if err := validateExplorerWindow("explorer.settlements", c.Explorer.SettlementsMaxWindowDays, c.Explorer.SettlementsDefaultWindowHours, 31, 365); err != nil {
+		return err
+	}
+	if c.Explorer.GatewayTimeoutMs < 100 || c.Explorer.GatewayTimeoutMs > 10000 {
+		return fmt.Errorf("explorer.gateway_timeout_ms must be between 100 and 10000")
+	}
+	if c.Explorer.QueryTimeoutMs < 100 || c.Explorer.QueryTimeoutMs > 30000 {
+		return fmt.Errorf("explorer.query_timeout_ms must be between 100 and 30000")
+	}
+	if c.Explorer.PollMinIntervalSeconds < 1 || c.Explorer.PollMinIntervalSeconds > 60 {
+		return fmt.Errorf("explorer.poll_min_interval_seconds must be between 1 and 60")
+	}
+	if c.Explorer.RequestsPerMinuteCap < 1 || c.Explorer.RequestsPerMinuteCap > 600 {
+		return fmt.Errorf("explorer.requests_per_minute_cap must be between 1 and 600")
+	}
+	if c.Explorer.Enabled && c.Explorer.GatewayBaseURL != "" && !strings.HasPrefix(c.Explorer.GatewayBaseURL, "http://") && !strings.HasPrefix(c.Explorer.GatewayBaseURL, "https://") {
+		return fmt.Errorf("explorer.gateway_base_url must begin with http:// or https:// when set")
+	}
+	return nil
+}
+
+func validateExplorerWindow(prefix string, maxDays, defaultHours, minDays, maxDaysAllowed int) error {
+	if maxDays < minDays || maxDays > maxDaysAllowed {
+		return fmt.Errorf("%s_max_window_days must be between %d and %d", prefix, minDays, maxDaysAllowed)
+	}
+	if defaultHours < 1 || defaultHours > maxDays*24 {
+		return fmt.Errorf("%s_default_window_hours must be between 1 and %d", prefix, maxDays*24)
 	}
 	return nil
 }

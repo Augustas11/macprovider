@@ -64,6 +64,7 @@ type Store interface {
 	storage.FeedbackStore
 	storage.CapacityStore
 	storage.HealthStore
+	storage.ExplorerStore
 }
 
 type Option func(*Server)
@@ -129,6 +130,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/kill-switch", s.handleKillSwitch)
 	mux.HandleFunc("/admin/capacity-signal", s.handleCapacitySignal)
 	mux.HandleFunc("/admin/capacity-tier/evaluate", s.handleCapacityEvaluate)
+	mux.HandleFunc("/admin/explorer/buyers", s.handleExplorerBuyers)
+	mux.HandleFunc("/admin/explorer/buyers/", s.handleExplorerBuyerDetail)
+	mux.HandleFunc("/admin/explorer/sessions", s.handleExplorerSessions)
+	mux.HandleFunc("/admin/explorer/sessions/", s.handleExplorerSessionDetail)
+	mux.HandleFunc("/admin/explorer/activity", s.handleExplorerActivity)
+	mux.HandleFunc("/admin/explorer/health", s.handleExplorerHealth)
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.middleware(mux)
 }

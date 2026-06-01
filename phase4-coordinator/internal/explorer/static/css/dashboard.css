@@ -1,0 +1,23 @@
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#111827;background:#f7f8fa}
+body{margin:0}
+header{display:flex;gap:16px;align-items:center;justify-content:space-between;padding:14px 18px;background:#ffffff;border-bottom:1px solid #d9dee7}
+h1{font-size:18px;margin:0}
+form{display:flex;gap:8px}
+input,button,select{font:inherit;border:1px solid #b9c1d0;border-radius:6px;padding:7px 9px;background:#fff}
+button{cursor:pointer}
+nav{display:flex;gap:6px;overflow:auto;padding:8px 18px;background:#eef1f6;border-bottom:1px solid #d9dee7}
+nav button{white-space:nowrap}
+nav button.active{background:#14315f;color:#fff;border-color:#14315f}
+main{padding:16px 18px}
+.strip{display:flex;gap:10px;align-items:center;margin-bottom:12px}
+.status{width:10px;height:10px;border-radius:50%;background:#16a34a}
+.status.degraded{background:#d97706}
+.status.down{background:#dc2626}
+.toolbar{display:flex;gap:8px;margin-bottom:12px}
+table{width:100%;border-collapse:collapse;background:#fff;border:1px solid #d9dee7}
+th,td{text-align:left;border-bottom:1px solid #e6e9ef;padding:7px 8px;font-size:13px;vertical-align:top}
+th{background:#f1f4f8;font-weight:650}
+code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px}
+.panel{background:#fff;border:1px solid #d9dee7;border-radius:6px;padding:12px;margin-bottom:12px}
+.error{color:#b91c1c}
+@media(max-width:760px){header{display:block}.toolbar{flex-wrap:wrap}th,td{font-size:12px;padding:6px}}

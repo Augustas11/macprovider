@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Protocol Explorer</title>
+  <link rel="stylesheet" href="css/dashboard.css">
+</head>
+<body>
+  <header>
+    <h1>Protocol Explorer</h1>
+    <form id="authForm">
+      <input id="bearer" type="password" autocomplete="off" placeholder="Operator bearer">
+      <button type="submit">Unlock</button>
+    </form>
+  </header>
+  <nav id="tabs">
+    <button data-view="overview">Overview</button>
+    <button data-view="providers">Live state</button>
+    <button data-view="activity">Activity</button>
+    <button data-view="sessions">Sessions</button>
+    <button data-view="buyers">Buyers</button>
+    <button data-view="ledger">Ledger</button>
+    <button data-view="settlements">Settlements</button>
+    <button data-view="health">Health</button>
+    <button data-view="feedback">Feedback</button>
+  </nav>
+  <main id="app"></main>
+  <script type="module" src="js/dashboard.js"></script>
+</body>
+</html>

@@ -54,6 +54,7 @@ type Server struct {
 	admission *AdmissionManager
 	sessions  sync.Map
 	started   time.Time
+	explorer  http.Handler
 }
 
 type TokenValidator interface {
@@ -72,6 +73,12 @@ type Option func(*Server)
 func WithTokenValidator(tokens TokenValidator) Option {
 	return func(s *Server) {
 		s.tokens = tokens
+	}
+}
+
+func WithExplorerHandler(handler http.Handler) Option {
+	return func(s *Server) {
+		s.explorer = handler
 	}
 }
 
@@ -135,6 +142,11 @@ func (s *Server) tier2Config() config.Tier2Config {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	if s.cfg.Explorer.Enabled && s.explorer != nil {
+		bindPath := s.cfg.Explorer.BindPath
+		mux.Handle(bindPath, s.explorer)
+		mux.Handle(strings.TrimSuffix(bindPath, "/"), s.explorer)
+	}
 	mux.HandleFunc("/ws/provider", s.handleProvider)
 	mux.HandleFunc("/healthz", s.handleHealthz)
 	mux.HandleFunc("/poolz", s.handlePoolz)

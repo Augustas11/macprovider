@@ -181,3 +181,225 @@ type CapacityTier struct {
 	Signals   string
 	UpdatedAt time.Time
 }
+
+type ExplorerBuyerQuery struct {
+	From             time.Time
+	To               time.Time
+	Status           string
+	QuotaClass       string
+	ConcurrencyClass string
+	AccountID        string
+	Email            string
+	EmailPrefix      string
+	KeyStatus        string
+	Limit            int
+	Cursor           string
+}
+
+type ExplorerDetailQuery struct {
+	From   time.Time
+	To     time.Time
+	Limit  int
+	Cursor string
+}
+
+type ExplorerSessionQuery struct {
+	From      time.Time
+	To        time.Time
+	AccountID string
+	Limit     int
+	Cursor    string
+}
+
+type ExplorerActivityQuery struct {
+	From        time.Time
+	To          time.Time
+	Type        string
+	AccountID   string
+	RequestID   string
+	Limit       int
+	Cursor      string
+	SinceCursor string
+}
+
+type ExplorerBuyerList struct {
+	Items      []ExplorerBuyerSummary `json:"items"`
+	NextCursor *string                `json:"next_cursor"`
+	Partial    bool                   `json:"partial"`
+	Error      any                    `json:"error"`
+	Summary    ExplorerBuyerRollup    `json:"summary"`
+}
+
+type ExplorerBuyerRollup struct {
+	ActiveAccountsWindow int `json:"active_accounts_window"`
+	NewAccountsWindow    int `json:"new_accounts_window"`
+	ActiveAPIKeys        int `json:"active_api_keys"`
+	BlockedAccounts      int `json:"blocked_accounts"`
+}
+
+type ExplorerBuyerSummary struct {
+	AccountID                     string             `json:"account_id"`
+	Status                        string             `json:"status"`
+	QuotaClass                    string             `json:"quota_class"`
+	ConcurrencyClass              string             `json:"concurrency_class"`
+	CreatedAt                     time.Time          `json:"created_at"`
+	Identities                    []ExplorerIdentity `json:"identities"`
+	APIKeys                       []ExplorerAPIKey   `json:"api_keys"`
+	DailyTokensUsed               int64              `json:"daily_tokens_used"`
+	DailyTokensReserved           int64              `json:"daily_tokens_reserved"`
+	DailyTokenLimit               int64              `json:"daily_token_limit"`
+	DailyTokensRemaining          int64              `json:"daily_tokens_remaining"`
+	ActiveConcurrencyReservations int                `json:"active_concurrency_reservations"`
+	LastUsageTime                 *time.Time         `json:"last_usage_time"`
+	LastRequestID                 *string            `json:"last_request_id"`
+	FeedbackCount                 int                `json:"feedback_count"`
+	AverageRating                 *float64           `json:"average_rating"`
+}
+
+type ExplorerIdentity struct {
+	Provider       string    `json:"provider"`
+	ProviderUserID string    `json:"provider_user_id"`
+	Email          string    `json:"email"`
+	CreatedAt      time.Time `json:"created_at"`
+}
+
+type ExplorerAPIKey struct {
+	KeyID         string     `json:"key_id"`
+	KeyHashPrefix string     `json:"key_hash_prefix"`
+	Status        string     `json:"status"`
+	CreatedAt     time.Time  `json:"created_at"`
+	RevokedAt     *time.Time `json:"revoked_at"`
+}
+
+type ExplorerBuyerDetail struct {
+	Account     ExplorerBuyerSummary             `json:"account"`
+	Usage       []ExplorerUsageEvent             `json:"usage_events"`
+	Quota       []ExplorerQuotaReservation       `json:"quota_reservations"`
+	Concurrency []ExplorerConcurrencyReservation `json:"concurrency_reservations"`
+	Feedback    []ExplorerFeedbackEvent          `json:"feedback_events"`
+	Audit       []ExplorerAuditEvent             `json:"audit_events"`
+	NextCursor  *string                          `json:"next_cursor"`
+	Partial     bool                             `json:"partial"`
+	Error       any                              `json:"error"`
+}
+
+type ExplorerSessionList struct {
+	Items      []ExplorerUsageEvent `json:"items"`
+	NextCursor *string              `json:"next_cursor"`
+	Partial    bool                 `json:"partial"`
+	Error      any                  `json:"error"`
+}
+
+type ExplorerSessionDetail struct {
+	RequestID              string                          `json:"request_id"`
+	UsageEvent             *ExplorerUsageEvent             `json:"usage_event"`
+	QuotaReservation       *ExplorerQuotaReservation       `json:"quota_reservation"`
+	ConcurrencyReservation *ExplorerConcurrencyReservation `json:"concurrency_reservation"`
+	FeedbackEvents         []ExplorerFeedbackEvent         `json:"feedback_events"`
+	AuditEvents            []ExplorerAuditEvent            `json:"audit_events"`
+	Partial                bool                            `json:"partial"`
+	Error                  any                             `json:"error"`
+}
+
+type ExplorerUsageEvent struct {
+	RequestID        string    `json:"request_id"`
+	AccountID        string    `json:"account_id"`
+	DemoIdentity     string    `json:"demo_identity"`
+	WindowDate       string    `json:"window_date"`
+	PromptTokens     int64     `json:"prompt_tokens"`
+	CompletionTokens int64     `json:"completion_tokens"`
+	TotalTokens      int64     `json:"total_tokens"`
+	TokenSource      string    `json:"token_source"`
+	Outcome          string    `json:"outcome"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type ExplorerQuotaReservation struct {
+	AccountID      string     `json:"account_id"`
+	RequestID      string     `json:"request_id"`
+	WindowDate     string     `json:"window_date"`
+	ReservedTokens int64      `json:"reserved_tokens"`
+	SettledTokens  int64      `json:"settled_tokens"`
+	Status         string     `json:"status"`
+	ExpiresAt      time.Time  `json:"expires_at"`
+	CreatedAt      time.Time  `json:"created_at"`
+	SettledAt      *time.Time `json:"settled_at"`
+}
+
+type ExplorerConcurrencyReservation struct {
+	AccountID  string     `json:"account_id"`
+	RequestID  string     `json:"request_id"`
+	Status     string     `json:"status"`
+	ExpiresAt  time.Time  `json:"expires_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+	ReleasedAt *time.Time `json:"released_at"`
+}
+
+type ExplorerFeedbackEvent struct {
+	EventID   string    `json:"event_id"`
+	RequestID string    `json:"request_id"`
+	AccountID string    `json:"account_id,omitempty"`
+	Scope     string    `json:"scope"`
+	Rating    int       `json:"rating"`
+	Comment   string    `json:"comment"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+type ExplorerAuditEvent struct {
+	EventID     string    `json:"event_id"`
+	RequestID   string    `json:"request_id"`
+	AccountID   string    `json:"account_id,omitempty"`
+	Actor       string    `json:"actor"`
+	EventType   string    `json:"event_type"`
+	PayloadJSON string    `json:"payload_json"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type ExplorerActivityList struct {
+	Items        []ExplorerActivityEvent `json:"items"`
+	LatestCursor *string                 `json:"latest_cursor"`
+	NextCursor   *string                 `json:"next_cursor"`
+	Partial      bool                    `json:"partial"`
+	Error        any                     `json:"error"`
+}
+
+type ExplorerActivityEvent struct {
+	EventTimeUTC time.Time `json:"event_time_utc"`
+	EventType    string    `json:"event_type"`
+	Severity     string    `json:"severity"`
+	Source       string    `json:"source"`
+	SourceID     string    `json:"source_id"`
+	RequestID    *string   `json:"request_id"`
+	AccountID    *string   `json:"account_id"`
+	KeyID        *string   `json:"key_id"`
+	ProviderID   *string   `json:"provider_id"`
+	ModelID      *string   `json:"model_id"`
+	Status       *string   `json:"status"`
+	ErrorCode    *string   `json:"error_code"`
+	Tokens       *int64    `json:"tokens"`
+	Credits      *int64    `json:"credits"`
+	LinkTarget   string    `json:"link_target"`
+	Cursor       string    `json:"cursor"`
+}
+
+type ExplorerHealth struct {
+	CheckedAtUTC                  time.Time `json:"checked_at_utc"`
+	GatewayHealth                 string    `json:"gateway_health"`
+	PublicStatus                  string    `json:"public_status"`
+	CapacityTier                  int       `json:"capacity_tier"`
+	CapacitySignalsFiring         int       `json:"capacity_signals_firing"`
+	PublicAPIPaused               bool      `json:"public_api_paused"`
+	DemoPaused                    bool      `json:"demo_paused"`
+	ActiveAccountsWindow          int       `json:"active_accounts_window"`
+	NewAccountsWindow             int       `json:"new_accounts_window"`
+	ActiveAPIKeys                 int       `json:"active_api_keys"`
+	ActiveQuotaReservations       int       `json:"active_quota_reservations"`
+	ExpiredQuotaReservations      int       `json:"expired_quota_reservations"`
+	ActiveConcurrencyReservations int       `json:"active_concurrency_reservations"`
+	UsageEventsWindow             int       `json:"usage_events_window"`
+	DemoUsageEventsWindow         int       `json:"demo_usage_events_window"`
+	QuotaReservationsWindow       int       `json:"quota_reservations_window"`
+	SignupEventsWindow            int       `json:"signup_events_window"`
+	FeedbackEventsWindow          int       `json:"feedback_events_window"`
+	AuditEventsWindow             int       `json:"audit_events_window"`
+}

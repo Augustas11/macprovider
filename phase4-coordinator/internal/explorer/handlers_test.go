@@ -1,0 +1,751 @@
+package explorer
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/augstar/macprovider-coordinator/internal/billing"
+	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+)
+
+func TestAC01_BearerRequired(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/overview", "")
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "invalid_operator_token") {
+		t.Fatalf("missing auth error: %s", resp.Body.String())
+	}
+}
+
+func TestAC02_BadBearerRejected(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/overview", "wrong")
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAC05_OverviewLoadsUnder500msWithSeededData(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	start := time.Now()
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/overview", "operator-key")
+	elapsed := time.Since(start)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if elapsed >= 500*time.Millisecond {
+		t.Fatalf("overview took %s", elapsed)
+	}
+}
+
+func TestAC06_SessionsCursorIsStableWhenNewerRowsArrive(t *testing.T) {
+	h, db := newTestExplorer(t, nil)
+	for i := 0; i < 60; i++ {
+		requestID := "req_page_" + string(rune('A'+i/26)) + string(rune('a'+i%26))
+		seedRequestLog(t, db, fixedExplorerTime().Add(-time.Duration(i+1)*time.Minute), requestID)
+	}
+	from := fixedExplorerTime().Add(-2 * time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
+	page1 := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions?limit=25&from="+from+"&to="+to, "operator-key")
+	if page1.Code != http.StatusOK {
+		t.Fatalf("page1 status=%d body=%s", page1.Code, page1.Body.String())
+	}
+	body1 := decodeObject(t, page1)
+	items1 := body1["items"].([]any)
+	if len(items1) != 25 {
+		t.Fatalf("page1 items=%d", len(items1))
+	}
+	next, ok := body1["next_cursor"].(string)
+	if !ok || next == "" {
+		t.Fatalf("missing next_cursor: %s", page1.Body.String())
+	}
+	seedRequestLog(t, db, fixedExplorerTime().Add(30*time.Minute), "req_newer_after_page1")
+	page2 := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions?limit=25&from="+from+"&to="+to+"&cursor="+next, "operator-key")
+	if page2.Code != http.StatusOK {
+		t.Fatalf("page2 status=%d body=%s", page2.Code, page2.Body.String())
+	}
+	seen := requestIDs(items1)
+	for id := range requestIDs(decodeObject(t, page2)["items"].([]any)) {
+		if seen[id] {
+			t.Fatalf("duplicate request id across cursor pages: %s", id)
+		}
+		if id == "req_newer_after_page1" {
+			t.Fatalf("newer row appeared on older cursor page")
+		}
+	}
+}
+
+func TestAC07_SessionDetailIncludesLocalAndGatewayData(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"request_id":"req_seed","gateway_marker":true,"partial":false,"error":null}`)),
+		}, nil
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/req_seed", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	for _, want := range []string{`"attempts":[`, `"ledger_rows":[`, `"gateway_marker":true`} {
+		if !strings.Contains(resp.Body.String(), want) {
+			t.Fatalf("session detail missing %q: %s", want, resp.Body.String())
+		}
+	}
+}
+
+func TestAC08_ProviderDirectoryCombinesPoolAndTokenStatus(t *testing.T) {
+	h, db := newTestExplorer(t, nil)
+	left, right := net.Pipe()
+	t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{
+		ProviderID:        "provider_live",
+		AssignedID:        "assigned_live",
+		Hostname:          "host-live",
+		ModelID:           "llama",
+		State:             pool.StateReady,
+		SlotsFree:         1,
+		SlotsTotal:        2,
+		LastHeartbeatAt:   fixedExplorerTime(),
+		LastActivityAt:    fixedExplorerTime(),
+		ConnectedAt:       fixedExplorerTime().Add(-time.Minute),
+		BinaryVersion:     "v1",
+		HashStatus:        pool.HashStatusVerified,
+		EncryptedLeg:      true,
+		InferencePath:     pool.InferencePathWSTunneled,
+		AttestationStatus: pool.AttestationStatusNotRequired,
+	}, left)
+	h.pool = registry
+	if _, err := db.ExecContext(context.Background(), `
+insert into provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at)
+values ('hash-live', 'tok_live', 'provider_live', 'live', ?)`, fixedExplorerTime().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed provider token: %v", err)
+	}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/providers", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	for _, want := range []string{"provider_live", `"state":"ready"`, `"token_status":"active"`, `"token_prefix":"tok_live"`} {
+		if !strings.Contains(resp.Body.String(), want) {
+			t.Fatalf("providers missing %q: %s", want, resp.Body.String())
+		}
+	}
+}
+
+func TestLedgerWindowRejectsOverMaxRange(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	from := fixedExplorerTime().Add(-32 * 24 * time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Format(time.RFC3339)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/ledger?from="+from+"&to="+to, "operator-key")
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAC09_ProviderTokenHashNeverReturned(t *testing.T) {
+	h, db := newTestExplorer(t, nil)
+	left, right := net.Pipe()
+	t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{ProviderID: "provider_hash", AssignedID: "assigned_hash", ModelID: "llama", State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1}, left)
+	h.pool = registry
+	if _, err := db.ExecContext(context.Background(), `
+insert into provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at)
+values ('secret-token-hash', 'tok_hash', 'provider_hash', 'hash', ?)`, fixedExplorerTime().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed provider token: %v", err)
+	}
+	for _, path := range []string{"/admin/explorer/providers", "/admin/explorer/providers/provider_hash"} {
+		resp := requestExplorer(t, h, http.MethodGet, path, "operator-key")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
+		if !strings.Contains(resp.Body.String(), "tok_hash") {
+			t.Fatalf("%s missing token prefix: %s", path, resp.Body.String())
+		}
+		if strings.Contains(resp.Body.String(), "secret-token-hash") {
+			t.Fatalf("%s leaked token hash: %s", path, resp.Body.String())
+		}
+	}
+}
+
+func TestAC12_SettlementsReadOnlyMethods(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	resp := requestExplorer(t, h, http.MethodPost, "/admin/explorer/settlements", "operator-key")
+	if resp.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("POST collection status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if resp.Header().Get("Allow") != http.MethodGet {
+		t.Fatalf("Allow=%q", resp.Header().Get("Allow"))
+	}
+	resp = requestExplorer(t, h, http.MethodPatch, "/admin/explorer/settlements/1", "operator-key")
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("PATCH detail status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAC13_ConsumedAndVoidedSettlementsAreImmutable(t *testing.T) {
+	h, db := newTestExplorer(t, nil)
+	seedSettlement(t, db, "provider_consumed", "consumed", fixedExplorerTime().Add(-48*time.Hour), "settlement_consumed")
+	seedSettlement(t, db, "provider_voided", "voided", fixedExplorerTime().Add(-72*time.Hour), "settlement_voided")
+	before := tableCounts(t, db)
+	for _, status := range []string{"consumed", "voided"} {
+		resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/settlements?status="+status, "operator-key")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", status, resp.Code, resp.Body.String())
+		}
+		if !strings.Contains(resp.Body.String(), status) {
+			t.Fatalf("%s settlement missing: %s", status, resp.Body.String())
+		}
+	}
+	for _, path := range []string{"/admin/explorer/settlements", "/admin/explorer/settlements/1"} {
+		resp := requestExplorer(t, h, http.MethodDelete, path, "operator-key")
+		if resp.Code != http.StatusMethodNotAllowed && resp.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+	after := tableCounts(t, db)
+	for table, count := range before {
+		if after[table] != count {
+			t.Fatalf("%s count changed: before=%d after=%d", table, count, after[table])
+		}
+	}
+}
+
+func TestAC10_LedgerBoundedWindowEnforced(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	from := fixedExplorerTime().Add(-32 * 24 * time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Format(time.RFC3339)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/ledger?from="+from+"&to="+to, "operator-key")
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("32-day status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	from = fixedExplorerTime().Add(-31 * 24 * time.Hour).Format(time.RFC3339)
+	resp = requestExplorer(t, h, http.MethodGet, "/admin/explorer/ledger?from="+from+"&to="+to, "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("31-day status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAC11_LedgerViewShowsSeededEntries(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	from := fixedExplorerTime().Add(-time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/ledger?from="+from+"&to="+to, "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := resp.Body.String()
+	for _, want := range []string{"req_seed", `"gross_credits":15`, `"provider_credits":13`, `"operator_credits":2`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("ledger missing %q: %s", want, body)
+		}
+	}
+}
+
+func TestPollingPausesOnHiddenTabWiring(t *testing.T) {
+	raw := readStatic(t, "static/js/lib/poll.js")
+	for _, want := range []string{"document.visibilityState", "visibilitychange", "clearTimeout"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("poll.js missing %q", want)
+		}
+	}
+}
+
+func TestAC20_GatewayUnreachableReturnsPartial(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) {
+		cfg.Explorer.GatewayBaseURL = "http://127.0.0.1:1"
+		cfg.Explorer.GatewayTimeoutMs = 100
+	})
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/overview", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"partial":true`) {
+		t.Fatalf("expected partial gateway degradation: %s", resp.Body.String())
+	}
+}
+
+func TestAC14_HealthExposesReconciliationDelta(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/health", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"last_reconciliation_delta":123`) {
+		t.Fatalf("delta missing: %s", resp.Body.String())
+	}
+}
+
+func TestAC15_ActivityCursorMonotonic(t *testing.T) {
+	h, db := newTestExplorer(t, nil)
+	seedRequestLog(t, db, fixedExplorerTime().Add(-time.Minute), "req_activity_next")
+	from := fixedExplorerTime().Add(-time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to, "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("page1 status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := decodeObject(t, resp)
+	if body["latest_cursor"] == nil || body["latest_cursor"] == "" {
+		t.Fatalf("missing latest_cursor: %s", resp.Body.String())
+	}
+	next := body["next_cursor"].(string)
+	items := body["items"].([]any)
+	if len(items) == 0 || items[0].(map[string]any)["cursor"] == "" {
+		t.Fatalf("activity row cursor missing: %s", resp.Body.String())
+	}
+	page2 := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to+"&cursor="+next, "operator-key")
+	if page2.Code != http.StatusOK {
+		t.Fatalf("page2 status=%d body=%s", page2.Code, page2.Body.String())
+	}
+	page2Items := decodeObject(t, page2)["items"].([]any)
+	if page2Items[0].(map[string]any)["request_id"] == items[0].(map[string]any)["request_id"] {
+		t.Fatalf("activity cursor replayed boundary row: page1=%s page2=%s", resp.Body.String(), page2.Body.String())
+	}
+}
+
+func TestAC16_ActivityReplayFromCursorContiguous(t *testing.T) {
+	h, db := newTestExplorer(t, nil)
+	want := map[string]bool{"req_seed": true}
+	for i := 0; i < 39; i++ {
+		requestID := "req_replay_" + string(rune('A'+i/26)) + string(rune('a'+i%26))
+		want[requestID] = true
+		seedRequestLog(t, db, fixedExplorerTime().Add(-time.Duration(i+1)*time.Minute), requestID)
+	}
+	from := fixedExplorerTime().Add(-time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
+	seen := map[string]bool{}
+	cursor := ""
+	for {
+		path := "/admin/explorer/activity?limit=7&from=" + from + "&to=" + to
+		if cursor != "" {
+			path += "&cursor=" + cursor
+		}
+		resp := requestExplorer(t, h, http.MethodGet, path, "operator-key")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		body := decodeObject(t, resp)
+		for id := range requestIDs(body["items"].([]any)) {
+			if seen[id] {
+				t.Fatalf("duplicate activity id %s", id)
+			}
+			seen[id] = true
+		}
+		next, ok := body["next_cursor"].(string)
+		if !ok || next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("seen=%d want=%d values=%v", len(seen), len(want), seen)
+	}
+	for id := range want {
+		if !seen[id] {
+			t.Fatalf("missing activity id %s", id)
+		}
+	}
+}
+
+func TestAC17_ActivitySinceCursorReturnsOnlyNewEvents(t *testing.T) {
+	h, db := newTestExplorer(t, nil)
+	from := fixedExplorerTime().Add(-time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
+	initial := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?from="+from+"&to="+to, "operator-key")
+	if initial.Code != http.StatusOK {
+		t.Fatalf("initial status=%d body=%s", initial.Code, initial.Body.String())
+	}
+	latest := decodeObject(t, initial)["latest_cursor"].(string)
+	seedRequestLog(t, db, fixedExplorerTime().Add(30*time.Minute), "req_live_activity")
+	seedRequestLog(t, db, fixedExplorerTime().Add(31*time.Minute), "req_live_activity_2")
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?from="+from+"&to="+to+"&since_cursor="+latest, "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := decodeObject(t, resp)
+	ids := requestIDs(body["items"].([]any))
+	if len(ids) != 2 || !ids["req_live_activity"] || !ids["req_live_activity_2"] {
+		t.Fatalf("new activity missing: %s", resp.Body.String())
+	}
+	if ids["req_seed"] {
+		t.Fatalf("old activity repeated: %s", resp.Body.String())
+	}
+	if body["latest_cursor"] == latest {
+		t.Fatalf("latest cursor did not advance: %s", resp.Body.String())
+	}
+}
+
+func TestActivityRejectsBadCursor(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?cursor=not-a-cursor", "operator-key")
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAC18_PollingPausesOnHiddenTab(t *testing.T) {
+	raw := readStatic(t, "static/js/lib/poll.js")
+	for _, want := range []string{"document.visibilityState === \"visible\"", "document.visibilityState === \"hidden\"", "timers.clear()"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("poll.js missing %q", want)
+		}
+	}
+}
+
+func TestAC19_RequestCapClientWiring(t *testing.T) {
+	raw := readStatic(t, "static/js/lib/api.js")
+	for _, want := range []string{"REQUESTS_PER_MINUTE_CAP = 60", "queue = queue.then", "stamps.length >= REQUESTS_PER_MINUTE_CAP"} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("api.js missing %q", want)
+		}
+	}
+}
+
+func TestGatewayHealthUnknownWhenDisabled(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/health", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"health":"unknown"`) {
+		t.Fatalf("gateway health unknown missing: %s", resp.Body.String())
+	}
+}
+
+func TestAC21_BuyerDirectoryPathProxy(t *testing.T) {
+	var gotPath, gotQuery, gotAuth string
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		gotAuth = r.Header.Get("Authorization")
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"items":[{"account_id":"acct_proxy"}],"next_cursor":null,"partial":false,"error":null}`)),
+		}, nil
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/buyers?limit=7", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if gotPath != "/admin/explorer/buyers" || gotQuery != "limit=7" {
+		t.Fatalf("gateway got path=%q query=%q", gotPath, gotQuery)
+	}
+	if gotAuth != "Bearer operator-key" {
+		t.Fatalf("gateway auth=%q", gotAuth)
+	}
+	if !strings.Contains(resp.Body.String(), "acct_proxy") {
+		t.Fatalf("proxied account missing: %s", resp.Body.String())
+	}
+}
+
+func TestAC23_DeferredEndpointsDoNotExist(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/in-flight", "operator-key")
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("in-flight status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestAC24_NoSSEEndpoint(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	for _, path := range []string{"/admin/explorer/stream", "/admin/explorer/events"} {
+		resp := requestExplorer(t, h, http.MethodGet, path, "operator-key")
+		if resp.Code != http.StatusNotFound {
+			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+func TestAC25_CoreExplorerRoutesTraverseSuccessfully(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	left, right := net.Pipe()
+	t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
+	registry := pool.NewRegistry(nil)
+	registry.Register(&pool.Provider{ProviderID: "provider_seed", AssignedID: "assigned_seed", ModelID: "llama", State: pool.StateReady, SlotsFree: 1, SlotsTotal: 1}, left)
+	h.pool = registry
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"items":[{"account_id":"acct_walk"}],"next_cursor":null,"partial":false,"error":null}`)),
+		}, nil
+	})}
+	for _, path := range []string{
+		"/admin/explorer/overview?include_gateway=false",
+		"/admin/explorer/sessions",
+		"/admin/explorer/sessions/req_seed",
+		"/admin/explorer/buyers",
+		"/admin/explorer/providers",
+		"/admin/explorer/providers/provider_seed",
+		"/admin/explorer/ledger",
+		"/admin/explorer/settlements",
+		"/admin/explorer/settlements/1",
+		"/admin/explorer/health",
+		"/admin/explorer/activity",
+	} {
+		resp := requestExplorer(t, h, http.MethodGet, path, "operator-key")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+func TestAC26_StaticBundleHasNoThirdPartyJS(t *testing.T) {
+	raw := readStatic(t, "static/index.html") + readStatic(t, "static/js/dashboard.js") + readStatic(t, "static/js/lib/api.js")
+	for _, forbidden := range []string{"https://", "http://", "react", "next", "chart.js", "fonts.googleapis"} {
+		if strings.Contains(strings.ToLower(raw), forbidden) {
+			t.Fatalf("static bundle contains forbidden reference %q", forbidden)
+		}
+	}
+}
+
+func TestAC27_EndpointMethodsAreReadOnly(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	for _, path := range []string{
+		"/admin/explorer/overview",
+		"/admin/explorer/sessions",
+		"/admin/explorer/providers",
+		"/admin/explorer/ledger",
+		"/admin/explorer/settlements",
+		"/admin/explorer/health",
+		"/admin/explorer/activity",
+		"/admin/explorer/feedback",
+	} {
+		resp := requestExplorer(t, h, http.MethodDelete, path, "operator-key")
+		if resp.Code != http.StatusNotFound && resp.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s delete status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+}
+
+func TestAC28_NoExplorerWrites(t *testing.T) {
+	h, db := newTestExplorer(t, nil)
+	before := tableSnapshots(t, db)
+	for _, path := range []string{
+		"/admin/explorer/overview",
+		"/admin/explorer/sessions",
+		"/admin/explorer/providers",
+		"/admin/explorer/ledger",
+		"/admin/explorer/settlements",
+		"/admin/explorer/health",
+		"/admin/explorer/activity",
+		"/admin/explorer/feedback",
+		"/admin/explorer/buyers",
+	} {
+		resp := requestExplorer(t, h, http.MethodGet, path, "operator-key")
+		if resp.Code >= 500 && resp.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+	after := tableSnapshots(t, db)
+	for table, beforeState := range before {
+		if after[table] != beforeState {
+			t.Fatalf("%s changed: before=%+v after=%+v", table, beforeState, after[table])
+		}
+	}
+}
+
+func newTestExplorer(t *testing.T, mutate func(*config.Config)) (*Handler, *sql.DB) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	tokenStore, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("auth.OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = tokenStore.Close() })
+	reqStore, err := requestlog.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("requestlog.OpenStore: %v", err)
+	}
+	t.Cleanup(func() { _ = reqStore.Close() })
+	_, err = billing.NewStore(reqStore.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	if err := reqStore.Insert(context.Background(), requestlog.Row{TSUtc: fixedExplorerTime(), RequestID: "req_seed", Model: "llama", Status: http.StatusOK}); err != nil {
+		t.Fatalf("request log insert: %v", err)
+	}
+	if _, err := reqStore.DB().ExecContext(context.Background(), `
+insert into ledger_request_credits (
+	request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model, status, stream,
+	prompt_tokens, completion_tokens, estimated_completion_tokens, usage_source,
+	prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm,
+	gross_credits, provider_share_bps, provider_credits, created_at_utc
+) values (?, 0, 'provider_seed', 'assigned_seed', ?, 'llama', 200, 0, 10, 5, NULL, 'provider_reported', 1, 1, 1000000, 15, 9000, 13, ?)`,
+		"req_seed", fixedExplorerTime().Format(time.RFC3339Nano), fixedExplorerTime().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed ledger_request_credits: %v", err)
+	}
+	if _, err := reqStore.DB().ExecContext(context.Background(), `
+insert into ledger_operator_credits (
+	request_credit_id, request_id, attempt_n, provider_id, ts_utc, gross_credits,
+	operator_share_bps, operator_credits, created_at_utc
+) values (1, 'req_seed', 0, 'provider_seed', ?, 15, 1000, 2, ?)`,
+		fixedExplorerTime().Format(time.RFC3339Nano), fixedExplorerTime().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed ledger_operator_credits: %v", err)
+	}
+	if _, err := reqStore.DB().ExecContext(context.Background(), `
+insert into ledger_reconciliation_runs (
+	run_type, from_utc, to_utc, request_log_rows_scanned, missing_credit_rows_created,
+	orphan_credit_rows_quarantined, buyer_equivalent_credits, provider_gross_credits,
+	reconciliation_delta_credits, started_at_utc, finished_at_utc, status, created_at_utc
+) values ('nightly_reconcile', ?, ?, 1, 0, 0, 15, 15, 123, ?, ?, 'complete', ?)`,
+		fixedExplorerTime().Add(-time.Hour).Format(time.RFC3339Nano),
+		fixedExplorerTime().Format(time.RFC3339Nano),
+		fixedExplorerTime().Format(time.RFC3339Nano),
+		fixedExplorerTime().Format(time.RFC3339Nano),
+		fixedExplorerTime().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed ledger_reconciliation_runs: %v", err)
+	}
+	if _, err := reqStore.DB().ExecContext(context.Background(), `
+insert into ledger_payout_ready (
+	provider_id, window_start_utc, window_end_utc, cadence_days, source_credit_count,
+	gross_credits, provider_credits, operator_credits, min_payout_credits,
+	payout_currency, payout_external_id, status, idempotency_key, created_at_utc
+) values ('provider_seed', ?, ?, 1, 1, 15, 13, 2, 1, 'credits', NULL, 'ready', 'settlement_seed', ?)`,
+		fixedExplorerTime().Add(-24*time.Hour).Format(time.RFC3339Nano),
+		fixedExplorerTime().Format(time.RFC3339Nano),
+		fixedExplorerTime().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed ledger_payout_ready: %v", err)
+	}
+	cfg := config.Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Explorer.Enabled = true
+	if mutate != nil {
+		mutate(&cfg)
+	}
+	return NewHandler(cfg, reqStore.DB(), pool.NewRegistry(nil), fixedExplorerTime()), reqStore.DB()
+}
+
+func requestExplorer(t *testing.T, h *Handler, method, path, bearer string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, nil)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	return resp
+}
+
+func seedRequestLog(t *testing.T, db *sql.DB, ts time.Time, requestID string) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `
+insert into request_log (
+	ts_utc, request_id, model, provider_assigned_id, prompt_tokens, completion_tokens,
+	total_tokens, latency_ms, routing_ms, status, stream, buyer_ip, error, error_code,
+	pref_header, provider_header, retried
+) values (?, ?, 'llama', 'assigned_seed', 1, 1, 2, 10, 2, 200, 0, '', NULL, NULL, NULL, NULL, 0)`,
+		ts.UTC().Format(time.RFC3339Nano), requestID); err != nil {
+		t.Fatalf("seed request_log: %v", err)
+	}
+}
+
+func seedSettlement(t *testing.T, db *sql.DB, providerID, status string, windowEnd time.Time, key string) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `
+insert into ledger_payout_ready (
+	provider_id, window_start_utc, window_end_utc, cadence_days, source_credit_count,
+	gross_credits, provider_credits, operator_credits, min_payout_credits,
+	payout_currency, payout_external_id, status, idempotency_key, created_at_utc
+) values (?, ?, ?, 1, 1, 21, 19, 2, 1, 'credits', NULL, ?, ?, ?)`,
+		providerID,
+		windowEnd.Add(-24*time.Hour).Format(time.RFC3339Nano),
+		windowEnd.Format(time.RFC3339Nano),
+		status,
+		key,
+		fixedExplorerTime().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("seed settlement: %v", err)
+	}
+}
+
+func decodeObject(t *testing.T, resp *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	var out map[string]any
+	if err := json.Unmarshal(resp.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode json: %v body=%s", err, resp.Body.String())
+	}
+	return out
+}
+
+func requestIDs(items []any) map[string]bool {
+	out := map[string]bool{}
+	for _, item := range items {
+		row, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if id, ok := row["request_id"].(string); ok {
+			out[id] = true
+		}
+	}
+	return out
+}
+
+func tableCounts(t *testing.T, db *sql.DB) map[string]int {
+	t.Helper()
+	out := map[string]int{}
+	for _, table := range []string{"request_log", "ledger_request_credits", "ledger_operator_credits", "ledger_payout_ready", "ledger_reconciliation_runs", "provider_tokens"} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM ` + table).Scan(&n); err != nil {
+			t.Fatalf("count %s: %v", table, err)
+		}
+		out[table] = n
+	}
+	return out
+}
+
+type tableSnapshot struct {
+	Count int
+	MaxID int64
+}
+
+func tableSnapshots(t *testing.T, db *sql.DB) map[string]tableSnapshot {
+	t.Helper()
+	out := map[string]tableSnapshot{}
+	for _, table := range []string{"request_log", "ledger_request_credits", "ledger_operator_credits", "ledger_payout_ready", "ledger_reconciliation_runs", "provider_tokens"} {
+		var snap tableSnapshot
+		if err := db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM `+table).Scan(&snap.Count, &snap.MaxID); err != nil {
+			t.Fatalf("snapshot %s: %v", table, err)
+		}
+		out[table] = snap
+	}
+	return out
+}
+
+func readStatic(t *testing.T, name string) string {
+	t.Helper()
+	b, err := staticFS.ReadFile(name)
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+	return string(b)
+}
+
+func fixedExplorerTime() time.Time {
+	return time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}

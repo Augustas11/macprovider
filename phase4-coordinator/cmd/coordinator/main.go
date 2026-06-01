@@ -16,6 +16,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
+	"github.com/augstar/macprovider-coordinator/internal/explorer"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
@@ -70,6 +71,10 @@ func main() {
 		logger.Info().Msg("provider WS token validation REQUIRED (auth.require_provider_tokens=true)")
 	} else {
 		logger.Info().Msg("provider WS token validation NOT required (auth.require_provider_tokens=false); pinned providers connect by provider_id match only")
+	}
+	if cfg.Explorer.Enabled {
+		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, reqLogStore.DB(), registry, startedAt)))
+		logger.Info().Str("path", cfg.Explorer.BindPath).Msg("operator explorer enabled")
 	}
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	buyerServer := buyer.NewServer(
