@@ -420,6 +420,17 @@ func TestClientIPDetectionRejectsForgedXFF(t *testing.T) {
 	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.RemoteAddr = "5.6.7.8:1234"
 	req.Header.Set("X-Demo-Token", body.DemoToken)
+	req.Header.Set("X-Real-IP", "1.2.3.4")
+	resp = httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("forged x-real-ip auth status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "invalid_demo_token")
+
+	req = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.RemoteAddr = "5.6.7.8:1234"
+	req.Header.Set("X-Demo-Token", body.DemoToken)
 	req.Header.Set("X-Forwarded-For", "1.2.3.4")
 	resp = httptest.NewRecorder()
 	h.ServeHTTP(resp, req)

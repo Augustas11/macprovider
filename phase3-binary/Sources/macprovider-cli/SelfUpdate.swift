@@ -4,6 +4,12 @@ import Foundation
 
 struct SelfUpdate {
     static let defaultReleasesAPIURL = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
+    static let checksumPublicKeyPEM = """
+    -----BEGIN PUBLIC KEY-----
+    MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwwd0Vzj35OP8DlZU+0lUa8vI9gHK
+    09J48LDizWScsH6rutnZLkKnGQ4X5Q8lT9L5mglF8Ba0DDoUXKrFfSAX4Q==
+    -----END PUBLIC KEY-----
+    """
 
     private let currentVersion: String
     private let releasesAPIURL: String
@@ -46,7 +52,8 @@ struct SelfUpdate {
         }
 
         guard let tarball = release.assets.first(where: { $0.name.hasSuffix("darwin-arm64.tar.gz") }),
-              let checksums = release.assets.first(where: { $0.name == "checksums.txt" })
+              let checksums = release.assets.first(where: { $0.name == "checksums.txt" }),
+              let checksumsSignature = release.assets.first(where: { $0.name == "checksums.txt.sig" })
         else {
             throw UpdateError.missingAsset
         }
@@ -60,9 +67,15 @@ struct SelfUpdate {
 
         try validateDownloadURL(tarball.browserDownloadURL)
         try validateDownloadURL(checksums.browserDownloadURL)
+        try validateDownloadURL(checksumsSignature.browserDownloadURL)
 
         let tarballURL = tempDir.appendingPathComponent(tarball.name)
-        let checksumsText = try await fetchText(from: checksums.browserDownloadURL)
+        let checksumsURL = tempDir.appendingPathComponent(checksums.name)
+        let checksumsSignatureURL = tempDir.appendingPathComponent(checksumsSignature.name)
+        try await download(from: checksums.browserDownloadURL, to: checksumsURL)
+        try await download(from: checksumsSignature.browserDownloadURL, to: checksumsSignatureURL)
+        try verifyChecksumSignature(checksumsURL: checksumsURL, signatureURL: checksumsSignatureURL, tempDir: tempDir)
+        let checksumsText = try String(contentsOf: checksumsURL, encoding: .utf8)
         let expectedSHA = try Self.expectedSHA256(for: tarball.name, in: checksumsText)
         try await download(from: tarball.browserDownloadURL, to: tarballURL)
         let actualSHA = try Self.sha256(file: tarballURL)
@@ -229,6 +242,26 @@ struct SelfUpdate {
         }
     }
 
+    private func verifyChecksumSignature(checksumsURL: URL, signatureURL: URL, tempDir: URL) throws {
+        let publicKeyURL = tempDir.appendingPathComponent("release-signing-public.pem")
+        let keyPEM = ProcessInfo.processInfo.environment["MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM"] ?? Self.checksumPublicKeyPEM
+        try keyPEM.write(to: publicKeyURL, atomically: true, encoding: .utf8)
+        do {
+            try runProcess(
+                "/usr/bin/openssl",
+                arguments: [
+                    "dgst",
+                    "-sha256",
+                    "-verify", publicKeyURL.path,
+                    "-signature", signatureURL.path,
+                    checksumsURL.path,
+                ]
+            )
+        } catch {
+            throw UpdateError.checksumSignatureInvalid
+        }
+    }
+
     private func processOutput(_ executable: String, arguments: [String]) throws -> String {
         let process = Process()
         let pipe = Pipe()
@@ -316,6 +349,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case missingAsset
     case checksumMissing(String)
     case checksumMismatch(expected: String, actual: String)
+    case checksumSignatureInvalid
     case missingExtractedBinary
     case currentBinaryUnknown
     case processFailed(String, Int32)
@@ -330,11 +364,13 @@ enum UpdateError: Error, CustomStringConvertible {
         case .httpStatus(let status):
             return "GitHub API returned HTTP \(status)"
         case .missingAsset:
-            return "Release is missing darwin-arm64 tarball or checksums.txt"
+            return "Release is missing darwin-arm64 tarball, checksums.txt, or checksums.txt.sig"
         case .checksumMissing(let filename):
             return "checksums.txt does not contain \(filename)"
         case let .checksumMismatch(expected, actual):
             return "Checksum mismatch: expected \(expected), got \(actual)"
+        case .checksumSignatureInvalid:
+            return "checksums.txt signature verification failed"
         case .missingExtractedBinary:
             return "Downloaded archive does not contain macprovider-cli"
         case .currentBinaryUnknown:

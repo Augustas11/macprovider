@@ -1636,6 +1636,7 @@ func newTestHarnessConfig(t *testing.T, oauth auth.OAuthProvider, mutate func(*c
 	cfg.Auth.OAuth.GitHub.ClientSecret = "client-secret"
 	cfg.Coordinator.OperatorKey = "operator-key"
 	cfg.Explorer.Enabled = true
+	cfg.Proxy.TrustedCIDRs = []string{"127.0.0.0/8", "::1/128", "192.0.2.0/24"}
 	cfg.Auth.OAuth.CallbackAllowlist = []string{"https://api.streamvc.live/auth/github/callback"}
 	cfg.Storage.DBPath = filepath.Join(t.TempDir(), "gateway.db")
 	if mutate != nil {

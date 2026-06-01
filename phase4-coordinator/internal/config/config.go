@@ -142,14 +142,9 @@ type CoordinatorAdvertisedVersion struct {
 
 type AuthConfig struct {
 	OperatorKey string `yaml:"operator_key"`
-	// RequireProviderTokens gates the pinned-provider token check added by
-	// the Go stream's integration audit. Defaults to false: pinned providers
-	// connect by hello.provider_id matching config.providers[] (legacy
-	// pre-token behavior). Set true once you've issued tokens to every
-	// pinned provider AND every pinned provider's binary sends them in the
-	// WS upgrade — anonymous pinned spoofing is then blocked. Filed
-	// 2026-05-28 after the v1.1.2 deploy silently rejected M4/M1 (which
-	// don't send tokens).
+	// RequireProviderTokens fails closed for public provider WebSocket
+	// exposure. Disable only for isolated local development or one-off
+	// migrations where anonymous pinned-provider admission is acceptable.
 	RequireProviderTokens bool `yaml:"require_provider_tokens"`
 }
 
@@ -343,6 +338,9 @@ func Default() Config {
 			SettlementsMaxWindowDays:      180,
 			SettlementsDefaultWindowHours: 720,
 			RequestsPerMinuteCap:          60,
+		},
+		Auth: AuthConfig{
+			RequireProviderTokens: true,
 		},
 	}
 }

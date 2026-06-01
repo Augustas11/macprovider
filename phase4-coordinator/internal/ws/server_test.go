@@ -646,6 +646,18 @@ func TestPinnedProviderRequiresTokenWhenValidatorConfigured(t *testing.T) {
 	}
 }
 
+func TestProviderTokensRequiredFailsClosedWithoutValidator(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Auth.RequireProviderTokens = true
+	})
+	defer h.HTTP.Close()
+
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, validHello("m4-anon"))
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
+}
+
 func TestProvisionalProviderRequiresTokenWhenValidatorConfigured(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
@@ -1646,6 +1658,9 @@ func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValid
 	t.Helper()
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
+	if validator == nil {
+		cfg.Auth.RequireProviderTokens = false
+	}
 	cfg.Pool.WarmupGateEnabled = false
 	cfg.Providers = []config.ProviderConfig{
 		{

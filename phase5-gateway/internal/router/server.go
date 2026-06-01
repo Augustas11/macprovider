@@ -29,19 +29,21 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/auth"
 	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/storage"
+	"gopkg.in/yaml.v3"
 )
 
 type Server struct {
-	cfg     config.Config
-	cfgPath string
-	store   Store
-	keyMgr  auth.KeyManager
-	demoMgr auth.DemoManager
-	oauth   auth.OAuthProvider
-	now     func() time.Time
-	client  *http.Client
-	mu      sync.RWMutex
-	poolz   statusCache
+	cfg              config.Config
+	cfgPath          string
+	store            Store
+	keyMgr           auth.KeyManager
+	demoMgr          auth.DemoManager
+	oauth            auth.OAuthProvider
+	now              func() time.Time
+	client           *http.Client
+	trustedProxyNets []*net.IPNet
+	mu               sync.RWMutex
+	poolz            statusCache
 	// routingMeta is a small TTL cache for /internal/routing probes. Without
 	// it, every sticky-eligible chat-completion AND every /v1/models request
 	// fires a coordinator roundtrip (the SPEC-004 audit's HIGH perf finding).
@@ -95,14 +97,19 @@ func WithConfigPath(path string) Option {
 }
 
 func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Option) *Server {
+	trustedProxyNets, err := cfg.TrustedProxyNets()
+	if err != nil {
+		trustedProxyNets = nil
+	}
 	s := &Server{
-		cfg:     cfg,
-		store:   store,
-		keyMgr:  auth.NewKeyManager(cfg.Auth.KeyPrefix, cfg.Auth.KeyHash, cfg.Auth.KeyHashSecret),
-		demoMgr: auth.NewDemoManager(cfg.Auth.Demo.SigningSecret),
-		oauth:   oauth,
-		now:     func() time.Time { return time.Now().UTC() },
-		client:  http.DefaultClient,
+		cfg:              cfg,
+		store:            store,
+		keyMgr:           auth.NewKeyManager(cfg.Auth.KeyPrefix, cfg.Auth.KeyHash, cfg.Auth.KeyHashSecret),
+		demoMgr:          auth.NewDemoManager(cfg.Auth.Demo.SigningSecret),
+		oauth:            oauth,
+		now:              func() time.Time { return time.Now().UTC() },
+		client:           http.DefaultClient,
+		trustedProxyNets: trustedProxyNets,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -199,7 +206,7 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	if err := s.store.StoreOAuthState(r.Context(), storage.OAuthState{
 		StateHash: auth.StateHash(state), SessionID: sessionID, RedirectURI: redirectURI,
-		ClientIP: clientIP(r), CreatedAt: now, ExpiresAt: auth.OAuthStateExpiry(now),
+		ClientIP: s.clientIP(r), CreatedAt: now, ExpiresAt: auth.OAuthStateExpiry(now),
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "oauth_state_store_failed", "Could not start OAuth flow")
 		return
@@ -274,7 +281,7 @@ func (s *Server) createSignupAccount(w http.ResponseWriter, ctx context.Context,
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "capacity_signup_closed", "Signup is closed while capacity catches up. Existing keys continue to work.")
 		return storage.Account{}, storage.ErrQuotaExceeded
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	count, err := s.store.CountSignupEventsSince(ctx, ip, s.now().Add(-24*time.Hour))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "signup_limit_check_failed", "Could not check signup limit")
@@ -314,7 +321,7 @@ func (s *Server) handleDemoSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "demo_paused", "Demo access is paused while capacity catches up. API keys continue to work.")
 		return
 	}
-	ip := clientIP(r)
+	ip := s.clientIP(r)
 	count, err := s.store.CountDemoSessionEventsSince(r.Context(), ip, s.now().Add(-time.Hour))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "demo_session_check_failed", "Could not check demo session limit")
@@ -578,7 +585,7 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		token := r.Header.Get("X-Demo-Token")
-		payload, err := s.demoMgr.Validate(token, clientIP(r), s.now())
+		payload, err := s.demoMgr.Validate(token, s.clientIP(r), s.now())
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "authentication_error", "invalid_demo_token", "Invalid demo token")
 			return
@@ -1661,7 +1668,7 @@ func (s *Server) authenticateAny(w http.ResponseWriter, r *http.Request) (authRe
 			writeError(w, http.StatusServiceUnavailable, "service_unavailable", "demo_paused", "Demo access is paused while capacity catches up. API keys continue to work.")
 			return authResult{}, false
 		}
-		payload, err := s.demoMgr.Validate(token, clientIP(r), s.now())
+		payload, err := s.demoMgr.Validate(token, s.clientIP(r), s.now())
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "authentication_error", "invalid_demo_token", "Invalid demo token")
 			return authResult{}, false
@@ -2002,22 +2009,58 @@ func persistKillSwitch(path string, ks config.KillSwitchConfig) error {
 	if err != nil {
 		return err
 	}
-	text := string(b)
-	text = replaceYAMLBool(text, "demo_only", ks.DemoOnly)
-	text = replaceYAMLBool(text, "all_public_api", ks.AllPublicAPI)
-	return os.WriteFile(path, []byte(text), 0600)
+	var root yaml.Node
+	if err := yaml.Unmarshal(b, &root); err != nil {
+		return err
+	}
+	doc := &root
+	if root.Kind == yaml.DocumentNode && len(root.Content) > 0 {
+		doc = root.Content[0]
+	}
+	if doc.Kind != yaml.MappingNode {
+		return fmt.Errorf("gateway config root must be a YAML mapping")
+	}
+	killSwitch := yamlMappingValue(doc, "kill_switch")
+	if killSwitch == nil {
+		killSwitch = &yaml.Node{Kind: yaml.MappingNode}
+		doc.Content = append(doc.Content, yamlScalar("kill_switch"), killSwitch)
+	}
+	if killSwitch.Kind != yaml.MappingNode {
+		return fmt.Errorf("gateway config kill_switch must be a YAML mapping")
+	}
+	setYAMLBool(killSwitch, "demo_only", ks.DemoOnly)
+	setYAMLBool(killSwitch, "all_public_api", ks.AllPublicAPI)
+	out, err := yaml.Marshal(&root)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, out, 0600)
 }
 
-func replaceYAMLBool(text, key string, value bool) string {
-	lines := strings.Split(text, "\n")
-	replacement := fmt.Sprintf("  %s: %t", key, value)
-	for i, line := range lines {
-		if strings.TrimSpace(strings.SplitN(line, ":", 2)[0]) == key {
-			prefix := line[:len(line)-len(strings.TrimLeft(line, " "))]
-			lines[i] = prefix + strings.TrimSpace(replacement)
+func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value == key {
+			return mapping.Content[i+1]
 		}
 	}
-	return strings.Join(lines, "\n")
+	return nil
+}
+
+func setYAMLBool(mapping *yaml.Node, key string, value bool) {
+	node := yamlMappingValue(mapping, key)
+	if node == nil {
+		mapping.Content = append(mapping.Content, yamlScalar(key), yamlBool(value))
+		return
+	}
+	*node = *yamlBool(value)
+}
+
+func yamlScalar(value string) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value}
+}
+
+func yamlBool(value bool) *yaml.Node {
+	return &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: strconv.FormatBool(value)}
 }
 
 func (s *Server) requireBearer(w http.ResponseWriter, r *http.Request) (storage.KeyValidation, bool) {
@@ -2106,8 +2149,8 @@ func requestID(r *http.Request) string {
 	return newUUID()
 }
 
-func clientIP(r *http.Request) string {
-	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+func (s *Server) clientIP(r *http.Request) string {
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" && s.requestFromTrustedProxy(r) {
 		return realIP
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -2115,6 +2158,23 @@ func clientIP(r *http.Request) string {
 		return host
 	}
 	return r.RemoteAddr
+}
+
+func (s *Server) requestFromTrustedProxy(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip := net.ParseIP(strings.TrimSpace(host))
+	if ip == nil {
+		return false
+	}
+	for _, network := range s.trustedProxyNets {
+		if network.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

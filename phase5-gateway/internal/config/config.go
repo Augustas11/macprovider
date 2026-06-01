@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 type Config struct {
 	Listen       ListenConfig        `yaml:"listen"`
+	Proxy        ProxyConfig         `yaml:"proxy"`
 	Public       PublicConfig        `yaml:"public"`
 	Coordinators []CoordinatorTarget `yaml:"coordinators"`
 	Coordinator  CoordinatorConfig   `yaml:"coordinator"`
@@ -30,6 +32,10 @@ type Config struct {
 type ListenConfig struct {
 	BindAddress string `yaml:"bind_address"`
 	Port        int    `yaml:"port"`
+}
+
+type ProxyConfig struct {
+	TrustedCIDRs []string `yaml:"trusted_cidrs"`
 }
 
 type PublicConfig struct {
@@ -133,6 +139,7 @@ type ExplorerConfig struct {
 func Default() Config {
 	return Config{
 		Listen: ListenConfig{BindAddress: "127.0.0.1", Port: 9443},
+		Proxy:  ProxyConfig{TrustedCIDRs: []string{"127.0.0.0/8", "::1/128"}},
 		Public: PublicConfig{BaseURL: "https://api.streamvc.live", AccountPath: "/account"},
 		Coordinators: []CoordinatorTarget{{
 			Name: "pearl-local", BaseURL: "http://127.0.0.1:8443", Weight: 1, Enabled: true,
@@ -216,6 +223,14 @@ func (c Config) Validate() error {
 	}
 	if c.Listen.Port <= 0 || c.Listen.Port > 65535 {
 		return fmt.Errorf("listen.port must be between 1 and 65535")
+	}
+	if len(c.Proxy.TrustedCIDRs) == 0 {
+		return fmt.Errorf("proxy.trusted_cidrs must contain at least one trusted proxy CIDR")
+	}
+	for i, cidr := range c.Proxy.TrustedCIDRs {
+		if _, _, err := parseCIDROrIP(cidr); err != nil {
+			return fmt.Errorf("proxy.trusted_cidrs[%d] must be a valid CIDR or IP: %w", i, err)
+		}
 	}
 	if err := requireURL("public.base_url", c.Public.BaseURL); err != nil {
 		return err
@@ -335,6 +350,42 @@ func (c Config) Validate() error {
 		}
 	}
 	return nil
+}
+
+func (c Config) TrustedProxyNets() ([]*net.IPNet, error) {
+	nets := make([]*net.IPNet, 0, len(c.Proxy.TrustedCIDRs))
+	for _, raw := range c.Proxy.TrustedCIDRs {
+		_, network, err := parseCIDROrIP(raw)
+		if err != nil {
+			return nil, err
+		}
+		nets = append(nets, network)
+	}
+	return nets, nil
+}
+
+func parseCIDROrIP(raw string) (string, *net.IPNet, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil, fmt.Errorf("empty")
+	}
+	if strings.Contains(raw, "/") {
+		ip, network, err := net.ParseCIDR(raw)
+		if err != nil {
+			return "", nil, err
+		}
+		network.IP = ip
+		return raw, network, nil
+	}
+	ip := net.ParseIP(raw)
+	if ip == nil {
+		return "", nil, fmt.Errorf("invalid IP")
+	}
+	bits := 32
+	if ip.To4() == nil {
+		bits = 128
+	}
+	return raw, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}, nil
 }
 
 func requireURL(field, raw string) error {

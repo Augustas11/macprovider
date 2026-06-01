@@ -174,6 +174,10 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 	authz := r.Header.Get("Authorization")
+	if s.cfg.Auth.RequireProviderTokens && s.tokens == nil {
+		s.log.Error().Msg("provider token validation is required but no token validator is configured")
+		return providerAuth{}, false
+	}
 	if authz == "" && s.tokens != nil {
 		return providerAuth{}, false
 	}

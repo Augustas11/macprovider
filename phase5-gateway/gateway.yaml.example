@@ -2,6 +2,11 @@ listen:
   bind_address: 127.0.0.1
   port: 9443
 
+proxy:
+  trusted_cidrs:
+    - 127.0.0.0/8
+    - ::1/128
+
 public:
   base_url: https://api.streamvc.live
   account_path: /account

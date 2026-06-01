@@ -18,6 +18,13 @@ func TestModelClassRejectsMembersAndModelsTogether(t *testing.T) {
 	}
 }
 
+func TestProviderTokensRequiredByDefault(t *testing.T) {
+	cfg := Default()
+	if !cfg.Auth.RequireProviderTokens {
+		t.Fatal("auth.require_provider_tokens should default to true")
+	}
+}
+
 func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"

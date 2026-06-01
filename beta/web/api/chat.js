@@ -18,6 +18,10 @@ const PROVIDERS = {
 };
 
 export default async function handler(req) {
+  if (globalThis.process?.env?.MACPROVIDER_ENABLE_LEGACY_BETA_PROXY !== '1') {
+    return new Response('legacy beta proxy disabled', { status: 410 });
+  }
+
   if (req.method === 'GET' && new URL(req.url).pathname.endsWith('/providers')) {
     return Response.json(PROVIDERS);
   }

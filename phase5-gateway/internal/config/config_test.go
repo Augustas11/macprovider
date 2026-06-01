@@ -52,6 +52,26 @@ func TestStickyRequiresKeyHashSecret(t *testing.T) {
 	}
 }
 
+func TestProxyTrustedCIDRValidation(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Proxy.TrustedCIDRs = nil
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "proxy.trusted_cidrs") {
+		t.Fatalf("empty trusted CIDRs error=%v", err)
+	}
+
+	cfg = validTestConfig()
+	cfg.Proxy.TrustedCIDRs = []string{"not-a-cidr"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "proxy.trusted_cidrs[0]") {
+		t.Fatalf("invalid trusted CIDR error=%v", err)
+	}
+
+	cfg = validTestConfig()
+	cfg.Proxy.TrustedCIDRs = []string{"127.0.0.1", "10.0.0.0/8", "::1/128"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("valid trusted CIDRs error=%v", err)
+	}
+}
+
 func validTestConfig() Config {
 	cfg := Default()
 	cfg.Coordinator.OperatorKey = "operator-key"

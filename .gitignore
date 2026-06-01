@@ -27,10 +27,18 @@ state/
 phase4-coordinator/coordinator
 phase4-coordinator/coordinator-cli
 phase4-coordinator/mockprovider
+phase4-coordinator/*.db
+phase4-coordinator/*.db-shm
+phase4-coordinator/*.db-wal
+phase4-coordinator/coordinator.local-*.yaml
 default.profraw
 
 # Phase 4 dist artifacts that are rebuilt locally
 phase4-coordinator/dist/coordinator-linux-amd64
+phase4-coordinator/dist/*.bak
+
+# Phase 5 gateway build artifacts
+phase5-gateway/dist/gateway-linux-amd64
 
 # Phase 4 production config contains the operator API key in plaintext.
 # Use coordinator.yaml.example as a template; keep real config local.

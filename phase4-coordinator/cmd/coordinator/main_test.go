@@ -25,6 +25,19 @@ import (
 const reloadTestHash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 const reloadOtherHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 
+func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
+	server := newHTTPServer("127.0.0.1:0", http.NewServeMux())
+	if server.ReadHeaderTimeout != 10*time.Second {
+		t.Fatalf("ReadHeaderTimeout=%s want 10s", server.ReadHeaderTimeout)
+	}
+	if server.ReadTimeout == 0 {
+		t.Fatal("ReadTimeout must be set")
+	}
+	if server.IdleTimeout == 0 {
+		t.Fatal("IdleTimeout must be set")
+	}
+}
+
 func TestReloadTier2RejectsStartupCatalogFieldChange(t *testing.T) {
 	defer tier2.ResetForTest()
 	startup, _, wsServer, buyerServer := reloadTestServers(config.Default())

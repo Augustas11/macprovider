@@ -70,7 +70,7 @@ func main() {
 		wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
 		logger.Info().Msg("provider WS token validation REQUIRED (auth.require_provider_tokens=true)")
 	} else {
-		logger.Info().Msg("provider WS token validation NOT required (auth.require_provider_tokens=false); pinned providers connect by provider_id match only")
+		logger.Warn().Msg("provider WS token validation NOT required (auth.require_provider_tokens=false); use only for isolated local development")
 	}
 	if cfg.Explorer.Enabled {
 		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, reqLogStore.DB(), registry, startedAt)))
@@ -116,8 +116,8 @@ func main() {
 	if cfg.Auth.RequireProviderTokens {
 		providerMux.Handle("/providers/", billingHandler)
 	}
-	providerHTTP := &http.Server{Addr: providerAddr, Handler: providerMux}
-	buyerHTTP := &http.Server{Addr: buyerAddr, Handler: buyerServer.Handler()}
+	providerHTTP := newHTTPServer(providerAddr, providerMux)
+	buyerHTTP := newHTTPServer(buyerAddr, buyerServer.Handler())
 	errs := make(chan error, 2)
 
 	if err := billingStore.StartStartupScan(context.Background(), cfg.Settlement, time.Now().UTC()); err != nil {
@@ -169,6 +169,16 @@ func main() {
 			}
 			return
 		}
+	}
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       310 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 }
 

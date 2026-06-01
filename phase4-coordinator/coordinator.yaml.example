@@ -95,7 +95,7 @@ coordinator_advertised_version:
 
 auth:
   operator_key: "change-me"
-  require_provider_tokens: false # Set true before exposing provider WS on a public network.
+  require_provider_tokens: true # Disable only for isolated local development.
 
 storage:
   db_path: "coordinator.db"

@@ -89,7 +89,7 @@ curl -i https://api.streamvc.live/v1/status
 
 The API nginx site proxies public `/v1/*`, `/auth/*`, `/account`, and `/healthz` to `127.0.0.1:9443`, except `/v1/pool/check` returns a JSON 404 envelope. Operator `/admin/*` endpoints stay off the public API nginx site and should be reached only through a trusted operator path such as loopback or a private tunnel. Coordinator `/poolz` is not exposed on `api.streamvc.live`. The `/ws/provider` route is present only with SPEC-002 PG-2 nginx `limit_req` and `limit_conn` controls before the WebSocket upgrade.
 
-The gateway trusts only nginx-set `X-Real-IP` for buyer identity and rate-limit binding. The nginx site must overwrite `X-Forwarded-For` and set `X-Real-IP`; if the gateway is reached directly or nginx is misconfigured, raw buyer-supplied `X-Forwarded-For` is ignored and the TCP remote address is used.
+The gateway trusts nginx-set `X-Real-IP` only when the TCP peer is inside `proxy.trusted_cidrs` for buyer identity and rate-limit binding. The nginx site must overwrite `X-Forwarded-For` and set `X-Real-IP`; if the gateway is reached directly, from an untrusted peer, or nginx is misconfigured, raw buyer-supplied forwarding headers are ignored and the TCP remote address is used.
 
 ## Storage And Quota
 

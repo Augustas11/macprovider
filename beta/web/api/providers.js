@@ -15,6 +15,10 @@ const PROVIDERS = {
 };
 
 export default function handler() {
+  if (globalThis.process?.env?.MACPROVIDER_ENABLE_LEGACY_BETA_PROXY !== '1') {
+    return new Response('legacy beta proxy disabled', { status: 410 });
+  }
+
   return Response.json(PROVIDERS, {
     headers: { 'Cache-Control': 'public, max-age=60' },
   });
