@@ -26,15 +26,15 @@
 | Run MLX models locally on any M1+ Mac | OpenAI-compatible `/v1/chat/completions` endpoint |
 | Outbound WebSocket only — no port-forwarding needed | Route to the full pool or pin to a specific provider |
 | Earn per request served | Pay only for compute, no subscription required |
-| Manage your node at [console.streamvc.live](https://console.streamvc.live) | Monitor usage at [console.streamvc.live](https://console.streamvc.live) |
+| Manage your node at [console.streamvc.live](https://console.streamvc.live) | Chat and monitor at [console.streamvc.live](https://console.streamvc.live) |
 
 ## Console
 
-**[console.streamvc.live](https://console.streamvc.live)** is the operator dashboard for the network. From the console you can:
+**[console.streamvc.live](https://console.streamvc.live)** is the front end for MacProvider. Use it to chat with the network, manage your provider node, or monitor the pool:
 
-- Monitor live pool status and per-provider health
-- Promote providers from provisional to pinned
-- Inspect session history and per-request logs
+- Send requests to the network directly from the browser
+- View session history and per-request logs
+- Manage provider status and pool visibility
 - Review billing and earnings
 
 ## Architecture
@@ -48,7 +48,7 @@ Provider Mac (MLX)
                ┌─────────────┴─────────────┐
                │                           │
     api.streamvc.live/v1          console.streamvc.live
-    (OpenAI-compatible)             (operator dashboard)
+    (OpenAI-compatible)               (web front end)
 ```
 
 New public installs join as **provisional providers** over outbound WebSocket tunneling and can be promoted to pinned by the operator after observation. No inbound port-forwarding is required on the provider Mac.
