@@ -47,9 +47,10 @@ CF_ZONE_NAME="streamvc.live"
 
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 INDEX="$DIST_DIR/../index.html"
+FAVICON="$DIST_DIR/../favicon.svg"
 NGINX_SITE="$DIST_DIR/nginx-console.streamvc.live.conf"
 
-for f in "$INDEX" "$NGINX_SITE"; do
+for f in "$INDEX" "$FAVICON" "$NGINX_SITE"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
@@ -101,6 +102,7 @@ done
 
 log "step 4/8: upload files + install port-80 stub vhost (ACME)"
 $SCP "$INDEX" "$VPS_USER@$VPS_HOST:/tmp/console-index.html" >/dev/null
+$SCP "$FAVICON" "$VPS_USER@$VPS_HOST:/tmp/console-favicon.svg" >/dev/null
 $SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-console-full.conf" >/dev/null
 $SSH "set -e
   install -d -o www-data -g www-data -m 0755 /var/www/html
@@ -138,11 +140,12 @@ $SSH "set -e
   nginx -t && systemctl reload nginx
 "
 
-log "step 7/8: install static index.html to /var/www/console"
+log "step 7/8: install static files to /var/www/console"
 $SSH "set -e
   install -d -o www-data -g www-data -m 0755 /var/www/console
   install -o www-data -g www-data -m 0644 /tmp/console-index.html /var/www/console/index.html
-  rm -f /tmp/console-index.html
+  install -o www-data -g www-data -m 0644 /tmp/console-favicon.svg /var/www/console/favicon.svg
+  rm -f /tmp/console-index.html /tmp/console-favicon.svg
 "
 
 log "step 8/8: verify public endpoint + cert"
