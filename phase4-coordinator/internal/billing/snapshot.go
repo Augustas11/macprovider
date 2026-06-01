@@ -39,19 +39,13 @@ func (s *Store) InsertConfigSnapshot(ctx context.Context, cfg RewardsConfig, now
 INSERT INTO ledger_config_snapshots (
     effective_at_utc, config_hash, provider_share_bps, global_multiplier_ppm,
     rate_card_json, created_at_utc
-) VALUES (?, ?, ?, ?, ?, ?)
-ON CONFLICT(config_hash) DO NOTHING`,
+) VALUES (?, ?, ?, ?, ?, ?)`,
 		ts, hash, canon.ProviderShareBps, canon.GlobalMultiplierPPM, string(rateJSON), ts,
 	)
 	if err != nil {
 		return 0, err
 	}
-	if id, _ := res.LastInsertId(); id > 0 {
-		return id, nil
-	}
-	var id int64
-	err = s.db.QueryRowContext(ctx, `SELECT id FROM ledger_config_snapshots WHERE config_hash = ?`, hash).Scan(&id)
-	return id, err
+	return res.LastInsertId()
 }
 
 func (s *Store) LatestConfigSnapshotAt(ctx context.Context, t time.Time) (int64, error) {

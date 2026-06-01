@@ -129,7 +129,7 @@ SELECT provider_id,
 			return
 		}
 		if len(items) == limit {
-			nextCursor = providerID
+			nextCursor = items[len(items)-1]["provider_id"]
 			break
 		}
 		items = append(items, map[string]any{
@@ -161,14 +161,22 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	rowsScanned := h.sum(ctx, `SELECT COUNT(*) FROM request_log WHERE ts_utc >= ? AND ts_utc < ?`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
-	providerGross := h.sum(ctx, `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=0`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	rowsScanned, err := h.sumErr(ctx, `SELECT COUNT(*) FROM request_log WHERE ts_utc >= ? AND ts_utc < ?`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
+	providerGross, err := h.sumErr(ctx, `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=0`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
 	buyerEquivalent, err := h.buyerEquivalentCredits(ctx, from, to)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	splitDelta := h.sum(ctx, `
+	splitDelta, err := h.sumErr(ctx, `
 SELECT COUNT(*)
   FROM ledger_request_credits lrc
   LEFT JOIN ledger_operator_credits loc ON loc.request_credit_id = lrc.id
@@ -176,11 +184,19 @@ SELECT COUNT(*)
    AND lrc.quarantined = 0
    AND (loc.id IS NULL OR lrc.provider_credits + loc.operator_credits != lrc.gross_credits)`,
 		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
 	rowsRecovered := int64(0)
-	rowsQuarantined := h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=1`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	rowsQuarantined, err := h.sumErr(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=1`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
 	delta := providerGross - buyerEquivalent
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = h.store.db.ExecContext(ctx, `
+	if _, err := h.store.db.ExecContext(ctx, `
 INSERT INTO ledger_reconciliation_runs (
     run_type, from_utc, to_utc, request_log_rows_scanned,
     missing_credit_rows_created, orphan_credit_rows_quarantined,
@@ -190,7 +206,10 @@ INSERT INTO ledger_reconciliation_runs (
 ) VALUES ('admin_reconcile', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete', NULL, ?)`,
 		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano), rowsScanned,
 		rowsRecovered, rowsQuarantined, buyerEquivalent, providerGross, delta, now, now, now,
-	)
+	); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"from_utc":                 from.Format(time.RFC3339),
 		"to_utc":                   to.Format(time.RFC3339),
@@ -230,19 +249,9 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_token
 		if status == http.StatusServiceUnavailable {
 			continue
 		}
-		if gross, ok, err := h.byteEstimatedLedgerGross(ctx, requestID, attemptN); err != nil {
-			return 0, err
-		} else if ok {
-			total += gross
-			continue
-		}
 		ts, err := time.Parse(time.RFC3339Nano, tsText)
 		if err != nil {
 			return 0, err
-		}
-		_, rewards, multiplier, share, err := h.store.snapshotAt(ctx, ts)
-		if err != nil {
-			continue
 		}
 		var pp, cp *int64
 		if prompt.Valid {
@@ -253,26 +262,56 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_token
 			v := completion.Int64
 			cp = &v
 		}
+		if gross, ok, err := h.byteEstimatedLedgerGross(ctx, requestID, attemptN, pp); err != nil {
+			return 0, err
+		} else if ok {
+			total += gross
+			continue
+		}
+		_, rewards, multiplier, share, err := h.store.snapshotAt(ctx, ts)
+		if err != nil {
+			continue
+		}
 		row := ComputeCredits(pp, cp, nil, usageFor(errorCode.String, nil), FaultNone, RateFor(rewards.RateCard, model), multiplier, share)
 		total += row.GrossCredits
 	}
 	return total, rows.Err()
 }
 
-func (h *handler) byteEstimatedLedgerGross(ctx context.Context, requestID string, attemptN int) (int64, bool, error) {
-	var gross sql.NullInt64
-	var rows int64
-	err := h.store.db.QueryRowContext(ctx, `
-SELECT SUM(gross_credits), COUNT(*)
+func (h *handler) byteEstimatedLedgerGross(ctx context.Context, requestID string, attemptN int, promptTokens *int64) (int64, bool, error) {
+	rows, err := h.store.db.QueryContext(ctx, `
+SELECT estimated_completion_tokens, fault_flag, prompt_rate_per_mtok,
+       completion_rate_per_mtok, global_multiplier_ppm, provider_share_bps
   FROM ledger_request_credits
- WHERE request_id = ? AND attempt_n = ? AND quarantined = 0 AND usage_source = 'byte_estimated'`, requestID, attemptN).Scan(&gross, &rows)
+ WHERE request_id = ? AND attempt_n = ? AND quarantined = 0 AND usage_source = 'byte_estimated'`, requestID, attemptN)
 	if err != nil {
 		return 0, false, err
 	}
-	if rows != 1 || !gross.Valid {
+	defer rows.Close()
+	count := 0
+	var estimated sql.NullInt64
+	var faultFlag string
+	var promptRate, completionRate, multiplier, share int64
+	for rows.Next() {
+		count++
+		if count > 1 {
+			return 0, false, nil
+		}
+		if err := rows.Scan(&estimated, &faultFlag, &promptRate, &completionRate, &multiplier, &share); err != nil {
+			return 0, false, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, false, err
+	}
+	if count != 1 || !estimated.Valid {
 		return 0, false, nil
 	}
-	return gross.Int64, true, nil
+	row := ComputeCredits(promptTokens, nil, intPtrFromNull(estimated), UsageByteEstimated, faultFlag, RateCardEntry{
+		PromptCreditsPerMtok:     promptRate,
+		CompletionCreditsPerMtok: completionRate,
+	}, multiplier, share)
+	return row.GrossCredits, true, nil
 }
 
 func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
@@ -307,27 +346,78 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found", "provider not found")
 		return
 	}
+	rangeFrom, rangeTo, hasRange, err := parseOptionalDayRange(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request", err.Error())
+		return
+	}
+	rangeSQL, rangeArgs := earningsRangeFilter(rangeFrom, rangeTo, hasRange)
 	current := currentMondayUTC(time.Now().UTC()).Format(time.RFC3339Nano)
-	models := h.modelsServed(r.Context(), providerID)
+	models := h.modelsServed(r.Context(), providerID, rangeSQL, rangeArgs...)
+	totalArgs := append([]any{providerID}, rangeArgs...)
+	currentArgs := append([]any{providerID, current}, rangeArgs...)
+	faultArgs := append([]any{providerID}, rangeArgs...)
 	resp := map[string]any{
 		"provider_id":            providerID,
-		"total_credits":          h.sum(r.Context(), `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE provider_id=? AND quarantined=0`, providerID),
-		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE provider_id=? AND quarantined=0 AND ts_utc >= ?`, providerID, current),
+		"total_credits":          h.sum(r.Context(), `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE provider_id=? AND quarantined=0`+rangeSQL, totalArgs...),
+		"current_window_credits": h.sum(r.Context(), `SELECT SUM(provider_credits) FROM ledger_request_credits WHERE provider_id=? AND quarantined=0 AND ts_utc >= ?`+rangeSQL, currentArgs...),
 		"last_payout_ready":      h.lastPayout(r.Context(), providerID),
 		"provider_share_bps":     h.latestShareBps(r.Context()),
 		"models_served":          models,
 		"rate_card_excerpt":      h.rateCardExcerpt(r.Context(), models),
-		"fault_count":            h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`, providerID),
+		"fault_count":            h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id=? AND fault_flag != 'none'`+rangeSQL, faultArgs...),
+	}
+	if hasRange {
+		resp["from_utc"] = rangeFrom.Format(time.RFC3339)
+		resp["to_utc"] = rangeTo.Format(time.RFC3339)
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func parseOptionalDayRange(r *http.Request) (time.Time, time.Time, bool, error) {
+	fromRaw, toRaw := r.URL.Query().Get("from"), r.URL.Query().Get("to")
+	if fromRaw == "" && toRaw == "" {
+		return time.Time{}, time.Time{}, false, nil
+	}
+	if fromRaw == "" || toRaw == "" {
+		return time.Time{}, time.Time{}, false, errors.New("from and to must be YYYY-MM-DD")
+	}
+	fromDay, err1 := time.Parse("2006-01-02", fromRaw)
+	toDay, err2 := time.Parse("2006-01-02", toRaw)
+	if err1 != nil || err2 != nil {
+		return time.Time{}, time.Time{}, false, errors.New("from and to must be YYYY-MM-DD")
+	}
+	from, to := fromDay.UTC(), toDay.UTC()
+	if !to.After(from) || to.Sub(from) > 31*24*time.Hour {
+		return time.Time{}, time.Time{}, false, errors.New("earnings range must be > 0 and <= 31 days")
+	}
+	return from, to, true, nil
+}
+
+func earningsRangeFilter(from, to time.Time, enabled bool) (string, []any) {
+	if !enabled {
+		return "", nil
+	}
+	return " AND ts_utc >= ? AND ts_utc < ?", []any{from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano)}
+}
+
 func (h *handler) sum(ctx context.Context, query string, args ...any) int64 {
-	var n sql.NullInt64
-	if err := h.store.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil || !n.Valid {
+	n, err := h.sumErr(ctx, query, args...)
+	if err != nil {
 		return 0
 	}
-	return n.Int64
+	return n
+}
+
+func (h *handler) sumErr(ctx context.Context, query string, args ...any) (int64, error) {
+	var n sql.NullInt64
+	if err := h.store.db.QueryRowContext(ctx, query, args...).Scan(&n); err != nil {
+		return 0, err
+	}
+	if !n.Valid {
+		return 0, nil
+	}
+	return n.Int64, nil
 }
 
 func (h *handler) allowEarnings(providerID string) bool {
@@ -351,8 +441,9 @@ func (h *handler) allowEarnings(providerID string) bool {
 	return true
 }
 
-func (h *handler) modelsServed(ctx context.Context, providerID string) []string {
-	rows, err := h.store.db.QueryContext(ctx, `SELECT DISTINCT model FROM ledger_request_credits WHERE provider_id=? ORDER BY model`, providerID)
+func (h *handler) modelsServed(ctx context.Context, providerID string, rangeSQL string, rangeArgs ...any) []string {
+	args := append([]any{providerID}, rangeArgs...)
+	rows, err := h.store.db.QueryContext(ctx, `SELECT DISTINCT model FROM ledger_request_credits WHERE provider_id=?`+rangeSQL+` ORDER BY model`, args...)
 	if err != nil {
 		return []string{}
 	}

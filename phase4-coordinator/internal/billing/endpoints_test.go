@@ -64,6 +64,45 @@ func TestProvidersEndpoint(t *testing.T) {
 	}
 }
 
+func TestProvidersEndpoint_CursorStartsAfterLastEmittedProvider(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	now := time.Now().UTC()
+	for _, providerID := range []string{"provider-a", "provider-b", "provider-c"} {
+		insertCredit(t, store.db, providerID, now, 500)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/providers?limit=2", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var first struct {
+		NextCursor string `json:"next_cursor"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/admin/ledger/providers?limit=2&cursor="+first.NextCursor, nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w = httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var second struct {
+		Providers []struct {
+			ProviderID string `json:"provider_id"`
+		} `json:"providers"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &second); err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Providers) != 1 || second.Providers[0].ProviderID != "provider-c" {
+		t.Fatalf("second page providers=%v want provider-c", second.Providers)
+	}
+}
+
 func TestReconcileEndpoint_CleanDelta(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	cfg := testRewards()
@@ -225,6 +264,31 @@ func TestEarningsEndpoint_DisabledWhenTokensOff(t *testing.T) {
 	}
 	if resp.Error.Code != "unavailable" {
 		t.Fatalf("code=%s want unavailable", resp.Error.Code)
+	}
+}
+
+func TestEarningsEndpoint_AppliesDateRange(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	from := currentMondayUTC(time.Now().UTC())
+	to := from.AddDate(0, 0, 7)
+	insertCredit(t, store.db, "provider-a", from.Add(12*time.Hour), 500)
+	insertCredit(t, store.db, "provider-a", to.Add(12*time.Hour), 700)
+	req := httptest.NewRequest(http.MethodGet, "/providers/provider-a/earnings?from="+from.Format("2006-01-02")+"&to="+to.Format("2006-01-02"), nil)
+	req.Header.Set("Authorization", "Bearer good")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{"good": "provider-a"}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["total_credits"].(float64) != 500 {
+		t.Fatalf("total_credits=%v want 500", resp["total_credits"])
+	}
+	if resp["current_window_credits"].(float64) != 500 {
+		t.Fatalf("current_window_credits=%v want 500", resp["current_window_credits"])
 	}
 }
 

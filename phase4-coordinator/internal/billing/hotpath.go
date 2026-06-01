@@ -77,6 +77,9 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 				if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, "ambiguous_attempt_n"); err != nil {
 					return err
 				}
+				if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+					return err
+				}
 				_, err := conn.ExecContext(ctx, `COMMIT`)
 				committed = err == nil
 				return err
@@ -89,6 +92,29 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	}
 	if in.FaultFlag == "" {
 		in.FaultFlag = FaultNone
+	}
+	if in.AttemptN > 1 || (in.AttemptN == 1 && reqRow.Retried == 0) {
+		result := ComputeCredits(
+			in.PromptTokens,
+			in.CompletionTokens,
+			in.EstimatedCompTokens,
+			usageFor(in.ErrorCode, in.EstimatedCompTokens),
+			in.FaultFlag,
+			in.RateEntry,
+			in.MultiplierPPM,
+			in.ProviderShareBps,
+		)
+		result = zeroCredits(result)
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, true, "ambiguous_attempt_n"); err != nil {
+			return err
+		}
+		if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+			return err
+		}
+		_, err := conn.ExecContext(ctx, `COMMIT`)
+		committed = err == nil
+		return err
 	}
 	result := ComputeCredits(
 		in.PromptTokens,
@@ -108,18 +134,52 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 	if err := insertOperatorCreditTx(ctx, conn, requestCreditID, in, result, now); err != nil {
 		return err
 	}
-	if _, err := conn.ExecContext(ctx, `
+	if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, `COMMIT`)
+	committed = err == nil
+	return err
+}
+
+func (s *Store) WriteRequestLogWithIdentity(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
+		return err
+	}
+	if in.ProviderAssignedID != "" && in.ProviderID != "" {
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if err := insertProviderIdentitySnapshotTx(ctx, conn, in, now); err != nil {
+			return err
+		}
+	}
+	_, err = conn.ExecContext(ctx, `COMMIT`)
+	committed = err == nil
+	return err
+}
+
+func insertProviderIdentitySnapshotTx(ctx context.Context, db sqlExecutor, in HotPathInput, now string) error {
+	_, err := db.ExecContext(ctx, `
 INSERT INTO ledger_provider_identity_snapshots (
     request_id, attempt_n, provider_assigned_id, provider_id, resolved_from,
     pool_session_started_at_utc, created_at_utc
 ) VALUES (?, ?, ?, ?, 'pool_entry', NULL, ?)
 ON CONFLICT(request_id, attempt_n, provider_assigned_id) DO NOTHING`,
 		in.RequestID, in.AttemptN, in.ProviderAssignedID, in.ProviderID, now,
-	); err != nil {
-		return err
-	}
-	_, err = conn.ExecContext(ctx, `COMMIT`)
-	committed = err == nil
+	)
 	return err
 }
 

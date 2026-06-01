@@ -14,10 +14,51 @@ func (s *Store) RunSettlement(ctx context.Context, cfg SettlementConfig, windowS
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET quarantined = 1,
+       quarantine_reason = COALESCE(quarantine_reason, 'conflicting_settlement_id'),
+       updated_at_utc = ?
+ WHERE ts_utc < ?
+   AND settled = 0
+   AND settlement_id IS NOT NULL
+   AND quarantined = 0`,
+		now,
+		windowEnd.UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET quarantined = 1,
+       quarantine_reason = COALESCE(quarantine_reason, 'operator_split_mismatch'),
+       updated_at_utc = ?
+ WHERE ts_utc < ?
+   AND settled = 0
+   AND settlement_id IS NULL
+   AND quarantined = 0
+   AND (
+       (
+           SELECT COUNT(*)
+             FROM ledger_operator_credits
+            WHERE request_credit_id = ledger_request_credits.id
+       ) != 1
+       OR (
+           SELECT COALESCE(SUM(operator_credits), 0)
+             FROM ledger_operator_credits
+            WHERE request_credit_id = ledger_request_credits.id
+       ) + provider_credits != gross_credits
+   )`,
+		now,
+		windowEnd.UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return err
+	}
 	rows, err := tx.QueryContext(ctx, `
 SELECT provider_id, COUNT(*), SUM(gross_credits), SUM(provider_credits), SUM(gross_credits - provider_credits)
   FROM ledger_request_credits
- WHERE ts_utc < ? AND settled = 0 AND quarantined = 0
+ WHERE ts_utc < ? AND settled = 0 AND settlement_id IS NULL AND quarantined = 0
  GROUP BY provider_id
 HAVING SUM(provider_credits) >= ?`,
 		windowEnd.UTC().Format(time.RFC3339Nano),
@@ -27,7 +68,6 @@ HAVING SUM(provider_credits) >= ?`,
 		return err
 	}
 	defer rows.Close()
-	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for rows.Next() {
 		var providerID string
 		var count, gross, providerCredits, operatorCredits int64
@@ -77,7 +117,7 @@ WHERE ledger_payout_ready.status = 'ready'`,
 		if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET settled = 1, settlement_id = ?, updated_at_utc = ?
- WHERE provider_id = ? AND ts_utc < ? AND settled = 0 AND quarantined = 0`,
+ WHERE provider_id = ? AND ts_utc < ? AND settled = 0 AND settlement_id IS NULL AND quarantined = 0`,
 			settlementID,
 			now,
 			providerID,
@@ -94,9 +134,6 @@ UPDATE ledger_request_credits
 
 func (s *Store) StartWeeklySettlement(ctx context.Context, cfg SettlementConfig) {
 	s.SetSettlementConfig(cfg)
-	if !cfg.JobEnabled {
-		return
-	}
 	go func() {
 		for {
 			next := NextMondayUTC(time.Now().UTC())

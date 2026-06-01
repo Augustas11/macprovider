@@ -118,6 +118,12 @@ CREATE TABLE IF NOT EXISTS ledger_payout_ready (
 );
 CREATE INDEX IF NOT EXISTS idx_lpr_provider_status ON ledger_payout_ready(provider_id, status, window_end_utc);
 CREATE INDEX IF NOT EXISTS idx_lpr_status ON ledger_payout_ready(status, window_end_utc);
+CREATE TRIGGER IF NOT EXISTS trg_lpr_terminal_status_guard
+BEFORE UPDATE OF status ON ledger_payout_ready
+WHEN OLD.status IN ('consumed','voided') AND NEW.status != OLD.status
+BEGIN
+    SELECT RAISE(ABORT, 'ledger_payout_ready status is terminal');
+END;
 
 CREATE TABLE IF NOT EXISTS ledger_reconciliation_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -146,8 +152,7 @@ CREATE TABLE IF NOT EXISTS ledger_config_snapshots (
     provider_share_bps INTEGER NOT NULL CHECK(provider_share_bps BETWEEN 0 AND 10000),
     global_multiplier_ppm INTEGER NOT NULL CHECK(global_multiplier_ppm >= 0),
     rate_card_json TEXT NOT NULL,
-    created_at_utc TEXT NOT NULL,
-    UNIQUE(config_hash)
+    created_at_utc TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lcs_effective_at ON ledger_config_snapshots(effective_at_utc);
 
@@ -167,7 +172,84 @@ CREATE INDEX IF NOT EXISTS idx_lpis_provider ON ledger_provider_identity_snapsho
 `); err != nil {
 		return err
 	}
+	if err := s.rebuildLegacyConfigSnapshots(ctx); err != nil {
+		return err
+	}
 	return s.validateRequestLog(ctx)
+}
+
+func (s *Store) rebuildLegacyConfigSnapshots(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA index_list(ledger_config_snapshots)`)
+	if err != nil {
+		return err
+	}
+	hasLegacyUnique := false
+	for rows.Next() {
+		var seq int
+		var name string
+		var unique int
+		var origin, partial any
+		if err := rows.Scan(&seq, &name, &unique, &origin, &partial); err != nil {
+			rows.Close()
+			return err
+		}
+		if unique == 1 {
+			indexInfo, err := s.db.QueryContext(ctx, `PRAGMA index_info(`+name+`)`)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			cols := []string{}
+			for indexInfo.Next() {
+				var seqno, cid int
+				var col string
+				if err := indexInfo.Scan(&seqno, &cid, &col); err != nil {
+					indexInfo.Close()
+					return err
+				}
+				cols = append(cols, col)
+			}
+			if err := indexInfo.Err(); err != nil {
+				indexInfo.Close()
+				return err
+			}
+			indexInfo.Close()
+			if len(cols) == 1 && cols[0] == "config_hash" {
+				hasLegacyUnique = true
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if !hasLegacyUnique {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `
+DROP TABLE IF EXISTS ledger_config_snapshots_rebuild;
+CREATE TABLE ledger_config_snapshots_rebuild (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    effective_at_utc TEXT NOT NULL,
+    config_hash TEXT NOT NULL,
+    provider_share_bps INTEGER NOT NULL CHECK(provider_share_bps BETWEEN 0 AND 10000),
+    global_multiplier_ppm INTEGER NOT NULL CHECK(global_multiplier_ppm >= 0),
+    rate_card_json TEXT NOT NULL,
+    created_at_utc TEXT NOT NULL
+);
+INSERT INTO ledger_config_snapshots_rebuild (
+    id, effective_at_utc, config_hash, provider_share_bps,
+    global_multiplier_ppm, rate_card_json, created_at_utc
+)
+SELECT id, effective_at_utc, config_hash, provider_share_bps,
+       global_multiplier_ppm, rate_card_json, created_at_utc
+  FROM ledger_config_snapshots;
+DROP TABLE ledger_config_snapshots;
+ALTER TABLE ledger_config_snapshots_rebuild RENAME TO ledger_config_snapshots;
+CREATE INDEX IF NOT EXISTS idx_lcs_effective_at ON ledger_config_snapshots(effective_at_utc);
+`)
+	return err
 }
 
 func (s *Store) SetSettlementConfig(cfg SettlementConfig) {

@@ -3,6 +3,7 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"time"
 )
 
@@ -12,7 +13,7 @@ type RecoverInput struct {
 	Source   string
 }
 
-func (s *Store) RecoverLedger(ctx context.Context, in RecoverInput) error {
+func (s *Store) RecoverLedger(ctx context.Context, in RecoverInput) (retErr error) {
 	if in.Source == "" {
 		in.Source = "startup_scan"
 	}
@@ -20,8 +21,30 @@ func (s *Store) RecoverLedger(ctx context.Context, in RecoverInput) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
 	started := time.Now().UTC()
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		finished := time.Now().UTC()
+		_, _ = s.db.ExecContext(context.Background(), `
+INSERT INTO ledger_reconciliation_runs (
+    run_type, from_utc, to_utc, request_log_rows_scanned,
+    missing_credit_rows_created, orphan_credit_rows_quarantined,
+    buyer_equivalent_credits, provider_gross_credits,
+    reconciliation_delta_credits, started_at_utc, finished_at_utc, status,
+    error, created_at_utc
+) VALUES (?, ?, ?, 0, 0, 0, 0, 0, 0, ?, ?, 'failed', ?, ?)`,
+			in.Source,
+			in.ScanFrom.UTC().Format(time.RFC3339Nano),
+			in.ScanTo.UTC().Format(time.RFC3339Nano),
+			started.Format(time.RFC3339Nano),
+			finished.Format(time.RFC3339Nano),
+			retErr.Error(),
+			started.Format(time.RFC3339Nano),
+		)
+	}()
+	defer func() { _ = tx.Rollback() }()
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	orphanRes, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
@@ -29,6 +52,8 @@ UPDATE ledger_request_credits
        quarantine_reason = COALESCE(quarantine_reason, 'missing_request_log'),
        updated_at_utc = ?
  WHERE quarantined = 0
+    AND ts_utc >= ?
+    AND ts_utc < ?
 	AND NOT EXISTS (
        SELECT 1
          FROM request_log rl
@@ -42,7 +67,7 @@ UPDATE ledger_request_credits
               SELECT COUNT(*) - 1 FROM request_log prior
                WHERE prior.request_id = rl.request_id AND prior.id <= rl.id
           ), 0) = ledger_request_credits.attempt_n
-   )`, now)
+   )`, now, in.ScanFrom.UTC().Format(time.RFC3339Nano), in.ScanTo.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -92,10 +117,19 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
 			if err != nil {
 				return err
 			}
-			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, nil, nil, errorCode.String, in.Source, "invalid_usage_tokens", now); err != nil {
-				return err
+			if affected == 0 {
+				exists, err := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, nil, nil, errorCode.String, in.Source, "invalid_usage_tokens", now); err != nil {
+						return err
+					}
+					quarantined++
+				}
 			}
-			quarantined += affected + 1
+			quarantined += affected
 			continue
 		}
 		ambiguousAttempt := attemptN > 1 || (attemptN == 1 && retried == 0) || sameRequestCount > 2
@@ -117,10 +151,23 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 		}
 		snapshotID, rewards, multiplier, share, err := s.snapshotAt(ctx, ts)
 		if err != nil {
-			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), errorCode.String, in.Source, "missing_config_snapshot", now); err != nil {
-				return err
+			affected, quarantineErr := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "missing_config_snapshot", now)
+			if quarantineErr != nil {
+				return quarantineErr
 			}
-			quarantined++
+			if affected == 0 {
+				exists, existsErr := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
+				if existsErr != nil {
+					return existsErr
+				}
+				if !exists {
+					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), errorCode.String, in.Source, "missing_config_snapshot", now); err != nil {
+						return err
+					}
+					quarantined++
+				}
+			}
+			quarantined += affected
 			continue
 		}
 		var pp, cp *int64
@@ -151,6 +198,26 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			ProviderShareBps:   share,
 		}
 		result := ComputeCredits(pp, cp, nil, usageFor(errorCode.String, nil), FaultNone, input.RateEntry, multiplier, share)
+		if attemptN > 1 {
+			affected, err := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "ambiguous_attempt_n", now)
+			if err != nil {
+				return err
+			}
+			if affected == 0 {
+				exists, err := ledgerRowExistsForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, pp, cp, errorCode.String, in.Source, "ambiguous_attempt_n", now); err != nil {
+						return err
+					}
+					quarantined++
+				}
+			}
+			quarantined += affected
+			continue
+		}
 		actualGross, expectedGross, exists, mismatch, err := reconcileExistingCreditTx(ctx, tx, input, result, now)
 		if err != nil {
 			return err
@@ -220,9 +287,6 @@ func (s *Store) StartStartupScan(ctx context.Context, cfg SettlementConfig, now 
 
 func (s *Store) StartNightlyReconcile(ctx context.Context, cfg SettlementConfig) {
 	s.SetSettlementConfig(cfg)
-	if !cfg.JobEnabled {
-		return
-	}
 	go func() {
 		for {
 			now := time.Now().UTC()
@@ -282,14 +346,15 @@ func reconcileExistingCreditTx(ctx context.Context, tx *sql.Tx, input HotPathInp
 	var id, gross, providerCredits, promptRate, completionRate, multiplier, share int64
 	var usageSource, faultFlag string
 	var estimated sql.NullInt64
-	var quarantined int
+	var quarantined, settled int
+	var settlementID sql.NullInt64
 	err := tx.QueryRowContext(ctx, `
 SELECT id, gross_credits, provider_credits, usage_source, estimated_completion_tokens,
        prompt_rate_per_mtok, completion_rate_per_mtok, global_multiplier_ppm,
-       provider_share_bps, fault_flag, quarantined
+       provider_share_bps, fault_flag, quarantined, settled, settlement_id
   FROM ledger_request_credits
  WHERE request_id = ? AND attempt_n = ? AND provider_id = ?
- LIMIT 1`, input.RequestID, input.AttemptN, input.ProviderID).Scan(&id, &gross, &providerCredits, &usageSource, &estimated, &promptRate, &completionRate, &multiplier, &share, &faultFlag, &quarantined)
+ LIMIT 1`, input.RequestID, input.AttemptN, input.ProviderID).Scan(&id, &gross, &providerCredits, &usageSource, &estimated, &promptRate, &completionRate, &multiplier, &share, &faultFlag, &quarantined, &settled, &settlementID)
 	if err == sql.ErrNoRows {
 		return 0, 0, false, false, nil
 	}
@@ -327,6 +392,9 @@ SELECT id, gross_credits, provider_credits, usage_source, estimated_completion_t
 		operatorRows != 1 ||
 		providerCredits+operatorCredits.Int64 != gross
 	if mismatch {
+		if settled == 1 || settlementID.Valid {
+			return gross, recomputed.GrossCredits, true, false, fmt.Errorf("ledger mismatch on settled credit request_id=%s attempt_n=%d provider_id=%s", input.RequestID, input.AttemptN, input.ProviderID)
+		}
 		if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET quarantined = 1,
@@ -337,6 +405,31 @@ UPDATE ledger_request_credits
 		}
 	}
 	return gross, recomputed.GrossCredits, true, mismatch, nil
+}
+
+func ledgerRowExistsForRequestAttemptTx(ctx context.Context, tx *sql.Tx, requestID string, attemptN int, assignedID string) (bool, error) {
+	var exists int
+	err := tx.QueryRowContext(ctx, `
+SELECT EXISTS(
+    SELECT 1
+      FROM ledger_request_credits
+     WHERE request_id = ?
+       AND attempt_n = ?
+       AND (
+           provider_assigned_id = ?
+           OR provider_id IN (
+               SELECT provider_id
+                 FROM ledger_provider_identity_snapshots
+                WHERE request_id = ?
+                  AND attempt_n = ?
+                  AND provider_assigned_id = ?
+           )
+       )
+)`, requestID, attemptN, assignedID, requestID, attemptN, assignedID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists == 1, nil
 }
 
 func quarantineExistingLedgerForRequestAttemptTx(ctx context.Context, tx *sql.Tx, requestID string, attemptN int, assignedID, reason, now string) (int64, error) {

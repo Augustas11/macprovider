@@ -804,6 +804,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	billingAttemptN := 0
 	logRowWithBilling := func(
 		providerAssignedID string,
+		providerID string,
 		status int,
 		promptTok, completionTok *int64,
 		errMsg, errCode string,
@@ -815,7 +816,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		attemptN := billingAttemptN
-		if providerAssignedID != "" && status != http.StatusServiceUnavailable {
+		if providerAssignedID != "" {
 			defer func() {
 				billingAttemptN++
 			}()
@@ -842,42 +843,49 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		defer cancel()
 		billingStore, billingCfg, billingSnapshotID := s.billingState()
 		if billingStore != nil && s.reqLogStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
-			stableProviderID := ""
-			for _, p := range s.pool.Snapshot() {
-				if p.AssignedID == providerAssignedID {
-					stableProviderID = p.ProviderID
-					break
+			stableProviderID := providerID
+			if stableProviderID == "" {
+				for _, p := range s.pool.Snapshot() {
+					if p.AssignedID == providerAssignedID {
+						stableProviderID = p.ProviderID
+						break
+					}
 				}
 			}
-			if stableProviderID != "" {
-				if faultFlag == "" {
-					faultFlag = billing.FaultNone
-				}
-				err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billing.HotPathInput{
-					RequestID:           row.RequestID,
-					AttemptN:            attemptN,
-					ProviderAssignedID:  providerAssignedID,
-					ProviderID:          stableProviderID,
-					Model:               row.Model,
-					Status:              status,
-					Stream:              row.Stream,
-					TSUtc:               row.TSUtc,
-					PromptTokens:        promptTok,
-					CompletionTokens:    completionTok,
-					EstimatedCompTokens: estimatedCompTokens,
-					ErrorCode:           errCode,
-					FaultFlag:           faultFlag,
-					ConfigSnapshotID:    billingSnapshotID,
-					RateEntry:           billing.RateFor(billingCfg.RateCard, row.Model),
-					MultiplierPPM:       billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
-					ProviderShareBps:    billing.ParseShareBps(billingCfg.ProviderShare),
-				})
-				if err != nil {
-					s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("billing hot-path insert failed")
-				} else {
-					return
+			if stableProviderID == "" {
+				s.log.Warn().Str("request_id", originalRequestID).Str("provider_assigned_id", providerAssignedID).Msg("billing hot-path skipped without stable provider identity")
+				return
+			}
+			if faultFlag == "" {
+				faultFlag = billing.FaultNone
+			}
+			billingInput := billing.HotPathInput{
+				RequestID:           row.RequestID,
+				AttemptN:            attemptN,
+				ProviderAssignedID:  providerAssignedID,
+				ProviderID:          stableProviderID,
+				Model:               row.Model,
+				Status:              status,
+				Stream:              row.Stream,
+				TSUtc:               row.TSUtc,
+				PromptTokens:        promptTok,
+				CompletionTokens:    completionTok,
+				EstimatedCompTokens: estimatedCompTokens,
+				ErrorCode:           errCode,
+				FaultFlag:           faultFlag,
+				ConfigSnapshotID:    billingSnapshotID,
+				RateEntry:           billing.RateFor(billingCfg.RateCard, row.Model),
+				MultiplierPPM:       billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
+				ProviderShareBps:    billing.ParseShareBps(billingCfg.ProviderShare),
+			}
+			err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
+			if err != nil {
+				s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("billing hot-path insert failed")
+				if fallbackErr := billingStore.WriteRequestLogWithIdentity(ctx, s.reqLogStore, row, billingInput); fallbackErr != nil {
+					s.log.Warn().Err(fallbackErr).Str("request_id", originalRequestID).Msg("request_log identity fallback insert failed")
 				}
 			}
+			return
 		}
 		if err := s.reqLog.Insert(ctx, row); err != nil {
 			s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("request_log insert failed")
@@ -890,10 +898,19 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		errMsg, errCode string,
 		retried int,
 	) {
-		logRowWithBilling(providerAssignedID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
+		logRowWithBilling(providerAssignedID, "", status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
 	}
 	logBuyerFailure := func(status int, msg string) {
 		logRow("", status, nil, nil, msg, "", 0)
+	}
+	logProviderRow := func(
+		provider pool.Provider,
+		status int,
+		promptTok, completionTok *int64,
+		errMsg, errCode string,
+		retried int,
+	) {
+		logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
 	}
 	maxBodyBytes := s.maxChatBodyBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
@@ -930,7 +947,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			estimatedPrompt := int64(estimateTokens(req.raw))
 			attempt.PromptTokens = &estimatedPrompt
 		}
-		logRowWithBilling(provider.AssignedID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, explicitRetries, attempt.EstimatedCompTokens, attempt.FaultFlag)
+		logRowWithBilling(provider.AssignedID, provider.ProviderID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, explicitRetries, attempt.EstimatedCompTokens, attempt.FaultFlag)
 	}
 	shouldLogAttempt := func(attempt requestLogAttempt) bool {
 		return attempt.Status != 0 || attempt.PromptTokens != nil || attempt.CompletionTokens != nil || attempt.EstimatedCompTokens != nil || attempt.Error != "" || attempt.ErrorCode != ""
@@ -951,7 +968,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		for {
 			dispatchBody, err := dispatchBodyForProvider(req, provider)
 			if err != nil {
-				logRow(provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
+				logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return
 			}
@@ -1049,7 +1066,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		for {
 			dispatchBody, err := dispatchBodyForProvider(req, provider)
 			if err != nil {
-				logRow(provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
+				logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return
 			}
@@ -1143,7 +1160,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	for {
 		dispatchBody, err := dispatchBodyForProvider(req, provider)
 		if err != nil {
-			logRow(provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
+			logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 			return
 		}
@@ -1157,7 +1174,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		upReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, bytes.NewReader(dispatchBody))
 		if err != nil {
 			cancelAttempt()
-			logRow(provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
+			logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 			return
 		}
@@ -1169,7 +1186,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			_ = resp.Body.Close()
 			if readErr != nil {
 				cancelAttempt()
-				logRow(provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
+				logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return
 			}
@@ -1184,7 +1201,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(respBody)
 			cancelAttempt()
 			promptTok, completionTok := tokenPointersFromChatResponse(respBody)
-			logRow(provider.AssignedID, http.StatusOK, promptTok, completionTok, "", "", explicitRetries)
+			logProviderRow(provider, http.StatusOK, promptTok, completionTok, "", "", explicitRetries)
 			return
 		}
 		status := 0
@@ -1202,11 +1219,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		if !s.shouldRetry(r, startedAt, explicitRetries, faultedProviders, status, err) {
 			if retryRequested && status == http.StatusGatewayTimeout {
-				logRow(provider.AssignedID, http.StatusGatewayTimeout, nil, nil, "Selected provider timed out; buyer should retry", attempt.ErrorCode, explicitRetries)
+				logProviderRow(provider, http.StatusGatewayTimeout, nil, nil, "Selected provider timed out; buyer should retry", attempt.ErrorCode, explicitRetries)
 				writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
 				return
 			}
-			logRow(provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", attempt.ErrorCode, explicitRetries)
+			logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", attempt.ErrorCode, explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
 			return
 		}
@@ -1218,7 +1235,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			errMsg = err.Error()
 		}
-		logRow(provider.AssignedID, failStatus, nil, nil, errMsg, attempt.ErrorCode, explicitRetries)
+		logProviderRow(provider, failStatus, nil, nil, errMsg, attempt.ErrorCode, explicitRetries)
 		nextRouteID := uuid.NewString()
 		next, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
 		if routeErr != nil {
