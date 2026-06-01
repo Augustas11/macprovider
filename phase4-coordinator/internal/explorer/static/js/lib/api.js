@@ -1,13 +1,14 @@
 export const REQUESTS_PER_MINUTE_CAP = 60;
 let queue = Promise.resolve();
 let stamps = [];
+let bearer = "";
 
 export function token() {
-  return sessionStorage.getItem("explorerBearer") || "";
+  return bearer;
 }
 
 export function setToken(value) {
-  sessionStorage.setItem("explorerBearer", value);
+  bearer = value || "";
 }
 
 export function api(path) {

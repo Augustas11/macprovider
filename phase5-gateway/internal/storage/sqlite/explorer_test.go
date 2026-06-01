@@ -63,6 +63,68 @@ func TestExplorerSQLiteActivityCursorsAcrossSources(t *testing.T) {
 	}
 }
 
+func TestExplorerSQLiteActivitySinceCursorPaginatesNewerRows(t *testing.T) {
+	store := newExplorerSQLiteStore(t)
+	seedExplorerSQLiteBuyer(t, store, "acct_since", "since@x")
+	seedExplorerSQLiteUsage(t, store, "acct_since", "req_old", fixedExplorerSQLiteTime())
+	initial, err := store.ExplorerActivity(context.Background(), storage.ExplorerActivityQuery{
+		From: fixedExplorerSQLiteTime().Add(-time.Hour), To: fixedExplorerSQLiteTime().Add(time.Hour), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ExplorerActivity initial: %v", err)
+	}
+	if initial.LatestCursor == nil {
+		t.Fatal("missing latest cursor")
+	}
+	seedExplorerSQLiteUsage(t, store, "acct_since", "req_new_1", fixedExplorerSQLiteTime().Add(1*time.Minute))
+	seedExplorerSQLiteUsage(t, store, "acct_since", "req_new_2", fixedExplorerSQLiteTime().Add(2*time.Minute))
+	seedExplorerSQLiteUsage(t, store, "acct_since", "req_new_3", fixedExplorerSQLiteTime().Add(3*time.Minute))
+
+	page1, err := store.ExplorerActivity(context.Background(), storage.ExplorerActivityQuery{
+		From: fixedExplorerSQLiteTime().Add(-time.Hour), To: fixedExplorerSQLiteTime().Add(time.Hour), SinceCursor: *initial.LatestCursor, Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("ExplorerActivity page1: %v", err)
+	}
+	if len(page1.Items) != 2 || page1.Items[0].SourceID != "req_new_1" || page1.Items[1].SourceID != "req_new_2" || page1.NextCursor == nil {
+		t.Fatalf("page1=%+v", page1)
+	}
+	page2, err := store.ExplorerActivity(context.Background(), storage.ExplorerActivityQuery{
+		From: fixedExplorerSQLiteTime().Add(-time.Hour), To: fixedExplorerSQLiteTime().Add(time.Hour), SinceCursor: *page1.NextCursor, Limit: 2,
+	})
+	if err != nil {
+		t.Fatalf("ExplorerActivity page2: %v", err)
+	}
+	if len(page2.Items) != 1 || page2.Items[0].SourceID != "req_new_3" {
+		t.Fatalf("page2=%+v", page2)
+	}
+}
+
+func TestExplorerSQLiteActivityIncludesAPIKeyEventsAndDoesNotUseFeedbackRatingAsTokens(t *testing.T) {
+	store := newExplorerSQLiteStore(t)
+	seedExplorerSQLiteBuyer(t, store, "acct_activity", "activity@x")
+	seedExplorerSQLiteAPIKeyEvent(t, store, "acct_activity", "acct_activity_key", fixedExplorerSQLiteTime().Add(-time.Minute))
+	seedExplorerSQLiteFeedback(t, store, "acct_activity", "req_activity", "fb_activity", fixedExplorerSQLiteTime())
+	list, err := store.ExplorerActivity(context.Background(), storage.ExplorerActivityQuery{
+		From: fixedExplorerSQLiteTime().Add(-time.Hour), To: fixedExplorerSQLiteTime().Add(time.Hour), Limit: 20,
+	})
+	if err != nil {
+		t.Fatalf("ExplorerActivity: %v", err)
+	}
+	seenAPIKey := false
+	for _, item := range list.Items {
+		if item.EventType == "api_key_event" {
+			seenAPIKey = true
+		}
+		if item.EventType == "feedback" && item.Tokens != nil {
+			t.Fatalf("feedback tokens=%v want nil", *item.Tokens)
+		}
+	}
+	if !seenAPIKey {
+		t.Fatalf("api_key_event missing from activity: %+v", list.Items)
+	}
+}
+
 func TestExplorerSQLiteHealthCountsWindowedRows(t *testing.T) {
 	store := newExplorerSQLiteStore(t)
 	seedExplorerSQLiteBuyer(t, store, "acct_health", "health@x")
@@ -124,6 +186,15 @@ func seedExplorerSQLiteFeedback(t *testing.T, store *Store, accountID, requestID
 		EventID: eventID, RequestID: requestID, AccountID: accountID, Scope: "response", Rating: 4, Comment: "ok", CreatedAt: at,
 	}); err != nil {
 		t.Fatalf("InsertFeedbackEvent: %v", err)
+	}
+}
+
+func seedExplorerSQLiteAPIKeyEvent(t *testing.T, store *Store, accountID, keyID string, at time.Time) {
+	t.Helper()
+	if _, err := store.db.ExecContext(context.Background(), `
+		INSERT INTO api_key_events(key_id, account_id, request_id, event_type, actor, created_at)
+		VALUES(?, ?, ?, 'created', 'test', ?)`, keyID, accountID, "req_key_"+accountID, encodeTime(at)); err != nil {
+		t.Fatalf("insert api_key_events: %v", err)
 	}
 }
 

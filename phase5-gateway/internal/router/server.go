@@ -130,12 +130,14 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/kill-switch", s.handleKillSwitch)
 	mux.HandleFunc("/admin/capacity-signal", s.handleCapacitySignal)
 	mux.HandleFunc("/admin/capacity-tier/evaluate", s.handleCapacityEvaluate)
-	mux.HandleFunc("/admin/explorer/buyers", s.handleExplorerBuyers)
-	mux.HandleFunc("/admin/explorer/buyers/", s.handleExplorerBuyerDetail)
-	mux.HandleFunc("/admin/explorer/sessions", s.handleExplorerSessions)
-	mux.HandleFunc("/admin/explorer/sessions/", s.handleExplorerSessionDetail)
-	mux.HandleFunc("/admin/explorer/activity", s.handleExplorerActivity)
-	mux.HandleFunc("/admin/explorer/health", s.handleExplorerHealth)
+	if s.cfg.Explorer.Enabled {
+		mux.HandleFunc("/admin/explorer/buyers", s.handleExplorerBuyers)
+		mux.HandleFunc("/admin/explorer/buyers/", s.handleExplorerBuyerDetail)
+		mux.HandleFunc("/admin/explorer/sessions", s.handleExplorerSessions)
+		mux.HandleFunc("/admin/explorer/sessions/", s.handleExplorerSessionDetail)
+		mux.HandleFunc("/admin/explorer/activity", s.handleExplorerActivity)
+		mux.HandleFunc("/admin/explorer/health", s.handleExplorerHealth)
+	}
 	mux.HandleFunc("/", s.handleNotFound)
 	return s.middleware(mux)
 }
@@ -148,10 +150,12 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}
 		if stripped := stripInternalMacProviderHeaders(r.Header); len(stripped) > 0 {
 			slog.Warn("internal header injection stripped", "request_id", requestID, "headers", stripped)
-			_ = s.store.InsertAuditEvent(context.Background(), storage.AuditEvent{
-				EventID: mustID("audit"), RequestID: requestID, Actor: "public_ingress", Type: "internal_header_injection_stripped",
-				Payload: fmt.Sprintf(`{"headers":%q}`, strings.Join(stripped, ",")), CreatedAt: s.now(),
-			})
+			if !strings.HasPrefix(r.URL.Path, "/admin/explorer/") && r.URL.Path != "/admin/explorer" {
+				_ = s.store.InsertAuditEvent(context.Background(), storage.AuditEvent{
+					EventID: mustID("audit"), RequestID: requestID, Actor: "public_ingress", Type: "internal_header_injection_stripped",
+					Payload: fmt.Sprintf(`{"headers":%q}`, strings.Join(stripped, ",")), CreatedAt: s.now(),
+				})
+			}
 		}
 		w.Header().Set("X-Request-ID", requestID)
 		if s.publicPaused(r.URL.Path) {

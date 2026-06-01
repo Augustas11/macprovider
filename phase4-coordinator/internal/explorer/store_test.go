@@ -34,7 +34,7 @@ func TestStoreSessionDetailReturnsLedgerJoin(t *testing.T) {
 
 func TestStoreActivitySinceCursorOnlyReturnsNewerRows(t *testing.T) {
 	_, db := newTestExplorer(t, nil)
-	result, err := Store{}.Activity(context.Background(), db, fixedExplorerTime().Add(-time.Hour), fixedExplorerTime().Add(time.Hour), "", "", 10)
+	result, err := Store{}.Activity(context.Background(), db, fixedExplorerTime().Add(-time.Hour), fixedExplorerTime().Add(time.Hour), "", "", "", 10)
 	if err != nil {
 		t.Fatalf("Activity initial: %v", err)
 	}
@@ -42,7 +42,7 @@ func TestStoreActivitySinceCursorOnlyReturnsNewerRows(t *testing.T) {
 		t.Fatalf("missing latest cursor")
 	}
 	seedRequestLog(t, db, fixedExplorerTime().Add(time.Minute), "req_store_newer")
-	next, err := Store{}.Activity(context.Background(), db, fixedExplorerTime().Add(-time.Hour), fixedExplorerTime().Add(time.Hour), "", *result.LatestCursor, 10)
+	next, err := Store{}.Activity(context.Background(), db, fixedExplorerTime().Add(-time.Hour), fixedExplorerTime().Add(time.Hour), "", *result.LatestCursor, "", 10)
 	if err != nil {
 		t.Fatalf("Activity since: %v", err)
 	}

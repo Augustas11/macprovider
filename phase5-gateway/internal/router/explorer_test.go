@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/augstar/macprovider-gateway/internal/config"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
@@ -69,6 +72,49 @@ func TestAC29_BuyerEmailFilterSemantics(t *testing.T) {
 
 	resp = assertStatus(t, h, http.MethodGet, "/admin/explorer/buyers?email=a@x&email_prefix=a", cfg.Coordinator.OperatorKey, "", "", http.StatusBadRequest)
 	assertErrorCode(t, resp.Body.String(), "bad_request")
+}
+
+func TestGatewayExplorerMalformedCursorsReturnBadRequest(t *testing.T) {
+	h, _, _, cfg := newTestHarness(t, fakeOAuth{})
+	for _, path := range []string{
+		"/admin/explorer/buyers?cursor=!!",
+		"/admin/explorer/sessions?cursor=!!",
+		"/admin/explorer/activity?cursor=!!",
+	} {
+		resp := assertStatus(t, h, http.MethodGet, path, cfg.Coordinator.OperatorKey, "", "", http.StatusBadRequest)
+		assertErrorCode(t, resp.Body.String(), "bad_request")
+	}
+}
+
+func TestGatewayExplorerRejectsOverWideWindows(t *testing.T) {
+	h, _, _, cfg := newTestHarness(t, fakeOAuth{})
+	resp := assertStatus(t, h, http.MethodGet, "/admin/explorer/activity?window_hours=9999", cfg.Coordinator.OperatorKey, "", "", http.StatusBadRequest)
+	assertErrorCode(t, resp.Body.String(), "bad_request")
+	from := fixedNow().Add(-32 * 24 * time.Hour).Format(time.RFC3339)
+	to := fixedNow().Format(time.RFC3339)
+	resp = assertStatus(t, h, http.MethodGet, "/admin/explorer/buyers?from="+from+"&to="+to, cfg.Coordinator.OperatorKey, "", "", http.StatusBadRequest)
+	assertErrorCode(t, resp.Body.String(), "bad_request")
+}
+
+func TestGatewayExplorerDisabledReturnsNotFound(t *testing.T) {
+	h, _, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Explorer.Enabled = false
+	})
+	assertStatus(t, h, http.MethodGet, "/admin/explorer/buyers", cfg.Coordinator.OperatorKey, "", "", http.StatusNotFound)
+}
+
+func TestGatewayExplorerDoesNotAuditUnauthenticatedInternalHeaderProbe(t *testing.T) {
+	h, _, dbPath, _ := newTestHarness(t, fakeOAuth{})
+	req := httptest.NewRequest(http.MethodGet, "/admin/explorer/buyers", nil)
+	req.Header.Set("X-MacProvider-Internal-Conv", "conv:attacker")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := countAuditEvents(t, dbPath, "internal_header_injection_stripped"); got != 0 {
+		t.Fatalf("explorer audit events=%d want 0", got)
+	}
 }
 
 func seedExplorerBuyer(t *testing.T, store interface {

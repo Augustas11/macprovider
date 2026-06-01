@@ -211,7 +211,7 @@ func parseExplorerWindow(r *http.Request, defaultHours, maxDays int) (explorerWi
 		}
 		maxHours := maxDays * 24
 		if hours > maxHours {
-			hours = maxHours
+			return explorerWindow{}, errors.New("window exceeds maximum")
 		}
 		from = to.Add(-time.Duration(hours) * time.Hour)
 	}
@@ -225,7 +225,7 @@ func parseExplorerWindow(r *http.Request, defaultHours, maxDays int) (explorerWi
 		return explorerWindow{}, errors.New("from must be before to")
 	}
 	if to.Sub(from) > time.Duration(maxDays)*24*time.Hour {
-		from = to.Add(-time.Duration(maxDays) * 24 * time.Hour)
+		return explorerWindow{}, errors.New("window exceeds maximum")
 	}
 	return explorerWindow{from: from.UTC(), to: to.UTC()}, nil
 }
@@ -244,12 +244,15 @@ func parseExplorerLimit(r *http.Request) int {
 }
 
 func (s *Server) explorerAllowed(w http.ResponseWriter, r *http.Request) bool {
+	if !s.operatorAuthorized(w, r) {
+		return false
+	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method_not_allowed", "Method not allowed")
 		return false
 	}
-	return s.operatorAuthorized(w, r)
+	return true
 }
 
 func writeExplorerBadRequest(w http.ResponseWriter, detail string) {
@@ -265,6 +268,10 @@ func writeExplorerBadRequest(w http.ResponseWriter, detail string) {
 func writeExplorerStorageError(w http.ResponseWriter, err error) {
 	if errors.Is(err, storage.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "invalid_request_error", "not_found", "Explorer resource not found")
+		return
+	}
+	if errors.Is(err, storage.ErrBadCursor) {
+		writeExplorerBadRequest(w, "invalid cursor")
 		return
 	}
 	if errors.Is(err, context.DeadlineExceeded) {

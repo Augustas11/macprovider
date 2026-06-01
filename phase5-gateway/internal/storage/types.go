@@ -272,15 +272,54 @@ type ExplorerAPIKey struct {
 }
 
 type ExplorerBuyerDetail struct {
-	Account     ExplorerBuyerSummary             `json:"account"`
-	Usage       []ExplorerUsageEvent             `json:"usage_events"`
-	Quota       []ExplorerQuotaReservation       `json:"quota_reservations"`
-	Concurrency []ExplorerConcurrencyReservation `json:"concurrency_reservations"`
-	Feedback    []ExplorerFeedbackEvent          `json:"feedback_events"`
-	Audit       []ExplorerAuditEvent             `json:"audit_events"`
-	NextCursor  *string                          `json:"next_cursor"`
-	Partial     bool                             `json:"partial"`
-	Error       any                              `json:"error"`
+	AccountID   string                   `json:"account_id"`
+	Account     ExplorerBuyerAccount     `json:"account"`
+	Identities  []ExplorerIdentity       `json:"identities"`
+	APIKeys     []ExplorerAPIKey         `json:"api_keys"`
+	Usage       ExplorerBuyerUsage       `json:"usage"`
+	Quota       ExplorerBuyerQuota       `json:"quota"`
+	Concurrency ExplorerBuyerConcurrency `json:"concurrency"`
+	Feedback    ExplorerBuyerFeedback    `json:"feedback"`
+	Audit       ExplorerBuyerAudit       `json:"audit"`
+	NextCursor  *string                  `json:"next_cursor"`
+	Partial     bool                     `json:"partial,omitempty"`
+	Error       any                      `json:"error,omitempty"`
+}
+
+type ExplorerBuyerAccount struct {
+	Status           string    `json:"status"`
+	QuotaClass       string    `json:"quota_class"`
+	ConcurrencyClass string    `json:"concurrency_class"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
+type ExplorerBuyerUsage struct {
+	Events        []ExplorerUsageEvent `json:"events"`
+	TokensWindow  int64                `json:"tokens_window"`
+	TokensToday   int64                `json:"tokens_today"`
+	LastUsageTime *time.Time           `json:"last_usage_time"`
+	LastRequestID *string              `json:"last_request_id"`
+}
+
+type ExplorerBuyerQuota struct {
+	Reservations         []ExplorerQuotaReservation `json:"reservations"`
+	ActiveReservedTokens int64                      `json:"active_reserved_tokens"`
+	ExpiredReservations  int                        `json:"expired_reservations"`
+}
+
+type ExplorerBuyerConcurrency struct {
+	ActiveReservations int                              `json:"active_reservations"`
+	Reservations       []ExplorerConcurrencyReservation `json:"reservations"`
+}
+
+type ExplorerBuyerFeedback struct {
+	Events        []ExplorerFeedbackEvent `json:"events"`
+	Count         int                     `json:"count"`
+	AverageRating *float64                `json:"average_rating"`
+}
+
+type ExplorerBuyerAudit struct {
+	Events []ExplorerAuditEvent `json:"events"`
 }
 
 type ExplorerSessionList struct {
@@ -356,7 +395,7 @@ type ExplorerAuditEvent struct {
 }
 
 type ExplorerActivityList struct {
-	Items        []ExplorerActivityEvent `json:"items"`
+	Items        []ExplorerActivityEvent `json:"events"`
 	LatestCursor *string                 `json:"latest_cursor"`
 	NextCursor   *string                 `json:"next_cursor"`
 	Partial      bool                    `json:"partial"`

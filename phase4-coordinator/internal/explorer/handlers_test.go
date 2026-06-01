@@ -39,6 +39,16 @@ func TestAC02_BadBearerRejected(t *testing.T) {
 	}
 }
 
+func TestStaticAssetsRequireBearer(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	for _, path := range []string{"/admin/explorer/", "/admin/explorer/index.html", "/admin/explorer/js/dashboard.js"} {
+		resp := requestExplorer(t, h, http.MethodGet, path, "")
+		if resp.Code != http.StatusUnauthorized {
+			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
+		}
+	}
+}
+
 func TestAC05_OverviewLoadsUnder500msWithSeededData(t *testing.T) {
 	h, _ := newTestExplorer(t, nil)
 	start := time.Now()
@@ -65,7 +75,7 @@ func TestAC06_SessionsCursorIsStableWhenNewerRowsArrive(t *testing.T) {
 		t.Fatalf("page1 status=%d body=%s", page1.Code, page1.Body.String())
 	}
 	body1 := decodeObject(t, page1)
-	items1 := body1["items"].([]any)
+	items1 := body1["sessions"].([]any)
 	if len(items1) != 25 {
 		t.Fatalf("page1 items=%d", len(items1))
 	}
@@ -79,7 +89,7 @@ func TestAC06_SessionsCursorIsStableWhenNewerRowsArrive(t *testing.T) {
 		t.Fatalf("page2 status=%d body=%s", page2.Code, page2.Body.String())
 	}
 	seen := requestIDs(items1)
-	for id := range requestIDs(decodeObject(t, page2)["items"].([]any)) {
+	for id := range requestIDs(decodeObject(t, page2)["sessions"].([]any)) {
 		if seen[id] {
 			t.Fatalf("duplicate request id across cursor pages: %s", id)
 		}
@@ -105,6 +115,26 @@ func TestAC07_SessionDetailIncludesLocalAndGatewayData(t *testing.T) {
 	for _, want := range []string{`"attempts":[`, `"ledger_rows":[`, `"gateway_marker":true`} {
 		if !strings.Contains(resp.Body.String(), want) {
 			t.Fatalf("session detail missing %q: %s", want, resp.Body.String())
+		}
+	}
+}
+
+func TestSessionDetailGatewayOnlyReturnsEmptyLocalArrays(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"request_id":"req_gateway_only","usage_event":{"request_id":"req_gateway_only"},"partial":false,"error":null}`)),
+		}, nil
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/sessions/req_gateway_only", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	for _, want := range []string{`"attempts":[]`, `"ledger_rows":[]`, `"provider_identity_snapshots":[]`, `"req_gateway_only"`} {
+		if !strings.Contains(resp.Body.String(), want) {
+			t.Fatalf("gateway-only detail missing %q: %s", want, resp.Body.String())
 		}
 	}
 }
@@ -281,6 +311,25 @@ func TestAC20_GatewayUnreachableReturnsPartial(t *testing.T) {
 	}
 }
 
+func TestBuyerProxyGatewayErrorsKeepStatusSemantics(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/buyers", "operator-key")
+	if resp.Code != http.StatusServiceUnavailable {
+		t.Fatalf("unavailable status=%d body=%s", resp.Code, resp.Body.String())
+	}
+
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader(`{"error":{"code":"not_found"}}`))}, nil
+	})}
+	resp = requestExplorer(t, h, http.MethodGet, "/admin/explorer/buyers/acct_missing", "operator-key")
+	if resp.Code != http.StatusNotFound {
+		t.Fatalf("not found status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
 func TestAC14_HealthExposesReconciliationDelta(t *testing.T) {
 	h, _ := newTestExplorer(t, nil)
 	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/health", "operator-key")
@@ -306,7 +355,7 @@ func TestAC15_ActivityCursorMonotonic(t *testing.T) {
 		t.Fatalf("missing latest_cursor: %s", resp.Body.String())
 	}
 	next := body["next_cursor"].(string)
-	items := body["items"].([]any)
+	items := body["events"].([]any)
 	if len(items) == 0 || items[0].(map[string]any)["cursor"] == "" {
 		t.Fatalf("activity row cursor missing: %s", resp.Body.String())
 	}
@@ -314,7 +363,7 @@ func TestAC15_ActivityCursorMonotonic(t *testing.T) {
 	if page2.Code != http.StatusOK {
 		t.Fatalf("page2 status=%d body=%s", page2.Code, page2.Body.String())
 	}
-	page2Items := decodeObject(t, page2)["items"].([]any)
+	page2Items := decodeObject(t, page2)["events"].([]any)
 	if page2Items[0].(map[string]any)["request_id"] == items[0].(map[string]any)["request_id"] {
 		t.Fatalf("activity cursor replayed boundary row: page1=%s page2=%s", resp.Body.String(), page2.Body.String())
 	}
@@ -342,7 +391,7 @@ func TestAC16_ActivityReplayFromCursorContiguous(t *testing.T) {
 			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 		}
 		body := decodeObject(t, resp)
-		for id := range requestIDs(body["items"].([]any)) {
+		for id := range requestIDs(body["events"].([]any)) {
 			if seen[id] {
 				t.Fatalf("duplicate activity id %s", id)
 			}
@@ -380,7 +429,7 @@ func TestAC17_ActivitySinceCursorReturnsOnlyNewEvents(t *testing.T) {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
 	body := decodeObject(t, resp)
-	ids := requestIDs(body["items"].([]any))
+	ids := requestIDs(body["events"].([]any))
 	if len(ids) != 2 || !ids["req_live_activity"] || !ids["req_live_activity_2"] {
 		t.Fatalf("new activity missing: %s", resp.Body.String())
 	}
@@ -440,7 +489,7 @@ func TestGatewayHealthUnknownWhenDisabled(t *testing.T) {
 	if resp.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	if !strings.Contains(resp.Body.String(), `"health":"unknown"`) {
+	if !strings.Contains(resp.Body.String(), `"gateway_health":"unknown"`) {
 		t.Fatalf("gateway health unknown missing: %s", resp.Body.String())
 	}
 }

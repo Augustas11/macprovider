@@ -1,20 +1,30 @@
 import {api,setToken,token} from "./lib/api.js";
 import {poll,stop} from "./lib/poll.js";
+import {spec as overviewSpec} from "./views/overview.js";
+import {spec as sessionsSpec} from "./views/sessions.js";
+import {spec as buyersSpec} from "./views/buyers.js";
+import {spec as providersSpec} from "./views/providers.js";
+import {spec as ledgerSpec} from "./views/ledger.js";
+import {spec as settlementsSpec} from "./views/settlements.js";
+import {spec as activitySpec} from "./views/activity.js";
+import {spec as healthSpec} from "./views/health.js";
+import {spec as feedbackSpec} from "./views/feedback.js";
 
 const app = document.querySelector("#app");
 const tabs = [...document.querySelectorAll("#tabs button")];
 const intervals = {overview:30000,providers:10000,activity:15000,health:30000,feedback:30000};
-const paths = {
-  overview:"/admin/explorer/overview",
-  providers:"/admin/explorer/providers",
-  activity:"/admin/explorer/activity",
-  sessions:"/admin/explorer/sessions",
-  buyers:"/admin/explorer/buyers",
-  ledger:"/admin/explorer/ledger",
-  settlements:"/admin/explorer/settlements",
-  health:"/admin/explorer/health",
-  feedback:"/admin/explorer/feedback"
+const specs = {
+  overview: overviewSpec,
+  sessions: sessionsSpec,
+  buyers: buyersSpec,
+  providers: providersSpec,
+  ledger: ledgerSpec,
+  settlements: settlementsSpec,
+  activity: activitySpec,
+  health: healthSpec,
+  feedback: feedbackSpec
 };
+const paths = Object.fromEntries(Object.entries(specs).map(([k,v])=>[k,v.path]));
 
 document.querySelector("#bearer").value = token();
 document.querySelector("#authForm").addEventListener("submit",(e)=>{e.preventDefault();setToken(document.querySelector("#bearer").value);load(current);});
@@ -84,8 +94,9 @@ async function load(view, path) {
   document.querySelector("#refresh").onclick = () => load(view, currentPath);
   try {
     const data = await api(currentPath);
-    const rows = data.items || (data.event ? [data.event] : data.account ? [data.account] : data.provider ? [data.provider] : data.settlement ? [data.settlement] : [data]);
-    app.innerHTML = `<div class="toolbar"><button id="refresh">Refresh</button></div>${statusStrip(data)}${healthLinks(data)}${table(rows)}`;
+    const spec = specs[view] || overviewSpec;
+    const rows = spec.rows(data);
+    app.innerHTML = `<div class="toolbar"><button id="refresh">Refresh</button>${filters(spec)}</div>${statusStrip(data)}${healthLinks(data)}${summary(spec,data)}${table(rows)}`;
     document.querySelector("#refresh").onclick = () => load(view, currentPath);
   } catch (err) {
     app.innerHTML = `<div class="panel error">${escapeHtml(err.message)}</div>`;
@@ -94,3 +105,12 @@ async function load(view, path) {
 }
 
 load(current);
+
+function filters(spec) {
+  return (spec.filters || []).map((f)=>`<button data-view="${spec.view}" data-path="${spec.path}${f.query}">${escapeHtml(f.label)}</button>`).join("");
+}
+
+function summary(spec, data) {
+  const panels = (spec.panels || []).map((p)=>`<div><strong>${escapeHtml(p.label)}</strong><span class="mono">${escapeHtml(String(p.value(data)))}</span></div>`);
+  return panels.length ? `<div class="grid">${panels.join("")}</div>` : "";
+}

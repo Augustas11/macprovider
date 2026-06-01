@@ -589,22 +589,40 @@ func (c Config) validateExplorer() error {
 	if err := validateExplorerWindow("explorer.settlements", c.Explorer.SettlementsMaxWindowDays, c.Explorer.SettlementsDefaultWindowHours, 31, 365); err != nil {
 		return err
 	}
-	if c.Explorer.GatewayTimeoutMs < 100 || c.Explorer.GatewayTimeoutMs > 10000 {
-		return fmt.Errorf("explorer.gateway_timeout_ms must be between 100 and 10000")
+	if c.Explorer.GatewayTimeoutMs < 100 || c.Explorer.GatewayTimeoutMs > 5000 {
+		return fmt.Errorf("explorer.gateway_timeout_ms must be between 100 and 5000")
 	}
-	if c.Explorer.QueryTimeoutMs < 100 || c.Explorer.QueryTimeoutMs > 30000 {
-		return fmt.Errorf("explorer.query_timeout_ms must be between 100 and 30000")
+	if c.Explorer.QueryTimeoutMs < 100 || c.Explorer.QueryTimeoutMs > 5000 {
+		return fmt.Errorf("explorer.query_timeout_ms must be between 100 and 5000")
 	}
 	if c.Explorer.PollMinIntervalSeconds < 1 || c.Explorer.PollMinIntervalSeconds > 60 {
 		return fmt.Errorf("explorer.poll_min_interval_seconds must be between 1 and 60")
 	}
-	if c.Explorer.RequestsPerMinuteCap < 1 || c.Explorer.RequestsPerMinuteCap > 600 {
-		return fmt.Errorf("explorer.requests_per_minute_cap must be between 1 and 600")
+	if c.Explorer.RequestsPerMinuteCap < 1 || c.Explorer.RequestsPerMinuteCap > 60 {
+		return fmt.Errorf("explorer.requests_per_minute_cap must be between 1 and 60")
 	}
-	if c.Explorer.Enabled && c.Explorer.GatewayBaseURL != "" && !strings.HasPrefix(c.Explorer.GatewayBaseURL, "http://") && !strings.HasPrefix(c.Explorer.GatewayBaseURL, "https://") {
-		return fmt.Errorf("explorer.gateway_base_url must begin with http:// or https:// when set")
+	if c.Explorer.Enabled && c.Explorer.GatewayBaseURL != "" {
+		u, err := url.Parse(c.Explorer.GatewayBaseURL)
+		if err != nil || u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("explorer.gateway_base_url must be an absolute URL when set")
+		}
+		if u.User != nil {
+			return fmt.Errorf("explorer.gateway_base_url must not contain userinfo")
+		}
+		if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+			return fmt.Errorf("explorer.gateway_base_url must use https unless targeting loopback")
+		}
 	}
 	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateExplorerWindow(prefix string, maxDays, defaultHours, minDays, maxDaysAllowed int) error {

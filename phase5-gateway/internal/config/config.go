@@ -24,6 +24,7 @@ type Config struct {
 	Timeouts     TimeoutsConfig      `yaml:"timeouts"`
 	CORS         CORSConfig          `yaml:"cors"`
 	Routing      RoutingConfig       `yaml:"routing"`
+	Explorer     ExplorerConfig      `yaml:"explorer"`
 }
 
 type ListenConfig struct {
@@ -125,6 +126,10 @@ type RoutingConfig struct {
 	StickyTTLS    int  `yaml:"sticky_ttl_s"`
 }
 
+type ExplorerConfig struct {
+	Enabled bool `yaml:"enabled"`
+}
+
 func Default() Config {
 	return Config{
 		Listen: ListenConfig{BindAddress: "127.0.0.1", Port: 9443},
@@ -170,6 +175,7 @@ func Default() Config {
 		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, StreamingCancelMS: 500},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
+		Explorer: ExplorerConfig{Enabled: false},
 	}
 }
 

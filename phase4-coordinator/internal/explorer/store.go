@@ -221,7 +221,53 @@ func (Store) Health(ctx context.Context, q ReadDB, started time.Time, poolSize i
 	}, nil
 }
 
-func (Store) Activity(ctx context.Context, q ReadDB, from, to time.Time, cursor, sinceCursor string, limit int) (ListResult, error) {
+func (Store) Overview(ctx context.Context, q ReadDB, from, to time.Time) (map[string]any, error) {
+	trafficRows, err := queryMaps(ctx, q, `
+		SELECT COUNT(*) AS requests_window,
+		       COALESCE(SUM(total_tokens), 0) AS tokens_window,
+		       COALESCE(SUM(CASE WHEN status >= 400 THEN 1 ELSE 0 END), 0) AS error_count_window,
+		       COALESCE(SUM(CASE WHEN retried != 0 THEN 1 ELSE 0 END), 0) AS retry_count_window
+		FROM request_log
+		WHERE ts_utc >= ? AND ts_utc < ?`, encodeTime(from), encodeTime(to))
+	if err != nil {
+		return nil, err
+	}
+	ledgerRows, err := queryMaps(ctx, q, `
+		SELECT COALESCE(SUM(CASE WHEN lrc.ts_utc >= ? AND lrc.ts_utc < ? THEN lrc.provider_credits ELSE 0 END), 0) AS current_window_provider_credits,
+		       COALESCE(SUM(lrc.gross_credits), 0) AS total_gross_credits,
+		       COALESCE(SUM(lrc.provider_credits), 0) AS total_provider_credits,
+		       COALESCE(SUM(loc.operator_credits), 0) AS total_operator_credits,
+		       COALESCE((SELECT COUNT(*) FROM ledger_payout_ready WHERE status = 'ready'), 0) AS pending_payout_count,
+		       COALESCE((SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status = 'ready'), 0) AS pending_payout_credits,
+		       COALESCE(SUM(CASE WHEN lrc.quarantined != 0 THEN 1 ELSE 0 END), 0) AS quarantined_count,
+		       COALESCE(SUM(CASE WHEN lrc.fault_flag != '' AND lrc.fault_flag != 'none' THEN 1 ELSE 0 END), 0) AS fault_count
+		FROM ledger_request_credits lrc
+		LEFT JOIN ledger_operator_credits loc ON loc.request_credit_id = lrc.id`, encodeTime(from), encodeTime(to))
+	if err != nil {
+		return nil, err
+	}
+	reconciliationRows, err := queryMaps(ctx, q, `
+		SELECT id AS last_run_id, status AS last_status,
+		       reconciliation_delta_credits AS last_delta_credits,
+		       finished_at_utc AS last_finished_at_utc
+		FROM ledger_reconciliation_runs
+		ORDER BY started_at_utc DESC, id DESC
+		LIMIT 1`)
+	if err != nil {
+		return nil, err
+	}
+	reconciliation := map[string]any{"last_run_id": nil, "last_status": nil, "last_delta_credits": nil, "last_finished_at_utc": nil}
+	if len(reconciliationRows) > 0 {
+		reconciliation = reconciliationRows[0]
+	}
+	return map[string]any{
+		"traffic":        firstOrNil(trafficRows),
+		"ledger":         firstOrNil(ledgerRows),
+		"reconciliation": reconciliation,
+	}, nil
+}
+
+func (Store) Activity(ctx context.Context, q ReadDB, from, to time.Time, cursor, sinceCursor, eventType string, limit int) (ListResult, error) {
 	if cursor != "" && sinceCursor != "" {
 		return ListResult{}, ErrBadCursor
 	}
@@ -231,13 +277,14 @@ func (Store) Activity(ctx context.Context, q ReadDB, from, to time.Time, cursor,
 			return ListResult{}, err
 		}
 		items, err := queryMaps(ctx, q, `
-		SELECT id AS request_log_id, ts_utc AS event_time_utc, 'request' AS event_type, request_id AS source_id,
-		       request_id, provider_assigned_id, model, status, error_code, total_tokens
-		FROM request_log
-		WHERE ts_utc >= ? AND ts_utc < ?
-		  AND (ts_utc > ? OR (ts_utc = ? AND id > ?))
-		ORDER BY ts_utc ASC, id ASC
-		LIMIT ?`, encodeTime(from), encodeTime(to), boundary.TS, boundary.TS, boundary.ID, limit+1)
+			SELECT id AS request_log_id, ts_utc AS event_time_utc, 'request_completed' AS event_type, 'coordinator' AS source, request_id AS source_id,
+			       request_id, provider_assigned_id, model, status, error_code, total_tokens
+			FROM request_log
+			WHERE ts_utc >= ? AND ts_utc < ?
+			  AND (? = '' OR 'request_completed' = ?)
+			  AND (ts_utc > ? OR (ts_utc = ? AND id > ?))
+			ORDER BY ts_utc ASC, id ASC
+			LIMIT ?`, encodeTime(from), encodeTime(to), eventType, eventType, boundary.TS, boundary.TS, boundary.ID, limit+1)
 		if err != nil {
 			return ListResult{}, err
 		}
@@ -252,13 +299,14 @@ func (Store) Activity(ctx context.Context, q ReadDB, from, to time.Time, cursor,
 		cursorTS, cursorID = boundary.TS, boundary.ID
 	}
 	items, err := queryMaps(ctx, q, `
-		SELECT id AS request_log_id, ts_utc AS event_time_utc, 'request' AS event_type, request_id AS source_id,
-		       request_id, provider_assigned_id, model, status, error_code, total_tokens
-		FROM request_log
-		WHERE ts_utc >= ? AND ts_utc < ?
-		  AND (? = '' OR ts_utc < ? OR (ts_utc = ? AND id < ?))
-		ORDER BY ts_utc DESC, id DESC
-		LIMIT ?`, encodeTime(from), encodeTime(to), cursorTS, cursorTS, cursorTS, cursorID, limit+1)
+			SELECT id AS request_log_id, ts_utc AS event_time_utc, 'request_completed' AS event_type, 'coordinator' AS source, request_id AS source_id,
+			       request_id, provider_assigned_id, model, status, error_code, total_tokens
+			FROM request_log
+			WHERE ts_utc >= ? AND ts_utc < ?
+			  AND (? = '' OR 'request_completed' = ?)
+			  AND (? = '' OR ts_utc < ? OR (ts_utc = ? AND id < ?))
+			ORDER BY ts_utc DESC, id DESC
+			LIMIT ?`, encodeTime(from), encodeTime(to), eventType, eventType, cursorTS, cursorTS, cursorTS, cursorID, limit+1)
 	if err != nil {
 		return ListResult{}, err
 	}

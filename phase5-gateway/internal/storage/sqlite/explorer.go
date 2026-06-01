@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"strings"
 	"time"
 
@@ -121,20 +120,62 @@ func (s *Store) ExplorerBuyerDetail(ctx context.Context, accountID string, q sto
 	if err != nil {
 		return storage.ExplorerBuyerDetail{}, err
 	}
-	out := storage.ExplorerBuyerDetail{Account: account, Partial: false, Error: nil}
-	if out.Usage, err = s.explorerUsageEvents(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
+	out := storage.ExplorerBuyerDetail{
+		AccountID: account.AccountID,
+		Account: storage.ExplorerBuyerAccount{
+			Status: account.Status, QuotaClass: account.QuotaClass,
+			ConcurrencyClass: account.ConcurrencyClass, CreatedAt: account.CreatedAt,
+		},
+		Identities: account.Identities,
+		APIKeys:    account.APIKeys,
+		Partial:    false,
+		Error:      nil,
+	}
+	if out.Usage.Events, err = s.explorerUsageEvents(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
 		return storage.ExplorerBuyerDetail{}, err
 	}
-	if out.Quota, err = s.explorerQuotaReservations(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
+	for _, ev := range out.Usage.Events {
+		out.Usage.TokensWindow += ev.TotalTokens
+		out.Usage.TokensToday += ev.TotalTokens
+		if out.Usage.LastUsageTime == nil || ev.CreatedAt.After(*out.Usage.LastUsageTime) {
+			t := ev.CreatedAt
+			id := ev.RequestID
+			out.Usage.LastUsageTime = &t
+			out.Usage.LastRequestID = &id
+		}
+	}
+	if out.Quota.Reservations, err = s.explorerQuotaReservations(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
 		return storage.ExplorerBuyerDetail{}, err
 	}
-	if out.Concurrency, err = s.explorerConcurrencyReservations(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
+	for _, reservation := range out.Quota.Reservations {
+		switch reservation.Status {
+		case "active":
+			out.Quota.ActiveReservedTokens += reservation.ReservedTokens
+		case "expired":
+			out.Quota.ExpiredReservations++
+		}
+	}
+	if out.Concurrency.Reservations, err = s.explorerConcurrencyReservations(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
 		return storage.ExplorerBuyerDetail{}, err
 	}
-	if out.Feedback, err = s.explorerFeedbackEvents(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
+	for _, reservation := range out.Concurrency.Reservations {
+		if reservation.Status == "active" {
+			out.Concurrency.ActiveReservations++
+		}
+	}
+	if out.Feedback.Events, err = s.explorerFeedbackEvents(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
 		return storage.ExplorerBuyerDetail{}, err
 	}
-	if out.Audit, err = s.explorerAuditEvents(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
+	out.Feedback.Count = len(out.Feedback.Events)
+	if out.Feedback.Count > 0 {
+		var sum float64
+		for _, ev := range out.Feedback.Events {
+			sum += float64(ev.Rating)
+		}
+		avg := sum / float64(out.Feedback.Count)
+		out.Feedback.AverageRating = &avg
+	}
+	if out.Audit.Events, err = s.explorerAuditEvents(ctx, accountID, "", q.From, q.To, q.Limit); err != nil {
 		return storage.ExplorerBuyerDetail{}, err
 	}
 	return out, nil
@@ -229,7 +270,9 @@ func (s *Store) ExplorerActivity(ctx context.Context, q storage.ExplorerActivity
 			UNION ALL
 			SELECT created_at, 70 AS source_rank, 'quota_reservation' AS event_type, request_id AS source_id, request_id, account_id, '' AS key_id, status, reserved_tokens AS tokens FROM quota_reservations
 			UNION ALL
-			SELECT created_at, 60 AS source_rank, 'feedback' AS event_type, event_id AS source_id, request_id, account_id, '' AS key_id, scope AS status, rating AS tokens FROM feedback_events
+				SELECT created_at, 65 AS source_rank, 'api_key_event' AS event_type, CAST(event_id AS TEXT) AS source_id, request_id, account_id, key_id, event_type AS status, 0 AS tokens FROM api_key_events
+				UNION ALL
+				SELECT created_at, 60 AS source_rank, 'feedback' AS event_type, event_id AS source_id, request_id, account_id, '' AS key_id, scope AS status, 0 AS tokens FROM feedback_events
 			UNION ALL
 			SELECT created_at, 50 AS source_rank, event_type, event_id AS source_id, request_id, account_id, '' AS key_id, actor AS status, 0 AS tokens FROM audit_events
 			UNION ALL
@@ -248,11 +291,18 @@ func (s *Store) ExplorerActivity(ctx context.Context, q storage.ExplorerActivity
 		  AND (? = '' OR
 		       (? = 0 AND (created_at < ? OR (created_at = ? AND source_rank < ?) OR (created_at = ? AND source_rank = ? AND source_id < ?))) OR
 		       (? = 1 AND (created_at > ? OR (created_at = ? AND source_rank > ?) OR (created_at = ? AND source_rank = ? AND source_id > ?))))
-		ORDER BY created_at DESC, source_rank DESC, source_id DESC
-		LIMIT ?`,
+			ORDER BY
+				CASE WHEN ? = 1 THEN created_at END ASC,
+				CASE WHEN ? = 1 THEN source_rank END ASC,
+				CASE WHEN ? = 1 THEN source_id END ASC,
+				CASE WHEN ? = 0 THEN created_at END DESC,
+				CASE WHEN ? = 0 THEN source_rank END DESC,
+				CASE WHEN ? = 0 THEN source_id END DESC
+			LIMIT ?`,
 		encodeTime(q.From), encodeTime(q.To), q.Type, q.Type, q.AccountID, q.AccountID, q.RequestID, q.RequestID,
 		cursor.TS, boolInt(newer), cursor.TS, cursor.TS, cursor.Rank, cursor.TS, cursor.Rank, cursor.ID,
-		boolInt(newer), cursor.TS, cursor.TS, cursor.Rank, cursor.TS, cursor.Rank, cursor.ID, q.Limit+1)
+		boolInt(newer), cursor.TS, cursor.TS, cursor.Rank, cursor.TS, cursor.Rank, cursor.ID,
+		boolInt(newer), boolInt(newer), boolInt(newer), boolInt(newer), boolInt(newer), boolInt(newer), q.Limit+1)
 	if err != nil {
 		return storage.ExplorerActivityList{}, err
 	}
@@ -295,14 +345,18 @@ func (s *Store) ExplorerActivity(ctx context.Context, q storage.ExplorerActivity
 	if err := rows.Err(); err != nil {
 		return storage.ExplorerActivityList{}, err
 	}
-	if len(out.Items) > 0 {
-		latest := out.Items[0].Cursor
-		out.LatestCursor = &latest
-	}
 	if len(out.Items) > q.Limit {
 		next := out.Items[q.Limit-1].Cursor
 		out.NextCursor = &next
 		out.Items = out.Items[:q.Limit]
+	}
+	if len(out.Items) > 0 {
+		latestIndex := 0
+		if newer {
+			latestIndex = len(out.Items) - 1
+		}
+		latest := out.Items[latestIndex].Cursor
+		out.LatestCursor = &latest
 	}
 	return out, nil
 }
@@ -636,7 +690,7 @@ func decodeListID(raw string) (string, error) {
 	}
 	b, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
-		return "", err
+		return "", storage.ErrBadCursor
 	}
 	return string(b), nil
 }
@@ -652,14 +706,14 @@ func decodeListCursor(raw string) (listCursor, error) {
 	}
 	b, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
-		return listCursor{}, err
+		return listCursor{}, storage.ErrBadCursor
 	}
 	var c listCursor
 	if err := json.Unmarshal(b, &c); err != nil {
-		return listCursor{}, err
+		return listCursor{}, storage.ErrBadCursor
 	}
 	if c.TS == "" || c.ID == "" {
-		return listCursor{}, errors.New("invalid cursor")
+		return listCursor{}, storage.ErrBadCursor
 	}
 	return c, nil
 }
@@ -675,14 +729,14 @@ func decodeActivityCursor(raw string) (activityCursor, error) {
 	}
 	b, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
-		return activityCursor{}, err
+		return activityCursor{}, storage.ErrBadCursor
 	}
 	var c activityCursor
 	if err := json.Unmarshal(b, &c); err != nil {
-		return activityCursor{}, err
+		return activityCursor{}, storage.ErrBadCursor
 	}
 	if c.TS == "" || c.ID == "" {
-		return activityCursor{}, errors.New("invalid cursor")
+		return activityCursor{}, storage.ErrBadCursor
 	}
 	return c, nil
 }

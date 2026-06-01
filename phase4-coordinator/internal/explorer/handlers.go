@@ -8,8 +8,10 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -23,6 +25,8 @@ type Handler struct {
 	started time.Time
 	client  *http.Client
 	store   Store
+	mu      sync.Mutex
+	stamps  map[string][]time.Time
 }
 
 func NewHandler(cfg config.Config, db *sql.DB, registry *pool.Registry, started time.Time) *Handler {
@@ -32,12 +36,21 @@ func NewHandler(cfg config.Config, db *sql.DB, registry *pool.Registry, started 
 		pool:    registry,
 		started: started.UTC(),
 		client:  &http.Client{Timeout: time.Duration(cfg.Explorer.GatewayTimeoutMs) * time.Millisecond},
+		stamps:  map[string][]time.Time{},
 	}
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	path := strings.TrimPrefix(r.URL.Path, strings.TrimSuffix(h.cfg.Explorer.BindPath, "/"))
+	if !h.authorized(r) {
+		writeExplorerError(w, http.StatusUnauthorized, "invalid_operator_token", "invalid operator token")
+		return
+	}
+	if !h.allowRequest(r) {
+		writeExplorerError(w, http.StatusTooManyRequests, "rate_limited", "explorer request cap reached")
+		return
+	}
 	if path == "" {
 		http.Redirect(w, r, h.cfg.Explorer.BindPath, http.StatusMovedPermanently)
 		return
@@ -53,10 +66,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeExplorerError(w, http.StatusNotFound, "not_found", "not found")
-		return
-	}
-	if !h.authorized(r) {
-		writeExplorerError(w, http.StatusUnauthorized, "invalid_operator_token", "invalid operator token")
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(h.cfg.Explorer.QueryTimeoutMs)*time.Millisecond)
@@ -106,16 +115,27 @@ func (h *Handler) handleOverview(ctx context.Context, w http.ResponseWriter, r *
 		writeExplorerStorageError(w, err)
 		return
 	}
+	overview, err := h.store.Overview(ctx, h.db, time.Now().UTC().Add(-24*time.Hour), time.Now().UTC())
+	if err != nil {
+		writeExplorerStorageError(w, err)
+		return
+	}
 	includeGateway := r.URL.Query().Get("include_gateway") != "false"
-	gateway := map[string]any{"health": "unknown", "error": nil}
+	gateway := map[string]any{"health": "unknown", "capacity_tier": 0, "public_api_paused": false, "demo_paused": false, "error": nil}
 	partial := false
 	if includeGateway && h.cfg.Explorer.GatewayBaseURL != "" {
-		status, err := h.fetchGatewayJSON(r, "/admin/explorer/health")
-		if err != nil {
+		status, httpStatus, err := h.fetchGatewayJSONStatus(r, "/admin/explorer/health")
+		if err != nil || httpStatus == 0 {
 			partial = true
 			gateway = map[string]any{"health": "unknown", "error": map[string]any{"code": "gateway_unavailable"}}
+		} else if httpStatus < 200 || httpStatus >= 300 {
+			partial = true
+			gateway = map[string]any{"health": "unavailable", "error": map[string]any{"code": "gateway_bad_response"}}
 		} else {
-			gateway = status
+			gateway = gatewayOverview(status)
+			if gateway["health"] != "ok" {
+				partial = true
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -123,7 +143,11 @@ func (h *Handler) handleOverview(ctx context.Context, w http.ResponseWriter, r *
 		"protocol_status": statusFromPartial(partial),
 		"coordinator":     map[string]any{"health": "ok", "started_at_utc": encodeTime(h.started)},
 		"gateway":         gateway,
-		"pool":            map[string]any{"total_providers": len(providers), "ready_providers": countReady(providers)},
+		"pool":            poolOverview(providers),
+		"traffic":         overview["traffic"],
+		"buyers":          gatewayBuyerOverview(gateway),
+		"ledger":          overview["ledger"],
+		"reconciliation":  overview["reconciliation"],
 		"health":          health,
 		"partial":         partial,
 		"error":           nil,
@@ -144,7 +168,7 @@ func (h *Handler) handleSessions(ctx context.Context, w http.ResponseWriter, r *
 		writeExplorerStorageError(w, err)
 		return
 	}
-	writeListResult(w, result)
+	writeListResult(w, "sessions", result, &window)
 }
 
 func (h *Handler) handleSessionDetail(ctx context.Context, w http.ResponseWriter, r *http.Request, requestID string) {
@@ -154,6 +178,17 @@ func (h *Handler) handleSessionDetail(ctx context.Context, w http.ResponseWriter
 	}
 	detail, err := h.store.SessionDetail(ctx, h.db, requestID)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) && h.cfg.Explorer.GatewayBaseURL != "" {
+			gateway, status, gwErr := h.fetchGatewayJSONStatus(r, "/admin/explorer/sessions/"+url.PathEscape(requestID))
+			if gwErr == nil && status >= 200 && status < 300 {
+				writeJSON(w, http.StatusOK, map[string]any{
+					"request_id": requestID, "attempts": []any{}, "ledger_rows": []any{},
+					"provider_identity_snapshots": []any{}, "gateway": gateway,
+					"partial": false, "error": nil,
+				})
+				return
+			}
+		}
 		writeExplorerStorageError(w, err)
 		return
 	}
@@ -175,7 +210,7 @@ func (h *Handler) handleProviders(ctx context.Context, w http.ResponseWriter) {
 		writeExplorerStorageError(w, err)
 		return
 	}
-	writeList(w, items)
+	writeList(w, "providers", items)
 }
 
 func (h *Handler) handleProviderDetail(ctx context.Context, w http.ResponseWriter, providerID string) {
@@ -202,7 +237,7 @@ func (h *Handler) handleLedger(ctx context.Context, w http.ResponseWriter, r *ht
 		writeExplorerStorageError(w, err)
 		return
 	}
-	writeList(w, items)
+	writeList(w, "entries", items)
 }
 
 func (h *Handler) handleSettlements(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -215,7 +250,7 @@ func (h *Handler) handleSettlements(ctx context.Context, w http.ResponseWriter, 
 		writeExplorerStorageError(w, err)
 		return
 	}
-	writeList(w, items)
+	writeList(w, "settlements", items)
 }
 
 func (h *Handler) handleSettlementDetail(ctx context.Context, w http.ResponseWriter, payoutID string) {
@@ -234,10 +269,14 @@ func (h *Handler) handleHealth(ctx context.Context, w http.ResponseWriter, r *ht
 		return
 	}
 	if h.cfg.Explorer.GatewayBaseURL == "" {
-		health["gateway"] = map[string]any{"health": "unknown"}
-	} else if gateway, err := h.fetchGatewayJSON(r, "/admin/explorer/health"); err == nil {
-		health["gateway"] = gateway
+		health["gateway_health"] = "unknown"
+	} else if gateway, status, err := h.fetchGatewayJSONStatus(r, "/admin/explorer/health"); err == nil && status >= 200 && status < 300 {
+		for k, v := range gateway {
+			health[k] = v
+		}
+		health["gateway_health"] = gatewayHealth(gateway)
 	} else {
+		health["gateway_health"] = "unavailable"
 		health["gateway"] = map[string]any{"health": "unavailable", "error": map[string]any{"code": "gateway_unavailable"}}
 		health["partial"] = true
 	}
@@ -249,7 +288,8 @@ func (h *Handler) handleActivity(ctx context.Context, w http.ResponseWriter, r *
 	if !ok {
 		return
 	}
-	result, err := h.store.Activity(ctx, h.db, window.from, window.to, r.URL.Query().Get("cursor"), r.URL.Query().Get("since_cursor"), limit)
+	eventType := r.URL.Query().Get("type")
+	result, err := h.store.Activity(ctx, h.db, window.from, window.to, r.URL.Query().Get("cursor"), r.URL.Query().Get("since_cursor"), eventType, limit)
 	if err != nil {
 		if errors.Is(err, ErrBadCursor) {
 			writeExplorerError(w, http.StatusBadRequest, "bad_request", "invalid cursor")
@@ -258,17 +298,32 @@ func (h *Handler) handleActivity(ctx context.Context, w http.ResponseWriter, r *
 		writeExplorerStorageError(w, err)
 		return
 	}
+	items := result.Items
+	partial := false
+	warnings := []string{}
+	if r.URL.Query().Get("include_gateway") != "false" && h.cfg.Explorer.GatewayBaseURL != "" {
+		gateway, status, err := h.fetchGatewayJSONStatus(r, "/admin/explorer/activity")
+		if err != nil || status == 0 || status < 200 || status >= 300 {
+			partial = true
+			warnings = append(warnings, "gateway_unavailable")
+		} else {
+			items = mergeActivity(items, gatewayList(gateway))
+			if latest := latestCursor(items); latest != nil {
+				result.LatestCursor = latest
+			}
+		}
+	}
 	if eventID != "" {
-		for _, item := range result.Items {
+		for _, item := range items {
 			if item["source_id"] == eventID || item["request_id"] == eventID {
-				writeJSON(w, http.StatusOK, map[string]any{"event": item, "partial": false, "error": nil})
+				writeJSON(w, http.StatusOK, map[string]any{"event": item, "partial": partial, "warnings": warnings, "error": nil})
 				return
 			}
 		}
 		writeExplorerError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
-	writeListResult(w, result)
+	writeActivityResult(w, items, result.NextCursor, result.LatestCursor, partial, warnings)
 }
 
 func (h *Handler) proxyGateway(w http.ResponseWriter, r *http.Request, path string) {
@@ -278,11 +333,15 @@ func (h *Handler) proxyGateway(w http.ResponseWriter, r *http.Request, path stri
 	}
 	body, status, err := h.fetchGateway(r, path)
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"code": "gateway_bad_response"}})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": map[string]any{"code": "gateway_unavailable"}})
 		return
 	}
 	if status == http.StatusUnauthorized || status == http.StatusForbidden {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"code": "gateway_unauthorized"}})
+		writeJSON(w, http.StatusBadGateway, map[string]any{"error": map[string]any{"code": "gateway_bad_response"}})
+		return
+	}
+	if status == http.StatusNotFound {
+		writeExplorerError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
 	if status < 200 || status >= 300 {
@@ -295,18 +354,26 @@ func (h *Handler) proxyGateway(w http.ResponseWriter, r *http.Request, path stri
 }
 
 func (h *Handler) fetchGatewayJSON(r *http.Request, path string) (map[string]any, error) {
-	body, status, err := h.fetchGateway(r, path)
+	out, status, err := h.fetchGatewayJSONStatus(r, path)
 	if err != nil {
 		return nil, err
 	}
 	if status < 200 || status >= 300 {
 		return nil, errors.New("gateway status")
 	}
+	return out, nil
+}
+
+func (h *Handler) fetchGatewayJSONStatus(r *http.Request, path string) (map[string]any, int, error) {
+	body, status, err := h.fetchGateway(r, path)
+	if err != nil {
+		return nil, status, err
+	}
 	var out map[string]any
 	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, err
+		return nil, status, err
 	}
-	return out, nil
+	return out, status, nil
 }
 
 func (h *Handler) fetchGateway(r *http.Request, path string) ([]byte, int, error) {
@@ -397,6 +464,31 @@ func (h *Handler) authorized(r *http.Request) bool {
 	return h.cfg.Auth.OperatorKey != "" && r.Header.Get("Authorization") == "Bearer "+h.cfg.Auth.OperatorKey
 }
 
+func (h *Handler) allowRequest(r *http.Request) bool {
+	cap := h.cfg.Explorer.RequestsPerMinuteCap
+	if cap <= 0 {
+		return true
+	}
+	key := r.Header.Get("Authorization") + "|" + r.RemoteAddr
+	now := time.Now()
+	cutoff := now.Add(-time.Minute)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	stamps := h.stamps[key][:0]
+	for _, at := range h.stamps[key] {
+		if at.After(cutoff) {
+			stamps = append(stamps, at)
+		}
+	}
+	if len(stamps) >= cap {
+		h.stamps[key] = stamps
+		return false
+	}
+	stamps = append(stamps, now)
+	h.stamps[key] = stamps
+	return true
+}
+
 func statusFromPartial(partial bool) string {
 	if partial {
 		return "degraded"
@@ -404,12 +496,161 @@ func statusFromPartial(partial bool) string {
 	return "ok"
 }
 
-func writeList(w http.ResponseWriter, items any) {
-	writeJSON(w, http.StatusOK, map[string]any{"items": items, "next_cursor": nil, "partial": false, "error": nil})
+func gatewayOverview(gateway map[string]any) map[string]any {
+	return map[string]any{
+		"health":            gatewayHealth(gateway),
+		"capacity_tier":     valueOrZero(gateway["capacity_tier"]),
+		"public_api_paused": valueOrFalse(gateway["public_api_paused"]),
+		"demo_paused":       valueOrFalse(gateway["demo_paused"]),
+		"error":             nil,
+	}
 }
 
-func writeListResult(w http.ResponseWriter, result ListResult) {
-	writeJSON(w, http.StatusOK, map[string]any{"items": result.Items, "next_cursor": result.NextCursor, "latest_cursor": result.LatestCursor, "partial": false, "error": nil})
+func gatewayHealth(gateway map[string]any) string {
+	if v, ok := gateway["gateway_health"].(string); ok && v == "ok" {
+		return "ok"
+	}
+	return "unavailable"
+}
+
+func gatewayBuyerOverview(gateway map[string]any) map[string]any {
+	return map[string]any{
+		"active_accounts_window": valueOrZero(gateway["active_accounts_window"]),
+		"new_accounts_window":    valueOrZero(gateway["new_accounts_window"]),
+		"active_api_keys":        valueOrZero(gateway["active_api_keys"]),
+		"error":                  gateway["error"],
+	}
+}
+
+func poolOverview(providers []pool.Provider) map[string]any {
+	models := map[string]bool{}
+	out := map[string]any{
+		"total_providers":       len(providers),
+		"ready_providers":       0,
+		"busy_providers":        0,
+		"degraded_providers":    0,
+		"draining_providers":    0,
+		"unavailable_providers": 0,
+		"models_available":      []string{},
+		"slots_free":            0,
+		"slots_total":           0,
+	}
+	for _, p := range providers {
+		switch p.State {
+		case pool.StateReady:
+			out["ready_providers"] = out["ready_providers"].(int) + 1
+		case pool.StateBusy:
+			out["busy_providers"] = out["busy_providers"].(int) + 1
+		case pool.StateDegraded:
+			out["degraded_providers"] = out["degraded_providers"].(int) + 1
+		case pool.StateDraining:
+			out["draining_providers"] = out["draining_providers"].(int) + 1
+		case pool.StateUnavailable:
+			out["unavailable_providers"] = out["unavailable_providers"].(int) + 1
+		}
+		if p.ModelID != "" {
+			models[p.ModelID] = true
+		}
+		out["slots_free"] = out["slots_free"].(int) + p.SlotsFree
+		out["slots_total"] = out["slots_total"].(int) + p.SlotsTotal
+	}
+	list := make([]string, 0, len(models))
+	for model := range models {
+		list = append(list, model)
+	}
+	sort.Strings(list)
+	out["models_available"] = list
+	return out
+}
+
+func gatewayList(gateway map[string]any) []map[string]any {
+	raw, ok := gateway["events"]
+	if !ok {
+		raw = gateway["items"]
+	}
+	rows, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		if m, ok := row.(map[string]any); ok {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func mergeActivity(local, gateway []map[string]any) []map[string]any {
+	out := append(append([]map[string]any{}, local...), gateway...)
+	sort.SliceStable(out, func(i, j int) bool {
+		ti := timeFromAny(out[i]["event_time_utc"])
+		tj := timeFromAny(out[j]["event_time_utc"])
+		if !ti.Equal(tj) {
+			return ti.After(tj)
+		}
+		return sourceRank(out[i]["source"]) > sourceRank(out[j]["source"])
+	})
+	return out
+}
+
+func latestCursor(items []map[string]any) *string {
+	if len(items) == 0 {
+		return nil
+	}
+	if cursor, ok := items[0]["cursor"].(string); ok && cursor != "" {
+		return &cursor
+	}
+	return nil
+}
+
+func sourceRank(v any) int {
+	if s, _ := v.(string); s == "coordinator" {
+		return 100
+	}
+	return 80
+}
+
+func timeFromAny(v any) time.Time {
+	switch t := v.(type) {
+	case time.Time:
+		return t
+	case string:
+		parsed, _ := time.Parse(time.RFC3339Nano, t)
+		return parsed
+	default:
+		return time.Time{}
+	}
+}
+
+func valueOrZero(v any) any {
+	if v == nil {
+		return 0
+	}
+	return v
+}
+
+func valueOrFalse(v any) any {
+	if v == nil {
+		return false
+	}
+	return v
+}
+
+func writeList(w http.ResponseWriter, key string, items any) {
+	writeJSON(w, http.StatusOK, map[string]any{key: items, "next_cursor": nil, "partial": false, "error": nil})
+}
+
+func writeListResult(w http.ResponseWriter, key string, result ListResult, window *windowRange) {
+	body := map[string]any{key: result.Items, "next_cursor": result.NextCursor, "partial": false, "error": nil}
+	if window != nil {
+		body["window"] = map[string]any{"from_utc": encodeTime(window.from), "to_utc": encodeTime(window.to)}
+	}
+	writeJSON(w, http.StatusOK, body)
+}
+
+func writeActivityResult(w http.ResponseWriter, items []map[string]any, next, latest *string, partial bool, warnings []string) {
+	writeJSON(w, http.StatusOK, map[string]any{"events": items, "next_cursor": next, "latest_cursor": latest, "partial": partial, "warnings": warnings, "error": nil})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
