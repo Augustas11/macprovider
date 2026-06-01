@@ -1,11 +1,17 @@
 # SPEC-007 operator pre-commitments
 
 Lock each decision below before drafting normative `specs/SPEC-007-explorer.md` v0.1.
-These answers follow `specs/SPEC-007-explorer-design.md` §10 and keep SPEC-007 scoped to an
+These answers follow `specs/SPEC-007-explorer-design.md` section 10 and keep SPEC-007 scoped to an
 internal, read-only, single-operator protocol explorer.
 
-The BUILD session should encode these as normative § 2 pre-commitments with no further
+The BUILD session should encode these as normative section  2 pre-commitments with no further
 design space unless a later audit identifies a contradiction with the locked spec corpus.
+
+## Change log
+
+| Version | Date | Author | Summary |
+|---|---|---|---|
+| v0.2 | 2026-06-01 | operator | adds D15, pinning gateway explorer routes to the existing shared gateway `/admin/*` bearer model for SPEC-007 v0.2. |
 
 | # | Design question | Options (from explorer-design.md) | Operator Decision |
 |---|---|---|---|
@@ -23,12 +29,21 @@ design space unless a later audit identifies a contradiction with the locked spe
 | D12 | Index posture | A) **Add only measured-needed indexes (recommended)** / B) proactively add provider/time and buyer rollup indexes | **A** - start with existing indexes plus bounded date windows, cursors, limits, and query timeouts; add only indexes required by implementation tests or measured slow queries. No materialized rollups or proactive analytics indexes in v1. |
 | D13 | Public explorer scope | A) **Treat public explorer as later SPEC (recommended)** / B) include redaction endpoints now | **A** - public explorer is a later SPEC; v1 is internal-only and may expose operator-only fields behind admin auth. Do not build redaction endpoints, public schemas, or public rate limits in SPEC-007 v1. |
 | D14 | V1 success bar | A) **One operator can answer live state, recent activity, buyers, providers, ledger, settlements, and health in under two minutes (recommended)** / B) analytics-grade charts | **A** - v1 succeeds when the operator can answer the core operational questions in under two minutes using tables, status strips, filters, and detail views; analytics-grade charts, long-horizon BI, and public explorer polish are later work. |
+| D15 | Gateway explorer bearer model | A) **Reuse gateway `/admin/*` shared bearer for v0.2** / B) add distinct explorer-only gateway bearer | **A** - Gateway explorer routes reuse `coordinator.operator_key` for v0.2; no distinct gateway explorer bearer. Rationale: section 10.5 excludes compromised-coordinator threat; existing gateway `/admin/*` surface shares the key; splitting explorer-only secret is undermotivated and would require AC-3 to reject configs that work today. Reconsider when a future spec migrates all gateway admin endpoints to a gateway-side bearer. |
+
+## D15 - Gateway explorer bearer model
+
+D15: Gateway explorer routes reuse `coordinator.operator_key` for v0.2; no distinct
+gateway explorer bearer. Rationale: section 10.5 excludes compromised-coordinator threat;
+existing gateway `/admin/*` surface shares the key; splitting explorer-only secret is
+undermotivated and would require AC-3 to reject configs that work today. Reconsider when
+a future spec migrates all gateway admin endpoints to a gateway-side bearer.
 
 ---
 
 ## Gate checks before moving to BUILD
 
-- [x] All 14 rows have a decision.
+- [x] All 15 rows have a decision.
 - [x] Internal-only v1 is preserved: no public explorer, no public redaction endpoints, no multi-tenant auth.
 - [x] Read-only boundary is preserved: explorer observes; payout claim/consume/void, provider admission, key issuance, and kill switches stay on existing non-explorer admin surfaces.
 - [x] Coordinator remains the explorer origin for v1, but buyer data remains gateway-owned.
@@ -36,4 +51,4 @@ design space unless a later audit identifies a contradiction with the locked spe
 - [x] SPEC-005 settlement handoff is respected: `ledger_payout_ready` rows are visible but not mutated.
 - [x] Refresh model is polling-first with hidden-tab pause and bounded server-side limits.
 - [x] Public-safe tags remain design/spec metadata only; endpoint schemas do not carry tag metadata in v1.
-- [ ] File committed to git before drafting `specs/BUILD_SPEC_007_IMPL_PROMPT.md`.
+- [x] File committed to git before drafting `specs/BUILD_SPEC_007_PROMPT.md`.
