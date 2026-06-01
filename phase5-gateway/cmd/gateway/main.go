@@ -48,11 +48,22 @@ func main() {
 
 	go runReservationReaper(ctx, store, time.Duration(cfg.Quotas.ReaperIntervalHours)*time.Hour)
 
-	upstreamClient := &http.Client{Timeout: cfg.CoordinatorTimeout()}
-	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, upstreamClient)
+	// coordinatorTransport clones the default transport and adds
+	// ResponseHeaderTimeout so buyers get a fast 503 if the coordinator
+	// holds the connection without sending headers (e.g. during a restart
+	// while the provider pool is empty). This does not affect inference
+	// streams — ResponseHeaderTimeout only covers the header phase.
+	coordinatorTransport := http.DefaultTransport.(*http.Transport).Clone()
+	coordinatorTransport.ResponseHeaderTimeout = cfg.CoordinatorHeaderTimeout()
+	coordinatorClient := &http.Client{
+		Timeout:   cfg.CoordinatorTimeout(),
+		Transport: coordinatorTransport,
+	}
+	oauthClient := &http.Client{Timeout: 30 * time.Second}
+	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, oauthClient)
 	httpServer := &http.Server{
 		Addr:              cfg.Address(),
-		Handler:           router.New(cfg, store, oauth, router.WithHTTPClient(upstreamClient)).Handler(),
+		Handler:           router.New(cfg, store, oauth, router.WithHTTPClient(coordinatorClient)).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

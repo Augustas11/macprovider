@@ -119,8 +119,9 @@ type CapacityConfig struct {
 }
 
 type TimeoutsConfig struct {
-	CoordinatorRequestSeconds int `yaml:"coordinator_request_seconds"`
-	StreamingCancelMS         int `yaml:"streaming_cancel_ms"`
+	CoordinatorRequestSeconds       int `yaml:"coordinator_request_seconds"`
+	CoordinatorHeaderTimeoutSeconds int `yaml:"coordinator_header_timeout_seconds"`
+	StreamingCancelMS               int `yaml:"streaming_cancel_ms"`
 }
 
 type CORSConfig struct {
@@ -179,7 +180,7 @@ func Default() Config {
 		Capacity: CapacityConfig{
 			MonthlyBudgetUSD: 500, ReadyProviderDegradedThreshold: 1, ProjectedCostTier1Percent: 80, TierCooldownSeconds: 3600,
 		},
-		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, StreamingCancelMS: 500},
+		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, CoordinatorHeaderTimeoutSeconds: 10, StreamingCancelMS: 500},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
 		Explorer: ExplorerConfig{Enabled: false},
@@ -334,7 +335,7 @@ func (c Config) Validate() error {
 	if c.Capacity.MonthlyBudgetUSD <= 0 || c.Capacity.ReadyProviderDegradedThreshold <= 0 || c.Capacity.ProjectedCostTier1Percent <= 0 || c.Capacity.TierCooldownSeconds <= 0 {
 		return fmt.Errorf("capacity thresholds must be positive")
 	}
-	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 {
+	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.CoordinatorHeaderTimeoutSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 {
 		return fmt.Errorf("timeouts must be positive")
 	}
 	if c.Routing.StickyTTLS <= 0 {
@@ -402,4 +403,13 @@ func (c Config) Address() string {
 
 func (c Config) CoordinatorTimeout() time.Duration {
 	return time.Duration(c.Timeouts.CoordinatorRequestSeconds) * time.Second
+}
+
+// CoordinatorHeaderTimeout is the max time to wait for the coordinator to
+// start sending response headers after the request is fully written. This
+// bounds buyer-visible hangs during coordinator restarts or empty-pool windows
+// without capping long-running inference streams (ResponseHeaderTimeout only
+// covers the header phase; body streaming continues unaffected).
+func (c Config) CoordinatorHeaderTimeout() time.Duration {
+	return time.Duration(c.Timeouts.CoordinatorHeaderTimeoutSeconds) * time.Second
 }
