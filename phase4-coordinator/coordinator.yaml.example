@@ -128,7 +128,8 @@ settlement:
   job_enabled: true
 
 endpoints:
-  provider_earnings_rate_limit_per_minute: 60
+  provider_earnings:
+    rate_limit_per_minute: 60
 
 providers:
   - provider_id: "m4-anon"

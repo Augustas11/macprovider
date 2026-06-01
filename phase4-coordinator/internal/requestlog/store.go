@@ -132,6 +132,15 @@ func (s *Store) InsertTx(ctx context.Context, tx *sql.Tx, row Row) error {
 	return insert(ctx, tx, row)
 }
 
+func (s *Store) InsertExec(ctx context.Context, db interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, row Row) error {
+	if db == nil {
+		return fmt.Errorf("db is required")
+	}
+	return insert(ctx, db, row)
+}
+
 func insert(ctx context.Context, db execer, row Row) error {
 	var totalTokens sql.NullInt64
 	if row.PromptTokens != nil && row.CompletionTokens != nil {

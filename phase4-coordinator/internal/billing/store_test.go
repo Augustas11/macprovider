@@ -12,7 +12,7 @@ import (
 )
 
 func TestBillingMigration(t *testing.T) {
-	db, err := sql.Open("sqlite", ":memory:")
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "migration.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,6 +120,30 @@ func TestWriteHotPath_NullError_ZeroCredits(t *testing.T) {
 	}
 }
 
+func TestWriteHotPath_DuplicateRequestIDDerivesAttempt(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "buyer-controlled-duplicate"
+	input.RequestID = row.RequestID
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	input2 := input
+	row2 := row
+	input2.ProviderID = "provider-b"
+	input2.ProviderAssignedID = "assigned-b"
+	row2.ProviderAssignedID = "assigned-b"
+	if err := store.WriteHotPath(context.Background(), reqStore, row2, input2); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = ? AND attempt_n IN (0, 1)`, row.RequestID); got != 2 {
+		t.Fatalf("ledger attempts=%d want 2", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_provider_identity_snapshots WHERE request_id = ? AND attempt_n IN (0, 1)`, row.RequestID); got != 2 {
+		t.Fatalf("identity attempts=%d want 2", got)
+	}
+}
+
 func TestRecoverLedger_Idempotent(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	cfg := testRewards()
@@ -152,6 +176,42 @@ func TestRecoverLedger_Idempotent(t *testing.T) {
 	}
 }
 
+func TestRecoverLedger_QuarantinesMissingIdentity(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	if _, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Unix(100, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Unix(200, 0).UTC()
+	prompt, completion := int64(1000), int64(1000)
+	if err := reqStore.Insert(context.Background(), requestlog.Row{
+		TSUtc: ts, RequestID: "missing-identity", Model: "model-a", ProviderAssignedID: "assigned-a",
+		PromptTokens: &prompt, CompletionTokens: &completion, Status: 200, BuyerIP: "127.0.0.1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE request_id = 'missing-identity' AND quarantined = 1 AND quarantine_reason = 'missing_provider_identity'`); got != 1 {
+		t.Fatalf("quarantined rows=%d want 1", got)
+	}
+}
+
+func TestRecoverLedger_QuarantinesOrphanLedgerRows(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	ts := time.Unix(200, 0).UTC()
+	insertCredit(t, store.db, "orphan-provider", ts, 500)
+	in := RecoverInput{ScanFrom: ts.Add(-time.Minute), ScanTo: ts.Add(time.Minute), Source: "startup_scan"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id = 'orphan-provider' AND quarantined = 1 AND quarantine_reason = 'missing_request_log'`); got != 1 {
+		t.Fatalf("orphan quarantined rows=%d want 1", got)
+	}
+}
+
 func TestSettlement_ThresholdEnforced(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -181,6 +241,52 @@ func TestSettlement_Idempotency(t *testing.T) {
 	}
 	if got := scalar(t, store.db, `SELECT COUNT(DISTINCT settlement_id) FROM ledger_request_credits WHERE settlement_id IS NOT NULL`); got != 1 {
 		t.Fatalf("distinct settlement IDs=%d want 1", got)
+	}
+}
+
+func TestSettlement_RollsForwardBelowThresholdCredits(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	cfg := SettlementConfig{CadenceDays: 7, MinPayoutCredits: 500}
+	insertCredit(t, store.db, "provider-a", start.Add(time.Hour), 300)
+	if err := store.RunSettlement(context.Background(), cfg, start, start.AddDate(0, 0, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready`); got != 0 {
+		t.Fatalf("payout rows after under-threshold week=%d want 0", got)
+	}
+	insertCredit(t, store.db, "provider-a", start.AddDate(0, 0, 8), 300)
+	if err := store.RunSettlement(context.Background(), cfg, start.AddDate(0, 0, 7), start.AddDate(0, 0, 14)); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = 'provider-a'`); got != 600 {
+		t.Fatalf("rolled provider credits=%d want 600", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_request_credits WHERE provider_id = 'provider-a' AND settled = 1`); got != 2 {
+		t.Fatalf("settled rows=%d want 2", got)
+	}
+}
+
+func TestSettlement_RerunAddsLateRowsToExistingPayout(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	start := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	cfg := SettlementConfig{CadenceDays: 7, MinPayoutCredits: 500}
+	insertCredit(t, store.db, "provider-a", start.Add(time.Hour), 500)
+	if err := store.RunSettlement(context.Background(), cfg, start, start.AddDate(0, 0, 7)); err != nil {
+		t.Fatal(err)
+	}
+	insertCredit(t, store.db, "provider-a", start.Add(2*time.Hour), 600)
+	if err := store.RunSettlement(context.Background(), cfg, start, start.AddDate(0, 0, 7)); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_payout_ready WHERE provider_id = 'provider-a'`); got != 1 {
+		t.Fatalf("payout rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT provider_credits FROM ledger_payout_ready WHERE provider_id = 'provider-a'`); got != 1100 {
+		t.Fatalf("upserted provider credits=%d want 1100", got)
+	}
+	if got := scalar(t, store.db, `SELECT source_credit_count FROM ledger_payout_ready WHERE provider_id = 'provider-a'`); got != 2 {
+		t.Fatalf("source count=%d want 2", got)
 	}
 }
 
@@ -302,6 +408,7 @@ func scalar(t *testing.T, db *sql.DB, query string, args ...any) int64 {
 
 func insertCredit(t *testing.T, db *sql.DB, providerID string, ts time.Time, providerCredits int64) {
 	t.Helper()
+	requestID := providerID + "-" + ts.UTC().Format("20060102150405.000000000") + "-req"
 	_, err := db.Exec(`
 INSERT INTO ledger_request_credits (
     request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
@@ -309,7 +416,7 @@ INSERT INTO ledger_request_credits (
     global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
     fault_flag, recovery_source, created_at_utc
 ) VALUES (?, 0, ?, 'assigned', ?, 'model-a', 200, 0, 'provider_reported', 1, 1, 1000000, ?, 9000, ?, 'none', 'hot_path', ?)`,
-		providerID+"-req", providerID, ts.Format(time.RFC3339Nano), providerCredits, providerCredits, ts.Format(time.RFC3339Nano))
+		requestID, providerID, ts.Format(time.RFC3339Nano), providerCredits, providerCredits, ts.Format(time.RFC3339Nano))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -28,6 +28,20 @@ func TestComputeCredits_WorkedExamples(t *testing.T) {
 	}
 }
 
+func TestComputeCredits_InvalidTokenCountsZeroAndFlag(t *testing.T) {
+	rate := RateCardEntry{PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000}
+	negative := int64(-1)
+	row := ComputeCredits(&negative, nil, nil, UsageProviderReported, FaultNone, rate, 1000000, 9000)
+	if row.GrossCredits != 0 || row.ProviderCredits != 0 || row.OperatorCredits != 0 || row.FaultFlag != FaultNullUsageError {
+		t.Fatalf("negative token row = %+v", row)
+	}
+	tooLarge := maxBillableTokens + 1
+	row = ComputeCredits(nil, &tooLarge, nil, UsageProviderReported, FaultNone, rate, 1000000, 9000)
+	if row.GrossCredits != 0 || row.ProviderCredits != 0 || row.OperatorCredits != 0 || row.FaultFlag != FaultNullUsageError {
+		t.Fatalf("too-large token row = %+v", row)
+	}
+}
+
 func TestRoundHalfEven(t *testing.T) {
 	cases := []struct {
 		n, d int64

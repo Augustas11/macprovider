@@ -99,6 +99,54 @@ func TestReconcileEndpoint_CleanDelta(t *testing.T) {
 	}
 }
 
+func TestReconcileEndpoint_DetectsMissingOperatorSplit(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	cfg := testRewards()
+	snapshotID, err := store.InsertConfigSnapshot(context.Background(), cfg, time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	prompt, completion := int64(1000), int64(2000)
+	input := HotPathInput{
+		RequestID: "reconcile-split", AttemptN: 0, ProviderAssignedID: "assigned-a", ProviderID: "provider-a",
+		Model: "model-a", Status: 200, TSUtc: ts, PromptTokens: &prompt, CompletionTokens: &completion,
+		ConfigSnapshotID: snapshotID, RateEntry: RateFor(cfg.RateCard, "model-a"),
+		MultiplierPPM: 1000000, ProviderShareBps: 9000,
+	}
+	if err := store.WriteHotPath(context.Background(), reqStore, requestLogRow(input), input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM ledger_operator_credits WHERE request_id = ?`, input.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from=2026-06-01&to=2026-06-08", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp["split_delta_rows"].(float64) != 1 {
+		t.Fatalf("split_delta_rows=%v want 1", resp["split_delta_rows"])
+	}
+}
+
+func TestReconcileEndpoint_RejectsOversizedRange(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile?from=2026-06-01&to=2026-07-15", nil)
+	req.Header.Set("Authorization", "Bearer operator")
+	w := httptest.NewRecorder()
+	store.Handlers("operator", fakeTokens{}, true, 60).ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", w.Code)
+	}
+}
+
 func TestReconcileEndpoint_MissingParams(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	req := httptest.NewRequest(http.MethodGet, "/admin/ledger/reconcile", nil)

@@ -29,16 +29,33 @@ type HotPathInput struct {
 }
 
 func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store, reqRow requestlog.Row, in HotPathInput) error {
-	tx, err := s.db.BeginTx(ctx, nil)
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback() }()
-	if err := reqLogStore.InsertTx(ctx, tx, reqRow); err != nil {
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+	if err := reqLogStore.InsertExec(ctx, conn, reqRow); err != nil {
 		return err
 	}
 	if in.ProviderAssignedID == "" {
-		return tx.Commit()
+		_, err := conn.ExecContext(ctx, `COMMIT`)
+		committed = err == nil
+		return err
+	}
+	var requestCount int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE request_id = ?`, in.RequestID).Scan(&requestCount); err == nil && requestCount > 0 {
+		if derived := requestCount - 1; derived > in.AttemptN {
+			in.AttemptN = derived
+		}
 	}
 	if in.TSUtc.IsZero() {
 		in.TSUtc = time.Now().UTC()
@@ -57,14 +74,14 @@ func (s *Store) WriteHotPath(ctx context.Context, reqLogStore *requestlog.Store,
 		in.ProviderShareBps,
 	)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	requestCreditID, err := insertRequestCreditTx(ctx, tx, in, result, "hot_path", now, false, "")
+	requestCreditID, err := insertRequestCreditTx(ctx, conn, in, result, "hot_path", now, false, "")
 	if err != nil {
 		return err
 	}
-	if err := insertOperatorCreditTx(ctx, tx, requestCreditID, in, result, now); err != nil {
+	if err := insertOperatorCreditTx(ctx, conn, requestCreditID, in, result, now); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := conn.ExecContext(ctx, `
 INSERT INTO ledger_provider_identity_snapshots (
     request_id, attempt_n, provider_assigned_id, provider_id, resolved_from,
     pool_session_started_at_utc, created_at_utc
@@ -74,11 +91,17 @@ ON CONFLICT(request_id, attempt_n, provider_assigned_id) DO NOTHING`,
 	); err != nil {
 		return err
 	}
-	return tx.Commit()
+	_, err = conn.ExecContext(ctx, `COMMIT`)
+	committed = err == nil
+	return err
 }
 
-func insertRequestCreditTx(ctx context.Context, tx *sql.Tx, in HotPathInput, result BilledRow, source, now string, quarantined bool, quarantineReason string) (int64, error) {
-	res, err := tx.ExecContext(ctx, `
+type sqlExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+func insertRequestCreditTx(ctx context.Context, db sqlExecutor, in HotPathInput, result BilledRow, source, now string, quarantined bool, quarantineReason string) (int64, error) {
+	res, err := db.ExecContext(ctx, `
 INSERT INTO ledger_request_credits (
     request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
     status, stream, prompt_tokens, completion_tokens, estimated_completion_tokens,
@@ -117,8 +140,8 @@ INSERT INTO ledger_request_credits (
 	return res.LastInsertId()
 }
 
-func insertOperatorCreditTx(ctx context.Context, tx *sql.Tx, requestCreditID int64, in HotPathInput, result BilledRow, now string) error {
-	_, err := tx.ExecContext(ctx, `
+func insertOperatorCreditTx(ctx context.Context, db sqlExecutor, requestCreditID int64, in HotPathInput, result BilledRow, now string) error {
+	_, err := db.ExecContext(ctx, `
 INSERT INTO ledger_operator_credits (
     request_credit_id, request_id, attempt_n, provider_id, ts_utc,
     gross_credits, operator_share_bps, operator_credits, fault_flag, created_at_utc

@@ -8,6 +8,7 @@ import (
 )
 
 func (s *Store) RunSettlement(ctx context.Context, cfg SettlementConfig, windowStart, windowEnd time.Time) error {
+	s.SetSettlementConfig(cfg)
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -16,10 +17,9 @@ func (s *Store) RunSettlement(ctx context.Context, cfg SettlementConfig, windowS
 	rows, err := tx.QueryContext(ctx, `
 SELECT provider_id, COUNT(*), SUM(gross_credits), SUM(provider_credits), SUM(gross_credits - provider_credits)
   FROM ledger_request_credits
- WHERE ts_utc >= ? AND ts_utc < ? AND settled = 0 AND quarantined = 0
+ WHERE ts_utc < ? AND settled = 0 AND quarantined = 0
  GROUP BY provider_id
 HAVING SUM(provider_credits) >= ?`,
-		windowStart.UTC().Format(time.RFC3339Nano),
 		windowEnd.UTC().Format(time.RFC3339Nano),
 		cfg.MinPayoutCredits,
 	)
@@ -41,7 +41,11 @@ INSERT INTO ledger_payout_ready (
     gross_credits, provider_credits, operator_credits, min_payout_credits,
     payout_currency, payout_external_id, status, idempotency_key, created_at_utc
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, 'ready', ?, ?)
-ON CONFLICT(idempotency_key) DO NOTHING`,
+ON CONFLICT(idempotency_key) DO UPDATE SET
+    source_credit_count = source_credit_count + excluded.source_credit_count,
+    gross_credits = gross_credits + excluded.gross_credits,
+    provider_credits = provider_credits + excluded.provider_credits,
+    operator_credits = operator_credits + excluded.operator_credits`,
 			providerID,
 			windowStart.UTC().Format(time.RFC3339Nano),
 			windowEnd.UTC().Format(time.RFC3339Nano),
@@ -67,11 +71,10 @@ ON CONFLICT(idempotency_key) DO NOTHING`,
 		if _, err := tx.ExecContext(ctx, `
 UPDATE ledger_request_credits
    SET settled = 1, settlement_id = ?, updated_at_utc = ?
- WHERE provider_id = ? AND ts_utc >= ? AND ts_utc < ? AND settled = 0 AND quarantined = 0`,
+ WHERE provider_id = ? AND ts_utc < ? AND settled = 0 AND quarantined = 0`,
 			settlementID,
 			now,
 			providerID,
-			windowStart.UTC().Format(time.RFC3339Nano),
 			windowEnd.UTC().Format(time.RFC3339Nano),
 		); err != nil {
 			return err
@@ -84,6 +87,7 @@ UPDATE ledger_request_credits
 }
 
 func (s *Store) StartWeeklySettlement(ctx context.Context, cfg SettlementConfig) {
+	s.SetSettlementConfig(cfg)
 	if !cfg.JobEnabled {
 		return
 	}
@@ -96,6 +100,7 @@ func (s *Store) StartWeeklySettlement(ctx context.Context, cfg SettlementConfig)
 				timer.Stop()
 				return
 			case <-timer.C:
+				cfg := s.SettlementConfig(cfg)
 				end := next
 				start := end.AddDate(0, 0, -cfg.CadenceDays)
 				_ = s.RunSettlement(ctx, cfg, start, end)

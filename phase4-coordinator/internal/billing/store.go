@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	_ "modernc.org/sqlite"
@@ -15,7 +16,9 @@ type RewardsConfig = config.RewardsConfig
 type SettlementConfig = config.SettlementConfig
 
 type Store struct {
-	db *sql.DB
+	db           *sql.DB
+	settlementMu sync.RWMutex
+	settlement   SettlementConfig
 }
 
 func NewStore(db *sql.DB) (*Store, error) {
@@ -30,8 +33,12 @@ func NewStore(db *sql.DB) (*Store, error) {
 }
 
 func (s *Store) migrate(ctx context.Context) error {
-	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
+	var mode string
+	if err := s.db.QueryRowContext(ctx, `PRAGMA journal_mode=WAL`).Scan(&mode); err != nil {
 		return err
+	}
+	if !strings.EqualFold(mode, "wal") {
+		return fmt.Errorf("sqlite journal_mode must be WAL, got %s", mode)
 	}
 	if _, err := s.db.ExecContext(ctx, `
 CREATE TABLE IF NOT EXISTS ledger_request_credits (
@@ -161,6 +168,21 @@ CREATE INDEX IF NOT EXISTS idx_lpis_provider ON ledger_provider_identity_snapsho
 		return err
 	}
 	return s.validateRequestLog(ctx)
+}
+
+func (s *Store) SetSettlementConfig(cfg SettlementConfig) {
+	s.settlementMu.Lock()
+	defer s.settlementMu.Unlock()
+	s.settlement = cfg
+}
+
+func (s *Store) SettlementConfig(defaultCfg SettlementConfig) SettlementConfig {
+	s.settlementMu.RLock()
+	defer s.settlementMu.RUnlock()
+	if s.settlement.CadenceDays == 0 {
+		return defaultCfg
+	}
+	return s.settlement
 }
 
 func (s *Store) validateRequestLog(ctx context.Context) error {

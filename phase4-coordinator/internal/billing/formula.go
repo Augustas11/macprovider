@@ -13,6 +13,7 @@ const (
 	globalMultiplierDenom  = int64(1000000)
 	tokensPerMillion       = int64(1000000)
 	providerShareDenom     = int64(10000)
+	maxBillableTokens      = int64(10000000)
 )
 
 type BilledRow struct {
@@ -131,11 +132,72 @@ func ComputeCredits(
 			completion = *completionTokens
 		}
 	}
-	baseNumerator := prompt*rateEntry.PromptCreditsPerMtok + completion*rateEntry.CompletionCreditsPerMtok
-	rateScaled := baseNumerator * multiplierPPM
+	if invalidBillableTokenCount(prompt) || invalidBillableTokenCount(completion) {
+		row.FaultFlag = FaultNullUsageError
+		return zeroCredits(row)
+	}
+	promptNumerator, ok := checkedMul(prompt, rateEntry.PromptCreditsPerMtok)
+	if !ok {
+		row.FaultFlag = FaultNullUsageError
+		return zeroCredits(row)
+	}
+	completionNumerator, ok := checkedMul(completion, rateEntry.CompletionCreditsPerMtok)
+	if !ok {
+		row.FaultFlag = FaultNullUsageError
+		return zeroCredits(row)
+	}
+	baseNumerator, ok := checkedAdd(promptNumerator, completionNumerator)
+	if !ok {
+		row.FaultFlag = FaultNullUsageError
+		return zeroCredits(row)
+	}
+	rateScaled, ok := checkedMul(baseNumerator, multiplierPPM)
+	if !ok {
+		row.FaultFlag = FaultNullUsageError
+		return zeroCredits(row)
+	}
 	row.GrossCredits = RoundHalfEven(rateScaled, globalMultiplierDenom*tokensPerMillion)
-	row.ProviderCredits = RoundHalfEven(row.GrossCredits*providerShareBps, providerShareDenom)
+	providerNumerator, ok := checkedMul(row.GrossCredits, providerShareBps)
+	if !ok {
+		row.FaultFlag = FaultNullUsageError
+		return zeroCredits(row)
+	}
+	row.ProviderCredits = RoundHalfEven(providerNumerator, providerShareDenom)
 	row.OperatorCredits = row.GrossCredits - row.ProviderCredits
+	return row
+}
+
+func invalidBillableTokenCount(v int64) bool {
+	return v < 0 || v > maxBillableTokens
+}
+
+func checkedMul(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 {
+		return 0, false
+	}
+	if a == 0 || b == 0 {
+		return 0, true
+	}
+	if a > math.MaxInt64/b {
+		return 0, false
+	}
+	return a * b, true
+}
+
+func checkedAdd(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 {
+		return 0, false
+	}
+	if a > math.MaxInt64-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func zeroCredits(row BilledRow) BilledRow {
+	row.GrossCredits = 0
+	row.ProviderCredits = 0
+	row.OperatorCredits = 0
 	return row
 }
 

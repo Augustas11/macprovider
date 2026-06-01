@@ -33,7 +33,7 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 		cfg.Settlement.RecoveryGraceSeconds != 30 || !cfg.Settlement.JobEnabled {
 		t.Fatalf("unexpected settlement defaults: %+v", cfg.Settlement)
 	}
-	if cfg.Endpoints.ProviderEarningsRateLimitPerMinute != 60 {
+	if cfg.Endpoints.ProviderEarnings.RateLimitPerMinute != 60 {
 		t.Fatalf("unexpected endpoints defaults: %+v", cfg.Endpoints)
 	}
 

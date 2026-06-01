@@ -22,13 +22,33 @@ func (s *Store) RecoverLedger(ctx context.Context, in RecoverInput) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 	started := time.Now().UTC()
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	orphanRes, err := tx.ExecContext(ctx, `
+UPDATE ledger_request_credits
+   SET quarantined = 1,
+       quarantine_reason = COALESCE(quarantine_reason, 'missing_request_log'),
+       updated_at_utc = ?
+ WHERE quarantined = 0
+   AND NOT EXISTS (
+       SELECT 1 FROM request_log rl
+        WHERE rl.request_id = ledger_request_credits.request_id
+   )`, now)
+	if err != nil {
+		return err
+	}
+	orphanRows, _ := orphanRes.RowsAffected()
 	rows, err := tx.QueryContext(ctx, `
 SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
        rl.prompt_tokens, rl.completion_tokens, rl.status, rl.stream, rl.error_code,
+       rl.retried,
        COALESCE((
          SELECT COUNT(*) - 1 FROM request_log prior
           WHERE prior.request_id = rl.request_id AND prior.id <= rl.id
-       ), 0) AS attempt_n
+       ), 0) AS attempt_n,
+       COALESCE((
+         SELECT COUNT(*) FROM request_log same
+          WHERE same.request_id = rl.request_id
+       ), 0) AS same_request_count
   FROM request_log rl
  WHERE rl.ts_utc >= ? AND rl.ts_utc < ?
    AND rl.provider_assigned_id IS NOT NULL
@@ -41,16 +61,15 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
 		return err
 	}
 	defer rows.Close()
-	scanned, created, quarantined := int64(0), int64(0), int64(0)
+	scanned, created, quarantined := int64(0), int64(0), orphanRows
 	buyerEquivalent, providerGross := int64(0), int64(0)
-	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for rows.Next() {
 		var rlID int64
 		var tsText, requestID, model, assignedID string
 		var errorCode sql.NullString
 		var prompt, completion sql.NullInt64
-		var status, stream, attemptN int
-		if err := rows.Scan(&rlID, &tsText, &requestID, &model, &assignedID, &prompt, &completion, &status, &stream, &errorCode, &attemptN); err != nil {
+		var status, stream, retried, attemptN, sameRequestCount int
+		if err := rows.Scan(&rlID, &tsText, &requestID, &model, &assignedID, &prompt, &completion, &status, &stream, &errorCode, &retried, &attemptN, &sameRequestCount); err != nil {
 			return err
 		}
 		scanned++
@@ -58,12 +77,22 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
 		if err != nil {
 			ts = time.Now().UTC()
 		}
+		if attemptN > 1 || (attemptN == 1 && retried == 0) || sameRequestCount > 2 {
+			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), errorCode.String, in.Source, "ambiguous_attempt_n", now); err != nil {
+				return err
+			}
+			quarantined++
+			continue
+		}
 		var providerID string
 		err = tx.QueryRowContext(ctx, `
 SELECT provider_id FROM ledger_provider_identity_snapshots
  WHERE request_id = ? AND attempt_n = ? AND provider_assigned_id = ?
- ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID)
+	 ORDER BY id DESC LIMIT 1`, requestID, attemptN, assignedID).Scan(&providerID)
 		if err != nil {
+			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, unresolvedProviderID(assignedID), assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), errorCode.String, in.Source, "missing_provider_identity", now); err != nil {
+				return err
+			}
 			quarantined++
 			continue
 		}
@@ -76,6 +105,9 @@ SELECT 1 FROM ledger_request_credits
 		}
 		snapshotID, rewards, multiplier, share, err := s.snapshotAt(ctx, ts)
 		if err != nil {
+			if err := insertQuarantineTx(ctx, tx, requestID, attemptN, providerID, assignedID, ts, model, status, stream == 1, ppFromNull(prompt), cpFromNull(completion), errorCode.String, in.Source, "missing_config_snapshot", now); err != nil {
+				return err
+			}
 			quarantined++
 			continue
 		}
@@ -156,6 +188,7 @@ func (s *Store) StartStartupScan(ctx context.Context, cfg SettlementConfig, now 
 }
 
 func (s *Store) StartNightlyReconcile(ctx context.Context, cfg SettlementConfig) {
+	s.SetSettlementConfig(cfg)
 	if !cfg.JobEnabled {
 		return
 	}
@@ -169,10 +202,67 @@ func (s *Store) StartNightlyReconcile(ctx context.Context, cfg SettlementConfig)
 				timer.Stop()
 				return
 			case <-timer.C:
+				cfg := s.SettlementConfig(cfg)
 				to := time.Now().UTC().Add(-time.Duration(cfg.RecoveryGraceSeconds) * time.Second)
 				from := to.AddDate(0, 0, -cfg.NightlyReconcileWindowDays)
 				_ = s.RecoverLedger(ctx, RecoverInput{ScanFrom: from, ScanTo: to, Source: "nightly_reconcile"})
 			}
 		}
 	}()
+}
+
+func insertQuarantineTx(ctx context.Context, tx *sql.Tx, requestID string, attemptN int, providerID, assignedID string, ts time.Time, model string, status int, stream bool, promptTokens, completionTokens *int64, errorCode, source, reason, now string) error {
+	usage := usageFor(errorCode, nil)
+	fault := FaultNone
+	if usage == UsageNullError {
+		fault = FaultNullUsageError
+	}
+	_, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO ledger_request_credits (
+    request_id, attempt_n, provider_id, provider_assigned_id, ts_utc, model,
+    status, stream, prompt_tokens, completion_tokens, estimated_completion_tokens,
+    usage_source, prompt_rate_per_mtok, completion_rate_per_mtok,
+    global_multiplier_ppm, gross_credits, provider_share_bps, provider_credits,
+    fault_flag, recovery_source, created_at_utc, quarantined, quarantine_reason
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, 0, 0, 0, 0, 0, 0, ?, ?, ?, 1, ?)`,
+		requestID,
+		attemptN,
+		providerID,
+		nullString(assignedID),
+		ts.UTC().Format(time.RFC3339Nano),
+		model,
+		status,
+		boolInt(stream),
+		nullInt64(promptTokens),
+		nullInt64(completionTokens),
+		usage,
+		fault,
+		source,
+		now,
+		reason,
+	)
+	return err
+}
+
+func unresolvedProviderID(assignedID string) string {
+	if assignedID == "" {
+		return "__unresolved__"
+	}
+	return "__unresolved__:" + assignedID
+}
+
+func ppFromNull(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	out := v.Int64
+	return &out
+}
+
+func cpFromNull(v sql.NullInt64) *int64 {
+	if !v.Valid {
+		return nil
+	}
+	out := v.Int64
+	return &out
 }

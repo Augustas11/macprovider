@@ -68,6 +68,7 @@ type Server struct {
 	maxChatBodyBytes       int64
 	recovering             sync.Map
 	poolCheckLast          sync.Map
+	billingMu              sync.RWMutex
 	billing                *billing.Store
 	billingCfg             config.RewardsConfig
 	billingSnapshotID      int64
@@ -100,12 +101,16 @@ type requestLogInserter interface {
 type wsForwardResult string
 
 type requestLogAttempt struct {
-	PromptTokens     *int64
-	CompletionTokens *int64
-	Status           int
-	Error            string
-	ErrorCode        string
+	PromptTokens        *int64
+	CompletionTokens    *int64
+	Status              int
+	Error               string
+	ErrorCode           string
+	EstimatedCompTokens *int64
+	FaultFlag           string
 }
+
+const maxRequestLogUsageTokens = int64(10000000)
 
 const (
 	wsForwardComplete                      wsForwardResult = "complete"
@@ -259,6 +264,8 @@ func WithRequestLog(store requestLogInserter) Option {
 
 func WithBilling(store *billing.Store, cfg config.RewardsConfig) Option {
 	return func(s *Server) {
+		s.billingMu.Lock()
+		defer s.billingMu.Unlock()
 		s.billing = store
 		s.billingCfg = cfg
 	}
@@ -266,13 +273,23 @@ func WithBilling(store *billing.Store, cfg config.RewardsConfig) Option {
 
 func WithBillingSnapshotID(snapshotID int64) Option {
 	return func(s *Server) {
+		s.billingMu.Lock()
+		defer s.billingMu.Unlock()
 		s.billingSnapshotID = snapshotID
 	}
 }
 
 func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64) {
+	s.billingMu.Lock()
+	defer s.billingMu.Unlock()
 	s.billingCfg = cfg
 	s.billingSnapshotID = snapshotID
+}
+
+func (s *Server) billingState() (*billing.Store, config.RewardsConfig, int64) {
+	s.billingMu.RLock()
+	defer s.billingMu.RUnlock()
+	return s.billing, s.billingCfg, s.billingSnapshotID
 }
 
 func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Time, opts ...Option) *Server {
@@ -784,12 +801,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	requestLogModel := ""
 	requestLogStream := false
 	explicitRetries := 0
-	logRow := func(
+	logRowWithBilling := func(
 		providerAssignedID string,
 		status int,
 		promptTok, completionTok *int64,
 		errMsg, errCode string,
 		retried int,
+		estimatedCompTokens *int64,
+		faultFlag string,
 	) {
 		if s.reqLog == nil {
 			return
@@ -814,7 +833,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
 		defer cancel()
-		if s.billing != nil && s.reqLogStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
+		billingStore, billingCfg, billingSnapshotID := s.billingState()
+		if billingStore != nil && s.reqLogStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
 			stableProviderID := ""
 			for _, p := range s.pool.Snapshot() {
 				if p.AssignedID == providerAssignedID {
@@ -823,33 +843,47 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			if stableProviderID != "" {
-				err := s.billing.WriteHotPath(ctx, s.reqLogStore, row, billing.HotPathInput{
-					RequestID:          row.RequestID,
-					AttemptN:           retried,
-					ProviderAssignedID: providerAssignedID,
-					ProviderID:         stableProviderID,
-					Model:              row.Model,
-					Status:             status,
-					Stream:             row.Stream,
-					TSUtc:              row.TSUtc,
-					PromptTokens:       promptTok,
-					CompletionTokens:   completionTok,
-					ErrorCode:          errCode,
-					FaultFlag:          billing.FaultNone,
-					ConfigSnapshotID:   s.billingSnapshotID,
-					RateEntry:          billing.RateFor(s.billingCfg.RateCard, row.Model),
-					MultiplierPPM:      billing.ParseMultiplierPPM(s.billingCfg.GlobalMultiplier),
-					ProviderShareBps:   billing.ParseShareBps(s.billingCfg.ProviderShare),
+				if faultFlag == "" {
+					faultFlag = billing.FaultNone
+				}
+				err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billing.HotPathInput{
+					RequestID:           row.RequestID,
+					AttemptN:            retried,
+					ProviderAssignedID:  providerAssignedID,
+					ProviderID:          stableProviderID,
+					Model:               row.Model,
+					Status:              status,
+					Stream:              row.Stream,
+					TSUtc:               row.TSUtc,
+					PromptTokens:        promptTok,
+					CompletionTokens:    completionTok,
+					EstimatedCompTokens: estimatedCompTokens,
+					ErrorCode:           errCode,
+					FaultFlag:           faultFlag,
+					ConfigSnapshotID:    billingSnapshotID,
+					RateEntry:           billing.RateFor(billingCfg.RateCard, row.Model),
+					MultiplierPPM:       billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
+					ProviderShareBps:    billing.ParseShareBps(billingCfg.ProviderShare),
 				})
 				if err != nil {
 					s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("billing hot-path insert failed")
+				} else {
+					return
 				}
-				return
 			}
 		}
 		if err := s.reqLog.Insert(ctx, row); err != nil {
 			s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("request_log insert failed")
 		}
+	}
+	logRow := func(
+		providerAssignedID string,
+		status int,
+		promptTok, completionTok *int64,
+		errMsg, errCode string,
+		retried int,
+	) {
+		logRowWithBilling(providerAssignedID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
 	}
 	logBuyerFailure := func(status int, msg string) {
 		logRow("", status, nil, nil, msg, "", 0)
@@ -885,7 +919,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if status == 0 {
 			status = fallbackStatus
 		}
-		logRow(provider.AssignedID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, explicitRetries)
+		if attempt.PromptTokens == nil && attempt.ErrorCode == "" && (attempt.EstimatedCompTokens != nil || status == http.StatusBadGateway || status == http.StatusGatewayTimeout) {
+			estimatedPrompt := int64(estimateTokens(req.raw))
+			attempt.PromptTokens = &estimatedPrompt
+		}
+		logRowWithBilling(provider.AssignedID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, explicitRetries, attempt.EstimatedCompTokens, attempt.FaultFlag)
+	}
+	shouldLogAttempt := func(attempt requestLogAttempt) bool {
+		return attempt.Status != 0 || attempt.PromptTokens != nil || attempt.CompletionTokens != nil || attempt.EstimatedCompTokens != nil || attempt.Error != "" || attempt.ErrorCode != ""
 	}
 	provider, routeErr := s.selectProvider(routingRequestID, req, r.Header)
 	if routeErr != nil {
@@ -922,6 +963,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				excluded[routeKey(provider)] = struct{}{}
 				faultedRoutes[routeKey(provider)] = struct{}{}
 				if result == wsForwardCancelled {
+					if shouldLogAttempt(attempt) {
+						logAttempt(provider, http.StatusOK, attempt)
+					}
 					return
 				}
 				if result == wsForwardProviderDisconnected {
@@ -964,7 +1008,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if result == wsForwardProviderDisconnectedCommitted || result == wsForwardCancelled {
-				if result == wsForwardProviderDisconnectedCommitted {
+				if shouldLogAttempt(attempt) {
 					logAttempt(provider, http.StatusOK, attempt)
 				}
 				return
@@ -1036,7 +1080,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 			if result == wsForwardFailed || result == wsForwardUnavailable || result == wsForwardCancelled {
-				if result != wsForwardCancelled {
+				if result != wsForwardCancelled || shouldLogAttempt(attempt) {
 					logAttempt(provider, statusForForwardResult(result), attempt)
 				}
 				return
@@ -1257,6 +1301,10 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 	guard := tier2.NewPillarDGuard(s.tier2Config(), requestID, provider, s.log)
 	started := time.Now()
 	ttftLogged := false
+	faultFlag := billing.FaultNone
+	estimatedCompletion := func() *int64 {
+		return estimatedCompletionTokensFromBytes(body.Len())
+	}
 	observeTTFT := func() {
 		if ttftLogged {
 			return
@@ -1298,6 +1346,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			}
 			if s.zeroTokenFault(end, finishReasonFromChatResponse(body.Bytes())) {
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
+				faultFlag = billing.FaultBreakerQualifying
 			}
 			checkedBody, err := guard.CheckNonStreamingBody(body.Bytes())
 			if err != nil {
@@ -1313,18 +1362,18 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if promptTok == nil && completionTok == nil {
 				promptTok, completionTok = tokenPointersFromChatResponse(checkedBody)
 			}
-			return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok}
+			return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, FaultFlag: faultFlag}
 		case err := <-relay.Errors:
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws relay failed")
 			if errors.Is(err, providerws.ErrRelayTimeout) {
 				s.recordBreakerFault(provider, breakerFaultRelayTimeout, requestID)
-				return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry"}
+				return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: estimatedCompletion(), FaultFlag: billing.FaultBreakerQualifying}
 			} else if errors.Is(err, providerws.ErrRelayClosed) {
 				if r.Context().Err() != nil {
-					return wsForwardCancelled, requestLogAttempt{}
+					return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during request", EstimatedCompTokens: estimatedCompletion()}
 				}
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
-				return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry"}
+				return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry", EstimatedCompTokens: estimatedCompletion(), FaultFlag: billing.FaultBreakerQualifying}
 			} else if errors.Is(err, providerws.ErrRelayAEADFailed) {
 				writeError(w, http.StatusBadGateway, "tier2_aead_decrypt_failed", "Provider encrypted response failed authentication")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider encrypted response failed authentication"}
@@ -1347,6 +1396,10 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	chunks := relay.Chunks
 	committed := false
 	finishReason := ""
+	bytesEmitted := 0
+	progressAttempt := func(message string) requestLogAttempt {
+		return requestLogAttempt{Status: http.StatusOK, Error: message, EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted)}
+	}
 	commit := func() {
 		if committed {
 			return
@@ -1386,6 +1439,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer ws stream write failed")
 			return true, wsForwardCancelled
 		}
+		bytesEmitted += len(checked)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -1399,14 +1453,14 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		select {
 		case <-r.Context().Done():
 			relay.Cancel("buyer_disconnected")
-			return wsForwardCancelled, requestLogAttempt{}
+			return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming")
 		case chunk, ok := <-chunks:
 			if !ok {
 				chunks = nil
 				continue
 			}
 			if done, result := writeChunk(chunk.Data); done {
-				return result, requestLogAttempt{Status: http.StatusOK}
+				return result, progressAttempt("")
 			}
 		case end := <-relay.Done:
 			for chunks != nil {
@@ -1417,7 +1471,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 						continue
 					}
 					if done, result := writeChunk(chunk.Data); done {
-						return result, requestLogAttempt{Status: http.StatusOK}
+						return result, progressAttempt("")
 					}
 				default:
 					chunks = nil
@@ -1436,10 +1490,16 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			attempt := requestLogAttempt{Status: http.StatusOK}
 			attempt.PromptTokens, attempt.CompletionTokens = tokenPointersFromUsageObject(end.Usage)
+			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
+				attempt.FaultFlag = billing.FaultBreakerQualifying
+			}
 			if end.Status != "complete" && end.Status != "cancelled" {
 				writeSSEError(w, "Provider failed during streaming", "provider_error")
 				attempt.Error = endErrorMessage(end)
 				attempt.ErrorCode = spec001EndStatus(end.Status)
+				if attempt.CompletionTokens == nil {
+					attempt.EstimatedCompTokens = estimatedCompletionTokensFromBytes(bytesEmitted)
+				}
 			}
 			if flusher != nil {
 				flusher.Flush()
@@ -1449,23 +1509,29 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws streaming relay failed")
 			if errors.Is(err, providerws.ErrRelayClosed) {
 				if r.Context().Err() != nil {
-					return wsForwardCancelled, requestLogAttempt{}
+					return wsForwardCancelled, progressAttempt("Buyer disconnected during streaming")
 				}
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				if !committed {
-					return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry"}
+					return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 				}
 				writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider disconnected during streaming"}
+				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider disconnected during streaming", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 			}
 			if errors.Is(err, providerws.ErrRelayTimeout) {
 				s.recordBreakerFault(provider, breakerFaultRelayTimeout, requestID)
 				if !committed {
-					return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry"}
+					return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 				}
+				commit()
+				writeSSEError(w, "Provider timed out during streaming", "provider_timeout")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider timed out during streaming", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 			}
 			if errors.Is(err, providerws.ErrRelayAEADFailed) {
 				if !committed {
@@ -1476,14 +1542,14 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider encrypted response failed authentication"}
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider encrypted response failed authentication", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted)}
 			}
 			commit()
 			writeSSEError(w, "Provider failed during streaming", "provider_error")
 			if flusher != nil {
 				flusher.Flush()
 			}
-			return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider failed during streaming"}
+			return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider failed during streaming", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted)}
 		}
 	}
 }
@@ -1539,6 +1605,14 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 
 	reader := bufio.NewReader(resp.Body)
 	var promptTok, completionTok *int64
+	bytesEmitted := 0
+	progressAttempt := func(message string) requestLogAttempt {
+		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, Error: message}
+		if completionTok == nil {
+			attempt.EstimatedCompTokens = estimatedCompletionTokensFromBytes(bytesEmitted)
+		}
+		return attempt
+	}
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -1547,8 +1621,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			}
 			if _, writeErr := w.Write(line); writeErr != nil {
 				s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
-				return wsForwardCancelled, 0, requestLogAttempt{}
+				return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming")
 			}
+			bytesEmitted += len(line)
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -1565,7 +1640,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if flusher != nil {
 			flusher.Flush()
 		}
-		return wsForwardProviderDisconnectedCommitted, http.StatusOK, requestLogAttempt{Status: http.StatusOK, Error: "Provider disconnected during streaming"}
+		return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider disconnected during streaming")
 	}
 }
 
@@ -2651,7 +2726,28 @@ func tokenPointersFromUsageObject(raw json.RawMessage) (*int64, *int64) {
 	if err := json.Unmarshal(raw, &usage); err != nil {
 		return nil, nil
 	}
+	if !validRequestLogUsageToken(usage.PromptTokens) || !validRequestLogUsageToken(usage.CompletionTokens) {
+		return nil, nil
+	}
 	return usage.PromptTokens, usage.CompletionTokens
+}
+
+func validRequestLogUsageToken(v *int64) bool {
+	return v == nil || (*v >= 0 && *v <= maxRequestLogUsageTokens)
+}
+
+func estimatedCompletionTokensFromBytes(n int) *int64 {
+	if n <= 0 {
+		return nil
+	}
+	tokens := int64((n + 3) / 4)
+	if tokens < 1 {
+		tokens = 1
+	}
+	if tokens > maxRequestLogUsageTokens {
+		tokens = maxRequestLogUsageTokens
+	}
+	return &tokens
 }
 
 func tokenPointersFromSSE(line []byte) (*int64, *int64) {

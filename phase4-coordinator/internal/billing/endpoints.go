@@ -155,19 +155,32 @@ func (h *handler) reconcile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	from, to := fromDay.UTC(), toDay.UTC()
-	rowsScanned := h.sum(r.Context(), `SELECT COUNT(*) FROM request_log WHERE ts_utc >= ? AND ts_utc < ?`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
-	providerGross := h.sum(r.Context(), `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=0`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
-	buyerEquivalent, err := h.buyerEquivalentCredits(r.Context(), from, to)
+	if !to.After(from) || to.Sub(from) > 31*24*time.Hour {
+		writeError(w, http.StatusBadRequest, "invalid_request", "reconcile range must be > 0 and <= 31 days")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	rowsScanned := h.sum(ctx, `SELECT COUNT(*) FROM request_log WHERE ts_utc >= ? AND ts_utc < ?`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	providerGross := h.sum(ctx, `SELECT SUM(gross_credits) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=0`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	buyerEquivalent, err := h.buyerEquivalentCredits(ctx, from, to)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
-	splitDelta := h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND provider_credits + (gross_credits - provider_credits) != gross_credits`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	splitDelta := h.sum(ctx, `
+SELECT COUNT(*)
+  FROM ledger_request_credits lrc
+  LEFT JOIN ledger_operator_credits loc ON loc.request_credit_id = lrc.id
+ WHERE lrc.ts_utc >= ? AND lrc.ts_utc < ?
+   AND lrc.quarantined = 0
+   AND (loc.id IS NULL OR lrc.provider_credits + loc.operator_credits != lrc.gross_credits)`,
+		from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
 	rowsRecovered := int64(0)
-	rowsQuarantined := h.sum(r.Context(), `SELECT COUNT(*) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=1`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
+	rowsQuarantined := h.sum(ctx, `SELECT COUNT(*) FROM ledger_request_credits WHERE ts_utc >= ? AND ts_utc < ? AND quarantined=1`, from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano))
 	delta := providerGross - buyerEquivalent
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, _ = h.store.db.ExecContext(r.Context(), `
+	_, _ = h.store.db.ExecContext(ctx, `
 INSERT INTO ledger_reconciliation_runs (
     run_type, from_utc, to_utc, request_log_rows_scanned,
     missing_credit_rows_created, orphan_credit_rows_quarantined,
@@ -245,6 +258,10 @@ func (h *handler) earnings(w http.ResponseWriter, r *http.Request) {
 	raw := bearer(r.Header.Get("Authorization"))
 	if raw == "" {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "provider bearer token required")
+		return
+	}
+	if h.tokenStore == nil {
+		writeError(w, http.StatusServiceUnavailable, "unavailable", "provider tokens not available")
 		return
 	}
 	subject, ok, err := h.tokenStore.ValidateToken(r.Context(), raw)

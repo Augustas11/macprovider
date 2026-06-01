@@ -182,7 +182,11 @@ type SettlementConfig struct {
 }
 
 type EndpointsConfig struct {
-	ProviderEarningsRateLimitPerMinute int `yaml:"provider_earnings_rate_limit_per_minute"`
+	ProviderEarnings EndpointsProviderEarningsConfig `yaml:"provider_earnings"`
+}
+
+type EndpointsProviderEarningsConfig struct {
+	RateLimitPerMinute int `yaml:"rate_limit_per_minute"`
 }
 
 type ProviderConfig struct {
@@ -296,7 +300,9 @@ func Default() Config {
 			JobEnabled:                  true,
 		},
 		Endpoints: EndpointsConfig{
-			ProviderEarningsRateLimitPerMinute: 60,
+			ProviderEarnings: EndpointsProviderEarningsConfig{
+				RateLimitPerMinute: 60,
+			},
 		},
 	}
 }
@@ -489,8 +495,8 @@ func (c Config) Validate() error {
 	if c.Settlement.RecoveryGraceSeconds < 0 {
 		return fmt.Errorf("settlement.recovery_grace_seconds must be >= 0")
 	}
-	if c.Endpoints.ProviderEarningsRateLimitPerMinute <= 0 {
-		return fmt.Errorf("endpoints.provider_earnings_rate_limit_per_minute must be > 0")
+	if c.Endpoints.ProviderEarnings.RateLimitPerMinute <= 0 {
+		return fmt.Errorf("endpoints.provider_earnings.rate_limit_per_minute must be > 0")
 	}
 	if _, ok := c.Rewards.RateCard["default"]; !ok {
 		return fmt.Errorf("rewards.rate_card must contain default")

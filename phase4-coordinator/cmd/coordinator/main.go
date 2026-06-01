@@ -105,10 +105,12 @@ func main() {
 		cfg.Auth.OperatorKey,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
-		cfg.Endpoints.ProviderEarningsRateLimitPerMinute,
+		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
 	)
 	providerMux.Handle("/admin/ledger/", billingHandler)
-	providerMux.Handle("/providers/", billingHandler)
+	if cfg.Auth.RequireProviderTokens {
+		providerMux.Handle("/providers/", billingHandler)
+	}
 	providerHTTP := &http.Server{Addr: providerAddr, Handler: providerMux}
 	buyerHTTP := &http.Server{Addr: buyerAddr, Handler: buyerServer.Handler()}
 	errs := make(chan error, 2)
@@ -196,6 +198,7 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 			return
 		}
 		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID)
+		billingStores[0].SetSettlementConfig(cfg.Settlement)
 	}
 	updated := wsServer.RefreshTier2HashStatuses()
 	logger.Info().Int("provider_hash_statuses_updated", updated).Msg("tier2 config reloaded")
