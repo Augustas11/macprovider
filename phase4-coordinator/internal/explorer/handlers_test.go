@@ -418,6 +418,22 @@ func TestAC19_RequestCapClientWiring(t *testing.T) {
 	}
 }
 
+func TestDashboardCrossViewLinkWiring(t *testing.T) {
+	raw := readStatic(t, "static/js/dashboard.js")
+	for _, want := range []string{
+		`data-view`,
+		`/admin/explorer/sessions/${encodeURIComponent(v)}`,
+		`/admin/explorer/buyers/${encodeURIComponent(v)}`,
+		`/admin/explorer/providers/${encodeURIComponent(v)}`,
+		`/admin/explorer/settlements/${encodeURIComponent(v)}`,
+		`Last reconciliation ledger window`,
+	} {
+		if !strings.Contains(raw, want) {
+			t.Fatalf("dashboard.js missing %q", want)
+		}
+	}
+}
+
 func TestGatewayHealthUnknownWhenDisabled(t *testing.T) {
 	h, _ := newTestExplorer(t, nil)
 	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/health", "operator-key")

@@ -1,5 +1,5 @@
 import {api,setToken,token} from "./lib/api.js";
-import {poll} from "./lib/poll.js";
+import {poll,stop} from "./lib/poll.js";
 
 const app = document.querySelector("#app");
 const tabs = [...document.querySelectorAll("#tabs button")];
@@ -20,7 +20,14 @@ document.querySelector("#bearer").value = token();
 document.querySelector("#authForm").addEventListener("submit",(e)=>{e.preventDefault();setToken(document.querySelector("#bearer").value);load(current);});
 
 let current = "overview";
+let currentPath = paths.overview;
 tabs.forEach((b)=>b.addEventListener("click",()=>load(b.dataset.view)));
+app.addEventListener("click",(e)=>{
+  const link = e.target.closest("[data-view]");
+  if (!link) return;
+  e.preventDefault();
+  load(link.dataset.view, link.dataset.path || paths[link.dataset.view]);
+});
 
 function statusStrip(data) {
   const partial = data && data.partial;
@@ -30,31 +37,56 @@ function statusStrip(data) {
 function table(rows) {
   if (!Array.isArray(rows) || rows.length === 0) return `<div class="panel">No rows</div>`;
   const cols = [...new Set(rows.flatMap((r)=>Object.keys(r)).slice(0,14))];
-  return `<table><thead><tr>${cols.map((c)=>`<th>${c}</th>`).join("")}</tr></thead><tbody>${rows.map((r)=>`<tr>${cols.map((c)=>cell(r[c])).join("")}</tr>`).join("")}</tbody></table>`;
+  return `<table><thead><tr>${cols.map((c)=>`<th>${c}</th>`).join("")}</tr></thead><tbody>${rows.map((r)=>`<tr>${cols.map((c)=>cell(c,r[c],r)).join("")}</tr>`).join("")}</tbody></table>`;
 }
 
-function cell(v) {
+function cell(k, v, row) {
   if (v === null || v === undefined) return "<td></td>";
   if (typeof v === "object") return `<td><code>${escapeHtml(JSON.stringify(v))}</code></td>`;
   const s = String(v);
   const cls = s.length > 18 ? "mono" : "";
-  return `<td class="${cls}">${escapeHtml(s)}</td>`;
+  const link = linkFor(k, s, row);
+  return `<td class="${cls}">${link || escapeHtml(s)}</td>`;
+}
+
+function linkFor(k, v, row) {
+  if (!v) return "";
+  if (k === "request_id") return action("sessions", `/admin/explorer/sessions/${encodeURIComponent(v)}`, v);
+  if (k === "account_id") return action("buyers", `/admin/explorer/buyers/${encodeURIComponent(v)}`, v);
+  if (k === "provider_id") return action("providers", `/admin/explorer/providers/${encodeURIComponent(v)}`, v);
+  if (k === "id" && row && row.window_end_utc) return action("settlements", `/admin/explorer/settlements/${encodeURIComponent(v)}`, v);
+  if (k === "link_target" && v.startsWith("session:")) return action("sessions", `/admin/explorer/sessions/${encodeURIComponent(v.slice(8))}`, v);
+  if (k === "link_target" && v.startsWith("buyer:")) return action("buyers", `/admin/explorer/buyers/${encodeURIComponent(v.slice(6))}`, v);
+  return "";
+}
+
+function action(view, path, label) {
+  return `<a href="#" data-view="${view}" data-path="${path}">${escapeHtml(label)}</a>`;
 }
 
 function escapeHtml(s) {
   return s.replace(/[&<>"']/g,(c)=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 }
 
-async function load(view) {
+function healthLinks(data) {
+  const rec = data && (data.last_reconciliation || (data.health && data.health.last_reconciliation));
+  if (!rec || !rec.from_utc || !rec.to_utc) return "";
+  const path = `/admin/explorer/ledger?from=${encodeURIComponent(rec.from_utc)}&to=${encodeURIComponent(rec.to_utc)}`;
+  return `<div class="toolbar">${action("ledger", path, "Last reconciliation ledger window")}</div>`;
+}
+
+async function load(view, path) {
+  if (current !== view) stop(current);
   current = view;
+  currentPath = path || paths[view];
   tabs.forEach((b)=>b.classList.toggle("active", b.dataset.view === view));
   app.innerHTML = `<div class="toolbar"><button id="refresh">Refresh</button></div><div class="panel">Loading</div>`;
-  document.querySelector("#refresh").onclick = () => load(view);
+  document.querySelector("#refresh").onclick = () => load(view, currentPath);
   try {
-    const data = await api(paths[view]);
-    const rows = data.items || (data.event ? [data.event] : data.account ? [data.account] : data.provider ? [data.provider] : [data]);
-    app.innerHTML = `<div class="toolbar"><button id="refresh">Refresh</button></div>${statusStrip(data)}${table(rows)}`;
-    document.querySelector("#refresh").onclick = () => load(view);
+    const data = await api(currentPath);
+    const rows = data.items || (data.event ? [data.event] : data.account ? [data.account] : data.provider ? [data.provider] : data.settlement ? [data.settlement] : [data]);
+    app.innerHTML = `<div class="toolbar"><button id="refresh">Refresh</button></div>${statusStrip(data)}${healthLinks(data)}${table(rows)}`;
+    document.querySelector("#refresh").onclick = () => load(view, currentPath);
   } catch (err) {
     app.innerHTML = `<div class="panel error">${escapeHtml(err.message)}</div>`;
   }
