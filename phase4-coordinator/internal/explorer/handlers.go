@@ -3,9 +3,11 @@ package explorer
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"sort"
@@ -43,20 +45,20 @@ func NewHandler(cfg config.Config, db *sql.DB, registry *pool.Registry, started 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	setSecurityHeaders(w)
 	path := strings.TrimPrefix(r.URL.Path, strings.TrimSuffix(h.cfg.Explorer.BindPath, "/"))
+	if path == "" && r.Method == http.MethodGet {
+		http.Redirect(w, r, h.cfg.Explorer.BindPath, http.StatusMovedPermanently)
+		return
+	}
+	if r.Method == http.MethodGet && (path == "/" || path == "/index.html" || strings.HasPrefix(path, "/css/") || strings.HasPrefix(path, "/js/")) {
+		h.serveStatic(w, r, path)
+		return
+	}
 	if !h.authorized(r) {
 		writeExplorerError(w, http.StatusUnauthorized, "invalid_operator_token", "invalid operator token")
 		return
 	}
 	if !h.allowRequest(r) {
 		writeExplorerError(w, http.StatusTooManyRequests, "rate_limited", "explorer request cap reached")
-		return
-	}
-	if path == "" {
-		http.Redirect(w, r, h.cfg.Explorer.BindPath, http.StatusMovedPermanently)
-		return
-	}
-	if path == "/" || path == "/index.html" || strings.HasPrefix(path, "/css/") || strings.HasPrefix(path, "/js/") {
-		h.serveStatic(w, r, path)
 		return
 	}
 	if r.Method != http.MethodGet {
@@ -122,6 +124,7 @@ func (h *Handler) handleOverview(ctx context.Context, w http.ResponseWriter, r *
 	}
 	includeGateway := r.URL.Query().Get("include_gateway") != "false"
 	gateway := map[string]any{"health": "unknown", "capacity_tier": 0, "public_api_paused": false, "demo_paused": false, "error": nil}
+	gatewayRaw := gateway
 	partial := false
 	if includeGateway && h.cfg.Explorer.GatewayBaseURL != "" {
 		status, httpStatus, err := h.fetchGatewayJSONStatus(r, "/admin/explorer/health")
@@ -132,6 +135,7 @@ func (h *Handler) handleOverview(ctx context.Context, w http.ResponseWriter, r *
 			partial = true
 			gateway = map[string]any{"health": "unavailable", "error": map[string]any{"code": "gateway_bad_response"}}
 		} else {
+			gatewayRaw = status
 			gateway = gatewayOverview(status)
 			if gateway["health"] != "ok" {
 				partial = true
@@ -145,7 +149,7 @@ func (h *Handler) handleOverview(ctx context.Context, w http.ResponseWriter, r *
 		"gateway":         gateway,
 		"pool":            poolOverview(providers),
 		"traffic":         overview["traffic"],
-		"buyers":          gatewayBuyerOverview(gateway),
+		"buyers":          gatewayBuyerOverview(gatewayRaw),
 		"ledger":          overview["ledger"],
 		"reconciliation":  overview["reconciliation"],
 		"health":          health,
@@ -289,7 +293,29 @@ func (h *Handler) handleActivity(ctx context.Context, w http.ResponseWriter, r *
 		return
 	}
 	eventType := r.URL.Query().Get("type")
-	result, err := h.store.Activity(ctx, h.db, window.from, window.to, r.URL.Query().Get("cursor"), r.URL.Query().Get("since_cursor"), eventType, limit)
+	cursor, err := decodeFederatedActivityCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		writeExplorerError(w, http.StatusBadRequest, "bad_request", "invalid cursor")
+		return
+	}
+	sinceCursor, err := decodeFederatedActivityCursor(r.URL.Query().Get("since_cursor"))
+	if err != nil {
+		writeExplorerError(w, http.StatusBadRequest, "bad_request", "invalid cursor")
+		return
+	}
+	if r.URL.Query().Get("cursor") != "" && r.URL.Query().Get("since_cursor") != "" {
+		writeExplorerError(w, http.StatusBadRequest, "bad_request", "invalid cursor")
+		return
+	}
+	sourceCursor := cursor
+	localCursor := sourceCursor.Local
+	localSinceCursor := ""
+	if r.URL.Query().Get("since_cursor") != "" {
+		sourceCursor = sinceCursor
+		localCursor = ""
+		localSinceCursor = sourceCursor.Local
+	}
+	result, err := h.store.Activity(ctx, h.db, window.from, window.to, localCursor, localSinceCursor, eventType, limit)
 	if err != nil {
 		if errors.Is(err, ErrBadCursor) {
 			writeExplorerError(w, http.StatusBadRequest, "bad_request", "invalid cursor")
@@ -301,18 +327,22 @@ func (h *Handler) handleActivity(ctx context.Context, w http.ResponseWriter, r *
 	items := result.Items
 	partial := false
 	warnings := []string{}
+	gatewayResult := map[string]any{}
 	if r.URL.Query().Get("include_gateway") != "false" && h.cfg.Explorer.GatewayBaseURL != "" {
-		gateway, status, err := h.fetchGatewayJSONStatus(r, "/admin/explorer/activity")
+		gateway, status, err := h.fetchGatewayJSONStatusRawQuery(r, "/admin/explorer/activity", gatewayActivityRawQuery(r, sourceCursor.Gateway))
+		if status == http.StatusBadRequest {
+			writeExplorerError(w, http.StatusBadRequest, "bad_request", "invalid cursor")
+			return
+		}
 		if err != nil || status == 0 || status < 200 || status >= 300 {
 			partial = true
 			warnings = append(warnings, "gateway_unavailable")
 		} else {
+			gatewayResult = gateway
 			items = mergeActivity(items, gatewayList(gateway))
-			if latest := latestCursor(items); latest != nil {
-				result.LatestCursor = latest
-			}
 		}
 	}
+	items, nextCursor, latestCursor := federatedActivityPage(items, limit, sourceCursor, result, gatewayResult, r.URL.Query().Get("since_cursor") != "")
 	if eventID != "" {
 		for _, item := range items {
 			if item["source_id"] == eventID || item["request_id"] == eventID {
@@ -323,7 +353,7 @@ func (h *Handler) handleActivity(ctx context.Context, w http.ResponseWriter, r *
 		writeExplorerError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
-	writeActivityResult(w, items, result.NextCursor, result.LatestCursor, partial, warnings)
+	writeActivityResult(w, items, nextCursor, latestCursor, partial, warnings)
 }
 
 func (h *Handler) proxyGateway(w http.ResponseWriter, r *http.Request, path string) {
@@ -365,7 +395,11 @@ func (h *Handler) fetchGatewayJSON(r *http.Request, path string) (map[string]any
 }
 
 func (h *Handler) fetchGatewayJSONStatus(r *http.Request, path string) (map[string]any, int, error) {
-	body, status, err := h.fetchGateway(r, path)
+	return h.fetchGatewayJSONStatusRawQuery(r, path, r.URL.RawQuery)
+}
+
+func (h *Handler) fetchGatewayJSONStatusRawQuery(r *http.Request, path string, rawQuery string) (map[string]any, int, error) {
+	body, status, err := h.fetchGatewayRawQuery(r, path, rawQuery)
 	if err != nil {
 		return nil, status, err
 	}
@@ -377,12 +411,16 @@ func (h *Handler) fetchGatewayJSONStatus(r *http.Request, path string) (map[stri
 }
 
 func (h *Handler) fetchGateway(r *http.Request, path string) ([]byte, int, error) {
+	return h.fetchGatewayRawQuery(r, path, r.URL.RawQuery)
+}
+
+func (h *Handler) fetchGatewayRawQuery(r *http.Request, path string, rawQuery string) ([]byte, int, error) {
 	base, err := url.Parse(h.cfg.Explorer.GatewayBaseURL)
 	if err != nil {
 		return nil, 0, err
 	}
 	base.Path = path
-	base.RawQuery = r.URL.RawQuery
+	base.RawQuery = rawQuery
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(h.cfg.Explorer.GatewayTimeoutMs)*time.Millisecond)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
@@ -469,7 +507,7 @@ func (h *Handler) allowRequest(r *http.Request) bool {
 	if cap <= 0 {
 		return true
 	}
-	key := r.Header.Get("Authorization") + "|" + r.RemoteAddr
+	key := clientAddrKey(r.RemoteAddr)
 	now := time.Now()
 	cutoff := now.Add(-time.Minute)
 	h.mu.Lock()
@@ -487,6 +525,14 @@ func (h *Handler) allowRequest(r *http.Request) bool {
 	stamps = append(stamps, now)
 	h.stamps[key] = stamps
 	return true
+}
+
+func clientAddrKey(remoteAddr string) string {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
 }
 
 func statusFromPartial(partial bool) string {
@@ -581,6 +627,149 @@ func gatewayList(gateway map[string]any) []map[string]any {
 	return out
 }
 
+type federatedActivityCursor struct {
+	Version int    `json:"v,omitempty"`
+	Local   string `json:"local,omitempty"`
+	Gateway string `json:"gateway,omitempty"`
+}
+
+func decodeFederatedActivityCursor(raw string) (federatedActivityCursor, error) {
+	if raw == "" {
+		return federatedActivityCursor{}, nil
+	}
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return federatedActivityCursor{}, ErrBadCursor
+	}
+	var cursor federatedActivityCursor
+	if err := json.Unmarshal(b, &cursor); err == nil && cursor.Version == 1 {
+		if cursor.Local != "" {
+			if _, err := decodeCursor(cursor.Local); err != nil {
+				return federatedActivityCursor{}, err
+			}
+		}
+		if cursor.Gateway != "" {
+			if err := validateGatewayActivityCursor(cursor.Gateway); err != nil {
+				return federatedActivityCursor{}, err
+			}
+		}
+		return cursor, nil
+	}
+	if _, err := decodeCursor(raw); err != nil {
+		return federatedActivityCursor{}, err
+	}
+	return federatedActivityCursor{Version: 1, Local: raw}, nil
+}
+
+func validateGatewayActivityCursor(raw string) error {
+	b, err := base64.RawURLEncoding.DecodeString(raw)
+	if err != nil {
+		return ErrBadCursor
+	}
+	var cursor struct {
+		TS string `json:"ts"`
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(b, &cursor); err != nil {
+		return ErrBadCursor
+	}
+	if cursor.TS == "" || cursor.ID == "" {
+		return ErrBadCursor
+	}
+	if _, err := time.Parse(time.RFC3339Nano, cursor.TS); err != nil {
+		return ErrBadCursor
+	}
+	return nil
+}
+
+func encodeFederatedActivityCursor(cursor federatedActivityCursor) *string {
+	if cursor.Local == "" && cursor.Gateway == "" {
+		return nil
+	}
+	cursor.Version = 1
+	b, err := json.Marshal(cursor)
+	if err != nil {
+		return nil
+	}
+	out := base64.RawURLEncoding.EncodeToString(b)
+	return &out
+}
+
+func gatewayActivityRawQuery(r *http.Request, cursor string) string {
+	q := r.URL.Query()
+	q.Del("cursor")
+	q.Del("since_cursor")
+	if r.URL.Query().Get("since_cursor") != "" {
+		if cursor != "" {
+			q.Set("since_cursor", cursor)
+		}
+	} else if cursor != "" {
+		q.Set("cursor", cursor)
+	}
+	return q.Encode()
+}
+
+func federatedActivityPage(items []map[string]any, limit int, input federatedActivityCursor, local ListResult, gateway map[string]any, newer bool) ([]map[string]any, *string, *string) {
+	if newer {
+		sort.SliceStable(items, func(i, j int) bool {
+			ti := timeFromAny(items[i]["event_time_utc"])
+			tj := timeFromAny(items[j]["event_time_utc"])
+			if !ti.Equal(tj) {
+				return ti.Before(tj)
+			}
+			return sourceRank(items[i]["source"]) < sourceRank(items[j]["source"])
+		})
+	}
+	overflow := limit > 0 && len(items) > limit
+	if limit > 0 && len(items) > limit {
+		items = items[:limit]
+	}
+	next := federatedActivityCursor{Version: 1, Local: input.Local, Gateway: input.Gateway}
+	if c := lastSourceCursor(items, "coordinator"); c != "" {
+		next.Local = c
+	}
+	if c := lastSourceCursor(items, "gateway"); c != "" {
+		next.Gateway = c
+	}
+	var nextCursor *string
+	if overflow || local.NextCursor != nil || stringValue(gateway["next_cursor"]) != "" {
+		nextCursor = encodeFederatedActivityCursor(next)
+	}
+
+	latest := federatedActivityCursor{Version: 1, Local: input.Local, Gateway: input.Gateway}
+	if local.LatestCursor != nil {
+		latest.Local = *local.LatestCursor
+	}
+	if c := stringValue(gateway["latest_cursor"]); c != "" {
+		latest.Gateway = c
+	}
+	if newer {
+		if c := lastSourceCursor(items, "coordinator"); c != "" {
+			latest.Local = c
+		}
+		if c := lastSourceCursor(items, "gateway"); c != "" {
+			latest.Gateway = c
+		}
+	}
+	return items, nextCursor, encodeFederatedActivityCursor(latest)
+}
+
+func lastSourceCursor(items []map[string]any, source string) string {
+	for i := len(items) - 1; i >= 0; i-- {
+		if items[i]["source"] == source {
+			return stringValue(items[i]["cursor"])
+		}
+	}
+	return ""
+}
+
+func stringValue(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
 func mergeActivity(local, gateway []map[string]any) []map[string]any {
 	out := append(append([]map[string]any{}, local...), gateway...)
 	sort.SliceStable(out, func(i, j int) bool {
@@ -592,16 +781,6 @@ func mergeActivity(local, gateway []map[string]any) []map[string]any {
 		return sourceRank(out[i]["source"]) > sourceRank(out[j]["source"])
 	})
 	return out
-}
-
-func latestCursor(items []map[string]any) *string {
-	if len(items) == 0 {
-		return nil
-	}
-	if cursor, ok := items[0]["cursor"].(string); ok && cursor != "" {
-		return &cursor
-	}
-	return nil
 }
 
 func sourceRank(v any) int {

@@ -12,7 +12,7 @@ export function setToken(value) {
 }
 
 export function api(path) {
-  queue = queue.then(async () => {
+  queue = queue.catch(() => {}).then(async () => {
     const now = Date.now();
     stamps = stamps.filter((t) => now - t < 60000);
     if (stamps.length >= REQUESTS_PER_MINUTE_CAP) {

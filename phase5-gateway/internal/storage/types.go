@@ -282,8 +282,8 @@ type ExplorerBuyerDetail struct {
 	Feedback    ExplorerBuyerFeedback    `json:"feedback"`
 	Audit       ExplorerBuyerAudit       `json:"audit"`
 	NextCursor  *string                  `json:"next_cursor"`
-	Partial     bool                     `json:"partial,omitempty"`
-	Error       any                      `json:"error,omitempty"`
+	Partial     bool                     `json:"partial"`
+	Error       any                      `json:"error"`
 }
 
 type ExplorerBuyerAccount struct {

@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -39,11 +40,11 @@ func TestAC02_BadBearerRejected(t *testing.T) {
 	}
 }
 
-func TestStaticAssetsRequireBearer(t *testing.T) {
+func TestStaticAssetsBootstrapWithoutBearer(t *testing.T) {
 	h, _ := newTestExplorer(t, nil)
 	for _, path := range []string{"/admin/explorer/", "/admin/explorer/index.html", "/admin/explorer/js/dashboard.js"} {
 		resp := requestExplorer(t, h, http.MethodGet, path, "")
-		if resp.Code != http.StatusUnauthorized {
+		if resp.Code != http.StatusOK {
 			t.Fatalf("%s status=%d body=%s", path, resp.Code, resp.Body.String())
 		}
 	}
@@ -311,6 +312,25 @@ func TestAC20_GatewayUnreachableReturnsPartial(t *testing.T) {
 	}
 }
 
+func TestOverviewUsesRawGatewayBuyerMetrics(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"gateway_health":"ok","capacity_tier":2,"public_api_paused":false,"demo_paused":false,"active_accounts_window":7,"new_accounts_window":3,"active_api_keys":11}`)),
+		}, nil
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/overview", "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	buyers := decodeObject(t, resp)["buyers"].(map[string]any)
+	if buyers["active_accounts_window"] != float64(7) || buyers["new_accounts_window"] != float64(3) || buyers["active_api_keys"] != float64(11) {
+		t.Fatalf("buyer metrics lost: %s", resp.Body.String())
+	}
+}
+
 func TestBuyerProxyGatewayErrorsKeepStatusSemantics(t *testing.T) {
 	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
 	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
@@ -441,11 +461,135 @@ func TestAC17_ActivitySinceCursorReturnsOnlyNewEvents(t *testing.T) {
 	}
 }
 
+func TestActivitySinceCursorPagesNewEventsWithoutReplay(t *testing.T) {
+	h, db := newTestExplorer(t, nil)
+	from := fixedExplorerTime().Add(-time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
+	initial := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?from="+from+"&to="+to, "operator-key")
+	if initial.Code != http.StatusOK {
+		t.Fatalf("initial status=%d body=%s", initial.Code, initial.Body.String())
+	}
+	cursor := decodeObject(t, initial)["latest_cursor"].(string)
+	seedRequestLog(t, db, fixedExplorerTime().Add(30*time.Minute), "req_live_page_1")
+	seedRequestLog(t, db, fixedExplorerTime().Add(31*time.Minute), "req_live_page_2")
+	seedRequestLog(t, db, fixedExplorerTime().Add(32*time.Minute), "req_live_page_3")
+
+	seen := map[string]bool{}
+	for {
+		resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to+"&since_cursor="+url.QueryEscape(cursor), "operator-key")
+		if resp.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		body := decodeObject(t, resp)
+		events := body["events"].([]any)
+		if len(events) != 1 {
+			t.Fatalf("events=%d body=%s", len(events), resp.Body.String())
+		}
+		for id := range requestIDs(events) {
+			if seen[id] {
+				t.Fatalf("replayed id %s", id)
+			}
+			seen[id] = true
+		}
+		next, ok := body["next_cursor"].(string)
+		if !ok || next == "" {
+			break
+		}
+		cursor = next
+	}
+	for _, id := range []string{"req_live_page_1", "req_live_page_2", "req_live_page_3"} {
+		if !seen[id] {
+			t.Fatalf("missing %s seen=%v", id, seen)
+		}
+	}
+}
+
 func TestActivityRejectsBadCursor(t *testing.T) {
 	h, _ := newTestExplorer(t, nil)
 	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?cursor=not-a-cursor", "operator-key")
 	if resp.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestActivityRejectsBadGatewayCursorInsideComposite(t *testing.T) {
+	h, _ := newTestExplorer(t, nil)
+	cursor := encodeFederatedActivityCursor(federatedActivityCursor{Version: 1, Gateway: "not-a-gateway-cursor"})
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?since_cursor="+url.QueryEscape(*cursor), "operator-key")
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestActivityGatewayBadCursorPropagatesBadRequest(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":"bad_request"}}`)),
+		}, nil
+	})}
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity", "operator-key")
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+}
+
+func TestActivityCompositeCursorSeparatesLocalAndGatewaySources(t *testing.T) {
+	h, db := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.GatewayBaseURL = "http://gateway.test" })
+	seedRequestLog(t, db, fixedExplorerTime().Add(-time.Minute), "req_local_composite")
+	gatewayCursor0 := "eyJ0cyI6IjIwMjYtMDYtMDFUMTE6NTk6MDBaIiwicmFuayI6ODAsInNvdXJjZSI6InVzYWdlIiwiaWQiOiJyZXFfZ2F0ZXdheV9jb21wb3NpdGVfMCJ9"
+	gatewayCursor1 := "eyJ0cyI6IjIwMjYtMDYtMDFUMTE6NTk6MzBaIiwicmFuayI6ODAsInNvdXJjZSI6InVzYWdlIiwiaWQiOiJyZXFfZ2F0ZXdheV9jb21wb3NpdGVfMSJ9"
+	gatewayCursor2 := "eyJ0cyI6IjIwMjYtMDYtMDFUMTI6MDA6MzBaIiwicmFuayI6ODAsInNvdXJjZSI6InVzYWdlIiwiaWQiOiJyZXFfZ2F0ZXdheV9jb21wb3NpdGVfMiJ9"
+	var gotQueries []string
+	h.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		gotQueries = append(gotQueries, r.URL.RawQuery)
+		body := `{"events":[{"event_time_utc":"2026-06-01T11:59:00Z","event_type":"usage","source":"gateway","source_id":"req_gateway_composite_0","request_id":"req_gateway_composite_0","cursor":"` + gatewayCursor0 + `"}],"latest_cursor":"` + gatewayCursor0 + `","next_cursor":null,"partial":false,"error":null}`
+		if strings.Contains(r.URL.RawQuery, "since_cursor=") {
+			body = `{"events":[{"event_time_utc":"2026-06-01T11:59:30Z","event_type":"usage","source":"gateway","source_id":"req_gateway_composite_1","request_id":"req_gateway_composite_1","cursor":"` + gatewayCursor1 + `"},{"event_time_utc":"2026-06-01T12:00:30Z","event_type":"usage","source":"gateway","source_id":"req_gateway_composite_2","request_id":"req_gateway_composite_2","cursor":"` + gatewayCursor2 + `"}],"latest_cursor":"` + gatewayCursor2 + `","next_cursor":"` + gatewayCursor2 + `","partial":false,"error":null}`
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	})}
+	from := fixedExplorerTime().Add(-time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
+	resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to, "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body := decodeObject(t, resp)
+	if got := len(body["events"].([]any)); got != 1 {
+		t.Fatalf("merged limit not enforced: got %d body=%s", got, resp.Body.String())
+	}
+	latest, ok := body["latest_cursor"].(string)
+	if !ok || latest == "" {
+		t.Fatalf("missing composite latest cursor: %s", resp.Body.String())
+	}
+	resp = requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to+"&since_cursor="+url.QueryEscape(latest), "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("since status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	body = decodeObject(t, resp)
+	if got := len(body["events"].([]any)); got != 1 {
+		t.Fatalf("since merged limit not enforced: got %d body=%s", got, resp.Body.String())
+	}
+	if len(gotQueries) < 2 || strings.Contains(gotQueries[1], latest) || !strings.Contains(gotQueries[1], "since_cursor="+url.QueryEscape(gatewayCursor0)) {
+		t.Fatalf("gateway did not receive source cursor only: queries=%v latest=%s", gotQueries, latest)
+	}
+	next, ok := body["next_cursor"].(string)
+	if !ok || next == "" {
+		t.Fatalf("missing next cursor for overflow: %s", resp.Body.String())
+	}
+	resp = requestExplorer(t, h, http.MethodGet, "/admin/explorer/activity?limit=1&from="+from+"&to="+to+"&since_cursor="+url.QueryEscape(next), "operator-key")
+	if resp.Code != http.StatusOK {
+		t.Fatalf("next since status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if len(gotQueries) < 3 || !strings.Contains(gotQueries[2], "since_cursor="+url.QueryEscape(gatewayCursor1)) {
+		t.Fatalf("next page did not advance to newest delivered gateway cursor: queries=%v", gotQueries)
 	}
 }
 
@@ -460,9 +604,27 @@ func TestAC18_PollingPausesOnHiddenTab(t *testing.T) {
 
 func TestAC19_RequestCapClientWiring(t *testing.T) {
 	raw := readStatic(t, "static/js/lib/api.js")
-	for _, want := range []string{"REQUESTS_PER_MINUTE_CAP = 60", "queue = queue.then", "stamps.length >= REQUESTS_PER_MINUTE_CAP"} {
+	for _, want := range []string{"REQUESTS_PER_MINUTE_CAP = 60", "queue = queue.catch", "stamps.length >= REQUESTS_PER_MINUTE_CAP"} {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("api.js missing %q", want)
+		}
+	}
+}
+
+func TestServerRequestCapUsesClientHostNotPort(t *testing.T) {
+	h, _ := newTestExplorer(t, func(cfg *config.Config) { cfg.Explorer.RequestsPerMinuteCap = 1 })
+	for i, remote := range []string{"203.0.113.10:1000", "203.0.113.10:1001"} {
+		req := httptest.NewRequest(http.MethodGet, "/admin/explorer/overview", nil)
+		req.RemoteAddr = remote
+		req.Header.Set("Authorization", "Bearer operator-key")
+		resp := httptest.NewRecorder()
+		h.ServeHTTP(resp, req)
+		want := http.StatusOK
+		if i == 1 {
+			want = http.StatusTooManyRequests
+		}
+		if resp.Code != want {
+			t.Fatalf("%s status=%d want=%d body=%s", remote, resp.Code, want, resp.Body.String())
 		}
 	}
 }

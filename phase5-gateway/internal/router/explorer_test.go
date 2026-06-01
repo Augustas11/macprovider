@@ -103,7 +103,7 @@ func TestGatewayExplorerDisabledReturnsNotFound(t *testing.T) {
 	assertStatus(t, h, http.MethodGet, "/admin/explorer/buyers", cfg.Coordinator.OperatorKey, "", "", http.StatusNotFound)
 }
 
-func TestGatewayExplorerDoesNotAuditUnauthenticatedInternalHeaderProbe(t *testing.T) {
+func TestGatewayExplorerDoesNotPersistUnauthenticatedInternalHeaderProbe(t *testing.T) {
 	h, _, dbPath, _ := newTestHarness(t, fakeOAuth{})
 	req := httptest.NewRequest(http.MethodGet, "/admin/explorer/buyers", nil)
 	req.Header.Set("X-MacProvider-Internal-Conv", "conv:attacker")
@@ -114,6 +114,19 @@ func TestGatewayExplorerDoesNotAuditUnauthenticatedInternalHeaderProbe(t *testin
 	}
 	if got := countAuditEvents(t, dbPath, "internal_header_injection_stripped"); got != 0 {
 		t.Fatalf("explorer audit events=%d want 0", got)
+	}
+}
+
+func TestGatewayExplorerBuyerDetailIncludesSuccessEnvelope(t *testing.T) {
+	h, store, _, cfg := newTestHarness(t, fakeOAuth{})
+	seedExplorerBuyer(t, store, "acct_envelope", "envelope@example.test")
+
+	resp := assertStatus(t, h, http.MethodGet, "/admin/explorer/buyers/acct_envelope", cfg.Coordinator.OperatorKey, "", "", http.StatusOK)
+	body := resp.Body.String()
+	for _, want := range []string{`"partial":false`, `"error":null`, `"next_cursor":null`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("buyer detail missing %s: %s", want, body)
+		}
 	}
 }
 

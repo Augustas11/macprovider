@@ -150,7 +150,7 @@ func (s *Server) middleware(next http.Handler) http.Handler {
 		}
 		if stripped := stripInternalMacProviderHeaders(r.Header); len(stripped) > 0 {
 			slog.Warn("internal header injection stripped", "request_id", requestID, "headers", stripped)
-			if !strings.HasPrefix(r.URL.Path, "/admin/explorer/") && r.URL.Path != "/admin/explorer" {
+			if s.shouldPersistInternalHeaderAudit(r) {
 				_ = s.store.InsertAuditEvent(context.Background(), storage.AuditEvent{
 					EventID: mustID("audit"), RequestID: requestID, Actor: "public_ingress", Type: "internal_header_injection_stripped",
 					Payload: fmt.Sprintf(`{"headers":%q}`, strings.Join(stripped, ",")), CreatedAt: s.now(),
@@ -1912,6 +1912,13 @@ func (s *Server) operatorAuthorized(w http.ResponseWriter, r *http.Request) bool
 	}
 	writeError(w, http.StatusUnauthorized, "authentication_error", "invalid_operator_token", "Invalid operator token")
 	return false
+}
+
+func (s *Server) shouldPersistInternalHeaderAudit(r *http.Request) bool {
+	if strings.HasPrefix(r.URL.Path, "/admin/explorer/") || r.URL.Path == "/admin/explorer" {
+		return r.Header.Get("Authorization") == "Bearer "+s.cfg.Coordinator.OperatorKey
+	}
+	return true
 }
 
 func (s *Server) publicPaused(path string) bool {
