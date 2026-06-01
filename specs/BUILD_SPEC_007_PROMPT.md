@@ -1,5 +1,13 @@
 # Build prompt — SPEC-007 v0.1 (normative explorer spec)
 
+> **Status (2026-06-01):** This prompt produced SPEC-007 v0.1. The spec
+> has since advanced to **v0.2** via `specs/FIX_SPEC_007_V0_2.md`, which
+> resolved 3 audit blockers and 2 majors and added D15 to
+> `specs/SPEC-007-operator-decisions.md`. Do not re-run this prompt to
+> draft v0.1 again — read `specs/SPEC-007-explorer.md` (current v0.2)
+> and `specs/FIX_SPEC_007_V0_2.md` instead. This file is retained as
+> the historical record of the v0.1 drafting contract.
+
 Operator-paste prompt that drafts the normative `specs/SPEC-007-explorer.md`
 v0.1 against the locked decisions captured in
 `specs/SPEC-007-operator-decisions.md`. The design exploration was
@@ -410,29 +418,25 @@ work begins.
 
 ## After running this prompt
 
-Operator's review checklist (~45 min):
+**Historical timeline:**
 
-1. Read `specs/SPEC-007-explorer.md` start to finish.
-2. Verify § 2 (Locked decisions) matches D1-D14 verbatim from
-   `specs/SPEC-007-operator-decisions.md` with no rewording.
-3. Verify § 17 (Out of scope) names everything the guardrails and the
-   D-rows deferred.
-4. Verify § 15 has 18+ acceptance criteria including the D14
-   two-minute traversal AC.
-5. Verify no mutating endpoints exist anywhere in §§ 5-6.
-6. Verify § 6 introduces a gateway-side bearer distinct from the
-   coordinator bearer.
+1. v0.1 drafted via this prompt and committed.
+2. Critic audit run against v0.1 — surfaced 3 blockers (`bearer_env`
+   unimplementable, SPEC-005 "SPEC-007 consumer" cross-spec conflict,
+   gateway distinct-bearer model undermotivated) and 12 majors.
+3. `specs/FIX_SPEC_007_V0_2.md` drafted to land 3 blockers + 2
+   high-impact majors (email filter semantics; per-endpoint window
+   knobs). M-3 through M-12 deferred to a future v0.3 reconciliation.
+4. v0.2 committed (`docs(spec-007): v0.2 — resolve audit blockers and
+   high-impact majors`). D15 added to operator-decisions, locking the
+   gateway-shared-bearer model. SPEC-005 §4.5.1 renamed to
+   "payout-rail consumer contract".
 
-If clean: draft `AUDIT_SPEC_007_PROMPT.md` for a cross-model audit
-pass following the SPEC-005 / SPEC-006 audit pattern. Codex audits
-the Claude draft; Claude audits the Codex draft. Reconcile findings
-into a v0.2 if anything material surfaces.
-
-If issues: file fix prompt under `FIX_SPEC_007_V0_2_PROMPT.md`.
-
-After audit + fix cycles: spec locks to v1.0. Then draft
-`BUILD_SPEC_007_IMPL_PROMPT.md` to drive the Go + static-bundle
-implementation in a separate session.
+**Next step:** draft `BUILD_SPEC_007_IMPL_PROMPT.md` to drive the Go
+coordinator handlers + read-only gateway endpoints + static bundle
+against the current SPEC-007 v0.2 contract. The v0.3 reconciliation
+pass (M-3 through M-12 + minors/nits) is OPTIONAL pre-BUILD; the v0.2
+contract is already implementable.
 
 ## Why this prompt is structured this way
 
