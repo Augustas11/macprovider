@@ -3,51 +3,1183 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Mac Provider</title>
+<title>MacProvider</title>
 <style>
-:root{color-scheme:dark;--bg:#0d1117;--panel:#161b22;--panel2:#0f1620;--border:#30363d;--text:#c9d1d9;--muted:#8b949e;--accent:#58a6ff;--ok:#3fb950;--warn:#d29922;--bad:#f85149}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}a{color:var(--accent);text-decoration:none}a:hover{text-decoration:underline}header{position:sticky;top:0;z-index:2;background:rgba(13,17,23,.92);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}.bar{max-width:1180px;margin:0 auto;padding:13px 18px;display:flex;align-items:center;justify-content:space-between;gap:14px}.brand{font-weight:800;color:#f0f6fc;font-size:18px}.right{display:flex;gap:14px;align-items:center}.status{color:var(--muted)}.dot{color:var(--warn)}.dot.up{color:var(--ok)}.dot.down{color:var(--bad)}.btn{border:1px solid var(--border);background:#21262d;color:#f0f6fc;border-radius:8px;padding:9px 13px;font-weight:700;cursor:pointer}.btn:hover:not(:disabled){border-color:var(--accent);text-decoration:none}.btn:disabled{opacity:.55;cursor:not-allowed}.wrap{max-width:1180px;margin:0 auto;padding:28px 18px 44px;display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:22px}.chat,.side section{background:var(--panel);border:1px solid var(--border);border-radius:8px}.chat{min-height:70vh;padding:18px}.suggestions{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px}.pill{border:1px solid var(--border);background:var(--panel2);color:var(--text);border-radius:999px;padding:7px 11px;cursor:pointer}.pill:hover{border-color:var(--accent)}textarea{width:100%;min-height:118px;resize:vertical;background:#0b1017;color:var(--text);border:1px solid var(--border);border-radius:8px;padding:13px;font:15px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.actions{display:flex;justify-content:space-between;align-items:center;gap:14px;margin:12px 0}.hint{color:var(--muted);font-size:13px}.response{min-height:260px;background:#0b1017;border:1px solid var(--border);border-radius:8px;padding:16px;white-space:pre-wrap;overflow:auto;font:15px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}.meta{margin-top:10px;color:var(--muted);font-size:13px;display:flex;gap:14px;flex-wrap:wrap}.side{display:flex;flex-direction:column;gap:14px}.side section{padding:16px}h2{font-size:15px;margin:0 0 10px;color:#f0f6fc}.privacy{padding-left:19px;margin:0}.privacy li{margin:9px 0}.kv{display:grid;grid-template-columns:1fr auto;gap:8px;margin:7px 0;color:var(--muted)}.kv strong{color:var(--text);font-weight:650}.cta{display:block;text-align:center;margin-top:12px}.footer{max-width:1180px;margin:0 auto;padding:0 18px 30px;display:flex;gap:16px;flex-wrap:wrap;color:var(--muted)}@media(max-width:720px){.wrap{grid-template-columns:1fr;padding:18px 12px}.bar{padding:12px}.right{gap:8px}.status{display:none}.chat{min-height:auto}.side{grid-row:auto}.footer{padding:0 12px 24px}.btn{padding:8px 10px}}
+:root{
+  --bg:#0c0d10;--sb:#111316;--surface:#16181d;--border:#252830;--border2:#323743;
+  --text:#e1e3e8;--muted:#878d99;--hint:#4a5060;
+  --accent:#7c6af6;--accent-dim:rgba(124,106,246,.14);
+  --ok:#22c55e;--warn:#f59e0b;--bad:#ef4444;
+  color-scheme:dark;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;overflow:hidden}
+body{background:var(--bg);color:var(--text);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Inter",sans-serif}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+button{cursor:pointer;font:inherit;border:none;background:none;color:inherit}
+svg{display:block;flex-shrink:0}
+::-webkit-scrollbar{width:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+
+/* ── Shell ─────────────────────────────────────────── */
+.shell{display:flex;height:100vh;overflow:hidden}
+.hidden{display:none!important}
+
+/* ── Sidebar ────────────────────────────────────────── */
+.sidebar{
+  width:220px;flex-shrink:0;
+  background:var(--sb);
+  border-right:1px solid var(--border);
+  display:flex;flex-direction:column;
+  overflow:hidden;
+}
+.sb-header{
+  padding:14px 14px 10px;
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+.brand{display:flex;align-items:center;gap:7px;font-weight:700;font-size:14px;color:var(--text)}
+.brand-icon{color:var(--accent);font-size:18px;line-height:1}
+.new-chat{
+  display:flex;align-items:center;gap:7px;
+  width:calc(100% - 20px);margin:10px;
+  padding:8px 10px;border-radius:7px;
+  border:1px solid var(--border2);
+  background:transparent;color:var(--text);
+  font-size:13px;font-weight:500;
+  transition:background .14s,border-color .14s;
+}
+.new-chat:hover{background:var(--surface);border-color:var(--accent)}
+.new-chat svg{color:var(--muted)}
+.section-label{
+  padding:10px 14px 4px;
+  font-size:11px;font-weight:600;letter-spacing:.06em;
+  text-transform:uppercase;color:var(--hint);
+  flex-shrink:0;
+}
+.history{
+  flex:1;overflow-y:auto;overflow-x:hidden;
+  padding:2px 6px;
+  min-height:0;
+}
+.history-item{
+  display:flex;align-items:center;gap:7px;
+  padding:7px 8px;border-radius:6px;
+  cursor:pointer;color:var(--muted);
+  font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  transition:background .12s,color .12s;
+}
+.history-item:hover{background:var(--surface);color:var(--text)}
+.history-item.active{background:var(--accent-dim);color:var(--text)}
+.history-item .dot{width:6px;height:6px;border-radius:50%;background:var(--border2);flex-shrink:0}
+.history-item.active .dot{background:var(--accent)}
+.history-empty{padding:8px 14px;font-size:12px;color:var(--hint)}
+.sb-spacer{flex:1;min-height:10px}
+.sb-nav{
+  border-top:1px solid var(--border);
+  padding:6px;flex-shrink:0;
+}
+.nav-item{
+  display:flex;align-items:center;gap:8px;
+  padding:7px 8px;border-radius:6px;
+  font-size:13px;color:var(--muted);
+  cursor:pointer;
+  transition:background .12s,color .12s;
+  text-decoration:none;
+}
+.nav-item:hover,.nav-item.active{background:var(--surface);color:var(--text);text-decoration:none}
+.sb-footer{
+  border-top:1px solid var(--border);
+  padding:10px 12px;flex-shrink:0;
+  display:flex;flex-direction:column;gap:8px;
+}
+.pool-status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.pool-dot{font-size:9px;line-height:1}
+.pool-dot.ok{color:var(--ok)}
+.pool-dot.warn{color:var(--warn)}
+.pool-dot.bad{color:var(--bad)}
+.sign-in-link{
+  display:flex;align-items:center;justify-content:center;
+  padding:7px;border-radius:7px;
+  border:1px solid var(--border2);
+  font-size:12px;font-weight:500;color:var(--text);
+  transition:border-color .14s,background .14s;
+  text-decoration:none;
+}
+.sign-in-link:hover{border-color:var(--accent);background:var(--accent-dim);text-decoration:none}
+.user-chip{
+  display:flex;align-items:center;gap:8px;
+  font-size:12px;color:var(--muted);
+}
+.user-avatar{
+  width:22px;height:22px;border-radius:50%;
+  background:var(--accent-dim);color:var(--accent);
+  display:flex;align-items:center;justify-content:center;
+  font-size:10px;font-weight:700;flex-shrink:0;
+}
+.user-badge{
+  font-size:10px;padding:1px 5px;border-radius:3px;
+  background:var(--surface);border:1px solid var(--border2);color:var(--hint);
+  margin-left:auto;
+}
+
+/* ── Main ────────────────────────────────────────────── */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+.view{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+
+/* ── Chat view ──────────────────────────────────────── */
+.chat-messages{
+  flex:1;overflow-y:auto;
+  display:flex;flex-direction:column;
+  min-height:0;
+}
+
+/* Empty state */
+.empty-state{
+  flex:1;display:flex;flex-direction:column;
+  align-items:center;justify-content:flex-end;
+  padding:40px 24px 40px;gap:24px;
+}
+.hero{display:flex;flex-direction:column;align-items:center;gap:10px;text-align:center}
+.hero-icon{font-size:36px;color:var(--accent);line-height:1}
+.hero-title{font-size:24px;font-weight:700;color:var(--text)}
+.hero-sub{font-size:14px;color:var(--muted);max-width:340px;line-height:1.6}
+.chips{
+  display:flex;flex-wrap:wrap;gap:8px;
+  justify-content:center;max-width:580px;
+}
+.chip{
+  padding:8px 14px;border-radius:20px;
+  border:1px solid var(--border2);
+  background:var(--surface);color:var(--muted);
+  font-size:12px;line-height:1.4;
+  cursor:pointer;text-align:left;
+  transition:border-color .14s,color .14s,background .14s;
+}
+.chip:hover{border-color:var(--accent);color:var(--text);background:var(--accent-dim)}
+
+/* Active messages */
+.messages-list{
+  flex:1;padding:24px max(24px, calc((100% - 720px)/2));
+  display:flex;flex-direction:column;gap:20px;
+}
+.message{display:flex;flex-direction:column;gap:4px}
+.msg-header{display:flex;align-items:center;gap:8px;margin-bottom:2px}
+.msg-role{font-size:12px;font-weight:600;color:var(--muted)}
+.msg-model{font-size:11px;color:var(--hint);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.msg-content{
+  font-size:14px;line-height:1.65;color:var(--text);
+  white-space:pre-wrap;word-break:break-word;
+}
+.message-user .msg-content{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:10px;padding:10px 14px;
+  align-self:flex-end;max-width:80%;
+}
+.message-user .msg-header{justify-content:flex-end}
+.msg-meta{font-size:11px;color:var(--hint);display:flex;gap:8px;margin-top:2px}
+.cursor-blink{
+  display:inline-block;width:2px;height:1em;
+  background:var(--accent);vertical-align:middle;
+  animation:blink .9s step-end infinite;
+}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:0}}
+
+/* ── Input dock ─────────────────────────────────────── */
+.input-dock{
+  flex-shrink:0;
+  padding:12px 24px 18px;
+}
+.input-card{
+  border:1px solid var(--border2);border-radius:10px;
+  background:var(--surface);
+  transition:border-color .16s;
+  position:relative;
+}
+.input-card:focus-within{border-color:var(--accent)}
+#prompt{
+  width:100%;min-height:80px;max-height:220px;
+  resize:none;overflow-y:auto;
+  background:transparent;border:none;outline:none;
+  color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+  padding:14px 14px 8px;
+}
+#prompt::placeholder{color:var(--hint)}
+.input-footer{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:6px 10px 8px;gap:8px;
+  position:relative;
+}
+.input-left{display:flex;align-items:center;gap:6px;position:relative}
+.model-chip{
+  display:flex;align-items:center;gap:5px;
+  padding:4px 9px;border-radius:5px;
+  border:1px solid var(--border);
+  background:transparent;color:var(--muted);
+  font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  transition:border-color .14s,color .14s,background .14s;
+}
+.model-chip:hover{border-color:var(--border2);color:var(--text);background:var(--bg)}
+.model-chip .chevron{color:var(--hint)}
+.model-menu{
+  position:absolute;bottom:calc(100% + 8px);left:0;
+  min-width:260px;
+  background:var(--surface);border:1px solid var(--border2);
+  border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.4);
+  overflow:hidden;z-index:100;
+}
+.model-menu-header{padding:10px 12px 6px;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint)}
+.model-option{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:9px 12px;cursor:pointer;
+  transition:background .12s;
+  font-size:12px;
+}
+.model-option:hover{background:var(--border)}
+.model-option.selected{background:var(--accent-dim)}
+.model-option-name{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--text)}
+.model-option-status{font-size:11px;padding:1px 6px;border-radius:3px}
+.model-option-status.avail{background:rgba(34,197,94,.12);color:var(--ok)}
+.model-option-status.unavail{background:rgba(239,68,68,.1);color:var(--bad)}
+.model-sleep-note{padding:8px 12px 10px;font-size:11px;color:var(--hint);border-top:1px solid var(--border)}
+.input-right{display:flex;align-items:center;gap:8px}
+.kbd-hint{font-size:11px;color:var(--hint)}
+.send-btn{
+  padding:6px 14px;border-radius:6px;
+  background:var(--accent);color:#fff;
+  font-size:13px;font-weight:600;
+  transition:opacity .14s,background .14s;
+}
+.send-btn:disabled{opacity:.4;cursor:not-allowed}
+.send-btn.stop{background:var(--bad)}
+.input-note{font-size:11px;color:var(--hint);text-align:center;margin-top:5px}
+
+/* ── Dashboard ──────────────────────────────────────── */
+.dash-header{
+  flex-shrink:0;
+  display:flex;align-items:center;justify-content:space-between;
+  padding:18px 28px 14px;
+  border-bottom:1px solid var(--border);
+}
+.dash-title{font-size:16px;font-weight:700;color:var(--text)}
+.back-btn{
+  font-size:12px;color:var(--muted);
+  padding:5px 10px;border-radius:5px;border:1px solid var(--border);
+  transition:border-color .14s,color .14s;
+}
+.back-btn:hover{border-color:var(--accent);color:var(--accent)}
+.dash-body{
+  flex:1;overflow-y:auto;
+  padding:24px 28px;
+  display:flex;flex-direction:column;gap:24px;
+}
+.dash-section-title{font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--hint);margin-bottom:12px}
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px}
+.stat-card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:16px;
+}
+.stat-value{font-size:26px;font-weight:700;color:var(--text);line-height:1;margin-bottom:5px;font-variant-numeric:tabular-nums}
+.stat-label{font-size:12px;color:var(--muted)}
+.chart-wrap{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:16px;
+}
+.chart-bars{
+  display:flex;align-items:flex-end;gap:6px;
+  height:80px;
+}
+.chart-bar-col{
+  flex:1;display:flex;flex-direction:column;align-items:center;gap:4px;
+}
+.chart-bar{
+  width:100%;border-radius:3px 3px 0 0;
+  background:var(--accent-dim);border:1px solid rgba(124,106,246,.3);
+  min-height:3px;
+  transition:background .2s;
+}
+.chart-bar:hover{background:var(--accent)}
+.chart-bar.today{background:var(--accent)}
+.chart-day-label{font-size:10px;color:var(--hint)}
+.pool-card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:16px;
+}
+.pool-row{display:flex;justify-content:space-between;align-items:center;padding:6px 0;font-size:13px}
+.pool-row:not(:last-child){border-bottom:1px solid var(--border)}
+.pool-key{color:var(--muted)}
+.pool-val{color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.pool-val.ok{color:var(--ok)}
+.pool-val.warn{color:var(--warn)}
+.pool-val.bad{color:var(--bad)}
+.models-list{display:flex;flex-direction:column;gap:4px}
+.model-tag{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:4px 10px;border-radius:4px;
+  border:1px solid var(--border);
+  font-size:11px;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--muted);
+}
+.quick-links{display:flex;gap:10px;flex-wrap:wrap}
+.quick-link{
+  padding:8px 14px;border-radius:6px;
+  border:1px solid var(--border);
+  font-size:12px;color:var(--muted);
+  transition:border-color .14s,color .14s;
+  text-decoration:none;
+}
+.quick-link:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
+
+/* ── Mobile ─────────────────────────────────────────── */
+@media(max-width:680px){
+  .sidebar{
+    position:fixed;top:0;left:0;bottom:0;z-index:50;
+    transform:translateX(-100%);transition:transform .22s;
+  }
+  .sidebar.open{transform:translateX(0)}
+  .mobile-header{
+    flex-shrink:0;display:flex;align-items:center;gap:10px;
+    padding:10px 14px;border-bottom:1px solid var(--border);
+    background:var(--sb);
+  }
+  .hamburger{padding:6px;border-radius:5px;border:1px solid var(--border);color:var(--muted)}
+  .hamburger:hover{border-color:var(--accent);color:var(--accent)}
+  .input-dock{padding:10px 12px 14px}
+  .messages-list{padding:16px 14px}
+}
+@media(min-width:681px){
+  .mobile-header{display:none}
+}
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand">Mac Provider</div><div class="right"><span class="status">Status: <span class="dot" id="dot">&#9679;</span> <span id="statusText">checking</span></span><a class="btn" href="https://api.streamvc.live/auth/github/start">Sign in</a></div></div></header>
-<main class="wrap">
-<section class="chat" aria-label="Try Mac Provider">
-<div class="suggestions" aria-label="Suggested prompts">
-<button class="pill" type="button">Translate this into concise Indonesian: The model is running on a contributor Mac.</button>
-<button class="pill" type="button">Summarize why strict CORS matters for browser API demos in three bullets.</button>
-<button class="pill" type="button">Write a tiny Go function that validates an origin against an allowlist.</button>
+<div class="shell" id="shell">
+
+  <!-- ── SIDEBAR ── -->
+  <nav class="sidebar" id="sidebar">
+    <div class="sb-header">
+      <div class="brand">
+        <span class="brand-icon">⬡</span>
+        <span class="brand-name">MacProvider</span>
+      </div>
+    </div>
+
+    <button class="new-chat" id="newChatBtn">
+      <svg width="12" height="12" viewBox="0 0 12 12"><path d="M6 1v10M1 6h10" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      New Chat
+    </button>
+
+    <div class="section-label">Recent</div>
+    <div class="history" id="historyList"></div>
+
+    <div class="sb-spacer"></div>
+
+    <div class="sb-nav">
+      <a class="nav-item" id="navDashboard">
+        <svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="8" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="8" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>
+        Dashboard
+      </a>
+      <a class="nav-item" href="https://api.streamvc.live/docs" target="_blank" rel="noopener">
+        <svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 4h10M2 7h6M2 10h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+        API Docs
+      </a>
+    </div>
+
+    <div class="sb-footer">
+      <div class="pool-status">
+        <span class="pool-dot warn" id="sbPoolDot">●</span>
+        <span id="sbPoolLabel">checking…</span>
+      </div>
+      <div id="userArea">
+        <a class="sign-in-link" href="https://api.streamvc.live/auth/github/start">Sign in with GitHub</a>
+      </div>
+    </div>
+  </nav>
+
+  <!-- ── MAIN ── -->
+  <main class="main">
+    <!-- mobile header -->
+    <div class="mobile-header" id="mobileHeader">
+      <button class="hamburger" id="hamburgerBtn">
+        <svg width="14" height="12" viewBox="0 0 14 12"><path d="M1 1h12M1 6h12M1 11h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>
+      </button>
+      <span style="font-weight:700;font-size:13px">MacProvider</span>
+    </div>
+
+    <!-- VIEW: Chat -->
+    <div class="view" id="viewChat">
+      <div class="chat-messages" id="chatMessages">
+        <!-- Empty state -->
+        <div class="empty-state" id="emptyState">
+          <div class="hero">
+            <div class="hero-icon">⬡</div>
+            <h1 class="hero-title">MacProvider</h1>
+            <p class="hero-sub">AI inference on contributor Macs — open, fast, transparent.</p>
+          </div>
+          <div class="chips" id="suggestionChips"></div>
+        </div>
+        <!-- Message thread (rendered into chat-messages directly by JS) -->
+      </div>
+
+      <!-- Input dock -->
+      <div class="input-dock">
+        <div class="input-card">
+          <textarea id="prompt" placeholder="Ask a question or try a prompt…" rows="3"></textarea>
+          <div class="input-footer">
+            <div class="input-left">
+              <button class="model-chip" id="modelChip">
+                <span id="modelChipLabel">loading…</span>
+                <svg class="chevron" width="10" height="10" viewBox="0 0 10 10"><path d="M2 3.5l3 3 3-3" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              </button>
+              <div class="model-menu hidden" id="modelMenu"></div>
+            </div>
+            <div class="input-right">
+              <span class="kbd-hint">⌘↵</span>
+              <button class="send-btn" id="sendBtn" disabled>Send</button>
+            </div>
+          </div>
+        </div>
+        <div class="input-note" id="inputNote"></div>
+      </div>
+    </div>
+
+    <!-- VIEW: Dashboard -->
+    <div class="view hidden" id="viewDashboard">
+      <div class="dash-header">
+        <h2 class="dash-title">Dashboard</h2>
+        <button class="back-btn" id="backToChatBtn">← Back to chat</button>
+      </div>
+      <div class="dash-body" id="dashBody"></div>
+    </div>
+  </main>
 </div>
-<textarea id="prompt" placeholder="Ask a question or try a suggested prompt"></textarea>
-<div class="actions"><span class="hint">Cmd-Enter to send</span><button class="btn" id="send" type="button">Send</button></div>
-<div class="response" id="response" aria-live="polite">Ready.</div>
-<div class="meta"><span>model: <strong id="model">unknown</strong></span><span>tokens: <strong id="tokens">0</strong></span><span>wall time: <strong id="wall">0ms</strong></span><span id="request"></span></div>
-</section>
-<aside class="side">
-<section><h2>Privacy notes</h2><ol class="privacy">
-<li><strong>plaintext_to_provider</strong>: Buyer prompts and provider responses are processed as plaintext on provider hardware. Providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee.</li>
-<li><strong>hardware_attestation</strong>: There is no hardware attestation or runtime integrity check on providers. The coordinator admits providers based on `provider_id` match (pinned tier) or rate-limited provisional admission. Once admitted, the provider runtime is trusted to faithfully serve requests; SPEC-006 v0.8 does NOT cryptographically verify this.</li>
-<li><strong>model_identity</strong>: Model identity is provider-reported. When `/v1/models` aggregates the pool's served models, the model identifier reflects what the provider's binary advertises. SPEC-006 v0.8 does NOT cryptographically verify the loaded model against a catalog of known artifact hashes.</li>
-<li><strong>tier2_milestone</strong>: The product makes NO privacy, attestation, integrity, untrusted-provider, or malicious-provider claims. Any buyer-facing language, including front-door copy, docs, error messages, API responses, marketing material, and this spec, MUST be consistent with properties 1-3.</li>
-</ol></section>
-<section><h2>Beta quota</h2><p>Free during beta - 1000 tokens/IP/day for this browser demo. Shared NATs count as one IP.</p><a class="btn cta" href="https://api.streamvc.live/auth/github/start">Like this? Get an API key &rarr;</a></section>
-<section><h2>Status</h2><div class="kv"><span>Pool size</span><strong id="pool">unknown</strong></div><div class="kv"><span>Models</span><strong id="models">loading</strong></div><div class="kv"><span>Refreshed</span><strong id="refreshed">never</strong></div></section>
-</aside>
-</main>
-<nav class="footer" aria-label="Footer links"><a href="https://api.streamvc.live/docs">Documentation</a><a href="https://api.streamvc.live/v1/status">Status</a><a href="https://api.streamvc.live/docs#api-reference">API reference</a><a href="https://api.streamvc.live/docs#disclosures">Disclosures</a></nav>
+
 <script>
-const API="https://api.streamvc.live",promptEl=document.getElementById("prompt"),sendEl=document.getElementById("send"),respEl=document.getElementById("response"),modelEl=document.getElementById("model"),tokensEl=document.getElementById("tokens"),wallEl=document.getElementById("wall"),reqEl=document.getElementById("request");let demoToken="",model="mlx-community/Llama-3.2-3B-Instruct-4bit",minting=null;
-function text(el,v){el.textContent=v}
-function statusLabel(s){return s==="idle"?"no providers awake":s==="degraded"?"limited capacity":s==="down"?"coordinator unavailable":s||"unknown"}
-function modelLabel(m){return m.availability==="no_awake_provider"?m.id+" (no provider awake)":m.availability==="no_free_slots"?m.id+" (busy)":m.id}
-async function status(){try{const r=await fetch(API+"/v1/status");const j=await r.json(),dot=document.getElementById("dot");dot.classList.toggle("up",j.status==="up");dot.classList.toggle("down",j.status==="down");text(document.getElementById("statusText"),statusLabel(j.status));text(document.getElementById("pool"),String((j.pool&&j.pool.ready)||0)+(j.status==="idle"?" ready - providers asleep":" ready"));if(j.models&&j.models.length){model=j.models[0].id;text(document.getElementById("models"),j.models.map(modelLabel).join(", "))}else{text(document.getElementById("models"),j.status==="idle"?"providers asleep":"none")}text(document.getElementById("refreshed"),new Date().toLocaleTimeString())}catch(e){const dot=document.getElementById("dot");dot.classList.remove("up");dot.classList.add("down");text(document.getElementById("statusText"),"coordinator unavailable");text(document.getElementById("models"),"unavailable")}}
-function ensureDemo(){if(demoToken)return Promise.resolve(demoToken);if(!minting){minting=fetch(API+"/auth/demo-session",{method:"POST"}).then(async r=>{const j=await r.json();if(!r.ok)throw new Error((j.error&&j.error.message)||"Could not start demo session");demoToken=j.demo_token;return demoToken}).catch(e=>{minting=null;throw e})}return minting}
-document.querySelectorAll(".pill").forEach(b=>b.addEventListener("click",()=>{promptEl.value=b.textContent;promptEl.focus()}));
-promptEl.addEventListener("input",()=>{ensureDemo().catch(()=>{})},{once:true});
-promptEl.addEventListener("keydown",e=>{if((e.metaKey||e.ctrlKey)&&e.key==="Enter")send()});
-sendEl.addEventListener("click",send);
-async function send(){const content=promptEl.value.trim();if(!content)return;sendEl.disabled=true;text(respEl,"");text(tokensEl,"0");text(modelEl,model);text(reqEl,"");const started=performance.now();try{const token=await ensureDemo();const r=await fetch(API+"/v1/chat/completions",{method:"POST",headers:{"Content-Type":"application/json","Accept":"text/event-stream","X-Demo-Token":token},body:JSON.stringify({model,messages:[{role:"user",content}],max_tokens:256,stream:true})});const requestID=r.headers.get("X-Request-ID");if(requestID)text(reqEl,"request_id: "+requestID);if(!r.ok){let j={};try{j=await r.json()}catch(e){}throw new Error((j.error&&j.error.message)||("Request failed: "+r.status))}const reader=r.body.getReader(),dec=new TextDecoder();let buf="",total=0;for(;;){const {value,done}=await reader.read();if(done)break;buf+=dec.decode(value,{stream:true});let cut;while((cut=buf.indexOf("\n\n"))>=0){const event=buf.slice(0,cut);buf=buf.slice(cut+2);for(const line of event.split("\n")){if(!line.startsWith("data:"))continue;const data=line.slice(5).trim();if(data==="[DONE]")continue;try{const j=JSON.parse(data);if(j.model){model=j.model;text(modelEl,model)}const delta=j.choices&&j.choices[0]&&j.choices[0].delta&&j.choices[0].delta.content;if(delta){respEl.append(document.createTextNode(delta))}if(j.usage){total=j.usage.total_tokens||total;text(tokensEl,String(total))}}catch(e){}}}}}catch(e){text(respEl,e.message)}finally{text(wallEl,Math.round(performance.now()-started)+"ms");sendEl.disabled=false}}
-status();
+// ── Constants ────────────────────────────────────────
+const API = 'https://api.streamvc.live'
+const MAX_SESSIONS = 50
+const SUGGESTIONS = [
+  'Show me a minimal Python snippet that streams chat completions using the openai SDK pointed at this endpoint.',
+  'Summarize why strict CORS matters for browser API demos in three bullets.',
+  'Write a tiny Go function that validates an origin against an allowlist.',
+]
+
+// ── State ────────────────────────────────────────────
+let sessions = []
+let currentId = null
+let models = []
+let selectedModel = null
+let poolStatus = null
+let streaming = false
+let streamAbort = null
+let demoToken = null
+let mintingPromise = null
+let currentView = 'chat'
+let usage = {}
+
+// ── localStorage ─────────────────────────────────────
+function load() {
+  try { sessions = JSON.parse(localStorage.getItem('mp_sessions') || '[]') } catch(e) { sessions = [] }
+  currentId = localStorage.getItem('mp_current') || null
+  try { models = JSON.parse(localStorage.getItem('mp_models') || '[]') } catch(e) { models = [] }
+  try { usage = JSON.parse(localStorage.getItem('mp_usage') || '{}') } catch(e) { usage = {} }
+  if (models.length) selectedModel = models[0]
+}
+
+function save() {
+  try {
+    if (sessions.length > MAX_SESSIONS) sessions = sessions.slice(-MAX_SESSIONS)
+    localStorage.setItem('mp_sessions', JSON.stringify(sessions))
+    if (currentId) localStorage.setItem('mp_current', currentId)
+    localStorage.setItem('mp_models', JSON.stringify(models))
+    localStorage.setItem('mp_usage', JSON.stringify(usage))
+  } catch(e) {}
+}
+
+// ── Session helpers ──────────────────────────────────
+function uid() {
+  return 'ses_' + Math.random().toString(36).slice(2, 10)
+}
+
+function today() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function trackUsage(tokens, latencyMs) {
+  const d = today()
+  if (!usage[d]) usage[d] = { requests: 0, tokens: 0, latencies: [] }
+  usage[d].requests++
+  usage[d].tokens += (tokens || 0)
+  if (latencyMs) usage[d].latencies.push(latencyMs)
+  save()
+}
+
+function currentSession() {
+  return sessions.find(s => s.id === currentId) || null
+}
+
+function shortModel(id) {
+  if (!id) return 'unknown'
+  const parts = id.split('/')
+  const name = parts[parts.length - 1]
+  return name.replace(/-(4|8|16)bit$/i, '').replace(/-Instruct$/i, '').replace(/-Chat$/i, '')
+}
+
+function newChat() {
+  const id = uid()
+  sessions.push({ id, title: 'New chat', created: new Date().toISOString(), messages: [] })
+  currentId = id
+  save()
+  renderHistory()
+  showEmptyState()
+  navigate('chat')
+  document.getElementById('prompt').focus()
+}
+
+function loadSession(id) {
+  currentId = id
+  save()
+  renderHistory()
+  renderMessages()
+  navigate('chat')
+}
+
+// ── Navigation ───────────────────────────────────────
+function navigate(view) {
+  currentView = view
+  const chat = document.getElementById('viewChat')
+  const dash = document.getElementById('viewDashboard')
+  const navDash = document.getElementById('navDashboard')
+  if (view === 'dashboard') {
+    chat.classList.add('hidden')
+    dash.classList.remove('hidden')
+    navDash.classList.add('active')
+    renderDashboard()
+  } else {
+    dash.classList.add('hidden')
+    chat.classList.remove('hidden')
+    navDash.classList.remove('active')
+  }
+  closeSidebar()
+}
+
+// ── Empty / active state ─────────────────────────────
+function showEmptyState() {
+  const es = document.getElementById('emptyState')
+  const cm = document.getElementById('chatMessages')
+  cm.querySelectorAll('.messages-list').forEach(el => el.remove())
+  es.classList.remove('hidden')
+  document.getElementById('prompt').value = ''
+  updateSendBtn()
+}
+
+function hideEmptyState() {
+  document.getElementById('emptyState').classList.add('hidden')
+}
+
+// ── Message rendering ────────────────────────────────
+function renderMessages() {
+  const sess = currentSession()
+  const cm = document.getElementById('chatMessages')
+  cm.querySelectorAll('.messages-list').forEach(el => el.remove())
+  if (!sess || sess.messages.length === 0) {
+    showEmptyState()
+    return
+  }
+  hideEmptyState()
+  const list = document.createElement('div')
+  list.className = 'messages-list'
+  sess.messages.forEach(msg => {
+    list.appendChild(buildMsgEl(msg))
+  })
+  cm.appendChild(list)
+  cm.scrollTop = cm.scrollHeight
+}
+
+function buildMsgEl(msg) {
+  const wrap = document.createElement('div')
+  wrap.className = 'message message-' + msg.role
+
+  if (msg.role === 'user') {
+    const header = document.createElement('div')
+    header.className = 'msg-header'
+    const role = document.createElement('span')
+    role.className = 'msg-role'
+    role.textContent = 'You'
+    header.appendChild(role)
+    wrap.appendChild(header)
+  } else {
+    const header = document.createElement('div')
+    header.className = 'msg-header'
+    const role = document.createElement('span')
+    role.className = 'msg-role'
+    role.textContent = 'MacProvider'
+    header.appendChild(role)
+    if (msg.model) {
+      const m = document.createElement('span')
+      m.className = 'msg-model'
+      m.textContent = shortModel(msg.model)
+      header.appendChild(m)
+    }
+    wrap.appendChild(header)
+  }
+
+  const content = document.createElement('div')
+  content.className = 'msg-content'
+  content.textContent = msg.content
+  if (msg.id) content.id = 'msg-' + msg.id
+  wrap.appendChild(content)
+
+  if (msg.role === 'assistant' && (msg.tokens || msg.latencyMs)) {
+    const meta = document.createElement('div')
+    meta.className = 'msg-meta'
+    if (msg.tokens) meta.appendChild(span(msg.tokens + ' tokens'))
+    if (msg.latencyMs) meta.appendChild(span(msg.latencyMs + 'ms'))
+    wrap.appendChild(meta)
+  }
+  return wrap
+}
+
+function span(text) {
+  const s = document.createElement('span')
+  s.textContent = text
+  return s
+}
+
+function appendMessage(msg) {
+  const sess = currentSession()
+  if (!sess) return
+  sess.messages.push(msg)
+  if (sess.messages.length === 1 && msg.role === 'user') {
+    sess.title = msg.content.slice(0, 40) + (msg.content.length > 40 ? '…' : '')
+    renderHistory()
+  }
+  save()
+
+  const cm = document.getElementById('chatMessages')
+  let list = cm.querySelector('.messages-list')
+  if (!list) {
+    hideEmptyState()
+    list = document.createElement('div')
+    list.className = 'messages-list'
+    cm.appendChild(list)
+  }
+  const el = buildMsgEl(msg)
+  list.appendChild(el)
+  cm.scrollTop = cm.scrollHeight
+}
+
+// ── History sidebar ──────────────────────────────────
+function renderHistory() {
+  const container = document.getElementById('historyList')
+  container.innerHTML = ''
+  if (sessions.length === 0) {
+    const empty = document.createElement('div')
+    empty.className = 'history-empty'
+    empty.textContent = 'No chats yet'
+    container.appendChild(empty)
+    return
+  }
+  const sorted = [...sessions].reverse()
+  sorted.forEach(s => {
+    const item = document.createElement('div')
+    item.className = 'history-item' + (s.id === currentId ? ' active' : '')
+    item.dataset.id = s.id
+    const dot = document.createElement('div')
+    dot.className = 'dot'
+    const label = document.createElement('span')
+    label.style.overflow = 'hidden'
+    label.style.textOverflow = 'ellipsis'
+    label.textContent = s.title || 'New chat'
+    item.appendChild(dot)
+    item.appendChild(label)
+    item.addEventListener('click', () => loadSession(s.id))
+    container.appendChild(item)
+  })
+}
+
+// ── Model UI ─────────────────────────────────────────
+function renderModelChip() {
+  const label = document.getElementById('modelChipLabel')
+  label.textContent = selectedModel ? shortModel(selectedModel) : 'no model'
+}
+
+function renderModelMenu() {
+  const menu = document.getElementById('modelMenu')
+  menu.innerHTML = ''
+
+  const header = document.createElement('div')
+  header.className = 'model-menu-header'
+  header.textContent = 'Model'
+  menu.appendChild(header)
+
+  if (models.length === 0) {
+    const note = document.createElement('div')
+    note.className = 'model-sleep-note'
+    note.textContent = 'No providers awake. Waiting for pool.'
+    menu.appendChild(note)
+    return
+  }
+
+  models.forEach(m => {
+    const item = document.createElement('div')
+    item.className = 'model-option' + (m === selectedModel ? ' selected' : '')
+    const name = document.createElement('span')
+    name.className = 'model-option-name'
+    name.textContent = shortModel(m)
+    name.title = m
+    const status = document.createElement('span')
+    status.className = 'model-option-status avail'
+    status.textContent = 'ready'
+    item.appendChild(name)
+    item.appendChild(status)
+    item.addEventListener('click', () => {
+      selectedModel = m
+      save()
+      renderModelChip()
+      closeModelMenu()
+    })
+    menu.appendChild(item)
+  })
+
+  if (poolStatus && poolStatus.status === 'idle') {
+    const note = document.createElement('div')
+    note.className = 'model-sleep-note'
+    note.textContent = 'Providers asleep — first request wakes them up.'
+    menu.appendChild(note)
+  }
+}
+
+function toggleModelMenu() {
+  const menu = document.getElementById('modelMenu')
+  if (menu.classList.contains('hidden')) {
+    renderModelMenu()
+    menu.classList.remove('hidden')
+  } else {
+    closeModelMenu()
+  }
+}
+
+function closeModelMenu() {
+  document.getElementById('modelMenu').classList.add('hidden')
+}
+
+// ── Pool status ──────────────────────────────────────
+async function fetchStatus() {
+  try {
+    const r = await fetch(API + '/v1/status')
+    const j = await r.json()
+    poolStatus = j
+    const dot = document.getElementById('sbPoolDot')
+    const label = document.getElementById('sbPoolLabel')
+    dot.className = 'pool-dot'
+    if (j.status === 'up') { dot.classList.add('ok'); label.textContent = 'pool up' }
+    else if (j.status === 'idle') { dot.classList.add('warn'); label.textContent = 'idle' }
+    else { dot.classList.add('bad'); label.textContent = 'down' }
+
+    if (j.models && j.models.length > 0) {
+      models = j.models.map(m => typeof m === 'string' ? m : m.id).filter(Boolean)
+      if (!selectedModel || !models.includes(selectedModel)) selectedModel = models[0]
+      save()
+    }
+    renderModelChip()
+  } catch(e) {
+    const dot = document.getElementById('sbPoolDot')
+    dot.className = 'pool-dot bad'
+    document.getElementById('sbPoolLabel').textContent = 'unavailable'
+  }
+}
+
+// ── Demo token ───────────────────────────────────────
+function ensureToken() {
+  if (demoToken) return Promise.resolve(demoToken)
+  if (!mintingPromise) {
+    mintingPromise = fetch(API + '/auth/demo-session', { method: 'POST' })
+      .then(async r => {
+        const j = await r.json()
+        if (!r.ok) throw new Error((j.error && j.error.message) || 'Demo session failed')
+        demoToken = j.demo_token
+        return demoToken
+      })
+      .catch(e => { mintingPromise = null; throw e })
+  }
+  return mintingPromise
+}
+
+// ── Send ─────────────────────────────────────────────
+async function send() {
+  if (streaming) { abortStream(); return }
+  const promptEl = document.getElementById('prompt')
+  const content = promptEl.value.trim()
+  if (!content) return
+
+  if (!currentId) newChat()
+  if (!currentId) return
+
+  promptEl.value = ''
+  promptEl.style.height = ''
+  updateSendBtn()
+  setInputNote('')
+
+  appendMessage({ role: 'user', content, ts: new Date().toISOString() })
+
+  const model = selectedModel || (models[0]) || 'mlx-community/Llama-3.2-3B-Instruct-4bit'
+  const msgId = uid()
+  const asstMsg = { id: msgId, role: 'assistant', content: '', model, tokens: 0, latencyMs: 0, ts: new Date().toISOString() }
+  appendMessage(asstMsg)
+
+  const contentEl = document.getElementById('msg-' + msgId)
+  if (contentEl) {
+    const cur = document.createElement('span')
+    cur.className = 'cursor-blink'
+    contentEl.appendChild(cur)
+  }
+
+  streaming = true
+  updateSendBtn()
+
+  const started = performance.now()
+  try {
+    const token = await ensureToken()
+    const ctrl = new AbortController()
+    streamAbort = ctrl
+
+    const r = await fetch(API + '/v1/chat/completions', {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json', 'Accept': 'text/event-stream', 'X-Demo-Token': token },
+      body: JSON.stringify({ model, messages: buildMessages(), max_tokens: 512, stream: true })
+    })
+    if (!r.ok) {
+      let j = {}
+      try { j = await r.json() } catch(e) {}
+      throw new Error((j.error && j.error.message) || 'Request failed: ' + r.status)
+    }
+
+    const reader = r.body.getReader()
+    const dec = new TextDecoder()
+    let buf = '', totalTokens = 0, fullText = ''
+
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      buf += dec.decode(value, { stream: true })
+      let cut
+      while ((cut = buf.indexOf('\n\n')) >= 0) {
+        const event = buf.slice(0, cut)
+        buf = buf.slice(cut + 2)
+        for (const line of event.split('\n')) {
+          if (!line.startsWith('data:')) continue
+          const data = line.slice(5).trim()
+          if (data === '[DONE]') continue
+          try {
+            const j = JSON.parse(data)
+            if (j.model && j.model !== model) { asstMsg.model = j.model; selectedModel = j.model }
+            const delta = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content
+            if (delta) {
+              fullText += delta
+              if (contentEl) {
+                const cur = contentEl.querySelector('.cursor-blink')
+                if (cur) contentEl.insertBefore(document.createTextNode(delta), cur)
+                else contentEl.appendChild(document.createTextNode(delta))
+                const cm = document.getElementById('chatMessages')
+                cm.scrollTop = cm.scrollHeight
+              }
+            }
+            if (j.usage) totalTokens = j.usage.total_tokens || totalTokens
+          } catch(e) {}
+        }
+      }
+    }
+
+    const latencyMs = Math.round(performance.now() - started)
+    asstMsg.content = fullText
+    asstMsg.tokens = totalTokens
+    asstMsg.latencyMs = latencyMs
+    trackUsage(totalTokens, latencyMs)
+
+    const sess = currentSession()
+    if (sess) {
+      const m = sess.messages.find(x => x.id === msgId)
+      if (m) { m.content = fullText; m.tokens = totalTokens; m.latencyMs = latencyMs; m.model = asstMsg.model }
+      save()
+    }
+
+    if (contentEl) {
+      const cur = contentEl.querySelector('.cursor-blink')
+      if (cur) cur.remove()
+      const meta = contentEl.closest('.message')
+      if (meta) {
+        let metaEl = meta.querySelector('.msg-meta')
+        if (!metaEl) { metaEl = document.createElement('div'); metaEl.className = 'msg-meta'; meta.appendChild(metaEl) }
+        metaEl.innerHTML = ''
+        if (totalTokens) metaEl.appendChild(span(totalTokens + ' tokens'))
+        metaEl.appendChild(span(latencyMs + 'ms'))
+      }
+    }
+
+  } catch(e) {
+    if (e.name !== 'AbortError') {
+      if (contentEl) {
+        const cur = contentEl.querySelector('.cursor-blink')
+        if (cur) cur.remove()
+        contentEl.textContent = '⚠ ' + e.message
+      }
+      setInputNote(e.message)
+    }
+  } finally {
+    streaming = false
+    streamAbort = null
+    updateSendBtn()
+  }
+}
+
+function abortStream() {
+  if (streamAbort) { streamAbort.abort(); streamAbort = null }
+}
+
+function buildMessages() {
+  const sess = currentSession()
+  if (!sess) return []
+  return sess.messages
+    .filter(m => m.role === 'user' || (m.role === 'assistant' && m.content))
+    .map(m => ({ role: m.role, content: m.content }))
+    .slice(-20)
+}
+
+// ── Input helpers ─────────────────────────────────────
+function updateSendBtn() {
+  const btn = document.getElementById('sendBtn')
+  const val = document.getElementById('prompt').value.trim()
+  if (streaming) {
+    btn.textContent = 'Stop'
+    btn.classList.add('stop')
+    btn.disabled = false
+  } else {
+    btn.textContent = 'Send'
+    btn.classList.remove('stop')
+    btn.disabled = !val
+  }
+}
+
+function setInputNote(msg) {
+  document.getElementById('inputNote').textContent = msg
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, 220) + 'px'
+  updateSendBtn()
+}
+
+function onKey(e) {
+  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send() }
+}
+
+function usePrompt(el) {
+  const p = document.getElementById('prompt')
+  p.value = el.textContent
+  p.focus()
+  updateSendBtn()
+  ensureToken().catch(() => {})
+}
+
+// ── Suggestion chips ──────────────────────────────────
+function renderChips() {
+  const container = document.getElementById('suggestionChips')
+  container.innerHTML = ''
+  SUGGESTIONS.forEach(text => {
+    const btn = document.createElement('button')
+    btn.className = 'chip'
+    btn.textContent = text
+    btn.addEventListener('click', () => usePrompt(btn))
+    container.appendChild(btn)
+  })
+}
+
+// ── Dashboard ─────────────────────────────────────────
+function renderDashboard() {
+  const body = document.getElementById('dashBody')
+  body.innerHTML = ''
+
+  const d = today()
+  const todayData = usage[d] || { requests: 0, tokens: 0, latencies: [] }
+  const avgLatency = todayData.latencies.length
+    ? Math.round(todayData.latencies.reduce((a, b) => a + b, 0) / todayData.latencies.length)
+    : 0
+
+  // last 7 days including today
+  const days = []
+  for (let i = 6; i >= 0; i--) {
+    const dt = new Date()
+    dt.setDate(dt.getDate() - i)
+    const key = dt.toISOString().slice(0, 10)
+    days.push({ key, label: dt.toLocaleDateString('en', { weekday: 'short' }).slice(0, 3), data: usage[key] || { requests: 0 } })
+  }
+  const weekTotal = days.reduce((a, b) => a + b.data.requests, 0)
+  const maxReq = Math.max(...days.map(x => x.data.requests), 1)
+
+  // Stats row
+  const statsSection = document.createElement('div')
+  statsSection.innerHTML = '<div class="dash-section-title">Today</div>'
+  const grid = document.createElement('div')
+  grid.className = 'stats-grid'
+  ;[
+    { value: todayData.requests, label: 'Requests' },
+    { value: (todayData.tokens || 0).toLocaleString(), label: 'Tokens used' },
+    { value: avgLatency ? avgLatency + 'ms' : '—', label: 'Avg latency' },
+    { value: weekTotal, label: 'This week' },
+  ].forEach(({ value, label }) => {
+    const card = document.createElement('div')
+    card.className = 'stat-card'
+    card.innerHTML = `<div class="stat-value">${value}</div><div class="stat-label">${label}</div>`
+    grid.appendChild(card)
+  })
+  statsSection.appendChild(grid)
+  body.appendChild(statsSection)
+
+  // Chart
+  const chartSection = document.createElement('div')
+  chartSection.innerHTML = '<div class="dash-section-title">Activity — last 7 days</div>'
+  const chartWrap = document.createElement('div')
+  chartWrap.className = 'chart-wrap'
+  const bars = document.createElement('div')
+  bars.className = 'chart-bars'
+  days.forEach(day => {
+    const col = document.createElement('div')
+    col.className = 'chart-bar-col'
+    const bar = document.createElement('div')
+    bar.className = 'chart-bar' + (day.key === d ? ' today' : '')
+    bar.style.height = Math.round((day.data.requests / maxReq) * 70) + 'px'
+    bar.title = day.label + ': ' + day.data.requests + ' req'
+    const lbl = document.createElement('div')
+    lbl.className = 'chart-day-label'
+    lbl.textContent = day.label
+    col.appendChild(bar)
+    col.appendChild(lbl)
+    bars.appendChild(col)
+  })
+  chartWrap.appendChild(bars)
+  chartSection.appendChild(chartWrap)
+  body.appendChild(chartSection)
+
+  // Pool card
+  const poolSection = document.createElement('div')
+  poolSection.innerHTML = '<div class="dash-section-title">Provider pool</div>'
+  const poolCard = document.createElement('div')
+  poolCard.className = 'pool-card'
+  const ps = poolStatus
+
+  const poolRows = [
+    { key: 'Status', val: ps ? ps.status : 'checking', cls: ps ? (ps.status === 'up' ? 'ok' : ps.status === 'idle' ? 'warn' : 'bad') : '' },
+    { key: 'Providers ready', val: ps ? String((ps.pool && ps.pool.ready) || 0) : '—', cls: '' },
+    { key: 'Total providers', val: ps ? String((ps.pool && ps.pool.total_providers) || 0) : '—', cls: '' },
+  ]
+  poolRows.forEach(({ key, val, cls }) => {
+    const row = document.createElement('div')
+    row.className = 'pool-row'
+    row.innerHTML = `<span class="pool-key">${key}</span><span class="pool-val ${cls}">${val}</span>`
+    poolCard.appendChild(row)
+  })
+
+  if (models.length > 0) {
+    const row = document.createElement('div')
+    row.className = 'pool-row'
+    row.style.flexDirection = 'column'
+    row.style.alignItems = 'flex-start'
+    row.style.gap = '8px'
+    row.innerHTML = '<span class="pool-key">Available models</span>'
+    const mlist = document.createElement('div')
+    mlist.className = 'models-list'
+    models.forEach(m => {
+      const tag = document.createElement('div')
+      tag.className = 'model-tag'
+      tag.textContent = m
+      mlist.appendChild(tag)
+    })
+    row.appendChild(mlist)
+    poolCard.appendChild(row)
+  } else {
+    const row = document.createElement('div')
+    row.className = 'pool-row'
+    row.innerHTML = '<span class="pool-key">Models</span><span class="pool-val warn">sleeping</span>'
+    poolCard.appendChild(row)
+  }
+
+  poolSection.appendChild(poolCard)
+  body.appendChild(poolSection)
+
+  // Quick links
+  const linkSection = document.createElement('div')
+  linkSection.innerHTML = '<div class="dash-section-title">Links</div>'
+  const links = document.createElement('div')
+  links.className = 'quick-links'
+  ;[
+    { label: 'API Docs', href: 'https://api.streamvc.live/docs' },
+    { label: 'Status', href: 'https://api.streamvc.live/v1/status' },
+    { label: 'Get API key', href: 'https://api.streamvc.live/auth/github/start' },
+  ].forEach(({ label, href }) => {
+    const a = document.createElement('a')
+    a.className = 'quick-link'
+    a.href = href
+    a.target = '_blank'
+    a.rel = 'noopener'
+    a.textContent = label
+    links.appendChild(a)
+  })
+  linkSection.appendChild(links)
+  body.appendChild(linkSection)
+}
+
+// ── Mobile sidebar ───────────────────────────────────
+function closeSidebar() {
+  document.getElementById('sidebar').classList.remove('open')
+}
+
+// ── Init ─────────────────────────────────────────────
+function init() {
+  load()
+  renderChips()
+  renderHistory()
+  renderModelChip()
+  fetchStatus()
+  setInterval(fetchStatus, 30000)
+
+  // Restore last session
+  if (currentId && currentSession()) {
+    renderMessages()
+  } else {
+    showEmptyState()
+  }
+
+  // Events
+  document.getElementById('newChatBtn').addEventListener('click', newChat)
+  document.getElementById('navDashboard').addEventListener('click', () => navigate('dashboard'))
+  document.getElementById('backToChatBtn').addEventListener('click', () => navigate('chat'))
+  document.getElementById('modelChip').addEventListener('click', toggleModelMenu)
+  document.getElementById('sendBtn').addEventListener('click', send)
+  document.getElementById('prompt').addEventListener('keydown', onKey)
+  document.getElementById('prompt').addEventListener('input', function() { autoGrow(this); updateSendBtn() })
+  document.getElementById('prompt').addEventListener('focus', () => ensureToken().catch(() => {}), { once: true })
+
+  document.getElementById('hamburgerBtn').addEventListener('click', () => {
+    document.getElementById('sidebar').classList.toggle('open')
+  })
+
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.input-left')) closeModelMenu()
+    if (!e.target.closest('.sidebar') && !e.target.closest('#hamburgerBtn')) closeSidebar()
+  })
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeModelMenu(); closeSidebar() }
+  })
+}
+
+document.addEventListener('DOMContentLoaded', init)
 </script>
 </body>
 </html>
