@@ -1,30 +1,75 @@
-# Mac Provider
+<p align="center">
+  <img src="doc/assets/banner.svg" alt="MacProvider — pooled Apple Silicon inference" width="720" />
+</p>
 
-Mac Provider is a pooled Apple Silicon inference network. Contributor
-Macs run local MLX inference, connect outbound to the coordinator, and
-serve buyer traffic without requiring an inbound public URL.
+<p align="center">
+  <a href="https://console.streamvc.live"><strong>Console</strong></a> &middot;
+  <a href="#for-providers"><strong>Join as Provider</strong></a> &middot;
+  <a href="#for-buyers"><strong>API Access</strong></a> &middot;
+  <a href="https://github.com/augustas11/macprovider/releases"><strong>Releases</strong></a>
+</p>
 
-## Join the Network
+<p align="center">
+  <img src="https://img.shields.io/github/v/release/augustas11/macprovider?style=flat" alt="Latest release" />
+  <img src="https://img.shields.io/badge/platform-Apple%20Silicon-000000?style=flat&logo=apple&logoColor=white" alt="Platform" />
+  <img src="https://img.shields.io/badge/runtime-MLX%20%7C%20macOS%2014%2B-5a5a5a?style=flat" alt="Runtime" />
+</p>
 
-Run this on any Apple Silicon Mac (M1 or newer, macOS 14+):
+<br/>
+
+# MacProvider
+
+**Pooled Apple Silicon inference. Contribute a Mac, earn per request. Buy OpenAI-compatible inference at cost.**
+
+| For Providers | For Buyers |
+|---|---|
+| Run MLX models locally on any M1+ Mac | OpenAI-compatible `/v1/chat/completions` endpoint |
+| Outbound WebSocket only — no port-forwarding needed | Route to the full pool or pin to a specific provider |
+| Earn per request served | Pay only for compute, no subscription required |
+| Manage your node at [console.streamvc.live](https://console.streamvc.live) | Monitor usage at [console.streamvc.live](https://console.streamvc.live) |
+
+## Console
+
+**[console.streamvc.live](https://console.streamvc.live)** is the operator dashboard for the network. From the console you can:
+
+- Monitor live pool status and per-provider health
+- Promote providers from provisional to pinned
+- Inspect session history and per-request logs
+- Review billing and earnings
+
+## Architecture
+
+```
+Provider Mac (MLX)
+  └── outbound WS ──▶ coordinator.streamvc.live
+                             │
+                       smart router / gateway
+                             │
+               ┌─────────────┴─────────────┐
+               │                           │
+    api.streamvc.live/v1          console.streamvc.live
+    (OpenAI-compatible)             (operator dashboard)
+```
+
+New public installs join as **provisional providers** over outbound WebSocket tunneling and can be promoted to pinned by the operator after observation. No inbound port-forwarding is required on the provider Mac.
+
+## For Providers
+
+Run on any Apple Silicon Mac (M1 or newer, macOS 14+):
 
 ```bash
 curl -fsSL https://get.streamvc.live/install.sh | bash
 ```
 
-The installer will:
+The installer:
 
-- Check that the Mac is Apple Silicon and has the required macOS tools.
-- Pick a recommended MLX model from available RAM and let you override it.
-- Ask for a stable provider handle used as your pool identity.
-- Download the latest `macprovider-cli` release from GitHub Releases.
-- Verify the signed checksum manifest and SHA-256 before extracting the tarball.
-- Install under `~/macprovider` and set up a user-level launchd service.
-- Run a local `/v1/models` check and a coordinator pool visibility check.
+- Picks a recommended MLX model based on available RAM (you can override)
+- Asks for a stable provider handle used as your pool identity
+- Downloads and verifies the latest `macprovider-cli` release against a signed checksum manifest
+- Installs under `~/macprovider` and sets up a user-level launchd service
+- Runs a local `/v1/models` check and a coordinator pool visibility check
 
-Security note: `curl | bash` is convenient but gives the downloaded
-script control of your user account. Read the script first if you want
-to inspect it:
+**Security note:** `curl | bash` gives the downloaded script control of your user account. Inspect first if you prefer:
 
 ```bash
 curl -fsSL https://get.streamvc.live/install.sh -o install.sh
@@ -32,19 +77,33 @@ less install.sh
 bash install.sh
 ```
 
-The current release is unsigned at the macOS app-signing layer. The
-installer verifies a signed release checksum manifest, then asks before
-clearing the macOS quarantine attribute with
-`xattr -dr com.apple.quarantine`; this is the v1 workaround until
-Developer ID signing and notarization are added.
+The binary is checksum-verified against a signed release manifest. macOS quarantine (`xattr`) is cleared with your approval during install. Developer ID signing and notarization are planned for a future release.
 
-Technical readers can start with
-[`SPEC-003`](specs/SPEC-003-open-onboarding.md), which defines the open
-onboarding distribution flow.
+## For Buyers
 
-## Project Context
+Base URL: `https://api.streamvc.live`
 
-The coordinator is hosted at `coordinator.streamvc.live`. Existing
-operator-managed providers are pinned; new public installs join as
-provisional providers over outbound WebSocket tunneling and can be
-promoted by the operator after observation.
+The API is OpenAI-compatible — swap in your existing client:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://api.streamvc.live/v1",
+    api_key="<your-api-key>",
+)
+
+response = client.chat.completions.create(
+    model="mlx-community/Llama-3.2-3B-Instruct-4bit",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(response.choices[0].message.content)
+```
+
+Get an API key → [api.streamvc.live/auth/github/start](https://api.streamvc.live/auth/github/start)  
+API reference → [api.streamvc.live/docs#api-reference](https://api.streamvc.live/docs#api-reference)
+
+## Releases
+
+Current release: **[v1.2.5](https://github.com/augustas11/macprovider/releases/latest)**  
+Full changelog and signed binaries: [github.com/augustas11/macprovider/releases](https://github.com/augustas11/macprovider/releases)

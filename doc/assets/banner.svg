@@ -1,0 +1,101 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1280" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0c0d10"/>
+      <stop offset="100%" stop-color="#111316"/>
+    </linearGradient>
+    <marker id="arr" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <path d="M0,0 L0,7 L7,3.5 z" fill="#323743"/>
+    </marker>
+    <marker id="arr-a" markerWidth="7" markerHeight="7" refX="5" refY="3.5" orient="auto">
+      <path d="M0,0 L0,7 L7,3.5 z" fill="#7c6af6"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="440" fill="url(#bg)"/>
+  <rect x="0.5" y="0.5" width="1279" height="439" fill="none" stroke="#252830" stroke-width="1"/>
+
+  <!-- Subtle grid -->
+  <g opacity="0.025" stroke="#e1e3e8" stroke-width="1">
+    <line x1="0" y1="110" x2="1280" y2="110"/><line x1="0" y1="220" x2="1280" y2="220"/>
+    <line x1="0" y1="330" x2="1280" y2="330"/>
+    <line x1="320" y1="0" x2="320" y2="440"/><line x1="640" y1="0" x2="640" y2="440"/>
+    <line x1="960" y1="0" x2="960" y2="440"/>
+  </g>
+
+  <!-- Accent glow -->
+  <ellipse cx="640" cy="155" rx="380" ry="90" fill="#7c6af6" opacity="0.05"/>
+
+  <!-- Brand -->
+  <text x="640" y="140"
+    font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+    font-size="84" font-weight="700" text-anchor="middle" letter-spacing="-3"
+    fill="#e1e3e8">Mac<tspan fill="#7c6af6">Provider</tspan></text>
+
+  <!-- Tagline -->
+  <text x="640" y="192"
+    font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+    font-size="21" text-anchor="middle" fill="#878d99">
+    Pooled Apple Silicon inference · Outbound-only · OpenAI-compatible
+  </text>
+
+  <!-- ── Network diagram ── -->
+
+  <!-- PROVIDERS label -->
+  <text x="168" y="252" font-family="-apple-system, sans-serif" font-size="10"
+    font-weight="600" letter-spacing="0.1em" text-anchor="middle" fill="#4a5060">PROVIDERS</text>
+
+  <!-- Provider nodes -->
+  <rect x="68" y="262" width="200" height="38" rx="7" fill="#16181d" stroke="#252830"/>
+  <circle cx="92" cy="281" r="5" fill="#22c55e"/>
+  <text x="108" y="277" font-family="ui-monospace,Menlo,monospace" font-size="12" fill="#e1e3e8">M1 Mac</text>
+  <text x="108" y="293" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#4a5060">MLX inference</text>
+
+  <rect x="68" y="314" width="200" height="38" rx="7" fill="#16181d" stroke="#252830"/>
+  <circle cx="92" cy="333" r="5" fill="#22c55e"/>
+  <text x="108" y="329" font-family="ui-monospace,Menlo,monospace" font-size="12" fill="#e1e3e8">M2 Mac</text>
+  <text x="108" y="345" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#4a5060">MLX inference</text>
+
+  <rect x="68" y="366" width="200" height="38" rx="7" fill="#16181d" stroke="#7c6af6" stroke-opacity="0.6"/>
+  <circle cx="92" cy="385" r="5" fill="#7c6af6"/>
+  <text x="108" y="381" font-family="ui-monospace,Menlo,monospace" font-size="12" fill="#7c6af6">M4 Mac</text>
+  <text x="108" y="397" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#4a5060">MLX inference</text>
+
+  <!-- outbound WS label -->
+  <text x="380" y="310" font-family="-apple-system, sans-serif" font-size="10" text-anchor="middle" fill="#4a5060">outbound WS</text>
+
+  <!-- Arrows: providers → coordinator -->
+  <line x1="268" y1="281" x2="496" y2="330" stroke="#323743" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="268" y1="333" x2="496" y2="340" stroke="#323743" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="268" y1="385" x2="496" y2="352" stroke="#7c6af6" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#arr-a)"/>
+
+  <!-- COORDINATOR node (center) -->
+  <rect x="500" y="310" width="280" height="58" rx="10" fill="#16181d" stroke="#7c6af6" stroke-width="1.5"/>
+  <circle cx="526" cy="335" r="7" fill="#22c55e"/>
+  <text x="544" y="331" font-family="ui-monospace,Menlo,monospace" font-size="13" fill="#e1e3e8">coordinator</text>
+  <text x="544" y="349" font-family="ui-monospace,Menlo,monospace" font-size="12" fill="#878d99">.streamvc.live</text>
+  <text x="544" y="362" font-family="ui-monospace,Menlo,monospace" font-size="10" fill="#4a5060">smart router · gateway</text>
+
+  <!-- Arrow: coordinator → right -->
+  <line x1="780" y1="339" x2="870" y2="320" stroke="#323743" stroke-width="1.5" marker-end="url(#arr)"/>
+  <line x1="780" y1="349" x2="870" y2="380" stroke="#7c6af6" stroke-width="1.5" stroke-opacity="0.5" marker-end="url(#arr-a)"/>
+
+  <!-- BUYERS label -->
+  <text x="1020" y="252" font-family="-apple-system, sans-serif" font-size="10"
+    font-weight="600" letter-spacing="0.1em" text-anchor="middle" fill="#4a5060">BUYERS &amp; OPERATORS</text>
+
+  <!-- API node -->
+  <rect x="874" y="292" width="292" height="42" rx="8" fill="#16181d" stroke="#252830"/>
+  <text x="894" y="309" font-family="ui-monospace,Menlo,monospace" font-size="12" fill="#e1e3e8">api.streamvc.live/v1</text>
+  <text x="894" y="326" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#4a5060">OpenAI-compatible API</text>
+
+  <!-- Console node -->
+  <rect x="874" y="352" width="292" height="42" rx="8" fill="#16181d" stroke="#7c6af6" stroke-opacity="0.7"/>
+  <text x="894" y="369" font-family="ui-monospace,Menlo,monospace" font-size="12" fill="#7c6af6">console.streamvc.live</text>
+  <text x="894" y="386" font-family="ui-monospace,Menlo,monospace" font-size="11" fill="#4a5060">operator dashboard</text>
+
+  <!-- Install pill at bottom -->
+  <rect x="440" y="418" width="400" height="14" rx="7" fill="#111316" stroke="#252830"/>
+  <text x="640" y="429" font-family="ui-monospace,Menlo,monospace" font-size="10" text-anchor="middle" fill="#4a5060">curl -fsSL https://get.streamvc.live/install.sh | bash</text>
+</svg>
