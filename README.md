@@ -41,9 +41,8 @@
 
 ```
 Provider Mac (MLX)
-  └── outbound WS ──▶ coordinator.streamvc.live
-                             │
-                       smart router / gateway
+  └── outbound WS ──▶ MacProvider
+                      (pool · routing · billing)
                              │
                ┌─────────────┴─────────────┐
                │                           │
