@@ -63,6 +63,82 @@ it returns empty rather than the matching account's token). So pinning
 must explicitly call `gh auth token -u Augustas11` to bypass gh's
 active-account state.
 
+## PR workflow: don't develop on local `main`
+
+Money-path and security-sensitive changes (billing, payouts, gateway,
+coordinator auth) go through PRs in this repo, not direct push (origin
+commit `9bd77f4 Close audited billing and idempotency gaps` is one such
+PR). GitHub's **squash-merge** produces a single new commit on
+`origin/main` containing the diff of all your PR-branch commits, plus
+any review-round additions.
+
+If you developed on local `main` instead of a feature branch, your
+local `main` keeps the original individual commits while `origin/main`
+has the squashed equivalent under a different hash. Git sees this as
+two divergent branches modifying the same lines, and the next push,
+rebase, or merge **will conflict**.
+
+**Rule: always work on a feature branch in this repo.**
+
+```bash
+# Start any change
+git fetch origin
+git checkout -b fix/<topic> origin/main
+
+# Commit, push, open PR
+git push -u origin fix/<topic>
+gh pr create
+
+# After PR squash-merges on GitHub
+git checkout main
+git fetch origin
+git reset --hard origin/main          # mirror origin, discard local PR commits
+git branch -D fix/<topic>             # delete the dead PR branch
+```
+
+The `reset --hard origin/main` after each PR is the step most people
+miss. It is what keeps local `main` from becoming a parallel-universe
+copy of code that already exists on origin under a different hash.
+
+### If you inherit a divergent local main
+
+Symptoms:
+
+- `git push origin main` returns non-fast-forward
+- `git log origin/main..HEAD` shows local commits that author-overlap
+  with recent origin commits on the same files
+- Rebase or merge produces conflicts where the same author appears on
+  both sides of `<<<<<<< HEAD` / `>>>>>>> origin/main` markers
+
+In priority order:
+
+1. **Verify equivalence, then reset.** Pick an overlapping file (e.g.
+   `phase4-coordinator/internal/billing/formula.go`) and run
+   `git diff origin/main HEAD~N -- <file>`. If empty, the local commits
+   are stale duplicates of a squashed origin commit. Backup first:
+   `git branch backup-pre-sync HEAD`. Then `git reset --hard origin/main`.
+2. **Merge and prefer origin** when origin has review-round work local
+   does not. `git merge origin/main`, resolve conflicts with
+   `git checkout --theirs <file>` for each conflict (origin = local
+   work + review additions in this pattern). Build + test both modules
+   (`phase4-coordinator`, `phase5-gateway`) before sealing.
+3. **Stop and ask the user** if the relationship between the two sides
+   is not clear from commit messages and file diffs. Never guess on
+   money-path code.
+
+Never `git push --force` to make local "win" — it discards origin's
+review-round additions, which often include security/billing fixes.
+
+### Reference event (2026-06-04)
+
+We inherited a 14-commit local-main divergence against origin commit
+`9bd77f4 Close audited billing and idempotency gaps`. The 14 commits
+were the original PR-branch commits left behind on local main after
+the squash-merge. Resolved via merge + `--theirs`, preserving local
+intent and bringing in the idempotency-key feature added during
+review. Backup branch `backup-main-pre-merge-20260604` preserves the
+pre-merge tip in case of regression.
+
 ## Other repo conventions worth remembering
 
 - Spec corpus lives in `specs/`. House style: `BUILD_SPEC_*`, `AUDIT_SPEC_*`,
