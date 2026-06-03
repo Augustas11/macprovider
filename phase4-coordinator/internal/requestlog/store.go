@@ -3,6 +3,7 @@ package requestlog
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 type Store struct {
 	db *sql.DB
 }
+
+var ErrIdempotencyConflict = errors.New("idempotency key body hash mismatch")
 
 type execer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
@@ -111,6 +114,15 @@ CREATE INDEX IF NOT EXISTS idx_request_log_ts_utc
     ON request_log(ts_utc);
 CREATE INDEX IF NOT EXISTS idx_request_log_request_id_id
     ON request_log(request_id, id);
+
+CREATE TABLE IF NOT EXISTS request_idempotency_keys (
+    idempotency_key TEXT PRIMARY KEY,
+    body_sha256    TEXT NOT NULL,
+    request_id     TEXT NOT NULL UNIQUE,
+    created_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_request_idempotency_request
+    ON request_idempotency_keys(request_id);
 `); err != nil {
 		return err
 	}
@@ -121,11 +133,58 @@ func (s *Store) Insert(ctx context.Context, row Row) error {
 	return insert(ctx, s.db, row)
 }
 
+func (s *Store) ReserveIdempotencyKey(ctx context.Context, key, bodySHA256, requestID string, now time.Time) (string, bool, error) {
+	if s == nil || s.db == nil {
+		return "", false, fmt.Errorf("store is closed")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{})
+	if err != nil {
+		return "", false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+	var existingHash, existingRequestID string
+	err = tx.QueryRowContext(ctx, `SELECT body_sha256, request_id FROM request_idempotency_keys WHERE idempotency_key = ?`, key).Scan(&existingHash, &existingRequestID)
+	if err == nil {
+		if existingHash != bodySHA256 {
+			return "", false, ErrIdempotencyConflict
+		}
+		if err := tx.Commit(); err != nil {
+			return "", false, err
+		}
+		committed = true
+		return existingRequestID, true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO request_idempotency_keys (idempotency_key, body_sha256, request_id, created_at_utc)
+VALUES (?, ?, ?, ?)`,
+		key, bodySHA256, requestID, now.UTC().Format(time.RFC3339Nano),
+	); err != nil {
+		return "", false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, err
+	}
+	committed = true
+	return requestID, false, nil
+}
+
 func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("store is closed")
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM request_log WHERE julianday(ts_utc) < julianday(?)`, cutoff.UTC().Format(time.RFC3339Nano))
+	cutoffText := cutoff.UTC().Format(time.RFC3339Nano)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM request_idempotency_keys WHERE julianday(created_at_utc) < julianday(?)`, cutoffText); err != nil {
+		return 0, err
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM request_log WHERE julianday(ts_utc) < julianday(?)`, cutoffText)
 	if err != nil {
 		return 0, err
 	}

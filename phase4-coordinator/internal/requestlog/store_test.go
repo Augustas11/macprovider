@@ -3,6 +3,7 @@ package requestlog
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -199,6 +200,51 @@ func TestRequestLogPruneBeforeDeletesOldRowsOnly(t *testing.T) {
 	}
 	if len(remaining) != 2 || remaining[0] != "req-cutoff" || remaining[1] != "req-new" {
 		t.Fatalf("remaining=%v want [req-cutoff req-new]", remaining)
+	}
+}
+
+func TestReserveIdempotencyKeyDetectsReplayConflictAndPrunes(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	old := time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC)
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+
+	requestID, replay, err := store.ReserveIdempotencyKey(ctx, "idem-old", "hash-a", "req-a", old)
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey first: %v", err)
+	}
+	if replay || requestID != "req-a" {
+		t.Fatalf("first reserve requestID=%q replay=%v", requestID, replay)
+	}
+	requestID, replay, err = store.ReserveIdempotencyKey(ctx, "idem-old", "hash-a", "req-b", cutoff)
+	if err != nil {
+		t.Fatalf("ReserveIdempotencyKey replay: %v", err)
+	}
+	if !replay || requestID != "req-a" {
+		t.Fatalf("replay requestID=%q replay=%v", requestID, replay)
+	}
+	if _, _, err := store.ReserveIdempotencyKey(ctx, "idem-old", "hash-b", "req-c", cutoff); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("mismatch err=%v want ErrIdempotencyConflict", err)
+	}
+	if _, _, err := store.ReserveIdempotencyKey(ctx, "idem-new", "hash-n", "req-n", cutoff.Add(time.Second)); err != nil {
+		t.Fatalf("ReserveIdempotencyKey new: %v", err)
+	}
+	if _, err := store.PruneBefore(ctx, cutoff); err != nil {
+		t.Fatalf("PruneBefore: %v", err)
+	}
+	var count int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_idempotency_keys WHERE idempotency_key = 'idem-old'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("old idempotency keys=%d want 0", count)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_idempotency_keys WHERE idempotency_key = 'idem-new'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("new idempotency keys=%d want 1", count)
 	}
 }
 

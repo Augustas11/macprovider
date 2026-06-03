@@ -2244,6 +2244,9 @@ func copyForwardHeaders(dst, src http.Header) {
 	if retry := strings.TrimSpace(src.Get("X-MacProvider-Retry")); retry != "" {
 		dst.Set("X-MacProvider-Retry", retry)
 	}
+	if idempotencyKey := strings.TrimSpace(src.Get("Idempotency-Key")); idempotencyKey != "" {
+		dst.Set("Idempotency-Key", idempotencyKey)
+	}
 }
 
 func copyCleanHeaders(dst, src http.Header) {
