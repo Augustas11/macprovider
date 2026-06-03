@@ -69,7 +69,10 @@ type Server struct {
 	provisionalWeight      float64
 	maxChatBodyBytes       int64
 	recovering             sync.Map
-	poolCheckLast          sync.Map
+	poolCheckMu            sync.Mutex
+	poolCheckLast          map[string]time.Time
+	poolCheckMaxEntries    int
+	poolCheckTTL           time.Duration
 	billingMu              sync.RWMutex
 	billing                *billing.Store
 	billingCfg             config.RewardsConfig
@@ -285,6 +288,17 @@ func WithBillingSnapshotID(snapshotID int64) Option {
 	}
 }
 
+func WithPoolCheckLimiter(maxEntries int, ttl time.Duration) Option {
+	return func(s *Server) {
+		if maxEntries > 0 {
+			s.poolCheckMaxEntries = maxEntries
+		}
+		if ttl > 0 {
+			s.poolCheckTTL = ttl
+		}
+	}
+}
+
 func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64) {
 	s.billingMu.Lock()
 	defer s.billingMu.Unlock()
@@ -320,6 +334,9 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		modelClasses:           map[string]config.ModelClassConfig{},
 		provisionalWeight:      0.3,
 		maxChatBodyBytes:       config.Default().Limits.MaxChatRequestBodyBytes,
+		poolCheckLast:          map[string]time.Time{},
+		poolCheckMaxEntries:    4096,
+		poolCheckTTL:           time.Minute,
 		now:                    func() time.Time { return time.Now().UTC() },
 	}
 	for _, opt := range opts {
@@ -615,24 +632,45 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) allowPoolCheck(r *http.Request) bool {
-	ip := clientIP(r)
-	now := time.Now()
-	if prevAny, ok := s.poolCheckLast.Load(ip); ok {
-		if now.Sub(prevAny.(time.Time)) < time.Second {
+	key := poolCheckClientKey(r)
+	now := s.now()
+	s.poolCheckMu.Lock()
+	defer s.poolCheckMu.Unlock()
+	s.evictPoolCheckEntries(now)
+	if prev, ok := s.poolCheckLast[key]; ok {
+		if now.Sub(prev) < time.Second {
 			return false
 		}
 	}
-	s.poolCheckLast.Store(ip, now)
+	s.poolCheckLast[key] = now
+	s.evictPoolCheckEntries(now)
 	return true
 }
 
-func clientIP(r *http.Request) string {
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		if i := strings.IndexByte(forwarded, ','); i >= 0 {
-			return strings.TrimSpace(forwarded[:i])
+func (s *Server) evictPoolCheckEntries(now time.Time) {
+	cutoff := now.Add(-s.poolCheckTTL)
+	for key, seen := range s.poolCheckLast {
+		if seen.Before(cutoff) {
+			delete(s.poolCheckLast, key)
 		}
-		return forwarded
 	}
+	for len(s.poolCheckLast) > s.poolCheckMaxEntries {
+		var oldestKey string
+		var oldest time.Time
+		for key, seen := range s.poolCheckLast {
+			if oldestKey == "" || seen.Before(oldest) {
+				oldestKey = key
+				oldest = seen
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.poolCheckLast, oldestKey)
+	}
+}
+
+func poolCheckClientKey(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil || host == "" {
 		return r.RemoteAddr

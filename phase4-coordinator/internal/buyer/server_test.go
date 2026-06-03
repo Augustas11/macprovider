@@ -769,6 +769,7 @@ func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+	req.RemoteAddr = "198.51.100.1:12345"
 	req.Header.Set("X-Forwarded-For", "192.0.2.1")
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)
@@ -781,6 +782,7 @@ func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
 	}
 
 	missingReq := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=missing", nil)
+	missingReq.RemoteAddr = "198.51.100.2:12345"
 	missingReq.Header.Set("X-Forwarded-For", "192.0.2.2")
 	missing := httptest.NewRecorder()
 	server.Handler().ServeHTTP(missing, missingReq)
@@ -800,12 +802,62 @@ func TestPoolCheckRateLimitsPerIP(t *testing.T) {
 
 	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
 		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
-		req.Header.Set("X-Forwarded-For", "192.0.2.3")
+		req.RemoteAddr = "198.51.100.10:12345"
 		rr := httptest.NewRecorder()
 		server.Handler().ServeHTTP(rr, req)
 		if rr.Code != want {
 			t.Fatalf("request %d status = %d, want %d body=%s", i+1, rr.Code, want, rr.Body.String())
 		}
+	}
+}
+
+func TestPoolCheckRateLimitIgnoresSpoofedXForwardedFor(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	for i, forwarded := range []string{"192.0.2.10", "192.0.2.11"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+		req.RemoteAddr = "198.51.100.20:54321"
+		req.Header.Set("X-Forwarded-For", forwarded)
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		want := http.StatusOK
+		if i == 1 {
+			want = http.StatusTooManyRequests
+		}
+		if rr.Code != want {
+			t.Fatalf("request %d status = %d, want %d body=%s", i+1, rr.Code, want, rr.Body.String())
+		}
+	}
+}
+
+func TestPoolCheckRateLimiterEvictsToBoundUniqueKeys(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithPoolCheckLimiter(2, time.Hour),
+	)
+
+	for i := 1; i <= 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+		req.RemoteAddr = fmt.Sprintf("198.51.100.%d:12345", i)
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unique request %d status = %d, body=%s", i, rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+	req.RemoteAddr = "198.51.100.1:54321"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("evicted first key status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 }
 
