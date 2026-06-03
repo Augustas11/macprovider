@@ -158,6 +158,71 @@ func TestRequestLogMultiAttemptRows(t *testing.T) {
 	}
 }
 
+func TestRequestLogPruneBeforeDeletesOldRowsOnly(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	rows := []Row{
+		{TSUtc: cutoff.Add(-time.Second), RequestID: "req-old", Model: "model-a", Status: 200, BuyerIP: "203.0.113.10"},
+		{TSUtc: cutoff, RequestID: "req-cutoff", Model: "model-a", Status: 200, BuyerIP: "203.0.113.11"},
+		{TSUtc: cutoff.Add(time.Second), RequestID: "req-new", Model: "model-a", Status: 200, BuyerIP: "203.0.113.12"},
+	}
+	for _, row := range rows {
+		if err := store.Insert(ctx, row); err != nil {
+			t.Fatalf("insert %s: %v", row.RequestID, err)
+		}
+	}
+
+	deleted, err := store.PruneBefore(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("PruneBefore: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted=%d want 1", deleted)
+	}
+	var remaining []string
+	dbRows, err := store.db.QueryContext(ctx, `SELECT request_id FROM request_log ORDER BY request_id`)
+	if err != nil {
+		t.Fatalf("query remaining: %v", err)
+	}
+	defer dbRows.Close()
+	for dbRows.Next() {
+		var id string
+		if err := dbRows.Scan(&id); err != nil {
+			t.Fatalf("scan remaining: %v", err)
+		}
+		remaining = append(remaining, id)
+	}
+	if err := dbRows.Err(); err != nil {
+		t.Fatalf("remaining rows: %v", err)
+	}
+	if len(remaining) != 2 || remaining[0] != "req-cutoff" || remaining[1] != "req-new" {
+		t.Fatalf("remaining=%v want [req-cutoff req-new]", remaining)
+	}
+}
+
+func TestOpenStoreAppliesSQLitePragmasViaDSN(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{query: `PRAGMA busy_timeout`, want: 5000},
+		{query: `PRAGMA foreign_keys`, want: 1},
+	} {
+		var got int
+		if err := store.db.QueryRowContext(ctx, tc.query).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", tc.query, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s=%d want %d", tc.query, got, tc.want)
+		}
+	}
+}
+
 func TestRequestLogErrorCodePopulation(t *testing.T) {
 	store := openTestStore(t)
 	defer store.Close()

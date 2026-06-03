@@ -153,8 +153,9 @@ type AuthConfig struct {
 }
 
 type StorageConfig struct {
-	DBPath            string `yaml:"db_path"`
-	SnapshotIntervalS int    `yaml:"snapshot_interval_s"`
+	DBPath                  string `yaml:"db_path"`
+	SnapshotIntervalS       int    `yaml:"snapshot_interval_s"`
+	RequestLogRetentionDays int    `yaml:"request_log_retention_days"`
 }
 
 type LoggingConfig struct {
@@ -299,8 +300,9 @@ func Default() Config {
 			ResponseTimeAnomalyMinMS:       10000,
 		},
 		Storage: StorageConfig{
-			DBPath:            "coordinator.db",
-			SnapshotIntervalS: 300,
+			DBPath:                  "coordinator.db",
+			SnapshotIntervalS:       300,
+			RequestLogRetentionDays: 90,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
@@ -578,6 +580,12 @@ func (c Config) Validate() error {
 	}
 	if c.Settlement.RecoveryGraceSeconds < 0 {
 		return fmt.Errorf("settlement.recovery_grace_seconds must be >= 0")
+	}
+	if c.Storage.RequestLogRetentionDays <= 0 {
+		return fmt.Errorf("storage.request_log_retention_days must be > 0")
+	}
+	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
+		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")
 	}
 	if c.Endpoints.ProviderEarnings.RateLimitPerMinute <= 0 {
 		return fmt.Errorf("endpoints.provider_earnings.rate_limit_per_minute must be > 0")

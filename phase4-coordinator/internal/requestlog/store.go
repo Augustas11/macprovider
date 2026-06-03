@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	_ "modernc.org/sqlite"
 )
 
@@ -48,7 +49,7 @@ func OpenStore(dbPath string) (*Store, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", sqliteutil.WithPragmas(dbPath))
 	if err != nil {
 		return nil, err
 	}
@@ -118,6 +119,17 @@ CREATE INDEX IF NOT EXISTS idx_request_log_request_id_id
 
 func (s *Store) Insert(ctx context.Context, row Row) error {
 	return insert(ctx, s.db, row)
+}
+
+func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, fmt.Errorf("store is closed")
+	}
+	result, err := s.db.ExecContext(ctx, `DELETE FROM request_log WHERE julianday(ts_utc) < julianday(?)`, cutoff.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 func (s *Store) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {

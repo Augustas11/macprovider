@@ -131,6 +131,7 @@ func main() {
 	}
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
+	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
 
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
@@ -176,6 +177,40 @@ func main() {
 			return
 		}
 	}
+}
+
+type requestLogPruner interface {
+	PruneBefore(context.Context, time.Time) (int64, error)
+}
+
+func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
+	if store == nil || retentionDays <= 0 {
+		return
+	}
+	prune := func() {
+		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
+		deleted, err := store.PruneBefore(ctx, cutoff)
+		if err != nil {
+			logger.Warn().Err(err).Time("cutoff", cutoff).Msg("request_log retention prune failed")
+			return
+		}
+		if deleted > 0 {
+			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Msg("request_log retention pruned rows")
+		}
+	}
+	prune()
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
 }
 
 func newHTTPServer(addr string, handler http.Handler) *http.Server {

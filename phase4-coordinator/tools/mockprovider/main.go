@@ -301,6 +301,12 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 	}
 
 	stopHB := make(chan struct{})
+	var stopHBOnce sync.Once
+	stopHeartbeat := func() {
+		stopHBOnce.Do(func() {
+			close(stopHB)
+		})
+	}
 	var writeMu sync.Mutex
 	writeText := func(b []byte) error {
 		writeMu.Lock()
@@ -364,7 +370,7 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 		<-sigs
 		logger.Printf("signal received; emitting drain_status sequence")
 		runDrain(cfg, logger, drainer, writeText)
-		close(stopHB)
+		stopHeartbeat()
 		_ = conn.Close()
 	}()
 
@@ -372,14 +378,14 @@ func runWS(cfg config, logger *log.Logger, drainer *drainController) error {
 	for {
 		payload, op, err := wsutil.ReadServerData(conn)
 		if err != nil {
-			close(stopHB)
+			stopHeartbeat()
 			return fmt.Errorf("ws read: %w", err)
 		}
 		if op != gobwas.OpText {
 			continue
 		}
 		handleInbound(cfg, logger, drainer, writeText, &active, payload, func() {
-			close(stopHB)
+			stopHeartbeat()
 			_ = conn.Close()
 		})
 	}

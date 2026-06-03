@@ -69,6 +69,27 @@ func TestMigrateAndAuthCRUD(t *testing.T) {
 	}
 }
 
+func TestOpenAppliesSQLitePragmasViaDSN(t *testing.T) {
+	store := newTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	for _, tc := range []struct {
+		query string
+		want  int
+	}{
+		{query: `PRAGMA busy_timeout`, want: 5000},
+		{query: `PRAGMA foreign_keys`, want: 1},
+	} {
+		var got int
+		if err := store.db.QueryRowContext(ctx, tc.query).Scan(&got); err != nil {
+			t.Fatalf("%s: %v", tc.query, err)
+		}
+		if got != tc.want {
+			t.Fatalf("%s=%d want %d", tc.query, got, tc.want)
+		}
+	}
+}
+
 func TestAccountScopedRevocationAndRotation(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

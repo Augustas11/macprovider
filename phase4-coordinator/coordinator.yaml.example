@@ -104,6 +104,7 @@ auth:
 storage:
   db_path: "coordinator.db"
   snapshot_interval_s: 300
+  request_log_retention_days: 90
 
 logging:
   level: "info"

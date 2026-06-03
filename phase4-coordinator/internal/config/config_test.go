@@ -67,10 +67,27 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	if cfg.Endpoints.ProviderEarnings.RateLimitPerMinute != 60 {
 		t.Fatalf("unexpected endpoints defaults: %+v", cfg.Endpoints)
 	}
+	if cfg.Storage.RequestLogRetentionDays != 90 {
+		t.Fatalf("request log retention default=%d want 90", cfg.Storage.RequestLogRetentionDays)
+	}
 
 	cfg.Rewards.ProviderShare = 1.01
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "provider_share") {
 		t.Fatalf("provider share validation err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Storage.RequestLogRetentionDays = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_log_retention_days") {
+		t.Fatalf("request log retention validation err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Storage.RequestLogRetentionDays = 3
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "nightly_reconcile_window_days") {
+		t.Fatalf("request log retention reconcile validation err=%v", err)
 	}
 
 	cfg = Default()
