@@ -19,11 +19,15 @@ func TestTokenPointersFromUsageObjectPreservesInvalidUsageForBillingFault(t *tes
 }
 
 func TestEstimatedCompletionTokensFromBytes(t *testing.T) {
-	if got := estimatedCompletionTokensFromBytes(0); got != nil {
+	if got := estimatedCompletionTokensFromBytes(0, 4); got != nil {
 		t.Fatalf("zero-byte estimate = %v, want nil", *got)
 	}
-	got := estimatedCompletionTokensFromBytes(5)
+	got := estimatedCompletionTokensFromBytes(5, 4)
 	if got == nil || *got != 2 {
 		t.Fatalf("five-byte estimate = %v, want 2", got)
+	}
+	got = estimatedCompletionTokensFromBytes(5, 16)
+	if got == nil || *got != 1 {
+		t.Fatalf("five-byte estimate with configured ceiling = %v, want 1", got)
 	}
 }

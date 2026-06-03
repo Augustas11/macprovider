@@ -20,22 +20,23 @@ type execer interface {
 }
 
 type Row struct {
-	TSUtc              time.Time
-	RequestID          string
-	Model              string
-	ProviderAssignedID string
-	PromptTokens       *int64
-	CompletionTokens   *int64
-	LatencyMs          float64
-	RoutingMs          float64
-	Status             int
-	Stream             bool
-	BuyerIP            string
-	Error              string
-	ErrorCode          string
-	PrefHeader         string
-	ProviderHeader     string
-	Retried            int
+	TSUtc               time.Time
+	RequestID           string
+	Model               string
+	ProviderAssignedID  string
+	PromptTokens        *int64
+	CompletionTokens    *int64
+	EstimatedCompTokens *int64
+	LatencyMs           float64
+	RoutingMs           float64
+	Status              int
+	Stream              bool
+	BuyerIP             string
+	Error               string
+	ErrorCode           string
+	PrefHeader          string
+	ProviderHeader      string
+	Retried             int
 }
 
 func OpenStore(dbPath string) (*Store, error) {
@@ -92,6 +93,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     provider_assigned_id TEXT    NULL,
     prompt_tokens        INTEGER NULL,
     completion_tokens    INTEGER NULL,
+    estimated_completion_tokens INTEGER NULL,
     total_tokens         INTEGER NULL,
     latency_ms           REAL    NOT NULL,
     routing_ms           REAL    NOT NULL,
@@ -154,6 +156,7 @@ INSERT INTO request_log (
     provider_assigned_id,
     prompt_tokens,
     completion_tokens,
+    estimated_completion_tokens,
     total_tokens,
     latency_ms,
     routing_ms,
@@ -165,13 +168,14 @@ INSERT INTO request_log (
     pref_header,
     provider_header,
     retried
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.TSUtc.UTC().Format(time.RFC3339Nano),
 		row.RequestID,
 		row.Model,
 		nullString(row.ProviderAssignedID),
 		nullInt64(row.PromptTokens),
 		nullInt64(row.CompletionTokens),
+		nullInt64(row.EstimatedCompTokens),
 		totalTokens,
 		row.LatencyMs,
 		row.RoutingMs,
@@ -199,6 +203,7 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		{name: "provider_assigned_id", sql: `ALTER TABLE request_log ADD COLUMN provider_assigned_id TEXT NULL`},
 		{name: "prompt_tokens", sql: `ALTER TABLE request_log ADD COLUMN prompt_tokens INTEGER NULL`},
 		{name: "completion_tokens", sql: `ALTER TABLE request_log ADD COLUMN completion_tokens INTEGER NULL`},
+		{name: "estimated_completion_tokens", sql: `ALTER TABLE request_log ADD COLUMN estimated_completion_tokens INTEGER NULL`},
 		{name: "total_tokens", sql: `ALTER TABLE request_log ADD COLUMN total_tokens INTEGER NULL`},
 		{name: "latency_ms", sql: `ALTER TABLE request_log ADD COLUMN latency_ms REAL NOT NULL DEFAULT 0`},
 		{name: "routing_ms", sql: `ALTER TABLE request_log ADD COLUMN routing_ms REAL NOT NULL DEFAULT 0`},

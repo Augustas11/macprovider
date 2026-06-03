@@ -168,6 +168,38 @@ func TestWriteHotPath_NullError_ZeroCredits(t *testing.T) {
 	}
 }
 
+func TestWriteHotPath_ClampsProviderCompletionToObservedEstimateAndRecoveryPreservesClamp(t *testing.T) {
+	reqStore, store := newRequestAndBillingStores(t)
+	input, row := testHotPathInput(t, store)
+	row.RequestID = "inflated-provider-usage"
+	input.RequestID = row.RequestID
+	inflatedCompletion := int64(10000000)
+	observedEstimate := int64(2)
+	row.CompletionTokens = &inflatedCompletion
+	row.EstimatedCompTokens = &observedEstimate
+	input.CompletionTokens = &inflatedCompletion
+	input.EstimatedCompTokens = &observedEstimate
+	if err := store.WriteHotPath(context.Background(), reqStore, row, input); err != nil {
+		t.Fatal(err)
+	}
+	assertInflatedUsageClamped(t, store.db, row.RequestID, 1004)
+	in := RecoverInput{ScanFrom: row.TSUtc.Add(-time.Minute), ScanTo: row.TSUtc.Add(time.Minute), Source: "nightly_reconcile"}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	assertInflatedUsageClamped(t, store.db, row.RequestID, 1004)
+	if _, err := store.db.Exec(`DELETE FROM ledger_operator_credits WHERE request_id = ?`, row.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM ledger_request_credits WHERE request_id = ?`, row.RequestID); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecoverLedger(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	assertInflatedUsageClamped(t, store.db, row.RequestID, 1004)
+}
+
 func TestWriteHotPath_DuplicateRequestIDWithoutRetryQuarantinesAttempt(t *testing.T) {
 	reqStore, store := newRequestAndBillingStores(t)
 	input, row := testHotPathInput(t, store)
@@ -877,6 +909,7 @@ CREATE TABLE request_log (
     provider_assigned_id TEXT NULL,
     prompt_tokens INTEGER NULL,
     completion_tokens INTEGER NULL,
+    estimated_completion_tokens INTEGER NULL,
     error_code TEXT NULL,
     retried INTEGER NOT NULL DEFAULT 0,
     status INTEGER NOT NULL DEFAULT 0,
@@ -922,6 +955,27 @@ func scalar(t *testing.T, db *sql.DB, query string, args ...any) int64 {
 		return 0
 	}
 	return n.Int64
+}
+
+func assertInflatedUsageClamped(t *testing.T, db *sql.DB, requestID string, wantGross int64) {
+	t.Helper()
+	var gross, providerCredits, completion, estimated int64
+	var usage string
+	if err := db.QueryRow(`
+SELECT gross_credits, provider_credits, usage_source, completion_tokens, estimated_completion_tokens
+  FROM ledger_request_credits
+ WHERE request_id = ? AND quarantined = 0`, requestID).Scan(&gross, &providerCredits, &usage, &completion, &estimated); err != nil {
+		t.Fatal(err)
+	}
+	if gross != wantGross || providerCredits != 904 || usage != UsageByteEstimated || completion != 10000000 || estimated != 2 {
+		t.Fatalf("clamped ledger row got gross=%d provider=%d usage=%s completion=%d estimated=%d", gross, providerCredits, usage, completion, estimated)
+	}
+	if got := scalar(t, db, `SELECT gross_credits FROM ledger_operator_credits WHERE request_id = ?`, requestID); got != wantGross {
+		t.Fatalf("operator gross=%d want %d", got, wantGross)
+	}
+	if got := scalar(t, db, `SELECT estimated_completion_tokens FROM request_log WHERE request_id = ?`, requestID); got != 2 {
+		t.Fatalf("request_log estimated completion=%d want 2", got)
+	}
 }
 
 func insertCredit(t *testing.T, db *sql.DB, providerID string, ts time.Time, providerCredits int64) {

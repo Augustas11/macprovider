@@ -295,7 +295,7 @@ func TestEarningsEndpoint_AppliesDateRange(t *testing.T) {
 func requestLogRow(in HotPathInput) requestlog.Row {
 	return requestlog.Row{
 		TSUtc: in.TSUtc, RequestID: in.RequestID, Model: in.Model, ProviderAssignedID: in.ProviderAssignedID,
-		PromptTokens: in.PromptTokens, CompletionTokens: in.CompletionTokens, Status: in.Status,
+		PromptTokens: in.PromptTokens, CompletionTokens: in.CompletionTokens, EstimatedCompTokens: in.EstimatedCompTokens, Status: in.Status,
 		Stream: in.Stream, BuyerIP: "127.0.0.1",
 	}
 }
