@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
@@ -31,7 +32,23 @@ type TokenRecord struct {
 }
 
 func AuthorizedBearer(r *http.Request, expected string) bool {
-	return expected == "" || r.Header.Get("Authorization") == "Bearer "+expected
+	return expected == "" || BearerTokenMatchesHeader(r.Header, expected)
+}
+
+func BearerTokenMatchesHeader(headers http.Header, expected string) bool {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return false
+	}
+	auth := strings.TrimSpace(headers.Get("Authorization"))
+	token, ok := strings.CutPrefix(auth, "Bearer ")
+	if !ok {
+		return false
+	}
+	token = strings.TrimSpace(token)
+	tokenHash := sha256.Sum256([]byte(token))
+	expectedHash := sha256.Sum256([]byte(expected))
+	return hmac.Equal(tokenHash[:], expectedHash[:])
 }
 
 func OpenStore(path string) (*Store, error) {

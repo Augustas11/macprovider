@@ -22,6 +22,8 @@ import (
 	"github.com/gobwas/ws/wsutil"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 )
 
 const (
@@ -1578,7 +1580,7 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorizedOperator(r *http.Request) bool {
-	return s.cfg.Auth.OperatorKey == "" || r.Header.Get("Authorization") == "Bearer "+s.cfg.Auth.OperatorKey
+	return s.cfg.Auth.OperatorKey == "" || auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.OperatorKey)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

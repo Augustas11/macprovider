@@ -935,6 +935,21 @@ func TestFeedbackSummaryAggregation(t *testing.T) {
 	}
 }
 
+func TestOperatorBearerAuthorized(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer operator-key")
+	if !operatorBearerAuthorized(headers, "operator-key") {
+		t.Fatal("valid operator bearer rejected")
+	}
+	headers.Set("Authorization", "Bearer bad-key")
+	if operatorBearerAuthorized(headers, "operator-key") {
+		t.Fatal("invalid operator bearer accepted")
+	}
+	if operatorBearerAuthorized(headers, "") {
+		t.Fatal("empty operator key accepted")
+	}
+}
+
 func TestCapacityTierDeescalation(t *testing.T) {
 	current := fixedNow()
 	h, _, dbPath, _ := newTestHarness(t, fakeOAuth{}, WithNow(func() time.Time { return current }))

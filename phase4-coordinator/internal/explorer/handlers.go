@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 )
@@ -499,7 +500,7 @@ func parseWindow(r *http.Request, defaultHours, maxDays int) (windowRange, error
 }
 
 func (h *Handler) authorized(r *http.Request) bool {
-	return h.cfg.Auth.OperatorKey != "" && r.Header.Get("Authorization") == "Bearer "+h.cfg.Auth.OperatorKey
+	return auth.BearerTokenMatchesHeader(r.Header, h.cfg.Auth.OperatorKey)
 }
 
 func (h *Handler) allowRequest(r *http.Request) bool {

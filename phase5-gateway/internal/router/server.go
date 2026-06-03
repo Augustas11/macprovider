@@ -1938,7 +1938,7 @@ func (s *Server) setCapacityTier(ctx context.Context, tier int, signals, eventTy
 }
 
 func (s *Server) operatorAuthorized(w http.ResponseWriter, r *http.Request) bool {
-	if r.Header.Get("Authorization") == "Bearer "+s.cfg.Coordinator.OperatorKey {
+	if operatorBearerAuthorized(r.Header, s.cfg.Coordinator.OperatorKey) {
 		return true
 	}
 	writeError(w, http.StatusUnauthorized, "authentication_error", "invalid_operator_token", "Invalid operator token")
@@ -1947,9 +1947,25 @@ func (s *Server) operatorAuthorized(w http.ResponseWriter, r *http.Request) bool
 
 func (s *Server) shouldPersistInternalHeaderAudit(r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/admin/explorer/") || r.URL.Path == "/admin/explorer" {
-		return r.Header.Get("Authorization") == "Bearer "+s.cfg.Coordinator.OperatorKey
+		return operatorBearerAuthorized(r.Header, s.cfg.Coordinator.OperatorKey)
 	}
 	return true
+}
+
+func operatorBearerAuthorized(headers http.Header, expected string) bool {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return false
+	}
+	authHeader := strings.TrimSpace(headers.Get("Authorization"))
+	token, ok := strings.CutPrefix(authHeader, "Bearer ")
+	if !ok {
+		return false
+	}
+	token = strings.TrimSpace(token)
+	tokenHash := sha256.Sum256([]byte(token))
+	expectedHash := sha256.Sum256([]byte(expected))
+	return hmac.Equal(tokenHash[:], expectedHash[:])
 }
 
 func (s *Server) publicPaused(path string) bool {
