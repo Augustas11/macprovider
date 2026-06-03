@@ -27,9 +27,7 @@ struct SelfUpdate {
         restartLaunchd: (() throws -> Void)? = nil
     ) {
         self.currentVersion = currentVersion
-        self.releasesAPIURL = releasesAPIURL
-            ?? ProcessInfo.processInfo.environment["MACPROVIDER_RELEASES_API_URL"]
-            ?? Self.defaultReleasesAPIURL
+        self.releasesAPIURL = releasesAPIURL ?? Self.defaultReleasesAPIURL
         self.session = session
         self.drainBeforeReplace = drainBeforeReplace
         self.replaceBinary = replaceBinary
@@ -98,6 +96,14 @@ struct SelfUpdate {
         try await applyValidatedUpdate(newBinary: newBinary)
     }
 
+    func resolvedReleasesAPIURLForTest() -> String {
+        releasesAPIURL
+    }
+
+    static func releaseSigningPublicKeyPEMForTest() -> String {
+        checksumPublicKeyPEM
+    }
+
     func latestVersionCached() async throws -> String {
         let cacheURL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cache/macprovider/latest-release.json")
@@ -130,6 +136,7 @@ struct SelfUpdate {
         guard let url = URL(string: releasesAPIURL) else {
             throw UpdateError.invalidURL(releasesAPIURL)
         }
+        try validateReleaseAPIURL(url)
         var request = URLRequest(url: url)
         request.addValue("application/vnd.github+json", forHTTPHeaderField: "accept")
         request.addValue("macprovider-cli/\(currentVersion)", forHTTPHeaderField: "user-agent")
@@ -231,6 +238,12 @@ struct SelfUpdate {
         }
     }
 
+    private func validateReleaseAPIURL(_ url: URL) throws {
+        guard url.scheme?.lowercased() == "https", let host = url.host?.lowercased(), host == "api.github.com" else {
+            throw UpdateError.untrustedReleaseAPIURL(url.absoluteString)
+        }
+    }
+
     private func validateTarball(_ url: URL) throws {
         let listing = try processOutput("/usr/bin/tar", arguments: ["-tzf", url.path])
         for rawEntry in listing.split(separator: "\n").map(String.init) {
@@ -242,21 +255,15 @@ struct SelfUpdate {
         }
     }
 
-    private func verifyChecksumSignature(checksumsURL: URL, signatureURL: URL, tempDir: URL) throws {
-        let publicKeyURL = tempDir.appendingPathComponent("release-signing-public.pem")
-        let keyPEM = ProcessInfo.processInfo.environment["MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM"] ?? Self.checksumPublicKeyPEM
-        try keyPEM.write(to: publicKeyURL, atomically: true, encoding: .utf8)
+    private func verifyChecksumSignature(checksumsURL: URL, signatureURL: URL, tempDir _: URL) throws {
         do {
-            try runProcess(
-                "/usr/bin/openssl",
-                arguments: [
-                    "dgst",
-                    "-sha256",
-                    "-verify", publicKeyURL.path,
-                    "-signature", signatureURL.path,
-                    checksumsURL.path,
-                ]
-            )
+            let publicKey = try P256.Signing.PublicKey(pemRepresentation: Self.checksumPublicKeyPEM)
+            let checksums = try Data(contentsOf: checksumsURL)
+            let signature = try P256.Signing.ECDSASignature(derRepresentation: Data(contentsOf: signatureURL))
+            let digest = SHA256.hash(data: checksums)
+            guard publicKey.isValidSignature(signature, for: digest) else {
+                throw UpdateError.checksumSignatureInvalid
+            }
         } catch {
             throw UpdateError.checksumSignatureInvalid
         }
@@ -355,6 +362,7 @@ enum UpdateError: Error, CustomStringConvertible {
     case processFailed(String, Int32)
     case renameFailed(Int32)
     case untrustedDownloadURL(String)
+    case untrustedReleaseAPIURL(String)
     case unsafeArchiveEntry(String)
 
     var description: String {
@@ -381,6 +389,8 @@ enum UpdateError: Error, CustomStringConvertible {
             return "Atomic binary replacement failed with errno \(errnoValue)"
         case .untrustedDownloadURL(let url):
             return "Untrusted release asset URL: \(url)"
+        case .untrustedReleaseAPIURL(let url):
+            return "Untrusted release API URL: \(url)"
         case .unsafeArchiveEntry(let entry):
             return "Release archive contains unsafe entry: \(entry)"
         }
