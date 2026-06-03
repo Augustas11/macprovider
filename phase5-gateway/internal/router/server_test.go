@@ -1531,6 +1531,67 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 	}
 }
 
+func TestStreamingScannerErrorSettlesStreamTruncated(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"large line"}]}`
+	accountID := "acct_stream_truncated"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte("data: "))
+			_, _ = pw.Write([]byte(strings.Repeat("x", 1024*1024+1)))
+			_, _ = pw.Write([]byte("\n\n"))
+			_ = pw.Close()
+		}()
+		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: pr}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "stream_truncated" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want stream_truncated/gateway_estimated", outcome, source)
+	}
+}
+
+func TestStreamingCleanEOFSettlesOK(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"ok"}]}`
+	accountID := "acct_stream_ok"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload+"\n\ndata: [DONE]\n\n"), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "ok" || source != "provider_reported" {
+		t.Fatalf("usage outcome/source = %s/%s, want ok/provider_reported", outcome, source)
+	}
+}
+
 func TestNotFoundReturnsOpenAIEnvelope(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
 	resp := assertStatus(t, h, http.MethodGet, "/v1/does-not-exist", "", "", "", http.StatusNotFound)
@@ -1695,6 +1756,20 @@ func createAccountAndKey(t *testing.T, store *sqlite.Store, cfg config.Config, a
 		t.Fatalf("Issue: %v", err)
 	}
 	return fullKey
+}
+
+func usageEventOutcome(t *testing.T, dbPath, accountID string) (string, string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var outcome, source string
+	if err := db.QueryRow(`SELECT outcome, token_source FROM usage_events WHERE account_id = ? ORDER BY created_at DESC LIMIT 1`, accountID).Scan(&outcome, &source); err != nil {
+		t.Fatalf("query usage outcome: %v", err)
+	}
+	return outcome, source
 }
 
 func assertStatus(t *testing.T, h http.Handler, method, path, bearer, demoToken, ip string, want int) *httptest.ResponseRecorder {

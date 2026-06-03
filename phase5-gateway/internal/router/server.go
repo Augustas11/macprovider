@@ -1523,6 +1523,19 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		s.settleCancelledStream(r, subject, promptEstimate, emitted, cancelCoordinator)
 		return
 	}
+	if err := scanner.Err(); err != nil {
+		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
+		writeSSEError(w, "Upstream stream failed", "stream_truncated")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if reported != nil {
+			_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "stream_truncated")
+			return
+		}
+		_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "stream_truncated")
+		return
+	}
 	if reported != nil {
 		_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "ok")
 		return
@@ -2158,6 +2171,13 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 
 func writeError(w http.ResponseWriter, status int, typ, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "code": code}})
+}
+
+func writeSSEError(w http.ResponseWriter, message, code string) {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "api_error", "code": code}})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\n"))
 }
 
 func parseChatRequest(body []byte) (chatRequest, error) {
