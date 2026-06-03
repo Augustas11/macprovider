@@ -8,9 +8,13 @@ func setNoStoreHeaders(h http.Header) {
 	h.Set("Expires", "0")
 }
 
-func setBrowserSecurityHeaders(h http.Header) {
+func setBrowserSecurityHeaders(h http.Header, scriptNonce string) {
+	scriptSrc := "'none'"
+	if scriptNonce != "" {
+		scriptSrc = "'nonce-" + scriptNonce + "'"
+	}
 	h.Set("X-Content-Type-Options", "nosniff")
 	h.Set("Referrer-Policy", "no-referrer")
 	h.Set("Permissions-Policy", "geolocation=(), microphone=(), camera=(), payment=()")
-	h.Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; form-action 'self'")
+	h.Set("Content-Security-Policy", "default-src 'none'; base-uri 'none'; style-src 'unsafe-inline'; script-src "+scriptSrc+"; connect-src 'self'; frame-ancestors 'none'; form-action 'self'")
 }

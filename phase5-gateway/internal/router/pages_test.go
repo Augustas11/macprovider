@@ -142,6 +142,9 @@ func TestConsoleStaticContracts(t *testing.T) {
 			t.Fatalf("console missing %q", want)
 		}
 	}
+	if strings.Contains(html, "innerHTML") {
+		t.Fatal("console must build status/dashboard DOM with textContent, not innerHTML")
+	}
 }
 
 func renderAccountForDisclosureTest(t *testing.T) string {

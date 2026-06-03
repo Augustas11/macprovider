@@ -46,6 +46,32 @@ func TestHTMLRoutesSetBrowserSecurityHeaders(t *testing.T) {
 		if got := resp.Header().Get("Content-Security-Policy"); !strings.Contains(got, "frame-ancestors 'none'") {
 			t.Fatalf("%s csp=%q", path, got)
 		}
+		if got := resp.Header().Get("Content-Security-Policy"); strings.Contains(got, "script-src 'unsafe-inline'") {
+			t.Fatalf("%s csp allows inline script: %q", path, got)
+		}
+	}
+}
+
+func TestAccountPageScriptUsesCSPNonce(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{})
+	resp := assertStatus(t, h, http.MethodGet, "/account", "", "", "", http.StatusOK)
+	csp := resp.Header().Get("Content-Security-Policy")
+	marker := "script-src 'nonce-"
+	start := strings.Index(csp, marker)
+	if start < 0 {
+		t.Fatalf("account csp missing nonce: %q", csp)
+	}
+	nonceStart := start + len(marker)
+	nonceEnd := strings.Index(csp[nonceStart:], "'")
+	if nonceEnd < 0 {
+		t.Fatalf("account csp malformed nonce: %q", csp)
+	}
+	nonce := csp[nonceStart : nonceStart+nonceEnd]
+	if nonce == "" {
+		t.Fatalf("account csp empty nonce: %q", csp)
+	}
+	if !strings.Contains(resp.Body.String(), `<script nonce="`+nonce+`">`) {
+		t.Fatalf("account script nonce does not match csp nonce %q", nonce)
 	}
 }
 

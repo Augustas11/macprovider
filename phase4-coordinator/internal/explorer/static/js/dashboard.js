@@ -70,65 +70,106 @@ document.addEventListener("visibilitychange", () => {
 
 function statusStrip(data) {
   const partial = data && data.partial;
-  return `<div class="strip"><span class="status ${partial?"degraded":""}"></span><strong>${partial?"partial":"ok"}</strong><span class="mono">${new Date().toISOString()}</span></div>`;
+  const wrap = el("div", "strip");
+  wrap.appendChild(el("span", `status ${partial?"degraded":""}`.trim()));
+  wrap.appendChild(el("strong", "", partial ? "partial" : "ok"));
+  wrap.appendChild(el("span", "mono", new Date().toISOString()));
+  return wrap;
 }
 
 function table(rows) {
-  if (!Array.isArray(rows) || rows.length === 0) return `<div class="panel">No rows</div>`;
+  if (!Array.isArray(rows) || rows.length === 0) return el("div", "panel", "No rows");
   const cols = [...new Set(rows.flatMap((r) => Object.keys(r)).slice(0,14))];
-  return `<table><thead><tr>${cols.map((c)=>`<th>${c}</th>`).join("")}</tr></thead><tbody>${rows.map((r)=>`<tr>${cols.map((c)=>cell(c,r[c],r)).join("")}</tr>`).join("")}</tbody></table>`;
+  const out = document.createElement("table");
+  const thead = document.createElement("thead");
+  const headRow = document.createElement("tr");
+  cols.forEach((c) => headRow.appendChild(el("th", "", c)));
+  thead.appendChild(headRow);
+  out.appendChild(thead);
+  const tbody = document.createElement("tbody");
+  rows.forEach((r) => {
+    const tr = document.createElement("tr");
+    cols.forEach((c) => tr.appendChild(cell(c, r[c], r)));
+    tbody.appendChild(tr);
+  });
+  out.appendChild(tbody);
+  return out;
 }
 
 function cell(k, v, row) {
-  if (v === null || v === undefined) return "<td></td>";
-  if (typeof v === "object") return `<td><code>${escapeHtml(JSON.stringify(v))}</code></td>`;
+  const td = document.createElement("td");
+  if (v === null || v === undefined) return td;
+  if (typeof v === "object") {
+    td.appendChild(el("code", "", JSON.stringify(v)));
+    return td;
+  }
   const s = String(v);
   const link = linkFor(k, s, row);
-  return `<td class="${s.length > 18 ? "mono" : ""}">${link || escapeHtml(s)}</td>`;
+  if (s.length > 18) td.className = "mono";
+  td.appendChild(link || document.createTextNode(s));
+  return td;
 }
 
 function linkFor(k, v, _row) {
-  if (!v) return "";
+  if (!v) return null;
   if (k === "request_id") return action("sessions",    `/admin/explorer/sessions/${encodeURIComponent(v)}`, v);
   if (k === "account_id") return action("buyers",      `/admin/explorer/buyers/${encodeURIComponent(v)}`, v);
   if (k === "provider_id") return action("providers",  `/admin/explorer/providers/${encodeURIComponent(v)}`, v);
   if (k === "settlement_id") return action("settlements", `/admin/explorer/settlements/${encodeURIComponent(v)}`, v);
   if (k === "link_target" && v.startsWith("session:")) return action("sessions", `/admin/explorer/sessions/${encodeURIComponent(v.slice(8))}`, v);
   if (k === "link_target" && v.startsWith("buyer:"))   return action("buyers",   `/admin/explorer/buyers/${encodeURIComponent(v.slice(6))}`, v);
-  return "";
+  return null;
 }
 
 function action(view, path, label) {
-  return `<a href="#" data-view="${view}" data-path="${path}">${escapeHtml(label)}</a>`;
+  const a = el("a", "", label);
+  a.href = "#";
+  a.dataset.view = view;
+  a.dataset.path = path;
+  return a;
 }
 
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+function el(tag, className, text) {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
 }
 
 function healthLinks(data) {
   const rec = data && (data.last_reconciliation || (data.health && data.health.last_reconciliation));
-  if (!rec || !rec.from_utc || !rec.to_utc) return "";
+  if (!rec || !rec.from_utc || !rec.to_utc) return null;
   const path = `/admin/explorer/ledger?from=${encodeURIComponent(rec.from_utc)}&to=${encodeURIComponent(rec.to_utc)}`;
-  return `<div class="toolbar">${action("ledger", path, "Last reconciliation ledger window")}</div>`;
+  const out = el("div", "toolbar");
+  out.appendChild(action("ledger", path, "Last reconciliation ledger window"));
+  return out;
 }
 
 function filters(spec) {
-  return (spec.filters || []).map((f) =>
-    `<button data-view="${spec.view}" data-path="${spec.path}${f.query}">${escapeHtml(f.label)}</button>`
-  ).join("");
+  return (spec.filters || []).map((f) => {
+    const button = el("button", "", f.label);
+    button.dataset.view = spec.view;
+    button.dataset.path = `${spec.path}${f.query}`;
+    return button;
+  });
 }
 
 function summary(spec, data) {
-  const panels = (spec.panels || []).map((p) =>
-    `<div><strong>${escapeHtml(p.label)}</strong><span class="mono">${escapeHtml(String(p.value(data)))}</span></div>`
-  );
-  return panels.length ? `<div class="grid">${panels.join("")}</div>` : "";
+  const panels = (spec.panels || []).map((p) => {
+    const panel = document.createElement("div");
+    panel.appendChild(el("strong", "", p.label));
+    panel.appendChild(el("span", "mono", String(p.value(data))));
+    return panel;
+  });
+  if (!panels.length) return null;
+  const grid = el("div", "grid");
+  panels.forEach((panel) => grid.appendChild(panel));
+  return grid;
 }
 
 function showMsg(msg, isError) {
   stop(current);
-  app.innerHTML = `<div class="panel${isError ? " error" : ""}">${escapeHtml(msg)}</div>`;
+  app.replaceChildren(el("div", `panel${isError ? " error" : ""}`, msg));
 }
 
 // --- core functions ---
@@ -136,16 +177,30 @@ function showMsg(msg, isError) {
 // load(): fetch data for view and render. Does NOT start or restart polling.
 async function load(view, path) {
   const target = path || paths[view];
-  app.innerHTML = `<div class="toolbar"><button id="refresh">Refresh</button></div><div class="panel">Loading…</div>`;
-  document.querySelector("#refresh").onclick = () => activate(view, target);
+  const loadingToolbar = el("div", "toolbar");
+  const loadingRefresh = el("button", "", "Refresh");
+  loadingRefresh.id = "refresh";
+  loadingRefresh.onclick = () => activate(view, target);
+  loadingToolbar.appendChild(loadingRefresh);
+  app.replaceChildren(loadingToolbar, el("div", "panel", "Loading…"));
   try {
     const data = await api(target);
     const spec = specs[view] || overviewSpec;
     const rows = spec.rows(data);
-    app.innerHTML = `<div class="toolbar"><button id="refresh">Refresh</button>${filters(spec)}</div>${statusStrip(data)}${healthLinks(data)}${summary(spec,data)}${table(rows)}`;
-    document.querySelector("#refresh").onclick = () => activate(view, target);
+    const toolbar = el("div", "toolbar");
+    const refresh = el("button", "", "Refresh");
+    refresh.id = "refresh";
+    refresh.onclick = () => activate(view, target);
+    toolbar.appendChild(refresh);
+    filters(spec).forEach((button) => toolbar.appendChild(button));
+    app.replaceChildren(
+      toolbar,
+      statusStrip(data),
+      ...[healthLinks(data), summary(spec,data)].filter(Boolean),
+      table(rows),
+    );
   } catch (err) {
-    app.innerHTML = `<div class="panel error">${escapeHtml(err.message)}</div>`;
+    app.replaceChildren(el("div", "panel error", err.message));
   }
 }
 

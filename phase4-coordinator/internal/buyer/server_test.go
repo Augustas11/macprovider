@@ -1476,7 +1476,7 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 		if stream {
 			streamField = `,"stream":true`
 		}
-		return []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}],"max_tokens":8,"response_format":{"type":"json_object"},"metadata":{"trace":"preserve-me"}` + streamField + `}`)
+		return []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}],"max_tokens":8,"seed":12345,"presence_penalty":0.25,"frequency_penalty":-0.5,"response_format":{"type":"json_object"},"metadata":{"trace":"preserve-me"}` + streamField + `}`)
 	}
 	assertForwardedBody := func(t *testing.T, body []byte) {
 		t.Helper()
@@ -1493,6 +1493,15 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 		}
 		if string(got["response_format"]) != `{"type":"json_object"}` {
 			t.Fatalf("response_format not preserved: %s", string(got["response_format"]))
+		}
+		if string(got["seed"]) != `12345` {
+			t.Fatalf("seed not preserved: %s", string(got["seed"]))
+		}
+		if string(got["presence_penalty"]) != `0.25` {
+			t.Fatalf("presence_penalty not preserved: %s", string(got["presence_penalty"]))
+		}
+		if string(got["frequency_penalty"]) != `-0.5` {
+			t.Fatalf("frequency_penalty not preserved: %s", string(got["frequency_penalty"]))
 		}
 		if string(got["metadata"]) != `{"trace":"preserve-me"}` {
 			t.Fatalf("metadata not preserved: %s", string(got["metadata"]))
