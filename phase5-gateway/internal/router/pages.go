@@ -106,5 +106,5 @@ func newScriptNonce() (string, error) {
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", err
 	}
-	return base64.RawStdEncoding.EncodeToString(nonce[:]), nil
+	return base64.RawURLEncoding.EncodeToString(nonce[:]), nil
 }

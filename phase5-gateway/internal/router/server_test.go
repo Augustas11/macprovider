@@ -1009,6 +1009,7 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	req.Header.Set("X-MacProvider-Retry", "1")
 	req.Header.Set("X-MacProvider-Foo", "attacker")
 	req.Header.Set("X-Request-ID", "55555555-5555-4555-8555-555555555555")
+	req.Header.Set("Idempotency-Key", "idem-gateway-1")
 	req.Header.Set("Cookie", "session=secret")
 	req.Header.Set("Proxy-Authorization", "Basic secret")
 	req.Header.Set("X-Custom-Control", "attacker")
@@ -1033,6 +1034,9 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	}
 	if got := captured.Get("X-MacProvider-Retry"); got != "1" {
 		t.Fatalf("forwarded retry = %q, want 1", got)
+	}
+	if got := captured.Get("Idempotency-Key"); got != "idem-gateway-1" {
+		t.Fatalf("forwarded idempotency key = %q, want idem-gateway-1", got)
 	}
 	if got := captured.Get("X-MacProvider-Foo"); got != "" {
 		t.Fatalf("forwarded unknown MacProvider header = %q", got)

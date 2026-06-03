@@ -4,7 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/subtle"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -962,6 +964,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	) error {
 		return logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
 	}
+	logProviderRowWithEstimate := func(
+		provider pool.Provider,
+		status int,
+		promptTok, completionTok *int64,
+		errMsg, errCode string,
+		retried int,
+		estimatedCompTokens *int64,
+	) error {
+		return logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone)
+	}
 	maxBodyBytes := s.maxChatBodyBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
@@ -983,6 +995,35 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	requestLogModel = req.Model
 	requestLogStream = req.Stream
+	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
+		if s.reqLogStore == nil {
+			logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
+			writeError(w, http.StatusServiceUnavailable, "idempotency_unavailable", "Idempotency-Key requires durable request logging")
+			return
+		}
+		bodyHash := sha256.Sum256(body)
+		reservedRequestID, replay, err := s.reqLogStore.ReserveIdempotencyKey(r.Context(), idempotencyKey, hex.EncodeToString(bodyHash[:]), originalRequestID, startedAt)
+		if err != nil {
+			if errors.Is(err, requestlog.ErrIdempotencyConflict) {
+				logBuyerFailure(http.StatusConflict, "Idempotency-Key was already used with a different request body")
+				writeError(w, http.StatusConflict, "idempotency_key_body_mismatch", "Idempotency-Key was already used with a different request body")
+				return
+			}
+			s.log.Warn().Err(err).Msg("idempotency reservation failed")
+			logBuyerFailure(http.StatusInternalServerError, "Could not reserve idempotency key")
+			writeError(w, http.StatusInternalServerError, "idempotency_reservation_failed", "Could not reserve idempotency key")
+			return
+		}
+		originalRequestID = reservedRequestID
+		requestID = reservedRequestID
+		routingRequestID = reservedRequestID
+		if replay {
+			w.Header().Set("X-Request-ID", reservedRequestID)
+			logBuyerFailure(http.StatusConflict, "Idempotency-Key request is already recorded")
+			writeError(w, http.StatusConflict, "idempotency_key_replayed", "Idempotency-Key request is already recorded")
+			return
+		}
+	}
 	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
 		logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
 		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)
@@ -1241,7 +1282,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			promptTok, completionTok := tokenPointersFromChatResponse(respBody)
-			if err := logProviderRow(provider, http.StatusOK, promptTok, completionTok, "", "", explicitRetries); err != nil {
+			estimatedCompletion := s.observedCompletionTokensFromBytes(len(respBody))
+			if err := logProviderRowWithEstimate(provider, http.StatusOK, promptTok, completionTok, "", "", explicitRetries, estimatedCompletion); err != nil {
 				cancelAttempt()
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
@@ -1440,7 +1482,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if promptTok == nil && completionTok == nil {
 				promptTok, completionTok = tokenPointersFromChatResponse(checkedBody)
 			}
-			return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, FaultFlag: faultFlag}
+			return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(body.Len()), FaultFlag: faultFlag}
 		case err := <-relay.Errors:
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws relay failed")
 			if errors.Is(err, providerws.ErrRelayTimeout) {
@@ -1574,7 +1616,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
 			}
-			attempt := requestLogAttempt{Status: http.StatusOK}
+			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted)}
 			attempt.PromptTokens, attempt.CompletionTokens = tokenPointersFromUsageObject(end.Usage)
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
 				attempt.FaultFlag = billing.FaultBreakerQualifying
@@ -1720,7 +1762,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		}
 		if err == io.EOF {
 			s.stickyStore(r.Header, provider, modelScope)
-			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok}
+			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted)}
 		}
 		if r.Context().Err() != nil {
 			return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
@@ -2639,20 +2681,7 @@ func hasInternalRoutingHeader(headers http.Header) bool {
 }
 
 func (s *Server) internalBearerAuthorized(headers http.Header) bool {
-	expected := strings.TrimSpace(s.internalAuthKey)
-	if expected == "" {
-		return false
-	}
-	auth := strings.TrimSpace(headers.Get("Authorization"))
-	token, ok := strings.CutPrefix(auth, "Bearer ")
-	if !ok {
-		return false
-	}
-	token = strings.TrimSpace(token)
-	if len(token) != len(expected) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
+	return auth.BearerTokenMatchesHeader(headers, s.internalAuthKey)
 }
 
 func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig) (pool.Provider, *routeError) {
@@ -2823,6 +2852,14 @@ func (s *Server) estimatedCompletionTokensFromBytes(n int) *int64 {
 	return estimatedCompletionTokensFromBytes(n, s.tier2Config().OutputBytesPerTokenCeiling)
 }
 
+func (s *Server) observedCompletionTokensFromBytes(n int) *int64 {
+	if n <= 0 {
+		zero := int64(0)
+		return &zero
+	}
+	return s.estimatedCompletionTokensFromBytes(n)
+}
+
 func estimatedCompletionTokensFromBytes(n, bytesPerToken int) *int64 {
 	if n <= 0 {
 		return nil
@@ -2880,6 +2917,19 @@ func endErrorMessage(end providerws.InferenceResponseEnd) string {
 
 func requestIDForBuyerRequest() string {
 	return uuid.NewString()
+}
+
+func normalizeIdempotencyKey(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 256 {
+		return ""
+	}
+	for _, r := range value {
+		if r < 0x21 || r > 0x7e {
+			return ""
+		}
+	}
+	return value
 }
 
 func modelForRequestLog(body []byte) string {

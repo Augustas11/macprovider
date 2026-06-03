@@ -1033,6 +1033,91 @@ func TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID(t *testing.T)
 	}
 }
 
+func TestSuccessfulNonStreamingBillingClampsInflatedProviderCompletion(t *testing.T) {
+	responseBody := []byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":10000000,"total_tokens":10000004}}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(responseBody)
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	row := queryLatestBillingRow(t, dbPath)
+	wantEstimate := int64((len(responseBody) + 15) / 16)
+	if row.UsageSource != "byte_estimated" {
+		t.Fatalf("usage_source=%q want byte_estimated", row.UsageSource)
+	}
+	if row.EstimatedCompletionTokens != wantEstimate {
+		t.Fatalf("estimated_completion_tokens=%d want %d", row.EstimatedCompletionTokens, wantEstimate)
+	}
+	if row.CompletionTokens != 10000000 {
+		t.Fatalf("stored provider completion_tokens=%d want 10000000", row.CompletionTokens)
+	}
+	wantGross := int64(4 + 2*wantEstimate)
+	if row.GrossCredits != wantGross {
+		t.Fatalf("gross_credits=%d want %d", row.GrossCredits, wantGross)
+	}
+}
+
+func TestIdempotencyKeyRejectsReplayAndBodyMismatchBeforeProvider(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, _ := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRequestLog(reqLog))
+
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+	headers := http.Header{"Idempotency-Key": []string{"idem-1"}}
+	rr := postChat(t, server, body, headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = postChat(t, server, body, headers)
+	if rr.Code != http.StatusConflict || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"idempotency_key_replayed"`)) {
+		t.Fatalf("replay status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	otherBody := []byte(`{"model":"model-a","messages":[{"role":"user","content":"different"}]}`)
+	rr = postChat(t, server, otherBody, headers)
+	if rr.Code != http.StatusConflict || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"idempotency_key_body_mismatch"`)) {
+		t.Fatalf("mismatch status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("provider calls=%d want 1", calls)
+	}
+}
+
 func TestRawHTTPStreamingBuyerCancelDoesNotBreakerFaultProvider(t *testing.T) {
 	firstChunk := make(chan struct{})
 	cancelSeen := make(chan struct{})
@@ -3851,6 +3936,35 @@ func queryBillingCredit(t *testing.T, dbPath string) (int64, int64, string) {
 		t.Fatalf("query billing credit: %v", err)
 	}
 	return gross, provider, fault
+}
+
+type billingRow struct {
+	GrossCredits              int64
+	CompletionTokens          int64
+	EstimatedCompletionTokens int64
+	UsageSource               string
+}
+
+func queryLatestBillingRow(t *testing.T, dbPath string) billingRow {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open billing db: %v", err)
+	}
+	defer db.Close()
+	var row billingRow
+	if err := db.QueryRow(`
+SELECT gross_credits, completion_tokens, estimated_completion_tokens, usage_source
+FROM ledger_request_credits
+ORDER BY id DESC LIMIT 1`).Scan(
+		&row.GrossCredits,
+		&row.CompletionTokens,
+		&row.EstimatedCompletionTokens,
+		&row.UsageSource,
+	); err != nil {
+		t.Fatalf("query billing row: %v", err)
+	}
+	return row
 }
 
 func providerByID(registry *pool.Registry, providerID string) (pool.Provider, bool) {
