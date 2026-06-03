@@ -419,7 +419,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
-	upReq.Header.Set("X-Request-ID", requestID(r))
+	upReq.Header.Set("X-Request-ID", newUUID())
 	resp, err := s.client.Do(upReq)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -518,7 +518,7 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
-	upReq.Header.Set("X-Request-ID", requestID(r))
+	upReq.Header.Set("X-Request-ID", newUUID())
 	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
 	resp, err := s.client.Do(upReq)
 	if err != nil {
@@ -1346,7 +1346,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	copyForwardHeaders(upReq.Header, r.Header)
 	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("X-Request-ID", requestID(r))
+	upReq.Header.Set("X-Request-ID", newUUID())
 	if s.cfg.Routing.StickyEnabled && !authn.Demo {
 		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
 			if !validConversationTag(tag) {

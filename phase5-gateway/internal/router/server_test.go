@@ -993,6 +993,7 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	req.Header.Set("X-MacProvider-Pref", "fast")
 	req.Header.Set("X-MacProvider-Retry", "1")
 	req.Header.Set("X-MacProvider-Foo", "attacker")
+	req.Header.Set("X-Request-ID", "55555555-5555-4555-8555-555555555555")
 	req.Header.Set("Cookie", "session=secret")
 	req.Header.Set("Proxy-Authorization", "Basic secret")
 	req.Header.Set("X-Custom-Control", "attacker")
@@ -1012,8 +1013,8 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	if got := resp.Header().Get("X-MacProvider-Route"); got != "" {
 		t.Fatalf("buyer response exposed route=%q", got)
 	}
-	if got := captured.Get("X-Request-ID"); got == "" {
-		t.Fatalf("forwarded X-Request-ID missing")
+	if got := captured.Get("X-Request-ID"); got == "" || got == "55555555-5555-4555-8555-555555555555" {
+		t.Fatalf("forwarded X-Request-ID = %q, want gateway-generated coordinator ID", got)
 	}
 	if got := captured.Get("X-MacProvider-Retry"); got != "1" {
 		t.Fatalf("forwarded retry = %q, want 1", got)

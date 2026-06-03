@@ -875,17 +875,22 @@ func TestRequestLogNilGuard(t *testing.T) {
 
 func TestRequestLogBuyerMultiAttemptRows(t *testing.T) {
 	const requestID = "11111111-1111-4111-8111-111111111111"
+	var providerRequestIDs []string
 	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Request-ID"); got != requestID {
-			t.Fatalf("fail X-Request-ID = %q, want %q", got, requestID)
+		got := r.Header.Get("X-Request-ID")
+		if got == "" || got == requestID {
+			t.Fatalf("fail X-Request-ID = %q, want coordinator-generated value", got)
 		}
+		providerRequestIDs = append(providerRequestIDs, got)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}))
 	defer failUpstream.Close()
 	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Request-ID"); got != requestID {
-			t.Fatalf("ok X-Request-ID = %q, want %q", got, requestID)
+		got := r.Header.Get("X-Request-ID")
+		if got == "" || got == requestID {
+			t.Fatalf("ok X-Request-ID = %q, want coordinator-generated value", got)
 		}
+		providerRequestIDs = append(providerRequestIDs, got)
 		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
 	}))
 	defer okUpstream.Close()
@@ -916,7 +921,10 @@ func TestRequestLogBuyerMultiAttemptRows(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	rows := queryRequestLogRows(t, dbPath, requestID)
+	if len(providerRequestIDs) != 2 || providerRequestIDs[0] != providerRequestIDs[1] {
+		t.Fatalf("provider request IDs = %#v, want same coordinator-generated ID across attempts", providerRequestIDs)
+	}
+	rows := queryRequestLogRows(t, dbPath, providerRequestIDs[0])
 	if len(rows) != 2 {
 		t.Fatalf("request_log rows = %d, want 2: %#v", len(rows), rows)
 	}
@@ -934,8 +942,47 @@ func TestRequestLogBuyerMultiAttemptRows(t *testing.T) {
 	}
 }
 
+func TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID(t *testing.T) {
+	const clientRequestID = "44444444-4444-4444-8444-444444444444"
+	var providerRequestIDs []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("X-Request-ID")
+		if got == "" || got == clientRequestID {
+			t.Fatalf("provider X-Request-ID = %q, want coordinator-generated value", got)
+		}
+		providerRequestIDs = append(providerRequestIDs, got)
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRequestLog(reqLog))
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+	for i := 0; i < 2; i++ {
+		rr := postChat(t, server, body, http.Header{"X-Request-ID": []string{clientRequestID}})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d status=%d body=%s", i, rr.Code, rr.Body.String())
+		}
+	}
+	if len(providerRequestIDs) != 2 || providerRequestIDs[0] == providerRequestIDs[1] {
+		t.Fatalf("provider request IDs = %#v, want distinct coordinator-generated IDs", providerRequestIDs)
+	}
+	if rows := queryRequestLogRows(t, dbPath, clientRequestID); len(rows) != 0 {
+		t.Fatalf("request_log used buyer request ID: %#v", rows)
+	}
+	for _, id := range providerRequestIDs {
+		if rows := queryRequestLogRows(t, dbPath, id); len(rows) != 1 {
+			t.Fatalf("request_log rows for %s = %d, want 1: %#v", id, len(rows), rows)
+		}
+	}
+}
+
 func TestRequestLogBuyerErrorCodePopulation(t *testing.T) {
 	const requestID = "22222222-2222-4222-8222-222222222222"
+	var relayRequestID string
 	reqLog, dbPath := openBuyerRequestLog(t)
 	defer reqLog.Close()
 	registry := pool.NewRegistry(nil)
@@ -946,9 +993,10 @@ func TestRequestLogBuyerErrorCodePopulation(t *testing.T) {
 		time.Unix(1716768000, 0),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, gotRequestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
-			if gotRequestID != requestID {
-				t.Fatalf("relay request_id = %q, want %q", gotRequestID, requestID)
+			if gotRequestID == "" || gotRequestID == requestID {
+				t.Fatalf("relay request_id = %q, want coordinator-generated value", gotRequestID)
 			}
+			relayRequestID = gotRequestID
 			chunks := make(chan providerws.InferenceResponseChunk, 1)
 			done := make(chan providerws.InferenceResponseEnd, 1)
 			errs := make(chan error, 1)
@@ -964,7 +1012,7 @@ func TestRequestLogBuyerErrorCodePopulation(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	rows := queryRequestLogRows(t, dbPath, requestID)
+	rows := queryRequestLogRows(t, dbPath, relayRequestID)
 	if len(rows) != 1 {
 		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
 	}
@@ -991,9 +1039,12 @@ func TestRequestLogBuyerValidationFailure(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	rows := queryRequestLogRows(t, dbPath, requestID)
+	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 1 {
 		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
+	}
+	if rows[0].RequestID == requestID {
+		t.Fatalf("request_log used buyer X-Request-ID %q", requestID)
 	}
 	if rows[0].ProviderAssignedID.Valid {
 		t.Fatalf("provider_assigned_id = %#v, want NULL", rows[0].ProviderAssignedID)
@@ -3584,6 +3635,46 @@ SELECT id, request_id, model, provider_assigned_id, prompt_tokens,
 FROM request_log
 WHERE request_id = ?
 ORDER BY id ASC`, requestID)
+	if err != nil {
+		t.Fatalf("query request log: %v", err)
+	}
+	defer rows.Close()
+	var got []requestLogTestRow
+	for rows.Next() {
+		var row requestLogTestRow
+		if err := rows.Scan(
+			&row.ID,
+			&row.RequestID,
+			&row.Model,
+			&row.ProviderAssignedID,
+			&row.PromptTokens,
+			&row.CompletionTokens,
+			&row.Status,
+			&row.ErrorCode,
+			&row.Retried,
+		); err != nil {
+			t.Fatalf("scan request log: %v", err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("request log rows: %v", err)
+	}
+	return got
+}
+
+func queryAllRequestLogRows(t *testing.T, dbPath string) []requestLogTestRow {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open request log db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`
+SELECT id, request_id, model, provider_assigned_id, prompt_tokens,
+       completion_tokens, status, error_code, retried
+FROM request_log
+ORDER BY id ASC`)
 	if err != nil {
 		t.Fatalf("query request log: %v", err)
 	}

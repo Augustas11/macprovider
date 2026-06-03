@@ -799,7 +799,7 @@ type chatMessage struct {
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	externalRequestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-	requestID := requestIDForBuyerRequest(externalRequestID)
+	requestID := requestIDForBuyerRequest()
 	routingRequestID := uuid.NewString()
 	originalRequestID := requestID
 	startedAt := s.now()
@@ -2837,12 +2837,7 @@ func endErrorMessage(end providerws.InferenceResponseEnd) string {
 	return "Provider failed during inference"
 }
 
-func requestIDForBuyerRequest(headerValue string) string {
-	if headerValue != "" {
-		if parsed, err := uuid.Parse(headerValue); err == nil && parsed.Version() == 4 {
-			return parsed.String()
-		}
-	}
+func requestIDForBuyerRequest() string {
 	return uuid.NewString()
 }
 
