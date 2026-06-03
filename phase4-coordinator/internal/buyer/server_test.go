@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -977,6 +978,79 @@ func TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID(t *testing.T)
 		if rows := queryRequestLogRows(t, dbPath, id); len(rows) != 1 {
 			t.Fatalf("request_log rows for %s = %d, want 1: %#v", id, len(rows), rows)
 		}
+	}
+}
+
+func TestRawHTTPStreamingBuyerCancelDoesNotBreakerFaultProvider(t *testing.T) {
+	firstChunk := make(chan struct{})
+	cancelSeen := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		flusher, _ := w.(http.Flusher)
+		_, _ = fmt.Fprint(w, `data: {"id":"chunk","usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6},"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		close(firstChunk)
+		<-r.Context().Done()
+		close(cancelSeen)
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`)).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.Handler().ServeHTTP(rr, req)
+		close(done)
+	}()
+	select {
+	case <-firstChunk:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first stream chunk")
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-cancelSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not see buyer cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("coordinator did not finish after buyer cancellation")
+	}
+	if got := rr.Code; got != http.StatusOK {
+		t.Fatalf("response code=%d body=%s", got, rr.Body.String())
+	}
+	gross, providerCredits, fault := queryBillingCredit(t, dbPath)
+	if gross <= 0 || providerCredits <= 0 || fault != billing.FaultNone {
+		t.Fatalf("billing row gross=%d provider=%d fault=%s, want paid non-breaker row", gross, providerCredits, fault)
+	}
+	provider, ok := providerByID(registry, "p1")
+	if !ok || provider.State != pool.StateReady {
+		t.Fatalf("provider after buyer cancel = %#v ok=%v, want ready", provider, ok)
 	}
 }
 
@@ -3701,6 +3775,30 @@ ORDER BY id ASC`)
 		t.Fatalf("request log rows: %v", err)
 	}
 	return got
+}
+
+func queryBillingCredit(t *testing.T, dbPath string) (int64, int64, string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open billing db: %v", err)
+	}
+	defer db.Close()
+	var gross, provider int64
+	var fault string
+	if err := db.QueryRow(`SELECT gross_credits, provider_credits, fault_flag FROM ledger_request_credits ORDER BY id DESC LIMIT 1`).Scan(&gross, &provider, &fault); err != nil {
+		t.Fatalf("query billing credit: %v", err)
+	}
+	return gross, provider, fault
+}
+
+func providerByID(registry *pool.Registry, providerID string) (pool.Provider, bool) {
+	for _, provider := range registry.Snapshot() {
+		if provider.ProviderID == providerID {
+			return provider, true
+		}
+	}
+	return pool.Provider{}, false
 }
 
 func chatBodyWithContent(model, content string) []byte {

@@ -1684,6 +1684,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			s.stickyStore(r.Header, provider, modelScope)
 			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok}
 		}
+		if r.Context().Err() != nil {
+			return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+		}
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
 		writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
 		if flusher != nil {
