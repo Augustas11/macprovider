@@ -50,6 +50,7 @@ type providerSession struct {
 	assignedID string
 	conn       net.Conn
 	writeCh    chan []byte
+	writeLimit time.Duration
 	closeOnce  sync.Once
 	writeMu    sync.Mutex
 	closed     bool
@@ -82,21 +83,27 @@ type encryptedInferenceResponseEnd struct {
 	Enc       tier2.AEADEnvelopeBody `json:"enc"`
 }
 
-func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize int) *providerSession {
+func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize int, writeLimits ...time.Duration) *providerSession {
 	if bufferSize <= 0 {
 		bufferSize = 64
+	}
+	writeLimit := 10 * time.Second
+	if len(writeLimits) > 0 && writeLimits[0] > 0 {
+		writeLimit = writeLimits[0]
 	}
 	return &providerSession{
 		providerID: providerID,
 		assignedID: assignedID,
 		conn:       conn,
 		writeCh:    make(chan []byte, bufferSize),
+		writeLimit: writeLimit,
 		active:     map[string]*relayActive{},
 	}
 }
 
 func (ps *providerSession) runWriter() {
 	for payload := range ps.writeCh {
+		_ = ps.conn.SetWriteDeadline(time.Now().Add(ps.writeLimit))
 		if err := wsutil.WriteServerText(ps.conn, payload); err != nil {
 			ps.failAll(ErrRelayClosed)
 			_ = ps.conn.Close()

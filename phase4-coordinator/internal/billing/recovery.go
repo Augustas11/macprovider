@@ -74,7 +74,8 @@ UPDATE ledger_request_credits
 	orphanRows, _ := orphanRes.RowsAffected()
 	rows, err := tx.QueryContext(ctx, `
 SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
-       rl.prompt_tokens, rl.completion_tokens, rl.status, rl.stream, rl.error_code,
+       rl.prompt_tokens, rl.completion_tokens, rl.estimated_completion_tokens,
+       rl.status, rl.stream, rl.error_code,
        rl.retried,
        COALESCE((
          SELECT COUNT(*) - 1 FROM request_log prior
@@ -102,9 +103,9 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
 		var rlID int64
 		var tsText, requestID, model, assignedID string
 		var errorCode sql.NullString
-		var prompt, completion sql.NullInt64
+		var prompt, completion, estimated sql.NullInt64
 		var status, stream, retried, attemptN, sameRequestCount int
-		if err := rows.Scan(&rlID, &tsText, &requestID, &model, &assignedID, &prompt, &completion, &status, &stream, &errorCode, &retried, &attemptN, &sameRequestCount); err != nil {
+		if err := rows.Scan(&rlID, &tsText, &requestID, &model, &assignedID, &prompt, &completion, &estimated, &status, &stream, &errorCode, &retried, &attemptN, &sameRequestCount); err != nil {
 			return err
 		}
 		scanned++
@@ -112,7 +113,7 @@ SELECT rl.id, rl.ts_utc, rl.request_id, rl.model, rl.provider_assigned_id,
 		if err != nil {
 			ts = time.Now().UTC()
 		}
-		if invalidRecoveryToken(prompt) || invalidRecoveryToken(completion) {
+		if invalidRecoveryToken(prompt) || invalidRecoveryEstimate(estimated) || invalidRecoveryCompletion(completion, estimated) {
 			affected, err := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "invalid_usage_tokens", now)
 			if err != nil {
 				return err
@@ -171,6 +172,7 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			continue
 		}
 		var pp, cp *int64
+		var ep *int64
 		if prompt.Valid {
 			v := prompt.Int64
 			pp = &v
@@ -179,25 +181,30 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			v := completion.Int64
 			cp = &v
 		}
-		input := HotPathInput{
-			RequestID:          requestID,
-			AttemptN:           attemptN,
-			ProviderAssignedID: assignedID,
-			ProviderID:         providerID,
-			Model:              model,
-			Status:             status,
-			Stream:             stream == 1,
-			TSUtc:              ts,
-			PromptTokens:       pp,
-			CompletionTokens:   cp,
-			ErrorCode:          errorCode.String,
-			FaultFlag:          FaultNone,
-			ConfigSnapshotID:   snapshotID,
-			RateEntry:          RateFor(rewards.RateCard, model),
-			MultiplierPPM:      multiplier,
-			ProviderShareBps:   share,
+		if estimated.Valid {
+			v := estimated.Int64
+			ep = &v
 		}
-		result := ComputeCredits(pp, cp, nil, usageFor(errorCode.String, nil), FaultNone, input.RateEntry, multiplier, share)
+		input := HotPathInput{
+			RequestID:           requestID,
+			AttemptN:            attemptN,
+			ProviderAssignedID:  assignedID,
+			ProviderID:          providerID,
+			Model:               model,
+			Status:              status,
+			Stream:              stream == 1,
+			TSUtc:               ts,
+			PromptTokens:        pp,
+			CompletionTokens:    cp,
+			EstimatedCompTokens: ep,
+			ErrorCode:           errorCode.String,
+			FaultFlag:           FaultNone,
+			ConfigSnapshotID:    snapshotID,
+			RateEntry:           RateFor(rewards.RateCard, model),
+			MultiplierPPM:       multiplier,
+			ProviderShareBps:    share,
+		}
+		result := ComputeCredits(pp, cp, ep, usageFor(errorCode.String, ep), FaultNone, input.RateEntry, multiplier, share)
 		if attemptN > 1 {
 			affected, err := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "ambiguous_attempt_n", now)
 			if err != nil {
@@ -460,6 +467,23 @@ UPDATE ledger_request_credits
 
 func invalidRecoveryToken(v sql.NullInt64) bool {
 	return v.Valid && invalidBillableTokenCount(v.Int64)
+}
+
+func invalidRecoveryEstimate(v sql.NullInt64) bool {
+	return v.Valid && invalidBillableTokenCount(v.Int64)
+}
+
+func invalidRecoveryCompletion(completion, estimated sql.NullInt64) bool {
+	if !completion.Valid {
+		return false
+	}
+	if completion.Int64 < 0 {
+		return true
+	}
+	if completion.Int64 <= maxBillableTokens {
+		return false
+	}
+	return !estimated.Valid || invalidRecoveryEstimate(estimated)
 }
 
 func intPtrFromNull(v sql.NullInt64) *int64 {

@@ -30,7 +30,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("sqlite db path must be set")
 	}
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", sqliteDSN(path))
 	if err != nil {
 		return nil, err
 	}

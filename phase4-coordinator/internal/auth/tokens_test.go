@@ -2,11 +2,31 @@ package auth_test
 
 import (
 	"context"
+	"net/http"
 	"path/filepath"
 	"testing"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 )
+
+func TestBearerTokenMatchesHeader(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer operator-secret")
+	if !auth.BearerTokenMatchesHeader(headers, "operator-secret") {
+		t.Fatal("valid bearer token rejected")
+	}
+	headers.Set("Authorization", "Bearer wrong-secret")
+	if auth.BearerTokenMatchesHeader(headers, "operator-secret") {
+		t.Fatal("invalid bearer token accepted")
+	}
+	headers.Set("Authorization", "Basic operator-secret")
+	if auth.BearerTokenMatchesHeader(headers, "operator-secret") {
+		t.Fatal("non-bearer authorization accepted")
+	}
+	if auth.BearerTokenMatchesHeader(headers, "") {
+		t.Fatal("empty expected token accepted")
+	}
+}
 
 func TestTokenIssueValidateRevokeAndList(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))

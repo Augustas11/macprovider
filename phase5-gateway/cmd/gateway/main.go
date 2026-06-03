@@ -61,11 +61,7 @@ func main() {
 	}
 	oauthClient := &http.Client{Timeout: 30 * time.Second}
 	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, oauthClient)
-	httpServer := &http.Server{
-		Addr:              cfg.Address(),
-		Handler:           router.New(cfg, store, oauth, router.WithHTTPClient(coordinatorClient)).Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	httpServer := newHTTPServer(cfg.Address(), router.New(cfg, store, oauth, router.WithHTTPClient(coordinatorClient)).Handler())
 	go func() {
 		slog.Info("gateway listening", "address", cfg.Address())
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -81,6 +77,16 @@ func main() {
 		slog.Warn("gateway shutdown error", "error", err)
 	}
 	slog.Info("gateway shutdown complete")
+}
+
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 }
 
 type reservationReaper interface {

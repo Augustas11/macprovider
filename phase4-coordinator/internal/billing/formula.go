@@ -120,17 +120,18 @@ func ComputeCredits(
 	if promptTokens != nil {
 		prompt = *promptTokens
 	}
-	completion := int64(0)
-	switch row.UsageSource {
-	case UsageByteEstimated:
-		if estimatedCompletionTokens != nil {
-			completion = *estimatedCompletionTokens
-		}
+	completion, completionOK, clampedToEstimate := billableCompletion(row.UsageSource, completionTokens, estimatedCompletionTokens)
+	if !completionOK {
+		row.FaultFlag = FaultNullUsageError
+		row.UsageSource = UsageNullError
+		return zeroCredits(row)
+	}
+	switch {
+	case row.UsageSource == UsageByteEstimated:
+	case clampedToEstimate:
+		row.UsageSource = UsageByteEstimated
 	default:
 		row.UsageSource = UsageProviderReported
-		if completionTokens != nil {
-			completion = *completionTokens
-		}
 	}
 	if invalidBillableTokenCount(prompt) || invalidBillableTokenCount(completion) {
 		row.FaultFlag = FaultNullUsageError
@@ -171,6 +172,49 @@ func ComputeCredits(
 	row.ProviderCredits = RoundHalfEven(providerNumerator, providerShareDenom)
 	row.OperatorCredits = row.GrossCredits - row.ProviderCredits
 	return row
+}
+
+func billableCompletion(usageSource string, completionTokens, estimatedCompletionTokens *int64) (int64, bool, bool) {
+	if usageSource == UsageByteEstimated {
+		if estimatedCompletionTokens == nil {
+			return 0, true, false
+		}
+		estimate := *estimatedCompletionTokens
+		if estimate < 0 {
+			return 0, false, false
+		}
+		if completionTokens != nil {
+			providerReported := *completionTokens
+			if providerReported < 0 {
+				return 0, false, false
+			}
+			if providerReported < estimate {
+				return providerReported, true, false
+			}
+		}
+		return estimate, true, false
+	}
+	if completionTokens == nil {
+		if estimatedCompletionTokens == nil {
+			return 0, true, false
+		}
+		return *estimatedCompletionTokens, true, true
+	}
+	providerReported := *completionTokens
+	if providerReported < 0 {
+		return 0, false, false
+	}
+	if estimatedCompletionTokens == nil {
+		return providerReported, true, false
+	}
+	estimate := *estimatedCompletionTokens
+	if estimate < 0 {
+		return 0, false, false
+	}
+	if estimate < providerReported {
+		return estimate, true, true
+	}
+	return providerReported, true, false
 }
 
 func invalidBillableTokenCount(v int64) bool {

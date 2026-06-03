@@ -47,6 +47,10 @@ limits:
 
 ws:
   write_buffer_size: 64
+  handshake_timeout_s: 10
+  write_timeout_s: 10
+  max_frame_bytes: 4194304
+  max_unauthenticated_conn: 64
 
 admission:
   pinned_only: false
@@ -100,6 +104,7 @@ auth:
 storage:
   db_path: "coordinator.db"
   snapshot_interval_s: 300
+  request_log_retention_days: 90
 
 logging:
   level: "info"

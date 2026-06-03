@@ -419,7 +419,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
-	upReq.Header.Set("X-Request-ID", requestID(r))
+	upReq.Header.Set("X-Request-ID", newUUID())
 	resp, err := s.client.Do(upReq)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -518,7 +518,7 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
-	upReq.Header.Set("X-Request-ID", requestID(r))
+	upReq.Header.Set("X-Request-ID", newUUID())
 	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
 	resp, err := s.client.Do(upReq)
 	if err != nil {
@@ -1346,7 +1346,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	copyForwardHeaders(upReq.Header, r.Header)
 	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("X-Request-ID", requestID(r))
+	upReq.Header.Set("X-Request-ID", newUUID())
 	if s.cfg.Routing.StickyEnabled && !authn.Demo {
 		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
 			if !validConversationTag(tag) {
@@ -1521,6 +1521,19 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		s.settleCancelledStream(r, subject, promptEstimate, emitted, cancelCoordinator)
+		return
+	}
+	if err := scanner.Err(); err != nil {
+		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
+		writeSSEError(w, "Upstream stream failed", "stream_truncated")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		if reported != nil {
+			_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "stream_truncated")
+			return
+		}
+		_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "stream_truncated")
 		return
 	}
 	if reported != nil {
@@ -1734,11 +1747,6 @@ func (s *Server) statusFromPoolz(ctx context.Context) (statusResponse, error) {
 }
 
 func (s *Server) coordinatorBuyerURL() string {
-	for _, target := range s.cfg.Coordinators {
-		if target.Enabled {
-			return target.BaseURL
-		}
-	}
 	return s.cfg.Coordinator.BuyerURL
 }
 
@@ -1930,7 +1938,7 @@ func (s *Server) setCapacityTier(ctx context.Context, tier int, signals, eventTy
 }
 
 func (s *Server) operatorAuthorized(w http.ResponseWriter, r *http.Request) bool {
-	if r.Header.Get("Authorization") == "Bearer "+s.cfg.Coordinator.OperatorKey {
+	if operatorBearerAuthorized(r.Header, s.cfg.Coordinator.OperatorKey) {
 		return true
 	}
 	writeError(w, http.StatusUnauthorized, "authentication_error", "invalid_operator_token", "Invalid operator token")
@@ -1939,9 +1947,25 @@ func (s *Server) operatorAuthorized(w http.ResponseWriter, r *http.Request) bool
 
 func (s *Server) shouldPersistInternalHeaderAudit(r *http.Request) bool {
 	if strings.HasPrefix(r.URL.Path, "/admin/explorer/") || r.URL.Path == "/admin/explorer" {
-		return r.Header.Get("Authorization") == "Bearer "+s.cfg.Coordinator.OperatorKey
+		return operatorBearerAuthorized(r.Header, s.cfg.Coordinator.OperatorKey)
 	}
 	return true
+}
+
+func operatorBearerAuthorized(headers http.Header, expected string) bool {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return false
+	}
+	authHeader := strings.TrimSpace(headers.Get("Authorization"))
+	token, ok := strings.CutPrefix(authHeader, "Bearer ")
+	if !ok {
+		return false
+	}
+	token = strings.TrimSpace(token)
+	tokenHash := sha256.Sum256([]byte(token))
+	expectedHash := sha256.Sum256([]byte(expected))
+	return hmac.Equal(tokenHash[:], expectedHash[:])
 }
 
 func (s *Server) publicPaused(path string) bool {
@@ -2160,6 +2184,13 @@ func writeError(w http.ResponseWriter, status int, typ, code, message string) {
 	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "code": code}})
 }
 
+func writeSSEError(w http.ResponseWriter, message, code string) {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "api_error", "code": code}})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\n"))
+}
+
 func parseChatRequest(body []byte) (chatRequest, error) {
 	var req chatRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -2212,6 +2243,9 @@ func copyForwardHeaders(dst, src http.Header) {
 	}
 	if retry := strings.TrimSpace(src.Get("X-MacProvider-Retry")); retry != "" {
 		dst.Set("X-MacProvider-Retry", retry)
+	}
+	if idempotencyKey := strings.TrimSpace(src.Get("Idempotency-Key")); idempotencyKey != "" {
+		dst.Set("Idempotency-Key", idempotencyKey)
 	}
 }
 

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 )
 
 type tokenValidator interface {
@@ -58,7 +60,7 @@ func (h *handler) admin(w http.ResponseWriter, r *http.Request, fn func(http.Res
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	if h.operatorKey != "" && r.Header.Get("Authorization") != "Bearer "+h.operatorKey {
+	if h.operatorKey != "" && !auth.BearerTokenMatchesHeader(r.Header, h.operatorKey) {
 		writeError(w, http.StatusForbidden, "forbidden", "operator key required")
 		return
 	}

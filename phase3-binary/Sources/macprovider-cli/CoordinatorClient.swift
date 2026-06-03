@@ -5,11 +5,64 @@ import Darwin
 protocol ProviderWebSocketTask: AnyObject, Sendable {
     func resume()
     func send(_ message: URLSessionWebSocketTask.Message) async throws
+    func sendPing() async throws
     func receive() async throws -> URLSessionWebSocketTask.Message
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
 }
 
 extension URLSessionWebSocketTask: ProviderWebSocketTask {}
+
+extension URLSessionWebSocketTask {
+    func sendPing() async throws {
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sendPing { error in
+                if let error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: ())
+                }
+            }
+        }
+    }
+}
+
+protocol ProviderSleepAssertion: AnyObject, Sendable {
+    func stop()
+}
+
+final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendable {
+    private let lock = NSLock()
+    private var process: Process?
+
+    private init(process: Process) {
+        self.process = process
+    }
+
+    static func start() -> CaffeinateSleepAssertion? {
+        let path = "/usr/bin/caffeinate"
+        guard FileManager.default.isExecutableFile(atPath: path) else {
+            return nil
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = ["-dimsu", "-w", String(getpid())]
+        do {
+            try process.run()
+            return CaffeinateSleepAssertion(process: process)
+        } catch {
+            CoordinatorClient.keepaliveDebug("sleep_assertion_start_failed error=\(error)")
+            return nil
+        }
+    }
+
+    func stop() {
+        lock.lock()
+        let running = process
+        process = nil
+        lock.unlock()
+        running?.terminate()
+    }
+}
 
 actor CoordinatorClient {
     static let binaryVersion = "1.2.6"
@@ -29,11 +82,13 @@ actor CoordinatorClient {
     private let connectAndRunOverride: (() async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
     private let webSocketFactory: (URL) -> ProviderWebSocketTask
+    private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
     private var inferenceRelay: InferenceRelay?
     private var tier2Session: Tier2ProviderSession?
     private var webSocket: ProviderWebSocketTask?
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var sleepAssertion: ProviderSleepAssertion?
     private let sendOverride: (([String: Any]) async throws -> Void)?
 
     init?(
@@ -44,6 +99,7 @@ actor CoordinatorClient {
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
         attestationGenerator: Tier2AttestationTokenGenerating = ManagedDeviceAttestationGenerator(),
         webSocketFactory: @escaping @Sendable (URL) -> ProviderWebSocketTask = { URLSession.shared.webSocketTask(with: $0) },
+        sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         connectAndRunOverride: (() async throws -> Void)? = nil
     ) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
@@ -66,6 +122,7 @@ actor CoordinatorClient {
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
         self.attestationGenerator = attestationGenerator
         self.webSocketFactory = webSocketFactory
+        self.sleepAssertionFactory = sleepAssertionFactory
         self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
     }
@@ -80,6 +137,8 @@ actor CoordinatorClient {
     func stop() async {
         runTask?.cancel()
         heartbeatTask?.cancel()
+        sleepAssertion?.stop()
+        sleepAssertion = nil
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
         tier2Session = nil
@@ -214,6 +273,8 @@ actor CoordinatorClient {
     private func cleanupConnection() async {
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        sleepAssertion?.stop()
+        sleepAssertion = nil
         await inferenceRelay?.cancelAllAndClear()
         inferenceRelay = nil
         tier2Session = nil
@@ -392,6 +453,8 @@ actor CoordinatorClient {
         {
             print("A newer version is available (v\(recommended)). Run 'macprovider-cli update' to upgrade.")
         }
+        sleepAssertion?.stop()
+        sleepAssertion = sleepAssertionFactory()
         startHeartbeat(intervalSeconds: interval)
         try await sendStateUpdate(state: nil, reason: reason)
     }
@@ -402,9 +465,29 @@ actor CoordinatorClient {
         heartbeatTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(intervalSeconds) * 1_000_000_000)
-                try? await self?.sendHeartbeat()
+                if Task.isCancelled {
+                    return
+                }
+                do {
+                    try await self?.sendWebSocketPing()
+                    try await self?.sendHeartbeat()
+                } catch {
+                    Self.keepaliveDebug("keepalive_send_error error=\(error)")
+                    await self?.closeWebSocketAfterKeepaliveFailure()
+                    return
+                }
             }
         }
+    }
+
+    private func sendWebSocketPing() async throws {
+        guard let webSocket else { throw CancellationError() }
+        try await webSocket.sendPing()
+        Self.keepaliveDebug("ws_ping")
+    }
+
+    private func closeWebSocketAfterKeepaliveFailure() {
+        webSocket?.cancel(with: .goingAway, reason: nil)
     }
 
     private func handlePreflight(_ message: [String: Any]) async throws {
@@ -491,6 +574,8 @@ actor CoordinatorClient {
         webSocket?.cancel(with: .goingAway, reason: nil)
         heartbeatTask?.cancel()
         heartbeatTask = nil
+        sleepAssertion?.stop()
+        sleepAssertion = nil
         // v1.1.4: reset local state for the next coordinator session.
         // Local HTTP server kept serving throughout drain; provider is ready.
         await providerStatus.setState(.ready)
@@ -665,7 +750,7 @@ actor CoordinatorClient {
         }
     }
 
-    private static func keepaliveDebug(_ message: String) {
+    fileprivate static func keepaliveDebug(_ message: String) {
         guard keepaliveDebugEnabled else { return }
         let timestamp = String(format: "%.2f", Date().timeIntervalSince1970)
         FileHandle.standardError.write(Data("[keepalive \(timestamp)] \(message)\n".utf8))

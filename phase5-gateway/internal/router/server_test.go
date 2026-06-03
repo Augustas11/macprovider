@@ -935,6 +935,21 @@ func TestFeedbackSummaryAggregation(t *testing.T) {
 	}
 }
 
+func TestOperatorBearerAuthorized(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer operator-key")
+	if !operatorBearerAuthorized(headers, "operator-key") {
+		t.Fatal("valid operator bearer rejected")
+	}
+	headers.Set("Authorization", "Bearer bad-key")
+	if operatorBearerAuthorized(headers, "operator-key") {
+		t.Fatal("invalid operator bearer accepted")
+	}
+	if operatorBearerAuthorized(headers, "") {
+		t.Fatal("empty operator key accepted")
+	}
+}
+
 func TestCapacityTierDeescalation(t *testing.T) {
 	current := fixedNow()
 	h, _, dbPath, _ := newTestHarness(t, fakeOAuth{}, WithNow(func() time.Time { return current }))
@@ -993,6 +1008,8 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	req.Header.Set("X-MacProvider-Pref", "fast")
 	req.Header.Set("X-MacProvider-Retry", "1")
 	req.Header.Set("X-MacProvider-Foo", "attacker")
+	req.Header.Set("X-Request-ID", "55555555-5555-4555-8555-555555555555")
+	req.Header.Set("Idempotency-Key", "idem-gateway-1")
 	req.Header.Set("Cookie", "session=secret")
 	req.Header.Set("Proxy-Authorization", "Basic secret")
 	req.Header.Set("X-Custom-Control", "attacker")
@@ -1012,11 +1029,14 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	if got := resp.Header().Get("X-MacProvider-Route"); got != "" {
 		t.Fatalf("buyer response exposed route=%q", got)
 	}
-	if got := captured.Get("X-Request-ID"); got == "" {
-		t.Fatalf("forwarded X-Request-ID missing")
+	if got := captured.Get("X-Request-ID"); got == "" || got == "55555555-5555-4555-8555-555555555555" {
+		t.Fatalf("forwarded X-Request-ID = %q, want gateway-generated coordinator ID", got)
 	}
 	if got := captured.Get("X-MacProvider-Retry"); got != "1" {
 		t.Fatalf("forwarded retry = %q, want 1", got)
+	}
+	if got := captured.Get("Idempotency-Key"); got != "idem-gateway-1" {
+		t.Fatalf("forwarded idempotency key = %q, want idem-gateway-1", got)
 	}
 	if got := captured.Get("X-MacProvider-Foo"); got != "" {
 		t.Fatalf("forwarded unknown MacProvider header = %q", got)
@@ -1530,6 +1550,67 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 	}
 }
 
+func TestStreamingScannerErrorSettlesStreamTruncated(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"large line"}]}`
+	accountID := "acct_stream_truncated"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte("data: "))
+			_, _ = pw.Write([]byte(strings.Repeat("x", 1024*1024+1)))
+			_, _ = pw.Write([]byte("\n\n"))
+			_ = pw.Close()
+		}()
+		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: pr}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "stream_truncated" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want stream_truncated/gateway_estimated", outcome, source)
+	}
+}
+
+func TestStreamingCleanEOFSettlesOK(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"ok"}]}`
+	accountID := "acct_stream_ok"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload+"\n\ndata: [DONE]\n\n"), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "ok" || source != "provider_reported" {
+		t.Fatalf("usage outcome/source = %s/%s, want ok/provider_reported", outcome, source)
+	}
+}
+
 func TestNotFoundReturnsOpenAIEnvelope(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
 	resp := assertStatus(t, h, http.MethodGet, "/v1/does-not-exist", "", "", "", http.StatusNotFound)
@@ -1666,9 +1747,6 @@ func newTestHarnessConfig(t *testing.T, oauth auth.OAuthProvider, mutate func(*c
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	if len(cfg.Coordinators) > 0 && cfg.Coordinator.BuyerURL != "" {
-		cfg.Coordinators[0].BaseURL = cfg.Coordinator.BuyerURL
-	}
 	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
 	if err != nil {
 		t.Fatalf("sqlite.Open: %v", err)
@@ -1694,6 +1772,20 @@ func createAccountAndKey(t *testing.T, store *sqlite.Store, cfg config.Config, a
 		t.Fatalf("Issue: %v", err)
 	}
 	return fullKey
+}
+
+func usageEventOutcome(t *testing.T, dbPath, accountID string) (string, string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	defer db.Close()
+	var outcome, source string
+	if err := db.QueryRow(`SELECT outcome, token_source FROM usage_events WHERE account_id = ? ORDER BY created_at DESC LIMIT 1`, accountID).Scan(&outcome, &source); err != nil {
+		t.Fatalf("query usage outcome: %v", err)
+	}
+	return outcome, source
 }
 
 func assertStatus(t *testing.T, h http.Handler, method, path, bearer, demoToken, ip string, want int) *httptest.ResponseRecorder {
@@ -1816,11 +1908,6 @@ listen:
 public:
   base_url: https://api.streamvc.live
   account_path: /account
-coordinators:
-  - name: pearl-local
-    base_url: http://127.0.0.1:8443
-    weight: 1
-    enabled: true
 coordinator:
   buyer_url: http://coordinator.test
   operator_url: http://operator.test

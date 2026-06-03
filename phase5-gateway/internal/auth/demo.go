@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"net"
+	"net/netip"
 	"strings"
 	"time"
 )
@@ -77,16 +77,12 @@ func (m DemoManager) sign(payload []byte) []byte {
 }
 
 func normalizeDemoIP(raw string) string {
-	ip := net.ParseIP(raw)
-	if ip == nil {
+	addr, err := netip.ParseAddr(strings.TrimSpace(raw))
+	if err != nil {
 		return raw
 	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4.String()
+	if addr.Is4() {
+		return addr.String()
 	}
-	ip = ip.To16()
-	if ip == nil {
-		return raw
-	}
-	return net.IP(ip[:8]).String() + "::/64"
+	return netip.PrefixFrom(addr, 64).Masked().String()
 }

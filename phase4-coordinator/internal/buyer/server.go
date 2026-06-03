@@ -4,7 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/subtle"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -69,7 +71,10 @@ type Server struct {
 	provisionalWeight      float64
 	maxChatBodyBytes       int64
 	recovering             sync.Map
-	poolCheckLast          sync.Map
+	poolCheckMu            sync.Mutex
+	poolCheckLast          map[string]time.Time
+	poolCheckMaxEntries    int
+	poolCheckTTL           time.Duration
 	billingMu              sync.RWMutex
 	billing                *billing.Store
 	billingCfg             config.RewardsConfig
@@ -285,6 +290,17 @@ func WithBillingSnapshotID(snapshotID int64) Option {
 	}
 }
 
+func WithPoolCheckLimiter(maxEntries int, ttl time.Duration) Option {
+	return func(s *Server) {
+		if maxEntries > 0 {
+			s.poolCheckMaxEntries = maxEntries
+		}
+		if ttl > 0 {
+			s.poolCheckTTL = ttl
+		}
+	}
+}
+
 func (s *Server) SetBillingConfig(cfg config.RewardsConfig, snapshotID int64) {
 	s.billingMu.Lock()
 	defer s.billingMu.Unlock()
@@ -320,6 +336,9 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		modelClasses:           map[string]config.ModelClassConfig{},
 		provisionalWeight:      0.3,
 		maxChatBodyBytes:       config.Default().Limits.MaxChatRequestBodyBytes,
+		poolCheckLast:          map[string]time.Time{},
+		poolCheckMaxEntries:    4096,
+		poolCheckTTL:           time.Minute,
 		now:                    func() time.Time { return time.Now().UTC() },
 	}
 	for _, opt := range opts {
@@ -615,24 +634,45 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) allowPoolCheck(r *http.Request) bool {
-	ip := clientIP(r)
-	now := time.Now()
-	if prevAny, ok := s.poolCheckLast.Load(ip); ok {
-		if now.Sub(prevAny.(time.Time)) < time.Second {
+	key := poolCheckClientKey(r)
+	now := s.now()
+	s.poolCheckMu.Lock()
+	defer s.poolCheckMu.Unlock()
+	s.evictPoolCheckEntries(now)
+	if prev, ok := s.poolCheckLast[key]; ok {
+		if now.Sub(prev) < time.Second {
 			return false
 		}
 	}
-	s.poolCheckLast.Store(ip, now)
+	s.poolCheckLast[key] = now
+	s.evictPoolCheckEntries(now)
 	return true
 }
 
-func clientIP(r *http.Request) string {
-	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-For")); forwarded != "" {
-		if i := strings.IndexByte(forwarded, ','); i >= 0 {
-			return strings.TrimSpace(forwarded[:i])
+func (s *Server) evictPoolCheckEntries(now time.Time) {
+	cutoff := now.Add(-s.poolCheckTTL)
+	for key, seen := range s.poolCheckLast {
+		if seen.Before(cutoff) {
+			delete(s.poolCheckLast, key)
 		}
-		return forwarded
 	}
+	for len(s.poolCheckLast) > s.poolCheckMaxEntries {
+		var oldestKey string
+		var oldest time.Time
+		for key, seen := range s.poolCheckLast {
+			if oldestKey == "" || seen.Before(oldest) {
+				oldestKey = key
+				oldest = seen
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.poolCheckLast, oldestKey)
+	}
+}
+
+func poolCheckClientKey(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil || host == "" {
 		return r.RemoteAddr
@@ -799,7 +839,7 @@ type chatMessage struct {
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	externalRequestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
-	requestID := requestIDForBuyerRequest(externalRequestID)
+	requestID := requestIDForBuyerRequest()
 	routingRequestID := uuid.NewString()
 	originalRequestID := requestID
 	startedAt := s.now()
@@ -828,22 +868,23 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			}()
 		}
 		row := requestlog.Row{
-			TSUtc:              startedAt,
-			RequestID:          originalRequestID,
-			Model:              requestLogModel,
-			ProviderAssignedID: providerAssignedID,
-			PromptTokens:       promptTok,
-			CompletionTokens:   completionTok,
-			LatencyMs:          float64(time.Since(startedAt).Milliseconds()),
-			RoutingMs:          float64(routingDone.Sub(startedAt).Milliseconds()),
-			Status:             status,
-			Stream:             requestLogStream,
-			BuyerIP:            buyerIP(r.RemoteAddr),
-			Error:              sanitizeRequestLogText(errMsg),
-			ErrorCode:          errCode,
-			PrefHeader:         sanitizeRequestLogText(r.Header.Get("X-MacProvider-Pref")),
-			ProviderHeader:     sanitizeRequestLogText(r.Header.Get("X-MacProvider-Provider")),
-			Retried:            retried,
+			TSUtc:               startedAt,
+			RequestID:           originalRequestID,
+			Model:               requestLogModel,
+			ProviderAssignedID:  providerAssignedID,
+			PromptTokens:        promptTok,
+			CompletionTokens:    completionTok,
+			EstimatedCompTokens: estimatedCompTokens,
+			LatencyMs:           float64(time.Since(startedAt).Milliseconds()),
+			RoutingMs:           float64(routingDone.Sub(startedAt).Milliseconds()),
+			Status:              status,
+			Stream:              requestLogStream,
+			BuyerIP:             buyerIP(r.RemoteAddr),
+			Error:               sanitizeRequestLogText(errMsg),
+			ErrorCode:           errCode,
+			PrefHeader:          sanitizeRequestLogText(r.Header.Get("X-MacProvider-Pref")),
+			ProviderHeader:      sanitizeRequestLogText(r.Header.Get("X-MacProvider-Provider")),
+			Retried:             retried,
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
 		defer cancel()
@@ -923,6 +964,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	) error {
 		return logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
 	}
+	logProviderRowWithEstimate := func(
+		provider pool.Provider,
+		status int,
+		promptTok, completionTok *int64,
+		errMsg, errCode string,
+		retried int,
+		estimatedCompTokens *int64,
+	) error {
+		return logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone)
+	}
 	maxBodyBytes := s.maxChatBodyBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
@@ -944,6 +995,35 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	requestLogModel = req.Model
 	requestLogStream = req.Stream
+	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
+		if s.reqLogStore == nil {
+			logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
+			writeError(w, http.StatusServiceUnavailable, "idempotency_unavailable", "Idempotency-Key requires durable request logging")
+			return
+		}
+		bodyHash := sha256.Sum256(body)
+		reservedRequestID, replay, err := s.reqLogStore.ReserveIdempotencyKey(r.Context(), idempotencyKey, hex.EncodeToString(bodyHash[:]), originalRequestID, startedAt)
+		if err != nil {
+			if errors.Is(err, requestlog.ErrIdempotencyConflict) {
+				logBuyerFailure(http.StatusConflict, "Idempotency-Key was already used with a different request body")
+				writeError(w, http.StatusConflict, "idempotency_key_body_mismatch", "Idempotency-Key was already used with a different request body")
+				return
+			}
+			s.log.Warn().Err(err).Msg("idempotency reservation failed")
+			logBuyerFailure(http.StatusInternalServerError, "Could not reserve idempotency key")
+			writeError(w, http.StatusInternalServerError, "idempotency_reservation_failed", "Could not reserve idempotency key")
+			return
+		}
+		originalRequestID = reservedRequestID
+		requestID = reservedRequestID
+		routingRequestID = reservedRequestID
+		if replay {
+			w.Header().Set("X-Request-ID", reservedRequestID)
+			logBuyerFailure(http.StatusConflict, "Idempotency-Key request is already recorded")
+			writeError(w, http.StatusConflict, "idempotency_key_replayed", "Idempotency-Key request is already recorded")
+			return
+		}
+	}
 	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
 		logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
 		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)
@@ -1202,7 +1282,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			promptTok, completionTok := tokenPointersFromChatResponse(respBody)
-			if err := logProviderRow(provider, http.StatusOK, promptTok, completionTok, "", "", explicitRetries); err != nil {
+			estimatedCompletion := s.observedCompletionTokensFromBytes(len(respBody))
+			if err := logProviderRowWithEstimate(provider, http.StatusOK, promptTok, completionTok, "", "", explicitRetries, estimatedCompletion); err != nil {
 				cancelAttempt()
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
@@ -1342,7 +1423,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 	ttftLogged := false
 	faultFlag := billing.FaultNone
 	estimatedCompletion := func() *int64 {
-		return estimatedCompletionTokensFromBytes(body.Len())
+		return s.estimatedCompletionTokensFromBytes(body.Len())
 	}
 	observeTTFT := func() {
 		if ttftLogged {
@@ -1401,7 +1482,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 			if promptTok == nil && completionTok == nil {
 				promptTok, completionTok = tokenPointersFromChatResponse(checkedBody)
 			}
-			return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, FaultFlag: faultFlag}
+			return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(body.Len()), FaultFlag: faultFlag}
 		case err := <-relay.Errors:
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws relay failed")
 			if errors.Is(err, providerws.ErrRelayTimeout) {
@@ -1437,7 +1518,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	finishReason := ""
 	bytesEmitted := 0
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
-		return requestLogAttempt{Status: http.StatusOK, Error: message, EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: faultFlag}
+		return requestLogAttempt{Status: http.StatusOK, Error: message, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: faultFlag}
 	}
 	commit := func() {
 		if committed {
@@ -1535,7 +1616,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
 			}
-			attempt := requestLogAttempt{Status: http.StatusOK}
+			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted)}
 			attempt.PromptTokens, attempt.CompletionTokens = tokenPointersFromUsageObject(end.Usage)
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
 				attempt.FaultFlag = billing.FaultBreakerQualifying
@@ -1546,7 +1627,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				attempt.ErrorCode = spec001EndStatus(end.Status)
 				attempt.FaultFlag = billing.FaultBreakerQualifying
 				if attempt.CompletionTokens == nil {
-					attempt.EstimatedCompTokens = estimatedCompletionTokensFromBytes(bytesEmitted)
+					attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(bytesEmitted)
 				}
 			}
 			if flusher != nil {
@@ -1561,25 +1642,25 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				}
 				s.recordBreakerFault(provider, breakerFaultDeadWS, requestID)
 				if !committed {
-					return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
+					return wsForwardProviderDisconnected, requestLogAttempt{Status: http.StatusBadGateway, Error: "Selected provider disconnected; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 				}
 				writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider disconnected during streaming", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
+				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider disconnected during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 			}
 			if errors.Is(err, providerws.ErrRelayTimeout) {
 				s.recordBreakerFault(provider, breakerFaultRelayTimeout, requestID)
 				if !committed {
-					return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
+					return wsForwardTimedOut, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Selected provider timed out; buyer should retry", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 				}
 				commit()
 				writeSSEError(w, "Provider timed out during streaming", "provider_timeout")
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider timed out during streaming", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
+				return wsForwardProviderDisconnectedCommitted, requestLogAttempt{Status: http.StatusOK, Error: "Provider timed out during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 			}
 			if errors.Is(err, providerws.ErrRelayAEADFailed) {
 				if !committed {
@@ -1590,14 +1671,14 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 				if flusher != nil {
 					flusher.Flush()
 				}
-				return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider encrypted response failed authentication", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider encrypted response failed authentication", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 			}
 			commit()
 			writeSSEError(w, "Provider failed during streaming", "provider_error")
 			if flusher != nil {
 				flusher.Flush()
 			}
-			return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider failed during streaming", EstimatedCompTokens: estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
+			return wsForwardFailed, requestLogAttempt{Status: http.StatusOK, Error: "Provider failed during streaming", EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: billing.FaultBreakerQualifying}
 		}
 	}
 }
@@ -1657,7 +1738,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
 		attempt := requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, Error: message, FaultFlag: faultFlag}
 		if completionTok == nil {
-			attempt.EstimatedCompTokens = estimatedCompletionTokensFromBytes(bytesEmitted)
+			attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(bytesEmitted)
 		}
 		return attempt
 	}
@@ -1681,7 +1762,10 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		}
 		if err == io.EOF {
 			s.stickyStore(r.Header, provider, modelScope)
-			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok}
+			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted)}
+		}
+		if r.Context().Err() != nil {
+			return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 		}
 		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
 		writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
@@ -2597,20 +2681,7 @@ func hasInternalRoutingHeader(headers http.Header) bool {
 }
 
 func (s *Server) internalBearerAuthorized(headers http.Header) bool {
-	expected := strings.TrimSpace(s.internalAuthKey)
-	if expected == "" {
-		return false
-	}
-	auth := strings.TrimSpace(headers.Get("Authorization"))
-	token, ok := strings.CutPrefix(auth, "Bearer ")
-	if !ok {
-		return false
-	}
-	token = strings.TrimSpace(token)
-	if len(token) != len(expected) {
-		return false
-	}
-	return subtle.ConstantTimeCompare([]byte(token), []byte(expected)) == 1
+	return auth.BearerTokenMatchesHeader(headers, s.internalAuthKey)
 }
 
 func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig) (pool.Provider, *routeError) {
@@ -2777,11 +2848,26 @@ func tokenPointersFromUsageObject(raw json.RawMessage) (*int64, *int64) {
 	return usage.PromptTokens, usage.CompletionTokens
 }
 
-func estimatedCompletionTokensFromBytes(n int) *int64 {
+func (s *Server) estimatedCompletionTokensFromBytes(n int) *int64 {
+	return estimatedCompletionTokensFromBytes(n, s.tier2Config().OutputBytesPerTokenCeiling)
+}
+
+func (s *Server) observedCompletionTokensFromBytes(n int) *int64 {
+	if n <= 0 {
+		zero := int64(0)
+		return &zero
+	}
+	return s.estimatedCompletionTokensFromBytes(n)
+}
+
+func estimatedCompletionTokensFromBytes(n, bytesPerToken int) *int64 {
 	if n <= 0 {
 		return nil
 	}
-	tokens := int64((n + 3) / 4)
+	if bytesPerToken <= 0 {
+		bytesPerToken = 4
+	}
+	tokens := int64((n + bytesPerToken - 1) / bytesPerToken)
 	if tokens < 1 {
 		tokens = 1
 	}
@@ -2829,13 +2915,21 @@ func endErrorMessage(end providerws.InferenceResponseEnd) string {
 	return "Provider failed during inference"
 }
 
-func requestIDForBuyerRequest(headerValue string) string {
-	if headerValue != "" {
-		if parsed, err := uuid.Parse(headerValue); err == nil && parsed.Version() == 4 {
-			return parsed.String()
+func requestIDForBuyerRequest() string {
+	return uuid.NewString()
+}
+
+func normalizeIdempotencyKey(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 256 {
+		return ""
+	}
+	for _, r := range value {
+		if r < 0x21 || r > 0x7e {
+			return ""
 		}
 	}
-	return uuid.NewString()
+	return value
 }
 
 func modelForRequestLog(body []byte) string {

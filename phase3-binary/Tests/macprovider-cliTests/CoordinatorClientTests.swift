@@ -100,6 +100,44 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(attemptCount, 2)
     }
 
+    func testCoordinatorSessionSendsWebSocketPingBeforeHeartbeat() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = false
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let socket = FakeProviderWebSocketTask(
+            receiveResults: [
+                .success(.string("""
+                {"type":"hello_ack","assigned_id":"session-1","heartbeat_interval_s":1,"tier":"pinned"}
+                """)),
+                .failure(CancellationError()),
+            ],
+            receiveDelayNanoseconds: 1_200_000_000
+        )
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            webSocketFactory: { _ in socket },
+            sleepAssertionFactory: { nil }
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+        } catch is CancellationError {
+        }
+
+        XCTAssertGreaterThanOrEqual(socket.pingCountSnapshot(), 1)
+        XCTAssertTrue(socket.sentFrames().contains { $0["type"] as? String == "heartbeat" })
+    }
+
     func testHelloIncludesModelHashWhenAvailable() async throws {
         let recorder = CoordinatorFrameRecorder()
         let modelHash = String(repeating: "a", count: 64)
@@ -472,6 +510,7 @@ final class CoordinatorClientTests: XCTestCase {
             },
             reconnectGraceNanoseconds: reconnectGraceNanoseconds,
             attestationGenerator: attestationGenerator,
+            sleepAssertionFactory: { nil },
             connectAndRunOverride: connectAndRunOverride
         ))
     }
@@ -532,12 +571,15 @@ private final class FakeProviderWebSocketFactory: @unchecked Sendable {
 private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked Sendable {
     private let queue = DispatchQueue(label: "FakeProviderWebSocketTask")
     private var receiveResults: [Result<URLSessionWebSocketTask.Message, Error>]
+    private let receiveDelayNanoseconds: UInt64
     private var sent: [[String: Any]] = []
     private(set) var resumeCount = 0
     private(set) var cancelCount = 0
+    private var pingCount = 0
 
-    init(receiveResults: [Result<URLSessionWebSocketTask.Message, Error>]) {
+    init(receiveResults: [Result<URLSessionWebSocketTask.Message, Error>], receiveDelayNanoseconds: UInt64 = 0) {
         self.receiveResults = receiveResults
+        self.receiveDelayNanoseconds = receiveDelayNanoseconds
     }
 
     func resume() {
@@ -563,7 +605,16 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
         }
     }
 
+    func sendPing() async throws {
+        queue.sync {
+            pingCount += 1
+        }
+    }
+
     func receive() async throws -> URLSessionWebSocketTask.Message {
+        if receiveDelayNanoseconds > 0 {
+            try? await Task.sleep(nanoseconds: receiveDelayNanoseconds)
+        }
         let result = queue.sync {
             receiveResults.isEmpty ? Result<URLSessionWebSocketTask.Message, Error>.failure(CancellationError()) : receiveResults.removeFirst()
         }
@@ -579,6 +630,12 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
     func sentFrames() -> [[String: Any]] {
         queue.sync {
             sent
+        }
+    }
+
+    func pingCountSnapshot() -> Int {
+        queue.sync {
+            pingCount
         }
     }
 }

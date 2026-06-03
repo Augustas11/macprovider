@@ -22,6 +22,8 @@ import (
 	"github.com/gobwas/ws/wsutil"
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
+
+	"github.com/augstar/macprovider-coordinator/internal/auth"
 )
 
 const (
@@ -55,6 +57,7 @@ type Server struct {
 	sessions  sync.Map
 	started   time.Time
 	explorer  http.Handler
+	unauth    chan struct{}
 }
 
 type TokenValidator interface {
@@ -105,6 +108,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		now:     func() time.Time { return time.Now().UTC() },
 		newUUID: func() string { return uuid.NewString() },
 		started: time.Now().UTC(),
+		unauth:  make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
 	}
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
 	for _, opt := range opts {
@@ -171,13 +175,21 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn().Err(err).Msg("provider websocket upgrade failed")
 		return
 	}
-	auth, ok := s.validateProviderToken(r)
-	if !ok {
-		s.close(conn, CloseInvalidToken, "invalid_token")
+	s.enableProviderTCPKeepAlive(conn)
+	if !s.reserveUnauthenticatedConn() {
+		s.close(conn, ClosePoolFull, "too_many_unauthenticated_connections")
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
 		return
 	}
-	go s.handleConn(conn, auth)
+	s.setReadDeadline(conn, s.cfg.ProviderWSHandshakeTimeout())
+	auth, ok := s.validateProviderToken(r)
+	if !ok {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		s.releaseUnauthenticatedConn()
+		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
+		return
+	}
+	go s.handleConn(conn, auth, s.releaseUnauthenticatedConn)
 }
 
 func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
@@ -208,8 +220,15 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 	return providerAuth{validated: ok, providerID: providerID, token: token}, ok
 }
 
-func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
+func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthenticated func()) {
 	defer conn.Close()
+	var releaseOnce sync.Once
+	releaseUnauth := func() {
+		if releaseUnauthenticated != nil {
+			releaseOnce.Do(releaseUnauthenticated)
+		}
+	}
+	defer releaseUnauth()
 	var providerID string
 	var assignedID string
 	defer func() {
@@ -218,7 +237,7 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 		}
 	}()
 
-	payload, op, err := wsutil.ReadClientData(conn)
+	payload, op, err := s.readClientData(conn)
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_hello: read")
 		return
@@ -235,15 +254,15 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth) {
 	}
 	switch {
 	case typ == "hello" && version == 1:
-		providerID, assignedID = s.handleV1Conn(conn, auth, payload)
+		providerID, assignedID = s.handleV1Conn(conn, auth, payload, releaseUnauth)
 	case typ == "auth_request" && version == 2:
-		providerID, assignedID = s.handleV2Conn(conn, auth, payload)
+		providerID, assignedID = s.handleV2Conn(conn, auth, payload, releaseUnauth)
 	default:
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 	}
 }
 
-func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte) (string, string) {
+func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	hello, badField, err := ParseHello(payload)
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_hello: "+badField)
@@ -266,6 +285,7 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte) 
 		return "", ""
 	}
 	session := s.registerProviderSession(conn, entry)
+	releaseUnauth()
 
 	ack := HelloAck{
 		Type:                     "hello_ack",
@@ -292,7 +312,7 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte) 
 	return entry.ProviderID, entry.AssignedID
 }
 
-func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte) (string, string) {
+func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	initial, badField, err := ParseAuthRequest(payload)
 	if err != nil || initial.Stage != "initial" {
 		if badField == "" {
@@ -351,12 +371,13 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte) 
 		s.close(conn, CloseTier2KeyExchangeFailed, "tier2_key_exchange_failed")
 		return "", ""
 	}
-	if err := wsutil.WriteServerText(conn, rawChallenge); err != nil {
+	if err := s.writeServerText(conn, rawChallenge); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", initial.ProviderID).Msg("auth_challenge write failed")
 		return "", ""
 	}
 
-	proofPayload, op, err := wsutil.ReadClientData(conn)
+	s.setReadDeadline(conn, s.cfg.ProviderWSHandshakeTimeout())
+	proofPayload, op, err := s.readClientData(conn)
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_auth_request: read")
 		return "", ""
@@ -398,6 +419,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte) 
 		StartedAt:    s.now(),
 	}
 	session := s.registerProviderSession(conn, entry)
+	releaseUnauth()
 	response := AuthResponse{
 		Type:                     "auth_response",
 		Version:                  2,
@@ -600,7 +622,7 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *p
 	if old := s.pool.Register(entry, conn); old != nil {
 		_ = old.Close()
 	}
-	session := newProviderSession(entry.ProviderID, entry.AssignedID, conn, s.cfg.WS.WriteBufferSize)
+	session := newProviderSession(entry.ProviderID, entry.AssignedID, conn, s.cfg.WS.WriteBufferSize, s.cfg.ProviderWSWriteTimeout())
 	session.useTier2Session(entry.Tier2Session)
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
 	go session.runWriter()
@@ -610,7 +632,8 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *p
 
 func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) {
 	for {
-		payload, op, err := wsutil.ReadClientData(conn)
+		s.setReadDeadline(conn, s.cfg.HeartbeatMissThreshold())
+		payload, op, err := s.readClientData(conn)
 		if err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider websocket read failed")
 			return
@@ -657,14 +680,93 @@ func (s *Server) sendAuthRejection(conn net.Conn, code, message string) {
 	if err != nil {
 		return
 	}
-	_ = wsutil.WriteServerText(conn, raw)
+	_ = s.writeServerText(conn, raw)
 }
 
 func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 	// Log every WS close at warn level so silent failures (like the v1.1.2
 	// deploy's invalid_token rejection of M4/M1) are visible in the journal.
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
-	_ = wsutil.WriteServerMessage(conn, gobwas.OpClose, gobwas.NewCloseFrameBody(code, reason))
+	_ = s.writeServerMessage(conn, gobwas.OpClose, gobwas.NewCloseFrameBody(code, reason))
+}
+
+func (s *Server) reserveUnauthenticatedConn() bool {
+	select {
+	case s.unauth <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) releaseUnauthenticatedConn() {
+	select {
+	case <-s.unauth:
+	default:
+	}
+}
+
+func (s *Server) setReadDeadline(conn net.Conn, timeout time.Duration) {
+	_ = conn.SetReadDeadline(s.now().Add(timeout))
+}
+
+func (s *Server) enableProviderTCPKeepAlive(conn net.Conn) {
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	if err := tcp.SetKeepAlive(true); err != nil {
+		s.log.Warn().Err(err).Msg("provider tcp keepalive enable failed")
+	}
+	if err := tcp.SetKeepAlivePeriod(30 * time.Second); err != nil {
+		s.log.Warn().Err(err).Msg("provider tcp keepalive period failed")
+	}
+}
+
+func (s *Server) setWriteDeadline(conn net.Conn) {
+	_ = conn.SetWriteDeadline(s.now().Add(s.cfg.ProviderWSWriteTimeout()))
+}
+
+func (s *Server) writeServerText(conn net.Conn, payload []byte) error {
+	s.setWriteDeadline(conn)
+	return wsutil.WriteServerText(conn, payload)
+}
+
+func (s *Server) writeServerMessage(conn net.Conn, op gobwas.OpCode, payload []byte) error {
+	s.setWriteDeadline(conn)
+	return wsutil.WriteServerMessage(conn, op, payload)
+}
+
+func (s *Server) readClientData(conn net.Conn) ([]byte, gobwas.OpCode, error) {
+	controlHandler := wsutil.ControlFrameHandler(conn, gobwas.StateServerSide)
+	rd := wsutil.Reader{
+		Source:          conn,
+		State:           gobwas.StateServerSide,
+		CheckUTF8:       true,
+		SkipHeaderCheck: false,
+		MaxFrameSize:    s.cfg.ProviderWSMaxFrameBytes(),
+		OnIntermediate:  controlHandler,
+	}
+	for {
+		hdr, err := rd.NextFrame()
+		if err != nil {
+			return nil, 0, err
+		}
+		if hdr.OpCode.IsControl() {
+			if err := controlHandler(hdr, &rd); err != nil {
+				return nil, 0, err
+			}
+			continue
+		}
+		if hdr.OpCode&(gobwas.OpText|gobwas.OpBinary) == 0 {
+			if err := rd.Discard(); err != nil {
+				return nil, 0, err
+			}
+			continue
+		}
+		payload, err := io.ReadAll(&rd)
+		return payload, hdr.OpCode, err
+	}
 }
 
 func sessionKey(providerID, assignedID string) string {
@@ -1478,7 +1580,7 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authorizedOperator(r *http.Request) bool {
-	return s.cfg.Auth.OperatorKey == "" || r.Header.Get("Authorization") == "Bearer "+s.cfg.Auth.OperatorKey
+	return s.cfg.Auth.OperatorKey == "" || auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.OperatorKey)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

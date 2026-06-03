@@ -632,7 +632,7 @@ func TestServerRequestCapUsesClientHostNotPort(t *testing.T) {
 func TestDashboardCrossViewLinkWiring(t *testing.T) {
 	raw := readStatic(t, "static/js/dashboard.js")
 	for _, want := range []string{
-		`data-view`,
+		`dataset.view`,
 		`/admin/explorer/sessions/${encodeURIComponent(v)}`,
 		`/admin/explorer/buyers/${encodeURIComponent(v)}`,
 		`/admin/explorer/providers/${encodeURIComponent(v)}`,
@@ -642,6 +642,9 @@ func TestDashboardCrossViewLinkWiring(t *testing.T) {
 		if !strings.Contains(raw, want) {
 			t.Fatalf("dashboard.js missing %q", want)
 		}
+	}
+	if strings.Contains(raw, "innerHTML") {
+		t.Fatal("dashboard.js must render with DOM nodes and textContent, not innerHTML")
 	}
 }
 

@@ -30,32 +30,62 @@ func (s *Store) ExplorerListBuyers(ctx context.Context, q storage.ExplorerBuyerQ
 		return storage.ExplorerBuyerList{}, err
 	}
 	rows, err := s.db.QueryContext(ctx, `
+		WITH usage_rollup AS (
+			SELECT account_id,
+			       SUM(total_tokens) AS used_tokens,
+			       MAX(created_at) AS last_usage_time
+			FROM usage_events
+			WHERE created_at >= ? AND created_at < ?
+			GROUP BY account_id
+		),
+		quota_rollup AS (
+			SELECT account_id,
+			       SUM(CASE WHEN status = 'active' THEN reserved_tokens ELSE 0 END) AS reserved_tokens
+			FROM quota_reservations
+			WHERE created_at >= ? AND created_at < ?
+			GROUP BY account_id
+		),
+		concurrency_rollup AS (
+			SELECT account_id, COUNT(*) AS active_concurrency
+			FROM concurrency_reservations
+			WHERE status = 'active'
+			GROUP BY account_id
+		),
+		feedback_rollup AS (
+			SELECT account_id, COUNT(*) AS feedback_count, AVG(rating) AS average_rating
+			FROM feedback_events
+			WHERE created_at >= ? AND created_at < ?
+			GROUP BY account_id
+		)
 		SELECT a.account_id, a.status, a.quota_class, a.concurrency_class, a.created_at,
-		       COALESCE(SUM(ue.total_tokens), 0) AS used_tokens,
-		       COALESCE(SUM(CASE WHEN qr.status = 'active' THEN qr.reserved_tokens ELSE 0 END), 0) AS reserved_tokens,
-		       COALESCE(MAX(ue.created_at), '') AS last_usage_time,
+		       COALESCE(ur.used_tokens, 0) AS used_tokens,
+		       COALESCE(qr.reserved_tokens, 0) AS reserved_tokens,
+		       COALESCE(ur.last_usage_time, '') AS last_usage_time,
 		       COALESCE((SELECT request_id FROM usage_events u2 WHERE u2.account_id = a.account_id ORDER BY u2.created_at DESC, u2.request_id DESC LIMIT 1), '') AS last_request_id,
-		       COALESCE((SELECT COUNT(*) FROM concurrency_reservations cr WHERE cr.account_id = a.account_id AND cr.status = 'active'), 0) AS active_concurrency,
-		       COALESCE((SELECT COUNT(*) FROM feedback_events f WHERE f.account_id = a.account_id AND f.created_at >= ? AND f.created_at < ?), 0) AS feedback_count,
-		       COALESCE((SELECT AVG(rating) FROM feedback_events f WHERE f.account_id = a.account_id AND f.created_at >= ? AND f.created_at < ?), -1) AS average_rating
+		       COALESCE(cr.active_concurrency, 0) AS active_concurrency,
+		       COALESCE(fr.feedback_count, 0) AS feedback_count,
+		       COALESCE(fr.average_rating, -1) AS average_rating
 		FROM accounts a
-		LEFT JOIN account_identities ai ON ai.account_id = a.account_id
-		LEFT JOIN api_keys ak ON ak.account_id = a.account_id
-		LEFT JOIN usage_events ue ON ue.account_id = a.account_id AND ue.created_at >= ? AND ue.created_at < ?
-		LEFT JOIN quota_reservations qr ON qr.account_id = a.account_id AND qr.created_at >= ? AND qr.created_at < ?
+		LEFT JOIN usage_rollup ur ON ur.account_id = a.account_id
+		LEFT JOIN quota_rollup qr ON qr.account_id = a.account_id
+		LEFT JOIN concurrency_rollup cr ON cr.account_id = a.account_id
+		LEFT JOIN feedback_rollup fr ON fr.account_id = a.account_id
 		WHERE (? = '' OR a.account_id > ?)
 		  AND (? = '' OR a.status = ?)
 		  AND (? = '' OR a.quota_class = ?)
 		  AND (? = '' OR a.concurrency_class = ?)
 		  AND (? = '' OR a.account_id = ?)
-		  AND (? = '' OR ai.email = ?)
-		  AND (? = '' OR ((? = 0 AND lower(ai.email) LIKE ? || '%') OR (? = 1 AND ai.email GLOB ? || '*')))
-		  AND (? = '' OR ak.status = ?)
-		GROUP BY a.account_id, a.status, a.quota_class, a.concurrency_class, a.created_at
+		  AND (? = '' OR EXISTS (SELECT 1 FROM account_identities ai WHERE ai.account_id = a.account_id AND ai.email = ?))
+		  AND (? = '' OR EXISTS (
+		    SELECT 1 FROM account_identities ai
+		    WHERE ai.account_id = a.account_id
+		      AND ((? = 0 AND lower(ai.email) LIKE ? || '%') OR (? = 1 AND ai.email GLOB ? || '*'))
+		  ))
+		  AND (? = '' OR EXISTS (SELECT 1 FROM api_keys ak WHERE ak.account_id = a.account_id AND ak.status = ?))
 		ORDER BY a.account_id ASC
 		LIMIT ?`,
 		encodeTime(q.From), encodeTime(q.To), encodeTime(q.From), encodeTime(q.To),
-		encodeTime(q.From), encodeTime(q.To), encodeTime(q.From), encodeTime(q.To),
+		encodeTime(q.From), encodeTime(q.To),
 		cursorID, cursorID, q.Status, q.Status, q.QuotaClass, q.QuotaClass,
 		q.ConcurrencyClass, q.ConcurrencyClass, q.AccountID, q.AccountID,
 		q.Email, q.Email, q.EmailPrefix, boolInt(hasUpperASCII(q.EmailPrefix)), foldEmail(q.EmailPrefix), boolInt(hasUpperASCII(q.EmailPrefix)), q.EmailPrefix,

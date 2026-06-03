@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -768,6 +769,7 @@ func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+	req.RemoteAddr = "198.51.100.1:12345"
 	req.Header.Set("X-Forwarded-For", "192.0.2.1")
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)
@@ -780,6 +782,7 @@ func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
 	}
 
 	missingReq := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=missing", nil)
+	missingReq.RemoteAddr = "198.51.100.2:12345"
 	missingReq.Header.Set("X-Forwarded-For", "192.0.2.2")
 	missing := httptest.NewRecorder()
 	server.Handler().ServeHTTP(missing, missingReq)
@@ -799,12 +802,62 @@ func TestPoolCheckRateLimitsPerIP(t *testing.T) {
 
 	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
 		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
-		req.Header.Set("X-Forwarded-For", "192.0.2.3")
+		req.RemoteAddr = "198.51.100.10:12345"
 		rr := httptest.NewRecorder()
 		server.Handler().ServeHTTP(rr, req)
 		if rr.Code != want {
 			t.Fatalf("request %d status = %d, want %d body=%s", i+1, rr.Code, want, rr.Body.String())
 		}
+	}
+}
+
+func TestPoolCheckRateLimitIgnoresSpoofedXForwardedFor(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	for i, forwarded := range []string{"192.0.2.10", "192.0.2.11"} {
+		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+		req.RemoteAddr = "198.51.100.20:54321"
+		req.Header.Set("X-Forwarded-For", forwarded)
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		want := http.StatusOK
+		if i == 1 {
+			want = http.StatusTooManyRequests
+		}
+		if rr.Code != want {
+			t.Fatalf("request %d status = %d, want %d body=%s", i+1, rr.Code, want, rr.Body.String())
+		}
+	}
+}
+
+func TestPoolCheckRateLimiterEvictsToBoundUniqueKeys(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	register(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithPoolCheckLimiter(2, time.Hour),
+	)
+
+	for i := 1; i <= 5; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+		req.RemoteAddr = fmt.Sprintf("198.51.100.%d:12345", i)
+		rr := httptest.NewRecorder()
+		server.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("unique request %d status = %d, body=%s", i, rr.Code, rr.Body.String())
+		}
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/pool/check?provider_id=p1", nil)
+	req.RemoteAddr = "198.51.100.1:54321"
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("evicted first key status = %d, want %d body=%s", rr.Code, http.StatusOK, rr.Body.String())
 	}
 }
 
@@ -875,17 +928,22 @@ func TestRequestLogNilGuard(t *testing.T) {
 
 func TestRequestLogBuyerMultiAttemptRows(t *testing.T) {
 	const requestID = "11111111-1111-4111-8111-111111111111"
+	var providerRequestIDs []string
 	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Request-ID"); got != requestID {
-			t.Fatalf("fail X-Request-ID = %q, want %q", got, requestID)
+		got := r.Header.Get("X-Request-ID")
+		if got == "" || got == requestID {
+			t.Fatalf("fail X-Request-ID = %q, want coordinator-generated value", got)
 		}
+		providerRequestIDs = append(providerRequestIDs, got)
 		http.Error(w, "bad gateway", http.StatusBadGateway)
 	}))
 	defer failUpstream.Close()
 	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("X-Request-ID"); got != requestID {
-			t.Fatalf("ok X-Request-ID = %q, want %q", got, requestID)
+		got := r.Header.Get("X-Request-ID")
+		if got == "" || got == requestID {
+			t.Fatalf("ok X-Request-ID = %q, want coordinator-generated value", got)
 		}
+		providerRequestIDs = append(providerRequestIDs, got)
 		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
 	}))
 	defer okUpstream.Close()
@@ -916,7 +974,10 @@ func TestRequestLogBuyerMultiAttemptRows(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	rows := queryRequestLogRows(t, dbPath, requestID)
+	if len(providerRequestIDs) != 2 || providerRequestIDs[0] != providerRequestIDs[1] {
+		t.Fatalf("provider request IDs = %#v, want same coordinator-generated ID across attempts", providerRequestIDs)
+	}
+	rows := queryRequestLogRows(t, dbPath, providerRequestIDs[0])
 	if len(rows) != 2 {
 		t.Fatalf("request_log rows = %d, want 2: %#v", len(rows), rows)
 	}
@@ -934,8 +995,205 @@ func TestRequestLogBuyerMultiAttemptRows(t *testing.T) {
 	}
 }
 
+func TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID(t *testing.T) {
+	const clientRequestID = "44444444-4444-4444-8444-444444444444"
+	var providerRequestIDs []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("X-Request-ID")
+		if got == "" || got == clientRequestID {
+			t.Fatalf("provider X-Request-ID = %q, want coordinator-generated value", got)
+		}
+		providerRequestIDs = append(providerRequestIDs, got)
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRequestLog(reqLog))
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+	for i := 0; i < 2; i++ {
+		rr := postChat(t, server, body, http.Header{"X-Request-ID": []string{clientRequestID}})
+		if rr.Code != http.StatusOK {
+			t.Fatalf("request %d status=%d body=%s", i, rr.Code, rr.Body.String())
+		}
+	}
+	if len(providerRequestIDs) != 2 || providerRequestIDs[0] == providerRequestIDs[1] {
+		t.Fatalf("provider request IDs = %#v, want distinct coordinator-generated IDs", providerRequestIDs)
+	}
+	if rows := queryRequestLogRows(t, dbPath, clientRequestID); len(rows) != 0 {
+		t.Fatalf("request_log used buyer request ID: %#v", rows)
+	}
+	for _, id := range providerRequestIDs {
+		if rows := queryRequestLogRows(t, dbPath, id); len(rows) != 1 {
+			t.Fatalf("request_log rows for %s = %d, want 1: %#v", id, len(rows), rows)
+		}
+	}
+}
+
+func TestSuccessfulNonStreamingBillingClampsInflatedProviderCompletion(t *testing.T) {
+	responseBody := []byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":10000000,"total_tokens":10000004}}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(responseBody)
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+		buyer.WithTier2Config(config.Tier2Config{OutputBytesPerTokenCeiling: 16}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	row := queryLatestBillingRow(t, dbPath)
+	wantEstimate := int64((len(responseBody) + 15) / 16)
+	if row.UsageSource != "byte_estimated" {
+		t.Fatalf("usage_source=%q want byte_estimated", row.UsageSource)
+	}
+	if row.EstimatedCompletionTokens != wantEstimate {
+		t.Fatalf("estimated_completion_tokens=%d want %d", row.EstimatedCompletionTokens, wantEstimate)
+	}
+	if row.CompletionTokens != 10000000 {
+		t.Fatalf("stored provider completion_tokens=%d want 10000000", row.CompletionTokens)
+	}
+	wantGross := int64(4 + 2*wantEstimate)
+	if row.GrossCredits != wantGross {
+		t.Fatalf("gross_credits=%d want %d", row.GrossCredits, wantGross)
+	}
+}
+
+func TestIdempotencyKeyRejectsReplayAndBodyMismatchBeforeProvider(t *testing.T) {
+	var calls int
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	reqLog, _ := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRequestLog(reqLog))
+
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`)
+	headers := http.Header{"Idempotency-Key": []string{"idem-1"}}
+	rr := postChat(t, server, body, headers)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rr = postChat(t, server, body, headers)
+	if rr.Code != http.StatusConflict || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"idempotency_key_replayed"`)) {
+		t.Fatalf("replay status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	otherBody := []byte(`{"model":"model-a","messages":[{"role":"user","content":"different"}]}`)
+	rr = postChat(t, server, otherBody, headers)
+	if rr.Code != http.StatusConflict || !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"idempotency_key_body_mismatch"`)) {
+		t.Fatalf("mismatch status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if calls != 1 {
+		t.Fatalf("provider calls=%d want 1", calls)
+	}
+}
+
+func TestRawHTTPStreamingBuyerCancelDoesNotBreakerFaultProvider(t *testing.T) {
+	firstChunk := make(chan struct{})
+	cancelSeen := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		flusher, _ := w.(http.Flusher)
+		_, _ = fmt.Fprint(w, `data: {"id":"chunk","usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6},"choices":[{"delta":{"content":"ok"}}]}`+"\n\n")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		close(firstChunk)
+		<-r.Context().Done()
+		close(cancelSeen)
+	}))
+	defer upstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	billingStore, err := billing.NewStore(reqLog.DB())
+	if err != nil {
+		t.Fatalf("billing.NewStore: %v", err)
+	}
+	rewards := config.RewardsConfig{
+		GlobalMultiplier: 1.0,
+		ProviderShare:    0.90,
+		RateCard: map[string]config.RateCardEntry{
+			"model-a": {PromptCreditsPerMtok: 1000000, CompletionCreditsPerMtok: 2000000},
+		},
+	}
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithBilling(billingStore, rewards),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"model-a","stream":true,"messages":[{"role":"user","content":"hello"}]}`)).WithContext(ctx)
+	rr := httptest.NewRecorder()
+	done := make(chan struct{})
+	go func() {
+		server.Handler().ServeHTTP(rr, req)
+		close(done)
+	}()
+	select {
+	case <-firstChunk:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for first stream chunk")
+	}
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-cancelSeen:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upstream did not see buyer cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("coordinator did not finish after buyer cancellation")
+	}
+	if got := rr.Code; got != http.StatusOK {
+		t.Fatalf("response code=%d body=%s", got, rr.Body.String())
+	}
+	gross, providerCredits, fault := queryBillingCredit(t, dbPath)
+	if gross <= 0 || providerCredits <= 0 || fault != billing.FaultNone {
+		t.Fatalf("billing row gross=%d provider=%d fault=%s, want paid non-breaker row", gross, providerCredits, fault)
+	}
+	provider, ok := providerByID(registry, "p1")
+	if !ok || provider.State != pool.StateReady {
+		t.Fatalf("provider after buyer cancel = %#v ok=%v, want ready", provider, ok)
+	}
+}
+
 func TestRequestLogBuyerErrorCodePopulation(t *testing.T) {
 	const requestID = "22222222-2222-4222-8222-222222222222"
+	var relayRequestID string
 	reqLog, dbPath := openBuyerRequestLog(t)
 	defer reqLog.Close()
 	registry := pool.NewRegistry(nil)
@@ -946,9 +1204,10 @@ func TestRequestLogBuyerErrorCodePopulation(t *testing.T) {
 		time.Unix(1716768000, 0),
 		buyer.WithRequestLog(reqLog),
 		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, gotRequestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
-			if gotRequestID != requestID {
-				t.Fatalf("relay request_id = %q, want %q", gotRequestID, requestID)
+			if gotRequestID == "" || gotRequestID == requestID {
+				t.Fatalf("relay request_id = %q, want coordinator-generated value", gotRequestID)
 			}
+			relayRequestID = gotRequestID
 			chunks := make(chan providerws.InferenceResponseChunk, 1)
 			done := make(chan providerws.InferenceResponseEnd, 1)
 			errs := make(chan error, 1)
@@ -964,7 +1223,7 @@ func TestRequestLogBuyerErrorCodePopulation(t *testing.T) {
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	rows := queryRequestLogRows(t, dbPath, requestID)
+	rows := queryRequestLogRows(t, dbPath, relayRequestID)
 	if len(rows) != 1 {
 		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
 	}
@@ -991,9 +1250,12 @@ func TestRequestLogBuyerValidationFailure(t *testing.T) {
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	rows := queryRequestLogRows(t, dbPath, requestID)
+	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 1 {
 		t.Fatalf("request_log rows = %d, want 1: %#v", len(rows), rows)
+	}
+	if rows[0].RequestID == requestID {
+		t.Fatalf("request_log used buyer X-Request-ID %q", requestID)
 	}
 	if rows[0].ProviderAssignedID.Valid {
 		t.Fatalf("provider_assigned_id = %#v, want NULL", rows[0].ProviderAssignedID)
@@ -1299,7 +1561,7 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 		if stream {
 			streamField = `,"stream":true`
 		}
-		return []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}],"max_tokens":8,"response_format":{"type":"json_object"},"metadata":{"trace":"preserve-me"}` + streamField + `}`)
+		return []byte(`{"model":"mlx-accurate","messages":[{"role":"user","content":"hello"}],"max_tokens":8,"seed":12345,"presence_penalty":0.25,"frequency_penalty":-0.5,"response_format":{"type":"json_object"},"metadata":{"trace":"preserve-me"}` + streamField + `}`)
 	}
 	assertForwardedBody := func(t *testing.T, body []byte) {
 		t.Helper()
@@ -1316,6 +1578,15 @@ func TestModelClassAliasRewrittenToConcreteModelOnDispatch(t *testing.T) {
 		}
 		if string(got["response_format"]) != `{"type":"json_object"}` {
 			t.Fatalf("response_format not preserved: %s", string(got["response_format"]))
+		}
+		if string(got["seed"]) != `12345` {
+			t.Fatalf("seed not preserved: %s", string(got["seed"]))
+		}
+		if string(got["presence_penalty"]) != `0.25` {
+			t.Fatalf("presence_penalty not preserved: %s", string(got["presence_penalty"]))
+		}
+		if string(got["frequency_penalty"]) != `-0.5` {
+			t.Fatalf("frequency_penalty not preserved: %s", string(got["frequency_penalty"]))
 		}
 		if string(got["metadata"]) != `{"trace":"preserve-me"}` {
 			t.Fatalf("metadata not preserved: %s", string(got["metadata"]))
@@ -3610,6 +3881,99 @@ ORDER BY id ASC`, requestID)
 		t.Fatalf("request log rows: %v", err)
 	}
 	return got
+}
+
+func queryAllRequestLogRows(t *testing.T, dbPath string) []requestLogTestRow {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open request log db: %v", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`
+SELECT id, request_id, model, provider_assigned_id, prompt_tokens,
+       completion_tokens, status, error_code, retried
+FROM request_log
+ORDER BY id ASC`)
+	if err != nil {
+		t.Fatalf("query request log: %v", err)
+	}
+	defer rows.Close()
+	var got []requestLogTestRow
+	for rows.Next() {
+		var row requestLogTestRow
+		if err := rows.Scan(
+			&row.ID,
+			&row.RequestID,
+			&row.Model,
+			&row.ProviderAssignedID,
+			&row.PromptTokens,
+			&row.CompletionTokens,
+			&row.Status,
+			&row.ErrorCode,
+			&row.Retried,
+		); err != nil {
+			t.Fatalf("scan request log: %v", err)
+		}
+		got = append(got, row)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("request log rows: %v", err)
+	}
+	return got
+}
+
+func queryBillingCredit(t *testing.T, dbPath string) (int64, int64, string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open billing db: %v", err)
+	}
+	defer db.Close()
+	var gross, provider int64
+	var fault string
+	if err := db.QueryRow(`SELECT gross_credits, provider_credits, fault_flag FROM ledger_request_credits ORDER BY id DESC LIMIT 1`).Scan(&gross, &provider, &fault); err != nil {
+		t.Fatalf("query billing credit: %v", err)
+	}
+	return gross, provider, fault
+}
+
+type billingRow struct {
+	GrossCredits              int64
+	CompletionTokens          int64
+	EstimatedCompletionTokens int64
+	UsageSource               string
+}
+
+func queryLatestBillingRow(t *testing.T, dbPath string) billingRow {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open billing db: %v", err)
+	}
+	defer db.Close()
+	var row billingRow
+	if err := db.QueryRow(`
+SELECT gross_credits, completion_tokens, estimated_completion_tokens, usage_source
+FROM ledger_request_credits
+ORDER BY id DESC LIMIT 1`).Scan(
+		&row.GrossCredits,
+		&row.CompletionTokens,
+		&row.EstimatedCompletionTokens,
+		&row.UsageSource,
+	); err != nil {
+		t.Fatalf("query billing row: %v", err)
+	}
+	return row
+}
+
+func providerByID(registry *pool.Registry, providerID string) (pool.Provider, bool) {
+	for _, provider := range registry.Snapshot() {
+		if provider.ProviderID == providerID {
+			return provider, true
+		}
+	}
+	return pool.Provider{}, false
 }
 
 func chatBodyWithContent(model, content string) []byte {

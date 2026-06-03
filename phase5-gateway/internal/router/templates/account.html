@@ -79,7 +79,7 @@ console.log(resp.choices[0].message.content);</code></pre>
 </nav>
 </section>
 </main>
-<script>
+<script nonce="{{.ScriptNonce}}">
 const saved=document.getElementById("saved"),cont=document.getElementById("continue"),copy=document.getElementById("copy"),key=document.getElementById("api-key");
 if(saved&&cont){const sync=()=>{const ok=saved.checked;cont.disabled=!ok;cont.classList.toggle("ok",ok)};saved.addEventListener("change",sync);cont.addEventListener("click",()=>{location.href="/docs"});sync()}
 // document.execCommand is kept only as a Safari fallback when Clipboard API is unavailable.

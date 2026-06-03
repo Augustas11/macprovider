@@ -37,6 +37,40 @@ func TestExplorerSQLiteBuyerCursorAndHashPrivacy(t *testing.T) {
 	}
 }
 
+func TestExplorerSQLiteBuyerAggregatesDoNotFanOutAcrossJoinedTables(t *testing.T) {
+	store := newExplorerSQLiteStore(t)
+	seedExplorerSQLiteBuyer(t, store, "acct_fanout", "fanout@x")
+	if err := store.AddAccountIdentity(context.Background(), storage.AccountIdentity{
+		AccountID: "acct_fanout", Provider: "google", ProviderUserID: "acct_fanout_google", Email: "fanout.alt@x", CreatedAt: fixedExplorerSQLiteTime(),
+	}); err != nil {
+		t.Fatalf("AddAccountIdentity alt: %v", err)
+	}
+	if err := store.CreateAPIKey(context.Background(), storage.APIKey{
+		KeyID: "acct_fanout_key_alt", AccountID: "acct_fanout", KeyHash: []byte("acct_fanout_hash_alt"), KeyHashPrefix: "mp_acct_fanout_alt",
+		Status: "active", CreatedAt: fixedExplorerSQLiteTime(),
+	}); err != nil {
+		t.Fatalf("CreateAPIKey alt: %v", err)
+	}
+	seedExplorerSQLiteUsage(t, store, "acct_fanout", "req_usage_1", fixedExplorerSQLiteTime().Add(-2*time.Minute))
+	seedExplorerSQLiteUsage(t, store, "acct_fanout", "req_usage_2", fixedExplorerSQLiteTime().Add(-time.Minute))
+	seedExplorerSQLiteQuotaReservation(t, store, "acct_fanout", "req_quota_1", 30)
+	seedExplorerSQLiteQuotaReservation(t, store, "acct_fanout", "req_quota_2", 40)
+
+	list, err := store.ExplorerListBuyers(context.Background(), storage.ExplorerBuyerQuery{
+		From: fixedExplorerSQLiteTime().Add(-time.Hour), To: fixedExplorerSQLiteTime().Add(time.Hour), Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("ExplorerListBuyers: %v", err)
+	}
+	if len(list.Items) != 1 {
+		t.Fatalf("items=%+v", list.Items)
+	}
+	got := list.Items[0]
+	if got.DailyTokensUsed != 24 || got.DailyTokensReserved != 70 {
+		t.Fatalf("buyer totals used=%d reserved=%d, want 24/70", got.DailyTokensUsed, got.DailyTokensReserved)
+	}
+}
+
 func TestExplorerSQLiteActivityCursorsAcrossSources(t *testing.T) {
 	store := newExplorerSQLiteStore(t)
 	seedExplorerSQLiteBuyer(t, store, "acct_usage", "usage@x")
@@ -177,6 +211,21 @@ func seedExplorerSQLiteUsage(t *testing.T, store *Store, accountID, requestID st
 		TotalTokens: 12, TokenSource: "provider_reported", Outcome: "success", CreatedAt: at,
 	}); err != nil {
 		t.Fatalf("InsertUsageEvent: %v", err)
+	}
+}
+
+func seedExplorerSQLiteQuotaReservation(t *testing.T, store *Store, accountID, requestID string, tokens int64) {
+	t.Helper()
+	if _, err := store.ReserveQuota(context.Background(), storage.ReservationRequest{
+		AccountID:       accountID,
+		RequestID:       requestID,
+		WindowDate:      "2026-06-01",
+		RequestedTokens: tokens,
+		DailyQuota:      1000,
+		CreatedAt:       fixedExplorerSQLiteTime(),
+		ExpiresAt:       fixedExplorerSQLiteTime().Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota: %v", err)
 	}
 }
 

@@ -288,7 +288,7 @@ func (s *Store) validateRequestLog(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	required := []string{"id", "ts_utc", "request_id", "model", "provider_assigned_id", "prompt_tokens", "completion_tokens", "error_code", "retried"}
+	required := []string{"id", "ts_utc", "request_id", "model", "provider_assigned_id", "prompt_tokens", "completion_tokens", "estimated_completion_tokens", "error_code", "retried"}
 	missing := []string{}
 	for _, col := range required {
 		if !cols[col] {

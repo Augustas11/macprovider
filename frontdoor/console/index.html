@@ -657,6 +657,17 @@ function span(text) {
   return s
 }
 
+function div(className, text) {
+  const el = document.createElement('div')
+  el.className = className
+  if (text !== undefined) el.textContent = text
+  return el
+}
+
+function appendSectionTitle(parent, text) {
+  parent.appendChild(div('dash-section-title', text))
+}
+
 function appendMessage(msg) {
   const sess = currentSession()
   if (!sess) return
@@ -683,7 +694,7 @@ function appendMessage(msg) {
 // ── History sidebar ──────────────────────────────────
 function renderHistory() {
   const container = document.getElementById('historyList')
-  container.innerHTML = ''
+  container.replaceChildren()
   if (sessions.length === 0) {
     const empty = document.createElement('div')
     empty.className = 'history-empty'
@@ -717,7 +728,7 @@ function renderModelChip() {
 
 function renderModelMenu() {
   const menu = document.getElementById('modelMenu')
-  menu.innerHTML = ''
+  menu.replaceChildren()
 
   const header = document.createElement('div')
   header.className = 'model-menu-header'
@@ -924,7 +935,7 @@ async function send() {
       if (meta) {
         let metaEl = meta.querySelector('.msg-meta')
         if (!metaEl) { metaEl = document.createElement('div'); metaEl.className = 'msg-meta'; meta.appendChild(metaEl) }
-        metaEl.innerHTML = ''
+        metaEl.replaceChildren()
         if (totalTokens) metaEl.appendChild(span(totalTokens + ' tokens'))
         metaEl.appendChild(span(latencyMs + 'ms'))
       }
@@ -999,7 +1010,7 @@ function usePrompt(el) {
 // ── Suggestion chips ──────────────────────────────────
 function renderChips() {
   const container = document.getElementById('suggestionChips')
-  container.innerHTML = ''
+  container.replaceChildren()
   SUGGESTIONS.forEach(text => {
     const btn = document.createElement('button')
     btn.className = 'chip'
@@ -1012,7 +1023,7 @@ function renderChips() {
 // ── Dashboard ─────────────────────────────────────────
 function renderDashboard() {
   const body = document.getElementById('dashBody')
-  body.innerHTML = ''
+  body.replaceChildren()
 
   const d = today()
   const todayData = usage[d] || { requests: 0, tokens: 0, latencies: [] }
@@ -1033,7 +1044,7 @@ function renderDashboard() {
 
   // Stats row
   const statsSection = document.createElement('div')
-  statsSection.innerHTML = '<div class="dash-section-title">Today</div>'
+  appendSectionTitle(statsSection, 'Today')
   const grid = document.createElement('div')
   grid.className = 'stats-grid'
   ;[
@@ -1044,7 +1055,8 @@ function renderDashboard() {
   ].forEach(({ value, label }) => {
     const card = document.createElement('div')
     card.className = 'stat-card'
-    card.innerHTML = `<div class="stat-value">${value}</div><div class="stat-label">${label}</div>`
+    card.appendChild(div('stat-value', String(value)))
+    card.appendChild(div('stat-label', label))
     grid.appendChild(card)
   })
   statsSection.appendChild(grid)
@@ -1052,7 +1064,7 @@ function renderDashboard() {
 
   // Chart
   const chartSection = document.createElement('div')
-  chartSection.innerHTML = '<div class="dash-section-title">Activity — last 7 days</div>'
+  appendSectionTitle(chartSection, 'Activity — last 7 days')
   const chartWrap = document.createElement('div')
   chartWrap.className = 'chart-wrap'
   const bars = document.createElement('div')
@@ -1077,7 +1089,7 @@ function renderDashboard() {
 
   // Pool card
   const poolSection = document.createElement('div')
-  poolSection.innerHTML = '<div class="dash-section-title">Provider pool</div>'
+  appendSectionTitle(poolSection, 'Provider pool')
   const poolCard = document.createElement('div')
   poolCard.className = 'pool-card'
   const ps = poolStatus
@@ -1090,7 +1102,14 @@ function renderDashboard() {
   poolRows.forEach(({ key, val, cls }) => {
     const row = document.createElement('div')
     row.className = 'pool-row'
-    row.innerHTML = `<span class="pool-key">${key}</span><span class="pool-val ${cls}">${val}</span>`
+    const keyEl = document.createElement('span')
+    keyEl.className = 'pool-key'
+    keyEl.textContent = key
+    const valEl = document.createElement('span')
+    valEl.className = 'pool-val' + (cls ? ' ' + cls : '')
+    valEl.textContent = val
+    row.appendChild(keyEl)
+    row.appendChild(valEl)
     poolCard.appendChild(row)
   })
 
@@ -1100,7 +1119,10 @@ function renderDashboard() {
     row.style.flexDirection = 'column'
     row.style.alignItems = 'flex-start'
     row.style.gap = '8px'
-    row.innerHTML = '<span class="pool-key">Available models</span>'
+    const keyEl = document.createElement('span')
+    keyEl.className = 'pool-key'
+    keyEl.textContent = 'Available models'
+    row.appendChild(keyEl)
     const mlist = document.createElement('div')
     mlist.className = 'models-list'
     models.forEach(m => {
@@ -1114,7 +1136,14 @@ function renderDashboard() {
   } else {
     const row = document.createElement('div')
     row.className = 'pool-row'
-    row.innerHTML = '<span class="pool-key">Models</span><span class="pool-val warn">sleeping</span>'
+    const keyEl = document.createElement('span')
+    keyEl.className = 'pool-key'
+    keyEl.textContent = 'Models'
+    const valEl = document.createElement('span')
+    valEl.className = 'pool-val warn'
+    valEl.textContent = 'sleeping'
+    row.appendChild(keyEl)
+    row.appendChild(valEl)
     poolCard.appendChild(row)
   }
 
@@ -1123,7 +1152,7 @@ function renderDashboard() {
 
   // Quick links
   const linkSection = document.createElement('div')
-  linkSection.innerHTML = '<div class="dash-section-title">Links</div>'
+  appendSectionTitle(linkSection, 'Links')
   const links = document.createElement('div')
   links.className = 'quick-links'
   ;[

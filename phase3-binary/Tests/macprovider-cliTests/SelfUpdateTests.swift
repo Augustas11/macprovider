@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import XCTest
 @testable import macprovider_cli
 
@@ -8,6 +9,41 @@ final class SelfUpdateTests: XCTestCase {
             SelfUpdate.defaultReleasesAPIURL,
             "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
         )
+    }
+
+    func testReleaseAPIURLIgnoresEnvironmentFallback() {
+        withEnvironmentVariable("MACPROVIDER_RELEASES_API_URL", value: "http://attacker.invalid/releases") {
+            let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: nil)
+
+            XCTAssertEqual(update.resolvedReleasesAPIURLForTest(), SelfUpdate.defaultReleasesAPIURL)
+        }
+    }
+
+    func testReleaseAPIURLRejectsUntrustedExplicitOverrideBeforeFetching() async throws {
+        let update = SelfUpdate(currentVersion: "1.2.0", releasesAPIURL: "http://attacker.invalid/releases")
+
+        do {
+            try await update.run(checkOnly: true)
+            XCTFail("update unexpectedly fetched from an untrusted release API URL")
+        } catch let error as UpdateError {
+            XCTAssertEqual(
+                error.description,
+                UpdateError.untrustedReleaseAPIURL("http://attacker.invalid/releases").description
+            )
+        }
+    }
+
+    func testReleaseSigningKeyIgnoresEnvironmentOverride() {
+        let attackerKey = """
+        -----BEGIN PUBLIC KEY-----
+        attacker-controlled-key
+        -----END PUBLIC KEY-----
+        """
+
+        withEnvironmentVariable("MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM", value: attackerKey) {
+            XCTAssertEqual(SelfUpdate.releaseSigningPublicKeyPEMForTest(), SelfUpdate.checksumPublicKeyPEM)
+            XCTAssertNotEqual(SelfUpdate.releaseSigningPublicKeyPEMForTest(), attackerKey)
+        }
     }
 
     func testSemverComparison() {
@@ -128,4 +164,17 @@ private final class MockURLProtocol: URLProtocol {
     }
 
     override func stopLoading() {}
+}
+
+private func withEnvironmentVariable(_ name: String, value: String, body: () -> Void) {
+    let previous = getenv(name).map { String(cString: $0) }
+    setenv(name, value, 1)
+    defer {
+        if let previous {
+            setenv(name, previous, 1)
+        } else {
+            unsetenv(name)
+        }
+    }
+    body()
 }
