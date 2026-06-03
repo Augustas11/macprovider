@@ -222,6 +222,60 @@ func TestProviderAuthFirstMessageDispatchRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestProviderWebSocketDropsSilentPreAuthClientAfterHandshakeDeadline(t *testing.T) {
+	ts := newProviderServer(t, func(cfg *config.Config) {
+		cfg.WS.HandshakeTimeoutS = 1
+	})
+	defer ts.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	start := time.Now()
+	frame, err := gobwas.ReadFrame(conn)
+	if time.Since(start) > 2500*time.Millisecond {
+		t.Fatal("silent pre-auth provider connection was not dropped by the handshake deadline")
+	}
+	if err == nil && frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close or closed connection", frame.Header.OpCode)
+	}
+}
+
+func TestProviderWebSocketRejectsOversizeInitialFrame(t *testing.T) {
+	ts := newProviderServer(t, func(cfg *config.Config) {
+		cfg.WS.MaxFrameBytes = 32
+	})
+	defer ts.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+
+	if err := wsutil.WriteClientText(conn, []byte(strings.Repeat("x", 64))); err != nil {
+		t.Fatalf("write oversize frame: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read close: %v", err)
+	}
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close", frame.Header.OpCode)
+	}
+	code, _ := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidHello {
+		t.Fatalf("code = %d, want %d", code, providerws.CloseInvalidHello)
+	}
+}
+
 func TestWarmupGateHoldsProviderUntilTokenProducingProbe(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Pool.WarmupGateEnabled = true

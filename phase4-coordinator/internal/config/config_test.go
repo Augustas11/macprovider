@@ -25,6 +25,30 @@ func TestProviderTokensRequiredByDefault(t *testing.T) {
 	}
 }
 
+func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	if cfg.WS.HandshakeTimeoutS != 10 || cfg.WS.WriteTimeoutS != 10 ||
+		cfg.WS.MaxFrameBytes != 4<<20 || cfg.WS.MaxUnauthenticatedConn != 64 {
+		t.Fatalf("unexpected ws bounds defaults: %+v", cfg.WS)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("default ws bounds should validate: %v", err)
+	}
+
+	cfg.WS.MaxFrameBytes = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "ws handshake") {
+		t.Fatalf("zero frame cap validation err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.WS.MaxFrameBytes = 65 << 20
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_frame_bytes") {
+		t.Fatalf("oversize frame cap validation err=%v", err)
+	}
+}
+
 func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"

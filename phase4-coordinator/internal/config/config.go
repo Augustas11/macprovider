@@ -95,7 +95,11 @@ type LimitsConfig struct {
 }
 
 type WSConfig struct {
-	WriteBufferSize int `yaml:"write_buffer_size"`
+	WriteBufferSize        int   `yaml:"write_buffer_size"`
+	HandshakeTimeoutS      int   `yaml:"handshake_timeout_s"`
+	WriteTimeoutS          int   `yaml:"write_timeout_s"`
+	MaxFrameBytes          int64 `yaml:"max_frame_bytes"`
+	MaxUnauthenticatedConn int   `yaml:"max_unauthenticated_conn"`
 }
 
 type AdmissionConfig struct {
@@ -257,7 +261,11 @@ func Default() Config {
 			MaxChatRequestBodyBytes: 1 << 20,
 		},
 		WS: WSConfig{
-			WriteBufferSize: 64,
+			WriteBufferSize:        64,
+			HandshakeTimeoutS:      10,
+			WriteTimeoutS:          10,
+			MaxFrameBytes:          4 << 20,
+			MaxUnauthenticatedConn: 64,
 		},
 		Admission: AdmissionConfig{
 			PinnedOnly:                      false,
@@ -386,6 +394,38 @@ func (c Config) HeartbeatMissThreshold() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func (c Config) ProviderWSHandshakeTimeout() time.Duration {
+	seconds := c.WS.HandshakeTimeoutS
+	if seconds <= 0 {
+		seconds = Default().WS.HandshakeTimeoutS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (c Config) ProviderWSWriteTimeout() time.Duration {
+	seconds := c.WS.WriteTimeoutS
+	if seconds <= 0 {
+		seconds = Default().WS.WriteTimeoutS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (c Config) ProviderWSMaxFrameBytes() int64 {
+	bytes := c.WS.MaxFrameBytes
+	if bytes <= 0 {
+		bytes = Default().WS.MaxFrameBytes
+	}
+	return bytes
+}
+
+func (c Config) ProviderWSMaxUnauthenticatedConn() int {
+	count := c.WS.MaxUnauthenticatedConn
+	if count <= 0 {
+		count = Default().WS.MaxUnauthenticatedConn
+	}
+	return count
+}
+
 func (c Config) ProviderByID() map[string]ProviderConfig {
 	out := make(map[string]ProviderConfig, len(c.Providers))
 	for _, p := range c.Providers {
@@ -400,6 +440,12 @@ func (c Config) Validate() error {
 	}
 	if c.WS.WriteBufferSize <= 0 {
 		return fmt.Errorf("ws.write_buffer_size must be > 0")
+	}
+	if c.WS.HandshakeTimeoutS <= 0 || c.WS.WriteTimeoutS <= 0 || c.WS.MaxFrameBytes <= 0 || c.WS.MaxUnauthenticatedConn <= 0 {
+		return fmt.Errorf("ws handshake, write, frame, and unauthenticated connection limits must be > 0")
+	}
+	if c.WS.MaxFrameBytes > 64<<20 {
+		return fmt.Errorf("ws.max_frame_bytes must be <= 67108864")
 	}
 	if c.Routing.PreflightTimeoutS <= 0 || c.Routing.RequestTimeoutS <= 0 || c.Routing.FailoverTimeoutS <= 0 {
 		return fmt.Errorf("routing timeouts must be > 0")
