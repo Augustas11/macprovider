@@ -173,6 +173,7 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn().Err(err).Msg("provider websocket upgrade failed")
 		return
 	}
+	s.enableProviderTCPKeepAlive(conn)
 	if !s.reserveUnauthenticatedConn() {
 		s.close(conn, ClosePoolFull, "too_many_unauthenticated_connections")
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
@@ -705,6 +706,19 @@ func (s *Server) releaseUnauthenticatedConn() {
 
 func (s *Server) setReadDeadline(conn net.Conn, timeout time.Duration) {
 	_ = conn.SetReadDeadline(s.now().Add(timeout))
+}
+
+func (s *Server) enableProviderTCPKeepAlive(conn net.Conn) {
+	tcp, ok := conn.(*net.TCPConn)
+	if !ok {
+		return
+	}
+	if err := tcp.SetKeepAlive(true); err != nil {
+		s.log.Warn().Err(err).Msg("provider tcp keepalive enable failed")
+	}
+	if err := tcp.SetKeepAlivePeriod(30 * time.Second); err != nil {
+		s.log.Warn().Err(err).Msg("provider tcp keepalive period failed")
+	}
 }
 
 func (s *Server) setWriteDeadline(conn net.Conn) {

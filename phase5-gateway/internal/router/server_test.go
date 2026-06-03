@@ -1728,9 +1728,6 @@ func newTestHarnessConfig(t *testing.T, oauth auth.OAuthProvider, mutate func(*c
 	if mutate != nil {
 		mutate(&cfg)
 	}
-	if len(cfg.Coordinators) > 0 && cfg.Coordinator.BuyerURL != "" {
-		cfg.Coordinators[0].BaseURL = cfg.Coordinator.BuyerURL
-	}
 	store, err := sqlite.Open(context.Background(), cfg.Storage.DBPath)
 	if err != nil {
 		t.Fatalf("sqlite.Open: %v", err)
@@ -1892,11 +1889,6 @@ listen:
 public:
   base_url: https://api.streamvc.live
   account_path: /account
-coordinators:
-  - name: pearl-local
-    base_url: http://127.0.0.1:8443
-    weight: 1
-    enabled: true
 coordinator:
   buyer_url: http://coordinator.test
   operator_url: http://operator.test

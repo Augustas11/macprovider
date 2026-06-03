@@ -12,21 +12,20 @@ import (
 )
 
 type Config struct {
-	Listen       ListenConfig        `yaml:"listen"`
-	Proxy        ProxyConfig         `yaml:"proxy"`
-	Public       PublicConfig        `yaml:"public"`
-	Coordinators []CoordinatorTarget `yaml:"coordinators"`
-	Coordinator  CoordinatorConfig   `yaml:"coordinator"`
-	Storage      StorageConfig       `yaml:"storage"`
-	Auth         AuthConfig          `yaml:"auth"`
-	Quotas       QuotasConfig        `yaml:"quotas"`
-	Limits       LimitsConfig        `yaml:"limits"`
-	KillSwitch   KillSwitchConfig    `yaml:"kill_switch"`
-	Capacity     CapacityConfig      `yaml:"capacity"`
-	Timeouts     TimeoutsConfig      `yaml:"timeouts"`
-	CORS         CORSConfig          `yaml:"cors"`
-	Routing      RoutingConfig       `yaml:"routing"`
-	Explorer     ExplorerConfig      `yaml:"explorer"`
+	Listen      ListenConfig      `yaml:"listen"`
+	Proxy       ProxyConfig       `yaml:"proxy"`
+	Public      PublicConfig      `yaml:"public"`
+	Coordinator CoordinatorConfig `yaml:"coordinator"`
+	Storage     StorageConfig     `yaml:"storage"`
+	Auth        AuthConfig        `yaml:"auth"`
+	Quotas      QuotasConfig      `yaml:"quotas"`
+	Limits      LimitsConfig      `yaml:"limits"`
+	KillSwitch  KillSwitchConfig  `yaml:"kill_switch"`
+	Capacity    CapacityConfig    `yaml:"capacity"`
+	Timeouts    TimeoutsConfig    `yaml:"timeouts"`
+	CORS        CORSConfig        `yaml:"cors"`
+	Routing     RoutingConfig     `yaml:"routing"`
+	Explorer    ExplorerConfig    `yaml:"explorer"`
 }
 
 type ListenConfig struct {
@@ -41,13 +40,6 @@ type ProxyConfig struct {
 type PublicConfig struct {
 	BaseURL     string `yaml:"base_url"`
 	AccountPath string `yaml:"account_path"`
-}
-
-type CoordinatorTarget struct {
-	Name    string `yaml:"name"`
-	BaseURL string `yaml:"base_url"`
-	Weight  int    `yaml:"weight"`
-	Enabled bool   `yaml:"enabled"`
 }
 
 type CoordinatorConfig struct {
@@ -142,9 +134,6 @@ func Default() Config {
 		Listen: ListenConfig{BindAddress: "127.0.0.1", Port: 9443},
 		Proxy:  ProxyConfig{TrustedCIDRs: []string{"127.0.0.0/8", "::1/128"}},
 		Public: PublicConfig{BaseURL: "https://api.streamvc.live", AccountPath: "/account"},
-		Coordinators: []CoordinatorTarget{{
-			Name: "pearl-local", BaseURL: "http://127.0.0.1:8443", Weight: 1, Enabled: true,
-		}},
 		Coordinator: CoordinatorConfig{
 			BuyerURL: "http://127.0.0.1:8443", OperatorURL: "http://127.0.0.1:8444", PoolzPollInterval: 10,
 		},
@@ -262,20 +251,6 @@ func (c Config) Validate() error {
 	}
 	if c.Coordinator.PoolzPollInterval <= 0 {
 		return fmt.Errorf("coordinator.poolz_poll_interval_s must be > 0")
-	}
-	if len(c.Coordinators) == 0 {
-		return fmt.Errorf("coordinators must contain at least one target")
-	}
-	for i, target := range c.Coordinators {
-		if target.Name == "" {
-			return fmt.Errorf("coordinators[%d].name must be set", i)
-		}
-		if err := requireURL(fmt.Sprintf("coordinators[%d].base_url", i), target.BaseURL); err != nil {
-			return err
-		}
-		if target.Weight <= 0 {
-			return fmt.Errorf("coordinators[%d].weight must be > 0", i)
-		}
 	}
 	if c.Auth.KeyPrefix != "mp_" {
 		return fmt.Errorf("auth.key_prefix must be mp_")

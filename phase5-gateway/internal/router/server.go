@@ -1747,11 +1747,6 @@ func (s *Server) statusFromPoolz(ctx context.Context) (statusResponse, error) {
 }
 
 func (s *Server) coordinatorBuyerURL() string {
-	for _, target := range s.cfg.Coordinators {
-		if target.Enabled {
-			return target.BaseURL
-		}
-	}
 	return s.cfg.Coordinator.BuyerURL
 }
 
