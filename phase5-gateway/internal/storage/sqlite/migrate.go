@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS oauth_states (
 	client_ip TEXT NOT NULL,
 	created_at TEXT NOT NULL,
 	expires_at TEXT NOT NULL,
-	consumed_at TEXT NOT NULL DEFAULT ''
+	consumed_at TEXT NOT NULL DEFAULT '',
+	action TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_oauth_states_session ON oauth_states(session_id, expires_at);
