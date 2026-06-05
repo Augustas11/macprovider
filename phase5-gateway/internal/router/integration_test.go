@@ -448,6 +448,173 @@ func TestClientIPDetectionRejectsForgedXFF(t *testing.T) {
 	}
 }
 
+// TestOAuthMintActionIssuesFreshKeyForExistingAccount exercises the
+// `?action=mint` flow added so the /account page's "sign in again to mint a
+// new one" copy is actually truthful for existing accounts. Without the
+// action, the existing-account branch of handleGitHubCallback issues no key
+// — which is what dropped us into the chicken-and-egg state where a user
+// who lost their key had no in-product path to recover.
+func TestOAuthMintActionIssuesFreshKeyForExistingAccount(t *testing.T) {
+	identity := auth.OAuthIdentity{ProviderUserID: "mint-acct", Scopes: []string{"read:user"}}
+	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: identity})
+
+	signupKey := completeOAuth(t, h, "", "https://api.streamvc.live/auth/github/callback")
+	if !strings.HasPrefix(signupKey, "mp_") {
+		t.Fatalf("signup key=%q", signupKey)
+	}
+
+	noActionKey := completeOAuth(t, h, "", "https://api.streamvc.live/auth/github/callback")
+	if noActionKey != "" {
+		t.Fatalf("existing-account login without action must NOT issue a key; got %q", noActionKey)
+	}
+
+	mintedKey := completeOAuth(t, h, "mint", "https://api.streamvc.live/auth/github/callback")
+	if !strings.HasPrefix(mintedKey, "mp_") {
+		t.Fatalf("mint-action key=%q", mintedKey)
+	}
+	if mintedKey == signupKey {
+		t.Fatalf("mint must issue a fresh key, got same as signup: %q", mintedKey)
+	}
+
+	// We verify the minted key authenticates by hitting a bearer-protected
+	// endpoint and asserting we DON'T get 401. The downstream resource
+	// (coordinator) is intentionally not mocked here — any 5xx from the
+	// downstream is still proof the bearer lookup succeeded.
+	chatResp := postChat(t, h, mintedKey, `{"model":"llama","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}`, nil)
+	if chatResp.Code == http.StatusUnauthorized {
+		t.Fatalf("minted key did not authenticate; chat status=401 body=%s", chatResp.Body.String())
+	}
+}
+
+// TestOAuthMintActionRejectsUnknownActions guards against the action
+// surface becoming a footgun for future contributors who add new action
+// values without validating them. Unknown actions must 400 at
+// /auth/github/start, never reach the callback.
+func TestOAuthMintActionRejectsUnknownActions(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{})
+	req := httptest.NewRequest(http.MethodGet, "/auth/github/start?action=delete&redirect_uri="+url.QueryEscape("https://api.streamvc.live/auth/github/callback"), nil)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("unknown action status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "oauth_action_unknown") {
+		t.Fatalf("expected oauth_action_unknown in body, got %s", resp.Body.String())
+	}
+}
+
+// TestOAuthMintActionRejectsUnknownRedirectURI defends against an attacker
+// who tricks the victim into following /auth/github/start with a tampered
+// redirect_uri AND action=mint. The redirect_uri allowlist gate must fire
+// before the action is persisted; even with action=mint set, an
+// off-allowlist redirect_uri returns 400 and no state row is created.
+func TestOAuthMintActionRejectsUnknownRedirectURI(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{})
+	startURL := "/auth/github/start?action=mint&redirect_uri=" + url.QueryEscape("https://evil.example/callback")
+	req := httptest.NewRequest(http.MethodGet, startURL, nil)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusBadRequest {
+		t.Fatalf("tampered redirect_uri status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "oauth_callback_not_allowed") {
+		t.Fatalf("expected oauth_callback_not_allowed in body, got %s", resp.Body.String())
+	}
+}
+
+// TestOAuthMintActionDoesNotSetCookie locks in the design that the action
+// is bound to the OAuthState row, NOT to a sibling cookie. The cookie shape
+// (mp_oauth_action) was prototyped during PR #2 review and rejected because
+// it leaked across parallel flows, persisted across early callback errors,
+// and could be CSRF-planted to taint a later normal login. Any reintroduction
+// of an action cookie will fail this test.
+func TestOAuthMintActionDoesNotSetCookie(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{
+		ProviderUserID: "no-action-cookie", Scopes: []string{"read:user"},
+	}})
+	startURL := "/auth/github/start?action=mint&redirect_uri=" + url.QueryEscape("https://api.streamvc.live/auth/github/callback")
+	req := httptest.NewRequest(http.MethodGet, startURL, nil)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusFound {
+		t.Fatalf("mint start status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	for _, c := range resp.Result().Cookies() {
+		if c.Name == "mp_oauth_action" {
+			t.Fatalf("mp_oauth_action cookie must not be set; got value=%q", c.Value)
+		}
+	}
+}
+
+// TestOAuthMintActionIsBoundToStateAcrossInterleavedFlows reproduces the
+// parallel-flow attack the cookie-based design was vulnerable to: tab A
+// starts a mint flow, tab B starts a normal flow, tab A's callback fails
+// (state replay / expiry), tab B's callback succeeds. Under the cookie
+// design, tab A's `mp_oauth_action` cookie would survive and cause tab B
+// to mint a key. Under the state-bound design, each flow's action is
+// pinned to its own state row, so tab B's normal flow must NOT mint.
+func TestOAuthMintActionIsBoundToStateAcrossInterleavedFlows(t *testing.T) {
+	h, _, _, _ := newTestHarness(t, fakeOAuth{identity: auth.OAuthIdentity{
+		ProviderUserID: "interleave-acct", Scopes: []string{"read:user"},
+	}})
+
+	signupKey := completeOAuth(t, h, "", "https://api.streamvc.live/auth/github/callback")
+	if !strings.HasPrefix(signupKey, "mp_") {
+		t.Fatalf("signup key=%q", signupKey)
+	}
+
+	// Tab A: start mint flow but never complete callback.
+	mintStartReq := httptest.NewRequest(http.MethodGet, "/auth/github/start?action=mint&redirect_uri="+url.QueryEscape("https://api.streamvc.live/auth/github/callback"), nil)
+	mintStartResp := httptest.NewRecorder()
+	h.ServeHTTP(mintStartResp, mintStartReq)
+	if mintStartResp.Code != http.StatusFound {
+		t.Fatalf("tab A start status=%d body=%s", mintStartResp.Code, mintStartResp.Body.String())
+	}
+
+	// Tab B: start normal flow + complete it. Under cookie design, the
+	// dangling action cookie from tab A would cause tab B to mint.
+	plainKey := completeOAuth(t, h, "", "https://api.streamvc.live/auth/github/callback")
+	if plainKey != "" {
+		t.Fatalf("tab B normal flow must not mint when tab A's mint state is pending; got key=%q", plainKey)
+	}
+}
+
+// completeOAuth runs one full /auth/github/start → /auth/github/callback
+// round-trip with an optional action and returns the value of the
+// mp_new_api_key cookie (empty if not set).
+func completeOAuth(t *testing.T, h http.Handler, action, redirectURI string) string {
+	t.Helper()
+	startPath := "/auth/github/start?redirect_uri=" + url.QueryEscape(redirectURI)
+	if action != "" {
+		startPath += "&action=" + url.QueryEscape(action)
+	}
+	startReq := httptest.NewRequest(http.MethodGet, startPath, nil)
+	startResp := httptest.NewRecorder()
+	h.ServeHTTP(startResp, startReq)
+	if startResp.Code != http.StatusFound {
+		t.Fatalf("start status=%d body=%s", startResp.Code, startResp.Body.String())
+	}
+	location, err := url.Parse(startResp.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse location: %v", err)
+	}
+	state := location.Query().Get("state")
+	if state == "" {
+		t.Fatalf("state missing in %s", location.String())
+	}
+
+	callbackReq := httptest.NewRequest(http.MethodGet, "/auth/github/callback?code=ok&state="+url.QueryEscape(state), nil)
+	for _, c := range startResp.Result().Cookies() {
+		callbackReq.AddCookie(c)
+	}
+	callbackResp := httptest.NewRecorder()
+	h.ServeHTTP(callbackResp, callbackReq)
+	if callbackResp.Code != http.StatusFound {
+		t.Fatalf("callback status=%d body=%s", callbackResp.Code, callbackResp.Body.String())
+	}
+	return findCookie(callbackResp, "mp_new_api_key")
+}
+
 func TestPublicEndpointAllowlistDoesNotExposeCoordinatorInternals(t *testing.T) {
 	h, _, _, _ := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
 	for _, path := range []string{"/admin/foo", "/poolz", "/ws/provider"} {

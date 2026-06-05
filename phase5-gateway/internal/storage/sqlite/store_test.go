@@ -227,18 +227,21 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	stateHash := keyHash("oauth-state")
 	if err := store.StoreOAuthState(ctx, storage.OAuthState{
 		StateHash: stateHash[:], SessionID: "session_1", RedirectURI: "https://api.streamvc.live/auth/github/callback",
-		ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+		ClientIP: "1.2.3.4", Action: "mint", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
 	}); err != nil {
 		t.Fatalf("StoreOAuthState: %v", err)
 	}
-	redirectURI, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(time.Minute))
+	redirectURI, action, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("ConsumeOAuthState: %v", err)
 	}
 	if redirectURI != "https://api.streamvc.live/auth/github/callback" {
 		t.Fatalf("redirectURI=%q", redirectURI)
 	}
-	if _, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if action != "mint" {
+		t.Fatalf("action=%q, want %q", action, "mint")
+	}
+	if _, _, err := store.ConsumeOAuthState(ctx, stateHash[:], "session_1", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState replay err=%v, want ErrNotFound", err)
 	}
 
@@ -249,8 +252,24 @@ func TestOAuthStateAndRateLimitStores(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("StoreOAuthState expired: %v", err)
 	}
-	if _, err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
+	if _, _, err := store.ConsumeOAuthState(ctx, expiredHash[:], "session_2", now.Add(2*time.Minute)); !errors.Is(err, storage.ErrNotFound) {
 		t.Fatalf("ConsumeOAuthState expired err=%v, want ErrNotFound", err)
+	}
+
+	// Default (unset) action persists as empty string and round-trips cleanly.
+	plainHash := keyHash("plain-oauth-state")
+	if err := store.StoreOAuthState(ctx, storage.OAuthState{
+		StateHash: plainHash[:], SessionID: "session_3", RedirectURI: "https://api.streamvc.live/auth/github/callback",
+		ClientIP: "1.2.3.4", CreatedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}); err != nil {
+		t.Fatalf("StoreOAuthState plain: %v", err)
+	}
+	_, action, err = store.ConsumeOAuthState(ctx, plainHash[:], "session_3", now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("ConsumeOAuthState plain: %v", err)
+	}
+	if action != "" {
+		t.Fatalf("default action=%q, want empty", action)
 	}
 
 	if err := store.RecordSignupEvent(ctx, storage.SignupEvent{

@@ -60,7 +60,44 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return err
 	}
+	if err := s.ensureOAuthStateActionColumn(ctx); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(1, ?)", encodeTime(time.Now().UTC()))
+	return err
+}
+
+// ensureOAuthStateActionColumn handles upgrade-in-place for pre-existing
+// gateway.db files that were created before `oauth_states.action` was added
+// to schemaSQL. Mirrors phase4-coordinator/internal/auth/tokens.go's
+// ensureProviderIDColumn — check PRAGMA table_info, ALTER TABLE if missing.
+func (s *Store) ensureOAuthStateActionColumn(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(oauth_states)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasAction := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == "action" {
+			hasAction = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if hasAction {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx, `ALTER TABLE oauth_states ADD COLUMN action TEXT NOT NULL DEFAULT ''`)
 	return err
 }
 
@@ -280,39 +317,41 @@ func (s *Store) StoreOAuthState(ctx context.Context, state storage.OAuthState) e
 		state.ExpiresAt = state.CreatedAt.Add(10 * time.Minute)
 	}
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO oauth_states(state_hash, session_id, redirect_uri, client_ip, created_at, expires_at)
-		VALUES(?, ?, ?, ?, ?, ?)`,
-		state.StateHash, state.SessionID, state.RedirectURI, state.ClientIP, encodeTime(state.CreatedAt), encodeTime(state.ExpiresAt))
+		INSERT INTO oauth_states(state_hash, session_id, redirect_uri, client_ip, created_at, expires_at, action)
+		VALUES(?, ?, ?, ?, ?, ?, ?)`,
+		state.StateHash, state.SessionID, state.RedirectURI, state.ClientIP,
+		encodeTime(state.CreatedAt), encodeTime(state.ExpiresAt), state.Action)
 	return err
 }
 
-func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (string, error) {
+func (s *Store) ConsumeOAuthState(ctx context.Context, stateHash []byte, sessionID string, now time.Time) (string, string, error) {
 	tx, err := s.beginImmediate(ctx)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer tx.Rollback()
 	var redirectURI string
 	var expiresAt string
 	var consumedAt string
+	var action string
 	if err := tx.QueryRowContext(ctx, `
-		SELECT redirect_uri, expires_at, consumed_at
+		SELECT redirect_uri, expires_at, consumed_at, action
 		FROM oauth_states
 		WHERE state_hash = ? AND session_id = ?`,
-		stateHash, sessionID).Scan(&redirectURI, &expiresAt, &consumedAt); err != nil {
+		stateHash, sessionID).Scan(&redirectURI, &expiresAt, &consumedAt, &action); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", storage.ErrNotFound
+			return "", "", storage.ErrNotFound
 		}
-		return "", err
+		return "", "", err
 	}
 	if consumedAt != "" || !now.Before(decodeTime(expiresAt)) {
-		return "", storage.ErrNotFound
+		return "", "", storage.ErrNotFound
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE oauth_states SET consumed_at = ? WHERE state_hash = ?`, encodeTime(now.UTC()), stateHash)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return redirectURI, tx.Commit()
+	return redirectURI, action, tx.Commit()
 }
 
 func (s *Store) RecordSignupEvent(ctx context.Context, event storage.SignupEvent) error {

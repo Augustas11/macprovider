@@ -207,6 +207,18 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_callback_not_allowed", "OAuth callback URL is not allowed")
 		return
 	}
+	// `?action=mint` opts the flow into issuing a fresh API key for an
+	// existing account on callback. Without this, the existing-account branch
+	// of handleGitHubCallback is a no-op (signup-only key issuance), which
+	// makes the /account page's "sign in again to mint a new one" copy a lie.
+	// The action is bound to the OAuthState row (not a sibling cookie) so it
+	// is single-use, state-linked, and impossible to leak across parallel
+	// flows or stick around after an early callback failure.
+	action := r.URL.Query().Get("action")
+	if action != "" && action != "mint" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_action_unknown", "Unknown OAuth action")
+		return
+	}
 	state, err := auth.StateToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "state_generation_failed", "Could not start OAuth flow")
@@ -220,7 +232,7 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 	now := s.now()
 	if err := s.store.StoreOAuthState(r.Context(), storage.OAuthState{
 		StateHash: auth.StateHash(state), SessionID: sessionID, RedirectURI: redirectURI,
-		ClientIP: s.clientIP(r), CreatedAt: now, ExpiresAt: auth.OAuthStateExpiry(now),
+		ClientIP: s.clientIP(r), Action: action, CreatedAt: now, ExpiresAt: auth.OAuthStateExpiry(now),
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "oauth_state_store_failed", "Could not start OAuth flow")
 		return
@@ -244,7 +256,11 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_state_invalid", "OAuth state is invalid")
 		return
 	}
-	redirectURI, err := s.store.ConsumeOAuthState(r.Context(), auth.StateHash(state), cookie.Value, s.now())
+	// ConsumeOAuthState atomically reads + marks-consumed the state row, and
+	// returns the action bound to it at /auth/github/start time. Action lives
+	// in the state row exactly so it is single-use and impossible to leak
+	// across browser tabs, stale cookies, or early callback failures.
+	redirectURI, action, err := s.store.ConsumeOAuthState(r.Context(), auth.StateHash(state), cookie.Value, s.now())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_state_invalid", "OAuth state is invalid")
 		return
@@ -266,6 +282,7 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "upstream_error", "oauth_exchange_failed", "OAuth exchange failed")
 		return
 	}
+
 	account, err := s.store.LookupAccountByIdentity(r.Context(), "github", identity.ProviderUserID)
 	if errors.Is(err, storage.ErrNotFound) {
 		account, err = s.createSignupAccount(w, r.Context(), r, identity)
@@ -281,6 +298,33 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "account_lookup_failed", "Could not load account")
 		return
+	} else if action == "mint" {
+		// Existing account, operator-initiated mint. Issue a fresh API key
+		// and deliver via the same one-shot cookie the signup path uses.
+		// keyMgr.Issue stores the new key alongside existing ones; the user
+		// can revoke older keys via POST /auth/api-keys/{key_id}/revoke once
+		// they have a working bearer. Re-issuing (not rotating) preserves
+		// any other still-in-use keys the operator has elsewhere.
+		fullKey, summary, err := s.keyMgr.Issue(r.Context(), s.store, account.AccountID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "server_error", "api_key_issuance_failed", "Could not issue API key")
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name: "mp_new_api_key", Value: fullKey, Path: "/account", HttpOnly: true,
+			Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: 300,
+		})
+		// Audit payload includes key_id and key_prefix so the lifecycle of
+		// each minted key is traceable end-to-end alongside the revoke/rotate
+		// events in api_key_events. account_id is in Actor; the action label
+		// is in Type so it is filterable without parsing payload.
+		_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
+			EventID: mustID("audit"), RequestID: requestID(r), Actor: account.AccountID,
+			Type: "api_key_minted_via_oauth",
+			Payload: fmt.Sprintf(`{"action":"mint","key_id":%q,"key_prefix":%q}`,
+				summary.KeyID, summary.KeyHashPrefix),
+			CreatedAt: s.now(),
+		})
 	}
 	http.Redirect(w, r, s.cfg.Public.AccountPath, http.StatusFound)
 }
