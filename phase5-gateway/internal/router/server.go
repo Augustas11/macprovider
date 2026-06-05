@@ -207,6 +207,16 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_callback_not_allowed", "OAuth callback URL is not allowed")
 		return
 	}
+	// `?action=mint` opts the flow into rotating a fresh API key for an
+	// existing account on callback. Without this, the existing-account branch
+	// of handleGitHubCallback is a no-op (signup-only key issuance), which
+	// makes the /account page's "sign in again to mint a new one" copy a lie.
+	// Validate strictly so unknown actions don't get persisted as cookies.
+	action := r.URL.Query().Get("action")
+	if action != "" && action != "mint" {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "oauth_action_unknown", "Unknown OAuth action")
+		return
+	}
 	state, err := auth.StateToken()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "state_generation_failed", "Could not start OAuth flow")
@@ -229,6 +239,16 @@ func (s *Server) handleGitHubStart(w http.ResponseWriter, r *http.Request) {
 		Name: "mp_oauth_session", Value: sessionID, Path: "/auth/github", HttpOnly: true,
 		SameSite: http.SameSiteLaxMode, Secure: s.secureCookies(), MaxAge: 600,
 	})
+	if action == "mint" {
+		// Transient sibling cookie scoped to the same OAuth path. Lives only
+		// for the round-trip and is cleared on callback entry. Storing the
+		// action in a cookie (rather than threading it through OAuthState)
+		// avoids a storage schema change for a single boolean intent.
+		http.SetCookie(w, &http.Cookie{
+			Name: "mp_oauth_action", Value: "mint", Path: "/auth/github", HttpOnly: true,
+			SameSite: http.SameSiteLaxMode, Secure: s.secureCookies(), MaxAge: 600,
+		})
+	}
 	http.Redirect(w, r, s.githubAuthURL(redirectURI, state), http.StatusFound)
 }
 
@@ -266,6 +286,20 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, "upstream_error", "oauth_exchange_failed", "OAuth exchange failed")
 		return
 	}
+	// Read and clear the optional action cookie set by handleGitHubStart.
+	// Validate against the same allowlist so a forged or stale cookie can't
+	// drive unexpected behavior on callback.
+	action := ""
+	if c, errCookie := r.Cookie("mp_oauth_action"); errCookie == nil && c.Value == "mint" {
+		action = "mint"
+	}
+	if action != "" {
+		http.SetCookie(w, &http.Cookie{
+			Name: "mp_oauth_action", Value: "", Path: "/auth/github", HttpOnly: true,
+			Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: -1,
+		})
+	}
+
 	account, err := s.store.LookupAccountByIdentity(r.Context(), "github", identity.ProviderUserID)
 	if errors.Is(err, storage.ErrNotFound) {
 		account, err = s.createSignupAccount(w, r.Context(), r, identity)
@@ -281,6 +315,26 @@ func (s *Server) handleGitHubCallback(w http.ResponseWriter, r *http.Request) {
 	} else if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "account_lookup_failed", "Could not load account")
 		return
+	} else if action == "mint" {
+		// Existing account, operator-initiated mint. Issue a fresh API key
+		// and deliver via the same one-shot cookie the signup path uses.
+		// keyMgr.Issue stores the new key alongside existing ones; the user
+		// can revoke older keys via POST /auth/api-keys/{key_id}/revoke once
+		// they have a working bearer. Re-issuing (not rotating) preserves
+		// any other still-in-use keys the operator has elsewhere.
+		fullKey, _, err := s.keyMgr.Issue(r.Context(), s.store, account.AccountID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "server_error", "api_key_issuance_failed", "Could not issue API key")
+			return
+		}
+		http.SetCookie(w, &http.Cookie{
+			Name: "mp_new_api_key", Value: fullKey, Path: "/account", HttpOnly: true,
+			Secure: s.secureCookies(), SameSite: http.SameSiteLaxMode, MaxAge: 300,
+		})
+		_ = s.store.InsertAuditEvent(r.Context(), storage.AuditEvent{
+			EventID: mustID("audit"), RequestID: requestID(r), Actor: account.AccountID,
+			Type: "api_key_minted_via_oauth", Payload: `{"action":"mint"}`, CreatedAt: s.now(),
+		})
 	}
 	http.Redirect(w, r, s.cfg.Public.AccountPath, http.StatusFound)
 }
