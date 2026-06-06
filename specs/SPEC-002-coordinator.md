@@ -1,7 +1,10 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.3.4 (2026-05-31, SPEC-005 v0.3 cross-spec request_log patch)
+**Version:** 1.3.5 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 + SPEC-001 v1.3 absorption)
 **Depends on:** SPEC-001 v1.2.4 (Phase 3 binary wire protocol, locked)
+
+**Change log v1.3.5:**
+- **v1.3.5 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 + SPEC-001 v1.3 absorption):** Adds coordinator-side surface for three now-LOCKED companion specs. SPEC-010 v1.5 adds the `Provider` data-model extension (`SupportedModels[]`, `PublishesSupportedModels`); opt-in `/v1/status.supported_models` echo per R-3.3.3 / AC-21. SPEC-011 v0.5 adds heartbeat parsing for optional `model_hash` + `loading: bool` per R-3.3.0 / R-3.3.1; REPLACES the locked `ApplyHeartbeat` hash-clearing semantics with a two-path (legacy clear / SPEC-011 re-verify) contract at `phase4-coordinator/internal/pool/provider.go:411-432`; adds NEW §7.10 audit-log infrastructure + normative `operator_model_swap` event schema. ALSO adds a new normative §7.8 v2 `auth_request` provider handshake section — the v2 contract has been in code since SPEC-002 v1.2.x but was never normatively documented in SPEC-002; v1.3.5 closes that gap on the coordinator side (matching SPEC-001 v1.3 §6.7 binary-side closure). ALSO adds a new normative §7.9 auth-attempt lifecycle section (10-minute timeout per `s.now().Add(10 * time.Minute)` at server.go:355; per-attempt state release on success/reject/expiry/disconnect); takes over as the source of truth from SPEC-010 v1.5 R-3.1.10 clauses 1 and 5 per SPEC-010 §6.2 transition note. L-1 baseline preserved literally: a v1.3 binary in the unset/unset cell continues to be accepted and processed exactly as a pre-SPEC-010/SPEC-011 binary per SPEC-001 v1.3 §6.7.3 cell 1 and SPEC-010 §4.1 back-compat analysis. NO new buyer HTTP surface; NO routing-behavior change; NO Tier-2 (SPEC-008) expansion; NO change to existing FR-P* numbering or AC numbering.
 
 **Change log v1.3.4:**
 - Adds the SPEC-005 v0.3 X-2 request_log bundle to FR-B9: `error_code TEXT NULL` for SPEC-001 null-usage errors, `ts_utc` and `(request_id, id)` indexes for reconciliation and attempt fallback, and explicit multi-row-per-request_id semantics for provider retry attempts. Adds deterministic ACs for multi-row request logging and exact error_code population. No SPEC-001 wire change.
@@ -143,6 +146,18 @@ intelligence.
 - Structured JSON logging to stdout
 - Coordinator CLI: `coordinator-cli issue-token --provider-id ...`,
   `coordinator-cli revoke-token`, `coordinator-cli list-tokens`
+- Operator-opt-in coordinator-side capability advertisement per
+  SPEC-010 v1.5 §3.3 / §3.6: extend `Provider` data model with
+  `SupportedModels[]` and `PublishesSupportedModels`; extend
+  `/v1/status` to opt-in echo `supported_models` when the provider
+  set `publishes_supported_models: true` on the v2 `auth_request`
+  initial-stage frame.
+- Operator-opt-in coordinator-side warm-swap handling per SPEC-011
+  v0.5 §3.3 / §3.5 / §3.6: extend heartbeat parser to accept
+  optional `model_hash` (raw lowercase hex) + `loading: bool`;
+  REPLACE the `ApplyHeartbeat` hash-clearing semantics with the
+  two-path (legacy clear / SPEC-011 re-verify) contract; emit
+  `operator_model_swap` audit-log event when a swap completes.
 
 ### In Tier 2 roadmap scope (designed-in but not implemented)
 
@@ -286,6 +301,68 @@ existing providers.
 static `config.providers[]` map remains the mechanism for pinned-tier
 admission and endpoint_url fallback. It is no longer the sole admission
 mechanism — see § 7.5 for provisional admission.
+
+### Provider data model (v1.3.5 SPEC-010 extension)
+
+SPEC-002 v1.3.4 does not normatively enumerate the `Provider` Go
+struct. The struct exists in code at
+`phase4-coordinator/internal/pool/provider.go:50-88`, while existing
+fields such as provider identity, `model_id`, capacity, state, and
+heartbeat-derived metrics are specified operationally through FR-P1
+through FR-P21. v1.3.5 adds normative documentation only for the
+coordinator-side fields and retention state extended by SPEC-010 v1.5,
+SPEC-011 v0.5, and SPEC-008 v0.3.
+
+R-3.X.1 `SupportedModels []string` MUST be populated from the v2
+`auth_request` initial-stage `supported_models[]` field per
+SPEC-010 v1.5 §3.3 R-3.3.1. When `supported_models[]` is absent on
+the wire, the coordinator MUST synthesize `[model_id]` per SPEC-010
+v1.5 R-3.1.5. For the L-1 unset/unset baseline defined by SPEC-001
+v1.3 §6.7.3 cell 1, a v1.3 binary's single-entry
+`supported_models: [model_id]` frame and a pre-SPEC-010 binary's absent
+catalog field both result in `SupportedModels = [model_id]` and no
+buyer-visible change per SPEC-010 v1.5 §4.1.
+
+R-3.X.2 `PublishesSupportedModels bool` MUST be populated from the v2
+`auth_request` initial-stage `publishes_supported_models` field per
+SPEC-010 v1.5 §3.3 R-3.3.2. The default is `false` when the wire field
+is absent or explicitly `false`. This bool is the sole coordinator data
+model gate for `/v1/status.supported_models` per §7.4 and SPEC-010
+v1.5 R-3.3.3 / AC-21; the L-1 baseline omits that response field.
+
+R-3.X.3 `HashStatus` MUST use the five-state SPEC-008 v0.3 §5.5
+enumeration: `hash_verified`, `hash_mismatch`, `hash_invalid`,
+`uncatalogued`, and `catalog_unavailable`. The enum already exists in
+the coordinator; v1.3.5 documents it here because §7.1's
+ApplyHeartbeat REPLACEMENT now makes `HashStatus` assignment a
+heartbeat-state contract. No sixth state is introduced by SPEC-011
+v0.5 §3.5 R-3.5.2.
+
+R-3.X.4 `LastLoadingState bool` MUST be retained per active provider
+session to implement the SPEC-011 v0.5 §3.3 R-3.3.5 and §3.6
+exactly-once `operator_model_swap` emission gate. The value is updated
+from the current heartbeat's `loading` field when present; absence of
+`loading` is equivalent to `false` per SPEC-011 v0.5 R-3.3.4. The
+sticky gate resets after the first post-loading swap-completion
+heartbeat so later steady-state heartbeats do not re-emit the audit
+event.
+
+R-3.X.5 `AuthAttemptRetention map[string]AuthAttemptState` MUST be
+keyed by the coordinator-generated `auth_attempt_id` from
+`phase4-coordinator/internal/ws/server.go:354` and MUST retain only the
+per-attempt state required by SPEC-010 v1.5 R-3.1.10 and §7.9. A
+retention entry includes the initial-stage SPEC-010 values when present,
+challenge details, `provider_id`, start/expiry timestamps, and the
+generated auth-attempt ID. The L-1 baseline rule from SPEC-010 v1.5
+R-3.1.10 clause 1 remains binding: if neither SPEC-010 field is present
+on an initial-stage frame, no SPEC-010 retention entry is created.
+
+R-3.X.6 The coordinator MAY populate the internal `seenModels` index
+from the union of `Provider.ModelID` and every entry in
+`Provider.SupportedModels` per SPEC-010 v1.5 R-3.3.4 and R-3.4.1, but
+v1.3.5 MUST NOT change dispatch outcomes. A request still requires an
+otherwise eligible currently loaded provider; buyer HTTP behavior and
+§5 routing results remain unchanged under all defaults.
 
 ### Tier 2 hook points summary
 
@@ -1892,6 +1969,92 @@ This preserves SPEC-001 § 6.5's locked one-directional `nak` semantics
 exactly. Provider binaries do not need any new parser logic; standard
 WebSocket close handling per SPEC-001 FR-13 is sufficient.
 
+#### Heartbeat field extension (v1.3.5, SPEC-011)
+
+The existing heartbeat schema above remains the L-1 baseline shape.
+When the binary has not enabled SPEC-011 warm swap, heartbeats omit
+`model_hash` and `loading`, and the coordinator processes the frame
+through the legacy behavior below. When the binary has enabled
+`--enable-warm-swap`, the heartbeat MAY carry the following optional
+fields per SPEC-011 v0.5 §3.3 R-3.3.0 / R-3.3.1 and SPEC-001 v1.3
+§6.10:
+
+| Field | JSON name | Type | Requiredness | Coordinator handling |
+|---|---|---|---|---|
+| Model hash | `model_hash` | string, raw 64-char lowercase hex | optional; present only on SPEC-011 warm-swap path | Validated and used as the new `Provider.ModelHash` when present; triggers SPEC-008 v0.3 §5.3-§5.6 re-verification on model change |
+| Loading flag | `loading` | bool | optional; absence is equivalent to `false` | Marks the provider routing-ineligible while `true` via the existing non-ready exclusion path and feeds `LastLoadingState` for exactly-once audit emission |
+
+R-7.1.1 The coordinator MUST accept heartbeat frames that omit
+`model_hash` and `loading` and MUST process them exactly as SPEC-002
+v1.3.4 did. This preserves the L-1 byte-identical default for
+pre-SPEC-011 binaries and for v1.3 binaries in SPEC-001 v1.3 §6.7.3
+cell 1, per SPEC-011 v0.5 R-3.3.0 / AC-18.
+
+R-7.1.2 When `loading: true` is present, the coordinator MUST treat the
+provider as routing-ineligible until the next heartbeat with
+`loading: false` or an absent `loading` field, reusing the existing
+non-ready filtering path and adding no new coordinator-side provider
+state, per SPEC-011 v0.5 R-3.3.3 / R-3.3.4.
+
+#### ApplyHeartbeat hash-clearing REPLACEMENT (v1.3.5, per SPEC-011 v0.5 §6.2)
+
+**THIS SUB-SECTION NORMATIVELY REPLACES THE HASH-CLEARING PART OF THE
+LOCKED v1.3.4 `ApplyHeartbeat` BEHAVIOR AT
+`phase4-coordinator/internal/pool/provider.go:411-432`.** The
+replacement is a two-path dispatch keyed ONLY by whether the current
+heartbeat carries the `model_hash` field. It applies per-heartbeat; the
+coordinator MUST NOT infer a sticky SPEC-011 path from a prior heartbeat.
+
+**LEGACY PATH — heartbeat lacks `model_hash` field.**
+
+R-7.1.3 If the current heartbeat lacks `model_hash` and
+`heartbeat.model_id != Provider.ModelID`, the coordinator MUST keep the
+locked v1.3.4 behavior at
+`phase4-coordinator/internal/pool/provider.go:420-432`: update
+`Provider.ModelID`, CLEAR `Provider.ModelHash`, and SET
+`Provider.HashStatus = HashStatusUncatalogued`. No
+`operator_model_swap` event is emitted. This is the L-1 path for
+pre-SPEC-011 binaries and for any SPEC-011 binary heartbeat that omits
+`model_hash`, per SPEC-011 v0.5 R-3.3.2 / R-3.3.5 and SPEC-001 v1.3
+AC-18.0.
+
+**SPEC-011 PATH — heartbeat carries `model_hash` field.**
+
+R-7.1.4 If the current heartbeat carries `model_hash` and
+`heartbeat.model_id != Provider.ModelID`, the coordinator MUST update
+`Provider.ModelID` and MUST UPDATE `Provider.ModelHash` to the new
+heartbeat value, not clear it, per SPEC-011 v0.5 R-3.3.5 and
+SPEC-011 v0.5 AC-10.
+
+R-7.1.5 After updating `Provider.ModelHash` on the SPEC-011 PATH, the
+coordinator MUST run SPEC-008 v0.3 §5.3-§5.6 Pillar A re-verification
+against the new hash and MUST populate `Provider.HashStatus` from the
+SPEC-008 v0.3 §5.5 five-state enumeration, per SPEC-011 v0.5 §3.5
+R-3.5.2 / R-3.5.3.
+
+R-7.1.6 The coordinator MUST emit an `operator_model_swap` audit event
+IF AND ONLY IF the prior heartbeat on the current provider session had
+`loading: true` and the current SPEC-011 PATH heartbeat is the
+post-swap heartbeat. The `LastLoadingState` sticky gate MUST reset
+after the emission so the event is emitted exactly once per completed
+swap, per SPEC-011 v0.5 R-3.3.5 / R-3.6.3 / AC-20. The "current
+session" qualifier is normative: per §7.10 R-7.10.10 (the conditional
+emission rule of SPEC-011 v0.5 R-3.6.6), if the WS dropped during the
+loading window and the provider reconnected AFTER swap completion, no
+`loading: true` heartbeat exists on the new session and therefore NO
+`operator_model_swap` event fires. Reconnect DURING load (post-
+reconnect heartbeat has `loading: true` with the OLD `model_id`) DOES
+re-establish the sticky on the new session and a subsequent swap
+completion DOES emit normally. The full emission contract — payload
+schema, F-1.5 invariants, conditional emission, and emission
+exactly-once — lives in §7.10.
+
+R-7.1.7 The SPEC-011 PATH MUST NOT change buyer HTTP endpoints,
+SPEC-002 §5 routing order, or Tier-2 behavior beyond invoking the
+existing SPEC-008 v0.3 §5.3-§5.6 Pillar A pipeline. The SPEC-010
+catalog opt-in and the SPEC-011 heartbeat opt-in remain orthogonal for
+all four SPEC-001 v1.3 §6.7.3 matrix cells per SPEC-001 v1.3 R-6.7.7.
+
 ### 7.2. Buyer HTTP API
 
 Wire-compatible with SPEC-001 section 6.2. The harness (`beta/harness.py`)
@@ -2272,6 +2435,17 @@ the entry is gone. AC-10 asserts this two-phase observable behavior
 (not "removed immediately" — that would conflict with FR-P6's normal
 disconnect-then-remove flow).
 
+#### /v1/status SPEC-010 echo (v1.3.5)
+
+R-7.4.1 For each provider entry returned by `/v1/status`, the
+coordinator MUST INCLUDE the `supported_models` field IF the provider's
+`PublishesSupportedModels` is `true` per §3 Provider data model and
+SPEC-010 v1.5 R-3.3.3. When `PublishesSupportedModels` is `false` or
+absent, the `supported_models` field MUST be OMITTED entirely, not
+emitted as `null` or `[]`. This preserves byte-identical `/v1/status`
+output for pre-SPEC-010 binaries and for SPEC-010 binaries that opt out
+per SPEC-010 v1.5 AC-21 and SPEC-001 v1.3 AC-18.0.
+
 ### 7.5. Admission state and operator endpoints (v1.1)
 
 All endpoints in this section are mounted on `listen.provider_port`
@@ -2452,6 +2626,332 @@ count, configured hourly limit, and threshold. This is the canary signal
 for Sybil pressure.
 
 Each invariant has an associated acceptance criterion in § 11.
+
+### 7.8. v2 `auth_request` provider handshake (NEW in v1.3.5)
+
+Locked SPEC-002 v1.3.4 §7.1 documents the legacy `hello` handshake.
+The v2 `auth_request` two-stage handshake has been in coordinator code
+since SPEC-002 v1.2.x: the frame validator at
+`phase4-coordinator/internal/ws/messages.go:302-329` gates on
+`type == "auth_request"`, `version == 2`, and
+`stage ∈ {"initial", "proof"}`. This section closes the coordinator-side
+normative documentation gap, matching the SPEC-001 v1.3 §6.7
+binary-side closure. The legacy `hello` parser remains the reconnect
+path for SPEC-011 WS-drop cases per SPEC-001 v1.3 R-6.7.9 / R-6.11.4.
+
+#### 7.8.1. Initial-stage frame (P->C)
+
+R-7.8.1 The coordinator MUST accept a v2 initial-stage frame with the
+SPEC-010 v1.5 §3.1.A field set and MUST process it through
+`parseAuthInitial` at
+`phase4-coordinator/internal/ws/messages.go:333-388`, per SPEC-010
+v1.5 R-3.1.1 through R-3.1.10 and SPEC-001 v1.3 R-6.7.1.
+
+| Field | JSON name | Type | Parser requiredness | Binding source |
+|---|---|---|---|---|
+| Message type | `type` | string, exactly `"auth_request"` | REQUIRED by frame validator | SPEC-010 v1.5 §3.1.A / R-3.1.1 |
+| Protocol version | `version` | int, exactly `2` | REQUIRED by frame validator | SPEC-010 v1.5 §3.1.A |
+| Stage | `stage` | string, exactly `"initial"` | REQUIRED by frame validator | SPEC-010 v1.5 §3.1.A |
+| Provider ID | `provider_id` | string ULID | REQUIRED by `parseAuthInitial` | SPEC-010 v1.5 §3.1.A |
+| Hostname | `hostname` | string | REQUIRED by `parseAuthInitial` | SPEC-010 v1.5 §3.1.A |
+| Loaded model | `model_id` | string | REQUIRED by `parseAuthInitial` | SPEC-010 v1.5 §3.1.A |
+| Model hash | `model_hash` | string sha256-hex | optional | SPEC-008 v0.3 §5.3-§5.6 |
+| Model params (B) | `model_params_b` | float | REQUIRED by `parseAuthInitial` | SPEC-010 v1.5 §3.1.A |
+| RAM (GB) | `ram_gb` | int | REQUIRED by `parseAuthInitial` | SPEC-010 v1.5 §3.1.A |
+| Max context tokens | `max_context_tokens` | int | REQUIRED by `parseAuthInitial` | SPEC-010 v1.5 §3.1.A |
+| Max concurrency | `max_concurrency` | int | REQUIRED by `parseAuthInitial` | SPEC-010 v1.5 §3.1.A |
+| Throughput TPS estimate | `throughput_tps_estimate` | float | REQUIRED by `parseAuthInitial` | SPEC-010 v1.5 §3.1.A |
+| Model load time | `model_load_time_ms` | int64 | optional | SPEC-010 v1.5 §3.1.A |
+| Binary version | `binary_version` | string | REQUIRED by `parseAuthInitial` | SPEC-010 v1.5 §3.1.A |
+| Endpoint URL | `endpoint_url` | string pointer (nullable) | optional | SPEC-010 v1.5 §3.1.A |
+| Provider ECDH public key | `provider_ecdh_public_key` | string base64 | REQUIRED by `parseAuthInitial` | SPEC-008 v0.3 |
+| Tier-2 capabilities | `tier2_capabilities` | object `{encrypted_leg: bool, attestation: bool, aead_suites: []string}` | REQUIRED by `parseAuthInitial` | SPEC-008 v0.3 |
+| Supported models | `supported_models` | array of strings | optional SPEC-010 field; v1.3 binary emits single-entry default | SPEC-010 v1.5 R-3.1.1 through R-3.1.9 / R-3.6.2 |
+| Publishes supported models | `publishes_supported_models` | bool | optional SPEC-010 field | SPEC-010 v1.5 R-3.1.6 / R-3.6.4 |
+
+R-7.8.2 The 11 parser-required data fields in SPEC-010 v1.5 §3.1.A
+MUST be treated as required even if a Go struct tag is `omitempty`:
+`provider_id`, `hostname`, `model_id`, `model_params_b`, `ram_gb`,
+`max_context_tokens`, `max_concurrency`, `throughput_tps_estimate`,
+`binary_version`, `provider_ecdh_public_key`, and
+`tier2_capabilities`. This is the current coordinator parser contract
+per SPEC-010 v1.5 R-3.1.1 through R-3.1.10 / AC-16 and SPEC-001 v1.3
+R-6.7.1 / AC-18.10.
+
+R-7.8.3 The optional SPEC-010 fields on the initial-stage frame MUST
+populate `Provider.SupportedModels` and `Provider.PublishesSupportedModels`
+per §3 Provider data model and SPEC-010 v1.5 R-3.3.1 / R-3.3.2. The
+L-1 baseline accepts a v1.3 binary's `supported_models: [model_id]`
+single-entry frame and treats it as functionally indistinguishable from
+a pre-SPEC-010 binary per SPEC-010 v1.5 §4.1 and SPEC-001 v1.3
+AC-18.0.
+
+R-7.8.4 The coordinator MUST apply SPEC-010 field validation in the
+order mandated by SPEC-010 v1.5 R-3.1.9: JSON type, per-entry byte
+length, array length, normalized duplicate check, then `model_id`
+containment. Rejection reason strings MUST trace to SPEC-010 v1.5
+AC-17 / AC-22 / AC-23.
+
+#### 7.8.2. Proof-stage frame (P->C)
+
+R-7.8.5 The coordinator MUST accept a v2 proof-stage frame with the
+SPEC-010 v1.5 §3.1.C field set and MUST process it through
+`parseAuthProof` at `phase4-coordinator/internal/ws/messages.go:391-401`,
+per SPEC-010 v1.5 R-3.1.10 and SPEC-001 v1.3 R-6.7.4.
+
+| Field | JSON name | Type | Parser requiredness | Binding source |
+|---|---|---|---|---|
+| Message type | `type` | string, exactly `"auth_request"` | REQUIRED by frame validator | SPEC-010 v1.5 §3.1.C |
+| Protocol version | `version` | int, exactly `2` | REQUIRED by frame validator | SPEC-010 v1.5 §3.1.C |
+| Stage | `stage` | string, exactly `"proof"` | REQUIRED by frame validator | SPEC-010 v1.5 §3.1.C |
+| Auth attempt ID | `auth_attempt_id` | string | REQUIRED by `parseAuthProof` | SPEC-010 v1.5 R-3.1.10 |
+| Provider ID | `provider_id` | string | REQUIRED by `parseAuthProof`; must match initial-stage value | SPEC-010 v1.5 R-3.1.10 |
+| Attestation token | `attestation_token` | JSON raw | conditional per Tier-2 negotiation | SPEC-008 v0.3 |
+| Supported models | `supported_models` | array of strings | optional SPEC-010 proof-stage field | SPEC-010 v1.5 R-3.1.10 |
+| Publishes supported models | `publishes_supported_models` | bool | optional SPEC-010 proof-stage field | SPEC-010 v1.5 R-3.1.10 |
+
+R-7.8.6 The proof-stage `auth_attempt_id` MUST match the
+coordinator-generated value emitted in the prior `auth_challenge`, and
+`provider_id` MUST match the initial-stage provider ID, per SPEC-010
+v1.5 R-3.1.10 and SPEC-001 v1.3 R-6.7.5. Current code enforces the
+provider-ID match at `phase4-coordinator/internal/ws/server.go:398`.
+
+R-7.8.7 Proof-stage SPEC-010 fields MUST follow SPEC-010 v1.5
+R-3.1.10: absent `supported_models[]` or absent
+`publishes_supported_models` is accepted and performs no comparison;
+present values MUST match the retained initial-stage values after NFC
+normalization and ASCII case-fold per SPEC-010 v1.5 R-3.1.7. Mismatch
+MUST be rejected with `auth_response.error.code = "bad_request"` and
+reason text containing `"supported_models mismatch between auth_request
+stages"` (the exact substring mandated by SPEC-010 v1.5 R-3.1.10
+clause 4 and SPEC-010 AC-18(c); this is the locked test oracle).
+
+R-7.8.8 `attestation_token` handling remains bound to SPEC-008 v0.3
+§5.3-§5.7 and SPEC-001 v1.3 R-6.7.4. v1.3.5 documents the field
+location in the v2 proof-stage frame but adds no encrypted-leg,
+attestation, TEE, or Tier-2 expansion beyond current SPEC-008 behavior.
+
+#### 7.8.3. Auth-attempt ID source-of-truth
+
+R-7.8.9 The coordinator MUST generate `auth_attempt_id` only after
+successful initial-stage parse, at
+`phase4-coordinator/internal/ws/server.go:354`
+(`authAttemptID := "auth-" + s.newUUID()`), per SPEC-010 v1.5
+R-3.1.10 and SPEC-001 v1.3 R-6.7.5. The coordinator MUST attach this
+ID to the outgoing `auth_challenge` frame and MUST expect the proof
+stage to echo it verbatim. Implementations MUST NOT trust a
+client-supplied `auth_attempt_id` on the initial stage; `parseAuthInitial`
+does not read it per SPEC-010 v1.5 §3.1.A.
+
+### 7.9. Auth-attempt lifecycle (NEW in v1.3.5)
+
+SPEC-010 v1.5 §6.2 states that until SPEC-002 v1.3.5 lands,
+SPEC-010 R-3.1.10 clauses 1 and 5 are the source of truth for the
+auth-attempt retention lifecycle as it interacts with SPEC-010. This
+new §7.9 now takes over as the coordinator-side state-management source
+of truth. SPEC-010 v1.5 R-3.1.10 clauses 1 and 5 remain the wire-side
+binding contract for the SPEC-010 fields.
+
+#### 7.9.1. Lifecycle events
+
+R-7.9.1 On initial-stage parse success, the coordinator MUST generate
+`authAttemptID` at `phase4-coordinator/internal/ws/server.go:354` and
+compute `challengeExpiresAt := s.now().Add(10 * time.Minute)` at
+`phase4-coordinator/internal/ws/server.go:355`, per SPEC-010 v1.5
+R-3.1.10 and SPEC-001 v1.3 R-6.7.5.
+
+R-7.9.2 The outgoing `auth_challenge` MUST carry the generated
+`auth_attempt_id` and an explicit expiry timestamp derived from
+`challengeExpiresAt`, per SPEC-010 v1.5 R-3.1.10.
+
+R-7.9.3 The coordinator MUST retain per-attempt state keyed by the
+generated `auth_attempt_id` in `AuthAttemptRetention` per §3 data model
+and SPEC-010 v1.5 R-3.1.10. State includes any retained SPEC-010 values,
+challenge details, generated ID, `provider_id`, start timestamp, and
+expiry timestamp.
+
+R-7.9.4 Per-attempt state MUST be released on any terminal path:
+successful proof-stage completion and provider registration,
+proof-stage rejection for any reason, expiry timeout, WebSocket
+disconnect-before-proof, proof read/parse error, or challenge write
+failure. This is the coordinator-side lifecycle takeover from
+SPEC-010 v1.5 R-3.1.10 clause 5.
+
+#### 7.9.2. Timeout bound
+
+R-7.9.5 The auth-attempt timeout is 10 minutes, matching
+`challengeExpiresAt := s.now().Add(10 * time.Minute)` at
+`phase4-coordinator/internal/ws/server.go:355`, per SPEC-010 v1.5
+R-3.1.10 and SPEC-001 v1.3 R-6.7.5.
+
+R-7.9.6 Implementations MUST bound aggregate retention map size as a
+defensive safeguard per SPEC-010 v1.5 R-3.1.10. Recommended bound:
+1024 in-flight auth attempts per coordinator instance; when exceeded,
+reject new initial-stage attempts with `auth_response.error.code =
+"too_many_auth_attempts"` and a 503-class WebSocket close code drawn
+from the existing close-code registry. The current unauthenticated
+connection cap (`ws.max_unauthenticated_conn`, default 64 at
+`phase4-coordinator/internal/config/config.go:269`) remains an
+additional operational bound.
+
+#### 7.9.3. Release implementation
+
+R-7.9.7 Retention release MUST be implemented with an
+auth-attempt-scoped `defer releaseRetention(authAttemptID)` installed
+immediately after retention entry creation and before `auth_challenge`
+emission, per SPEC-010 v1.5 R-3.1.10 clause 5. The release call MUST
+live at the auth-attempt scope between initial-stage parse acceptance
+and final session registration, not only in session-level
+`handleDisconnect`, so pre-proof failures release state synchronously.
+
+R-7.9.8 The L-1 baseline presence gate from SPEC-010 v1.5 R-3.1.10
+clause 1 remains binding: if an initial-stage frame has neither
+`supported_models` nor `publishes_supported_models` present, the
+coordinator MUST NOT create SPEC-010 retention state, MUST NOT install
+the SPEC-010 retention defer, and MUST NOT increment retention metrics.
+
+### 7.10. Audit-log infrastructure (NEW in v1.3.5)
+
+SPEC-002 v1.3.4 does not currently define a normative audit-log
+infrastructure section. SPEC-005 v0.3 documents the `request_log` table
+for per-request accounting and billing; this section adds a separate
+operator-action audit log for coordinator-observed operator-side
+actions. v1.3.5 defines one event type: `operator_model_swap`.
+
+#### 7.10.1. Audit-log table requirement
+
+R-7.10.1 The coordinator MUST persist audit-log entries to a durable
+store for SPEC-011 operator-side events per SPEC-011 v0.5 §3.6
+R-3.6.1 / R-3.6.2. Implementations SHOULD use SQLite, matching
+`request_log` storage, with this schema:
+
+```sql
+CREATE TABLE audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts_utc TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    provider_id TEXT,
+    payload_json TEXT NOT NULL
+);
+CREATE INDEX idx_audit_log_ts_utc ON audit_log(ts_utc);
+CREATE INDEX idx_audit_log_provider_id ON audit_log(provider_id);
+CREATE INDEX idx_audit_log_event_type ON audit_log(event_type);
+```
+
+R-7.10.2 `ts_utc` MUST be RFC3339 in UTC. `payload_json` MUST be a
+well-formed JSON object whose schema depends on `event_type`. The table
+retention policy follows §7.7 / §13 `storage.audit_log_retention_days`
+with default 90 days, mirroring `request_log_retention_days`, per
+SPEC-011 v0.5 §3.6 R-3.6.1 / R-3.6.2 and SPEC-002 v1.3.5 AC-K.14.
+
+#### 7.10.2. `operator_model_swap` event type (NORMATIVE)
+
+R-7.10.3 Per SPEC-011 v0.5 §3.6 R-3.6.1 through R-3.6.6, the
+coordinator MUST emit `operator_model_swap` when a SPEC-011 warm swap
+completes under the §7.1 ApplyHeartbeat REPLACEMENT emission gate
+(R-7.1.6), subject to the conditional-emission rule in R-7.10.10 below.
+The payload schema is byte-for-byte SPEC-011 v0.5 §3.6 (LOCKED) — field
+names, types, and units are NORMATIVE and MUST NOT be renamed or
+restructured:
+
+```json
+{
+  "event": "operator_model_swap",
+  "ts": "2026-06-06T14:23:09.123Z",
+  "provider_assigned_id": "p_01HK4Z3VYE...",
+  "from_model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+  "to_model_id": "mlx-community/Llama-3.1-8B-Instruct-4bit",
+  "from_model_hash": "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f",
+  "to_model_hash": "9e8d7c6b5a4f3e2d1c0b9a8f7e6d5c4b3a2f1e0d9c8b7a6f5e4d3c2b1a0f9e8d",
+  "loading_window_ms": 18243,
+  "hash_verification_result": "hash_verified",
+  "drain_inflight_count_estimate": 2
+}
+```
+
+R-7.10.4 Payload field requiredness, per SPEC-011 v0.5 R-3.6.1 /
+R-3.6.2:
+- **REQUIRED (8 fields):** `event`, `ts`, `provider_assigned_id`,
+  `from_model_id`, `to_model_id`, `to_model_hash`,
+  `loading_window_ms`, `hash_verification_result`.
+- **OPTIONAL (2 fields):** `from_model_hash` (MAY be empty string
+  or null if the prior `model_hash` was not recorded);
+  `drain_inflight_count_estimate` (MAY be omitted;
+  observability-only).
+
+Coordinator MUST populate the REQUIRED fields and MAY omit the
+OPTIONAL fields. No other top-level keys are part of the v1.3.5
+contract; future event types or future payload extensions are out of
+scope per §7.10.3.
+
+R-7.10.5 The `provider_assigned_id` field MUST be the per-session
+coordinator-issued `AssignedID` (see `Provider.AssignedID` in the
+data model), NOT the operator-issued `provider_id`. This matches the
+SPEC-011 v0.5 §3.6 example payload semantics and SPEC-002's existing
+distinction between operator-issued `provider_id` and per-session
+`assigned_id`.
+
+R-7.10.6 `loading_window_ms` MUST be computed as the wall-clock
+duration (integer milliseconds) from the FIRST observed heartbeat
+with `loading: true` to the FIRST observed heartbeat with
+`loading: false` carrying the new `model_id`, using the coordinator
+clock (NOT provider-reported timestamps), per SPEC-011 v0.5 R-3.6.3.
+Implementations MUST record the loading-start timestamp on the
+`Provider` struct when the LEGACY-or-SPEC-011-PATH heartbeat first
+flips `LastLoadingState` from `false` to `true`, and compute the
+duration at swap-completion emission time.
+
+R-7.10.7 `hash_verification_result` MUST be exactly one of SPEC-008
+v0.3 §5.5's five states — `"hash_verified"`, `"hash_mismatch"`,
+`"hash_invalid"`, `"uncatalogued"`, `"catalog_unavailable"` — per
+SPEC-011 v0.5 R-3.6.4. No sixth state is permitted. The value MUST
+be derived from the SPEC-008 Pillar A re-verification run in §7.1
+R-7.1.5.
+
+R-7.10.8 The `operator_model_swap` event MUST be emitted EXACTLY ONCE
+per completed swap, enforced by the §7.1 R-7.1.6 `LastLoadingState`
+sticky reset, per SPEC-011 v0.5 R-3.3.5 / R-3.6.3 / AC-20. Emission
+MUST be best-effort: audit-log write failure MUST NOT block heartbeat
+processing or trigger a provider drop. Failures MUST be logged at
+WARN level with the full payload available in process logs for
+forensic recovery.
+
+R-7.10.9 **F-1.5 payload invariants (per SPEC-011 v0.5 R-3.6.5).**
+The `operator_model_swap` payload MUST NOT include `conv:` prefixed
+strings, raw `account_id` values, sticky session identifiers, buyer
+prompt text, or any input that could feed sticky derivation. This is
+the L-6 F-1.5 survivability invariant inherited from SPEC-006 v0.8.1
+and MUST be enforced by static review (grep for the prohibited
+substrings against payload-building code) plus a runtime regression
+test that asserts the payload of a real swap event contains none of
+the prohibited tokens.
+
+R-7.10.10 **Conditional emission (per SPEC-011 v0.5 R-3.6.6 + §3.8
+C.2.2 outline decision).** The `operator_model_swap` event fires
+ONLY when the coordinator observed the `loading: true → loading: false`
+transition on a CONNECTED WS session. If the WS dropped during the
+loading window (per SPEC-011 v0.5 §3.8) and the provider reconnected
+AFTER the swap completed, the first heartbeat on the new session
+arrives with the new `model_id` and `loading: false` but WITHOUT a
+preceding `loading: true` on the current session — in that case NO
+`operator_model_swap` event fires. This is the documented
+observation-only audit invariant; operators who require complete
+swap audit history MUST keep WS sessions alive during swaps
+(typical load: 20-30 seconds; WS sessions are persistent and rarely
+drop on that scale per SPEC-011 v0.5 §3.6 prose). Reconnect during
+load (first post-reconnect heartbeat has `loading: true` with the
+OLD `model_id`) DOES re-establish the `LastLoadingState` sticky on
+the new session, so a subsequent `loading: false` heartbeat with the
+new `model_id` WILL emit the event normally per SPEC-011 v0.5
+§3.6 R-3.6.6 rationale block.
+
+#### 7.10.3. Future event types
+
+R-7.10.11 The audit-log infrastructure MAY support additional event
+types in future revisions, but v1.3.5 ships exactly one normative event
+type, `operator_model_swap`, per SPEC-011 v0.5 §3.6 R-3.6.1 through
+R-3.6.6. No SPEC-005 billing or request-log semantics are changed by
+this section.
 
 ---
 
@@ -3094,6 +3594,175 @@ Expected result: a WARN-level log line containing
 `provisional_admission_pressure`, `rolling_10m_count`, `limit_per_hour`,
 and `threshold_count`.
 
+### Audit category K — SPEC-010 / SPEC-011 coordinator absorption
+
+**AC-K.0 L-1 baseline coordinator handling.**
+A v1.3 binary invoked with neither `--supported-models` nor
+`--enable-warm-swap` registers with the v1.3.5 coordinator and is
+processed byte-identical to a pre-SPEC-010/SPEC-011 binary: v2
+`auth_request` initial-stage frame with single-entry
+`supported_models: [model_id]` is accepted; `Provider` struct has
+`SupportedModels = [model_id]` and `PublishesSupportedModels = false`;
+`/v1/status` for this provider OMITS the `supported_models` field;
+heartbeat without `model_hash` / `loading` triggers the LEGACY PATH of
+ApplyHeartbeat (clear hash on `ModelID` change). Traces to SPEC-010
+v1.5 AC-2 + AC-21, SPEC-011 v0.5 AC-18, and SPEC-001 v1.3 AC-18.0.
+
+**AC-K.1 SPEC-010 catalog opt-in echo.**
+A v1.3 binary registered with `supported_models: [A, B, C]` and
+`publishes_supported_models: true` MUST cause `/v1/status` for this
+provider to include `"supported_models": ["A", "B", "C"]`. Traces to
+SPEC-010 v1.5 AC-1 + AC-21 and SPEC-001 v1.3 AC-18.1.
+
+**AC-K.2 SPEC-010 catalog opt-in suppressed echo.**
+A v1.3 binary registered with `supported_models: [A, B, C]` but
+without `publishes_supported_models: true` MUST cause `/v1/status` for
+this provider to OMIT the `supported_models` field. Traces to SPEC-010
+v1.5 R-3.3.3 / AC-21.
+
+**AC-K.3 v2 `auth_request` proof-stage retention.**
+A v1.3 binary's proof-stage frame that omits `supported_models[]` MUST
+be accepted (no comparison performed). A proof-stage frame that
+includes `supported_models[]` MUST be compared byte-identical to the
+initial-stage value after NFC normalization + ASCII case-fold per
+SPEC-010 v1.5 R-3.1.7. Mismatch MUST be rejected with
+`auth_response.error.code = "bad_request"` and reason text containing
+the exact substring `"supported_models mismatch between auth_request
+stages"` (the locked SPEC-010 v1.5 R-3.1.10 clause 4 + AC-18(c) test
+oracle). Traces to SPEC-010 v1.5 R-3.1.10 / AC-18(c).
+
+**AC-K.4 Auth-attempt expiry.**
+A binary that completes the initial-stage handshake but disconnects
+before sending the proof-stage frame MUST cause the coordinator to
+release the auth-attempt retention state within 10 minutes, matching
+`phase4-coordinator/internal/ws/server.go:355` `challengeExpiresAt`.
+Traces to SPEC-010 v1.5 R-3.1.10 clauses 1 and 5 / AC-18 and
+SPEC-002 v1.3.5 §7.9.
+
+**AC-K.5 Auth-attempt release on disconnect-before-proof.**
+A binary that completes initial-stage and then drops the WebSocket
+before sending proof-stage MUST cause IMMEDIATE release of the
+auth-attempt retention, not wait for the 10-minute timeout. Traces to
+SPEC-010 v1.5 R-3.1.10 clause 5 / AC-18(f) and SPEC-002 v1.3.5 §7.9.
+
+**AC-K.6 ApplyHeartbeat LEGACY PATH.**
+A v1.3 binary without `--enable-warm-swap` (emits heartbeat without
+`model_hash` field) that changes `ModelID` between heartbeats MUST
+cause the coordinator to clear `Provider.ModelHash` and set
+`Provider.HashStatus = HashStatusUncatalogued` per the locked v1.3.4
+behavior at `phase4-coordinator/internal/pool/provider.go:420-432`.
+Traces to SPEC-011 v0.5 §6.2 D2.1 fix (LEGACY PATH) and SPEC-011 v0.5
+AC-19.
+
+**AC-K.7 ApplyHeartbeat SPEC-011 PATH.**
+A v1.3 binary with `--enable-warm-swap` (emits heartbeat with
+`model_hash` field) that changes `ModelID` between heartbeats MUST
+cause the coordinator to: (a) UPDATE `Provider.ModelHash` to the new
+value (not clear); (b) run SPEC-008 v0.3 §5.3-§5.6 Pillar A
+re-verification; (c) populate `Provider.HashStatus` from the
+verification result; (d) emit `operator_model_swap` audit-log event per
+§7.10 IF the prior heartbeat had `loading: true`. Traces to SPEC-011
+v0.5 §6.2 D2.1 fix (SPEC-011 PATH) and SPEC-011 v0.5 AC-10 + AC-13 +
+AC-20.
+
+**AC-K.8 ApplyHeartbeat path selection by field presence.**
+A SPEC-011 binary that omits `model_hash` from a single heartbeat
+(e.g. transient bug) MUST be handled by the LEGACY PATH for that
+heartbeat. There is no sticky path; path selection is per-heartbeat
+based on field presence. Traces to SPEC-002 v1.3.5 R-7.1.3 /
+R-7.1.4 and SPEC-011 v0.5 AC-18 + AC-19.
+
+**AC-K.9 `operator_model_swap` exactly-once emission.**
+A completed warm swap MUST cause EXACTLY ONE `operator_model_swap`
+audit-log row, not one per heartbeat after swap completion. Traces to
+SPEC-002 v1.3.5 R-7.1.6 / R-7.10.8 (`LastLoadingState` sticky) and
+SPEC-011 v0.5 AC-20.
+
+**AC-K.10 `operator_model_swap` payload schema (REQUIRED/OPTIONAL keys).**
+Every emitted `operator_model_swap` row MUST have a `payload_json`
+field that parses as a JSON object containing:
+- The 8 REQUIRED keys per §7.10 R-7.10.4 / SPEC-011 v0.5 R-3.6.1:
+  `event` (value `"operator_model_swap"`), `ts` (RFC3339 UTC),
+  `provider_assigned_id` (per-session assigned ID, not operator-
+  issued provider_id per R-7.10.5), `from_model_id`, `to_model_id`,
+  `to_model_hash` (raw 64-char lowercase hex), `loading_window_ms`
+  (int, coordinator-clock per R-7.10.6), and `hash_verification_result`
+  (exactly one of the 5 SPEC-008 §5.5 enum values per R-7.10.7).
+- The 2 OPTIONAL keys per §7.10 R-7.10.4 / SPEC-011 v0.5 R-3.6.2:
+  `from_model_hash` (MAY be empty/null), `drain_inflight_count_estimate`
+  (MAY be omitted).
+- NO other top-level keys (key drift = AC fail). v1.3.5 ships
+  exactly one event type per §7.10.3.
+Traces to SPEC-011 v0.5 §3.6 R-3.6.1 / R-3.6.2 and AC-20.
+
+**AC-K.11 `operator_model_swap` payload F-1.5 invariants.**
+The emitted `payload_json` MUST NOT contain any `conv:` prefixed
+string, raw `account_id` value, sticky session identifier, buyer
+prompt text, or any input that could feed sticky derivation. Test
+oracle: a static grep against payload-building code AND a runtime
+regression test that captures a real swap event payload and asserts
+the absence of each prohibited substring. Traces to SPEC-002 v1.3.5
+R-7.10.9 and SPEC-011 v0.5 R-3.6.5.
+
+**AC-K.12 `operator_model_swap` conditional emission (WS-drop).**
+A v1.3 binary that begins a swap (heartbeat with `loading: true`),
+loses its WebSocket mid-load, completes the swap locally, and
+reconnects with `loading: false` carrying the new `model_id` MUST
+NOT cause an `operator_model_swap` event to be emitted (no
+`loading: true` is observed on the new session). A binary that
+reconnects DURING the load (first post-reconnect heartbeat has
+`loading: true` with the OLD `model_id`) and then completes the
+swap on the new session MUST cause exactly one
+`operator_model_swap` event on swap completion (the new session
+re-establishes the `LastLoadingState` sticky). Traces to SPEC-002
+v1.3.5 R-7.10.10 / R-7.1.6 and SPEC-011 v0.5 R-3.6.6.
+
+**AC-K.13 Audit-log write failure tolerance.**
+A simulated SQLite write failure during `operator_model_swap` emission
+MUST NOT block heartbeat processing OR cause a provider drop; the
+failure MUST be logged at WARN level with the full payload. Traces to
+SPEC-002 v1.3.5 R-7.10.8 and SPEC-011 v0.5 AC-20.
+
+**AC-K.14 Audit-log retention.**
+Rows older than `storage.audit_log_retention_days` (default 90) MUST be
+pruned by the existing coordinator pruner, extended from the §7.7
+pruner pattern. Traces to SPEC-002 v1.3.5 §7.10.1 and SPEC-011 v0.5
+AC-20.
+
+**AC-K.15 SPEC-010 validation-order pass-through.**
+The coordinator's v2 `auth_request` initial-stage parser MUST apply
+SPEC-010 field validation in the order mandated by SPEC-010 v1.5
+R-3.1.9 (JSON type → per-entry byte length → array length → normalized
+duplicate check → `model_id` containment). Each ordered validation
+failure MUST surface the corresponding locked SPEC-010 reason-text
+substring on first-failure (each substring quoted verbatim on its own
+line so test-oracle grep can match without spanning line wraps):
+- AC-17 per-entry byte length: `"supported_models entry exceeds 256 bytes"`
+- AC-22 array length: `"supported_models exceeds 64 entries"`
+- AC-23 normalized duplicate: `"supported_models contains duplicate entries"`
+- R-3.6.3 / R-3.1.9 `model_id` containment: pre-flight oracle per §6.2 of SPEC-010 v1.5
+Traces to SPEC-002 v1.3.5 R-7.8.4 and SPEC-010 v1.5 R-3.1.9 / AC-17 /
+AC-22 / AC-23.
+
+**AC-K.16 Auth-attempt retention-bound rejection.**
+When the in-flight auth-attempt count reaches the §7.9.2 R-7.9.6
+defensive bound (recommended 1024), a new initial-stage frame MUST be
+rejected with `auth_response.error.code = "too_many_auth_attempts"`
+and a 503-class WebSocket close drawn from the existing close-code
+registry. The rejection MUST occur BEFORE creating a new retention
+entry (no off-by-one growth past the bound). Traces to SPEC-002 v1.3.5
+R-7.9.6 and SPEC-010 v1.5 R-3.1.10 (defensive-bound rationale).
+
+**AC-K.17 Audit-log table schema + `ts_utc` format.**
+Coordinator startup migrations MUST create the `audit_log` table with
+exactly the §7.10.1 R-7.10.1 column list (`id`, `ts_utc`, `event_type`,
+`provider_id`, `payload_json`) and exactly the three indexes
+(`idx_audit_log_ts_utc`, `idx_audit_log_provider_id`,
+`idx_audit_log_event_type`). Every persisted `ts_utc` value MUST be a
+valid RFC3339 string in UTC (with `Z` suffix or `+00:00`); non-UTC or
+non-RFC3339 values MUST NOT be written. Traces to SPEC-002 v1.3.5
+R-7.10.1 / R-7.10.2.
+
 ---
 
 ## 12. Open questions for operator
@@ -3305,6 +3974,50 @@ phase4-coordinator/
 +-- coordinator.yaml.example         # Example config file
 ```
 
+v1.3.5 implementation hand-off extension:
+
+New files:
+- `phase4-coordinator/internal/pool/provider_swap.go` — implements the
+  §7.1 ApplyHeartbeat SPEC-011 PATH branch (new file to keep the
+  REPLACEMENT semantics isolated for review and testing); existing
+  `phase4-coordinator/internal/pool/provider.go:411-432`
+  `ApplyHeartbeat` gains branch-on-field-presence dispatch.
+- `phase4-coordinator/internal/ws/auth_attempt_retention.go` —
+  implements the §7.9 auth-attempt lifecycle: retention map, release
+  machinery, expiry handling, and test-only accessors for bounded-state
+  assertions.
+- `phase4-coordinator/internal/audit/log.go` — implements the §7.10
+  audit-log infrastructure: SQLite table creation, write API, retention
+  pruner, and WARN-on-write-failure behavior.
+- `phase4-coordinator/internal/audit/events.go` — defines normative
+  audit event types and payload schemas; v1.3.5 ships with exactly one
+  event, `operator_model_swap`.
+
+Existing files modified:
+- `phase4-coordinator/internal/ws/server.go` — auth flow extended to
+  install `defer releaseRetention(authAttemptID)` at the auth-attempt
+  scope per §7.9.3; v2 `auth_request` flow remains unchanged in
+  structure.
+- `phase4-coordinator/internal/ws/messages.go` — `parseAuthInitial`
+  extended to parse the two SPEC-010 optional fields into the
+  `AuthRequest` struct; `parseAuthProof` extended to parse the same two
+  fields conditionally per SPEC-010 v1.5 R-3.1.10.
+- `phase4-coordinator/internal/pool/provider.go` — `Provider` struct
+  gains `SupportedModels []string`, `PublishesSupportedModels bool`,
+  and `LastLoadingState bool`; `ApplyHeartbeat` gains the
+  branch-on-field-presence dispatch with the SPEC-011 PATH delegated to
+  `provider_swap.go`.
+- `phase4-coordinator/internal/api/status.go` (or wherever
+  `/v1/status` is served) — extended to conditionally include
+  `supported_models` per §7.4.
+- `phase4-coordinator/internal/config/config.go` — add
+  `storage.audit_log_retention_days` config key with default 90,
+  mirroring `request_log_retention_days`.
+- `phase4-coordinator/dist/coordinator.yaml` (or
+  `phase4-coordinator/dist/coordinator.yaml.template`) — add a
+  commented line for `storage.audit_log_retention_days: 90` matching
+  the new config key.
+
 ### Configuration file schema (coordinator.yaml)
 
 ```yaml
@@ -3344,6 +4057,7 @@ auth:
 storage:
   db_path: "coordinator.db"
   snapshot_interval_s: 300
+  audit_log_retention_days: 90  # v1.3.5 operator audit-log retention
 
 logging:
   level: "info"
