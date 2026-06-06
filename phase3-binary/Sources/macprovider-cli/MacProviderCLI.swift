@@ -48,6 +48,12 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("publish-supported-models"), inversion: .prefixedNo, help: "Opt into publishing the supported_models catalog to the coordinator's /v1/status echo (SPEC-010 v1.5 R-3.6.4). Default off.")
     var publishSupportedModels: Bool?
 
+    @Flag(name: .customLong("enable-warm-swap"), inversion: .prefixedNo, help: "Opt into the operator-pushed warm model swap workflow (SPEC-011 v0.5). Default off. When off, the binary follows the SPEC-001 v1.2.4 synchronous-load path; no control socket is opened.")
+    var enableWarmSwap: Bool?
+
+    @Option(help: "Drain timeout in seconds for an in-flight warm swap (SPEC-011 v0.5 §3.4 / §3.9). Default 30. Only meaningful when --enable-warm-swap is set.")
+    var swapDrainTimeoutSeconds: Int?
+
     static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
         if resolved.supportedModels != nil {
             do {
@@ -74,7 +80,9 @@ struct ServeCommand: AsyncParsableCommand {
                 configPath: config,
                 logLevel: logLevel,
                 supportedModels: SupportedModels.parseCSV(supportedModels),
-                publishesSupportedModels: publishSupportedModels
+                publishesSupportedModels: publishSupportedModels,
+                enableWarmSwap: enableWarmSwap,
+                swapDrainTimeoutSeconds: swapDrainTimeoutSeconds
             )
         )
 
@@ -84,7 +92,9 @@ struct ServeCommand: AsyncParsableCommand {
 
         let modelRuntime = try await ModelRuntime(
             modelID: resolved.model,
-            maxContextTokensOverride: resolved.maxContextOverride
+            maxContextTokensOverride: resolved.maxContextOverride,
+            warmSwapEnabled: resolved.enableWarmSwap,
+            swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds
         )
         // MLX generation is currently guarded by a process-local semaphore of 1.
         // Advertise the real runtime concurrency until the runtime is proven safe

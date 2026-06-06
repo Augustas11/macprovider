@@ -38,7 +38,7 @@ struct HTTPServer {
     }
 }
 
-private final class RouterHandler: ChannelInboundHandler {
+final class RouterHandler: ChannelInboundHandler {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
@@ -196,6 +196,10 @@ private final class RouterHandler: ChannelInboundHandler {
             Task.detached { @Sendable [modelRuntime, providerStatus, request, writer] in
                 let startedAt = await providerStatus.beginRequest()
                 do {
+                    let snapshot = await modelRuntime.currentSnapshot()
+                    if let error = Self.warmSwapRejectionError(for: snapshot) {
+                        throw error
+                    }
                     let completion = try await modelRuntime.complete(request)
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
                     let response = Self.chatCompletionResponse(request: request, completion: completion)
@@ -238,6 +242,10 @@ private final class RouterHandler: ChannelInboundHandler {
         Task.detached { @Sendable [modelRuntime, providerStatus, request, writer] in
             let startedAt = await providerStatus.beginRequest()
             do {
+                let snapshot = await modelRuntime.currentSnapshot()
+                if let error = Self.warmSwapRejectionError(for: snapshot) {
+                    throw error
+                }
                 try await modelRuntime.preflight(request)
             } catch let error as APIError {
                 await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
@@ -317,6 +325,10 @@ private final class RouterHandler: ChannelInboundHandler {
                 writer.writeSSEDone()
             }
         }
+    }
+
+    static func warmSwapRejectionError(for snapshot: RuntimeSnapshot) -> APIError? {
+        snapshot.state == .ready ? nil : ModelRuntime.providerLoadingError()
     }
 
     private static func chatCompletionResponse(request: ChatCompletionRequest, completion: CompletionResult) -> [String: Any] {

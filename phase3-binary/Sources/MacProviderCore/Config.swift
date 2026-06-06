@@ -36,6 +36,8 @@ public struct AppConfig: Equatable, Sendable {
     public var tier2MDAArtifactPath: String?
     public var supportedModels: [String]?
     public var publishesSupportedModels: Bool
+    public var enableWarmSwap: Bool
+    public var swapDrainTimeoutSeconds: Int
 
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
@@ -59,7 +61,9 @@ public struct AppConfig: Equatable, Sendable {
             maxRequestBodyBytes: 10 * 1024 * 1024,
             tier2MDAArtifactPath: nil,
             supportedModels: nil,
-            publishesSupportedModels: false
+            publishesSupportedModels: false,
+            enableWarmSwap: false,
+            swapDrainTimeoutSeconds: 30
         )
     }
 }
@@ -74,6 +78,8 @@ public struct CLIOverrides: Equatable, Sendable {
     public var logLevel: String?
     public var supportedModels: [String]?
     public var publishesSupportedModels: Bool?
+    public var enableWarmSwap: Bool?
+    public var swapDrainTimeoutSeconds: Int?
 
     public init(
         port: Int? = nil,
@@ -84,7 +90,9 @@ public struct CLIOverrides: Equatable, Sendable {
         configPath: String? = nil,
         logLevel: String? = nil,
         supportedModels: [String]? = nil,
-        publishesSupportedModels: Bool? = nil
+        publishesSupportedModels: Bool? = nil,
+        enableWarmSwap: Bool? = nil,
+        swapDrainTimeoutSeconds: Int? = nil
     ) {
         self.port = port
         self.model = model
@@ -95,6 +103,8 @@ public struct CLIOverrides: Equatable, Sendable {
         self.logLevel = logLevel
         self.supportedModels = supportedModels
         self.publishesSupportedModels = publishesSupportedModels
+        self.enableWarmSwap = enableWarmSwap
+        self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
     }
 }
 
@@ -192,6 +202,8 @@ public enum ConfigLoader {
         try assign(&config.tier2MDAArtifactPath, from: dict, key: "tier2_mda_artifact_path", expected: "string")
         try assign(&config.supportedModels, from: dict, key: "supported_models", expected: "array of strings or comma-separated string")
         try assign(&config.publishesSupportedModels, from: dict, key: "publishes_supported_models", expected: "boolean")
+        try assign(&config.enableWarmSwap, from: dict, key: "enable_warm_swap", expected: "boolean")
+        try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
         return config
     }
 
@@ -218,6 +230,8 @@ public enum ConfigLoader {
         try assign(&config.tier2MDAArtifactPath, from: environment, env: "MACPROVIDER_TIER2_MDA_ARTIFACT_PATH", expected: "string")
         config.supportedModels = SupportedModels.parseCSV(environment["MACPROVIDER_SUPPORTED_MODELS"]) ?? config.supportedModels
         try assign(&config.publishesSupportedModels, from: environment, env: "MACPROVIDER_PUBLISHES_SUPPORTED_MODELS", expected: "boolean")
+        try assign(&config.enableWarmSwap, from: environment, env: "MACPROVIDER_ENABLE_WARM_SWAP", expected: "boolean")
+        try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
         return config
     }
 
@@ -249,6 +263,12 @@ public enum ConfigLoader {
         }
         if let publishesSupportedModels = cli.publishesSupportedModels {
             config.publishesSupportedModels = publishesSupportedModels
+        }
+        if let enableWarmSwap = cli.enableWarmSwap {
+            config.enableWarmSwap = enableWarmSwap
+        }
+        if let swapDrainTimeoutSeconds = cli.swapDrainTimeoutSeconds {
+            config.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         }
         return config
     }

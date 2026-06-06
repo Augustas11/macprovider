@@ -22,40 +22,76 @@ extension ModelRuntimeServing {
     }
 }
 
+public struct RuntimeSnapshot: @unchecked Sendable {
+    public let state: SwapState
+    public let container: ModelContainer?
+    public let modelID: String?
+    public let modelHash: String?
+}
+
+public struct WarmSwapDisabledError: Error, CustomStringConvertible {
+    public var description: String {
+        "warm swap is not enabled (start serve with --enable-warm-swap)"
+    }
+}
+
 actor ModelRuntime: ModelRuntimeServing {
-    private let modelID: String?
-    private let container: ModelContainer?
+    private var currentModelID: String?
+    private var currentContainer: ModelContainer?
     private let stopTokenFilter: StopTokenFilter
-    private let modelHash: String?
+    private var currentModelHash: String?
     private let maxContextTokens: Int
     private let inferenceGate = AsyncSemaphore(value: 1)
+    private let stateMachine: RuntimeStateMachine
+    private let warmSwapEnabled: Bool
+    private let swapDrainTimeoutSeconds: Int
+    private let loader: @Sendable (String) async throws -> (ModelContainer, String, String?)
+    private let testLoader: (@Sendable (String) async throws -> (String, String?))?
+    private let testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
 
     var loadedModelID: String? {
-        modelID
+        currentModelID
     }
 
     var loadedModelHash: String? {
-        modelHash
+        currentModelHash
     }
 
     var isLoaded: Bool {
-        container != nil
+        currentContainer != nil
     }
 
-    init(modelID: String?, maxContextTokensOverride: Int? = nil) async throws {
-        self.modelID = modelID
+    init(
+        modelID: String?,
+        maxContextTokensOverride: Int? = nil,
+        warmSwapEnabled: Bool = false,
+        swapDrainTimeoutSeconds: Int = 30
+    ) async throws {
+        self.currentModelID = modelID
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
+        self.stateMachine = RuntimeStateMachine()
+        self.warmSwapEnabled = warmSwapEnabled
+        self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
+        self.loader = { targetModelID in
+            let configuration = Self.configuration(for: targetModelID)
+            let container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
+            let directory = configuration.modelDirectory()
+            let modelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
+            return (container, targetModelID, modelHash)
+        }
+        self.testLoader = nil
+        self.testCompletion = nil
 
         guard let modelID else {
-            self.container = nil
+            self.currentContainer = nil
             self.stopTokenFilter = StopTokenFilter(tokens: [])
-            self.modelHash = nil
+            self.currentModelHash = nil
             return
         }
 
         let configuration = Self.configuration(for: modelID)
         let container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
-        self.container = container
+        self.currentContainer = container
 
         let directory = configuration.modelDirectory()
         let tokenizerConfigURL = directory.appendingPathComponent("tokenizer_config.json")
@@ -64,12 +100,83 @@ actor ModelRuntime: ModelRuntimeServing {
         } else {
             self.stopTokenFilter = StopTokenFilter(tokens: [])
         }
-        self.modelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
+        self.currentModelHash = try? Self.modelWeightArtifactManifestHash(in: directory)
+    }
+
+    init(
+        modelID: String?,
+        modelHash: String? = nil,
+        maxContextTokensOverride: Int? = nil,
+        warmSwapEnabled: Bool,
+        swapDrainTimeoutSeconds: Int = 30,
+        stateMachine: RuntimeStateMachine = RuntimeStateMachine(),
+        loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
+        testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
+        testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
+    ) {
+        self.currentModelID = modelID
+        self.currentContainer = nil
+        self.currentModelHash = modelHash
+        self.stopTokenFilter = StopTokenFilter(tokens: [])
+        self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
+        self.stateMachine = stateMachine
+        self.warmSwapEnabled = warmSwapEnabled
+        self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
+        self.loader = loader
+        self.testLoader = testLoader
+        self.testCompletion = testCompletion
+    }
+
+    func currentSnapshot() async -> RuntimeSnapshot {
+        RuntimeSnapshot(
+            state: await stateMachine.current(),
+            container: currentContainer,
+            modelID: currentModelID,
+            modelHash: currentModelHash
+        )
+    }
+
+    func swapSignals() async -> AsyncStream<SwapSignal> {
+        await stateMachine.signalStream()
+    }
+
+    func beginSwap(targetModelID: String) async throws -> Task<Void, Error> {
+        guard warmSwapEnabled else { throw WarmSwapDisabledError() }
+        try await stateMachine.transitionToLoading(target: targetModelID)
+        return Task.detached { [stateMachine, loader, testLoader] in
+            do {
+                if let testLoader {
+                    let (modelID, modelHash) = try await testLoader(targetModelID)
+                    await self.applySwap(container: nil, modelID: modelID, modelHash: modelHash)
+                } else {
+                    let (container, modelID, modelHash) = try await loader(targetModelID)
+                    await self.applySwap(container: container, modelID: modelID, modelHash: modelHash)
+                }
+            } catch {
+                await stateMachine.failSwap(reason: String(describing: error))
+            }
+        }
+    }
+
+    nonisolated func swapDrainTimeoutForTest() -> Int {
+        swapDrainTimeoutSeconds
+    }
+
+    private func applySwap(container: ModelContainer?, modelID: String, modelHash: String?) async {
+        currentContainer = container
+        currentModelID = modelID
+        currentModelHash = modelHash
+        await stateMachine.completeSwap(newModelID: modelID, newModelHash: modelHash)
     }
 
     func preflight(_ request: ChatCompletionRequest) async throws {
-        try request.validateModelMatches(modelID)
-        guard let container else {
+        let snapshot = await currentSnapshot()
+        try Self.validateReady(snapshot.state)
+        try request.validateModelMatches(snapshot.modelID)
+        guard let container = snapshot.container else {
+            if testCompletion != nil {
+                return
+            }
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
 
@@ -87,8 +194,13 @@ actor ModelRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> CompletionResult {
-        try request.validateModelMatches(modelID)
-        guard let container else {
+        let snapshot = await currentSnapshot()
+        try Self.validateReady(snapshot.state)
+        try request.validateModelMatches(snapshot.modelID)
+        if let testCompletion {
+            return try await testCompletion(snapshot, request)
+        }
+        guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
 
@@ -141,8 +253,17 @@ actor ModelRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (String) -> Void
     ) async throws -> CompletionResult {
-        try request.validateModelMatches(modelID)
-        guard let container else {
+        let snapshot = await currentSnapshot()
+        try Self.validateReady(snapshot.state)
+        try request.validateModelMatches(snapshot.modelID)
+        if let testCompletion {
+            let completion = try await testCompletion(snapshot, request)
+            if !completion.content.isEmpty {
+                onChunk(completion.content)
+            }
+            return completion
+        }
+        guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
 
@@ -220,7 +341,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     func measureStartupThroughput(maxTokens: Int = 8) async -> Double {
-        guard let container else {
+        guard let container = currentContainer else {
             return 0.0
         }
 
@@ -263,6 +384,21 @@ actor ModelRuntime: ModelRuntimeServing {
                 param: "messages"
             )
         }
+    }
+
+    static func validateReady(_ state: SwapState) throws {
+        guard state == .ready else {
+            throw providerLoadingError()
+        }
+    }
+
+    static func providerLoadingError() -> APIError {
+        APIError(
+            status: 503,
+            message: "Provider is loading a new model and is temporarily unavailable. Retry after the indicated interval.",
+            type: "service_unavailable",
+            code: "provider_loading"
+        )
     }
 
     private static func defaultMaxContextTokens() -> Int {
