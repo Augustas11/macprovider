@@ -10,7 +10,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, UpdateCommand.self, UninstallCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -54,6 +54,13 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Drain timeout in seconds for an in-flight warm swap (SPEC-011 v0.5 §3.4 / §3.9). Default 30. Only meaningful when --enable-warm-swap is set.")
     var swapDrainTimeoutSeconds: Int?
 
+    @Option(help: "Control socket path. Overrides MACPROVIDER_CTL_SOCKET_PATH and config ctl_socket_path. Default $TMPDIR/macprovider-cli/ctl.sock. Only meaningful when --enable-warm-swap is set.")
+    var ctlSocketPath: String?
+
+    // Phase 1E reads/writes this path for the cooldown soft guard; Phase 1C only plumbs it.
+    @Option(help: "CLI-side cooldown state file. Overrides MACPROVIDER_SWITCH_STATE_PATH and config switch_state_path. Default $HOME/Library/Application Support/macprovider-cli/last-switch.ts. Cooldown soft guard lands in Phase 1E.")
+    var switchStatePath: String?
+
     static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
         if resolved.supportedModels != nil {
             do {
@@ -82,7 +89,9 @@ struct ServeCommand: AsyncParsableCommand {
                 supportedModels: SupportedModels.parseCSV(supportedModels),
                 publishesSupportedModels: publishSupportedModels,
                 enableWarmSwap: enableWarmSwap,
-                swapDrainTimeoutSeconds: swapDrainTimeoutSeconds
+                swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
+                ctlSocketPath: ctlSocketPath,
+                switchStatePath: switchStatePath
             )
         )
 
@@ -116,16 +125,33 @@ struct ServeCommand: AsyncParsableCommand {
             providerStatus: providerStatus,
             attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
         )
+        let controlSocket: ControlSocketServer?
+        if resolved.enableWarmSwap {
+            let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
+            controlSocket = ControlSocketServer(socketPath: socketURL, modelRuntime: modelRuntime)
+            do {
+                try await controlSocket?.start()
+            } catch {
+                if let serverError = error as? ControlSocketServerError,
+                   serverError != .staleSocket(path: socketURL.path) {
+                    FileHandle.standardError.write(Data(("\(serverError.description)\n").utf8))
+                }
+                throw ExitCode(1)
+            }
+        } else {
+            controlSocket = nil
+        }
         await coordinatorClient?.start()
         let server = HTTPServer(config: resolved, modelRuntime: modelRuntime, providerStatus: providerStatus)
-        let terminationHandler = installTerminationHandler(coordinatorClient: coordinatorClient)
+        let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket)
         defer {
             Task {
+                await controlSocket?.stop()
                 await coordinatorClient?.stop()
             }
-            terminationHandler.cancel()
+            terminationHandlers.forEach { $0.cancel() }
         }
-        try withExtendedLifetime(terminationHandler) {
+        try withExtendedLifetime(terminationHandlers) {
             try server.run()
         }
     }
@@ -204,17 +230,34 @@ struct UpdateCommand: AsyncParsableCommand {
     }
 }
 
-private func installTerminationHandler(coordinatorClient: CoordinatorClient?) -> DispatchSourceSignal {
-    signal(SIGTERM, SIG_IGN)
-    let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .userInitiated))
-    source.setEventHandler {
-        Task {
-            await coordinatorClient?.drainAndExit(reason: "SIGTERM received")
-            Darwin.exit(0)
+private func installTerminationHandlers(
+    coordinatorClient: CoordinatorClient?,
+    controlSocket: ControlSocketServer?
+) -> [DispatchSourceSignal] {
+    [SIGTERM, SIGINT].map { signalNumber in
+        signal(signalNumber, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: signalNumber, queue: .global(qos: .userInitiated))
+        source.setEventHandler {
+            Task {
+                await controlSocket?.stop()
+                await coordinatorClient?.drainAndExit(reason: "\(signalName(signalNumber)) received")
+                Darwin.exit(0)
+            }
         }
+        source.resume()
+        return source
     }
-    source.resume()
-    return source
+}
+
+private func signalName(_ signalNumber: Int32) -> String {
+    switch signalNumber {
+    case SIGTERM:
+        return "SIGTERM"
+    case SIGINT:
+        return "SIGINT"
+    default:
+        return "signal \(signalNumber)"
+    }
 }
 
 private func printResolvedConfiguration(_ config: AppConfig) {

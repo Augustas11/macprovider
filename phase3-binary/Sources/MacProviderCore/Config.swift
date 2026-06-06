@@ -38,6 +38,8 @@ public struct AppConfig: Equatable, Sendable {
     public var publishesSupportedModels: Bool
     public var enableWarmSwap: Bool
     public var swapDrainTimeoutSeconds: Int
+    public var ctlSocketPath: String?
+    public var switchStatePath: String?
 
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
@@ -63,7 +65,9 @@ public struct AppConfig: Equatable, Sendable {
             supportedModels: nil,
             publishesSupportedModels: false,
             enableWarmSwap: false,
-            swapDrainTimeoutSeconds: 30
+            swapDrainTimeoutSeconds: 30,
+            ctlSocketPath: nil,
+            switchStatePath: nil
         )
     }
 }
@@ -80,6 +84,8 @@ public struct CLIOverrides: Equatable, Sendable {
     public var publishesSupportedModels: Bool?
     public var enableWarmSwap: Bool?
     public var swapDrainTimeoutSeconds: Int?
+    public var ctlSocketPath: String?
+    public var switchStatePath: String?
 
     public init(
         port: Int? = nil,
@@ -92,7 +98,9 @@ public struct CLIOverrides: Equatable, Sendable {
         supportedModels: [String]? = nil,
         publishesSupportedModels: Bool? = nil,
         enableWarmSwap: Bool? = nil,
-        swapDrainTimeoutSeconds: Int? = nil
+        swapDrainTimeoutSeconds: Int? = nil,
+        ctlSocketPath: String? = nil,
+        switchStatePath: String? = nil
     ) {
         self.port = port
         self.model = model
@@ -105,6 +113,8 @@ public struct CLIOverrides: Equatable, Sendable {
         self.publishesSupportedModels = publishesSupportedModels
         self.enableWarmSwap = enableWarmSwap
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
+        self.ctlSocketPath = ctlSocketPath
+        self.switchStatePath = switchStatePath
     }
 }
 
@@ -204,6 +214,8 @@ public enum ConfigLoader {
         try assign(&config.publishesSupportedModels, from: dict, key: "publishes_supported_models", expected: "boolean")
         try assign(&config.enableWarmSwap, from: dict, key: "enable_warm_swap", expected: "boolean")
         try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
+        try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
+        try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
         return config
     }
 
@@ -232,6 +244,8 @@ public enum ConfigLoader {
         try assign(&config.publishesSupportedModels, from: environment, env: "MACPROVIDER_PUBLISHES_SUPPORTED_MODELS", expected: "boolean")
         try assign(&config.enableWarmSwap, from: environment, env: "MACPROVIDER_ENABLE_WARM_SWAP", expected: "boolean")
         try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
+        try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
+        try assign(&config.switchStatePath, from: environment, env: "MACPROVIDER_SWITCH_STATE_PATH", expected: "string")
         return config
     }
 
@@ -269,6 +283,12 @@ public enum ConfigLoader {
         }
         if let swapDrainTimeoutSeconds = cli.swapDrainTimeoutSeconds {
             config.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
+        }
+        if let ctlSocketPath = cli.ctlSocketPath {
+            config.ctlSocketPath = ctlSocketPath
+        }
+        if let switchStatePath = cli.switchStatePath {
+            config.switchStatePath = switchStatePath
         }
         return config
     }
