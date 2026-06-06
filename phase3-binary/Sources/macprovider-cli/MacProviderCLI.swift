@@ -42,8 +42,29 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Log level: trace, debug, info, notice, warning, error, critical.")
     var logLevel: String?
 
+    @Option(help: "Comma-separated list of HuggingFace model IDs (or local paths) this provider can serve. Overrides MACPROVIDER_SUPPORTED_MODELS and config key supported_models. When unset, the binary publishes supported_models: [model_id] (single-entry, per SPEC-010 v1.5 R-3.6.2).")
+    var supportedModels: String?
+
+    @Flag(name: .customLong("publish-supported-models"), inversion: .prefixedNo, help: "Opt into publishing the supported_models catalog to the coordinator's /v1/status echo (SPEC-010 v1.5 R-3.6.4). Default off.")
+    var publishSupportedModels: Bool?
+
+    static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
+        if resolved.supportedModels != nil {
+            do {
+                let catalog = try SupportedModels.validate(
+                    model: resolved.model ?? "",
+                    supportedModels: resolved.supportedModels
+                )
+                resolved.supportedModels = catalog
+            } catch let error as SupportedModelsValidationError {
+                FileHandle.standardError.write(Data(("\(error)\n").utf8))
+                throw ExitCode(2)
+            }
+        }
+    }
+
     func run() async throws {
-        let resolved = try ConfigLoader.load(
+        var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
                 port: port,
                 model: model,
@@ -51,9 +72,13 @@ struct ServeCommand: AsyncParsableCommand {
                 providerID: providerID,
                 endpointURL: endpointURL,
                 configPath: config,
-                logLevel: logLevel
+                logLevel: logLevel,
+                supportedModels: SupportedModels.parseCSV(supportedModels),
+                publishesSupportedModels: publishSupportedModels
             )
         )
+
+        try Self.runSupportedModelsPreflight(&resolved)
 
         printResolvedConfiguration(resolved)
 

@@ -197,6 +197,114 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["aead_suites"] as? [String], [Tier2ProviderSession.aeadSuite])
     }
 
+    func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-id-from-snapshot"
+        config.supportedModels = nil
+        config.publishesSupportedModels = false
+        let status = ProviderStatus(
+            modelID: "model-id-from-snapshot",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            sleepAssertionFactory: { nil }
+        ))
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        let json = Self.jsonString(auth)
+
+        XCTAssertTrue(json.contains("\"supported_models\":[\"model-id-from-snapshot\"]"), json)
+        XCTAssertFalse(json.contains("\"publishes_supported_models\""), json)
+    }
+
+    func testAuthInitialEmitsExplicitCatalogWhenSet() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "A"
+        config.supportedModels = ["A", "B"]
+        config.publishesSupportedModels = true
+        let status = ProviderStatus(
+            modelID: "A",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            sleepAssertionFactory: { nil }
+        ))
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        let json = Self.jsonString(auth)
+
+        XCTAssertTrue(json.contains("\"supported_models\":[\"A\",\"B\"]"), json)
+        XCTAssertTrue(json.contains("\"publishes_supported_models\":true"), json)
+    }
+
+    func testAuthInitialOmitsPublishesWhenFalse() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "A"
+        config.supportedModels = ["A", "B"]
+        config.publishesSupportedModels = false
+        let status = ProviderStatus(
+            modelID: "A",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            sleepAssertionFactory: { nil }
+        ))
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+        let json = Self.jsonString(auth)
+
+        XCTAssertTrue(json.contains("\"supported_models\":[\"A\",\"B\"]"), json)
+        XCTAssertFalse(json.contains("\"publishes_supported_models\""), json)
+    }
+
+    func testHelloMessageUnchangedByPhase1A() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "A"
+        config.supportedModels = ["A", "B"]
+        config.publishesSupportedModels = true
+        let status = ProviderStatus(
+            modelID: "A",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            sleepAssertionFactory: { nil }
+        ))
+
+        let hello = await client.helloMessage()
+        let json = Self.jsonString(hello)
+
+        XCTAssertFalse(json.contains("\"supported_models\""), json)
+        XCTAssertFalse(json.contains("\"publishes_supported_models\""), json)
+    }
+
     func testWsTunneledV2ChallengeFailureFailsClosed() async throws {
         let firstSocket = FakeProviderWebSocketTask(receiveResults: [
             .failure(CoordinatorAuthError.invalidMessage("unrecognized auth message")),

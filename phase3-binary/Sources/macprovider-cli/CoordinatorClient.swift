@@ -78,6 +78,8 @@ actor CoordinatorClient {
     private let loadedModelID: String?
     private let maxBodyBytes: Int
     private let maxActiveRequests: Int
+    private let supportedModels: [String]?
+    private let publishesSupportedModels: Bool
     private let reconnectGraceNanoseconds: UInt64
     private let connectAndRunOverride: (() async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
@@ -119,6 +121,8 @@ actor CoordinatorClient {
         self.loadedModelID = config.model
         self.maxBodyBytes = config.maxRequestBodyBytes
         self.maxActiveRequests = 1
+        self.supportedModels = config.supportedModels
+        self.publishesSupportedModels = config.publishesSupportedModels
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
         self.attestationGenerator = attestationGenerator
         self.webSocketFactory = webSocketFactory
@@ -663,6 +667,19 @@ actor CoordinatorClient {
                 "aead_suites": [Tier2ProviderSession.aeadSuite],
             ],
         ]
+        let resolvedCatalog: [String]
+        do {
+            resolvedCatalog = try SupportedModels.validate(
+                model: snapshot.modelID ?? "",
+                supportedModels: supportedModels
+            )
+        } catch {
+            resolvedCatalog = [snapshot.modelID ?? ""]
+        }
+        message["supported_models"] = resolvedCatalog
+        if publishesSupportedModels {
+            message["publishes_supported_models"] = true
+        }
         if let endpointURL {
             message["endpoint_url"] = endpointURL
         }
