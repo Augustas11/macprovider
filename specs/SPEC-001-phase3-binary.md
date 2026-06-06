@@ -1,7 +1,10 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.2.4 (2026-05-29, audit response, concurrency reality alignment)
-**Revision:** v1.2.4 resolves H-003 by aligning advertised RAM-tier concurrency with the Swift runtime's enforced semaphore-of-1 behavior.
+**Version:** 1.3 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 absorption)
+**Revision:** v1.3 absorbs the binary-side surface of LOCKED SPEC-010 v1.5 (Provider Model Catalog) and LOCKED SPEC-011 v0.5 (Operator-Pushed Warm Swap), and adds the first normative documentation of the v2 `auth_request` two-stage handshake. L-1 baseline preserved: with neither `--supported-models` nor `--enable-warm-swap` set, a v1.3 binary introduces no NEW SPEC-010 or SPEC-011 fields, sockets, or runtime state beyond the SPEC-010 R-3.6.2 single-entry `supported_models: [model_id]` default emission, which SPEC-010 v1.5 §4.1 establishes as observably indistinguishable from a pre-SPEC-010 binary on routing, `/v1/status`, and `/v1/models`. The v2 `auth_request` first-connect frame type is unchanged from existing v1.2.x binaries (already in code per SPEC-010 v1.5 §3.1.A; v1.3 normatively documents the contract for the first time).
+
+**Change log v1.3:**
+- **v1.3 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 absorption):** Adds binary-side surface for two now-LOCKED companion specs. SPEC-010 v1.5 adds `--supported-models` / `--publish-supported-models` flags, gains the two optional v2 `auth_request` initial-stage fields, gains local pre-flight validation per R-3.6.3. SPEC-011 v0.5 adds `--enable-warm-swap` opt-in gate, `--swap-drain-timeout-seconds`, `--ctl-socket-path`, `--switch-state-path` flags on `serve`; adds the `models` subcommand with `list / switch / status` actions; mandates a `ModelRuntime` refactor from immutable `let container` to actor-isolated mutable `current_container` with an atomic-swap state machine; adds an opt-in heartbeat extension carrying `model_hash` (raw lowercase hex) and `loading: bool`; adds a newline-delimited JSON control socket protocol on a macOS-native `$TMPDIR`-based path. ALSO adds a new normative §6.7 v2 `auth_request` handshake section — the v2 contract has been in code since v1.2.x but was never normatively documented in SPEC-001; v1.3 closes that gap. L-1 baseline preserved: with neither flag set, a v1.3 binary introduces no NEW SPEC-010/SPEC-011 fields, sockets, or runtime state beyond the SPEC-010 R-3.6.2 single-entry `supported_models: [model_id]` default (which SPEC-010 v1.5 §4.1 establishes as observably indistinguishable from a pre-SPEC-010 binary on routing, `/v1/status`, and `/v1/models`).
 
 **Change log v1.2.4:**
 - **v1.2.4 (2026-05-29, audit response, concurrency reality alignment):** Aligns the RAM-tier max_concurrency documentation to the Swift runtime's enforced semaphore-of-1 reality (H-003 from the 2026-05-29 independent security audit). Spec previously documented per-tier defaults >1; runtime always overrode to 1. No code change required. Future parallel generation deferred to a SPEC-001 v1.3 candidate pending runtime validation.
@@ -121,6 +124,17 @@ behind the Phase 4 coordinator.
 - Structured logging to stdout (JSON lines format)
 - macOS code signing (Developer ID, not notarized for v1)
 - `THIRD_PARTY_NOTICES.md` shipping with the binary
+- Operator-opt-in capability advertisement per SPEC-010 v1.5 §3.6
+  (`--supported-models`, `--publish-supported-models`). Default
+  OFF; when on, the v2 `auth_request` initial-stage frame carries
+  `supported_models[]` and `publishes_supported_models: true`.
+- Operator-opt-in warm model swap per SPEC-011 v0.5 §3.1-§3.9
+  (`--enable-warm-swap`). Default OFF; when on, enables the
+  `models switch <id>` operator workflow, the in-process runtime
+  state machine, the control socket, and the extended heartbeat
+  fields. Closes arm64golf canary operator pains #1 (multi-minute
+  restart loop to change served model) and #2 (red-dashboard / WS
+  reconnect on swap).
 
 ### In Tier 2 roadmap scope (designed-in but not implemented)
 
@@ -950,6 +964,65 @@ are caught and returned as structured errors (400 for input issues,
 503 for model issues). If a 500 escapes, it indicates a bug in the
 binary. See AC-2.
 
+#### v1.3 provider CLI additions (serve + models)
+
+The `macprovider-cli` top-level subcommand inventory gains `models` as
+the sixth subcommand alongside the existing `serve`, `status`,
+`self-test`, `update`, and `uninstall` commands. The `models`
+subcommand has actions `models list`, `models switch <model-id>
+[--force]`, and `models status` per SPEC-011 v0.5 §3.1. `--force`
+suppresses ONLY the CLI-side cooldown soft guard per SPEC-011 v0.5
+R-3.1.3; it does not bypass supported-model validation or concurrent
+load rejection.
+
+The `serve` command gains the following additive flags:
+
+- `--supported-models <ids>` — comma-separated list of HuggingFace
+  model IDs or local paths per SPEC-010 v1.5 R-3.6.1. Resolution
+  priority is CLI > ENV (`MACPROVIDER_SUPPORTED_MODELS`) > config key
+  `supported_models: [string]`. Default unset. When unset after
+  resolution, the binary MUST send `supported_models: [model_id]`
+  (single-entry) on the v2 `auth_request` initial-stage frame per
+  SPEC-010 v1.5 R-3.6.2 and AC-19. This single-entry default is the
+  L-1 baseline: it does not change observable routing or `/v1/status`
+  shape relative to a pre-SPEC-010 binary per SPEC-010 v1.5 §4.1
+  back-compat analysis. Local pre-flight per SPEC-010 v1.5 R-3.6.3
+  validates `model_id ∈ supported_models` (case-folded), array length
+  <= 64, and each entry <= 256 UTF-8 bytes. Validation failures exit
+  code 2 with specific stderr per SPEC-010 v1.5 R-3.6.3 / R-3.1.9.
+- `--publish-supported-models <bool>` — opt-in flag per SPEC-010
+  v1.5 R-3.6.4. Default `false`. Resolution priority is CLI > ENV
+  (`MACPROVIDER_PUBLISH_SUPPORTED_MODELS`) > config key
+  `publish_supported_models: bool`, mirroring `--supported-models` per
+  SPEC-010 v1.5 AC-10. When `true`, populates
+  `publishes_supported_models: true` on the v2 `auth_request`
+  initial-stage frame per SPEC-010 v1.5 R-3.1.6 and AC-21. When
+  `false` (default), the field is omitted from the wire per SPEC-010
+  v1.5 AC-21 unless a future locked SPEC-010 revision requires
+  explicit `false` emission.
+- `--enable-warm-swap` — opt-in gate per SPEC-011 v0.5 R-3.1.0.
+  Boolean: presence enables; explicit `=true` / `=false` are supported.
+  Default DISABLED. When disabled, the binary MUST NOT open the
+  control socket, MUST NOT host the §6.8 state machine (legacy
+  synchronous load path remains), and MUST NOT emit `loading` or
+  `model_hash` heartbeat fields. This preserves the SPEC-011 v0.5 L-1
+  byte-identical default (no NEW SPEC-011 fields, sockets, or state
+  appear on the wire or on disk when the flag is absent). This flag
+  is exclusive to `serve`; it is not valid on `models <subcommand>`.
+- `--swap-drain-timeout-seconds <N>` — drain budget per SPEC-011
+  v0.5 §3.4 and R-3.9.1. Default `20`. Range `5 <= N <= 600` per
+  SPEC-011 v0.5 R-3.9.1; out-of-range values cause `serve` to exit
+  code 2 with stderr diagnostic at startup per R-3.9.1. Only
+  meaningful when `--enable-warm-swap` is set.
+- `--ctl-socket-path <path>` — override the macOS-native default per
+  SPEC-011 v0.5 R-3.1.5. Default `$TMPDIR/macprovider-cli/ctl.sock`,
+  resolved via `FileManager.default.temporaryDirectory`. Socket parent
+  directory mode is `0700`; socket mode is `0600`. Only meaningful when
+  `--enable-warm-swap` is set.
+- `--switch-state-path <path>` — override the cooldown state file per
+  SPEC-011 v0.5 R-3.1.4. Default
+  `$HOME/Library/Application Support/macprovider-cli/last-switch.ts`.
+
 ### 6.3. POST /v1/chat/completions (streaming)
 
 **Request:** Same as 6.2, with `"stream": true`.
@@ -1518,6 +1591,360 @@ The provider maintains a bounded write buffer for outgoing
   drops below 50% capacity (128 chunks). This hysteresis prevents
   rapid pause/resume oscillation.
 
+### 6.7. v2 `auth_request` handshake (NEW in v1.3)
+
+Locked SPEC-001 v1.2.4 §6.5 documents the legacy `hello` handshake.
+The v2 `auth_request` two-stage handshake has been in code since
+SPEC-001 v1.2.x but was never normatively documented in SPEC-001; this
+section closes that gap. The legacy `hello` handshake at §6.5 remains
+the back-compat reconnect path. The v2 `auth_request` handshake is the
+modern first-connect path that supports the SPEC-010 fields and the
+SPEC-008 Tier-2 attestation hooks.
+
+#### 6.7.1. Initial-stage frame (P->C)
+
+R-6.7.1 The binary MUST send the v2 initial-stage frame with
+`type == "auth_request"`, `version == 2`, and `stage == "initial"` per
+SPEC-010 v1.5 R-3.1.1 through R-3.1.10 and the parser-required field
+table in SPEC-010 v1.5 §3.1.A.
+
+The initial-stage frame field table is the SPEC-010 v1.5 §3.1.A table:
+
+| Field | JSON name | Type | Parser requiredness | Notes |
+|---|---|---|---|---|
+| Message type | `type` | string, exactly `"auth_request"` | REQUIRED by frame validator | parser rejects with `bad_message_type` otherwise |
+| Protocol version | `version` | int, exactly `2` | REQUIRED by frame validator | parser rejects with `bad_version` otherwise |
+| Stage | `stage` | string, exactly `"initial"` here | REQUIRED by frame validator | parser routes to `parseAuthInitial` for `"initial"`, `parseAuthProof` for `"proof"` |
+| Provider ID | `provider_id` | string ULID | REQUIRED by `parseAuthInitial` | |
+| Hostname | `hostname` | string | REQUIRED by `parseAuthInitial` | struct tag is `omitempty` but parser requires it |
+| Loaded model | `model_id` | string | REQUIRED by `parseAuthInitial` | struct tag is `omitempty` but parser requires it |
+| Model hash | `model_hash` | string sha256-hex | optional | SPEC-008 Pillar A |
+| Model params (B) | `model_params_b` | float | REQUIRED by `parseAuthInitial` | |
+| RAM (GB) | `ram_gb` | int | REQUIRED by `parseAuthInitial` | |
+| Max context tokens | `max_context_tokens` | int | REQUIRED by `parseAuthInitial` | |
+| Max concurrency | `max_concurrency` | int | REQUIRED by `parseAuthInitial` | |
+| Throughput TPS estimate | `throughput_tps_estimate` | float | REQUIRED by `parseAuthInitial` | |
+| Model load time | `model_load_time_ms` | int64 | optional | |
+| Binary version | `binary_version` | string | REQUIRED by `parseAuthInitial` | |
+| Endpoint URL | `endpoint_url` | string pointer (nullable) | optional | |
+| Provider ECDH public key | `provider_ecdh_public_key` | string base64 | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2 |
+| Tier-2 capabilities | `tier2_capabilities` | object `{encrypted_leg: bool, attestation: bool, aead_suites: []string}` | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2 |
+| Supported models | `supported_models` | array of strings | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.1 through R-3.1.9 and R-3.6.1 through R-3.6.3 |
+| Publishes supported models | `publishes_supported_models` | bool | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.6 and R-3.6.4 |
+
+R-6.7.2 The binary MUST populate the frame from the same flag
+resolution as legacy `hello`: `provider_id` from CLI > ENV > config and
+`model_id` from `--model`, plus SPEC-010 fields resolved per §6.2 and
+SPEC-010 v1.5 R-3.6.1 through R-3.6.4.
+
+R-6.7.3 The `supported_models[]` and `publishes_supported_models`
+fields are SPEC-010 fields controlled by `--supported-models` /
+`--publish-supported-models` per SPEC-010 v1.5 R-3.6.1 and R-3.6.4,
+independent of the SPEC-011 heartbeat/control-socket gate per
+SPEC-011 v0.5 R-3.1.0 and R-3.3.0. `supported_models[]` is ALWAYS
+emitted by a v1.3 binary on the v2 `auth_request` initial-stage
+frame: when `--supported-models` is set after CLI/ENV/config
+resolution, the resolved list is emitted; when unset, the binary
+MUST emit `supported_models: [model_id]` (single-entry) per SPEC-010
+v1.5 R-3.6.2 and AC-19. `publishes_supported_models` is the bool
+that the operator opts into; when `false` (default), the field is
+OMITTED from the wire per SPEC-010 v1.5 AC-21; when `true`, the
+field is emitted as `publishes_supported_models: true`. They MUST
+NOT be treated as warm-swap heartbeat fields.
+
+Wire example with all parser-required fields plus SPEC-010 additions
+(structure copied from SPEC-010 v1.5 §3.1.B):
+
+```json
+{
+  "type": "auth_request",
+  "version": 2,
+  "stage": "initial",
+  "provider_id": "p_01HK4Z3VYE...",
+  "hostname": "mac-mini-01.local",
+  "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+  "model_params_b": 7.6,
+  "ram_gb": 64,
+  "max_context_tokens": 32768,
+  "max_concurrency": 1,
+  "throughput_tps_estimate": 42.5,
+  "binary_version": "1.3.0",
+  "provider_ecdh_public_key": "<base64url-32-byte-x25519-public-key>",
+  "tier2_capabilities": {
+    "encrypted_leg": false,
+    "attestation": false,
+    "aead_suites": []
+  },
+  "supported_models": [
+    "mlx-community/Qwen2.5-7B-Instruct-4bit",
+    "mlx-community/Llama-3.1-8B-Instruct-4bit",
+    "mlx-community/Mistral-7B-Instruct-v0.3-4bit"
+  ],
+  "publishes_supported_models": true
+}
+```
+
+Tier-2 fields (`provider_ecdh_public_key`, `tier2_capabilities`) are
+parser-required in the v2 initial-stage frame and remain handled by the
+existing SPEC-008 v0.3 §5.3-§5.7 pipeline. v1.3 adds no encrypted-leg,
+attestation, or TEE behavior beyond current SPEC-008 scope.
+
+#### 6.7.2. Proof-stage frame (P->C)
+
+R-6.7.4 The binary MUST send the v2 proof-stage frame with the
+SPEC-010 v1.5 §3.1.C field set and MUST echo the coordinator-generated
+`auth_attempt_id` from the prior `auth_challenge` per SPEC-010 v1.5
+R-3.1.10.
+
+| Field | JSON name | Type | Parser requiredness | Notes |
+|---|---|---|---|---|
+| Message type | `type` | string, exactly `"auth_request"` | REQUIRED by frame validator | shared with initial stage |
+| Protocol version | `version` | int, exactly `2` | REQUIRED by frame validator | shared with initial stage |
+| Stage | `stage` | string, exactly `"proof"` | REQUIRED by frame validator | parser routes to `parseAuthProof` |
+| Auth attempt ID | `auth_attempt_id` | string | REQUIRED by `parseAuthProof` | echoes coordinator-generated value from prior `auth_challenge` |
+| Provider ID | `provider_id` | string | REQUIRED by `parseAuthProof` | must match initial-stage provider ID |
+| Attestation token | `attestation_token` | JSON raw | conditional per SPEC-008 Tier-2 | |
+| Supported models | `supported_models` | array of strings | optional, ADDED by SPEC-010 v1.5 R-3.1.10 | absent is not a mismatch |
+| Publishes supported models | `publishes_supported_models` | bool | optional, ADDED by SPEC-010 v1.5 R-3.1.10 | absent is not a mismatch |
+
+R-6.7.5 The coordinator generates `auth_attempt_id` at
+`phase4-coordinator/internal/ws/server.go:354`
+(`authAttemptID := "auth-" + s.newUUID()`). The binary MUST NOT
+generate this value; it echoes the value received on `auth_challenge`
+on the proof-stage frame per SPEC-010 v1.5 R-3.1.10.
+
+R-6.7.6 If the binary re-sends `supported_models[]` or
+`publishes_supported_models` on the proof-stage frame, the values MUST
+be byte-identical to the initial-stage values per SPEC-010 v1.5
+R-3.1.10.
+
+#### 6.7.3. Two opt-ins, four matrix cells
+
+R-6.7.7 The binary MUST treat SPEC-010 catalog publication and
+SPEC-011 warm swap as orthogonal opt-ins per SPEC-010 v1.5 R-3.6.1 /
+R-3.6.4 and SPEC-011 v0.5 R-3.1.0 / R-3.3.0.
+
+| `--supported-models` | `--enable-warm-swap` | Behavior cell |
+|---|---|---|
+| unset | unset | LEGACY-EQUIVALENT: v2 `auth_request` initial-stage frame emits `supported_models: [model_id]` (single-entry) per SPEC-010 v1.5 R-3.6.2 / AC-19; `publishes_supported_models` is OMITTED per SPEC-010 v1.5 R-3.6.4 / AC-21; no `model_hash` or `loading` heartbeat fields per SPEC-011 v0.5 R-3.3.0; no control socket per SPEC-011 v0.5 R-3.1.0. This is the L-1 baseline cell: no NEW SPEC-010 or SPEC-011 surface beyond the single-entry catalog (which SPEC-010 v1.5 §4.1 establishes as observably indistinguishable from a pre-SPEC-010 binary on routing, `/v1/status`, and `/v1/models`). Buyer HTTP behavior is unchanged from SPEC-001 v1.2.4. |
+| set | unset | SPEC-010 only: provider publishes the explicit catalog list per SPEC-010 v1.5 R-3.6.1, with `publishes_supported_models: true` (when `--publish-supported-models=true`) per SPEC-010 v1.5 R-3.6.4. No warm swap; no `model_hash` / `loading` heartbeat fields per SPEC-011 v0.5 R-3.3.0; no control socket per SPEC-011 v0.5 R-3.1.0. |
+| unset | set | SPEC-011 only: warm swap enabled per SPEC-011 v0.5 R-3.1.0; heartbeat carries `model_hash` / `loading` per SPEC-011 v0.5 R-3.3.0 / R-3.3.1; effective catalog is `supported_models: [model_id]` (single-entry, from R-3.6.2 default resolution) and `publishes_supported_models` remains OMITTED per SPEC-010 v1.5 R-3.6.4 / AC-21. |
+| set | set | BOTH: explicit catalog emitted per SPEC-010 v1.5 R-3.6.1 / R-3.6.4 and warm swap surfaces enabled per SPEC-011 v0.5 R-3.1.0 / R-3.3.0. |
+
+#### 6.7.4. Back-compat with legacy hello
+
+R-6.7.8 A v1.3 binary uses v2 `auth_request` for the first connection
+attempt with a coordinator per SPEC-010 v1.5 §3.1 and R-3.1.1 through
+R-3.1.10, whether or not either opt-in is set.
+
+R-6.7.9 The legacy `hello` handshake at §6.5 remains the reconnect
+mid-session path per SPEC-011 v0.5 §3.8 and R-3.8.3, including WS drop
+reconnect after a warm-swap-in-flight.
+
+R-6.7.10 A pre-v1.3 (v1.2.x) binary uses legacy `hello` on first
+connect; the coordinator accepts both paths per SPEC-010 v1.5 §3.1 and
+SPEC-011 v0.5 R-3.8.3 compatibility notes.
+
+### 6.8. Warm-swap opt-in gate + runtime state machine (NEW in v1.3)
+
+SPEC-011 v0.5 §2 L-1 locks the byte-identical default and L-2 locks
+operator initiation. The §6.8 state machine, §6.9 control socket, and
+§6.10 heartbeat extension activate ONLY when the operator invokes
+`serve` with `--enable-warm-swap`. In disabled mode, the binary follows
+the SPEC-001 v1.2.4 synchronous-load path: the current `ModelRuntime`
+actor populates a single immutable container at boot.
+
+#### 6.8.1. ModelRuntime refactor (REQUIRED when warm swap enabled)
+
+R-6.8.1 When `--enable-warm-swap` is enabled, the existing immutable
+`let container` / `let modelID` / `let modelHash` fields in
+`ModelRuntime` (`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift`
+lines 25-68, 86-147) MUST be refactored to actor-isolated mutable state
+per SPEC-011 v0.5 R-3.2.1.
+
+R-6.8.2 The actor MUST expose `currentContainer() -> ModelContainer`
+for snapshot reads and `swap(new: ModelContainer, newID: String,
+newHash: String)` for atomic replacement per SPEC-011 v0.5 R-3.2.1 and
+R-3.2.4.
+
+#### 6.8.2. State enumeration
+
+R-6.8.3 Runtime state values are `ready`, `loading`, `draining`, and
+`failed` with the semantics of SPEC-011 v0.5 R-3.2.3. The SPEC-011
+v0.5 §3.2 state machine diagram is incorporated by reference and MUST
+NOT be redrawn here.
+
+#### 6.8.3. Inference-while-loading rejection
+
+R-6.8.4 In `loading` or `draining`, NEW HTTP inference requests to the
+binary MUST be rejected with HTTP 503 and OpenAI envelope
+`{error: {type: "service_unavailable", code: "provider_loading"}}` per
+SPEC-011 v0.5 R-3.2.3 and R-3.4.4. In-flight requests started in
+`ready` MUST continue to completion using their snapshot reference per
+SPEC-011 v0.5 R-3.2.2.
+
+#### 6.8.4. No-starve rule
+
+R-6.8.5 The async load task MUST run on Swift task isolation distinct
+from the WebSocket receive loop, the WebSocket send loop including
+heartbeat emission, and the HTTP inference server accept loop per
+SPEC-011 v0.5 R-3.2.5. Heartbeat MUST continue at the negotiated
+cadence throughout `loading` and `draining`, anchoring SPEC-002 §11
+J.1's v1.1.6 35s heartbeat-miss kill incident as cited by SPEC-011
+v0.5 R-3.2.5.
+
+#### 6.8.5. Rollback semantics
+
+R-6.8.6 If async load fails, `current_container` remains unchanged,
+state transitions `loading -> failed -> ready`, heartbeat emits
+`loading: false` with the OLD `model_id` and OLD `model_hash`, the CLI
+receives typed `switch_progress` with `state: "failed"` and REQUIRED
+`reason`, and the CLI exits code 5 per SPEC-011 v0.5 R-3.2.6.
+
+#### 6.8.6. Boot path unchanged
+
+R-6.8.7 Startup-time synchronous load (`--model X` at boot) populates
+`current_container` once and transitions directly to `ready` without
+going through `loading` per SPEC-011 v0.5 R-3.2.7. This preserves
+existing boot semantics and L-1 back-compat.
+
+### 6.9. Control socket protocol (NEW in v1.3)
+
+R-6.9.1 The serve process MUST refuse to open the control socket unless
+`--enable-warm-swap` was passed to `serve` per SPEC-011 v0.5 R-3.1.0
+and R-3.1.5. In disabled mode, the socket MUST be absent.
+
+The macOS-native default path is `$TMPDIR/macprovider-cli/ctl.sock`,
+resolved via `FileManager.default.temporaryDirectory`, per SPEC-011
+v0.5 R-3.1.5. Why not `$XDG_RUNTIME_DIR`: that variable is a Linux /
+freedesktop convention and is not set on stock macOS; SPEC-011 v0.5
+R-3.1.5 records the empirical platform check.
+
+#### 6.9.1. Wire format
+
+R-6.9.2 The control socket protocol is newline-delimited JSON and every
+frame MUST include a REQUIRED `type` field per SPEC-011 v0.5 R-3.1.5.
+Messages with missing or unknown `type` MUST be discarded, and the
+receiver MUST close the connection with an error log line per SPEC-011
+v0.5 R-3.1.5.
+
+The SPEC-011 v0.5 R-3.1.5 field reference table is incorporated here:
+`type`, `target_model_id`, `requested_at_ms`, `accepted`, `reason`,
+`current_target`, `seconds_remaining`, `state`, `elapsed_ms`,
+`current_model_id`, and `runtime_state` retain the requiredness and
+enum constraints from SPEC-011 v0.5 R-3.1.5.
+
+#### 6.9.2. Frame types
+
+R-6.9.3 The binary MUST implement the SPEC-011 v0.5 R-3.1.5 frame
+schemas for `switch_request`, `status_request`, `switch_ack`,
+`switch_progress`, and `status_response`.
+
+R-6.9.4 `switch_ack` frames MUST include the REQUIRED `type:
+"switch_ack"` field and the REQUIRED `accepted` field per SPEC-011
+v0.5 R-3.1.5 and R-3.7.3.
+
+#### 6.9.3. Detection precedence
+
+R-6.9.5 The `models` CLI MUST use the SPEC-011 v0.5 R-3.1.5.x
+three-case detection precedence: ENOENT exits 4 with
+`"macprovider-cli serve is not running on this host (no control socket
+at <socket_path>)"`; ECONNREFUSED exits 4 with `"stale control socket
+at <socket_path> (no listener); remove the file and restart serve"`;
+connect-success plus missing `status_response` within 2s exits 4 with
+`"serve is running but warm-swap is not enabled (or serve is
+unresponsive); restart serve with --enable-warm-swap"`.
+
+#### 6.9.4. Permissions and lifecycle
+
+R-6.9.6 Socket parent directory mode MUST be `0700` and socket mode
+MUST be `0600`; the socket opens on `serve` startup only when
+`--enable-warm-swap` is set and closes on `serve` shutdown per
+SPEC-011 v0.5 R-3.1.5. Stale-socket reclaim after ECONNREFUSED requires
+operator removal of the socket file before restart per SPEC-011 v0.5
+R-3.1.5.x case 2.
+
+### 6.10. Heartbeat extension (NEW in v1.3, additive when warm-swap opt-in is enabled)
+
+§6.10 specifies what the BINARY emits. COORDINATOR-side handling,
+including the hash-clearing REPLACEMENT for `ApplyHeartbeat` at
+`phase4-coordinator/internal/pool/provider.go:411-432`, is covered by
+the SPEC-002 v1.3.5 candidate per SPEC-011 v0.5 §6.2 and is NOT in
+scope for SPEC-001 v1.3.
+
+#### 6.10.1. Opt-in gating
+
+R-6.10.1 The `model_hash` and `loading` heartbeat fields MUST be
+emitted by the binary ONLY when `--enable-warm-swap` is enabled (per
+R-3.1.0 of SPEC-011 v0.5); in disabled mode, both fields MUST be omitted
+from the wire entirely per SPEC-011 v0.5 R-3.3.0. This preserves L-1
+byte-identical default.
+
+#### 6.10.2. Field definitions
+
+R-6.10.2 `model_hash` MUST be a raw 64-character lowercase hex string
+matching the output of `modelWeightArtifactManifestHash()` at
+`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:294-325`
+(which formats the SHA-256 of the artifact manifest via the
+`hexString()` byte→hex helper at
+`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:340`) per
+SPEC-011 v0.5 R-3.3.1.
+
+R-6.10.3 `loading: bool` MUST reflect the §6.8 state machine:
+`true` in `loading` or `draining`, `false` in `ready`, per SPEC-011
+v0.5 R-3.3.3 and R-3.2.3.
+
+#### 6.10.3. Emission cadence
+
+R-6.10.4 Heartbeat MUST continue at the SPEC-002 §7.1 negotiated
+cadence throughout all state-machine states per SPEC-011 v0.5 R-3.2.5.
+The `loading: true` transition is communicated by the first heartbeat
+after state enters `loading`; the new `model_hash` is communicated by
+the first heartbeat after atomic swap into `ready` per SPEC-011 v0.5
+R-3.2.4 step 4.
+
+#### 6.10.4. Hash source-of-truth on reconnect (WS drop)
+
+R-6.10.5 After a WS drop mid-swap, the binary reconnects via legacy
+`hello` per SPEC-011 v0.5 §3.8 and R-3.8.3. The `hello.model_hash`
+field MUST carry the hash of the container currently referenced by
+`current_container` at reconnect time, not the in-progress load target.
+If the swap was mid-`loading` when the WS dropped, the load continues
+independently of the WS; on reconnect `hello.model_hash` is the OLD
+hash, and the next post-reconnect heartbeat carries the new hash once
+the swap completes per SPEC-011 v0.5 R-3.8.3.
+
+### 6.11. Concurrent switch + WS drop policies (NEW in v1.3)
+
+#### 6.11.1. Concurrent operator-pushed switch
+
+R-6.11.1 If `models switch <Y>` arrives while a prior `models switch
+<X>` is still in `loading` or `draining`, the serve process MUST reply
+with typed `switch_ack` `{type: "switch_ack", accepted: false, reason:
+"loading_in_progress", current_target: "X"}` per SPEC-011 v0.5 R-3.7.1.
+The CLI MUST exit code 3 per SPEC-011 v0.5 R-3.1.2.
+
+R-6.11.2 The serve process MUST NOT queue the second switch per
+SPEC-011 v0.5 R-3.7.2.
+
+#### 6.11.2. WS drop mid-load
+
+R-6.11.3 WS drop MUST NOT abort an in-flight load; the in-process state
+machine continues independently of WS connectivity per SPEC-011 v0.5
+R-3.8.1 and R-3.8.5.
+
+R-6.11.4 Reconnect uses legacy `hello` per SPEC-011 v0.5 R-3.8.3, not
+v2 `auth_request`. Reconnect carries the same `provider_id` identity
+and the OLD `model_hash` while the load remains in progress, using the
+§6.10.4 source-of-truth rule per SPEC-011 v0.5 R-3.8.3.
+
+#### 6.11.3. Cooldown soft guard
+
+R-6.11.5 The CLI tracks last-switch timestamp at the macOS-native state
+file path defined by §6.2 `--switch-state-path`; default cooldown window
+is 10s and `--force` suppresses ONLY the CLI-side soft guard per
+SPEC-011 v0.5 R-3.1.4 and R-3.1.3.
+
 ---
 
 ## 7. Dependencies and references
@@ -1884,6 +2311,162 @@ actual generated count), and `usage.total_tokens` ==
 **Run by:** Mock coordinator unit test plus hardware integration test
 against a local coordinator.
 
+**AC-18.0. L-1 baseline default — no NEW SPEC-010/SPEC-011 surface.**
+A v1.3 binary built per this spec, invoked with neither
+`--supported-models` nor `--enable-warm-swap`, MUST satisfy ALL of:
+(a) v2 `auth_request` initial-stage frame emits
+`supported_models: [model_id]` (single-entry) per SPEC-010 v1.5
+R-3.6.2 / AC-19 and OMITS `publishes_supported_models` per SPEC-010
+v1.5 R-3.6.4 / AC-21;
+(b) heartbeat frame OMITS `model_hash` and `loading` fields entirely
+(REAL byte-identical, not "additional fields tolerated") per SPEC-011
+v0.5 R-3.3.0 / AC-18;
+(c) no control socket file exists at
+`$TMPDIR/macprovider-cli/ctl.sock` while serve is running per
+SPEC-011 v0.5 R-3.1.0 / R-3.1.5 / AC-18;
+(d) coordinator-observable routing, `/v1/status`, and `/v1/models`
+behavior is indistinguishable from a pre-SPEC-010 binary per SPEC-010
+v1.5 §4.1 back-compat analysis.
+This is the L-1 BASELINE cell, scoped to "no NEW SPEC-010/SPEC-011
+fields, sockets, or runtime state" — the single-entry catalog default
+is part of SPEC-010 v1.5's locked binding contract and is the
+back-compat-equivalent baseline. Traces to SPEC-011 v0.5 AC-18 and
+SPEC-010 v1.5 AC-2 + AC-19 + AC-21.
+
+**AC-18.1. SPEC-010 opt-in.**
+A v1.3 binary invoked with `--supported-models A,B,C
+--publish-supported-models=true --model A` MUST send v2
+`auth_request` initial-stage with `supported_models: [A, B, C]`,
+`publishes_supported_models: true`, and `model_id: A`. Traces to
+SPEC-010 v1.5 AC-1 and AC-21.
+
+**AC-18.2. SPEC-010 pre-flight.**
+A v1.3 binary invoked with `--supported-models A,B --model C` MUST
+exit code 2 BEFORE opening the coordinator WS with stderr containing
+`"--model C not in --supported-models"`. Traces to SPEC-010 v1.5 AC-9.
+
+**AC-18.3. SPEC-011 opt-in gate — disabled mode (ENOENT path).**
+A v1.3 binary `serve` started without `--enable-warm-swap` MUST NOT
+create any file at `$TMPDIR/macprovider-cli/ctl.sock`. A
+`macprovider-cli models list` invocation against that binary MUST
+take the R-6.9.5 / R-3.1.5.x ENOENT case-1 path: exit code 4 with
+stderr containing `"macprovider-cli serve is not running on this
+host (no control socket at"` (followed by the resolved socket path).
+Traces to SPEC-011 v0.5 AC-18 case-1 and SPEC-001 v1.3 R-6.9.5.
+
+**AC-18.4. SPEC-011 opt-in gate — enabled mode.**
+A v1.3 binary `serve --enable-warm-swap` MUST create the control socket
+with mode `0600` and parent dir mode `0700`. Traces to SPEC-011 v0.5
+AC-22 and AC-26.
+
+**AC-18.5. macOS-native socket path.**
+The default control socket path resolves to
+`$TMPDIR/macprovider-cli/ctl.sock` via
+`FileManager.default.temporaryDirectory`. Linux/freedesktop runtime-dir
+environment paths MUST NOT appear anywhere in the binary's runtime path
+resolution; they are unset on stock macOS. Traces to SPEC-011 v0.5
+AC-26.
+
+**AC-18.6. Atomic swap.**
+Under `models switch <Y>` while serving an in-flight inference request,
+the in-flight request MUST complete using the OLD weights; a NEW
+request arriving AFTER atomic swap completion MUST be served by the NEW
+weights. No caller observes mixed state. Traces to SPEC-011 v0.5 AC-9.
+
+**AC-18.7. No-starve heartbeat.**
+Heartbeat cadence MUST NOT pause during `loading` or `draining`. A
+SPEC-002 §7.1 heartbeat-miss threshold MUST NOT be triggered by a model
+swap. Traces to SPEC-011 v0.5 AC-12.
+
+**AC-18.8. Heartbeat hash format.**
+When `--enable-warm-swap` is set, `model_hash` on heartbeat frames MUST
+be a 64-char lowercase hex string with no `sha256:` prefix and no
+uppercase characters. Traces to SPEC-011 v0.5 AC-10 and AC-20.
+
+**AC-18.9. Four matrix cells.**
+Test matrix exercises all four cells of the SPEC-010 × SPEC-011 opt-in
+matrix per §6.7.3. Each cell's expected wire behavior is verified by
+capturing the v2 `auth_request` frame and first heartbeat:
+- Cell 1 (unset/unset): frame carries `supported_models: [model_id]`
+  per SPEC-010 v1.5 R-3.6.2 / AC-19; OMITS `publishes_supported_models`
+  per SPEC-010 v1.5 R-3.6.4 / AC-21; heartbeat OMITS `model_hash` /
+  `loading` per SPEC-011 v0.5 R-3.3.0 / AC-18.
+- Cell 2 (set/unset): frame carries the explicit `supported_models[]`
+  list; `publishes_supported_models: true` when
+  `--publish-supported-models=true`; heartbeat OMITS SPEC-011 fields.
+- Cell 3 (unset/set): frame carries `supported_models: [model_id]`
+  per R-3.6.2; OMITS `publishes_supported_models`; heartbeat carries
+  `model_hash` (raw lowercase hex) and `loading` per SPEC-011 v0.5
+  R-3.3.1 / AC-10 / AC-20.
+- Cell 4 (set/set): frame carries explicit catalog + heartbeat carries
+  SPEC-011 fields.
+Each cell's expected shape is byte-asserted against the captured frame,
+not "additional fields tolerated." Traces to SPEC-010 v1.5 AC-1, AC-2,
+AC-19, AC-21 and SPEC-011 v0.5 AC-10, AC-18, AC-20, AC-23.
+
+**AC-18.10. NEW §6.7 v2 handshake documented.**
+The SPEC-001 v1.3 §6.7 v2 `auth_request` handshake section is
+consistent with the SPEC-010 v1.5 §3.1.A field table by byte-for-byte
+field comparison. No field appears in one and not the other. Traces to
+SPEC-010 v1.5 AC-16 and AC-18.
+
+**AC-18.11. No drift in §6.5.**
+SPEC-001 v1.3 §6.5 (Coordinator WebSocket envelope — legacy `hello`
+handshake) is byte-identical to SPEC-001 v1.2.4 §6.5. v1.3 adds the v2
+handshake as a new §6.7; it does NOT modify the legacy `hello`
+documentation. Verifiable by `diff` of the two versions' §6.5 sections.
+Traces to SPEC-011 v0.5 AC-18 and SPEC-010 v1.5 AC-16.
+
+**AC-18.12. Control-socket detection precedence — ECONNREFUSED.**
+A v1.3 binary `serve --enable-warm-swap` running with a stale socket
+file at `$TMPDIR/macprovider-cli/ctl.sock` left by a prior crashed
+process (file exists but no listener) MUST cause `macprovider-cli
+models list` to take the R-6.9.5 / R-3.1.5.x ECONNREFUSED case-2
+path: exit code 4 with stderr containing `"stale control socket at"`
+and `"remove the file and restart serve"`. Traces to SPEC-011 v0.5
+R-3.1.5.x case 2 and SPEC-001 v1.3 R-6.9.5.
+
+**AC-18.13. Control-socket detection precedence — handshake timeout.**
+If the binary connects to the control socket successfully but no
+`status_response` arrives within 2 seconds, `macprovider-cli models
+list` MUST take the R-6.9.5 / R-3.1.5.x case-3 path: exit code 4
+with stderr containing `"serve is running but warm-swap is not
+enabled (or serve is unresponsive)"`. Traces to SPEC-011 v0.5
+R-3.1.5.x case 3 and SPEC-001 v1.3 R-6.9.5.
+
+**AC-18.14. Cooldown soft guard + `--force` bypass.**
+A v1.3 binary `serve --enable-warm-swap` that has successfully
+processed a `models switch <X>` within the last 10 seconds MUST cause
+the next `macprovider-cli models switch <Y>` to exit code 6 with
+stderr containing `"swap on cooldown for"` and `"Re-issue with
+--force to bypass"` per SPEC-011 v0.5 R-3.1.4 / R-3.1.2 step 4. The
+same invocation with `--force` MUST bypass ONLY the cooldown soft
+guard and proceed to step 4 acceptance (or rejection on other
+grounds) per SPEC-011 v0.5 R-3.1.3. `--force` MUST NOT bypass the
+SPEC-010 R-3.6.3 pre-flight validation (verified by AC-18.2 path).
+Traces to SPEC-011 v0.5 R-3.1.2 / R-3.1.3 / R-3.1.4 and AC-24.
+
+**AC-18.15. WS drop reconnect uses legacy `hello`, not v2.**
+A v1.3 binary `serve --enable-warm-swap` whose WebSocket connection
+drops mid-load MUST reconnect using the legacy §6.5 `hello`
+handshake per R-6.11.4 and SPEC-011 v0.5 R-3.8.3 / §3.8 — NOT a
+fresh v2 `auth_request`. The reconnect `hello.model_hash` MUST carry
+the hash of the container currently referenced by
+`current_container` at reconnect time per R-6.10.5 (the OLD hash if
+the swap is still in-flight). The first post-reconnect heartbeat
+after atomic swap MUST carry the new `model_hash`. Traces to
+SPEC-011 v0.5 R-3.8.3 / §3.8 and SPEC-001 v1.3 R-6.10.5 / R-6.11.4.
+
+**AC-18.16. Runtime state-value enumeration.**
+A v1.3 binary `serve --enable-warm-swap` runtime MUST expose
+exactly the four observable state values defined in §6.8.2 /
+SPEC-011 v0.5 R-3.2.3: `ready`, `loading`, `draining`, `failed`.
+Status responses on the control socket MUST report one of `ready`,
+`loading`, `draining` per SPEC-011 v0.5 R-3.1.5 `runtime_state`
+enum (the `failed` state is internal-only-transient per R-3.2.3 and
+MUST NOT appear in `status_response.runtime_state`). Traces to
+SPEC-011 v0.5 R-3.2.3 and R-3.1.5 field reference.
+
 ---
 
 ## 10. Open questions for operator
@@ -2026,6 +2609,9 @@ phase3-binary/
 │       ├── ContextPreflight.swift       # FR-8 (both stages)
 │       ├── CapacityManager.swift        # FR-9, FR-11
 │       ├── CoordinatorClient.swift      # FR-13, FR-14, FR-15, FR-17
+│       ├── ModelsSubcommand.swift       # §6.2, §6.9 models list/switch/status
+│       ├── ControlSocket.swift          # §6.9 newline-delimited JSON control socket
+│       ├── RuntimeStateMachine.swift    # §6.8 state machine + atomic swap
 │       ├── WarmupManager.swift          # FR-16
 │       ├── SelfTest.swift               # FR-20
 │       ├── Middleware/
@@ -2033,6 +2619,8 @@ phase3-binary/
 │       │   ├── InputDecryptor.swift     # Tier 2 hook (passthrough)
 │       │   └── ResponseSeal.swift       # Tier 2 hook (passthrough)
 │       └── Logging.swift                # NFR-7
+│   └── MacProviderCore/
+│       └── SupportedModels.swift        # §6.2 SPEC-010 resolution/pre-flight
 ├── Tests/
 │   └── macprovider-cliTests/
 │       ├── RequestValidatorTests.swift
@@ -2047,6 +2635,20 @@ phase3-binary/
 ├── implementation-notes.html            # Populated by build session
 └── THIRD_PARTY_NOTICES.md
 ```
+
+Expected v1.3 implementation modifications to existing files:
+
+- `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift` —
+  refactored per §6.8.1 from immutable `let` fields to actor-isolated
+  mutable `current_container`.
+- `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift` —
+  extended v2 `auth_request` builder to emit SPEC-010 fields when
+  opt-in flags are set; heartbeat builder gains opt-in-gated
+  `model_hash` / `loading` fields per §6.10. Existing `helloMessage`
+  hash source-of-truth follows §6.10.4 on reconnect.
+- `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift` — adds
+  `models` subcommand to the existing subcommand list (currently lines
+  7-15).
 
 ---
 
