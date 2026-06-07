@@ -439,8 +439,21 @@ type SwapEvent struct {
 
 // SwapEventEmitter is called from ApplyHeartbeat when a SPEC-011 PATH
 // heartbeat completes a swap (prior heartbeat had loading:true; current
-// heartbeat has loading:false AND carries model_hash). Default nil = no-op.
-// Phase 2E registers the SQLite emitter via WithSwapEmitter.
+// heartbeat has loading:false AND carries model_hash AND reports a new
+// model_id). Default nil = no-op. Phase 2E registers the SQLite emitter
+// via WithSwapEmitter.
+//
+// CONCURRENCY CONTRACT: the emitter is invoked while ApplyHeartbeat
+// holds Registry.mu. Implementations MUST NOT:
+//   - call back into any Registry method (deadlock — r.mu is held)
+//   - block for long (heartbeat throughput on every connected
+//     provider depends on this; the spec R-7.10.8 also mandates that
+//     audit write failures MUST NOT block heartbeat processing or
+//     drop the provider).
+//
+// Phase 2E's SQLite writer is best-effort + short-running per
+// SPEC-002 v1.3.5 §7.10 R-7.10.8; a panic propagates and crashes the
+// heartbeat handler, matching the v1.3.4 default failure mode.
 type SwapEventEmitter func(event SwapEvent)
 
 type HeartbeatUpdate struct {
@@ -515,9 +528,17 @@ func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpd
 		}
 		p.LastLoadingState = hb.Loading
 	}
+	// SPEC-002 v1.3.5 §7.1 R-7.1.6 + §7.10 R-7.10.6 gate the audit
+	// emission on "the FIRST observed heartbeat with loading:false
+	// carrying the NEW model_id" — i.e. the post-swap heartbeat
+	// MUST report a model_id different from the prior heartbeat's.
+	// Without the modelIDChanged guard, a malicious provider could
+	// send loading:true → loading:false on the same model_id and
+	// forge spurious operator_model_swap events.
 	swapCompleted := hb.ModelHashPresent &&
 		priorLoadingState &&
-		hb.LoadingPresent && !hb.Loading
+		hb.LoadingPresent && !hb.Loading &&
+		modelIDChanged
 	if swapCompleted && r.swapEmitter != nil {
 		r.swapEmitter(SwapEvent{
 			ProviderID:             p.ProviderID,

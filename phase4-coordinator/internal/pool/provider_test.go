@@ -402,6 +402,44 @@ func TestApplyHeartbeatPathSelectionIsPerHeartbeatNotSticky(t *testing.T) {
 	if provider.ModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
 		t.Fatalf("frame #2 hash state = (%q, %q), want legacy clear", provider.ModelHash, provider.HashStatus)
 	}
+	// Frame #3 — SPEC-011 re-entry after the LEGACY clear. Per AC-K.8,
+	// path selection is per-heartbeat and presence-keyed: a binary that
+	// re-includes model_hash MUST re-take the SPEC-011 path, updating
+	// the hash and re-invoking the verifier even though frame #2 had
+	// cleared the prior hash via the LEGACY path.
+	provider, _, ok = registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-c", "hash-c", false, start.Add(3*time.Minute)))
+	if !ok {
+		t.Fatal("frame #3 heartbeat not applied")
+	}
+	if provider.ModelHash != "hash-c" || provider.HashStatus != HashStatusVerified {
+		t.Fatalf("frame #3 hash state = (%q, %q), want SPEC-011 repopulation", provider.ModelHash, provider.HashStatus)
+	}
+}
+
+// TestApplyHeartbeatSwapEmitterDoesNotFireWhenModelIDUnchanged
+// regression-pins the [sec:1.1] R2 closure: a malicious provider
+// that pulses loading:true → loading:false on the SAME model_id
+// (forged or genuine same-model re-load) MUST NOT fire the
+// operator_model_swap emitter. SPEC-002 v1.3.5 §7.10 R-7.10.6 gates
+// emission on "loading:false carrying the NEW model_id".
+func TestApplyHeartbeatSwapEmitterDoesNotFireWhenModelIDUnchanged(t *testing.T) {
+	called := false
+	registry := NewRegistry(nil,
+		WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+			return HashStatusVerified
+		}),
+		WithSwapEmitter(func(event SwapEvent) {
+			called = true
+		}),
+	)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", true, start.Add(time.Minute)))
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", false, start.Add(2*time.Minute)))
+	if called {
+		t.Fatal("emitter fired on a same-model loading pulse")
+	}
 }
 
 func TestApplyHeartbeatLoadingStartedAtStampedOnFalseToTrueTransition(t *testing.T) {
