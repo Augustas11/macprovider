@@ -170,6 +170,8 @@ actor CoordinatorClient {
                 return
             }
             switch signal.outcome {
+            case .loadFinished:
+                continue
             case .completed:
                 do {
                     try await sendHeartbeat()

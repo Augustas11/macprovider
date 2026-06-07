@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import MacProviderCore
 
 public enum SwitchAckReason: String, Sendable, Equatable {
     case loadingInProgress = "loading_in_progress"
@@ -223,18 +224,30 @@ public enum ControlSocketServerError: Error, CustomStringConvertible, Equatable 
 public enum ControlSocketConnectionError: Error, Equatable {
     case closed
     case timedOut
+    case frameTooLarge(size: Int)
 }
 
 actor ControlSocketServer {
     private let socketPath: URL
     private let modelRuntime: ModelRuntime
+    private let supportedModels: [String]?
+    private let idleTimeoutSeconds: TimeInterval
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
+    private var clientTasks: [Task<Void, Never>] = []
+    private var clientFDs: [Int32] = []
 
-    init(socketPath: URL, modelRuntime: ModelRuntime) {
+    init(
+        socketPath: URL,
+        modelRuntime: ModelRuntime,
+        supportedModels: [String]? = nil,
+        idleTimeoutSeconds: TimeInterval = 30.0
+    ) {
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
+        self.supportedModels = supportedModels
+        self.idleTimeoutSeconds = idleTimeoutSeconds
     }
 
     func start() async throws {
@@ -276,14 +289,31 @@ actor ControlSocketServer {
         listenerFD = fd
         let runtime = modelRuntime
         let tracker = tracker
+        let supportedModels = supportedModels
+        let idleTimeoutSeconds = idleTimeoutSeconds
         acceptTask = Task.detached(priority: .userInitiated) {
-            await Self.acceptLoop(listenerFD: fd, modelRuntime: runtime, tracker: tracker)
+            await Self.acceptLoop(
+                listenerFD: fd,
+                modelRuntime: runtime,
+                tracker: tracker,
+                supportedModels: supportedModels,
+                idleTimeoutSeconds: idleTimeoutSeconds,
+                server: self
+            )
         }
     }
 
     func stop() async {
         acceptTask?.cancel()
         acceptTask = nil
+        for task in clientTasks {
+            task.cancel()
+        }
+        clientTasks.removeAll()
+        for fd in clientFDs {
+            close(fd)
+        }
+        clientFDs.removeAll()
         if let listenerFD {
             close(listenerFD)
             self.listenerFD = nil
@@ -292,10 +322,26 @@ actor ControlSocketServer {
         await tracker.clear()
     }
 
+    private func appendClientTask(_ task: Task<Void, Never>) {
+        clientTasks = clientTasks.filter { !$0.isCancelled }
+        clientTasks.append(task)
+    }
+
+    private func appendClientFD(_ fd: Int32) {
+        clientFDs.append(fd)
+    }
+
+    private func removeClientFD(_ fd: Int32) {
+        clientFDs.removeAll { $0 == fd }
+    }
+
     private nonisolated static func acceptLoop(
         listenerFD: Int32,
         modelRuntime: ModelRuntime,
-        tracker: ControlSocketSwitchTracker
+        tracker: ControlSocketSwitchTracker,
+        supportedModels: [String]?,
+        idleTimeoutSeconds: TimeInterval,
+        server: ControlSocketServer
     ) async {
         while !Task.isCancelled {
             let clientFD = Darwin.accept(listenerFD, nil, nil)
@@ -305,21 +351,32 @@ actor ControlSocketServer {
                 }
                 break
             }
-            Task.detached(priority: .userInitiated) {
-                await handleClient(fd: clientFD, modelRuntime: modelRuntime, tracker: tracker)
+            await server.appendClientFD(clientFD)
+            let task = Task.detached(priority: .userInitiated) {
+                await handleClient(
+                    fd: clientFD,
+                    modelRuntime: modelRuntime,
+                    tracker: tracker,
+                    supportedModels: supportedModels,
+                    idleTimeoutSeconds: idleTimeoutSeconds
+                )
+                await server.removeClientFD(clientFD)
             }
+            await server.appendClientTask(task)
         }
     }
 
     private nonisolated static func handleClient(
         fd: Int32,
         modelRuntime: ModelRuntime,
-        tracker: ControlSocketSwitchTracker
+        tracker: ControlSocketSwitchTracker,
+        supportedModels: [String]?,
+        idleTimeoutSeconds: TimeInterval
     ) async {
         let connection = ControlSocketConnection(fd: fd)
         while !Task.isCancelled {
             do {
-                let frame = try await connection.receive()
+                let frame = try await connection.receive(timeout: idleTimeoutSeconds)
                 switch frame {
                 case .statusRequest:
                     let snapshot = await modelRuntime.currentSnapshot()
@@ -331,7 +388,8 @@ actor ControlSocketServer {
                         requestedAtMs: requestedAtMs,
                         connection: connection,
                         modelRuntime: modelRuntime,
-                        tracker: tracker
+                        tracker: tracker,
+                        supportedModels: supportedModels
                     )
                     await connection.close()
                     return
@@ -345,6 +403,9 @@ actor ControlSocketServer {
                 await connection.close()
                 return
             } catch ControlSocketConnectionError.closed {
+                await connection.close()
+                return
+            } catch ControlSocketConnectError.other(let underlying) where Task.isCancelled && underlying == "Bad file descriptor" {
                 await connection.close()
                 return
             } catch {
@@ -361,10 +422,28 @@ actor ControlSocketServer {
         requestedAtMs: Int64,
         connection: ControlSocketConnection,
         modelRuntime: ModelRuntime,
-        tracker: ControlSocketSwitchTracker
+        tracker: ControlSocketSwitchTracker,
+        supportedModels: [String]?
     ) async {
-        let stream = await modelRuntime.swapSignals()
         do {
+            do {
+                _ = try SupportedModels.validate(model: targetModelID, supportedModels: supportedModels)
+            } catch SupportedModelsValidationError.modelNotInCatalog {
+                try? await connection.send(.switchAck(
+                    accepted: false,
+                    reason: .notInSupportedModels,
+                    currentTarget: nil,
+                    secondsRemaining: nil
+                ))
+                await connection.close()
+                return
+            } catch {
+                try? await connection.send(.switchAck(accepted: false, reason: .other, currentTarget: nil, secondsRemaining: nil))
+                await connection.close()
+                return
+            }
+
+            let stream = await modelRuntime.swapSignals()
             _ = try await modelRuntime.beginSwap(targetModelID: targetModelID)
             await tracker.start(targetModelID)
             try await connection.send(.switchAck(accepted: true, reason: nil, currentTarget: nil, secondsRemaining: nil))
@@ -376,8 +455,10 @@ actor ControlSocketServer {
                     continue
                 }
                 switch signal.outcome {
-                case .completed:
+                case .loadFinished:
                     try await connection.send(.switchProgress(state: .draining, elapsedMs: elapsedMs(since: requestedAtMs), reason: nil))
+                    continue
+                case .completed:
                     try await connection.send(.switchProgress(state: .loaded, elapsedMs: elapsedMs(since: requestedAtMs), reason: nil))
                 case let .failed(reason):
                     try await connection.send(.switchProgress(state: .failed, elapsedMs: elapsedMs(since: requestedAtMs), reason: reason))
@@ -449,6 +530,8 @@ public enum ControlSocketClient {
 }
 
 public actor ControlSocketConnection {
+    public static let maxFrameBytes = 64 * 1024
+
     private var fd: Int32?
     private var receiveBuffer = Data()
 
@@ -464,6 +547,10 @@ public actor ControlSocketConnection {
     public func receive(timeout: TimeInterval? = nil) async throws -> ControlSocketFrame {
         while true {
             if let newline = receiveBuffer.firstIndex(of: 0x0A) {
+                let frameSize = receiveBuffer.distance(from: receiveBuffer.startIndex, to: newline) + 1
+                if frameSize > Self.maxFrameBytes {
+                    throw ControlSocketConnectionError.frameTooLarge(size: frameSize)
+                }
                 let line = receiveBuffer.prefix(through: newline)
                 receiveBuffer.removeSubrange(...newline)
                 return try ControlSocketCodec.decode(Data(line))
@@ -475,8 +562,10 @@ public actor ControlSocketConnection {
             if let timeout, !waitForReadable(fd: fd, timeout: timeout) {
                 throw ControlSocketConnectionError.timedOut
             }
-            var byte: UInt8 = 0
-            let count = Darwin.read(fd, &byte, 1)
+            var bytes = [UInt8](repeating: 0, count: 4096)
+            let count = bytes.withUnsafeMutableBytes { rawBuffer in
+                Darwin.read(fd, rawBuffer.baseAddress, rawBuffer.count)
+            }
             if count == 0 {
                 throw ControlSocketConnectionError.closed
             }
@@ -486,7 +575,15 @@ public actor ControlSocketConnection {
                 }
                 throw ControlSocketConnectError.other(underlying: String(cString: strerror(errno)))
             }
-            receiveBuffer.append(byte)
+            receiveBuffer.append(contentsOf: bytes.prefix(count))
+            if let newline = receiveBuffer.firstIndex(of: 0x0A) {
+                let frameSize = receiveBuffer.distance(from: receiveBuffer.startIndex, to: newline) + 1
+                if frameSize > Self.maxFrameBytes {
+                    throw ControlSocketConnectionError.frameTooLarge(size: frameSize)
+                }
+            } else if receiveBuffer.count > Self.maxFrameBytes {
+                throw ControlSocketConnectionError.frameTooLarge(size: receiveBuffer.count)
+            }
         }
     }
 

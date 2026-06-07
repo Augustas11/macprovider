@@ -121,4 +121,44 @@ final class SupportedModelsTests: XCTestCase {
             XCTAssertEqual(error, ExitCode(2))
         }
     }
+
+    func testServeCommandExits2WhenDrainTimeoutBelowMinimum() {
+        assertDrainTimeoutRejected(4)
+    }
+
+    func testServeCommandExits2WhenDrainTimeoutAboveMaximum() {
+        assertDrainTimeoutRejected(601)
+    }
+
+    func testServeCommandExits2WhenDrainTimeoutIsNegative() {
+        assertDrainTimeoutRejected(-1)
+    }
+
+    func testServeCommandAllowsDrainTimeoutMinimumBoundary() throws {
+        try assertDrainTimeoutAccepted(5)
+    }
+
+    func testServeCommandAllowsDrainTimeoutDefault() throws {
+        try assertDrainTimeoutAccepted(30)
+    }
+
+    func testServeCommandAllowsDrainTimeoutMaximumBoundary() throws {
+        try assertDrainTimeoutAccepted(600)
+    }
+
+    private func assertDrainTimeoutRejected(_ value: Int) {
+        var config = AppConfig.defaults()
+        config.swapDrainTimeoutSeconds = value
+
+        XCTAssertThrowsError(try ServeCommand.runDrainTimeoutPreflight(config)) { error in
+            XCTAssertEqual(error as? ExitCode, ExitCode(2))
+        }
+    }
+
+    private func assertDrainTimeoutAccepted(_ value: Int) throws {
+        var config = AppConfig.defaults()
+        config.swapDrainTimeoutSeconds = value
+
+        try ServeCommand.runDrainTimeoutPreflight(config)
+    }
 }

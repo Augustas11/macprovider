@@ -33,6 +33,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
 
     func testInFlightInferenceUsesOldSnapshot() async throws {
         let probe = InFlightProbe()
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
         let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true, loader: { target in
             (target, "new-hash")
         }, completion: { snapshot, _ in
@@ -42,6 +43,7 @@ final class ModelRuntimeSwapTests: XCTestCase {
             }
             return CompletionResult(content: snapshot.modelID ?? "<nil>", finishReason: "stop", promptTokens: 1, completionTokens: 1)
         })
+        await runtime.setProviderStatus(providerStatus)
 
         let request = try makeRequest(model: "old-model")
         let completionTask = Task {
@@ -117,6 +119,122 @@ final class ModelRuntimeSwapTests: XCTestCase {
         XCTAssertEqual(runtime.swapDrainTimeoutForTest(), 42)
     }
 
+    func testDrainWaitsForRequestsInFlightBeforeAtomicSwap() async throws {
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true) { target in
+            (target, "new-hash")
+        }
+        await runtime.setProviderStatus(providerStatus)
+        var signals = await runtime.swapSignals().makeAsyncIterator()
+        let requestStartedAt = await providerStatus.beginRequest()
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        let loadSignal = await signals.next()
+        try await Task.sleep(nanoseconds: 120_000_000)
+        let drainingSnapshot = await runtime.currentSnapshot()
+
+        guard case .loadFinished = loadSignal?.outcome else {
+            XCTFail("Expected loadFinished signal")
+            return
+        }
+        XCTAssertEqual(drainingSnapshot.state, .draining)
+        XCTAssertEqual(drainingSnapshot.modelID, "old-model")
+        XCTAssertEqual(drainingSnapshot.modelHash, "old-hash")
+
+        await providerStatus.finishRequest(startedAt: requestStartedAt, completion: nil, failed: false)
+        try await task.value
+        let completedSignal = await signals.next()
+        let finalSnapshot = await runtime.currentSnapshot()
+
+        guard case let .completed(newModelID, newModelHash) = completedSignal?.outcome else {
+            XCTFail("Expected completed signal")
+            return
+        }
+        XCTAssertEqual(newModelID, "new-model")
+        XCTAssertEqual(newModelHash, "new-hash")
+        XCTAssertEqual(finalSnapshot.state, .ready)
+        XCTAssertEqual(finalSnapshot.modelID, "new-model")
+        XCTAssertEqual(finalSnapshot.modelHash, "new-hash")
+    }
+
+    func testDrainWithNoRequestsInFlightCompletesImmediately() async throws {
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true) { target in
+            (target, "new-hash")
+        }
+        await runtime.setProviderStatus(providerStatus)
+        var signals = await runtime.swapSignals().makeAsyncIterator()
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        try await task.value
+        let loadSignal = await signals.next()
+        let completedSignal = await signals.next()
+        let finalSnapshot = await runtime.currentSnapshot()
+
+        guard case .loadFinished = loadSignal?.outcome else {
+            XCTFail("Expected loadFinished signal")
+            return
+        }
+        guard case .completed = completedSignal?.outcome else {
+            XCTFail("Expected completed signal")
+            return
+        }
+        XCTAssertEqual(finalSnapshot.state, .ready)
+        XCTAssertEqual(finalSnapshot.modelID, "new-model")
+    }
+
+    func testDrainTimeoutProceedsWithAtomicSwap() async throws {
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = makeRuntime(
+            modelID: "old-model",
+            modelHash: "old-hash",
+            warmSwapEnabled: true,
+            swapDrainTimeoutSeconds: 0
+        ) { target in
+            (target, "new-hash")
+        }
+        await runtime.setProviderStatus(providerStatus)
+        _ = await providerStatus.beginRequest()
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        try await task.value
+        let snapshot = await runtime.currentSnapshot()
+
+        XCTAssertEqual(snapshot.state, .ready)
+        XCTAssertEqual(snapshot.modelID, "new-model")
+        XCTAssertEqual(snapshot.modelHash, "new-hash")
+    }
+
+    func testConcurrentSnapshotsDoNotObserveMixedSwapState() async throws {
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let runtime = makeRuntime(modelID: "old-model", modelHash: "old-hash", warmSwapEnabled: true) { target in
+            try await Task.sleep(nanoseconds: 100_000_000)
+            return (target, "new-hash")
+        }
+        await runtime.setProviderStatus(providerStatus)
+        let requestStartedAt = await providerStatus.beginRequest()
+
+        let task = try await runtime.beginSwap(targetModelID: "new-model")
+        var observedMixedSnapshots: [RuntimeSnapshot] = []
+        for _ in 0 ..< 1000 {
+            let snapshot = await runtime.currentSnapshot()
+            if snapshot.state != .ready && snapshot.modelID == "new-model" {
+                observedMixedSnapshots.append(snapshot)
+            }
+            if snapshot.state == .ready && snapshot.modelID == "old-model" {
+                observedMixedSnapshots.append(snapshot)
+            }
+        }
+
+        await providerStatus.finishRequest(startedAt: requestStartedAt, completion: nil, failed: false)
+        try await task.value
+        let finalSnapshot = await runtime.currentSnapshot()
+
+        XCTAssertTrue(observedMixedSnapshots.isEmpty)
+        XCTAssertEqual(finalSnapshot.state, .ready)
+        XCTAssertEqual(finalSnapshot.modelID, "new-model")
+    }
+
     func testWarmSwapConfigUsesCLIOverEnvironmentOverYAML() throws {
         let config = try ConfigLoader.load(
             cli: CLIOverrides(enableWarmSwap: false, swapDrainTimeoutSeconds: 44),
@@ -178,6 +296,15 @@ final class ModelRuntimeSwapTests: XCTestCase {
         ]
         let data = try JSONSerialization.data(withJSONObject: body)
         return try ChatCompletionRequest.parse(data: data)
+    }
+
+    private func makeProviderStatus(modelID: String?, modelHash: String?) -> ProviderStatus {
+        ProviderStatus(
+            modelID: modelID,
+            modelLoaded: modelID != nil,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1),
+            modelHash: modelHash
+        )
     }
 }
 

@@ -36,15 +36,18 @@ public struct WarmSwapDisabledError: Error, CustomStringConvertible {
 }
 
 actor ModelRuntime: ModelRuntimeServing {
+    private var state: SwapState = .ready
+    private var targetModelID: String?
     private var currentModelID: String?
     private var currentContainer: ModelContainer?
     private let stopTokenFilter: StopTokenFilter
     private var currentModelHash: String?
     private let maxContextTokens: Int
     private let inferenceGate = AsyncSemaphore(value: 1)
-    private let stateMachine: RuntimeStateMachine
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
+    private var providerStatus: ProviderStatus?
+    private var signalContinuations: [AsyncStream<SwapSignal>.Continuation] = []
     private let loader: @Sendable (String) async throws -> (ModelContainer, String, String?)
     private let testLoader: (@Sendable (String) async throws -> (String, String?))?
     private let testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
@@ -69,7 +72,6 @@ actor ModelRuntime: ModelRuntimeServing {
     ) async throws {
         self.currentModelID = modelID
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
-        self.stateMachine = RuntimeStateMachine()
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.loader = { targetModelID in
@@ -109,7 +111,7 @@ actor ModelRuntime: ModelRuntimeServing {
         maxContextTokensOverride: Int? = nil,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
-        stateMachine: RuntimeStateMachine = RuntimeStateMachine(),
+        providerStatus: ProviderStatus? = nil,
         loader: @escaping @Sendable (String) async throws -> (ModelContainer, String, String?),
         testLoader: (@Sendable (String) async throws -> (String, String?))? = nil,
         testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)? = nil
@@ -119,41 +121,62 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentModelHash = modelHash
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
-        self.stateMachine = stateMachine
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
+        self.providerStatus = providerStatus
         self.loader = loader
         self.testLoader = testLoader
         self.testCompletion = testCompletion
     }
 
-    func currentSnapshot() async -> RuntimeSnapshot {
+    func setProviderStatus(_ providerStatus: ProviderStatus) {
+        self.providerStatus = providerStatus
+    }
+
+    func currentSnapshot() -> RuntimeSnapshot {
         RuntimeSnapshot(
-            state: await stateMachine.current(),
+            state: state,
             container: currentContainer,
             modelID: currentModelID,
             modelHash: currentModelHash
         )
     }
 
-    func swapSignals() async -> AsyncStream<SwapSignal> {
-        await stateMachine.signalStream()
+    func swapSignals() -> AsyncStream<SwapSignal> {
+        let pair = AsyncStream<SwapSignal>.makeStream(of: SwapSignal.self)
+        signalContinuations.append(pair.continuation)
+        return pair.stream
     }
 
     func beginSwap(targetModelID: String) async throws -> Task<Void, Error> {
         guard warmSwapEnabled else { throw WarmSwapDisabledError() }
-        try await stateMachine.transitionToLoading(target: targetModelID)
-        return Task.detached { [stateMachine, loader, testLoader] in
+        try transitionToLoading(target: targetModelID)
+        let drainTimeoutSeconds = swapDrainTimeoutSeconds
+        let providerStatus = providerStatus
+        let loader = loader
+        let testLoader = testLoader
+        return Task.detached { [weak self, loader, testLoader, drainTimeoutSeconds, providerStatus] in
+            guard let self else { return }
             do {
+                let container: ModelContainer?
+                let modelID: String
+                let modelHash: String?
                 if let testLoader {
-                    let (modelID, modelHash) = try await testLoader(targetModelID)
-                    await self.applySwap(container: nil, modelID: modelID, modelHash: modelHash)
+                    let loaded = try await testLoader(targetModelID)
+                    container = nil
+                    modelID = loaded.0
+                    modelHash = loaded.1
                 } else {
-                    let (container, modelID, modelHash) = try await loader(targetModelID)
-                    await self.applySwap(container: container, modelID: modelID, modelHash: modelHash)
+                    let loaded = try await loader(targetModelID)
+                    container = loaded.0
+                    modelID = loaded.1
+                    modelHash = loaded.2
                 }
+                try await self.enterDrainPhase()
+                await Self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
+                await self.completeSwapAtomically(container: container, modelID: modelID, modelHash: modelHash)
             } catch {
-                await stateMachine.failSwap(reason: String(describing: error))
+                await self.failSwap(reason: String(describing: error))
             }
         }
     }
@@ -162,15 +185,70 @@ actor ModelRuntime: ModelRuntimeServing {
         swapDrainTimeoutSeconds
     }
 
-    private func applySwap(container: ModelContainer?, modelID: String, modelHash: String?) async {
+    private func transitionToLoading(target: String) throws {
+        guard state == .ready else {
+            throw RuntimeStateMachineError.notReady(current: state)
+        }
+        state = .loading
+        targetModelID = target
+    }
+
+    private func enterDrainPhase() throws {
+        guard state == .loading else {
+            throw RuntimeStateMachineError.notReady(current: state)
+        }
+        state = .draining
+        signal(SwapSignal(targetModelID: targetModelID ?? "", outcome: .loadFinished))
+    }
+
+    private nonisolated static func waitForDrainOrTimeout(providerStatus: ProviderStatus?, timeoutSeconds: Int) async {
+        guard let providerStatus else {
+            return
+        }
+        let drainStartMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let timeoutMs = Int64(timeoutSeconds * 1000)
+        while !Task.isCancelled {
+            let snapshot = await providerStatus.snapshot()
+            if snapshot.requestsInFlight == 0 {
+                return
+            }
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            if nowMs - drainStartMs > timeoutMs {
+                return
+            }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    private func completeSwapAtomically(container: ModelContainer?, modelID: String, modelHash: String?) {
+        let target = targetModelID ?? modelID
         currentContainer = container
         currentModelID = modelID
         currentModelHash = modelHash
-        await stateMachine.completeSwap(newModelID: modelID, newModelHash: modelHash)
+        state = .ready
+        targetModelID = nil
+        signal(SwapSignal(targetModelID: target, outcome: .completed(newModelID: modelID, newModelHash: modelHash)))
+    }
+
+    private func failSwap(reason: String) {
+        guard state == .loading || state == .draining else {
+            return
+        }
+        let target = targetModelID ?? ""
+        state = .failed
+        signal(SwapSignal(targetModelID: target, outcome: .failed(reason: reason)))
+        state = .ready
+        targetModelID = nil
+    }
+
+    private func signal(_ signal: SwapSignal) {
+        for continuation in signalContinuations {
+            continuation.yield(signal)
+        }
     }
 
     func preflight(_ request: ChatCompletionRequest) async throws {
-        let snapshot = await currentSnapshot()
+        let snapshot = currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
         guard let container = snapshot.container else {
@@ -194,7 +272,7 @@ actor ModelRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> CompletionResult {
-        let snapshot = await currentSnapshot()
+        let snapshot = currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
         if let testCompletion {
@@ -253,7 +331,7 @@ actor ModelRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (String) -> Void
     ) async throws -> CompletionResult {
-        let snapshot = await currentSnapshot()
+        let snapshot = currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
         if let testCompletion {

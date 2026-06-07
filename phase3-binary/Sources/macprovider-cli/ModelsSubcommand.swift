@@ -135,6 +135,9 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
             case .cooldown:
                 writeStderr("swap on cooldown for \(secondsRemaining ?? 0)s. Re-issue with --force to bypass")
                 throw ExitCode(6)
+            case .notInSupportedModels:
+                writeStderr("switch target \(targetModelID) not in --supported-models (rejected by serve)")
+                throw ExitCode(2)
             default:
                 writeStderr("switch rejected")
                 throw ExitCode(4)

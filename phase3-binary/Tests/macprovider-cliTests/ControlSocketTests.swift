@@ -48,6 +48,15 @@ final class ControlSocketTests: XCTestCase {
         ))
     }
 
+    func testEncodeDecodeSwitchAckNotInSupportedModels() throws {
+        try assertRoundTrip(.switchAck(
+            accepted: false,
+            reason: .notInSupportedModels,
+            currentTarget: nil,
+            secondsRemaining: nil
+        ))
+    }
+
     func testEncodeDecodeSwitchProgressLoading() throws {
         try assertRoundTrip(.switchProgress(state: .loading, elapsedMs: 11, reason: nil))
     }
@@ -102,7 +111,7 @@ final class ControlSocketTests: XCTestCase {
     func testServerBindsAndAcceptsConnection() async throws {
         let socketPath = try makeSocketPath()
         let runtime = makeRuntime(modelID: "ready-model")
-        let server = ControlSocketServer(socketPath: socketPath, modelRuntime: runtime)
+        let server = makeServer(socketPath: socketPath, modelRuntime: runtime)
         try await server.start()
 
         let connection = try await ControlSocketClient.connect(socketPath: socketPath)
@@ -118,7 +127,7 @@ final class ControlSocketTests: XCTestCase {
         let socketPath = try makeSocketPath()
         try FileManager.default.createDirectory(at: socketPath.deletingLastPathComponent(), withIntermediateDirectories: true)
         FileManager.default.createFile(atPath: socketPath.path, contents: Data())
-        let server = ControlSocketServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
 
         do {
             try await server.start()
@@ -132,7 +141,7 @@ final class ControlSocketTests: XCTestCase {
 
     func testServerSocketParentDirIs0700AndSocketIs0600() async throws {
         let socketPath = try makeSocketPath()
-        let server = ControlSocketServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
         try await server.start()
 
         XCTAssertEqual(mode(path: socketPath.deletingLastPathComponent().path), 0o700)
@@ -143,13 +152,56 @@ final class ControlSocketTests: XCTestCase {
 
     func testServerStopUnlinksSocket() async throws {
         let socketPath = try makeSocketPath()
-        let server = ControlSocketServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
         try await server.start()
         XCTAssertTrue(FileManager.default.fileExists(atPath: socketPath.path))
 
         await server.stop()
 
         XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath.path))
+    }
+
+    func testReceiveRejectsFramesLargerThan64KB() async throws {
+        let socketPath = try makeSocketPath()
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        try await server.start()
+        let fd = try rawConnect(socketPath: socketPath)
+        defer { close(fd) }
+
+        let oversized = Data(repeating: 0x61, count: ControlSocketConnection.maxFrameBytes + 1)
+        try writeAll(oversized, to: fd)
+
+        XCTAssertTrue(try waitForEOF(fd: fd, timeout: 2.0))
+        await server.stop()
+    }
+
+    func testReceiveTimesOutAfterConfiguredIdleTimeout() async throws {
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "ready-model"),
+            idleTimeoutSeconds: 0.2
+        )
+        try await server.start()
+        let fd = try rawConnect(socketPath: socketPath)
+        defer { close(fd) }
+
+        XCTAssertTrue(try waitForEOF(fd: fd, timeout: 1.0))
+        await server.stop()
+    }
+
+    func testServerStopCancelsActiveClientTasks() async throws {
+        let socketPath = try makeSocketPath()
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        try await server.start()
+        let fd = try rawConnect(socketPath: socketPath)
+        defer { close(fd) }
+        try writeAll(Data(#"{"type":"status_request""#.utf8), to: fd)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        await server.stop()
+
+        XCTAssertTrue(try waitForEOF(fd: fd, timeout: 1.0))
     }
 
     private func assertRoundTrip(_ frame: ControlSocketFrame) throws {
@@ -166,6 +218,79 @@ final class ControlSocketTests: XCTestCase {
         var status = stat()
         XCTAssertEqual(lstat(path, &status), 0)
         return status.st_mode & mode_t(0o777)
+    }
+
+    private func makeServer(socketPath: URL, modelRuntime: ModelRuntime) -> ControlSocketServer {
+        ControlSocketServer(socketPath: socketPath, modelRuntime: modelRuntime, idleTimeoutSeconds: 0.2)
+    }
+
+    private func rawConnect(socketPath: URL) throws -> Int32 {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        XCTAssertGreaterThanOrEqual(fd, 0)
+        var address = try unixAddress(path: socketPath.path)
+        let result = withUnsafePointer(to: &address.sockaddr) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(fd, $0, address.length)
+            }
+        }
+        if result != 0 {
+            let err = errno
+            close(fd)
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(err))
+        }
+        return fd
+    }
+
+    private func unixAddress(path: String) throws -> (sockaddr: sockaddr_un, length: socklen_t) {
+        let pathBytes = Array(path.utf8)
+        var address = sockaddr_un()
+        let capacity = MemoryLayout.size(ofValue: address.sun_path)
+        guard pathBytes.count < capacity else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(ENAMETOOLONG))
+        }
+        address.sun_len = UInt8(MemoryLayout<sockaddr_un>.offset(of: \.sun_path)! + pathBytes.count + 1)
+        address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { bytes in
+            for (index, byte) in pathBytes.enumerated() {
+                bytes[index] = byte
+            }
+            bytes[pathBytes.count] = 0
+        }
+        return (address, socklen_t(address.sun_len))
+    }
+
+    private func writeAll(_ data: Data, to fd: Int32) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else { return }
+            var sent = 0
+            while sent < rawBuffer.count {
+                let count = Darwin.write(fd, base.advanced(by: sent), rawBuffer.count - sent)
+                if count < 0 {
+                    if errno == EINTR {
+                        continue
+                    }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                sent += count
+            }
+        }
+    }
+
+    private func waitForEOF(fd: Int32, timeout: TimeInterval) throws -> Bool {
+        var pollFD = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let result = Darwin.poll(&pollFD, 1, Int32((timeout * 1000).rounded()))
+        guard result > 0 else {
+            return false
+        }
+        var byte: UInt8 = 0
+        let count = Darwin.read(fd, &byte, 1)
+        if count == 0 {
+            return true
+        }
+        if count < 0 {
+            return errno == ECONNRESET || errno == EBADF
+        }
+        return false
     }
 
     private func makeRuntime(modelID: String?) -> ModelRuntime {

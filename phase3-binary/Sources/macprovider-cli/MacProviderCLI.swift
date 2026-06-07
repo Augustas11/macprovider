@@ -76,6 +76,15 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    static func runDrainTimeoutPreflight(_ resolved: AppConfig) throws {
+        if !(5...600).contains(resolved.swapDrainTimeoutSeconds) {
+            FileHandle.standardError.write(Data((
+                "--swap-drain-timeout-seconds \(resolved.swapDrainTimeoutSeconds) out of range 5...600\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+    }
+
     func run() async throws {
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
@@ -96,6 +105,7 @@ struct ServeCommand: AsyncParsableCommand {
         )
 
         try Self.runSupportedModelsPreflight(&resolved)
+        try Self.runDrainTimeoutPreflight(resolved)
 
         printResolvedConfiguration(resolved)
 
@@ -119,6 +129,7 @@ struct ServeCommand: AsyncParsableCommand {
             capacity: capacityDefaults.withThroughputEstimate(throughputEstimate),
             modelHash: await modelRuntime.loadedModelHash
         )
+        await modelRuntime.setProviderStatus(providerStatus)
         let coordinatorClient = CoordinatorClient(
             config: resolved,
             modelRuntime: modelRuntime,
@@ -128,7 +139,11 @@ struct ServeCommand: AsyncParsableCommand {
         let controlSocket: ControlSocketServer?
         if resolved.enableWarmSwap {
             let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
-            controlSocket = ControlSocketServer(socketPath: socketURL, modelRuntime: modelRuntime)
+            controlSocket = ControlSocketServer(
+                socketPath: socketURL,
+                modelRuntime: modelRuntime,
+                supportedModels: resolved.supportedModels
+            )
             do {
                 try await controlSocket?.start()
             } catch {

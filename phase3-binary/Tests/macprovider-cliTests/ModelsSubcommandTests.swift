@@ -79,6 +79,7 @@ final class ModelsSubcommandTests: XCTestCase {
             "--supported-models", "old-model,new-model",
             "--model", "old-model",
             "--ctl-socket-path", socketPath.path,
+            "--switch-state-path", makeStatePath().path,
         ])
         let capture = await captureOutput {
             try await command.run()
@@ -87,7 +88,46 @@ final class ModelsSubcommandTests: XCTestCase {
 
         XCTAssertNil(capture.error)
         XCTAssertTrue(capture.stderr.contains("state=loading"))
+        XCTAssertTrue(capture.stderr.contains("state=draining"))
         XCTAssertTrue(capture.stderr.contains("state=loaded"))
+    }
+
+    func testModelsSwitchReportsDrainingWhileInFlightRequestFinishes() async throws {
+        let socketPath = try makeSocketPath()
+        let providerStatus = makeProviderStatus(modelID: "old-model", modelHash: "old-hash")
+        let requestStartedAt = await providerStatus.beginRequest()
+        let runtime = makeRuntime(modelID: "old-model") { target in
+            (target, "hash")
+        }
+        await runtime.setProviderStatus(providerStatus)
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: runtime,
+            supportedModels: ["old-model", "new-model"]
+        )
+        try await server.start()
+
+        let command = try ModelsSwitchCommand.parse([
+            "new-model",
+            "--supported-models", "old-model,new-model",
+            "--model", "old-model",
+            "--ctl-socket-path", socketPath.path,
+            "--switch-state-path", makeStatePath().path,
+        ])
+        let release = Task {
+            try await Task.sleep(nanoseconds: 250_000_000)
+            await providerStatus.finishRequest(startedAt: requestStartedAt, completion: nil, failed: false)
+        }
+        let capture = await captureOutput {
+            try await command.run()
+        }
+        try await release.value
+        await server.stop()
+
+        XCTAssertNil(capture.error)
+        XCTAssertTrue(capture.stderr.contains("switch_progress state=loading"))
+        XCTAssertTrue(capture.stderr.contains("switch_progress state=draining"))
+        XCTAssertTrue(capture.stderr.contains("switch_progress state=loaded"))
     }
 
     func testModelsSwitchPreFlightRejection() async throws {
@@ -106,6 +146,27 @@ final class ModelsSubcommandTests: XCTestCase {
         XCTAssertEqual(capture.error as? ExitCode, ExitCode(2))
         XCTAssertTrue(capture.stderr.contains("switch target C not in --supported-models"))
         XCTAssertFalse(FileManager.default.fileExists(atPath: socketPath.path))
+    }
+
+    func testServerSideRejectsSwitchWhenNotInSupportedModels() async throws {
+        let socketPath = try makeSocketPath()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "A"),
+            supportedModels: ["A", "B"]
+        )
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.switchRequest(targetModelID: "C", requestedAtMs: nowMs()))
+        let response = try await connection.receive(timeout: 1)
+        await connection.close()
+        await server.stop()
+
+        XCTAssertEqual(
+            response,
+            .switchAck(accepted: false, reason: .notInSupportedModels, currentTarget: nil, secondsRemaining: nil)
+        )
     }
 
     func testModelsSwitchConcurrentRejection() async throws {
@@ -147,6 +208,12 @@ final class ModelsSubcommandTests: XCTestCase {
         return dir.appendingPathComponent("ctl.sock")
     }
 
+    private func makeStatePath() -> URL {
+        URL(fileURLWithPath: "/tmp")
+            .appendingPathComponent("mpm-state-\(getpid())-\(Int.random(in: 0 ... 999_999))")
+            .appendingPathComponent("last-switch.ts")
+    }
+
     private func makeRuntime(
         modelID: String?,
         loader: @escaping @Sendable (String) async throws -> (String, String?) = { target in (target, "hash") }
@@ -156,6 +223,15 @@ final class ModelsSubcommandTests: XCTestCase {
             warmSwapEnabled: true,
             loader: { _ in throw ModelsSubcommandTestError.unexpectedContainerLoader },
             testLoader: loader
+        )
+    }
+
+    private func makeProviderStatus(modelID: String?, modelHash: String?) -> ProviderStatus {
+        ProviderStatus(
+            modelID: modelID,
+            modelLoaded: modelID != nil,
+            capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: 1),
+            modelHash: modelHash
         )
     }
 
