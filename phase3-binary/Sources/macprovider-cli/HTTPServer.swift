@@ -25,6 +25,7 @@ struct HTTPServer {
                             coordinatorURL: config.coordinatorURL,
                             modelRuntime: modelRuntime,
                             providerStatus: providerStatus,
+                            warmSwapEnabled: config.enableWarmSwap,
                             maxBodyBytes: config.maxRequestBodyBytes
                         )
                     )
@@ -38,7 +39,7 @@ struct HTTPServer {
     }
 }
 
-private final class RouterHandler: ChannelInboundHandler {
+final class RouterHandler: ChannelInboundHandler {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
@@ -46,16 +47,25 @@ private final class RouterHandler: ChannelInboundHandler {
     private let coordinatorURL: String?
     private let modelRuntime: ModelRuntime
     private let providerStatus: ProviderStatus
+    private let warmSwapEnabled: Bool
     private let maxBodyBytes: Int
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
 
-    init(modelID: String?, coordinatorURL: String?, modelRuntime: ModelRuntime, providerStatus: ProviderStatus, maxBodyBytes: Int) {
+    init(
+        modelID: String?,
+        coordinatorURL: String?,
+        modelRuntime: ModelRuntime,
+        providerStatus: ProviderStatus,
+        warmSwapEnabled: Bool,
+        maxBodyBytes: Int
+    ) {
         self.modelID = modelID
         self.coordinatorURL = coordinatorURL
         self.modelRuntime = modelRuntime
         self.providerStatus = providerStatus
+        self.warmSwapEnabled = warmSwapEnabled
         self.maxBodyBytes = maxBodyBytes
     }
 
@@ -182,24 +192,42 @@ private final class RouterHandler: ChannelInboundHandler {
         let data = Data(body.readBytes(length: body.readableBytes) ?? [])
         let writer = ResponseWriter(context: context)
         let modelRuntime = modelRuntime
+        let warmSwapEnabled = warmSwapEnabled
 
         do {
             let request = try ChatCompletionRequest.parse(data: data)
-            try request.validateModelMatches(modelID)
+            if !warmSwapEnabled {
+                try request.validateModelMatches(modelID)
+            }
 
             if request.stream {
-                handleStreamingChatCompletions(request: request, writer: writer, modelRuntime: modelRuntime)
+                handleStreamingChatCompletions(
+                    request: request,
+                    writer: writer,
+                    modelRuntime: modelRuntime,
+                    warmSwapEnabled: warmSwapEnabled
+                )
                 return
             }
 
             let providerStatus = providerStatus
-            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer] in
+            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled] in
                 let startedAt = await providerStatus.beginRequest()
                 do {
+                    let snapshot = await modelRuntime.currentSnapshot()
+                    if let error = Self.warmSwapRejectionError(for: snapshot) {
+                        throw error
+                    }
+                    if warmSwapEnabled {
+                        try request.validateModelMatches(snapshot.modelID)
+                    }
                     let completion = try await modelRuntime.complete(request)
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
                     let response = Self.chatCompletionResponse(request: request, completion: completion)
                     writer.writeJSON(status: .ok, body: response)
+                } catch is DrainCancelledError {
+                    await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                    writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
                 } catch let error as APIError {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                     writer.writeAPIError(error)
@@ -229,41 +257,43 @@ private final class RouterHandler: ChannelInboundHandler {
     private func handleStreamingChatCompletions(
         request: ChatCompletionRequest,
         writer: ResponseWriter,
-        modelRuntime: ModelRuntime
+        modelRuntime: ModelRuntime,
+        warmSwapEnabled: Bool
     ) {
         let created = Int(Date().timeIntervalSince1970)
         let id = "chatcmpl-\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
 
         let providerStatus = providerStatus
-        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer] in
+        Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled] in
             let startedAt = await providerStatus.beginRequest()
+            var sseStarted = false
             do {
-                try await modelRuntime.preflight(request)
-            } catch let error as APIError {
-                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                writer.writeAPIError(error)
-                return
-            } catch {
-                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                writer.writeAPIError(
-                    APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
-                )
-                return
-            }
+                let snapshot = await modelRuntime.currentSnapshot()
+                if let error = Self.warmSwapRejectionError(for: snapshot) {
+                    throw error
+                }
+                if warmSwapEnabled {
+                    try request.validateModelMatches(snapshot.modelID)
+                }
+                let handle = try await modelRuntime.acquireRequestHandle(request)
+                defer {
+                    Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
+                }
+                try await modelRuntime.preflight(request, with: handle)
 
-            writer.startSSE()
-            writer.writeSSEJSON(
-                Self.chatCompletionChunk(
-                    id: id,
-                    created: created,
-                    model: request.model,
-                    delta: ["role": "assistant", "content": ""],
-                    finishReason: NSNull()
+                writer.startSSE()
+                sseStarted = true
+                writer.writeSSEJSON(
+                    Self.chatCompletionChunk(
+                        id: id,
+                        created: created,
+                        model: request.model,
+                        delta: ["role": "assistant", "content": ""],
+                        finishReason: NSNull()
+                    )
                 )
-            )
 
-            do {
-                let completion = try await modelRuntime.stream(request) { chunk in
+                let completion = try await modelRuntime.stream(request, with: handle) { chunk in
                     writer.writeSSEJSON(
                         Self.chatCompletionChunk(
                             id: id,
@@ -302,21 +332,56 @@ private final class RouterHandler: ChannelInboundHandler {
                 writer.writeSSEDone()
             } catch let error as APIError {
                 await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                writer.writeSSEJSON(error.envelope)
-                writer.writeSSEDone()
+                if sseStarted {
+                    writer.writeSSEJSON(error.envelope)
+                    writer.writeSSEDone()
+                } else {
+                    writer.writeAPIError(error)
+                }
+            } catch is DrainCancelledError {
+                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                if sseStarted {
+                    writer.writeSSEJSON(Self.swapDrainTimeoutEnvelope())
+                    writer.writeSSEDone()
+                } else {
+                    writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
+                }
             } catch {
                 await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                writer.writeSSEJSON(
-                    APIError(
-                        status: 500,
-                        message: "Inference engine error",
-                        type: "server_error",
-                        code: "internal_error"
-                    ).envelope
-                )
-                writer.writeSSEDone()
+                if sseStarted {
+                    writer.writeSSEJSON(
+                        APIError(
+                            status: 500,
+                            message: "Inference engine error",
+                            type: "server_error",
+                            code: "internal_error"
+                        ).envelope
+                    )
+                    writer.writeSSEDone()
+                } else {
+                    writer.writeAPIError(
+                        APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
+                    )
+                }
             }
         }
+    }
+
+    static func warmSwapRejectionError(for snapshot: RuntimeSnapshot) -> APIError? {
+        snapshot.state == .ready ? nil : ModelRuntime.providerLoadingError()
+    }
+
+    static func modelIDForValidation(warmSwapEnabled: Bool, bootModelID: String?, runtimeSnapshot: RuntimeSnapshot) -> String? {
+        warmSwapEnabled ? runtimeSnapshot.modelID : bootModelID
+    }
+
+    static func swapDrainTimeoutEnvelope() -> [String: Any] {
+        [
+            "error": [
+                "type": "service_unavailable",
+                "code": "swap_drain_timeout",
+            ]
+        ]
     }
 
     private static func chatCompletionResponse(request: ChatCompletionRequest, completion: CompletionResult) -> [String: Any] {

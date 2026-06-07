@@ -34,6 +34,12 @@ public struct AppConfig: Equatable, Sendable {
     public var warmupEnabled: Bool
     public var maxRequestBodyBytes: Int
     public var tier2MDAArtifactPath: String?
+    public var supportedModels: [String]?
+    public var publishesSupportedModels: Bool
+    public var enableWarmSwap: Bool
+    public var swapDrainTimeoutSeconds: Int
+    public var ctlSocketPath: String?
+    public var switchStatePath: String?
 
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
@@ -55,7 +61,13 @@ public struct AppConfig: Equatable, Sendable {
             drainTimeoutSeconds: 30,
             warmupEnabled: true,
             maxRequestBodyBytes: 10 * 1024 * 1024,
-            tier2MDAArtifactPath: nil
+            tier2MDAArtifactPath: nil,
+            supportedModels: nil,
+            publishesSupportedModels: false,
+            enableWarmSwap: false,
+            swapDrainTimeoutSeconds: 30,
+            ctlSocketPath: nil,
+            switchStatePath: nil
         )
     }
 }
@@ -68,6 +80,12 @@ public struct CLIOverrides: Equatable, Sendable {
     public var endpointURL: String?
     public var configPath: String?
     public var logLevel: String?
+    public var supportedModels: [String]?
+    public var publishesSupportedModels: Bool?
+    public var enableWarmSwap: Bool?
+    public var swapDrainTimeoutSeconds: Int?
+    public var ctlSocketPath: String?
+    public var switchStatePath: String?
 
     public init(
         port: Int? = nil,
@@ -76,7 +94,13 @@ public struct CLIOverrides: Equatable, Sendable {
         providerID: String? = nil,
         endpointURL: String? = nil,
         configPath: String? = nil,
-        logLevel: String? = nil
+        logLevel: String? = nil,
+        supportedModels: [String]? = nil,
+        publishesSupportedModels: Bool? = nil,
+        enableWarmSwap: Bool? = nil,
+        swapDrainTimeoutSeconds: Int? = nil,
+        ctlSocketPath: String? = nil,
+        switchStatePath: String? = nil
     ) {
         self.port = port
         self.model = model
@@ -85,6 +109,12 @@ public struct CLIOverrides: Equatable, Sendable {
         self.endpointURL = endpointURL
         self.configPath = configPath
         self.logLevel = logLevel
+        self.supportedModels = supportedModels
+        self.publishesSupportedModels = publishesSupportedModels
+        self.enableWarmSwap = enableWarmSwap
+        self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
+        self.ctlSocketPath = ctlSocketPath
+        self.switchStatePath = switchStatePath
     }
 }
 
@@ -180,6 +210,12 @@ public enum ConfigLoader {
         try assign(&config.warmupEnabled, from: dict, key: "warmup_enabled", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: dict, key: "max_request_body_bytes", expected: "integer")
         try assign(&config.tier2MDAArtifactPath, from: dict, key: "tier2_mda_artifact_path", expected: "string")
+        try assign(&config.supportedModels, from: dict, key: "supported_models", expected: "array of strings or comma-separated string")
+        try assign(&config.publishesSupportedModels, from: dict, key: "publishes_supported_models", expected: "boolean")
+        try assign(&config.enableWarmSwap, from: dict, key: "enable_warm_swap", expected: "boolean")
+        try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
+        try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
+        try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
         return config
     }
 
@@ -204,6 +240,12 @@ public enum ConfigLoader {
         try assign(&config.warmupEnabled, from: environment, env: "MACPROVIDER_WARMUP_ENABLED", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: environment, env: "MACPROVIDER_MAX_REQUEST_BODY_BYTES", expected: "integer")
         try assign(&config.tier2MDAArtifactPath, from: environment, env: "MACPROVIDER_TIER2_MDA_ARTIFACT_PATH", expected: "string")
+        config.supportedModels = SupportedModels.parseCSV(environment["MACPROVIDER_SUPPORTED_MODELS"]) ?? config.supportedModels
+        try assign(&config.publishesSupportedModels, from: environment, env: "MACPROVIDER_PUBLISHES_SUPPORTED_MODELS", expected: "boolean")
+        try assign(&config.enableWarmSwap, from: environment, env: "MACPROVIDER_ENABLE_WARM_SWAP", expected: "boolean")
+        try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
+        try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
+        try assign(&config.switchStatePath, from: environment, env: "MACPROVIDER_SWITCH_STATE_PATH", expected: "string")
         return config
     }
 
@@ -229,6 +271,24 @@ public enum ConfigLoader {
                 throw ConfigError.invalidValue(key: "--log-level", value: logLevel, expected: "valid log level")
             }
             config.logLevel = value
+        }
+        if let supportedModels = cli.supportedModels {
+            config.supportedModels = supportedModels
+        }
+        if let publishesSupportedModels = cli.publishesSupportedModels {
+            config.publishesSupportedModels = publishesSupportedModels
+        }
+        if let enableWarmSwap = cli.enableWarmSwap {
+            config.enableWarmSwap = enableWarmSwap
+        }
+        if let swapDrainTimeoutSeconds = cli.swapDrainTimeoutSeconds {
+            config.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
+        }
+        if let ctlSocketPath = cli.ctlSocketPath {
+            config.ctlSocketPath = ctlSocketPath
+        }
+        if let switchStatePath = cli.switchStatePath {
+            config.switchStatePath = switchStatePath
         }
         return config
     }
@@ -265,6 +325,19 @@ public enum ConfigLoader {
             throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
         }
         field = string
+    }
+
+    private static func assign(_ field: inout [String]?, from dict: [String: Any], key: String, expected: String) throws {
+        guard let value = dict[key], !(value is NSNull) else { return }
+        if let strings = value as? [String] {
+            field = strings
+            return
+        }
+        if let string = value as? String {
+            field = SupportedModels.parseCSV(string)
+            return
+        }
+        throw ConfigError.invalidValue(key: key, value: String(describing: value), expected: expected)
     }
 
     private static func assign(_ field: inout Bool, from dict: [String: Any], key: String, expected: String) throws {

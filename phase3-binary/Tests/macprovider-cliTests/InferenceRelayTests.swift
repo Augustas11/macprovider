@@ -243,8 +243,19 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
         CompletionResult(content: "", finishReason: "stop", promptTokens: 7, completionTokens: 0)
     }
 
+    func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        RequestHandle(
+            snapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: request.model, modelHash: nil),
+            registrationID: 0,
+            drainCancelled: DrainCancelToken()
+        )
+    }
+
+    func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws { }
+
     func stream(
         _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (String) -> Void
     ) async throws -> CompletionResult {
@@ -256,6 +267,8 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
         }
         return CompletionResult(content: "onetwo", finishReason: "stop", promptTokens: 7, completionTokens: 2)
     }
+
+    func unregisterInFlight(_ id: Int) { }
 }
 
 private actor FakeCompletionRuntime: ModelRuntimeServing {
@@ -266,14 +279,27 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
         CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
     }
 
+    func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        RequestHandle(
+            snapshot: RuntimeSnapshot(state: .ready, container: nil, modelID: request.model, modelHash: nil),
+            registrationID: 0,
+            drainCancelled: DrainCancelToken()
+        )
+    }
+
+    func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws { }
+
     func stream(
         _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool,
         onChunk: @escaping @Sendable (String) -> Void
     ) async throws -> CompletionResult {
         onChunk("encrypted answer")
         return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
     }
+
+    func unregisterInFlight(_ id: Int) { }
 }
 
 private func testTier2Session() throws -> Tier2ProviderSession {
