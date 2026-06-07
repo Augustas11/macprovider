@@ -65,7 +65,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 }
 
 actor CoordinatorClient {
-    static let binaryVersion = "1.2.6"
+    static let binaryVersion = "1.3.0"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
