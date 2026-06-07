@@ -139,6 +139,13 @@ type Heartbeat struct {
 	RequestsServedSinceLast int     `json:"requests_served_since_last"`
 	AvgLatencyMSSinceLast   float64 `json:"avg_latency_ms_since_last"`
 	ThroughputTPSSinceLast  float64 `json:"throughput_tps_since_last"`
+	ModelHash               string  `json:"model_hash,omitempty"`
+	Loading                 bool    `json:"loading,omitempty"`
+}
+
+type HeartbeatPresence struct {
+	ModelHash bool
+	Loading   bool
 }
 
 type StateUpdate struct {
@@ -531,55 +538,74 @@ func requireFloat(raw map[string]json.RawMessage, field string, out *float64) *f
 	return nil
 }
 
-func ParseHeartbeat(payload []byte) (Heartbeat, string, error) {
+func ParseHeartbeat(payload []byte) (Heartbeat, HeartbeatPresence, string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
-		return Heartbeat{}, "json", err
+		return Heartbeat{}, HeartbeatPresence{}, "json", err
 	}
 	var hb Heartbeat
 	if err := requireString(raw, "type", &hb.Type); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if hb.Type != "heartbeat" {
-		return Heartbeat{}, "type", fmt.Errorf("expected heartbeat, got %q", hb.Type)
+		return Heartbeat{}, HeartbeatPresence{}, "type", fmt.Errorf("expected heartbeat, got %q", hb.Type)
 	}
 	if err := requireString(raw, "status", &hb.Status); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireString(raw, "model_id", &hb.ModelID); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireFloat(raw, "model_params_b", &hb.ModelParamsB); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireInt(raw, "ram_gb", &hb.RAMGB); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireInt(raw, "max_context_tokens", &hb.MaxContextTokens); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireInt(raw, "max_concurrency", &hb.MaxConcurrency); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireInt(raw, "slots_free", &hb.SlotsFree); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireInt(raw, "slots_total", &hb.SlotsTotal); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireFloat(raw, "throughput_tps_estimate", &hb.ThroughputTPSEstimate); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireInt(raw, "requests_served_since_last", &hb.RequestsServedSinceLast); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireFloat(raw, "avg_latency_ms_since_last", &hb.AvgLatencyMSSinceLast); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
 	if err := requireFloat(raw, "throughput_tps_since_last", &hb.ThroughputTPSSinceLast); err != nil {
-		return Heartbeat{}, err.Field, err
+		return Heartbeat{}, HeartbeatPresence{}, err.Field, err
 	}
-	return hb, "", nil
+	presence := HeartbeatPresence{}
+	if v, ok := raw["model_hash"]; ok {
+		presence.ModelHash = true
+		if string(v) == "null" {
+			return Heartbeat{}, presence, "model_hash", fmt.Errorf("model_hash must be a string")
+		}
+		if err := json.Unmarshal(v, &hb.ModelHash); err != nil {
+			return Heartbeat{}, presence, "model_hash", err
+		}
+	}
+	if v, ok := raw["loading"]; ok {
+		presence.Loading = true
+		if string(v) == "null" {
+			return Heartbeat{}, presence, "loading", fmt.Errorf("loading must be a bool")
+		}
+		if err := json.Unmarshal(v, &hb.Loading); err != nil {
+			return Heartbeat{}, presence, "loading", err
+		}
+	}
+	return hb, presence, "", nil
 }
 
 func ParseStateUpdate(payload []byte) (StateUpdate, string, error) {

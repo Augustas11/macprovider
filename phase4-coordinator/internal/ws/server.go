@@ -108,6 +108,20 @@ func WithAuthAttemptRetentionBound(maxBound int) Option {
 	}
 }
 
+// WithRegistryOptions applies test-facing pool Registry options to the
+// server-owned registry. Production wiring installs the heartbeat hash verifier
+// automatically in NewServer; tests use this to inject Phase 2C emitters.
+func WithRegistryOptions(opts ...pool.RegistryOption) Option {
+	return func(s *Server) {
+		if s.pool == nil {
+			return
+		}
+		for _, opt := range opts {
+			opt(s.pool)
+		}
+	}
+}
+
 // AuthAttemptCount returns the number of in-flight auth-attempt
 // retention entries. Test-only — production code MUST NOT
 // condition behavior on this value (the retention bound is the
@@ -135,6 +149,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
+	if registry != nil {
+		pool.WithHeartbeatHashVerifier(tier2.VerifyProviderHash)(registry)
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -1296,7 +1313,7 @@ func (s *Server) handlePreflightAck(providerID, assignedID string, payload []byt
 }
 
 func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, payload []byte) {
-	hb, field, err := ParseHeartbeat(payload)
+	hb, presence, field, err := ParseHeartbeat(payload)
 	if err != nil {
 		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid heartbeat")
 		return
@@ -1319,6 +1336,10 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		SlotsFree:             hb.SlotsFree,
 		SlotsTotal:            hb.SlotsTotal,
 		ThroughputTPSEstimate: hb.ThroughputTPSEstimate,
+		ModelHash:             hb.ModelHash,
+		ModelHashPresent:      presence.ModelHash,
+		Loading:               hb.Loading,
+		LoadingPresent:        presence.Loading,
 		At:                    s.now(),
 	})
 	if !ok {

@@ -30,9 +30,12 @@ func TestParseNakAcceptsSwiftSpecShape(t *testing.T) {
 func TestParseHeartbeatPreservesRollingMetrics(t *testing.T) {
 	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5}`)
 
-	hb, field, err := ParseHeartbeat(payload)
+	hb, presence, field, err := ParseHeartbeat(payload)
 	if err != nil {
 		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if presence != (HeartbeatPresence{}) {
+		t.Fatalf("presence = %+v, want zero", presence)
 	}
 	if hb.RequestsServedSinceLast != 12 {
 		t.Fatalf("requests_served_since_last = %d", hb.RequestsServedSinceLast)
@@ -42,6 +45,61 @@ func TestParseHeartbeatPreservesRollingMetrics(t *testing.T) {
 	}
 	if hb.ThroughputTPSSinceLast != 18.5 {
 		t.Fatalf("throughput_tps_since_last = %v", hb.ThroughputTPSSinceLast)
+	}
+}
+
+func TestParseHeartbeatL1AcceptsLegacyAbsentSPEC011Fields(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5}`)
+
+	hb, presence, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if presence != (HeartbeatPresence{}) {
+		t.Fatalf("presence = %+v, want zero", presence)
+	}
+	if hb.ModelHash != "" || hb.Loading {
+		t.Fatalf("SPEC-011 fields = (%q, %v), want zero", hb.ModelHash, hb.Loading)
+	}
+}
+
+func TestParseHeartbeatAcceptsSPEC011Fields(t *testing.T) {
+	hash := "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12"
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"model_hash":"` + hash + `","loading":true}`)
+
+	hb, presence, field, err := ParseHeartbeat(payload)
+	if err != nil {
+		t.Fatalf("ParseHeartbeat field=%q err=%v", field, err)
+	}
+	if !presence.ModelHash || !presence.Loading {
+		t.Fatalf("presence = %+v, want both true", presence)
+	}
+	if hb.ModelHash != hash || !hb.Loading {
+		t.Fatalf("SPEC-011 fields = (%q, %v)", hb.ModelHash, hb.Loading)
+	}
+}
+
+func TestParseHeartbeatRejectsModelHashWrongType(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"model_hash":123}`)
+
+	_, _, field, err := ParseHeartbeat(payload)
+	if err == nil {
+		t.Fatal("ParseHeartbeat err = nil")
+	}
+	if field != "model_hash" {
+		t.Fatalf("badField = %q", field)
+	}
+}
+
+func TestParseHeartbeatRejectsLoadingWrongType(t *testing.T) {
+	payload := []byte(`{"type":"heartbeat","status":"ready","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.0,"ram_gb":16,"max_context_tokens":50000,"max_concurrency":2,"slots_free":1,"slots_total":2,"throughput_tps_estimate":19.8,"requests_served_since_last":12,"avg_latency_ms_since_last":450.0,"throughput_tps_since_last":18.5,"loading":"yes"}`)
+
+	_, _, field, err := ParseHeartbeat(payload)
+	if err == nil {
+		t.Fatal("ParseHeartbeat err = nil")
+	}
+	if field != "loading" {
+		t.Fatalf("badField = %q", field)
 	}
 }
 

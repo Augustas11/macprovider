@@ -135,6 +135,8 @@ type Registry struct {
 	recoveryHolds         map[string]recoveryHold
 	lastBreakerRecoveries map[string]time.Time
 	maxProvider           int
+	hashVerifier          HeartbeatHashVerifier
+	swapEmitter           SwapEventEmitter
 }
 
 type recoveryHold struct {
@@ -142,12 +144,12 @@ type recoveryHold struct {
 	reason     RecoveryReason
 }
 
-func NewRegistry(providers []config.ProviderConfig) *Registry {
+func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Registry {
 	endpoints := make(map[string]config.ProviderConfig, len(providers))
 	for _, p := range providers {
 		endpoints[p.ProviderID] = p
 	}
-	return &Registry{
+	r := &Registry{
 		providers:             map[string]*Provider{},
 		sessions:              map[string]*Provider{},
 		endpoints:             endpoints,
@@ -156,6 +158,10 @@ func NewRegistry(providers []config.ProviderConfig) *Registry {
 		recoveryHolds:         map[string]recoveryHold{},
 		lastBreakerRecoveries: map[string]time.Time{},
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
@@ -409,6 +415,34 @@ func (r *Registry) Count() int {
 	return len(r.providers)
 }
 
+// HeartbeatHashVerifier verifies a (model_id, reported_hash) pair against
+// the SPEC-008 v0.3 §5.5 five-state enum. Injected into Registry via
+// WithHeartbeatHashVerifier so the pool package stays decoupled from the tier2
+// catalog package; the production wiring at internal/ws/server.go passes
+// tier2.VerifyProviderHash.
+type HeartbeatHashVerifier func(modelID, reportedHash string) HashStatus
+
+// SwapEvent carries the per-swap data needed for the operator_model_swap audit
+// event per SPEC-002 v1.3.5 §7.10. Phase 2C only populates and emits this
+// event; Phase 2E adds the SQLite write + payload schema + F-1.5 invariants.
+type SwapEvent struct {
+	ProviderID             string
+	AssignedID             string
+	FromModelID            string
+	FromModelHash          string
+	ToModelID              string
+	ToModelHash            string
+	HashVerificationResult HashStatus
+	LoadingStartedAt       time.Time
+	CompletedAt            time.Time
+}
+
+// SwapEventEmitter is called from ApplyHeartbeat when a SPEC-011 PATH
+// heartbeat completes a swap (prior heartbeat had loading:true; current
+// heartbeat has loading:false AND carries model_hash). Default nil = no-op.
+// Phase 2E registers the SQLite emitter via WithSwapEmitter.
+type SwapEventEmitter func(event SwapEvent)
+
 type HeartbeatUpdate struct {
 	Status                State
 	ModelID               string
@@ -419,7 +453,17 @@ type HeartbeatUpdate struct {
 	SlotsFree             int
 	SlotsTotal            int
 	ThroughputTPSEstimate float64
-	At                    time.Time
+	// ModelHash is the raw lowercase hex hash from the heartbeat when
+	// ModelHashPresent is true; ignored otherwise. Populated from the SPEC-011
+	// v0.5 optional heartbeat field per SPEC-002 v1.3.5 §7.1 R-7.1.4.
+	ModelHash        string
+	ModelHashPresent bool
+	// Loading is the value of the heartbeat's optional `loading` field; absent
+	// on the wire (= LoadingPresent false) is equivalent to false per SPEC-011
+	// v0.5 R-3.3.4.
+	Loading        bool
+	LoadingPresent bool
+	At             time.Time
 }
 
 func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
@@ -430,11 +474,27 @@ func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpd
 		return nil, 0, false
 	}
 	prev := p.LastHeartbeatAt
+	priorModelID := p.ModelID
+	priorModelHash := p.ModelHash
+	priorLoadingState := p.LastLoadingState
+	priorLoadingStartedAt := p.LoadingStartedAt
 	p.LastHeartbeatAt = hb.At
-	if !strings.EqualFold(p.ModelID, hb.ModelID) {
-		p.ModelHash = ""
-		p.HashStatus = HashStatusUncatalogued
+
+	modelIDChanged := !strings.EqualFold(priorModelID, hb.ModelID)
+	if !hb.ModelHashPresent {
+		if modelIDChanged {
+			p.ModelHash = ""
+			p.HashStatus = HashStatusUncatalogued
+		}
+	} else if modelIDChanged || !strings.EqualFold(priorModelHash, hb.ModelHash) {
+		p.ModelHash = hb.ModelHash
+		if r.hashVerifier != nil {
+			p.HashStatus = r.hashVerifier(hb.ModelID, hb.ModelHash)
+		} else {
+			p.HashStatus = HashStatusUncatalogued
+		}
 	}
+
 	p.ModelID = hb.ModelID
 	p.ModelParamsB = hb.ModelParamsB
 	p.RAMGB = hb.RAMGB
@@ -448,6 +508,28 @@ func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpd
 		if r.canApplyProviderStateLocked(p, hb.Status) {
 			r.setStateLocked(p, hb.Status)
 		}
+	}
+	if hb.LoadingPresent {
+		if !priorLoadingState && hb.Loading {
+			p.LoadingStartedAt = hb.At
+		}
+		p.LastLoadingState = hb.Loading
+	}
+	swapCompleted := hb.ModelHashPresent &&
+		priorLoadingState &&
+		hb.LoadingPresent && !hb.Loading
+	if swapCompleted && r.swapEmitter != nil {
+		r.swapEmitter(SwapEvent{
+			ProviderID:             p.ProviderID,
+			AssignedID:             p.AssignedID,
+			FromModelID:            priorModelID,
+			FromModelHash:          priorModelHash,
+			ToModelID:              p.ModelID,
+			ToModelHash:            p.ModelHash,
+			HashVerificationResult: p.HashStatus,
+			LoadingStartedAt:       priorLoadingStartedAt,
+			CompletedAt:            hb.At,
+		})
 	}
 	cp := *p
 	var gap time.Duration
@@ -580,4 +662,22 @@ func (r *Registry) Snapshot() []Provider {
 		out = append(out, cp)
 	}
 	return out
+}
+
+type RegistryOption func(*Registry)
+
+// WithHeartbeatHashVerifier injects the SPEC-008 v0.3 Pillar A verifier used
+// by the SPEC-011 PATH of ApplyHeartbeat per SPEC-002 v1.3.5 §7.1 R-7.1.5.
+// If never set, the SPEC-011 PATH defaults to HashStatusUncatalogued (the
+// conservative fallback for an un-injected Registry — tests typically either
+// inject a stub or never exercise the SPEC-011 PATH).
+func WithHeartbeatHashVerifier(fn HeartbeatHashVerifier) RegistryOption {
+	return func(r *Registry) { r.hashVerifier = fn }
+}
+
+// WithSwapEmitter injects the operator_model_swap callback per SPEC-002
+// v1.3.5 §7.10. Default nil = no-op (Phase 2C ships the detection logic; Phase
+// 2E ships the SQLite writer).
+func WithSwapEmitter(fn SwapEventEmitter) RegistryOption {
+	return func(r *Registry) { r.swapEmitter = fn }
 }
