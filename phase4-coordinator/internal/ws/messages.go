@@ -35,25 +35,32 @@ type HelloAck struct {
 }
 
 type AuthRequest struct {
-	Type                  string          `json:"type"`
-	Version               int             `json:"version"`
-	Stage                 string          `json:"stage"`
-	AuthAttemptID         string          `json:"auth_attempt_id,omitempty"`
-	ProviderID            string          `json:"provider_id"`
-	Hostname              string          `json:"hostname,omitempty"`
-	ModelID               string          `json:"model_id,omitempty"`
-	ModelHash             string          `json:"model_hash,omitempty"`
-	ModelParamsB          float64         `json:"model_params_b,omitempty"`
-	RAMGB                 int             `json:"ram_gb,omitempty"`
-	MaxContextTokens      int             `json:"max_context_tokens,omitempty"`
-	MaxConcurrency        int             `json:"max_concurrency,omitempty"`
-	ThroughputTPSEstimate float64         `json:"throughput_tps_estimate,omitempty"`
-	ModelLoadTimeMs       int64           `json:"model_load_time_ms,omitempty"`
-	BinaryVersion         string          `json:"binary_version,omitempty"`
-	EndpointURL           *string         `json:"endpoint_url,omitempty"`
-	ProviderECDHPublicKey string          `json:"provider_ecdh_public_key,omitempty"`
-	Tier2Capabilities     Tier2Caps       `json:"tier2_capabilities,omitempty"`
-	AttestationToken      json.RawMessage `json:"attestation_token,omitempty"`
+	Type                     string          `json:"type"`
+	Version                  int             `json:"version"`
+	Stage                    string          `json:"stage"`
+	AuthAttemptID            string          `json:"auth_attempt_id,omitempty"`
+	ProviderID               string          `json:"provider_id"`
+	Hostname                 string          `json:"hostname,omitempty"`
+	ModelID                  string          `json:"model_id,omitempty"`
+	ModelHash                string          `json:"model_hash,omitempty"`
+	ModelParamsB             float64         `json:"model_params_b,omitempty"`
+	RAMGB                    int             `json:"ram_gb,omitempty"`
+	MaxContextTokens         int             `json:"max_context_tokens,omitempty"`
+	MaxConcurrency           int             `json:"max_concurrency,omitempty"`
+	ThroughputTPSEstimate    float64         `json:"throughput_tps_estimate,omitempty"`
+	ModelLoadTimeMs          int64           `json:"model_load_time_ms,omitempty"`
+	BinaryVersion            string          `json:"binary_version,omitempty"`
+	EndpointURL              *string         `json:"endpoint_url,omitempty"`
+	ProviderECDHPublicKey    string          `json:"provider_ecdh_public_key,omitempty"`
+	Tier2Capabilities        Tier2Caps       `json:"tier2_capabilities,omitempty"`
+	AttestationToken         json.RawMessage `json:"attestation_token,omitempty"`
+	SupportedModels          []string        `json:"supported_models,omitempty"`
+	PublishesSupportedModels bool            `json:"publishes_supported_models,omitempty"`
+}
+
+type Spec010Presence struct {
+	SupportedModels          bool
+	PublishesSupportedModels bool
 }
 
 type Tier2Caps struct {
@@ -299,26 +306,26 @@ func ParseFirstAuthMessage(payload []byte) (string, int, error) {
 	return typ, version, nil
 }
 
-func ParseAuthRequest(payload []byte) (AuthRequest, string, error) {
+func ParseAuthRequest(payload []byte) (AuthRequest, Spec010Presence, string, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(payload, &raw); err != nil {
-		return AuthRequest{}, "json", err
+		return AuthRequest{}, Spec010Presence{}, "json", err
 	}
 	var req AuthRequest
 	if err := requireString(raw, "type", &req.Type); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if req.Type != "auth_request" {
-		return AuthRequest{}, "type", fmt.Errorf("expected auth_request, got %q", req.Type)
+		return AuthRequest{}, Spec010Presence{}, "type", fmt.Errorf("expected auth_request, got %q", req.Type)
 	}
 	if err := requireInt(raw, "version", &req.Version); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if req.Version != 2 {
-		return AuthRequest{}, "version", fmt.Errorf("unsupported auth_request version %d", req.Version)
+		return AuthRequest{}, Spec010Presence{}, "version", fmt.Errorf("unsupported auth_request version %d", req.Version)
 	}
 	if err := requireString(raw, "stage", &req.Stage); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	switch req.Stage {
 	case "initial":
@@ -326,79 +333,138 @@ func ParseAuthRequest(payload []byte) (AuthRequest, string, error) {
 	case "proof":
 		return parseAuthProof(raw, req)
 	default:
-		return AuthRequest{}, "stage", fmt.Errorf("unsupported auth_request stage %q", req.Stage)
+		return AuthRequest{}, Spec010Presence{}, "stage", fmt.Errorf("unsupported auth_request stage %q", req.Stage)
 	}
 }
 
-func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequest, string, error) {
+func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequest, Spec010Presence, string, error) {
 	if err := requireString(raw, "provider_id", &req.ProviderID); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if err := requireString(raw, "hostname", &req.Hostname); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if err := requireString(raw, "model_id", &req.ModelID); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if v, ok := raw["model_hash"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &req.ModelHash); err != nil {
-			return AuthRequest{}, "model_hash", err
+			return AuthRequest{}, Spec010Presence{}, "model_hash", err
 		}
 	}
 	if err := requireFloat(raw, "model_params_b", &req.ModelParamsB); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if err := requireInt(raw, "ram_gb", &req.RAMGB); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if err := requireInt(raw, "max_context_tokens", &req.MaxContextTokens); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if err := requireInt(raw, "max_concurrency", &req.MaxConcurrency); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if err := requireFloat(raw, "throughput_tps_estimate", &req.ThroughputTPSEstimate); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if v, ok := raw["model_load_time_ms"]; ok && string(v) != "null" {
 		if err := json.Unmarshal(v, &req.ModelLoadTimeMs); err != nil {
-			return AuthRequest{}, "model_load_time_ms", err
+			return AuthRequest{}, Spec010Presence{}, "model_load_time_ms", err
 		}
 	}
 	if err := requireString(raw, "binary_version", &req.BinaryVersion); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if v, ok := raw["endpoint_url"]; ok && string(v) != "null" {
 		var endpoint string
 		if err := json.Unmarshal(v, &endpoint); err != nil {
-			return AuthRequest{}, "endpoint_url", err
+			return AuthRequest{}, Spec010Presence{}, "endpoint_url", err
 		}
 		req.EndpointURL = &endpoint
 	}
 	if err := requireString(raw, "provider_ecdh_public_key", &req.ProviderECDHPublicKey); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	capsRaw, ok := raw["tier2_capabilities"]
 	if !ok {
-		return AuthRequest{}, "missing tier2_capabilities", fieldError{Field: "missing tier2_capabilities"}
+		return AuthRequest{}, Spec010Presence{}, "missing tier2_capabilities", fieldError{Field: "missing tier2_capabilities"}
 	}
 	if err := json.Unmarshal(capsRaw, &req.Tier2Capabilities); err != nil {
-		return AuthRequest{}, "tier2_capabilities", err
+		return AuthRequest{}, Spec010Presence{}, "tier2_capabilities", err
 	}
-	return req, "", nil
+	presence := Spec010Presence{}
+	if v, ok := raw["supported_models"]; ok {
+		presence.SupportedModels = true
+		if string(v) == "null" {
+			return AuthRequest{}, presence, "supported_models", fmt.Errorf("supported_models must be an array of strings")
+		}
+		if err := json.Unmarshal(v, &req.SupportedModels); err != nil {
+			return AuthRequest{}, presence, "supported_models", err
+		}
+	}
+	if v, ok := raw["publishes_supported_models"]; ok {
+		presence.PublishesSupportedModels = true
+		if string(v) == "null" {
+			return AuthRequest{}, presence, "publishes_supported_models", fmt.Errorf("publishes_supported_models must be a bool")
+		}
+		if err := json.Unmarshal(v, &req.PublishesSupportedModels); err != nil {
+			return AuthRequest{}, presence, "publishes_supported_models", err
+		}
+	}
+	if presence.SupportedModels {
+		for _, model := range req.SupportedModels {
+			if len([]byte(model)) > 256 {
+				return AuthRequest{}, presence, "supported_models entry exceeds 256 bytes", fieldError{Field: "supported_models entry exceeds 256 bytes"}
+			}
+		}
+		if len(req.SupportedModels) > 64 {
+			return AuthRequest{}, presence, "supported_models exceeds 64 entries", fieldError{Field: "supported_models exceeds 64 entries"}
+		}
+		seen := make(map[string]struct{}, len(req.SupportedModels))
+		for _, model := range req.SupportedModels {
+			normalized := normalizeSupportedModelEntry(model)
+			if _, ok := seen[normalized]; ok {
+				return AuthRequest{}, presence, "supported_models contains duplicate entries", fieldError{Field: "supported_models contains duplicate entries"}
+			}
+			seen[normalized] = struct{}{}
+		}
+		if _, ok := seen[normalizeSupportedModelEntry(req.ModelID)]; !ok {
+			return AuthRequest{}, presence, "supported_models missing model_id", fieldError{Field: "supported_models missing model_id"}
+		}
+	}
+	return req, presence, "", nil
 }
 
-func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthRequest, string, error) {
+func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthRequest, Spec010Presence, string, error) {
 	if err := requireString(raw, "auth_attempt_id", &req.AuthAttemptID); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if err := requireString(raw, "provider_id", &req.ProviderID); err != nil {
-		return AuthRequest{}, err.Field, err
+		return AuthRequest{}, Spec010Presence{}, err.Field, err
 	}
 	if token, ok := raw["attestation_token"]; ok {
 		req.AttestationToken = token
 	}
-	return req, "", nil
+	presence := Spec010Presence{}
+	if v, ok := raw["supported_models"]; ok {
+		presence.SupportedModels = true
+		if string(v) == "null" {
+			return AuthRequest{}, presence, "supported_models", fmt.Errorf("supported_models must be an array of strings")
+		}
+		if err := json.Unmarshal(v, &req.SupportedModels); err != nil {
+			return AuthRequest{}, presence, "supported_models", err
+		}
+	}
+	if v, ok := raw["publishes_supported_models"]; ok {
+		presence.PublishesSupportedModels = true
+		if string(v) == "null" {
+			return AuthRequest{}, presence, "publishes_supported_models", fmt.Errorf("publishes_supported_models must be a bool")
+		}
+		if err := json.Unmarshal(v, &req.PublishesSupportedModels); err != nil {
+			return AuthRequest{}, presence, "publishes_supported_models", err
+		}
+	}
+	return req, presence, "", nil
 }
 
 func (r AuthRequest) Hello() Hello {

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -134,6 +135,257 @@ func TestProviderAuthV2AcceptsMockAttestationToken(t *testing.T) {
 		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
 		return ok && provider.EncryptedLeg && provider.AttestationStatus == pool.AttestationStatusAttested
 	})
+}
+
+func TestProviderAuthV2L1NoRetentionEntry(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw)))); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	if got := authAttemptCount(t, h.Provider); got != 0 {
+		t.Fatalf("auth attempt count after initial = %d, want 0", got)
+	}
+	challenge := readAuthChallenge(t, conn)
+	if got := authAttemptCount(t, h.Provider); got != 0 {
+		t.Fatalf("auth attempt count after challenge = %d, want 0", got)
+	}
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	if got := authAttemptCount(t, h.Provider); got != 0 {
+		t.Fatalf("auth attempt count after proof = %d, want 0", got)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
+		return ok &&
+			len(provider.SupportedModels) == 1 &&
+			provider.SupportedModels[0] == "mlx-community/Qwen2.5-7B-Instruct-4bit" &&
+			!provider.PublishesSupportedModels
+	})
+}
+
+func TestProviderAuthV2Spec010RetentionEntryCreatedAndReleased(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	models := []string{"mlx-community/Qwen2.5-7B-Instruct-4bit"}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["supported_models"] = models
+	initial["publishes_supported_models"] = true
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	if got := authAttemptCount(t, h.Provider); got != 1 {
+		t.Fatalf("auth attempt count after challenge = %d, want 1", got)
+	}
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	eventually(t, func() bool {
+		return authAttemptCount(t, h.Provider) == 0
+	})
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
+		return ok &&
+			reflect.DeepEqual(provider.SupportedModels, models) &&
+			provider.PublishesSupportedModels
+	})
+}
+
+func TestProviderAuthV2RetentionReleasedOnDisconnectBeforeProof(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["supported_models"] = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit"}
+	initial["publishes_supported_models"] = true
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	_ = readAuthChallenge(t, conn)
+	if got := authAttemptCount(t, h.Provider); got != 1 {
+		t.Fatalf("auth attempt count after challenge = %d, want 1", got)
+	}
+	_ = conn.Close()
+	eventually(t, func() bool {
+		return authAttemptCount(t, h.Provider) == 0
+	})
+}
+
+func TestProviderAuthV2Retention1024BoundRejection(t *testing.T) {
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{providerws.WithAuthAttemptRetentionBound(1)}, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	firstConn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial first: %v", err)
+	}
+	_, firstProviderPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair first: %v", err)
+	}
+	firstInitial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(firstProviderPublicRaw))
+	firstInitial["supported_models"] = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit"}
+	if err := wsutil.WriteClientText(firstConn, mustJSON(firstInitial)); err != nil {
+		t.Fatalf("write first auth initial: %v", err)
+	}
+	_ = readAuthChallenge(t, firstConn)
+	if got := authAttemptCount(t, h.Provider); got != 1 {
+		t.Fatalf("auth attempt count = %d, want 1", got)
+	}
+
+	secondConn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial second: %v", err)
+	}
+	defer secondConn.Close()
+	_, secondProviderPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair second: %v", err)
+	}
+	secondInitial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(secondProviderPublicRaw))
+	secondInitial["supported_models"] = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit"}
+	if err := wsutil.WriteClientText(secondConn, mustJSON(secondInitial)); err != nil {
+		t.Fatalf("write second auth initial: %v", err)
+	}
+	response := readAuthResponse(t, secondConn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "too_many_auth_attempts" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	frame, err := gobwas.ReadFrame(secondConn)
+	if err != nil {
+		t.Fatalf("read close: %v", err)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.ClosePoolFull || reason != "too_many_auth_attempts" {
+		t.Fatalf("close = (%d, %q)", code, reason)
+	}
+	if got := authAttemptCount(t, h.Provider); got != 1 {
+		t.Fatalf("auth attempt count after reject = %d, want 1", got)
+	}
+
+	_ = firstConn.Close()
+	eventually(t, func() bool {
+		return authAttemptCount(t, h.Provider) == 0
+	})
+
+	thirdConn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial third: %v", err)
+	}
+	defer thirdConn.Close()
+	_, thirdProviderPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair third: %v", err)
+	}
+	thirdInitial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(thirdProviderPublicRaw))
+	thirdInitial["supported_models"] = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit"}
+	if err := wsutil.WriteClientText(thirdConn, mustJSON(thirdInitial)); err != nil {
+		t.Fatalf("write third auth initial: %v", err)
+	}
+	_ = readAuthChallenge(t, thirdConn)
+	if got := authAttemptCount(t, h.Provider); got != 1 {
+		t.Fatalf("auth attempt count after third challenge = %d, want 1", got)
+	}
+}
+
+func TestProviderAuthV2ProofMismatchRejectedWithLockedSubstring(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["model_id"] = "model-a"
+	initial["supported_models"] = []string{"model-a"}
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProofWithFields(t, conn, challenge, "m4-anon", nil, map[string]any{
+		"supported_models": []string{"model-b"},
+	})
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "bad_request" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	if !strings.Contains(response.Error.Message, "supported_models mismatch between auth_request stages") {
+		t.Fatalf("error message = %q", response.Error.Message)
+	}
+}
+
+func TestProviderAuthV2ProofAbsentSpec010Accepted(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["supported_models"] = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit"}
+	initial["publishes_supported_models"] = true
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" {
+		t.Fatalf("auth_response = %+v", response)
+	}
 }
 
 func TestProviderAuthV2RejectsMissingRequiredAttestation(t *testing.T) {
@@ -1753,15 +2005,20 @@ func newProviderServer(t *testing.T, opts ...func(*config.Config)) *httptest.Ser
 
 func newProviderHarnessWithTokenValidator(t *testing.T, validator providerws.TokenValidator, opts ...func(*config.Config)) providerHarness {
 	t.Helper()
-	return newProviderHarnessWithOptions(t, validator, opts...)
+	return newProviderHarnessWithOptions(t, validator, nil, opts...)
 }
 
 func newProviderHarness(t *testing.T, opts ...func(*config.Config)) providerHarness {
 	t.Helper()
-	return newProviderHarnessWithOptions(t, nil, opts...)
+	return newProviderHarnessWithOptions(t, nil, nil, opts...)
 }
 
-func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValidator, opts ...func(*config.Config)) providerHarness {
+func newProviderHarnessWithServerOptions(t *testing.T, validator providerws.TokenValidator, serverOpts []providerws.Option, opts ...func(*config.Config)) providerHarness {
+	t.Helper()
+	return newProviderHarnessWithOptions(t, validator, serverOpts, opts...)
+}
+
+func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValidator, serverOpts []providerws.Option, opts ...func(*config.Config)) providerHarness {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
@@ -1780,11 +2037,11 @@ func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValid
 		opt(&cfg)
 	}
 	registry := pool.NewRegistry(cfg.Providers)
-	serverOpts := []providerws.Option{}
+	allServerOpts := append([]providerws.Option(nil), serverOpts...)
 	if validator != nil {
-		serverOpts = append(serverOpts, providerws.WithTokenValidator(validator))
+		allServerOpts = append(allServerOpts, providerws.WithTokenValidator(validator))
 	}
-	server := providerws.NewServer(cfg, registry, zerolog.Nop(), serverOpts...)
+	server := providerws.NewServer(cfg, registry, zerolog.Nop(), allServerOpts...)
 	return providerHarness{
 		HTTP:     httptest.NewServer(server.Handler()),
 		Provider: server,
@@ -1879,6 +2136,11 @@ func readAuthChallenge(t *testing.T, conn net.Conn) providerws.AuthChallenge {
 
 func writeAuthProof(t *testing.T, conn net.Conn, challenge providerws.AuthChallenge, providerID string, token json.RawMessage) {
 	t.Helper()
+	writeAuthProofWithFields(t, conn, challenge, providerID, token, nil)
+}
+
+func writeAuthProofWithFields(t *testing.T, conn net.Conn, challenge providerws.AuthChallenge, providerID string, token json.RawMessage, fields map[string]any) {
+	t.Helper()
 	proof := map[string]any{
 		"type":              "auth_request",
 		"version":           2,
@@ -1886,6 +2148,9 @@ func writeAuthProof(t *testing.T, conn net.Conn, challenge providerws.AuthChalle
 		"auth_attempt_id":   challenge.AuthAttemptID,
 		"provider_id":       providerID,
 		"attestation_token": token,
+	}
+	for key, value := range fields {
+		proof[key] = value
 	}
 	if err := wsutil.WriteClientText(conn, mustJSON(proof)); err != nil {
 		t.Fatalf("write auth proof: %v", err)
@@ -1946,6 +2211,15 @@ func eventuallyWithin(t *testing.T, timeout time.Duration, f func() bool) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+func authAttemptCount(t *testing.T, server *providerws.Server) int {
+	t.Helper()
+	store := reflect.ValueOf(server).Elem().FieldByName("authAttempts")
+	if !store.IsValid() || store.IsNil() {
+		return 0
+	}
+	return store.Elem().FieldByName("entries").Len()
 }
 
 func mustJSON(v any) []byte {
