@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/audit"
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
@@ -1278,6 +1279,83 @@ func TestHeartbeatSwapCompletionFiresInjectedEmitter(t *testing.T) {
 		event.LoadingStartedAt.IsZero() ||
 		event.CompletedAt.IsZero() {
 		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestHeartbeatSwapEmitterWritesAuditLogRow(t *testing.T) {
+	auditStore, err := audit.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open audit store: %v", err)
+	}
+	defer auditStore.Close()
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithRegistryOptions(pool.WithSwapEmitter(func(event pool.SwapEvent) {
+			if err := auditStore.EmitSwap(context.Background(), event); err != nil {
+				t.Errorf("emit swap: %v", err)
+			}
+		})),
+	}, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, assignedID := dialAndAuthV2Provider(t, h)
+	defer conn.Close()
+	fromHash := "ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12"
+	toHash := "cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12cd34ef56ab12ab12"
+
+	hb := heartbeat()
+	hb["model_hash"] = fromHash
+	hb["loading"] = true
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write loading heartbeat: %v", err)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", assignedID)
+		return ok && provider.LastLoadingState
+	})
+
+	hb = heartbeat()
+	hb["model_id"] = "mlx-community/Llama-3.1-8B-Instruct-4bit"
+	hb["model_hash"] = toHash
+	hb["loading"] = false
+	if err := wsutil.WriteClientText(conn, mustJSON(hb)); err != nil {
+		t.Fatalf("write completed heartbeat: %v", err)
+	}
+
+	eventually(t, func() bool {
+		var count int
+		err := auditStore.DB().QueryRowContext(context.Background(), `
+SELECT COUNT(*) FROM audit_log
+WHERE event_type = 'operator_model_swap'`).Scan(&count)
+		return err == nil && count == 1
+	})
+	var eventType, providerID, payloadJSON string
+	if err := auditStore.DB().QueryRowContext(context.Background(), `
+SELECT event_type, provider_id, payload_json
+FROM audit_log`).Scan(&eventType, &providerID, &payloadJSON); err != nil {
+		t.Fatalf("read audit row: %v", err)
+	}
+	if eventType != "operator_model_swap" || providerID != "m4-anon" {
+		t.Fatalf("audit row event_type=%q provider_id=%q", eventType, providerID)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if payload["event"] != "operator_model_swap" ||
+		payload["provider_assigned_id"] != assignedID ||
+		payload["from_model_id"] != "mlx-community/Qwen2.5-7B-Instruct-4bit" ||
+		payload["from_model_hash"] != fromHash ||
+		payload["to_model_id"] != "mlx-community/Llama-3.1-8B-Instruct-4bit" ||
+		payload["to_model_hash"] != toHash ||
+		payload["hash_verification_result"] != string(pool.HashStatusUncatalogued) {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if _, ok := payload["loading_window_ms"].(float64); !ok {
+		t.Fatalf("loading_window_ms type=%T payload=%#v", payload["loading_window_ms"], payload)
+	}
+	if _, ok := payload["drain_inflight_count_estimate"]; ok {
+		t.Fatalf("drain_inflight_count_estimate must be omitted: %#v", payload)
 	}
 }
 

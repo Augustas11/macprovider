@@ -70,6 +70,9 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	if cfg.Storage.RequestLogRetentionDays != 90 {
 		t.Fatalf("request log retention default=%d want 90", cfg.Storage.RequestLogRetentionDays)
 	}
+	if cfg.Storage.AuditLogRetentionDays != 90 {
+		t.Fatalf("audit log retention default=%d want 90", cfg.Storage.AuditLogRetentionDays)
+	}
 
 	cfg.Rewards.ProviderShare = 1.01
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "provider_share") {
@@ -81,6 +84,13 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	cfg.Storage.RequestLogRetentionDays = 0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "request_log_retention_days") {
 		t.Fatalf("request log retention validation err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Storage.AuditLogRetentionDays = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_retention_days") {
+		t.Fatalf("audit log retention validation err=%v", err)
 	}
 
 	cfg = Default()

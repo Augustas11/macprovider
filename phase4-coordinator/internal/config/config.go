@@ -156,6 +156,10 @@ type StorageConfig struct {
 	DBPath                  string `yaml:"db_path"`
 	SnapshotIntervalS       int    `yaml:"snapshot_interval_s"`
 	RequestLogRetentionDays int    `yaml:"request_log_retention_days"`
+	// SPEC-002 v1.3.5 §7.10.1 R-7.10.2 — retention for the
+	// operator_model_swap audit_log table (and any future audit event
+	// types). Default 90 days mirrors request_log_retention_days.
+	AuditLogRetentionDays int `yaml:"audit_log_retention_days"`
 }
 
 type LoggingConfig struct {
@@ -303,6 +307,7 @@ func Default() Config {
 			DBPath:                  "coordinator.db",
 			SnapshotIntervalS:       300,
 			RequestLogRetentionDays: 90,
+			AuditLogRetentionDays:   90,
 		},
 		Logging: LoggingConfig{
 			Level:  "info",
@@ -583,6 +588,9 @@ func (c Config) Validate() error {
 	}
 	if c.Storage.RequestLogRetentionDays <= 0 {
 		return fmt.Errorf("storage.request_log_retention_days must be > 0")
+	}
+	if c.Storage.AuditLogRetentionDays <= 0 {
+		return fmt.Errorf("storage.audit_log_retention_days must be > 0")
 	}
 	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
 		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")
