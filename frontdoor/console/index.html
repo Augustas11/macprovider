@@ -337,6 +337,78 @@ svg{display:block;flex-shrink:0}
 .quick-link:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
 .compliance-copy{position:absolute;left:-10000px;top:auto;width:1px;height:1px;overflow:hidden}
 
+/* ── arm64golf view ──────────────────────────────────── */
+.a64-hero{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;padding:20px 22px;
+}
+.a64-eyebrow{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:11px;letter-spacing:.04em;color:var(--muted);
+  margin-bottom:10px;
+}
+.a64-title{
+  font-size:20px;font-weight:700;color:var(--text);letter-spacing:-.01em;
+  margin-bottom:10px;line-height:1.2;
+}
+.a64-lede{
+  font-size:13.5px;line-height:1.65;color:var(--muted);max-width:780px;
+}
+.a64-lede em{font-style:italic}
+.a64-note{
+  border-left:2px solid var(--accent);
+  background:var(--surface);
+  padding:14px 16px;border-radius:0 6px 6px 0;
+  font-size:13px;line-height:1.6;color:var(--muted);
+}
+.a64-note strong{color:var(--text);font-weight:600}
+.a64-table-wrap{
+  border:1px solid var(--border);border-radius:8px;overflow:hidden;
+}
+.a64-table{width:100%;border-collapse:collapse;font-size:12.5px}
+.a64-table th{
+  text-align:left;padding:10px 14px;
+  background:var(--sb);border-bottom:1px solid var(--border);
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:11px;font-weight:600;letter-spacing:.04em;
+  color:var(--hint);text-transform:uppercase;
+}
+.a64-table td{
+  padding:10px 14px;border-bottom:1px solid var(--border);
+  color:var(--muted);vertical-align:top;
+}
+.a64-table tbody tr:last-child td{border-bottom:0}
+.a64-table tbody tr:hover td{background:rgba(124,106,246,.04)}
+.a64-table td.a64-score{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  color:var(--text);font-weight:700;
+}
+
+/* ── arm64golf dashboard tile ───────────────────────── */
+.a64-tile{
+  display:flex;align-items:center;justify-content:space-between;gap:16px;
+  padding:14px 18px;border-radius:8px;
+  background:linear-gradient(135deg, var(--accent-dim) 0%, var(--surface) 80%);
+  border:1px solid rgba(124,106,246,.4);
+  color:var(--text);text-decoration:none;
+  transition:border-color .14s,transform .14s;
+}
+.a64-tile:hover{border-color:var(--accent);text-decoration:none;transform:translateY(-1px)}
+.a64-tile-left{display:flex;flex-direction:column;gap:3px;min-width:0}
+.a64-tile-kicker{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  font-size:10.5px;letter-spacing:.06em;color:var(--accent);text-transform:uppercase;
+}
+.a64-tile-title{font-size:14px;font-weight:700;color:var(--text)}
+.a64-tile-sub{font-size:12px;color:var(--muted);line-height:1.5}
+.a64-tile-arrow{
+  font-size:18px;color:var(--accent);flex-shrink:0;
+}
+.a64-stamp{
+  margin-top:14px;font-size:11.5px;color:var(--hint);
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+}
+
 /* ── Mobile ─────────────────────────────────────────── */
 @media(max-width:680px){
   .sidebar{
@@ -382,7 +454,11 @@ svg{display:block;flex-shrink:0}
     <div class="sb-spacer"></div>
 
     <div class="sb-nav">
-      <a class="nav-item" id="navDashboard">
+      <a class="nav-item" id="navArm64golf" href="/arm64golf">
+        <svg width="14" height="14" viewBox="0 0 14 14"><path d="M1 11l4-7 2 4 2-2 4 5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+        arm64golf
+      </a>
+      <a class="nav-item" id="navDashboard" href="/">
         <svg width="14" height="14" viewBox="0 0 14 14"><rect x="1" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="8" y="1" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="1" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/><rect x="8" y="8" width="5" height="5" rx="1" stroke="currentColor" stroke-width="1.3"/></svg>
         Dashboard
       </a>
@@ -457,6 +533,15 @@ svg{display:block;flex-shrink:0}
         <button class="back-btn" id="backToChatBtn">← Back to chat</button>
       </div>
       <div class="dash-body" id="dashBody"></div>
+    </div>
+
+    <!-- VIEW: arm64golf -->
+    <div class="view hidden" id="viewArm64golf">
+      <div class="dash-header">
+        <h2 class="dash-title">arm64golf</h2>
+        <button class="back-btn" id="backFromArmBtn">← Back to chat</button>
+      </div>
+      <div class="dash-body" id="armBody"></div>
     </div>
   </main>
   <section class="compliance-copy" aria-label="Tier 1 disclosure">
@@ -559,20 +644,43 @@ function loadSession(id) {
 }
 
 // ── Navigation ───────────────────────────────────────
-function navigate(view) {
+function navigate(view, opts) {
+  opts = opts || {}
+  if (currentView === view && !opts.fromPopstate) return
+  const prevView = currentView
   currentView = view
   const chat = document.getElementById('viewChat')
   const dash = document.getElementById('viewDashboard')
+  const arm = document.getElementById('viewArm64golf')
   const navDash = document.getElementById('navDashboard')
+  const navArm = document.getElementById('navArm64golf')
+  chat.classList.add('hidden')
+  dash.classList.add('hidden')
+  arm.classList.add('hidden')
+  navDash.classList.remove('active')
+  navArm.classList.remove('active')
+  navDash.removeAttribute('aria-current')
+  navArm.removeAttribute('aria-current')
   if (view === 'dashboard') {
-    chat.classList.add('hidden')
     dash.classList.remove('hidden')
     navDash.classList.add('active')
+    navDash.setAttribute('aria-current', 'page')
     renderDashboard()
+  } else if (view === 'arm64golf') {
+    arm.classList.remove('hidden')
+    navArm.classList.add('active')
+    navArm.setAttribute('aria-current', 'page')
+    renderArm64golf()
   } else {
-    dash.classList.add('hidden')
     chat.classList.remove('hidden')
-    navDash.classList.remove('active')
+  }
+  if (!opts.fromPopstate) {
+    const path = view === 'arm64golf' ? '/arm64golf' : '/'
+    // Always push state so popstate can recover the view even when the
+    // path doesn't change (chat <-> dashboard both live at "/").
+    if (location.pathname !== path || prevView !== view) {
+      history.pushState({ view: view }, '', path)
+    }
   }
   closeSidebar()
 }
@@ -1084,6 +1192,21 @@ function renderDashboard() {
   const weekTotal = days.reduce((a, b) => a + b.data.requests, 0)
   const maxReq = Math.max(...days.map(x => x.data.requests), 1)
 
+  // arm64golf tile (above stats)
+  const a64Tile = document.createElement('a')
+  a64Tile.className = 'a64-tile'
+  a64Tile.href = '/arm64golf'
+  a64Tile.addEventListener('click', (e) => { e.preventDefault(); navigate('arm64golf') })
+  a64Tile.innerHTML = `
+    <div class="a64-tile-left">
+      <div class="a64-tile-kicker">MacProvider · sort3-arm64</div>
+      <div class="a64-tile-title">arm64golf · best verified ${Number(ARM64_DATA.rows[0].score)} instructions</div>
+      <div class="a64-tile-sub">Open-weight ARM64 superoptimization benchmark on the MacProvider network.</div>
+    </div>
+    <div class="a64-tile-arrow">→</div>
+  `
+  body.appendChild(a64Tile)
+
   // Stats row
   const statsSection = document.createElement('div')
   appendSectionTitle(statsSection, 'Today')
@@ -1214,6 +1337,150 @@ function renderDashboard() {
   body.appendChild(linkSection)
 }
 
+// ── arm64golf ────────────────────────────────────────
+// Snapshot of arm64golf/web/public/leaderboard.json. Refresh by hand when
+// a new candidate is promoted; the public marketing page loads live JSON.
+// Inlined here so the console doesn't need extra connect-src in CSP.
+const ARM64_DATA = {
+  problem_id: 'sort3-arm64',
+  attempt_count: 90,
+  candidate_response_count: 328,
+  last_update: '2026-06-05T22:04:45Z',
+  rows: [
+    { rank: 1, score: 12, candidate_hash_short: '57b2aa236342', model_id: 'Qwen2.5-Coder-7B-Instruct-4bit', provider_id: 'air5', receipt_signature_short: 'wkwPk0Wbwx2Use1e', discovered_at: '2026-06-05T22:04:45Z' },
+    { rank: 2, score: 12, candidate_hash_short: 'b4d6f989140e', model_id: 'Qwen2.5-Coder-7B-Instruct-4bit', provider_id: 'air5', receipt_signature_short: 'V9fz/L7Mcgi1uigY', discovered_at: '2026-06-05T22:18:06Z' },
+    { rank: 3, score: 16, candidate_hash_short: '9fa2d622fdae', model_id: 'Qwen2.5-Coder-7B-Instruct-4bit', provider_id: 'air5', receipt_signature_short: 'lJVrDbE0S8H35F22', discovered_at: '2026-06-05T22:32:03Z' },
+    { rank: 4, score: 18, candidate_hash_short: '726c3e4c49b5', model_id: 'baseline', provider_id: 'local', receipt_signature_short: 'oohYX7sTa3ISX/mF', discovered_at: '2026-06-05T10:52:23Z' },
+    { rank: 5, score: 24, candidate_hash_short: '47f0dd8d0a24', model_id: 'Qwen2.5-Coder-7B-Instruct-4bit', provider_id: 'air5', receipt_signature_short: 'c+TR1jKm8BPSBzVe', discovered_at: '2026-06-05T10:52:24Z' },
+    { rank: 6, score: 24, candidate_hash_short: 'f41b055a1965', model_id: 'Qwen2.5-Coder-7B-Instruct-4bit', provider_id: 'air5', receipt_signature_short: '', discovered_at: '2026-06-05T11:14:02Z' },
+    { rank: 7, score: 24, candidate_hash_short: '17e628abfc2b', model_id: 'Qwen2.5-Coder-7B-Instruct-4bit', provider_id: 'air5', receipt_signature_short: '', discovered_at: '2026-06-05T11:22:18Z' },
+  ],
+}
+
+function fmtArmDate(iso) {
+  if (!iso) return '—'
+  return new Intl.DateTimeFormat('en', {
+    month: 'short', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    timeZone: 'UTC', timeZoneName: 'short',
+  }).format(new Date(iso))
+}
+
+function escArm(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]))
+}
+
+function renderArm64golf() {
+  const body = document.getElementById('armBody')
+  body.replaceChildren()
+
+  const hero = document.createElement('div')
+  hero.className = 'a64-hero'
+  hero.innerHTML = `
+    <div class="a64-eyebrow">A public benchmark for ARM64 instruction-count superoptimization.</div>
+    <h3 class="a64-title">Can open weights match AlphaDev on ARM?</h3>
+    <p class="a64-lede">
+      AlphaDev established a learned-search frontier for x86 sorting in 2023,
+      reporting <span class="mono">Sort3AlphaDev</span> at 17 instructions
+      [Fawzi et al., <em>Nature</em> 618, 257&ndash;263]. No equivalent public result
+      exists for ARM64. arm64golf asks whether open-weight coding models, served
+      on consumer Apple Silicon via the MacProvider network, can produce
+      verifiable ARM64 routines shorter than published references. The metric
+      is instruction count over a deterministic 1200-case verifier.
+    </p>
+  `
+  body.appendChild(hero)
+
+  const best = ARM64_DATA.rows[0]
+  appendSectionTitle(body, 'Frontier · sort3-arm64')
+  const grid = document.createElement('div')
+  grid.className = 'stats-grid'
+  ;[
+    { value: best.score, label: 'Best verified (ARM64)' },
+    { value: '17', label: 'AlphaDev x86 reference' },
+    { value: '18', label: 'ARM64 baseline in harness' },
+    { value: ARM64_DATA.candidate_response_count.toLocaleString(), label: 'Candidate responses' },
+  ].forEach(({ value, label }) => {
+    const card = document.createElement('div')
+    card.className = 'stat-card'
+    card.appendChild(div('stat-value', String(value)))
+    card.appendChild(div('stat-label', label))
+    grid.appendChild(card)
+  })
+  body.appendChild(grid)
+
+  const note = document.createElement('div')
+  note.className = 'a64-note'
+  note.innerHTML = `
+    <strong>Methodological note.</strong> The best verified ARM64 candidate at
+    12 instructions (<span class="mono">57b2aa236342</span>) is produced by the
+    model tiling the four-instruction <span class="mono">cmp/csel/csel/mov</span>
+    block supplied as a worked example in the <span class="mono">csel_hint</span>
+    prompt template. The receipt is valid against the 1200-case verifier.
+    Structural credit is shared between the prompt and the sampler. A
+    discovery-class result requires a verified candidate below 12 from a
+    template that does not contain the structure, or one with non-isomorphic
+    structure. Neither has been observed across 223 post-canary evaluations on
+    the 7B configuration.
+  `
+  body.appendChild(note)
+
+  appendSectionTitle(body, 'Score history')
+  const tableWrap = document.createElement('div')
+  tableWrap.className = 'a64-table-wrap'
+  const table = document.createElement('table')
+  table.className = 'a64-table'
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Score</th>
+        <th>Candidate</th>
+        <th>Model</th>
+        <th>Provider</th>
+        <th>Receipt</th>
+        <th>Discovered (UTC)</th>
+      </tr>
+    </thead>
+    <tbody>${ARM64_DATA.rows.map(r => `
+      <tr>
+        <td>${Number(r.rank)}</td>
+        <td class="a64-score">${Number(r.score)}</td>
+        <td class="mono">${escArm(r.candidate_hash_short)}</td>
+        <td class="mono">${escArm(r.model_id)}</td>
+        <td class="mono">${escArm(r.provider_id)}</td>
+        <td class="mono">${escArm(r.receipt_signature_short || 'pending')}</td>
+        <td>${fmtArmDate(r.discovered_at)}</td>
+      </tr>`).join('')}
+    </tbody>
+  `
+  tableWrap.appendChild(table)
+  body.appendChild(tableWrap)
+
+  appendSectionTitle(body, 'Links')
+  const links = document.createElement('div')
+  links.className = 'quick-links'
+  ;[
+    { label: 'Repository', href: 'https://github.com/Augustas11/arm64golf' },
+    { label: 'REPORT.md', href: 'https://github.com/Augustas11/arm64golf/blob/main/REPORT.md' },
+    { label: 'SPEC.md', href: 'https://github.com/Augustas11/arm64golf/blob/main/SPEC.md' },
+    { label: 'Provider onboarding', href: 'https://github.com/Augustas11/macprovider#for-providers' },
+  ].forEach(({ label, href }) => {
+    const a = document.createElement('a')
+    a.className = 'quick-link'
+    a.href = href
+    a.target = '_blank'
+    a.rel = 'noopener'
+    a.textContent = label
+    links.appendChild(a)
+  })
+  body.appendChild(links)
+
+  const stamp = document.createElement('p')
+  stamp.className = 'a64-stamp'
+  stamp.textContent = `Snapshot dated ${ARM64_DATA.last_update}. Live page: arm64golf.streamvc.live (private preview).`
+  body.appendChild(stamp)
+}
+
 // ── Mobile sidebar ───────────────────────────────────
 function closeSidebar() {
   document.getElementById('sidebar').classList.remove('open')
@@ -1237,8 +1504,20 @@ function init() {
 
   // Events
   document.getElementById('newChatBtn').addEventListener('click', newChat)
-  document.getElementById('navDashboard').addEventListener('click', () => navigate('dashboard'))
+  document.getElementById('navDashboard').addEventListener('click', (e) => { e.preventDefault(); navigate('dashboard') })
+  document.getElementById('navArm64golf').addEventListener('click', (e) => { e.preventDefault(); navigate('arm64golf') })
   document.getElementById('backToChatBtn').addEventListener('click', () => navigate('chat'))
+  document.getElementById('backFromArmBtn').addEventListener('click', () => navigate('chat'))
+  window.addEventListener('popstate', (e) => {
+    const view = (e.state && e.state.view) || (location.pathname === '/arm64golf' ? 'arm64golf' : 'chat')
+    navigate(view, { fromPopstate: true })
+  })
+  // Seed history.state so an initial Back press lands somewhere intentional.
+  const initialView = location.pathname === '/arm64golf' ? 'arm64golf' : 'chat'
+  history.replaceState({ view: initialView }, '', location.pathname)
+  if (location.pathname === '/arm64golf') {
+    navigate('arm64golf', { fromPopstate: true })
+  }
   document.getElementById('modelChip').addEventListener('click', toggleModelMenu)
   document.getElementById('sendBtn').addEventListener('click', send)
   document.getElementById('prompt').addEventListener('keydown', onKey)
