@@ -2,6 +2,7 @@ package auth_test
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -43,8 +44,8 @@ func TestTokenIssueValidateRevokeAndList(t *testing.T) {
 	if len(token) != 64 {
 		t.Fatalf("token len = %d, want 64", len(token))
 	}
-	if record.TokenPrefix != token[:6] {
-		t.Fatalf("prefix = %q, want %q", record.TokenPrefix, token[:6])
+	if record.TokenPrefix != token[:12] {
+		t.Fatalf("prefix = %q, want %q", record.TokenPrefix, token[:12])
 	}
 	if record.ProviderID != "m4-anon" {
 		t.Fatalf("provider_id = %q, want m4-anon", record.ProviderID)
@@ -87,5 +88,47 @@ func TestTokenIssueValidateRevokeAndList(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].TokenPrefix != record.TokenPrefix || records[0].ProviderID != "m4-anon" || !records[0].LastUsedAt.Valid {
 		t.Fatalf("records = %#v", records)
+	}
+}
+
+func TestRevokeTokenRejectsAmbiguousPrefix(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open sqlite fixture handle: %v", err)
+	}
+	defer db.Close()
+	for _, row := range []struct {
+		hash       string
+		providerID string
+		name       string
+	}{
+		{hash: "hash-a", providerID: "m4-a", name: "M4 A"},
+		{hash: "hash-b", providerID: "m4-b", name: "M4 B"},
+	} {
+		if _, err := db.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, row.hash, "abcdef123456", row.providerID, row.name, "2026-06-07T00:00:00Z"); err != nil {
+			t.Fatalf("insert fixture token %s: %v", row.providerID, err)
+		}
+	}
+
+	_, err = store.RevokeToken(ctx, "abcdef")
+	if err == nil {
+		t.Fatal("ambiguous prefix unexpectedly revoked token")
+	}
+	records, err := store.ListTokens(ctx)
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	for _, record := range records {
+		if record.RevokedAt.Valid {
+			t.Fatalf("record %d revoked despite ambiguous prefix: %#v", record.ID, record)
+		}
 	}
 }

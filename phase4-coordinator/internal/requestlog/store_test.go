@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -106,6 +107,35 @@ WHERE request_id = ?`, "req-roundtrip").Scan(
 		got.ProviderHeader.String != "p1" || !got.ProviderHeader.Valid ||
 		got.Retried != 2 {
 		t.Fatalf("row mismatch: %#v", got)
+	}
+}
+
+func TestRequestLogTotalTokensOverflowStoresNull(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	promptTokens := int64(math.MaxInt64)
+	completionTokens := int64(1)
+
+	if err := store.Insert(ctx, Row{
+		TSUtc:              time.Now().UTC(),
+		RequestID:          "req-overflow",
+		Model:              "model-a",
+		ProviderAssignedID: "session-1",
+		PromptTokens:       &promptTokens,
+		CompletionTokens:   &completionTokens,
+		Status:             200,
+		BuyerIP:            "203.0.113.1:41234",
+	}); err != nil {
+		t.Fatalf("insert overflow row: %v", err)
+	}
+
+	var totalTokens sql.NullInt64
+	if err := store.db.QueryRowContext(ctx, `SELECT total_tokens FROM request_log WHERE request_id = ?`, "req-overflow").Scan(&totalTokens); err != nil {
+		t.Fatalf("query total_tokens: %v", err)
+	}
+	if totalTokens.Valid {
+		t.Fatalf("total_tokens = %#v, want NULL on overflow", totalTokens)
 	}
 }
 

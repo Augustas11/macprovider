@@ -2237,6 +2237,34 @@ func TestChatCompletionsWSTunneledNonStreaming(t *testing.T) {
 	}
 }
 
+func TestChatCompletionsWSTunneledNonStreamingResponseCap(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 2)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: strings.Repeat("a", 16<<20)}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 1, Data: "x"}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 2}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"provider_response_too_large"`)) {
+		t.Fatalf("body missing provider_response_too_large: %s", rr.Body.String())
+	}
+}
+
 func TestChatCompletionsWSTunneledTier2RejectsInvalidNonStreamingOutput(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)

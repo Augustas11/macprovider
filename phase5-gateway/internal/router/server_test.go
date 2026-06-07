@@ -1345,6 +1345,111 @@ func TestQuotaSettlement504ZeroCompletion(t *testing.T) {
 	}
 }
 
+func TestNonStreamingRejectsInvalidProviderUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		responseBody string
+	}{
+		{name: "negative", responseBody: `{"id":"chatcmpl_bad_usage","usage":{"prompt_tokens":-1,"completion_tokens":2,"total_tokens":1}}`},
+		{name: "empty_object", responseBody: `{"id":"chatcmpl_bad_usage","usage":{}}`},
+		{name: "missing_completion", responseBody: `{"id":"chatcmpl_bad_usage","usage":{"prompt_tokens":1}}`},
+		{name: "malformed_field", responseBody: `{"id":"chatcmpl_bad_usage","usage":{"prompt_tokens":"1","completion_tokens":2}}`},
+		{name: "exceeds_request_bound", responseBody: `{"id":"chatcmpl_bad_usage","usage":{"prompt_tokens":1,"completion_tokens":10000,"total_tokens":10001}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"invalid usage"}]}`
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, tc.responseBody), nil
+			})}
+			h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, "acct_invalid_usage_"+tc.name)
+
+			resp := postChat(t, h, fullKey, body, nil)
+
+			if resp.Code != http.StatusBadGateway {
+				t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+			}
+			assertErrorCode(t, resp.Body.String(), "invalid_provider_usage")
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			wantUsed := float64(estimatePromptTokens([]byte(body)))
+			if quota["daily_tokens_used"].(float64) != wantUsed {
+				t.Fatalf("daily_tokens_used=%v want prompt estimate %v", quota["daily_tokens_used"], wantUsed)
+			}
+			if quota["daily_tokens_reserved"].(float64) != 0 {
+				t.Fatalf("daily_tokens_reserved=%v want 0", quota["daily_tokens_reserved"])
+			}
+		})
+	}
+}
+
+func TestNonStreamingSettlementFailureDoesNotReturnSuccess(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"id":"chatcmpl_ok","usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}`), nil
+	})}
+	_, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_settle_fail")
+	fakeStore := &settlementFailStore{Store: store, settleErr: errors.New("forced settlement failure")}
+	h := New(cfg, fakeStore, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(client)).Handler()
+
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if resp.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "settlement_failed")
+	if fakeStore.refundCalls != 1 {
+		t.Fatalf("RefundReservation calls=%d, want 1", fakeStore.refundCalls)
+	}
+}
+
+func TestUsageFromJSONValidatesProviderReportedUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{name: "negative", body: `{"usage":{"prompt_tokens":-1,"completion_tokens":2,"total_tokens":1}}`},
+		{name: "empty_object", body: `{"usage":{}}`},
+		{name: "missing_completion", body: `{"usage":{"prompt_tokens":1}}`},
+		{name: "malformed_field", body: `{"usage":{"prompt_tokens":"1","completion_tokens":2}}`},
+		{name: "overflow", body: `{"usage":{"prompt_tokens":9223372036854775807,"completion_tokens":1}}`},
+		{name: "inconsistent_total", body: `{"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":4}}`},
+		{name: "exceeds_request_bound", body: `{"usage":{"prompt_tokens":1,"completion_tokens":10,"total_tokens":11}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, ok, err := usageFromJSON([]byte(tc.body), 10); !ok || err == nil {
+				t.Fatalf("usageFromJSON ok=%v err=%v, want provider usage validation error", ok, err)
+			}
+		})
+	}
+	usage, ok, err := usageFromJSON([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2}}`), 10)
+	if err != nil || !ok || usage.TotalTokens != 3 {
+		t.Fatalf("valid usage = %#v ok=%v err=%v, want total 3", usage, ok, err)
+	}
+	if _, ok, err := usageFromJSON([]byte(`{"usage":null}`), 10); ok || err != nil {
+		t.Fatalf("usage null ok=%v err=%v, want absent usage", ok, err)
+	}
+}
+
+type settlementFailStore struct {
+	*sqlite.Store
+	settleErr   error
+	refundCalls int
+}
+
+func (f *settlementFailStore) SettleReservation(context.Context, storage.ReservationSettlement) error {
+	return f.settleErr
+}
+
+func (f *settlementFailStore) RefundReservation(context.Context, string, string, int64) error {
+	f.refundCalls++
+	return nil
+}
+
 func TestChatCompletionsCoordinatorTimeoutAppliesToStreamAndNonStream(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		<-r.Context().Done()
@@ -1679,6 +1784,39 @@ func TestStreamingCleanEOFSettlesOK(t *testing.T) {
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
 	if outcome != "ok" || source != "provider_reported" {
 		t.Fatalf("usage outcome/source = %s/%s, want ok/provider_reported", outcome, source)
+	}
+}
+
+func TestStreamingInvalidUsageAfterValidFallsBackToGatewayEstimate(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"ok"}]}`
+	accountID := "acct_stream_invalid_usage"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := strings.Join([]string{
+			`data: {"id":"chatcmpl","usage":{"prompt_tokens":1,"completion_tokens":0,"total_tokens":1},"choices":[{"delta":{"content":"ok"}}]}`,
+			`data: {"id":"chatcmpl","choices":[{"delta":{"content":"more"}}]}`,
+			`data: {"id":"chatcmpl","usage":{},"choices":[{"delta":{"content":""}}]}`,
+			`data: [DONE]`,
+			``,
+		}, "\n\n")
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "ok" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
 	}
 }
 

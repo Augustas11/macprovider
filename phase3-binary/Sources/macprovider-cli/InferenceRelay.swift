@@ -2,7 +2,7 @@ import Foundation
 import MacProviderCore
 
 actor InferenceRelay {
-    typealias SendFrame = ([String: Any]) async throws -> Void
+    typealias SendFrame = @Sendable (sending [String: Any]) async throws -> Void
 
     private struct ActiveRequest {
         let task: Task<Void, Never>
@@ -93,7 +93,7 @@ actor InferenceRelay {
         }
 
         let state = RelayRequestState()
-        let task = Task { [modelRuntime, providerStatus, loadedModelID, warmSwapEnabled, sendFrame, tier2Session, state] in
+        let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, warmSwapEnabled, sendFrame, tier2Session, state] in
             await Self.process(
                 requestID: requestID,
                 body: body,
@@ -106,7 +106,7 @@ actor InferenceRelay {
                 tier2Session: tier2Session,
                 sendFrame: sendFrame
             )
-            await self.removeActive(requestID)
+            await self?.removeActive(requestID)
         }
         active[requestID] = ActiveRequest(task: task, state: state)
     }
@@ -446,7 +446,7 @@ actor InferenceRelay {
     }
 
     private static func sendEndFrame(
-        _ frame: [String: Any],
+        _ frame: sending [String: Any],
         requestID: String,
         stream: Bool,
         tier2Session: Tier2ProviderSession?,

@@ -124,6 +124,7 @@ type ReservationSettlement struct {
 	PromptTokens     int64
 	CompletionTokens int64
 	TotalTokens      int64
+	MaxTotalTokens   int64
 	TokenSource      string
 	Outcome          string
 	SettledAt        time.Time
