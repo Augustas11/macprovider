@@ -7,6 +7,98 @@ import (
 	"time"
 )
 
+func TestProviderJSONL1ByteIdenticalDefault(t *testing.T) {
+	p := providerJSONL1Baseline()
+
+	got, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal provider: %v", err)
+	}
+
+	// Regenerate by running the test, copying the `got` value from the failure diff, and pasting here. Any diff against this constant for a default-zero new-field set is an L-1 regression per SPEC-001 v1.3 §6.7.3 cell 1.
+	const expected = `{"provider_id":"test-provider-1","assigned_id":"p_01H000000000000000000000","hostname":"test-host","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.6,"ram_gb":16,"max_context_tokens":8192,"max_concurrency":1,"slots_free":1,"slots_total":1,"throughput_tps_estimate":42.5,"endpoint_url":"","tier":"pinned","inference_path":"ws_tunneled","admitted_at":"2026-06-07T12:00:00Z","state":"ready","last_heartbeat_at":"2026-06-07T12:05:00Z","last_activity_at":"2026-06-07T12:05:00Z","connected_at":"2026-06-07T12:00:00Z","binary_version":"1.2.4"}`
+	if !bytes.Equal(got, []byte(expected)) {
+		t.Fatalf("provider JSON mismatch\n got: %s\nwant: %s", got, expected)
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(got, &fields); err != nil {
+		t.Fatalf("unmarshal provider json: %v", err)
+	}
+	for _, key := range []string{
+		"supported_models",
+		"publishes_supported_models",
+		"last_loading_state",
+		"loading_started_at",
+		"LastLoadingState",
+		"LoadingStartedAt",
+	} {
+		if _, ok := fields[key]; ok {
+			t.Fatalf("default provider JSON unexpectedly included %q: %s", key, got)
+		}
+	}
+}
+
+func TestProviderJSONSerializesNewFieldsWhenSet(t *testing.T) {
+	p := providerJSONL1Baseline()
+	p.SupportedModels = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit"}
+	p.PublishesSupportedModels = true
+	p.LastLoadingState = true
+	p.LoadingStartedAt = time.Date(2026, 6, 7, 12, 4, 30, 0, time.UTC)
+
+	got, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal provider: %v", err)
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(got, &fields); err != nil {
+		t.Fatalf("unmarshal provider json: %v", err)
+	}
+	models, ok := fields["supported_models"].([]any)
+	if !ok || len(models) != 1 || models[0] != "mlx-community/Qwen2.5-7B-Instruct-4bit" {
+		t.Fatalf("supported_models = %#v, want one model id", fields["supported_models"])
+	}
+	if fields["publishes_supported_models"] != true {
+		t.Fatalf("publishes_supported_models = %#v, want true", fields["publishes_supported_models"])
+	}
+	for _, key := range []string{
+		"last_loading_state",
+		"loading_started_at",
+		"LastLoadingState",
+		"LoadingStartedAt",
+	} {
+		if _, ok := fields[key]; ok {
+			t.Fatalf("internal loading field %q leaked in provider JSON: %s", key, got)
+		}
+	}
+}
+
+func providerJSONL1Baseline() Provider {
+	return Provider{
+		ProviderID:            "test-provider-1",
+		AssignedID:            "p_01H000000000000000000000",
+		Hostname:              "test-host",
+		ModelID:               "mlx-community/Qwen2.5-7B-Instruct-4bit",
+		ModelParamsB:          7.6,
+		RAMGB:                 16,
+		MaxContextTokens:      8192,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 42.5,
+		EndpointURL:           "",
+		Tier:                  TierPinned,
+		InferencePath:         InferencePathWSTunneled,
+		AdmittedAt:            time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC),
+		State:                 StateReady,
+		LastHeartbeatAt:       time.Date(2026, 6, 7, 12, 5, 0, 0, time.UTC),
+		LastActivityAt:        time.Date(2026, 6, 7, 12, 5, 0, 0, time.UTC),
+		ConnectedAt:           time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC),
+		BinaryVersion:         "1.2.4",
+	}
+}
+
 func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
 	base := Provider{State: StateReady, SlotsFree: 1}
 	if !base.RoutingEligible() {

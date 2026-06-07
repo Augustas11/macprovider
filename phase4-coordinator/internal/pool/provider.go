@@ -82,6 +82,20 @@ type Provider struct {
 	// enabled. The zero value represents a legacy provider with no claim.
 	AttestationStatus AttestationStatus `json:"attestation_status,omitempty"`
 
+	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
+	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.
+	SupportedModels []string `json:"supported_models,omitempty"`
+	// SPEC-002 v1.3.5 §3.X.2 — populated from publishes_supported_models per
+	// SPEC-010 v1.5 R-3.3.2; gates /v1/status echo per §7.4 R-7.4.1.
+	PublishesSupportedModels bool `json:"publishes_supported_models,omitempty"`
+	// SPEC-002 v1.3.5 §3.X.4 — sticky last-heartbeat loading flag for the
+	// §7.1 R-7.1.6 / §7.10 R-7.10.8 exactly-once operator_model_swap gate.
+	LastLoadingState bool `json:"-"`
+	// SPEC-002 v1.3.5 §7.10.2 R-7.10.6 — coordinator clock at the first
+	// observed loading:true heartbeat; loading_window_ms is computed at
+	// swap-completion emission.
+	LoadingStartedAt time.Time `json:"-"`
+
 	Tier2Session *Tier2Session `json:"-"`
 
 	conn net.Conn
