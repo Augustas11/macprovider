@@ -22,6 +22,8 @@ type Store struct {
 	db *sql.DB
 }
 
+const tokenDisplayPrefixLength = 12
+
 type TokenRecord struct {
 	ID           int64
 	TokenPrefix  string
@@ -151,7 +153,7 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	}
 	token := hex.EncodeToString(raw[:])
 	hash := tokenHash(token)
-	prefix := token[:6]
+	prefix := token[:tokenDisplayPrefixLength]
 	createdAt := nowString()
 	res, err := s.db.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, createdAt)
 	if err != nil {
@@ -205,9 +207,37 @@ func (s *Store) RevokeToken(ctx context.Context, tokenPrefix string) (TokenRecor
 	if len(tokenPrefix) < 6 {
 		return TokenRecord{}, fmt.Errorf("token prefix must be at least 6 hex characters")
 	}
-	prefix := tokenPrefix[:6]
+	prefix := tokenPrefix
+	if len(prefix) > tokenDisplayPrefixLength {
+		prefix = prefix[:tokenDisplayPrefixLength]
+	}
+	if !isHexPrefix(prefix) {
+		return TokenRecord{}, fmt.Errorf("token prefix must contain only hex characters")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM provider_tokens WHERE substr(token_prefix, 1, ?) = ? AND revoked_at IS NULL LIMIT 2`, len(prefix), prefix)
+	if err != nil {
+		return TokenRecord{}, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return TokenRecord{}, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return TokenRecord{}, err
+	}
+	if len(ids) == 0 {
+		return TokenRecord{}, fmt.Errorf("no active token found for prefix %s", prefix)
+	}
+	if len(ids) > 1 {
+		return TokenRecord{}, fmt.Errorf("ambiguous active token prefix %s", prefix)
+	}
 	revokedAt := nowString()
-	res, err := s.db.ExecContext(ctx, `UPDATE provider_tokens SET revoked_at = ? WHERE token_prefix = ? AND revoked_at IS NULL`, revokedAt, prefix)
+	res, err := s.db.ExecContext(ctx, `UPDATE provider_tokens SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, revokedAt, ids[0])
 	if err != nil {
 		return TokenRecord{}, err
 	}
@@ -218,7 +248,7 @@ func (s *Store) RevokeToken(ctx context.Context, tokenPrefix string) (TokenRecor
 	if affected == 0 {
 		return TokenRecord{}, fmt.Errorf("no active token found for prefix %s", prefix)
 	}
-	return s.tokenByPrefix(ctx, prefix)
+	return s.tokenByID(ctx, ids[0])
 }
 
 func (s *Store) ListTokens(ctx context.Context) ([]TokenRecord, error) {
@@ -238,11 +268,21 @@ func (s *Store) ListTokens(ctx context.Context) ([]TokenRecord, error) {
 	return records, rows.Err()
 }
 
-func (s *Store) tokenByPrefix(ctx context.Context, prefix string) (TokenRecord, error) {
+func (s *Store) tokenByID(ctx context.Context, id int64) (TokenRecord, error) {
 	var r TokenRecord
-	err := s.db.QueryRowContext(ctx, `SELECT id, token_prefix, provider_id, provider_name, created_at, revoked_at, last_used_at FROM provider_tokens WHERE token_prefix = ? ORDER BY id DESC LIMIT 1`, prefix).
+	err := s.db.QueryRowContext(ctx, `SELECT id, token_prefix, provider_id, provider_name, created_at, revoked_at, last_used_at FROM provider_tokens WHERE id = ?`, id).
 		Scan(&r.ID, &r.TokenPrefix, &r.ProviderID, &r.ProviderName, &r.CreatedAt, &r.RevokedAt, &r.LastUsedAt)
 	return r, err
+}
+
+func isHexPrefix(prefix string) bool {
+	for _, r := range prefix {
+		if r >= '0' && r <= '9' || r >= 'a' && r <= 'f' || r >= 'A' && r <= 'F' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func tokenHash(token string) string {

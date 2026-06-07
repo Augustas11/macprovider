@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/augstar/macprovider-gateway/internal/storage"
@@ -453,8 +454,8 @@ func (s *Store) SettleReservation(ctx context.Context, settlement storage.Reserv
 	if settlement.SettledAt.IsZero() {
 		settlement.SettledAt = time.Now().UTC()
 	}
-	if settlement.TotalTokens == 0 {
-		settlement.TotalTokens = settlement.PromptTokens + settlement.CompletionTokens
+	if err := normalizeSettlementTokens(&settlement); err != nil {
+		return err
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE quota_reservations
@@ -497,8 +498,8 @@ func (s *Store) SettleDemoReservation(ctx context.Context, settlement storage.Re
 	if settlement.SettledAt.IsZero() {
 		settlement.SettledAt = time.Now().UTC()
 	}
-	if settlement.TotalTokens == 0 {
-		settlement.TotalTokens = settlement.PromptTokens + settlement.CompletionTokens
+	if err := normalizeSettlementTokens(&settlement); err != nil {
+		return err
 	}
 	_, err = tx.ExecContext(ctx, `
 		UPDATE quota_reservations
@@ -622,8 +623,17 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) 
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
+	if event.PromptTokens < 0 || event.CompletionTokens < 0 || event.TotalTokens < 0 {
+		return fmt.Errorf("usage tokens must be non-negative")
+	}
+	if event.PromptTokens > math.MaxInt64-event.CompletionTokens {
+		return fmt.Errorf("usage token total overflows int64")
+	}
+	sum := event.PromptTokens + event.CompletionTokens
 	if event.TotalTokens == 0 {
-		event.TotalTokens = event.PromptTokens + event.CompletionTokens
+		event.TotalTokens = sum
+	} else if event.TotalTokens != sum {
+		return fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
@@ -631,6 +641,25 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) 
 		event.RequestID, event.AccountID, event.DemoIdentity, event.WindowDate, event.PromptTokens, event.CompletionTokens,
 		event.TotalTokens, event.TokenSource, event.Outcome, encodeTime(event.CreatedAt))
 	return err
+}
+
+func normalizeSettlementTokens(settlement *storage.ReservationSettlement) error {
+	if settlement.PromptTokens < 0 || settlement.CompletionTokens < 0 || settlement.TotalTokens < 0 {
+		return fmt.Errorf("settlement tokens must be non-negative")
+	}
+	if settlement.PromptTokens > math.MaxInt64-settlement.CompletionTokens {
+		return fmt.Errorf("settlement token total overflows int64")
+	}
+	sum := settlement.PromptTokens + settlement.CompletionTokens
+	if settlement.TotalTokens == 0 {
+		settlement.TotalTokens = sum
+	} else if settlement.TotalTokens != sum {
+		return fmt.Errorf("settlement total_tokens does not match prompt_tokens plus completion_tokens")
+	}
+	if settlement.MaxTotalTokens > 0 && settlement.TotalTokens > settlement.MaxTotalTokens {
+		return fmt.Errorf("settlement total_tokens exceeds request maximum")
+	}
+	return nil
 }
 
 func (s *Store) DailyUsage(ctx context.Context, accountID, windowDate string) (int64, int64, error) {

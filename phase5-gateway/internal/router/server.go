@@ -1414,14 +1414,15 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	promptEstimate := estimatePromptTokens(body)
+	maxUsageTokens := promptEstimate + maxTokens
 	if chat.Stream {
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, cancelUpstream)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, cancelUpstream)
 		return
 	}
-	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate)
+	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens)
 }
 
-func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate int64) {
+func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens int64) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
@@ -1438,7 +1439,9 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if resp.StatusCode == http.StatusGatewayTimeout {
-		_ = s.settleRequest(r, subject, promptEstimate, 0, "gateway_estimated", "provider_timeout")
+		if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
+			return
+		}
 		writeError(w, http.StatusGatewayTimeout, "api_error", "provider_timeout", "Provider timed out")
 		return
 	}
@@ -1457,25 +1460,35 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	}
 	if resp.StatusCode != http.StatusOK {
 		completion := completionFromHeader(resp.Header)
-		_ = s.settleRequest(r, subject, promptEstimate, completion, "gateway_estimated", "upstream_error")
+		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "upstream_error") {
+			return
+		}
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
-	usage, ok := usageFromJSON(body)
+	usage, ok, usageErr := usageFromJSON(body, maxUsageTokens)
 	tokenSource := "gateway_estimated"
 	if !ok {
 		usage = tokenUsage{PromptTokens: promptEstimate, CompletionTokens: 0, TotalTokens: promptEstimate}
+	} else if usageErr != nil {
+		if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "invalid_provider_usage") {
+			return
+		}
+		writeError(w, http.StatusBadGateway, "api_error", "invalid_provider_usage", "Upstream provider returned invalid usage")
+		return
 	} else {
 		tokenSource = "provider_reported"
 	}
-	_ = s.settleRequest(r, subject, usage.PromptTokens, usage.CompletionTokens, tokenSource, "ok")
+	if !s.settleBeforeResponse(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok") {
+		return
+	}
 	copyCleanHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate int64, cancelUpstream func()) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens int64, cancelUpstream func()) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
@@ -1488,7 +1501,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusGatewayTimeout {
-			_ = s.settleRequest(r, subject, promptEstimate, 0, "gateway_estimated", "provider_timeout")
+			if !s.settleBeforeResponse(w, r, subject, promptEstimate, 0, maxUsageTokens, "gateway_estimated", "provider_timeout") {
+				return
+			}
 			writeError(w, http.StatusGatewayTimeout, "api_error", "provider_timeout", "Provider timed out")
 			return
 		}
@@ -1506,7 +1521,9 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
 		}
-		_ = s.settleRequest(r, subject, promptEstimate, completionFromHeader(resp.Header), "gateway_estimated", "upstream_error")
+		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completionFromHeader(resp.Header), maxUsageTokens, "gateway_estimated", "upstream_error") {
+			return
+		}
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
@@ -1533,14 +1550,15 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}()
 	var emitted int64
 	var reported *tokenUsage
+	invalidReportedUsage := false
 	for scanner.Scan() {
 		select {
 		case <-r.Context().Done():
 			if reported != nil {
-				_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "client_disconnect")
+				s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
 				return
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, cancelCoordinator)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
 			return
 		default:
 		}
@@ -1549,8 +1567,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			data := strings.TrimPrefix(line, "data: ")
 			if data != "[DONE]" {
 				emitted += int64(len(data))
-				if usage, ok := usageFromJSON([]byte(data)); ok {
-					reported = &usage
+				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens); ok {
+					if err != nil {
+						invalidReportedUsage = true
+						reported = nil
+						slog.Warn("invalid provider usage in stream; falling back to gateway estimate", "request_id", requestID(r), "error", err)
+					} else if !invalidReportedUsage {
+						reported = &usage
+					}
 				}
 			}
 		}
@@ -1561,10 +1585,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	if errors.Is(r.Context().Err(), context.Canceled) {
 		if reported != nil {
-			_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "client_disconnect")
+			s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
 			return
 		}
-		s.settleCancelledStream(r, subject, promptEstimate, emitted, cancelCoordinator)
+		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
 		return
 	}
 	if err := scanner.Err(); err != nil {
@@ -1574,17 +1598,17 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			flusher.Flush()
 		}
 		if reported != nil {
-			_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "stream_truncated")
+			s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "stream_truncated")
 			return
 		}
-		_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "stream_truncated")
+		s.settleAfterCommit(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), maxUsageTokens, "gateway_estimated", "stream_truncated")
 		return
 	}
-	if reported != nil {
-		_ = s.settleRequest(r, subject, reported.PromptTokens, reported.CompletionTokens, "provider_reported", "ok")
+	if reported != nil && !invalidReportedUsage {
+		s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "ok")
 		return
 	}
-	_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "ok")
+	s.settleAfterCommit(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), maxUsageTokens, "gateway_estimated", "ok")
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
@@ -1619,9 +1643,26 @@ func openAIErrorCode(body []byte) string {
 	return strings.TrimSpace(envelope.Error.Code)
 }
 
-func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted int64, cancelCoordinator func()) {
+func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens int64, cancelCoordinator func()) {
 	cancelCoordinator()
-	_ = s.settleRequest(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), "gateway_estimated", "client_disconnect")
+	s.settleAfterCommit(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), maxUsageTokens, "gateway_estimated", "client_disconnect")
+}
+
+func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) bool {
+	if err := s.settleRequest(r, subject, prompt, completion, maxTotal, source, outcome); err != nil {
+		slog.Error("gateway settlement failed before response", "request_id", requestID(r), "account_id", subject.AccountID, "source", source, "outcome", outcome, "error", err)
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		writeError(w, http.StatusInternalServerError, "server_error", "settlement_failed", "Could not settle usage")
+		return false
+	}
+	return true
+}
+
+func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) {
+	if err := s.settleRequest(r, subject, prompt, completion, maxTotal, source, outcome); err != nil {
+		slog.Error("gateway settlement failed after response commit", "request_id", requestID(r), "account_id", subject.AccountID, "source", source, "outcome", outcome, "error", err)
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+	}
 }
 
 func validConversationTag(tag string) bool {
@@ -1653,10 +1694,10 @@ func (s *Server) deriveConversationKey(accountID, tag string) string {
 	return "conv:" + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, completion int64, source, outcome string) error {
+func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) error {
 	settlement := storage.ReservationSettlement{
 		AccountID: subject.AccountID, RequestID: requestID(r), PromptTokens: prompt, CompletionTokens: completion,
-		TokenSource: source, Outcome: outcome, SettledAt: s.now(),
+		MaxTotalTokens: maxTotal, TokenSource: source, Outcome: outcome, SettledAt: s.now(),
 	}
 	if subject.DemoIdentity != "" {
 		return s.store.SettleDemoReservation(context.Background(), settlement, storage.DemoUsageEvent{
@@ -2285,17 +2326,48 @@ func parseChatRequest(body []byte) (chatRequest, error) {
 	return req, nil
 }
 
-func usageFromJSON(body []byte) (tokenUsage, bool) {
+func usageFromJSON(body []byte, maxUsageTokens int64) (tokenUsage, bool, error) {
 	var envelope struct {
-		Usage *tokenUsage `json:"usage"`
+		Usage json.RawMessage `json:"usage"`
 	}
 	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Usage == nil {
-		return tokenUsage{}, false
+		return tokenUsage{}, false, nil
 	}
-	if envelope.Usage.TotalTokens == 0 {
-		envelope.Usage.TotalTokens = envelope.Usage.PromptTokens + envelope.Usage.CompletionTokens
+	if bytes.Equal(bytes.TrimSpace(envelope.Usage), []byte("null")) {
+		return tokenUsage{}, false, nil
 	}
-	return *envelope.Usage, true
+	var rawUsage struct {
+		PromptTokens     *int64 `json:"prompt_tokens"`
+		CompletionTokens *int64 `json:"completion_tokens"`
+		TotalTokens      *int64 `json:"total_tokens"`
+	}
+	if err := json.Unmarshal(envelope.Usage, &rawUsage); err != nil {
+		return tokenUsage{}, true, fmt.Errorf("usage object is malformed")
+	}
+	if rawUsage.PromptTokens == nil || rawUsage.CompletionTokens == nil {
+		return tokenUsage{}, true, fmt.Errorf("usage prompt_tokens and completion_tokens are required")
+	}
+	usage := tokenUsage{}
+	usage.PromptTokens = *rawUsage.PromptTokens
+	usage.CompletionTokens = *rawUsage.CompletionTokens
+	if rawUsage.TotalTokens != nil {
+		usage.TotalTokens = *rawUsage.TotalTokens
+	}
+	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 {
+		return tokenUsage{}, true, fmt.Errorf("usage tokens must be non-negative")
+	}
+	if usage.PromptTokens > math.MaxInt64-usage.CompletionTokens {
+		return tokenUsage{}, true, fmt.Errorf("usage token total overflows int64")
+	}
+	sum := usage.PromptTokens + usage.CompletionTokens
+	if sum > maxUsageTokens {
+		return tokenUsage{}, true, fmt.Errorf("usage token total exceeds request maximum")
+	}
+	if rawUsage.TotalTokens != nil && usage.TotalTokens != 0 && usage.TotalTokens != sum {
+		return tokenUsage{}, true, fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
+	}
+	usage.TotalTokens = sum
+	return usage, true, nil
 }
 
 func completionFromHeader(header http.Header) int64 {

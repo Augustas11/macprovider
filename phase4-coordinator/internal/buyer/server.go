@@ -1438,6 +1438,11 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 		case chunk, ok := <-chunks:
 			if ok {
 				observeTTFT()
+				if body.Len() > int(maxUpstreamResponseBodyBytes)-len(chunk.Data) {
+					relay.Cancel("response_body_too_large")
+					writeError(w, http.StatusBadGateway, "provider_response_too_large", "Provider response exceeded coordinator limit")
+					return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider response exceeded coordinator limit"}
+				}
 				body.WriteString(chunk.Data)
 			} else {
 				chunks = nil
@@ -1451,6 +1456,11 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 						continue
 					}
 					observeTTFT()
+					if body.Len() > int(maxUpstreamResponseBodyBytes)-len(chunk.Data) {
+						relay.Cancel("response_body_too_large")
+						writeError(w, http.StatusBadGateway, "provider_response_too_large", "Provider response exceeded coordinator limit")
+						return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider response exceeded coordinator limit"}
+					}
 					body.WriteString(chunk.Data)
 				default:
 					chunks = nil

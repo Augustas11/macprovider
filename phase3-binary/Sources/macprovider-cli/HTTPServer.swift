@@ -239,12 +239,12 @@ final class RouterHandler: ChannelInboundHandler {
                 }
             }
         } catch let error as APIError {
-            Task {
+            Task { [providerStatus] in
                 await providerStatus.recordError()
             }
             writeAPIError(context: context, error)
         } catch {
-            Task {
+            Task { [providerStatus] in
                 await providerStatus.recordError()
             }
             writeAPIError(

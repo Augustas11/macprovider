@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
@@ -217,7 +218,9 @@ func (s *Store) InsertExec(ctx context.Context, db interface {
 func insert(ctx context.Context, db execer, row Row) error {
 	var totalTokens sql.NullInt64
 	if row.PromptTokens != nil && row.CompletionTokens != nil {
-		totalTokens = sql.NullInt64{Int64: *row.PromptTokens + *row.CompletionTokens, Valid: true}
+		if *row.PromptTokens >= 0 && *row.CompletionTokens >= 0 && *row.PromptTokens <= math.MaxInt64-*row.CompletionTokens {
+			totalTokens = sql.NullInt64{Int64: *row.PromptTokens + *row.CompletionTokens, Valid: true}
+		}
 	}
 	_, err := db.ExecContext(ctx, `
 INSERT INTO request_log (

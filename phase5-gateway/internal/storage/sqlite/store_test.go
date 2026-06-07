@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -548,6 +550,57 @@ func TestReservationErrorBranches(t *testing.T) {
 	}
 }
 
+func TestReservationSettlementRejectsInvalidTokenTotals(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_invalid_settlement")
+	for _, tc := range []struct {
+		name       string
+		settlement storage.ReservationSettlement
+	}{
+		{
+			name: "negative",
+			settlement: storage.ReservationSettlement{
+				AccountID: "acct_invalid_settlement", RequestID: "req_negative", PromptTokens: -1, CompletionTokens: 1,
+				TokenSource: "provider_reported", Outcome: "ok", SettledAt: fixedTime(),
+			},
+		},
+		{
+			name: "overflow",
+			settlement: storage.ReservationSettlement{
+				AccountID: "acct_invalid_settlement", RequestID: "req_overflow", PromptTokens: math.MaxInt64, CompletionTokens: 1,
+				TokenSource: "provider_reported", Outcome: "ok", SettledAt: fixedTime(),
+			},
+		},
+		{
+			name: "inconsistent_total",
+			settlement: storage.ReservationSettlement{
+				AccountID: "acct_invalid_settlement", RequestID: "req_inconsistent", PromptTokens: 1, CompletionTokens: 2, TotalTokens: 4,
+				TokenSource: "provider_reported", Outcome: "ok", SettledAt: fixedTime(),
+			},
+		},
+		{
+			name: "exceeds_request_max",
+			settlement: storage.ReservationSettlement{
+				AccountID: "acct_invalid_settlement", RequestID: "req_exceeds_max", PromptTokens: 7, CompletionTokens: 5, MaxTotalTokens: 10,
+				TokenSource: "provider_reported", Outcome: "ok", SettledAt: fixedTime(),
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+				AccountID: "acct_invalid_settlement", RequestID: tc.settlement.RequestID, WindowDate: "2026-05-29",
+				RequestedTokens: 10, DailyQuota: 1000, ExpiresAt: fixedTime().Add(time.Minute), CreatedAt: fixedTime(),
+			}); err != nil {
+				t.Fatalf("ReserveQuota: %v", err)
+			}
+			if err := store.SettleReservation(ctx, tc.settlement); err == nil {
+				t.Fatal("SettleReservation unexpectedly accepted invalid token totals")
+			}
+		})
+	}
+}
+
 func TestEventInsertDefaults(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
@@ -674,6 +727,9 @@ func TestFeedbackSummaryAndCapacityStores(t *testing.T) {
 }
 
 func TestAuthLookupP95UnderOneMillisecondWith10KKeys(t *testing.T) {
+	if raceEnabled {
+		t.Skip("sub-millisecond latency threshold is not meaningful under race instrumentation")
+	}
 	ctx := context.Background()
 	store := newTestStore(t)
 	createAccount(t, store, "acct_bench")
@@ -707,6 +763,18 @@ func TestAuthLookupP95UnderOneMillisecondWith10KKeys(t *testing.T) {
 		t.Fatalf("auth lookup p95 = %s, want < 1ms", p95)
 	}
 	t.Logf("auth lookup p95 against 10K keys: %s", p95)
+}
+
+func TestAPIKeyHashIndexExists(t *testing.T) {
+	store := newTestStore(t)
+	var sqlText string
+	err := store.db.QueryRowContext(context.Background(), `SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'idx_api_keys_hash'`).Scan(&sqlText)
+	if err != nil {
+		t.Fatalf("idx_api_keys_hash lookup: %v", err)
+	}
+	if !strings.Contains(sqlText, "key_hash") {
+		t.Fatalf("idx_api_keys_hash sql = %q, want key_hash index", sqlText)
+	}
 }
 
 func newTestStore(t *testing.T) *Store {

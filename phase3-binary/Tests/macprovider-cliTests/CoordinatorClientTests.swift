@@ -856,7 +856,7 @@ final class CoordinatorClientTests: XCTestCase {
         enableWarmSwap: Bool = false,
         modelRuntime: ModelRuntime? = nil,
         attestationGenerator: Tier2AttestationTokenGenerating = StaticAttestationGenerator(token: nil),
-        connectAndRunOverride: (() async throws -> Void)? = nil
+        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"

@@ -65,6 +65,8 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 }
 
 actor CoordinatorClient {
+    typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
+
     static let binaryVersion = "1.3.0"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
@@ -82,9 +84,9 @@ actor CoordinatorClient {
     private let publishesSupportedModels: Bool
     private let warmSwapEnabled: Bool
     private let reconnectGraceNanoseconds: UInt64
-    private let connectAndRunOverride: (() async throws -> Void)?
+    private let connectAndRunOverride: (@Sendable () async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
-    private let webSocketFactory: (URL) -> ProviderWebSocketTask
+    private let webSocketFactory: @Sendable (URL) -> ProviderWebSocketTask
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
     private var inferenceRelay: InferenceRelay?
     private var tier2Session: Tier2ProviderSession?
@@ -93,18 +95,18 @@ actor CoordinatorClient {
     private var heartbeatTask: Task<Void, Never>?
     private var swapHeartbeatTask: Task<Void, Never>?
     private var sleepAssertion: ProviderSleepAssertion?
-    private let sendOverride: (([String: Any]) async throws -> Void)?
+    private let sendOverride: SendOverride?
 
     init?(
         config: AppConfig,
         modelRuntime: ModelRuntime,
         providerStatus: ProviderStatus,
-        sendOverride: (([String: Any]) async throws -> Void)? = nil,
+        sendOverride: SendOverride? = nil,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
         attestationGenerator: Tier2AttestationTokenGenerating = ManagedDeviceAttestationGenerator(),
         webSocketFactory: @escaping @Sendable (URL) -> ProviderWebSocketTask = { URLSession.shared.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
-        connectAndRunOverride: (() async throws -> Void)? = nil
+        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
     ) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
             return nil
@@ -772,7 +774,7 @@ actor CoordinatorClient {
         return message
     }
 
-    private func send(_ payload: [String: Any]) async throws {
+    private func send(_ payload: sending [String: Any]) async throws {
         if let sendOverride {
             try await sendOverride(payload)
             return
@@ -781,7 +783,7 @@ actor CoordinatorClient {
         try await Self.send(payload, to: webSocket)
     }
 
-    private static func send(_ payload: [String: Any], to webSocket: ProviderWebSocketTask) async throws {
+    private static func send(_ payload: sending [String: Any], to webSocket: ProviderWebSocketTask) async throws {
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
         let text = String(decoding: data, as: UTF8.self)
         if let type = payload["type"] as? String {
