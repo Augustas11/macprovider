@@ -316,6 +316,10 @@ actor InferenceRelay {
         }
 
         do {
+            let handle = try await modelRuntime.acquireRequestHandle(request)
+            defer {
+                Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
+            }
             _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                 id: id,
                 created: created,
@@ -324,7 +328,7 @@ actor InferenceRelay {
                 finishReason: NSNull()
             )))
 
-            let completion = try await modelRuntime.stream(request, shouldCancel: { state.isCancelled }) { chunk in
+            let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
                 _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                     id: id,
                     created: created,

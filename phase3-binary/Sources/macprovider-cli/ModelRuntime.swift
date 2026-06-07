@@ -4,9 +4,12 @@ import MLXLLM
 import MLXLMCommon
 import MacProviderCore
 
-protocol ModelRuntimeServing: Sendable {
+protocol ModelRuntimeServing: Actor {
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult
-    func stream(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (String) -> Void) async throws -> CompletionResult
+    func stream(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (String) -> Void) async throws -> CompletionResult
+    func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws
+    func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
+    func unregisterInFlight(_ id: Int)
     func currentSnapshot() async -> RuntimeSnapshot
 }
 
@@ -19,12 +22,6 @@ extension ModelRuntimeServing {
         try await complete(request, shouldCancel: { false })
     }
 
-    func stream(
-        _ request: ChatCompletionRequest,
-        onChunk: @escaping @Sendable (String) -> Void
-    ) async throws -> CompletionResult {
-        try await stream(request, shouldCancel: { false }, onChunk: onChunk)
-    }
 }
 
 public struct RuntimeSnapshot: @unchecked Sendable {
@@ -32,6 +29,12 @@ public struct RuntimeSnapshot: @unchecked Sendable {
     public let container: ModelContainer?
     public let modelID: String?
     public let modelHash: String?
+}
+
+public struct RequestHandle: @unchecked Sendable {
+    public let snapshot: RuntimeSnapshot
+    public let registrationID: Int
+    let drainCancelled: DrainCancelToken
 }
 
 public struct WarmSwapDisabledError: Error, CustomStringConvertible {
@@ -287,11 +290,26 @@ actor ModelRuntime: ModelRuntimeServing {
         signalContinuations.removeValue(forKey: id)
     }
 
-    func preflight(_ request: ChatCompletionRequest) async throws {
-        let snapshot = await currentSnapshot()
+    func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle {
+        let snapshot = RuntimeSnapshot(
+            state: state,
+            container: currentContainer,
+            modelID: currentModelID,
+            modelHash: currentModelHash
+        )
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
-        guard let container = snapshot.container else {
+        let drainCancelled = DrainCancelToken()
+        let registrationID = registerInFlight { drainCancelled.fire() }
+        return RequestHandle(
+            snapshot: snapshot,
+            registrationID: registrationID,
+            drainCancelled: drainCancelled
+        )
+    }
+
+    func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws {
+        guard let container = handle.snapshot.container else {
             if testCompletion != nil {
                 return
             }
@@ -380,15 +398,12 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func stream(
         _ request: ChatCompletionRequest,
+        with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (String) -> Void
     ) async throws -> CompletionResult {
-        let snapshot = await currentSnapshot()
-        try Self.validateReady(snapshot.state)
-        try request.validateModelMatches(snapshot.modelID)
-        let drainCancelled = DrainCancelToken()
-        let registrationID = registerInFlight { drainCancelled.fire() }
-        defer { unregisterInFlight(registrationID) }
+        let snapshot = handle.snapshot
+        let drainCancelled = handle.drainCancelled
         if let testCompletion {
             let completion = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
@@ -704,7 +719,7 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 }
 
-private final class DrainCancelToken: @unchecked Sendable {
+final class DrainCancelToken: @unchecked Sendable {
     private var _fired = false
     private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
     private let lock = NSLock()

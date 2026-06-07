@@ -266,6 +266,7 @@ final class RouterHandler: ChannelInboundHandler {
         let providerStatus = providerStatus
         Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled] in
             let startedAt = await providerStatus.beginRequest()
+            var sseStarted = false
             do {
                 let snapshot = await modelRuntime.currentSnapshot()
                 if let error = Self.warmSwapRejectionError(for: snapshot) {
@@ -274,32 +275,25 @@ final class RouterHandler: ChannelInboundHandler {
                 if warmSwapEnabled {
                     try request.validateModelMatches(snapshot.modelID)
                 }
-                try await modelRuntime.preflight(request)
-            } catch let error as APIError {
-                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                writer.writeAPIError(error)
-                return
-            } catch {
-                await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                writer.writeAPIError(
-                    APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
-                )
-                return
-            }
+                let handle = try await modelRuntime.acquireRequestHandle(request)
+                defer {
+                    Task { await modelRuntime.unregisterInFlight(handle.registrationID) }
+                }
+                try await modelRuntime.preflight(request, with: handle)
 
-            writer.startSSE()
-            writer.writeSSEJSON(
-                Self.chatCompletionChunk(
-                    id: id,
-                    created: created,
-                    model: request.model,
-                    delta: ["role": "assistant", "content": ""],
-                    finishReason: NSNull()
+                writer.startSSE()
+                sseStarted = true
+                writer.writeSSEJSON(
+                    Self.chatCompletionChunk(
+                        id: id,
+                        created: created,
+                        model: request.model,
+                        delta: ["role": "assistant", "content": ""],
+                        finishReason: NSNull()
+                    )
                 )
-            )
 
-            do {
-                let completion = try await modelRuntime.stream(request) { chunk in
+                let completion = try await modelRuntime.stream(request, with: handle) { chunk in
                     writer.writeSSEJSON(
                         Self.chatCompletionChunk(
                             id: id,
@@ -338,23 +332,37 @@ final class RouterHandler: ChannelInboundHandler {
                 writer.writeSSEDone()
             } catch let error as APIError {
                 await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                writer.writeSSEJSON(error.envelope)
-                writer.writeSSEDone()
+                if sseStarted {
+                    writer.writeSSEJSON(error.envelope)
+                    writer.writeSSEDone()
+                } else {
+                    writer.writeAPIError(error)
+                }
             } catch is DrainCancelledError {
                 await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                writer.writeSSEJSON(Self.swapDrainTimeoutEnvelope())
-                writer.writeSSEDone()
+                if sseStarted {
+                    writer.writeSSEJSON(Self.swapDrainTimeoutEnvelope())
+                    writer.writeSSEDone()
+                } else {
+                    writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
+                }
             } catch {
                 await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                writer.writeSSEJSON(
-                    APIError(
-                        status: 500,
-                        message: "Inference engine error",
-                        type: "server_error",
-                        code: "internal_error"
-                    ).envelope
-                )
-                writer.writeSSEDone()
+                if sseStarted {
+                    writer.writeSSEJSON(
+                        APIError(
+                            status: 500,
+                            message: "Inference engine error",
+                            type: "server_error",
+                            code: "internal_error"
+                        ).envelope
+                    )
+                    writer.writeSSEDone()
+                } else {
+                    writer.writeAPIError(
+                        APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
+                    )
+                }
             }
         }
     }
