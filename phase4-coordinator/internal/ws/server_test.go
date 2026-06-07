@@ -361,7 +361,22 @@ func TestProviderAuthV2InitialMissingModelIDRejectedOnTheWire(t *testing.T) {
 	initial["model_id"] = "X"
 	initial["supported_models"] = []string{"Y"}
 
-	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models missing model_id")
+	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "model_id not in supported_models")
+}
+
+// TestProviderAuthV2InitialSupportedModelsWrongTypeRejectedOnTheWire
+// closes the pre-merge audit CRITICAL [code:1.1]: initial-stage
+// JSON-type drift on supported_models MUST surface the SPEC-010 v1.5
+// R-3.1.9 step-1 LOCKED substring "supported_models must be array of
+// strings" via auth_response + WS close per AC-K.15. Pre-R3 the parser
+// returned bare badField="supported_models" which was excluded from
+// isSpec010CatalogBadField's exact-match allowlist and fell through to
+// the generic envelope close path, violating the AC.
+func TestProviderAuthV2InitialSupportedModelsWrongTypeRejectedOnTheWire(t *testing.T) {
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	initial["supported_models"] = "not-an-array"
+
+	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models must be array of strings")
 }
 
 func TestProviderAuthV2InitialEmptyCatalogRejectedOnTheWire(t *testing.T) {

@@ -399,14 +399,20 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	if err := json.Unmarshal(capsRaw, &req.Tier2Capabilities); err != nil {
 		return AuthRequest{}, Spec010Presence{}, "tier2_capabilities", err
 	}
+	// SPEC-010 v1.5 R-3.1.9 mandates the LOCKED reason-text substring
+	// for each first-failure validation step. JSON-type failures MUST
+	// surface "supported_models must be array of strings" (NOT a bare
+	// "supported_models" badField — that would miss the
+	// isSpec010CatalogBadField allowlist and fall through to the
+	// generic close path, violating AC-K.15).
 	presence := Spec010Presence{}
 	if v, ok := raw["supported_models"]; ok {
 		presence.SupportedModels = true
 		if string(v) == "null" {
-			return AuthRequest{}, presence, "supported_models", fmt.Errorf("supported_models must be an array of strings")
+			return AuthRequest{}, presence, "supported_models must be array of strings", fieldError{Field: "supported_models must be array of strings"}
 		}
 		if err := json.Unmarshal(v, &req.SupportedModels); err != nil {
-			return AuthRequest{}, presence, "supported_models", err
+			return AuthRequest{}, presence, "supported_models must be array of strings", fieldError{Field: "supported_models must be array of strings"}
 		}
 	}
 	if v, ok := raw["publishes_supported_models"]; ok {
@@ -438,8 +444,11 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 			}
 			seen[normalized] = struct{}{}
 		}
+		// SPEC-010 v1.5 R-3.1.4 / R-3.1.9 — containment failure surfaces
+		// the LOCKED substring "model_id not in supported_models" (NOT
+		// the inverted "supported_models missing model_id").
 		if _, ok := seen[normalizeSupportedModelEntry(req.ModelID)]; !ok {
-			return AuthRequest{}, presence, "supported_models missing model_id", fieldError{Field: "supported_models missing model_id"}
+			return AuthRequest{}, presence, "model_id not in supported_models", fieldError{Field: "model_id not in supported_models"}
 		}
 	}
 	return req, presence, "", nil
@@ -455,6 +464,15 @@ func parseAuthProof(raw map[string]json.RawMessage, req AuthRequest) (AuthReques
 	if token, ok := raw["attestation_token"]; ok {
 		req.AttestationToken = token
 	}
+	// Proof-stage MUST keep the bare "supported_models" badField (NOT
+	// the locked initial-stage substring) — AC-K.15's surfacing
+	// contract is initial-stage-only, and the R2V regression test
+	// TestProviderAuthV2ProofStageFirstWithMalformedCatalogTakesEnvelopePath
+	// requires a proof-stage-first frame with malformed
+	// supported_models to take CloseUnrecognizedAuthMessage (4000),
+	// not the AC-K.15 CloseInvalidHello path. Keeping the bare
+	// badField out of isSpec010CatalogBadField's exact-match list is
+	// what implements this separation.
 	presence := Spec010Presence{}
 	if v, ok := raw["supported_models"]; ok {
 		presence.SupportedModels = true

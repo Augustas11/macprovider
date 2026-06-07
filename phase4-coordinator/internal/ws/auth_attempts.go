@@ -94,11 +94,16 @@ func (s *authAttemptStore) count() int {
 // failures keep the existing generic close path).
 func isSpec010CatalogBadField(badField string) bool {
 	switch badField {
-	case "supported_models cannot be empty",
+	// SPEC-010 v1.5 R-3.1.9 LOCKED first-failure substrings. Each MUST
+	// reach the wire verbatim per SPEC-002 v1.3.5 AC-K.15. Order here
+	// mirrors the R-3.1.9 validation order (JSON type → empty → per-
+	// entry length → array length → duplicate → containment).
+	case "supported_models must be array of strings",
+		"supported_models cannot be empty",
 		"supported_models entry exceeds 256 bytes",
 		"supported_models exceeds 64 entries",
 		"supported_models contains duplicate entries",
-		"supported_models missing model_id":
+		"model_id not in supported_models":
 		return true
 	default:
 		return false

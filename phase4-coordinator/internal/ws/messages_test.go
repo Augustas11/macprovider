@@ -202,8 +202,29 @@ func TestParseAuthInitialRejectsMissingModelID(t *testing.T) {
 	if err == nil {
 		t.Fatal("ParseAuthRequest err = nil")
 	}
-	if !strings.Contains(field, "missing model_id") {
-		t.Fatalf("badField = %q", field)
+	// SPEC-010 v1.5 R-3.1.4 / R-3.1.9 LOCKED containment substring.
+	if field != "model_id not in supported_models" {
+		t.Fatalf("badField = %q, want %q (SPEC-010 R-3.1.4 locked oracle)",
+			field, "model_id not in supported_models")
+	}
+}
+
+// TestParseAuthInitialRejectsSupportedModelsWrongType pins the SPEC-010
+// v1.5 R-3.1.9 step-1 LOCKED substring "supported_models must be array
+// of strings" for the JSON-type-check failure path. Without the exact
+// substring, the wire-side AC-K.15 surfacing falls through to the
+// generic envelope close (the pre-merge audit CRITICAL [code:1.1]).
+func TestParseAuthInitialRejectsSupportedModelsWrongType(t *testing.T) {
+	payload := validAuthRequestInitial()
+	payload["supported_models"] = "not-an-array"
+
+	_, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+	if err == nil {
+		t.Fatal("ParseAuthRequest err = nil")
+	}
+	if field != "supported_models must be array of strings" {
+		t.Fatalf("badField = %q, want %q (SPEC-010 R-3.1.9 step-1 locked oracle)",
+			field, "supported_models must be array of strings")
 	}
 }
 
