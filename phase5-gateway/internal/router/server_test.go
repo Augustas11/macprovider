@@ -851,6 +851,77 @@ func TestAggregateStatusNoFreeSlotsIsModelUnavailableNotSystemIdle(t *testing.T)
 	}
 }
 
+func TestAggregateStatusL1ByteIdenticalWhenNoProviderPublishes(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"model-a","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"supported_models":["model-a","model-b"],"publishes_supported_models":false},
+			{"model_id":"model-a","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"supported_models":["model-a","model-c"]}
+		],
+		"summary":{"total_providers":2,"ready":2,"total_slots":2,"free_slots":2}
+	}`), 1, fixedNow())
+
+	body, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	if bytes.Contains(body, []byte(`"supported_models"`)) {
+		t.Fatalf("status JSON contains supported_models in L-1 opt-out case: %s", string(body))
+	}
+}
+
+func TestAggregateStatusEchoesSupportedModelsWhenSingleProviderPublishes(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"model-a","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"supported_models":["model-b","model-a"],"publishes_supported_models":true}
+		],
+		"summary":{"total_providers":1,"ready":1,"total_slots":1,"free_slots":1}
+	}`), 1, fixedNow())
+
+	if len(out.Models) != 1 {
+		t.Fatalf("models=%+v, want one model", out.Models)
+	}
+	want := []string{"model-a", "model-b"}
+	if !reflect.DeepEqual(out.Models[0].SupportedModels, want) {
+		t.Fatalf("supported_models=%+v, want %+v", out.Models[0].SupportedModels, want)
+	}
+}
+
+func TestAggregateStatusUnionsSupportedModelsAcrossPublishingProviders(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"model-a","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"supported_models":["model-a","model-b"],"publishes_supported_models":true},
+			{"model_id":"model-a","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"supported_models":["model-a","model-c"],"publishes_supported_models":true}
+		],
+		"summary":{"total_providers":2,"ready":2,"total_slots":2,"free_slots":2}
+	}`), 1, fixedNow())
+
+	if len(out.Models) != 1 {
+		t.Fatalf("models=%+v, want one model", out.Models)
+	}
+	want := []string{"model-a", "model-b", "model-c"}
+	if !reflect.DeepEqual(out.Models[0].SupportedModels, want) {
+		t.Fatalf("supported_models=%+v, want %+v", out.Models[0].SupportedModels, want)
+	}
+}
+
+func TestAggregateStatusExcludesNonPublishingProviderFromUnion(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"model-a","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"supported_models":["model-a","model-b"],"publishes_supported_models":true},
+			{"model_id":"model-a","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"supported_models":["model-a","model-z"],"publishes_supported_models":false}
+		],
+		"summary":{"total_providers":2,"ready":2,"total_slots":2,"free_slots":2}
+	}`), 1, fixedNow())
+
+	if len(out.Models) != 1 {
+		t.Fatalf("models=%+v, want one model", out.Models)
+	}
+	want := []string{"model-a", "model-b"}
+	if !reflect.DeepEqual(out.Models[0].SupportedModels, want) {
+		t.Fatalf("supported_models=%+v, want %+v", out.Models[0].SupportedModels, want)
+	}
+}
+
 func TestStatusCoordinatorUnreachableRemainsDown(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return nil, errors.New("coordinator unavailable")

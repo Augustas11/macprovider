@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/audit"
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 	"github.com/augstar/macprovider-coordinator/internal/billing"
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
@@ -55,6 +56,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	auditStore, err := audit.OpenStore(cfg.Storage.DBPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "audit log storage: %v\n", err)
+		os.Exit(1)
+	}
+	defer auditStore.Close()
 	admissionStore, err := providerws.NewSQLiteAdmissionStore(reqLogStore.DB())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "admission storage: %v\n", err)
@@ -70,6 +77,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
 		os.Exit(1)
 	}
+	shutdownCtx, stopBackground := context.WithCancel(context.Background())
+	defer stopBackground()
 	wsOpts := []providerws.Option{}
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
 	if cfg.Auth.RequireProviderTokens {
@@ -82,6 +91,27 @@ func main() {
 		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, reqLogStore.DB(), registry, startedAt)))
 		logger.Info().Str("path", cfg.Explorer.BindPath).Msg("operator explorer enabled")
 	}
+	swapEmitter := func(event pool.SwapEvent) {
+		if err := auditStore.EmitSwap(shutdownCtx, event); err != nil {
+			loadingWindowMS := int64(0)
+			if !event.LoadingStartedAt.IsZero() {
+				loadingWindowMS = event.CompletedAt.Sub(event.LoadingStartedAt).Milliseconds()
+			}
+			logger.Warn().
+				Err(err).
+				Str("provider_id", event.ProviderID).
+				Str("assigned_id", event.AssignedID).
+				Str("from_model_id", event.FromModelID).
+				Str("to_model_id", event.ToModelID).
+				Str("to_model_hash", event.ToModelHash).
+				Int64("loading_window_ms", loadingWindowMS).
+				Str("hash_verification_result", string(event.HashVerificationResult)).
+				Msg("operator_model_swap audit write failed")
+		}
+	}
+	wsOpts = append(wsOpts, providerws.WithRegistryOptions(
+		pool.WithSwapEmitter(swapEmitter),
+	))
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	buyerServer := buyer.NewServer(
 		registry,
@@ -105,8 +135,6 @@ func main() {
 			return buyer.PreflightResult{Accepted: ack.Accepted, Reason: ack.Reason}, ok, err
 		}),
 	)
-	shutdownCtx, stopBackground := context.WithCancel(context.Background())
-	defer stopBackground()
 	providerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.ProviderPort)
 	buyerAddr := fmt.Sprintf("%s:%d", cfg.Listen.BindAddress, cfg.Listen.BuyerPort)
 	providerMux := http.NewServeMux()
@@ -132,6 +160,7 @@ func main() {
 	billingStore.StartNightlyReconcile(shutdownCtx, cfg.Settlement)
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
+	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
 
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
@@ -196,6 +225,36 @@ func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner,
 		}
 		if deleted > 0 {
 			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Msg("request_log retention pruned rows")
+		}
+	}
+	prune()
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
+}
+
+func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
+	if store == nil || retentionDays <= 0 {
+		return
+	}
+	prune := func() {
+		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
+		deleted, err := store.PruneBefore(ctx, cutoff)
+		if err != nil {
+			logger.Warn().Err(err).Time("cutoff", cutoff).Msg("audit_log retention prune failed")
+			return
+		}
+		if deleted > 0 {
+			logger.Info().Int64("deleted_rows", deleted).Time("cutoff", cutoff).Msg("audit_log retention pruned rows")
 		}
 	}
 	prune()

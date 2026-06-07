@@ -58,6 +58,8 @@ type Server struct {
 	started   time.Time
 	explorer  http.Handler
 	unauth    chan struct{}
+	// SPEC-002 v1.3.5 §7.9 — auth-attempt retention store, 1024 bound
+	authAttempts *authAttemptStore
 }
 
 type TokenValidator interface {
@@ -93,6 +95,41 @@ func WithAdmissionStore(store AdmissionStateStore) Option {
 	}
 }
 
+// WithAuthAttemptRetentionBound overrides the default 1024-bound
+// on the SPEC-002 v1.3.5 §7.9 auth-attempt retention store.
+// INTENDED USE: tests that exercise the AC-K.16 retention-bound
+// rejection path with a smaller bound (commonly 1). Production
+// deployments SHOULD NOT lower the bound below 1024 (per
+// SPEC-002 v1.3.5 R-7.9.6 recommended value); lower values
+// will reject legitimate auth attempts under normal traffic.
+func WithAuthAttemptRetentionBound(maxBound int) Option {
+	return func(s *Server) {
+		s.authAttempts = newAuthAttemptStore(maxBound)
+	}
+}
+
+// WithRegistryOptions applies test-facing pool Registry options to the
+// server-owned registry. Production wiring installs the heartbeat hash verifier
+// automatically in NewServer; tests use this to inject Phase 2C emitters.
+func WithRegistryOptions(opts ...pool.RegistryOption) Option {
+	return func(s *Server) {
+		if s.pool == nil {
+			return
+		}
+		for _, opt := range opts {
+			opt(s.pool)
+		}
+	}
+}
+
+// AuthAttemptCount returns the number of in-flight auth-attempt
+// retention entries. Test-only — production code MUST NOT
+// condition behavior on this value (the retention bound is the
+// operational gate per SPEC-002 v1.3.5 R-7.9.6 / AC-K.16).
+func (s *Server) AuthAttemptCount() int {
+	return s.authAttempts.count()
+}
+
 type pendingPreflight struct {
 	providerID string
 	assignedID string
@@ -110,7 +147,11 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		started: time.Now().UTC(),
 		unauth:  make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
 	}
+	s.authAttempts = newAuthAttemptStore(1024)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
+	if registry != nil {
+		pool.WithHeartbeatHashVerifier(tier2.VerifyProviderHash)(registry)
+	}
 	for _, opt := range opts {
 		opt(s)
 	}
@@ -313,10 +354,21 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 }
 
 func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
-	initial, badField, err := ParseAuthRequest(payload)
+	initial, initialPresence, badField, err := ParseAuthRequest(payload)
 	if err != nil || initial.Stage != "initial" {
 		if badField == "" {
 			badField = "stage"
+		}
+		// SPEC-002 v1.3.5 §11 AC-K.15 / SPEC-010 v1.5 R-3.1.9 — when
+		// initial-stage parse fails on a SPEC-010 catalog validation
+		// rule, surface the LOCKED reason substring on the wire so
+		// the AC-K.15 grep-based test oracle holds. Envelope-level
+		// and stage-mismatch failures keep the existing generic
+		// rejection.
+		if isSpec010CatalogBadField(badField) {
+			s.sendAuthRejection(conn, "bad_request", badField)
+			s.close(conn, CloseInvalidHello, badField)
+			return "", ""
 		}
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return "", ""
@@ -353,6 +405,40 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 	authAttemptID := "auth-" + s.newUUID()
 	challengeExpiresAt := s.now().Add(10 * time.Minute).UTC()
+	// SPEC-002 v1.3.5 §7.9 + R-7.9.8 — L-1 baseline gate:
+	// create retention state only if the initial-stage frame
+	// carried at least one SPEC-010 field. Absence of both means
+	// a pre-SPEC-010 (or single-entry-default v1.3) binary —
+	// no retention entry, no defer, no metric.
+	supportedModelsPresent := initialPresence.SupportedModels
+	publishesPresent := initialPresence.PublishesSupportedModels
+	retainSpec010 := supportedModelsPresent || publishesPresent
+	if retainSpec010 {
+		state := AuthAttemptState{
+			AuthAttemptID:            authAttemptID,
+			ProviderID:               initial.ProviderID,
+			SupportedModels:          append([]string(nil), initial.SupportedModels...),
+			PublishesSupportedModels: initial.PublishesSupportedModels,
+			SupportedModelsPresent:   supportedModelsPresent,
+			PublishesPresent:         publishesPresent,
+			StartedAt:                s.now(),
+			ExpiresAt:                challengeExpiresAt,
+		}
+		// R-7.9.6 / AC-K.16 — defensive 1024 bound. Reject
+		// BEFORE creating the entry; tryReserve does the test +
+		// insert atomically.
+		if !s.authAttempts.tryReserve(state) {
+			s.sendAuthRejection(conn, "too_many_auth_attempts", "auth-attempt retention bound exceeded")
+			s.close(conn, ClosePoolFull, "too_many_auth_attempts")
+			return "", ""
+		}
+		// R-7.9.7 — defer-based release scoped to the
+		// auth-attempt, installed AFTER reserve and BEFORE
+		// auth_challenge write. Any terminal path (proof success,
+		// proof reject, expiry, disconnect-before-proof, read/
+		// parse error, challenge write failure) hits this defer.
+		defer s.authAttempts.release(authAttemptID)
+	}
 	challenge := AuthChallenge{
 		Type:                     "auth_challenge",
 		Version:                  2,
@@ -386,7 +472,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseInvalidHello, "invalid_auth_request: type")
 		return "", ""
 	}
-	proof, badField, err := ParseAuthRequest(proofPayload)
+	proof, proofPresence, badField, err := ParseAuthRequest(proofPayload)
 	if err != nil || proof.Stage != "proof" {
 		if badField == "" {
 			badField = "stage"
@@ -400,6 +486,29 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		s.close(conn, CloseTier2AttestationFailed, "tier2_attestation_failed")
 		return "", ""
 	}
+	// SPEC-002 v1.3.5 §7.8 R-7.8.7 + AC-K.3 — when proof carries
+	// SPEC-010 fields, they MUST byte-identical-compare to the
+	// retained initial-stage values after NFC + ASCII case-fold.
+	// Absent proof fields = no comparison (accept). The locked
+	// test oracle is the exact substring
+	// "supported_models mismatch between auth_request stages".
+	if retainSpec010 {
+		retained, ok := s.authAttempts.lookup(authAttemptID)
+		if ok && proofPresence.SupportedModels {
+			if !supportedModelsEqualUnderNFCASCIIFold(retained.SupportedModels, proof.SupportedModels) {
+				s.sendAuthRejection(conn, "bad_request", "supported_models mismatch between auth_request stages")
+				s.close(conn, CloseInvalidHello, "supported_models mismatch between auth_request stages")
+				return "", ""
+			}
+		}
+		if ok && proofPresence.PublishesSupportedModels {
+			if proof.PublishesSupportedModels != retained.PublishesSupportedModels {
+				s.sendAuthRejection(conn, "bad_request", "publishes_supported_models mismatch between auth_request stages")
+				s.close(conn, CloseInvalidHello, "publishes_supported_models mismatch between auth_request stages")
+				return "", ""
+			}
+		}
+	}
 	attestationStatus := tier2.VerifyAttestationToken(proof.AttestationToken, tier2Cfg, challengeBytes, authAttemptID, initial.ProviderID, initial.ProviderECDHPublicKey, s.now(), s.log)
 	if tier2Cfg.RequireAttestation && attestationStatus != pool.AttestationStatusAttested {
 		s.sendAuthRejection(conn, string(attestationStatus), string(attestationStatus))
@@ -409,6 +518,17 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 
 	entry.EncryptedLeg = true
 	entry.AttestationStatus = attestationStatus
+	// SPEC-002 v1.3.5 §3.X.1 / §3.X.2 + SPEC-010 v1.5 R-3.3.1 /
+	// R-3.3.2 — populate the catalog onto Provider. The fallback
+	// synthesis [ModelID] applies when supported_models was
+	// absent on the wire OR when the parsed slice is empty
+	// (pre-SPEC-010 binary, defensive guard).
+	if len(initial.SupportedModels) > 0 {
+		entry.SupportedModels = append([]string(nil), initial.SupportedModels...)
+	} else {
+		entry.SupportedModels = []string{entry.ModelID}
+	}
+	entry.PublishesSupportedModels = initial.PublishesSupportedModels
 	entry.Tier2Session = &pool.Tier2Session{
 		AEADSuite:    selectedAEAD,
 		C2PKey:       keys.C2PKey,
@@ -417,6 +537,17 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		P2CNonceBase: keys.P2CNonceBase,
 		KeyID:        keys.KeyID,
 		StartedAt:    s.now(),
+	}
+	if retainSpec010 {
+		// SPEC-002 v1.3.5 §7.9 — explicit early release so the
+		// retention entry does not persist for the WS-session lifetime
+		// (handleV2Conn does not return until readProviderLoop exits,
+		// which for a healthy provider is hours or days). The auth-
+		// handler-scoped defer at the top of this function remains as
+		// the safety net for terminal failure paths between initial
+		// parse and proof acceptance. Double-release is a harmless
+		// no-op delete.
+		s.authAttempts.release(authAttemptID)
 	}
 	session := s.registerProviderSession(conn, entry)
 	releaseUnauth()
@@ -1182,7 +1313,7 @@ func (s *Server) handlePreflightAck(providerID, assignedID string, payload []byt
 }
 
 func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, payload []byte) {
-	hb, field, err := ParseHeartbeat(payload)
+	hb, presence, field, err := ParseHeartbeat(payload)
 	if err != nil {
 		s.log.Warn().Err(err).Str("field", field).Str("provider_id", providerID).Msg("invalid heartbeat")
 		return
@@ -1205,6 +1336,10 @@ func (s *Server) handleHeartbeat(conn net.Conn, providerID, assignedID string, p
 		SlotsFree:             hb.SlotsFree,
 		SlotsTotal:            hb.SlotsTotal,
 		ThroughputTPSEstimate: hb.ThroughputTPSEstimate,
+		ModelHash:             hb.ModelHash,
+		ModelHashPresent:      presence.ModelHash,
+		Loading:               hb.Loading,
+		LoadingPresent:        presence.Loading,
 		At:                    s.now(),
 	})
 	if !ok {

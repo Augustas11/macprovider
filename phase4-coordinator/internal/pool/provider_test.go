@@ -7,6 +7,98 @@ import (
 	"time"
 )
 
+func TestProviderJSONL1ByteIdenticalDefault(t *testing.T) {
+	p := providerJSONL1Baseline()
+
+	got, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal provider: %v", err)
+	}
+
+	// Regenerate by running the test, copying the `got` value from the failure diff, and pasting here. Any diff against this constant for a default-zero new-field set is an L-1 regression per SPEC-001 v1.3 §6.7.3 cell 1.
+	const expected = `{"provider_id":"test-provider-1","assigned_id":"p_01H000000000000000000000","hostname":"test-host","model_id":"mlx-community/Qwen2.5-7B-Instruct-4bit","model_params_b":7.6,"ram_gb":16,"max_context_tokens":8192,"max_concurrency":1,"slots_free":1,"slots_total":1,"throughput_tps_estimate":42.5,"endpoint_url":"","tier":"pinned","inference_path":"ws_tunneled","admitted_at":"2026-06-07T12:00:00Z","state":"ready","last_heartbeat_at":"2026-06-07T12:05:00Z","last_activity_at":"2026-06-07T12:05:00Z","connected_at":"2026-06-07T12:00:00Z","binary_version":"1.2.4"}`
+	if !bytes.Equal(got, []byte(expected)) {
+		t.Fatalf("provider JSON mismatch\n got: %s\nwant: %s", got, expected)
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(got, &fields); err != nil {
+		t.Fatalf("unmarshal provider json: %v", err)
+	}
+	for _, key := range []string{
+		"supported_models",
+		"publishes_supported_models",
+		"last_loading_state",
+		"loading_started_at",
+		"LastLoadingState",
+		"LoadingStartedAt",
+	} {
+		if _, ok := fields[key]; ok {
+			t.Fatalf("default provider JSON unexpectedly included %q: %s", key, got)
+		}
+	}
+}
+
+func TestProviderJSONSerializesNewFieldsWhenSet(t *testing.T) {
+	p := providerJSONL1Baseline()
+	p.SupportedModels = []string{"mlx-community/Qwen2.5-7B-Instruct-4bit"}
+	p.PublishesSupportedModels = true
+	p.LastLoadingState = true
+	p.LoadingStartedAt = time.Date(2026, 6, 7, 12, 4, 30, 0, time.UTC)
+
+	got, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal provider: %v", err)
+	}
+
+	var fields map[string]any
+	if err := json.Unmarshal(got, &fields); err != nil {
+		t.Fatalf("unmarshal provider json: %v", err)
+	}
+	models, ok := fields["supported_models"].([]any)
+	if !ok || len(models) != 1 || models[0] != "mlx-community/Qwen2.5-7B-Instruct-4bit" {
+		t.Fatalf("supported_models = %#v, want one model id", fields["supported_models"])
+	}
+	if fields["publishes_supported_models"] != true {
+		t.Fatalf("publishes_supported_models = %#v, want true", fields["publishes_supported_models"])
+	}
+	for _, key := range []string{
+		"last_loading_state",
+		"loading_started_at",
+		"LastLoadingState",
+		"LoadingStartedAt",
+	} {
+		if _, ok := fields[key]; ok {
+			t.Fatalf("internal loading field %q leaked in provider JSON: %s", key, got)
+		}
+	}
+}
+
+func providerJSONL1Baseline() Provider {
+	return Provider{
+		ProviderID:            "test-provider-1",
+		AssignedID:            "p_01H000000000000000000000",
+		Hostname:              "test-host",
+		ModelID:               "mlx-community/Qwen2.5-7B-Instruct-4bit",
+		ModelParamsB:          7.6,
+		RAMGB:                 16,
+		MaxContextTokens:      8192,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 42.5,
+		EndpointURL:           "",
+		Tier:                  TierPinned,
+		InferencePath:         InferencePathWSTunneled,
+		AdmittedAt:            time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC),
+		State:                 StateReady,
+		LastHeartbeatAt:       time.Date(2026, 6, 7, 12, 5, 0, 0, time.UTC),
+		LastActivityAt:        time.Date(2026, 6, 7, 12, 5, 0, 0, time.UTC),
+		ConnectedAt:           time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC),
+		BinaryVersion:         "1.2.4",
+	}
+}
+
 func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
 	base := Provider{State: StateReady, SlotsFree: 1}
 	if !base.RoutingEligible() {
@@ -212,6 +304,267 @@ func TestProviderCannotEscapeBreakerHoldViaDrainingLaundering(t *testing.T) {
 	assertState("after coordinator MarkRecovered", StateReady)
 }
 
+func TestApplyHeartbeatL1ByteIdenticalLegacyPath(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", heartbeatUpdateAt("model-a", start.Add(time.Minute)))
+	if !ok {
+		t.Fatal("heartbeat not applied")
+	}
+	if provider.ModelHash != "hash-a" || provider.HashStatus != HashStatusVerified {
+		t.Fatalf("legacy unchanged hash state = (%q, %q)", provider.ModelHash, provider.HashStatus)
+	}
+	if provider.LastLoadingState {
+		t.Fatal("LastLoadingState changed on absent loading")
+	}
+	if !provider.LoadingStartedAt.IsZero() {
+		t.Fatalf("LoadingStartedAt = %s, want zero", provider.LoadingStartedAt)
+	}
+
+	provider, _, ok = registry.ApplyHeartbeat("p1", "current", heartbeatUpdateAt("model-b", start.Add(2*time.Minute)))
+	if !ok {
+		t.Fatal("second heartbeat not applied")
+	}
+	if provider.ModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
+		t.Fatalf("legacy model change hash state = (%q, %q), want cleared uncatalogued", provider.ModelHash, provider.HashStatus)
+	}
+}
+
+func TestApplyHeartbeatSPEC011PathUpdatesHashOnModelIDChange(t *testing.T) {
+	registry := NewRegistry(nil, WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+		return HashStatusVerified
+	}))
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusMismatch, start)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-b", "ab12", false, start.Add(time.Minute)))
+	if !ok {
+		t.Fatal("heartbeat not applied")
+	}
+	if provider.ModelHash != "ab12" || provider.HashStatus != HashStatusVerified {
+		t.Fatalf("SPEC-011 model change hash state = (%q, %q)", provider.ModelHash, provider.HashStatus)
+	}
+}
+
+func TestApplyHeartbeatSPEC011PathReVerifiesOnHashChangeSameModelID(t *testing.T) {
+	registry := NewRegistry(nil, WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+		return HashStatusMismatch
+	}))
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-b", false, start.Add(time.Minute)))
+	if !ok {
+		t.Fatal("heartbeat not applied")
+	}
+	if provider.ModelHash != "hash-b" || provider.HashStatus != HashStatusMismatch {
+		t.Fatalf("SPEC-011 same-model hash state = (%q, %q)", provider.ModelHash, provider.HashStatus)
+	}
+}
+
+func TestApplyHeartbeatSPEC011PathNoChangeWhenBothModelIDAndHashUnchanged(t *testing.T) {
+	verifierCalls := 0
+	registry := NewRegistry(nil, WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+		verifierCalls++
+		return HashStatusMismatch
+	}))
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", false, start.Add(time.Minute)))
+	if !ok {
+		t.Fatal("heartbeat not applied")
+	}
+	if verifierCalls != 0 {
+		t.Fatalf("verifierCalls = %d, want 0", verifierCalls)
+	}
+	if provider.ModelHash != "hash-a" || provider.HashStatus != HashStatusVerified {
+		t.Fatalf("unchanged SPEC-011 hash state = (%q, %q)", provider.ModelHash, provider.HashStatus)
+	}
+}
+
+func TestApplyHeartbeatPathSelectionIsPerHeartbeatNotSticky(t *testing.T) {
+	registry := NewRegistry(nil, WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+		return HashStatusVerified
+	}))
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusMismatch, start)
+
+	if provider, _, ok := registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-b", false, start.Add(time.Minute))); !ok || provider.ModelHash != "hash-b" || provider.HashStatus != HashStatusVerified {
+		t.Fatalf("frame #1 provider=%+v ok=%v", provider, ok)
+	}
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", heartbeatUpdateAt("model-b", start.Add(2*time.Minute)))
+	if !ok {
+		t.Fatal("frame #2 heartbeat not applied")
+	}
+	if provider.ModelHash != "" || provider.HashStatus != HashStatusUncatalogued {
+		t.Fatalf("frame #2 hash state = (%q, %q), want legacy clear", provider.ModelHash, provider.HashStatus)
+	}
+	// Frame #3 — SPEC-011 re-entry after the LEGACY clear. Per AC-K.8,
+	// path selection is per-heartbeat and presence-keyed: a binary that
+	// re-includes model_hash MUST re-take the SPEC-011 path, updating
+	// the hash and re-invoking the verifier even though frame #2 had
+	// cleared the prior hash via the LEGACY path.
+	provider, _, ok = registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-c", "hash-c", false, start.Add(3*time.Minute)))
+	if !ok {
+		t.Fatal("frame #3 heartbeat not applied")
+	}
+	if provider.ModelHash != "hash-c" || provider.HashStatus != HashStatusVerified {
+		t.Fatalf("frame #3 hash state = (%q, %q), want SPEC-011 repopulation", provider.ModelHash, provider.HashStatus)
+	}
+}
+
+// TestApplyHeartbeatSwapEmitterDoesNotFireWhenModelIDUnchanged
+// regression-pins the [sec:1.1] R2 closure: a malicious provider
+// that pulses loading:true → loading:false on the SAME model_id
+// (forged or genuine same-model re-load) MUST NOT fire the
+// operator_model_swap emitter. SPEC-002 v1.3.5 §7.10 R-7.10.6 gates
+// emission on "loading:false carrying the NEW model_id".
+func TestApplyHeartbeatSwapEmitterDoesNotFireWhenModelIDUnchanged(t *testing.T) {
+	called := false
+	registry := NewRegistry(nil,
+		WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+			return HashStatusVerified
+		}),
+		WithSwapEmitter(func(event SwapEvent) {
+			called = true
+		}),
+	)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", true, start.Add(time.Minute)))
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", false, start.Add(2*time.Minute)))
+	if called {
+		t.Fatal("emitter fired on a same-model loading pulse")
+	}
+}
+
+func TestApplyHeartbeatLoadingStartedAtStampedOnFalseToTrueTransition(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+	first := start.Add(time.Minute)
+	second := start.Add(2 * time.Minute)
+
+	provider, _, ok := registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", true, first))
+	if !ok {
+		t.Fatal("first heartbeat not applied")
+	}
+	if !provider.LoadingStartedAt.Equal(first) {
+		t.Fatalf("LoadingStartedAt = %s, want %s", provider.LoadingStartedAt, first)
+	}
+	provider, _, ok = registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", true, second))
+	if !ok {
+		t.Fatal("second heartbeat not applied")
+	}
+	if !provider.LoadingStartedAt.Equal(first) {
+		t.Fatalf("LoadingStartedAt restamped to %s, want %s", provider.LoadingStartedAt, first)
+	}
+}
+
+func TestApplyHeartbeatLastLoadingStateTracksPerHeartbeat(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	for i, loading := range []bool{true, true, false, false} {
+		provider, _, ok := registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", loading, start.Add(time.Duration(i+1)*time.Minute)))
+		if !ok {
+			t.Fatalf("heartbeat %d not applied", i)
+		}
+		if provider.LastLoadingState != loading {
+			t.Fatalf("heartbeat %d LastLoadingState = %v, want %v", i, provider.LastLoadingState, loading)
+		}
+	}
+}
+
+func TestApplyHeartbeatLoadingAbsentLeavesStateUntouched(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	for i := 1; i <= 3; i++ {
+		provider, _, ok := registry.ApplyHeartbeat("p1", "current", heartbeatUpdateAt("model-a", start.Add(time.Duration(i)*time.Minute)))
+		if !ok {
+			t.Fatalf("heartbeat %d not applied", i)
+		}
+		if provider.LastLoadingState || !provider.LoadingStartedAt.IsZero() {
+			t.Fatalf("heartbeat %d loading state = (%v, %s), want zero", i, provider.LastLoadingState, provider.LoadingStartedAt)
+		}
+	}
+}
+
+func TestApplyHeartbeatSwapEmitterFiresOnPostSwapTransition(t *testing.T) {
+	var events []SwapEvent
+	registry := NewRegistry(nil,
+		WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+			return HashStatusVerified
+		}),
+		WithSwapEmitter(func(event SwapEvent) {
+			events = append(events, event)
+		}),
+	)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+	loadingAt := start.Add(time.Minute)
+	completedAt := start.Add(2 * time.Minute)
+
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", true, loadingAt))
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-b", "hash-b", false, completedAt))
+
+	if len(events) != 1 {
+		t.Fatalf("events = %d, want 1", len(events))
+	}
+	event := events[0]
+	if event.ProviderID != "p1" || event.AssignedID != "current" || event.FromModelID != "model-a" || event.FromModelHash != "hash-a" || event.ToModelID != "model-b" || event.ToModelHash != "hash-b" || event.HashVerificationResult != HashStatusVerified || !event.LoadingStartedAt.Equal(loadingAt) || !event.CompletedAt.Equal(completedAt) {
+		t.Fatalf("event = %+v", event)
+	}
+}
+
+func TestApplyHeartbeatSwapEmitterDoesNotFireOnLegacyPath(t *testing.T) {
+	called := false
+	registry := NewRegistry(nil, WithSwapEmitter(func(event SwapEvent) {
+		called = true
+	}))
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	registry.ApplyHeartbeat("p1", "current", legacyLoadingHeartbeatUpdate("model-a", true, start.Add(time.Minute)))
+	registry.ApplyHeartbeat("p1", "current", legacyLoadingHeartbeatUpdate("model-b", false, start.Add(2*time.Minute)))
+	if called {
+		t.Fatal("emitter fired on legacy path")
+	}
+}
+
+func TestApplyHeartbeatSwapEmitterDoesNotFireWhenNoPriorLoading(t *testing.T) {
+	called := false
+	registry := NewRegistry(nil, WithSwapEmitter(func(event SwapEvent) {
+		called = true
+	}))
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", false, start.Add(time.Minute)))
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-b", "hash-b", false, start.Add(2*time.Minute)))
+	if called {
+		t.Fatal("emitter fired without prior loading")
+	}
+}
+
+func TestApplyHeartbeatSwapEmitterNilDoesNotCrash(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", true, start.Add(time.Minute)))
+	if _, _, ok := registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-b", "hash-b", false, start.Add(2*time.Minute))); !ok {
+		t.Fatal("swap completion heartbeat not applied")
+	}
+}
+
 func assertProviderReady(t *testing.T, registry *Registry, lastActivityAt time.Time) {
 	t.Helper()
 	provider, ok := registry.Resolve("p1", "current")
@@ -221,4 +574,54 @@ func assertProviderReady(t *testing.T, registry *Registry, lastActivityAt time.T
 	if provider.State != StateReady || provider.SlotsFree != 1 || !provider.LastActivityAt.Equal(lastActivityAt) {
 		t.Fatalf("provider = %#v, want ready unchanged with last_activity_at %s", provider, lastActivityAt)
 	}
+}
+
+func registerHeartbeatProvider(t *testing.T, registry *Registry, modelID, modelHash string, hashStatus HashStatus, at time.Time) {
+	t.Helper()
+	registry.Register(&Provider{
+		ProviderID:            "p1",
+		AssignedID:            "current",
+		ModelID:               modelID,
+		ModelHash:             modelHash,
+		HashStatus:            hashStatus,
+		State:                 StateReady,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		LastHeartbeatAt:       at,
+		LastActivityAt:        at,
+		MaxConcurrency:        1,
+		MaxContextTokens:      20000,
+		ThroughputTPSEstimate: 20,
+	}, nil)
+}
+
+func heartbeatUpdateAt(modelID string, at time.Time) HeartbeatUpdate {
+	return HeartbeatUpdate{
+		Status:                StateReady,
+		ModelID:               modelID,
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		At:                    at,
+	}
+}
+
+func spec011HeartbeatUpdate(modelID, modelHash string, loading bool, at time.Time) HeartbeatUpdate {
+	update := heartbeatUpdateAt(modelID, at)
+	update.ModelHash = modelHash
+	update.ModelHashPresent = true
+	update.Loading = loading
+	update.LoadingPresent = true
+	return update
+}
+
+func legacyLoadingHeartbeatUpdate(modelID string, loading bool, at time.Time) HeartbeatUpdate {
+	update := heartbeatUpdateAt(modelID, at)
+	update.Loading = loading
+	update.LoadingPresent = true
+	return update
 }
