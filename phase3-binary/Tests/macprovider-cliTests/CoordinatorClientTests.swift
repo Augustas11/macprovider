@@ -201,7 +201,7 @@ final class CoordinatorClientTests: XCTestCase {
     func testHeartbeatEnabledModeReadyEmitsLoadingFalse() async throws {
         let recorder = CoordinatorFrameRecorder()
         let runtimeHash = String(repeating: "1", count: 64)
-        let runtime = makeRuntime(modelID: "model-a", modelHash: runtimeHash, warmSwapEnabled: true)
+        let runtime = makeRuntime(modelID: "model-b", modelHash: runtimeHash, warmSwapEnabled: true)
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
@@ -214,6 +214,7 @@ final class CoordinatorClientTests: XCTestCase {
         let heartbeat = try XCTUnwrap(frames.first)
         let json = Self.jsonString(heartbeat)
 
+        XCTAssertEqual(heartbeat["model_id"] as? String, "model-b")
         XCTAssertEqual(heartbeat["model_hash"] as? String, runtimeHash)
         XCTAssertEqual(heartbeat["loading"] as? Bool, false)
         XCTAssertTrue(json.contains("\"\(runtimeHash)\""), json)
@@ -293,9 +294,45 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertFalse(json.contains("runtime-hash"), json)
     }
 
+    func testHeartbeatDisabledModeKeepsProviderStatusModelIDWhenRuntimeDiffers() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(modelID: "model-b", modelHash: "runtime-hash", warmSwapEnabled: true)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "boot-hash"
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: false, modelRuntime: runtime)
+
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+
+        XCTAssertEqual(heartbeat["model_id"] as? String, "model-a")
+        XCTAssertNil(heartbeat["loading"])
+    }
+
+    func testHelloDisabledModeKeepsProviderStatusModelIDWhenRuntimeDiffers() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(modelID: "model-b", modelHash: "runtime-hash", warmSwapEnabled: true)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "boot-hash"
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: false, modelRuntime: runtime)
+
+        let hello = await client.helloMessage()
+
+        XCTAssertEqual(hello["model_id"] as? String, "model-a")
+        XCTAssertEqual(hello["model_hash"] as? String, "boot-hash")
+    }
+
     func testHelloEnabledModeReadsFromModelRuntime() async throws {
         let recorder = CoordinatorFrameRecorder()
-        let runtime = makeRuntime(modelID: "model-a", modelHash: "runtime-hash", warmSwapEnabled: true)
+        let runtime = makeRuntime(modelID: "model-b", modelHash: "runtime-hash", warmSwapEnabled: true)
         let status = ProviderStatus(
             modelID: "model-a",
             modelLoaded: true,
@@ -307,7 +344,9 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let json = Self.jsonString(hello)
 
+        XCTAssertEqual(hello["model_id"] as? String, "model-b")
         XCTAssertEqual(hello["model_hash"] as? String, "runtime-hash")
+        XCTAssertTrue(json.contains("\"model_id\":\"model-b\""), json)
         XCTAssertTrue(json.contains("\"model_hash\":\"runtime-hash\""), json)
         XCTAssertFalse(json.contains("boot-hash"), json)
     }

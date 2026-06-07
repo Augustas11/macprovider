@@ -204,6 +204,27 @@ final class ControlSocketTests: XCTestCase {
         XCTAssertTrue(try waitForEOF(fd: fd, timeout: 1.0))
     }
 
+    func testClientTasksDoNotLeakOnCompletion() async throws {
+        let socketPath = try makeSocketPath()
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        try await server.start()
+
+        for _ in 0 ..< 50 {
+            let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+            try await connection.send(.statusRequest)
+            _ = try await connection.receive(timeout: 1)
+            await connection.close()
+        }
+
+        try await waitUntil(timeoutNanoseconds: 500_000_000) {
+            await server.clientTasksCountForTest() <= 2
+        }
+        let taskCount = await server.clientTasksCountForTest()
+        await server.stop()
+
+        XCTAssertLessThanOrEqual(taskCount, 2)
+    }
+
     private func assertRoundTrip(_ frame: ControlSocketFrame) throws {
         XCTAssertEqual(try ControlSocketCodec.decode(try ControlSocketCodec.encode(frame)), frame)
     }
@@ -291,6 +312,20 @@ final class ControlSocketTests: XCTestCase {
             return errno == ECONNRESET || errno == EBADF
         }
         return false
+    }
+
+    private func waitUntil(
+        timeoutNanoseconds: UInt64,
+        _ predicate: () async -> Bool
+    ) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if await predicate() {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed out waiting for condition")
     }
 
     private func makeRuntime(modelID: String?) -> ModelRuntime {

@@ -235,7 +235,7 @@ actor ControlSocketServer {
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
     private var acceptTask: Task<Void, Never>?
-    private var clientTasks: [Task<Void, Never>] = []
+    private var clientTasks: [UUID: Task<Void, Never>] = [:]
     private var clientFDs: [Int32] = []
 
     init(
@@ -306,7 +306,7 @@ actor ControlSocketServer {
     func stop() async {
         acceptTask?.cancel()
         acceptTask = nil
-        for task in clientTasks {
+        for task in clientTasks.values {
             task.cancel()
         }
         clientTasks.removeAll()
@@ -322,9 +322,16 @@ actor ControlSocketServer {
         await tracker.clear()
     }
 
-    private func appendClientTask(_ task: Task<Void, Never>) {
-        clientTasks = clientTasks.filter { !$0.isCancelled }
-        clientTasks.append(task)
+    func clientTasksCountForTest() -> Int {
+        clientTasks.count
+    }
+
+    private func appendClientTask(id: UUID, task: Task<Void, Never>) {
+        clientTasks[id] = task
+    }
+
+    private func removeClientTask(_ id: UUID) {
+        clientTasks.removeValue(forKey: id)
     }
 
     private func appendClientFD(_ fd: Int32) {
@@ -352,7 +359,11 @@ actor ControlSocketServer {
                 break
             }
             await server.appendClientFD(clientFD)
-            let task = Task.detached(priority: .userInitiated) {
+            let taskID = UUID()
+            let task = Task.detached(priority: .userInitiated) { [server] in
+                defer {
+                    Task { await server.removeClientTask(taskID) }
+                }
                 await handleClient(
                     fd: clientFD,
                     modelRuntime: modelRuntime,
@@ -362,7 +373,7 @@ actor ControlSocketServer {
                 )
                 await server.removeClientFD(clientFD)
             }
-            await server.appendClientTask(task)
+            await server.appendClientTask(id: taskID, task: task)
         }
     }
 

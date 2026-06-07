@@ -262,6 +262,7 @@ actor CoordinatorClient {
             modelRuntime: modelRuntime,
             providerStatus: providerStatus,
             loadedModelID: loadedModelID,
+            warmSwapEnabled: warmSwapEnabled,
             maxActiveRequests: maxActiveRequests,
             maxBodyBytes: maxBodyBytes,
             tier2Session: session,
@@ -279,6 +280,7 @@ actor CoordinatorClient {
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
                 loadedModelID: loadedModelID,
+                warmSwapEnabled: warmSwapEnabled,
                 maxActiveRequests: maxActiveRequests,
                 maxBodyBytes: maxBodyBytes,
                 sendFrame: { payload in
@@ -639,6 +641,7 @@ actor CoordinatorClient {
         ]
         if warmSwapEnabled {
             let runtimeSnapshot = await modelRuntime.currentSnapshot()
+            payload["model_id"] = runtimeSnapshot.modelID ?? ""
             if let modelHash = runtimeSnapshot.modelHash {
                 payload["model_hash"] = modelHash
             }
@@ -752,12 +755,17 @@ actor CoordinatorClient {
         if let endpointURL {
             message["endpoint_url"] = endpointURL
         }
+        let modelIDForHello: String
         let hashForHello: String?
         if warmSwapEnabled {
-            hashForHello = await modelRuntime.currentSnapshot().modelHash
+            let runtimeSnapshot = await modelRuntime.currentSnapshot()
+            modelIDForHello = runtimeSnapshot.modelID ?? ""
+            hashForHello = runtimeSnapshot.modelHash
         } else {
+            modelIDForHello = snapshot.modelID ?? ""
             hashForHello = snapshot.modelHash
         }
+        message["model_id"] = modelIDForHello
         if let hashForHello {
             message["model_hash"] = hashForHello
         }

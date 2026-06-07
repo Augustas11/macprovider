@@ -12,6 +12,7 @@ actor InferenceRelay {
     private let modelRuntime: any ModelRuntimeServing
     private let providerStatus: ProviderStatus
     private let loadedModelID: String?
+    private let warmSwapEnabled: Bool
     private let maxActiveRequests: Int
     private let maxBodyBytes: Int
     private let sendFrame: SendFrame
@@ -22,6 +23,7 @@ actor InferenceRelay {
         modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         loadedModelID: String?,
+        warmSwapEnabled: Bool = false,
         maxActiveRequests: Int,
         maxBodyBytes: Int,
         tier2Session: Tier2ProviderSession? = nil,
@@ -30,6 +32,7 @@ actor InferenceRelay {
         self.modelRuntime = modelRuntime
         self.providerStatus = providerStatus
         self.loadedModelID = loadedModelID
+        self.warmSwapEnabled = warmSwapEnabled
         self.maxActiveRequests = max(1, maxActiveRequests)
         self.maxBodyBytes = max(1, maxBodyBytes)
         self.tier2Session = tier2Session
@@ -90,7 +93,7 @@ actor InferenceRelay {
         }
 
         let state = RelayRequestState()
-        let task = Task { [modelRuntime, providerStatus, loadedModelID, sendFrame, tier2Session, state] in
+        let task = Task { [modelRuntime, providerStatus, loadedModelID, warmSwapEnabled, sendFrame, tier2Session, state] in
             await Self.process(
                 requestID: requestID,
                 body: body,
@@ -99,6 +102,7 @@ actor InferenceRelay {
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
                 loadedModelID: loadedModelID,
+                warmSwapEnabled: warmSwapEnabled,
                 tier2Session: tier2Session,
                 sendFrame: sendFrame
             )
@@ -176,6 +180,7 @@ actor InferenceRelay {
         modelRuntime: any ModelRuntimeServing,
         providerStatus: ProviderStatus,
         loadedModelID: String?,
+        warmSwapEnabled: Bool,
         tier2Session: Tier2ProviderSession?,
         sendFrame: @escaping SendFrame
     ) async {
@@ -186,7 +191,10 @@ actor InferenceRelay {
         do {
             let requestData = Data(body.utf8)
             let request = try ChatCompletionRequest.parse(data: requestData)
-            try request.validateModelMatches(loadedModelID)
+            let validationModelID = warmSwapEnabled
+                ? await modelRuntime.currentSnapshot().modelID
+                : loadedModelID
+            try request.validateModelMatches(validationModelID)
             if stream {
                 completionResult = try await processStreaming(
                     requestID: requestID,

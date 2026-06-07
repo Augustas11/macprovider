@@ -7,9 +7,14 @@ import MacProviderCore
 protocol ModelRuntimeServing: Sendable {
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult
     func stream(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (String) -> Void) async throws -> CompletionResult
+    func currentSnapshot() async -> RuntimeSnapshot
 }
 
 extension ModelRuntimeServing {
+    func currentSnapshot() async -> RuntimeSnapshot {
+        RuntimeSnapshot(state: .ready, container: nil, modelID: nil, modelHash: nil)
+    }
+
     func complete(_ request: ChatCompletionRequest) async throws -> CompletionResult {
         try await complete(request, shouldCancel: { false })
     }
@@ -35,6 +40,8 @@ public struct WarmSwapDisabledError: Error, CustomStringConvertible {
     }
 }
 
+public struct DrainCancelledError: Error { }
+
 actor ModelRuntime: ModelRuntimeServing {
     private var state: SwapState = .ready
     private var targetModelID: String?
@@ -47,7 +54,9 @@ actor ModelRuntime: ModelRuntimeServing {
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     private var providerStatus: ProviderStatus?
-    private var signalContinuations: [AsyncStream<SwapSignal>.Continuation] = []
+    private var signalContinuations: [UUID: AsyncStream<SwapSignal>.Continuation] = [:]
+    private var nextInFlightID: Int = 0
+    private var inFlightCancellations: [Int: @Sendable () -> Void] = [:]
     private let loader: @Sendable (String) async throws -> (ModelContainer, String, String?)
     private let testLoader: (@Sendable (String) async throws -> (String, String?))?
     private let testCompletion: (@Sendable (RuntimeSnapshot, ChatCompletionRequest) async throws -> CompletionResult)?
@@ -133,7 +142,7 @@ actor ModelRuntime: ModelRuntimeServing {
         self.providerStatus = providerStatus
     }
 
-    func currentSnapshot() -> RuntimeSnapshot {
+    func currentSnapshot() async -> RuntimeSnapshot {
         RuntimeSnapshot(
             state: state,
             container: currentContainer,
@@ -144,7 +153,11 @@ actor ModelRuntime: ModelRuntimeServing {
 
     func swapSignals() -> AsyncStream<SwapSignal> {
         let pair = AsyncStream<SwapSignal>.makeStream(of: SwapSignal.self)
-        signalContinuations.append(pair.continuation)
+        let id = UUID()
+        signalContinuations[id] = pair.continuation
+        pair.continuation.onTermination = { @Sendable [weak self] _ in
+            Task { await self?.removeSignalContinuation(id) }
+        }
         return pair.stream
     }
 
@@ -173,7 +186,10 @@ actor ModelRuntime: ModelRuntimeServing {
                     modelHash = loaded.2
                 }
                 try await self.enterDrainPhase()
-                await Self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
+                let didTimeout = await Self.waitForDrainOrTimeout(providerStatus: providerStatus, timeoutSeconds: drainTimeoutSeconds)
+                if didTimeout {
+                    await self.cancelAllInFlightForDrainTimeout()
+                }
                 await self.completeSwapAtomically(container: container, modelID: modelID, modelHash: modelHash)
             } catch {
                 await self.failSwap(reason: String(describing: error))
@@ -201,23 +217,24 @@ actor ModelRuntime: ModelRuntimeServing {
         signal(SwapSignal(targetModelID: targetModelID ?? "", outcome: .loadFinished))
     }
 
-    private nonisolated static func waitForDrainOrTimeout(providerStatus: ProviderStatus?, timeoutSeconds: Int) async {
+    private nonisolated static func waitForDrainOrTimeout(providerStatus: ProviderStatus?, timeoutSeconds: Int) async -> Bool {
         guard let providerStatus else {
-            return
+            return false
         }
         let drainStartMs = Int64(Date().timeIntervalSince1970 * 1000)
         let timeoutMs = Int64(timeoutSeconds * 1000)
         while !Task.isCancelled {
             let snapshot = await providerStatus.snapshot()
             if snapshot.requestsInFlight == 0 {
-                return
+                return false
             }
             let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
-            if nowMs - drainStartMs > timeoutMs {
-                return
+            if nowMs - drainStartMs >= timeoutMs {
+                return true
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
+        return false
     }
 
     private func completeSwapAtomically(container: ModelContainer?, modelID: String, modelHash: String?) {
@@ -242,13 +259,36 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 
     private func signal(_ signal: SwapSignal) {
-        for continuation in signalContinuations {
+        for continuation in signalContinuations.values {
             continuation.yield(signal)
         }
     }
 
+    func registerInFlight(_ cancel: @escaping @Sendable () -> Void) -> Int {
+        nextInFlightID += 1
+        let id = nextInFlightID
+        inFlightCancellations[id] = cancel
+        return id
+    }
+
+    func unregisterInFlight(_ id: Int) {
+        inFlightCancellations.removeValue(forKey: id)
+    }
+
+    private func cancelAllInFlightForDrainTimeout() {
+        let cancels = Array(inFlightCancellations.values)
+        inFlightCancellations.removeAll()
+        for cancel in cancels {
+            cancel()
+        }
+    }
+
+    private func removeSignalContinuation(_ id: UUID) {
+        signalContinuations.removeValue(forKey: id)
+    }
+
     func preflight(_ request: ChatCompletionRequest) async throws {
-        let snapshot = currentSnapshot()
+        let snapshot = await currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
         guard let container = snapshot.container else {
@@ -272,56 +312,68 @@ actor ModelRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> CompletionResult {
-        let snapshot = currentSnapshot()
+        let snapshot = await currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
+        let drainCancelled = DrainCancelToken()
+        let registrationID = registerInFlight { drainCancelled.fire() }
+        defer { unregisterInFlight(registrationID) }
         if let testCompletion {
-            return try await testCompletion(snapshot, request)
+            return try await Self.withDrainCancellation(drainCancelled) {
+                try await testCompletion(snapshot, request)
+            }
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
 
         let maxContextTokens = maxContextTokens
-        return try await inferenceGate.withPermit {
-            try Task.checkCancellation()
-            return try await container.perform { context in
+        let inferenceGate = inferenceGate
+        let stopTokenFilter = stopTokenFilter
+        return try await Self.withDrainCancellation(drainCancelled) {
+            try await inferenceGate.withPermit {
+                try drainCancelled.check()
                 try Task.checkCancellation()
-                let input = UserInput(chat: request.messages.map { $0.mlxMessage })
-                let lmInput = try await context.processor.prepare(input: input)
-                try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                let parameters = GenerateParameters(
-                    maxTokens: request.maxTokens,
-                    temperature: Float(request.temperature),
-                    topP: Float(request.topP)
-                )
-                let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
-                    if Task.isCancelled || shouldCancel() {
-                        return GenerateDisposition.stop
+                return try await container.perform { context in
+                    try drainCancelled.check()
+                    try Task.checkCancellation()
+                    let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+                    let lmInput = try await context.processor.prepare(input: input)
+                    try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+                    let parameters = GenerateParameters(
+                        maxTokens: request.maxTokens,
+                        temperature: Float(request.temperature),
+                        topP: Float(request.topP)
+                    )
+                    let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                        if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
+                            return GenerateDisposition.stop
+                        }
+                        return GenerateDisposition.more
                     }
-                    return GenerateDisposition.more
+                    try drainCancelled.check()
+                    try Task.checkCancellation()
+
+                    let filtered = Self.applyOutputFilters(
+                        result.output,
+                        stopTokenFilter: stopTokenFilter,
+                        requestStops: request.stop
+                    )
+
+                    let finishReason: String
+                    if let maxTokens = request.maxTokens, result.generationTokenCount >= maxTokens, !filtered.hitStop {
+                        finishReason = "length"
+                    } else {
+                        finishReason = "stop"
+                    }
+
+                    return CompletionResult(
+                        content: filtered.text,
+                        finishReason: finishReason,
+                        promptTokens: result.promptTokenCount,
+                        completionTokens: result.generationTokenCount
+                    )
                 }
-                try Task.checkCancellation()
-
-                let filtered = Self.applyOutputFilters(
-                    result.output,
-                    stopTokenFilter: stopTokenFilter,
-                    requestStops: request.stop
-                )
-
-                let finishReason: String
-                if let maxTokens = request.maxTokens, result.generationTokenCount >= maxTokens, !filtered.hitStop {
-                    finishReason = "length"
-                } else {
-                    finishReason = "stop"
-                }
-
-                return CompletionResult(
-                    content: filtered.text,
-                    finishReason: finishReason,
-                    promptTokens: result.promptTokenCount,
-                    completionTokens: result.generationTokenCount
-                )
             }
         }
     }
@@ -331,11 +383,16 @@ actor ModelRuntime: ModelRuntimeServing {
         shouldCancel: @escaping @Sendable () -> Bool = { false },
         onChunk: @escaping @Sendable (String) -> Void
     ) async throws -> CompletionResult {
-        let snapshot = currentSnapshot()
+        let snapshot = await currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
+        let drainCancelled = DrainCancelToken()
+        let registrationID = registerInFlight { drainCancelled.fire() }
+        defer { unregisterInFlight(registrationID) }
         if let testCompletion {
-            let completion = try await testCompletion(snapshot, request)
+            let completion = try await Self.withDrainCancellation(drainCancelled) {
+                try await testCompletion(snapshot, request)
+            }
             if !completion.content.isEmpty {
                 onChunk(completion.content)
             }
@@ -346,74 +403,81 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
-        return try await inferenceGate.withPermit {
-            try Task.checkCancellation()
-            return try await container.perform { context in
+        let inferenceGate = inferenceGate
+        let stopTokenFilter = stopTokenFilter
+        return try await Self.withDrainCancellation(drainCancelled) {
+            try await inferenceGate.withPermit {
+                try drainCancelled.check()
                 try Task.checkCancellation()
-                let input = UserInput(chat: request.messages.map { $0.mlxMessage })
-                let lmInput = try await context.processor.prepare(input: input)
-                try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
-                let parameters = GenerateParameters(
-                    maxTokens: request.maxTokens,
-                    temperature: Float(request.temperature),
-                    topP: Float(request.topP)
-                )
+                return try await container.perform { context in
+                    try drainCancelled.check()
+                    try Task.checkCancellation()
+                    let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+                    let lmInput = try await context.processor.prepare(input: input)
+                    try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
+                    let parameters = GenerateParameters(
+                        maxTokens: request.maxTokens,
+                        temperature: Float(request.temperature),
+                        topP: Float(request.topP)
+                    )
 
-                var emittedText = ""
-                var stoppedByRequestStop = false
+                    var emittedText = ""
+                    var stoppedByRequestStop = false
 
-                let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
-                    if Task.isCancelled || shouldCancel() {
-                        return .stop
+                    let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
+                        if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
+                            return .stop
+                        }
+                        let decoded = context.tokenizer.decode(tokens: tokens)
+                        let candidate = Self.streamingSafePrefix(
+                            decoded,
+                            stopTokenFilter: stopTokenFilter,
+                            requestStops: request.stop
+                        )
+
+                        let delta = Self.delta(from: emittedText, to: candidate.text)
+                        if !delta.isEmpty {
+                            emittedText = candidate.text
+                            onChunk(delta)
+                        }
+
+                        if candidate.hitStop {
+                            stoppedByRequestStop = true
+                            return .stop
+                        }
+                        return .more
                     }
-                    let decoded = context.tokenizer.decode(tokens: tokens)
-                    let candidate = Self.streamingSafePrefix(
-                        decoded,
+                    try drainCancelled.check()
+                    try Task.checkCancellation()
+
+                    let final = Self.applyOutputFilters(
+                        result.output,
                         stopTokenFilter: stopTokenFilter,
                         requestStops: request.stop
                     )
-
-                    let delta = Self.delta(from: emittedText, to: candidate.text)
-                    if !delta.isEmpty {
-                        emittedText = candidate.text
-                        onChunk(delta)
+                    let finalDelta = Self.delta(from: emittedText, to: final.text)
+                    if !finalDelta.isEmpty {
+                        onChunk(finalDelta)
                     }
 
-                    if candidate.hitStop {
-                        stoppedByRequestStop = true
-                        return .stop
+                    let finishReason: String
+                    if let maxTokens = request.maxTokens,
+                       result.generationTokenCount >= maxTokens,
+                       !stoppedByRequestStop,
+                       !final.hitStop
+                    {
+                        finishReason = "length"
+                    } else {
+                        finishReason = "stop"
                     }
-                    return .more
-                }
-                try Task.checkCancellation()
 
-                let final = Self.applyOutputFilters(
-                    result.output,
-                    stopTokenFilter: stopTokenFilter,
-                    requestStops: request.stop
-                )
-                let finalDelta = Self.delta(from: emittedText, to: final.text)
-                if !finalDelta.isEmpty {
-                    onChunk(finalDelta)
+                    return CompletionResult(
+                        content: final.text,
+                        finishReason: finishReason,
+                        promptTokens: result.promptTokenCount,
+                        completionTokens: result.generationTokenCount
+                    )
                 }
-
-                let finishReason: String
-                if let maxTokens = request.maxTokens,
-                   result.generationTokenCount >= maxTokens,
-                   !stoppedByRequestStop,
-                   !final.hitStop
-                {
-                    finishReason = "length"
-                } else {
-                    finishReason = "stop"
-                }
-
-                return CompletionResult(
-                    content: final.text,
-                    finishReason: finishReason,
-                    promptTokens: result.promptTokenCount,
-                    completionTokens: result.generationTokenCount
-                )
             }
         }
     }
@@ -477,6 +541,28 @@ actor ModelRuntime: ModelRuntimeServing {
             type: "service_unavailable",
             code: "provider_loading"
         )
+    }
+
+    private nonisolated static func withDrainCancellation<T: Sendable>(
+        _ token: DrainCancelToken,
+        operation: @escaping @Sendable () async throws -> T
+    ) async throws -> T {
+        try await withThrowingTaskGroup(of: T.self) { group in
+            group.addTask {
+                try await operation()
+            }
+            group.addTask {
+                while !token.isFired {
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                throw DrainCancelledError()
+            }
+            guard let result = try await group.next() else {
+                throw DrainCancelledError()
+            }
+            group.cancelAll()
+            return result
+        }
     }
 
     private static func defaultMaxContextTokens() -> Int {
@@ -618,6 +704,62 @@ actor ModelRuntime: ModelRuntimeServing {
     }
 }
 
+private final class DrainCancelToken: @unchecked Sendable {
+    private var _fired = false
+    private var waiters: [UUID: CheckedContinuation<Void, Never>] = [:]
+    private let lock = NSLock()
+
+    var isFired: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return _fired
+    }
+
+    func check() throws {
+        if isFired {
+            throw DrainCancelledError()
+        }
+    }
+
+    func fire() {
+        let continuations: [CheckedContinuation<Void, Never>]
+        lock.lock()
+        if _fired {
+            lock.unlock()
+            return
+        }
+        _fired = true
+        continuations = Array(waiters.values)
+        waiters.removeAll()
+        lock.unlock()
+
+        for continuation in continuations {
+            continuation.resume()
+        }
+    }
+
+    func waitUntilFired() async {
+        if isFired {
+            return
+        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            var shouldResume = false
+            let id = UUID()
+            lock.lock()
+            if _fired {
+                shouldResume = true
+            } else {
+                waiters[id] = continuation
+            }
+            lock.unlock()
+
+            if shouldResume {
+                continuation.resume()
+            }
+        }
+    }
+}
+
 private struct ModelWeightManifest: Encodable {
     let files: [ModelWeightManifestFile]
 }
@@ -628,7 +770,7 @@ private struct ModelWeightManifestFile: Encodable {
     let size: UInt64
 }
 
-struct CompletionResult {
+struct CompletionResult: Sendable {
     let content: String
     let finishReason: String
     let promptTokens: Int
