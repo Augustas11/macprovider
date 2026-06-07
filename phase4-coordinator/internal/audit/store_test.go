@@ -120,6 +120,62 @@ func TestPruneBeforeRemovesOlderRows(t *testing.T) {
 	}
 }
 
+// TestPruneBeforeBoundaryIsStrictlyLess pins the exact-cutoff semantic of
+// PruneBefore per SPEC-002 v1.3.5 §7.10 R-7.10.2 and the requestlog
+// precedent: PruneBefore uses a strict `<` comparison, so a row stamped
+// exactly at the cutoff MUST survive while a row stamped any amount older
+// MUST be removed. A future regression flipping `<` to `<=` would let the
+// at-cutoff row escape — this test catches that drift.
+func TestPruneBeforeBoundaryIsStrictlyLess(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 6, 7, 12, 0, 0, 0, time.UTC)
+	// Epsilon is 1 second because PruneBefore compares via SQLite
+	// julianday() (float64 days). Sub-millisecond epsilons collapse
+	// to the same Julian Date at float64 precision near ~2.46e6.
+	// The strict-< vs <= semantic is still proven: "at" the cutoff
+	// survives, "before" is removed.
+	rows := []struct {
+		label string
+		ts    time.Time
+	}{
+		{"before", cutoff.Add(-time.Second)},
+		{"at", cutoff},
+		{"after", cutoff.Add(time.Second)},
+	}
+	for _, r := range rows {
+		if err := store.Insert(ctx, r.ts, "event", r.label, `{"event":"event"}`); err != nil {
+			t.Fatalf("insert %s: %v", r.label, err)
+		}
+	}
+
+	deleted, err := store.PruneBefore(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if deleted != 1 {
+		t.Fatalf("deleted=%d want 1 (only the strictly-before row)", deleted)
+	}
+
+	rowsAfter, err := store.DB().QueryContext(ctx, `SELECT provider_id FROM audit_log ORDER BY ts_utc ASC`)
+	if err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	defer rowsAfter.Close()
+	var labels []string
+	for rowsAfter.Next() {
+		var label string
+		if err := rowsAfter.Scan(&label); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		labels = append(labels, label)
+	}
+	if len(labels) != 2 || labels[0] != "at" || labels[1] != "after" {
+		t.Fatalf("remaining provider_id order = %v, want [at after] — exact-cutoff row MUST survive", labels)
+	}
+}
+
 func TestEmitterDoesNotPanicOnSQLiteFailure(t *testing.T) {
 	store := openTestStore(t)
 	if err := store.Close(); err != nil {

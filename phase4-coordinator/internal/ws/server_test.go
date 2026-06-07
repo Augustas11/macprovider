@@ -1351,8 +1351,19 @@ FROM audit_log`).Scan(&eventType, &providerID, &payloadJSON); err != nil {
 		payload["hash_verification_result"] != string(pool.HashStatusUncatalogued) {
 		t.Fatalf("payload = %#v", payload)
 	}
-	if _, ok := payload["loading_window_ms"].(float64); !ok {
+	loadingWindowMs, ok := payload["loading_window_ms"].(float64)
+	if !ok {
 		t.Fatalf("loading_window_ms type=%T payload=%#v", payload["loading_window_ms"], payload)
+	}
+	// SPEC-002 v1.3.5 §7.10.2 R-7.10.6 — loading_window_ms is the
+	// wall-clock duration from prior LoadingStartedAt to the
+	// completion heartbeat. Phase 2C stamps both on coordinator clock;
+	// a positive value confirms the prior+completion heartbeats
+	// actually flowed through ApplyHeartbeat. A zero would silently
+	// pass the prior type-only assertion even if the loading-state
+	// pipeline regressed.
+	if loadingWindowMs <= 0 {
+		t.Fatalf("loading_window_ms=%v, want > 0 (positive wall-clock duration)", loadingWindowMs)
 	}
 	if _, ok := payload["drain_inflight_count_estimate"]; ok {
 		t.Fatalf("drain_inflight_count_estimate must be omitted: %#v", payload)

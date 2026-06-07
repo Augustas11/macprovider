@@ -57,6 +57,15 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// DB returns the underlying *sql.DB. This exists for two scopes only:
+//   - tests that need to assert on row state (the integration tests in
+//     internal/ws and the boundary tests in this package read via DB()).
+//   - future SPEC-002 §7.10.3 R-7.10.11 event types that may want to
+//     share connection pooling with operator_model_swap.
+//
+// Production code MUST use EmitSwap / Insert / PruneBefore. Bypassing
+// those entry points skips the F-1.5 invariant guard (SPEC-002 v1.3.5
+// R-7.10.9) and the eventType/providerID hygiene.
 func (s *Store) DB() *sql.DB {
 	if s == nil {
 		return nil

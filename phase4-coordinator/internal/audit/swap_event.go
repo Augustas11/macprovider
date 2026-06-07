@@ -32,8 +32,15 @@ type swapPayload struct {
 // account_id values.
 func buildSwapPayload(event pool.SwapEvent) ([]byte, error) {
 	payload := swapPayload{
-		Event:                  "operator_model_swap",
-		TS:                     event.CompletedAt.UTC().Format(time.RFC3339),
+		Event: "operator_model_swap",
+		// SPEC-002 v1.3.5 §7.10.1 R-7.10.2 mandates ts_utc be RFC3339 in
+		// UTC; SPEC-011 v0.5 §3.6 example shows subsecond precision
+		// ("2026-06-06T14:23:09.123Z"). RFC3339Nano is a superset
+		// (parses cleanly as RFC3339) and matches the precision of the
+		// audit_log.ts_utc column at store.go to keep payload/row
+		// timestamps consistent for forensic correlation across
+		// same-second swaps.
+		TS:                     event.CompletedAt.UTC().Format(time.RFC3339Nano),
 		ProviderAssignedID:     event.AssignedID,
 		FromModelID:            event.FromModelID,
 		FromModelHash:          event.FromModelHash,
