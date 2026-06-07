@@ -80,6 +80,7 @@ actor CoordinatorClient {
     private let maxActiveRequests: Int
     private let supportedModels: [String]?
     private let publishesSupportedModels: Bool
+    private let warmSwapEnabled: Bool
     private let reconnectGraceNanoseconds: UInt64
     private let connectAndRunOverride: (() async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
@@ -90,6 +91,7 @@ actor CoordinatorClient {
     private var webSocket: ProviderWebSocketTask?
     private var runTask: Task<Void, Never>?
     private var heartbeatTask: Task<Void, Never>?
+    private var swapHeartbeatTask: Task<Void, Never>?
     private var sleepAssertion: ProviderSleepAssertion?
     private let sendOverride: (([String: Any]) async throws -> Void)?
 
@@ -123,6 +125,7 @@ actor CoordinatorClient {
         self.maxActiveRequests = 1
         self.supportedModels = config.supportedModels
         self.publishesSupportedModels = config.publishesSupportedModels
+        self.warmSwapEnabled = config.enableWarmSwap
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
         self.attestationGenerator = attestationGenerator
         self.webSocketFactory = webSocketFactory
@@ -136,11 +139,17 @@ actor CoordinatorClient {
         runTask = Task { [weak self] in
             await self?.runReconnectLoop()
         }
+        if warmSwapEnabled {
+            swapHeartbeatTask = Task { [weak self] in
+                await self?.consumeSwapSignals()
+            }
+        }
     }
 
     func stop() async {
         runTask?.cancel()
         heartbeatTask?.cancel()
+        swapHeartbeatTask?.cancel()
         sleepAssertion?.stop()
         sleepAssertion = nil
         await inferenceRelay?.cancelAllAndClear()
@@ -150,7 +159,27 @@ actor CoordinatorClient {
         await providerStatus.setCoordinatorSession(connected: false)
         runTask = nil
         heartbeatTask = nil
+        swapHeartbeatTask = nil
         webSocket = nil
+    }
+
+    private func consumeSwapSignals() async {
+        let stream = await modelRuntime.swapSignals()
+        for await signal in stream {
+            if Task.isCancelled {
+                return
+            }
+            switch signal.outcome {
+            case .completed:
+                do {
+                    try await sendHeartbeat()
+                } catch {
+                    Self.keepaliveDebug("warm_swap_heartbeat_send_error error=\(error)")
+                }
+            case let .failed(reason):
+                Self.keepaliveDebug("coordinator.warmSwap.swapFailed reason=\(reason)")
+            }
+        }
     }
 
     private func runReconnectLoop() async {
@@ -356,6 +385,10 @@ actor CoordinatorClient {
     func handleCoordinatorPayloadForTest(_ payload: [String: Any]) async throws {
         let data = try JSONSerialization.data(withJSONObject: payload)
         try await handle(.string(String(decoding: data, as: UTF8.self)))
+    }
+
+    func sendHeartbeatForTest() async throws {
+        try await sendHeartbeat()
     }
 
     private func receiveAuthChallenge(from socket: ProviderWebSocketTask) async throws -> [String: Any] {
@@ -587,7 +620,7 @@ actor CoordinatorClient {
 
     private func sendHeartbeat() async throws {
         let snapshot = await providerStatus.snapshot(resetWindow: true)
-        try await send([
+        var payload: [String: Any] = [
             "type": "heartbeat",
             "status": snapshot.status.rawValue,
             "model_id": snapshot.modelID ?? "",
@@ -601,7 +634,15 @@ actor CoordinatorClient {
             "requests_served_since_last": snapshot.requestsServedSinceLast,
             "avg_latency_ms_since_last": nullableNumber(snapshot.avgLatencyMSSinceLast),
             "throughput_tps_since_last": nullableNumber(snapshot.throughputTPSSinceLast),
-        ])
+        ]
+        if warmSwapEnabled {
+            let runtimeSnapshot = await modelRuntime.currentSnapshot()
+            if let modelHash = runtimeSnapshot.modelHash {
+                payload["model_hash"] = modelHash
+            }
+            payload["loading"] = runtimeSnapshot.state == .loading || runtimeSnapshot.state == .draining
+        }
+        try await send(payload)
     }
 
     private func sendStateUpdate(state newState: ProviderHealthState?, reason: String) async throws {
@@ -709,8 +750,14 @@ actor CoordinatorClient {
         if let endpointURL {
             message["endpoint_url"] = endpointURL
         }
-        if let modelHash = snapshot.modelHash {
-            message["model_hash"] = modelHash
+        let hashForHello: String?
+        if warmSwapEnabled {
+            hashForHello = await modelRuntime.currentSnapshot().modelHash
+        } else {
+            hashForHello = snapshot.modelHash
+        }
+        if let hashForHello {
+            message["model_hash"] = hashForHello
         }
         return message
     }

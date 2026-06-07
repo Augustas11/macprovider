@@ -168,6 +168,220 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(hello["model_hash"])
     }
 
+    func testHeartbeatDisabledModeOmitsBothFields() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let capacity = ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: capacity,
+            modelHash: String(repeating: "a", count: 64)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: false)
+
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+        let heartbeatJSON = Self.jsonString(heartbeat)
+        let helloJSON = Self.jsonString(await client.helloMessage())
+        let expectedHeartbeat = """
+        {"avg_latency_ms_since_last":null,"max_concurrency":1,"max_context_tokens":20000,"model_id":"model-a","model_params_b":0,"ram_gb":\(capacity.ramGB),"requests_served_since_last":0,"slots_free":1,"slots_total":1,"status":"ready","throughput_tps_estimate":0,"throughput_tps_since_last":null,"type":"heartbeat"}
+        """
+        let expectedHello = """
+        {"attestation":null,"binary_version":"\(CoordinatorClient.binaryVersion)","hostname":"\(Host.current().localizedName ?? "unknown")","max_concurrency":1,"max_context_tokens":20000,"model_hash":"\(String(repeating: "a", count: 64))","model_id":"model-a","model_params_b":0,"provider_id":"provider-test","ram_gb":\(capacity.ramGB),"throughput_tps_estimate":0,"tier":1,"type":"hello","version":1}
+        """
+
+        XCTAssertFalse(heartbeatJSON.contains("\"model_hash\""), heartbeatJSON)
+        XCTAssertFalse(heartbeatJSON.contains("\"loading\""), heartbeatJSON)
+        XCTAssertFalse(helloJSON.contains("\"loading\""), helloJSON)
+        XCTAssertEqual(heartbeatJSON, expectedHeartbeat)
+        XCTAssertEqual(helloJSON, expectedHello)
+    }
+
+    func testHeartbeatEnabledModeReadyEmitsLoadingFalse() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtimeHash = String(repeating: "1", count: 64)
+        let runtime = makeRuntime(modelID: "model-a", modelHash: runtimeHash, warmSwapEnabled: true)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: true, modelRuntime: runtime)
+
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+        let json = Self.jsonString(heartbeat)
+
+        XCTAssertEqual(heartbeat["model_hash"] as? String, runtimeHash)
+        XCTAssertEqual(heartbeat["loading"] as? Bool, false)
+        XCTAssertTrue(json.contains("\"\(runtimeHash)\""), json)
+        XCTAssertTrue(json.contains("\"loading\":false"), json)
+        XCTAssertNotNil(runtimeHash.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression))
+    }
+
+    func testHeartbeatEnabledModeLoadingEmitsLoadingTrue() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let gate = SwapLoaderGate()
+        let oldHash = String(repeating: "2", count: 64)
+        let newHash = String(repeating: "3", count: 64)
+        let runtime = makeRuntime(modelID: "model-a", modelHash: oldHash, warmSwapEnabled: true) { target in
+            try await gate.waitForRelease()
+            return (target, newHash)
+        }
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: true, modelRuntime: runtime)
+
+        let swapTask = try await runtime.beginSwap(targetModelID: "model-b")
+        try await Self.waitUntil {
+            await runtime.currentSnapshot().state == .loading
+        }
+        try await client.sendHeartbeatForTest()
+        await gate.release()
+        try await swapTask.value
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+        let json = Self.jsonString(heartbeat)
+
+        XCTAssertEqual(heartbeat["model_hash"] as? String, oldHash)
+        XCTAssertEqual(heartbeat["loading"] as? Bool, true)
+        XCTAssertTrue(json.contains("\"loading\":true"), json)
+    }
+
+    func testHeartbeatEnabledModeOmitsModelHashWhenNil() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(modelID: nil, modelHash: nil, warmSwapEnabled: true)
+        let status = ProviderStatus(
+            modelID: nil,
+            modelLoaded: false,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: true, modelRuntime: runtime)
+
+        try await client.sendHeartbeatForTest()
+        let frames = await recorder.frames
+        let heartbeat = try XCTUnwrap(frames.first)
+        let json = Self.jsonString(heartbeat)
+
+        XCTAssertNil(heartbeat["model_hash"])
+        XCTAssertEqual(heartbeat["loading"] as? Bool, false)
+        XCTAssertFalse(json.contains("\"model_hash\""), json)
+        XCTAssertTrue(json.contains("\"loading\":false"), json)
+    }
+
+    func testHelloDisabledModeReadsFromProviderStatus() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(modelID: "model-a", modelHash: "runtime-hash", warmSwapEnabled: true)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "boot-hash"
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: false, modelRuntime: runtime)
+
+        let hello = await client.helloMessage()
+        let json = Self.jsonString(hello)
+
+        XCTAssertEqual(hello["model_hash"] as? String, "boot-hash")
+        XCTAssertTrue(json.contains("\"model_hash\":\"boot-hash\""), json)
+        XCTAssertFalse(json.contains("runtime-hash"), json)
+    }
+
+    func testHelloEnabledModeReadsFromModelRuntime() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(modelID: "model-a", modelHash: "runtime-hash", warmSwapEnabled: true)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "boot-hash"
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: true, modelRuntime: runtime)
+
+        let hello = await client.helloMessage()
+        let json = Self.jsonString(hello)
+
+        XCTAssertEqual(hello["model_hash"] as? String, "runtime-hash")
+        XCTAssertTrue(json.contains("\"model_hash\":\"runtime-hash\""), json)
+        XCTAssertFalse(json.contains("boot-hash"), json)
+    }
+
+    func testHelloDuringInFlightSwapReturnsOldHash() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let gate = SwapLoaderGate()
+        let runtime = makeRuntime(modelID: "A", modelHash: "old-hash", warmSwapEnabled: true) { target in
+            try await gate.waitForRelease()
+            return (target, "new-hash")
+        }
+        let status = ProviderStatus(
+            modelID: "A",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "boot-hash"
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: true, modelRuntime: runtime)
+
+        let swapTask = try await runtime.beginSwap(targetModelID: "B")
+        try await Self.waitUntil {
+            await runtime.currentSnapshot().state == .loading
+        }
+        let inFlightHello = await client.helloMessage()
+        await gate.release()
+        try await swapTask.value
+        let completedHello = await client.helloMessage()
+
+        XCTAssertEqual(inFlightHello["model_hash"] as? String, "old-hash")
+        XCTAssertNotEqual(inFlightHello["model_hash"] as? String, "new-hash")
+        XCTAssertEqual(completedHello["model_hash"] as? String, "new-hash")
+    }
+
+    func testSwapCompletionTriggersImmediateHeartbeat() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let newHash = String(repeating: "4", count: 64)
+        let runtime = makeRuntime(modelID: "model-a", modelHash: String(repeating: "5", count: 64), warmSwapEnabled: true) { target in
+            (target, newHash)
+        }
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            enableWarmSwap: true,
+            modelRuntime: runtime,
+            connectAndRunOverride: {
+                while !Task.isCancelled {
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+            }
+        )
+
+        await client.start()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let swapTask = try await runtime.beginSwap(targetModelID: "model-b")
+        try await swapTask.value
+        try await Self.waitUntil(timeoutNanoseconds: 500_000_000) {
+            let frames = await recorder.frames
+            return frames.contains { frame in
+                frame["type"] as? String == "heartbeat"
+                    && frame["model_hash"] as? String == newHash
+                    && frame["loading"] as? Bool == false
+            }
+        }
+        await client.stop()
+
+        let frames = await recorder.frames
+        XCTAssertTrue(frames.contains { $0["type"] as? String == "heartbeat" && $0["model_hash"] as? String == newHash })
+    }
+
     func testAuthInitialUsesV2EncryptedLegCapabilitiesAndModelHash() async throws {
         let recorder = CoordinatorFrameRecorder()
         let modelHash = String(repeating: "b", count: 64)
@@ -575,7 +789,7 @@ final class CoordinatorClientTests: XCTestCase {
     }
 
     private static func jsonString(_ object: [String: Any]) -> String {
-        let data = try! JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
+        let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
         return String(decoding: data, as: UTF8.self)
     }
 
@@ -600,6 +814,8 @@ final class CoordinatorClientTests: XCTestCase {
         recorder: CoordinatorFrameRecorder,
         drainTimeoutSeconds: Int = 1,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
+        enableWarmSwap: Bool = false,
+        modelRuntime: ModelRuntime? = nil,
         attestationGenerator: Tier2AttestationTokenGenerating = StaticAttestationGenerator(token: nil),
         connectAndRunOverride: (() async throws -> Void)? = nil
     ) async throws -> CoordinatorClient {
@@ -608,7 +824,13 @@ final class CoordinatorClientTests: XCTestCase {
         config.providerID = "provider-test"
         config.model = "model-a"
         config.drainTimeoutSeconds = drainTimeoutSeconds
-        let runtime = try await ModelRuntime(modelID: nil)
+        config.enableWarmSwap = enableWarmSwap
+        let runtime: ModelRuntime
+        if let modelRuntime {
+            runtime = modelRuntime
+        } else {
+            runtime = try await ModelRuntime(modelID: nil)
+        }
         return try XCTUnwrap(CoordinatorClient(
             config: config,
             modelRuntime: runtime,
@@ -621,6 +843,53 @@ final class CoordinatorClientTests: XCTestCase {
             sleepAssertionFactory: { nil },
             connectAndRunOverride: connectAndRunOverride
         ))
+    }
+
+    private func makeRuntime(
+        modelID: String?,
+        modelHash: String? = nil,
+        warmSwapEnabled: Bool,
+        loader: @escaping @Sendable (String) async throws -> (String, String?) = { target in (target, nil) }
+    ) -> ModelRuntime {
+        ModelRuntime(
+            modelID: modelID,
+            modelHash: modelHash,
+            warmSwapEnabled: warmSwapEnabled,
+            loader: { _ in throw CoordinatorClientTestError.unexpectedContainerLoader },
+            testLoader: loader
+        )
+    }
+
+    private static func waitUntil(
+        timeoutNanoseconds: UInt64 = 2_000_000_000,
+        _ predicate: () async -> Bool
+    ) async throws {
+        let deadline = DispatchTime.now().uptimeNanoseconds + timeoutNanoseconds
+        while DispatchTime.now().uptimeNanoseconds < deadline {
+            if await predicate() {
+                return
+            }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTFail("Timed out waiting for condition")
+    }
+}
+
+private enum CoordinatorClientTestError: Error {
+    case unexpectedContainerLoader
+}
+
+private actor SwapLoaderGate {
+    private var released = false
+
+    func waitForRelease() async throws {
+        while !released {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+    }
+
+    func release() {
+        released = true
     }
 }
 
