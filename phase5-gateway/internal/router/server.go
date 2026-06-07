@@ -1710,22 +1710,32 @@ type statusModel struct {
 	Degraded           bool   `json:"degraded"`
 	Available          bool   `json:"available"`
 	Availability       string `json:"availability"`
+	// SPEC-002 v1.3.5 §7.4 R-7.4.1 / SPEC-010 v1.5 R-3.3.3 — per
+	// SPEC-006 v0.8.1 §5.6 anonymization, the buyer-facing
+	// /v1/status surfaces supported_models as a per-model UNION
+	// across providers serving this model_id whose
+	// PublishesSupportedModels == true (NOT per-provider entries,
+	// which would leak provider count fingerprints). The field is
+	// OMITTED when the union is empty.
+	SupportedModels []string `json:"supported_models,omitempty"`
 }
 
 type poolzResponse struct {
 	Pool []struct {
-		ProviderID       string `json:"provider_id"`
-		AssignedID       string `json:"assigned_id"`
-		EndpointURL      string `json:"endpoint_url"`
-		Hostname         string `json:"hostname"`
-		ModelID          string `json:"model_id"`
-		State            string `json:"state"`
-		SlotsFree        int    `json:"slots_free"`
-		SlotsTotal       int    `json:"slots_total"`
-		MaxContextTokens int    `json:"max_context_tokens"`
-		MemoryBytes      int64  `json:"memory_bytes"`
-		CPUCount         int    `json:"cpu_count"`
-		OperatorIdentity string `json:"operator_identity"`
+		ProviderID               string   `json:"provider_id"`
+		AssignedID               string   `json:"assigned_id"`
+		EndpointURL              string   `json:"endpoint_url"`
+		Hostname                 string   `json:"hostname"`
+		ModelID                  string   `json:"model_id"`
+		State                    string   `json:"state"`
+		SlotsFree                int      `json:"slots_free"`
+		SlotsTotal               int      `json:"slots_total"`
+		MaxContextTokens         int      `json:"max_context_tokens"`
+		MemoryBytes              int64    `json:"memory_bytes"`
+		CPUCount                 int      `json:"cpu_count"`
+		OperatorIdentity         string   `json:"operator_identity"`
+		SupportedModels          []string `json:"supported_models,omitempty"`
+		PublishesSupportedModels bool     `json:"publishes_supported_models,omitempty"`
 	} `json:"pool"`
 	Summary struct {
 		TotalProviders int `json:"total_providers"`
@@ -1803,6 +1813,7 @@ func (s *Server) flushStatusCache() {
 func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) statusResponse {
 	models := map[string]statusModel{}
 	stats := map[string]poolzModelStats{}
+	supportedSets := map[string]map[string]struct{}{}
 	out := statusResponse{
 		Status:      "up",
 		Coordinator: coordinatorStatus{Status: "up", CheckedAt: now.Format(time.RFC3339)},
@@ -1834,6 +1845,14 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 			m.MaxContextTokens = p.MaxContextTokens
 		}
 		models[p.ModelID] = m
+		if p.PublishesSupportedModels && len(p.SupportedModels) > 0 {
+			if supportedSets[p.ModelID] == nil {
+				supportedSets[p.ModelID] = map[string]struct{}{}
+			}
+			for _, s := range p.SupportedModels {
+				supportedSets[p.ModelID][s] = struct{}{}
+			}
+		}
 		st := stats[p.ModelID]
 		st.TotalProviders++
 		st.SlotsFreeTotal += p.SlotsFree
@@ -1856,6 +1875,14 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 	} else if out.Pool.Ready < readyThreshold {
 		out.Status = "degraded"
 		out.Degraded = true
+	}
+	for modelID, set := range supportedSets {
+		if len(set) == 0 {
+			continue
+		}
+		m := models[modelID]
+		m.SupportedModels = sortedKeys(set)
+		models[modelID] = m
 	}
 	for _, model := range models {
 		model.Degraded = computeDegraded(stats[model.ID])
@@ -1898,6 +1925,15 @@ func computeAvailability(modelStats poolzModelStats) (bool, string) {
 		return false, "no_free_slots"
 	}
 	return true, "available"
+}
+
+func sortedKeys(set map[string]struct{}) []string {
+	keys := make([]string, 0, len(set))
+	for k := range set {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func buildFeedbackSummary(events []storage.FeedbackSummaryEvent, start, end time.Time) map[string]any {
