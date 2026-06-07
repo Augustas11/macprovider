@@ -445,8 +445,10 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 			seen[normalized] = struct{}{}
 		}
 		// SPEC-010 v1.5 R-3.1.4 / R-3.1.9 — containment failure surfaces
-		// the LOCKED substring "model_id not in supported_models" (NOT
-		// the inverted "supported_models missing model_id").
+		// the LOCKED substring "model_id not in supported_models". The
+		// inverted ordering caught by the pre-merge audit is excluded
+		// from the AC-K.15 allowlist; only the verbatim spec substring
+		// passes isSpec010CatalogBadField.
 		if _, ok := seen[normalizeSupportedModelEntry(req.ModelID)]; !ok {
 			return AuthRequest{}, presence, "model_id not in supported_models", fieldError{Field: "model_id not in supported_models"}
 		}
