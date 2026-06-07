@@ -369,6 +369,36 @@ func TestProviderAuthV2InitialEmptyCatalogRejectedOnTheWire(t *testing.T) {
 	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models cannot be empty")
 }
 
+// TestProviderAuthV2ProofStageFirstWithMalformedCatalogTakesEnvelopePath
+// regression-pins the [r2:1.1] R2V closure: a first-frame
+// auth_request with stage:"proof" whose supported_models field is a
+// malformed JSON type (string instead of array) returns
+// badField="supported_models" from parseAuthProof. The original R2
+// gate prefix-matched on "supported_models" and misclassified this
+// envelope-level failure as an AC-K.15 catalog rejection
+// (bad_request + 4001 + locked substring). After the R3 exact-match
+// switch in isSpec010CatalogBadField, this frame correctly takes the
+// CloseUnrecognizedAuthMessage (4000) generic envelope path.
+func TestProviderAuthV2ProofStageFirstWithMalformedCatalogTakesEnvelopePath(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+	code, reason := sendHelloExpectClose(t, ts.URL, map[string]any{
+		"type":             "auth_request",
+		"version":          2,
+		"stage":            "proof",
+		"auth_attempt_id":  "auth-fake-attempt-id",
+		"provider_id":      "m4-anon",
+		"supported_models": "not-an-array",
+	})
+	if code != providerws.CloseUnrecognizedAuthMessage {
+		t.Fatalf("close code = %d, want %d (envelope path, not AC-K.15 path)",
+			code, providerws.CloseUnrecognizedAuthMessage)
+	}
+	if reason != "unrecognized auth message" {
+		t.Fatalf("close reason = %q, want %q", reason, "unrecognized auth message")
+	}
+}
+
 func TestProviderAuthV2ProofMismatchRejectedWithLockedSubstring(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""

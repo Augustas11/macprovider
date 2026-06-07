@@ -87,9 +87,22 @@ func (s *authAttemptStore) count() int {
 // string identifies a SPEC-010 v1.5 R-3.1.9 catalog validation
 // failure (length / array / duplicate / containment / empty), per
 // SPEC-002 v1.3.5 AC-K.15. These badField values are LOCKED test
-// oracles that MUST reach the wire verbatim.
+// oracles that MUST reach the wire verbatim — exact-match guards
+// against a proof-stage-first frame whose JSON-type error returns
+// the bare "supported_models" badField from parseAuthProof being
+// misclassified as an AC-K.15 catalog rejection (envelope-level
+// failures keep the existing generic close path).
 func isSpec010CatalogBadField(badField string) bool {
-	return strings.HasPrefix(badField, "supported_models")
+	switch badField {
+	case "supported_models cannot be empty",
+		"supported_models entry exceeds 256 bytes",
+		"supported_models exceeds 64 entries",
+		"supported_models contains duplicate entries",
+		"supported_models missing model_id":
+		return true
+	default:
+		return false
+	}
 }
 
 func supportedModelsEqualUnderNFCASCIIFold(a, b []string) bool {
