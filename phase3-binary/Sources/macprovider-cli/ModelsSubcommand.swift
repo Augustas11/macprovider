@@ -63,7 +63,7 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
     @Argument(help: "Target HuggingFace model ID or local path.")
     var targetModelID: String
 
-    @Flag(help: "Accepted in Phase 1C; cooldown bypass behavior lands in Phase 1E.")
+    @Flag(help: "Bypass the CLI-side cooldown soft guard.")
     var force = false
 
     @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
@@ -78,13 +78,11 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
     @Option(help: "Control socket path override. Overrides MACPROVIDER_CTL_SOCKET_PATH and config ctl_socket_path. Default $TMPDIR/macprovider-cli/ctl.sock.")
     var ctlSocketPath: String?
 
-    // Phase 1E reads/writes this path for the cooldown soft guard; Phase 1C only stores it.
-    @Option(help: "CLI-side cooldown state file. Overrides MACPROVIDER_SWITCH_STATE_PATH and config switch_state_path. Default $HOME/Library/Application Support/macprovider-cli/last-switch.ts. Cooldown soft guard lands in Phase 1E.")
+    @Option(help: "CLI-side cooldown state file. Overrides MACPROVIDER_SWITCH_STATE_PATH and config switch_state_path. Default $HOME/Library/Application Support/macprovider-cli/last-switch.ts.")
     var switchStatePath: String?
 
     func run() async throws {
-        // Stored for Phase 1E cooldown bypass/read-write behavior; intentionally unused in 1C.
-        _ = ModelsSwitchOptions(force: force, switchStatePath: switchStatePath)
+        let options = ModelsSwitchOptions(force: force, switchStatePath: switchStatePath)
         let resolved = try loadModelsConfig(
             config: config,
             model: model,
@@ -101,6 +99,19 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
         } catch let error as SupportedModelsValidationError {
             writeStderr("\(error)")
             throw ExitCode(2)
+        }
+
+        if !options.force {
+            let storePath = ControlSocketPaths.defaultSwitchStatePath(resolved.switchStatePath)
+            let store = SwitchStateStore(path: storePath)
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            switch store.cooldownDecision(now: nowMs) {
+            case .clear:
+                break
+            case .cooldown(let secondsRemaining):
+                writeStderr("swap on cooldown for \(secondsRemaining)s. Re-issue with --force to bypass")
+                throw ExitCode(6)
+            }
         }
 
         let socketPath = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
@@ -128,6 +139,14 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
                 writeStderr("switch rejected")
                 throw ExitCode(4)
             }
+        }
+
+        let storePath = ControlSocketPaths.defaultSwitchStatePath(resolved.switchStatePath)
+        let store = SwitchStateStore(path: storePath)
+        do {
+            try store.writeLastSwitchMs(requestedAtMs)
+        } catch {
+            writeStderr("warning: could not write switch state file at \(storePath.path): \(error)")
         }
 
         while true {
