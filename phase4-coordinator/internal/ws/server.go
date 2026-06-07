@@ -95,10 +95,25 @@ func WithAdmissionStore(store AdmissionStateStore) Option {
 	}
 }
 
+// WithAuthAttemptRetentionBound overrides the default 1024-bound
+// on the SPEC-002 v1.3.5 §7.9 auth-attempt retention store.
+// INTENDED USE: tests that exercise the AC-K.16 retention-bound
+// rejection path with a smaller bound (commonly 1). Production
+// deployments SHOULD NOT lower the bound below 1024 (per
+// SPEC-002 v1.3.5 R-7.9.6 recommended value); lower values
+// will reject legitimate auth attempts under normal traffic.
 func WithAuthAttemptRetentionBound(maxBound int) Option {
 	return func(s *Server) {
 		s.authAttempts = newAuthAttemptStore(maxBound)
 	}
+}
+
+// AuthAttemptCount returns the number of in-flight auth-attempt
+// retention entries. Test-only — production code MUST NOT
+// condition behavior on this value (the retention bound is the
+// operational gate per SPEC-002 v1.3.5 R-7.9.6 / AC-K.16).
+func (s *Server) AuthAttemptCount() int {
+	return s.authAttempts.count()
 }
 
 type pendingPreflight struct {
@@ -327,6 +342,17 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		if badField == "" {
 			badField = "stage"
 		}
+		// SPEC-002 v1.3.5 §11 AC-K.15 / SPEC-010 v1.5 R-3.1.9 — when
+		// initial-stage parse fails on a SPEC-010 catalog validation
+		// rule, surface the LOCKED reason substring on the wire so
+		// the AC-K.15 grep-based test oracle holds. Envelope-level
+		// and stage-mismatch failures keep the existing generic
+		// rejection.
+		if isSpec010CatalogBadField(badField) {
+			s.sendAuthRejection(conn, "bad_request", badField)
+			s.close(conn, CloseInvalidHello, badField)
+			return "", ""
+		}
 		s.close(conn, CloseUnrecognizedAuthMessage, "unrecognized auth message")
 		return "", ""
 	}
@@ -496,6 +522,14 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		StartedAt:    s.now(),
 	}
 	if retainSpec010 {
+		// SPEC-002 v1.3.5 §7.9 — explicit early release so the
+		// retention entry does not persist for the WS-session lifetime
+		// (handleV2Conn does not return until readProviderLoop exits,
+		// which for a healthy provider is hours or days). The auth-
+		// handler-scoped defer at the top of this function remains as
+		// the safety net for terminal failure paths between initial
+		// parse and proof acceptance. Double-release is a harmless
+		// no-op delete.
 		s.authAttempts.release(authAttemptID)
 	}
 	session := s.registerProviderSession(conn, entry)

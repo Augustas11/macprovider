@@ -327,6 +327,48 @@ func TestProviderAuthV2Retention1024BoundRejection(t *testing.T) {
 	}
 }
 
+func TestProviderAuthV2InitialOverlongEntryRejectedWithLockedSubstring(t *testing.T) {
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	initial["supported_models"] = []string{strings.Repeat("x", 257)}
+
+	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models entry exceeds 256 bytes")
+}
+
+func TestProviderAuthV2InitialOverlongCatalogRejectedWithLockedSubstring(t *testing.T) {
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	models := make([]string, 65)
+	for i := range models {
+		models[i] = "model-" + string(rune('A'+i))
+	}
+	models[0] = "mlx-community/Qwen2.5-7B-Instruct-4bit"
+	initial["supported_models"] = models
+
+	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models exceeds 64 entries")
+}
+
+func TestProviderAuthV2InitialDuplicateCatalogRejectedWithLockedSubstring(t *testing.T) {
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	initial["model_id"] = "Model-A"
+	initial["supported_models"] = []string{"Model-A", "MODEL-A"}
+
+	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models contains duplicate entries")
+}
+
+func TestProviderAuthV2InitialMissingModelIDRejectedOnTheWire(t *testing.T) {
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	initial["model_id"] = "X"
+	initial["supported_models"] = []string{"Y"}
+
+	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models missing model_id")
+}
+
+func TestProviderAuthV2InitialEmptyCatalogRejectedOnTheWire(t *testing.T) {
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	initial["supported_models"] = []string{}
+
+	assertInitialCatalogRejectedWithLockedSubstring(t, initial, "supported_models cannot be empty")
+}
+
 func TestProviderAuthV2ProofMismatchRejectedWithLockedSubstring(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""
@@ -2115,6 +2157,49 @@ func validAuthInitial(providerID, providerPublic string) map[string]any {
 	return h
 }
 
+func validAuthInitialWithFreshKey(t *testing.T, providerID string) map[string]any {
+	t.Helper()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	return validAuthInitial(providerID, base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+}
+
+func assertInitialCatalogRejectedWithLockedSubstring(t *testing.T, initial map[string]any, substring string) {
+	t.Helper()
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	response := readAuthResponse(t, conn)
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "bad_request" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	if !strings.Contains(response.Error.Message, substring) {
+		t.Fatalf("error message = %q, want substring %q", response.Error.Message, substring)
+	}
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read close: %v", err)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidHello {
+		t.Fatalf("close code = %d, want %d", code, providerws.CloseInvalidHello)
+	}
+	if !strings.Contains(reason, substring) {
+		t.Fatalf("close reason = %q, want substring %q", reason, substring)
+	}
+}
+
 func readAuthChallenge(t *testing.T, conn net.Conn) providerws.AuthChallenge {
 	t.Helper()
 	payload, op, err := wsutil.ReadServerData(conn)
@@ -2215,11 +2300,7 @@ func eventuallyWithin(t *testing.T, timeout time.Duration, f func() bool) {
 
 func authAttemptCount(t *testing.T, server *providerws.Server) int {
 	t.Helper()
-	store := reflect.ValueOf(server).Elem().FieldByName("authAttempts")
-	if !store.IsValid() || store.IsNil() {
-		return 0
-	}
-	return store.Elem().FieldByName("entries").Len()
+	return server.AuthAttemptCount()
 }
 
 func mustJSON(v any) []byte {

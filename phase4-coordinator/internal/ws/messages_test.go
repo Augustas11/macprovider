@@ -90,6 +90,19 @@ func TestParseAuthInitialRejectsOverlongEntry(t *testing.T) {
 	}
 }
 
+func TestParseAuthInitialRejectsEmptyCatalog(t *testing.T) {
+	payload := validAuthRequestInitial()
+	payload["supported_models"] = []string{}
+
+	_, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+	if err == nil {
+		t.Fatal("ParseAuthRequest err = nil")
+	}
+	if field != "supported_models cannot be empty" {
+		t.Fatalf("badField = %q", field)
+	}
+}
+
 func TestParseAuthInitialRejectsOverlongCatalog(t *testing.T) {
 	payload := validAuthRequestInitial()
 	models := make([]string, 65)

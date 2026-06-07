@@ -83,6 +83,15 @@ func (s *authAttemptStore) count() int {
 	return len(s.entries)
 }
 
+// isSpec010CatalogBadField reports whether a parser-level badField
+// string identifies a SPEC-010 v1.5 R-3.1.9 catalog validation
+// failure (length / array / duplicate / containment / empty), per
+// SPEC-002 v1.3.5 AC-K.15. These badField values are LOCKED test
+// oracles that MUST reach the wire verbatim.
+func isSpec010CatalogBadField(badField string) bool {
+	return strings.HasPrefix(badField, "supported_models")
+}
+
 func supportedModelsEqualUnderNFCASCIIFold(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

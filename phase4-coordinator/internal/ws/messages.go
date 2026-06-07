@@ -412,6 +412,9 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 		}
 	}
 	if presence.SupportedModels {
+		if len(req.SupportedModels) == 0 {
+			return AuthRequest{}, presence, "supported_models cannot be empty", fieldError{Field: "supported_models cannot be empty"}
+		}
 		for _, model := range req.SupportedModels {
 			if len([]byte(model)) > 256 {
 				return AuthRequest{}, presence, "supported_models entry exceeds 256 bytes", fieldError{Field: "supported_models entry exceeds 256 bytes"}
