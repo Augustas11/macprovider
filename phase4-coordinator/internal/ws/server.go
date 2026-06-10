@@ -1504,6 +1504,9 @@ func validState(state pool.State) bool {
 }
 
 func (s *Server) wakeGapThreshold() time.Duration {
+	if ms := s.cfg.Pool.WakeGapThresholdMs; ms > 0 {
+		return time.Duration(ms) * time.Millisecond
+	}
 	seconds := s.cfg.Pool.WakeGapThresholdS
 	if seconds <= 0 {
 		seconds = config.Default().Pool.WakeGapThresholdS

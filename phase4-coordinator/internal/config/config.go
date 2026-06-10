@@ -52,6 +52,9 @@ type PoolConfig struct {
 	// liveness). Defaults to 90s (3x the 30s heartbeat interval).
 	HeartbeatMissThresholdS int  `yaml:"heartbeat_miss_threshold_s"`
 	WakeGapThresholdS       int  `yaml:"wake_gap_threshold_s"`
+	// WakeGapThresholdMs, when > 0, overrides WakeGapThresholdS for
+	// millisecond-precision test scenarios. Not for production use.
+	WakeGapThresholdMs      int  `yaml:"wake_gap_threshold_ms"`
 	WarmupFallbackS         int  `yaml:"warmup_fallback_s"`
 	WarmupGateEnabled       bool `yaml:"warmup_gate_enabled"`
 	WarmupGateTimeoutS      int  `yaml:"warmup_gate_timeout_s"`
