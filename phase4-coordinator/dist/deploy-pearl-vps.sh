@@ -195,12 +195,30 @@ HEALTHZ_BODY=$(curl -fsS --max-time 10 --max-filesize 65536 "https://$DOMAIN/hea
 printf '%s\n' "$HEALTHZ_BODY" | python3 -m json.tool
 
 # Provenance check: compare the deployed version (from /healthz) against
-# what the local working tree would have built. Non-fatal — a warning is
-# enough to surface a mismatched binary without blocking the deploy.
+# what the local working tree would have built. Three outcomes:
+#   - "?"        the binary predates PR #18 and has no `version` field on
+#                /healthz at all → CRITICAL line (and abort if
+#                STRICT_PROVENANCE=1) because the entire M0-5 instrumentation
+#                got bypassed. By design still non-fatal by default so the
+#                operator can decide.
+#   - matched    OK line.
+#   - mismatched WARN line (the deployed binary was built from a different
+#                commit than the local tree — usually means an unstaged or
+#                unfetched change locally; investigate before trusting).
 # See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the rollback path.
 DEPLOYED_VERSION=$(printf '%s' "$HEALTHZ_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version', '?'))" 2>/dev/null || echo "?")
 EXPECTED_VERSION=$(git describe --always --dirty --tags 2>/dev/null || git rev-parse --short HEAD)
-if [ "$DEPLOYED_VERSION" = "$EXPECTED_VERSION" ]; then
+if [ "$DEPLOYED_VERSION" = "?" ]; then
+  echo "  CRITICAL provenance MISSING: /healthz returned no \"version\" field" >&2
+  echo "           This almost certainly means the deployed binary predates the" >&2
+  echo "           M0-5 instrumentation (PR #18) and the rollback gate is bypassed." >&2
+  echo "           Expected was: $EXPECTED_VERSION" >&2
+  echo "           See audits/2026-06-10/ROLLBACK_PROCEDURE.md to replace the live binary." >&2
+  if [ "${STRICT_PROVENANCE:-0}" = "1" ]; then
+    echo "  STRICT_PROVENANCE=1 set — aborting." >&2
+    exit 7
+  fi
+elif [ "$DEPLOYED_VERSION" = "$EXPECTED_VERSION" ]; then
   echo "  provenance OK: deployed=$DEPLOYED_VERSION | expected=$EXPECTED_VERSION"
 else
   echo "  WARN provenance mismatch: deployed=$DEPLOYED_VERSION | expected=$EXPECTED_VERSION" >&2
