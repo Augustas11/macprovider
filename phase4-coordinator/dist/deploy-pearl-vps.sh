@@ -68,7 +68,21 @@ $SSH 'set -e
   install -d -o macprovider -g macprovider -m 0750 /var/log/macprovider
 '
 
-log "step 4/9: upload binary + config + nginx site"
+log "step 4/9: upload binary + config + nginx site (with rollback snapshot)"
+# Backup the live binary BEFORE the install so a rollback is one mv away.
+# Use install(1) instead of cp -p so ownership (macprovider:macprovider)
+# is explicit per-invocation rather than inherited from the source —
+# protects against a future "rebuild snapshot from scratch" recovery that
+# would otherwise drift the .prev to root:root and then propagate that
+# back into /opt/macprovider/coordinator on rollback.
+# See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the swap-back steps.
+$SSH 'if [ -x /opt/macprovider/coordinator ]; then
+        install -o macprovider -g macprovider -m 0755 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
+        echo "  snapshot saved at /opt/macprovider/coordinator.prev"
+      else
+        echo "  no live binary at /opt/macprovider/coordinator — first deploy"
+      fi'
+
 $SCP "$BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-linux-amd64"
 $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:/tmp/coordinator.yaml"
 $SCP "$SERVICE" "$VPS_USER@$VPS_HOST:/tmp/macprovider-coordinator.service"
@@ -148,7 +162,7 @@ log "step 6c/9: pre-restart safeguard (check for connected providers)"
 # kills tunnel-direct buyer traffic. Until you can guarantee every
 # connected provider is on v1.1.3+, refuse to auto-restart with
 # connected providers unless the operator passes --force-restart.
-CONNECTED_COUNT=$(curl -fsS --max-time 5 "https://$DOMAIN/healthz" 2>/dev/null \
+CONNECTED_COUNT=$(curl -fsS --max-time 5 --max-filesize 65536 "https://$DOMAIN/healthz" 2>/dev/null \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('pool_size', 0))" 2>/dev/null \
   || echo 0)
 if [ "${CONNECTED_COUNT:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
@@ -173,7 +187,26 @@ $SSH 'set -e
 log "step 8/9: verify public endpoints"
 sleep 2
 echo "  GET https://$DOMAIN/healthz"
-curl -fsS --max-time 10 "https://$DOMAIN/healthz" | python3 -m json.tool || { echo "healthz failed"; exit 1; }
+# --max-filesize bounds bytes (--max-time only bounds wall-clock); /healthz
+# is a few hundred bytes in practice, so 64 KiB is a generous cap that
+# protects the operator Mac from a malicious or misbehaving upstream
+# streaming gigabytes inside the 10s window.
+HEALTHZ_BODY=$(curl -fsS --max-time 10 --max-filesize 65536 "https://$DOMAIN/healthz" || { echo "healthz failed"; exit 1; })
+printf '%s\n' "$HEALTHZ_BODY" | python3 -m json.tool
+
+# Provenance check: compare the deployed version (from /healthz) against
+# what the local working tree would have built. Non-fatal — a warning is
+# enough to surface a mismatched binary without blocking the deploy.
+# See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the rollback path.
+DEPLOYED_VERSION=$(printf '%s' "$HEALTHZ_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version', '?'))" 2>/dev/null || echo "?")
+EXPECTED_VERSION=$(git describe --always --dirty --tags 2>/dev/null || git rev-parse --short HEAD)
+if [ "$DEPLOYED_VERSION" = "$EXPECTED_VERSION" ]; then
+  echo "  provenance OK: deployed=$DEPLOYED_VERSION | expected=$EXPECTED_VERSION"
+else
+  echo "  WARN provenance mismatch: deployed=$DEPLOYED_VERSION | expected=$EXPECTED_VERSION" >&2
+  echo "       (build artifact does not match the local working tree — investigate before relying on this deploy)" >&2
+fi
+
 echo "  GET https://$DOMAIN/v1/models -> expect 404 (buyer API is gateway-only)"
 STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/v1/models")
 if [ "$STATUS" != "404" ]; then
