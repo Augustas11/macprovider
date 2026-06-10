@@ -1888,6 +1888,25 @@ func TestHealthzReturnsOK(t *testing.T) {
 	if body["status"] != "ok" {
 		t.Fatalf("health status=%v", body)
 	}
+	if _, ok := body["version"]; !ok {
+		t.Fatalf("/healthz must include version key; body=%v", body)
+	}
+	if body["version"] != "dev" {
+		t.Fatalf("/healthz version=%q, want default \"dev\"", body["version"])
+	}
+}
+
+func TestHealthzReportsInjectedVersion(t *testing.T) {
+	_, store, _, cfg := newTestHarness(t, fakeOAuth{}, WithHTTPClient(noopClient()))
+	h := New(cfg, store, fakeOAuth{}, WithNow(fixedNow), WithHTTPClient(noopClient()), WithVersion("v1.3.0-7-gabcdef0")).Handler()
+	resp := assertStatus(t, h, http.MethodGet, "/healthz", "", "", "", http.StatusOK)
+	var body map[string]string
+	if err := json.Unmarshal(resp.Body.Bytes(), &body); err != nil {
+		t.Fatalf("health json: %v", err)
+	}
+	if body["version"] != "v1.3.0-7-gabcdef0" {
+		t.Fatalf("/healthz did not surface injected version; body=%v", body)
+	}
 }
 
 type failingPingStore struct {

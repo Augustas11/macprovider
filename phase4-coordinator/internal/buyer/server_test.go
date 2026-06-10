@@ -761,6 +761,25 @@ func TestHealthzMountedOnBuyerHandler(t *testing.T) {
 	if !bytes.Contains(rr.Body.Bytes(), []byte(`"status":"ok"`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_ready":1`)) {
 		t.Fatalf("body = %s", rr.Body.String())
 	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"version":"dev"`)) {
+		t.Fatalf("/healthz must surface the build version; body = %s", rr.Body.String())
+	}
+}
+
+func TestHealthzReportsInjectedVersion(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithVersion("v1.3.0-7-gabcdef0"))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"version":"v1.3.0-7-gabcdef0"`)) {
+		t.Fatalf("/healthz did not surface injected version; body = %s", rr.Body.String())
+	}
 }
 
 func TestPoolCheckReturnsProviderStateAnd404(t *testing.T) {
