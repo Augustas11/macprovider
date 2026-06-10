@@ -3,7 +3,7 @@ module github.com/augstar/macprovider-coordinator
 go 1.26
 
 require (
-	github.com/go-chi/chi/v5 v5.1.0
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/gobwas/ws v1.4.0
 	github.com/google/uuid v1.6.0
 	github.com/rs/zerolog v1.33.0
