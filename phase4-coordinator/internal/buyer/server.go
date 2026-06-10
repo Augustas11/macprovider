@@ -80,6 +80,7 @@ type Server struct {
 	billingCfg             config.RewardsConfig
 	billingSnapshotID      int64
 	now                    func() time.Time
+	version                string
 }
 
 type stickyEntry struct {
@@ -282,6 +283,14 @@ func WithBilling(store *billing.Store, cfg config.RewardsConfig) Option {
 	}
 }
 
+func WithVersion(v string) Option {
+	return func(s *Server) {
+		if v != "" {
+			s.version = v
+		}
+	}
+}
+
 func WithBillingSnapshotID(snapshotID int64) Option {
 	return func(s *Server) {
 		s.billingMu.Lock()
@@ -340,6 +349,7 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		poolCheckMaxEntries:    4096,
 		poolCheckTTL:           time.Minute,
 		now:                    func() time.Time { return time.Now().UTC() },
+		version:                "dev",
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -573,7 +583,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		Status:   "ok",
 		UptimeS:  int64(time.Since(time.Unix(s.createdAt, 0)).Seconds()),
 		PoolSize: len(providers),
-		Version:  "0.1.0",
+		Version:  s.version,
 	}
 	for _, p := range providers {
 		switch p.State {

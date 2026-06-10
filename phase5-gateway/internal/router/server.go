@@ -42,6 +42,7 @@ type Server struct {
 	now              func() time.Time
 	client           *http.Client
 	trustedProxyNets []*net.IPNet
+	version          string
 	mu               sync.RWMutex
 	poolz            statusCache
 	// routingMeta is a small TTL cache for /internal/routing probes. Without
@@ -96,6 +97,14 @@ func WithConfigPath(path string) Option {
 	}
 }
 
+func WithVersion(v string) Option {
+	return func(s *Server) {
+		if v != "" {
+			s.version = v
+		}
+	}
+}
+
 func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Option) *Server {
 	trustedProxyNets, err := cfg.TrustedProxyNets()
 	if err != nil {
@@ -110,6 +119,7 @@ func New(cfg config.Config, store Store, oauth auth.OAuthProvider, opts ...Optio
 		now:              func() time.Time { return time.Now().UTC() },
 		client:           http.DefaultClient,
 		trustedProxyNets: trustedProxyNets,
+		version:          "dev",
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -497,10 +507,10 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), time.Second)
 	defer cancel()
 	if err := s.store.Ping(ctx); err != nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"status": "unavailable", "version": s.version})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": s.version})
 }
 
 func (s *Server) handleNotFound(w http.ResponseWriter, r *http.Request) {

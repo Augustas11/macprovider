@@ -26,9 +26,19 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// version is overridden at build time via
+//   go build -ldflags "-X main.version=$(git describe --always --dirty --tags)"
+// (see scripts/build-linux.sh). Defaults to "dev" for local `go run`.
+var version = "dev"
+
 func main() {
 	configPath := flag.String("config", "coordinator.yaml", "path to coordinator YAML config")
+	showVersion := flag.Bool("version", false, "print build version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -80,6 +90,7 @@ func main() {
 	shutdownCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
 	wsOpts := []providerws.Option{}
+	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
 	if cfg.Auth.RequireProviderTokens {
 		wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
@@ -117,6 +128,7 @@ func main() {
 		registry,
 		logger,
 		startedAt,
+		buyer.WithVersion(version),
 		buyer.WithPreflightConfig(cfg.Routing.PreflightThresholdTokens, time.Duration(cfg.Routing.PreflightTimeoutS)*time.Second),
 		buyer.WithRecoveryConfig(time.Duration(cfg.Pool.DegradedBackoffS)*time.Second, cfg.Pool.DegradedMaxRetries, cfg.Pool.DegradedProbeAfter502),
 		buyer.WithBreakerConfig(cfg.Pool.BreakerFailureThreshold, time.Duration(cfg.Pool.BreakerWindowS)*time.Second),

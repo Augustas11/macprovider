@@ -58,6 +58,7 @@ type Server struct {
 	started   time.Time
 	explorer  http.Handler
 	unauth    chan struct{}
+	version   string
 	// SPEC-002 v1.3.5 §7.9 — auth-attempt retention store, 1024 bound
 	authAttempts *authAttemptStore
 }
@@ -78,6 +79,14 @@ type Option func(*Server)
 func WithTokenValidator(tokens TokenValidator) Option {
 	return func(s *Server) {
 		s.tokens = tokens
+	}
+}
+
+func WithVersion(v string) Option {
+	return func(s *Server) {
+		if v != "" {
+			s.version = v
+		}
 	}
 }
 
@@ -146,6 +155,7 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		newUUID: func() string { return uuid.NewString() },
 		started: time.Now().UTC(),
 		unauth:  make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
+		version: "dev",
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
@@ -1564,7 +1574,7 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 		Status:   "ok",
 		UptimeS:  int64(s.now().Sub(s.started).Seconds()),
 		PoolSize: len(providers),
-		Version:  "0.1.0",
+		Version:  s.version,
 	}
 	for _, p := range providers {
 		switch p.State {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -16,10 +17,20 @@ import (
 	"github.com/augstar/macprovider-gateway/internal/storage/sqlite"
 )
 
+// version is overridden at build time via
+//   go build -ldflags "-X main.version=$(git describe --always --dirty --tags)"
+// (see scripts/build-linux.sh). Defaults to "dev" for local `go run`.
+var version = "dev"
+
 func main() {
 	configPath := flag.String("config", "gateway.yaml", "path to gateway YAML config")
 	checkOnly := flag.Bool("check", false, "load config, migrate storage, then exit")
+	showVersion := flag.Bool("version", false, "print build version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Println(version)
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -61,7 +72,7 @@ func main() {
 	}
 	oauthClient := &http.Client{Timeout: 30 * time.Second}
 	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, oauthClient)
-	httpServer := newHTTPServer(cfg.Address(), router.New(cfg, store, oauth, router.WithHTTPClient(coordinatorClient)).Handler())
+	httpServer := newHTTPServer(cfg.Address(), router.New(cfg, store, oauth, router.WithHTTPClient(coordinatorClient), router.WithVersion(version)).Handler())
 	go func() {
 		slog.Info("gateway listening", "address", cfg.Address())
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
