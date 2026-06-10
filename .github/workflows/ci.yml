@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  coordinator:
+    name: phase4-coordinator (go vet + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v4.2.2. Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+
+      - name: go vet
+        working-directory: phase4-coordinator
+        run: go vet ./...
+
+      - name: go test
+        working-directory: phase4-coordinator
+        run: go test ./...
+
+  gateway:
+    name: phase5-gateway (go vet + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v4.2.2. Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: phase5-gateway/go.mod
+          cache-dependency-path: phase5-gateway/go.sum
+
+      - name: go vet
+        working-directory: phase5-gateway
+        run: go vet ./...
+
+      - name: go test
+        working-directory: phase5-gateway
+        run: go test ./...

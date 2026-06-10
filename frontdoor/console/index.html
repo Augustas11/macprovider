@@ -1197,14 +1197,13 @@ function renderDashboard() {
   a64Tile.className = 'a64-tile'
   a64Tile.href = '/arm64golf'
   a64Tile.addEventListener('click', (e) => { e.preventDefault(); navigate('arm64golf') })
-  a64Tile.innerHTML = `
-    <div class="a64-tile-left">
-      <div class="a64-tile-kicker">MacProvider · sort3-arm64</div>
-      <div class="a64-tile-title">arm64golf · best verified ${Number(ARM64_DATA.rows[0].score)} instructions</div>
-      <div class="a64-tile-sub">Open-weight ARM64 superoptimization benchmark on the MacProvider network.</div>
-    </div>
-    <div class="a64-tile-arrow">→</div>
-  `
+  const a64Left = document.createElement('div')
+  a64Left.className = 'a64-tile-left'
+  a64Left.appendChild(div('a64-tile-kicker', 'MacProvider · sort3-arm64'))
+  a64Left.appendChild(div('a64-tile-title', 'arm64golf · best verified ' + Number(ARM64_DATA.rows[0].score) + ' instructions'))
+  a64Left.appendChild(div('a64-tile-sub', 'Open-weight ARM64 superoptimization benchmark on the MacProvider network.'))
+  a64Tile.appendChild(a64Left)
+  a64Tile.appendChild(div('a64-tile-arrow', '→'))
   body.appendChild(a64Tile)
 
   // Stats row
@@ -1365,29 +1364,30 @@ function fmtArmDate(iso) {
   }).format(new Date(iso))
 }
 
-function escArm(s) {
-  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[c]))
-}
-
 function renderArm64golf() {
   const body = document.getElementById('armBody')
   body.replaceChildren()
 
   const hero = document.createElement('div')
   hero.className = 'a64-hero'
-  hero.innerHTML = `
-    <div class="a64-eyebrow">A public benchmark for ARM64 instruction-count superoptimization.</div>
-    <h3 class="a64-title">Can open weights match AlphaDev on ARM?</h3>
-    <p class="a64-lede">
-      AlphaDev established a learned-search frontier for x86 sorting in 2023,
-      reporting <span class="mono">Sort3AlphaDev</span> at 17 instructions
-      [Fawzi et al., <em>Nature</em> 618, 257&ndash;263]. No equivalent public result
-      exists for ARM64. arm64golf asks whether open-weight coding models, served
-      on consumer Apple Silicon via the MacProvider network, can produce
-      verifiable ARM64 routines shorter than published references. The metric
-      is instruction count over a deterministic 1200-case verifier.
-    </p>
-  `
+  hero.appendChild(div('a64-eyebrow', 'A public benchmark for ARM64 instruction-count superoptimization.'))
+  const heroTitle = document.createElement('h3')
+  heroTitle.className = 'a64-title'
+  heroTitle.textContent = 'Can open weights match AlphaDev on ARM?'
+  hero.appendChild(heroTitle)
+  const heroLede = document.createElement('p')
+  heroLede.className = 'a64-lede'
+  const sortSpan = document.createElement('span')
+  sortSpan.className = 'mono'
+  sortSpan.textContent = 'Sort3AlphaDev'
+  const natureEm = document.createElement('em')
+  natureEm.textContent = 'Nature'
+  heroLede.appendChild(document.createTextNode('AlphaDev established a learned-search frontier for x86 sorting in 2023, reporting '))
+  heroLede.appendChild(sortSpan)
+  heroLede.appendChild(document.createTextNode(' at 17 instructions [Fawzi et al., '))
+  heroLede.appendChild(natureEm)
+  heroLede.appendChild(document.createTextNode(' 618, 257–263]. No equivalent public result exists for ARM64. arm64golf asks whether open-weight coding models, served on consumer Apple Silicon via the MacProvider network, can produce verifiable ARM64 routines shorter than published references. The metric is instruction count over a deterministic 1200-case verifier.'))
+  hero.appendChild(heroLede)
   body.appendChild(hero)
 
   const best = ARM64_DATA.rows[0]
@@ -1410,18 +1410,25 @@ function renderArm64golf() {
 
   const note = document.createElement('div')
   note.className = 'a64-note'
-  note.innerHTML = `
-    <strong>Methodological note.</strong> The best verified ARM64 candidate at
-    12 instructions (<span class="mono">57b2aa236342</span>) is produced by the
-    model tiling the four-instruction <span class="mono">cmp/csel/csel/mov</span>
-    block supplied as a worked example in the <span class="mono">csel_hint</span>
-    prompt template. The receipt is valid against the 1200-case verifier.
-    Structural credit is shared between the prompt and the sampler. A
-    discovery-class result requires a verified candidate below 12 from a
-    template that does not contain the structure, or one with non-isomorphic
-    structure. Neither has been observed across 223 post-canary evaluations on
-    the 7B configuration.
-  `
+  const noteStrong = document.createElement('strong')
+  noteStrong.textContent = 'Methodological note.'
+  note.appendChild(noteStrong)
+  const monoCandidate = document.createElement('span')
+  monoCandidate.className = 'mono'
+  monoCandidate.textContent = '57b2aa236342'
+  const monoBlock = document.createElement('span')
+  monoBlock.className = 'mono'
+  monoBlock.textContent = 'cmp/csel/csel/mov'
+  const monoHint = document.createElement('span')
+  monoHint.className = 'mono'
+  monoHint.textContent = 'csel_hint'
+  note.appendChild(document.createTextNode(' The best verified ARM64 candidate at 12 instructions ('))
+  note.appendChild(monoCandidate)
+  note.appendChild(document.createTextNode(') is produced by the model tiling the four-instruction '))
+  note.appendChild(monoBlock)
+  note.appendChild(document.createTextNode(' block supplied as a worked example in the '))
+  note.appendChild(monoHint)
+  note.appendChild(document.createTextNode(' prompt template. The receipt is valid against the 1200-case verifier. Structural credit is shared between the prompt and the sampler. A discovery-class result requires a verified candidate below 12 from a template that does not contain the structure, or one with non-isomorphic structure. Neither has been observed across 223 post-canary evaluations on the 7B configuration.'))
   body.appendChild(note)
 
   appendSectionTitle(body, 'Score history')
@@ -1429,30 +1436,37 @@ function renderArm64golf() {
   tableWrap.className = 'a64-table-wrap'
   const table = document.createElement('table')
   table.className = 'a64-table'
-  table.innerHTML = `
-    <thead>
-      <tr>
-        <th>#</th>
-        <th>Score</th>
-        <th>Candidate</th>
-        <th>Model</th>
-        <th>Provider</th>
-        <th>Receipt</th>
-        <th>Discovered (UTC)</th>
-      </tr>
-    </thead>
-    <tbody>${ARM64_DATA.rows.map(r => `
-      <tr>
-        <td>${Number(r.rank)}</td>
-        <td class="a64-score">${Number(r.score)}</td>
-        <td class="mono">${escArm(r.candidate_hash_short)}</td>
-        <td class="mono">${escArm(r.model_id)}</td>
-        <td class="mono">${escArm(r.provider_id)}</td>
-        <td class="mono">${escArm(r.receipt_signature_short || 'pending')}</td>
-        <td>${fmtArmDate(r.discovered_at)}</td>
-      </tr>`).join('')}
-    </tbody>
-  `
+  const thead = document.createElement('thead')
+  const headRow = document.createElement('tr')
+  ;['#', 'Score', 'Candidate', 'Model', 'Provider', 'Receipt', 'Discovered (UTC)'].forEach(label => {
+    const th = document.createElement('th')
+    th.textContent = label
+    headRow.appendChild(th)
+  })
+  thead.appendChild(headRow)
+  table.appendChild(thead)
+  const tbody = document.createElement('tbody')
+  ARM64_DATA.rows.forEach(r => {
+    const tr = document.createElement('tr')
+    const tdRank = document.createElement('td')
+    tdRank.textContent = String(Number(r.rank))
+    tr.appendChild(tdRank)
+    const tdScore = document.createElement('td')
+    tdScore.className = 'a64-score'
+    tdScore.textContent = String(Number(r.score))
+    tr.appendChild(tdScore)
+    ;[r.candidate_hash_short, r.model_id, r.provider_id, r.receipt_signature_short || 'pending'].forEach(val => {
+      const td = document.createElement('td')
+      td.className = 'mono'
+      td.textContent = String(val)
+      tr.appendChild(td)
+    })
+    const tdDate = document.createElement('td')
+    tdDate.textContent = fmtArmDate(r.discovered_at)
+    tr.appendChild(tdDate)
+    tbody.appendChild(tr)
+  })
+  table.appendChild(tbody)
   tableWrap.appendChild(table)
   body.appendChild(tableWrap)
 
