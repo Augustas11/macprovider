@@ -1475,8 +1475,14 @@ func TestStateUpdateCyclesProviderState(t *testing.T) {
 }
 
 func TestWakeGapSendsWarmUpAndMarksDegraded(t *testing.T) {
+	// The wake-gap detector fires when the interval between two
+	// heartbeats exceeds wake_gap_threshold. Use a 25ms threshold so the
+	// scenario can be reproduced with a 50ms sleep instead of >1s, which
+	// shrinks the test under CI contention. The real flake risk is
+	// server-side goroutine starvation between the resume heartbeat and
+	// pool-state propagation — eventuallyWithin gives that wide latitude.
 	ts := newProviderServer(t, func(cfg *config.Config) {
-		cfg.Pool.WakeGapThresholdS = 1
+		cfg.Pool.WakeGapThresholdMs = 25
 	})
 	defer ts.Close()
 
@@ -1490,7 +1496,7 @@ func TestWakeGapSendsWarmUpAndMarksDegraded(t *testing.T) {
 	if err := wsutil.WriteClientText(conn, mustJSON(heartbeat())); err != nil {
 		t.Fatalf("write first heartbeat: %v", err)
 	}
-	time.Sleep(1100 * time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
 	if err := wsutil.WriteClientText(conn, mustJSON(heartbeat())); err != nil {
 		t.Fatalf("write resume heartbeat: %v", err)
 	}
@@ -1510,7 +1516,7 @@ func TestWakeGapSendsWarmUpAndMarksDegraded(t *testing.T) {
 		t.Fatalf("message type = %q, want warm_up", msg["type"])
 	}
 
-	eventually(t, func() bool {
+	eventuallyWithin(t, 4*time.Second, func() bool {
 		got := fetchPoolz(t, ts.URL)
 		return len(got.Pool) == 1 && got.Pool[0].State == "degraded"
 	})
