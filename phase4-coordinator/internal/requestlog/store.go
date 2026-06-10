@@ -57,11 +57,6 @@ func OpenStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Match phase5-gateway/internal/storage/sqlite/store.go:38-39: cap the
-	// pool at one connection so writers using BEGIN IMMEDIATE serialise
-	// inside the Go layer instead of contending in sqlite's 5s busy_timeout.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
 	s := &Store{db: db}
 	ctx := context.Background()
 	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
