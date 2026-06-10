@@ -70,9 +70,14 @@ $SSH 'set -e
 
 log "step 4/9: upload binary + config + nginx site (with rollback snapshot)"
 # Backup the live binary BEFORE the install so a rollback is one mv away.
+# Use install(1) instead of cp -p so ownership (macprovider:macprovider)
+# is explicit per-invocation rather than inherited from the source —
+# protects against a future "rebuild snapshot from scratch" recovery that
+# would otherwise drift the .prev to root:root and then propagate that
+# back into /opt/macprovider/coordinator on rollback.
 # See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the swap-back steps.
 $SSH 'if [ -x /opt/macprovider/coordinator ]; then
-        cp -p /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
+        install -o macprovider -g macprovider -m 0755 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
         echo "  snapshot saved at /opt/macprovider/coordinator.prev"
       else
         echo "  no live binary at /opt/macprovider/coordinator — first deploy"
@@ -157,7 +162,7 @@ log "step 6c/9: pre-restart safeguard (check for connected providers)"
 # kills tunnel-direct buyer traffic. Until you can guarantee every
 # connected provider is on v1.1.3+, refuse to auto-restart with
 # connected providers unless the operator passes --force-restart.
-CONNECTED_COUNT=$(curl -fsS --max-time 5 "https://$DOMAIN/healthz" 2>/dev/null \
+CONNECTED_COUNT=$(curl -fsS --max-time 5 --max-filesize 65536 "https://$DOMAIN/healthz" 2>/dev/null \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('pool_size', 0))" 2>/dev/null \
   || echo 0)
 if [ "${CONNECTED_COUNT:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
@@ -182,7 +187,11 @@ $SSH 'set -e
 log "step 8/9: verify public endpoints"
 sleep 2
 echo "  GET https://$DOMAIN/healthz"
-HEALTHZ_BODY=$(curl -fsS --max-time 10 "https://$DOMAIN/healthz" || { echo "healthz failed"; exit 1; })
+# --max-filesize bounds bytes (--max-time only bounds wall-clock); /healthz
+# is a few hundred bytes in practice, so 64 KiB is a generous cap that
+# protects the operator Mac from a malicious or misbehaving upstream
+# streaming gigabytes inside the 10s window.
+HEALTHZ_BODY=$(curl -fsS --max-time 10 --max-filesize 65536 "https://$DOMAIN/healthz" || { echo "healthz failed"; exit 1; })
 printf '%s\n' "$HEALTHZ_BODY" | python3 -m json.tool
 
 # Provenance check: compare the deployed version (from /healthz) against

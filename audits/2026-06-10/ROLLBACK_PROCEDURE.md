@@ -27,7 +27,7 @@ ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 '
     exit 1
   fi
   mv /opt/macprovider/coordinator /opt/macprovider/coordinator.bad
-  cp -p /opt/macprovider/coordinator.prev /opt/macprovider/coordinator
+  install -o macprovider -g macprovider -m 0755 /opt/macprovider/coordinator.prev /opt/macprovider/coordinator
   systemctl restart macprovider-coordinator
   sleep 2
   systemctl is-active macprovider-coordinator
@@ -45,13 +45,23 @@ curl -fsS https://coordinator.streamvc.live/healthz \
 If `is-active` returns `active` and the version field matches the
 previous build, the rollback is complete. Total wall-clock: ~10–20s.
 
-## Why `cp -p` not `mv` for the restore
+## Why `install` not `mv` for the restore
 
 Keeping `coordinator.prev` in place after the restore lets the next
 rollback (if the operator pushes a third build that also fails) still
 have the same known-good snapshot to fall back to. The "bad" binary
 goes to `coordinator.bad` rather than being deleted so a post-mortem
 can `strings` / `nm` / re-run it locally.
+
+We use `install -o macprovider -g macprovider -m 0755` rather than
+`cp -p` so the restored binary's ownership is set explicitly per
+invocation. A `cp -p` would propagate whatever owner/mode the
+`.prev` file happens to carry, which is normally fine — but if the
+`.prev` was ever recreated from a root-owned binary (the "rebuilding
+from scratch" path below, run incorrectly without `chown`), the next
+rollback would silently place a root-owned binary at the live path
+and break systemd's expectation that the service runs as
+`macprovider`.
 
 ## When the fast path is wrong
 
@@ -94,10 +104,12 @@ about to be replaced. To populate it WITHOUT a new deploy:
 
 ```bash
 ssh -i ~/.ssh/pearl_operator_ed25519 root@159.223.165.194 '
-  cp -p /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
+  install -o macprovider -g macprovider -m 0755 /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
 '
 ```
 
 This makes the *current* binary the rollback target. Useful right
 before a risky maintenance window: take the snapshot when you know
-the system is healthy.
+the system is healthy. Using `install(1)` (rather than `cp -p`)
+keeps ownership explicit even if the running binary on this VPS
+happens to be root-owned for any reason.
