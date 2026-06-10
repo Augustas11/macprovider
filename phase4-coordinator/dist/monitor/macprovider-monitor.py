@@ -159,25 +159,44 @@ def main():
     # --- emit alerts ---
     for sev, msg in alerts:
         print(f"[{sev}] {msg}", flush=True)
+    delivery = None
     if alerts:
-        send_email(env, alerts)
+        delivery = send_email(env, alerts)
 
-    save_state({
+    # Persist only when EITHER (a) the new state is non-alerting (transitions
+    # to healthy save unconditionally), OR (b) at least one non-journald
+    # delivery succeeded. A failed alerting-transition delivery keeps the
+    # OLD state so the next 3-minute poll re-alerts as long as the
+    # condition persists. Journal-only configurations behave the same way:
+    # without an external delivery path, persistent alerting transitions
+    # keep re-emitting to journald rather than silently sealing.
+    new_state = {
         "pool": pool,
         "ready": ready,
         "coord_up": coord_up,
         "gw_status": gw_status,
-    })
+    }
+    alerting = any(sev in ("CRITICAL", "WARN") for sev, _ in alerts)
+    if not alerting or delivery is True:
+        save_state(new_state)
+    else:
+        print("[INFO] state not advanced; will re-evaluate next cycle", flush=True)
     return 0
 
 
 def send_email(env, alerts):
+    """Attempt to deliver alerts.
+
+    Returns True on successful delivery, False if delivery was attempted
+    and failed, and None if no non-journald recipient is configured (the
+    alerts already landed in journald via the caller's stdout prints).
+    """
     user = env.get("GMAIL_USER")
     pw = env.get("GMAIL_APP_PASSWORD")
     to = env.get("ALERT_EMAIL")
     if not (user and pw and to):
         print("[INFO] email not configured (set GMAIL_* in /etc/macprovider/monitor.env) — journal-only", flush=True)
-        return
+        return None
     worst = "CRITICAL" if any(s == "CRITICAL" for s, _ in alerts) else "WARN"
     body = "\n".join(f"[{s}] {m}" for s, m in alerts)
     msg = EmailMessage()
@@ -191,8 +210,11 @@ def send_email(env, alerts):
             smtp.login(user, pw)
             smtp.send_message(msg)
         print(f"[INFO] emailed {len(alerts)} alert(s) to {to}", flush=True)
+        return True
     except Exception as e:  # noqa: BLE001
         print(f"[WARN] email send failed: {e}", flush=True)
+        print(f"SMTP failure, will retry: {e}", file=sys.stderr, flush=True)
+        return False
 
 
 if __name__ == "__main__":
