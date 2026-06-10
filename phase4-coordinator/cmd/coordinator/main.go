@@ -56,7 +56,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
-	auditStore, err := audit.OpenStore(cfg.Storage.DBPath)
+	// Share the requestlog *sql.DB so audit writes contend on the same single
+	// capped connection pool as request_log + admission + billing — opening a
+	// second *sql.DB against the same sqlite file would race writes on the 5s
+	// busy_timeout instead of serialising them in Go.
+	auditStore, err := audit.NewStoreFromDB(reqLogStore.DB())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "audit log storage: %v\n", err)
 		os.Exit(1)

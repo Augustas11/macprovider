@@ -17,9 +17,16 @@ import (
 var errStoreClosed = errors.New("audit store is closed")
 
 type Store struct {
-	db *sql.DB
+	db     *sql.DB
+	ownsDB bool
 }
 
+// OpenStore opens its own *sql.DB against dbPath and is retained for tests and
+// other one-off owners. Production callers in cmd/coordinator should use
+// NewStoreFromDB to share the requestlog store's connection — otherwise two
+// write-intent *sql.DB handles target the same sqlite file and writers race
+// only on the 5s busy_timeout (gateway-parity pattern, see
+// phase5-gateway/internal/storage/sqlite/store.go:38-39).
 func OpenStore(dbPath string) (*Store, error) {
 	if dbPath == "" {
 		return nil, fmt.Errorf("db path is required")
@@ -38,7 +45,7 @@ func OpenStore(dbPath string) (*Store, error) {
 	// inside the Go layer instead of contending in sqlite's 5s busy_timeout.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-	s := &Store{db: db}
+	s := &Store{db: db, ownsDB: true}
 	ctx := context.Background()
 	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
 		_ = db.Close()
@@ -55,8 +62,32 @@ func OpenStore(dbPath string) (*Store, error) {
 	return s, nil
 }
 
+// NewStoreFromDB wraps an already-open *sql.DB so the audit store shares the
+// requestlog/admission/billing connection pool. Production constructor wired
+// in cmd/coordinator/main.go: when audit/requestlog open independent *sql.DB
+// handles against the same sqlite file, two write-intent connections can
+// still race and hit sqlite's 5s busy_timeout — sharing one capped pool
+// serialises every write end-to-end. Mirrors billing.NewStore and
+// ws.NewSQLiteAdmissionStore.
+//
+// Caller retains DB ownership; Close on a NewStoreFromDB-built Store is a
+// no-op so we don't double-close the requestlog handle on shutdown.
+func NewStoreFromDB(db *sql.DB) (*Store, error) {
+	if db == nil {
+		return nil, fmt.Errorf("db is required")
+	}
+	s := &Store{db: db, ownsDB: false}
+	if err := s.migrate(context.Background()); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
 func (s *Store) Close() error {
 	if s == nil || s.db == nil {
+		return nil
+	}
+	if !s.ownsDB {
 		return nil
 	}
 	return s.db.Close()
