@@ -83,6 +83,8 @@ def save_state(state):
     tmp = STATE_FILE + ".tmp"
     with open(tmp, "w") as f:
         json.dump(state, f)
+        f.flush()
+        os.fsync(f.fileno())
     os.replace(tmp, STATE_FILE)
 
 
@@ -177,7 +179,14 @@ def main():
         "gw_status": gw_status,
     }
     alerting = any(sev in ("CRITICAL", "WARN") for sev, _ in alerts)
-    if not alerting or delivery is True:
+    # `delivery is not False` keeps the strong "SMTP failed -> don't seal"
+    # guarantee while letting journal-only mode (delivery is None) advance
+    # state normally. Without an external delivery path journald IS the
+    # configured sink, and blocking save_state forever would refire every
+    # prior transition on every subsequent poll (not just the unfired
+    # alerting transition that originally failed). The original `delivery
+    # is True` gate had that flaw — flagged by the M0-4a code review.
+    if not alerting or delivery is not False:
         save_state(new_state)
     else:
         print("[INFO] state not advanced; will re-evaluate next cycle", flush=True)
