@@ -148,8 +148,11 @@ pre-merge tip in case of regression.
   what was decided and why. Pattern established through Entries 1-21.
 - d-inference (https://github.com/layr-labs/d-inference) is strictly
   clean-room. NOASSERTION license. Do NOT inspect their source.
-- v1.2.3 is the current phase3-binary release. SPEC-001 v1.2.2,
-  SPEC-002 v1.1.3, SPEC-003 v0.5 are locked. SPEC-006 v0.2 is in
-  regression-audit pending.
+- Current versions of record: line 3 of each `specs/SPEC-NNN-*.md`,
+  and the `binaryVersion` constant in
+  `phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift`. Do
+  not hardcode versions in this file — they drift; the spec headers
+  and the constant do not. See also `specs/README.md` for a generated
+  index (also subject to drift, source of truth is each spec header).
 - Production coordinator: `coordinator.streamvc.live` (Pearl VPS).
   Public installer redirect: `get.streamvc.live/install.sh`.

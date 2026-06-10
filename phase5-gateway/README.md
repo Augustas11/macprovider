@@ -1,6 +1,6 @@
 # Mac Provider Buyer API Gateway
 
-Phase 5 gateway implementation for SPEC-006 v0.5. The gateway is intentionally separate from `phase4-coordinator`: the coordinator remains router-only, while the gateway owns buyer identity, API keys, quota reservations, usage events, feedback events, audit events, status shaping, and kill switches.
+Phase 5 gateway implementation for SPEC-006 v0.8.3. The gateway is intentionally separate from `phase4-coordinator`: the coordinator remains router-only, while the gateway owns buyer identity, API keys, quota reservations, usage events, feedback events, audit events, status shaping, and kill switches.
 
 ## What Is Implemented
 
