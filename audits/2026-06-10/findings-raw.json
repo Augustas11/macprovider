@@ -5,71 +5,71 @@
    "area": "phase4-coordinator (Go 1.26 coordinator service)",
    "purpose": "The coordinator is the hub of the MacProvider network: it terminates outbound WebSocket connections from provider Macs (admission, auth, heartbeats, liveness, warm-up gating), exposes an OpenAI-compatible buyer API (/v1/chat/completions, /v1/models) that routes requests to providers either over the WS tunnel or via HTTP forwarding to pinned endpoints, and writes the money path \u2014 a SQLite credit ledger (request credits, operator credits, payout windows, reconciliation runs) computed per request attempt. It also serves an operator explorer UI, admin/ledger endpoints, and tier-2 trust features (signed model-hash catalog, encrypted leg AEAD key exchange, device attestation).",
    "entryPoints": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/cmd/coordinator/main.go \u2014 the service. Wires config -> stores -> ws.Server (provider port) + buyer.Server (buyer port); two http.Servers (main.go:138-172); signal loop with SIGHUP hot-reload of tier2/rewards config (main.go:176-208, 285-320); retention pruners for request_log and audit_log (main.go:215-273)",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/cmd/coordinator-cli/main.go \u2014 operator CLI: issue-token / revoke-token / list-tokens / revoke-and-kick against the same SQLite DB (main.go:16-38)",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/cmd/tier2-mda-artifact/main.go \u2014 offline tool to build Apple managed-device-attestation artifacts",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/tools/mockprovider/main.go \u2014 test mock provider",
+    "phase4-coordinator/cmd/coordinator/main.go \u2014 the service. Wires config -> stores -> ws.Server (provider port) + buyer.Server (buyer port); two http.Servers (main.go:138-172); signal loop with SIGHUP hot-reload of tier2/rewards config (main.go:176-208, 285-320); retention pruners for request_log and audit_log (main.go:215-273)",
+    "phase4-coordinator/cmd/coordinator-cli/main.go \u2014 operator CLI: issue-token / revoke-token / list-tokens / revoke-and-kick against the same SQLite DB (main.go:16-38)",
+    "phase4-coordinator/cmd/tier2-mda-artifact/main.go \u2014 offline tool to build Apple managed-device-attestation artifacts",
+    "phase4-coordinator/tools/mockprovider/main.go \u2014 test mock provider",
     "HTTP surfaces: provider port mux (main.go:140-152) = /ws/provider, /healthz, /poolz, /admin/* (ws/server.go:196-211), /internal/* (buyer InternalHandler), /admin/ledger/* + /providers/*/earnings (billing/endpoints.go:43-56), explorer at cfg.Explorer.BindPath; buyer port = /healthz, /v1/models, /v1/pool/check, /v1/chat/completions (buyer/server.go:350-357)"
    ],
    "keyModules": [
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/ws/server.go",
+     "path": "phase4-coordinator/internal/ws/server.go",
      "role": "Provider WS lifecycle (1747 lines). Upgrade -> unauthenticated-conn semaphore (line 220-224) -> Bearer token validation (236-262) -> v1 'hello' or v2 'auth_request' handshake (296-304). v2 adds X25519 ECDH + AEAD negotiation + attestation challenge/proof with a bounded (1024) auth-attempt retention store (356-592). prepareProviderAdmission (594-690) enforces required binary version, pinned-vs-provisional tier, endpoint_url policy. readProviderLoop dispatches heartbeat/state_update/preflight_ack/inference chunks/NAK/drain_status (933-966). monitorHeartbeat reaps providers with no inbound frame past HeartbeatMissThreshold (1449-1485), using LastActivityAt (any frame counts, the v1.1.7 liveness fix). Warm-up gate sends a tiny real inference before marking ready (1018-1101)."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go",
+     "path": "phase4-coordinator/internal/pool/provider.go",
      "role": "In-memory provider registry (single RWMutex over maps keyed by providerID and assignedID). State machine ready/busy/degraded/draining/unavailable with two deliberately asymmetric guards: coordinator-initiated (line 354-362) vs provider-reported transitions (377-385) so a breaker-held provider cannot self-launder back to routable. Breaker fault windows (304-346), heartbeat application incl. SPEC-011 model-swap detection + audit emitter invoked under the registry lock (482-561)."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/buyer/server.go",
+     "path": "phase4-coordinator/internal/buyer/server.go",
      "role": "Buyer API (3183 lines). handleChatCompletions (840-1350) is the spine: body limit -> validateChatRequest -> Idempotency-Key reservation (998-1026) -> selectProvider (scoring, model classes, sticky sessions, epsilon tiebreak, provisional tier weight) -> three forwarding paths (WS streaming, WS non-streaming, HTTP forwarding 1246-1349) with retry/failover/breaker bookkeeping. logRowWithBilling closure (851-945) writes request_log + ledger atomically per attempt."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/ws/relay.go",
+     "path": "phase4-coordinator/internal/ws/relay.go",
      "role": "providerSession: per-provider writer goroutine with bounded channel (backpressure = ErrRelayBackpressure, relay.go:125-137), active request map, optional tier2 AEAD encryption of inference frames, RelayStream (Chunks/Done/Errors) consumed by buyer.forwardWS."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/billing/",
+     "path": "phase4-coordinator/internal/billing/",
      "role": "Money path. formula.go: integer credit math, ppm/bps fixed point, RoundHalfEven banker's rounding (54-81), overflow-checked mul/add, fault flags zero credits. hotpath.go WriteHotPath: BEGIN IMMEDIATE transaction inserting request_log row + ledger_request_credits + ledger_operator_credits + identity snapshot atomically; ambiguous attempt_n rows are quarantined with zeroed credits (55-89). store.go: full ledger schema with CHECK constraints and a trigger making payout status terminal (121-126). settlement.go RunSettlement: quarantine inconsistent rows, aggregate unsettled credits per provider over min-payout threshold into ledger_payout_ready, mark settled in same tx. endpoints.go: /admin/ledger/* (operator key) and /providers/{id}/earnings (provider token + rate limit)."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/auth/tokens.go",
+     "path": "phase4-coordinator/internal/auth/tokens.go",
      "role": "Provider token store (SQLite provider_tokens): 32-byte random hex tokens stored as SHA-256 hashes, 12-char display prefix, revoke-by-prefix with ambiguity check (206-252). BearerTokenMatchesHeader does constant-time compare via sha256+hmac.Equal (41-55)."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/ws/admission.go",
+     "path": "phase4-coordinator/internal/ws/admission.go",
      "role": "Provisional-tier admission: per-hour admission rate, pool max, per-provider request quota; records persisted via AdmissionStateStore (SQLite) and reloaded on boot (38-63). Pinned providers bypass everything (78-81)."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/tier2/",
+     "path": "phase4-coordinator/internal/tier2/",
      "role": "Tier-2 trust: catalog.go loads an ed25519-signed model-hash catalog into a package-global singleton (catalog.go:81-86); pillar_b (X25519/HKDF AEAD keys), pillar_c (behavioral safety: output caps, encoding validation, response-time anomaly), pillar_d (attestation verification)."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/requestlog/store.go",
+     "path": "phase4-coordinator/internal/requestlog/store.go",
      "role": "request_log table + request_idempotency_keys (ReserveIdempotencyKey tx: replay returns prior request_id, body-hash mismatch returns ErrIdempotencyConflict, 137-178); shared *sql.DB handed to admission, billing, and explorer."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/explorer/handlers.go",
+     "path": "phase4-coordinator/internal/explorer/handlers.go",
      "role": "Operator console JSON API + embedded static UI (static.go go:embed). Operator-key auth on everything except static assets (46-73); proxies /buyers to the phase5 gateway; per-endpoint windowed queries against the shared SQLite."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/config/config.go",
+     "path": "phase4-coordinator/internal/config/config.go",
      "role": "Single YAML config (708 lines): listen/pool/routing/ws/admission/tier2/auth/storage/rewards/settlement/explorer/providers; Default() provides fallbacks that call sites re-apply defensively when fields are <=0."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/audit/store.go",
+     "path": "phase4-coordinator/internal/audit/store.go",
      "role": "audit_log SQLite store for operator_model_swap events, emitted from pool.ApplyHeartbeat via the swapEmitter wired in main.go:94-114."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/providerhttp/client.go",
+     "path": "phase4-coordinator/internal/providerhttp/client.go",
      "role": "Package-global *http.Client for provider HTTP forwarding, timeout set once via Init() at startup (main.go:38); redirects disabled."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/sqliteutil/dsn.go",
+     "path": "phase4-coordinator/internal/sqliteutil/dsn.go",
      "role": "DSN pragma helper (busy_timeout, foreign_keys, WAL, synchronous NORMAL) shared by all stores."
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/internal/testfaults/relay.go",
+     "path": "phase4-coordinator/internal/testfaults/relay.go",
      "role": "//go:build testfaults \u2014 build-tag-gated fault injection (dead-WS-mid-inference relay, slow reader) so production binaries cannot contain the fault paths."
     }
    ],
@@ -101,62 +101,62 @@
    "area": "phase5-gateway \u2014 buyer-facing OpenAI-compatible API gateway (api.streamvc.live)",
    "purpose": "Go (stdlib-only HTTP) service that sits between buyers and the phase4 coordinator. It owns buyer identity (GitHub OAuth signup, API keys, demo tokens), token quotas/concurrency limits with reserve-settle-refund accounting in SQLite, and proxies /v1/chat/completions and /v1/models to the coordinator's buyer URL. It also serves the /account and /docs HTML pages, an operator admin plane (kill switch, capacity tiers, feedback summary, explorer), and a buyer-anonymized /v1/status aggregated from the coordinator's /poolz. Notably, despite the project's \"signed inference receipts\" pitch, there is NO receipt issuance/verification code anywhere in this module (grep for \"receipt\" across phase5-gateway/*.go returns zero hits; same for phase4-coordinator/internal and phase3-binary/Sources) \u2014 receipts are aspirational, not implemented here.",
    "entryPoints": [
-    "/Users/augstar/macprovider-poc/phase5-gateway/cmd/gateway/main.go:19 \u2014 main(): flags -config (gateway.yaml) and -check (migrate-and-exit); opens sqlite store, builds router.New(...), starts HTTP server with graceful shutdown",
-    "/Users/augstar/macprovider-poc/phase5-gateway/cmd/gateway/main.go:49,96-121 \u2014 background reservation reaper goroutine (hourly default) expiring stale quota reservations",
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/server.go:134-164 \u2014 Handler(): full route table (auth/*, /account, /docs, /v1/*, /healthz, /admin/*, optional /admin/explorer/*)",
-    "/Users/augstar/macprovider-poc/phase5-gateway/dist/ \u2014 deploy surface: gateway-linux-amd64 binary, macprovider-gateway.service systemd unit, nginx-api.streamvc.live.conf, deploy-pearl-vps.md"
+    "phase5-gateway/cmd/gateway/main.go:19 \u2014 main(): flags -config (gateway.yaml) and -check (migrate-and-exit); opens sqlite store, builds router.New(...), starts HTTP server with graceful shutdown",
+    "phase5-gateway/cmd/gateway/main.go:49,96-121 \u2014 background reservation reaper goroutine (hourly default) expiring stale quota reservations",
+    "phase5-gateway/internal/router/server.go:134-164 \u2014 Handler(): full route table (auth/*, /account, /docs, /v1/*, /healthz, /admin/*, optional /admin/explorer/*)",
+    "phase5-gateway/dist/ \u2014 deploy surface: gateway-linux-amd64 binary, macprovider-gateway.service systemd unit, nginx-api.streamvc.live.conf, deploy-pearl-vps.md"
    ],
    "keyModules": [
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/server.go",
+     "path": "phase5-gateway/internal/router/server.go",
      "role": "2495-line monolith: middleware (request-ID, panic recovery, internal-header stripping at 166-195), GitHub OAuth start/callback (197-330), signup with per-IP rate limit + capacity gate (332-371), demo sessions (373-403), API key rotate/revoke (405-451), /v1/models + tier1/tier2 trust disclosure synthesis (453-490, 887-1249), chat-completions proxy with quota reserve/settle/refund and SSE streaming (1251-1712), /v1/status poolz aggregation with anonymization (1809-1978), admin kill-switch/capacity handlers (696-815), operator bearer auth (2061-2090), client-IP trusted-proxy logic (2270-2296)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/auth/keys.go",
+     "path": "phase5-gateway/internal/auth/keys.go",
      "role": "API key lifecycle: keys are 'mp_' + base64url(32 random bytes); stored only as HMAC-SHA256 (or plain SHA256) hash + 12-char display prefix (lines 38-71); Validate looks up by hash. RandomID/StateToken helpers"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/auth/oauth.go",
+     "path": "phase5-gateway/internal/auth/oauth.go",
      "role": "GitHub OAuth code exchange (50-106): token POST then /user fetch; scope allowlist enforced (read:user, user:email only \u2014 108-119); 10-min state expiry (134-136)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/auth/demo.go",
+     "path": "phase5-gateway/internal/auth/demo.go",
      "role": "Demo tokens: HMAC-SHA256-signed JSON payload bound to client IP (IPv6 normalized to /64, lines 79-88), max 24h TTL, no DB row \u2014 stateless validation (46-71)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/storage/types.go",
+     "path": "phase5-gateway/internal/storage/types.go",
      "role": "All storage structs: Account, APIKey, OAuthState (with single-use Action field, 50-64), quota ReservationRequest/Settlement, UsageEvent, FeedbackEvent, AuditEvent, CapacityTier, KillSwitchState, Explorer* DTOs"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/storage/interfaces.go",
+     "path": "phase5-gateway/internal/storage/interfaces.go",
      "role": "Role-segregated store interfaces (AuthStore, UsageStore, CapacityStore, ExplorerStore...); router.Server.Store composes seven of them (server.go:62-70)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/storage/sqlite/store.go",
+     "path": "phase5-gateway/internal/storage/sqlite/store.go",
      "role": "SQLite (modernc, CGO-free) store: single connection (SetMaxOpenConns(1), line 38), WAL + busy_timeout pragmas, hand-rolled BEGIN IMMEDIATE transactions (immediateTx, 880-926) for quota reserve/settle/refund and concurrency acquire/release; atomic ConsumeOAuthState (328-356)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/storage/sqlite/migrate.go",
+     "path": "phase5-gateway/internal/storage/sqlite/migrate.go",
      "role": "Single schemaSQL string: 14 tables incl. accounts, api_keys, oauth_states, quota_reservations, concurrency_reservations, usage_events, audit_events, runtime_config; append-only enforced by RAISE(ABORT) triggers on usage/feedback/audit/api_key/demo/capacity/signup event tables (184-251)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/storage/sqlite/explorer.go",
+     "path": "phase5-gateway/internal/storage/sqlite/explorer.go",
      "role": "Read-only operator explorer queries (buyers, sessions, activity feed, health rollups) backing /admin/explorer/*"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/config/config.go",
+     "path": "phase5-gateway/internal/config/config.go",
      "role": "YAML config with hardcoded production defaults (Default() at 132-177: api.streamvc.live, coordinator on localhost 8443/8444, 100k daily tokens, 4096 max_tokens); 'env:NAME' secret indirection (195-208); strict fail-closed Validate() (210-329)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/pages.go",
+     "path": "phase5-gateway/internal/router/pages.go",
      "role": "/account (show-once API key from mp_new_api_key cookie, CSP nonce, embedded html template) and /docs (goldmark-rendered embedded markdown). tier1DisclosureText hardcodes the honest no-privacy/no-attestation claims (27-44)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/cors.go",
+     "path": "phase5-gateway/internal/router/cors.go",
      "role": "Exact-origin CORS allowlist (console.streamvc.live, streamvc.live by default), credentials=false, applied per-route via withCORS"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/explorer.go",
+     "path": "phase5-gateway/internal/router/explorer.go",
      "role": "Operator-only explorer HTTP handlers: window/cursor parsing, 3s query timeout, limit cap 200"
     }
    ],
@@ -189,60 +189,60 @@
    "area": "phase3-binary (Swift provider CLI)",
    "purpose": "phase3-binary is the Swift 6 CLI (`macprovider-cli`) that runs on provider Macs and turns them into MLX inference endpoints. It loads an MLX model, serves an OpenAI-compatible HTTP API on localhost, maintains an outbound WebSocket session to the coordinator (tier-2 encrypted by default), relays coordinator-tunneled inference requests to the MLX runtime, and handles signed self-update, operator-driven warm model swaps over a Unix control socket, and managed-device attestation. SwiftPM package with two targets: `MacProviderCore` (pure library: config, request parsing, stop-token filter, model catalog) and the `macprovider-cli` executable (Package.swift lines 41-68, platform macOS 14, StrictConcurrency enabled).",
    "entryPoints": [
-    "@main MacProviderCLI with subcommands serve (default), self-test, status, update, uninstall, models \u2014 /Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:7-16",
-    "ServeCommand.run() \u2014 the long-running provider daemon path \u2014 /Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:88-172",
-    "UpdateCommand.run() \u2192 SelfUpdate.run(checkOnly:) \u2014 /Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:228-246",
-    "models list/switch/status subcommands talking to the control socket \u2014 /Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:5-55",
-    "Acceptance/ops harness: /Users/augstar/macprovider-poc/phase3-binary/scripts/ (run-acceptance.sh, test-ac11..15.sh, soak-test.sh, harness-*.sh) and mock coordinator at /Users/augstar/macprovider-poc/phase3-binary/tools/mock-coordinator/mock_coordinator.py",
-    "Install/relaunch shell surface for partner Macs: /Users/augstar/macprovider-poc/phase3-binary/dist/install.sh, relaunch-m1.sh, relaunch-m4.sh, launchd-plist-template.plist"
+    "@main MacProviderCLI with subcommands serve (default), self-test, status, update, uninstall, models \u2014 phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:7-16",
+    "ServeCommand.run() \u2014 the long-running provider daemon path \u2014 phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:88-172",
+    "UpdateCommand.run() \u2192 SelfUpdate.run(checkOnly:) \u2014 phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift:228-246",
+    "models list/switch/status subcommands talking to the control socket \u2014 phase3-binary/Sources/macprovider-cli/ModelsSubcommand.swift:5-55",
+    "Acceptance/ops harness: phase3-binary/scripts/ (run-acceptance.sh, test-ac11..15.sh, soak-test.sh, harness-*.sh) and mock coordinator at phase3-binary/tools/mock-coordinator/mock_coordinator.py",
+    "Install/relaunch shell surface for partner Macs: phase3-binary/dist/install.sh, relaunch-m1.sh, relaunch-m4.sh, launchd-plist-template.plist"
    ],
    "keyModules": [
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift",
      "role": "CLI entry; ServeCommand wires Config \u2192 ModelRuntime \u2192 ProviderStatus \u2192 CoordinatorClient \u2192 optional ControlSocketServer \u2192 HTTPServer; installs SIGTERM/SIGINT drain handlers (lines 248-265)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/MacProviderCore/Config.swift",
+     "path": "phase3-binary/Sources/MacProviderCore/Config.swift",
      "role": "AppConfig + ConfigLoader; precedence defaults < YAML (~/.config/macprovider/config.yaml) < MACPROVIDER_* env < CLI flags (lines 139-161); typed assign() validators"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift",
      "role": "Actor owning the coordinator WS session: reconnect loop w/ 1\u219260s exponential backoff (189-221), tier-2 auth handshake (251-276), heartbeat task w/ WS ping (505-524), preflight acks (536-578), drain flows (580-625), caffeinate sleep assertion (33-65); holds binaryVersion = \"1.3.0\" (line 70)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/Tier2ProviderSession.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/Tier2ProviderSession.swift",
      "role": "Tier-2 crypto: X25519 ECDH + HKDF-SHA256 directional keys, transcript-bound keyID (58-96); AES-256-GCM seal/open with strict per-direction seq counters, deterministic nonce = 4-byte base + 8-byte BE seq, AAD binding type/direction/request_id/stream/provider_id/assigned_id/seq (104-189, 259-304, 363-385)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/InferenceRelay.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/InferenceRelay.swift",
      "role": "Actor relaying coordinator inference_request frames to ModelRuntime; enforces encrypted frames in tier-2 (50-60), duplicate-id NAK, queue-full and body-size end frames (68-93); streaming via BlockingChunkBuffer backpressure (capacity 256 / resume 128, lines 303, 616-681); emits OpenAI SSE chunks wrapped in WS frames"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/ModelRuntime.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/ModelRuntime.swift",
      "role": "Actor over MLX (LLMModelFactory/ModelContainer): synchronous boot load (99-118), AsyncSemaphore(1) inference gate (56), complete/stream with stop-token + request-stop filtering and streaming-safe holdback (659-714), prompt-length 413 enforcement (534-544), warm-swap state machine ready\u2192loading\u2192draining\u2192ready (167-262), safetensors manifest SHA-256 model hash (609-640)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/HTTPServer.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/HTTPServer.swift",
      "role": "SwiftNIO HTTP/1.1 server bound to 127.0.0.1 only (line 36); routes GET /v1/models, /v1/health, /v1/status, POST /v1/chat/completions (116-135); SSE streaming; every response sends connection: close (509, 585)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/SelfUpdate.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/SelfUpdate.swift",
      "role": "Signed self-update: pinned repo api.github.com/repos/Augustas11/macprovider (line 6), embedded P-256 key verifies checksums.txt.sig before tarball download (7-12, 73-82, 258-270), HTTPS host allowlists (232-245), tar path-traversal check (247-256), runs new binary self-test (90), atomic rename + launchd restart (166-219)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/ControlSocket.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/ControlSocket.swift",
      "role": "Warm-swap control plane: Unix socket (default $TMPDIR/macprovider-cli/ctl.sock, 178-186) created 0600 in 0700 dir (254-281), refuses stale socket; JSON-lines codec, 64KB frame cap (544); frames switch_request/status_request/switch_ack/switch_progress/status_response (19-25); switch validated against supported_models (439-455)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/Tier2Attestation.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/Tier2Attestation.swift",
      "role": "ManagedDeviceAttestationGenerator: reads MDA ACME artifact JSON from configured path, builds attestation token envelope with hardware/RAM/model claims and optional ES256 binding signature with Go-compatible JSON escaping (187-308); returns nil with WARN if artifact absent \u2014 attestation is optional"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/ProviderStatus.swift",
+     "path": "phase3-binary/Sources/macprovider-cli/ProviderStatus.swift",
      "role": "Actor tracking health state, in-flight counts, per-heartbeat metrics window; ProviderCapacity maps RAM tiers to context caps 20k/50k/120k/200k (24-37); waitUntilDrained polling (213-222)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/Sources/MacProviderCore/SupportedModels.swift",
+     "path": "phase3-binary/Sources/MacProviderCore/SupportedModels.swift",
      "role": "Catalog validation: CSV parse, 256-byte entry / 64-entry caps, case-insensitive model-in-catalog check (38-73)"
     }
    ],
@@ -265,7 +265,7 @@
     "fact: heartbeat interval is coordinator-controlled with a floor of 1s (CoordinatorClient.swift:484: max(interval, 1)) \u2014 a misbehaving coordinator could request 1Hz heartbeats",
     "fact: SelfUpdate verifies checksums.txt + its ECDSA signature BEFORE downloading the tarball, then executes the downloaded binary's `self-test` before atomic replace (SelfUpdate.swift:73-91) \u2014 strong ordering, but sha256(file:) loads the whole tarball into memory (SelfUpdate.swift:309-313) while model hashing streams in 1MB chunks (ModelRuntime.swift:642-653)",
     "judgment: drainAndExit calls Darwin.exit(0) from inside the actor after the drain sequence (CoordinatorClient.swift:580-594), so HTTPServer/NIO shutdown is skipped on SIGTERM \u2014 acceptable for a launchd-managed daemon but worth knowing",
-    "fact: dist/ ships ~10 historical release tarballs (v1.1.2 through v1.2.6) checked into the repo alongside install/relaunch scripts (ls of /Users/augstar/macprovider-poc/phase3-binary/dist)",
+    "fact: dist/ ships ~10 historical release tarballs (v1.1.2 through v1.2.6) checked into the repo alongside install/relaunch scripts (ls of phase3-binary/dist)",
     "fact: Tier2 attestation degrades silently to nil (token omitted) with only a WARN print when the MDA artifact path is unset or invalid (Tier2Attestation.swift:51-84) \u2014 tier assignment is thus entirely coordinator-side policy"
    ]
   },
@@ -274,68 +274,68 @@
    "area": "Operational surface: beta/ harness + cron, scripts/ (release signing + tier-2 ops), frontdoor/ (console + install front door), .github/workflows/release.yml, phase4-coordinator/dist+scripts, phase5-gateway/dist",
    "purpose": "This is the deploy/upgrade/monitoring layer of MacProvider. Provider Macs get the Swift binary via a curl-pipe-bash installer chain (get.streamvc.live -> raw GitHub main -> signed GitHub Releases built by the one CI workflow). The coordinator and console are pushed from the operator's laptop to a single root-SSH VPS (159.223.165.194 \"Pearl\") by idempotent bash deploy scripts; the gateway is deployed by hand from a markdown runbook. Monitoring is a 3-minute systemd-timer Python poller on the VPS plus an operator-side cron harness that fires synthetic buyer traffic through the production coordinator every 15 minutes.",
    "entryPoints": [
-    "/Users/augstar/macprovider-poc/phase3-binary/dist/install.sh \u2014 public provider installer served at get.streamvc.live/install.sh (828 lines; main() at lines 766-826)",
-    "/Users/augstar/macprovider-poc/.github/workflows/release.yml \u2014 the ONLY CI workflow; builds/signs/publishes the darwin-arm64 provider binary on v*.*.* tag push or workflow_dispatch",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/deploy-pearl-vps.sh \u2014 coordinator deploy: scp binary+config to root@159.223.165.194, systemd + nginx + certbot (9 steps, idempotent)",
-    "/Users/augstar/macprovider-poc/frontdoor/console/dist/deploy-console.sh \u2014 console.streamvc.live static-site deploy incl. Cloudflare DNS record creation",
-    "/Users/augstar/macprovider-poc/phase5-gateway/dist/deploy-pearl-vps.md \u2014 gateway deploy is a MANUAL runbook, no script",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/monitor/macprovider-monitor.py \u2014 Pearl-side observability poller, run by macprovider-monitor.timer every 3 min",
-    "/Users/augstar/macprovider-poc/beta/CRON_TEMPLATE.txt \u2014 operator-M1 crontab: coord-cooperative.sh every 15 min 9am-10pm, coord-adversarial.sh daily 16:00 (lines 31, 40)",
-    "/Users/augstar/macprovider-poc/beta/harness.py \u2014 synthetic buyer harness writing per-request metrics to beta/runs.sqlite",
-    "/Users/augstar/macprovider-poc/scripts/activate-tier2-*.sh + enforce-tier2-hash.sh \u2014 guarded --plan/--apply production config flips (SSH + single-key YAML edit + SIGHUP + verify + auto-rollback)",
-    "/Users/augstar/macprovider-poc/phase3-binary/dist/package.sh \u2014 operator-side release build (xcodebuild Release + tarball of binary + Metal .bundle dirs)"
+    "phase3-binary/dist/install.sh \u2014 public provider installer served at get.streamvc.live/install.sh (828 lines; main() at lines 766-826)",
+    ".github/workflows/release.yml \u2014 the ONLY CI workflow; builds/signs/publishes the darwin-arm64 provider binary on v*.*.* tag push or workflow_dispatch",
+    "phase4-coordinator/dist/deploy-pearl-vps.sh \u2014 coordinator deploy: scp binary+config to root@159.223.165.194, systemd + nginx + certbot (9 steps, idempotent)",
+    "frontdoor/console/dist/deploy-console.sh \u2014 console.streamvc.live static-site deploy incl. Cloudflare DNS record creation",
+    "phase5-gateway/dist/deploy-pearl-vps.md \u2014 gateway deploy is a MANUAL runbook, no script",
+    "phase4-coordinator/dist/monitor/macprovider-monitor.py \u2014 Pearl-side observability poller, run by macprovider-monitor.timer every 3 min",
+    "beta/CRON_TEMPLATE.txt \u2014 operator-M1 crontab: coord-cooperative.sh every 15 min 9am-10pm, coord-adversarial.sh daily 16:00 (lines 31, 40)",
+    "beta/harness.py \u2014 synthetic buyer harness writing per-request metrics to beta/runs.sqlite",
+    "scripts/activate-tier2-*.sh + enforce-tier2-hash.sh \u2014 guarded --plan/--apply production config flips (SSH + single-key YAML edit + SIGHUP + verify + auto-rollback)",
+    "phase3-binary/dist/package.sh \u2014 operator-side release build (xcodebuild Release + tarball of binary + Metal .bundle dirs)"
    ],
    "keyModules": [
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/dist/install.sh",
+     "path": "phase3-binary/dist/install.sh",
      "role": "Provider onboarding: platform gate (Darwin arm64, macOS>=14), RAM-tiered model pick, fetch latest GitHub Release, openssl signature-verify checksums.txt against embedded P-256 public key (lines 396-413), SHA-256 verify, tarball-path safety validation (lines 425-452), install real binary + .bundle dirs to ~/macprovider with ~/.local/bin symlink (Metal bundle adjacency, lines 484-504), quarantine clear after prompt (lines 534-546), launchd plist render+bootstrap, 5/20-min model self-test, coordinator /v1/pool/check"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/.github/workflows/release.yml",
+     "path": ".github/workflows/release.yml",
      "role": "Release CI: macos-15 runner, pinned actions/checkout SHA (line 25), package.sh build, tier-2 artifact preflight (skipped for pre-v1.2.6 tags, lines 68-73), signs checksums.txt with MACPROVIDER_RELEASE_SIGNING_KEY_PEM secret then deletes the key file (lines 96-99), gh release create, post-publish verify-tier2-provider-release.sh"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/dist/deploy-pearl-vps.sh",
+     "path": "phase4-coordinator/dist/deploy-pearl-vps.sh",
      "role": "Coordinator deploy from laptop: step-0 config-drift gate, root SSH to hardcoded VPS_HOST=159.223.165.194 (lines 25-27), installs /opt/macprovider/coordinator + 0600 coordinator.yaml, stub-then-full nginx for ACME, refuses restart with connected providers unless FORCE_RESTART=1 (lines 143-160), verifies /v1/models returns 404 on coordinator host (lines 177-182)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/dist/check-deploy-config.sh",
+     "path": "phase4-coordinator/dist/check-deploy-config.sh",
      "role": "Pre-deploy gate: hard-fails placeholder/non-64-hex operator_key (lines 37-46), heartbeat_miss <= heartbeat_interval (lines 49-57), warns on C2 coordinator-vs-gateway timer ordering (lines 62-72)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase4-coordinator/dist/monitor/macprovider-monitor.py",
+     "path": "phase4-coordinator/dist/monitor/macprovider-monitor.py",
      "role": "Only production alerting: polls loopback /healthz, /poolz (bearer = operator_key regex-parsed from coordinator.yaml, lines 56-62), gateway /v1/status; transition-based alerts (pool ready==0 CRITICAL, provider degraded/unavailable WARN, lines 131-157); journald always + Gmail app-password email if /etc/macprovider/monitor.env configured (lines 174-195)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase5-gateway/dist/nginx-api.streamvc.live.conf",
+     "path": "phase5-gateway/dist/nginx-api.streamvc.live.conf",
      "role": "Public buyer edge: rate/conn-limit zones (lines 10-12), blanks client-supplied internal affinity headers (lines 58-59), explicit 404 for /admin/, /poolz, /v1/pool/check (lines 46-49, 106-114), /ws/provider proxied to coordinator 8444 with 10r/m + 5-conn limits (lines 124-134)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/scripts/sign-catalog.go",
+     "path": "scripts/sign-catalog.go",
      "role": "Tier-2 model-catalog signer/verifier: Ed25519 over canonical JSON body (lines 305-314), strict catalog validation (expiry, dup model ids, 64-hex sha256, hash_scope whitelist, lines 231-279), keygen writes 0600 private key (lines 90-99)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/scripts/hash-model-weights.go",
+     "path": "scripts/hash-model-weights.go",
      "role": "Produces catalog entries: sorted manifest of .safetensors files (name+sha256+size) hashed as canonical JSON (lines 74-113); derives model id from HF cache models--org--repo path (lines 129-142)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/frontdoor/console/dist/deploy-console.sh",
+     "path": "frontdoor/console/dist/deploy-console.sh",
      "role": "Console deploy: Cloudflare API DNS-record creation from ~/.config/macprovider/cloudflare-api-token (lines 65-92), certbot webroot, static /var/www/console install"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/frontdoor/console/dist/nginx-console.streamvc.live.conf",
+     "path": "frontdoor/console/dist/nginx-console.streamvc.live.conf",
      "role": "Console vhost: strict CSP connect-src limited to api.streamvc.live (line 27), 5-min cache"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/beta/web/api/chat.js",
+     "path": "beta/web/api/chat.js",
      "role": "Legacy Vercel demo proxy \u2014 kill-switched: returns 410 unless MACPROVIDER_ENABLE_LEGACY_BETA_PROXY=1 (lines 21-23)"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/beta/DECISION_CRITERIA.md",
+     "path": "beta/DECISION_CRITERIA.md",
      "role": "Decision log: 344-line doc with locked pre-launch facts, day-2/day-3 go-no-go gates, hard/soft-stop triggers, and an append-only '## Decision log' table (line 248) \u2014 the project's operational memory"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/phase3-binary/dist/relaunch-m4.sh",
+     "path": "phase3-binary/dist/relaunch-m4.sh",
      "role": "Partner-Mac recovery script (kill + nohup restart with hardcoded model/provider-id/coordinator args, lines 12-18) \u2014 pre-launchd era ops for the two known partner Macs"
     }
    ],
@@ -363,71 +363,71 @@
   {
    "key": "specsdocs",
    "area": "Documentation and spec corpus (README, runbooks, AGENTS.md, specs/, beta/DECISION_CRITERIA.md)",
-   "purpose": "As documented in /Users/augstar/macprovider-poc/README.md:20-31, MacProvider makes any Apple Silicon Mac (M1+, macOS 14+) a remote-addressable MLX inference endpoint: OpenAI-compatible /v1/chat/completions at api.streamvc.live, with every response carrying an ed25519-signed receipt binding (prompt, output, provider). Intended users are two-sided: Providers (Mac owners installing via curl get.streamvc.live/install.sh, outbound-WS only, managed at console.streamvc.live) and Buyers (drop-in OpenAI client swap, pay-per-compute). The docs corpus shows a spec-driven, multi-round-audited 2-person PoC that has outgrown its own human-facing documentation: the normative specs are current and rigorous, while README/HANDOFF/specs-index lag by 2-6 versions.",
+   "purpose": "As documented in README.md:20-31, MacProvider makes any Apple Silicon Mac (M1+, macOS 14+) a remote-addressable MLX inference endpoint: OpenAI-compatible /v1/chat/completions at api.streamvc.live, with every response carrying an ed25519-signed receipt binding (prompt, output, provider). Intended users are two-sided: Providers (Mac owners installing via curl get.streamvc.live/install.sh, outbound-WS only, managed at console.streamvc.live) and Buyers (drop-in OpenAI client swap, pay-per-compute). The docs corpus shows a spec-driven, multi-round-audited 2-person PoC that has outgrown its own human-facing documentation: the normative specs are current and rigorous, while README/HANDOFF/specs-index lag by 2-6 versions.",
    "entryPoints": [
-    "/Users/augstar/macprovider-poc/README.md \u2014 public-facing front door: provider install, buyer API, receipt schema, architecture diagram",
-    "/Users/augstar/macprovider-poc/HANDOFF.md:5-7 \u2014 declares itself 'Next session entry point: This document', but status is frozen at 2026-05-26 ('Phase 1 PoC complete... Awaiting M4 user')",
-    "/Users/augstar/macprovider-poc/RUNBOOK.md:1-19 \u2014 NOT an ops runbook: it is the original Phase 1 falsifiability test script addressed to 'a Codex agent executing Phase 1' (mlx-lm venv + cloudflared tunnel validation)",
-    "/Users/augstar/macprovider-poc/CONTINUE_RUNBOOK.md:1-9 \u2014 Phase 1 continuation pass (Steps 6.5/6.7/7.5), same era",
-    "/Users/augstar/macprovider-poc/AGENTS.md \u2014 AI-agent rules digest: PR workflow, git identity, sensitive paths (billing/buyer/auth/requestlog/router) require PR, d-inference clean-room boundary, spec naming conventions",
-    "/Users/augstar/macprovider-poc/specs/README.md \u2014 the spec index (severely stale, see surprises)",
-    "/Users/augstar/macprovider-poc/beta/DECISION_CRITERIA.md \u2014 pre-committed go/no-go criteria + append-only decision log"
+    "README.md \u2014 public-facing front door: provider install, buyer API, receipt schema, architecture diagram",
+    "HANDOFF.md:5-7 \u2014 declares itself 'Next session entry point: This document', but status is frozen at 2026-05-26 ('Phase 1 PoC complete... Awaiting M4 user')",
+    "RUNBOOK.md:1-19 \u2014 NOT an ops runbook: it is the original Phase 1 falsifiability test script addressed to 'a Codex agent executing Phase 1' (mlx-lm venv + cloudflared tunnel validation)",
+    "CONTINUE_RUNBOOK.md:1-9 \u2014 Phase 1 continuation pass (Steps 6.5/6.7/7.5), same era",
+    "AGENTS.md \u2014 AI-agent rules digest: PR workflow, git identity, sensitive paths (billing/buyer/auth/requestlog/router) require PR, d-inference clean-room boundary, spec naming conventions",
+    "specs/README.md \u2014 the spec index (severely stale, see surprises)",
+    "beta/DECISION_CRITERIA.md \u2014 pre-committed go/no-go criteria + append-only decision log"
    ],
    "keyModules": [
     {
-     "path": "/Users/augstar/macprovider-poc/specs/",
+     "path": "specs/",
      "role": "176 files. By prefix: 45 AUDIT_* (audit prompts), 42 BUILD_* (build/commission prompts), 38 SPEC-* (normative docs + their audit reports), 29 FIX_* (fix-pass prompts), remainder = phase build reports (PHASE5/6/7_*), JOINT/INTEGRATION audits, GOAL/SCOPE/REGRESSION/HARDENING one-offs, README.md index"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-001-phase3-binary.md",
+     "path": "specs/SPEC-001-phase3-binary.md",
      "role": "Normative spec, Swift provider binary. Version 1.3 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 absorption) per line 3"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-002-coordinator.md",
+     "path": "specs/SPEC-002-coordinator.md",
      "role": "Normative spec, Go coordinator. Version 1.3.5 (2026-06-06) per line 3; note line 4 still declares dependency on SPEC-001 v1.2.4"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-003-open-onboarding.md",
+     "path": "specs/SPEC-003-open-onboarding.md",
      "role": "Normative spec, distribution/install.sh/onboarding. Version 0.7 (2026-05-29) per line 3"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-004-smart-router.md",
+     "path": "specs/SPEC-004-smart-router.md",
      "role": "Normative spec, routing. Version 0.3.1 (2026-05-30) per header"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-005-billing.md",
+     "path": "specs/SPEC-005-billing.md",
      "role": "Normative spec, billing/settlement/rewards. Version 0.3 (2026-05-31) per header"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-006-buyer-api.md",
+     "path": "specs/SPEC-006-buyer-api.md",
      "role": "Normative spec, buyer API/gateway. Version 0.8.3 (2026-05-31) per header"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-007-explorer.md",
+     "path": "specs/SPEC-007-explorer.md",
      "role": "Normative spec, internal read-only operator explorer (v0.2, RFC 2119 language, explicitly 'not a control plane')"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-008-tier2.md",
+     "path": "specs/SPEC-008-tier2.md",
      "role": "Normative spec, tier-2 trust/attestation layer. Version 0.3 (2026-05-31) per header"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-009-console-v2.md",
+     "path": "specs/SPEC-009-console-v2.md",
      "role": "Normative spec, console v2. Version 0.1 (early draft) per header"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-010-model-catalog.md",
+     "path": "specs/SPEC-010-model-catalog.md",
      "role": "Normative spec, provider model catalog. Version 1.5 (LOCKED per SPEC-001 v1.3 absorption note) per header"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-011-operator-pushed-warm-swap.md",
+     "path": "specs/SPEC-011-operator-pushed-warm-swap.md",
      "role": "Normative spec, warm model swap. Version 0.5 ('post round-3 polish pass \u2014 LOCK candidate') per header"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/specs/SPEC-012-source.md",
+     "path": "specs/SPEC-012-source.md",
      "role": "Normative spec (source/audit-history pairing with SPEC-012-source-audit-history.md). Version 0.3 per header"
     },
     {
-     "path": "/Users/augstar/macprovider-poc/beta/DECISION_CRITERIA.md",
+     "path": "beta/DECISION_CRITERIA.md",
      "role": "Pre-committed Phase 2 go/no-go criteria (signed-header pattern, hard-stop triggers, pivot menu) + append-only decision log table at line 248; 57 dated decision rows (grep '^| 2026-'), each with Observation / Decision / Phase-3-implication columns"
     }
    ],
@@ -442,9 +442,9 @@
     "Runbooks are written as self-contained prompts addressed to an executing agent ('You are a Codex agent...', RUNBOOK.md:3, CONTINUE_RUNBOOK.md:3) with PASS/FAIL gates and HALT.md escape hatches"
    ],
    "surprises": [
-    "[fact, Medium] specs/README.md (the spec index) is severely stale: lines 5-7 list only three specs \u2014 SPEC-001 'v1.1.1 Build-ready', SPEC-002 'v1.0.3', SPEC-005 'v0.3' \u2014 while the corpus actually has 12 SPEC families and SPEC-001 is at v1.3 (SPEC-001-phase3-binary.md:3), SPEC-002 at v1.3.5 (SPEC-002-coordinator.md:3). Anyone (human or agent) trusting the index gets versions ~6 revisions old. Cite: /Users/augstar/macprovider-poc/specs/README.md:5-7",
+    "[fact, Medium] specs/README.md (the spec index) is severely stale: lines 5-7 list only three specs \u2014 SPEC-001 'v1.1.1 Build-ready', SPEC-002 'v1.0.3', SPEC-005 'v0.3' \u2014 while the corpus actually has 12 SPEC families and SPEC-001 is at v1.3 (SPEC-001-phase3-binary.md:3), SPEC-002 at v1.3.5 (SPEC-002-coordinator.md:3). Anyone (human or agent) trusting the index gets versions ~6 revisions old. Cite: specs/README.md:5-7",
     "[fact, Low] README.md:137 hardcodes 'Current release: **v1.2.5**' but git tags include v1.3.0 and the shipped binary identifies as 1.3.0 (phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:70 'static let binaryVersion = \"1.3.0\"'). The same line links to /releases/latest, so the text and the link target silently disagree.",
-    "[fact, Low] Project CLAUDE.md (/Users/augstar/macprovider-poc/CLAUDE.md, 'Other repo conventions' section) states 'v1.2.3 is the current phase3-binary release. SPEC-001 v1.2.2, SPEC-002 v1.1.3, SPEC-003 v0.5 are locked' \u2014 every one of those is stale (actual: binary 1.3.0, SPEC-001 v1.3, SPEC-002 v1.3.5, SPEC-003 v0.7 per SPEC-003-open-onboarding.md:3). Agents are told these are locked baselines.",
+    "[fact, Low] Project CLAUDE.md (CLAUDE.md, 'Other repo conventions' section) states 'v1.2.3 is the current phase3-binary release. SPEC-001 v1.2.2, SPEC-002 v1.1.3, SPEC-003 v0.5 are locked' \u2014 every one of those is stale (actual: binary 1.3.0, SPEC-001 v1.3, SPEC-002 v1.3.5, SPEC-003 v0.7 per SPEC-003-open-onboarding.md:3). Agents are told these are locked baselines.",
     "[judgment, Medium] There is no current operations runbook despite live production. Root RUNBOOK.md:1-19 is the original Phase 1 falsifiability script ('You are a Codex agent executing Phase 1... This is a falsifiability test'), and CONTINUE_RUNBOOK.md:1-9 is its continuation. Ops knowledge for the live coordinator/gateway/console exists only scattered across phase reports in specs/ and memory files.",
     "[fact, Low] HANDOFF.md:5-7 status frozen at 2026-05-26: 'Phase 1 PoC complete. Phase 2 buyer-harness scaffold built... Awaiting M4 user before going live' \u2014 two weeks and roughly four phases behind reality (live beta, N=3 providers, money path). It carries a superseded-warning banner at line 3 but still names itself the session entry point.",
     "[fact, Low] beta/DECISION_CRITERIA.md:28 \u2014 the commitment signature line is still blank ('Signed (commit hash on this file is the timestamp): `_______________`') even though the header at lines 3-6 demands stamping BEFORE day 1 and the log below it has 57 dated decision rows through Phase 4+. The discipline held in practice but the ceremonial lock never happened.",
@@ -523,8 +523,8 @@
    "dimension": "dependencies",
    "healthSummary": "The dependency POSTURE is genuinely good \u2014 among the best I have seen at this maturity: tiny stdlib-first trees (the gateway has two direct deps), everything lock-filed and exact-pinned, the same CGO-free SQLite driver deliberately shared across both Go services to enable the laptop-to-Linux cross-compile deploy model, and zero vendored or CDN-loaded code. The dependency PROCESS, however, is set-and-forget: there is no Dependabot/Renovate/test CI (.github contains only the release workflow), `go mod tidy` has not been run since the gateway docs feature landed, and every manifest is frozen at roughly mid-2024 vintage. That process gap has already produced one real problem hiding in plain sight: both money-path services run modernc.org/sqlite v1.33.0, a version its own authors retracted as breaking clients, 19 minor versions behind current \u2014 the single highest-priority dependency action in the repo. The rest is cheap hygiene: bump the two-year-stale exact-pinned swift-nio, add a third-party license notice file to the publicly distributed provider tarball, note that gopkg.in/yaml.v3 is officially unmaintained, and drop the never-imported swift-log. Method note: Go version recency was checked live via `go list -m -u all` (network was available); upstream maintenance statuses (go-yaml archived 2025-04-01, gobwas/ws latest release 2024-05-03, swift-nio latest 2.101.0) were verified against the live GitHub pages, not memory.",
    "strengths": [
-    "Exceptionally small, stdlib-first dependency trees for money-path services: phase5-gateway has exactly TWO direct dependencies (gopkg.in/yaml.v3 and modernc.org/sqlite \u2014 /Users/augstar/macprovider-poc/phase5-gateway/go.mod:5-8) and phase4-coordinator only seven (/Users/augstar/macprovider-poc/phase4-coordinator/go.mod:5-13). No framework sprawl, no ORM, no HTTP client libs \u2014 minimal supply-chain surface where it matters most.",
-    "Full reproducibility discipline: go.sum committed for both modules, Package.resolved committed and git-tracked (verified via git ls-files), and every Swift dependency pinned with `exact:` version requirements (/Users/augstar/macprovider-poc/phase3-binary/Package.swift:20-39) \u2014 no version ranges anywhere, so the signed release pipeline can never silently pick up a different dependency than what was tested.",
+    "Exceptionally small, stdlib-first dependency trees for money-path services: phase5-gateway has exactly TWO direct dependencies (gopkg.in/yaml.v3 and modernc.org/sqlite \u2014 phase5-gateway/go.mod:5-8) and phase4-coordinator only seven (phase4-coordinator/go.mod:5-13). No framework sprawl, no ORM, no HTTP client libs \u2014 minimal supply-chain surface where it matters most.",
+    "Full reproducibility discipline: go.sum committed for both modules, Package.resolved committed and git-tracked (verified via git ls-files), and every Swift dependency pinned with `exact:` version requirements (phase3-binary/Package.swift:20-39) \u2014 no version ranges anywhere, so the signed release pipeline can never silently pick up a different dependency than what was tested.",
     "The duplicated modernc.org/sqlite choice across both Go services is the RIGHT duplication: same driver, same version in both (coordinator go.mod:12, gateway go.mod:7), and the pure-Go/CGO-free property is load-bearing \u2014 it is what allows cross-compiling the linux-amd64 production binaries (phase4-coordinator/dist/coordinator-linux-amd64, phase5-gateway/dist/gateway-linux-amd64, both properly gitignored) from the operator's macOS laptop with no Linux build infrastructure. One driver to reason about for WAL/busy_timeout semantics across the whole backend. The performance tradeoff vs CGo mattn is irrelevant at current request volume.",
     "Zero vendored or copied third-party code: a copyright/SPDX-header sweep across all first-party Go/Swift/JS sources found nothing foreign, and the embedded web UIs are small hand-written assets (explorer dashboard.js 228 lines, console index.html 1544 lines) with no CDN-loaded or bundled JS libraries \u2014 the only CDN reference in the tree is a test asserting their absence.",
     "Production ops scripts deliberately avoid third-party Python: the VPS monitor (phase4-coordinator/dist/monitor/macprovider-monitor.py) and the cron harness (beta/harness.py) import stdlib only (urllib/smtplib/sqlite3), so the deployed alerting path and synthetic-traffic path have no pip dependency at all."
@@ -1151,9 +1151,9 @@
    "kind": "fact",
    "what": "The gateway has no retention path for any table. usage_events, feedback_events, audit_events, api_key_events, demo_usage_events, capacity_signal_events, signup_events, and demo_session_events all have BEFORE DELETE triggers that RAISE(ABORT) (migrate.go:184-251), and concurrency_reservations has its own no-delete trigger (migrate.go:248-251). quota_reservations has no trigger but the only cleanup mechanism \u2014 the hourly reaper \u2014 issues an UPDATE that flips status to 'expired' rather than deleting rows (store.go:847-860; wired in main.go:96-121). Net effect: every non-demo chat request permanently adds at least 3 rows (quota_reservations, concurrency_reservations, usage_events), and pruning is impossible without a schema migration because the triggers forbid DELETE.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/storage/sqlite/migrate.go:184-251",
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/storage/sqlite/store.go:847-860",
-    "/Users/augstar/macprovider-poc/phase5-gateway/cmd/gateway/main.go:96-121"
+    "phase5-gateway/internal/storage/sqlite/migrate.go:184-251",
+    "phase5-gateway/internal/storage/sqlite/store.go:847-860",
+    "phase5-gateway/cmd/gateway/main.go:96-121"
    ],
    "why": "On the RAM- and disk-constrained Pearl VPS (already swapping), the gateway DB grows monotonically with traffic forever. Per-request quota math (dailyUsageTx SUM over usage_events + quota_reservations, store.go:862-878) and explorer analytics scan these growing tables on every request. The append-only triggers are a deliberate tamper-evidence design for money data, which is good \u2014 but it means there is no sanctioned cleanup story at all, and the eventual fix (periodic archive + DB rotation, or trigger amendment to allow aged-out deletes) needs to be designed before the tables are large, not after.",
    "confidence": "high",
@@ -1174,11 +1174,11 @@
    "kind": "fact",
    "what": "pool.Registry.ApplyHeartbeat invokes the SwapEventEmitter while holding Registry.mu (provider.go:482-484 takes the lock, emitter fires at 542-554). Production wiring makes that emitter a synchronous SQLite INSERT: main.go:94-111 calls auditStore.EmitSwap inline. The code's own concurrency contract comment (provider.go:446-457) says implementations 'MUST NOT block for long', but the production implementation is a DB write on a database opened with busy_timeout=5000 (sqliteutil/dsn.go:11), shared with request_log/billing/idempotency writes.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go:446-457",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go:482-484",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go:542-554",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/cmd/coordinator/main.go:94-111",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/sqliteutil/dsn.go:11"
+    "phase4-coordinator/internal/pool/provider.go:446-457",
+    "phase4-coordinator/internal/pool/provider.go:482-484",
+    "phase4-coordinator/internal/pool/provider.go:542-554",
+    "phase4-coordinator/cmd/coordinator/main.go:94-111",
+    "phase4-coordinator/internal/sqliteutil/dsn.go:11"
    ],
    "why": "Registry.mu guards everything: Touch() liveness updates for every inbound WS frame from every provider, ApplyHeartbeat, Snapshot() used by selectProvider on every buyer request. If the audit INSERT lands while another writer (billing hot path, retention prune, nightly reconcile) holds the SQLite write lock, the heartbeat goroutine can stall up to ~5s inside the registry lock \u2014 freezing routing and liveness for the whole pool. Swaps are operator-initiated and rare, which is why this is Medium not High, but the blast radius when it does collide is pool-wide.",
    "confidence": "high",
@@ -1198,11 +1198,11 @@
    "kind": "fact",
    "what": "PruneBefore wraps the indexed column in a function: `DELETE FROM request_log WHERE julianday(ts_utc) < julianday(?)` (requestlog/store.go:188, same pattern for request_idempotency_keys at :185 and audit_log at audit/store.go:122). julianday(ts_utc) defeats idx_request_log_ts_utc (created at requestlog/store.go:114-115), so each daily prune is a full-table scan, and the DELETE is a single unbatched statement holding the SQLite write lock for its entire duration.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/requestlog/store.go:185-188",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/requestlog/store.go:114-115",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/audit/store.go:118-126",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/buyer/server.go:123",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/buyer/server.go:1286-1290"
+    "phase4-coordinator/internal/requestlog/store.go:185-188",
+    "phase4-coordinator/internal/requestlog/store.go:114-115",
+    "phase4-coordinator/internal/audit/store.go:118-126",
+    "phase4-coordinator/internal/buyer/server.go:123",
+    "phase4-coordinator/internal/buyer/server.go:1286-1290"
    ],
    "why": "This DB is the money path. Billing's WriteHotPath uses BEGIN IMMEDIATE with a 6s budget (requestLogWriteTimeout, buyer/server.go:123) and the HTTP-forward success path returns buyer-visible HTTP 500 'request_log_failed' if the durable write fails (buyer/server.go:1286-1290). At today's ~10-20k retained rows the scan is milliseconds; at 100x beta traffic with 90-day retention, a multi-second full-scan DELETE once a day overlaps live requests and busy_timeout=5000 turns it into hot-path failures. Timestamps are RFC3339Nano text which sorts lexicographically, so the fix is trivial.",
    "confidence": "high",
@@ -1224,8 +1224,8 @@
    "kind": "judgment",
    "what": "The gateway store opens its DB with SetMaxOpenConns(1)/SetMaxIdleConns(1) (store.go:38-39), so every operation \u2014 quota reserve (BEGIN IMMEDIATE), settle, refund, concurrency acquire/release, auth key lookup \u2014 queues behind whatever currently holds the one connection. Explorer/admin analytics share that same connection with a 3-second per-query budget (explorerQueryTimeoutMs=3000, router/explorer.go:17,35) and result limits up to 200 rows over windows up to 31 days (explorer.go:15-23).",
    "where": [
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/storage/sqlite/store.go:38-39",
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/explorer.go:14-43"
+    "phase5-gateway/internal/storage/sqlite/store.go:38-39",
+    "phase5-gateway/internal/router/explorer.go:14-43"
    ],
    "why": "The single connection is a deliberate simplicity/SQLITE_BUSY-avoidance choice and is fine at beta volume. But it couples two growth curves: as the never-pruned event tables (finding above) grow, explorer window queries slow toward their 3s budget, and during those 3 seconds every concurrent buyer chat request blocks at ReserveQuota before any token is streamed. Operator opens console dashboard \u2192 all buyers stall. This will surface as mysterious p99 latency spikes correlated with console use.",
    "confidence": "high",
@@ -1245,10 +1245,10 @@
    "kind": "fact",
    "what": "seenModels (map[string]struct{}, provider.go:133,156) gains an entry on every Register (provider.go:194) and every heartbeat (provider.go:519) keyed by whatever model_id the provider reports. Entries are never deleted \u2014 not on provider removal, not on TTL \u2014 and the map is iterated at provider.go:589 to answer model-known queries.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go:133",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go:194",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go:519",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/pool/provider.go:589"
+    "phase4-coordinator/internal/pool/provider.go:133",
+    "phase4-coordinator/internal/pool/provider.go:194",
+    "phase4-coordinator/internal/pool/provider.go:519",
+    "phase4-coordinator/internal/pool/provider.go:589"
    ],
    "why": "With open provisional-tier onboarding, an admitted stranger Mac can heartbeat a new random model_id every few seconds, growing coordinator memory under the global registry lock indefinitely (~4MB/day/provider at 1Hz) on a VPS with ~180MiB free, and polluting ModelKnown()/model listing with garbage entries. Honest pool members never trigger it, hence Low \u2014 but it is the only unbounded in-memory structure I found in the coordinator, and the writers are the least-trusted parties in the system.",
    "confidence": "high",
@@ -1268,8 +1268,8 @@
    "kind": "fact",
    "what": "AcquireConcurrency is only called for non-demo subjects (`if !authn.Demo`, server.go:1362-1381), so demo requests are bounded by daily per-IP token quota but not by concurrent in-flight count. Each in-flight demo request holds a gateway goroutine, an upstream coordinator connection for up to CoordinatorTimeout (server.go:1383), and competes for the MLX-serialized provider slots.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/server.go:1362-1381",
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/server.go:1383"
+    "phase5-gateway/internal/router/server.go:1362-1381",
+    "phase5-gateway/internal/router/server.go:1383"
    ],
    "why": "A burst of parallel demo requests from one or a few IPs can occupy the provider pool (MLX serializes per provider; N=3) and hold many concurrent upstream streams on the RAM-capped gateway, degrading paying buyers, until the daily demo token budget runs out. Damage is capped by demo max_tokens and the IP-bound token quota, hence Low \u2014 but it is the one admission path with no concurrency bound.",
    "confidence": "high",
@@ -1291,8 +1291,8 @@
    "kind": "fact",
    "what": "phase4-coordinator and phase5-gateway both pin modernc.org/sqlite v1.33.0. The module's own current go.mod carries `retract v1.33.0 // intended to resolve #177 but breaks clients`, and `go list -m -u all` (run live in both modules \u2014 network was available) prints `modernc.org/sqlite v1.33.0 (retracted) [v1.52.0]`. The deployed services are 19 minor versions behind current (v1.52.0), missing roughly two years of driver fixes plus newer bundled SQLite upstream releases. This is the single most load-bearing dependency in the system: the billing ledger, request_log, idempotency keys, gateway API keys, quota reservations, and audit logs all live in SQLite through this driver in both services.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/go.mod:12",
-    "/Users/augstar/macprovider-poc/phase5-gateway/go.mod:7"
+    "phase4-coordinator/go.mod:12",
+    "phase5-gateway/go.mod:7"
    ],
    "why": "The driver authors explicitly declared this exact version broken for clients \u2014 a status nobody on the project has noticed because nothing checks for updates. Running a known-retracted DB driver under a live credit ledger and payout pipeline is exactly the kind of latent correctness risk that bites in beta: if the v1.33.0 regression (or any of 19 versions of subsequent fixes, including bundled SQLite engine updates) ever manifests, it manifests as ledger/locking misbehavior on the money path. The fix is cheap and both services have strong test suites to validate the bump.",
    "suggestedFix": "Bump modernc.org/sqlite to v1.52.0 in both go.mod files (one line each), run `go mod tidy`, run both modules' full test suites (billing store/ACID tests, gateway store tests, -race variants), then redeploy via the normal PR path. Verify WAL/busy_timeout behavior under the existing concurrent-load tests before shipping.",
@@ -1314,10 +1314,10 @@
    "kind": "fact",
    "what": ".github/ contains exactly one file \u2014 workflows/release.yml (the Swift release build). There is no dependabot.yml, no Renovate, no test CI, and no scheduled update pass. Concrete drift evidence: github.com/yuin/goldmark is directly imported by the gateway (pages.go:11-12, used at line 20 to render the public /docs page) yet go.mod line 17 still lists it as `// indirect`, meaning `go mod tidy` has not been run since the docs feature landed. Version lag is uniform: chi v5.1.0 (current v5.3.0), zerolog v1.33.0 (current v1.35.1), golang.org/x/sys v0.22.0 (current v0.46.0) per the live `go list -m -u all` runs.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/pages.go:11",
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/pages.go:20",
-    "/Users/augstar/macprovider-poc/phase5-gateway/go.mod:17",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/go.mod:6"
+    "phase5-gateway/internal/router/pages.go:11",
+    "phase5-gateway/internal/router/pages.go:20",
+    "phase5-gateway/go.mod:17",
+    "phase4-coordinator/go.mod:6"
    ],
    "why": "This is the systemic cause of the retracted-driver finding: with no automation and no tidy discipline, a publicly flagged-as-broken dependency sat in production unnoticed. As real users and money are live, the project needs at minimum a low-friction signal when a dependency is retracted or has a security release \u2014 not enterprise tooling, just a Dependabot config or a monthly `go list -m -u all` habit.",
    "suggestedFix": "Add a minimal .github/dependabot.yml covering gomod (both module dirs) and swift, monthly cadence to keep noise low. Run `go mod tidy` in phase5-gateway to correct the goldmark classification. Optionally add `go list -m -u -retracted all` to the pre-deploy check script.",
@@ -1337,8 +1337,8 @@
    "kind": "fact",
    "what": "Package.swift pins swift-nio with `exact: \"2.65.0\"` and Package.resolved confirms 2.65.0 resolved. Upstream's latest is 2.101.0 (checked via the GitHub releases page), and visible release notes for 2.100.0/2.101.0 include security-relevant fixes: HTTP request URI/method byte validation, ByteBuffer capacity-overflow prevention, and rejection of WebSocket 8-byte payload lengths exceeding Int.max. NIOHTTP1 serves the provider binary's local OpenAI-compatible HTTP API. Mitigation: that server binds 127.0.0.1 only (HTTPServer.swift), so exposure requires a local attacker or a tunnel misconfiguration.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase3-binary/Package.swift:24",
-    "/Users/augstar/macprovider-poc/phase3-binary/Package.resolved:76"
+    "phase3-binary/Package.swift:24",
+    "phase3-binary/Package.resolved:76"
    ],
    "why": "Exact pins with no update cadence means the network-parsing code in a publicly distributed signed binary is frozen at March-2024 vintage forever. The loopback-only binding keeps this from being High today, but every provider Mac on the network runs this HTTP parser, and the project's own architecture docs contemplate tunneled access to it. A two-year-stale NIO will also eventually block Swift toolchain upgrades.",
    "suggestedFix": "Bump swift-nio to the current 2.x release in Package.swift (exact pin is fine \u2014 just move it), rebuild, run the XCTest suite and acceptance scripts, and cut a binary release through the existing signed-release pipeline. Fold dependency bumps into the existing release rhythm rather than adding new infrastructure.",
@@ -1360,9 +1360,9 @@
    "kind": "fact",
    "what": "package.sh builds the release tarball containing only the binary plus Metal/NIO resource bundles (lines 52-60: `macprovider-cli`, `mlx-swift_Cmlx.bundle`, `swift-nio_NIOPosix.bundle`) \u2014 no LICENSE, NOTICE, or third-party attribution files. The binary statically links Apache-2.0 dependencies (swift-nio, swift-argument-parser, swift-log per Package.swift:24-35, plus transitive swift-transformers, swift-collections, swift-atomics per Package.resolved) and MIT dependencies (mlx-swift, mlx-swift-examples, Yams, GzipSwift). Apache-2.0 \u00a74 requires providing a copy of the license with binary redistributions; MIT requires notice retention. This tarball is distributed to strangers via GitHub Releases and the public curl|bash installer chain (get.streamvc.live).",
    "where": [
-    "/Users/augstar/macprovider-poc/phase3-binary/dist/package.sh:52",
-    "/Users/augstar/macprovider-poc/phase3-binary/Package.swift:19",
-    "/Users/augstar/macprovider-poc/phase3-binary/Package.resolved:76"
+    "phase3-binary/dist/package.sh:52",
+    "phase3-binary/Package.swift:19",
+    "phase3-binary/Package.resolved:76"
    ],
    "why": "Open onboarding means this is genuine public distribution, not a two-person handoff anymore. License non-compliance is trivial to fix now and increasingly awkward later \u2014 it is the kind of thing a future partner, acquirer, or hostile community member checks first. (Contrast: the project is scrupulously careful about the d-inference clean-room boundary, so the intent to be license-clean clearly exists.)",
    "suggestedFix": "Generate a THIRD-PARTY-NOTICES.txt aggregating the LICENSE files of all resolved packages (a 20-line script over Package.resolved checkouts) and add it to the tarball in package.sh. One-time, ~30 minutes.",
@@ -1382,8 +1382,8 @@
    "kind": "fact",
    "what": "Both Go services depend on gopkg.in/yaml.v3 v3.0.1 for config parsing. The upstream repository (go-yaml/yaml) was archived by its owner on April 1, 2025 and its README carries an explicit 'THIS PROJECT IS UNMAINTAINED' section (verified via web fetch). v3.0.1 is the final release; no bug or security fixes will ever ship.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/go.mod:11",
-    "/Users/augstar/macprovider-poc/phase5-gateway/go.mod:6"
+    "phase4-coordinator/go.mod:11",
+    "phase5-gateway/go.mod:6"
    ],
    "why": "Risk is low today because all YAML input is operator-controlled config files (coordinator.yaml, gateway.yaml), not untrusted data. But YAML parsers have a history of DoS-class bugs, and an unmaintained parser in both services is a slow-burning liability. Worth a note in the decision log and a planned migration (goccy/go-yaml is the common successor) next time config code is touched \u2014 not urgent.",
    "suggestedFix": "No immediate action. Record in beta/DECISION_CRITERIA.md; migrate to goccy/go-yaml opportunistically during a future config refactor. Never feed buyer-controlled input through this parser.",
@@ -1403,8 +1403,8 @@
    "kind": "fact",
    "what": "Package.swift declares swift-log exact 1.6.0 (lines 28-31) and links the Logging product into the macprovider-cli executable target (line 60), but a grep across all of phase3-binary/Sources/ finds zero `import Logging` statements \u2014 the codebase logs via print()/stderr writes instead. The library is declared, resolved, linked, and never used.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase3-binary/Package.swift:28",
-    "/Users/augstar/macprovider-poc/phase3-binary/Package.swift:60"
+    "phase3-binary/Package.swift:28",
+    "phase3-binary/Package.swift:60"
    ],
    "why": "Minor dead weight and one unnecessary supply-chain node in a signed, publicly distributed binary. Also a small signal to future contributors that structured logging was intended but never adopted \u2014 either use it or drop it.",
    "suggestedFix": "Remove the swift-log dependency and the Logging product from Package.swift, or adopt it deliberately if structured logging on the provider is wanted for beta debugging.",
@@ -1424,8 +1424,8 @@
    "kind": "fact",
    "what": "There is no requirements.txt, pyproject.toml, or lockfile anywhere in the repo (find across the tree, excluding .venv). The root .venv runs Python 3.9.6 from macOS CommandLineTools (pyvenv.cfg:3) \u2014 Python 3.9 reached end-of-life in October 2025 \u2014 and contains the Phase-1 mlx_lm serving stack (transformers 4.57.6, mlx 0.29.3, huggingface_hub) that current production no longer uses (providers run the Swift binary now). Of the live ops scripts: beta/harness.py and the VPS monitor (macprovider-monitor.py) are stdlib-only (good), but beta/report.py imports third-party `yaml` at line 26 with no documented way to recreate its environment.",
    "where": [
-    "/Users/augstar/macprovider-poc/.venv/pyvenv.cfg:3",
-    "/Users/augstar/macprovider-poc/beta/report.py:26"
+    ".venv/pyvenv.cfg:3",
+    "beta/report.py:26"
    ],
    "why": "Beta-grade impact only: the cron harness keeps working, but report.py silently depends on whatever Python/PyYAML happens to be on the operator laptop \u2014 on a fresh machine or after an OS update, report generation breaks with no manifest to rebuild from. The stale 2GB-class venv also invites confusion about what production actually depends on.",
    "suggestedFix": "Add a 3-line beta/requirements.txt (pyyaml) plus a README note on which python runs the cron scripts; delete or rebuild the Phase-1 .venv on a supported Python when convenient.",
@@ -1447,7 +1447,7 @@
    "kind": "judgment",
    "what": "The coordinator's provider WebSocket leg is built on github.com/gobwas/ws v1.4.0. That is the latest available version (`go list -m -u all` offers no update), and the upstream releases page shows v1.4.0 was published May 3, 2024 \u2014 over two years without a release as of June 2026, with v1.3.2 (Jan 2024) and v1.3.1 (Nov 2023) before it.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/go.mod:7"
+    "phase4-coordinator/go.mod:7"
    ],
    "why": "The library is stable, widely deployed, and the project is current on it \u2014 this is not a today problem. But every provider connection (auth handshake, encrypted-leg frames, inference relay) flows through a parser whose upstream may be slow or unresponsive if a protocol-level vulnerability is ever found. Worth knowing the contingency (e.g. coder/websocket) before an incident forces the question; the WS server code is well-isolated in internal/ws which would make a swap tractable.",
    "suggestedFix": "No action now. Note the dormancy in the decision log and keep the internal/ws abstraction boundary clean so a driver swap stays a contained change.",
@@ -1468,10 +1468,10 @@
    "kind": "fact",
    "what": "The only CI workflow in the repo is the release build: .github/workflows/release.yml triggers solely on v*.*.* tag push or manual dispatch and runs build \u2192 sign \u2192 publish, never `go test`, `go vet`, `swift test`, or any linter. Even the release path runs no tests: package.sh (invoked at release.yml:56-61) does xcodebuild + tar only. Meanwhile the repo carries large test suites that nothing executes automatically (26 *_test.go files in phase4-coordinator, 13 in phase5-gateway, 16 Swift test files), and AGENTS.md:32-42 mandates that billing/buyer/auth/router changes go through 'PR with review' \u2014 but a PR here has no required checks, no hooks (.git/hooks has zero non-sample entries), no .golangci.yml, no Makefile target. The PR gate for the money path is purely human eyeballs.",
    "where": [
-    "/Users/augstar/macprovider-poc/.github/workflows/release.yml:3-12 (tag/dispatch triggers only)",
-    "/Users/augstar/macprovider-poc/.github/workflows/release.yml:56-99 (build\u2192sign steps, no test step)",
-    "/Users/augstar/macprovider-poc/phase3-binary/dist/package.sh:25-60 (xcodebuild + tar, no tests)",
-    "/Users/augstar/macprovider-poc/AGENTS.md:32-42 (sensitive paths 'require PR with review')"
+    ".github/workflows/release.yml:3-12 (tag/dispatch triggers only)",
+    ".github/workflows/release.yml:56-99 (build\u2192sign steps, no test step)",
+    "phase3-binary/dist/package.sh:25-60 (xcodebuild + tar, no tests)",
+    "AGENTS.md:32-42 (sensitive paths 'require PR with review')"
    ],
    "why": "This project is explicitly AI-agent-authored (AGENTS.md is addressed to agents) with a 2-person review bench, and billing/quota correctness is guarded by tests that only run when someone remembers. A regression in phase4 billing or phase5 quota settlement can squash-merge to main looking green and ship to production in the next hand-deploy. The phase5 README even names the exact critical test sets (README.md:118-124) \u2014 they are one 20-line ubuntu workflow away from running on every PR, at zero cost. This is the single highest-leverage ops fix available.",
    "suggestedFix": "Add one .github/workflows/ci.yml: on pull_request + push to main, two ubuntu-latest jobs running `go vet ./... && go test ./...` in phase4-coordinator and phase5-gateway (~2-3 min, free). Optionally a macos job for `swift test` on phase3-binary paths, or defer that to release time. Mark the Go jobs as required checks on main.",
@@ -1491,11 +1491,11 @@
    "kind": "fact",
    "what": "Production alerting is exactly one mechanism: macprovider-monitor.py on a 3-minute systemd timer on Pearl, polling loopback /healthz, /poolz, /v1/status. Three compounding weaknesses: (1) email is silently optional \u2014 without Gmail creds in /etc/macprovider/monitor.env it degrades to journald-only with an INFO line (monitor.py:174-180), and per the monitor README:33-36 it runs journal-only 'until the password is filled in'; (2) alert delivery is single-shot \u2014 main() emits alerts, attempts email, then unconditionally save_state()s the new state (monitor.py:159-171), and send_email swallows failures with a printed WARN (monitor.py:194-195), so a transient SMTP failure permanently drops that transition alert; (3) the monitor runs on the same RAM-constrained VPS as the coordinator and gateway, so VPS death, OOM, or nginx failure kills the watcher along with the watched \u2014 and a repo-wide grep for uptimerobot/healthchecks/pingdom/statuscake/dead-man patterns returns nothing: there is no monitoring independent of Pearl.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/monitor/macprovider-monitor.py:159-171 (state saved regardless of email outcome)",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/monitor/macprovider-monitor.py:174-180 (silent degrade to journal-only)",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/monitor/macprovider-monitor.py:188-195 (email failure swallowed)",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/monitor/README.md:33-36 (email pending until app password configured)",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/monitor/macprovider-monitor.timer:1-11 (3-min timer)"
+    "phase4-coordinator/dist/monitor/macprovider-monitor.py:159-171 (state saved regardless of email outcome)",
+    "phase4-coordinator/dist/monitor/macprovider-monitor.py:174-180 (silent degrade to journal-only)",
+    "phase4-coordinator/dist/monitor/macprovider-monitor.py:188-195 (email failure swallowed)",
+    "phase4-coordinator/dist/monitor/README.md:33-36 (email pending until app password configured)",
+    "phase4-coordinator/dist/monitor/macprovider-monitor.timer:1-11 (3-min timer)"
    ],
    "why": "Real buyers and a real money path now depend on one swap-pressured VPS. If Pearl goes down at 3am \u2014 the one failure mode the monitor structurally cannot report \u2014 the operator learns about it from a user complaint. Even a provider-pool-empty CRITICAL may reach no human if the Gmail app password was never configured (the code's silent-degrade design makes that state invisible), and if the one email send fails, the alert is gone forever. The minimum bar for live money is one alerting path that does not live on the monitored host.",
    "suggestedFix": "Two cheap moves: (1) add a free external uptime check (healthchecks.io or UptimeRobot) on https://coordinator.streamvc.live/healthz and https://api.streamvc.live/healthz with email/push \u2014 this covers VPS-down, nginx-down, and monitor-dead in one stroke; (2) in monitor.py, only save_state() for a transition after the alert was delivered to at least one channel beyond journald (or retry on next poll while the condition persists), and confirm the Gmail app password is actually set in production.",
@@ -1515,9 +1515,9 @@
    "kind": "fact",
    "what": "The linux binaries that run the money path are produced by an undocumented manual cross-compile: the only trace in the entire repo is the comment 'coordinator-linux-amd64 cross-compiled into dist/' (deploy-pearl-vps.sh:9); a grep for GOOS=linux across both Go modules' scripts and docs finds no build command anywhere. deploy-pearl-vps.sh then ships whatever file currently sits at dist/coordinator-linux-amd64 (referenced at lines 32, installed at 72-78) with no version stamp, no commit linkage, and no post-deploy 'which build is this' verification. There is no rollback step in the script; the de facto rollback artifact is an untracked coordinator-linux-amd64.pre-phase6.bak sitting in dist/ (covered by .gitignore:38 '*.bak'). The Swift binary, by contrast, gets a full tagged-release pipeline with signing and post-publish verification.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/deploy-pearl-vps.sh:9 (comment is the only build documentation)",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/deploy-pearl-vps.sh:31-39,71-82 (ships whatever is in dist/, no provenance check)",
-    "/Users/augstar/macprovider-poc/.gitignore:36-41 (binaries and .bak rebuilt locally, untracked)"
+    "phase4-coordinator/dist/deploy-pearl-vps.sh:9 (comment is the only build documentation)",
+    "phase4-coordinator/dist/deploy-pearl-vps.sh:31-39,71-82 (ships whatever is in dist/, no provenance check)",
+    ".gitignore:36-41 (binaries and .bak rebuilt locally, untracked)"
    ],
    "why": "Combined with the absence of CI, the binary scp'd to production may have been built from uncommitted or never-tested code, and nobody can later answer 'which commit is running on Pearl?'. During an incident, rollback means remembering that a .bak file exists and hand-restoring it over SSH. For two rarely-deployed services this hasn't bitten yet, but the first bad deploy to the billing path will be diagnosed blind.",
    "suggestedFix": "Add a 15-line build script per Go service (GOOS=linux GOARCH=amd64 go build -ldflags \"-X main.version=$(git describe --always --dirty)\") that refuses to build from a dirty tree without an override; have deploy-pearl-vps.sh keep the previous binary as coordinator.prev on the VPS and print the deployed version from a --version flag or /healthz field as a final step.",
@@ -1538,9 +1538,9 @@
    "kind": "fact",
    "what": "Coordinator and console deploys are idempotent fail-closed scripts; the gateway's deploy is a manual markdown checklist that opens with 'This is an operator runbook draft' (deploy-pearl-vps.md:1-3) and whose rollback is three manual nginx/systemctl steps (lines 34-38). No pre-deploy gate validates gateway.yaml. Worse, the one cross-component safety check that exists \u2014 check-deploy-config.sh's C2 assertion that coordinator request_timeout_s < gateway coordinator_request_seconds \u2014 only executes if the operator passes gateway.yaml as a second argument (check-deploy-config.sh:18-19, 62-74), and the coordinator deploy script invokes it with only the coordinator config (deploy-pearl-vps.sh:50: `check-deploy-config.sh \"$CONFIG\"`), so every standard deploy prints 'skipped C2 timer cross-check'. Memory of this project records a real production drift on exactly this timer pair.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase5-gateway/dist/deploy-pearl-vps.md:1-3,34-38",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/check-deploy-config.sh:18-19,62-74",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/deploy-pearl-vps.sh:46-52 (gate invoked with coordinator.yaml only)"
+    "phase5-gateway/dist/deploy-pearl-vps.md:1-3,34-38",
+    "phase4-coordinator/dist/check-deploy-config.sh:18-19,62-74",
+    "phase4-coordinator/dist/deploy-pearl-vps.sh:46-52 (gate invoked with coordinator.yaml only)"
    ],
    "why": "Manual checklists drift and skip steps under incident pressure \u2014 and this is the service holding buyer auth, quotas, and usage accounting. The C2 check being structurally skipped means a known breaker-attribution hazard (documented in the script's own header, lines 8-12) can silently re-enter production on any coordinator timeout change.",
    "suggestedFix": "Script the gateway deploy by cloning the coordinator script's shape (gate \u2192 scp \u2192 install \u2192 restart \u2192 verify), and change deploy-pearl-vps.sh:50 to pass the gateway config when present, e.g. `check-deploy-config.sh \"$CONFIG\" \"$DIST_DIR/../../phase5-gateway/dist/gateway.yaml\"`, failing loudly if it is missing rather than noting and continuing.",
@@ -1560,9 +1560,9 @@
    "kind": "fact",
    "what": "coordinator.yaml (containing the plaintext operator_key and the authoritative provider enrollment list) is gitignored (.gitignore:43-45) and lives only in the laptop working tree. The template itself instructs: 'Edit this list locally \u2014 DO NOT add providers by SSHing to the VPS... because the next deploy run will overwrite your changes from this file. (Lesson learned 2026-05-28.)' (coordinator.yaml.example:79-83). deploy-pearl-vps.sh:73,79 scp's and installs the laptop file over /opt/macprovider/coordinator.yaml with no pull-and-diff against what is currently running and no backup of the VPS copy. check-deploy-config.sh validates the laptop file in isolation (placeholder key, thresholds) but cannot detect that it is stale relative to production.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/coordinator.yaml.example:79-83",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/deploy-pearl-vps.sh:71-82",
-    "/Users/augstar/macprovider-poc/.gitignore:43-45"
+    "phase4-coordinator/dist/coordinator.yaml.example:79-83",
+    "phase4-coordinator/dist/deploy-pearl-vps.sh:71-82",
+    ".gitignore:43-45"
    ],
    "why": "Two realistic failure modes for this exact setup: (a) laptop loss or an AI-agent session 'sanitizing' the local file (this repo runs many agent sessions in that worktree; the project's own notes record a near-miss) followed by a deploy clobbers production provider enrollment; (b) an emergency VPS-side edit made during an incident is silently reverted by the next routine deploy. With N=3 live providers, a clobbered provider list is a visible outage.",
    "suggestedFix": "Add a step 4a to deploy-pearl-vps.sh: scp the current VPS coordinator.yaml down, diff against the candidate, and require interactive confirmation (or a FORCE flag) when the remote copy differs in the providers: block or operator_key. Keep a dated backup of the remote file on the VPS before overwrite. Separately, keep an encrypted off-laptop copy of the real coordinator.yaml.",
@@ -1582,8 +1582,8 @@
    "kind": "judgment",
    "what": "There is no Makefile, justfile, or task runner anywhere in the repo (find across the tree returns nothing), and the three components have wildly different dev-loop documentation: phase5-gateway/README.md:26-39 and 115-127 give a complete copy-pasteable loop (env vars, go test ./..., -check mode, named critical test sets); phase3-binary has a README plus scripts/; phase4-coordinator \u2014 25k LOC including the billing engine \u2014 has no README whatsoever (the file does not exist), and its build, test, and cross-compile commands are written down nowhere.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase5-gateway/README.md:26-39,115-127 (the good pattern that proves the standard is achievable)",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/deploy-pearl-vps.sh:8-10 (build step exists only as a prose prerequisite)"
+    "phase5-gateway/README.md:26-39,115-127 (the good pattern that proves the standard is achievable)",
+    "phase4-coordinator/dist/deploy-pearl-vps.sh:8-10 (build step exists only as a prose prerequisite)"
    ],
    "why": "This repo's de facto contributors are fresh AI-agent sessions (per AGENTS.md and the project's own workflow), which re-derive the dev loop from scratch every session. Missing canonical commands for the biggest, most money-sensitive module increases per-session variance \u2014 an agent that doesn't know to run the billing tests before committing won't run them, and nothing else will either (see the CI finding). A 30-line phase4-coordinator/README.md plus a root Makefile with test/build/cross-compile targets closes this.",
    "suggestedFix": "Write phase4-coordinator/README.md modeled on the gateway's (build, test, mockprovider usage, cross-compile command, deploy pointer), and add a root Makefile with `make test` (both Go modules), `make build-linux` (both binaries, version-stamped), and `make check` (config gates) so agents and CI share one entry point.",
@@ -1605,11 +1605,11 @@
    "kind": "fact",
    "what": "The gateway does deployment secrets right: gateway.yaml carries env:NAME indirection and real values live in /etc/macprovider/gateway.env loaded via EnvironmentFile (macprovider-gateway.service:12; deploy-pearl-vps.md:6-11). The coordinator instead embeds operator_key in plaintext in coordinator.yaml (coordinator.yaml.example:65-68), which is scp'd from the laptop and installed 0600 (deploy-pearl-vps.sh:79). The monitor then extracts that key by regexing the YAML (macprovider-monitor.py:56-62) and runs as root (macprovider-monitor.service:8) although it only needs loopback HTTP plus read access to one file \u2014 while the coordinator and gateway themselves run as the unprivileged macprovider user.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/coordinator.yaml.example:65-68",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/monitor/macprovider-monitor.py:56-62",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/monitor/macprovider-monitor.service:6-10",
-    "/Users/augstar/macprovider-poc/phase5-gateway/dist/macprovider-gateway.service:7-12",
-    "/Users/augstar/macprovider-poc/phase5-gateway/dist/deploy-pearl-vps.md:6-11"
+    "phase4-coordinator/dist/coordinator.yaml.example:65-68",
+    "phase4-coordinator/dist/monitor/macprovider-monitor.py:56-62",
+    "phase4-coordinator/dist/monitor/macprovider-monitor.service:6-10",
+    "phase5-gateway/dist/macprovider-gateway.service:7-12",
+    "phase5-gateway/dist/deploy-pearl-vps.md:6-11"
    ],
    "why": "Acceptable at beta scale (0600, gitignored, root-only VPS), but the operator_key is the highest-blast-radius secret in the system (it authenticates the admin plane of BOTH services), and the plaintext laptop copy sits inside a worktree where AI agents operate constantly. The asymmetry also means anyone following the gateway pattern as the house style will be surprised by the coordinator. Cheap to converge now, annoying to converge after more providers join.",
    "suggestedFix": "Support env-indirection for auth.operator_key in the coordinator config (matching the gateway's env:NAME convention), move the value to /etc/macprovider/coordinator.env, drop the monitor to User=macprovider (or a dedicated user with group-read on the env file), and have the monitor read the key from the env file instead of regexing YAML.",
@@ -1631,9 +1631,9 @@
    "kind": "fact",
    "what": "git ls-files confirms 13 files under logs/ and 32 under results/ (curl outputs, tunnel logs, stress-test dumps dated 2026-05-26) are tracked. Everything else flagged as suspect is properly handled: default.profraw (5.3MB on disk) is ignored by .gitignore:34; phase3-binary/build-release/ (1.3GB) and .venv/ (241MB) exist on disk but have zero tracked files; the dist binaries, .bak, and the secret-bearing coordinator.yaml are explicitly ignored with a rationale comment (.gitignore:36-45). The only load-bearing tracked artifact is results/REPORT.md, which beta/harness.py references as the Phase 1 record.",
    "where": [
-    "/Users/augstar/macprovider-poc/.gitignore:1-45 (full coverage verified)",
-    "/Users/augstar/macprovider-poc/.gitignore:34 (default.profraw)",
-    "/Users/augstar/macprovider-poc/.gitignore:36-45 (dist binaries, .bak, secret config with rationale)"
+    ".gitignore:1-45 (full coverage verified)",
+    ".gitignore:34 (default.profraw)",
+    ".gitignore:36-45 (dist binaries, .bak, secret config with rationale)"
    ],
    "why": "Pure clutter, not risk: the raw logs bloat clones slightly and confuse new readers/agents about what is current ('06-tunnel.log' looks operational but is 2-week-old archaeology). Worth a 10-minute sweep, nothing more.",
    "suggestedFix": "Keep results/REPORT.md (move it to doc/ or specs/ as the Phase 1 record), `git rm -r` the raw logs/ and remaining results/ files, and add both directories to .gitignore. Delete the stale on-disk default.profraw while there.",
@@ -1654,10 +1654,10 @@
    "kind": "fact",
    "what": "README.md line 22 states 'Every response carries a signed receipt binding (prompt, output, provider) \u2014 verifiable inference'; line 57 claims the gateway performs 'receipt issuance'; lines 59-83 present a full v1 receipt JSON schema ('issued by the gateway and signed with the provider's key', fields: model, prompt_hash, output_hash, provider_id, provider_pubkey, ttft_ms, tokens_out, ts, sig) and three capability claims including 'a buyer can prove an inference happened... without trusting the gateway to be honest after the fact'. Grep for 'receipt' across phase5-gateway/**/*.go, phase4-coordinator/internal/**/*.go, and phase3-binary/Sources returns zero matches \u2014 there is no receipt issuance, signing, or verification code anywhere in the production stack (the only code matches are the legacy beta demo and the unrelated arm64golf benchmark-receipt UI in frontdoor/console/index.html:1350-1451). Meanwhile the LIVE buyer docs served by the gateway say the opposite: phase5-gateway/internal/router/templates/docs.md:119-124 (tier-1 disclosure) states 'There is no hardware attestation or runtime integrity check', 'The product makes NO privacy, attestation, integrity... claims', and item 4 explicitly mandates that 'Any buyer-facing language, including front-door copy... MUST be consistent with properties 1-3.' The README is exactly that front-door copy.",
    "where": [
-    "/Users/augstar/macprovider-poc/README.md:22",
-    "/Users/augstar/macprovider-poc/README.md:57",
-    "/Users/augstar/macprovider-poc/README.md:59-83",
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/templates/docs.md:119-124"
+    "README.md:22",
+    "README.md:57",
+    "README.md:59-83",
+    "phase5-gateway/internal/router/templates/docs.md:119-124"
    ],
    "why": "This is a live public beta with real buyers. The repo's public front page promises a cryptographic verifiability primitive the product does not deliver, while the deployed /docs page honestly disclaims it. A buyer who signed up on the receipt promise has been materially misled; a security researcher who notices will (correctly) frame it as a false cryptographic claim. It also violates the project's own SPEC-006 consistency rule, which the team otherwise enforces rigorously.",
    "suggestedFix": "Either move the receipt section under an explicit 'Roadmap \u2014 not yet implemented' heading (one-line edit preserving the schema as a design proposal), or delete lines 59-83 and soften lines 22/57 until receipts ship. Align with docs.md tier-1 disclosure language.",
@@ -1677,11 +1677,11 @@
    "kind": "fact",
    "what": "README.md:31 says providers 'Manage your node at console.streamvc.live' and README.md:35-40 lists console capabilities including 'Manage provider status and pool visibility' and 'Review billing and earnings'. The actual console (frontdoor/console/index.html) contains exactly three views \u2014 viewChat (line 493), viewDashboard (line 530), viewArm64golf (line 539). Grep over the file finds zero occurrences of 'earnings', 'payout', 'credits', 'billing', 'manage', 'pool visibility', or 'provider status'. Browser chat and pool monitoring are real; node management and billing review are not.",
    "where": [
-    "/Users/augstar/macprovider-poc/README.md:31",
-    "/Users/augstar/macprovider-poc/README.md:35-40",
-    "/Users/augstar/macprovider-poc/frontdoor/console/index.html:493",
-    "/Users/augstar/macprovider-poc/frontdoor/console/index.html:530",
-    "/Users/augstar/macprovider-poc/frontdoor/console/index.html:539-544"
+    "README.md:31",
+    "README.md:35-40",
+    "frontdoor/console/index.html:493",
+    "frontdoor/console/index.html:530",
+    "frontdoor/console/index.html:539-544"
    ],
    "why": "A provider who installs expecting to manage their node and review earnings at the console finds neither, eroding trust at exactly the moment the project is trying to recruit and retain N>3 providers. Same overclaim pattern as the receipts finding, on a softer axis.",
    "suggestedFix": "Trim README.md:35-40 to the two features that exist (browser chat, pool/dashboard monitoring) and mark management/billing views as planned.",
@@ -1701,13 +1701,13 @@
    "kind": "judgment",
    "what": "Root RUNBOOK.md:1-19 is the original Phase 1 falsifiability script addressed to 'a Codex agent executing Phase 1'; its operational content is obsolete: lines 157-172 instruct launching `python3 -m mlx_lm.server` on port 8080 (replaced by the Swift phase3-binary), line 33 references the antseed VPS 165.22.182.207 (production is Pearl 159.223.165.194 per phase4-coordinator/dist/deploy-pearl-vps.sh:18,26). CONTINUE_RUNBOOK.md:1-9 is its continuation pass, same era. HANDOFF.md:5-7 declares 'Status: Phase 1 PoC complete... Awaiting M4 user before going live' and names itself 'Next session entry point: This document' \u2014 frozen at 2026-05-26, four phases behind a live beta with a money path; HANDOFF.md:54 still describes Antseed as 'the initial billing/demand layer' when billing is now native. Actual ops knowledge (safe coordinator restart with the FORCE_RESTART provider-connected guard, settlement runs, monitor alert response, key rotation, gateway deploy) lives only in deploy-script comments, phase5-gateway/dist/deploy-pearl-vps.md, specs/ phase reports, and the 200KB beta/DECISION_CRITERIA.md decision log.",
    "where": [
-    "/Users/augstar/macprovider-poc/RUNBOOK.md:1-19",
-    "/Users/augstar/macprovider-poc/RUNBOOK.md:33",
-    "/Users/augstar/macprovider-poc/RUNBOOK.md:157-172",
-    "/Users/augstar/macprovider-poc/CONTINUE_RUNBOOK.md:1-9",
-    "/Users/augstar/macprovider-poc/HANDOFF.md:3-7",
-    "/Users/augstar/macprovider-poc/HANDOFF.md:54",
-    "/Users/augstar/macprovider-poc/phase4-coordinator/dist/deploy-pearl-vps.sh:18-26"
+    "RUNBOOK.md:1-19",
+    "RUNBOOK.md:33",
+    "RUNBOOK.md:157-172",
+    "CONTINUE_RUNBOOK.md:1-9",
+    "HANDOFF.md:3-7",
+    "HANDOFF.md:54",
+    "phase4-coordinator/dist/deploy-pearl-vps.sh:18-26"
    ],
    "why": "This is a 2-person project with live users and live money. If the operator is unavailable during an incident \u2014 or returns after a gap \u2014 the documents whose names promise operational guidance point at an architecture that no longer exists (mlx_lm.server, cloudflared tunnels, the wrong VPS). Incident history in this beta (provider flapping, coordinator restarts, config drift) shows incidents are routine; recovery currently depends entirely on one person's memory plus a decision log that records 'why' but not 'how'.",
    "suggestedFix": "Rename RUNBOOK.md/CONTINUE_RUNBOOK.md to docs/history/PHASE1_*.md (or add a superseded banner like HANDOFF.md has), and write a 1-2 page OPS.md covering: production topology, safe coordinator/gateway restart, monitor alert response, settlement, and key rotation \u2014 most content already exists in deploy-script comments and can be lifted.",
@@ -1729,10 +1729,10 @@
    "kind": "fact",
    "what": "specs/README.md:1-8 (the entire file) indexes only SPEC-001 ('v1.1.1, Build-ready'), SPEC-002 ('v1.0.3'), and SPEC-005 ('v0.3'). The actual corpus has 176 files including 38 SPEC-* documents across 12 families (SPEC-001 through SPEC-012, verified by directory listing). Actual current versions: SPEC-001 v1.3 (SPEC-001-phase3-binary.md:3), SPEC-002 v1.3.5 (SPEC-002-coordinator.md:3), SPEC-006 v0.8.3 (SPEC-006-buyer-api.md:3). The project's whole methodology is version-pinned spec-driven development, making a stale index an active hazard rather than mere clutter.",
    "where": [
-    "/Users/augstar/macprovider-poc/specs/README.md:1-8",
-    "/Users/augstar/macprovider-poc/specs/SPEC-001-phase3-binary.md:3",
-    "/Users/augstar/macprovider-poc/specs/SPEC-002-coordinator.md:3",
-    "/Users/augstar/macprovider-poc/specs/SPEC-006-buyer-api.md:3"
+    "specs/README.md:1-8",
+    "specs/SPEC-001-phase3-binary.md:3",
+    "specs/SPEC-002-coordinator.md:3",
+    "specs/SPEC-006-buyer-api.md:3"
    ],
    "why": "Humans and AI agents commissioning the next BUILD/AUDIT/FIX pass use the index to find the current normative baseline. Trusting it yields versions 5-6 revisions old, and the 9 unlisted spec families (router, buyer API, explorer, tier2, catalog, warm swap...) are undiscoverable except by directory listing. In a project where audits cite exact spec versions, this is how baseline drift starts.",
    "suggestedFix": "Regenerate the table to cover all 12 SPEC families with current version + status, and add one line of guidance ('version of record is line 3 of each spec'). ~15 minutes; consider a tiny script that greps line 3 of each SPEC-*.md.",
@@ -1752,11 +1752,11 @@
    "kind": "fact",
    "what": "CLAUDE.md:151-153 states 'v1.2.3 is the current phase3-binary release. SPEC-001 v1.2.2, SPEC-002 v1.1.3, SPEC-003 v0.5 are locked. SPEC-006 v0.2 is in regression-audit pending.' Actual: the shipped binary is 1.3.0 (phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:70 'static let binaryVersion = \"1.3.0\"'; git tag v1.3.0 exists), SPEC-001 is v1.3, SPEC-002 is v1.3.5, SPEC-006 is v0.8.3. AGENTS.md:3-6 directs ALL AI agents (Claude, Codex, Cursor) to read CLAUDE.md as the canonical rules document, so every coding session ingests these wrong baselines as ground truth.",
    "where": [
-    "/Users/augstar/macprovider-poc/CLAUDE.md:151-153",
-    "/Users/augstar/macprovider-poc/AGENTS.md:3-6",
-    "/Users/augstar/macprovider-poc/phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:70",
-    "/Users/augstar/macprovider-poc/specs/SPEC-001-phase3-binary.md:3",
-    "/Users/augstar/macprovider-poc/specs/SPEC-002-coordinator.md:3"
+    "CLAUDE.md:151-153",
+    "AGENTS.md:3-6",
+    "phase3-binary/Sources/macprovider-cli/CoordinatorClient.swift:70",
+    "specs/SPEC-001-phase3-binary.md:3",
+    "specs/SPEC-002-coordinator.md:3"
    ],
    "why": "This project's development model is agent-executed, spec-pinned builds. An agent told SPEC-002 v1.1.3 is the locked baseline can write a FIX prompt, audit, or compatibility check against a contract that is four versions behind the code it sits next to. Given how much process discipline the team invests in version pinning, the agent-facing memory being wrong undermines exactly that discipline.",
    "suggestedFix": "Either update the version lines now and on each release, or (better) replace hardcoded versions in CLAUDE.md with a pointer: 'current versions of record: line 3 of each specs/SPEC-NNN-*.md and the binaryVersion constant \u2014 do not trust this file for versions.'",
@@ -1776,10 +1776,10 @@
    "kind": "judgment",
    "what": "Real providers accrue real credits through the ledger, and a provider-token-authenticated earnings endpoint exists (/providers/{id}/earnings, phase4-coordinator/internal/billing/endpoints.go:51-52), but no surface a provider can see documents any of it: frontdoor/console/index.html has zero matches for earnings/payout/credits/billing; phase3-binary/dist/install.sh has zero matches for earn/payout; phase3-binary/README.md (read in full, 51 lines) covers install and trust caveats only; README.md's sole mention of the provider lifecycle is one clause at line 55 ('can be promoted to pinned by the operator after observation') with no criteria. The earnings endpoint is referenced only in internal specs (SPEC-005 family). Liveness/reaping rules (silent providers reaped after the heartbeat-miss window; sleeping Macs flap) are similarly spec-internal \u2014 buyers get one sentence (docs.md:130 'provider availability can change as Macs sleep') and providers get nothing.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase4-coordinator/internal/billing/endpoints.go:43-56",
-    "/Users/augstar/macprovider-poc/README.md:55",
-    "/Users/augstar/macprovider-poc/phase3-binary/README.md:1-51",
-    "/Users/augstar/macprovider-poc/phase5-gateway/internal/router/templates/docs.md:130"
+    "phase4-coordinator/internal/billing/endpoints.go:43-56",
+    "README.md:55",
+    "phase3-binary/README.md:1-51",
+    "phase5-gateway/internal/router/templates/docs.md:130"
    ],
    "why": "Money disputes without documentation land on the operator and are unresolvable by reference ('what rate? what share? when do I get paid? why did my Mac drop from the pool?'). The project's own growth plan is recruiting benchmark golfers as sellers; the first question a prospective seller asks \u2014 what do I earn and under what rules \u2014 currently has no answer anywhere public. Provider flapping due to sleep has already been a real support burden in this beta, and a paragraph of provider-facing explanation would deflect most of it.",
    "suggestedFix": "Add a short 'Provider economics & lifecycle' section to phase3-binary/README.md (or a console page): credit formula in plain language, provider share, payout threshold/window, how to call /providers/{id}/earnings with the provider token, promotion criteria, and a note that the Mac must stay awake (the binary holds a sleep assertion, but lid-closed sleep still drops you).",
@@ -1799,11 +1799,11 @@
    "kind": "fact",
    "what": "Three independent stale pins: (1) README.md:137 'Current release: **[v1.2.5]**' \u2014 but the hyperlink target is /releases/latest and git tags include v1.3.0 (also commit 2ace6d6 'bump binaryVersion 1.2.6 \u2192 1.3.0'), so the text and its own link target disagree, and the shields.io badge at README.md:13 auto-displays the real latest, contradicting line 137 on the same page. (2) phase5-gateway/README.md:3 says 'Phase 5 gateway implementation for SPEC-006 v0.5' while SPEC-006-buyer-api.md:3 is v0.8.3. (3) SPEC-002-coordinator.md:4 declares 'Depends on: SPEC-001 v1.2.4 (locked)' while its own line 3/changelog says v1.3.5 absorbs 'SPEC-001 v1.3' \u2014 a self-contradiction within the otherwise rigorous spec header discipline.",
    "where": [
-    "/Users/augstar/macprovider-poc/README.md:13",
-    "/Users/augstar/macprovider-poc/README.md:137",
-    "/Users/augstar/macprovider-poc/phase5-gateway/README.md:3",
-    "/Users/augstar/macprovider-poc/specs/SPEC-002-coordinator.md:3-7",
-    "/Users/augstar/macprovider-poc/specs/SPEC-006-buyer-api.md:3"
+    "README.md:13",
+    "README.md:137",
+    "phase5-gateway/README.md:3",
+    "specs/SPEC-002-coordinator.md:3-7",
+    "specs/SPEC-006-buyer-api.md:3"
    ],
    "why": "Each instance is cosmetic alone, but together they show hardcoded version strings are never swept at release time. The README one is public-facing and visibly self-contradictory (badge says one version, text says another); the SPEC-002 depends-on pin could mislead an audit pass into checking compatibility against the wrong SPEC-001 revision.",
    "suggestedFix": "Drop the hardcoded version from README.md:137 (the badge and /releases/latest link already carry it); fix gateway README to v0.8.3; correct SPEC-002:4's depends-on line. Add 'grep for old version string' to the release checklist.",
@@ -1823,9 +1823,9 @@
    "kind": "judgment",
    "what": "phase5-gateway/README.md:26-41 gives a complete copy-paste local dev path (env vars, yaml example, test/run commands) plus smoke curls (43-55), deployment layout (64-92), and a troubleshooting table (104-113) \u2014 a contributor can build and run it from docs alone. phase3-binary/README.md:1-51 documents the installed product and dist/ files but contains no source-build instructions (no swift build/test invocation; buildable only by inferring SwiftPM conventions or reading dist/package.sh). phase4-coordinator/ has no README whatsoever (verified by directory listing: cmd, internal, dist, coordinator.yaml.example, go.mod \u2014 no markdown doc); its only documentation is SPEC-002 (a 1.3.5-version normative wire-contract spec, not a build/run guide) and an implementation-notes.html.",
    "where": [
-    "/Users/augstar/macprovider-poc/phase5-gateway/README.md:26-55",
-    "/Users/augstar/macprovider-poc/phase5-gateway/README.md:104-127",
-    "/Users/augstar/macprovider-poc/phase3-binary/README.md:1-51"
+    "phase5-gateway/README.md:26-55",
+    "phase5-gateway/README.md:104-127",
+    "phase3-binary/README.md:1-51"
    ],
    "why": "The coordinator is the largest component, holds the billing ledger and provider auth, and is the piece a second contributor (or future hire, or the other half of this 2-person team) would most need to run locally to be useful. Today that requires reverse-engineering main.go and coordinator.yaml.example. The gateway README proves the team can write this doc well \u2014 the gap is just that the hub never got one.",
    "suggestedFix": "Write a phase4-coordinator/README.md modeled on the gateway's: build (go build ./cmd/coordinator), minimal local config from coordinator.yaml.example, how to run with the mockprovider tool, the two-port layout (provider 8444 / buyer 8443), and the key test invocations. Half a day, mostly transcription.",
