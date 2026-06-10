@@ -68,7 +68,16 @@ $SSH 'set -e
   install -d -o macprovider -g macprovider -m 0750 /var/log/macprovider
 '
 
-log "step 4/9: upload binary + config + nginx site"
+log "step 4/9: upload binary + config + nginx site (with rollback snapshot)"
+# Backup the live binary BEFORE the install so a rollback is one mv away.
+# See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the swap-back steps.
+$SSH 'if [ -x /opt/macprovider/coordinator ]; then
+        cp -p /opt/macprovider/coordinator /opt/macprovider/coordinator.prev
+        echo "  snapshot saved at /opt/macprovider/coordinator.prev"
+      else
+        echo "  no live binary at /opt/macprovider/coordinator — first deploy"
+      fi'
+
 $SCP "$BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-linux-amd64"
 $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:/tmp/coordinator.yaml"
 $SCP "$SERVICE" "$VPS_USER@$VPS_HOST:/tmp/macprovider-coordinator.service"
@@ -173,7 +182,22 @@ $SSH 'set -e
 log "step 8/9: verify public endpoints"
 sleep 2
 echo "  GET https://$DOMAIN/healthz"
-curl -fsS --max-time 10 "https://$DOMAIN/healthz" | python3 -m json.tool || { echo "healthz failed"; exit 1; }
+HEALTHZ_BODY=$(curl -fsS --max-time 10 "https://$DOMAIN/healthz" || { echo "healthz failed"; exit 1; })
+printf '%s\n' "$HEALTHZ_BODY" | python3 -m json.tool
+
+# Provenance check: compare the deployed version (from /healthz) against
+# what the local working tree would have built. Non-fatal — a warning is
+# enough to surface a mismatched binary without blocking the deploy.
+# See audits/2026-06-10/ROLLBACK_PROCEDURE.md for the rollback path.
+DEPLOYED_VERSION=$(printf '%s' "$HEALTHZ_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('version', '?'))" 2>/dev/null || echo "?")
+EXPECTED_VERSION=$(git describe --always --dirty --tags 2>/dev/null || git rev-parse --short HEAD)
+if [ "$DEPLOYED_VERSION" = "$EXPECTED_VERSION" ]; then
+  echo "  provenance OK: deployed=$DEPLOYED_VERSION | expected=$EXPECTED_VERSION"
+else
+  echo "  WARN provenance mismatch: deployed=$DEPLOYED_VERSION | expected=$EXPECTED_VERSION" >&2
+  echo "       (build artifact does not match the local working tree — investigate before relying on this deploy)" >&2
+fi
+
 echo "  GET https://$DOMAIN/v1/models -> expect 404 (buyer API is gateway-only)"
 STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/v1/models")
 if [ "$STATUS" != "404" ]; then
