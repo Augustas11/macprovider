@@ -8,8 +8,15 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [ -z "${FORCE_DIRTY:-}" ]; then
-  if ! git diff --quiet HEAD -- . ; then
-    echo "refusing to build with uncommitted changes (set FORCE_DIRTY=1 to override)" >&2
+  # `git status --porcelain` catches BOTH modified-tracked AND untracked
+  # files (relative to this module's pwd). `git diff --quiet` would miss a
+  # new .go file dropped in by an emergency hotfix, which would then ship
+  # in a binary whose -ldflags-stamped version still reports "clean" via
+  # `git describe` (which also ignores untracked files for its --dirty
+  # suffix). See M0-5 Phase 1 follow-up.
+  if [ -n "$(git status --porcelain -- .)" ]; then
+    echo "refusing to build with uncommitted or untracked changes (set FORCE_DIRTY=1 to override)" >&2
+    git status --short -- . >&2
     exit 1
   fi
 fi

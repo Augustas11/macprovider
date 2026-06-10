@@ -1780,6 +1780,55 @@ func TestPoolzRequiresOperatorKey(t *testing.T) {
 	}
 }
 
+func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
+	harness := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithVersion("v1.3.0-7-gabcdef0"),
+	})
+	defer harness.HTTP.Close()
+
+	resp, err := http.Get(harness.HTTP.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("healthz status = %d", resp.StatusCode)
+	}
+	var body struct {
+		Status  string `json:"status"`
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != "ok" {
+		t.Fatalf("status = %q", body.Status)
+	}
+	if body.Version != "v1.3.0-7-gabcdef0" {
+		t.Fatalf("version = %q, want %q", body.Version, "v1.3.0-7-gabcdef0")
+	}
+}
+
+func TestProviderHealthzDefaultVersion(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	resp, err := http.Get(ts.URL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	var body struct {
+		Version string `json:"version"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Version != "dev" {
+		t.Fatalf("default version = %q, want \"dev\"", body.Version)
+	}
+}
+
 func TestOperatorEndpointsBlacklistTwoPhaseDrain(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()

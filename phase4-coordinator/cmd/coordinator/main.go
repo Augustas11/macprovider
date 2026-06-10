@@ -90,6 +90,7 @@ func main() {
 	shutdownCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
 	wsOpts := []providerws.Option{}
+	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
 	if cfg.Auth.RequireProviderTokens {
 		wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
