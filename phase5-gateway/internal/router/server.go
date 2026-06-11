@@ -1369,26 +1369,40 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setRateLimitHeaders(w, decision.LimitTokens, decision.RemainingTokens, decision.ResetUnix)
-	if !authn.Demo {
-		if _, err := s.store.AcquireConcurrency(r.Context(), storage.ConcurrencyRequest{
-			AccountID: subject.AccountID, RequestID: requestID(r), Limit: s.cfg.Quotas.AccountConcurrency,
-			CreatedAt: s.now(), ExpiresAt: s.now().Add(s.cfg.CoordinatorTimeout() + time.Minute),
-		}); errors.Is(err, storage.ErrQuotaExceeded) {
-			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-			writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", "account_concurrency_exceeded", "Account concurrency limit exceeded")
-			return
-		} else if err != nil {
-			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return
-			}
-			writeError(w, http.StatusInternalServerError, "server_error", "concurrency_reservation_failed", "Could not reserve concurrency")
+	// M1-8 / PERF-6: demo subjects must also acquire concurrency. Pre-fix,
+	// only paying accounts went through AcquireConcurrency. 3+ parallel demo
+	// requests from a single demo identity (keyed on IP/64 via the demo
+	// AccountID) saturated the MLX-serialized provider pool for up to
+	// CoordinatorTimeout, an accidental DoS against paying buyers.
+	// subject.AccountID is already "demo:<ip>" with IPv6 normalized to /64
+	// (see auth.normalizeDemoIP), so the existing per-AccountID reservation
+	// machinery keys correctly without further per-IP tracking.
+	concurrencyLimit := s.cfg.Quotas.AccountConcurrency
+	concurrencyErrCode := "account_concurrency_exceeded"
+	concurrencyErrMsg := "Account concurrency limit exceeded"
+	if authn.Demo {
+		concurrencyLimit = s.cfg.Quotas.DemoConcurrency
+		concurrencyErrCode = "demo_concurrency_exceeded"
+		concurrencyErrMsg = "Demo concurrency limit exceeded"
+	}
+	if _, err := s.store.AcquireConcurrency(r.Context(), storage.ConcurrencyRequest{
+		AccountID: subject.AccountID, RequestID: requestID(r), Limit: concurrencyLimit,
+		CreatedAt: s.now(), ExpiresAt: s.now().Add(s.cfg.CoordinatorTimeout() + time.Minute),
+	}); errors.Is(err, storage.ErrQuotaExceeded) {
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", concurrencyErrCode, concurrencyErrMsg)
+		return
+	} else if err != nil {
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return
 		}
-		defer func() {
-			_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
-		}()
+		writeError(w, http.StatusInternalServerError, "server_error", "concurrency_reservation_failed", "Could not reserve concurrency")
+		return
 	}
+	defer func() {
+		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
+	}()
 
 	upCtx, cancelUpstream := context.WithTimeout(r.Context(), s.cfg.CoordinatorTimeout())
 	defer cancelUpstream()
