@@ -40,6 +40,16 @@ public struct AppConfig: Equatable, Sendable {
     public var swapDrainTimeoutSeconds: Int
     public var ctlSocketPath: String?
     public var switchStatePath: String?
+    // SPEC-001: provider authentication token (closes XSEC-1 from
+    // audits/2026-06-10/REPO_AUDIT.md). When set, the binary sends
+    // "Authorization: Bearer <token>" on the WS connect and the
+    // coordinator validates against its store when
+    // auth.require_provider_tokens=true. Triple-exposed per house
+    // convention: yaml key `provider_token`, env
+    // MACPROVIDER_PROVIDER_TOKEN, CLI --provider-token. Operator should
+    // chmod 0600 the config file containing this value; the binary
+    // never logs the token (URL is redacted, headers are not logged).
+    public var providerToken: String?
 
     public static let defaultConfigPath = "~/.config/macprovider/config.yaml"
 
@@ -67,7 +77,8 @@ public struct AppConfig: Equatable, Sendable {
             enableWarmSwap: false,
             swapDrainTimeoutSeconds: 30,
             ctlSocketPath: nil,
-            switchStatePath: nil
+            switchStatePath: nil,
+            providerToken: nil
         )
     }
 }
@@ -86,6 +97,7 @@ public struct CLIOverrides: Equatable, Sendable {
     public var swapDrainTimeoutSeconds: Int?
     public var ctlSocketPath: String?
     public var switchStatePath: String?
+    public var providerToken: String?
 
     public init(
         port: Int? = nil,
@@ -100,7 +112,8 @@ public struct CLIOverrides: Equatable, Sendable {
         enableWarmSwap: Bool? = nil,
         swapDrainTimeoutSeconds: Int? = nil,
         ctlSocketPath: String? = nil,
-        switchStatePath: String? = nil
+        switchStatePath: String? = nil,
+        providerToken: String? = nil
     ) {
         self.port = port
         self.model = model
@@ -115,6 +128,7 @@ public struct CLIOverrides: Equatable, Sendable {
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.ctlSocketPath = ctlSocketPath
         self.switchStatePath = switchStatePath
+        self.providerToken = providerToken
     }
 }
 
@@ -216,6 +230,7 @@ public enum ConfigLoader {
         try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
         try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
+        try assign(&config.providerToken, from: dict, key: "provider_token", expected: "string")
         return config
     }
 
@@ -246,6 +261,7 @@ public enum ConfigLoader {
         try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
         try assign(&config.switchStatePath, from: environment, env: "MACPROVIDER_SWITCH_STATE_PATH", expected: "string")
+        try assign(&config.providerToken, from: environment, env: "MACPROVIDER_PROVIDER_TOKEN", expected: "string")
         return config
     }
 
@@ -289,6 +305,9 @@ public enum ConfigLoader {
         }
         if let switchStatePath = cli.switchStatePath {
             config.switchStatePath = switchStatePath
+        }
+        if let providerToken = cli.providerToken {
+            config.providerToken = providerToken
         }
         return config
     }
