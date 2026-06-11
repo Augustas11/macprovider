@@ -74,22 +74,51 @@ public enum ModelFit {
     // MARK: - Internals (internal for testability)
 
     static func parseParamsBillions(from modelID: String) -> Double? {
+        // Round-2 (codex code MAJOR): match Mixture-of-Experts "NxMB" shape
+        // (e.g. "Mixtral-8x7B" — 8 experts of 7B each, total ~56B params)
+        // BEFORE the single-N pattern. Otherwise the old regex captured
+        // only the "7B" half and undercounted memory by N×, letting the
+        // switch fit guard pass a model that would OOM the host.
+        if let moe = matchFirst(pattern: #"([0-9]+)x([0-9]+(\.[0-9]+)?)[Bb]"#, in: modelID),
+           let experts = Double(moe.captures[1]),
+           let perExpert = Double(moe.captures[2]) {
+            return experts * perExpert
+        }
+
         // Regex compiled at first use; NSRegularExpression isn't Sendable so
         // we just rebuild it per call (tiny cost vs. avoiding shared mutable
         // state under StrictConcurrency).
-        let pattern = #"[0-9]+(\.[0-9]+)?[Bb]"#
+        guard let match = matchFirst(pattern: #"[0-9]+(\.[0-9]+)?[Bb]"#, in: modelID) else {
+            return nil
+        }
+        // Drop the trailing B/b from the full match.
+        let raw = match.fullMatch
+        return Double(raw.dropLast())
+    }
+
+    private struct RegexMatch {
+        let fullMatch: Substring
+        let captures: [String]
+    }
+
+    private static func matchFirst(pattern: String, in input: String) -> RegexMatch? {
         guard let regex = try? NSRegularExpression(pattern: pattern) else {
             return nil
         }
-        let range = NSRange(modelID.startIndex..., in: modelID)
-        guard let match = regex.firstMatch(in: modelID, range: range),
-              let matchRange = Range(match.range, in: modelID) else {
+        let nsRange = NSRange(input.startIndex..., in: input)
+        guard let match = regex.firstMatch(in: input, range: nsRange),
+              let fullRange = Range(match.range, in: input) else {
             return nil
         }
-        let raw = modelID[matchRange]
-        // Drop the trailing B/b.
-        let numPart = raw.dropLast()
-        return Double(numPart)
+        var captures: [String] = [String(input[fullRange])]
+        for groupIndex in 1..<match.numberOfRanges {
+            if let r = Range(match.range(at: groupIndex), in: input) {
+                captures.append(String(input[r]))
+            } else {
+                captures.append("")
+            }
+        }
+        return RegexMatch(fullMatch: input[fullRange], captures: captures)
     }
 
     static func inferBytesPerParam(from modelID: String) -> Double {

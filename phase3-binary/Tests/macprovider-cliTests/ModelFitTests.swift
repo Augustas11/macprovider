@@ -62,6 +62,28 @@ final class ModelFitTests: XCTestCase {
         XCTAssertEqual(ModelFit.estimateWeightSizeGB(modelID: "user/Qwen-7B_q4_k_m"), 4)
     }
 
+    // Round-2 (codex code MAJOR): Mixture-of-Experts shape must be parsed as
+    // experts × per-expert, not just the trailing "MB" half. A regression
+    // here means the switch fit guard accepts models that OOM the host.
+
+    func testEstimateMixtral8x7B4bit() {
+        // 8 × 7B = 56B params * 0.5 byte = 28 GB
+        XCTAssertEqual(ModelFit.estimateWeightSizeGB(modelID: "mlx-community/Mixtral-8x7B-Instruct-v0.1-4bit"), 28)
+    }
+
+    func testEstimateMixtral8x22B4bit() {
+        // 8 × 22B = 176B params * 0.5 = 88 GB
+        XCTAssertEqual(ModelFit.estimateWeightSizeGB(modelID: "mlx-community/Mixtral-8x22B-Instruct-v0.1-4bit"), 88)
+    }
+
+    func testEstimateMoEBeatsSingleNFallback() throws {
+        // The presence of "x7B" inside "8x7B" must not be captured as a
+        // standalone 7B; check by comparing against the single-N case.
+        let moe = try XCTUnwrap(ModelFit.estimateWeightSizeGB(modelID: "Mixtral-8x7B-4bit"))
+        let single = try XCTUnwrap(ModelFit.estimateWeightSizeGB(modelID: "Qwen-7B-4bit"))
+        XCTAssertGreaterThan(moe, single)
+    }
+
     // MARK: - evaluate (verdict tiers)
 
     func testEvaluateFitsWhenComfortable() {

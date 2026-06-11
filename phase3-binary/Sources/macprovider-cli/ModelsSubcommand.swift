@@ -104,7 +104,8 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
         // Pre-flight RAM fit check. Uses the same name-parsing + headroom
         // rules as the installer (SPEC-003 v0.9 FR-D2.1 step 4) so a model
         // accepted at install time is judged the same way here. `--force`
-        // bypasses both the wontFit hard-block and the tight-fit warning.
+        // bypasses both the wontFit hard-block and the tight-fit warning,
+        // and also overrides the round-2 fail-closed-on-unknown gate below.
         switch ModelFit.evaluate(modelID: targetModelID, ramGB: ModelFit.detectRAMGB()) {
         case let .wontFit(estGB, ramGB):
             if options.force {
@@ -114,10 +115,28 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
                 throw ExitCode(2)
             }
         case let .tight(estGB, ramGB):
-            writeStderr("warning: tight fit — target ~\(estGB) GB weights on \(ramGB) GB Mac; may swap or OOM under load")
+            // Round-2 (codex code MINOR): match the comment — --force quiets
+            // the tight warning too. CI scripts use --force to mean "I know
+            // what I'm doing, don't shout."
+            if !options.force {
+                writeStderr("warning: tight fit — target ~\(estGB) GB weights on \(ramGB) GB Mac; may swap or OOM under load")
+            }
         case .fits:
             break
         case let .unknown(reason):
+            // Round-2 (codex security MINOR): fail closed when the target
+            // *looks like* an HF id (contains '/' and isn't a local path)
+            // but the parser can't size it. Otherwise a malicious or
+            // oddly-named oversized repo bypasses the guard. Synthetic IDs
+            // like "old-model" / "A" used in tests, and local paths like
+            // "./checkpoints/foo", still skip the fit check as before.
+            let looksLikeHFID = targetModelID.contains("/")
+                && !targetModelID.hasPrefix(".")
+                && !targetModelID.hasPrefix("/")
+            if looksLikeHFID && !options.force {
+                writeStderr("could not size HF-style target \(targetModelID): \(reason). Re-issue with --force to override.")
+                throw ExitCode(2)
+            }
             writeStderr("note: \(reason); skipping fit check")
         }
 
