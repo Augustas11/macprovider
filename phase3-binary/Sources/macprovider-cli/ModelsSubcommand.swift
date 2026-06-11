@@ -10,6 +10,7 @@ struct ModelsCommand: AsyncParsableCommand {
             ModelsListCommand.self,
             ModelsSwitchCommand.self,
             ModelsStatusCommand.self,
+            ModelsBrowseCommand.self,
         ]
     )
 }
