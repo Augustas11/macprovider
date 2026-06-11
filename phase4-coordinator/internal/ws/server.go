@@ -71,6 +71,10 @@ type Server struct {
 type TokenValidator interface {
 	ValidateToken(context.Context, string) (string, bool, error)
 	MarkTokenUsed(context.Context, string) error
+	// SPEC-003 v0.8 FR-C9.1 — coordinator mints provisional tokens on
+	// tokenless first admission. Returns (record, cleartext_token, err);
+	// only the cleartext is used in the ack frame, the record is logged.
+	IssueToken(ctx context.Context, providerID, providerName string) (auth.TokenRecord, string, error)
 }
 
 type providerAuth struct {
@@ -285,10 +289,22 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 		s.log.Error().Msg("provider token validation is required but no token validator is configured")
 		return providerAuth{}, false
 	}
-	if authz == "" && s.tokens != nil {
-		return providerAuth{}, false
-	}
+	// SPEC-003 v0.8 FR-C9.1 — gating semantics changed at v0.8: prior to
+	// v0.8, `s.tokens != nil` implied strict enforcement (tokenless
+	// always rejected). With self-serve provisional minting, the token
+	// store has dual purpose — issuance AND enforcement — so the
+	// enforcement gate now depends on `cfg.Auth.RequireProviderTokens`
+	// only. When the flag is false (today's posture during the FR-C9.5
+	// settling window), tokenless connects are admitted with
+	// validated=false so the v1/v2 ack-write path can mint and return
+	// `assigned_provider_token`. Pinned-tier providers that fail the
+	// tokenless check are still rejected, but at `prepareProviderAdmission`
+	// (line 654) rather than at this gate — same close code, same reason
+	// string, same blast radius.
 	if authz == "" {
+		if s.cfg.Auth.RequireProviderTokens {
+			return providerAuth{}, false
+		}
 		return providerAuth{}, true
 	}
 	if s.tokens == nil {
@@ -349,6 +365,42 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 	}
 }
 
+// maybeIssueProvisionalToken implements SPEC-003 v0.8 FR-C9.1 — self-serve
+// provisional token minting. Returns the cleartext token to inject into
+// the ack frame, or "" when the caller MUST NOT include
+// assigned_provider_token in the ack.
+//
+// Mint conditions (all must hold):
+//   - The token store is configured (s.tokens != nil).
+//   - The connection arrived without a validated Bearer (!auth.validated).
+//
+// The second condition is equivalent to "provisional tier" at this call
+// site, because prepareProviderAdmission rejects pinned providers that
+// lack a validated token BEFORE we reach the ack-write path. So a
+// tokenless connection that survives admission is provisional by
+// construction.
+//
+// IssueToken failure (DB error) is non-fatal per FR-C9.1: log a warning
+// and return "" so the provider connects without a token. The next
+// reconnect will mint again (FR-C9.4 multi-mint).
+func (s *Server) maybeIssueProvisionalToken(auth providerAuth, providerID, providerName string) string {
+	if s.tokens == nil || auth.validated {
+		return ""
+	}
+	if providerName == "" {
+		// Defensive: hostname is requireString-enforced at parse time,
+		// but keep the synthesis for symmetry with FR-C9.1.
+		providerName = "provisional:" + providerID
+	}
+	_, token, err := s.tokens.IssueToken(context.Background(), providerID, providerName)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("self-serve provisional token mint failed; admitting tokenless and relying on FR-C9.4 retry on next connect")
+		return ""
+	}
+	s.log.Info().Str("provider_id", providerID).Msg("self-serve provisional token minted on first tokenless admission")
+	return token
+}
+
 func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	hello, badField, err := ParseHello(payload)
 	if err != nil {
@@ -374,6 +426,12 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	session := s.registerProviderSession(conn, entry)
 	releaseUnauth()
 
+	// SPEC-003 v0.8 FR-C9.1/FR-C9.2 — mint a fresh provisional token for
+	// tokenless admission, embed it in hello_ack so the binary can persist
+	// (FR-C9.3). Mint AFTER admission is approved and BEFORE ack write so
+	// an ack-write failure does not orphan a coordinator-side row without
+	// promising it to the binary.
+	assignedProviderToken := s.maybeIssueProvisionalToken(auth, entry.ProviderID, hello.Hostname)
 	ack := HelloAck{
 		Type:                     "hello_ack",
 		CoordinatorVersion:       1,
@@ -382,6 +440,7 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		Tier:                     string(entry.Tier),
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
+		AssignedProviderToken:    assignedProviderToken,
 	}
 	b, err := json.Marshal(ack)
 	if err != nil {
@@ -597,6 +656,10 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 	session := s.registerProviderSession(conn, entry)
 	releaseUnauth()
+	// SPEC-003 v0.8 FR-C9.1/FR-C9.2 — same hook as v1, applied at the
+	// proof-stage-accepted auth_response site only. Rejection-shaped
+	// auth_response paths (sendAuthRejection) never set this field.
+	assignedProviderToken := s.maybeIssueProvisionalToken(auth, entry.ProviderID, initial.Hostname)
 	response := AuthResponse{
 		Type:                     "auth_response",
 		Version:                  2,
@@ -606,6 +669,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		Tier:                     string(entry.Tier),
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
+		AssignedProviderToken:    assignedProviderToken,
 		Tier2Session: &AuthTier2Session{
 			EncryptedLeg: AuthEncryptedLegSession{
 				Enabled:            true,
