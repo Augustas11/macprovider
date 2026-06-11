@@ -134,6 +134,15 @@ $SSH "set -e
   install -o root -g root -m 0644 /tmp/nginx-api.streamvc.live.conf /etc/nginx/sites-available/$DOMAIN
   rm -f /tmp/gateway-linux-amd64 /tmp/macprovider-gateway.service /tmp/nginx-api.streamvc.live.conf
   ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
+  # Mirror the coordinator script's step 6b: nginx-api.streamvc.live.conf ships
+  # with the ssl_certificate / ssl_certificate_key lines commented (so a
+  # first-deploy clean run before certbot doesn't fail nginx -t with a missing
+  # cert). The cert exists by the time we get here on every subsequent deploy;
+  # uncomment idempotently. Without this, step 4 fails nginx -t with
+  # 'no ssl_certificate is defined for the listen ... ssl' (Pearl, 2026-06-11
+  # deploy — mitigated by switching to a binary-only swap at the time).
+  sed -i 's|# ssl_certificate /etc/letsencrypt|ssl_certificate /etc/letsencrypt|g' /etc/nginx/sites-available/$DOMAIN
+  sed -i 's|# ssl_certificate_key /etc/letsencrypt|ssl_certificate_key /etc/letsencrypt|g' /etc/nginx/sites-available/$DOMAIN
   nginx -t
   systemctl reload nginx
 "
