@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	stdLog "log"
 	"net"
 	"net/http"
 	"net/url"
@@ -500,7 +501,39 @@ func parseWindow(r *http.Request, defaultHours, maxDays int) (windowRange, error
 }
 
 func (h *Handler) authorized(r *http.Request) bool {
-	return auth.BearerTokenMatchesHeader(r.Header, h.cfg.Auth.OperatorKey)
+	// M3-2 / SECU-4 bridge: accept EITHER gateway_service_token (preferred
+	// when configured, the new service-to-service credential) OR
+	// operator_key (legacy human-admin credential). Each candidate is
+	// only counted when non-empty so an empty gateway_service_token can't
+	// widen the auth surface.
+	if h.cfg.Auth.GatewayServiceToken != "" &&
+		auth.BearerTokenMatchesHeader(r.Header, h.cfg.Auth.GatewayServiceToken) {
+		h.logBearerAccepted(r, "service_token")
+		return true
+	}
+	if h.cfg.Auth.OperatorKey != "" &&
+		auth.BearerTokenMatchesHeader(r.Header, h.cfg.Auth.OperatorKey) {
+		h.logBearerAccepted(r, "operator_key")
+		return true
+	}
+	return false
+}
+
+// logBearerAccepted is the audit-log line the operator watches during
+// the M3-2 cutover. JSON shape matches the equivalents in ws/server.go
+// and billing/endpoints.go so a single journald filter
+// (`event=internal_bearer_accepted`) catches every admin call.
+func (h *Handler) logBearerAccepted(r *http.Request, kind string) {
+	// stdlib log (explorer.Handler has no zerolog), JSON-shaped manually so
+	// it joins the other audit-log lines under a uniform event= filter.
+	// Avoids a new dependency for a one-line emitter.
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	// Use Println to stderr-like path via the default logger; coordinator
+	// captures os.Stderr into journald via the systemd unit.
+	stdLog.Printf(`{"event":"internal_bearer_accepted","key":%q,"path":%q,"remote_addr":%q}`, kind, r.URL.Path, host)
 }
 
 func (h *Handler) allowRequest(r *http.Request) bool {

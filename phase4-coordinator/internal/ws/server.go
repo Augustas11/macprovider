@@ -2047,14 +2047,42 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// authorizedOperator returns true only when the configured operator key is
-// non-empty and matches the request's Bearer token. Empty configured key →
-// DENY (M1-5 / SECU-5). Previously this short-circuited to allow on empty
-// expected key, relying on config.Validate() to refuse to start with an empty
-// key. That defense-in-depth coupling meant any future entry point bypassing
-// Validate (live SIGHUP, ad-hoc Server construction) would silently fail open.
+// authorizedOperator returns true when the request's Bearer token matches
+// EITHER the configured operator key (the legacy human-admin credential)
+// OR the configured gateway service token (M3-2 / SECU-4 — the new
+// service-to-service credential the gateway uses for upstream admin
+// calls). Both candidates are compared in constant time via
+// BearerTokenMatchesHeader; missing-but-configured keys are skipped so an
+// empty gateway_service_token doesn't widen the auth surface.
+//
+// Empty operator_key still means DENY on the legacy path (M1-5 / SECU-5
+// preserved): if neither candidate is configured AND non-matching, the
+// call is unauthorized. Audit-log emits the matched credential kind
+// ("operator_key" vs "service_token") so the operator can watch the
+// migration cutover and rotate operator_key once gateway-origin calls
+// stop showing key=operator_key.
 func (s *Server) authorizedOperator(r *http.Request) bool {
-	return s.cfg.Auth.OperatorKey != "" && auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.OperatorKey)
+	if s.cfg.Auth.GatewayServiceToken != "" &&
+		auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.GatewayServiceToken) {
+		s.log.Info().
+			Str("event", "internal_bearer_accepted").
+			Str("key", "service_token").
+			Str("path", r.URL.Path).
+			Str("remote_addr", r.RemoteAddr).
+			Msg("internal bearer accepted")
+		return true
+	}
+	if s.cfg.Auth.OperatorKey != "" &&
+		auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.OperatorKey) {
+		s.log.Info().
+			Str("event", "internal_bearer_accepted").
+			Str("key", "operator_key").
+			Str("path", r.URL.Path).
+			Str("remote_addr", r.RemoteAddr).
+			Msg("internal bearer accepted")
+		return true
+	}
+	return false
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

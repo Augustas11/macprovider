@@ -43,9 +43,18 @@ type PublicConfig struct {
 }
 
 type CoordinatorConfig struct {
-	BuyerURL          string `yaml:"buyer_url"`
-	OperatorURL       string `yaml:"operator_url"`
-	OperatorKey       string `yaml:"operator_key"`
+	BuyerURL    string `yaml:"buyer_url"`
+	OperatorURL string `yaml:"operator_url"`
+	OperatorKey string `yaml:"operator_key"`
+	// ServiceToken is the optional service-to-service credential the
+	// gateway sends on UPSTREAM calls to the coordinator (M3-2 /
+	// SECU-4). When set, it is preferred over OperatorKey on every
+	// outbound /poolz, /internal/*, /admin/* request; OperatorKey
+	// remains the fallback so an upgraded gateway can still talk to a
+	// not-yet-upgraded coordinator. Gateway's OWN admin-plane auth
+	// (operatorAuthorized) keeps using OperatorKey — that's the
+	// human-admin credential and is intentionally separate.
+	ServiceToken      string `yaml:"service_token"`
 	PoolzPollInterval int    `yaml:"poolz_poll_interval_s"`
 }
 
@@ -196,6 +205,7 @@ func Load(path string) (Config, error) {
 
 func (c *Config) resolveEnv() {
 	c.Coordinator.OperatorKey = resolveEnvValue(c.Coordinator.OperatorKey)
+	c.Coordinator.ServiceToken = resolveEnvValue(c.Coordinator.ServiceToken)
 	c.Auth.KeyHashSecret = resolveEnvValue(c.Auth.KeyHashSecret)
 	c.Auth.OAuth.GitHub.ClientID = resolveEnvValue(c.Auth.OAuth.GitHub.ClientID)
 	c.Auth.OAuth.GitHub.ClientSecret = resolveEnvValue(c.Auth.OAuth.GitHub.ClientSecret)
@@ -379,6 +389,19 @@ func requireURL(field, raw string) error {
 
 func (c Config) Address() string {
 	return fmt.Sprintf("%s:%d", c.Listen.BindAddress, c.Listen.Port)
+}
+
+// UpstreamCoordinatorBearer returns the credential the gateway should
+// send on UPSTREAM calls to the coordinator (M3-2 / SECU-4). Prefer
+// ServiceToken when set; fall back to OperatorKey for backward
+// compatibility with not-yet-upgraded coordinators. Empty return means
+// the gateway is misconfigured — Validate guarantees OperatorKey is
+// non-empty, so this only returns "" if a future caller bypasses Load.
+func (c CoordinatorConfig) UpstreamCoordinatorBearer() string {
+	if c.ServiceToken != "" {
+		return c.ServiceToken
+	}
+	return c.OperatorKey
 }
 
 func (c Config) CoordinatorTimeout() time.Duration {

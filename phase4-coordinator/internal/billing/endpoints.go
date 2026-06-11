@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/rs/zerolog"
 )
 
 type tokenValidator interface {
@@ -19,13 +21,25 @@ type tokenValidator interface {
 }
 
 func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
+	return s.HandlersWithBridge(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin)
+}
+
+// HandlersWithBridge mounts the admin/provider handlers with the
+// operator-key-vs-service-token bridge (M3-2 / SECU-4). When
+// gatewayServiceToken is non-empty, /admin/ledger/* accepts EITHER
+// credential and audit-logs which one matched. Empty service-token
+// preserves legacy single-key behavior. Handlers (the legacy signature)
+// is kept as a thin shim so existing call-sites and tests don't churn.
+func (s *Store) HandlersWithBridge(operatorKey, gatewayServiceToken string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
 	h := &handler{
 		store:                   s,
 		operatorKey:             operatorKey,
+		gatewayServiceToken:     gatewayServiceToken,
 		tokenStore:              tokenStore,
 		requireProviderTokens:   requireProviderTokens,
 		earningsRateLimitPerMin: earningsRateLimitPerMin,
 		lastEarnings:            map[string][]time.Time{},
+		log:                     zerolog.New(os.Stdout).With().Timestamp().Logger(),
 	}
 	return http.HandlerFunc(h.serveHTTP)
 }
@@ -33,11 +47,13 @@ func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireP
 type handler struct {
 	store                   *Store
 	operatorKey             string
+	gatewayServiceToken     string
 	tokenStore              tokenValidator
 	requireProviderTokens   bool
 	earningsRateLimitPerMin int
 	mu                      sync.Mutex
 	lastEarnings            map[string][]time.Time
+	log                     zerolog.Logger
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -60,14 +76,33 @@ func (h *handler) admin(w http.ResponseWriter, r *http.Request, fn func(http.Res
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	// Fail closed when the operator key is unset (M1-5 / SECU-5). Previously
-	// an empty configured key allowed every caller, relying on config.Validate
-	// in main.go to refuse to start.
-	if h.operatorKey == "" || !auth.BearerTokenMatchesHeader(r.Header, h.operatorKey) {
-		writeError(w, http.StatusForbidden, "forbidden", "operator key required")
+	// M3-2 / SECU-4 bridge: accept EITHER gateway_service_token (preferred
+	// when configured, the new service-to-service credential) OR
+	// operator_key (legacy human-admin credential). Each candidate is
+	// constant-time compared and only counted when non-empty so an empty
+	// gateway_service_token can't widen the auth surface. Empty
+	// operator_key still means DENY on the legacy path (M1-5 / SECU-5).
+	if h.gatewayServiceToken != "" && auth.BearerTokenMatchesHeader(r.Header, h.gatewayServiceToken) {
+		h.log.Info().
+			Str("event", "internal_bearer_accepted").
+			Str("key", "service_token").
+			Str("path", r.URL.Path).
+			Str("remote_addr", r.RemoteAddr).
+			Msg("internal bearer accepted")
+		fn(w, r)
 		return
 	}
-	fn(w, r)
+	if h.operatorKey != "" && auth.BearerTokenMatchesHeader(r.Header, h.operatorKey) {
+		h.log.Info().
+			Str("event", "internal_bearer_accepted").
+			Str("key", "operator_key").
+			Str("path", r.URL.Path).
+			Str("remote_addr", r.RemoteAddr).
+			Msg("internal bearer accepted")
+		fn(w, r)
+		return
+	}
+	writeError(w, http.StatusForbidden, "forbidden", "operator key required")
 }
 
 func (h *handler) summary(w http.ResponseWriter, r *http.Request) {

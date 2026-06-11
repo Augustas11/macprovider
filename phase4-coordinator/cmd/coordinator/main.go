@@ -242,8 +242,9 @@ func main() {
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
-	billingHandler := billingStore.Handlers(
+	billingHandler := billingStore.HandlersWithBridge(
 		cfg.Auth.OperatorKey,
+		cfg.Auth.GatewayServiceToken,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
