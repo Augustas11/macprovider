@@ -49,6 +49,34 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	return store, nil
 }
 
+// OpenReadOnly opens a SECOND handle to the same database file in
+// read-only mode. M2-4 / PERF-4: the primary handle is capped at
+// MaxOpenConns=1 to serialize BEGIN IMMEDIATE writes, which means a
+// slow explorer query (e.g. `EXPLAIN`-unfriendly aggregate over
+// usage_events) blocks ReserveQuota on the money path. A separate
+// read-only handle with conn cap 4 leverages SQLite WAL's concurrent
+// reader semantics so explorer/status/usage GETs no longer share a
+// connection with writes.
+//
+// The caller is responsible for opening the writable Store first and
+// running Migrate(): the read-only DSN cannot create or evolve schema.
+func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
+	if path == "" {
+		return nil, fmt.Errorf("sqlite db path must be set")
+	}
+	db, err := sql.Open("sqlite", sqliteReadOnlyDSN(path))
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
 func (s *Store) Close() error {
 	return s.db.Close()
 }
@@ -673,6 +701,42 @@ func (s *Store) ReapExpiredReservations(ctx context.Context, now time.Time) (int
 	}
 	defer tx.Rollback()
 	n, err := reapExpiredReservationsTx(ctx, tx, now)
+	if err != nil {
+		return 0, err
+	}
+	return n, tx.Commit()
+}
+
+// DeleteTerminalQuotaReservations removes quota_reservations rows in a
+// terminal status (expired / settled / refunded) whose settled_at is
+// strictly before `before`. M2-4 / PERF-1 Part B: terminal reservations
+// carry no audit value — the usage_events row is the durable record —
+// so they're safe to delete past a retention threshold. The caller picks
+// `before` (the reaper uses now - 7d).
+//
+// Only quota_reservations is touched here. concurrency_reservations has
+// a `concurrency_reservations_no_delete` BEFORE DELETE trigger that
+// forbids deletion; treating that as a Q4-gated decision per the audit's
+// PERF-1 / Open Q4 ("append-only-forever: requirement or default?").
+func (s *Store) DeleteTerminalQuotaReservations(ctx context.Context, before time.Time) (int64, error) {
+	if before.IsZero() {
+		return 0, fmt.Errorf("before time must be non-zero")
+	}
+	tx, err := s.beginImmediate(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `
+		DELETE FROM quota_reservations
+		WHERE status IN ('expired', 'settled', 'refunded')
+		  AND settled_at IS NOT NULL
+		  AND settled_at < ?`,
+		encodeTime(before))
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
 	if err != nil {
 		return 0, err
 	}

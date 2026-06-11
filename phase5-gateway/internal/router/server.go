@@ -33,9 +33,18 @@ import (
 const maxUpstreamResponseBodyBytes = int64(16 << 20)
 
 type Server struct {
-	cfg              config.Config
-	cfgPath          string
-	store            Store
+	cfg     config.Config
+	cfgPath string
+	store   Store
+	// readOnlyStore, when non-nil, backs GET-only handlers (explorer +
+	// /v1/usage). M2-4 / PERF-4: the primary `store` is capped at
+	// MaxOpenConns=1 to serialize BEGIN IMMEDIATE writes; a slow explorer
+	// query on the same handle blocks ReserveQuota on the money path.
+	// Routing reads through a second handle (opened by main.go via
+	// sqlite.OpenReadOnly with conn cap 4) lets SQLite WAL's concurrent-
+	// reader semantics absorb explorer load without touching the write
+	// path. When nil, handlers fall back to `store`.
+	readOnlyStore    Store
 	keyMgr           auth.KeyManager
 	demoMgr          auth.DemoManager
 	oauth            auth.OAuthProvider
@@ -51,6 +60,17 @@ type Server struct {
 	// 5s TTL — coordinator config only changes on reload, so staleness is
 	// harmless; cap on bursts.
 	routingMeta routingMetaCache
+}
+
+// readStore returns the read-only handle if registered, else the
+// primary store. M2-4: keep callers oblivious to whether the deployment
+// has the separate handle wired. Tests and the `-check` path use the
+// primary unconditionally; production wires both.
+func (s *Server) readStore() Store {
+	if s.readOnlyStore != nil {
+		return s.readOnlyStore
+	}
+	return s.store
 }
 
 type routingMetaCache struct {
@@ -101,6 +121,17 @@ func WithVersion(v string) Option {
 	return func(s *Server) {
 		if v != "" {
 			s.version = v
+		}
+	}
+}
+
+// WithReadStore registers a separate read-only Store handle for
+// GET-only handlers. See Server.readOnlyStore doc for the why
+// (M2-4 / PERF-4).
+func WithReadStore(store Store) Option {
+	return func(s *Server) {
+		if store != nil {
+			s.readOnlyStore = store
 		}
 	}
 }
@@ -527,12 +558,15 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	window := s.now().UTC().Format("2006-01-02")
-	used, reserved, err := s.store.DailyUsage(r.Context(), validation.AccountID, window)
+	// M2-4 / PERF-4: /v1/usage is a GET-only handler — read through
+	// the separate read-only handle so a hot explorer query can't
+	// stall a buyer-facing usage lookup.
+	used, reserved, err := s.readStore().DailyUsage(r.Context(), validation.AccountID, window)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "usage_load_failed", "Could not load usage")
 		return
 	}
-	keys, err := s.store.ListAPIKeys(r.Context(), validation.AccountID)
+	keys, err := s.readStore().ListAPIKeys(r.Context(), validation.AccountID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error", "keys_load_failed", "Could not load API keys")
 		return
@@ -543,7 +577,7 @@ func (s *Server) handleUsage(w http.ResponseWriter, r *http.Request) {
 		remaining = 0
 	}
 	setRateLimitHeaders(w, limit, remaining, resetUnix(window))
-	tier, _ := s.store.GetCapacityTier(r.Context())
+	tier, _ := s.readStore().GetCapacityTier(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
 		"account_id": validation.AccountID,
 		"quota": map[string]any{

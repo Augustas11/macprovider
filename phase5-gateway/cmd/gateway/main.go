@@ -52,6 +52,23 @@ func main() {
 		}
 	}()
 
+	// M2-4 / PERF-4: open a SECOND handle in read-only mode for the
+	// explorer + /v1/usage GET-only handlers. The primary handle is
+	// SetMaxOpenConns(1) so BEGIN IMMEDIATE writes serialize cleanly,
+	// but that also means a slow explorer query stalls ReserveQuota
+	// on the money path. The read handle is conn cap 4 and runs against
+	// the same WAL file, so reads compose with writes without contention.
+	readStore, err := sqlite.OpenReadOnly(ctx, cfg.Storage.DBPath)
+	if err != nil {
+		slog.Error("open read-only storage failed", "path", cfg.Storage.DBPath, "error", err)
+		os.Exit(1)
+	}
+	defer func() {
+		if err := readStore.Close(); err != nil {
+			slog.Warn("close read-only storage failed", "error", err)
+		}
+	}()
+
 	slog.Info("gateway initialized", "address", cfg.Address(), "db_path", cfg.Storage.DBPath)
 	if *checkOnly {
 		return
@@ -72,7 +89,11 @@ func main() {
 	}
 	oauthClient := &http.Client{Timeout: 30 * time.Second}
 	oauth := auth.NewGitHubProvider(cfg.Auth.OAuth.GitHub, oauthClient)
-	httpServer := newHTTPServer(cfg.Address(), router.New(cfg, store, oauth, router.WithHTTPClient(coordinatorClient), router.WithVersion(version)).Handler())
+	httpServer := newHTTPServer(cfg.Address(), router.New(cfg, store, oauth,
+		router.WithHTTPClient(coordinatorClient),
+		router.WithVersion(version),
+		router.WithReadStore(readStore),
+	).Handler())
 	go func() {
 		slog.Info("gateway listening", "address", cfg.Address())
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -100,8 +121,14 @@ func newHTTPServer(addr string, handler http.Handler) *http.Server {
 	}
 }
 
+// terminalReservationRetention is the threshold below which terminal-state
+// quota_reservations rows carry no audit value (the usage_events row is
+// the durable record) — M2-4 / PERF-1 Part B.
+const terminalReservationRetention = 7 * 24 * time.Hour
+
 type reservationReaper interface {
 	ReapExpiredReservations(context.Context, time.Time) (int64, error)
+	DeleteTerminalQuotaReservations(context.Context, time.Time) (int64, error)
 }
 
 func runReservationReaper(ctx context.Context, store reservationReaper, interval time.Duration) {
@@ -109,13 +136,21 @@ func runReservationReaper(ctx context.Context, store reservationReaper, interval
 		interval = time.Hour
 	}
 	reap := func() {
-		n, err := store.ReapExpiredReservations(ctx, time.Now().UTC())
+		now := time.Now().UTC()
+		n, err := store.ReapExpiredReservations(ctx, now)
 		if err != nil {
 			slog.Warn("quota reservation reaper failed", "error", err)
-			return
-		}
-		if n > 0 {
+		} else if n > 0 {
 			slog.Info("expired quota reservations reaped", "count", n)
+		}
+		// M2-4 / PERF-1 Part B: after marking expired, prune terminal-state
+		// rows past the retention window. concurrency_reservations has an
+		// append-only trigger; only quota_reservations is touched here.
+		deleted, err := store.DeleteTerminalQuotaReservations(ctx, now.Add(-terminalReservationRetention))
+		if err != nil {
+			slog.Warn("quota reservation terminal-prune failed", "error", err)
+		} else if deleted > 0 {
+			slog.Info("terminal quota reservations pruned", "count", deleted, "retention_hours", int(terminalReservationRetention.Hours()))
 		}
 	}
 	reap()
