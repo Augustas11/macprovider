@@ -69,8 +69,16 @@ Post-restart: the script polls `/healthz` and asserts the deployed `version`
 field matches the freshly built binary (M0-5 phase 2 provenance check). A
 mismatch implies the systemd unit started a stale binary; the script exits
 non-zero and the operator's responsibility is to investigate **before**
-declaring success. **TBD after first M0-5/M1-6 deploy**: the exact timing of
-this poll loop, and any retry/sleep tweaks discovered in practice.
+declaring success.
+
+Observed timing from the first M0-5/M1-6 production deploy (2026-06-11,
+v1.3.0-24-g87b3a6b → v1.3.1-5-gba04cd4): there is no retry loop. Step 7
+does `systemctl restart` → `sleep 3` → `systemctl is-active` (active on
+first check). Step 8 does `sleep 2` → a single `curl --max-time 10` GET
+on `https://coordinator.streamvc.live/healthz`. Total window between
+restart command and the provenance assert is ~5 seconds; `/healthz`
+responded immediately at `uptime_s=12` with the version field set. No
+tweaks were needed.
 
 ## 3. Safe gateway restart
 
@@ -99,10 +107,19 @@ sudo systemctl restart macprovider-gateway
 curl -s http://127.0.0.1:9443/healthz   # confirm OK + version reflects .prev
 ```
 
-**TBD after first M0-5/M1-6 deploy**: confirm the `.prev` filename layout
-matches the script (the path was inferred from `deploy-pearl-vps.sh`
-comments; the first real deploy should leave a `gateway.prev` artifact that
-either confirms or amends this section).
+Confirmed by the first M0-5/M1-6 production deploy (2026-06-11): both
+services maintain a **single** `.prev` artifact that is overwritten on
+each deploy, owned `macprovider:macprovider`, mode `0755`:
+
+- `/opt/macprovider/coordinator.prev`
+- `/opt/macprovider/gateway.prev`
+
+For the coordinator, the deploy script additionally writes a timestamped
+config backup at `/opt/macprovider/coordinator.yaml.bak-<UTC>` (UTC stamp
+in `YYYYMMDDTHHMMSSZ` form) before overwriting the live config. These
+accumulate across deploys (the script does not prune them); operators
+who want to free disk should reap the older ones after confirming a
+successful run.
 
 ## 4. Settlement
 
