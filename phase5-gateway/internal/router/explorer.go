@@ -34,7 +34,7 @@ func (s *Server) handleExplorerBuyers(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(explorerQueryTimeoutMs)*time.Millisecond)
 	defer cancel()
-	out, err := s.store.ExplorerListBuyers(ctx, q)
+	out, err := s.readStore().ExplorerListBuyers(ctx, q)
 	if err != nil {
 		writeExplorerStorageError(w, err)
 		return
@@ -58,7 +58,7 @@ func (s *Server) handleExplorerBuyerDetail(w http.ResponseWriter, r *http.Reques
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(explorerQueryTimeoutMs)*time.Millisecond)
 	defer cancel()
-	out, err := s.store.ExplorerBuyerDetail(ctx, accountID, storage.ExplorerDetailQuery{
+	out, err := s.readStore().ExplorerBuyerDetail(ctx, accountID, storage.ExplorerDetailQuery{
 		From: window.from, To: window.to, Limit: parseExplorerLimit(r),
 	})
 	if err != nil {
@@ -79,7 +79,7 @@ func (s *Server) handleExplorerSessions(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(explorerQueryTimeoutMs)*time.Millisecond)
 	defer cancel()
-	out, err := s.store.ExplorerListSessions(ctx, storage.ExplorerSessionQuery{
+	out, err := s.readStore().ExplorerListSessions(ctx, storage.ExplorerSessionQuery{
 		From: window.from, To: window.to, AccountID: r.URL.Query().Get("account_id"),
 		Limit: parseExplorerLimit(r), Cursor: r.URL.Query().Get("cursor"),
 	})
@@ -101,7 +101,7 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(explorerQueryTimeoutMs)*time.Millisecond)
 	defer cancel()
-	out, err := s.store.ExplorerSessionDetail(ctx, requestID)
+	out, err := s.readStore().ExplorerSessionDetail(ctx, requestID)
 	if err != nil {
 		writeExplorerStorageError(w, err)
 		return
@@ -120,7 +120,7 @@ func (s *Server) handleExplorerActivity(w http.ResponseWriter, r *http.Request) 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(explorerQueryTimeoutMs)*time.Millisecond)
 	defer cancel()
-	out, err := s.store.ExplorerActivity(ctx, storage.ExplorerActivityQuery{
+	out, err := s.readStore().ExplorerActivity(ctx, storage.ExplorerActivityQuery{
 		From: window.from, To: window.to, Type: r.URL.Query().Get("type"),
 		AccountID: r.URL.Query().Get("account_id"), RequestID: r.URL.Query().Get("request_id"),
 		Limit: parseExplorerLimit(r), Cursor: r.URL.Query().Get("cursor"),
@@ -149,7 +149,7 @@ func (s *Server) handleExplorerHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(explorerQueryTimeoutMs)*time.Millisecond)
 	defer cancel()
-	out, err := s.store.ExplorerHealth(ctx, s.now().Add(-time.Duration(windowHours)*time.Hour))
+	out, err := s.readStore().ExplorerHealth(ctx, s.now().Add(-time.Duration(windowHours)*time.Hour))
 	if err != nil {
 		writeExplorerStorageError(w, err)
 		return

@@ -409,6 +409,104 @@ func TestExpiredReservationsReclaimedAfter24h(t *testing.T) {
 	}
 }
 
+// TestDeleteTerminalQuotaReservationsKeepsActiveAndDropsOld pins the
+// M2-4 / PERF-1 Part B contract: terminal-state rows past the retention
+// window are deletable; active rows (and recent terminal rows) survive.
+func TestDeleteTerminalQuotaReservationsKeepsActiveAndDropsOld(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	createAccount(t, store, "acct_delete_terminal")
+
+	// 100 reservations created 8 days ago and settled then — terminal,
+	// past the 7-day retention window.
+	oldAt := fixedTime().Add(-8 * 24 * time.Hour)
+	for i := 0; i < 100; i++ {
+		reqID := fmt.Sprintf("req_old_%03d", i)
+		if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+			AccountID: "acct_delete_terminal", RequestID: reqID, WindowDate: "2026-05-21",
+			RequestedTokens: 1, DailyQuota: 1000000, CreatedAt: oldAt, ExpiresAt: oldAt.Add(24 * time.Hour),
+		}); err != nil {
+			t.Fatalf("ReserveQuota old #%d: %v", i, err)
+		}
+		if err := store.SettleReservation(ctx, storage.ReservationSettlement{
+			AccountID: "acct_delete_terminal", RequestID: reqID,
+			PromptTokens: 1, CompletionTokens: 0, TotalTokens: 1, MaxTotalTokens: 1000,
+			TokenSource: "provider_reported", Outcome: "ok", SettledAt: oldAt,
+		}); err != nil {
+			t.Fatalf("SettleReservation old #%d: %v", i, err)
+		}
+	}
+
+	// 10 active reservations created now — not yet terminal, must survive.
+	for i := 0; i < 10; i++ {
+		if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+			AccountID: "acct_delete_terminal", RequestID: fmt.Sprintf("req_active_%02d", i),
+			WindowDate: "2026-05-29", RequestedTokens: 1, DailyQuota: 1000000,
+			CreatedAt: fixedTime(), ExpiresAt: fixedTime().Add(24 * time.Hour),
+		}); err != nil {
+			t.Fatalf("ReserveQuota active #%d: %v", i, err)
+		}
+	}
+
+	deleted, err := store.DeleteTerminalQuotaReservations(ctx, fixedTime().Add(-7*24*time.Hour))
+	if err != nil {
+		t.Fatalf("DeleteTerminalQuotaReservations: %v", err)
+	}
+	if deleted != 100 {
+		t.Fatalf("deleted = %d, want 100 (terminal rows >7d old)", deleted)
+	}
+
+	// Active rows untouched.
+	used, reserved, err := store.DailyUsage(ctx, "acct_delete_terminal", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage post-prune: %v", err)
+	}
+	if used != 0 || reserved != 10 {
+		t.Fatalf("post-prune used=%d reserved=%d, want 0/10", used, reserved)
+	}
+}
+
+// TestOpenReadOnlyServesReadsButNotWrites pins the M2-4 / PERF-4 design:
+// the read handle uses mode=ro so writes through it fail loudly. This
+// catches a regression where a future handler accidentally routes a
+// write through readStore().
+func TestOpenReadOnlyServesReadsButNotWrites(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "gateway.db")
+	primary, err := Open(ctx, path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer primary.Close()
+	if err := primary.CreateAccount(ctx, storage.Account{
+		AccountID: "acct_ro_test", Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: fixedTime(),
+	}); err != nil {
+		t.Fatalf("CreateAccount via primary: %v", err)
+	}
+
+	readStore, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly: %v", err)
+	}
+	defer readStore.Close()
+
+	// Reads work.
+	used, reserved, err := readStore.DailyUsage(ctx, "acct_ro_test", "2026-05-29")
+	if err != nil {
+		t.Fatalf("DailyUsage via readStore: %v", err)
+	}
+	if used != 0 || reserved != 0 {
+		t.Fatalf("readStore DailyUsage = (%d,%d), want (0,0)", used, reserved)
+	}
+
+	// Writes fail (mode=ro at the SQLite driver level).
+	if err := readStore.CreateAccount(ctx, storage.Account{
+		AccountID: "acct_should_fail", Status: "active", QuotaClass: "default", ConcurrencyClass: "default", CreatedAt: fixedTime(),
+	}); err == nil {
+		t.Fatal("CreateAccount via read-only store unexpectedly succeeded; mode=ro guard is missing")
+	}
+}
+
 func TestConcurrentQuotaReservationsNoOverspend(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

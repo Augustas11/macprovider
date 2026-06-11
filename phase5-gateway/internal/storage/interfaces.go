@@ -60,6 +60,12 @@ type UsageStore interface {
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error
 	DailyUsage(ctx context.Context, accountID, windowDate string) (usedTokens, activeReservedTokens int64, err error)
 	ReapExpiredReservations(ctx context.Context, now time.Time) (int64, error)
+	// DeleteTerminalQuotaReservations drops quota_reservations rows in a
+	// terminal status (expired / settled / refunded) whose settled_at is
+	// strictly before `before`. M2-4 / PERF-1 Part B. Implementations
+	// MUST leave concurrency_reservations alone — that table is protected
+	// by an append-only trigger (Q4 territory).
+	DeleteTerminalQuotaReservations(ctx context.Context, before time.Time) (int64, error)
 	AcquireConcurrency(ctx context.Context, req ConcurrencyRequest) (ConcurrencyDecision, error)
 	ReleaseConcurrency(ctx context.Context, accountID, requestID string, releasedAt time.Time) error
 }
