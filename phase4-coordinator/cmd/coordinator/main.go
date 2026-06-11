@@ -173,6 +173,7 @@ func main() {
 	billingStore.StartWeeklySettlement(shutdownCtx, cfg.Settlement)
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
+	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
@@ -240,6 +241,49 @@ func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner,
 		}
 	}
 	prune()
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
+}
+
+// admissionPruner is the interface satisfied by *ws.AdmissionManager.Prune.
+// Kept narrow so tests can substitute a stub.
+type admissionPruner interface {
+	Prune(cutoff time.Time) (deletedRecords, deletedRejected, deletedTimePoints int)
+}
+
+// startAdmissionRetentionPruner wires ProvisionalRetentionDays
+// (coordinator.yaml admission.provisional_retention_days, default 30)
+// into the daily retention loop. M2-5 / XPERF-2: the config knob existed
+// since SPEC-003 but no code path consumed it.
+func startAdmissionRetentionPruner(ctx context.Context, mgr admissionPruner, retentionDays int, logger zerolog.Logger) {
+	if mgr == nil || retentionDays <= 0 {
+		return
+	}
+	prune := func() {
+		cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
+		records, rejected, timePoints := mgr.Prune(cutoff)
+		if records > 0 || rejected > 0 || timePoints > 0 {
+			logger.Info().
+				Int("deleted_records", records).
+				Int("deleted_rejected", rejected).
+				Int("deleted_time_points", timePoints).
+				Time("cutoff", cutoff).
+				Msg("admission state retention pruned")
+		}
+	}
+	prune()
+	nextRun := time.Now().UTC().Add(24 * time.Hour)
+	logger.Info().Time("next_prune_at", nextRun).Int("retention_days", retentionDays).Msg("admission state retention pruner armed")
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
 		defer ticker.Stop()

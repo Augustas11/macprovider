@@ -110,3 +110,58 @@ func TestAdmissionManagerPersistenceSurvivesRestart(t *testing.T) {
 		t.Fatalf("reload state: %v", err)
 	}
 }
+
+// TestAdmissionManagerPruneShrinksStateBeyondCutoff pins the M2-5 / XPERF-2
+// guarantee: ProvisionalRetentionDays actually takes effect. Without the
+// pruner the existing admission state grew without bound — the audit
+// flagged the config knob was set to 30 days but referenced nowhere in
+// the ws package.
+func TestAdmissionManagerPruneShrinksStateBeyondCutoff(t *testing.T) {
+	base := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	cur := base
+	cfg := config.AdmissionConfig{
+		ProvisionalAdmissionRatePerHour: 1000,
+		ProvisionalPoolMax:              1000,
+		ProvisionalQuotaPerHour:         1000,
+		ProvisionalTierWeight:           0.3,
+		ProvisionalRetentionDays:        30,
+	}
+	adm := NewAdmissionManager(cfg, func() time.Time { return cur })
+
+	// Three old providers (>30d ago) and one fresh provider (today).
+	for _, id := range []string{"old-1", "old-2", "old-3"} {
+		if _, _, _ = adm.Admit(Hello{ProviderID: id, ModelID: "m"}, false, 0); false {
+		}
+	}
+	cur = base.AddDate(0, 0, 31)
+	if _, _, _ = adm.Admit(Hello{ProviderID: "fresh-1", ModelID: "m"}, false, 0); false {
+	}
+	adm.Reject("old-1", "operator dropped")
+	adm.Reject("fresh-1", "operator")
+
+	// Populate fresh-1's request window so the time-points counter is
+	// observable on the survivor. Do NOT reserve on the old records —
+	// TryReserveRequest bumps LastSeenAt to the current time, which would
+	// keep them alive past the cutoff.
+	adm.TryReserveRequest(pool.Provider{ProviderID: "fresh-1", Tier: pool.TierProvisional})
+
+	cutoff := cur.AddDate(0, 0, -cfg.ProvisionalRetentionDays)
+	deletedRecords, deletedRejected, _ := adm.Prune(cutoff)
+	if deletedRecords != 3 {
+		t.Fatalf("deleted records = %d, want 3 (old-1/old-2/old-3)", deletedRecords)
+	}
+	// old-1 rejection drops because its record dropped; fresh-1 rejection survives.
+	if deletedRejected != 1 {
+		t.Fatalf("deleted rejected = %d, want 1 (only old-1's; fresh-1 must stay)", deletedRejected)
+	}
+	records := adm.Records(map[string]bool{"fresh-1": true})
+	if len(records) != 1 || records[0].ProviderID != "fresh-1" {
+		t.Fatalf("records after prune = %+v, want only fresh-1", records)
+	}
+	if !adm.Rejected("fresh-1") {
+		t.Fatal("fresh rejection lost across prune (operator action must survive while record survives)")
+	}
+	if adm.Rejected("old-1") {
+		t.Fatal("old rejection survived prune (record was dropped, rejection should follow)")
+	}
+}

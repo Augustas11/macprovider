@@ -206,6 +206,58 @@ func (a *AdmissionManager) Records(connected map[string]bool) []ProvisionalRecor
 	return out
 }
 
+// Prune drops provisional state older than cutoff:
+//   - records with LastSeenAt strictly before cutoff (the provider hasn't
+//     re-admitted within the retention window)
+//   - per-provider request-window timestamps strictly before cutoff
+//   - operator-rejected entries whose record was pruned (rejections
+//     expire alongside the provisional record they were aimed at —
+//     if the provider re-appears later it goes through the rate-limiter
+//     fresh, which is the operator's effective intent: the rejection
+//     was about the activity, not the identity-forever)
+//   - admission timestamps strictly before cutoff
+//
+// On every removal the SQLite persistence blob is rewritten so a restart
+// reads the pruned state directly. Returns the number of records,
+// rejected entries, and total time-points removed (admissions +
+// requestWindow entries). M2-5 / XPERF-2: wired into the daily retention
+// loop in cmd/coordinator/main.go alongside the request_log + audit_log
+// pruners.
+func (a *AdmissionManager) Prune(cutoff time.Time) (deletedRecords, deletedRejected, deletedTimePoints int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for id, rec := range a.records {
+		if rec == nil || rec.LastSeenAt.Before(cutoff) {
+			delete(a.records, id)
+			delete(a.requestWindows, id)
+			deletedRecords++
+		}
+	}
+	for id := range a.rejected {
+		if _, hasRecord := a.records[id]; !hasRecord {
+			delete(a.rejected, id)
+			deletedRejected++
+		}
+	}
+	for id, window := range a.requestWindows {
+		before := len(window)
+		pruned := keepAfter(window, cutoff)
+		if len(pruned) == 0 {
+			delete(a.requestWindows, id)
+		} else {
+			a.requestWindows[id] = pruned
+		}
+		deletedTimePoints += before - len(pruned)
+	}
+	beforeAdmissions := len(a.admissions)
+	a.admissions = keepAfter(a.admissions, cutoff)
+	deletedTimePoints += beforeAdmissions - len(a.admissions)
+	if deletedRecords > 0 || deletedRejected > 0 || deletedTimePoints > 0 {
+		a.persistLocked()
+	}
+	return deletedRecords, deletedRejected, deletedTimePoints
+}
+
 func (a *AdmissionManager) persistLocked() {
 	if a.store == nil {
 		return
