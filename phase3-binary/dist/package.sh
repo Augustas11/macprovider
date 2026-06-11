@@ -45,19 +45,26 @@ echo "==> Build products:"
 ls -la "$PRODUCTS/macprovider-cli"
 ls -la "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
 
+echo "==> Gathering third-party license notices..."
+NOTICES_FILE="$OUT_DIR/THIRD-PARTY-NOTICES.txt"
+REPO_ROOT=$(cd "$PHASE3_DIR/.." && pwd)
+"$REPO_ROOT/scripts/gather-third-party-notices.sh" "$NOTICES_FILE"
+
+echo "==> Staging tarball contents..."
+STAGE_DIR=$(mktemp -d)
+trap 'rm -rf "$STAGE_DIR"' EXIT
+cp "$PRODUCTS/macprovider-cli" "$STAGE_DIR/"
+cp -r "$PRODUCTS/mlx-swift_Cmlx.bundle" "$STAGE_DIR/"
+if [ -d "$PRODUCTS/swift-nio_NIOPosix.bundle" ]; then
+    cp -r "$PRODUCTS/swift-nio_NIOPosix.bundle" "$STAGE_DIR/"
+fi
+cp "$NOTICES_FILE" "$STAGE_DIR/THIRD-PARTY-NOTICES.txt"
+
 echo "==> Packaging tarball: $TARBALL"
 # Include the binary + all *.bundle resources that SwiftPM produced
 # (mlx-swift_Cmlx.bundle is the critical one; others contain privacy
-# manifests etc. and are small)
-tar czf "$TARBALL" \
-    -C "$PRODUCTS" \
-    macprovider-cli \
-    mlx-swift_Cmlx.bundle \
-    swift-nio_NIOPosix.bundle 2>/dev/null || \
-tar czf "$TARBALL" \
-    -C "$PRODUCTS" \
-    macprovider-cli \
-    mlx-swift_Cmlx.bundle
+# manifests etc. and are small), plus THIRD-PARTY-NOTICES.txt.
+tar czf "$TARBALL" -C "$STAGE_DIR" .
 
 echo "==> Tarball stats:"
 ls -la "$TARBALL"
