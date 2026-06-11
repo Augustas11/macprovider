@@ -7,6 +7,91 @@ import (
 	"time"
 )
 
+// TestApplyHeartbeatSwapEmitterCalledWithoutPoolLock pins the M2-2 / ARCH-2
+// invariant: the swap emitter MUST NOT run while Registry.mu is held.
+// The callback re-enters Registry via ModelKnown, which takes r.mu.RLock.
+// sync.RWMutex is not reentrant, so under the pre-M2-2 design (emitter
+// called while Lock is held) this would deadlock.
+func TestApplyHeartbeatSwapEmitterCalledWithoutPoolLock(t *testing.T) {
+	var (
+		seenModelLookup bool
+		emitterReturned = make(chan struct{})
+	)
+	var registry *Registry
+	registry = NewRegistry(nil,
+		WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+			return HashStatusVerified
+		}),
+		WithSwapEmitter(func(event SwapEvent) {
+			defer close(emitterReturned)
+			// Would deadlock under the old "emit-while-mu-locked" design.
+			// Under the M2-2 design (emit after Unlock) this returns
+			// promptly with the expected result.
+			seenModelLookup = registry.ModelKnown(event.ToModelID)
+		}),
+	)
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", true, start.Add(time.Minute)))
+
+	done := make(chan struct{})
+	go func() {
+		registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-b", "hash-b", false, start.Add(2*time.Minute)))
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ApplyHeartbeat did not return — likely deadlock: emitter ran under r.mu (M2-2 regression)")
+	}
+	select {
+	case <-emitterReturned:
+	case <-time.After(time.Second):
+		t.Fatal("emitter callback did not run")
+	}
+	if !seenModelLookup {
+		t.Fatal("ModelKnown should have observed model-b after swap completion")
+	}
+}
+
+// TestApplyHeartbeatSlowSwapEmitterDoesNotStallHeartbeat asserts the
+// audit-store contention story from M2-2: with a slow emitter (sleep 1s),
+// ApplyHeartbeat itself MUST complete within <50ms because in production
+// cmd/coordinator dispatches the emitter onto a buffered channel. This
+// test simulates that dispatch by using a Go channel as the emitter.
+// Audit ref: PERF-2 in REPO_AUDIT.md §3.6.
+func TestApplyHeartbeatSlowSwapEmitterDoesNotStallHeartbeat(t *testing.T) {
+	// Production wiring (cmd/coordinator/main.go) hands the emitter a
+	// non-blocking channel send. This test reproduces that pattern.
+	swapCh := make(chan SwapEvent, 64)
+	registry := NewRegistry(nil,
+		WithHeartbeatHashVerifier(func(modelID, reportedHash string) HashStatus {
+			return HashStatusVerified
+		}),
+		WithSwapEmitter(func(event SwapEvent) {
+			select {
+			case swapCh <- event:
+			default:
+			}
+		}),
+	)
+	go func() {
+		// Slow downstream consumer — like a busy_timeout-hit SQLite write.
+		for range swapCh {
+			time.Sleep(time.Second)
+		}
+	}()
+	start := time.Unix(1716768000, 0).UTC()
+	registerHeartbeatProvider(t, registry, "model-a", "hash-a", HashStatusVerified, start)
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-a", "hash-a", true, start.Add(time.Minute)))
+
+	began := time.Now()
+	registry.ApplyHeartbeat("p1", "current", spec011HeartbeatUpdate("model-b", "hash-b", false, start.Add(2*time.Minute)))
+	if elapsed := time.Since(began); elapsed > 50*time.Millisecond {
+		t.Fatalf("ApplyHeartbeat took %v; want <50ms — slow emitter is back-pressuring heartbeat (M2-2 regression)", elapsed)
+	}
+}
+
 func TestProviderJSONL1ByteIdenticalDefault(t *testing.T) {
 	p := providerJSONL1Baseline()
 
