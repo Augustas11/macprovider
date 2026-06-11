@@ -126,7 +126,15 @@ actor CoordinatorClient {
     // SPEC-001). The factory signature change is intentional — keeping
     // it URL-only would require a parallel header-injection seam.
     private let webSocketFactory: @Sendable (URLRequest) -> ProviderWebSocketTask
-    private let providerToken: String?
+    // SPEC-003 v0.8 FR-C9.3 — was `let` pre-v0.8, now `var` so a
+    // self-minted provisional token from acceptCoordinatorSession can be
+    // adopted in-process without waiting for a binary restart. Actor
+    // isolation makes the mutation race-free.
+    private var providerToken: String?
+    // SPEC-003 v0.8 FR-C9.3 — captured at init so the persist hook in
+    // acceptCoordinatorSession knows where to write the new token
+    // without taking another dependency on the loader.
+    private let configPath: String
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
     private var inferenceRelay: InferenceRelay?
     private var tier2Session: Tier2ProviderSession?
@@ -175,6 +183,7 @@ actor CoordinatorClient {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
+        self.configPath = config.configPath
         self.sleepAssertionFactory = sleepAssertionFactory
         self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
@@ -534,7 +543,51 @@ actor CoordinatorClient {
         try await acceptCoordinatorSession(response, reason: "coordinator auth_response accepted")
     }
 
+    /// SPEC-003 v0.8 FR-C9.3 — extract `assigned_provider_token` from a
+    /// hello_ack / auth_response payload, persist it to disk under the
+    /// `auth.provider_token` YAML key, and adopt it in-process so the
+    /// next reconnect carries `Authorization: Bearer <new_token>`
+    /// without waiting for a binary restart. Persist failure is logged
+    /// at warn level and NOT propagated — the WS session continues, and
+    /// FR-C9.4 multi-mint guarantees the next reconnect gets a fresh
+    /// chance.
+    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) {
+        guard let assigned = payload["assigned_provider_token"] as? String else {
+            return
+        }
+        let trimmed = assigned.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        // Persist before in-memory adoption so a write failure does not
+        // leave a token live in this process that cannot survive a
+        // restart.
+        do {
+            try ProviderTokenPersist.write(token: trimmed, configPath: configPath)
+        } catch {
+            // event=provider_token_persist_failed for the FR-C9.3
+            // structured-log contract. Use FileHandle directly so the
+            // log line lands even when stderr is the only sink in
+            // launchd context.
+            FileHandle.standardError.write(Data(
+                "{\"event\":\"provider_token_persist_failed\",\"error\":\"\(String(describing: error))\",\"config_path\":\"\(configPath)\"}\n".utf8
+            ))
+            return
+        }
+        FileHandle.standardError.write(Data(
+            "{\"event\":\"provider_token_persisted\",\"config_path\":\"\(configPath)\"}\n".utf8
+        ))
+        self.providerToken = trimmed
+    }
+
     private func acceptCoordinatorSession(_ payload: [String: Any], reason: String) async throws {
+        // SPEC-003 v0.8 FR-C9.3 — single hook for both v1 (hello_ack) and
+        // v2 (auth_response) ack paths since both funnel here. Persist
+        // FIRST so that on the rare race where setCoordinatorSession
+        // throws or this whole branch tears down before persist runs, we
+        // don't strand the token only in memory. Persist failure is
+        // non-fatal per FR-C9.3; FR-C9.4 multi-mint covers the retry.
+        adoptAssignedProviderTokenIfPresent(payload)
         let interval = max(Self.intValue(payload["heartbeat_interval_s"]) ?? 30, 1)
         await providerStatus.setCoordinatorSession(
             connected: true,
