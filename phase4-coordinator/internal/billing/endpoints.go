@@ -524,8 +524,15 @@ func writeJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
+func billingErrorType(status int) string {
+	if status >= 500 {
+		return "server_error"
+	}
+	return "invalid_request_error"
+}
+
 func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"code": code, "message": message}})
+	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": billingErrorType(status), "param": nil, "code": code}})
 }
 
 func nullInt(v sql.NullInt64) int64 {

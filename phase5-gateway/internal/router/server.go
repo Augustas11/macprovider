@@ -730,7 +730,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func writeError(w http.ResponseWriter, status int, typ, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "code": code}})
+	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "param": nil, "code": code}})
 }
 
 func copyCleanHeaders(dst, src http.Header) {

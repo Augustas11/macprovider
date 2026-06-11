@@ -2226,6 +2226,38 @@ func findCookie(resp *httptest.ResponseRecorder, name string) string {
 	return ""
 }
 
+// TestWriteErrorEnvelopeShape verifies the gateway writeError emits the
+// canonical 4-field OpenAI-compatible error envelope: message, type, param, code.
+func TestWriteErrorEnvelopeShape(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeError(w, http.StatusBadRequest, "invalid_request_error", "test_code", "test message")
+
+	var outer map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &outer); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	errObj, ok := outer["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing 'error' key or wrong type; body=%s", w.Body.String())
+	}
+	for _, required := range []string{"message", "type", "code"} {
+		if _, present := errObj[required]; !present {
+			t.Errorf("missing required key %q in error envelope; body=%s", required, w.Body.String())
+		}
+	}
+	// param must be present (may be null)
+	if _, present := errObj["param"]; !present {
+		t.Errorf("missing 'param' key in error envelope; body=%s", w.Body.String())
+	}
+	// no extra keys beyond the 4-field set
+	allowed := map[string]bool{"message": true, "type": true, "param": true, "code": true}
+	for k := range errObj {
+		if !allowed[k] {
+			t.Errorf("unexpected extra key %q in error envelope", k)
+		}
+	}
+}
+
 func countAuditEvents(t *testing.T, dbPath, eventType string) int {
 	t.Helper()
 	db, err := sql.Open("sqlite", dbPath)
