@@ -52,17 +52,30 @@ log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Previously only $CONFIG was passed, so check-deploy-config.sh silently
 # skipped C2 on every standard coordinator deploy — the past-incident
 # guard was effectively disabled.
+# M1-6 follow-up (codex audits 2026-06-11): the previous .example fallback
+# was a false fail-closed gate — production deploy could pass C2 using
+# SAMPLE timeout values while the real VPS gateway.yaml had drifted.
+# Sample config is documentation, not an operational input. Require a real
+# gateway.yaml or an explicit SKIP_C2_CHECK=1 override.
 GATEWAY_CONFIG_DEFAULT="$DIST_DIR/../../phase5-gateway/dist/gateway.yaml"
-[ -f "$GATEWAY_CONFIG_DEFAULT" ] || GATEWAY_CONFIG_DEFAULT="$DIST_DIR/../../phase5-gateway/gateway.yaml.example"
 GATEWAY_CONFIG="${GATEWAY_CONFIG:-$GATEWAY_CONFIG_DEFAULT}"
-if [ ! -f "$GATEWAY_CONFIG" ] && [ "${SKIP_C2_CHECK:-0}" != "1" ]; then
-  echo "aborting deploy: gateway.yaml not found for C2 cross-check ($GATEWAY_CONFIG)." >&2
-  echo "  Provide GATEWAY_CONFIG=<path> or set SKIP_C2_CHECK=1 to deploy without it." >&2
-  exit 5
+if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
+  echo "  SKIP_C2_CHECK=1 set — running coordinator-only check (C2 gate intentionally skipped)" >&2
+  SKIP_C2_CHECK=1 bash "$DIST_DIR/check-deploy-config.sh" "$CONFIG" || {
+    echo "aborting deploy: config-drift check failed" >&2; exit 5;
+  }
+else
+  if [ ! -f "$GATEWAY_CONFIG" ]; then
+    echo "aborting deploy: real gateway.yaml not found for C2 cross-check ($GATEWAY_CONFIG)." >&2
+    echo "  Provide GATEWAY_CONFIG=<path-to-real-gateway.yaml> or set SKIP_C2_CHECK=1" >&2
+    echo "  to deploy without the cross-check. gateway.yaml.example is sample" >&2
+    echo "  documentation and intentionally NOT accepted here." >&2
+    exit 5
+  fi
+  bash "$DIST_DIR/check-deploy-config.sh" "$CONFIG" "$GATEWAY_CONFIG" || {
+    echo "aborting deploy: config-drift check failed" >&2; exit 5;
+  }
 fi
-bash "$DIST_DIR/check-deploy-config.sh" "$CONFIG" "$GATEWAY_CONFIG" || {
-  echo "aborting deploy: config-drift check failed" >&2; exit 5;
-}
 
 log "step 1/9: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null

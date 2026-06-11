@@ -57,11 +57,11 @@ BINARY="$DIST_DIR/gateway-linux-amd64"
 SERVICE="$DIST_DIR/macprovider-gateway.service"
 NGINX_SITE="$DIST_DIR/nginx-api.streamvc.live.conf"
 
-# Resolve C2-check config inputs (best-effort; both may be missing locally,
-# in which case the C2 cross-check is skipped with a warning rather than a
-# hard fail — the coordinator deploy is the authoritative C2 gate).
+# M1-6 follow-up (codex audits 2026-06-11): no .example fallback. Sample
+# config is documentation, not an operational input — passing C2 against
+# example timeouts while the real VPS config has drifted is a false
+# fail-closed gate.
 GATEWAY_CONFIG_DEFAULT="$DIST_DIR/gateway.yaml"
-[ -f "$GATEWAY_CONFIG_DEFAULT" ] || GATEWAY_CONFIG_DEFAULT="$DIST_DIR/../gateway.yaml.example"
 GATEWAY_CONFIG="${GATEWAY_CONFIG:-$GATEWAY_CONFIG_DEFAULT}"
 
 COORD_CONFIG_DEFAULT="$DIST_DIR/../../phase4-coordinator/dist/coordinator.yaml"
@@ -79,29 +79,31 @@ SCP="scp -i $SSH_KEY -P 22"
 log() { printf "\n[deploy-gateway] %s\n" "$*"; }
 
 log "step 0/8: pre-deploy C2 cross-component config check"
-# Reuse the coordinator's check-deploy-config.sh — it knows how to check the
-# C2 timer relation given both configs. Without coord.yaml we still run a
-# best-effort with the gateway.yaml alone (the script warns/notes if either
-# arg is missing rather than hard-failing — see check-deploy-config.sh).
-if [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ] && [ -f "$GATEWAY_CONFIG" ]; then
+# M1-6 follow-up (codex audits 2026-06-11): require real configs for C2,
+# or an explicit SKIP_C2_CHECK=1 override. The previous "best-effort"
+# path treated missing inputs as a warning, which weakened a deploy gate
+# the audit called out as mandatory.
+if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
+  echo "  SKIP_C2_CHECK=1 set — C2 cross-check skipped by operator opt-out" >&2
+elif [ -x "$CHECK_SCRIPT" ] && [ -f "$COORD_CONFIG" ] && [ -f "$GATEWAY_CONFIG" ]; then
   bash "$CHECK_SCRIPT" "$COORD_CONFIG" "$GATEWAY_CONFIG" || {
     echo "aborting gateway deploy: config-drift check failed" >&2; exit 5;
   }
-elif [ -x "$CHECK_SCRIPT" ] && [ -f "$GATEWAY_CONFIG" ]; then
-  echo "  WARN: coordinator config not found at $COORD_CONFIG; running gateway-only check (C2 skipped)" >&2
-  # The check script still validates coord-side things on $COORD_CONFIG; pass
-  # gateway both as coordinator AND gateway args is wrong. Just run the
-  # gateway portion: we shortcut by checking whether the file has the
-  # expected coordinator_request_seconds key.
-  if ! grep -qE '^[[:space:]]*coordinator_request_seconds:' "$GATEWAY_CONFIG"; then
-    echo "  FAIL: gateway config $GATEWAY_CONFIG missing timeouts.coordinator_request_seconds" >&2
-    exit 5
-  fi
-  echo "  ok: gateway.yaml has coordinator_request_seconds (C2 cross-check vs coordinator deferred to coordinator deploy)"
 else
-  echo "  WARN: check-deploy-config.sh or local gateway.yaml not available — C2 gate skipped" >&2
+  echo "aborting gateway deploy: cannot run C2 cross-check." >&2
+  echo "  check-deploy-config.sh: $CHECK_SCRIPT $( [ -x "$CHECK_SCRIPT" ] || echo '(missing or not executable)')" >&2
+  echo "  coordinator config:    $COORD_CONFIG $( [ -f "$COORD_CONFIG" ] || echo '(missing)')" >&2
+  echo "  gateway config:        $GATEWAY_CONFIG $( [ -f "$GATEWAY_CONFIG" ] || echo '(missing — provide GATEWAY_CONFIG=<path>)')" >&2
+  echo "  To deploy without the cross-check, set SKIP_C2_CHECK=1 explicitly." >&2
+  echo "  gateway.yaml.example is sample documentation and intentionally NOT accepted here." >&2
+  exit 5
 fi
-
+# Defensive: even with C2 skipped, the gateway config (if provided) must at
+# least carry the coordinator_request_seconds key the C2 check looks at.
+if [ -f "$GATEWAY_CONFIG" ] && ! grep -qE '^[[:space:]]*coordinator_request_seconds:' "$GATEWAY_CONFIG"; then
+  echo "  FAIL: gateway config $GATEWAY_CONFIG missing timeouts.coordinator_request_seconds" >&2
+  exit 5
+fi
 log "step 1/8: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
 dig +short "$DOMAIN" | grep -q "$VPS_HOST" || { echo "DNS for $DOMAIN does not resolve to $VPS_HOST yet" >&2; exit 1; }
