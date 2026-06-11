@@ -23,12 +23,17 @@ import (
 // per-provider_id unique-constraint installed by
 // ensureActiveProviderIDUniqueness rejects the INSERT because an
 // unrevoked token already exists for the same provider_id. Callers
-// MUST treat this as a TOFU rejection — emitting it as a generic DB
-// error would let an attacker race the legitimate provider_id and
-// receive an "internal error" instead of the proper close code.
+// MUST distinguish this sentinel from generic DB errors so they can
+// apply SPEC-003 v0.8.3 FR-C9.4 admit-tokenless semantics (mark the
+// admission as AuthBearerlessDuplicate, exclude from routing/billing,
+// refuse to evict an existing routable session) rather than treating
+// it as an internal error.
 //
-// Pre-v0.8.2 this race was the credential-capture path the codex
-// security re-audit on PR #44 flagged as MAJOR-1.
+// Pre-v0.8.2 a race on the SELECT-then-INSERT TOFU pattern was the
+// credential-capture path the codex security re-audit on PR #44
+// flagged as MAJOR-1. The partial unique index added in v0.8.2 and
+// preserved in v0.8.3 (PR #69) closes that race; the wire-level
+// reject was replaced with admit-tokenless in v0.8.3 (Entry 66).
 var ErrActiveTokenAlreadyExists = errors.New("provider_token: active token already exists for provider_id")
 
 type Store struct {
@@ -130,7 +135,8 @@ CREATE INDEX IF NOT EXISTS idx_token_hash ON provider_tokens(token_hash);
 // the writes but does not retroactively serialize the reads. With this
 // partial unique index, the second INSERT fails with a constraint
 // violation and IssueToken returns ErrActiveTokenAlreadyExists, which
-// the caller translates to a TOFU rejection on the wire.
+// v0.8.3 (Entry 66) maps to admit-tokenless + AuthBearerlessDuplicate
+// on the wire (was: TOFU rejection / close).
 //
 // Pinned-tier operator-issued tokens use the same path; if an operator
 // runs `coordinator-cli issue-token` twice for the same provider_id
@@ -222,8 +228,9 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 		// token for the same provider_id. modernc.org/sqlite surfaces
 		// this as a constraint-failure error whose Error() string
 		// contains "UNIQUE constraint failed". Map to the sentinel so
-		// the WS server can close with CloseInvalidToken instead of
-		// leaking a generic DB error to the wire.
+		// the WS server can apply v0.8.3 admit-tokenless semantics
+		// (was: close with CloseInvalidToken) instead of leaking a
+		// generic DB error to the wire.
 		if isActiveProviderTokenConstraintFailure(err) {
 			return TokenRecord{}, "", ErrActiveTokenAlreadyExists
 		}
@@ -236,18 +243,19 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	return TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: createdAt}, token, nil
 }
 
-// HasActiveTokenForProvider implements SPEC-003 v0.8 FR-C9.4 TOFU
-// (trust-on-first-use): returns true when at least one unrevoked token
-// exists for `providerID`. The coordinator uses this to refuse minting a
-// second token for an already-known provisional `provider_id` — closing
-// the credential-capture vector flagged by the codex security audit on
-// PR #44, where an attacker could otherwise mint a parallel valid
-// bearer for someone else's declared provider_id during the settling
-// window.
+// HasActiveTokenForProvider returns true when at least one unrevoked
+// token row exists for `providerID`. Retained on the concrete Store
+// (not on the TokenIssuer interface in `internal/ws`) for operator
+// tooling — e.g. a future `coordinator-cli list-tokens --filter
+// active` invocation, or pre-flag-flip audit scripts that want a
+// quick presence check without scanning the full table.
 //
-// Callers must treat (false, nil) as "OK to mint" and (true, nil) as
-// "MUST refuse tokenless admission". An error indicates the gate could
-// not be evaluated; the coordinator MUST fail closed in that case.
+// The WS server's resolveProvisionalToken does NOT call this method;
+// in v0.8.3 (Entry 66) the SELECT-then-INSERT TOFU pattern was
+// replaced with relying on the partial unique index to atomically
+// trap duplicates at IssueToken time. Calling this method as a
+// pre-flight gate would reintroduce the TOCTOU window the v0.8.2
+// codex security re-audit (PR #44 MAJOR-1) closed.
 func (s *Store) HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error) {
 	providerID = strings.TrimSpace(providerID)
 	if providerID == "" {
