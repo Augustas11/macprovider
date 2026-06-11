@@ -36,7 +36,7 @@ if [ -n "${FORCE_DIRTY:-}" ] && [ -n "$DIRTY_STATE" ]; then
   esac
 fi
 
-OUT="dist/$(basename "$PWD")-linux-amd64"
+OUT="dist/gateway-linux-amd64"
 mkdir -p dist
 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${VERSION}" -o "$OUT" ./cmd/gateway
 echo "built $OUT @ ${VERSION}"
