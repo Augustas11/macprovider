@@ -1,6 +1,8 @@
 # Mac Provider — Session Handoff
 
 > **⚠ Phase 2 design superseded.** Read `beta/PHASE2_UPGRADED_PLAN.md` after this doc. It replaces the Phase 2 MVP section below (now 2 providers, two crons, pre-committed decision criteria, stable tunnels, host-side instrumentation). The original beta/ scaffold stays — changes are additive.
+>
+> **⚠ Operations are now in [`OPS.md`](OPS.md)** (added in M2-8 / DOCS-3). Anything in this document about deploys, restart procedure, monitor response, or settlement is historical Phase 1/2 context — use OPS.md for the live stack.
 
 **Status:** Phase 1 PoC complete. Phase 2 buyer-harness scaffold built and smoke-tested locally. Awaiting M4 user before going live.
 **Last session ended:** 2026-05-26

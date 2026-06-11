@@ -1,3 +1,8 @@
+> **SUPERSEDED — Phase 1 falsifiability script.** This document continues
+> `RUNBOOK.md` (also superseded). For current production operations see
+> [`OPS.md`](OPS.md). Kept here for historical reference and audit
+> traceability.
+
 # Phase 1 Runbook — Continuation Pass
 
 You are a Codex agent picking up an in-progress Mac Provider PoC. The
