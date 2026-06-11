@@ -10,6 +10,39 @@ protocol ProviderWebSocketTask: AnyObject, Sendable {
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
 }
 
+// M1-1 follow-up (codex security audit 2026-06-11): refuse HTTP redirects
+// on the provider WS connect so the Authorization: Bearer <token> header
+// cannot leak to an attacker-controlled redirect target. The default
+// URLSession.shared follows redirects with the credential headers attached.
+// We install this delegate on a dedicated session via providerWebSocketSession
+// so the same isolation holds across reconnects.
+final class NoRedirectURLSessionDelegate: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        CoordinatorClient.keepaliveDebug("ws_redirect_refused status=\(response.statusCode)")
+        completionHandler(nil)
+    }
+}
+
+// providerWebSocketSession is the dedicated URLSession used by the default
+// webSocketFactory. URLSession retains its delegate until invalidated, so we
+// keep a process-wide singleton rather than leaking one session per connect.
+private let providerWebSocketSession: URLSession = {
+    let config = URLSessionConfiguration.default
+    config.httpShouldUsePipelining = false
+    config.httpAdditionalHeaders = nil
+    return URLSession(
+        configuration: config,
+        delegate: NoRedirectURLSessionDelegate(),
+        delegateQueue: nil
+    )
+}()
+
 extension URLSessionWebSocketTask: ProviderWebSocketTask {}
 
 extension URLSessionWebSocketTask {
@@ -111,7 +144,7 @@ actor CoordinatorClient {
         sendOverride: SendOverride? = nil,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
         attestationGenerator: Tier2AttestationTokenGenerating = ManagedDeviceAttestationGenerator(),
-        webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { URLSession.shared.webSocketTask(with: $0) },
+        webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
     ) {

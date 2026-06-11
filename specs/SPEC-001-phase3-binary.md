@@ -1,7 +1,7 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
 **Version:** 1.3.1 (2026-06-11, M1-1 / XSEC-1 provider-token plumbing)
-**Revision:** v1.3.1 adds the `auth.provider_token` (yaml) /
+**Revision:** v1.3.1 adds the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
 coordinator WS connect when the token is non-empty. Closes
@@ -10,25 +10,34 @@ unauthenticated end-to-end" — for pinned providers. No change to the
 v2 ECDH handshake itself; the Bearer header is an HTTP-level credential
 checked at the WS upgrade (SPEC-002 v1.3.5 § auth) before the v2
 handshake starts. Backwards-compatible: a v1.3.1 binary with no
-provider_token configured sends no Authorization header, matching v1.3
+`provider_token` configured sends no Authorization header, matching v1.3
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
 
 **Change log v1.3.1:**
-- **v1.3.1 (2026-06-11, M1-1 / XSEC-1):** Adds `auth.provider_token`
-  config key, triple-exposed per house convention
-  (yaml `auth.provider_token`, env `MACPROVIDER_PROVIDER_TOKEN`, CLI
-  `--provider-token`). When set, the binary attaches
+- **v1.3.1 (2026-06-11, M1-1 / XSEC-1):** Adds top-level
+  `provider_token` config key, triple-exposed per house convention
+  (yaml `provider_token`, env `MACPROVIDER_PROVIDER_TOKEN`, CLI
+  `--provider-token`). Note: this is **flat**, not nested under
+  `auth:`, matching the rest of the binary's flat
+  `~/.config/macprovider/config.yaml` schema (the `auth.<flag>`
+  spelling refers to the COORDINATOR-side `coordinator.yaml` and is
+  not the binary's config layout). When set, the binary attaches
   `Authorization: Bearer <token>` to the coordinator WS connect
   (`CoordinatorClient.swift` `openWebSocket`). When unset, no
   Authorization header is sent. Token is redacted from logs (URL
-  redaction already in place; headers were never logged). The operator
-  is expected to chmod 0600 the config file containing this value.
-  Pinned-tier migration uses `coordinator-cli issue-token` to mint
-  per-provider tokens, write them into each provider's `macprovider.yaml`,
-  then flip `auth.require_provider_tokens=true` in the coordinator
-  config. v1.2.x and earlier binaries cannot send tokens; the flag flip
+  redaction already in place; headers were never logged; the default
+  `webSocketFactory` now uses a dedicated `URLSession` with a
+  `NoRedirectURLSessionDelegate` that refuses HTTP redirects so the
+  Bearer header cannot leak to an attacker-controlled redirect
+  target — M1-1 follow-up after the 2026-06-11 codex security audit).
+  The operator is expected to chmod 0600 the config file containing
+  this value. Pinned-tier migration uses `coordinator-cli issue-token`
+  to mint per-provider tokens, write them into each provider's
+  `macprovider.yaml` as `provider_token: <token>`, then flip
+  `auth.require_provider_tokens=true` in the COORDINATOR config.
+  v1.2.x and earlier binaries cannot send tokens; the flag flip
   is the compatibility cutoff. Stranger / curl|bash onboarding token
   flow is pending Open Question 2 (operator-issued vs self-serve
   provisional). SPEC-002's normative surface is unchanged — the

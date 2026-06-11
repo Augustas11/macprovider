@@ -206,6 +206,40 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
     }
 
+    // Regression: M1-1 follow-up (codex security audit 2026-06-11). The
+    // NoRedirectURLSessionDelegate refuses HTTP redirects on the provider
+    // WS task so the Authorization: Bearer <token> header cannot leak to an
+    // attacker-controlled redirect target. Pre-fix URLSession.shared
+    // followed redirects with credential headers attached.
+    func testNoRedirectURLSessionDelegateRefusesRedirect() {
+        let delegate = NoRedirectURLSessionDelegate()
+        let session = URLSession.shared
+        let dummyURL = URL(string: "https://example.test/ws/provider")!
+        let task = session.dataTask(with: dummyURL)
+        let response = HTTPURLResponse(
+            url: dummyURL,
+            statusCode: 302,
+            httpVersion: "HTTP/1.1",
+            headerFields: ["Location": "https://attacker.test/ws/provider"]
+        )!
+        let newRequest = URLRequest(url: URL(string: "https://attacker.test/ws/provider")!)
+
+        var capturedRequest: URLRequest? = URLRequest(url: dummyURL) // non-nil sentinel
+        let expectation = self.expectation(description: "completion called")
+        delegate.urlSession(
+            session,
+            task: task,
+            willPerformHTTPRedirection: response,
+            newRequest: newRequest
+        ) { request in
+            capturedRequest = request
+            expectation.fulfill()
+        }
+        wait(for: [expectation], timeout: 1.0)
+        task.cancel()
+        XCTAssertNil(capturedRequest, "delegate must call completion with nil to refuse the redirect")
+    }
+
     func testCoordinatorSessionSendsWebSocketPingBeforeHeartbeat() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
