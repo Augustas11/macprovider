@@ -35,6 +35,17 @@ if [ -z "$GW" ] && [ "${SKIP_C2_CHECK:-0}" != "1" ]; then
   exit 1
 fi
 
+# M1-6 follow-up (codex architect re-audit 2026-06-11): the wrapper deploy
+# scripts already refuse the *.example fallback, but the reusable C2 gate
+# itself should reject sample config too. Belt-and-suspenders against a
+# future caller passing the example path explicitly.
+case "$COORD" in
+  *.example) echo "FAIL: sample coordinator config ($COORD) is not deploy input" >&2; exit 1;;
+esac
+case "$GW" in
+  *.example) echo "FAIL: sample gateway config ($GW) is not deploy input" >&2; exit 1;;
+esac
+
 python3 - "$COORD" "$GW" <<'PY'
 import re, sys
 

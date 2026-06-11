@@ -33,10 +33,12 @@
 #   VPS_USER         default: root
 #   DOMAIN           default: api.streamvc.live
 #   EMAIL            default: augstar@gmail.com
-#   GATEWAY_CONFIG   path to a local gateway.yaml to use for the pre-deploy
+#   GATEWAY_CONFIG   path to a real gateway.yaml to use for the pre-deploy
 #                    C2 cross-check (must contain timeouts.coordinator_request_seconds).
-#                    Defaults to ./gateway.yaml under dist/ if present, else the
-#                    in-tree phase5-gateway/gateway.yaml.example.
+#                    Defaults to ./gateway.yaml under dist/. Missing config aborts
+#                    the deploy unless SKIP_C2_CHECK=1 is also set; the deploy
+#                    intentionally REFUSES gateway.yaml.example as input — sample
+#                    config is documentation, not a production safety input.
 #   COORD_CONFIG     path to the coordinator.yaml that's expected to be live
 #                    on Pearl. Defaults to ../../phase4-coordinator/dist/coordinator.yaml
 #                    if present. Used for the C2 timer cross-check.
