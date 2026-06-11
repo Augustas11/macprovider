@@ -232,34 +232,10 @@ Without confirmation, default recommendation is Qwen2.5 7B — runs on any M4 wi
 ├── scripts/
 │   ├── long_context_test.py   # Tokenizer-accurate 8K/16K/32K test (used in re-run)
 │   └── long_context_32k.py    # Focused 32K re-run script after power-off
-├── logs/
-│   ├── 00-preflight.txt       # Hardware/env state
-│   ├── 03-mlx-server.log      # All MLX server runs (last entries show OOM crash)
-│   ├── 06-tunnel.log          # Cloudflared
-│   ├── 06.5-localtunnel.log   # Localtunnel
-│   ├── 06.7-ssh-probe.log     # SSH probe (failed before fix)
-│   ├── 06.7-ssh-tunnel.log    # SSH tunnel (clean after fix)
-│   └── ...
-├── results/
-│   ├── REPORT.md              # ★ Full Phase 1 evidence — read this for details
-│   ├── 04a-local-nonstream.json
-│   ├── 06.5-localtunnel-test.json
-│   ├── 06.7-ssh-loopback.json # "Tunneled." response — confirmed
-│   ├── 06.7-ssh-latency.txt   # 5-request timings
-│   ├── 07a-tunnel-nonstream.json
-│   ├── 07b-tunnel-stream.txt
-│   ├── 07c-latency.txt
-│   ├── 08-cancellation-client.txt
-│   ├── 09-sse-format.txt
-│   └── stress/
-│       ├── 7.5.1-concurrent.txt
-│       ├── 7.5.2-coldstart.txt
-│       ├── 7.5.3-longcontext-v2-8000.json
-│       ├── 7.5.3-longcontext-v2-16000.json
-│       ├── 7.5.3-longcontext-v2-32000.json  # OOM evidence
-│       ├── 7.5.4-sustained.txt
-│       ├── 7.5.5-mempressure.txt
-│       └── 7.5.6-multimodel.txt
+├── logs/                      # ignored local regeneration output (git rm'd in M3-5)
+├── results/                   # ignored local regeneration output (git rm'd in M3-5)
+├── doc/
+│   └── PHASE1_REPORT.md       # ★ Durable Phase 1 evidence — read this for details
 ├── state/
 │   ├── tunnel-url.txt         # Last cloudflared URL (now stale)
 │   ├── lt-url.txt             # Last localtunnel URL (now stale)

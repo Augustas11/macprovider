@@ -12,7 +12,7 @@ Usage:
     python harness.py --batch --dry-run          # build prompts but don't POST
     python harness.py --list                     # show registered workloads
 
-Honors three SSE quirks identified in Phase 1 (results/REPORT.md):
+Honors three SSE quirks identified in Phase 1 (doc/PHASE1_REPORT.md):
   1. Skips ": keepalive" comment lines before json.loads.
   2. Strips model-specific stop tokens from accumulated streamed output and
      flags leakage in the `stop_token_leak` column.
