@@ -39,7 +39,7 @@ struct HTTPServer {
     }
 }
 
-final class RouterHandler: ChannelInboundHandler {
+final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = HTTPServerRequestPart
     typealias OutboundOut = HTTPServerResponsePart
 
