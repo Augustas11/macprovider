@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.3.1 (2026-06-11, M1-1 / XSEC-1 provider-token plumbing)
+**Version:** 1.4 (2026-06-12, custom model selection — installer + `models browse` + fit guard)
 **Revision:** v1.3.1 adds the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,14 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.4:**
+- **v1.4 (2026-06-12, custom model selection):** Closes architect MAJOR-1 from the parallel codex audit on the installer-custom-model PR series (PRs #67/#70/#72): the previously implicit "user picks any MLX model that fits" surface is now normative.
+  **(a) `--force` semantics on `models switch`** are extended beyond the v1.3 SPEC-011 cooldown-only contract: `--force` now ALSO bypasses the v1.4 RAM fit guard (`.wontFit` hard-block, `.tight` warning suppression, `.unknown`-on-HF-shape fail-closed override). It still does NOT bypass `SupportedModels.validate` (catalog membership) or the server-side concurrency rejection (an in-flight load still returns `loadingInProgress` per SPEC-011 v0.5 R-3.1.x). The v1.3 prose "suppresses ONLY the CLI-side cooldown soft guard" is superseded by the v1.4 §6.13 contract below.
+  **(b) `models browse` subcommand** is added alongside `list / switch / status`. Browse queries the HuggingFace API at `https://huggingface.co/api/models?author=mlx-community&sort=downloads&direction=-1&limit=N[&search=Q]` and annotates each result with the local-Mac `ModelFit` verdict. Filters: `--family <substr>`, `--limit N` (1 <= N <= 200), `--fits-only`, `--max-gb N` (N > 0). Output is tab-separated to stdout; the count summary is to stderr. `HF_TOKEN` env var, if set, is sent as a Bearer header for gated content; the underlying URLSession refuses cross-origin redirects so the token cannot leak.
+  **(c) Pre-flight fit guard on `models switch`** is added as a new normative requirement (§6.13). The guard runs after `SupportedModels.validate` succeeds and before any control-socket round-trip. Verdict tiers and headroom constants are shared between the installer (SPEC-003 v0.9 FR-D2.1) and the binary (`MacProviderCore/ModelFit`) so a model accepted at install time is judged the same way at switch time.
+  **(d) Forward-looking note on `MacProviderModelCatalog`:** v1.4 places `ModelFit` and `HFClient` in the existing `MacProviderCore` library next to `SupportedModels`. A future revision SHOULD extract these into a `MacProviderModelCatalog` target once the next consumer (download-at-switch with byte-accurate sizing, multi-model `supported_models` mutation, gated-repo flow) lands. The catalog boundary is named here but not yet enforced; the v1.4 module placement remains acceptable for the current consumer set per codex architect MAJOR-2.
+  No L-1 wire / on-disk impact: the fit guard is a local CLI policy that runs before the existing socket round-trip, and `browse` is read-only against HuggingFace's public API. No protocol, schema, or `supported_models` advertisement change.
 
 **Change log v1.3.1:**
 - **v1.3.1 (2026-06-11, M1-1 / XSEC-1):** Adds top-level
@@ -1011,10 +1019,17 @@ The `macprovider-cli` top-level subcommand inventory gains `models` as
 the sixth subcommand alongside the existing `serve`, `status`,
 `self-test`, `update`, and `uninstall` commands. The `models`
 subcommand has actions `models list`, `models switch <model-id>
-[--force]`, and `models status` per SPEC-011 v0.5 §3.1. `--force`
-suppresses ONLY the CLI-side cooldown soft guard per SPEC-011 v0.5
-R-3.1.3; it does not bypass supported-model validation or concurrent
-load rejection.
+[--force]`, `models status`, and (v1.4) `models browse` —
+see §6.13 for the v1.4 fit guard and §6.14 for `browse`.
+
+**v1.4 amendment to `--force` semantics on `models switch`:** v1.3's
+"suppresses ONLY the CLI-side cooldown soft guard" prose is superseded.
+`--force` now bypasses BOTH the SPEC-011 v0.5 R-3.1.3 cooldown soft
+guard AND the v1.4 §6.13 fit guard (wontFit hard-block, tight warning,
+and unknown-on-HF-shape fail-closed override). It still does NOT bypass
+`SupportedModels.validate` (catalog membership) or the server-side
+concurrency rejection (an in-flight load returns `loadingInProgress`
+per SPEC-011 v0.5 R-3.1.x).
 
 The `serve` command gains the following additive flags:
 
@@ -1983,8 +1998,135 @@ and the OLD `model_hash` while the load remains in progress, using the
 
 R-6.11.5 The CLI tracks last-switch timestamp at the macOS-native state
 file path defined by §6.2 `--switch-state-path`; default cooldown window
-is 10s and `--force` suppresses ONLY the CLI-side soft guard per
-SPEC-011 v0.5 R-3.1.4 and R-3.1.3.
+is 10s. v1.3 stated that `--force` suppresses ONLY this soft guard;
+v1.4 §6.13 extends `--force` to also bypass the new fit guard.
+SPEC-011 v0.5 R-3.1.4 and R-3.1.3 references are unchanged at the
+SPEC-011 layer.
+
+---
+
+### 6.13. `models switch` RAM fit guard (NEW in v1.4)
+
+**R-6.13.1 Verdict tiers.** Before the CLI sends `switch_request` over
+the control socket, it MUST evaluate the local fit verdict for the
+target model id against the host's physical RAM (via Foundation's
+`ProcessInfo.physicalMemory`, rounded up to whole GB). Weights are
+estimated from the model id using the same name-parsing rules as the
+installer (SPEC-003 v0.9 FR-D2.1 step 4): a "NxMB" Mixture-of-Experts
+prefix takes precedence over a plain `[0-9]+(\.[0-9]+)?B` suffix; the
+quantization byte cost is inferred from `4bit|q4` (0.5 B/param),
+`8bit|q8` (1.0), `bf16|fp16|-f16` (2.0), or 2.0 as the unknown-quant
+fallback.
+
+The verdict has four cases:
+
+| Verdict | Condition | Default action without `--force` |
+|---|---|---|
+| `.fits` | `ramGB >= estGB + 6` | silent, proceed |
+| `.tight` | `ramGB >= estGB + 2` and not `.fits` | stderr warning, proceed |
+| `.wontFit` | otherwise | stderr error, `ExitCode(2)`, do not proceed |
+| `.unknown` | model id name cannot be parsed | see R-6.13.3 |
+
+The headroom constants 6 GB (comfortable) and 2 GB (tight) MUST equal
+the SPEC-003 v0.9 FR-D2.1 step 4 constants. Drift between the two
+surfaces is a SPEC violation.
+
+**R-6.13.2 `--force` override.** When `--force` is set, `.wontFit`
+MUST log a one-line warning to stderr and proceed; `.tight` MUST be
+silent (consistent with `--force` meaning "I know what I'm doing,
+don't shout"); `.fits` is silent as before.
+
+**R-6.13.3 `.unknown` fail-closed for HF-shape ids.** When the parser
+cannot extract a size from the target id, the binary MUST inspect the
+id shape:
+- If the id contains `/` and does not start with `.` or `/` (i.e. it
+  looks like a HuggingFace `org/name` reference), `.unknown` MUST
+  fail closed with `ExitCode(2)` unless `--force` is set. This blocks
+  malicious or oddly-named oversized HF repos from bypassing the
+  guard silently.
+- Otherwise (synthetic test IDs, local paths starting with `./` or
+  `/`, single-segment names), `.unknown` MUST log a one-line note
+  ("skipping fit check") and proceed.
+
+**R-6.13.4 Ordering.** The fit guard MUST run AFTER
+`SupportedModels.validate` (so an out-of-catalog id is rejected with
+the catalog error, not a fit error) and BEFORE the cooldown soft
+guard (so a `.wontFit` fails before we burn the cooldown window).
+
+**R-6.13.5 Output discipline.** All fit-guard messages MUST go to
+stderr. Stdout of `models switch` is reserved for the existing
+control-socket progress lines per §6.9.
+
+---
+
+### 6.14. `models browse` subcommand (NEW in v1.4)
+
+**R-6.14.1 Action.** `macprovider-cli models browse` performs an
+unauthenticated GET against the HuggingFace API at
+`https://huggingface.co/api/models` with the following query params:
+
+- `author=mlx-community` (fixed in v1.4; future revisions MAY add
+  `--author` and `--all-authors` flags per the SPEC-001 v1.4 change
+  log architect MAJOR-1 forward-looking note)
+- `sort=downloads`
+- `direction=-1`
+- `limit=<--limit>`
+- `search=<--family>` (omitted if `--family` is unset)
+
+**R-6.14.2 Flags.**
+
+| Flag | Type | Default | Constraint |
+|---|---|---|---|
+| `--family` | string | unset | substring search, passed verbatim |
+| `--limit` | int | 30 | `1 <= N <= 200`; violations exit code 2 |
+| `--fits-only` | flag | off | drop rows where verdict is not `.fits` |
+| `--max-gb` | int | unset | when set, MUST be `> 0`; drops rows whose estimated GB exceeds the cap |
+
+**R-6.14.3 Authentication.** If the `HF_TOKEN` environment variable
+is set and non-empty, the request MUST carry
+`Authorization: Bearer <HF_TOKEN>`. The underlying `URLSession` MUST
+refuse cross-origin redirects (different scheme or host than the
+original request) to prevent the bearer header from leaking on an
+HF or edge 3xx to an attacker-controlled origin.
+
+**R-6.14.4 Status code routing.** Response status is routed as:
+
+| Status | CLI behavior |
+|---|---|
+| 200 | parse JSON, annotate with fit verdict, render |
+| 401, 403 | exit code 4, stderr advises setting `HF_TOKEN` |
+| 429 | exit code 4, stderr advises retry-after-a-minute |
+| other | exit code 4 with the numeric status |
+| network error (DNS / TLS / offline / timeout) | exit code 4, one-line `localizedDescription` |
+
+**R-6.14.5 Resource limits.** The CLI MUST set a request timeout
+(default 15 s) and resource timeout (default 30 s) on the
+`URLSession` configuration. v1.4 hardcodes both; future revisions
+MAY expose them as flags.
+
+**R-6.14.6 Output.** Stdout receives a tab-separated table with
+columns `model_id`, `est_gb`, `fit`. The `fit` column is one of the
+stable strings `fits`, `tight`, `wont_fit`, or `unknown`. Stderr
+receives a one-line summary (`N models on a M GB Mac` or
+`no models match the current filters on a M GB Mac`).
+
+**R-6.14.7 Output sanitization.** HF-returned ids are user content
+(anyone can publish to HuggingFace). Before rendering, the CLI MUST
+replace U+0000–U+001F and U+007F in the id with U+FFFD so a
+malicious model name cannot break the TSV layout (embedded tab or
+newline) or paint terminal escape sequences. Characters at U+0080 and
+above MUST pass through unchanged.
+
+**R-6.14.8 Module placement.** v1.4 places the `HFClient` and
+`ModelFit` types in the existing `MacProviderCore` library next to
+`SupportedModels`. A future revision SHOULD extract these into a
+`MacProviderModelCatalog` target once the next consumer set lands —
+expected drivers include download-at-switch with byte-accurate
+sizing (via `/api/models/<id>` per-id metadata), multi-model
+`supported_models` mutation, and a gated-repo flow via `HF_TOKEN`
+at switch time. The catalog target is named here so reviewers of
+future PRs can refer to a stable concept, but the boundary is not
+yet enforced at the package level.
 
 ---
 
