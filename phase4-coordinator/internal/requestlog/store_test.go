@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -442,6 +443,145 @@ func TestRequestLogInsertTx(t *testing.T) {
 	}
 	if count != 1 {
 		t.Fatalf("tx row count = %d, want 1", count)
+	}
+}
+
+// TestPruneBeforeBatchedDeletesCrossesBatchBoundary inserts 12,000 rows
+// straddling the cutoff (well above the 5,000-row pruneBatchSize) and
+// asserts that the batched DELETE loop deletes everything strictly older
+// than the cutoff and leaves everything at-or-after the cutoff intact.
+// Regression guard for M3-1 / PERF-3: a single un-LIMIT-ed DELETE would
+// hold the write lock for too long; a buggy loop would either stop early
+// (leaving stale rows) or delete too much.
+func TestPruneBeforeBatchedDeletesCrossesBatchBoundary(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	const each = 6000
+	for i := 0; i < each; i++ {
+		ts := cutoff.Add(-time.Duration(i+1) * time.Second)
+		if err := store.Insert(ctx, Row{TSUtc: ts, RequestID: "old", Model: "m", Status: 200, BuyerIP: "1"}); err != nil {
+			t.Fatalf("insert old %d: %v", i, err)
+		}
+	}
+	for i := 0; i < each; i++ {
+		ts := cutoff.Add(time.Duration(i) * time.Second)
+		if err := store.Insert(ctx, Row{TSUtc: ts, RequestID: "new", Model: "m", Status: 200, BuyerIP: "1"}); err != nil {
+			t.Fatalf("insert new %d: %v", i, err)
+		}
+	}
+
+	deleted, err := store.PruneBefore(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("PruneBefore: %v", err)
+	}
+	if deleted != each {
+		t.Fatalf("deleted=%d want %d", deleted, each)
+	}
+	var remaining int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log`).Scan(&remaining); err != nil {
+		t.Fatalf("count remaining: %v", err)
+	}
+	if remaining != each {
+		t.Fatalf("remaining=%d want %d", remaining, each)
+	}
+	var olderLeft int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM request_log WHERE julianday(ts_utc) < julianday(?)`, cutoff.UTC().Format(time.RFC3339Nano)).Scan(&olderLeft); err != nil {
+		t.Fatalf("count older: %v", err)
+	}
+	if olderLeft != 0 {
+		t.Fatalf("rows older than cutoff still present: %d", olderLeft)
+	}
+}
+
+// TestPruneBeforeNoSQLiteBusyUnderConcurrentInsert runs PruneBefore
+// against a backlog while a writer goroutine inserts fresh rows. Both
+// must complete without SQLITE_BUSY — the batched DELETE keeps the
+// write lock short enough that the writer's busy_timeout absorbs each
+// release. Regression guard for M3-1: a single multi-second DELETE
+// would exceed busy_timeout under contention.
+func TestPruneBeforeNoSQLiteBusyUnderConcurrentInsert(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	const old = 8000
+	for i := 0; i < old; i++ {
+		ts := cutoff.Add(-time.Duration(i+1) * time.Second)
+		if err := store.Insert(ctx, Row{TSUtc: ts, RequestID: "o", Model: "m", Status: 200, BuyerIP: "1"}); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	stop := make(chan struct{})
+	writerErr := make(chan error, 1)
+	go func() {
+		base := cutoff.Add(time.Hour)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				writerErr <- nil
+				return
+			default:
+			}
+			ts := base.Add(time.Duration(i) * time.Millisecond)
+			if err := store.Insert(ctx, Row{TSUtc: ts, RequestID: "w", Model: "m", Status: 200, BuyerIP: "1"}); err != nil {
+				if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked") {
+					writerErr <- err
+					return
+				}
+				writerErr <- err
+				return
+			}
+		}
+	}()
+
+	if _, err := store.PruneBefore(ctx, cutoff); err != nil {
+		close(stop)
+		<-writerErr
+		if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked") {
+			t.Fatalf("PruneBefore hit lock contention: %v", err)
+		}
+		t.Fatalf("PruneBefore: %v", err)
+	}
+	close(stop)
+	if err := <-writerErr; err != nil {
+		t.Fatalf("concurrent writer: %v", err)
+	}
+}
+
+// TestPruneBeforeUsesTsUtcIndex pins the DELETE's plan to the
+// idx_request_log_ts_utc index via EXPLAIN QUERY PLAN. A regression that
+// drops the index or rewrites the WHERE clause so the planner falls
+// back to a SCAN of request_log would break this assertion.
+func TestPruneBeforeUsesTsUtcIndex(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	rows, err := store.db.QueryContext(ctx,
+		`EXPLAIN QUERY PLAN DELETE FROM request_log WHERE rowid IN (SELECT rowid FROM request_log WHERE julianday(ts_utc) < julianday(?) LIMIT ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano), pruneBatchSize)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var combined strings.Builder
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		combined.WriteString(detail)
+		combined.WriteString("\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	plan := combined.String()
+	if !strings.Contains(plan, "idx_request_log_ts_utc") {
+		t.Fatalf("plan does not reference idx_request_log_ts_utc; full plan:\n%s", plan)
 	}
 }
 
