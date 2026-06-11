@@ -197,31 +197,147 @@ func TestSelfServeProvisionalTokenMintFailureTolerated(t *testing.T) {
 	}
 }
 
-// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for a provider_id
-// that already has an unrevoked token. Closes the credential-capture
-// vector from the codex security audit on PR #44: without this guard,
-// an attacker who declares a victim's provider_id on a tokenless
-// connect would receive a valid bearer for it. Pre-fix, the helper
-// would mint freely; the security audit's MAJOR-1 finding spelled out
-// the exploit chain.
-func TestSelfServeProvisionalTokenRejectedWhenActiveTokenExists(t *testing.T) {
+// SPEC-003 v0.8.3 FR-C9.4 unused-token self-heal — when an active row
+// exists for a provider_id but its last_used_at IS NULL (never
+// authenticated), the coordinator MUST revoke that row and mint a
+// fresh token for the incoming tokenless connect instead of
+// rejecting. Closes the deploy-gap lockout class that hit `air5` on
+// the 2026-06-12 production deploy: a provider minted a token under
+// the new coordinator but reconnected before consuming the ack
+// frame, and v0.8.2's blanket TOFU policy locked them out
+// indefinitely. The codex MAJOR-1 credential-capture vector that
+// v0.8.1 closed requires the attacker to have authenticated at
+// least once (which sets last_used_at) — an unused row carries no
+// live credential, so self-heal does not weaken the security model.
+// Pre-v0.8.3 this test asserted strict rejection; the new contract
+// is in DECISION_CRITERIA Entry 67.
+func TestSelfServeProvisionalTokenSelfHealsWhenExistingTokenUnused(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
-	// Seed: a legitimate provider already self-minted on a prior connect.
-	_, _, err = store.IssueToken(context.Background(), "claimed-provider", "claimed-provider hostname")
+	// Seed: a legitimate provider self-minted on a prior connect but
+	// never used the token (the deploy-gap pattern: minted, persisted
+	// or not, but ack-frame not consumed by the old binary in flight).
+	seedRecord, seedCleartext, err := store.IssueToken(context.Background(), "claimed-provider", "claimed-provider hostname")
 	if err != nil {
-		t.Fatalf("seed token: %v", err)
+		t.Fatalf("seed unused token: %v", err)
+	}
+	if seedCleartext == "" {
+		t.Fatalf("seed cleartext empty")
 	}
 	h := selfServeHarness(t, store)
 	defer h.HTTP.Close()
 
-	// Attacker: connects tokenless declaring the SAME provider_id.
+	// The same provider_id reconnects tokenless (binary lost the
+	// ack-frame's assigned_provider_token across a coordinator
+	// restart, or never persisted it). Self-heal should kick in.
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial tokenless reconnect: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("claimed-provider"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+
+	// Self-heal path: the ack frame should arrive normally with a NEW
+	// assigned_provider_token, not a close frame.
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read self-heal ack: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text (self-heal ack), not close (legacy strict reject)", op)
+	}
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack.Type != "hello_ack" {
+		t.Fatalf("ack type = %q, want hello_ack", ack.Type)
+	}
+	if ack.AssignedProviderToken == "" {
+		t.Fatalf("assigned_provider_token empty in self-heal hello_ack: %#v", ack)
+	}
+	if ack.AssignedProviderToken == seedCleartext {
+		t.Fatalf("self-heal ack returned the SAME cleartext as the seed; expected a freshly minted token")
+	}
+
+	// DB invariant: the seed row is revoked, exactly one active row
+	// remains (the fresh mint), and the fresh row resolves to the
+	// declared provider_id.
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("token rows after self-heal = %d, want 2 (revoked seed + fresh mint): %#v", len(records), records)
+	}
+	var seedRow, freshRow *auth.TokenRecord
+	for i := range records {
+		r := records[i]
+		if r.ID == seedRecord.ID {
+			cp := r
+			seedRow = &cp
+		} else {
+			cp := r
+			freshRow = &cp
+		}
+	}
+	if seedRow == nil || freshRow == nil {
+		t.Fatalf("could not classify rows: seed=%v fresh=%v records=%#v", seedRow, freshRow, records)
+	}
+	if !seedRow.RevokedAt.Valid {
+		t.Fatalf("seed row should be revoked after self-heal; revoked_at=%v", seedRow.RevokedAt)
+	}
+	if freshRow.RevokedAt.Valid {
+		t.Fatalf("fresh row should be active after self-heal; revoked_at=%v", freshRow.RevokedAt)
+	}
+	if freshRow.ProviderID != "claimed-provider" {
+		t.Fatalf("fresh row provider_id = %q, want claimed-provider", freshRow.ProviderID)
+	}
+	providerID, ok, err := store.ValidateToken(context.Background(), ack.AssignedProviderToken)
+	if err != nil || !ok || providerID != "claimed-provider" {
+		t.Fatalf("self-heal token validation: id=%q ok=%v err=%v (want claimed-provider true nil)", providerID, ok, err)
+	}
+}
+
+// SPEC-003 v0.8.3 FR-C9.4 strict-reject — the security path. When
+// the active row's last_used_at IS NOT NULL the codex MAJOR-1
+// credential-capture vector applies in full: the row represents a
+// live credential. A tokenless reconnect for that provider_id MUST
+// be rejected with CloseInvalidToken / "invalid_token" and the
+// operator runbook applies (revoke-token + retry). This test
+// preserves the v0.8.1 strict-reject behavior for the
+// used-token-tokenless-reconnect shape.
+func TestSelfServeProvisionalTokenRejectedWhenExistingTokenUsed(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	// Seed: a legitimate provider self-minted AND used the token at
+	// least once (the row's last_used_at is NOT NULL). This is the
+	// shape an attacker would also produce after capturing-and-using
+	// a victim's bearer.
+	_, seedCleartext, err := store.IssueToken(context.Background(), "claimed-provider", "claimed-provider hostname")
+	if err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if err := store.MarkTokenUsed(context.Background(), seedCleartext); err != nil {
+		t.Fatalf("mark seed used: %v", err)
+	}
+	h := selfServeHarness(t, store)
+	defer h.HTTP.Close()
+
+	// A tokenless connect declaring the SAME provider_id arrives.
+	// This is indistinguishable from an attacker trying to mint a
+	// parallel credential for the in-use identity, so strict reject.
 	conn, br, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
-		t.Fatalf("dial tokenless attacker: %v", err)
+		t.Fatalf("dial tokenless: %v", err)
 	}
 	defer conn.Close()
 	if err := wsutil.WriteClientText(conn, mustJSON(validHello("claimed-provider"))); err != nil {
@@ -237,20 +353,24 @@ func TestSelfServeProvisionalTokenRejectedWhenActiveTokenExists(t *testing.T) {
 		t.Fatalf("read tofu close: %v", err)
 	}
 	if frame.Header.OpCode != gobwas.OpClose {
-		t.Fatalf("op = %v, want close (TOFU rejection)", frame.Header.OpCode)
+		t.Fatalf("op = %v, want close (TOFU strict reject)", frame.Header.OpCode)
 	}
 	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
 	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
-		t.Fatalf("close = %d %q, want %d invalid_token (FR-C9.4 TOFU)", code, reason, providerws.CloseInvalidToken)
+		t.Fatalf("close = %d %q, want %d invalid_token (FR-C9.4 strict reject)", code, reason, providerws.CloseInvalidToken)
 	}
 
-	// Critically: no NEW row was minted. Exactly the seeded row should remain.
+	// Critically: no NEW row was minted AND the seed row is still
+	// active (NOT auto-revoked, since it has last_used_at NOT NULL).
 	records, err := store.ListTokens(context.Background())
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
 	if len(records) != 1 {
-		t.Fatalf("token rows after TOFU rejection = %d, want 1 (no parallel mint): %#v", len(records), records)
+		t.Fatalf("token rows after strict reject = %d, want 1 (no parallel mint, no self-heal on used token): %#v", len(records), records)
+	}
+	if records[0].RevokedAt.Valid {
+		t.Fatalf("seed row should remain active after strict reject; revoked_at=%v", records[0].RevokedAt)
 	}
 }
 

@@ -264,6 +264,55 @@ func (s *Store) HasActiveTokenForProvider(ctx context.Context, providerID string
 	return count > 0, nil
 }
 
+// RevokeUnusedTokenForProvider implements SPEC-003 v0.8.3 FR-C9.4
+// unused-token self-heal. Atomically revokes the (at most one) active
+// row for `providerID` whose `last_used_at IS NULL`, returning
+// (true, nil) if a row was revoked and (false, nil) if no row matched.
+//
+// "At most one" is guaranteed by the partial unique index
+// `idx_provider_tokens_one_active_per_provider` installed in v0.8.2.
+// The UPDATE is a single statement, and SQLite WAL serializes
+// writers — a concurrent reconnect either revokes the row first
+// (we see RowsAffected=0) or arrives after we have revoked it
+// (also RowsAffected=0 on its side). The unique index is the
+// second-line defense for any IssueToken that races after revoke.
+//
+// Used by ws.resolveProvisionalToken to convert a deploy-gap /
+// first-mint-not-yet-used lockout into an in-band self-heal. A
+// (true, nil) return means the caller should proceed to IssueToken —
+// the provider gets a fresh row, the operator sees an
+// `fr_c9_4_self_heal` log line, no human intervention required.
+// A (false, nil) return means EITHER no active row at all OR the
+// active row has `last_used_at IS NOT NULL` (a used token, the
+// codex MAJOR-1 vector). The caller MUST then call
+// HasActiveTokenForProvider to disambiguate; if a row remains it is
+// a used-token-tokenless-reconnect and the caller MUST follow the
+// v0.8.1 strict-reject path.
+//
+// On DB error the caller MUST fail closed (reject the connect).
+func (s *Store) RevokeUnusedTokenForProvider(ctx context.Context, providerID string) (bool, error) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return false, fmt.Errorf("provider id is required")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE provider_tokens
+		    SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		  WHERE provider_id = ?
+		    AND revoked_at IS NULL
+		    AND last_used_at IS NULL`,
+		providerID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // PruneUnusedTokens deletes tokens whose `last_used_at` is NULL and
 // whose `created_at` is older than the supplied cutoff time. Returns the
 // number of rows pruned. Used by `coordinator-cli prune-tokens` to bound
