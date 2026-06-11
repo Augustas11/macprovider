@@ -1727,8 +1727,14 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// authorizedOperator returns true only when the configured operator key is
+// non-empty and matches the request's Bearer token. Empty configured key →
+// DENY (M1-5 / SECU-5). Previously this short-circuited to allow on empty
+// expected key, relying on config.Validate() to refuse to start with an empty
+// key. That defense-in-depth coupling meant any future entry point bypassing
+// Validate (live SIGHUP, ad-hoc Server construction) would silently fail open.
 func (s *Server) authorizedOperator(r *http.Request) bool {
-	return s.cfg.Auth.OperatorKey == "" || auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.OperatorKey)
+	return s.cfg.Auth.OperatorKey != "" && auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.OperatorKey)
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {
