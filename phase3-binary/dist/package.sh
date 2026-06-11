@@ -48,7 +48,7 @@ ls -la "$PRODUCTS/mlx-swift_Cmlx.bundle/Contents/Resources/default.metallib"
 echo "==> Gathering third-party license notices..."
 NOTICES_FILE="$OUT_DIR/THIRD-PARTY-NOTICES.txt"
 REPO_ROOT=$(cd "$PHASE3_DIR/.." && pwd)
-"$REPO_ROOT/scripts/gather-third-party-notices.sh" "$NOTICES_FILE"
+"$REPO_ROOT/scripts/gather-third-party-notices.sh" "$NOTICES_FILE" "$RELEASE_DIR/SourcePackages/checkouts"
 
 echo "==> Staging tarball contents..."
 STAGE_DIR=$(mktemp -d)
