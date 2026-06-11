@@ -34,10 +34,6 @@ type TokenRecord struct {
 	LastUsedAt   sql.NullString
 }
 
-func AuthorizedBearer(r *http.Request, expected string) bool {
-	return expected == "" || BearerTokenMatchesHeader(r.Header, expected)
-}
-
 func BearerTokenMatchesHeader(headers http.Header, expected string) bool {
 	expected = strings.TrimSpace(expected)
 	if expected == "" {

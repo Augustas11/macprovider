@@ -39,6 +39,40 @@ func TestSummaryEndpoint(t *testing.T) {
 	}
 }
 
+// Regression: M1-5 / SECU-5. The admin gate must fail closed when the
+// configured operator key is empty. Pre-fix the `if operatorKey != ""`
+// short-circuit allowed every caller; we relied on config.Validate to
+// refuse to start. This test constructs Handlers with operatorKey="" and
+// asserts /admin/ledger/* denies — locking the local invariant so future
+// entry points cannot bypass Validate and silently fail open.
+func TestAdminLedgerDeniesWhenOperatorKeyEmpty(t *testing.T) {
+	_, store := newRequestAndBillingStores(t)
+	handler := store.Handlers("", fakeTokens{}, true, 60)
+
+	paths := []string{
+		"/admin/ledger/summary",
+		"/admin/ledger/providers",
+		"/admin/ledger/reconcile?from=2026-06-01&to=2026-06-08",
+	}
+	for _, p := range paths {
+		// No Authorization header.
+		req := httptest.NewRequest(http.MethodGet, p, nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("%s without bearer: status=%d body=%s, want 403 (empty operator key must deny)", p, w.Code, w.Body.String())
+		}
+		// Bearer-with-anything must also deny when configured key is empty.
+		req2 := httptest.NewRequest(http.MethodGet, p, nil)
+		req2.Header.Set("Authorization", "Bearer anything")
+		w2 := httptest.NewRecorder()
+		handler.ServeHTTP(w2, req2)
+		if w2.Code != http.StatusForbidden {
+			t.Fatalf("%s with arbitrary bearer: status=%d body=%s, want 403", p, w2.Code, w2.Body.String())
+		}
+	}
+}
+
 func TestProvidersEndpoint(t *testing.T) {
 	_, store := newRequestAndBillingStores(t)
 	now := time.Now().UTC()

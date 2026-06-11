@@ -60,7 +60,10 @@ func (h *handler) admin(w http.ResponseWriter, r *http.Request, fn func(http.Res
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	if h.operatorKey != "" && !auth.BearerTokenMatchesHeader(r.Header, h.operatorKey) {
+	// Fail closed when the operator key is unset (M1-5 / SECU-5). Previously
+	// an empty configured key allowed every caller, relying on config.Validate
+	// in main.go to refuse to start.
+	if h.operatorKey == "" || !auth.BearerTokenMatchesHeader(r.Header, h.operatorKey) {
 		writeError(w, http.StatusForbidden, "forbidden", "operator key required")
 		return
 	}

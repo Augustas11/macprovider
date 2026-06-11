@@ -1786,6 +1786,43 @@ func TestPoolzRequiresOperatorKey(t *testing.T) {
 	}
 }
 
+// Regression: M1-5 / SECU-5. authorizedOperator must DENY when the configured
+// operator key is empty (fail closed). Previously the predicate short-circuited
+// to allow on empty expected key, relying on config.Validate() in main.go to
+// refuse to start. That defense-in-depth coupling meant any future entry point
+// that bypassed Validate would silently fail open. This test constructs a
+// server with an empty OperatorKey directly (bypassing Validate) and asserts
+// /poolz returns 401 even without a Bearer token in the request.
+func TestPoolzDeniesWhenOperatorKeyEmpty(t *testing.T) {
+	ts := newProviderServer(t, func(cfg *config.Config) {
+		cfg.Auth.OperatorKey = ""
+	})
+	defer ts.Close()
+
+	// No Authorization header — pre-fix this returned 200 because the
+	// short-circuit treated empty expected key as "no auth required."
+	resp, err := http.Get(ts.URL + "/poolz")
+	if err != nil {
+		t.Fatalf("poolz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (empty operator key must deny)", resp.StatusCode)
+	}
+
+	// Even a Bearer token that happens to be the empty string must deny.
+	req, _ := http.NewRequest(http.MethodGet, ts.URL+"/poolz", nil)
+	req.Header.Set("Authorization", "Bearer ")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("poolz: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 with empty-bearer header", resp2.StatusCode)
+	}
+}
+
 func TestProviderHealthzReportsInjectedVersion(t *testing.T) {
 	harness := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
 		providerws.WithVersion("v1.3.0-7-gabcdef0"),
