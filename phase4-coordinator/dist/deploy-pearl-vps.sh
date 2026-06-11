@@ -55,6 +55,44 @@ log "step 1/9: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
 dig +short "$DOMAIN" | grep -q "$VPS_HOST" || { echo "DNS for $DOMAIN does not resolve to $VPS_HOST yet" >&2; exit 1; }
 
+log "step 1b/9: drift check vs live /opt/macprovider/coordinator.yaml"
+# Catches the silent-config-change hazard. The 2026-06-11 deploy caused
+# a brief outage because the local config dropped auth.require_provider_tokens
+# entirely; the prior binary defaulted false, the new binary defaulted true,
+# and providers were rejected. A field-level diff vs live is the tripwire
+# that would have surfaced that drift before the restart.
+#
+# Secrets are masked in the SSH pipe so unmasked Pearl content never lands
+# on local disk. Operator opts into pushing local-over-live with
+# ALLOW_CONFIG_DRIFT=1.
+normalize_yaml() {
+  # Mask any field whose name ends in _key / _secret / _token, then strip
+  # pure-comment lines and blanks so the drift check focuses on semantic
+  # differences (values + structure) rather than comment-placement noise.
+  sed -E 's/^([[:space:]]*[a-zA-Z0-9_]*(_key|_secret|_token)):[[:space:]]*.*$/\1: <MASKED>/' \
+    | sed -E 's/[[:space:]]+#.*$//' \
+    | grep -vE '^[[:space:]]*(#|$)'
+}
+LIVE_NORM=$($SSH 'cat /opt/macprovider/coordinator.yaml' 2>/dev/null | normalize_yaml) || {
+  echo "could not pull live coordinator.yaml from Pearl for drift check" >&2; exit 6;
+}
+LOCAL_NORM=$(normalize_yaml < "$CONFIG")
+if ! DRIFT_DIFF=$(diff <(printf '%s\n' "$LOCAL_NORM") <(printf '%s\n' "$LIVE_NORM")); then
+  echo "" >&2
+  echo "  CONFIG DRIFT detected (secrets masked; '<' = local, '>' = live):" >&2
+  printf '%s\n' "$DRIFT_DIFF" | sed 's/^/    /' >&2
+  echo "" >&2
+  if [ "${ALLOW_CONFIG_DRIFT:-0}" != "1" ]; then
+    echo "  Aborting. The local config will overwrite the live one on deploy." >&2
+    echo "  Review the diff above. To proceed (pushing local over live):" >&2
+    echo "    ALLOW_CONFIG_DRIFT=1 $0" >&2
+    exit 8
+  fi
+  echo "  ALLOW_CONFIG_DRIFT=1 set — proceeding despite drift." >&2
+else
+  echo "  ok: local config matches live (modulo secrets)"
+fi
+
 log "step 2/9: install certbot + nginx-snippets (apt)"
 $SSH 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -qq -y certbot python3-certbot-nginx >/dev/null' || {
   echo "certbot install failed" >&2; exit 1;
