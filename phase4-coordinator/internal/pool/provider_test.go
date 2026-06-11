@@ -600,6 +600,59 @@ func TestModelKnownShrinksOnProviderDisconnect(t *testing.T) {
 	}
 }
 
+// TestRegisterReplaceSessionClearsSeenModels pins the M2-5 / PERF-5 fix for the
+// codex code-audit 2026-06-11 #47 finding: a session replacement (same
+// provider_id, new assigned_id) MUST clear the per-provider seen-model
+// history, else stale model ids from the prior session survive into the
+// new one and ModelKnown over-reports.
+func TestRegisterReplaceSessionClearsSeenModels(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	// Session 1: register p1@s1 reporting model-a, heartbeat in model-b.
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-a",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	registry.ApplyHeartbeat("p1", "s1", heartbeatUpdateAt("model-b", start.Add(time.Minute)))
+	if !registry.ModelKnown("model-a") || !registry.ModelKnown("model-b") {
+		t.Fatal("session-1 seen models not recorded")
+	}
+
+	// Session 2 replaces session 1 with a different model entirely.
+	// (Same provider_id, new assigned_id — the direct-replacement path
+	// inside Register, not the RemoveIfSession path.)
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s2",
+		ModelID:          "model-c",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start.Add(2 * time.Minute),
+		LastActivityAt:   start.Add(2 * time.Minute),
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	if !registry.ModelKnown("model-c") {
+		t.Fatal("session-2 model not recorded after replacement")
+	}
+	if registry.ModelKnown("model-a") {
+		t.Fatal("ModelKnown(model-a) leaked across session replacement; prior history should be cleared")
+	}
+	if registry.ModelKnown("model-b") {
+		t.Fatal("ModelKnown(model-b) leaked across session replacement; prior history should be cleared")
+	}
+}
+
 // TestSeenModelsCappedPerProvider pins the M2-5 / PERF-5 per-provider cap.
 // A single misbehaving provider cannot grow its inner set without bound.
 func TestSeenModelsCappedPerProvider(t *testing.T) {

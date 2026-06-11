@@ -194,6 +194,15 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 	if existing := r.providers[p.ProviderID]; existing != nil {
 		old = existing.conn
 		delete(r.sessions, existing.AssignedID)
+		// M2-5: this is a session replacement (same provider_id, new
+		// assigned_id). The "currently-connected session only" invariant
+		// for ModelKnown requires the stale model history to be cleared
+		// here too — RemoveIfSession{,State} only fire on clean
+		// disconnect, not on this direct replacement path. Without this
+		// delete, model ids from the prior session would survive into
+		// the new one and ModelKnown would over-report. (Codex code-audit
+		// 2026-06-11 #47.)
+		delete(r.seenModelsByProvider, p.ProviderID)
 	}
 	p.conn = conn
 	if p.Tier == "" {
