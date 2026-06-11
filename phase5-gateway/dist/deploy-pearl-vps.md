@@ -1,38 +1,73 @@
-# Phase 5 Pearl Deployment Notes
+# Phase 5 Pearl Deployment — change-log and rollback runbook
 
-This is an operator runbook draft. Do not deploy from the build session without an explicit production authorization.
+The canonical deploy path is the scripted `deploy-pearl-vps.sh` (added in
+M1-6 / DEVE-4). Run it from the operator Mac after building the binary:
 
-1. Build the gateway binary on the target OS or copy a matching build artifact to `/opt/macprovider/gateway`.
-2. Copy `gateway.yaml.example` to `/opt/macprovider/gateway.yaml` and set secrets through `/etc/macprovider/gateway.env`:
-   - `COORDINATOR_OPERATOR_KEY`
-   - `MACPROVIDER_KEY_HASH_SECRET`
-   - `MACPROVIDER_DEMO_SIGNING_SECRET`
-   - `GITHUB_OAUTH_CLIENT_ID`
-   - `GITHUB_OAUTH_CLIENT_SECRET`
-3. Ensure coordinator buyer URL is loopback: `http://127.0.0.1:8443`.
-   - Keep quota reaper defaults unless intentionally changing them: `quotas.reaper_interval_hours: 1`, `quotas.reservation_max_age_hours: 24`.
-4. Install `dist/macprovider-gateway.service` as `/etc/systemd/system/macprovider-gateway.service`.
-5. Install `dist/nginx-api.streamvc.live.conf` as `/etc/nginx/sites-available/api.streamvc.live` and enable it from `sites-enabled`.
-   - Keep the SPEC-002 PG-2 `limit_req_zone` / `limit_conn_zone` directives and the `/ws/provider` `limit_req` / `limit_conn` location controls in place before launch.
-   - Keep nginx overwriting `X-Forwarded-For` and setting `X-Real-IP`; the gateway ignores raw buyer-supplied XFF.
-6. Run dry checks:
-   - `systemd-analyze verify /etc/systemd/system/macprovider-gateway.service`
-   - `nginx -t`
-   - `/opt/macprovider/gateway --config /opt/macprovider/gateway.yaml --check`
-7. Start in this order:
-   - `systemctl restart macprovider-coordinator`
-   - `systemctl enable --now macprovider-gateway`
-   - `systemctl reload nginx`
-8. Smoke checks:
-   - `curl -i https://api.streamvc.live/v1/status`
-   - `curl -i https://api.streamvc.live/healthz`
-   - `curl -i -H "Authorization: Bearer <key>" https://api.streamvc.live/v1/models`
-   - OpenAI SDK chat call with `base_url=https://api.streamvc.live/v1`.
+```bash
+cd phase5-gateway
+bash dist/build-linux.sh                # produces dist/gateway-linux-amd64
+bash dist/deploy-pearl-vps.sh           # idempotent SSH deploy + nginx + verify
+```
 
-Operator endpoints under `/admin/*` are intentionally not exposed by the public `api.streamvc.live` nginx site. Use loopback on the Pearl host or a separate trusted operator channel for kill-switch, feedback summary, and capacity controls.
+`deploy-pearl-vps.sh` is modelled on the coordinator's deploy script:
+fail-closed config gate as step 0 (reuses the coordinator's
+`check-deploy-config.sh` for C2 timer cross-check), `.prev` binary snapshot
+for one-command rollback, version-stamped provenance check on `/healthz`.
 
-Rollback:
+This `.md` is no longer the primary deploy procedure — it now serves as
+the change-log / rollback runbook the script's comments cross-reference.
 
-1. Disable the `api.streamvc.live` nginx site or point `/v1/*` back to the previous target.
-2. `systemctl stop macprovider-gateway`.
-3. Restore the previous nginx config and `systemctl reload nginx`.
+## Bootstrap prerequisites (do once, not on every deploy)
+
+`deploy-pearl-vps.sh` assumes these are already in place on Pearl:
+
+- The `macprovider` system user, `/opt/macprovider/`, and Pearl's
+  certbot-managed certificate for `api.streamvc.live` — set up alongside the
+  coordinator's first deploy (`phase4-coordinator/dist/deploy-pearl-vps.sh`).
+- `/etc/macprovider/gateway.env` with:
+  - `COORDINATOR_OPERATOR_KEY`
+  - `MACPROVIDER_KEY_HASH_SECRET`
+  - `MACPROVIDER_DEMO_SIGNING_SECRET`
+  - `GITHUB_OAUTH_CLIENT_ID`
+  - `GITHUB_OAUTH_CLIENT_SECRET`
+- `/opt/macprovider/gateway.yaml` — `coordinator.buyer_url: http://127.0.0.1:8443`,
+  `quotas.reaper_interval_hours: 1`, `quotas.reservation_max_age_hours: 24`,
+  `quotas.demo_concurrency: 2` (M1-8). `deploy-pearl-vps.sh` does NOT
+  overwrite this file.
+
+## Smoke checks after deploy
+
+```bash
+curl -i https://api.streamvc.live/healthz       # 200, includes "version"
+curl -i https://api.streamvc.live/v1/models     # 401 without auth
+curl -i -H "Authorization: Bearer <key>" \
+  https://api.streamvc.live/v1/models           # 200 with valid key
+```
+
+## Rollback
+
+One command — relies on the `.prev` snapshot the deploy script keeps:
+
+```bash
+ssh root@159.223.165.194 '
+  install -o macprovider -g macprovider -m 0755 \
+    /opt/macprovider/gateway.prev /opt/macprovider/gateway && \
+  systemctl restart macprovider-gateway
+'
+```
+
+If the nginx site changed and that broke the rollout, revert the nginx
+config separately:
+
+```bash
+ssh root@159.223.165.194 'git -C /etc/nginx/sites-available checkout HEAD~1 api.streamvc.live && nginx -t && systemctl reload nginx'
+```
+
+(That requires the operator to have started a git history in
+`/etc/nginx/sites-available` — recommended for any host with config files
+edited by hand.)
+
+Operator endpoints under `/admin/*` remain intentionally not exposed by
+the public `api.streamvc.live` nginx site. Use loopback on the Pearl host
+or a separate trusted operator channel for kill-switch, feedback summary,
+and capacity controls.

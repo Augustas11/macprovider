@@ -11,12 +11,40 @@
 #     the coordinator relay-timeout and a slow non-streaming provider can escape
 #     breaker attribution.
 #
-# Usage: check-deploy-config.sh <coordinator.yaml> [gateway.yaml]
+# Usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml>
 # Exit 1 on HARD failure; 0 otherwise (WARN/note lines are non-blocking).
+#
+# M1-6 / DEVE-4: the gateway config is REQUIRED by default. The C2
+# cross-component timer relation is the single most important safety check
+# this script performs — it caught a real past production incident. Silently
+# skipping it (the previous behavior when the gateway arg was omitted) made
+# every standard coordinator deploy run a no-op C2 gate. To opt out
+# deliberately (e.g. checking a coordinator-only config in isolation), set
+# SKIP_C2_CHECK=1.
 
 set -uo pipefail
-COORD="${1:?usage: check-deploy-config.sh <coordinator.yaml> [gateway.yaml]}"
+COORD="${1:?usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml>}"
 GW="${2:-}"
+
+if [ -z "$GW" ] && [ "${SKIP_C2_CHECK:-0}" != "1" ]; then
+  echo "FAIL: gateway.yaml argument missing." >&2
+  echo "  The C2 cross-component timer check requires both coordinator.yaml" >&2
+  echo "  AND gateway.yaml. To intentionally check the coordinator config" >&2
+  echo "  alone (skipping C2), set SKIP_C2_CHECK=1." >&2
+  echo "  Usage: check-deploy-config.sh <coordinator.yaml> <gateway.yaml>" >&2
+  exit 1
+fi
+
+# M1-6 follow-up (codex architect re-audit 2026-06-11): the wrapper deploy
+# scripts already refuse the *.example fallback, but the reusable C2 gate
+# itself should reject sample config too. Belt-and-suspenders against a
+# future caller passing the example path explicitly.
+case "$COORD" in
+  *.example) echo "FAIL: sample coordinator config ($COORD) is not deploy input" >&2; exit 1;;
+esac
+case "$GW" in
+  *.example) echo "FAIL: sample gateway config ($GW) is not deploy input" >&2; exit 1;;
+esac
 
 python3 - "$COORD" "$GW" <<'PY'
 import re, sys

@@ -43,13 +43,39 @@ SCP="scp -i $SSH_KEY -P 22"
 
 log() { printf "\n[deploy] %s\n" "$*"; }
 
-log "step 0/9: pre-deploy config-drift + sanity check"
+log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Fail closed before touching the VPS if the config to be deployed has a
 # placeholder operator_key, an unsafe threshold, etc. (see check-deploy-config.sh).
 # Catches the sanitized-config hazard that would otherwise break prod auth.
-bash "$DIST_DIR/check-deploy-config.sh" "$CONFIG" || {
-  echo "aborting deploy: config-drift check failed" >&2; exit 5;
-}
+#
+# M1-6 / DEVE-4: pass BOTH configs so the C2 timer cross-check runs.
+# Previously only $CONFIG was passed, so check-deploy-config.sh silently
+# skipped C2 on every standard coordinator deploy — the past-incident
+# guard was effectively disabled.
+# M1-6 follow-up (codex audits 2026-06-11): the previous .example fallback
+# was a false fail-closed gate — production deploy could pass C2 using
+# SAMPLE timeout values while the real VPS gateway.yaml had drifted.
+# Sample config is documentation, not an operational input. Require a real
+# gateway.yaml or an explicit SKIP_C2_CHECK=1 override.
+GATEWAY_CONFIG_DEFAULT="$DIST_DIR/../../phase5-gateway/dist/gateway.yaml"
+GATEWAY_CONFIG="${GATEWAY_CONFIG:-$GATEWAY_CONFIG_DEFAULT}"
+if [ "${SKIP_C2_CHECK:-0}" = "1" ]; then
+  echo "  SKIP_C2_CHECK=1 set — running coordinator-only check (C2 gate intentionally skipped)" >&2
+  SKIP_C2_CHECK=1 bash "$DIST_DIR/check-deploy-config.sh" "$CONFIG" || {
+    echo "aborting deploy: config-drift check failed" >&2; exit 5;
+  }
+else
+  if [ ! -f "$GATEWAY_CONFIG" ]; then
+    echo "aborting deploy: real gateway.yaml not found for C2 cross-check ($GATEWAY_CONFIG)." >&2
+    echo "  Provide GATEWAY_CONFIG=<path-to-real-gateway.yaml> or set SKIP_C2_CHECK=1" >&2
+    echo "  to deploy without the cross-check. gateway.yaml.example is sample" >&2
+    echo "  documentation and intentionally NOT accepted here." >&2
+    exit 5
+  fi
+  bash "$DIST_DIR/check-deploy-config.sh" "$CONFIG" "$GATEWAY_CONFIG" || {
+    echo "aborting deploy: config-drift check failed" >&2; exit 5;
+  }
+fi
 
 log "step 1/9: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
@@ -125,6 +151,20 @@ $SCP "$BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-linux-amd64"
 $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:/tmp/coordinator.yaml"
 $SCP "$SERVICE" "$VPS_USER@$VPS_HOST:/tmp/macprovider-coordinator.service"
 $SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-coordinator-full.conf"
+
+# M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
+# BEFORE we overwrite it. Step 1b already aborted on drift unless the
+# operator opted in, but the audit also calls for a persistent
+# remote-side backup so a bad deploy can be inspected/reverted without
+# trusting the operator's local copy. Backups live next to the live config
+# at /opt/macprovider/coordinator.yaml.bak-<UTC>.
+BACKUP_TS=$(date -u +%Y%m%dT%H%M%SZ)
+$SSH "if [ -f /opt/macprovider/coordinator.yaml ]; then
+        install -o macprovider -g macprovider -m 0600 /opt/macprovider/coordinator.yaml /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS
+        echo '  remote-config backup saved at /opt/macprovider/coordinator.yaml.bak-$BACKUP_TS'
+      else
+        echo '  no live coordinator.yaml — first deploy, skipping backup'
+      fi"
 
 $SSH "set -e
   install -o macprovider -g macprovider -m 0755 /tmp/coordinator-linux-amd64 /opt/macprovider/coordinator
