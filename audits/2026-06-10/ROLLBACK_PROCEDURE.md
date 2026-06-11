@@ -95,6 +95,22 @@ the `.prev` binary back. Reasoning:
 
 The full version-pin / blue-green path is a future M-tier item.
 
+### `STRICT_PROVENANCE=1` for the binary-predates-instrumentation case
+
+There is one provenance state where the deploy script will exit
+non-zero if the operator opts in: when `/healthz` returns no `version`
+field at all. That case (printed as `CRITICAL provenance MISSING` in
+step 8/9) almost certainly means the deployed binary predates PR #18
+and the entire rollback gate is bypassed — which is qualitatively
+different from a normal "deployed != expected" drift, because the
+operator can't reason about the running code from scrollback alone.
+
+Default is still non-fatal (operator decision). Set
+`STRICT_PROVENANCE=1 bash deploy-pearl-vps.sh` to abort with exit
+code 7 on the missing-version state. Recommended for any deploy
+where downstream automation expects the M0-5 instrumentation to be
+present.
+
 ## Rebuilding the `.prev` snapshot from scratch
 
 If `/opt/macprovider/coordinator.prev` is missing (manual deploys,
