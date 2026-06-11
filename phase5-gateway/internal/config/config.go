@@ -86,6 +86,7 @@ type QuotasConfig struct {
 	DemoDailyTokensPerIP      int64 `yaml:"demo_daily_tokens_per_ip"`
 	DemoSessionsPerIPPerHour  int   `yaml:"demo_sessions_per_ip_per_hour"`
 	AccountConcurrency        int   `yaml:"account_concurrency"`
+	DemoConcurrency           int   `yaml:"demo_concurrency"`
 	SignupAccountsPerIPPerDay int   `yaml:"signup_accounts_per_ip_per_day"`
 	ReaperIntervalHours       uint  `yaml:"reaper_interval_hours"`
 	ReservationMaxAgeHours    uint  `yaml:"reservation_max_age_hours"`
@@ -156,6 +157,7 @@ func Default() Config {
 			DemoDailyTokensPerIP:      1000,
 			DemoSessionsPerIPPerHour:  10,
 			AccountConcurrency:        2,
+			DemoConcurrency:           2,
 			SignupAccountsPerIPPerDay: 3,
 			ReaperIntervalHours:       1,
 			ReservationMaxAgeHours:    24,
@@ -294,6 +296,9 @@ func (c Config) Validate() error {
 	}
 	if c.Quotas.DemoSessionsPerIPPerHour <= 0 || c.Quotas.AccountConcurrency <= 0 || c.Quotas.SignupAccountsPerIPPerDay <= 0 {
 		return fmt.Errorf("quota counters must be positive")
+	}
+	if c.Quotas.DemoConcurrency <= 0 {
+		return fmt.Errorf("quotas.demo_concurrency must be positive")
 	}
 	if c.Quotas.ReaperIntervalHours < 1 {
 		return fmt.Errorf("quotas.reaper_interval_hours must be >= 1")

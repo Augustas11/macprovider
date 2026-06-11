@@ -248,6 +248,62 @@ func TestAccountConcurrencyCap(t *testing.T) {
 	}
 }
 
+// Regression: M1-8 / PERF-6. Demo requests must respect a concurrency cap.
+// Pre-fix the router skipped AcquireConcurrency for demo subjects, so 3+
+// parallel demo requests from a single IP could saturate the MLX-serialized
+// pool for up to CoordinatorTimeout — an accidental DoS against paying
+// buyers. The cap is keyed on subject.AccountID = "demo:<ip>" with IPv6
+// normalized to /64.
+func TestDemoConcurrencyCap(t *testing.T) {
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		entered <- struct{}{}
+		<-release
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+			"id":"chatcmpl_demo_concurrency",
+			"object":"chat.completion",
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2},
+			"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`), nil
+	})}
+	h, _, _, _ := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		cfg.Quotas.DemoConcurrency = 2
+		// Keep daily-token budget high enough that 3 requests don't hit
+		// quota_exhausted (which is checked before concurrency).
+		cfg.Quotas.DemoDailyTokensPerIP = 1_000_000
+		cfg.Limits.DemoMaxTokensPerRequest = 1_000
+	}, WithHTTPClient(client))
+	demo := issueDemoToken(t, h, "1.2.3.4")
+	body := `{"model":"llama","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`
+	headers := map[string]string{"X-Demo-Token": demo, "X-Real-IP": "1.2.3.4"}
+
+	done := make(chan *httptest.ResponseRecorder, 2)
+	for i := 0; i < 2; i++ {
+		go func() { done <- postChat(t, h, "", body, headers) }()
+	}
+	for i := 0; i < 2; i++ {
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("timed out waiting for upstream demo request to enter")
+		}
+	}
+	third := postChat(t, h, "", body, headers)
+	if third.Code != http.StatusTooManyRequests {
+		t.Fatalf("third demo request status=%d body=%s, want 429", third.Code, third.Body.String())
+	}
+	assertErrorCode(t, third.Body.String(), "demo_concurrency_exceeded")
+	close(release)
+	for i := 0; i < 2; i++ {
+		resp := <-done
+		if resp.Code != http.StatusOK {
+			t.Fatalf("in-flight demo response status=%d body=%s", resp.Code, resp.Body.String())
+		}
+	}
+}
+
 func TestProviderUnavailableReturns503AndRefunds(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return responseWithBody(http.StatusServiceUnavailable, nil, ""), nil
