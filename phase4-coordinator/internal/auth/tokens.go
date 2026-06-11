@@ -162,6 +162,56 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	return TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: createdAt}, token, nil
 }
 
+// HasActiveTokenForProvider implements SPEC-003 v0.8 FR-C9.4 TOFU
+// (trust-on-first-use): returns true when at least one unrevoked token
+// exists for `providerID`. The coordinator uses this to refuse minting a
+// second token for an already-known provisional `provider_id` — closing
+// the credential-capture vector flagged by the codex security audit on
+// PR #44, where an attacker could otherwise mint a parallel valid
+// bearer for someone else's declared provider_id during the settling
+// window.
+//
+// Callers must treat (false, nil) as "OK to mint" and (true, nil) as
+// "MUST refuse tokenless admission". An error indicates the gate could
+// not be evaluated; the coordinator MUST fail closed in that case.
+func (s *Store) HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return false, fmt.Errorf("provider id is required")
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM provider_tokens WHERE provider_id = ? AND revoked_at IS NULL`,
+		providerID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// PruneUnusedTokens deletes tokens whose `last_used_at` is NULL and
+// whose `created_at` is older than the supplied cutoff time. Returns the
+// number of rows pruned. Used by `coordinator-cli prune-tokens` to bound
+// the operational cost of FR-C9.4 multi-mint-then-self-heal — a token
+// that has never been used to authenticate and is older than the
+// settling window is safe to drop.
+//
+// The cutoff is compared as ISO-8601 strings; tokens.go nowString
+// formats `created_at` in the same `2006-01-02T15:04:05Z` shape, and
+// lexicographic comparison is monotonic within that format.
+func (s *Store) PruneUnusedTokens(ctx context.Context, olderThan time.Time) (int64, error) {
+	cutoff := olderThan.UTC().Format("2006-01-02T15:04:05Z")
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM provider_tokens WHERE last_used_at IS NULL AND revoked_at IS NULL AND created_at < ?`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) ValidateToken(ctx context.Context, token string) (string, bool, error) {
 	if token == "" {
 		return "", false, nil

@@ -114,33 +114,55 @@ public enum ProviderTokenPersist {
 
     /// Pure helper exposed for testing — given existing config text and
     /// a token, return the text after surgical replace/append of the
-    /// `provider_token:` line. Top-level keys only; no nesting.
+    /// top-level `provider_token:` line. Top-level keys ONLY; indented
+    /// nested keys (e.g. `provider_token:` under `auth:`) are SKIPPED
+    /// without modification. Codex code-reviewer + security-reviewer on
+    /// PR #44 flagged the pre-fix version: trimming whitespace before
+    /// the prefix check could clobber an indented `provider_token:` and
+    /// rewrite it as a top-level key, breaking the parent block.
+    ///
+    /// Behavior:
+    ///   - Lines that start with `provider_token:` at column 0 are
+    ///     replaced. ALL such lines are replaced (not just the first)
+    ///     so duplicate-key configs converge to a single canonical line
+    ///     — code-reviewer MAJOR-2 fix.
+    ///   - Lines that start with whitespace then `provider_token:` are
+    ///     preserved verbatim — they belong to a nested block this
+    ///     helper does not own.
+    ///   - Comment lines (e.g. `# provider_token: legacy notes`) are
+    ///     preserved verbatim because they do not start with the bare
+    ///     key.
+    ///   - If no top-level `provider_token:` line existed, one is
+    ///     appended.
     public static func applyProviderTokenLine(in existing: String, token: String) -> String {
         let lines = existing.split(separator: "\n", omittingEmptySubsequences: false)
-        var replaced = false
+        var replacedAny = false
         var output: [String] = []
         output.reserveCapacity(lines.count + 1)
+        let newLine = "provider_token: \(token)"
         for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if !replaced && trimmed.hasPrefix("provider_token:") {
-                output.append("provider_token: \(token)")
-                replaced = true
-            } else {
-                output.append(String(line))
+            // Top-level match ONLY — no whitespace trim. An indented
+            // `provider_token:` inside e.g. an `auth:` block stays put.
+            if line.hasPrefix("provider_token:") {
+                if !replacedAny {
+                    output.append(newLine)
+                    replacedAny = true
+                }
+                // Skip subsequent top-level provider_token lines so
+                // duplicates do not survive in the rewritten file.
+                continue
             }
+            output.append(String(line))
         }
-        if !replaced {
-            // Ensure trailing newline before append so the new line is
-            // its own record, not glued to the previous one.
-            if !output.isEmpty && !output.last!.isEmpty {
-                output.append("provider_token: \(token)")
-            } else if output.isEmpty {
-                output.append("provider_token: \(token)")
+        if !replacedAny {
+            if output.isEmpty {
+                output.append(newLine)
+            } else if !output.last!.isEmpty {
+                output.append(newLine)
             } else {
-                // Last element is empty (file ended with \n) — replace
-                // that empty slot with the token line so the file ends
-                // with exactly one newline after the rewrite.
-                output[output.count - 1] = "provider_token: \(token)"
+                // File ended with \n — replace the trailing empty
+                // sentinel with the token line and add a fresh \n.
+                output[output.count - 1] = newLine
                 output.append("")
             }
         }

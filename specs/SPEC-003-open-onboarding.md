@@ -1,13 +1,15 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.8 (2026-06-11, Q2 self-serve provisional token)
+**Version:** 0.8.1 (2026-06-11, post-audit hardening: TOFU + non-blocking persist)
 **Depends on:** SPEC-001 v1.3.1, SPEC-002 v1.3.5
 
 **Change log v0.6:** Resolves cross-spec findings F-603-1 and F-603-2 from `specs/SPEC-CROSS-006-audit.md`: the installer visibility self-test now references SPEC-002 v1.1.4's coordinator-owned `GET /v1/pool/check`, and dependencies align to SPEC-001 v1.2.2 + SPEC-002 v1.1.4.
 
 **Change log v0.7:** Resolves six v1.2.4 partner-upgrade follow-ups from Decision log Entry 22, building on the Entry 20 install.sh bug class: F-603-V7-1 existing config port detection, F-603-V7-2 own-service port holder stop, F-603-V7-4 real binary path in launchd plist for Swift Bundle resolution, F-603-V7-5 cold-cache 20-minute wait, F-603-V7-6 diagnostic self-test timeout messaging, and F-603-V7-7 mixed-state install-dir warning. F-603-V7-3 and F-603-V7-8 were retracted and are not part of v0.7.
 
-**Change log v0.8:** Closes Open Q2 from Decision log Entry 59 (provider-token issuance model for open onboarding). v0.8 picks self-serve provisional token minting and adds the normative contract under § 4 as **FR-C9**. The coordinator MINTs a fresh `provider_token` on every tokenless provisional admission and returns it in both the v1 `hello_ack` and v2 `auth_response` (initial-stage acceptance) frames under a new OPTIONAL field `assigned_provider_token`. The phase3-binary MUST persist the returned token to its on-disk config under the existing `auth.provider_token` key with file mode 0600 via atomic-rename. Pinned-tier token issuance (Entry 59 / M1-1) is unchanged — operator-issued via `coordinator-cli issue-token`. Dependencies bump to SPEC-001 v1.3.1 (M1-1 Bearer-on-WS-connect plumbing) and SPEC-002 v1.3.5 (locked, no coordinator-side schema change required). See Decision log Entry 60 for the full ruling and the rationale for dual-path delivery (the binary's default first frame is v1 `hello`, not v2 `auth_request`, so the v1 `hello_ack` path is the primary delivery channel for the actual target population — provisional strangers).
+**Change log v0.8:** Closes Open Q2 from Decision log Entry 59 (provider-token issuance model for open onboarding). v0.8 picks self-serve provisional token minting and adds the normative contract under § 4 as **FR-C9**. The coordinator MINTs a fresh `provider_token` on every tokenless provisional admission and returns it in both the v1 `hello_ack` and v2 `auth_response` (initial-stage acceptance) frames under a new OPTIONAL field `assigned_provider_token`. The phase3-binary MUST persist the returned token to its on-disk config under the existing top-level `provider_token` YAML key with file mode 0600 via atomic-rename. Pinned-tier token issuance (Entry 59 / M1-1) is unchanged — operator-issued via `coordinator-cli issue-token`. Dependencies bump to SPEC-001 v1.3.1 (M1-1 Bearer-on-WS-connect plumbing) and SPEC-002 v1.3.5 (locked, no coordinator-side schema change required). See Decision log Entry 60 for the full ruling and the rationale for dual-path delivery (the binary's default first frame is v1 `hello`, not v2 `auth_request`, so the v1 `hello_ack` path is the primary delivery channel for the actual target population — provisional strangers).
+
+**Change log v0.8.1:** Post-merge audit hardening from three codex auditors (code-reviewer / security-reviewer / architect) on the v0.8 implementation in PR #44. **(a)** FR-C9.4 rewritten from "multi-mint on tokenless reconnect" to **TOFU (trust-on-first-use)**: once an unrevoked token exists for a `provider_id`, the coordinator MUST refuse tokenless admission with `CloseInvalidToken / "invalid_token"`. This closes the security-MAJOR credential-capture exploit where an attacker could declare a victim's `provider_id` on a tokenless connect and harvest a valid bearer for it. Persist-failure self-healing is now an operator-action (revoke + retry), not an automatic re-mint. **(b)** FR-C9.3 binary-side persist relaxed from "MUST NOT block the WS receive loop" by moving from a strict prohibition to a "SHOULD offload" with the implementation using a detached Task. The previous inline implementation violated the contract. **(c)** Config key contract clarified everywhere: the binary writes the **top-level** YAML key `provider_token`, not `auth.provider_token`. Prior prose in v0.8 referenced the nested path; SPEC-001 and the actual `ConfigLoader` use flat. **(d)** Normative interaction with SPEC-002 v1.3.5 FR-P12 / PG-1 spelled out: SPEC-003 v0.8 supersedes those locked clauses for tokenless provisional admission under `require_provider_tokens=true`. **(e)** Operator-side prune is now normative: `coordinator-cli prune-tokens [--apply]` removes never-used unrevoked tokens older than the supplied cutoff. **(f)** Coordinator-side adds a separate `TokenIssuer` interface alongside `TokenValidator` (interface segregation per architect MINOR-2).
 
 **Restructure note (v0.2).** SPEC-003 v0.1 contained four parts in a
 single document. v0.2 redistributes them to avoid cross-spec drift:
@@ -517,26 +519,42 @@ The minted token MUST be returned to the binary in BOTH ack frames under the fie
 
 Both ack writes happen AFTER `prepareProviderAdmission` and AFTER `releaseUnauth()`, on the path that also calls `s.tokens.MarkTokenUsed` for already-validated tokens. The mint hook is symmetric: same condition (`s.tokens != nil && !auth.validated`), same call shape, different surrounding struct.
 
-**FR-C9.3. Binary MUST persist atomically with 0600 perms.**
+**FR-C9.3. Binary MUST persist atomically with 0600 perms; persist SHOULD NOT block the WS receive loop.**
 On receipt of an ack frame carrying `assigned_provider_token`, the phase3-binary MUST:
 
-1. Write the token value to a temporary file in the same directory as the config file (`macprovider.yaml`), with file mode 0600 set BEFORE writing the secret.
-2. Atomically rename the temp file to the final config file path (`rename(2)` semantics — POSIX-atomic on same-filesystem renames).
-3. Reload the in-memory `Config` so the next reconnect sends `Authorization: Bearer <new_token>`.
+1. Adopt the token in-memory immediately so the next reconnect can use it.
+2. Write the token value to a temporary file in the same directory as the config file, with file mode 0600 set BEFORE writing the secret.
+3. Atomically rename the temp file to the final config file path (`rename(2)` semantics — POSIX-atomic on same-filesystem renames).
+4. Match a **top-level** YAML key only: `provider_token: <value>`. Indented `provider_token:` entries nested under a parent block (e.g. an `auth:` map) MUST be preserved verbatim; the persist routine owns only the top-level key. If multiple top-level `provider_token:` lines exist (from a prior botched write), ALL such lines MUST be collapsed to a single canonical entry with the new value.
 
-The persist MUST NOT block the WS receive loop. On persist failure (disk full, permission denied, parent directory missing) the binary MUST log a warning with structured fields (`event=provider_token_persist_failed`, `error=<cause>`, `config_path=<resolved>`), continue serving the current WS session, and NOT crash. The next reconnect with no token triggers a fresh mint (per FR-C9.4), so a transient persist failure self-heals.
+The persist write SHOULD execute outside the WS receive loop (e.g. via a detached task) so disk I/O cannot stall heartbeats or inference frames. v0.8.1 hardening (PR #44 post-audit): the v0.8 implementation that performed persist inline was a contract violation flagged by the codex architect — implementations MUST move it off the receive loop.
 
-The persist target is the `auth.provider_token` YAML key (already wired by M1-1). If the config file already has a token populated, the new one REPLACES it. The binary MUST NOT keep both old and new tokens; the coordinator-side `provider_tokens` row for the old token remains unrevoked (operator may prune via `coordinator-cli revoke-token` if desired) but the binary will not use it again.
+On persist failure (disk full, permission denied, parent directory missing) the binary MUST log a JSON-encoded structured-log line with `event=provider_token_persist_failed`, `error=<cause>`, `config_path=<resolved>`, continue serving the current WS session with the in-memory token, and NOT crash. The JSON line MUST be encoded via a JSON encoder, not hand-built string interpolation, so embedded quotes/newlines/backslashes in the error description or path cannot break the JSON envelope.
 
-**FR-C9.4. Multi-mint on tokenless reconnect is intentional.**
-The coordinator MUST NOT attempt to deduplicate token issuance across sessions, MUST NOT look up prior unrevoked tokens for the same `provider_id` to "reuse" them (the clear-text is gone after first issuance — only the SHA-256 hash is stored), and MUST NOT serialize tokenless connects from the same `provider_id` waiting for a prior session to terminate. Every tokenless provisional admission gets a fresh row.
+The persist target is the top-level `provider_token` YAML key (already wired by M1-1 SPEC-001 v1.3.1 § config). If the config file already has a top-level token populated, the new one REPLACES it. Pre-v0.8.1 prose referenced `auth.provider_token` (nested); the correct contract is flat top-level.
 
-Rationale: a failed binary-side persist (FR-C9.3) means the binary reconnects tokenless and must successfully mint again. A "mint once, never again" policy would brick that provider permanently. Multi-mint also keeps the coordinator-side code path stateless across sessions. The cost is a small accumulation of unused rows in `provider_tokens`; operators MAY prune rows where `last_used_at IS NULL AND created_at < N days ago` via standard SQL or future admin tooling. `last_used_at` is maintained by the existing `MarkTokenUsed` call, so live tokens are always distinguishable from stale ones.
+**FR-C9.4. TOFU (trust-on-first-use): refuse a second token for a known provider_id.**
+When a tokenless connect arrives for a `provider_id` that already has an unrevoked row in `provider_tokens`, the coordinator MUST refuse admission with close code `CloseInvalidToken / "invalid_token"`. The coordinator MUST NOT mint a parallel token for an in-use identity. Implementations evaluate this via `HasActiveTokenForProvider(provider_id)`; on DB error the gate fails CLOSED (reject).
+
+Pre-v0.8.1 this clause specified "multi-mint on tokenless reconnect is intentional" so failed persists could self-heal automatically. The codex security audit on PR #44 (MAJOR-1) demonstrated that this design lets an attacker who declares a victim's `provider_id` on a tokenless connect harvest a valid bearer for it during the settling window. TOFU closes that vector at the cost of automatic self-healing: a binary that suffers a persist failure on its self-mint will reconnect tokenless, hit the TOFU gate, and be rejected with `invalid_token`. The operator notices the `event=provider_token_persist_failed` log and runs:
+
+```
+coordinator-cli revoke-token --token-prefix <prefix from list-tokens>
+# then restart the provider binary; next connect self-mints cleanly
+```
+
+The cost is operator labor in the (rare) persist-failure case; the gain is closing the credential-capture exploit at the (common) attacker-spam case. The trade was made explicit in DECISION_CRITERIA Entry 61.
+
+Operator-side bounded-cleanup is normative: `coordinator-cli prune-tokens [--older-than 168h] [--apply]` removes rows where `last_used_at IS NULL AND revoked_at IS NULL AND created_at < cutoff`. `last_used_at` is maintained by the existing `MarkTokenUsed` call, so live tokens are always distinguishable from stale ones.
 
 **FR-C9.5. Compatibility cutoff at flag flip.**
-When the operator flips `auth.require_provider_tokens=true` (Decision log Entry 59 forecast; Entry 60 confirmed), tokenless connects are rejected at `validateProviderToken` BEFORE reaching admission. After the flip, FR-C9.1's mint path is unreachable for new connects — only providers holding a valid token (operator-issued OR previously self-minted) connect. The flag flip is therefore safe AFTER:
+When the operator flips `auth.require_provider_tokens=true` (Decision log Entry 59 forecast; Entry 60 confirmed), tokenless connects are rejected at `validateProviderToken` BEFORE reaching admission. After the flip, FR-C9.1's mint path is unreachable for new connects — only providers holding a valid token (operator-issued OR previously self-minted) connect.
 
-1. The new coordinator binary carrying FR-C9.1/FR-C9.2 is deployed on Pearl.
+**Supersedes SPEC-002 v1.3.5 FR-P12 / PG-1 for tokenless provisional admission.** Those locked clauses say provisional providers may continue without tokens under `require_provider_tokens=true`; SPEC-003 v0.8.1 explicitly narrows that to "providers with at least one unrevoked token row." The locked SPEC-002 text is intentionally preserved as-is; this supersede is normative for the open-onboarding tier (per codex architect MAJOR-1, PR #44). A future SPEC-002 revision SHOULD amend FR-P12 / PG-1 to reflect this.
+
+The flag flip is safe AFTER:
+
+1. The new coordinator binary carrying FR-C9.1/FR-C9.2/FR-C9.4 is deployed on Pearl.
 2. A new release tag of `macprovider-cli` carrying FR-C9.3 is published and `install.sh`'s `latest_release_tag()` resolves to it.
 3. A settling window (≥24h, operator's discretion) has elapsed during which existing provisional providers reconnect at least once and self-mint.
 

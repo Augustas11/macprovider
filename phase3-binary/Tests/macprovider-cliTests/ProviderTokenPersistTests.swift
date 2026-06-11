@@ -129,6 +129,94 @@ final class ProviderTokenPersistTests: XCTestCase {
         XCTAssertTrue(onDisk.contains("provider_token: \(token)"))
     }
 
+    // SPEC-003 v0.8 FR-C9.3 — codex code-reviewer MAJOR-1 fix:
+    // an indented `provider_token:` (e.g. nested under `auth:`) MUST
+    // be preserved verbatim, not rewritten as a top-level key. Pre-fix
+    // the line was matched after trimmingCharacters, which collapsed an
+    // `auth: { provider_token: ... }` block into a top-level field and
+    // broke the parent block.
+    func testApplyProviderTokenLinePreservesIndentedNestedKey() {
+        let existing = """
+        port: 8080
+        auth:
+          provider_token: legacy-nested-value
+        model: m
+        """
+        let result = ProviderTokenPersist.applyProviderTokenLine(
+            in: existing,
+            token: String(repeating: "e", count: 64)
+        )
+        // The nested key must survive untouched.
+        XCTAssertTrue(result.contains("  provider_token: legacy-nested-value"),
+                      "indented provider_token must be preserved verbatim: \(result)")
+        // And a fresh top-level line must have been APPENDED.
+        let topLevel = result.split(separator: "\n").filter { line in
+            line.hasPrefix("provider_token:")
+        }
+        XCTAssertEqual(topLevel.count, 1,
+                       "expected exactly one top-level provider_token line, got \(topLevel.count): \(result)")
+        XCTAssertTrue(result.contains("provider_token: " + String(repeating: "e", count: 64)))
+        // Sibling top-level keys preserved.
+        XCTAssertTrue(result.contains("port: 8080"))
+        XCTAssertTrue(result.contains("model: m"))
+    }
+
+    // SPEC-003 v0.8 FR-C9.3 — codex code-reviewer MAJOR-2 fix:
+    // when the config has multiple top-level `provider_token:` lines
+    // (e.g. from a botched earlier write), ALL must be replaced. Pre-
+    // fix, only the first was rewritten and the rest survived, and the
+    // YAML parser's pick between them was undefined.
+    func testApplyProviderTokenLineReplacesAllDuplicateTopLevelLines() {
+        let existing = """
+        port: 8080
+        provider_token: first-old-value
+        model: m
+        provider_token: second-old-value
+        coordinator_url: wss://example
+        provider_token: third-old-value
+        """
+        let result = ProviderTokenPersist.applyProviderTokenLine(
+            in: existing,
+            token: String(repeating: "f", count: 64)
+        )
+        let topLevel = result.split(separator: "\n").filter { line in
+            line.hasPrefix("provider_token:")
+        }
+        XCTAssertEqual(topLevel.count, 1,
+                       "expected exactly one provider_token line after dedup, got \(topLevel.count): \(result)")
+        XCTAssertTrue(result.contains("provider_token: " + String(repeating: "f", count: 64)),
+                      "expected new token to be the only one: \(result)")
+        for oldValue in ["first-old-value", "second-old-value", "third-old-value"] {
+            XCTAssertFalse(result.contains(oldValue),
+                           "old duplicate value \(oldValue) must not survive: \(result)")
+        }
+        // Sibling keys preserved.
+        XCTAssertTrue(result.contains("port: 8080"))
+        XCTAssertTrue(result.contains("model: m"))
+        XCTAssertTrue(result.contains("coordinator_url: wss://example"))
+    }
+
+    // SPEC-003 v0.8 FR-C9.3 — codex security audit NIT/comment-clobber
+    // edge case: a comment line containing `provider_token:` as text
+    // (e.g. `# provider_token: <legacy notes>`) MUST be preserved
+    // verbatim. The prefix-only matcher already passes this because
+    // comment lines start with `#`, but we lock the contract with a
+    // regression test.
+    func testApplyProviderTokenLinePreservesCommentLines() {
+        let existing = """
+        port: 8080
+        # provider_token: historical-note do not change
+        coordinator_url: wss://example
+        """
+        let result = ProviderTokenPersist.applyProviderTokenLine(
+            in: existing,
+            token: String(repeating: "9", count: 64)
+        )
+        XCTAssertTrue(result.contains("# provider_token: historical-note do not change"),
+                      "comment with provider_token text must be preserved: \(result)")
+        XCTAssertTrue(result.contains("provider_token: " + String(repeating: "9", count: 64)))
+    }
+
     private func makeTempDir() throws -> String {
         let dir = NSTemporaryDirectory() + "macprovider-token-persist-tests-\(UUID().uuidString)"
         try FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: false)

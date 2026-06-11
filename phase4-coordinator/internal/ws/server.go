@@ -53,6 +53,13 @@ type Server struct {
 	pending   sync.Map
 	warmups   sync.Map
 	tokens    TokenValidator
+	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
+	// issuer roles can be wired independently. Production wires the same
+	// concrete *auth.Store to both (see main.go), but tests can override
+	// mint behavior (e.g. mintFailingStore) without touching the
+	// validator. Codex architect review on PR #44 flagged the
+	// interface-segregation regression of mixing both on TokenValidator.
+	issuer    TokenIssuer
 	admission *AdmissionManager
 	sessions  sync.Map
 	started   time.Time
@@ -68,13 +75,32 @@ type Server struct {
 	authAttempts *authAttemptStore
 }
 
+// TokenValidator handles inspection of a Bearer header on the WS connect.
+// Intentionally narrow — issuance is a separate concern (see TokenIssuer)
+// so test seams can mock validation independently.
 type TokenValidator interface {
 	ValidateToken(context.Context, string) (string, bool, error)
 	MarkTokenUsed(context.Context, string) error
-	// SPEC-003 v0.8 FR-C9.1 — coordinator mints provisional tokens on
-	// tokenless first admission. Returns (record, cleartext_token, err);
-	// only the cleartext is used in the ack frame, the record is logged.
+}
+
+// TokenIssuer handles SPEC-003 v0.8 FR-C9.1 self-serve provisional token
+// minting plus FR-C9.4 TOFU enforcement. Split from TokenValidator per
+// the codex architect review on PR #44 (interface segregation): a future
+// deployment may wire a validator backed by a remote service while
+// issuance remains local, or vice versa. Production wires the same
+// concrete *auth.Store to both, but the two roles are decoupled at the
+// interface layer so the seam exists when needed.
+type TokenIssuer interface {
+	// IssueToken returns (record, cleartext_token, err); only the
+	// cleartext is used in the ack frame, the record is logged.
 	IssueToken(ctx context.Context, providerID, providerName string) (auth.TokenRecord, string, error)
+	// HasActiveTokenForProvider implements FR-C9.4 TOFU: when true, the
+	// server MUST refuse to mint a second token for the same provider_id
+	// and MUST close the tokenless connection. Closes the
+	// credential-capture attack flagged by the codex security audit on
+	// PR #44 — without TOFU, an attacker could spam tokenless connects
+	// declaring a victim's provider_id and harvest a valid bearer.
+	HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error)
 }
 
 type providerAuth struct {
@@ -88,6 +114,17 @@ type Option func(*Server)
 func WithTokenValidator(tokens TokenValidator) Option {
 	return func(s *Server) {
 		s.tokens = tokens
+	}
+}
+
+// WithTokenIssuer installs the SPEC-003 v0.8 FR-C9 self-serve issuance
+// backend. Separate from WithTokenValidator so tests can inject mint
+// failures (mintFailingStore in provider_token_self_serve_test.go)
+// without disturbing validator behavior. Production wiring passes the
+// same *auth.Store to both options.
+func WithTokenIssuer(issuer TokenIssuer) Option {
+	return func(s *Server) {
+		s.issuer = issuer
 	}
 }
 
@@ -365,40 +402,73 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 	}
 }
 
-// maybeIssueProvisionalToken implements SPEC-003 v0.8 FR-C9.1 — self-serve
-// provisional token minting. Returns the cleartext token to inject into
-// the ack frame, or "" when the caller MUST NOT include
-// assigned_provider_token in the ack.
+// provisionalTokenOutcome captures the three possible results of a
+// tokenless admission's pre-ack mint decision. Splitting from the prior
+// "return string-or-empty" shape closes the codex security audit's
+// MAJOR finding on PR #44: an empty string was ambiguous between "mint
+// not needed" and "mint refused", so callers had no way to distinguish
+// admit-without-token from must-close. The reject path is now explicit
+// and the caller closes the connection before the ack frame is written.
+type provisionalTokenOutcome int
+
+const (
+	// provisionalTokenSkip — caller MUST NOT include assigned_provider_token
+	// in the ack and SHOULD proceed with admission. Triggers: no issuer
+	// configured, or the connect arrived with a validated Bearer.
+	provisionalTokenSkip provisionalTokenOutcome = iota
+	// provisionalTokenMinted — caller MUST include the returned token in
+	// the ack frame so the binary can persist it (FR-C9.3).
+	provisionalTokenMinted
+	// provisionalTokenRejectTOFU — caller MUST close the connection with
+	// CloseInvalidToken / "invalid_token" before admission. An active
+	// token already exists for this provider_id; minting a second one
+	// would let an attacker harvest a valid bearer for someone else's
+	// declared identity (codex security audit MAJOR-1, PR #44).
+	provisionalTokenRejectTOFU
+)
+
+// resolveProvisionalToken implements SPEC-003 v0.8 FR-C9.1 (mint) and
+// FR-C9.4 TOFU (refuse second mint for a known provider_id). It is the
+// single decision point the v1 hello_ack and v2 auth_response paths both
+// call before constructing their ack frame.
 //
-// Mint conditions (all must hold):
-//   - The token store is configured (s.tokens != nil).
-//   - The connection arrived without a validated Bearer (!auth.validated).
+// Algorithm:
+//  1. If the issuer is not wired OR the connect already validated a
+//     Bearer: return Skip — no mint needed, no token in ack.
+//  2. Query HasActiveTokenForProvider. If TRUE: return RejectTOFU —
+//     attacker (or a confused legitimate retry) is trying to mint a
+//     parallel credential for an already-claimed provider_id.
+//  3. Mint. On success: return Minted + cleartext.
+//  4. On mint failure (DB error): return Skip and log — the connection
+//     is admitted tokenless, the operator notices via the warning log,
+//     and the binary's next connect retries cleanly (because
+//     HasActiveTokenForProvider will still be false).
 //
-// The second condition is equivalent to "provisional tier" at this call
-// site, because prepareProviderAdmission rejects pinned providers that
-// lack a validated token BEFORE we reach the ack-write path. So a
-// tokenless connection that survives admission is provisional by
-// construction.
-//
-// IssueToken failure (DB error) is non-fatal per FR-C9.1: log a warning
-// and return "" so the provider connects without a token. The next
-// reconnect will mint again (FR-C9.4 multi-mint).
-func (s *Server) maybeIssueProvisionalToken(auth providerAuth, providerID, providerName string) string {
-	if s.tokens == nil || auth.validated {
-		return ""
+// On HasActiveTokenForProvider DB error: FAIL CLOSED with RejectTOFU.
+// We MUST NOT mint in the dark when the gate could not be evaluated —
+// that's the same posture validateProviderToken adopts when
+// ValidateToken errors.
+func (s *Server) resolveProvisionalToken(auth providerAuth, providerID, providerName string) (provisionalTokenOutcome, string) {
+	if s.issuer == nil || auth.validated {
+		return provisionalTokenSkip, ""
 	}
-	if providerName == "" {
-		// Defensive: hostname is requireString-enforced at parse time,
-		// but keep the synthesis for symmetry with FR-C9.1.
-		providerName = "provisional:" + providerID
-	}
-	_, token, err := s.tokens.IssueToken(context.Background(), providerID, providerName)
+	ctx := context.Background()
+	hasActive, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
 	if err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("self-serve provisional token mint failed; admitting tokenless and relying on FR-C9.4 retry on next connect")
-		return ""
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 TOFU gate evaluation failed; closing tokenless connect (fail closed)")
+		return provisionalTokenRejectTOFU, ""
 	}
-	s.log.Info().Str("provider_id", providerID).Msg("self-serve provisional token minted on first tokenless admission")
-	return token
+	if hasActive {
+		s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 TOFU: tokenless connect refused; an active token already exists for this provider_id (operator can revoke + retry if this is the legitimate provider after a persist failure)")
+		return provisionalTokenRejectTOFU, ""
+	}
+	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.1 self-serve mint failed; admitting tokenless. Next reconnect will retry mint since no row was written.")
+		return provisionalTokenSkip, ""
+	}
+	s.log.Info().Str("provider_id", providerID).Msg("FR-C9.1 self-serve provisional token minted on first tokenless admission")
+	return provisionalTokenMinted, token
 }
 
 func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
@@ -423,15 +493,20 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	if !ok {
 		return "", ""
 	}
+	// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for an
+	// already-known provider_id. Must run BEFORE registerProviderSession
+	// so a rejected attacker never enters the pool. Same close code as
+	// pinned-tokenless rejection (CloseInvalidToken / "invalid_token");
+	// the operator runbook + log message tell legitimate providers that
+	// a persist-failure recovery requires `coordinator-cli revoke-token`.
+	outcome, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
+	if outcome == provisionalTokenRejectTOFU {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
 	session := s.registerProviderSession(conn, entry)
 	releaseUnauth()
 
-	// SPEC-003 v0.8 FR-C9.1/FR-C9.2 — mint a fresh provisional token for
-	// tokenless admission, embed it in hello_ack so the binary can persist
-	// (FR-C9.3). Mint AFTER admission is approved and BEFORE ack write so
-	// an ack-write failure does not orphan a coordinator-side row without
-	// promising it to the binary.
-	assignedProviderToken := s.maybeIssueProvisionalToken(auth, entry.ProviderID, hello.Hostname)
 	ack := HelloAck{
 		Type:                     "hello_ack",
 		CoordinatorVersion:       1,
@@ -654,12 +729,16 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		// no-op delete.
 		s.authAttempts.release(authAttemptID)
 	}
+	// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for an
+	// already-known provider_id. Must run BEFORE registerProviderSession
+	// so a rejected attacker never enters the pool. v2 path mirrors v1.
+	outcome, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
+	if outcome == provisionalTokenRejectTOFU {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
 	session := s.registerProviderSession(conn, entry)
 	releaseUnauth()
-	// SPEC-003 v0.8 FR-C9.1/FR-C9.2 — same hook as v1, applied at the
-	// proof-stage-accepted auth_response site only. Rejection-shaped
-	// auth_response paths (sendAuthRejection) never set this field.
-	assignedProviderToken := s.maybeIssueProvisionalToken(auth, entry.ProviderID, initial.Hostname)
 	response := AuthResponse{
 		Type:                     "auth_response",
 		Version:                  2,

@@ -2526,6 +2526,13 @@ func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValid
 	allServerOpts := append([]providerws.Option(nil), serverOpts...)
 	if validator != nil {
 		allServerOpts = append(allServerOpts, providerws.WithTokenValidator(validator))
+		// SPEC-003 v0.8 FR-C9.1 — when the harness ships a TokenValidator
+		// that also satisfies TokenIssuer (i.e. *auth.Store or
+		// mintFailingStore), wire it as the issuer too so the self-serve
+		// path is exercised. Validator-only mocks skip this branch.
+		if issuer, ok := validator.(providerws.TokenIssuer); ok {
+			allServerOpts = append(allServerOpts, providerws.WithTokenIssuer(issuer))
+		}
 	}
 	server := providerws.NewServer(cfg, registry, zerolog.Nop(), allServerOpts...)
 	return providerHarness{
