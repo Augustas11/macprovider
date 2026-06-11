@@ -1114,17 +1114,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				logAttempt(provider, statusForForwardResult(result), attempt)
-				nextRouteID := uuid.NewString()
-				next, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
-				if routeErr != nil {
-					routingDone = s.now()
-					logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
-					writeRouteError(w, routeErr)
+				next, nextRouteID, ok := s.advanceToNextProvider(w, r, req, excluded, &routingDone, &explicitRetries, &faultedProviders, logRow)
+				if !ok {
 					return
 				}
-				routingDone = s.now()
-				explicitRetries++
-				faultedProviders++
 				provider = next
 				excluded[routeKey(provider)] = struct{}{}
 				s.logRoutingDecision(nextRouteID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
@@ -1148,17 +1141,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			logAttempt(provider, status, attempt)
-			nextRouteID := uuid.NewString()
-			next, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
-			if routeErr != nil {
-				routingDone = s.now()
-				logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
-				writeRouteError(w, routeErr)
+			next, nextRouteID, ok := s.advanceToNextProvider(w, r, req, excluded, &routingDone, &explicitRetries, &faultedProviders, logRow)
+			if !ok {
 				return
 			}
-			routingDone = s.now()
-			explicitRetries++
-			faultedProviders++
 			provider = next
 			excluded[routeKey(provider)] = struct{}{}
 			s.logRoutingDecision(nextRouteID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
@@ -1189,17 +1175,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				logAttempt(provider, http.StatusGatewayTimeout, attempt)
-				nextRouteID := uuid.NewString()
-				next, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
-				if routeErr != nil {
-					routingDone = s.now()
-					logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
-					writeRouteError(w, routeErr)
+				next, _, ok := s.advanceToNextProvider(w, r, req, excluded, &routingDone, &explicitRetries, &faultedProviders, logRow)
+				if !ok {
 					return
 				}
-				routingDone = s.now()
-				explicitRetries++
-				faultedProviders++
 				provider = next
 				excluded[routeKey(provider)] = struct{}{}
 				if provider.IsWSTunneled() {
@@ -1347,21 +1326,57 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			errMsg = err.Error()
 		}
 		logProviderRow(provider, failStatus, nil, nil, errMsg, attempt.ErrorCode, explicitRetries)
-		nextRouteID := uuid.NewString()
-		next, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
-		if routeErr != nil {
-			routingDone = s.now()
-			logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
-			writeRouteError(w, routeErr)
+		next, nextRouteID, ok := s.advanceToNextProvider(w, r, req, excluded, &routingDone, &explicitRetries, &faultedProviders, logRow)
+		if !ok {
 			return
 		}
-		routingDone = s.now()
-		explicitRetries++
-		faultedProviders++
 		provider = next
 		excluded[routeKey(provider)] = struct{}{}
 		s.logRoutingDecision(nextRouteID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
 	}
+}
+
+// forwardLogRowFunc is the signature of the `logRow` closure inside
+// handleChatCompletions. Hoisted into a named type so advanceToNextProvider
+// can accept the closure as a parameter without re-spelling the
+// 7-parameter signature.
+type forwardLogRowFunc func(providerAssignedID string, status int, promptTok, completionTok *int64, errMsg, errCode string, retried int)
+
+// advanceToNextProvider performs the per-retry "pick a fresh provider,
+// dispatch the route-error response on no-candidate, bump explicitRetries
+// and faultedProviders" tail that the 2026-06-10 audit (ARCH-1 / CODE-1)
+// flagged as a 5×-duplicated block inside handleChatCompletions. This
+// sub-PR (M2-1a) is a pure mechanical extraction with zero behaviour
+// diff — the caller is still responsible for the per-site suffix
+// (updating excluded, emitting logRoutingDecision, and any loop-control
+// continue/break) because those vary across callsites. Sub-PRs 1b and 1c
+// unify the three transport loops into a single failover skeleton.
+//
+// Returns (next provider, nextRouteID used for routing-decision logging,
+// ok). ok=false means a route error has already been written to w and
+// the caller MUST return from handleChatCompletions immediately.
+func (s *Server) advanceToNextProvider(
+	w http.ResponseWriter,
+	r *http.Request,
+	req chatRequest,
+	excluded map[string]struct{},
+	routingDone *time.Time,
+	explicitRetries *int,
+	faultedProviders *int,
+	logRow forwardLogRowFunc,
+) (next pool.Provider, nextRouteID string, ok bool) {
+	nextRouteID = uuid.NewString()
+	picked, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
+	if routeErr != nil {
+		*routingDone = s.now()
+		logRow("", routeErr.status, nil, nil, routeErr.message, "", *explicitRetries)
+		writeRouteError(w, routeErr)
+		return pool.Provider{}, "", false
+	}
+	*routingDone = s.now()
+	*explicitRetries++
+	*faultedProviders++
+	return picked, nextRouteID, true
 }
 
 func (s *Server) attemptTimeout(r *http.Request) time.Duration {
