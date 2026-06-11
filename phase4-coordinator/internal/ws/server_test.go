@@ -1772,6 +1772,101 @@ func TestProviderClosedAfterActivityStops(t *testing.T) {
 	})
 }
 
+// Regression: M1-4 follow-up. When nginx fronts the coordinator on
+// loopback, r.RemoteAddr is 127.0.0.1 for every public client and the
+// pre-fix per-IP bucket collapsed to a single shared 127.0.0.1 slot
+// (codex security audit 2026-06-11). Fix: honor X-Real-IP when the
+// immediate remote is loopback. This pins the bucket per real-client
+// IP behind a loopback proxy.
+func TestRemoteIPForUnauthSemaphoreHonorsXRealIPBehindLoopback(t *testing.T) {
+	cases := []struct {
+		name       string
+		remoteAddr string
+		xRealIP    string
+		want       string
+	}{
+		{name: "loopback_ipv4_with_real_ip", remoteAddr: "127.0.0.1:54321", xRealIP: "203.0.113.5", want: "203.0.113.5"},
+		{name: "loopback_ipv6_with_real_ip", remoteAddr: "[::1]:54321", xRealIP: "2001:db8::1", want: "2001:db8::1"},
+		{name: "loopback_no_real_ip_falls_back", remoteAddr: "127.0.0.1:54321", xRealIP: "", want: "127.0.0.1"},
+		{name: "non_loopback_ignores_real_ip", remoteAddr: "198.51.100.7:443", xRealIP: "203.0.113.5", want: "198.51.100.7"},
+		{name: "non_loopback_no_real_ip", remoteAddr: "198.51.100.7:443", xRealIP: "", want: "198.51.100.7"},
+		{name: "x_real_ip_whitespace_trimmed", remoteAddr: "127.0.0.1:54321", xRealIP: "  203.0.113.5  ", want: "203.0.113.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			header := http.Header{}
+			if tc.xRealIP != "" {
+				header.Set("X-Real-IP", tc.xRealIP)
+			}
+			got := providerws.RemoteIPForUnauthSemaphoreExport(tc.remoteAddr, header)
+			if got != tc.want {
+				t.Fatalf("remoteIPForUnauthSemaphore(%q, X-Real-IP=%q) = %q, want %q", tc.remoteAddr, tc.xRealIP, got, tc.want)
+			}
+		})
+	}
+}
+
+// Regression: M1-4 / SECU-1. Per-IP cap on concurrent unauthenticated WS
+// handshakes refuses the (cap+1)-th attempt from a single source even
+// when the global semaphore still has room. Pre-fix the only backstop
+// was a single global 64-slot semaphore with no per-IP dimension — one
+// host could starve all provider readmissions (full inference outage at
+// N=3). Test sets the cap to 4, opens 4 dialed-but-silent connections,
+// asserts the 5th gets ClosePoolFull with the per-IP reason.
+func TestProviderUnauthenticatedConnPerIPCapDeniesFifth(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.WS.MaxUnauthenticatedConnPerIP = 4
+		cfg.WS.MaxUnauthenticatedConn = 64 // global cap leaves room — per-IP must fire
+	})
+	defer h.HTTP.Close()
+
+	conns := make([]net.Conn, 0, 4)
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+	for i := 0; i < 4; i++ {
+		c, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		conns = append(conns, c)
+	}
+	// Dial returning means the HTTP upgrade completed; the server's
+	// reserveUnauthenticatedConnForIP call runs in the handler goroutine
+	// after gobwas.UpgradeHTTP returns. Wait for the counter to reach 4
+	// before opening the 5th conn, otherwise the 5th can win the race and
+	// reserve a slot before earlier conns get accounted (test flakiness).
+	eventually(t, func() bool {
+		return h.Provider.UnauthenticatedPerIPSnapshot() >= 4
+	})
+
+	fifth, fifthBR, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial fifth: %v", err)
+	}
+	defer fifth.Close()
+	// The server writes the close frame immediately after HTTP upgrade.
+	// gobwas.Dial's bufio.Reader may have already buffered those bytes off
+	// the socket as part of the same TCP read that delivered the upgrade
+	// response. Read from the bufio.Reader, not from the raw conn (which
+	// would EOF if the close frame was already pulled into the buffer).
+	_ = fifth.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var reader io.Reader = fifth
+	if fifthBR != nil && fifthBR.Buffered() > 0 {
+		reader = fifthBR
+	}
+	frame, err := gobwas.ReadFrame(reader)
+	if err != nil {
+		t.Fatalf("read fifth close: %v", err)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.ClosePoolFull || reason != "too_many_unauthenticated_connections_per_ip" {
+		t.Fatalf("fifth close = (%d, %q), want (%d, %q)", code, reason, providerws.ClosePoolFull, "too_many_unauthenticated_connections_per_ip")
+	}
+}
+
 func TestPoolzRequiresOperatorKey(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()

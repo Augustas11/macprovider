@@ -29,7 +29,8 @@ func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"
 	if cfg.WS.HandshakeTimeoutS != 10 || cfg.WS.WriteTimeoutS != 10 ||
-		cfg.WS.MaxFrameBytes != 4<<20 || cfg.WS.MaxUnauthenticatedConn != 64 {
+		cfg.WS.MaxFrameBytes != 4<<20 || cfg.WS.MaxUnauthenticatedConn != 64 ||
+		cfg.WS.MaxUnauthenticatedConnPerIP != 4 {
 		t.Fatalf("unexpected ws bounds defaults: %+v", cfg.WS)
 	}
 	if err := cfg.Validate(); err != nil {

@@ -103,6 +103,11 @@ type WSConfig struct {
 	WriteTimeoutS          int   `yaml:"write_timeout_s"`
 	MaxFrameBytes          int64 `yaml:"max_frame_bytes"`
 	MaxUnauthenticatedConn int   `yaml:"max_unauthenticated_conn"`
+	// MaxUnauthenticatedConnPerIP caps concurrent unauthenticated WS
+	// handshakes from a single remote IP. Defense-in-depth against a single
+	// host starving all provider readmissions even if it slips past nginx's
+	// limit_conn (M1-4 / SECU-1). Default 4. Must be > 0.
+	MaxUnauthenticatedConnPerIP int `yaml:"max_unauthenticated_conn_per_ip"`
 }
 
 type AdmissionConfig struct {
@@ -273,7 +278,8 @@ func Default() Config {
 			HandshakeTimeoutS:      10,
 			WriteTimeoutS:          10,
 			MaxFrameBytes:          4 << 20,
-			MaxUnauthenticatedConn: 64,
+			MaxUnauthenticatedConn:      64,
+			MaxUnauthenticatedConnPerIP: 4,
 		},
 		Admission: AdmissionConfig{
 			PinnedOnly:                      false,
@@ -436,6 +442,14 @@ func (c Config) ProviderWSMaxUnauthenticatedConn() int {
 	return count
 }
 
+func (c Config) ProviderWSMaxUnauthenticatedConnPerIP() int {
+	count := c.WS.MaxUnauthenticatedConnPerIP
+	if count <= 0 {
+		count = Default().WS.MaxUnauthenticatedConnPerIP
+	}
+	return count
+}
+
 func (c Config) ProviderByID() map[string]ProviderConfig {
 	out := make(map[string]ProviderConfig, len(c.Providers))
 	for _, p := range c.Providers {
@@ -453,6 +467,9 @@ func (c Config) Validate() error {
 	}
 	if c.WS.HandshakeTimeoutS <= 0 || c.WS.WriteTimeoutS <= 0 || c.WS.MaxFrameBytes <= 0 || c.WS.MaxUnauthenticatedConn <= 0 {
 		return fmt.Errorf("ws handshake, write, frame, and unauthenticated connection limits must be > 0")
+	}
+	if c.WS.MaxUnauthenticatedConnPerIP <= 0 {
+		return fmt.Errorf("ws.max_unauthenticated_conn_per_ip must be > 0")
 	}
 	if c.WS.MaxFrameBytes > 64<<20 {
 		return fmt.Errorf("ws.max_frame_bytes must be <= 67108864")
