@@ -1,7 +1,39 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.3 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 absorption)
-**Revision:** v1.3 absorbs the binary-side surface of LOCKED SPEC-010 v1.5 (Provider Model Catalog) and LOCKED SPEC-011 v0.5 (Operator-Pushed Warm Swap), and adds the first normative documentation of the v2 `auth_request` two-stage handshake. L-1 baseline preserved: with neither `--supported-models` nor `--enable-warm-swap` set, a v1.3 binary introduces no NEW SPEC-010 or SPEC-011 fields, sockets, or runtime state beyond the SPEC-010 R-3.6.2 single-entry `supported_models: [model_id]` default emission, which SPEC-010 v1.5 §4.1 establishes as observably indistinguishable from a pre-SPEC-010 binary on routing, `/v1/status`, and `/v1/models`. The v2 `auth_request` first-connect frame type is unchanged from existing v1.2.x binaries (already in code per SPEC-010 v1.5 §3.1.A; v1.3 normatively documents the contract for the first time).
+**Version:** 1.3.1 (2026-06-11, M1-1 / XSEC-1 provider-token plumbing)
+**Revision:** v1.3.1 adds the `auth.provider_token` (yaml) /
+`MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
+and mandates the binary attach `Authorization: Bearer <token>` on the
+coordinator WS connect when the token is non-empty. Closes
+[XSEC-1](../audits/2026-06-10/REPO_AUDIT.md) — "Provider identity
+unauthenticated end-to-end" — for pinned providers. No change to the
+v2 ECDH handshake itself; the Bearer header is an HTTP-level credential
+checked at the WS upgrade (SPEC-002 v1.3.5 § auth) before the v2
+handshake starts. Backwards-compatible: a v1.3.1 binary with no
+provider_token configured sends no Authorization header, matching v1.3
+behavior, so a coordinator running with `auth.require_provider_tokens=false`
+continues to accept tokenless legacy fleets. Flag flip on the
+coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.3.1:**
+- **v1.3.1 (2026-06-11, M1-1 / XSEC-1):** Adds `auth.provider_token`
+  config key, triple-exposed per house convention
+  (yaml `auth.provider_token`, env `MACPROVIDER_PROVIDER_TOKEN`, CLI
+  `--provider-token`). When set, the binary attaches
+  `Authorization: Bearer <token>` to the coordinator WS connect
+  (`CoordinatorClient.swift` `openWebSocket`). When unset, no
+  Authorization header is sent. Token is redacted from logs (URL
+  redaction already in place; headers were never logged). The operator
+  is expected to chmod 0600 the config file containing this value.
+  Pinned-tier migration uses `coordinator-cli issue-token` to mint
+  per-provider tokens, write them into each provider's `macprovider.yaml`,
+  then flip `auth.require_provider_tokens=true` in the coordinator
+  config. v1.2.x and earlier binaries cannot send tokens; the flag flip
+  is the compatibility cutoff. Stranger / curl|bash onboarding token
+  flow is pending Open Question 2 (operator-issued vs self-serve
+  provisional). SPEC-002's normative surface is unchanged — the
+  validator already exists at `internal/ws/server.go:236-262`; the
+  binary now sends Bearer (was: nothing).
 
 **Change log v1.3:**
 - **v1.3 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 absorption):** Adds binary-side surface for two now-LOCKED companion specs. SPEC-010 v1.5 adds `--supported-models` / `--publish-supported-models` flags, gains the two optional v2 `auth_request` initial-stage fields, gains local pre-flight validation per R-3.6.3. SPEC-011 v0.5 adds `--enable-warm-swap` opt-in gate, `--swap-drain-timeout-seconds`, `--ctl-socket-path`, `--switch-state-path` flags on `serve`; adds the `models` subcommand with `list / switch / status` actions; mandates a `ModelRuntime` refactor from immutable `let container` to actor-isolated mutable `current_container` with an atomic-swap state machine; adds an opt-in heartbeat extension carrying `model_hash` (raw lowercase hex) and `loading: bool`; adds a newline-delimited JSON control socket protocol on a macOS-native `$TMPDIR`-based path. ALSO adds a new normative §6.7 v2 `auth_request` handshake section — the v2 contract has been in code since v1.2.x but was never normatively documented in SPEC-001; v1.3 closes that gap. L-1 baseline preserved: with neither flag set, a v1.3 binary introduces no NEW SPEC-010/SPEC-011 fields, sockets, or runtime state beyond the SPEC-010 R-3.6.2 single-entry `supported_models: [model_id]` default (which SPEC-010 v1.5 §4.1 establishes as observably indistinguishable from a pre-SPEC-010 binary on routing, `/v1/status`, and `/v1/models`).

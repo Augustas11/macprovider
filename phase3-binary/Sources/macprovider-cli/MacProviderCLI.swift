@@ -61,6 +61,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "CLI-side cooldown state file. Overrides MACPROVIDER_SWITCH_STATE_PATH and config switch_state_path. Default $HOME/Library/Application Support/macprovider-cli/last-switch.ts. Cooldown soft guard lands in Phase 1E.")
     var switchStatePath: String?
 
+    @Option(help: "Provider authentication token (SPEC-001 / XSEC-1). When set, the binary sends 'Authorization: Bearer <token>' on the coordinator WS connect. Required when the coordinator runs with auth.require_provider_tokens=true. Overrides MACPROVIDER_PROVIDER_TOKEN and config key provider_token. Treat as a secret — the binary never logs it; chmod 0600 the config file containing it.")
+    var providerToken: String?
+
     static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
         if resolved.supportedModels != nil {
             do {
@@ -100,7 +103,8 @@ struct ServeCommand: AsyncParsableCommand {
                 enableWarmSwap: enableWarmSwap,
                 swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
                 ctlSocketPath: ctlSocketPath,
-                switchStatePath: switchStatePath
+                switchStatePath: switchStatePath,
+                providerToken: providerToken
             )
         )
 

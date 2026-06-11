@@ -86,7 +86,14 @@ actor CoordinatorClient {
     private let reconnectGraceNanoseconds: UInt64
     private let connectAndRunOverride: (@Sendable () async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
-    private let webSocketFactory: @Sendable (URL) -> ProviderWebSocketTask
+    // M1-1 / XSEC-1: the factory now takes a URLRequest so the binary can
+    // attach an Authorization: Bearer header when a provider token is
+    // configured. The header is required when the coordinator runs with
+    // auth.require_provider_tokens=true (the production posture per
+    // SPEC-001). The factory signature change is intentional — keeping
+    // it URL-only would require a parallel header-injection seam.
+    private let webSocketFactory: @Sendable (URLRequest) -> ProviderWebSocketTask
+    private let providerToken: String?
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
     private var inferenceRelay: InferenceRelay?
     private var tier2Session: Tier2ProviderSession?
@@ -104,7 +111,7 @@ actor CoordinatorClient {
         sendOverride: SendOverride? = nil,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
         attestationGenerator: Tier2AttestationTokenGenerating = ManagedDeviceAttestationGenerator(),
-        webSocketFactory: @escaping @Sendable (URL) -> ProviderWebSocketTask = { URLSession.shared.webSocketTask(with: $0) },
+        webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { URLSession.shared.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
     ) {
@@ -131,6 +138,10 @@ actor CoordinatorClient {
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
         self.attestationGenerator = attestationGenerator
         self.webSocketFactory = webSocketFactory
+        self.providerToken = config.providerToken.flatMap { value in
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
         self.sleepAssertionFactory = sleepAssertionFactory
         self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
@@ -241,10 +252,20 @@ actor CoordinatorClient {
     }
 
     private func openWebSocket() -> ProviderWebSocketTask {
-        let socket = webSocketFactory(coordinatorURL)
+        var request = URLRequest(url: coordinatorURL)
+        // M1-1 / XSEC-1: attach Authorization: Bearer when the operator has
+        // issued this provider a token. Coordinator validates the header in
+        // its WS upgrade path (server.go:236-262) and rejects with
+        // CloseInvalidToken when auth.require_provider_tokens=true.
+        // The token never appears in log lines — redactedURL only logs the
+        // URL, not headers, and we don't dump headers anywhere.
+        if let token = providerToken {
+            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
+        let socket = webSocketFactory(request)
         webSocket = socket
         socket.resume()
-        Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL))")
+        Self.keepaliveDebug("ws_resume url=\(Self.redactedURL(coordinatorURL)) token=\(providerToken == nil ? "absent" : "present")")
         return socket
     }
 

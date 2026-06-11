@@ -100,6 +100,112 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(attemptCount, 2)
     }
 
+    // Regression: M1-1 / XSEC-1. When config.providerToken is set, the WS
+    // connect attaches "Authorization: Bearer <token>". When unset, no
+    // Authorization header is sent (preserves the legacy fleet's ability
+    // to connect against a coordinator with require_provider_tokens=false).
+    // Covers both v1 plaintext (wsTunneledMode=false) and v2 ECDH
+    // (wsTunneledMode=true) connect paths via openWebSocket.
+    func testWebSocketConnectAttachesBearerAuthorizationWhenTokenConfigured_v1Plaintext() async throws {
+        let token = "test-token-deadbeef-deadbeef-deadbeef"
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = false
+        config.providerToken = token
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let socket = FakeProviderWebSocketTask(receiveResults: [.failure(CancellationError())])
+        let factory = FakeProviderWebSocketFactory(sockets: [socket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            webSocketFactory: { factory.makeSocket(for: $0) }
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+        } catch is CancellationError {
+        } catch {
+            // Other failures fine — we only care about the request handed to the factory.
+        }
+
+        let request = try XCTUnwrap(factory.lastRequest, "factory never received a URLRequest")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")
+    }
+
+    func testWebSocketConnectAttachesBearerAuthorizationWhenTokenConfigured_v2Tier2() async throws {
+        let token = "tier2-token-cafebabe-cafebabe-cafebabe"
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = true
+        config.providerToken = token
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let socket = FakeProviderWebSocketTask(receiveResults: [
+            .failure(CoordinatorAuthError.invalidMessage("unrecognized auth message")),
+        ])
+        let factory = FakeProviderWebSocketFactory(sockets: [socket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) }
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+        } catch {
+        }
+
+        let request = try XCTUnwrap(factory.lastRequest, "factory never received a URLRequest")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer \(token)")
+    }
+
+    func testWebSocketConnectOmitsAuthorizationWhenTokenUnset() async throws {
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = false
+        // providerToken intentionally not set
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let socket = FakeProviderWebSocketTask(receiveResults: [.failure(CancellationError())])
+        let factory = FakeProviderWebSocketFactory(sockets: [socket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            webSocketFactory: { factory.makeSocket(for: $0) }
+        ))
+
+        do {
+            try await client.connectAndRunOnceForTest()
+        } catch {
+        }
+
+        let request = try XCTUnwrap(factory.lastRequest, "factory never received a URLRequest")
+        XCTAssertNil(request.value(forHTTPHeaderField: "Authorization"))
+    }
+
     func testCoordinatorSessionSendsWebSocketPingBeforeHeartbeat() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
@@ -976,8 +1082,11 @@ private final class FakeProviderWebSocketFactory: @unchecked Sendable {
         self.sockets = sockets
     }
 
-    func makeSocket(for _: URL) -> ProviderWebSocketTask {
+    private(set) var lastRequest: URLRequest?
+
+    func makeSocket(for request: URLRequest) -> ProviderWebSocketTask {
         queue.sync {
+            lastRequest = request
             precondition(!sockets.isEmpty, "fake web socket factory exhausted")
             return sockets.removeFirst()
         }
