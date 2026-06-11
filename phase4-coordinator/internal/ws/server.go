@@ -415,73 +415,78 @@ type provisionalTokenOutcome int
 const (
 	// provisionalTokenSkip — caller MUST NOT include assigned_provider_token
 	// in the ack and SHOULD proceed with admission. Triggers: no issuer
-	// configured, or the connect arrived with a validated Bearer.
+	// configured, connect arrived with a validated Bearer, mint
+	// failed (DB error or duplicate-key collision against the partial
+	// unique index — see FR-C9.4 v0.8.3 settling-window discussion).
 	provisionalTokenSkip provisionalTokenOutcome = iota
 	// provisionalTokenMinted — caller MUST include the returned token in
 	// the ack frame so the binary can persist it (FR-C9.3).
 	provisionalTokenMinted
-	// provisionalTokenRejectTOFU — caller MUST close the connection with
-	// CloseInvalidToken / "invalid_token" before admission. An active
-	// token already exists for this provider_id; minting a second one
-	// would let an attacker harvest a valid bearer for someone else's
-	// declared identity (codex security audit MAJOR-1, PR #44).
-	provisionalTokenRejectTOFU
 )
 
-// resolveProvisionalToken implements SPEC-003 v0.8 FR-C9.1 (mint) and
-// FR-C9.4 TOFU (refuse second mint for a known provider_id). It is the
-// single decision point the v1 hello_ack and v2 auth_response paths both
-// call before constructing their ack frame.
+// Pre-v0.8.3 this enum included a third value `provisionalTokenRejectTOFU`
+// that triggered a hard close with CloseInvalidToken on duplicate-mint
+// attempts. v0.8.3 (DECISION_CRITERIA Entry 63) replaced that with
+// admit-tokenless so a settling-window deploy can ship the new
+// coordinator without bricking old-binary cohorts on reconnect. The
+// security property "at most one valid bearer per provider_id" is
+// preserved by the DB partial unique index, not by close-on-reject.
+
+// resolveProvisionalToken implements SPEC-003 v0.8.3 FR-C9.1 (mint) and
+// FR-C9.4 TOFU. It is the single decision point the v1 hello_ack and v2
+// auth_response paths both call before constructing their ack frame.
 //
 // Algorithm:
 //  1. If the issuer is not wired OR the connect already validated a
 //     Bearer: return Skip — no mint needed, no token in ack.
-//  2. Query HasActiveTokenForProvider. If TRUE: return RejectTOFU —
-//     attacker (or a confused legitimate retry) is trying to mint a
-//     parallel credential for an already-claimed provider_id.
-//  3. Mint. On success: return Minted + cleartext.
-//  4. On mint failure (DB error): return Skip and log — the connection
-//     is admitted tokenless, the operator notices via the warning log,
-//     and the binary's next connect retries cleanly (because
-//     HasActiveTokenForProvider will still be false).
+//  2. Attempt the mint. The partial unique index
+//     idx_provider_tokens_one_active_per_provider enforces "at most one
+//     unrevoked token per provider_id" at the DB layer.
+//  3. On success: return Minted + cleartext for the ack frame.
+//  4. On ErrActiveTokenAlreadyExists (a token row for this provider_id
+//     already exists): return Skip — admit the connection without a
+//     token in the ack. See settling-window discussion below.
+//  5. On other DB error: return Skip + warning log. The connection is
+//     admitted tokenless; the operator notices via the warning.
 //
-// On HasActiveTokenForProvider DB error: FAIL CLOSED with RejectTOFU.
-// We MUST NOT mint in the dark when the gate could not be evaluated —
-// that's the same posture validateProviderToken adopts when
-// ValidateToken errors.
-// authState is the renamed parameter for the providerAuth argument. The
-// auth.ErrActiveTokenAlreadyExists reference below needs the imported
-// auth package, but the parameter previously named `auth` shadowed it.
+// Settling-window design (FR-C9.4 v0.8.3 refinement, derived from the
+// 2026-06-12 deploy attempt — see DECISION_CRITERIA Entry 63):
+//
+// validateProviderToken rejects all tokenless connects at the WS
+// upgrade gate when `RequireProviderTokens=true`, so this function is
+// only reached for tokenless admissions during the settling window
+// (flag=false). The unique index already prevents an attacker from
+// minting a parallel bearer for someone else's provider_id; whoever
+// races first owns the bearer. Subsequent tokenless connects for the
+// same provider_id are admitted bearer-less rather than rejected,
+// because rejecting them would brick old-binary cohorts that connected
+// tokenless before the new coordinator was live and never had a chance
+// to persist a token. Pre-v0.8.3 the same call rejected with
+// CloseInvalidToken, which structurally cannot coexist with a phased
+// upgrade plan.
+//
+// The security property "at most one valid bearer per provider_id" is
+// preserved by the DB constraint. The operator MUST audit the
+// provider_tokens table (coordinator-cli list-tokens) before flipping
+// `RequireProviderTokens=true` and revoke any tokens that belong to
+// the wrong party. See the FR-C9.5 operator runbook.
+//
+// authState is renamed to disambiguate from the auth package.
 func (s *Server) resolveProvisionalToken(authState providerAuth, providerID, providerName string) (provisionalTokenOutcome, string) {
 	if s.issuer == nil || authState.validated {
 		return provisionalTokenSkip, ""
 	}
-	ctx := context.Background()
-	hasActive, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
+	_, token, err := s.issuer.IssueToken(context.Background(), providerID, providerName)
 	if err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 TOFU gate evaluation failed; closing tokenless connect (fail closed)")
-		return provisionalTokenRejectTOFU, ""
-	}
-	if hasActive {
-		s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 TOFU: tokenless connect refused; an active token already exists for this provider_id (operator can revoke + retry if this is the legitimate provider after a persist failure)")
-		return provisionalTokenRejectTOFU, ""
-	}
-	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
-	if err != nil {
-		// SPEC-003 v0.8.2 FR-C9.4 — defense in depth against the
-		// TOCTOU race. The pre-INSERT HasActiveTokenForProvider gate
-		// can race past a concurrent connect, but the partial unique
-		// index on provider_tokens(provider_id) WHERE revoked_at IS
-		// NULL traps the duplicate at INSERT time. When that happens
-		// we MUST close the loser with TOFU rejection — emitting a
-		// generic mint-failure would admit them tokenless on the
-		// next reconnect, defeating the closure of the codex security
-		// re-audit MAJOR-1 finding on PR #44.
 		if errors.Is(err, auth.ErrActiveTokenAlreadyExists) {
-			s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 TOFU: lost concurrent mint race; refusing tokenless admission")
-			return provisionalTokenRejectTOFU, ""
+			// Settling-window behavior (v0.8.3): admit tokenless
+			// without a token in the ack. The DB constraint
+			// guarantees only one party — whoever raced first —
+			// holds the bearer. Operator audits at flag-flip time.
+			s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 settling: active token already exists for this provider_id; admitting tokenless (bearer-less session — provider needs operator coordination to obtain a token before RequireProviderTokens flip)")
+			return provisionalTokenSkip, ""
 		}
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.1 self-serve mint failed; admitting tokenless. Next reconnect will retry mint since no row was written.")
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.1 self-serve mint failed; admitting tokenless. Next reconnect will retry since no row was written.")
 		return provisionalTokenSkip, ""
 	}
 	s.log.Info().Str("provider_id", providerID).Msg("FR-C9.1 self-serve provisional token minted on first tokenless admission")
@@ -510,17 +515,12 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	if !ok {
 		return "", ""
 	}
-	// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for an
-	// already-known provider_id. Must run BEFORE registerProviderSession
-	// so a rejected attacker never enters the pool. Same close code as
-	// pinned-tokenless rejection (CloseInvalidToken / "invalid_token");
-	// the operator runbook + log message tell legitimate providers that
-	// a persist-failure recovery requires `coordinator-cli revoke-token`.
-	outcome, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
-	if outcome == provisionalTokenRejectTOFU {
-		s.close(conn, CloseInvalidToken, "invalid_token")
-		return "", ""
-	}
+	// SPEC-003 v0.8.3 FR-C9.1/FR-C9.2 — attempt the self-serve mint and
+	// embed the token in hello_ack on success. On duplicate (a token
+	// already exists for this provider_id) admit tokenless without an
+	// ack token — see resolveProvisionalToken for the settling-window
+	// rationale.
+	_, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
 	session := s.registerProviderSession(conn, entry)
 	releaseUnauth()
 
@@ -746,14 +746,10 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		// no-op delete.
 		s.authAttempts.release(authAttemptID)
 	}
-	// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for an
-	// already-known provider_id. Must run BEFORE registerProviderSession
-	// so a rejected attacker never enters the pool. v2 path mirrors v1.
-	outcome, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
-	if outcome == provisionalTokenRejectTOFU {
-		s.close(conn, CloseInvalidToken, "invalid_token")
-		return "", ""
-	}
+	// SPEC-003 v0.8.3 FR-C9.1/FR-C9.2 — v2 mirrors v1: attempt the
+	// self-serve mint, embed the token in auth_response on success;
+	// duplicate admits tokenless without an ack token.
+	_, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
 	session := s.registerProviderSession(conn, entry)
 	releaseUnauth()
 	response := AuthResponse{

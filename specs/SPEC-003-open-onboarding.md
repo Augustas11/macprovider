@@ -1,6 +1,6 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.8.2 (2026-06-11, post-re-audit hardening: TOCTOU-safe TOFU + await persist + prune safety)
+**Version:** 0.8.3 (2026-06-12, settling-window admit-tokenless on duplicate; supersedes hard-TOFU reject)
 **Depends on:** SPEC-001 v1.3.1, SPEC-002 v1.3.5
 
 **Change log v0.6:** Resolves cross-spec findings F-603-1 and F-603-2 from `specs/SPEC-CROSS-006-audit.md`: the installer visibility self-test now references SPEC-002 v1.1.4's coordinator-owned `GET /v1/pool/check`, and dependencies align to SPEC-001 v1.2.2 + SPEC-002 v1.1.4.
@@ -8,6 +8,8 @@
 **Change log v0.7:** Resolves six v1.2.4 partner-upgrade follow-ups from Decision log Entry 22, building on the Entry 20 install.sh bug class: F-603-V7-1 existing config port detection, F-603-V7-2 own-service port holder stop, F-603-V7-4 real binary path in launchd plist for Swift Bundle resolution, F-603-V7-5 cold-cache 20-minute wait, F-603-V7-6 diagnostic self-test timeout messaging, and F-603-V7-7 mixed-state install-dir warning. F-603-V7-3 and F-603-V7-8 were retracted and are not part of v0.7.
 
 **Change log v0.8:** Closes Open Q2 from Decision log Entry 59 (provider-token issuance model for open onboarding). v0.8 picks self-serve provisional token minting and adds the normative contract under § 4 as **FR-C9**. The coordinator MINTs a fresh `provider_token` on every tokenless provisional admission and returns it in both the v1 `hello_ack` and v2 `auth_response` (initial-stage acceptance) frames under a new OPTIONAL field `assigned_provider_token`. The phase3-binary MUST persist the returned token to its on-disk config under the existing top-level `provider_token` YAML key with file mode 0600 via atomic-rename. Pinned-tier token issuance (Entry 59 / M1-1) is unchanged — operator-issued via `coordinator-cli issue-token`. Dependencies bump to SPEC-001 v1.3.1 (M1-1 Bearer-on-WS-connect plumbing) and SPEC-002 v1.3.5 (locked, no coordinator-side schema change required). See Decision log Entry 60 for the full ruling and the rationale for dual-path delivery (the binary's default first frame is v1 `hello`, not v2 `auth_request`, so the v1 `hello_ack` path is the primary delivery channel for the actual target population — provisional strangers).
+
+**Change log v0.8.3:** Operational fix derived from the 2026-06-12 deploy attempt of v1.3.1 coordinator to Pearl (see DECISION_CRITERIA Entry 63). The v0.8.2 hard-TOFU reject contract — "a tokenless connect for a provider_id that already has an unrevoked token MUST be closed with CloseInvalidToken" — was structurally incompatible with the settling-window deploy plan: existing pool members on pre-v1.3.1 binaries (which cannot persist `assigned_provider_token`) were instant-bricked on next reconnect because the coordinator had a row for them they could never use. v0.8.3 changes FR-C9.4 to **admit-tokenless on duplicate during the settling window** (when `RequireProviderTokens=false`). The "at most one valid bearer per provider_id" security property is preserved by the DB partial unique index that v0.8.2 introduced; whoever races first owns the bearer, subsequent tokenless connects for the same provider_id are admitted bearer-less. The credential-capture attack the v0.8.2 audit closed remains closed — an attacker still cannot mint a parallel bearer because the unique index traps the INSERT — but rejection (the wire-level brick) is replaced with admission (the wire-level admit-without-bearer). After flag-flip the `validateProviderToken` gate at the WS upgrade layer rejects any tokenless connect regardless, so the post-flip security posture is unchanged. The pre-INSERT `HasActiveTokenForProvider` SELECT call in `resolveProvisionalToken` is removed (it was a TOCTOU-racy belt for the unique-index suspenders, and the suspenders are the only canonical enforcement). The `provisionalTokenRejectTOFU` enum value + the v1/v2 ack-write close-on-reject paths are deleted. Pre-flip operator runbook now mandates an explicit `coordinator-cli list-tokens` audit + revoke-and-coordinate step on any duplicate active rows before flipping the flag.
 
 **Change log v0.8.2:** Post-re-audit hardening from the codex security-reviewer focused pass on commit 4b1c527 in PR #44. **(a)** FR-C9.4 TOFU enforcement moved from a SELECT-then-INSERT pattern (TOCTOU-vulnerable: two concurrent tokenless connects for the same `provider_id` could both pass the gate before either committed) to a DB-layer partial unique index `idx_provider_tokens_one_active_per_provider ON provider_tokens(provider_id) WHERE revoked_at IS NULL`. `IssueToken` now returns `ErrActiveTokenAlreadyExists` on constraint violation; `resolveProvisionalToken` maps that to the TOFU close path. The migration step revokes pre-existing duplicate active rows so the index can be installed on existing databases. **(b)** FR-C9.3 binary-side persist now AWAITs disk I/O completion before in-memory adoption, closing the v0.8.1 brick-mode where a process crash between in-memory adoption and persist flush would strand the token coordinator-side and TOFU-reject the binary on next restart. The await runs on a detached priority-utility Task so the actor suspends but the runtime doesn't, preserving the FR-C9.3 SHOULD-not-block intent. **(c)** `coordinator-cli prune-tokens` refuses cutoffs younger than 24h without `--force`, and the dry-run output now lists candidate `provider_id` + `token_prefix` + `created_at` so the operator can sanity-check before `--apply` (a self-minted token is `last_used_at IS NULL` until the binary reconnects with Bearer, which can be seconds out — naive cutoffs can brick providers mid-onboarding). **(d)** SPEC-003 prose contradictions cleaned: v0.8.1 still contained pre-TOFU "multi-mint by design" passages in FR-C9.1 + FR-C9.4 prose; v0.8.2 rewrites these to match the TOFU contract.
 
@@ -506,8 +508,10 @@ This provides simple 2-file rotation (~100 MB max disk usage for logs).
 **FR-C9. Self-serve provisional provider token (closes Open Q2 / Entry 60).**
 v0.8 closes the long-standing gate on flipping `auth.require_provider_tokens=true` with provisional strangers in the pool. Pinned-tier providers are operator-issued via `coordinator-cli issue-token` (M1-1, unchanged). Provisional providers self-mint on first admission.
 
-**FR-C9.1. Coordinator MUST mint on first tokenless provisional admission, subject to the FR-C9.4 TOFU gate.**
-When `prepareProviderAdmission` (`phase4-coordinator/internal/ws/server.go`) returns a non-pinned `*pool.Provider` AND `auth.validated == false` AND the token store is configured (`s.tokens != nil`), the coordinator MUST mint a fresh row in `provider_tokens` via `auth.Store.IssueToken(providerID, providerName)`, BUT only after the FR-C9.4 TOFU gate confirms no unrevoked token already exists for this `provider_id`. The mint MUST happen AFTER admission is approved and BEFORE the corresponding ack frame is written, so that ack-write failure does not leave the operator without a record that a token was promised. v0.8.1 specified the mint MUST NOT be conditional on prior rows (multi-mint by design); v0.8.2 narrows this to "MUST be conditional on FR-C9.4 TOFU" — see FR-C9.4 for the security rationale.
+**FR-C9.1. Coordinator MUST attempt the mint on every tokenless provisional admission.**
+When `prepareProviderAdmission` (`phase4-coordinator/internal/ws/server.go`) returns a non-pinned `*pool.Provider` AND `auth.validated == false` AND the token store is configured (`s.tokens != nil`), the coordinator MUST attempt a fresh row in `provider_tokens` via `auth.Store.IssueToken(providerID, providerName)`. The mint MUST happen AFTER admission is approved and BEFORE the corresponding ack frame is written, so that ack-write failure does not leave the operator without a record that a token was promised.
+
+If the INSERT succeeds, the cleartext token MUST be returned in the ack frame so the binary can persist it (FR-C9.3). If the INSERT fails on the partial unique index (`ErrActiveTokenAlreadyExists`), the coordinator MUST admit the connection without including `assigned_provider_token` in the ack — see FR-C9.4 for the settling-window rationale. If the INSERT fails on any other DB error, the coordinator MUST admit the connection tokenless and log a warning.
 
 The minting backend MUST enforce the one-active-token-per-provider_id invariant at the database layer (a partial unique index on `provider_tokens(provider_id) WHERE revoked_at IS NULL` is the normative implementation; the v0.8.2 reference store in `phase4-coordinator/internal/auth/tokens.go` installs this index in `migrate()`). The `IssueToken` call MUST surface a constraint failure as a distinct sentinel error (`ErrActiveTokenAlreadyExists` in the reference implementation) so the caller can map it to the TOFU close path without leaking a generic 500 to the wire. This DB-layer enforcement closes the TOCTOU race the codex security re-audit on PR #44 (MAJOR-1) flagged in the v0.8.1 implementation, where two concurrent tokenless connects could both pass the `HasActiveTokenForProvider` check before either insert.
 
@@ -537,19 +541,44 @@ On persist failure (disk full, permission denied, parent directory missing) the 
 
 The persist target is the top-level `provider_token` YAML key (already wired by M1-1 SPEC-001 v1.3.1 § config). If the config file already has a top-level token populated, the new one REPLACES it. Pre-v0.8.1 prose referenced `auth.provider_token` (nested); the correct contract is flat top-level.
 
-**FR-C9.4. TOFU (trust-on-first-use): refuse a second token for a known provider_id.**
-When a tokenless connect arrives for a `provider_id` that already has an unrevoked row in `provider_tokens`, the coordinator MUST refuse admission with close code `CloseInvalidToken / "invalid_token"`. The coordinator MUST NOT mint a parallel token for an in-use identity. Implementations evaluate this via `HasActiveTokenForProvider(provider_id)`; on DB error the gate fails CLOSED (reject).
+**FR-C9.4. TOFU (trust-on-first-use): the partial unique index is the canonical "at most one valid bearer per provider_id" enforcement.**
 
-Pre-v0.8.1 this clause specified "multi-mint on tokenless reconnect is intentional" so failed persists could self-heal automatically. The codex security audit on PR #44 (MAJOR-1) demonstrated that this design lets an attacker who declares a victim's `provider_id` on a tokenless connect harvest a valid bearer for it during the settling window. TOFU closes that vector at the cost of automatic self-healing: a binary that suffers a persist failure on its self-mint will reconnect tokenless, hit the TOFU gate, and be rejected with `invalid_token`. The operator notices the `event=provider_token_persist_failed` log and runs:
+v0.8.3 (DECISION_CRITERIA Entry 63) materially changes how TOFU is enforced. The security goal — "an attacker who declares a victim's `provider_id` on a tokenless connect MUST NOT receive a valid bearer for it" — is unchanged, but the implementation moves from a wire-level reject to a DB-level constraint.
 
+**Storage invariant (normative).** The token store MUST enforce a partial unique index equivalent to:
+
+```sql
+CREATE UNIQUE INDEX idx_provider_tokens_one_active_per_provider
+  ON provider_tokens(provider_id) WHERE revoked_at IS NULL AND provider_id <> '';
 ```
-coordinator-cli revoke-token --token-prefix <prefix from list-tokens>
-# then restart the provider binary; next connect self-mints cleanly
-```
 
-The cost is operator labor in the (rare) persist-failure case; the gain is closing the credential-capture exploit at the (common) attacker-spam case. The trade was made explicit in DECISION_CRITERIA Entry 61.
+This index is the authoritative "at most one valid bearer per provider_id" enforcement. The v0.8.2 reference store in `phase4-coordinator/internal/auth/tokens.go` installs it in `migrate()`; existing databases get a one-time migration that revokes pre-existing duplicate active rows so the index can be installed without aborting.
 
-Operator-side bounded-cleanup is normative: `coordinator-cli prune-tokens [--older-than 168h] [--apply]` removes rows where `last_used_at IS NULL AND revoked_at IS NULL AND created_at < cutoff`. `last_used_at` is maintained by the existing `MarkTokenUsed` call, so live tokens are always distinguishable from stale ones.
+`IssueToken` MUST surface a unique-constraint failure as a distinct sentinel error (`ErrActiveTokenAlreadyExists` in the reference implementation). Mapping it to a generic 500 would defeat the wire-level admit-tokenless behavior described below.
+
+**Settling-window wire contract (normative; `RequireProviderTokens=false`).** When a tokenless connect arrives for a `provider_id` that already has an unrevoked row in `provider_tokens`, the coordinator MUST:
+
+1. Attempt the mint (the partial unique index will reject the INSERT).
+2. Catch `ErrActiveTokenAlreadyExists`.
+3. Admit the connection WITHOUT including `assigned_provider_token` in the ack frame (`hello_ack` or `auth_response`).
+4. Log an info-level event with `provider_id` so operators can surface duplicate-admit attempts in `coordinator-cli list-tokens` audits.
+
+The coordinator MUST NOT close the connection with `CloseInvalidToken` in this case. The losing party's session is operationally bearer-less: they can serve buyer traffic, but they cannot authenticate with a Bearer header. Whichever party raced first owns the bearer for that `provider_id`; subsequent tokenless connects discover this at flag-flip time when their tokenless reconnect is rejected at the WS upgrade layer.
+
+**Post-flip wire contract (normative; `RequireProviderTokens=true`).** Tokenless connects are rejected at the WS upgrade layer by `validateProviderToken` BEFORE reaching admission. The DB constraint at this layer is defense in depth — even if a future code path admitted a tokenless connect under flag=true, the INSERT would fail and the connection would proceed bearer-less rather than minting a credential-capture window.
+
+**Why the design changed in v0.8.3.** v0.8.1 introduced TOFU as a wire-level reject; v0.8.2 hardened the underlying check from SELECT-then-INSERT to the DB constraint. The 2026-06-12 v1.3.1 deploy attempt to Pearl demonstrated that wire-level reject is structurally incompatible with the settling-window deploy plan: existing pool members on pre-v1.3.1 binaries received `assigned_provider_token` in their ack frame, silently dropped it (Swift JSON decoder ignores unknown keys), then reconnected tokenless on the next NAT blip — and were instantly rejected with `invalid_token`. The DB row they couldn't carry as a Bearer bricked them permanently until operator intervention.
+
+v0.8.3 trades the wire-level reject for two operator-mediated requirements at flag-flip time:
+
+1. Operator MUST run `coordinator-cli list-tokens` and audit for duplicate or unexpected active rows.
+2. Operator MUST `revoke-token --token-prefix <prefix>` any rows that belong to the wrong party + coordinate with the legitimate party to ensure they can mint cleanly on their next reconnect.
+
+The flag-flip becomes safe ONLY after this audit + reconciliation. The runbook MUST surface this as a hard checklist item.
+
+**What stays unchanged from v0.8.2.** The partial unique index, `ErrActiveTokenAlreadyExists` sentinel, and migration step are all preserved as-is. The credential-capture attack the codex security audit on PR #44 (MAJOR-1) closed remains closed — an attacker still cannot mint a parallel bearer for someone else's `provider_id`, because the INSERT fails on the unique constraint. The only thing v0.8.3 changes is what happens to the losing connection on the wire: admit-bearer-less instead of close-with-reject.
+
+Operator-side bounded-cleanup is unchanged: `coordinator-cli prune-tokens [--older-than 168h] [--apply]` removes rows where `last_used_at IS NULL AND revoked_at IS NULL AND created_at < cutoff`.
 
 **FR-C9.5. Compatibility cutoff at flag flip.**
 When the operator flips `auth.require_provider_tokens=true` (Decision log Entry 59 forecast; Entry 60 confirmed), tokenless connects are rejected at `validateProviderToken` BEFORE reaching admission. After the flip, FR-C9.1's mint path is unreachable for new connects — only providers holding a valid token (operator-issued OR previously self-minted) connect.

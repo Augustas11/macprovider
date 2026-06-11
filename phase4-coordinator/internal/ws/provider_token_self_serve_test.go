@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"io"
 	"path/filepath"
 	"testing"
 
@@ -197,20 +196,32 @@ func TestSelfServeProvisionalTokenMintFailureTolerated(t *testing.T) {
 	}
 }
 
-// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for a provider_id
-// that already has an unrevoked token. Closes the credential-capture
-// vector from the codex security audit on PR #44: without this guard,
-// an attacker who declares a victim's provider_id on a tokenless
-// connect would receive a valid bearer for it. Pre-fix, the helper
-// would mint freely; the security audit's MAJOR-1 finding spelled out
-// the exploit chain.
-func TestSelfServeProvisionalTokenRejectedWhenActiveTokenExists(t *testing.T) {
+// SPEC-003 v0.8.3 FR-C9.4 — during the settling window
+// (RequireProviderTokens=false), a tokenless connect from a
+// provider_id that already has an unrevoked token MUST be admitted
+// without a token in the ack frame, NOT rejected. The DB partial
+// unique index already prevents minting a parallel bearer for that
+// provider_id, so the credential-capture vector the v0.8.2 codex
+// security audit (PR #44 MAJOR-1) closed remains closed via the
+// constraint. Rejecting the connection — what v0.8.2 did — bricks
+// old-binary cohorts that connected tokenless before the new
+// coordinator was live (they never persisted the assigned token they
+// don't know about), so v0.8.3 (DECISION_CRITERIA Entry 63) replaced
+// reject-on-duplicate with admit-tokenless.
+//
+// Pre-v0.8.3 this test was TestSelfServeProvisionalTokenRejectedWhen-
+// ActiveTokenExists and asserted CloseInvalidToken / "invalid_token".
+// The 2026-06-12 deploy attempt demonstrated that behavior was a
+// structural brick of the settling window. The new test name + body
+// document the corrected contract.
+func TestSelfServeProvisionalTokenAdmitsTokenlessWhenActiveTokenExists(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
-	// Seed: a legitimate provider already self-minted on a prior connect.
+	// Seed: someone (legitimate provider or a prior race winner)
+	// already self-minted for "claimed-provider".
 	_, _, err = store.IssueToken(context.Background(), "claimed-provider", "claimed-provider hostname")
 	if err != nil {
 		t.Fatalf("seed token: %v", err)
@@ -218,39 +229,51 @@ func TestSelfServeProvisionalTokenRejectedWhenActiveTokenExists(t *testing.T) {
 	h := selfServeHarness(t, store)
 	defer h.HTTP.Close()
 
-	// Attacker: connects tokenless declaring the SAME provider_id.
-	conn, br, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	// Loser: connects tokenless declaring the SAME provider_id.
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
-		t.Fatalf("dial tokenless attacker: %v", err)
+		t.Fatalf("dial tokenless loser: %v", err)
 	}
 	defer conn.Close()
 	if err := wsutil.WriteClientText(conn, mustJSON(validHello("claimed-provider"))); err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
 
-	var src io.Reader = conn
-	if br != nil {
-		src = br
-	}
-	frame, err := gobwas.ReadFrame(src)
+	// MUST receive a hello_ack (not a close frame). MUST admit tokenless.
+	payload, op, err := wsutil.ReadServerData(conn)
 	if err != nil {
-		t.Fatalf("read tofu close: %v", err)
+		t.Fatalf("read hello_ack: %v", err)
 	}
-	if frame.Header.OpCode != gobwas.OpClose {
-		t.Fatalf("op = %v, want close (TOFU rejection)", frame.Header.OpCode)
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text (settling-window admit, not close)", op)
 	}
-	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
-	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
-		t.Fatalf("close = %d %q, want %d invalid_token (FR-C9.4 TOFU)", code, reason, providerws.CloseInvalidToken)
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack.Type != "hello_ack" {
+		t.Fatalf("ack type = %q, want hello_ack (settling-window admit)", ack.Type)
+	}
+	// MUST NOT include a token in the ack frame — the loser does not get
+	// a bearer because the winner already holds it via the DB constraint.
+	if ack.AssignedProviderToken != "" {
+		t.Fatalf("assigned_provider_token = %q, want empty (DB partial unique index prevented duplicate mint; loser is bearer-less)", ack.AssignedProviderToken)
 	}
 
-	// Critically: no NEW row was minted. Exactly the seeded row should remain.
+	// Critically: still exactly the seeded row, no new mint attempt
+	// produced an extra row via races or fallback paths.
 	records, err := store.ListTokens(context.Background())
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
-	if len(records) != 1 {
-		t.Fatalf("token rows after TOFU rejection = %d, want 1 (no parallel mint): %#v", len(records), records)
+	active := 0
+	for _, r := range records {
+		if r.ProviderID == "claimed-provider" && !r.RevokedAt.Valid {
+			active++
+		}
+	}
+	if active != 1 {
+		t.Fatalf("active rows for claimed-provider = %d, want 1: %#v", active, records)
 	}
 }
 
