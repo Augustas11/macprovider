@@ -101,6 +101,26 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
 
+        // Pre-flight RAM fit check. Uses the same name-parsing + headroom
+        // rules as the installer (SPEC-003 v0.9 FR-D2.1 step 4) so a model
+        // accepted at install time is judged the same way here. `--force`
+        // bypasses both the wontFit hard-block and the tight-fit warning.
+        switch ModelFit.evaluate(modelID: targetModelID, ramGB: ModelFit.detectRAMGB()) {
+        case let .wontFit(estGB, ramGB):
+            if options.force {
+                writeStderr("warning: target ~\(estGB) GB weights will not fit on \(ramGB) GB Mac; --force set, proceeding")
+            } else {
+                writeStderr("switch target \(targetModelID) (~\(estGB) GB weights) will not fit on \(ramGB) GB Mac. Re-issue with --force to override.")
+                throw ExitCode(2)
+            }
+        case let .tight(estGB, ramGB):
+            writeStderr("warning: tight fit — target ~\(estGB) GB weights on \(ramGB) GB Mac; may swap or OOM under load")
+        case .fits:
+            break
+        case let .unknown(reason):
+            writeStderr("note: \(reason); skipping fit check")
+        }
+
         if !options.force {
             let storePath = ControlSocketPaths.defaultSwitchStatePath(resolved.switchStatePath)
             let store = SwitchStateStore(path: storePath)
