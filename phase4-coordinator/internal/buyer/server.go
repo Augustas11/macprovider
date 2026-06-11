@@ -1087,6 +1087,9 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				}
 				excluded[routeKey(provider)] = struct{}{}
 				faultedRoutes[routeKey(provider)] = struct{}{}
+				if result == wsForwardQueueFull {
+					s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateBusy)
+				}
 				if result == wsForwardCancelled {
 					if shouldLogAttempt(attempt) {
 						logAttempt(provider, http.StatusOK, attempt)
@@ -1248,6 +1251,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			routingDone = s.now()
+			explicitRetries++
+			faultedProviders++
 			if !provider.IsWSTunneled() {
 				break
 			}

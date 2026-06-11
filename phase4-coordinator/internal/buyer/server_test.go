@@ -2897,6 +2897,110 @@ func TestChatCompletionsWSTunneledQueueFullFallsBackToNextProvider(t *testing.T)
 	}
 }
 
+// Regression: M1-2 ARCH-1/CODE-1 divergence 1. Streaming-WS forwardWS returning
+// wsForwardQueueFull must mark the provider StateBusy, matching the non-streaming
+// loop's behavior. Pre-fix: streaming branch never called pool.MarkState; provider
+// stayed StateReady and could be re-selected immediately.
+func TestChatCompletionsStreamingWSTunneledQueueFullMarksProviderBusy(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 2, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			if provider.ProviderID == "p1" {
+				done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "error_queue_full"}
+				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+			}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n"}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, 10*time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{"X-MacProvider-Retry": []string{"1"}})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
+		t.Fatalf("provider = %q, want p2", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy {
+		t.Fatalf("p1 = %#v ok=%v, want busy", p1, ok)
+	}
+}
+
+// Regression: M1-2 ARCH-1/CODE-1 divergence 2. Non-streaming QueueFull path must
+// increment explicitRetries (and faultedProviders) after the successful routing
+// transition, matching the timeout-retry pattern. Pre-fix: the retry hop after
+// QueueFull logged retried=0 on the next attempt's request_log row.
+func TestChatCompletionsWSTunneledQueueFullIncrementsExplicitRetries(t *testing.T) {
+	const requestID = "22222222-2222-4222-8222-222222222222"
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 10, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 2, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			if provider.ProviderID == "p1" {
+				done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "error_queue_full"}
+				return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+			}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2: %#v", len(rows), rows)
+	}
+	if rows[0].ProviderAssignedID.String != "s1" || rows[1].ProviderAssignedID.String != "s2" {
+		t.Fatalf("provider assignments = %#v, want s1 then s2", rows)
+	}
+	if rows[0].Retried != 0 {
+		t.Fatalf("rows[0].Retried = %d, want 0", rows[0].Retried)
+	}
+	if rows[1].Retried != 1 {
+		t.Fatalf("rows[1].Retried = %d, want 1 (QueueFull retry hop must bump explicitRetries)", rows[1].Retried)
+	}
+}
+
 func TestChatCompletionsWSTunneledDeadProviderFastFails(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
