@@ -20,9 +20,17 @@ struct ModelsBrowseCommand: AsyncParsableCommand {
     @Option(help: "Drop models whose estimated weight size exceeds this many GB.")
     var maxGb: Int?
 
+    static let maxAllowedLimit = 200
+
     func run() async throws {
-        guard limit > 0 else {
-            writeStderr("--limit must be positive")
+        // Round-2 (codex code MINOR + security MINOR): cap --limit to bound
+        // memory + network use; reject non-positive --max-gb.
+        guard limit > 0 && limit <= Self.maxAllowedLimit else {
+            writeStderr("--limit must be between 1 and \(Self.maxAllowedLimit)")
+            throw ExitCode(2)
+        }
+        if let maxGb, maxGb <= 0 {
+            writeStderr("--max-gb must be positive")
             throw ExitCode(2)
         }
 
@@ -32,6 +40,13 @@ struct ModelsBrowseCommand: AsyncParsableCommand {
             summaries = try await client.searchMLXCommunity(query: family, limit: limit)
         } catch let error as HFClientError {
             writeStderr("\(error)")
+            throw ExitCode(4)
+        } catch {
+            // Round-2 (codex code MAJOR): raw URLSession errors (DNS, TLS,
+            // offline, request timeout) previously escaped to ArgumentParser's
+            // default handler and produced an ugly stack-trace-style exit.
+            // Route them through ExitCode(4) with a one-line message.
+            writeStderr("HuggingFace request failed: \(error.localizedDescription)")
             throw ExitCode(4)
         }
 
@@ -49,13 +64,30 @@ struct ModelsBrowseCommand: AsyncParsableCommand {
         print("model_id\test_gb\tfit")
         for row in rows {
             let est = row.estimateGB.map { "\($0)" } ?? "?"
-            print("\(row.id)\t\(est)\t\(verdictLabel(row.verdict))")
+            print("\(sanitizeForTable(row.id))\t\(est)\t\(verdictLabel(row.verdict))")
         }
         let summary = rows.isEmpty
             ? "no models match the current filters on a \(ramGB) GB Mac"
             : "\(rows.count) models on a \(ramGB) GB Mac"
         FileHandle.standardError.write(Data((summary + "\n").utf8))
     }
+}
+
+/// Round-2 hardening (codex security NIT): HF-returned ids are user content
+/// (anyone can publish to HuggingFace). Strip control characters (including
+/// embedded tab and newline) so a malicious model name can't break our
+/// tab-separated rendering or paint terminal escape sequences.
+func sanitizeForTable(_ raw: String) -> String {
+    var out = String()
+    out.reserveCapacity(raw.count)
+    for scalar in raw.unicodeScalars {
+        if scalar.value < 0x20 || scalar.value == 0x7F {
+            out.unicodeScalars.append(Unicode.Scalar(0xFFFD)!)
+        } else {
+            out.unicodeScalars.append(scalar)
+        }
+    }
+    return out
 }
 
 struct BrowseRow: Sendable, Equatable {
