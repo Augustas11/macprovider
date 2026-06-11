@@ -180,6 +180,18 @@ func (a *AdmissionManager) Promote(providerID string) (string, bool) {
 	return string(pool.TierProvisional), true
 }
 
+// Reject marks a provisional provider as banned by the operator.
+//
+// REJECTION POLICY (M2-5 follow-up to codex security-audit Low #47):
+// rejections have TTL semantics keyed to the provisional record's
+// lifetime — Prune drops a rejection whose underlying record is past
+// ProvisionalRetentionDays (default 30d). The operator's effective
+// intent is "ban this activity," not "ban this provider_id forever":
+// if the provider does not reappear inside the retention window, the
+// rejection lapses; if they reappear within it, the rejection still
+// blocks them. A durable, identity-forever blocklist is intentionally
+// NOT this code path — that belongs in a separate operator-managed
+// blocklist (M3 follow-up, not yet built).
 func (a *AdmissionManager) Reject(providerID, reason string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()

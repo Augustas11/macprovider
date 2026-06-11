@@ -437,6 +437,47 @@ func TestDeleteTerminalQuotaReservationsKeepsActiveAndDropsOld(t *testing.T) {
 		}
 	}
 
+	// 5 recently-settled reservations (3 days ago) — terminal but INSIDE
+	// the retention window. Must survive. Added per codex code-audit
+	// 2026-06-11 Low #49: the original fixture only had old-terminal +
+	// active, so the test could not distinguish "deletes terminal rows
+	// past cutoff" from "deletes all terminal rows".
+	recentAt := fixedTime().Add(-3 * 24 * time.Hour)
+	for i := 0; i < 5; i++ {
+		reqID := fmt.Sprintf("req_recent_%03d", i)
+		if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+			AccountID: "acct_delete_terminal", RequestID: reqID, WindowDate: "2026-05-26",
+			RequestedTokens: 1, DailyQuota: 1000000, CreatedAt: recentAt, ExpiresAt: recentAt.Add(24 * time.Hour),
+		}); err != nil {
+			t.Fatalf("ReserveQuota recent #%d: %v", i, err)
+		}
+		if err := store.SettleReservation(ctx, storage.ReservationSettlement{
+			AccountID: "acct_delete_terminal", RequestID: reqID,
+			PromptTokens: 1, CompletionTokens: 0, TotalTokens: 1, MaxTotalTokens: 1000,
+			TokenSource: "provider_reported", Outcome: "ok", SettledAt: recentAt,
+		}); err != nil {
+			t.Fatalf("SettleReservation recent #%d: %v", i, err)
+		}
+	}
+
+	// 1 reservation settled EXACTLY at the cutoff (7 days ago). Must
+	// survive because the predicate is strict less-than (settled_at <
+	// before), not less-or-equal. Pins the boundary semantic.
+	boundaryAt := fixedTime().Add(-7 * 24 * time.Hour)
+	if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
+		AccountID: "acct_delete_terminal", RequestID: "req_boundary", WindowDate: "2026-05-22",
+		RequestedTokens: 1, DailyQuota: 1000000, CreatedAt: boundaryAt, ExpiresAt: boundaryAt.Add(24 * time.Hour),
+	}); err != nil {
+		t.Fatalf("ReserveQuota boundary: %v", err)
+	}
+	if err := store.SettleReservation(ctx, storage.ReservationSettlement{
+		AccountID: "acct_delete_terminal", RequestID: "req_boundary",
+		PromptTokens: 1, CompletionTokens: 0, TotalTokens: 1, MaxTotalTokens: 1000,
+		TokenSource: "provider_reported", Outcome: "ok", SettledAt: boundaryAt,
+	}); err != nil {
+		t.Fatalf("SettleReservation boundary: %v", err)
+	}
+
 	// 10 active reservations created now — not yet terminal, must survive.
 	for i := 0; i < 10; i++ {
 		if _, err := store.ReserveQuota(ctx, storage.ReservationRequest{
@@ -453,16 +494,36 @@ func TestDeleteTerminalQuotaReservationsKeepsActiveAndDropsOld(t *testing.T) {
 		t.Fatalf("DeleteTerminalQuotaReservations: %v", err)
 	}
 	if deleted != 100 {
-		t.Fatalf("deleted = %d, want 100 (terminal rows >7d old)", deleted)
+		t.Fatalf("deleted = %d, want 100 (old-terminal only; recent-terminal + boundary + active must survive)", deleted)
 	}
 
-	// Active rows untouched.
+	// Active rows untouched on today's window.
 	used, reserved, err := store.DailyUsage(ctx, "acct_delete_terminal", "2026-05-29")
 	if err != nil {
-		t.Fatalf("DailyUsage post-prune: %v", err)
+		t.Fatalf("DailyUsage post-prune (active window): %v", err)
 	}
 	if used != 0 || reserved != 10 {
-		t.Fatalf("post-prune used=%d reserved=%d, want 0/10", used, reserved)
+		t.Fatalf("post-prune (active) used=%d reserved=%d, want 0/10", used, reserved)
+	}
+
+	// Recent-terminal rows are settled, not active — they have used=5 on
+	// the 2026-05-26 window. Survives the prune; not in DailyUsage's
+	// active-reservation count.
+	used, reserved, err = store.DailyUsage(ctx, "acct_delete_terminal", "2026-05-26")
+	if err != nil {
+		t.Fatalf("DailyUsage post-prune (recent window): %v", err)
+	}
+	if used != 5 || reserved != 0 {
+		t.Fatalf("post-prune (recent) used=%d reserved=%d, want 5/0 (recent-terminal rows must survive)", used, reserved)
+	}
+
+	// Boundary row is settled on the 2026-05-22 window. Survives.
+	used, reserved, err = store.DailyUsage(ctx, "acct_delete_terminal", "2026-05-22")
+	if err != nil {
+		t.Fatalf("DailyUsage post-prune (boundary window): %v", err)
+	}
+	if used != 1 || reserved != 0 {
+		t.Fatalf("post-prune (boundary) used=%d reserved=%d, want 1/0 (cutoff-boundary row must survive on strict-less-than)", used, reserved)
 	}
 }
 

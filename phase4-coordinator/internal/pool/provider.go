@@ -495,14 +495,24 @@ type SwapEvent struct {
 //
 // CONCURRENCY CONTRACT (M2-2 / ARCH-2): the emitter is invoked AFTER
 // ApplyHeartbeat releases Registry.mu. Implementations MAY:
-//   - call back into Registry methods (no longer deadlocks)
-//   - block freely (will not stall heartbeat throughput); cmd/coordinator
-//     dispatches onto a buffered channel drained by a single goroutine,
-//     so a slow audit writer cannot back-pressure the heartbeat handler
-//   - per SPEC-002 v1.3.5 §7.10 R-7.10.8, audit-write failures are
-//     best-effort and MUST NOT block heartbeat processing or drop the
-//     provider; a panic still propagates and crashes the heartbeat
-//     handler, matching the v1.3.4 default failure mode.
+//   - call back into Registry methods (no longer deadlocks the global
+//     lock the way the pre-M2-2 design did).
+//
+// Implementations that block in the emitter callback DO pay that
+// latency on the calling goroutine — usually the WS heartbeat handler.
+// The pool contract makes that safe in the sense that no other
+// heartbeat is stalled, but it is NOT the same as a non-blocking
+// emitter: the calling goroutine itself waits. For true non-blocking
+// semantics the implementation MUST dispatch off the call path, e.g.
+// via a buffered channel + dedicated drain goroutine like the
+// cmd/coordinator wiring does (the production path). A naive
+// synchronous SQLite write here will still delay this provider's next
+// heartbeat ack by up to busy_timeout seconds.
+//
+// Per SPEC-002 v1.3.5 §7.10 R-7.10.8, audit-write failures are
+// best-effort and MUST NOT block heartbeat processing or drop the
+// provider; a panic still propagates and crashes the heartbeat
+// handler, matching the v1.3.4 default failure mode.
 type SwapEventEmitter func(event SwapEvent)
 
 type HeartbeatUpdate struct {
