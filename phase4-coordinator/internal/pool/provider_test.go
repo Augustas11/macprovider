@@ -639,6 +639,135 @@ func TestApplyHeartbeatSwapEmitterDoesNotFireWhenNoPriorLoading(t *testing.T) {
 	}
 }
 
+// TestModelKnownShrinksOnProviderDisconnect pins the M2-5 / PERF-5
+// guarantee: ModelKnown answers from currently-connected providers only.
+// Pre-M2-5 the registry-wide seenModels map accumulated forever — a
+// 31-day model id observed once still answered true 1y later.
+func TestModelKnownShrinksOnProviderDisconnect(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-a",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+
+	if !registry.ModelKnown("model-a") {
+		t.Fatal("ModelKnown(model-a) = false while p1 is connected reporting it")
+	}
+	// Heartbeat with a different model id — that model is also seen.
+	registry.ApplyHeartbeat("p1", "s1", heartbeatUpdateAt("model-b", start.Add(time.Minute)))
+	if !registry.ModelKnown("model-b") {
+		t.Fatal("ModelKnown(model-b) = false after p1 reported it via heartbeat")
+	}
+	// model-a should still be remembered (p1 reported it earlier this session).
+	if !registry.ModelKnown("model-a") {
+		t.Fatal("ModelKnown(model-a) = false; per-session memory regressed")
+	}
+	// Disconnect p1 — both models it ever reported should drop from the
+	// global view.
+	if !registry.RemoveIfSession("p1", "s1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+	if registry.ModelKnown("model-a") {
+		t.Fatal("ModelKnown(model-a) still true after the only provider serving it disconnected — leak (PERF-5)")
+	}
+	if registry.ModelKnown("model-b") {
+		t.Fatal("ModelKnown(model-b) still true after the only provider serving it disconnected — leak (PERF-5)")
+	}
+}
+
+// TestRegisterReplaceSessionClearsSeenModels pins the M2-5 / PERF-5 fix for the
+// codex code-audit 2026-06-11 #47 finding: a session replacement (same
+// provider_id, new assigned_id) MUST clear the per-provider seen-model
+// history, else stale model ids from the prior session survive into the
+// new one and ModelKnown over-reports.
+func TestRegisterReplaceSessionClearsSeenModels(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	// Session 1: register p1@s1 reporting model-a, heartbeat in model-b.
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-a",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	registry.ApplyHeartbeat("p1", "s1", heartbeatUpdateAt("model-b", start.Add(time.Minute)))
+	if !registry.ModelKnown("model-a") || !registry.ModelKnown("model-b") {
+		t.Fatal("session-1 seen models not recorded")
+	}
+
+	// Session 2 replaces session 1 with a different model entirely.
+	// (Same provider_id, new assigned_id — the direct-replacement path
+	// inside Register, not the RemoveIfSession path.)
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s2",
+		ModelID:          "model-c",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start.Add(2 * time.Minute),
+		LastActivityAt:   start.Add(2 * time.Minute),
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	if !registry.ModelKnown("model-c") {
+		t.Fatal("session-2 model not recorded after replacement")
+	}
+	if registry.ModelKnown("model-a") {
+		t.Fatal("ModelKnown(model-a) leaked across session replacement; prior history should be cleared")
+	}
+	if registry.ModelKnown("model-b") {
+		t.Fatal("ModelKnown(model-b) leaked across session replacement; prior history should be cleared")
+	}
+}
+
+// TestSeenModelsCappedPerProvider pins the M2-5 / PERF-5 per-provider cap.
+// A single misbehaving provider cannot grow its inner set without bound.
+func TestSeenModelsCappedPerProvider(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-0",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	// Drive the per-provider set well past the cap with 200 distinct model ids.
+	for i := 0; i < 200; i++ {
+		modelID := "model-" + itoaForTest(i)
+		registry.ApplyHeartbeat("p1", "s1", heartbeatUpdateAt(modelID, start.Add(time.Duration(i+1)*time.Second)))
+	}
+	registry.mu.RLock()
+	got := len(registry.seenModelsByProvider["p1"])
+	registry.mu.RUnlock()
+	if got > maxSeenModelsPerProvider {
+		t.Fatalf("seenModelsByProvider[p1] = %d entries, want <= %d (cap)", got, maxSeenModelsPerProvider)
+	}
+}
+
 func TestApplyHeartbeatSwapEmitterNilDoesNotCrash(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Unix(1716768000, 0).UTC()
@@ -659,6 +788,23 @@ func assertProviderReady(t *testing.T, registry *Registry, lastActivityAt time.T
 	if provider.State != StateReady || provider.SlotsFree != 1 || !provider.LastActivityAt.Equal(lastActivityAt) {
 		t.Fatalf("provider = %#v, want ready unchanged with last_activity_at %s", provider, lastActivityAt)
 	}
+}
+
+// itoaForTest is a tiny stdlib-free integer-to-string for test loops
+// that need distinct model ids. The pool package already avoids strconv;
+// keep that style here.
+func itoaForTest(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
 }
 
 func registerHeartbeatProvider(t *testing.T, registry *Registry, modelID, modelHash string, hashStatus HashStatus, at time.Time) {

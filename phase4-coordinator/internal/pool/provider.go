@@ -126,11 +126,21 @@ func (p Provider) IsWSTunneled() bool {
 }
 
 type Registry struct {
-	mu                    sync.RWMutex
-	providers             map[string]*Provider
-	sessions              map[string]*Provider
-	endpoints             map[string]config.ProviderConfig
-	seenModels            map[string]struct{}
+	mu        sync.RWMutex
+	providers map[string]*Provider
+	sessions  map[string]*Provider
+	endpoints map[string]config.ProviderConfig
+	// seenModelsByProvider tracks the model IDs ever reported by each
+	// currently-connected provider. M2-5 / PERF-5: previously a single
+	// registry-wide `seenModels map[string]struct{}` accumulated forever
+	// (no cleanup on provider removal); per the 2026-06-10 audit it could
+	// outgrow the pool unboundedly. Now keyed by providerID and dropped
+	// on RemoveIfSession / RemoveIfSessionState, with a per-provider cap
+	// to bound a single provider's contribution. ModelKnown is a view
+	// over currently-connected providers' sets — so when a provider
+	// disconnects, models only it had reported correctly disappear from
+	// the global "seen" answer.
+	seenModelsByProvider  map[string]map[string]struct{}
 	breakerFaults         map[string][]time.Time
 	recoveryHolds         map[string]recoveryHold
 	lastBreakerRecoveries map[string]time.Time
@@ -138,6 +148,13 @@ type Registry struct {
 	hashVerifier          HeartbeatHashVerifier
 	swapEmitter           SwapEventEmitter
 }
+
+// maxSeenModelsPerProvider caps the seenModelsByProvider inner set so a
+// single misbehaving provider can't blow up memory. 32 is several orders
+// of magnitude above legitimate use (a real provider serves 1-2 models
+// at a time); reaching this cap silently drops further model IDs.
+// M2-5 / PERF-5.
+const maxSeenModelsPerProvider = 32
 
 type recoveryHold struct {
 	assignedID string
@@ -153,7 +170,7 @@ func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Reg
 		providers:             map[string]*Provider{},
 		sessions:              map[string]*Provider{},
 		endpoints:             endpoints,
-		seenModels:            map[string]struct{}{},
+		seenModelsByProvider:  map[string]map[string]struct{}{},
 		breakerFaults:         map[string][]time.Time{},
 		recoveryHolds:         map[string]recoveryHold{},
 		lastBreakerRecoveries: map[string]time.Time{},
@@ -177,6 +194,15 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 	if existing := r.providers[p.ProviderID]; existing != nil {
 		old = existing.conn
 		delete(r.sessions, existing.AssignedID)
+		// M2-5: this is a session replacement (same provider_id, new
+		// assigned_id). The "currently-connected session only" invariant
+		// for ModelKnown requires the stale model history to be cleared
+		// here too — RemoveIfSession{,State} only fire on clean
+		// disconnect, not on this direct replacement path. Without this
+		// delete, model ids from the prior session would survive into
+		// the new one and ModelKnown would over-report. (Codex code-audit
+		// 2026-06-11 #47.)
+		delete(r.seenModelsByProvider, p.ProviderID)
 	}
 	p.conn = conn
 	if p.Tier == "" {
@@ -191,11 +217,35 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 	}
 	r.providers[p.ProviderID] = p
 	r.sessions[p.AssignedID] = p
-	r.seenModels[p.ModelID] = struct{}{}
+	r.recordSeenModelLocked(p.ProviderID, p.ModelID)
 	delete(r.breakerFaults, p.ProviderID)
 	delete(r.recoveryHolds, p.ProviderID)
 	delete(r.lastBreakerRecoveries, p.ProviderID)
 	return old
+}
+
+// recordSeenModelLocked records a model id under a provider's set,
+// respecting the per-provider cap. Caller must hold r.mu in WRITE mode.
+func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
+	if providerID == "" || modelID == "" {
+		return
+	}
+	set, ok := r.seenModelsByProvider[providerID]
+	if !ok {
+		set = map[string]struct{}{}
+		r.seenModelsByProvider[providerID] = set
+	}
+	if _, already := set[modelID]; already {
+		return
+	}
+	if len(set) >= maxSeenModelsPerProvider {
+		// Cap is well above legitimate use; reaching it means this
+		// provider is misbehaving or buggy. Silent-drop is operationally
+		// safe — ModelKnown still answers true via the currently-connected
+		// provider's live ModelID field.
+		return
+	}
+	set[modelID] = struct{}{}
 }
 
 func (r *Registry) SetTier(providerID string, tier Tier) (Provider, bool) {
@@ -528,7 +578,7 @@ func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb Heartb
 	p.SlotsFree = hb.SlotsFree
 	p.SlotsTotal = hb.SlotsTotal
 	p.ThroughputTPSEstimate = hb.ThroughputTPSEstimate
-	r.seenModels[hb.ModelID] = struct{}{}
+	r.recordSeenModelLocked(p.ProviderID, hb.ModelID)
 	if hb.Status != "" && hb.Status != p.State {
 		if r.canApplyProviderStateLocked(p, hb.Status) {
 			r.setStateLocked(p, hb.Status)
@@ -599,9 +649,18 @@ func (r *Registry) ModelKnown(modelID string) bool {
 			return true
 		}
 	}
-	for seen := range r.seenModels {
-		if strings.EqualFold(seen, modelID) {
-			return true
+	// M2-5 / PERF-5: iterate per-provider seenModels (only entries for
+	// currently-connected providers, since RemoveIfSession{,State} drop
+	// the inner map). The pre-M2-5 behaviour was a registry-wide
+	// accumulator that retained models from disconnected providers
+	// forever — a memory leak the audit flagged. The new semantic is
+	// "known iff a currently-connected provider has at any point served
+	// it during its current session."
+	for _, set := range r.seenModelsByProvider {
+		for seen := range set {
+			if strings.EqualFold(seen, modelID) {
+				return true
+			}
 		}
 	}
 	return false
@@ -642,6 +701,7 @@ func (r *Registry) RemoveIfSession(providerID, assignedID string) bool {
 	}
 	delete(r.providers, providerID)
 	delete(r.sessions, assignedID)
+	delete(r.seenModelsByProvider, providerID)
 	r.clearBreakerStateLocked(providerID)
 	return true
 }
@@ -655,6 +715,7 @@ func (r *Registry) RemoveIfSessionState(providerID, assignedID string, state Sta
 	}
 	delete(r.providers, providerID)
 	delete(r.sessions, assignedID)
+	delete(r.seenModelsByProvider, providerID)
 	r.clearBreakerStateLocked(providerID)
 	return true
 }
