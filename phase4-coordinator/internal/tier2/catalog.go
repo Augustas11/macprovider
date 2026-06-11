@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
@@ -35,7 +36,12 @@ type ModelEntry struct {
 	Source       string `json:"source"`
 }
 
-type Catalog struct {
+// ParsedCatalog is the verified, validated form of a tier-2 catalog file —
+// the in-memory shape of one signed JSON object on disk. It is returned by
+// ParseCatalog / LoadCatalog and held inside a *Catalog after Configure.
+// (Previously named Catalog; renamed M3-8d so the per-coordinator state
+// container could take that name. The on-disk format is unchanged.)
+type ParsedCatalog struct {
 	CatalogID string
 	ExpiresAt time.Time
 	Models    map[string]ModelEntry
@@ -75,59 +81,255 @@ type canonicalBody struct {
 type state struct {
 	configured bool
 	loadFailed bool
-	active     *Catalog
+	active     *ParsedCatalog
 }
 
-var global = struct {
+// Catalog is the per-coordinator tier-2 model-hash verification state. It
+// holds whatever ParsedCatalog (if any) is currently active plus the
+// bookkeeping needed to distinguish "never configured", "configured-and-
+// loaded", and "configured-but-load-failed". All accessors are RLocked;
+// Configure / ConfigureStrict take the write lock. M3-8d (audit TEST-4)
+// promoted the previous file-scoped `var global` into this type so tests
+// can construct independent instances and run in parallel and so SIGHUP
+// reload can be a pointer swap rather than an in-place mutation.
+type Catalog struct {
 	mu sync.RWMutex
 	st state
-}{}
+}
 
-var nowUTC = func() time.Time { return time.Now().UTC() }
+// NewCatalog returns an empty Catalog (configured=false, no active catalog).
+// Tests construct independent instances; production code typically calls
+// Default() to share the package singleton.
+func NewCatalog() *Catalog {
+	return &Catalog{}
+}
 
-func Configure(cfg config.Tier2Config, logger zerolog.Logger) error {
+// PoolHeartbeatVerifier returns a pool.RegistryOption that wires c's
+// VerifyProviderHash as the registry's HeartbeatHashVerifier. Lives in
+// tier2 (not pool) because pool cannot import tier2 without a cycle.
+// Equivalent to pool.WithHeartbeatHashVerifier(c.VerifyProviderHash).
+func PoolHeartbeatVerifier(c *Catalog) pool.RegistryOption {
+	return pool.WithHeartbeatHashVerifier(c.VerifyProviderHash)
+}
+
+var (
+	defaultCatalog atomic.Pointer[Catalog]
+
+	nowUTC = func() time.Time { return time.Now().UTC() }
+)
+
+func init() {
+	defaultCatalog.Store(NewCatalog())
+}
+
+// Default returns the package-singleton Catalog. Production wiring (main.go,
+// ws.Server default option, buyer.Server) reads through this so legacy call
+// sites that have not been threaded with an explicit *Catalog continue to
+// work. The pointer can be swapped atomically by SIGHUP reload via
+// SetDefault below.
+func Default() *Catalog {
+	return defaultCatalog.Load()
+}
+
+// SetDefault atomically swaps the package-singleton Catalog. The SIGHUP
+// reload path calls this with a freshly-configured *Catalog so an in-flight
+// VerifyProviderHash on the previous singleton never observes a torn read.
+// nil is rejected (leaves the previous singleton unchanged).
+func SetDefault(c *Catalog) {
+	if c == nil {
+		return
+	}
+	defaultCatalog.Store(c)
+}
+
+// Configure loads and activates a signed catalog on c. Preserves the previous
+// active catalog if reload fails AND RequireHashVerified is off — matches the
+// pre-M3-8d semantic that an operator pushing a malformed catalog over a
+// known-good one does not silently disable verification.
+func (c *Catalog) Configure(cfg config.Tier2Config, logger zerolog.Logger) error {
 	if strings.TrimSpace(cfg.CatalogPath) == "" {
-		global.mu.Lock()
-		global.st = state{}
-		global.mu.Unlock()
+		c.mu.Lock()
+		c.st = state{}
+		c.mu.Unlock()
 		if cfg.RequireHashVerified {
 			return fmt.Errorf("tier2.require_hash_verified requires a valid signed catalog")
 		}
 		return nil
 	}
-	catalog, err := LoadCatalog(cfg.CatalogPath, cfg.CatalogPublicKey, logger)
-	global.mu.Lock()
-	global.st.configured = true
-	global.st.loadFailed = err != nil
+	parsed, err := LoadCatalog(cfg.CatalogPath, cfg.CatalogPublicKey, logger)
+	c.mu.Lock()
+	c.st.configured = true
+	c.st.loadFailed = err != nil
 	if err == nil {
-		global.st.active = catalog
+		c.st.active = parsed
 	}
-	global.mu.Unlock()
+	c.mu.Unlock()
 	if err != nil && cfg.RequireHashVerified {
 		return fmt.Errorf("tier2.require_hash_verified requires a valid signed catalog: %w", err)
 	}
 	return nil
 }
 
-func ConfigureStrict(cfg config.Tier2Config, logger zerolog.Logger) error {
+// ConfigureStrict is the SIGHUP-reload variant: it never preserves a stale
+// catalog on parse/signature failure. A failing reload returns an error and
+// leaves c's prior state untouched.
+func (c *Catalog) ConfigureStrict(cfg config.Tier2Config, logger zerolog.Logger) error {
 	if strings.TrimSpace(cfg.CatalogPath) == "" {
 		if cfg.RequireHashVerified {
 			return fmt.Errorf("tier2.require_hash_verified requires a valid signed catalog")
 		}
-		global.mu.Lock()
-		global.st = state{}
-		global.mu.Unlock()
+		c.mu.Lock()
+		c.st = state{}
+		c.mu.Unlock()
 		return nil
 	}
-	catalog, err := LoadCatalog(cfg.CatalogPath, cfg.CatalogPublicKey, logger)
+	parsed, err := LoadCatalog(cfg.CatalogPath, cfg.CatalogPublicKey, logger)
 	if err != nil {
 		return fmt.Errorf("tier2 catalog reload rejected: %w", err)
 	}
-	global.mu.Lock()
-	global.st = state{configured: true, active: catalog}
-	global.mu.Unlock()
+	c.mu.Lock()
+	c.st = state{configured: true, active: parsed}
+	c.mu.Unlock()
 	return nil
 }
+
+// Active reports whether c currently has a non-expired ParsedCatalog loaded.
+func (c *Catalog) Active() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return activeParsedLocked(c.st) != nil
+}
+
+// Configured reports whether Configure has ever been called with a non-empty
+// CatalogPath on c, regardless of load outcome.
+func (c *Catalog) Configured() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.st.configured
+}
+
+// LoadFailed reports whether the most recent Configure attempt failed to load
+// or verify the catalog file.
+func (c *Catalog) LoadFailed() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.st.loadFailed
+}
+
+// CatalogUnavailable returns true when c was configured but the catalog is
+// not currently usable (load failed, or expired since load).
+func (c *Catalog) CatalogUnavailable() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return catalogUnavailableLocked(c.st)
+}
+
+// Catalogued reports whether modelID is present in c's active catalog.
+func (c *Catalog) Catalogued(modelID string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	parsed := activeParsedLocked(c.st)
+	if parsed == nil {
+		return false
+	}
+	_, ok := parsed.Models[catalogModelKey(modelID)]
+	return ok
+}
+
+// VerifyProviderHash implements the SPEC-008 v0.3 §5.5 five-state enum
+// against c's current active catalog. Behavior identical to the pre-M3-8d
+// package-level function — same inputs, same outputs.
+func (c *Catalog) VerifyProviderHash(modelID, reportedHash string) pool.HashStatus {
+	c.mu.RLock()
+	st := c.st
+	c.mu.RUnlock()
+	parsed := activeParsedLocked(st)
+	if parsed == nil {
+		if catalogUnavailableLocked(st) {
+			return pool.HashStatusCatalogUnavailable
+		}
+		return pool.HashStatusUncatalogued
+	}
+	model, ok := parsed.Models[catalogModelKey(modelID)]
+	if !ok || strings.TrimSpace(reportedHash) == "" {
+		return pool.HashStatusUncatalogued
+	}
+	reported := strings.TrimSpace(reportedHash)
+	if !hashPattern.MatchString(reported) {
+		return pool.HashStatusInvalid
+	}
+	reported = strings.ToLower(reported)
+	if strings.EqualFold(reported, model.SHA256) {
+		return pool.HashStatusVerified
+	}
+	return pool.HashStatusMismatch
+}
+
+// ExpectedHashPrefix returns the 8-hex-char prefix of the catalog hash for
+// modelID, or "" when not catalogued. Used in audit-log enrichment.
+func (c *Catalog) ExpectedHashPrefix(modelID string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	parsed := activeParsedLocked(c.st)
+	if parsed == nil {
+		return ""
+	}
+	model, ok := parsed.Models[catalogModelKey(modelID)]
+	if !ok {
+		return ""
+	}
+	return hashPrefix(model.SHA256)
+}
+
+// CatalogID returns the active catalog's ID, or "" if no active catalog.
+func (c *Catalog) CatalogID() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	parsed := activeParsedLocked(c.st)
+	if parsed == nil {
+		return ""
+	}
+	return parsed.CatalogID
+}
+
+// --- Package-level shims (legacy API; route to Default()) -------------------
+//
+// Pre-M3-8d code, including buyer.Server, cmd/coordinator/main.go, and tests
+// that have not been migrated to explicit *Catalog DI, calls these. They are
+// thin wrappers around the package-singleton; both styles compose because the
+// shims share the same Catalog with anything wired via ws.WithCatalog(Default()).
+
+func Configure(cfg config.Tier2Config, logger zerolog.Logger) error {
+	return Default().Configure(cfg, logger)
+}
+
+func ConfigureStrict(cfg config.Tier2Config, logger zerolog.Logger) error {
+	return Default().ConfigureStrict(cfg, logger)
+}
+
+func Active() bool                                                  { return Default().Active() }
+func Configured() bool                                              { return Default().Configured() }
+func LoadFailed() bool                                              { return Default().LoadFailed() }
+func CatalogUnavailable() bool                                      { return Default().CatalogUnavailable() }
+func Catalogued(modelID string) bool                                { return Default().Catalogued(modelID) }
+func VerifyProviderHash(modelID, reportedHash string) pool.HashStatus {
+	return Default().VerifyProviderHash(modelID, reportedHash)
+}
+func ExpectedHashPrefix(modelID string) string { return Default().ExpectedHashPrefix(modelID) }
+func CatalogID() string                        { return Default().CatalogID() }
+
+// ResetForTest swaps in a fresh package-singleton Catalog and restores nowUTC.
+//
+// Deprecated: prefer constructing a local *Catalog via NewCatalog() and
+// passing it to dependent constructors via ws.WithCatalog. Retained for
+// legacy tests (cmd/coordinator/main_test.go, internal/buyer/server_test.go)
+// that still drive the package-level shim API.
+func ResetForTest() {
+	defaultCatalog.Store(NewCatalog())
+	nowUTC = func() time.Time { return time.Now().UTC() }
+}
+
+// --- Stateless helpers (no Catalog state) -----------------------------------
 
 func ConfigActive(cfg config.Tier2Config) bool {
 	return ModelHashActive(cfg) ||
@@ -166,20 +368,15 @@ func PhaseForConfigWithModelHashEvidence(cfg config.Tier2Config, observedModelHa
 	}
 }
 
-func ResetForTest() {
-	global.mu.Lock()
-	global.st = state{}
-	global.mu.Unlock()
-	nowUTC = func() time.Time { return time.Now().UTC() }
-}
+// --- LoadCatalog / ParseCatalog ---------------------------------------------
 
-func LoadCatalog(path, publicKey string, logger zerolog.Logger) (*Catalog, error) {
+func LoadCatalog(path, publicKey string, logger zerolog.Logger) (*ParsedCatalog, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		logCatalogEvent(logger, "catalog_load_failed", "MAJOR", "", "reject", "read_failed")
 		return nil, err
 	}
-	catalog, err := ParseCatalog(raw, publicKey)
+	parsed, err := ParseCatalog(raw, publicKey)
 	if err != nil {
 		event := "catalog_load_failed"
 		reason := "parse_failed"
@@ -190,11 +387,11 @@ func LoadCatalog(path, publicKey string, logger zerolog.Logger) (*Catalog, error
 		logCatalogEvent(logger, event, "MAJOR", catalogIDFromRaw(raw), "reject", reason)
 		return nil, err
 	}
-	logCatalogLoaded(logger, catalog)
-	return catalog, nil
+	logCatalogLoaded(logger, parsed)
+	return parsed, nil
 }
 
-func ParseCatalog(raw []byte, publicKey string) (*Catalog, error) {
+func ParseCatalog(raw []byte, publicKey string) (*ParsedCatalog, error) {
 	var file catalogFile
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
@@ -294,95 +491,10 @@ func ParseCatalog(raw []byte, publicKey string) (*Catalog, error) {
 		model.SHA256 = strings.ToLower(model.SHA256)
 		models[modelID] = model
 	}
-	return &Catalog{CatalogID: file.CatalogID, ExpiresAt: expiresAt, Models: models}, nil
+	return &ParsedCatalog{CatalogID: file.CatalogID, ExpiresAt: expiresAt, Models: models}, nil
 }
 
-func Active() bool {
-	global.mu.RLock()
-	defer global.mu.RUnlock()
-	return activeCatalogLocked(global.st) != nil
-}
-
-func Configured() bool {
-	global.mu.RLock()
-	defer global.mu.RUnlock()
-	return global.st.configured
-}
-
-func LoadFailed() bool {
-	global.mu.RLock()
-	defer global.mu.RUnlock()
-	return global.st.loadFailed
-}
-
-func CatalogUnavailable() bool {
-	global.mu.RLock()
-	defer global.mu.RUnlock()
-	return catalogUnavailableLocked(global.st)
-}
-
-func Catalogued(modelID string) bool {
-	global.mu.RLock()
-	defer global.mu.RUnlock()
-	catalog := activeCatalogLocked(global.st)
-	if catalog == nil {
-		return false
-	}
-	_, ok := catalog.Models[catalogModelKey(modelID)]
-	return ok
-}
-
-func VerifyProviderHash(modelID, reportedHash string) pool.HashStatus {
-	global.mu.RLock()
-	st := global.st
-	global.mu.RUnlock()
-	catalog := activeCatalogLocked(st)
-	if catalog == nil {
-		if catalogUnavailableLocked(st) {
-			return pool.HashStatusCatalogUnavailable
-		}
-		return pool.HashStatusUncatalogued
-	}
-	model, ok := catalog.Models[catalogModelKey(modelID)]
-	if !ok || strings.TrimSpace(reportedHash) == "" {
-		return pool.HashStatusUncatalogued
-	}
-	reported := strings.TrimSpace(reportedHash)
-	if !hashPattern.MatchString(reported) {
-		return pool.HashStatusInvalid
-	}
-	reported = strings.ToLower(reported)
-	if strings.EqualFold(reported, model.SHA256) {
-		return pool.HashStatusVerified
-	}
-	return pool.HashStatusMismatch
-}
-
-func ExpectedHashPrefix(modelID string) string {
-	global.mu.RLock()
-	defer global.mu.RUnlock()
-	catalog := activeCatalogLocked(global.st)
-	if catalog == nil {
-		return ""
-	}
-	model, ok := catalog.Models[catalogModelKey(modelID)]
-	if !ok {
-		return ""
-	}
-	return hashPrefix(model.SHA256)
-}
-
-func CatalogID() string {
-	global.mu.RLock()
-	defer global.mu.RUnlock()
-	catalog := activeCatalogLocked(global.st)
-	if catalog == nil {
-		return ""
-	}
-	return catalog.CatalogID
-}
-
-func activeCatalogLocked(st state) *Catalog {
+func activeParsedLocked(st state) *ParsedCatalog {
 	if st.active == nil || !nowUTC().Before(st.active.ExpiresAt) {
 		return nil
 	}
@@ -392,7 +504,7 @@ func activeCatalogLocked(st state) *Catalog {
 // catalogUnavailableLocked returns true when a catalog was configured but is
 // not currently usable (load failed or expired).
 func catalogUnavailableLocked(st state) bool {
-	return st.configured && activeCatalogLocked(st) == nil && (st.loadFailed || st.active != nil)
+	return st.configured && activeParsedLocked(st) == nil && (st.loadFailed || st.active != nil)
 }
 
 func catalogModelKey(modelID string) string {
@@ -508,8 +620,8 @@ func logCatalogEvent(logger zerolog.Logger, event, severity, catalogID, decision
 		Msg("tier2 catalog event")
 }
 
-func logCatalogLoaded(logger zerolog.Logger, catalog *Catalog) {
-	if catalog == nil {
+func logCatalogLoaded(logger zerolog.Logger, parsed *ParsedCatalog) {
+	if parsed == nil {
 		return
 	}
 	logger.Info().
@@ -524,9 +636,9 @@ func logCatalogLoaded(logger zerolog.Logger, catalog *Catalog) {
 		Str("pillar", "A").
 		Str("reported_hash_prefix", "").
 		Str("expected_hash_prefix", "").
-		Str("catalog_id", catalog.CatalogID).
-		Int("model_count", len(catalog.Models)).
-		Time("expires_at", catalog.ExpiresAt).
+		Str("catalog_id", parsed.CatalogID).
+		Int("model_count", len(parsed.Models)).
+		Time("expires_at", parsed.ExpiresAt).
 		Str("decision", "allow").
 		Str("reason", "catalog_loaded").
 		Str("config_flag", "tier2.catalog_path").
