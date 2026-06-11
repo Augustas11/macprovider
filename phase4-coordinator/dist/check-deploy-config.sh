@@ -45,6 +45,25 @@ elif not re.fullmatch(r"[0-9a-fA-F]{64}", key):
 else:
     ok("operator_key present (64-hex, non-placeholder)")
 
+# --- require_provider_tokens ---
+# Security-sensitive: the binary default is `true` (fail-closed), but a
+# pre-existing fleet without issued provider tokens needs `false` to keep
+# connecting. Silent-defaulting on this field caused the 2026-06-11 outage
+# (deployed a config without the field; new binary defaulted true; air5/air8gb
+# rejected with close_code:4005 reason:invalid_token). Force an explicit choice.
+rpt = g(coord, "require_provider_tokens")
+if rpt is None:
+    hard("auth.require_provider_tokens is ABSENT — binary default (true) "
+         "will reject any provider not presenting a token. "
+         "Set explicitly to true (production / tokens issued) or false (legacy fleet).")
+elif rpt.lower() == "false":
+    warn("auth.require_provider_tokens=false — provider WS is unauthenticated; "
+         "intended only for legacy providers without issued tokens. Plan token migration.")
+elif rpt.lower() == "true":
+    ok("auth.require_provider_tokens=true (fail-closed)")
+else:
+    hard(f"auth.require_provider_tokens must be true or false, got: {rpt!r}")
+
 # --- threshold sanity ---
 hi = g(coord, "heartbeat_interval_s")
 hm = g(coord, "heartbeat_miss_threshold_s")
