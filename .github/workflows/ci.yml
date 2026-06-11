@@ -28,13 +28,11 @@ jobs:
           go-version-file: phase4-coordinator/go.mod
           cache-dependency-path: phase4-coordinator/go.sum
 
-      - name: go vet
-        working-directory: phase4-coordinator
-        run: go vet ./...
+      - name: make vet-coordinator
+        run: make vet-coordinator
 
-      - name: go test
-        working-directory: phase4-coordinator
-        run: go test ./...
+      - name: make test-coordinator
+        run: make test-coordinator
 
   gateway:
     name: phase5-gateway (go vet + test)
@@ -54,10 +52,8 @@ jobs:
           go-version-file: phase5-gateway/go.mod
           cache-dependency-path: phase5-gateway/go.sum
 
-      - name: go vet
-        working-directory: phase5-gateway
-        run: go vet ./...
+      - name: make vet-gateway
+        run: make vet-gateway
 
-      - name: go test
-        working-directory: phase5-gateway
-        run: go test ./...
+      - name: make test-gateway
+        run: make test-gateway
