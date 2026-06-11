@@ -294,6 +294,19 @@ validate_hf_id() {
   case "$id" in
     /*|*/) die 7 "model id must be in the form org/name (got: $id)" ;;
   esac
+  # Round-2 hardening (codex code/security MAJOR): reject "." / ".." path
+  # components even though the charset filter allows them. Otherwise an id
+  # like "org/.." or "../name" passes the format check and could be
+  # path-normalized into the HF URL or later treated as a relative local
+  # model path by the binary.
+  hf_org="${id%/*}"
+  hf_name="${id##*/}"
+  case "$hf_org" in
+    .|..) die 7 "model id org segment cannot be \".\" or \"..\"" ;;
+  esac
+  case "$hf_name" in
+    .|..) die 7 "model id name segment cannot be \".\" or \"..\"" ;;
+  esac
 }
 
 # SPEC-003 v0.9 FR-D2: estimate weight size in GB from HF repo name.
@@ -303,7 +316,20 @@ validate_hf_id() {
 # "skip fit check, warn user".
 estimate_weights_gb_from_name() {
   id="$1"
-  params_b="$(printf "%s" "$id" | grep -oE '[0-9]+(\.[0-9]+)?[Bb]' | head -n1 | tr -d 'Bb')"
+  # Round-2 (codex code MAJOR): match "NxMB" Mixture-of-Experts shape FIRST
+  # (e.g. "Mixtral-8x7B" — 8 experts of 7B each, total ~56B params). The
+  # single-N pattern below would otherwise capture only the "7B" half and
+  # under-count memory by ~N×, letting the fit check pass a model that
+  # would OOM the host.
+  moe_match="$(printf "%s" "$id" | grep -oE '[0-9]+x[0-9]+(\.[0-9]+)?[Bb]' | head -n1)"
+  if [ -n "$moe_match" ]; then
+    experts="${moe_match%%x*}"
+    per_rest="${moe_match#*x}"
+    per_b="${per_rest%[Bb]}"
+    params_b="$(awk -v e="$experts" -v p="$per_b" 'BEGIN { printf "%g", e * p }')"
+  else
+    params_b="$(printf "%s" "$id" | grep -oE '[0-9]+(\.[0-9]+)?[Bb]' | head -n1 | tr -d 'Bb')"
+  fi
   [ -n "$params_b" ] || return 0
   quant_lc="$(printf "%s" "$id" | tr '[:upper:]' '[:lower:]')"
   case "$quant_lc" in
@@ -360,9 +386,15 @@ hf_check_model() {
   case "$id" in
     mlx-community/*) is_mlx=1 ;;
   esac
-  if [ "$is_mlx" -eq 0 ] && \
-     printf "%s" "$body" | grep -qE '"library_name"[[:space:]]*:[[:space:]]*"mlx"|"tags"[[:space:]]*:[[:space:]]*\[[^]]*"mlx"'; then
-    is_mlx=1
+  if [ "$is_mlx" -eq 0 ]; then
+    # Round-2 (codex code MINOR): flatten the body to one line before the
+    # tags regex. HF currently returns minified JSON, but a future format
+    # change to pretty-printed bodies would defeat the bracketed-class
+    # match because grep -E reads line-by-line.
+    flat_body="$(printf "%s" "$body" | tr -d '\n\r')"
+    if printf "%s" "$flat_body" | grep -qE '"library_name"[[:space:]]*:[[:space:]]*"mlx"|"tags"[[:space:]]*:[[:space:]]*\[[^]]*"mlx"'; then
+      is_mlx=1
+    fi
   fi
   if [ "$is_mlx" -eq 0 ]; then
     die 7 "model $id is not an MLX repo. macprovider runs MLX-format models only. Pick an mlx-community/* variant or convert with mlx_lm.convert."
