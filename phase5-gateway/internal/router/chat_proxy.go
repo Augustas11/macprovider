@@ -10,10 +10,12 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -517,4 +519,161 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 func demoTokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
+}
+
+// ============================================================
+// Chat-only helpers migrated from server.go (M3-9 CODE-8 cleanup)
+// ============================================================
+
+const maxUpstreamResponseBodyBytes = int64(16 << 20)
+
+func readLimitedBody(r io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes < 0 {
+		maxBytes = 0
+	}
+	lr := &io.LimitedReader{R: r, N: maxBytes + 1}
+	body, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("upstream response body exceeds %d bytes", maxBytes)
+	}
+	return body, nil
+}
+
+// statusWriter wraps http.ResponseWriter to capture the HTTP status code that
+// was written. handleChatCompletions uses it for an end-of-request log line
+// (G3 — operator observability for the flaky-provider failure mode).
+type statusWriter struct {
+	http.ResponseWriter
+	statusCode int
+	flushed    bool
+}
+
+func (sw *statusWriter) WriteHeader(code int) {
+	if !sw.flushed {
+		sw.statusCode = code
+		sw.flushed = true
+	}
+	sw.ResponseWriter.WriteHeader(code)
+}
+
+func (sw *statusWriter) Write(b []byte) (int, error) {
+	if !sw.flushed {
+		sw.statusCode = http.StatusOK
+		sw.flushed = true
+	}
+	return sw.ResponseWriter.Write(b)
+}
+
+// Flush satisfies http.Flusher so SSE streaming through this wrapper still
+// flushes chunks to the buyer in real time.
+func (sw *statusWriter) Flush() {
+	if f, ok := sw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func writeSSEError(w http.ResponseWriter, message, code string) {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "api_error", "code": code}})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\n"))
+}
+
+func parseChatRequest(body []byte) (chatRequest, error) {
+	var req chatRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		return chatRequest{}, errors.New("Malformed JSON")
+	}
+	if strings.TrimSpace(req.Model) == "" {
+		return chatRequest{}, errors.New("model is required")
+	}
+	if len(req.Messages) == 0 {
+		return chatRequest{}, errors.New("messages is required")
+	}
+	return req, nil
+}
+
+func usageFromJSON(body []byte, maxUsageTokens int64) (tokenUsage, bool, error) {
+	var envelope struct {
+		Usage json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil || envelope.Usage == nil {
+		return tokenUsage{}, false, nil
+	}
+	if bytes.Equal(bytes.TrimSpace(envelope.Usage), []byte("null")) {
+		return tokenUsage{}, false, nil
+	}
+	var rawUsage struct {
+		PromptTokens     *int64 `json:"prompt_tokens"`
+		CompletionTokens *int64 `json:"completion_tokens"`
+		TotalTokens      *int64 `json:"total_tokens"`
+	}
+	if err := json.Unmarshal(envelope.Usage, &rawUsage); err != nil {
+		return tokenUsage{}, true, fmt.Errorf("usage object is malformed")
+	}
+	if rawUsage.PromptTokens == nil || rawUsage.CompletionTokens == nil {
+		return tokenUsage{}, true, fmt.Errorf("usage prompt_tokens and completion_tokens are required")
+	}
+	usage := tokenUsage{}
+	usage.PromptTokens = *rawUsage.PromptTokens
+	usage.CompletionTokens = *rawUsage.CompletionTokens
+	if rawUsage.TotalTokens != nil {
+		usage.TotalTokens = *rawUsage.TotalTokens
+	}
+	if usage.PromptTokens < 0 || usage.CompletionTokens < 0 || usage.TotalTokens < 0 {
+		return tokenUsage{}, true, fmt.Errorf("usage tokens must be non-negative")
+	}
+	if usage.PromptTokens > math.MaxInt64-usage.CompletionTokens {
+		return tokenUsage{}, true, fmt.Errorf("usage token total overflows int64")
+	}
+	sum := usage.PromptTokens + usage.CompletionTokens
+	if sum > maxUsageTokens {
+		return tokenUsage{}, true, fmt.Errorf("usage token total exceeds request maximum")
+	}
+	if rawUsage.TotalTokens != nil && usage.TotalTokens != 0 && usage.TotalTokens != sum {
+		return tokenUsage{}, true, fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
+	}
+	usage.TotalTokens = sum
+	return usage, true, nil
+}
+
+func completionFromHeader(header http.Header) int64 {
+	raw := header.Get("X-MacProvider-Completion-Tokens")
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func estimatePromptTokens(body []byte) int64 {
+	if len(body) == 0 {
+		return 0
+	}
+	return int64(math.Ceil(float64(len(body)) / 4.0))
+}
+
+func copyForwardHeaders(dst, src http.Header) {
+	if accept := strings.TrimSpace(src.Get("Accept")); accept != "" {
+		dst.Set("Accept", accept)
+	}
+	if retry := strings.TrimSpace(src.Get("X-MacProvider-Retry")); retry != "" {
+		dst.Set("X-MacProvider-Retry", retry)
+	}
+	if idempotencyKey := strings.TrimSpace(src.Get("Idempotency-Key")); idempotencyKey != "" {
+		dst.Set("Idempotency-Key", idempotencyKey)
+	}
+}
+
+func contentTypeOrJSON(header http.Header) string {
+	if ct := header.Get("Content-Type"); ct != "" {
+		return ct
+	}
+	return "application/json"
 }
