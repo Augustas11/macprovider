@@ -44,7 +44,12 @@ type Server struct {
 	// sqlite.OpenReadOnly with conn cap 4) lets SQLite WAL's concurrent-
 	// reader semantics absorb explorer load without touching the write
 	// path. When nil, handlers fall back to `store`.
-	readOnlyStore    Store
+	//
+	// Typed as ReadStore (the narrow read-only view), so a write method
+	// invoked via readStore() is a COMPILE error, not a runtime mode=ro
+	// driver error. The DSN-level mode=ro+query_only(1) guard in
+	// internal/storage/sqlite stays as defense in depth.
+	readOnlyStore    ReadStore
 	keyMgr           auth.KeyManager
 	demoMgr          auth.DemoManager
 	oauth            auth.OAuthProvider
@@ -62,11 +67,14 @@ type Server struct {
 	routingMeta routingMetaCache
 }
 
-// readStore returns the read-only handle if registered, else the
-// primary store. M2-4: keep callers oblivious to whether the deployment
-// has the separate handle wired. Tests and the `-check` path use the
-// primary unconditionally; production wires both.
-func (s *Server) readStore() Store {
+// readStore returns the read-only view of the database. M2-4: this
+// is the canonical invariant location for "GET-only handlers MUST NOT
+// write" — it returns a ReadStore, so any attempt to call a write
+// method through it is a compile error. When no separate handle is
+// registered (tests, -check) we fall back to the primary Store, which
+// trivially implements ReadStore because Store embeds every sub-
+// interface ReadStore lists.
+func (s *Server) readStore() ReadStore {
 	if s.readOnlyStore != nil {
 		return s.readOnlyStore
 	}
@@ -88,6 +96,19 @@ type Store interface {
 	storage.CapacityStore
 	storage.HealthStore
 	storage.ExplorerStore
+}
+
+// ReadStore is the narrow, write-free view of the gateway database used
+// by GET-only handlers (explorer + /v1/usage). M2-4 / PERF-4: the
+// router routes reads through ReadStore so a future handler can't
+// accidentally call ReserveQuota / SettleReservation / SetCapacityTier
+// through readStore() — that's a compile error. Bound by what
+// router/explorer.go and the /v1/usage path actually call.
+type ReadStore interface {
+	storage.ExplorerStore
+	DailyUsage(ctx context.Context, accountID, windowDate string) (int64, int64, error)
+	ListAPIKeys(ctx context.Context, accountID string) ([]storage.APIKeySummary, error)
+	GetCapacityTier(ctx context.Context) (storage.CapacityTier, error)
 }
 
 type Option func(*Server)
@@ -125,10 +146,12 @@ func WithVersion(v string) Option {
 	}
 }
 
-// WithReadStore registers a separate read-only Store handle for
-// GET-only handlers. See Server.readOnlyStore doc for the why
-// (M2-4 / PERF-4).
-func WithReadStore(store Store) Option {
+// WithReadStore registers a separate read-only handle for GET-only
+// handlers. The argument is typed as ReadStore (the narrow,
+// write-free interface) so callers can pass any read-only
+// implementation; a *sqlite.Store opened via OpenReadOnly satisfies
+// it. See Server.readOnlyStore doc for the why (M2-4 / PERF-4).
+func WithReadStore(store ReadStore) Option {
 	return func(s *Server) {
 		if store != nil {
 			s.readOnlyStore = store
