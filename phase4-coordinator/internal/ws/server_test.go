@@ -1772,6 +1772,67 @@ func TestProviderClosedAfterActivityStops(t *testing.T) {
 	})
 }
 
+// Regression: M1-4 / SECU-1. Per-IP cap on concurrent unauthenticated WS
+// handshakes refuses the (cap+1)-th attempt from a single source even
+// when the global semaphore still has room. Pre-fix the only backstop
+// was a single global 64-slot semaphore with no per-IP dimension — one
+// host could starve all provider readmissions (full inference outage at
+// N=3). Test sets the cap to 4, opens 4 dialed-but-silent connections,
+// asserts the 5th gets ClosePoolFull with the per-IP reason.
+func TestProviderUnauthenticatedConnPerIPCapDeniesFifth(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.WS.MaxUnauthenticatedConnPerIP = 4
+		cfg.WS.MaxUnauthenticatedConn = 64 // global cap leaves room — per-IP must fire
+	})
+	defer h.HTTP.Close()
+
+	conns := make([]net.Conn, 0, 4)
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+	for i := 0; i < 4; i++ {
+		c, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		conns = append(conns, c)
+	}
+	// Dial returning means the HTTP upgrade completed; the server's
+	// reserveUnauthenticatedConnForIP call runs in the handler goroutine
+	// after gobwas.UpgradeHTTP returns. Wait for the counter to reach 4
+	// before opening the 5th conn, otherwise the 5th can win the race and
+	// reserve a slot before earlier conns get accounted (test flakiness).
+	eventually(t, func() bool {
+		return h.Provider.UnauthenticatedPerIPSnapshot() >= 4
+	})
+
+	fifth, fifthBR, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial fifth: %v", err)
+	}
+	defer fifth.Close()
+	// The server writes the close frame immediately after HTTP upgrade.
+	// gobwas.Dial's bufio.Reader may have already buffered those bytes off
+	// the socket as part of the same TCP read that delivered the upgrade
+	// response. Read from the bufio.Reader, not from the raw conn (which
+	// would EOF if the close frame was already pulled into the buffer).
+	_ = fifth.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var reader io.Reader = fifth
+	if fifthBR != nil && fifthBR.Buffered() > 0 {
+		reader = fifthBR
+	}
+	frame, err := gobwas.ReadFrame(reader)
+	if err != nil {
+		t.Fatalf("read fifth close: %v", err)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.ClosePoolFull || reason != "too_many_unauthenticated_connections_per_ip" {
+		t.Fatalf("fifth close = (%d, %q), want (%d, %q)", code, reason, providerws.ClosePoolFull, "too_many_unauthenticated_connections_per_ip")
+	}
+}
+
 func TestPoolzRequiresOperatorKey(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()

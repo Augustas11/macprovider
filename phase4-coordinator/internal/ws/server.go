@@ -58,7 +58,12 @@ type Server struct {
 	started   time.Time
 	explorer  http.Handler
 	unauth    chan struct{}
-	version   string
+	// unauthPerIP counts concurrent unauthenticated WS handshakes by remote IP.
+	// Defense-in-depth against nginx limit_conn evasion: one host can still
+	// burn the global 64-slot semaphore without per-IP shaping (M1-4 / SECU-1).
+	unauthPerIPMu sync.Mutex
+	unauthPerIP   map[string]int
+	version       string
 	// SPEC-002 v1.3.5 §7.9 — auth-attempt retention store, 1024 bound
 	authAttempts *authAttemptStore
 }
@@ -139,6 +144,19 @@ func (s *Server) AuthAttemptCount() int {
 	return s.authAttempts.count()
 }
 
+// UnauthenticatedPerIPSnapshot returns the current sum of per-IP unauthenticated
+// WS handshake counters. Test-only; lets regression tests wait for handler
+// goroutines to actually reserve their slots after gobwas.Dial returns.
+func (s *Server) UnauthenticatedPerIPSnapshot() int {
+	s.unauthPerIPMu.Lock()
+	defer s.unauthPerIPMu.Unlock()
+	total := 0
+	for _, n := range s.unauthPerIP {
+		total += n
+	}
+	return total
+}
+
 type pendingPreflight struct {
 	providerID string
 	assignedID string
@@ -154,8 +172,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		now:     func() time.Time { return time.Now().UTC() },
 		newUUID: func() string { return uuid.NewString() },
 		started: time.Now().UTC(),
-		unauth:  make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
-		version: "dev",
+		unauth:      make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
+		unauthPerIP: map[string]int{},
+		version:     "dev",
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
@@ -227,8 +246,18 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.enableProviderTCPKeepAlive(conn)
+	// M1-4 / SECU-1: per-IP gate runs first so one source cannot starve all
+	// admissions even within the global unauth budget.
+	remoteIP := remoteIPForUnauthSemaphore(r.RemoteAddr)
+	perIPOK, releasePerIP := s.reserveUnauthenticatedConnForIP(remoteIP)
+	if !perIPOK {
+		s.close(conn, ClosePoolFull, "too_many_unauthenticated_connections_per_ip")
+		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
+		return
+	}
 	if !s.reserveUnauthenticatedConn() {
 		s.close(conn, ClosePoolFull, "too_many_unauthenticated_connections")
+		releasePerIP()
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
 		return
 	}
@@ -237,10 +266,14 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		s.releaseUnauthenticatedConn()
+		releasePerIP()
 		time.AfterFunc(100*time.Millisecond, func() { _ = conn.Close() })
 		return
 	}
-	go s.handleConn(conn, auth, s.releaseUnauthenticatedConn)
+	go s.handleConn(conn, auth, func() {
+		s.releaseUnauthenticatedConn()
+		releasePerIP()
+	})
 }
 
 func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
@@ -845,6 +878,47 @@ func (s *Server) releaseUnauthenticatedConn() {
 	case <-s.unauth:
 	default:
 	}
+}
+
+// reserveUnauthenticatedConnForIP returns true if the per-IP cap for
+// unauthenticated handshakes has room for one more. The release closure
+// MUST be called exactly once per successful reservation (defer it at the
+// caller). Empty ip is not tracked — pass r.RemoteAddr's host portion.
+func (s *Server) reserveUnauthenticatedConnForIP(ip string) (bool, func()) {
+	if ip == "" {
+		return true, func() {}
+	}
+	cap := s.cfg.ProviderWSMaxUnauthenticatedConnPerIP()
+	s.unauthPerIPMu.Lock()
+	if s.unauthPerIP[ip] >= cap {
+		s.unauthPerIPMu.Unlock()
+		return false, func() {}
+	}
+	s.unauthPerIP[ip]++
+	s.unauthPerIPMu.Unlock()
+	return true, func() {
+		s.unauthPerIPMu.Lock()
+		defer s.unauthPerIPMu.Unlock()
+		if s.unauthPerIP[ip] <= 1 {
+			delete(s.unauthPerIP, ip)
+			return
+		}
+		s.unauthPerIP[ip]--
+	}
+}
+
+// remoteIPForUnauthSemaphore extracts the IP portion of r.RemoteAddr for
+// per-IP unauth tracking. Returns "" if parsing fails so the caller skips
+// the per-IP gate (the global semaphore still applies).
+func remoteIPForUnauthSemaphore(remoteAddr string) string {
+	if remoteAddr == "" {
+		return ""
+	}
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		return remoteAddr
+	}
+	return host
 }
 
 func (s *Server) setReadDeadline(conn net.Conn, timeout time.Duration) {
