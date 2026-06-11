@@ -102,22 +102,100 @@ func main() {
 		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, reqLogStore.DB(), registry, startedAt)))
 		logger.Info().Str("path", cfg.Explorer.BindPath).Msg("operator explorer enabled")
 	}
-	swapEmitter := func(event pool.SwapEvent) {
-		if err := auditStore.EmitSwap(shutdownCtx, event); err != nil {
-			loadingWindowMS := int64(0)
-			if !event.LoadingStartedAt.IsZero() {
-				loadingWindowMS = event.CompletedAt.Sub(event.LoadingStartedAt).Milliseconds()
+	// M2-2 / ARCH-2: hand the pool emitter a non-blocking channel send
+	// instead of the synchronous SQLite write. The pool already releases
+	// Registry.mu before invoking the emitter (see ApplyHeartbeat), and
+	// a dedicated drain goroutine performs the EmitSwap write so a
+	// SQLite busy_timeout stall (~5s worst case) cannot back-pressure
+	// the heartbeat handler. R-7.10.8 best-effort semantics permit
+	// dropping on overflow — logged at WARN.
+	//
+	// Shutdown ordering (code-auditor flagged a race in the close-based
+	// design): swapCh is NEVER closed. Both sender (swapEmitter) and
+	// receiver (drain goroutine) coordinate via shutdownCtx.Done() so
+	// late heartbeats arriving after shutdown can never panic on
+	// send-on-closed-channel. Late events accumulate in the cap-64
+	// buffer until full, then drop with a WARN.
+	swapCh := make(chan pool.SwapEvent, 64)
+	swapDrained := make(chan struct{})
+	logSwapAuditFailure := func(event pool.SwapEvent, err error) {
+		loadingWindowMS := int64(0)
+		if !event.LoadingStartedAt.IsZero() {
+			loadingWindowMS = event.CompletedAt.Sub(event.LoadingStartedAt).Milliseconds()
+		}
+		logger.Warn().
+			Err(err).
+			Str("provider_id", event.ProviderID).
+			Str("assigned_id", event.AssignedID).
+			Str("from_model_id", event.FromModelID).
+			Str("to_model_id", event.ToModelID).
+			Str("to_model_hash", event.ToModelHash).
+			Int64("loading_window_ms", loadingWindowMS).
+			Str("hash_verification_result", string(event.HashVerificationResult)).
+			Msg("operator_model_swap audit write failed")
+	}
+	go func() {
+		defer close(swapDrained)
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				// Drain any remaining buffered events (best-effort) and
+				// return. New sends after this point hit swapEmitter's
+				// own shutdownCtx guard and become silent drops.
+				for {
+					select {
+					case event := <-swapCh:
+						if err := auditStore.EmitSwap(context.Background(), event); err != nil {
+							logSwapAuditFailure(event, err)
+						}
+					default:
+						return
+					}
+				}
+			case event := <-swapCh:
+				// Use a fresh background context here so a slow audit
+				// write near shutdown isn't truncated by ctx cancellation
+				// — the event was already accepted into the queue.
+				if err := auditStore.EmitSwap(context.Background(), event); err != nil {
+					logSwapAuditFailure(event, err)
+				}
 			}
-			logger.Warn().
-				Err(err).
-				Str("provider_id", event.ProviderID).
-				Str("assigned_id", event.AssignedID).
-				Str("from_model_id", event.FromModelID).
-				Str("to_model_id", event.ToModelID).
-				Str("to_model_hash", event.ToModelHash).
-				Int64("loading_window_ms", loadingWindowMS).
-				Str("hash_verification_result", string(event.HashVerificationResult)).
-				Msg("operator_model_swap audit write failed")
+		}
+	}()
+	logSwapDropped := func(event pool.SwapEvent, reason string) {
+		// Symmetry with logSwapAuditFailure: a dropped event must be
+		// reconstructable from the log line. Include the same identity
+		// fields plus loading_window_ms so an auditor can confirm what
+		// was lost.
+		loadingWindowMS := int64(0)
+		if !event.LoadingStartedAt.IsZero() {
+			loadingWindowMS = event.CompletedAt.Sub(event.LoadingStartedAt).Milliseconds()
+		}
+		logger.Warn().
+			Str("reason", reason).
+			Str("provider_id", event.ProviderID).
+			Str("assigned_id", event.AssignedID).
+			Str("from_model_id", event.FromModelID).
+			Str("from_model_hash", event.FromModelHash).
+			Str("to_model_id", event.ToModelID).
+			Str("to_model_hash", event.ToModelHash).
+			Int64("loading_window_ms", loadingWindowMS).
+			Str("hash_verification_result", string(event.HashVerificationResult)).
+			Msg("operator_model_swap event dropped (best-effort per R-7.10.8)")
+	}
+	swapEmitter := func(event pool.SwapEvent) {
+		// shutdownCtx.Done() check ordering: select picks randomly when
+		// multiple cases are ready, so we can't both rely on it AND let
+		// the buffered send race it. The double-check is cheap and the
+		// inner select handles steady-state.
+		if shutdownCtx.Err() != nil {
+			logSwapDropped(event, "shutdown")
+			return
+		}
+		select {
+		case swapCh <- event:
+		default:
+			logSwapDropped(event, "queue_full_cap_64")
 		}
 	}
 	wsOpts = append(wsOpts, providerws.WithRegistryOptions(
@@ -208,6 +286,21 @@ func main() {
 			if err := providerHTTP.Shutdown(ctx); err != nil {
 				logger.Error().Err(err).Msg("provider http shutdown failed")
 				os.Exit(1)
+			}
+			// M2-2: wait for the swap-audit drain goroutine to finish so
+			// the last few model swaps are persisted. The drain goroutine
+			// exits on shutdownCtx.Done() (already cancelled by
+			// stopBackground above) after flushing any buffered events.
+			// We deliberately do NOT close(swapCh): a late heartbeat that
+			// arrives while DrainAll is still tearing down WS handlers
+			// could otherwise panic with send-on-closed-channel (the
+			// 2026-06-11 code-audit caught this). The sender's emitter
+			// has its own shutdownCtx guard so late sends drop silently
+			// with a WARN.
+			select {
+			case <-swapDrained:
+			case <-ctx.Done():
+				logger.Warn().Msg("swap audit drain timed out at shutdown")
 			}
 			logger.Info().Msg("coordinator shutdown complete")
 			return

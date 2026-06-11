@@ -443,17 +443,16 @@ type SwapEvent struct {
 // model_id). Default nil = no-op. Phase 2E registers the SQLite emitter
 // via WithSwapEmitter.
 //
-// CONCURRENCY CONTRACT: the emitter is invoked while ApplyHeartbeat
-// holds Registry.mu. Implementations MUST NOT:
-//   - call back into any Registry method (deadlock — r.mu is held)
-//   - block for long (heartbeat throughput on every connected
-//     provider depends on this; the spec R-7.10.8 also mandates that
-//     audit write failures MUST NOT block heartbeat processing or
-//     drop the provider).
-//
-// Phase 2E's SQLite writer is best-effort + short-running per
-// SPEC-002 v1.3.5 §7.10 R-7.10.8; a panic propagates and crashes the
-// heartbeat handler, matching the v1.3.4 default failure mode.
+// CONCURRENCY CONTRACT (M2-2 / ARCH-2): the emitter is invoked AFTER
+// ApplyHeartbeat releases Registry.mu. Implementations MAY:
+//   - call back into Registry methods (no longer deadlocks)
+//   - block freely (will not stall heartbeat throughput); cmd/coordinator
+//     dispatches onto a buffered channel drained by a single goroutine,
+//     so a slow audit writer cannot back-pressure the heartbeat handler
+//   - per SPEC-002 v1.3.5 §7.10 R-7.10.8, audit-write failures are
+//     best-effort and MUST NOT block heartbeat processing or drop the
+//     provider; a panic still propagates and crashes the heartbeat
+//     handler, matching the v1.3.4 default failure mode.
 type SwapEventEmitter func(event SwapEvent)
 
 type HeartbeatUpdate struct {
@@ -480,11 +479,24 @@ type HeartbeatUpdate struct {
 }
 
 func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool) {
+	cp, gap, ok, swap, hasSwap := r.applyHeartbeatLocked(providerID, assignedID, hb)
+	// M2-2 / ARCH-2: emit AFTER releasing r.mu. The audit SQLite write
+	// can stall on busy_timeout; running it under the global pool lock
+	// stalled all routing/liveness. The emitter contract is now relaxed
+	// — see SwapEventEmitter doc — and cmd/coordinator dispatches onto
+	// a buffered channel drained by a dedicated goroutine.
+	if hasSwap && r.swapEmitter != nil {
+		r.swapEmitter(swap)
+	}
+	return cp, gap, ok
+}
+
+func (r *Registry) applyHeartbeatLocked(providerID, assignedID string, hb HeartbeatUpdate) (*Provider, time.Duration, bool, SwapEvent, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID {
-		return nil, 0, false
+		return nil, 0, false, SwapEvent{}, false
 	}
 	prev := p.LastHeartbeatAt
 	priorModelID := p.ModelID
@@ -539,8 +551,9 @@ func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpd
 		priorLoadingState &&
 		hb.LoadingPresent && !hb.Loading &&
 		modelIDChanged
-	if swapCompleted && r.swapEmitter != nil {
-		r.swapEmitter(SwapEvent{
+	var swap SwapEvent
+	if swapCompleted {
+		swap = SwapEvent{
 			ProviderID:             p.ProviderID,
 			AssignedID:             p.AssignedID,
 			FromModelID:            priorModelID,
@@ -550,14 +563,14 @@ func (r *Registry) ApplyHeartbeat(providerID, assignedID string, hb HeartbeatUpd
 			HashVerificationResult: p.HashStatus,
 			LoadingStartedAt:       priorLoadingStartedAt,
 			CompletedAt:            hb.At,
-		})
+		}
 	}
 	cp := *p
 	var gap time.Duration
 	if !prev.IsZero() {
 		gap = hb.At.Sub(prev)
 	}
-	return &cp, gap, true
+	return &cp, gap, true, swap, swapCompleted
 }
 
 // Touch records that an inbound frame was received from the provider,
