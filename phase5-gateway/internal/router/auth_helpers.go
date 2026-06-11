@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/augstar/macprovider-gateway/internal/auth"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
@@ -76,6 +77,13 @@ func (s *Server) effectiveAccountDailyQuota(ctx context.Context) int64 {
 		}
 	}
 	return limit
+}
+
+type authResult struct {
+	Bearer      *storage.KeyValidation
+	Demo        bool
+	DemoPayload auth.DemoPayload
+	DemoToken   string
 }
 
 func (s *Server) authenticateAny(w http.ResponseWriter, r *http.Request) (authResult, bool) {

@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/augstar/macprovider-gateway/internal/auth"
 	"github.com/augstar/macprovider-gateway/internal/storage"
 )
 
@@ -34,13 +33,6 @@ type tokenUsage struct {
 	PromptTokens     int64 `json:"prompt_tokens"`
 	CompletionTokens int64 `json:"completion_tokens"`
 	TotalTokens      int64 `json:"total_tokens"`
-}
-
-type authResult struct {
-	Bearer      *storage.KeyValidation
-	Demo        bool
-	DemoPayload auth.DemoPayload
-	DemoToken   string
 }
 
 type usageSubject struct {
