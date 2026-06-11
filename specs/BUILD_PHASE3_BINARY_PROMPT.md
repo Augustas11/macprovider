@@ -59,7 +59,7 @@ reads it asynchronously to catch divergence early.
    — project context. Read enough to understand what Mac Provider is
    and where Phase 3 sits in the roadmap.
 
-4. /Users/augstar/macprovider-poc/results/REPORT.md
+4. /Users/augstar/macprovider-poc/doc/PHASE1_REPORT.md
    — Phase 1 evidence. Skim Step 4 (mlx_lm.server quirks), Step 7
    (Cloudflare tunnel behavior), Step 7.5.3 (long-context OOM
    evidence). These are the failure modes your binary must handle.

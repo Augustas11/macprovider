@@ -103,6 +103,18 @@ beta/
     └── run-scheduled.sh    # cron entrypoint: batch + report
 ```
 
+### Python environment
+
+The existing `beta/.venv` was created with Python 3.9, which reached end-of-life in October 2025. To rebuild on a supported Python:
+
+```bash
+python3.11 -m venv beta/.venv
+source beta/.venv/bin/activate
+pip install -r beta/requirements.txt
+```
+
+Both `harness.py` and `report.py` import `pyyaml` and `requests`; `beta/requirements.txt` pins the minimum versions.
+
 ### Configure
 
 Edit `config.yaml`:
@@ -169,7 +181,7 @@ open reports/$(date -u +%F).html
 
 ### SSE quirks the harness already handles
 
-Phase 1 (`../results/REPORT.md`) found `mlx_lm.server` isn't strictly
+Phase 1 (`../doc/PHASE1_REPORT.md`) found `mlx_lm.server` isn't strictly
 OpenAI-compatible. The harness already handles:
 
 1. `: keepalive N/M` comment lines in the SSE stream — skipped.

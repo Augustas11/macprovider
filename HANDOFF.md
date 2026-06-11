@@ -6,7 +6,7 @@
 
 **Status:** Phase 1 PoC complete. Phase 2 buyer-harness scaffold built and smoke-tested locally. Awaiting M4 user before going live.
 **Last session ended:** 2026-05-26
-**Next session entry point:** This document. Read it first, then `beta/README.md` for the harness, then `results/REPORT.md` for Phase 1 evidence.
+**Next session entry point:** This document. Read it first, then `beta/README.md` for the harness, then `doc/PHASE1_REPORT.md` for Phase 1 evidence.
 
 ## What was built this session
 
@@ -68,7 +68,7 @@ A pooled Mac inference network where:
 
 **PASS with concrete caveats → proceed to Phase 2.**
 
-Full report: `results/REPORT.md` (305 lines). Three sections — original run, continuation run, and the tokenizer-accurate long-context re-run.
+Full report: `doc/PHASE1_REPORT.md` (305 lines). Three sections — original run, continuation run, and the tokenizer-accurate long-context re-run.
 
 ### Key findings cheat sheet
 
@@ -232,34 +232,10 @@ Without confirmation, default recommendation is Qwen2.5 7B — runs on any M4 wi
 ├── scripts/
 │   ├── long_context_test.py   # Tokenizer-accurate 8K/16K/32K test (used in re-run)
 │   └── long_context_32k.py    # Focused 32K re-run script after power-off
-├── logs/
-│   ├── 00-preflight.txt       # Hardware/env state
-│   ├── 03-mlx-server.log      # All MLX server runs (last entries show OOM crash)
-│   ├── 06-tunnel.log          # Cloudflared
-│   ├── 06.5-localtunnel.log   # Localtunnel
-│   ├── 06.7-ssh-probe.log     # SSH probe (failed before fix)
-│   ├── 06.7-ssh-tunnel.log    # SSH tunnel (clean after fix)
-│   └── ...
-├── results/
-│   ├── REPORT.md              # ★ Full Phase 1 evidence — read this for details
-│   ├── 04a-local-nonstream.json
-│   ├── 06.5-localtunnel-test.json
-│   ├── 06.7-ssh-loopback.json # "Tunneled." response — confirmed
-│   ├── 06.7-ssh-latency.txt   # 5-request timings
-│   ├── 07a-tunnel-nonstream.json
-│   ├── 07b-tunnel-stream.txt
-│   ├── 07c-latency.txt
-│   ├── 08-cancellation-client.txt
-│   ├── 09-sse-format.txt
-│   └── stress/
-│       ├── 7.5.1-concurrent.txt
-│       ├── 7.5.2-coldstart.txt
-│       ├── 7.5.3-longcontext-v2-8000.json
-│       ├── 7.5.3-longcontext-v2-16000.json
-│       ├── 7.5.3-longcontext-v2-32000.json  # OOM evidence
-│       ├── 7.5.4-sustained.txt
-│       ├── 7.5.5-mempressure.txt
-│       └── 7.5.6-multimodel.txt
+├── logs/                      # ignored local regeneration output (git rm'd in M3-5)
+├── results/                   # ignored local regeneration output (git rm'd in M3-5)
+├── doc/
+│   └── PHASE1_REPORT.md       # ★ Durable Phase 1 evidence — read this for details
 ├── state/
 │   ├── tunnel-url.txt         # Last cloudflared URL (now stale)
 │   ├── lt-url.txt             # Last localtunnel URL (now stale)
@@ -346,7 +322,7 @@ This is the single most expensive bug to discover late. Phase 3 spec must includ
 ## What to read in the next session, in order
 
 1. **This file (HANDOFF.md)** — the lay of the land
-2. **`results/REPORT.md`** — Phase 1 evidence in full detail
+2. **`doc/PHASE1_REPORT.md`** — Phase 1 evidence in full detail
 3. **The conversation history** (this assistant's prior session) — strategic context, persona analysis, smart router design, Darkbloom deconstruction. Most decisions live there. Search for keywords: "pooled model", "Type B", "smart router", "Darkbloom paper", "Antseed network state".
 
 Then decide: write the buyer harness, or talk to the M4 user first?
@@ -356,7 +332,7 @@ Then decide: write the buyer harness, or talk to the M4 user first?
 ## Suggested next-session first message
 
 ```
-Read /Users/augstar/macprovider-poc/HANDOFF.md, then /Users/augstar/macprovider-poc/results/REPORT.md.
+Read /Users/augstar/macprovider-poc/HANDOFF.md, then /Users/augstar/macprovider-poc/doc/PHASE1_REPORT.md.
 Today: [pick one]
   (a) Write the Phase 2 buyer harness in beta/. Target the M4 user setup.
   (b) Decide what to ask the M4 user first — get their RAM, availability, model preference.

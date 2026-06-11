@@ -27,7 +27,7 @@ will implement.
 
 1. /Users/augstar/macprovider-poc/HANDOFF.md
    — full project context, Phase 1+2 history, strategic decisions
-2. /Users/augstar/macprovider-poc/results/REPORT.md  (skim — Phase 1 evidence)
+2. /Users/augstar/macprovider-poc/doc/PHASE1_REPORT.md  (skim — Phase 1 evidence)
 3. /Users/augstar/macprovider-poc/beta/PHASE2_UPGRADED_PLAN.md
    — what Phase 2 was meant to find
 4. /Users/augstar/macprovider-poc/beta/DECISION_CRITERIA.md
@@ -181,7 +181,7 @@ know about how the implementation diverges from or interprets the spec:
    • HuggingFace tokenizer_config.json schema
 
 #### Internal sources
-   • Phase 1 results/REPORT.md
+   • Phase 1 doc/PHASE1_REPORT.md
    • Phase 2 beta/DECISION_CRITERIA.md decision log
 
 ### 8. Phase 1 + 2 findings the binary must encode

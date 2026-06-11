@@ -1,47 +1,0 @@
-==> Auto-updating Homebrew...
-Adjust how often this is run with `$HOMEBREW_AUTO_UPDATE_SECS` or disable with
-`$HOMEBREW_NO_AUTO_UPDATE=1`. Hide these hints with `$HOMEBREW_NO_ENV_HINTS=1` (see `man brew`).
-==> Downloading https://ghcr.io/v2/homebrew/core/portable-ruby/blobs/sha256:4ba8d535df01e4bf97e6661c3815796fd77364ea2552606e891659133a76f0e1
-#=#=#                                                                          ##O#-#                                                                         ##O=#  #                                                                                                                                                  0.3%#                                                                          1.8%###                                                                        4.4%#####                                                                      7.5%#######                                                                   11.0%##########                                                                15.1%##############                                                            19.6%#################                                                         24.8%######################                                                    30.8%###########################                                               37.6%############################                                              40.2%###############################                                           43.9%####################################                                      51.3%###########################################                               59.7%##################################################                        70.0%#########################################################                 79.5%###############################################################           88.7%######################################################################    98.0%######################################################################## 100.0%
-==> Pouring portable-ruby-4.0.5_1.arm64_big_sur.bottle.tar.gz
-==> Homebrew collects anonymous analytics.
-Read the analytics documentation (and how to opt-out) here:
-  https://docs.brew.sh/Analytics
-No analytics have been recorded yet (nor will be during this `brew` run).
-
-==> Homebrew is run entirely by unpaid volunteers. Please consider donating:
-  https://github.com/Homebrew/brew#donations
-
-==> Auto-updated Homebrew!
-Updated 2 taps (homebrew/core and homebrew/cask).
-==> New Formulae
-cloudmonkey: Apache CloudStack CloudMonkey CLI
-herdr: Agent multiplexer that lives in your terminal
-ladder: Selfhosted alternative to 12ft.io and 1ft.io HTTP web proxies
-m4ri: Library for fast arithmetic with dense matrices over GF(2)
-mercury-cli: CLI interface for Mercury banking
-mips-linux-gnu-binutils: GNU Binutils for mips-linux-gnu cross development
-panache: Language server, formatter, and linter for Markdown, Quarto, and R Markdown
-satellite-tracker: Terminal-based real-time satellite tracking and orbit prediction application
-vs-preview: Previewer for VapourSynth scripts
-
-You have 1 outdated formula installed.
-
-Inspect the formula dependency plan before installing with `brew install --ask`.
-Enable ask mode by setting `HOMEBREW_ASK=1`.
-Hide these hints with `HOMEBREW_NO_ENV_HINTS=1` (see `man brew`).
-==> Fetching downloads for: cloudflared
-✔︎ Bottle Manifest cloudflared (2026.5.1)
-✔︎ Bottle cloudflared (2026.5.1)
-==> Pouring cloudflared--2026.5.1.arm64_tahoe.bottle.tar.gz
-==> Caveats
-To start cloudflared now and restart at login:
-  brew services start cloudflared
-Or, if you don't want/need a background service you can just run:
-  /opt/homebrew/opt/cloudflared/bin/cloudflared
-==> Summary
-🍺  /opt/homebrew/Cellar/cloudflared/2026.5.1: 10 files, 38.3MB
-==> Running `brew cleanup cloudflared`...
-Disable this behaviour by setting `HOMEBREW_NO_INSTALL_CLEANUP=1`.
-Hide these hints with `HOMEBREW_NO_ENV_HINTS=1` (see `man brew`).
-cloudflared version 2026.5.1 (built 2026-05-25T09:32:09Z)

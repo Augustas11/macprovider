@@ -75,7 +75,7 @@ implementation.
    currently talks directly to providers; in Phase 4, the harness will
    point at the coordinator's HTTP endpoint and the coordinator routes.
 
-6. /Users/augstar/macprovider-poc/results/REPORT.md
+6. /Users/augstar/macprovider-poc/doc/PHASE1_REPORT.md
    — skim Step 6 (VPS SSH tunnel work) and Step 7 (tunnel latency) for
    existing VPS context.
 

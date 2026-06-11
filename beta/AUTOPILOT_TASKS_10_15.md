@@ -30,7 +30,7 @@ ground yourself, then proceed.
                                               (your new ones must match it)
 5. beta/config.yaml                         — config keys to extend
 6. beta/report.py                           — keep working; don't break it
-7. results/REPORT.md (skim Step 7.5 only)   — Phase 1 quirks already known
+7. doc/PHASE1_REPORT.md (skim Step 7.5 only)   — Phase 1 quirks already known
 
 ## Environment
 

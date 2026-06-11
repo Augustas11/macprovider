@@ -1,5 +1,0 @@
-Request 1: 0.176630s
-Request 2: 0.103341s
-Request 3: 0.086495s
-Request 4: 0.091289s
-Request 5: 0.146394s

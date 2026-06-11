@@ -7,14 +7,14 @@
 
 You are a Codex agent picking up an in-progress Mac Provider PoC. The
 previous Codex session completed Steps 0–11 of `RUNBOOK.md` and produced
-`results/REPORT.md` with verdict **PARTIAL — proceed with caveats**.
+`doc/PHASE1_REPORT.md` with verdict **PARTIAL — proceed with caveats**.
 
 Three groups of tests were skipped in that run. They are the most
 informative ones for the user's actual production architecture decision.
 This continuation runs them.
 
 **Do NOT redo Steps 0–11.** They are already complete. Read the existing
-report at `/Users/augstar/macprovider-poc/results/REPORT.md` for context
+report at `/Users/augstar/macprovider-poc/doc/PHASE1_REPORT.md` for context
 on what's already known.
 
 ## Mission
@@ -181,7 +181,7 @@ Verify no listeners on 8090 and no orphan processes.
 
 ## Step F — Append to REPORT.md
 
-Do NOT overwrite the existing `results/REPORT.md`. Append a new section.
+Do NOT overwrite the existing `doc/PHASE1_REPORT.md`. Append a new section.
 
 Read the existing report first to understand its structure, then append a
 clearly-delimited continuation section with this format:
@@ -267,7 +267,7 @@ You are done when:
 1. Steps B (6.5), C (6.7), D (7.5 all six) executed — or explicitly
    marked SKIPPED in the appended report with reasoning.
 2. Cleanup complete; no PoC processes remain.
-3. `results/REPORT.md` has the new continuation section appended.
+3. `doc/PHASE1_REPORT.md` has the new continuation section appended.
 4. No production antseed system was modified.
 
 Hand the path back to the user. Be specific about which tests skipped

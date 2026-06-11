@@ -43,3 +43,7 @@ phase5-gateway/dist/gateway-linux-amd64
 # Phase 4 production config contains the operator API key in plaintext.
 # Use coordinator.yaml.example as a template; keep real config local.
 phase4-coordinator/dist/coordinator.yaml
+
+# Phase 1 experiment artifacts (removed from tracking in M3-5; DEVE-8)
+/logs/
+/results/

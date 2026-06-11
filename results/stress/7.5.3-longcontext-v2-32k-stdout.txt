@@ -1,13 +1,0 @@
-/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
-  warnings.warn(
-Loading tokenizer...
-Fetching 6 files:   0%|          | 0/6 [00:00<?, ?it/s]Fetching 6 files: 100%|██████████| 6/6 [00:00<00:00, 158275.62it/s]
-Tokenizer loaded.
-Built prompt for target=32000: tokenized length=32000
-Sending request — this may take several minutes on M1 8GB...
-
-FAIL — 32K context
-  RemoteDisconnected: Remote end closed connection without response
-  wall before fail: 222.39s
-
-Result written to /Users/augstar/macprovider-poc/results/stress/7.5.3-longcontext-v2-32000.json

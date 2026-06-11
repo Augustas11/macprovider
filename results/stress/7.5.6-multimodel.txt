@@ -1,42 +1,0 @@
-=== Multi-model — switching to Phi-3.5-mini ===
-Tue May 26 01:31:44 UTC 2026
-Stopping Llama MLX PID 20625
-Llama server stopped; port 8090 free
-/Users/augstar/macprovider-poc/.venv/lib/python3.9/site-packages/urllib3/__init__.py:35: NotOpenSSLWarning: urllib3 v2 only supports OpenSSL 1.1.1+, currently the 'ssl' module is compiled with 'LibreSSL 2.8.3'. See: https://github.com/urllib3/urllib3/issues/3020
-  warnings.warn(
-Downloading mlx-community/Phi-3.5-mini-instruct-4bit if needed...
-Fetching 11 files:   0%|          | 0/11 [00:00<?, ?it/s]Fetching 11 files:   9%|▉         | 1/11 [00:00<00:06,  1.43it/s]Fetching 11 files:  18%|█▊        | 2/11 [00:00<00:03,  2.29it/s]Fetching 11 files:  36%|███▋      | 4/11 [02:11<04:47, 41.03s/it]Fetching 11 files: 100%|██████████| 11/11 [02:11<00:00, 11.94s/it]
-Loaded.
-Phi server up; PID 26589
---- Phi-3.5-mini through tunnel ---
-{"id": "chatcmpl-ea2a551a-438a-4e53-a3a6-70f8cd3364ad", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759350, "choices": [{"index": 0, "finish_reason": "stop", "logprobs": {"token_logprobs": [-0.0625, -0.21875, -0.125, 0.0, 0.0, -0.3125, -0.5, 0.0, 0.0, -0.40625, -1.109375, -0.34375, 0.0, -0.65625, -0.03125], "top_logprobs": [], "tokens": [10924, 338, 4049, 6942, 411, 10809, 29892, 25806, 29892, 322, 9311, 12554, 3335, 29889, 32007]}, "message": {"role": "assistant", "content": "Blue is often associated with depth, stability, and trustworthiness.<|end|>", "tool_calls": []}}], "usage": {"prompt_tokens": 14, "completion_tokens": 15, "total_tokens": 29}}
-Phi non-stream latency: 3.81s
-
---- Phi-3.5-mini streaming ---
-: keepalive 6/7
-
-data: {"id": "chatcmpl-8b2cca62-b79a-47ab-bcd8-d07ba004bac5", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759353, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "Here", "tool_calls": []}}]}
-
-data: {"id": "chatcmpl-8b2cca62-b79a-47ab-bcd8-d07ba004bac5", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759353, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": " are", "tool_calls": []}}]}
-
-data: {"id": "chatcmpl-8b2cca62-b79a-47ab-bcd8-d07ba004bac5", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759353, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": " three", "tool_calls": []}}]}
-
-data: {"id": "chatcmpl-8b2cca62-b79a-47ab-bcd8-d07ba004bac5", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759353, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": " items", "tool_calls": []}}]}
-
-data: {"id": "chatcmpl-8b2cca62-b79a-47ab-bcd8-d07ba004bac5", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759353, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": ":", "tool_calls": []}}]}
-
-data: {"id": "chatcmpl-8b2cca62-b79a-47ab-bcd8-d07ba004bac5", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759353, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "\n", "tool_calls": []}}]}
-
-data: {"id": "chatcmpl-8b2cca62-b79a-47ab-bcd8-d07ba004bac5", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759353, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "\n", "tool_calls": []}}]}
-
-data: {"id": "chatcmpl-8b2cca62-b79a-47ab-bcd8-d07ba004bac5", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759353, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": "1", "tool_calls": []}}]}
-
-data: {"id": "chatcmpl-8b2cca62-b79a-47ab-bcd8-d07ba004bac5", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion.chunk", "model": "mlx-community/Phi-3.5-mini-instruct-4bit", "created": 1779759353, "choices": [{"index": 0, "finish_reason": null, "delta": {"role": "assistant", "content": ".", "tool_calls": []}}]}
-
-curl: (56) Failure writing output to destination, passed 377 returned 4294967295
-=== Restore Llama after Phi probe ===
-Tue May 26 01:38:29 UTC 2026
-Stopping Phi MLX PID 26589
-Phi server stopped; port 8090 free
-Restored Llama server; PID 27105
-{"id": "chatcmpl-f5fdc765-44da-4096-a88d-6dc9da025fcf", "system_fingerprint": "0.29.1-0.29.3-macOS-26.3.1-arm64-arm-64bit-applegpu_g13g", "object": "chat.completion", "model": "mlx-community/Llama-3.2-3B-Instruct-4bit", "created": 1779759867, "choices": [{"index": 0, "finish_reason": "length", "logprobs": {"token_logprobs": [-0.8125, -0.015625, -0.015625, -0.015625, 0.0], "top_logprobs": [], "tokens": [791, 3492, 330, 4014, 3093]}, "message": {"role": "assistant", "content": "The word \"restored", "tool_calls": []}}], "usage": {"prompt_tokens": 37, "completion_tokens": 5, "total_tokens": 42}}

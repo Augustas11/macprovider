@@ -112,7 +112,7 @@ PERMITTED references:
 - Apple MLX documentation
 - OpenAI API reference (https://platform.openai.com/docs/api-reference)
 - HuggingFace tokenizer_config.json schema
-- This repository: Phase 1 results/REPORT.md, Phase 2 DECISION_CRITERIA.md,
+- This repository: Phase 1 doc/PHASE1_REPORT.md, Phase 2 DECISION_CRITERIA.md,
   harness.py, workloads_adversarial.py
 
 Patent analysis is separate from license. Darkbloom holds patents around
