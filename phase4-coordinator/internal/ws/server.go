@@ -247,8 +247,11 @@ func (s *Server) handleProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	s.enableProviderTCPKeepAlive(conn)
 	// M1-4 / SECU-1: per-IP gate runs first so one source cannot starve all
-	// admissions even within the global unauth budget.
-	remoteIP := remoteIPForUnauthSemaphore(r.RemoteAddr)
+	// admissions even within the global unauth budget. Proxy-aware (M1-4
+	// follow-up): when nginx fronts the coordinator on loopback, X-Real-IP
+	// carries the real client IP — otherwise the per-IP bucket collapses
+	// to a single shared 127.0.0.1 slot.
+	remoteIP := remoteIPForUnauthSemaphore(r.RemoteAddr, r.Header)
 	perIPOK, releasePerIP := s.reserveUnauthenticatedConnForIP(remoteIP)
 	if !perIPOK {
 		s.close(conn, ClosePoolFull, "too_many_unauthenticated_connections_per_ip")
@@ -907,18 +910,40 @@ func (s *Server) reserveUnauthenticatedConnForIP(ip string) (bool, func()) {
 	}
 }
 
-// remoteIPForUnauthSemaphore extracts the IP portion of r.RemoteAddr for
-// per-IP unauth tracking. Returns "" if parsing fails so the caller skips
-// the per-IP gate (the global semaphore still applies).
-func remoteIPForUnauthSemaphore(remoteAddr string) string {
+// remoteIPForUnauthSemaphore extracts the per-source IP for unauth tracking.
+// Pre-fix (M1-4 v1) used r.RemoteAddr only, but production sits behind nginx
+// on loopback so every public client appeared as 127.0.0.1 and the per-IP
+// cap collapsed to one shared bucket (codex security audit, 2026-06-11).
+// Fix: when r.RemoteAddr is a loopback address, honor X-Real-IP (which the
+// on-host nginx site sets — see nginx-coordinator.streamvc.live.conf).
+// Direct, non-loopback hits (no proxy in front) use r.RemoteAddr unchanged.
+// Returns "" if parsing fails so the caller skips the per-IP gate (the
+// global semaphore still applies).
+func remoteIPForUnauthSemaphore(remoteAddr string, header http.Header) string {
 	if remoteAddr == "" {
 		return ""
 	}
 	host, _, err := net.SplitHostPort(remoteAddr)
 	if err != nil {
-		return remoteAddr
+		host = remoteAddr
+	}
+	if isLoopbackHost(host) {
+		if realIP := strings.TrimSpace(header.Get("X-Real-IP")); realIP != "" {
+			return realIP
+		}
 	}
 	return host
+}
+
+// isLoopbackHost reports whether host is an IPv4 or IPv6 loopback address.
+// Anything not parseable as an IP is treated as non-loopback so the
+// fallback path through r.RemoteAddr stays in play.
+func isLoopbackHost(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 func (s *Server) setReadDeadline(conn net.Conn, timeout time.Duration) {

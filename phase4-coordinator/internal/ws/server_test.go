@@ -1772,6 +1772,40 @@ func TestProviderClosedAfterActivityStops(t *testing.T) {
 	})
 }
 
+// Regression: M1-4 follow-up. When nginx fronts the coordinator on
+// loopback, r.RemoteAddr is 127.0.0.1 for every public client and the
+// pre-fix per-IP bucket collapsed to a single shared 127.0.0.1 slot
+// (codex security audit 2026-06-11). Fix: honor X-Real-IP when the
+// immediate remote is loopback. This pins the bucket per real-client
+// IP behind a loopback proxy.
+func TestRemoteIPForUnauthSemaphoreHonorsXRealIPBehindLoopback(t *testing.T) {
+	cases := []struct {
+		name       string
+		remoteAddr string
+		xRealIP    string
+		want       string
+	}{
+		{name: "loopback_ipv4_with_real_ip", remoteAddr: "127.0.0.1:54321", xRealIP: "203.0.113.5", want: "203.0.113.5"},
+		{name: "loopback_ipv6_with_real_ip", remoteAddr: "[::1]:54321", xRealIP: "2001:db8::1", want: "2001:db8::1"},
+		{name: "loopback_no_real_ip_falls_back", remoteAddr: "127.0.0.1:54321", xRealIP: "", want: "127.0.0.1"},
+		{name: "non_loopback_ignores_real_ip", remoteAddr: "198.51.100.7:443", xRealIP: "203.0.113.5", want: "198.51.100.7"},
+		{name: "non_loopback_no_real_ip", remoteAddr: "198.51.100.7:443", xRealIP: "", want: "198.51.100.7"},
+		{name: "x_real_ip_whitespace_trimmed", remoteAddr: "127.0.0.1:54321", xRealIP: "  203.0.113.5  ", want: "203.0.113.5"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			header := http.Header{}
+			if tc.xRealIP != "" {
+				header.Set("X-Real-IP", tc.xRealIP)
+			}
+			got := providerws.RemoteIPForUnauthSemaphoreExport(tc.remoteAddr, header)
+			if got != tc.want {
+				t.Fatalf("remoteIPForUnauthSemaphore(%q, X-Real-IP=%q) = %q, want %q", tc.remoteAddr, tc.xRealIP, got, tc.want)
+			}
+		})
+	}
+}
+
 // Regression: M1-4 / SECU-1. Per-IP cap on concurrent unauthenticated WS
 // handshakes refuses the (cap+1)-th attempt from a single source even
 // when the global semaphore still has room. Pre-fix the only backstop
