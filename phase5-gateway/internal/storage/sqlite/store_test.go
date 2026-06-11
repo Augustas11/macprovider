@@ -885,6 +885,35 @@ func TestFeedbackSummaryAndCapacityStores(t *testing.T) {
 	}
 }
 
+// TestCapacityTierRoundTripSpecialChars verifies that SetCapacityTier/GetCapacityTier
+// round-trips Signals values that contain JSON-special characters.
+// Added because the old Sscanf %q format would have failed on these inputs.
+func TestCapacityTierRoundTripSpecialChars(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	// Signals containing backslashes, double quotes, control characters, and Unicode.
+	specialSignals := "cpu\\high \"memory\" \n\t load™"
+
+	now := time.Now().UTC().Truncate(time.Second)
+	if err := store.SetCapacityTier(ctx, storage.CapacityTier{Tier: 3, Signals: specialSignals, UpdatedAt: now}); err != nil {
+		t.Fatalf("SetCapacityTier with special chars: %v", err)
+	}
+	got, err := store.GetCapacityTier(ctx)
+	if err != nil {
+		t.Fatalf("GetCapacityTier with special chars: %v", err)
+	}
+	if got.Signals != specialSignals {
+		t.Fatalf("Signals round-trip mismatch:\n got:  %q\n want: %q", got.Signals, specialSignals)
+	}
+	if got.Tier != 3 {
+		t.Fatalf("Tier round-trip mismatch: got %d want 3", got.Tier)
+	}
+	if !got.UpdatedAt.Equal(now) {
+		t.Fatalf("UpdatedAt round-trip mismatch: got %v want %v", got.UpdatedAt, now)
+	}
+}
+
 // BenchmarkAuthLookupWith10KKeys replaces the previous
 // TestAuthLookupP95UnderOneMillisecondWith10KKeys: a hard 1ms ceiling in
 // a unit test flakes under parallel load on CI (observed 13ms). The

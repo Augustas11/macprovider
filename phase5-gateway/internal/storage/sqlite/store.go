@@ -817,6 +817,16 @@ func (s *Store) LatestCapacitySignals(ctx context.Context) ([]storage.CapacitySi
 	return out, rows.Err()
 }
 
+// capacityTierDTO is the on-disk JSON shape for capacity_tier runtime_config rows.
+// Matches the old fmt.Sprintf format `{"tier":N,"signals":"..."}` byte-for-byte
+// for signals that contain no JSON-special characters, and correctly handles
+// backslashes, quotes, control characters, and Unicode that the old %q verb
+// would have encoded differently (code-review finding CODE-6).
+type capacityTierDTO struct {
+	Tier    int    `json:"tier"`
+	Signals string `json:"signals"`
+}
+
 func (s *Store) GetCapacityTier(ctx context.Context) (storage.CapacityTier, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT value, updated_at FROM runtime_config WHERE key = 'capacity_tier'`)
 	var value string
@@ -827,24 +837,26 @@ func (s *Store) GetCapacityTier(ctx context.Context) (storage.CapacityTier, erro
 		}
 		return storage.CapacityTier{}, err
 	}
-	var tier storage.CapacityTier
-	if _, err := fmt.Sscanf(value, `{"tier":%d,"signals":%q}`, &tier.Tier, &tier.Signals); err != nil {
+	var dto capacityTierDTO
+	if err := json.Unmarshal([]byte(value), &dto); err != nil {
 		return storage.CapacityTier{}, err
 	}
-	tier.UpdatedAt = decodeTime(updated)
-	return tier, nil
+	return storage.CapacityTier{Tier: dto.Tier, Signals: dto.Signals, UpdatedAt: decodeTime(updated)}, nil
 }
 
 func (s *Store) SetCapacityTier(ctx context.Context, tier storage.CapacityTier) error {
 	if tier.UpdatedAt.IsZero() {
 		tier.UpdatedAt = time.Now().UTC()
 	}
-	value := fmt.Sprintf(`{"tier":%d,"signals":%q}`, tier.Tier, tier.Signals)
-	_, err := s.db.ExecContext(ctx, `
+	value, err := json.Marshal(capacityTierDTO{Tier: tier.Tier, Signals: tier.Signals})
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO runtime_config(key, value, updated_at)
 		VALUES('capacity_tier', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-		value, encodeTime(tier.UpdatedAt))
+		string(value), encodeTime(tier.UpdatedAt))
 	return err
 }
 
