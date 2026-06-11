@@ -1,3 +1,10 @@
+> **SUPERSEDED — Phase 1 falsifiability script.** This document is the
+> Phase 1 PoC runbook from 2026-05; the live `streamvc.live` stack has
+> moved past it. For current production operations (deploy, restart,
+> settlement, monitor response, incident response) see
+> [`OPS.md`](OPS.md). Kept here for historical reference and audit
+> traceability.
+
 # Phase 1 Runbook — Mac Provider PoC
 
 You are a Codex agent executing Phase 1 of the Mac Provider project. You have
