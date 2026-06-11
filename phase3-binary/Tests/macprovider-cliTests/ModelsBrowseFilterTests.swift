@@ -80,4 +80,17 @@ final class ModelsBrowseFilterTests: XCTestCase {
         XCTAssertEqual(verdictLabel(.wontFit(estGB: 35, ramGB: 8)), "wont_fit")
         XCTAssertEqual(verdictLabel(.unknown(reason: "x")), "unknown")
     }
+
+    // Round-2 (codex security NIT): HF-returned id is user content. Embedded
+    // tab/newline would corrupt the tab-separated rendering; ESC sequences
+    // could paint over the terminal.
+    func testSanitizeForTableReplacesControlChars() {
+        XCTAssertEqual(sanitizeForTable("safe-name"), "safe-name")
+        XCTAssertEqual(sanitizeForTable("a\tb"), "a\u{FFFD}b")
+        XCTAssertEqual(sanitizeForTable("a\nb"), "a\u{FFFD}b")
+        XCTAssertEqual(sanitizeForTable("\u{001B}[31mRED"), "\u{FFFD}[31mRED")
+        XCTAssertEqual(sanitizeForTable("DEL\u{007F}suffix"), "DEL\u{FFFD}suffix")
+        // Unicode above the C0/C1 range is preserved.
+        XCTAssertEqual(sanitizeForTable("mlx-community/Käse-7B"), "mlx-community/Käse-7B")
+    }
 }

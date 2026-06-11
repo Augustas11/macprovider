@@ -123,11 +123,25 @@ public protocol HTTPFetcher: Sendable {
     func fetch(url: URL, headers: [String: String]) async throws -> (Data, Int)
 }
 
-public struct URLSessionHTTPFetcher: HTTPFetcher {
-    let session: URLSession
+public final class URLSessionHTTPFetcher: NSObject, HTTPFetcher, URLSessionTaskDelegate, @unchecked Sendable {
+    private let requestTimeout: TimeInterval
+    private let resourceTimeout: TimeInterval
 
-    public init(session: URLSession = .shared) {
-        self.session = session
+    // Lazy so self is fully initialized before URLSession captures it as
+    // the delegate. Plain let-init from the initializer body trips
+    // "Property not initialized at super.init call" because the delegate
+    // self-reference requires super.init() to run first.
+    private lazy var session: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = self.requestTimeout
+        config.timeoutIntervalForResource = self.resourceTimeout
+        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }()
+
+    public init(timeoutSeconds: TimeInterval = 15, resourceTimeoutSeconds: TimeInterval = 30) {
+        self.requestTimeout = timeoutSeconds
+        self.resourceTimeout = resourceTimeoutSeconds
+        super.init()
     }
 
     public func fetch(url: URL, headers: [String: String]) async throws -> (Data, Int) {
@@ -140,5 +154,33 @@ public struct URLSessionHTTPFetcher: HTTPFetcher {
             throw HFClientError.badResponse
         }
         return (data, http.statusCode)
+    }
+
+    // MARK: URLSessionTaskDelegate
+    //
+    // Round-2 hardening (codex security MINOR): URLSession's default behavior
+    // forwards the `Authorization` header on cross-origin redirects. If HF
+    // (or an HTTPS-terminating edge) returns a 3xx to an attacker-controlled
+    // host, the bearer HF_TOKEN would leak. We refuse any redirect whose
+    // scheme+host doesn't match the original request — that's the bare
+    // minimum that lets HuggingFace's own canonicalization redirects work
+    // while blocking the leak.
+    public func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        guard let originalURL = task.originalRequest?.url,
+              let newURL = request.url,
+              originalURL.scheme == newURL.scheme,
+              originalURL.scheme == "https",
+              originalURL.host == newURL.host
+        else {
+            completionHandler(nil)
+            return
+        }
+        completionHandler(request)
     }
 }
