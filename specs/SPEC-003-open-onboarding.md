@@ -1,11 +1,17 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.7 (2026-05-29, install.sh partner-upgrade hardening)
-**Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.1.5
+**Version:** 0.8.2 (2026-06-11, post-re-audit hardening: TOCTOU-safe TOFU + await persist + prune safety)
+**Depends on:** SPEC-001 v1.3.1, SPEC-002 v1.3.5
 
 **Change log v0.6:** Resolves cross-spec findings F-603-1 and F-603-2 from `specs/SPEC-CROSS-006-audit.md`: the installer visibility self-test now references SPEC-002 v1.1.4's coordinator-owned `GET /v1/pool/check`, and dependencies align to SPEC-001 v1.2.2 + SPEC-002 v1.1.4.
 
 **Change log v0.7:** Resolves six v1.2.4 partner-upgrade follow-ups from Decision log Entry 22, building on the Entry 20 install.sh bug class: F-603-V7-1 existing config port detection, F-603-V7-2 own-service port holder stop, F-603-V7-4 real binary path in launchd plist for Swift Bundle resolution, F-603-V7-5 cold-cache 20-minute wait, F-603-V7-6 diagnostic self-test timeout messaging, and F-603-V7-7 mixed-state install-dir warning. F-603-V7-3 and F-603-V7-8 were retracted and are not part of v0.7.
+
+**Change log v0.8:** Closes Open Q2 from Decision log Entry 59 (provider-token issuance model for open onboarding). v0.8 picks self-serve provisional token minting and adds the normative contract under § 4 as **FR-C9**. The coordinator MINTs a fresh `provider_token` on every tokenless provisional admission and returns it in both the v1 `hello_ack` and v2 `auth_response` (initial-stage acceptance) frames under a new OPTIONAL field `assigned_provider_token`. The phase3-binary MUST persist the returned token to its on-disk config under the existing top-level `provider_token` YAML key with file mode 0600 via atomic-rename. Pinned-tier token issuance (Entry 59 / M1-1) is unchanged — operator-issued via `coordinator-cli issue-token`. Dependencies bump to SPEC-001 v1.3.1 (M1-1 Bearer-on-WS-connect plumbing) and SPEC-002 v1.3.5 (locked, no coordinator-side schema change required). See Decision log Entry 60 for the full ruling and the rationale for dual-path delivery (the binary's default first frame is v1 `hello`, not v2 `auth_request`, so the v1 `hello_ack` path is the primary delivery channel for the actual target population — provisional strangers).
+
+**Change log v0.8.2:** Post-re-audit hardening from the codex security-reviewer focused pass on commit 4b1c527 in PR #44. **(a)** FR-C9.4 TOFU enforcement moved from a SELECT-then-INSERT pattern (TOCTOU-vulnerable: two concurrent tokenless connects for the same `provider_id` could both pass the gate before either committed) to a DB-layer partial unique index `idx_provider_tokens_one_active_per_provider ON provider_tokens(provider_id) WHERE revoked_at IS NULL`. `IssueToken` now returns `ErrActiveTokenAlreadyExists` on constraint violation; `resolveProvisionalToken` maps that to the TOFU close path. The migration step revokes pre-existing duplicate active rows so the index can be installed on existing databases. **(b)** FR-C9.3 binary-side persist now AWAITs disk I/O completion before in-memory adoption, closing the v0.8.1 brick-mode where a process crash between in-memory adoption and persist flush would strand the token coordinator-side and TOFU-reject the binary on next restart. The await runs on a detached priority-utility Task so the actor suspends but the runtime doesn't, preserving the FR-C9.3 SHOULD-not-block intent. **(c)** `coordinator-cli prune-tokens` refuses cutoffs younger than 24h without `--force`, and the dry-run output now lists candidate `provider_id` + `token_prefix` + `created_at` so the operator can sanity-check before `--apply` (a self-minted token is `last_used_at IS NULL` until the binary reconnects with Bearer, which can be seconds out — naive cutoffs can brick providers mid-onboarding). **(d)** SPEC-003 prose contradictions cleaned: v0.8.1 still contained pre-TOFU "multi-mint by design" passages in FR-C9.1 + FR-C9.4 prose; v0.8.2 rewrites these to match the TOFU contract.
+
+**Change log v0.8.1:** Post-merge audit hardening from three codex auditors (code-reviewer / security-reviewer / architect) on the v0.8 implementation in PR #44. **(a)** FR-C9.4 rewritten from "multi-mint on tokenless reconnect" to **TOFU (trust-on-first-use)**: once an unrevoked token exists for a `provider_id`, the coordinator MUST refuse tokenless admission with `CloseInvalidToken / "invalid_token"`. This closes the security-MAJOR credential-capture exploit where an attacker could declare a victim's `provider_id` on a tokenless connect and harvest a valid bearer for it. Persist-failure self-healing is now an operator-action (revoke + retry), not an automatic re-mint. **(b)** FR-C9.3 binary-side persist relaxed from "MUST NOT block the WS receive loop" by moving from a strict prohibition to a "SHOULD offload" with the implementation using a detached Task. The previous inline implementation violated the contract. **(c)** Config key contract clarified everywhere: the binary writes the **top-level** YAML key `provider_token`, not `auth.provider_token`. Prior prose in v0.8 referenced the nested path; SPEC-001 and the actual `ConfigLoader` use flat. **(d)** Normative interaction with SPEC-002 v1.3.5 FR-P12 / PG-1 spelled out: SPEC-003 v0.8 supersedes those locked clauses for tokenless provisional admission under `require_provider_tokens=true`. **(e)** Operator-side prune is now normative: `coordinator-cli prune-tokens [--apply]` removes never-used unrevoked tokens older than the supplied cutoff. **(f)** Coordinator-side adds a separate `TokenIssuer` interface alongside `TokenValidator` (interface segregation per architect MINOR-2).
 
 **Restructure note (v0.2).** SPEC-003 v0.1 contained four parts in a
 single document. v0.2 redistributes them to avoid cross-spec drift:
@@ -496,6 +502,70 @@ startup:
 3. Open a fresh log file.
 
 This provides simple 2-file rotation (~100 MB max disk usage for logs).
+
+**FR-C9. Self-serve provisional provider token (closes Open Q2 / Entry 60).**
+v0.8 closes the long-standing gate on flipping `auth.require_provider_tokens=true` with provisional strangers in the pool. Pinned-tier providers are operator-issued via `coordinator-cli issue-token` (M1-1, unchanged). Provisional providers self-mint on first admission.
+
+**FR-C9.1. Coordinator MUST mint on first tokenless provisional admission, subject to the FR-C9.4 TOFU gate.**
+When `prepareProviderAdmission` (`phase4-coordinator/internal/ws/server.go`) returns a non-pinned `*pool.Provider` AND `auth.validated == false` AND the token store is configured (`s.tokens != nil`), the coordinator MUST mint a fresh row in `provider_tokens` via `auth.Store.IssueToken(providerID, providerName)`, BUT only after the FR-C9.4 TOFU gate confirms no unrevoked token already exists for this `provider_id`. The mint MUST happen AFTER admission is approved and BEFORE the corresponding ack frame is written, so that ack-write failure does not leave the operator without a record that a token was promised. v0.8.1 specified the mint MUST NOT be conditional on prior rows (multi-mint by design); v0.8.2 narrows this to "MUST be conditional on FR-C9.4 TOFU" — see FR-C9.4 for the security rationale.
+
+The minting backend MUST enforce the one-active-token-per-provider_id invariant at the database layer (a partial unique index on `provider_tokens(provider_id) WHERE revoked_at IS NULL` is the normative implementation; the v0.8.2 reference store in `phase4-coordinator/internal/auth/tokens.go` installs this index in `migrate()`). The `IssueToken` call MUST surface a constraint failure as a distinct sentinel error (`ErrActiveTokenAlreadyExists` in the reference implementation) so the caller can map it to the TOFU close path without leaking a generic 500 to the wire. This DB-layer enforcement closes the TOCTOU race the codex security re-audit on PR #44 (MAJOR-1) flagged in the v0.8.1 implementation, where two concurrent tokenless connects could both pass the `HasActiveTokenForProvider` check before either insert.
+
+The `providerID` is the value declared in the `hello` or `auth_request` initial frame. The `providerName` is the value declared as `hostname` in the same frame; if `hostname` is empty (unreachable per existing `requireString` parsing, but defensive), the coordinator MAY synthesize a placeholder of the form `provisional:<provider_id>`.
+
+When `auth.validated == true` (provider sent a Bearer that matched), or when admission is rejected, or when the token store is not configured, the coordinator MUST NOT mint and MUST NOT include the field in any ack frame.
+
+**FR-C9.2. Ack frame contract — both v1 and v2.**
+The minted token MUST be returned to the binary in BOTH ack frames under the field name `assigned_provider_token` (string, lowercase hex, 64 hex chars matching the existing `IssueToken` output format). The field is OPTIONAL (`omitempty`). Field placement:
+
+- **v1 path:** `HelloAck` struct in `phase4-coordinator/internal/ws/messages.go` gains `AssignedProviderToken string \`json:"assigned_provider_token,omitempty"\``. The v1 path writes this on the existing `hello_ack` emission at `server.go:386`.
+- **v2 path:** `AuthResponse` struct in the same file gains the same field. The v2 path writes this on the proof-stage-accepted `auth_response` emission at `server.go:624`. The v2 `auth_challenge` and any rejection-shaped `auth_response` MUST NOT carry the field.
+
+Both ack writes happen AFTER `prepareProviderAdmission` and AFTER `releaseUnauth()`, on the path that also calls `s.tokens.MarkTokenUsed` for already-validated tokens. The mint hook is symmetric: same condition (`s.tokens != nil && !auth.validated`), same call shape, different surrounding struct.
+
+**FR-C9.3. Binary MUST persist atomically with 0600 perms; persist SHOULD NOT block the WS receive loop.**
+On receipt of an ack frame carrying `assigned_provider_token`, the phase3-binary MUST:
+
+1. Write the token value to a temporary file in the same directory as the config file, with file mode 0600 set BEFORE writing the secret.
+2. Atomically rename the temp file to the final config file path (`rename(2)` semantics — POSIX-atomic on same-filesystem renames).
+3. Match a **top-level** YAML key only: `provider_token: <value>`. Indented `provider_token:` entries nested under a parent block (e.g. an `auth:` map) MUST be preserved verbatim; the persist routine owns only the top-level key. If multiple top-level `provider_token:` lines exist (from a prior botched write), ALL such lines MUST be collapsed to a single canonical entry with the new value.
+4. **AWAIT the persist completion before adopting the token in memory.** The in-memory token MUST be updated ONLY after the rename(2) returns successfully. v0.8.2 hardening: v0.8.1 adopted in memory FIRST then fired a fire-and-forget persist; the codex security re-audit on PR #44 (MINOR-1) flagged the resulting brick window — a process crash between in-memory adoption and persist flush leaves the coordinator with a valid token row that the binary never persisted, and on next process restart the binary reconnects tokenless and TOFU-rejects. Awaiting closes the window: persist either succeeds (both sides have the token) or fails (neither side has it, current WS session continues with the pre-existing bearer).
+
+The persist write SHOULD execute outside the WS receive loop synchronously (e.g. via `Task.detached(...).value` await) so disk I/O cannot stall the runtime even though the receive-handling actor suspends. The intent is "disk I/O does not block other actors / Tasks", not "disk I/O is fire-and-forget."
+
+On persist failure (disk full, permission denied, parent directory missing) the binary MUST log a JSON-encoded structured-log line with `event=provider_token_persist_failed`, `error=<cause>`, `config_path=<resolved>`, continue serving the current WS session with the previously-configured bearer (or no bearer), and NOT crash. The JSON line MUST be encoded via a JSON encoder, not hand-built string interpolation, so embedded quotes/newlines/backslashes in the error description or path cannot break the JSON envelope.
+
+The persist target is the top-level `provider_token` YAML key (already wired by M1-1 SPEC-001 v1.3.1 § config). If the config file already has a top-level token populated, the new one REPLACES it. Pre-v0.8.1 prose referenced `auth.provider_token` (nested); the correct contract is flat top-level.
+
+**FR-C9.4. TOFU (trust-on-first-use): refuse a second token for a known provider_id.**
+When a tokenless connect arrives for a `provider_id` that already has an unrevoked row in `provider_tokens`, the coordinator MUST refuse admission with close code `CloseInvalidToken / "invalid_token"`. The coordinator MUST NOT mint a parallel token for an in-use identity. Implementations evaluate this via `HasActiveTokenForProvider(provider_id)`; on DB error the gate fails CLOSED (reject).
+
+Pre-v0.8.1 this clause specified "multi-mint on tokenless reconnect is intentional" so failed persists could self-heal automatically. The codex security audit on PR #44 (MAJOR-1) demonstrated that this design lets an attacker who declares a victim's `provider_id` on a tokenless connect harvest a valid bearer for it during the settling window. TOFU closes that vector at the cost of automatic self-healing: a binary that suffers a persist failure on its self-mint will reconnect tokenless, hit the TOFU gate, and be rejected with `invalid_token`. The operator notices the `event=provider_token_persist_failed` log and runs:
+
+```
+coordinator-cli revoke-token --token-prefix <prefix from list-tokens>
+# then restart the provider binary; next connect self-mints cleanly
+```
+
+The cost is operator labor in the (rare) persist-failure case; the gain is closing the credential-capture exploit at the (common) attacker-spam case. The trade was made explicit in DECISION_CRITERIA Entry 61.
+
+Operator-side bounded-cleanup is normative: `coordinator-cli prune-tokens [--older-than 168h] [--apply]` removes rows where `last_used_at IS NULL AND revoked_at IS NULL AND created_at < cutoff`. `last_used_at` is maintained by the existing `MarkTokenUsed` call, so live tokens are always distinguishable from stale ones.
+
+**FR-C9.5. Compatibility cutoff at flag flip.**
+When the operator flips `auth.require_provider_tokens=true` (Decision log Entry 59 forecast; Entry 60 confirmed), tokenless connects are rejected at `validateProviderToken` BEFORE reaching admission. After the flip, FR-C9.1's mint path is unreachable for new connects — only providers holding a valid token (operator-issued OR previously self-minted) connect.
+
+**Supersedes SPEC-002 v1.3.5 FR-P12 / PG-1 for tokenless provisional admission.** Those locked clauses say provisional providers may continue without tokens under `require_provider_tokens=true`; SPEC-003 v0.8.1 explicitly narrows that to "providers with at least one unrevoked token row." The locked SPEC-002 text is intentionally preserved as-is; this supersede is normative for the open-onboarding tier (per codex architect MAJOR-1, PR #44). A future SPEC-002 revision SHOULD amend FR-P12 / PG-1 to reflect this.
+
+The flag flip is safe AFTER:
+
+1. The new coordinator binary carrying FR-C9.1/FR-C9.2/FR-C9.4 is deployed on Pearl.
+2. A new release tag of `macprovider-cli` carrying FR-C9.3 is published and `install.sh`'s `latest_release_tag()` resolves to it.
+3. A settling window (≥24h, operator's discretion) has elapsed during which existing provisional providers reconnect at least once and self-mint.
+
+Old binaries that cannot parse `assigned_provider_token` will silently drop the field (Swift's JSON decoder ignores unknown keys) and never persist a token; at flag-flip time they are rejected at the WS handshake — same blast radius as the original M1-1 plan, no worse. Entry 60 records this as the explicit compatibility cutoff. The operator action `coordinator-cli list-tokens` may be used during the settling window to verify that all expected provider IDs have at least one unrevoked token row before flipping the flag.
+
+**FR-C9.6. install.sh is NOT modified.**
+The bootstrap pipe `curl https://get.streamvc.live/install.sh | bash` continues to write a tokenless `config.yaml`. Token acquisition happens automatically on the first WS connect after install. This preserves the single-shell-pipe UX that the open-onboarding tier exists to provide; gating provisional token issuance on operator action would re-create the very approval bottleneck Q2 was about removing.
 
 ---
 

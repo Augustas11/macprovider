@@ -126,7 +126,15 @@ actor CoordinatorClient {
     // SPEC-001). The factory signature change is intentional — keeping
     // it URL-only would require a parallel header-injection seam.
     private let webSocketFactory: @Sendable (URLRequest) -> ProviderWebSocketTask
-    private let providerToken: String?
+    // SPEC-003 v0.8 FR-C9.3 — was `let` pre-v0.8, now `var` so a
+    // self-minted provisional token from acceptCoordinatorSession can be
+    // adopted in-process without waiting for a binary restart. Actor
+    // isolation makes the mutation race-free.
+    private var providerToken: String?
+    // SPEC-003 v0.8 FR-C9.3 — captured at init so the persist hook in
+    // acceptCoordinatorSession knows where to write the new token
+    // without taking another dependency on the loader.
+    private let configPath: String
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
     private var inferenceRelay: InferenceRelay?
     private var tier2Session: Tier2ProviderSession?
@@ -175,6 +183,7 @@ actor CoordinatorClient {
             let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
+        self.configPath = config.configPath
         self.sleepAssertionFactory = sleepAssertionFactory
         self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
@@ -534,7 +543,92 @@ actor CoordinatorClient {
         try await acceptCoordinatorSession(response, reason: "coordinator auth_response accepted")
     }
 
+    /// SPEC-003 v0.8.2 FR-C9.3 — extract `assigned_provider_token` from
+    /// a hello_ack / auth_response payload, persist it to disk via a
+    /// detached I/O task, and adopt it in-memory ONLY on persist
+    /// success. The token is `await`-gated by the persist outcome.
+    ///
+    /// v0.8.2 hardening: v0.8.1 implemented this as "adopt in memory
+    /// FIRST, then fire-and-forget detached persist". The codex security
+    /// re-audit on PR #44 (MINOR-1) flagged the brick-mode window:
+    /// process crash / SIGKILL between in-memory adoption and persist
+    /// flush leaves the coordinator holding a valid token row that the
+    /// binary will never use. On next process restart the binary
+    /// reconnects tokenless, the coordinator's FR-C9.4 TOFU gate refuses
+    /// it ("an active token already exists"), and the provider is
+    /// bricked until operator runs `coordinator-cli revoke-token`.
+    ///
+    /// v0.8.2 closes this by awaiting the persist task before adopting
+    /// in memory. The disk I/O still runs on a detached priority-utility
+    /// task so the receive loop is suspended (not the whole runtime)
+    /// during the ~10ms persist; this preserves the FR-C9.3 SHOULD-not-
+    /// block contract because it is a `Task.detached(...).value` await,
+    /// not a sync blocking call.
+    ///
+    /// On persist failure the in-memory token is NOT adopted. The
+    /// current WS session continues with whatever bearer (if any) was
+    /// already configured — the connect already authenticated, so the
+    /// session itself is fine. Next reconnect attempt will retry from
+    /// scratch and the legitimate provider can mint cleanly. The
+    /// asymmetry "coordinator has token / binary doesn't" never appears
+    /// in this design.
+    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) async {
+        guard let assigned = payload["assigned_provider_token"] as? String else {
+            return
+        }
+        let trimmed = assigned.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return
+        }
+        let path = configPath
+        let result: Result<Void, Error> = await Task.detached(priority: .utility) {
+            do {
+                try ProviderTokenPersist.write(token: trimmed, configPath: path)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }.value
+        switch result {
+        case .success:
+            self.providerToken = trimmed
+            Self.emitTokenPersistEvent(event: "provider_token_persisted", path: path, error: nil)
+        case .failure(let error):
+            Self.emitTokenPersistEvent(event: "provider_token_persist_failed", path: path, error: error)
+        }
+    }
+
+    /// Emit a structured-log line for the FR-C9.3 persist outcome via
+    /// `JSONSerialization` so embedded paths or error descriptions
+    /// containing quotes/backslashes/newlines cannot break the JSON
+    /// envelope. All three codex auditors (code, security, architect)
+    /// independently flagged the previous hand-built JSON as injectable.
+    private static func emitTokenPersistEvent(event: String, path: String, error: Error?) {
+        var payload: [String: String] = [
+            "event": event,
+            "config_path": path,
+        ]
+        if let error {
+            payload["error"] = String(describing: error)
+        }
+        do {
+            var data = try JSONSerialization.data(withJSONObject: payload, options: [])
+            data.append(0x0A)  // trailing newline
+            FileHandle.standardError.write(data)
+        } catch {
+            // Encoder failure on a String:String dict is essentially
+            // impossible; fall back to a safe minimal line so the
+            // operator still sees something.
+            FileHandle.standardError.write(Data(("{\"event\":\"" + event + "\"}\n").utf8))
+        }
+    }
+
     private func acceptCoordinatorSession(_ payload: [String: Any], reason: String) async throws {
+        // SPEC-003 v0.8.2 FR-C9.3 — single hook for both v1 (hello_ack)
+        // and v2 (auth_response) ack paths since both funnel here.
+        // Awaited so that persist-before-adopt holds: see
+        // adoptAssignedProviderTokenIfPresent doc-comment.
+        await adoptAssignedProviderTokenIfPresent(payload)
         let interval = max(Self.intValue(payload["heartbeat_interval_s"]) ?? 30, 1)
         await providerStatus.setCoordinatorSession(
             connected: true,

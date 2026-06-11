@@ -32,6 +32,12 @@ type HelloAck struct {
 	Tier                     string `json:"tier,omitempty"`
 	RecommendedBinaryVersion string `json:"recommended_binary_version,omitempty"`
 	RequiredBinaryVersion    string `json:"required_binary_version,omitempty"`
+	// SPEC-003 v0.8 FR-C9.2 — populated only when a tokenless provisional
+	// provider was just self-minted on this connect. Binary persists to
+	// the top-level `provider_token` YAML key (FR-C9.3) so the next
+	// reconnect carries Bearer. Note: top-level, NOT nested under
+	// `auth:` — codex audit on PR #44 caught the prior spec/code drift.
+	AssignedProviderToken string `json:"assigned_provider_token,omitempty"`
 }
 
 type AuthRequest struct {
@@ -94,6 +100,10 @@ type AuthResponse struct {
 	RequiredBinaryVersion    string             `json:"required_binary_version,omitempty"`
 	Tier2Session             *AuthTier2Session  `json:"tier2_session,omitempty"`
 	Error                    *AuthResponseError `json:"error,omitempty"`
+	// SPEC-003 v0.8 FR-C9.2 — populated only on proof-stage acceptance
+	// when a tokenless provisional provider was just self-minted on this
+	// connect. Never present on rejection-shaped responses.
+	AssignedProviderToken string `json:"assigned_provider_token,omitempty"`
 }
 
 type AuthResponseError struct {

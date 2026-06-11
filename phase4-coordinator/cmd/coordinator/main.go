@@ -92,11 +92,23 @@ func main() {
 	wsOpts := []providerws.Option{}
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
+	// SPEC-003 v0.8 FR-C9.1 — the token validator is always wired now,
+	// even when require_provider_tokens=false, because the same store
+	// is the issuance backend for self-serve provisional tokens. Pre-
+	// v0.8 the conditional made `s.tokens != nil` mean "enforce
+	// strictly"; v0.8 separates issuance from enforcement so the store
+	// is always available for FR-C9.1 mint-on-first-admit even during
+	// the settling window before the operator flips the flag.
+	wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
+	// SPEC-003 v0.8 FR-C9.1/FR-C9.4 — separate TokenIssuer wiring for
+	// minting + TOFU. Same concrete store today; the split is at the
+	// interface layer (codex architect review on PR #44, interface
+	// segregation MINOR).
+	wsOpts = append(wsOpts, providerws.WithTokenIssuer(tokenStore))
 	if cfg.Auth.RequireProviderTokens {
-		wsOpts = append(wsOpts, providerws.WithTokenValidator(tokenStore))
 		logger.Info().Msg("provider WS token validation REQUIRED (auth.require_provider_tokens=true)")
 	} else {
-		logger.Warn().Msg("provider WS token validation NOT required (auth.require_provider_tokens=false); use only for isolated local development")
+		logger.Info().Msg("provider WS token validation NOT required (auth.require_provider_tokens=false); tokenless provisional admissions will self-mint per SPEC-003 FR-C9")
 	}
 	if cfg.Explorer.Enabled {
 		wsOpts = append(wsOpts, providerws.WithExplorerHandler(explorer.NewHandler(cfg, reqLogStore.DB(), registry, startedAt)))

@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -17,6 +18,18 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/sqliteutil"
 	_ "modernc.org/sqlite"
 )
+
+// ErrActiveTokenAlreadyExists is returned by IssueToken when the
+// per-provider_id unique-constraint installed by
+// ensureActiveProviderIDUniqueness rejects the INSERT because an
+// unrevoked token already exists for the same provider_id. Callers
+// MUST treat this as a TOFU rejection — emitting it as a generic DB
+// error would let an attacker race the legitimate provider_id and
+// receive an "internal error" instead of the proper close code.
+//
+// Pre-v0.8.2 this race was the credential-capture path the codex
+// security re-audit on PR #44 flagged as MAJOR-1.
+var ErrActiveTokenAlreadyExists = errors.New("provider_token: active token already exists for provider_id")
 
 type Store struct {
 	db *sql.DB
@@ -101,7 +114,58 @@ CREATE INDEX IF NOT EXISTS idx_token_hash ON provider_tokens(token_hash);
 	if err != nil {
 		return err
 	}
-	return s.ensureProviderIDColumn(ctx)
+	if err := s.ensureProviderIDColumn(ctx); err != nil {
+		return err
+	}
+	return s.ensureActiveProviderIDUniqueness(ctx)
+}
+
+// ensureActiveProviderIDUniqueness installs the SPEC-003 v0.8.2 partial
+// unique index that enforces "at most one unrevoked token per
+// provider_id" at the SQL layer. This closes the TOCTOU window the
+// codex security re-audit on PR #44 flagged as MAJOR-1: pre-fix the
+// FR-C9.4 TOFU gate was a SELECT followed by an unrelated INSERT, and
+// two concurrent tokenless connects for the same provider_id could
+// both pass the SELECT before either committed. SQLite WAL serializes
+// the writes but does not retroactively serialize the reads. With this
+// partial unique index, the second INSERT fails with a constraint
+// violation and IssueToken returns ErrActiveTokenAlreadyExists, which
+// the caller translates to a TOFU rejection on the wire.
+//
+// Pinned-tier operator-issued tokens use the same path; if an operator
+// runs `coordinator-cli issue-token` twice for the same provider_id
+// without revoking the first, the second now fails fast — protecting
+// the operator from accidentally minting parallel valid bearers.
+//
+// The index excludes rows with empty provider_id (legacy unfilled
+// rows) and revoked rows, so the constraint matches the semantic
+// invariant "active credential for this identity" exactly.
+func (s *Store) ensureActiveProviderIDUniqueness(ctx context.Context) error {
+	// Best-effort cleanup of pre-existing duplicates: keep the most
+	// recently created unrevoked row per provider_id and revoke the
+	// rest. This is a one-time migration step so the unique index can
+	// be created without aborting on existing duplicate state from the
+	// v0.8 pre-TOFU era.
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE provider_tokens
+   SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+ WHERE revoked_at IS NULL
+   AND provider_id <> ''
+   AND id NOT IN (
+       SELECT MAX(id) FROM provider_tokens
+        WHERE revoked_at IS NULL
+          AND provider_id <> ''
+        GROUP BY provider_id
+   )
+`); err != nil {
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provider_tokens_one_active_per_provider
+    ON provider_tokens(provider_id)
+ WHERE revoked_at IS NULL AND provider_id <> ''
+`)
+	return err
 }
 
 func (s *Store) ensureProviderIDColumn(ctx context.Context) error {
@@ -153,6 +217,16 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	createdAt := nowString()
 	res, err := s.db.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, createdAt)
 	if err != nil {
+		// SPEC-003 v0.8.2 FR-C9.4 — the partial unique index installed
+		// by ensureActiveProviderIDUniqueness rejects a second active
+		// token for the same provider_id. modernc.org/sqlite surfaces
+		// this as a constraint-failure error whose Error() string
+		// contains "UNIQUE constraint failed". Map to the sentinel so
+		// the WS server can close with CloseInvalidToken instead of
+		// leaking a generic DB error to the wire.
+		if isActiveProviderTokenConstraintFailure(err) {
+			return TokenRecord{}, "", ErrActiveTokenAlreadyExists
+		}
 		return TokenRecord{}, "", err
 	}
 	id, err := res.LastInsertId()
@@ -160,6 +234,56 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 		return TokenRecord{}, "", err
 	}
 	return TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: createdAt}, token, nil
+}
+
+// HasActiveTokenForProvider implements SPEC-003 v0.8 FR-C9.4 TOFU
+// (trust-on-first-use): returns true when at least one unrevoked token
+// exists for `providerID`. The coordinator uses this to refuse minting a
+// second token for an already-known provisional `provider_id` — closing
+// the credential-capture vector flagged by the codex security audit on
+// PR #44, where an attacker could otherwise mint a parallel valid
+// bearer for someone else's declared provider_id during the settling
+// window.
+//
+// Callers must treat (false, nil) as "OK to mint" and (true, nil) as
+// "MUST refuse tokenless admission". An error indicates the gate could
+// not be evaluated; the coordinator MUST fail closed in that case.
+func (s *Store) HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return false, fmt.Errorf("provider id is required")
+	}
+	var count int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(1) FROM provider_tokens WHERE provider_id = ? AND revoked_at IS NULL`,
+		providerID,
+	).Scan(&count)
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+// PruneUnusedTokens deletes tokens whose `last_used_at` is NULL and
+// whose `created_at` is older than the supplied cutoff time. Returns the
+// number of rows pruned. Used by `coordinator-cli prune-tokens` to bound
+// the operational cost of FR-C9.4 multi-mint-then-self-heal — a token
+// that has never been used to authenticate and is older than the
+// settling window is safe to drop.
+//
+// The cutoff is compared as ISO-8601 strings; tokens.go nowString
+// formats `created_at` in the same `2006-01-02T15:04:05Z` shape, and
+// lexicographic comparison is monotonic within that format.
+func (s *Store) PruneUnusedTokens(ctx context.Context, olderThan time.Time) (int64, error) {
+	cutoff := olderThan.UTC().Format("2006-01-02T15:04:05Z")
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM provider_tokens WHERE last_used_at IS NULL AND revoked_at IS NULL AND created_at < ?`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) ValidateToken(ctx context.Context, token string) (string, bool, error) {
@@ -269,6 +393,24 @@ func (s *Store) tokenByID(ctx context.Context, id int64) (TokenRecord, error) {
 	err := s.db.QueryRowContext(ctx, `SELECT id, token_prefix, provider_id, provider_name, created_at, revoked_at, last_used_at FROM provider_tokens WHERE id = ?`, id).
 		Scan(&r.ID, &r.TokenPrefix, &r.ProviderID, &r.ProviderName, &r.CreatedAt, &r.RevokedAt, &r.LastUsedAt)
 	return r, err
+}
+
+// isActiveProviderTokenConstraintFailure detects the SQLite unique-
+// constraint failure for `idx_provider_tokens_one_active_per_provider`.
+// modernc.org/sqlite returns the constraint failure via the error
+// string ("UNIQUE constraint failed: provider_tokens.provider_id" for
+// indexed columns, but the partial index name appears in the SQLite
+// error message instead of column names for partial-index conflicts).
+// Match both forms defensively so a future driver-version bump doesn't
+// silently downgrade the TOFU gate to a generic 500.
+func isActiveProviderTokenConstraintFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "constraint failed") &&
+		(strings.Contains(msg, "idx_provider_tokens_one_active_per_provider") ||
+			strings.Contains(msg, "provider_tokens.provider_id"))
 }
 
 func isHexPrefix(prefix string) bool {

@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -53,6 +54,13 @@ type Server struct {
 	pending   sync.Map
 	warmups   sync.Map
 	tokens    TokenValidator
+	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
+	// issuer roles can be wired independently. Production wires the same
+	// concrete *auth.Store to both (see main.go), but tests can override
+	// mint behavior (e.g. mintFailingStore) without touching the
+	// validator. Codex architect review on PR #44 flagged the
+	// interface-segregation regression of mixing both on TokenValidator.
+	issuer    TokenIssuer
 	admission *AdmissionManager
 	sessions  sync.Map
 	started   time.Time
@@ -68,9 +76,32 @@ type Server struct {
 	authAttempts *authAttemptStore
 }
 
+// TokenValidator handles inspection of a Bearer header on the WS connect.
+// Intentionally narrow — issuance is a separate concern (see TokenIssuer)
+// so test seams can mock validation independently.
 type TokenValidator interface {
 	ValidateToken(context.Context, string) (string, bool, error)
 	MarkTokenUsed(context.Context, string) error
+}
+
+// TokenIssuer handles SPEC-003 v0.8 FR-C9.1 self-serve provisional token
+// minting plus FR-C9.4 TOFU enforcement. Split from TokenValidator per
+// the codex architect review on PR #44 (interface segregation): a future
+// deployment may wire a validator backed by a remote service while
+// issuance remains local, or vice versa. Production wires the same
+// concrete *auth.Store to both, but the two roles are decoupled at the
+// interface layer so the seam exists when needed.
+type TokenIssuer interface {
+	// IssueToken returns (record, cleartext_token, err); only the
+	// cleartext is used in the ack frame, the record is logged.
+	IssueToken(ctx context.Context, providerID, providerName string) (auth.TokenRecord, string, error)
+	// HasActiveTokenForProvider implements FR-C9.4 TOFU: when true, the
+	// server MUST refuse to mint a second token for the same provider_id
+	// and MUST close the tokenless connection. Closes the
+	// credential-capture attack flagged by the codex security audit on
+	// PR #44 — without TOFU, an attacker could spam tokenless connects
+	// declaring a victim's provider_id and harvest a valid bearer.
+	HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error)
 }
 
 type providerAuth struct {
@@ -84,6 +115,17 @@ type Option func(*Server)
 func WithTokenValidator(tokens TokenValidator) Option {
 	return func(s *Server) {
 		s.tokens = tokens
+	}
+}
+
+// WithTokenIssuer installs the SPEC-003 v0.8 FR-C9 self-serve issuance
+// backend. Separate from WithTokenValidator so tests can inject mint
+// failures (mintFailingStore in provider_token_self_serve_test.go)
+// without disturbing validator behavior. Production wiring passes the
+// same *auth.Store to both options.
+func WithTokenIssuer(issuer TokenIssuer) Option {
+	return func(s *Server) {
+		s.issuer = issuer
 	}
 }
 
@@ -285,10 +327,22 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 		s.log.Error().Msg("provider token validation is required but no token validator is configured")
 		return providerAuth{}, false
 	}
-	if authz == "" && s.tokens != nil {
-		return providerAuth{}, false
-	}
+	// SPEC-003 v0.8 FR-C9.1 — gating semantics changed at v0.8: prior to
+	// v0.8, `s.tokens != nil` implied strict enforcement (tokenless
+	// always rejected). With self-serve provisional minting, the token
+	// store has dual purpose — issuance AND enforcement — so the
+	// enforcement gate now depends on `cfg.Auth.RequireProviderTokens`
+	// only. When the flag is false (today's posture during the FR-C9.5
+	// settling window), tokenless connects are admitted with
+	// validated=false so the v1/v2 ack-write path can mint and return
+	// `assigned_provider_token`. Pinned-tier providers that fail the
+	// tokenless check are still rejected, but at `prepareProviderAdmission`
+	// (line 654) rather than at this gate — same close code, same reason
+	// string, same blast radius.
 	if authz == "" {
+		if s.cfg.Auth.RequireProviderTokens {
+			return providerAuth{}, false
+		}
 		return providerAuth{}, true
 	}
 	if s.tokens == nil {
@@ -349,6 +403,91 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 	}
 }
 
+// provisionalTokenOutcome captures the three possible results of a
+// tokenless admission's pre-ack mint decision. Splitting from the prior
+// "return string-or-empty" shape closes the codex security audit's
+// MAJOR finding on PR #44: an empty string was ambiguous between "mint
+// not needed" and "mint refused", so callers had no way to distinguish
+// admit-without-token from must-close. The reject path is now explicit
+// and the caller closes the connection before the ack frame is written.
+type provisionalTokenOutcome int
+
+const (
+	// provisionalTokenSkip — caller MUST NOT include assigned_provider_token
+	// in the ack and SHOULD proceed with admission. Triggers: no issuer
+	// configured, or the connect arrived with a validated Bearer.
+	provisionalTokenSkip provisionalTokenOutcome = iota
+	// provisionalTokenMinted — caller MUST include the returned token in
+	// the ack frame so the binary can persist it (FR-C9.3).
+	provisionalTokenMinted
+	// provisionalTokenRejectTOFU — caller MUST close the connection with
+	// CloseInvalidToken / "invalid_token" before admission. An active
+	// token already exists for this provider_id; minting a second one
+	// would let an attacker harvest a valid bearer for someone else's
+	// declared identity (codex security audit MAJOR-1, PR #44).
+	provisionalTokenRejectTOFU
+)
+
+// resolveProvisionalToken implements SPEC-003 v0.8 FR-C9.1 (mint) and
+// FR-C9.4 TOFU (refuse second mint for a known provider_id). It is the
+// single decision point the v1 hello_ack and v2 auth_response paths both
+// call before constructing their ack frame.
+//
+// Algorithm:
+//  1. If the issuer is not wired OR the connect already validated a
+//     Bearer: return Skip — no mint needed, no token in ack.
+//  2. Query HasActiveTokenForProvider. If TRUE: return RejectTOFU —
+//     attacker (or a confused legitimate retry) is trying to mint a
+//     parallel credential for an already-claimed provider_id.
+//  3. Mint. On success: return Minted + cleartext.
+//  4. On mint failure (DB error): return Skip and log — the connection
+//     is admitted tokenless, the operator notices via the warning log,
+//     and the binary's next connect retries cleanly (because
+//     HasActiveTokenForProvider will still be false).
+//
+// On HasActiveTokenForProvider DB error: FAIL CLOSED with RejectTOFU.
+// We MUST NOT mint in the dark when the gate could not be evaluated —
+// that's the same posture validateProviderToken adopts when
+// ValidateToken errors.
+// authState is the renamed parameter for the providerAuth argument. The
+// auth.ErrActiveTokenAlreadyExists reference below needs the imported
+// auth package, but the parameter previously named `auth` shadowed it.
+func (s *Server) resolveProvisionalToken(authState providerAuth, providerID, providerName string) (provisionalTokenOutcome, string) {
+	if s.issuer == nil || authState.validated {
+		return provisionalTokenSkip, ""
+	}
+	ctx := context.Background()
+	hasActive, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 TOFU gate evaluation failed; closing tokenless connect (fail closed)")
+		return provisionalTokenRejectTOFU, ""
+	}
+	if hasActive {
+		s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 TOFU: tokenless connect refused; an active token already exists for this provider_id (operator can revoke + retry if this is the legitimate provider after a persist failure)")
+		return provisionalTokenRejectTOFU, ""
+	}
+	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
+	if err != nil {
+		// SPEC-003 v0.8.2 FR-C9.4 — defense in depth against the
+		// TOCTOU race. The pre-INSERT HasActiveTokenForProvider gate
+		// can race past a concurrent connect, but the partial unique
+		// index on provider_tokens(provider_id) WHERE revoked_at IS
+		// NULL traps the duplicate at INSERT time. When that happens
+		// we MUST close the loser with TOFU rejection — emitting a
+		// generic mint-failure would admit them tokenless on the
+		// next reconnect, defeating the closure of the codex security
+		// re-audit MAJOR-1 finding on PR #44.
+		if errors.Is(err, auth.ErrActiveTokenAlreadyExists) {
+			s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 TOFU: lost concurrent mint race; refusing tokenless admission")
+			return provisionalTokenRejectTOFU, ""
+		}
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.1 self-serve mint failed; admitting tokenless. Next reconnect will retry mint since no row was written.")
+		return provisionalTokenSkip, ""
+	}
+	s.log.Info().Str("provider_id", providerID).Msg("FR-C9.1 self-serve provisional token minted on first tokenless admission")
+	return provisionalTokenMinted, token
+}
+
 func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
 	hello, badField, err := ParseHello(payload)
 	if err != nil {
@@ -371,6 +510,17 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	if !ok {
 		return "", ""
 	}
+	// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for an
+	// already-known provider_id. Must run BEFORE registerProviderSession
+	// so a rejected attacker never enters the pool. Same close code as
+	// pinned-tokenless rejection (CloseInvalidToken / "invalid_token");
+	// the operator runbook + log message tell legitimate providers that
+	// a persist-failure recovery requires `coordinator-cli revoke-token`.
+	outcome, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
+	if outcome == provisionalTokenRejectTOFU {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
 	session := s.registerProviderSession(conn, entry)
 	releaseUnauth()
 
@@ -382,6 +532,7 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		Tier:                     string(entry.Tier),
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
+		AssignedProviderToken:    assignedProviderToken,
 	}
 	b, err := json.Marshal(ack)
 	if err != nil {
@@ -595,6 +746,14 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		// no-op delete.
 		s.authAttempts.release(authAttemptID)
 	}
+	// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for an
+	// already-known provider_id. Must run BEFORE registerProviderSession
+	// so a rejected attacker never enters the pool. v2 path mirrors v1.
+	outcome, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
+	if outcome == provisionalTokenRejectTOFU {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
 	session := s.registerProviderSession(conn, entry)
 	releaseUnauth()
 	response := AuthResponse{
@@ -606,6 +765,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		Tier:                     string(entry.Tier),
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
+		AssignedProviderToken:    assignedProviderToken,
 		Tier2Session: &AuthTier2Session{
 			EncryptedLeg: AuthEncryptedLegSession{
 				Enabled:            true,

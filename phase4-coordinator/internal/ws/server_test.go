@@ -1053,7 +1053,17 @@ func TestProviderTokensRequiredFailsClosedWithoutValidator(t *testing.T) {
 	}
 }
 
-func TestProvisionalProviderRequiresTokenWhenValidatorConfigured(t *testing.T) {
+// SPEC-003 v0.8 FR-C9.1 / FR-C9.5 — replaces the pre-v0.8 test
+// `TestProvisionalProviderRequiresTokenWhenValidatorConfigured` which
+// asserted the old contract "validator wired = tokenless rejected for
+// everyone". v0.8 separates issuance from enforcement, so the gate
+// here is `cfg.Auth.RequireProviderTokens`, not `s.tokens != nil`.
+//
+// When require_provider_tokens=true (the post-flag-flip posture), a
+// tokenless connect is rejected at the WS upgrade with CloseInvalidToken
+// regardless of pinned vs provisional. This locks in the strict gate
+// the operator wants once the migration is complete.
+func TestProvisionalProviderRejectedWhenRequireProviderTokensTrue(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -1061,6 +1071,7 @@ func TestProvisionalProviderRequiresTokenWhenValidatorConfigured(t *testing.T) {
 	defer store.Close()
 	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
 		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
 	})
 	defer h.HTTP.Close()
 
@@ -2515,6 +2526,13 @@ func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValid
 	allServerOpts := append([]providerws.Option(nil), serverOpts...)
 	if validator != nil {
 		allServerOpts = append(allServerOpts, providerws.WithTokenValidator(validator))
+		// SPEC-003 v0.8 FR-C9.1 — when the harness ships a TokenValidator
+		// that also satisfies TokenIssuer (i.e. *auth.Store or
+		// mintFailingStore), wire it as the issuer too so the self-serve
+		// path is exercised. Validator-only mocks skip this branch.
+		if issuer, ok := validator.(providerws.TokenIssuer); ok {
+			allServerOpts = append(allServerOpts, providerws.WithTokenIssuer(issuer))
+		}
 	}
 	server := providerws.NewServer(cfg, registry, zerolog.Nop(), allServerOpts...)
 	return providerHarness{
