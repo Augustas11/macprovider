@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -448,8 +449,11 @@ const (
 // We MUST NOT mint in the dark when the gate could not be evaluated —
 // that's the same posture validateProviderToken adopts when
 // ValidateToken errors.
-func (s *Server) resolveProvisionalToken(auth providerAuth, providerID, providerName string) (provisionalTokenOutcome, string) {
-	if s.issuer == nil || auth.validated {
+// authState is the renamed parameter for the providerAuth argument. The
+// auth.ErrActiveTokenAlreadyExists reference below needs the imported
+// auth package, but the parameter previously named `auth` shadowed it.
+func (s *Server) resolveProvisionalToken(authState providerAuth, providerID, providerName string) (provisionalTokenOutcome, string) {
+	if s.issuer == nil || authState.validated {
 		return provisionalTokenSkip, ""
 	}
 	ctx := context.Background()
@@ -464,6 +468,19 @@ func (s *Server) resolveProvisionalToken(auth providerAuth, providerID, provider
 	}
 	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
 	if err != nil {
+		// SPEC-003 v0.8.2 FR-C9.4 — defense in depth against the
+		// TOCTOU race. The pre-INSERT HasActiveTokenForProvider gate
+		// can race past a concurrent connect, but the partial unique
+		// index on provider_tokens(provider_id) WHERE revoked_at IS
+		// NULL traps the duplicate at INSERT time. When that happens
+		// we MUST close the loser with TOFU rejection — emitting a
+		// generic mint-failure would admit them tokenless on the
+		// next reconnect, defeating the closure of the codex security
+		// re-audit MAJOR-1 finding on PR #44.
+		if errors.Is(err, auth.ErrActiveTokenAlreadyExists) {
+			s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 TOFU: lost concurrent mint race; refusing tokenless admission")
+			return provisionalTokenRejectTOFU, ""
+		}
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.1 self-serve mint failed; admitting tokenless. Next reconnect will retry mint since no row was written.")
 		return provisionalTokenSkip, ""
 	}

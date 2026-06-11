@@ -34,7 +34,9 @@ type HelloAck struct {
 	RequiredBinaryVersion    string `json:"required_binary_version,omitempty"`
 	// SPEC-003 v0.8 FR-C9.2 — populated only when a tokenless provisional
 	// provider was just self-minted on this connect. Binary persists to
-	// auth.provider_token (FR-C9.3) so the next reconnect carries Bearer.
+	// the top-level `provider_token` YAML key (FR-C9.3) so the next
+	// reconnect carries Bearer. Note: top-level, NOT nested under
+	// `auth:` — codex audit on PR #44 caught the prior spec/code drift.
 	AssignedProviderToken string `json:"assigned_provider_token,omitempty"`
 }
 

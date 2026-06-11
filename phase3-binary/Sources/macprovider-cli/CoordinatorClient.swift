@@ -543,26 +543,36 @@ actor CoordinatorClient {
         try await acceptCoordinatorSession(response, reason: "coordinator auth_response accepted")
     }
 
-    /// SPEC-003 v0.8 FR-C9.3 — extract `assigned_provider_token` from a
-    /// hello_ack / auth_response payload, adopt it in-process so the
-    /// next reconnect carries `Authorization: Bearer <new_token>`, and
-    /// kick off a non-blocking persist Task that writes the new value to
-    /// the top-level `provider_token` YAML key.
+    /// SPEC-003 v0.8.2 FR-C9.3 — extract `assigned_provider_token` from
+    /// a hello_ack / auth_response payload, persist it to disk via a
+    /// detached I/O task, and adopt it in-memory ONLY on persist
+    /// success. The token is `await`-gated by the persist outcome.
     ///
-    /// Non-blocking by design — codex architect on PR #44 flagged the
-    /// previous inline implementation as a FR-C9.3 contract violation
-    /// ("MUST NOT block the WS receive loop"). The detached Task means
-    /// disk I/O cannot stall the receive loop; the in-memory adoption is
-    /// effective immediately so the next reconnect uses the new bearer
-    /// even if persist hasn't flushed yet.
+    /// v0.8.2 hardening: v0.8.1 implemented this as "adopt in memory
+    /// FIRST, then fire-and-forget detached persist". The codex security
+    /// re-audit on PR #44 (MINOR-1) flagged the brick-mode window:
+    /// process crash / SIGKILL between in-memory adoption and persist
+    /// flush leaves the coordinator holding a valid token row that the
+    /// binary will never use. On next process restart the binary
+    /// reconnects tokenless, the coordinator's FR-C9.4 TOFU gate refuses
+    /// it ("an active token already exists"), and the provider is
+    /// bricked until operator runs `coordinator-cli revoke-token`.
     ///
-    /// Persist failure is logged at warn level and NOT propagated. The
-    /// WS session continues with the in-memory token; next process
-    /// restart loses the token (because the persist never flushed) and
-    /// the binary reconnects tokenless, which under FR-C9.4 TOFU is
-    /// rejected — the operator notices the persist-failed log and runs
-    /// `coordinator-cli revoke-token` to allow a fresh self-mint.
-    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) {
+    /// v0.8.2 closes this by awaiting the persist task before adopting
+    /// in memory. The disk I/O still runs on a detached priority-utility
+    /// task so the receive loop is suspended (not the whole runtime)
+    /// during the ~10ms persist; this preserves the FR-C9.3 SHOULD-not-
+    /// block contract because it is a `Task.detached(...).value` await,
+    /// not a sync blocking call.
+    ///
+    /// On persist failure the in-memory token is NOT adopted. The
+    /// current WS session continues with whatever bearer (if any) was
+    /// already configured — the connect already authenticated, so the
+    /// session itself is fine. Next reconnect attempt will retry from
+    /// scratch and the legitimate provider can mint cleanly. The
+    /// asymmetry "coordinator has token / binary doesn't" never appears
+    /// in this design.
+    private func adoptAssignedProviderTokenIfPresent(_ payload: [String: Any]) async {
         guard let assigned = payload["assigned_provider_token"] as? String else {
             return
         }
@@ -570,19 +580,21 @@ actor CoordinatorClient {
         guard !trimmed.isEmpty else {
             return
         }
-        // In-memory adoption FIRST so the next reconnect benefits even
-        // if persist takes a few ms or fails outright.
-        self.providerToken = trimmed
-        // Detached persist — actor isolation is dropped intentionally
-        // since the file I/O is independent of any actor state.
         let path = configPath
-        Task.detached(priority: .utility) {
+        let result: Result<Void, Error> = await Task.detached(priority: .utility) {
             do {
                 try ProviderTokenPersist.write(token: trimmed, configPath: path)
-                Self.emitTokenPersistEvent(event: "provider_token_persisted", path: path, error: nil)
+                return .success(())
             } catch {
-                Self.emitTokenPersistEvent(event: "provider_token_persist_failed", path: path, error: error)
+                return .failure(error)
             }
+        }.value
+        switch result {
+        case .success:
+            self.providerToken = trimmed
+            Self.emitTokenPersistEvent(event: "provider_token_persisted", path: path, error: nil)
+        case .failure(let error):
+            Self.emitTokenPersistEvent(event: "provider_token_persist_failed", path: path, error: error)
         }
     }
 
@@ -612,9 +624,11 @@ actor CoordinatorClient {
     }
 
     private func acceptCoordinatorSession(_ payload: [String: Any], reason: String) async throws {
-        // SPEC-003 v0.8 FR-C9.3 — single hook for both v1 (hello_ack) and
-        // v2 (auth_response) ack paths since both funnel here.
-        adoptAssignedProviderTokenIfPresent(payload)
+        // SPEC-003 v0.8.2 FR-C9.3 — single hook for both v1 (hello_ack)
+        // and v2 (auth_response) ack paths since both funnel here.
+        // Awaited so that persist-before-adopt holds: see
+        // adoptAssignedProviderTokenIfPresent doc-comment.
+        await adoptAssignedProviderTokenIfPresent(payload)
         let interval = max(Self.intValue(payload["heartbeat_interval_s"]) ?? 30, 1)
         await providerStatus.setCoordinatorSession(
             connected: true,
