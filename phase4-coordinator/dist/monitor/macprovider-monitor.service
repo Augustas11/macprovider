@@ -5,6 +5,18 @@ Documentation=https://github.com/Augustas11/macprovider/blob/main/specs/PHASE7_H
 
 [Service]
 Type=oneshot
-User=root
+# De-rooted (M3-2 / DEVE-7). Runs as the same unprivileged user the
+# coordinator runs as so monitor.py reads OPERATOR_KEY from the shared
+# env-file instead of regexing /opt/macprovider/coordinator.yaml as root.
+User=macprovider
+Group=macprovider
 Nice=10
+# Pulls OPERATOR_KEY (+ GATEWAY_SERVICE_TOKEN if set) from the same
+# env-file the coordinator unit uses. "-" tolerates a missing file so
+# alerts still land in journald before the operator drops a
+# coordinator.env on disk; polling endpoints requiring auth will simply
+# return 401 until it does.
+EnvironmentFile=-/etc/macprovider/coordinator.env
+# Optional monitor-specific overrides (ALERT_EMAIL / GMAIL_*).
+EnvironmentFile=-/etc/macprovider/monitor.env
 ExecStart=/usr/bin/python3 /opt/macprovider/monitor.py
