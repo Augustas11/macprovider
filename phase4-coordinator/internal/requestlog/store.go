@@ -186,7 +186,7 @@ VALUES (?, ?, ?, ?)`,
 // `<` ordering (".000…Z" sorts before "Z"). Normalizing writes to a
 // fixed-width format would touch the billing tables on the money path
 // and is deferred to a follow-up.
-const pruneBatchSize = 5000
+const pruneBatchSize = 500
 
 func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	if s == nil || s.db == nil {
@@ -198,6 +198,10 @@ func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error
 	}
 	return pruneBatchedCounting(ctx, s.db, `DELETE FROM request_log WHERE rowid IN (SELECT rowid FROM request_log WHERE julianday(ts_utc) < julianday(?) LIMIT ?)`, cutoffText)
 }
+
+// pruneBatchYieldMs is the sleep between full batches so concurrent
+// writers can acquire the SQLite writer lock between iterations.
+const pruneBatchYieldMs = 10
 
 // pruneBatched runs the DELETE in capped batches and ignores the count.
 // Used for the idempotency-keys side where the original PruneBefore
@@ -214,6 +218,12 @@ func pruneBatched(ctx context.Context, db *sql.DB, query, cutoffText string) err
 		}
 		if n < int64(pruneBatchSize) {
 			return nil
+		}
+		// Yield so concurrent writers can acquire the writer lock between full batches.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pruneBatchYieldMs * time.Millisecond):
 		}
 	}
 }
@@ -233,6 +243,12 @@ func pruneBatchedCounting(ctx context.Context, db *sql.DB, query, cutoffText str
 		total += n
 		if n < int64(pruneBatchSize) {
 			return total, nil
+		}
+		// Yield so concurrent writers can acquire the writer lock between full batches.
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(pruneBatchYieldMs * time.Millisecond):
 		}
 	}
 }

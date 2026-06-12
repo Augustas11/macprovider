@@ -122,7 +122,11 @@ INSERT INTO audit_log (
 // fractional seconds — variable widths break lexicographic `<` ordering
 // (".000…Z" sorts before "Z"). Normalizing writes to a fixed-width
 // format is deferred to a follow-up.
-const pruneBatchSize = 5000
+const pruneBatchSize = 500
+
+// pruneBatchYieldMs is the sleep between full batches so concurrent
+// audit writers can acquire the SQLite writer lock between iterations.
+const pruneBatchYieldMs = 10
 
 func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	if s == nil || s.db == nil {
@@ -142,6 +146,12 @@ func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error
 		total += n
 		if n < int64(pruneBatchSize) {
 			return total, nil
+		}
+		// Yield so concurrent writers can acquire the writer lock between full batches.
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(pruneBatchYieldMs * time.Millisecond):
 		}
 	}
 }

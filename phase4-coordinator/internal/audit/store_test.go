@@ -195,7 +195,7 @@ func TestEmitterDoesNotPanicOnSQLiteFailure(t *testing.T) {
 }
 
 // TestPruneBeforeBatchedDeletesCrossesBatchBoundary inserts 12,000 audit
-// rows across the cutoff (well above the 5,000-row pruneBatchSize) and
+// rows across the cutoff (well above the 500-row pruneBatchSize) and
 // asserts the batched DELETE loop drains everything strictly older while
 // leaving the at/after rows intact. Regression guard for M3-1 / PERF-3.
 func TestPruneBeforeBatchedDeletesCrossesBatchBoundary(t *testing.T) {
