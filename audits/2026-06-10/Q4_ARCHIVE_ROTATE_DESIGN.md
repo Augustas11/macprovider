@@ -1,6 +1,6 @@
 # Q4 / M2-4 Part C — Archive-Rotate Design Sketch
 
-**Status:** RULING — `archive-rotate to cold storage`. Implementation deferred. See `beta/DECISION_CRITERIA.md` Entry 63 (2026-06-11) for the decision.
+**Status:** RULING — `archive-rotate to cold storage`. Implementation deferred. See `beta/DECISION_CRITERIA.md` Entry 77 (2026-06-11) for the decision.
 
 **Audit refs:** `audits/2026-06-10/REPO_AUDIT.md` §3.6 PERF-1, §6 Open Q4.
 
