@@ -8,9 +8,11 @@ import (
 
 // These tests pin the M2-1b classifier behaviour. They are documentation
 // of the audit-confirmed per-transport differences: failoverEligible is
-// WS-non-streaming-only, committed is streaming-only, the HTTP path
-// uses retryable for every non-200, etc. M2-1c's unified loop will lean
-// on these flags, so any future flattening becomes a test failure.
+// WS-only (both classifyWSResult on non-streaming disconnect AND
+// classifyStreamResult on streaming pre-first-chunk disconnect — never
+// HTTP); committed is streaming-only; the HTTP path uses retryable for
+// every non-200, etc. M2-1c's unified loop will lean on these flags,
+// so any future flattening becomes a test failure.
 
 func TestClassifyWSResultBehaviourFlags(t *testing.T) {
 	cases := []struct {
@@ -179,21 +181,35 @@ func TestClassifyHTTPResultEncodesPerTransportShape(t *testing.T) {
 }
 
 // TestPerTransportDifferencesArePreserved is the audit-verifier's
-// belt-and-suspenders check: the flags failoverEligible and committed
-// MUST be set by exactly one transport each, never bled into the other
-// transport's classifier.
+// belt-and-suspenders check on the cross-classifier matrix: the HTTP
+// classifier must NEVER set failoverEligible (that path is WS-only,
+// shared between non-streaming and streaming pre-first-chunk
+// disconnects), and the WS-non-streaming classifier must NEVER set
+// committed (that flag is streaming-only). Note: failoverEligible is
+// set by BOTH classifyWSResult (non-streaming disconnect) AND
+// classifyStreamResult (streaming pre-chunk disconnect) — they share
+// the same failoverCandidate code at server.go:1120 / :1223. The
+// retryable flag is what diverges between them.
 func TestPerTransportDifferencesArePreserved(t *testing.T) {
-	// failoverEligible only via WS-disconnect (non-streaming or
-	// streaming-pre-first-chunk) — NOT via HTTP forward.
+	// failoverEligible never via HTTP forward (the failoverCandidate
+	// path is WS-only).
 	tr := classifyHTTPResult(&http.Response{StatusCode: http.StatusBadGateway}, nil, requestLogAttempt{})
 	if tr.failoverEligible {
 		t.Error("HTTP classifier set failoverEligible — that path is WS-only")
 	}
 
-	// committed only via streaming first-chunk paths — NOT via WS
-	// non-streaming.
+	// committed never via WS non-streaming (it's a streaming
+	// first-chunk concept).
 	tr = classifyWSResult(wsForwardCancelled, requestLogAttempt{})
 	if tr.committed {
 		t.Error("WS non-streaming classifier set committed — that flag is streaming-only")
+	}
+
+	// HTTP classifier must never set committed either — the HTTP
+	// non-streaming path has no first-chunk concept; success is
+	// observed atomically on the response.
+	tr = classifyHTTPResult(&http.Response{StatusCode: http.StatusOK}, nil, requestLogAttempt{})
+	if tr.committed {
+		t.Error("HTTP classifier set committed — that flag is streaming-only")
 	}
 }

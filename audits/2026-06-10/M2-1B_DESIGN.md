@@ -50,7 +50,9 @@ type transportResult struct {
     // in 1c can branch on flags rather than transport-specific if/else.
     //
     // retryable: caller should advance to the next provider.
-    // failoverEligible: WS-non-streaming "failoverCandidate" path is in play.
+    // failoverEligible: WS "failoverCandidate" path is in play. Set by
+    //   both non-streaming WS disconnect and streaming pre-first-chunk
+    //   disconnect; the two diverge on `retryable` instead.
     // markBusy: caller should call s.pool.MarkState(StateBusy) for the
     //   current provider before deciding retry.
     // committed: streaming first-chunk has been received — the attempt
@@ -103,7 +105,7 @@ func classifyStreamResult(result wsForwardResult, status int, attempt requestLog
 The audit-verifier was explicit that these are *intentional* per-transport differences and **must not be flattened** at any point in the strangler:
 
 1. **HTTP per-attempt context timeout** (`buyer/server.go:1262` pre-1a) — stays HTTP-only. Encoded as a separate code path inside `classifyHTTPResult`; not visible as a flag because no other transport has it.
-2. **WS-non-streaming failoverCandidate** — encoded as `failoverEligible`. Only `classifyWSResult` ever sets it to true.
+2. **WS failoverCandidate** — encoded as `failoverEligible`. Set by BOTH `classifyWSResult` (non-streaming disconnect) AND `classifyStreamResult` (streaming pre-first-chunk disconnect) — they share the same `failoverCandidate` code at `server.go:1120` / `:1223`. Never set by `classifyHTTPResult`. The cross-transport divergence on the same `wsForwardResult` lives in the `retryable` flag instead: WS-non-streaming sets `retryable=false` (fast-fail when failover misses), streaming pre-chunk sets `retryable=true` (falls through to `shouldRetry`).
 3. **Streaming first-chunk-received commits the attempt** — encoded as `committed`. Only `classifyStreamResult` ever sets it to true.
 
 ## `forwardState` (sketch — for M2-1c, NOT this PR)

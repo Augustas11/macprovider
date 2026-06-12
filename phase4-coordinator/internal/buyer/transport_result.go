@@ -37,8 +37,13 @@ type transportResult struct {
 	// differences, encoded as data so 1c's unified loop can branch on
 	// flags rather than transport-specific if/else.
 	//
-	// retryable: caller should advance to the next provider.
-	// failoverEligible: WS-non-streaming "failoverCandidate" path is in play.
+	// retryable: caller should advance to the next provider via the
+	//   normal shouldRetry + advanceToNextProvider path.
+	// failoverEligible: WS "failoverCandidate" path is in play. Set
+	//   by both non-streaming WS disconnect and streaming pre-first-
+	//   chunk disconnect; the two diverge on `retryable` instead
+	//   (non-streaming fast-fails when failover misses; streaming
+	//   falls through to shouldRetry).
 	// markBusy: caller should call s.pool.MarkState(StateBusy) for the
 	//   current provider before deciding retry.
 	// committed: streaming first-chunk has been received — the attempt
@@ -73,9 +78,10 @@ type transportResult struct {
 // branch correctly without re-introducing the audit's three-copies
 // drift.
 //
-// Status mapping: wsForwardComplete -> 200; queue-full / disconnected
-// / failed / unavailable all log as 502 via statusForForwardResult;
-// timed-out -> 504; cancelled -> 0 (no canonical HTTP status).
+// Status mapping (via statusForForwardResult): wsForwardComplete ->
+// 200; queue-full / disconnected / failed -> 502; unavailable -> 503;
+// timed-out -> 504; cancelled -> 502 default (unused — cancelled
+// caller skips status-keyed logging).
 func classifyWSResult(result wsForwardResult, attempt requestLogAttempt) transportResult {
 	tr := transportResult{
 		kind:    result,
