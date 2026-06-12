@@ -53,16 +53,29 @@ type transportResult struct {
 }
 
 // classifyWSResult converts forwardWS's (wsForwardResult, requestLogAttempt)
-// return into the unified transportResult. M2-1b: the
-// failoverCandidate path is WS-non-streaming-only — that's encoded as
-// failoverEligible=true on wsForwardProviderDisconnected, never set by
-// the other classifiers.
+// return into the unified transportResult for the WS-tunneled
+// NON-STREAMING loop at buyer/server.go:1172-1257.
 //
-// Mirrors the existing dispatch in buyer/server.go's non-streaming WS
-// loop. Behaviour is preserved byte-for-byte: a wsForwardComplete is
-// retryable=false / committed=false / status=200; a queue-full marks
-// busy + retryable; a provider-disconnect is retryable + failover-
-// eligible.
+// M2-1b contract: failoverEligible encodes the
+// failoverCandidate special-failover path. classifyStreamResult also
+// sets it for streaming pre-first-chunk disconnects, since both loops
+// run the same failoverCandidate code at server.go:1120 and
+// server.go:1223 respectively.
+//
+// Critical semantic difference vs streaming pre-chunk disconnect:
+// the non-streaming WS loop does NOT fall through to normal
+// shouldRetry/advanceToNextProvider when failover misses — it
+// fast-fails with 502 at server.go:1217-1228. So wsForwardProvider-
+// Disconnected here is failoverEligible=true but retryable=FALSE.
+// The streaming variant is failoverEligible=true AND retryable=true
+// (falls through to shouldRetry at server.go:1130 if failover misses).
+// Encoding the divergence as flags is what lets M2-1c's unified loop
+// branch correctly without re-introducing the audit's three-copies
+// drift.
+//
+// Status mapping: wsForwardComplete -> 200; queue-full / disconnected
+// / failed / unavailable all log as 502 via statusForForwardResult;
+// timed-out -> 504; cancelled -> 0 (no canonical HTTP status).
 func classifyWSResult(result wsForwardResult, attempt requestLogAttempt) transportResult {
 	tr := transportResult{
 		kind:    result,
@@ -79,13 +92,16 @@ func classifyWSResult(result wsForwardResult, attempt requestLogAttempt) transpo
 		tr.markBusy = true
 		tr.retryable = true
 	case wsForwardProviderDisconnected:
-		tr.retryable = true
+		// retryable=false: the WS-non-streaming loop fast-fails with
+		// 502 when failover misses (server.go:1217-1228) — it does
+		// NOT call shouldRetry + advanceToNextProvider. Only
+		// failoverEligible drives the next-attempt decision.
 		tr.failoverEligible = true
 	case wsForwardCancelled:
 		tr.cancelled = true
 	case wsForwardFailed, wsForwardUnavailable:
 		// Non-retryable on this transport (matches existing
-		// buyer/server.go:1189 behaviour: failed/unavailable/cancelled
+		// buyer/server.go:1208-1213 behaviour: failed/unavailable/cancelled
 		// short-circuit return without advancing).
 	}
 	return tr
@@ -108,7 +124,14 @@ func classifyStreamResult(result wsForwardResult, status int, attempt requestLog
 	}
 	switch result {
 	case wsForwardComplete:
-		// Success.
+		// Success. Normalize to 200 — the streaming loop logs OK on
+		// completion at server.go:1102 (WS) and server.go:1147 (HTTP
+		// streaming via forwardStreaming's returned status, which is
+		// 200 on success per server.go:1824). The caller-provided
+		// status may be 0 in unit-test or short-path cases; pin 200
+		// as the canonical log/return status the classifier contract
+		// promises.
+		tr.status = http.StatusOK
 	case wsForwardProviderDisconnectedCommitted:
 		// First chunk received then provider disconnected. The
 		// attempt is committed to this provider — finalize with
@@ -164,6 +187,15 @@ func classifyHTTPResult(resp *http.Response, err error, attempt requestLogAttemp
 	tr.retryable = true
 	if resp != nil {
 		tr.status = resp.StatusCode
+	} else {
+		// Nil response (dial/network error). The existing HTTP loop
+		// normalizes this to 502 before logging/returning at
+		// server.go:1335-1336 and server.go:1340-1341. Pin the same
+		// canonical log/return status so M2-1c's wired loop never
+		// records attempt rows with status=0. shouldRetry's
+		// "no-response" branch keys off err, not status, so
+		// preserving status=502 here does not change retry semantics.
+		tr.status = http.StatusBadGateway
 	}
 	return tr
 }

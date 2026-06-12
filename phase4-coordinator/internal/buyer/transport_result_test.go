@@ -26,7 +26,13 @@ func TestClassifyWSResultBehaviourFlags(t *testing.T) {
 		{"complete", wsForwardComplete, http.StatusOK, false, false, false, false, false},
 		{"timed_out", wsForwardTimedOut, http.StatusGatewayTimeout, true, false, false, false, false},
 		{"queue_full", wsForwardQueueFull, statusForForwardResult(wsForwardQueueFull), true, false, true, false, false},
-		{"provider_disconnected", wsForwardProviderDisconnected, statusForForwardResult(wsForwardProviderDisconnected), true, true, false, false, false},
+		// Non-streaming WS disconnect: failoverEligible=true, but
+		// retryable=FALSE. The WS-tunneled loop fast-fails with 502
+		// when failover misses (server.go:1217-1228) — never falls
+		// through to shouldRetry/advanceToNextProvider. Streaming
+		// pre-chunk disconnect has retryable=true (see
+		// TestClassifyStreamResult_DisconnectIsAlsoRetryable).
+		{"provider_disconnected", wsForwardProviderDisconnected, statusForForwardResult(wsForwardProviderDisconnected), false, true, false, false, false},
 		{"cancelled", wsForwardCancelled, statusForForwardResult(wsForwardCancelled), false, false, false, true, false},
 		{"failed", wsForwardFailed, statusForForwardResult(wsForwardFailed), false, false, false, false, false},
 		{"unavailable", wsForwardUnavailable, statusForForwardResult(wsForwardUnavailable), false, false, false, false, false},
@@ -68,18 +74,82 @@ func TestClassifyStreamResultCommitsAfterFirstChunk(t *testing.T) {
 		t.Errorf("ProviderDisconnectedCommitted got = %+v, want committed=true retryable=false status=200", tr)
 	}
 
-	// Streaming-specific: provider disconnect BEFORE first chunk is
-	// still retryable + failover-eligible (same as non-streaming WS).
-	tr = classifyStreamResult(wsForwardProviderDisconnected, 0, requestLogAttempt{})
-	if !tr.retryable || !tr.failoverEligible || tr.committed {
-		t.Errorf("ProviderDisconnected (pre-chunk) got = %+v, want retryable+failoverEligible, NOT committed", tr)
-	}
-
 	// Buyer cancelled mid-stream: committed (partial output already
 	// flushed), cancelled=true, status=200.
 	tr = classifyStreamResult(wsForwardCancelled, 0, requestLogAttempt{})
 	if !tr.committed || !tr.cancelled || tr.status != http.StatusOK {
 		t.Errorf("Cancelled got = %+v, want committed+cancelled status=200", tr)
+	}
+}
+
+// TestClassifyStreamResult_DisconnectIsAlsoRetryable pins the
+// per-transport semantic difference flagged by the M2-1b audit: the
+// streaming pre-first-chunk disconnect path tries failoverCandidate
+// AND falls through to shouldRetry/advanceToNextProvider at
+// server.go:1130 if failover misses. That's why streaming sets BOTH
+// failoverEligible=true and retryable=true — vs WS-non-streaming
+// which sets only failoverEligible=true (see
+// TestClassifyWSResultBehaviourFlags / provider_disconnected case).
+func TestClassifyStreamResult_DisconnectIsAlsoRetryable(t *testing.T) {
+	tr := classifyStreamResult(wsForwardProviderDisconnected, 0, requestLogAttempt{})
+	if !tr.retryable || !tr.failoverEligible || tr.committed {
+		t.Errorf("streaming pre-chunk disconnect got = %+v, want retryable+failoverEligible, NOT committed", tr)
+	}
+}
+
+// TestClassifyStreamResultCoverage pins the full stream-classifier
+// table the M2-1b audit asked for: every wsForwardResult must land on
+// an expected (status, retryable, failoverEligible, markBusy,
+// committed, cancelled) shape so M2-1c's wired loop cannot drift.
+func TestClassifyStreamResultCoverage(t *testing.T) {
+	cases := []struct {
+		name          string
+		result        wsForwardResult
+		inStatus      int
+		wantStatus    int
+		wantRetryable bool
+		wantFailover  bool
+		wantMarkBusy  bool
+		wantCommitted bool
+		wantCancelled bool
+	}{
+		// Success: normalize to 200 regardless of caller-supplied
+		// status — the streaming path logs OK on completion.
+		{"complete_zero_in", wsForwardComplete, 0, http.StatusOK, false, false, false, false, false},
+		{"complete_200_in", wsForwardComplete, http.StatusOK, http.StatusOK, false, false, false, false, false},
+		// Queue-full preserves the M1-2 / PR #36 markBusy+retryable
+		// fix on the streaming path. Status falls through (the
+		// streaming loop reads from forwardStreaming's returned
+		// status when logging).
+		{"queue_full", wsForwardQueueFull, http.StatusBadGateway, http.StatusBadGateway, true, false, true, false, false},
+		// Timed-out / failed / unavailable: retryable (the streaming
+		// loop calls shouldRetry then advances at server.go:1156-1169).
+		{"timed_out", wsForwardTimedOut, http.StatusGatewayTimeout, http.StatusGatewayTimeout, true, false, false, false, false},
+		{"failed", wsForwardFailed, http.StatusBadGateway, http.StatusBadGateway, true, false, false, false, false},
+		{"unavailable", wsForwardUnavailable, http.StatusBadGateway, http.StatusBadGateway, true, false, false, false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyStreamResult(tc.result, tc.inStatus, requestLogAttempt{})
+			if got.status != tc.wantStatus {
+				t.Errorf("status = %d, want %d", got.status, tc.wantStatus)
+			}
+			if got.retryable != tc.wantRetryable {
+				t.Errorf("retryable = %v, want %v", got.retryable, tc.wantRetryable)
+			}
+			if got.failoverEligible != tc.wantFailover {
+				t.Errorf("failoverEligible = %v, want %v", got.failoverEligible, tc.wantFailover)
+			}
+			if got.markBusy != tc.wantMarkBusy {
+				t.Errorf("markBusy = %v, want %v", got.markBusy, tc.wantMarkBusy)
+			}
+			if got.committed != tc.wantCommitted {
+				t.Errorf("committed = %v, want %v", got.committed, tc.wantCommitted)
+			}
+			if got.cancelled != tc.wantCancelled {
+				t.Errorf("cancelled = %v, want %v", got.cancelled, tc.wantCancelled)
+			}
+		})
 	}
 }
 
@@ -90,11 +160,15 @@ func TestClassifyHTTPResultEncodesPerTransportShape(t *testing.T) {
 		t.Errorf("HTTP 200 got = %+v, want non-retryable status=200", tr)
 	}
 
-	// Network error (no response).
+	// Network error (no response): retryable=true, err preserved,
+	// status normalized to 502 — the existing HTTP loop at
+	// server.go:1335-1341 logs 502 for nil-response errors. The
+	// classifier contract promises canonical log/return status; pin
+	// 502 so a wired M2-1c never writes attempt rows with status=0.
 	wantErr := errors.New("dial tcp: connection refused")
 	tr = classifyHTTPResult(nil, wantErr, requestLogAttempt{})
-	if !tr.retryable || tr.err == nil {
-		t.Errorf("HTTP dial-error got = %+v, want retryable + err non-nil", tr)
+	if !tr.retryable || tr.err == nil || tr.status != http.StatusBadGateway {
+		t.Errorf("HTTP dial-error got = %+v, want retryable + err non-nil + status=502", tr)
 	}
 
 	// Upstream 502.

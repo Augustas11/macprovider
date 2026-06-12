@@ -15,7 +15,7 @@ Two related types, introduced in two PRs (1b + 1c) — not bundled:
 | `transportResult` | **M2-1b (this PR)** | per attempt | "what just happened in one forward call" — billing payload, retry semantics, behaviour flags |
 | `forwardState` | **M2-1c (next sub-PR)** | per request | "what's accumulated across all attempts" — routingDone, explicitRetries, faultedProviders, faultedRoutes, current provider |
 
-The codex architect auditor asked us to lock the forwardState shape **before 1b opens**. I'm presenting the proposed shape in this design doc for review, but the PR itself implements only `transportResult` — that's faithful to the audit's original M2-1 sketch which split 1b (classification) and 1c (loop collapse) into separate steps.
+The codex architect auditor asked us to lock the forwardState shape **before 1b opens**. I'm presenting the proposed shape in this design doc for review, but the PR itself implements only `transportResult` — that's faithful to the audit's original M2-1 sketch which split 1b (classification) and 1c (loop collapse) into separate steps. The three transport loops at server.go:1085-1170 / 1172-1257 / 1264-1356 remain untouched in this PR; M2-1c will route them through the classifiers and collapse them into the unified failover skeleton.
 
 ## `transportResult` (this PR)
 
@@ -71,18 +71,30 @@ type transportResult struct {
 // classifyHTTPResult converts the HTTP-forward dispatch tuple into the
 // unified transportResult. Encodes HTTP-only invariants: per-attempt
 // context timeout maps to status=504; readLimitedBody failure maps to
-// 502; etc.
+// 502; nil-response normalizes to status=502 (matches
+// server.go:1335-1341).
 func classifyHTTPResult(resp *http.Response, err error, attempt requestLogAttempt) transportResult
 
-// classifyWSResult converts forwardWS's return into transportResult.
-// Encodes the WS-non-streaming-only failoverCandidate path as
-// failoverEligible=true on wsForwardProviderDisconnected.
+// classifyWSResult converts forwardWS's return into transportResult
+// for the WS-tunneled NON-STREAMING loop. Encodes the
+// failoverCandidate path as failoverEligible=true on
+// wsForwardProviderDisconnected. Critically, sets retryable=FALSE on
+// disconnect — the WS-non-streaming loop fast-fails with 502 when
+// failover misses (server.go:1217-1228); it does NOT fall through to
+// shouldRetry/advanceToNextProvider.
 func classifyWSResult(result wsForwardResult, attempt requestLogAttempt) transportResult
 
 // classifyStreamResult converts forwardStreaming's return into
 // transportResult. Encodes the first-chunk-received commit semantics
 // as committed=true on wsForwardProviderDisconnectedCommitted +
-// wsForwardCancelled.
+// wsForwardCancelled. ALSO sets failoverEligible=true on
+// wsForwardProviderDisconnected (pre-first-chunk) — the streaming
+// loop runs the same failoverCandidate code at server.go:1120 as
+// WS-non-streaming — AND retryable=true, since the streaming loop
+// falls through to shouldRetry at server.go:1130 if failover misses.
+// This per-transport divergence on the same wsForwardResult is what
+// kept the three failover loops drifting; encoding it as two flags
+// lets the M2-1c unified loop branch correctly.
 func classifyStreamResult(result wsForwardResult, status int, attempt requestLogAttempt) transportResult
 ```
 
