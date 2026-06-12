@@ -192,24 +192,32 @@ type scenario struct {
 	coordBuyerURL        string // http://127.0.0.1:<port>
 	coordProvURL         string // http://127.0.0.1:<port> (provider/admin/ws port)
 	providerID           string
-	providerEndpointURL  string // http://127.0.0.1:<port> — fake provider HTTP
-	providerToken        string // pre-issued via coordinator-cli for pinned admission
+	providerEndpointURL  string // http://127.0.0.1:<port> — first fake provider HTTP
+	providerToken        string // pre-issued via coordinator-cli for first provider
+	providerSlots        []struct {
+		ID  string
+		URL string
+	}
+	fakeProvs   []*fakeProvider
+	coordLogBuf *logBuffer // populated when captureCoordLogs=true
 	cancelAll      context.CancelFunc
 	fakeProv       *fakeProvider
 	procWG         sync.WaitGroup
 }
 
 type scenarioOpts struct {
-	// gatewayServiceToken overrides the COORDINATOR_SERVICE_TOKEN the
-	// gateway sends to the coordinator on /internal/* paths. Leave
-	// empty to use scenario.serviceToken (the matching token); set to
-	// a different value to exercise the wrong-token rejection path.
-	gatewayServiceToken string
-	// coordinatorGatewayServiceToken overrides the gateway_service_token
-	// the COORDINATOR is configured to accept. Empty = use
-	// scenario.serviceToken. Set to "" via empty + a different operator
-	// key + a service token to confirm operator-key-only fallback.
-	coordinatorGatewayServiceToken string
+	// gatewayServiceToken, when non-nil, overrides the gateway's
+	// coordinator.service_token config field. nil = use
+	// scenario.serviceToken. A pointer to the empty string is the only
+	// way to express "configure the gateway with NO service token" so
+	// upstream calls fall back to operator_key — required by the
+	// security audit's gateway-fallback-end-to-end gap.
+	gatewayServiceToken *string
+	// coordinatorGatewayServiceToken, when non-nil, overrides the
+	// coordinator's auth.gateway_service_token config field. nil = use
+	// scenario.serviceToken. Pointer-to-empty-string supported for
+	// future "coordinator without bridge configured" scenarios.
+	coordinatorGatewayServiceToken *string
 	// stickyEnabled toggles sticky on both sides. Required for the
 	// sticky-header forwarding scenario.
 	stickyEnabled bool
@@ -221,6 +229,17 @@ type scenarioOpts struct {
 	// connection (and the coordinator wait-for-ready) — used by the
 	// auth-rejection scenario where no provider is needed.
 	skipProvider bool
+	// providerCount, when > 1, spawns N fake providers with the same
+	// model so sticky routing has a candidate set bigger than 1. The
+	// coordinator's applySticky returns the input unchanged when
+	// len(candidates) < 2 (buyer/server.go:2530), so a single-provider
+	// sticky test cannot prove the sticky-header contract holds — it
+	// passes trivially. Defaults to 1.
+	providerCount int
+	// captureCoordLogs, when true, retains coordinator stdout for the
+	// scenario to inspect. Used by log-class assertion scenarios that
+	// pin `internal_bearer_accepted key=<service_token|operator_key>`.
+	captureCoordLogs bool
 }
 
 func newScenario(t *testing.T, opts scenarioOpts) *scenario {
@@ -246,25 +265,68 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	}
 	t.Cleanup(s.shutdown)
 
+	if opts.providerCount == 0 {
+		opts.providerCount = 1
+	}
+
 	buyerPort := allocatePort(t)
 	provPort := allocatePort(t)
 	gwPort := allocatePort(t)
-	providerEndpointPort := allocatePort(t)
-	s.providerEndpointURL = fmt.Sprintf("http://127.0.0.1:%d", providerEndpointPort)
+
+	// Allocate an endpoint port per fake provider, with a stable
+	// providerID-per-index. The first provider keeps the scenario's
+	// original ID for backward compatibility with single-provider
+	// scenarios.
+	type providerSlot struct {
+		ID    string
+		Port  int
+		URL   string
+		Token string
+	}
+	providerSlots := make([]providerSlot, opts.providerCount)
+	for i := range providerSlots {
+		port := allocatePort(t)
+		id := s.providerID
+		if i > 0 {
+			id = fmt.Sprintf("%s-%d", s.providerID, i)
+		}
+		providerSlots[i] = providerSlot{
+			ID:   id,
+			Port: port,
+			URL:  fmt.Sprintf("http://127.0.0.1:%d", port),
+		}
+	}
+	s.providerEndpointURL = providerSlots[0].URL
+	s.providerSlots = make([]struct {
+		ID  string
+		URL string
+	}, len(providerSlots))
+	for i, slot := range providerSlots {
+		s.providerSlots[i].ID = slot.ID
+		s.providerSlots[i].URL = slot.URL
+	}
 
 	s.coordBuyerURL = fmt.Sprintf("http://127.0.0.1:%d", buyerPort)
 	s.coordProvURL = fmt.Sprintf("http://127.0.0.1:%d", provPort)
 	s.gatewayBaseURL = fmt.Sprintf("http://127.0.0.1:%d", gwPort)
 
-	coordServiceTok := opts.coordinatorGatewayServiceToken
-	if coordServiceTok == "" && opts.coordinatorGatewayServiceToken == "" {
-		coordServiceTok = s.serviceToken
+	coordServiceTok := s.serviceToken
+	if opts.coordinatorGatewayServiceToken != nil {
+		coordServiceTok = *opts.coordinatorGatewayServiceToken
 	}
-	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok)
+	providerCfgs := make([]map[string]any, len(providerSlots))
+	for i, slot := range providerSlots {
+		providerCfgs[i] = map[string]any{
+			"provider_id":  slot.ID,
+			"endpoint_url": slot.URL,
+			"display_name": fmt.Sprintf("fake-integration-%d", i),
+		}
+	}
+	s.writeCoordinatorYAML(buyerPort, provPort, opts.stickyEnabled, coordServiceTok, providerCfgs)
 
-	gwServiceTok := opts.gatewayServiceToken
-	if gwServiceTok == "" && opts.gatewayServiceToken == "" {
-		gwServiceTok = s.serviceToken
+	gwServiceTok := s.serviceToken
+	if opts.gatewayServiceToken != nil {
+		gwServiceTok = *opts.gatewayServiceToken
 	}
 	s.writeGatewayYAML(gwPort, opts.stickyEnabled, gwServiceTok)
 
@@ -272,7 +334,7 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 		s.apiKey = s.seedGatewayAccountAndKey()
 	}
 
-	// Issue a token for the pinned provider BEFORE coordinator starts.
+	// Issue a token per pinned provider BEFORE coordinator starts.
 	// coordinator-cli creates the DB + migrates the schema; the
 	// coordinator binary then attaches to the same WAL DB. This is
 	// necessary because pinned providers are admitted only when
@@ -281,21 +343,34 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	// which requires an existing row. Provisional admission (no
 	// providers: list) would bypass this but force ws-tunneled mode
 	// — incompatible with our fake provider's HTTP-endpoint stub.
+	providerTokens := make([]string, len(providerSlots))
 	if !opts.skipProvider {
-		s.providerToken = s.issueProviderToken(s.providerID, "fake-integration")
+		for i, slot := range providerSlots {
+			providerTokens[i] = s.issueProviderToken(slot.ID, fmt.Sprintf("fake-integration-%d", i))
+		}
+		s.providerToken = providerTokens[0]
 	}
 
 	// Coordinator first — gateway healthz exercises a route that
 	// proxies to it on first hit, so order matters for fast startup.
+	if opts.captureCoordLogs {
+		s.coordLogBuf = newLogBuffer()
+	}
 	s.startCoordinator(ctx)
 	s.waitForHealth(s.coordBuyerURL + "/healthz")
 	s.waitForHealth(s.coordProvURL + "/healthz")
 
 	if !opts.skipProvider {
-		s.fakeProv = newFakeProvider(t, s.providerID, providerEndpointPort, s.coordProvURL, s.providerToken)
-		s.fakeProv.start(ctx)
-		// Wait until coordinator's /poolz shows the provider as ready.
-		s.waitForProviderReady(s.providerID)
+		for i, slot := range providerSlots {
+			fp := newFakeProvider(t, slot.ID, slot.Port, s.coordProvURL, providerTokens[i])
+			fp.start(ctx)
+			s.fakeProvs = append(s.fakeProvs, fp)
+			s.waitForProviderReady(slot.ID)
+		}
+		// Back-compat: scenarios that look at s.fakeProv get the first.
+		if len(s.fakeProvs) > 0 {
+			s.fakeProv = s.fakeProvs[0]
+		}
 	}
 
 	s.startGateway(ctx)
@@ -327,7 +402,7 @@ func randHex(t *testing.T, n int) string {
 // the audit fixture: we want a clean room for testing the GATEWAY ↔
 // COORDINATOR boundary, not the provider auth gate which has its own
 // dedicated tests in phase4-coordinator/internal/ws).
-func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string) {
+func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled bool, gatewayServiceToken string, providers []map[string]any) {
 	s.t.Helper()
 	cfg := map[string]any{
 		"listen": map[string]any{
@@ -441,20 +516,14 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 		"explorer": map[string]any{
 			"enabled": false,
 		},
-		// Pin the fake provider in coordinator config so it is admitted
-		// in HTTP-forwarding (endpoint_url) mode rather than ws-tunneled
+		// Pin each fake provider in coordinator config so they admit in
+		// HTTP-forwarding (endpoint_url) mode rather than ws-tunneled
 		// mode. Provisional providers always force ws-tunneled
 		// (ws/server.go:986-988) — and our fake doesn't implement the
 		// wsForward inference protocol, only the legacy HTTP path.
 		// Pinning is correct anyway: any operator using endpoint_url in
 		// production has the provider in their providers: list.
-		"providers": []map[string]any{
-			{
-				"provider_id":  s.providerID,
-				"endpoint_url": s.providerEndpointURL,
-				"display_name": "fake-integration",
-			},
-		},
+		"providers": providers,
 	}
 	b, err := yaml.Marshal(cfg)
 	if err != nil {
@@ -692,16 +761,76 @@ func (s *scenario) streamLogs(cmd *exec.Cmd, tag string) {
 	if err != nil {
 		s.t.Fatalf("stderr pipe: %v", err)
 	}
-	go pumpLogs(s.t, tag+".out", stdout)
-	go pumpLogs(s.t, tag+".err", stderr)
+	var captureOut *logBuffer
+	if tag == "coord" {
+		captureOut = s.coordLogBuf // nil when captureCoordLogs=false
+	}
+	go pumpLogs(s.t, tag+".out", stdout, captureOut)
+	go pumpLogs(s.t, tag+".err", stderr, nil)
 }
 
-func pumpLogs(t *testing.T, tag string, r io.ReadCloser) {
+func pumpLogs(t *testing.T, tag string, r io.ReadCloser, capture *logBuffer) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		t.Logf("[%s] %s", tag, scanner.Text())
+		line := scanner.Text()
+		t.Logf("[%s] %s", tag, line)
+		if capture != nil {
+			capture.append(line)
+		}
 	}
+}
+
+// logBuffer is a goroutine-safe append-only line buffer used by
+// scenarios that need to assert against subprocess log output (e.g.,
+// `internal_bearer_accepted key=<service_token|operator_key>` for the
+// M3-2 cutover audit-trail contract).
+type logBuffer struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func newLogBuffer() *logBuffer { return &logBuffer{} }
+
+func (b *logBuffer) append(line string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.lines = append(b.lines, line)
+}
+
+// snapshot returns a copy of all captured lines so far. Callers can
+// scan this for substring matches without holding the buffer mutex.
+func (b *logBuffer) snapshot() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, len(b.lines))
+	copy(out, b.lines)
+	return out
+}
+
+// awaitContains polls the buffer until ANY line contains all the
+// given substrings, or the deadline expires. Returns the matching
+// line on success, "" on timeout. Used to pin
+// `event=internal_bearer_accepted key=<kind>` audit log lines that the
+// coordinator writes asynchronously relative to the test's HTTP
+// response.
+func (b *logBuffer) awaitContains(deadline time.Time, substrs ...string) string {
+	for time.Now().Before(deadline) {
+		for _, line := range b.snapshot() {
+			matched := true
+			for _, s := range substrs {
+				if !strings.Contains(line, s) {
+					matched = false
+					break
+				}
+			}
+			if matched {
+				return line
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return ""
 }
 
 // waitForHealth polls until the /healthz endpoint returns 200, or
@@ -791,6 +920,17 @@ type fakeProvider struct {
 	hReady        chan struct{}
 	stopOnce      sync.Once
 	stopped       chan struct{}
+	hitMu         sync.Mutex
+	hits          int // /v1/chat/completions hit count, for sticky verification
+}
+
+// Hits returns the number of /v1/chat/completions requests this fake
+// provider has served. Sticky-routing scenarios assert that after a
+// first request, follow-up requests land on the same provider.
+func (p *fakeProvider) Hits() int {
+	p.hitMu.Lock()
+	defer p.hitMu.Unlock()
+	return p.hits
 }
 
 func newFakeProvider(t *testing.T, providerID string, httpPort int, coordProvURL, providerToken string) *fakeProvider {
@@ -832,6 +972,9 @@ func (p *fakeProvider) start(ctx context.Context) {
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
 		// Drain body to keep the connection clean.
 		_, _ = io.Copy(io.Discard, r.Body)
+		p.hitMu.Lock()
+		p.hits++
+		p.hitMu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-MacProvider-Completion-Tokens", "12")
 		w.WriteHeader(http.StatusOK)
@@ -1010,6 +1153,44 @@ type requestLogRow struct {
 	Status             int
 	TotalTokens        sql.NullInt64
 	Stream             int
+}
+
+// usageEventRow is the subset of the gateway's usage_events row we pin
+// in the money-path scenario. Columns match
+// phase5-gateway/internal/storage/sqlite/migrate.go:68-79.
+type usageEventRow struct {
+	AccountID        string
+	TotalTokens      int64
+	Outcome          string
+	TokenSource      string
+}
+
+// readLatestUsageEvent opens the gateway SQLite DB and returns the
+// most recent usage_events row for the seeded account, or (zero, false)
+// if none exists. This is the gateway-side store; together with
+// readLatestRequestLog (coordinator-side) it satisfies the audit's
+// "both stores' rows" coverage requirement (REPO_AUDIT.md:253).
+func (s *scenario) readLatestUsageEvent() (usageEventRow, bool) {
+	s.t.Helper()
+	db, err := sql.Open("sqlite", s.gatewayDB)
+	if err != nil {
+		s.t.Fatalf("open gateway db: %v", err)
+	}
+	defer db.Close()
+	var row usageEventRow
+	err = db.QueryRow(
+		`SELECT account_id, total_tokens, outcome, token_source
+		   FROM usage_events WHERE account_id = ?
+		  ORDER BY created_at DESC LIMIT 1`,
+		s.accountID,
+	).Scan(&row.AccountID, &row.TotalTokens, &row.Outcome, &row.TokenSource)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return usageEventRow{}, false
+		}
+		s.t.Fatalf("query usage_events: %v", err)
+	}
+	return row, true
 }
 
 // readLatestRequestLog opens the coordinator SQLite DB and returns the
