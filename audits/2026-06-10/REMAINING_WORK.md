@@ -95,11 +95,6 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 - **Status:** `CODE_SHIPPED_OPERATOR_PENDING`
 - **Detail:** **Evidence** - PR #73 / commit 11f7c0c `m3-2: operator-key split + coordinator env-file + de-root monitor (SECU-4 + DEVE-7)`, plus codex fixups c99f1ca and 55bb5c0. - `phase4-coordinator/dist/monitor/macprovider-monitor.service`: `User=macprovider`, `Group=macprovider`, `NoNewPrivileges=true`, `ProtectSystem=strict`, `ProtectHome=true`, `PrivateTmp=true`, `PrivateDevices=true`, `ReadOnlyPaths=/opt/macprovider`, `StateDirectory=macprovider-monitor`, `EnvironmentFile=-/etc/macprovider/coordinator.env` (the env file the coordinator unit also reads — symmetric with gateway). - `macprovider-monitor.py:54-61, 107`: `operator_key()` returns `os.environ.get("OPERATOR_KEY", "")` — no more regex-against-yaml-as-root. - `deploy-pearl-vps.sh:194-208`: enforces `coordinator.env` perms `root:macprovi...
 
-### [Low] ARCH-6 — Billing/request-log persistence orchestration lives inline in handler closures
-
-- **Status:** `DEFERRED`
-- **Detail:** **Evidence** Handoff lists M3-10 as DEFERRED, pairing with M2-1c. No commit references ARCH-6 or `logRowWithBilling` extraction. `buyer/server.go:869-974` still defines `logRowWithBilling` as an inline closure inside `handleChatCompletions` (lines 880-974). The gateway pattern the audit pointed at as the goal remains the contrast. **Original citation** Audit cited `buyer/server.go:851-945`; the closure now spans 880-974 (drifted but same shape). **Fix delta** Explicit deferral, paired with the M2-1 ARCH-1 work-stream so the extraction lands once the failover loops collapse to one. Justified sequencing. **Notes** No regression risk while deferred (money math in `formula.go` is the high-stakes part and stays isolated).
-
 ## §5 tasks not in RESOLVED state
 
 Tasks that did not reach `RESOLVED` (each maps to one or more findings above; this view is by task ID).
@@ -117,7 +112,6 @@ Tasks that did not reach `RESOLVED` (each maps to one or more findings above; th
 | M3-2 | `CODE_SHIPPED_OPERATOR_PENDING` | Operator key split + de-root monitor |
 | M3-4 | `CODE_SHIPPED_OPERATOR_PENDING` | swift-nio bump + drop swift-log + Swift CI |
 | M2-9 | `DEFERRED` | Cross-service integration test |
-| M3-10 | `DEFERRED` | Hoist logRowWithBilling into billing-recorder type |
 
 ## Operator-pending items (require human action, not code)
 
@@ -140,9 +134,7 @@ Code is merged; resolution depends on operator action on Pearl, in GitHub branch
 Confirmed-as-deferred findings, tasks, and Open Questions.
 
 - **TEST-6** (Medium) — No cross-service integration test between gateway and coordinator.
-- **ARCH-6** (Low) — Billing/request-log persistence orchestration lives inline in handler closures.
 - **M2-9** — Cross-service integration test.
-- **M3-10** — Hoist logRowWithBilling into billing-recorder type.
 - **Q3** — Target tier-2 posture for this beta.
 
 ## New issues surfaced (severity-ordered)
