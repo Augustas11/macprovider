@@ -205,6 +205,7 @@ file for the full forensic trail.
 | Coordinator OOM (Pearl is RAM-constrained) | A long admin query holding a SQLite handle | `sudo systemctl restart macprovider-coordinator` is the immediate mitigation; investigate the explorer/admin query that ran around the OOM time. M2-2 (swap-audit off the pool lock) and M2-5 (bounded seenModels) reduce the steady-state memory pressure. |
 | Gateway restart drops in-flight chat requests | Buyer requests holding the HTTP server were not given grace | The scripted deploy uses a 10s shutdown context (`cmd/gateway/main.go`). For a planned restart, schedule during a quiet window observed via `monitor.py` request graph. |
 | `/v1/usage` is slow during admin explorer load | Pre-M2-4 path: explorer + usage shared one capped DB handle | Confirm gateway is on M2-4-or-later (look for `read-only storage` log line at startup). If on older, restart during quiet window. |
+| A provider that mints a self-serve token cannot reconnect; coordinator log shows `event=fr_c9_4_tofu_reject` or `event=fr_c9_4_self_heal` | FR-C9.4 TOFU gate fired on tokenless reconnect | See **§9. FR-C9.4 lockout recovery** below — the self-heal path is automatic in v0.8.3; the strict-reject path needs `coordinator-cli revoke-token`. |
 
 ## 8. Provider provisioning
 
@@ -223,16 +224,157 @@ Send the token to the provider operator over a secure channel; they place
 it as `auth.provider_token: <token>` in their `macprovider.yaml` (and
 `chmod 0600 macprovider.yaml`), then restart the provider.
 
-Stranger-tier (curl|bash open-onboarding) — currently **gated on Open
-Question 2** from the audit. Two branches:
+Stranger-tier (curl|bash open-onboarding) — **self-serve provisional**
+is the production path per SPEC-003 v0.8.x. The coordinator mints a
+fresh `provider_token` on every tokenless provisional admission and
+returns it in the v1 `hello_ack` and v2 `auth_response` frames; the
+binary persists it atomically to `~/.config/macprovider/macprovider.yaml`
+(mode 0600). Next reconnect carries it as `Authorization: Bearer`.
+No operator action is required for the open-onboarding tier under
+`auth.require_provider_tokens=false`. After the flag flip (FR-C9.5
+compatibility cutoff), tokenless connects are rejected at the auth
+gate before admission — only tokens already issued at that point
+remain valid; new strangers must onboard before the flip.
 
-- **Operator-issued strangers:** `install.sh` prompts for a token or reads
-  `MACPROVIDER_PROVIDER_TOKEN` from env.
-- **Self-serve provisional:** the coordinator mints a provisional token on
-  first admission and returns it via `auth_response`; the installer writes
-  it back to config.
+Per SPEC-003 v0.8.1, two tokens MUST NOT exist for the same
+`provider_id` simultaneously. The v0.8.2 partial unique index
+`idx_provider_tokens_one_active_per_provider` enforces this at the
+DB layer. The v0.8.3 unused-token self-heal handles the deploy-gap
+case automatically; the strict-reject case is documented in §9 below.
 
-PR [#44](https://github.com/Augustas11/macprovider/pull/44)
-(`feat/m1-1-self-serve-provisional-tokens`) implements the self-serve
-path. Until it merges, only the pinned-tier path is documented as
-production-ready. Decision log entry pending.
+## 9. FR-C9.4 lockout recovery
+
+A provider that fails to authenticate after a deploy or a manual
+config change typically falls into one of two FR-C9.4 paths. The
+coordinator log line is the canonical signal — `journalctl -u
+macprovider-coordinator -n 200 \| grep fr_c9_4` shows which path
+fired.
+
+### 9.1 Self-heal path (v0.8.3+, in-band recovery)
+
+**Log fingerprint:** `event=fr_c9_4_self_heal provider_id=<id>`,
+message `FR-C9.4 self-heal: revoked existing unused token for this
+provider_id; proceeding to mint a fresh one`.
+
+**What happened:** the provider had a row in `provider_tokens` with
+`last_used_at IS NULL` (never authenticated since issuance — the
+deploy-gap shape). The coordinator atomically revoked it and minted
+a fresh token in the same admission path. The binary's next
+ack-frame carries the new token under `assigned_provider_token` and
+persists it. No operator action required.
+
+**When to investigate anyway:** if the same `provider_id` triggers
+`fr_c9_4_self_heal` repeatedly across several connects, the binary
+is NOT persisting the assigned token between connects. Check the
+provider's `~/.config/macprovider/macprovider.yaml` — the top-level
+`provider_token:` key must be present after a successful connect.
+File permissions must be 0600 owned by the user running the binary.
+
+### 9.2 Strict-reject path (v0.8.1+, operator action required)
+
+**Log fingerprint:** `event=fr_c9_4_tofu_reject provider_id=<id>`,
+message `FR-C9.4 TOFU: tokenless connect refused; an active USED
+token already exists for this provider_id`. WS close code
+`CloseInvalidToken` / reason `invalid_token`.
+
+**What happened:** the provider had a row in `provider_tokens` with
+`last_used_at IS NOT NULL` (the token has authenticated at least
+once) AND the binary is presenting no `Authorization: Bearer` on
+reconnect. This shape is INDISTINGUISHABLE from the codex MAJOR-1
+credential-capture attack the v0.8.1 TOFU rewrite closed; the
+coordinator MUST NOT mint a parallel token automatically. Operator
+intervention is the trust signal that distinguishes the legitimate
+provider from an attacker.
+
+**Recovery (the legitimate-provider case):**
+
+```bash
+ssh pearl
+
+# 1. Identify the active token. The output is a TSV row per
+#    token — id, prefix, provider_id, name, created_at, status,
+#    last_used. Find the prefix for the locked-out provider_id
+#    where status=active.
+sudo -u macprovider /opt/macprovider/coordinator-cli list-tokens \
+  --db /var/lib/macprovider/coordinator.db | grep -F <provider_id>
+
+# 2. Revoke the active row. The 12-hex prefix is enough; use the
+#    same prefix shown in step 1.
+sudo -u macprovider /opt/macprovider/coordinator-cli revoke-token \
+  --db /var/lib/macprovider/coordinator.db \
+  --token-prefix <12-hex-prefix>
+
+# 3. Tell the provider operator to restart their macprovider service.
+#    On their next connect, the FR-C9.4 gate sees no active row and
+#    proceeds to FR-C9.1 mint — the binary writes the fresh token to
+#    macprovider.yaml and uses it on the connect after that.
+
+# 4. Verify on the coordinator side. The first connect after revoke
+#    should log:
+#      event=fr_c9_1_self_serve_mint provider_id=<id> ...
+#    (self-heal does NOT fire because there is no active row at all,
+#     not because the existing row was unused.)
+journalctl -u macprovider-coordinator -n 50 -f | grep -F <provider_id>
+```
+
+**The attacker case:** the same shape can be an attacker declaring a
+victim's `provider_id` on a tokenless connect to harvest a fresh
+bearer. Do NOT run the recovery above if the operator cannot
+out-of-band confirm the request to restart came from the actual
+provider. Confirm via the contact channel established at admission
+time (Slack DM, email reply chain, etc.). If unconfirmable, leave
+the row in place and document the lockout — the legitimate provider
+will eventually escalate.
+
+**Fallback (CLI not yet on Pearl):** sqlite3 direct UPDATE is
+equivalent to `revoke-token` semantically. Use ONLY if
+`coordinator-cli` is not present on this Pearl host (which is the
+case for any host that hasn't been redeployed since this milestone):
+
+```bash
+# Identify
+ssh pearl "sudo -u macprovider sqlite3 /var/lib/macprovider/coordinator.db \
+  \"SELECT id, token_prefix, provider_id, datetime(created_at), datetime(last_used_at) \
+    FROM provider_tokens WHERE provider_id='<id>' AND revoked_at IS NULL;\""
+
+# Revoke
+ssh pearl "sudo -u macprovider sqlite3 /var/lib/macprovider/coordinator.db \
+  \"UPDATE provider_tokens \
+      SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+    WHERE provider_id='<id>' AND revoked_at IS NULL;\""
+```
+
+The sqlite3 path bypasses the CLI's prefix-uniqueness assertion; if
+multiple active rows somehow exist for the same `provider_id` (which
+should be impossible since v0.8.2's partial unique index), the
+`UPDATE` will revoke them all in one statement, which is the
+operator's intent.
+
+### 9.3 Routine token hygiene
+
+Two `coordinator-cli` subcommands belong on a quarterly hygiene
+cycle (or any time the operator notices unused tokens accumulating):
+
+```bash
+# Dry-run: list candidate prunes (default cutoff 168h = 7 days)
+sudo -u macprovider /opt/macprovider/coordinator-cli prune-tokens \
+  --db /var/lib/macprovider/coordinator.db \
+  --older-than 168h
+
+# Apply (after reviewing the dry-run output)
+sudo -u macprovider /opt/macprovider/coordinator-cli prune-tokens \
+  --db /var/lib/macprovider/coordinator.db \
+  --older-than 168h \
+  --apply
+```
+
+Prune-tokens (per SPEC-003 v0.8.2 hardening) refuses cutoffs younger
+than 24h without `--force` — a self-minted token is
+`last_used_at IS NULL` until the binary completes its first
+authenticated reconnect, which can be seconds to minutes after
+issuance under bad-network conditions. A naive `--older-than 0s
+--apply` during a settling window would brick the active
+first-session provider.
+
+`list-tokens` is read-only and safe to run any time; the output is
+a TSV that pipes cleanly into `awk` / `grep` / `column`.

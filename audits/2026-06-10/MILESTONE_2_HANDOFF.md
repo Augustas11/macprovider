@@ -167,8 +167,11 @@ Declare Milestone 2 done when:
   - M2-4 Part C lands as archive-rotate (preferred per "compliance posture"), or
   - M2-4 Part C lands as trigger-amendment (per "default tamper-evidence").
 - OPS.md TBD callouts are removed after the first M0-5/M1-6 deploy.
-- A new entry in `beta/DECISION_CRITERIA.md` (Entry 60) records the M2 PR list,
-  the decisions taken vs deferred, and the M3 follow-ups.
+- A new entry in `beta/DECISION_CRITERIA.md` (Entry 68; originally
+  numbered 60 at commit time, renumbered on 2026-06-12 to resolve a
+  collision with the Open Q2 ruling entry from a parallel session)
+  records the M2 PR list, the decisions taken vs deferred, and the
+  M3 follow-ups.
 
 ## Audit refs
 

@@ -158,11 +158,22 @@ func (m mintFailingStore) IssueToken(ctx context.Context, providerID, providerNa
 	return auth.TokenRecord{}, "", errors.New("synthetic mint failure")
 }
 
-// SPEC-003 v0.8 FR-C9.1 — mint failure (e.g. transient DB error) MUST
-// NOT prevent provisional admission. The ack still ships, the binary
-// connects without a token, and FR-C9.4 multi-mint will retry on the
-// next reconnect.
-func TestSelfServeProvisionalTokenMintFailureTolerated(t *testing.T) {
+// SPEC-003 v0.8.4 FR-C9.1 (fix-pass-5 G) — mint failure on a transient
+// DB error MUST fail-closed with CloseInvalidToken / "invalid_token".
+//
+// Pre-fix-pass-5 this case admitted-tokenless and the binary retried on
+// next reconnect. The codex security audit on the v0.8.4 composition
+// (MAJOR-1) flagged that the empty `AuthState` returned in the
+// admit-tokenless path was treated as routable, amplifying a DB-error
+// storm into a routing-admission DoS. fix-pass-5 G closes that by
+// returning provisionalTokenRejectTOFU + AuthMintFailed so the v1/v2
+// ack sites close the connection instead of registering an empty-state
+// routable session.
+//
+// The binary still recovers cleanly: no row was written (the mint
+// failed), so the next reconnect re-enters resolveProvisionalToken at
+// step 1 with no row in the DB and proceeds to mint normally.
+func TestSelfServeProvisionalTokenMintFailureFailsClosed(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -173,7 +184,7 @@ func TestSelfServeProvisionalTokenMintFailureTolerated(t *testing.T) {
 	})
 	defer h.HTTP.Close()
 
-	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	conn, br, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
 		t.Fatalf("dial tokenless: %v", err)
 	}
@@ -182,128 +193,249 @@ func TestSelfServeProvisionalTokenMintFailureTolerated(t *testing.T) {
 	if err := wsutil.WriteClientText(conn, mustJSON(validHello("flaky-mint-provider"))); err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
-	payload, _, err := wsutil.ReadServerData(conn)
+
+	// MUST receive a close frame, not a hello_ack.
+	var src io.Reader = conn
+	if br != nil {
+		src = br
+	}
+	frame, err := gobwas.ReadFrame(src)
 	if err != nil {
-		t.Fatalf("read ack: %v", err)
+		t.Fatalf("read mint-failure close: %v", err)
 	}
-	var ack providerws.HelloAck
-	if err := json.Unmarshal(payload, &ack); err != nil {
-		t.Fatalf("ack json: %v", err)
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close (fix-pass-5 fail-closed on transient DB error)", frame.Header.OpCode)
 	}
-	if ack.Type != "hello_ack" {
-		t.Fatalf("ack type = %q, want hello_ack despite mint failure", ack.Type)
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token (FR-C9.1 fail-closed)", code, reason, providerws.CloseInvalidToken)
 	}
-	if ack.AssignedProviderToken != "" {
-		t.Fatalf("assigned_provider_token = %q, want empty on mint failure", ack.AssignedProviderToken)
+
+	// DB invariant: no row written (mint failed).
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	for _, r := range records {
+		if r.ProviderID == "flaky-mint-provider" && !r.RevokedAt.Valid {
+			t.Fatalf("unexpected active row for flaky-mint-provider after fail-closed mint: %#v", r)
+		}
 	}
 }
 
-// SPEC-003 v0.8.3 FR-C9.4 — during the settling window
-// (RequireProviderTokens=false), a tokenless connect from a
-// provider_id that already has an unrevoked token MUST be admitted
-// without a token in the ack frame, NOT rejected. The DB partial
-// unique index already prevents minting a parallel bearer for that
-// provider_id, so the credential-capture vector the v0.8.2 codex
-// security audit (PR #44 MAJOR-1) closed remains closed via the
-// constraint. Rejecting the connection — what v0.8.2 did — bricks
-// old-binary cohorts that connected tokenless before the new
-// coordinator was live (they never persisted the assigned token they
-// don't know about), so v0.8.3 (DECISION_CRITERIA Entry 66) replaced
-// reject-on-duplicate with admit-tokenless.
-//
-// Pre-v0.8.3 this test was TestSelfServeProvisionalTokenRejectedWhen-
-// ActiveTokenExists and asserted CloseInvalidToken / "invalid_token".
-// The 2026-06-12 deploy attempt demonstrated that behavior was a
-// structural brick of the settling window. The new test name + body
-// document the corrected contract.
-func TestSelfServeProvisionalTokenAdmitsTokenlessWhenActiveTokenExists(t *testing.T) {
+// SPEC-003 v0.8.4 FR-C9.4 unused-token self-heal — when an active row
+// exists for a provider_id but its last_used_at IS NULL (never
+// authenticated), the coordinator MUST revoke that row and mint a
+// fresh token for the incoming tokenless connect instead of
+// rejecting. Closes the deploy-gap lockout class that hit `air5` on
+// the 2026-06-12 production deploy: a provider minted a token under
+// the new coordinator but reconnected before consuming the ack
+// frame, and v0.8.2's blanket TOFU policy locked them out
+// indefinitely. The codex MAJOR-1 credential-capture vector that
+// v0.8.1 closed requires the attacker to have authenticated at
+// least once (which sets last_used_at) — an unused row carries no
+// live credential, so self-heal does not weaken the security model.
+// Pre-v0.8.3 this test asserted strict rejection; the new contract
+// is in DECISION_CRITERIA Entry 67.
+func TestSelfServeProvisionalTokenSelfHealsWhenExistingTokenUnused(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
-	// Seed: someone (legitimate provider or a prior race winner)
-	// already self-minted for "claimed-provider".
-	_, _, err = store.IssueToken(context.Background(), "claimed-provider", "claimed-provider hostname")
+	// Seed: a legitimate provider self-minted on a prior connect but
+	// never used the token (the deploy-gap pattern: minted, persisted
+	// or not, but ack-frame not consumed by the old binary in flight).
+	seedRecord, seedCleartext, err := store.IssueToken(context.Background(), "claimed-provider", "claimed-provider hostname")
 	if err != nil {
-		t.Fatalf("seed token: %v", err)
+		t.Fatalf("seed unused token: %v", err)
+	}
+	if seedCleartext == "" {
+		t.Fatalf("seed cleartext empty")
 	}
 	h := selfServeHarness(t, store)
 	defer h.HTTP.Close()
 
-	// Loser: connects tokenless declaring the SAME provider_id.
+	// The same provider_id reconnects tokenless (binary lost the
+	// ack-frame's assigned_provider_token across a coordinator
+	// restart, or never persisted it). Self-heal should kick in.
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
-		t.Fatalf("dial tokenless loser: %v", err)
+		t.Fatalf("dial tokenless reconnect: %v", err)
 	}
 	defer conn.Close()
 	if err := wsutil.WriteClientText(conn, mustJSON(validHello("claimed-provider"))); err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
 
-	// MUST receive a hello_ack (not a close frame). MUST admit tokenless.
+	// Self-heal path: the ack frame should arrive normally with a NEW
+	// assigned_provider_token, not a close frame.
 	payload, op, err := wsutil.ReadServerData(conn)
 	if err != nil {
-		t.Fatalf("read hello_ack: %v", err)
+		t.Fatalf("read self-heal ack: %v", err)
 	}
 	if op != gobwas.OpText {
-		t.Fatalf("op = %v, want text (settling-window admit, not close)", op)
+		t.Fatalf("op = %v, want text (self-heal ack), not close (legacy strict reject)", op)
 	}
 	var ack providerws.HelloAck
 	if err := json.Unmarshal(payload, &ack); err != nil {
 		t.Fatalf("ack json: %v", err)
 	}
 	if ack.Type != "hello_ack" {
-		t.Fatalf("ack type = %q, want hello_ack (settling-window admit)", ack.Type)
+		t.Fatalf("ack type = %q, want hello_ack", ack.Type)
 	}
-	// MUST NOT include a token in the ack frame — the loser does not get
-	// a bearer because the winner already holds it via the DB constraint.
-	if ack.AssignedProviderToken != "" {
-		t.Fatalf("assigned_provider_token = %q, want empty (DB partial unique index prevented duplicate mint; loser is bearer-less)", ack.AssignedProviderToken)
+	if ack.AssignedProviderToken == "" {
+		t.Fatalf("assigned_provider_token empty in self-heal hello_ack: %#v", ack)
+	}
+	if ack.AssignedProviderToken == seedCleartext {
+		t.Fatalf("self-heal ack returned the SAME cleartext as the seed; expected a freshly minted token")
 	}
 
-	// Critically: still exactly the seeded row, no new mint attempt
-	// produced an extra row via races or fallback paths.
+	// DB invariant: the seed row is revoked, exactly one active row
+	// remains (the fresh mint), and the fresh row resolves to the
+	// declared provider_id.
 	records, err := store.ListTokens(context.Background())
 	if err != nil {
 		t.Fatalf("list tokens: %v", err)
 	}
-	active := 0
-	for _, r := range records {
-		if r.ProviderID == "claimed-provider" && !r.RevokedAt.Valid {
-			active++
+	if len(records) != 2 {
+		t.Fatalf("token rows after self-heal = %d, want 2 (revoked seed + fresh mint): %#v", len(records), records)
+	}
+	var seedRow, freshRow *auth.TokenRecord
+	for i := range records {
+		r := records[i]
+		if r.ID == seedRecord.ID {
+			cp := r
+			seedRow = &cp
+		} else {
+			cp := r
+			freshRow = &cp
 		}
 	}
-	if active != 1 {
-		t.Fatalf("active rows for claimed-provider = %d, want 1: %#v", active, records)
+	if seedRow == nil || freshRow == nil {
+		t.Fatalf("could not classify rows: seed=%v fresh=%v records=%#v", seedRow, freshRow, records)
+	}
+	if !seedRow.RevokedAt.Valid {
+		t.Fatalf("seed row should be revoked after self-heal; revoked_at=%v", seedRow.RevokedAt)
+	}
+	if freshRow.RevokedAt.Valid {
+		t.Fatalf("fresh row should be active after self-heal; revoked_at=%v", freshRow.RevokedAt)
+	}
+	if freshRow.ProviderID != "claimed-provider" {
+		t.Fatalf("fresh row provider_id = %q, want claimed-provider", freshRow.ProviderID)
+	}
+	providerID, ok, err := store.ValidateToken(context.Background(), ack.AssignedProviderToken)
+	if err != nil || !ok || providerID != "claimed-provider" {
+		t.Fatalf("self-heal token validation: id=%q ok=%v err=%v (want claimed-provider true nil)", providerID, ok, err)
 	}
 
-	// SPEC-003 v0.8.3 fix-pass-3 (PR #69 security MAJOR-1) — the
-	// admitted entry MUST be marked AuthBearerlessDuplicate so the
-	// registry refuses to evict an existing routable session and
-	// routing/billing exclude it.
+	// Composition with PR #69 (v0.8.4 fix-pass): the self-healed
+	// session is admitted with a freshly-minted token, so its
+	// AuthState MUST be AuthSelfMinted — fully routable, no
+	// quarantine. The bearer-less duplicate path is for the
+	// IssueToken race-loss case, not the self-heal path.
 	provider, ok := h.Registry.Resolve("claimed-provider", ack.AssignedID)
 	if !ok {
-		t.Fatalf("registry has no entry for assigned_id %q", ack.AssignedID)
+		t.Fatalf("registry has no entry for assigned_id %q after self-heal", ack.AssignedID)
 	}
-	if provider.AuthState != pool.AuthBearerlessDuplicate {
-		t.Fatalf("auth_state = %q, want %q (bearer-less duplicate marking)", provider.AuthState, pool.AuthBearerlessDuplicate)
-	}
-	if provider.RoutingEligible() {
-		t.Fatalf("RoutingEligible() = true for bearer-less duplicate; must be false")
+	if provider.AuthState != pool.AuthSelfMinted {
+		t.Fatalf("self-heal auth_state = %q, want %q (self-mint must mark routable, not quarantined)", provider.AuthState, pool.AuthSelfMinted)
 	}
 }
 
-// SPEC-003 v0.8.3 fix-pass-3 — eviction defense (PR #69 codex security
-// MAJOR-1). A bearer-less duplicate connect MUST NOT be allowed to
-// displace an existing routable session for the same provider_id. Pre-
-// fix, registerProviderSession would last-writer-win on provider_id,
-// kicking the legitimate provider out of the pool and routing buyer
-// traffic + billing to the duplicate. The fix: pool.Registry.Register
-// returns (oldConn, registered); when registered==false the WS handler
-// closes the duplicate with CloseInvalidToken without disturbing the
-// existing session.
-func TestSelfServeProvisionalTokenEvictionDefenseProtectsRoutableSession(t *testing.T) {
+// SPEC-003 v0.8.4 FR-C9.4 strict-reject — the security path. When
+// the active row's last_used_at IS NOT NULL the codex MAJOR-1
+// credential-capture vector applies in full: the row represents a
+// live credential. A tokenless reconnect for that provider_id MUST
+// be rejected with CloseInvalidToken / "invalid_token" and the
+// operator runbook applies (revoke-token + retry). This test
+// preserves the v0.8.1 strict-reject behavior for the
+// used-token-tokenless-reconnect shape.
+func TestSelfServeProvisionalTokenRejectedWhenExistingTokenUsed(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	// Seed: a legitimate provider self-minted AND used the token at
+	// least once (the row's last_used_at is NOT NULL). This is the
+	// shape an attacker would also produce after capturing-and-using
+	// a victim's bearer.
+	_, seedCleartext, err := store.IssueToken(context.Background(), "claimed-provider", "claimed-provider hostname")
+	if err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if err := store.MarkTokenUsed(context.Background(), seedCleartext); err != nil {
+		t.Fatalf("mark seed used: %v", err)
+	}
+	h := selfServeHarness(t, store)
+	defer h.HTTP.Close()
+
+	// A tokenless connect declaring the SAME provider_id arrives.
+	// This is indistinguishable from an attacker trying to mint a
+	// parallel credential for the in-use identity, so strict reject.
+	conn, br, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial tokenless: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("claimed-provider"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+
+	var src io.Reader = conn
+	if br != nil {
+		src = br
+	}
+	frame, err := gobwas.ReadFrame(src)
+	if err != nil {
+		t.Fatalf("read tofu close: %v", err)
+	}
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close (TOFU strict reject)", frame.Header.OpCode)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token (FR-C9.4 strict reject)", code, reason, providerws.CloseInvalidToken)
+	}
+
+	// Critically: no NEW row was minted AND the seed row is still
+	// active (NOT auto-revoked, since it has last_used_at NOT NULL).
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("token rows after strict reject = %d, want 1 (no parallel mint, no self-heal on used token): %#v", len(records), records)
+	}
+	if records[0].RevokedAt.Valid {
+		t.Fatalf("seed row should remain active after strict reject; revoked_at=%v", records[0].RevokedAt)
+	}
+}
+
+// SPEC-003 v0.8.4 (fix-pass-5) — DOCUMENTED BRANCH CHANGE.
+//
+// This test originally exercised the pool-registry eviction defense
+// (PR #69 fix-pass-3 codex security MAJOR-1): an attacker tokenless
+// connect with AuthBearerlessDuplicate marking would reach
+// pool.Registry.Register, and the defense would refuse to evict the
+// legitimate session.
+//
+// Under v0.8.4 (composition with PR #78), the legitimate Bearer
+// connect's atomic ValidateAndMarkTokenUsed stamps last_used_at at WS
+// upgrade. By the time the attacker's tokenless connect reaches
+// resolveProvisionalToken, RevokeUnusedTokenForProvider returns false
+// (row is not NULL), HasActiveTokenForProvider returns true, and the
+// attacker is closed via STRICT TOFU REJECT — before any Register call
+// is made.
+//
+// The test still proves the right end-state property (attacker closed,
+// legitimate session preserved, AuthBearerValidated positively locked),
+// but the fired layer is the strict-reject path, not the registry
+// eviction defense. The registry defense is now exercised directly by
+// TestRegistryRefusesBearerlessDuplicateReplacement in the pool
+// package.
+func TestSelfServeProvisionalTokenStrictRejectPreservesRoutableSession(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -446,21 +578,22 @@ func TestSelfServeProvisionalTokenMintedOnAuthResponseV2(t *testing.T) {
 	}
 }
 
-// SPEC-003 v0.8.3 fix-pass-3 (PR #69 codex code MAJOR-2) — v2 mirror
-// of TestSelfServeProvisionalTokenAdmitsTokenlessWhenActiveTokenExists.
-// The v0.8.3 admit-tokenless behavior on duplicate-token must hold on
-// the v2 ECDH path too. Asserts proof-accepted auth_response with
-// empty assigned_provider_token + AuthBearerlessDuplicate marking +
-// not routing-eligible.
-func TestSelfServeProvisionalTokenAdmitsTokenlessOnAuthResponseV2WhenActiveTokenExists(t *testing.T) {
+// SPEC-003 v0.8.4 — v2 mirror of TestSelfServeProvisionalTokenSelfHealsWhenExistingTokenUnused.
+// The composed self-heal contract MUST hold across the v2 ECDH path
+// too: a tokenless v2 connect declaring a provider_id whose active row
+// has last_used_at IS NULL self-heals (revoke + remint), and the
+// auth_response carries the fresh token. Also forces retainSpec010=true
+// via SPEC-010 catalog fields so the R-7.9.7 defer's terminal-path
+// release is exercised — AuthAttemptCount MUST return to 0.
+func TestSelfServeProvisionalTokenSelfHealsOnAuthResponseV2WithRetentionCleanup(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
 	defer store.Close()
-	_, _, err = store.IssueToken(context.Background(), "v2-duplicate", "v2-duplicate hostname")
+	seedRecord, seedCleartext, err := store.IssueToken(context.Background(), "v2-selfheal", "v2-selfheal hostname")
 	if err != nil {
-		t.Fatalf("seed token: %v", err)
+		t.Fatalf("seed unused token: %v", err)
 	}
 	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
 		cfg.Auth.RequireProviderTokens = false
@@ -470,83 +603,7 @@ func TestSelfServeProvisionalTokenAdmitsTokenlessOnAuthResponseV2WhenActiveToken
 
 	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
 	if err != nil {
-		t.Fatalf("dial tokenless v2 duplicate: %v", err)
-	}
-	defer conn.Close()
-
-	_, providerPublicRaw, err := tier2.NewX25519Keypair()
-	if err != nil {
-		t.Fatalf("keypair: %v", err)
-	}
-	providerPublic := base64.RawURLEncoding.EncodeToString(providerPublicRaw)
-	if err := wsutil.WriteClientText(conn, mustJSON(validAuthInitial("v2-duplicate", providerPublic))); err != nil {
-		t.Fatalf("write auth_request initial: %v", err)
-	}
-	challenge := readAuthChallenge(t, conn)
-	writeAuthProof(t, conn, challenge, "v2-duplicate", nil)
-	response := readAuthResponse(t, conn)
-
-	if response.Status != "accepted" {
-		t.Fatalf("auth_response.status = %q, want accepted (settling-window admit on v2): %+v", response.Status, response)
-	}
-	if response.AssignedProviderToken != "" {
-		t.Fatalf("v2 assigned_provider_token = %q, want empty (DB unique index prevented duplicate mint): %+v", response.AssignedProviderToken, response)
-	}
-
-	provider, ok := h.Registry.Resolve("v2-duplicate", response.AssignedID)
-	if !ok {
-		t.Fatalf("registry has no entry for assigned_id %q after v2 admit", response.AssignedID)
-	}
-	if provider.AuthState != pool.AuthBearerlessDuplicate {
-		t.Fatalf("v2 auth_state = %q, want %q", provider.AuthState, pool.AuthBearerlessDuplicate)
-	}
-	if provider.RoutingEligible() {
-		t.Fatalf("v2 bearer-less duplicate is routing-eligible; must not be")
-	}
-
-	// Exactly one row remains (the seed); no parallel mint succeeded.
-	records, err := store.ListTokens(context.Background())
-	if err != nil {
-		t.Fatalf("list tokens: %v", err)
-	}
-	active := 0
-	for _, r := range records {
-		if r.ProviderID == "v2-duplicate" && !r.RevokedAt.Valid {
-			active++
-		}
-	}
-	if active != 1 {
-		t.Fatalf("v2 active rows for v2-duplicate = %d, want 1: %#v", active, records)
-	}
-}
-
-// fix-pass-4 (code MINOR-2) — variant of
-// TestSelfServeProvisionalTokenAdmitsTokenlessOnAuthResponseV2WhenActiveTokenExists
-// that supplies SPEC-010 catalog fields in the initial frame. This forces
-// retainSpec010=true (R-7.9.6) — the auth-attempt retention store reserves an
-// entry that MUST be released on the duplicate-admit terminal path. The
-// non-catalog variant exercises only retainSpec010=false (no reserve, nothing
-// to clean up), so this variant locks the retention-cleanup invariant on the
-// admit-tokenless code path.
-func TestSelfServeProvisionalTokenAdmitsTokenlessOnAuthResponseV2WhenActiveTokenExistsRetentionCleanup(t *testing.T) {
-	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	defer store.Close()
-	_, _, err = store.IssueToken(context.Background(), "v2-duplicate-retain", "v2-duplicate-retain hostname")
-	if err != nil {
-		t.Fatalf("seed token: %v", err)
-	}
-	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
-		cfg.Auth.RequireProviderTokens = false
-		cfg.Providers = nil
-	})
-	defer h.HTTP.Close()
-
-	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
-	if err != nil {
-		t.Fatalf("dial tokenless v2 duplicate: %v", err)
+		t.Fatalf("dial tokenless v2: %v", err)
 	}
 	defer conn.Close()
 
@@ -556,9 +613,9 @@ func TestSelfServeProvisionalTokenAdmitsTokenlessOnAuthResponseV2WhenActiveToken
 	}
 	providerPublic := base64.RawURLEncoding.EncodeToString(providerPublicRaw)
 	// SPEC-010 catalog fields force retainSpec010=true so the auth-attempt
-	// retention store reserves an entry. The duplicate-admit path must
-	// release it.
-	initial := validAuthInitial("v2-duplicate-retain", providerPublic)
+	// retention store reserves an entry. ANY terminal path (including
+	// successful self-heal mint) must release it via the R-7.9.7 defer.
+	initial := validAuthInitial("v2-selfheal", providerPublic)
 	initial["supported_models"] = []string{
 		"mlx-community/Qwen2.5-7B-Instruct-4bit",
 	}
@@ -568,29 +625,50 @@ func TestSelfServeProvisionalTokenAdmitsTokenlessOnAuthResponseV2WhenActiveToken
 		t.Fatalf("write auth_request initial: %v", err)
 	}
 	challenge := readAuthChallenge(t, conn)
-	writeAuthProof(t, conn, challenge, "v2-duplicate-retain", nil)
+	writeAuthProof(t, conn, challenge, "v2-selfheal", nil)
 	response := readAuthResponse(t, conn)
 
 	if response.Status != "accepted" {
-		t.Fatalf("auth_response.status = %q, want accepted: %+v", response.Status, response)
+		t.Fatalf("v2 auth_response.status = %q, want accepted (self-heal mints fresh token): %+v", response.Status, response)
 	}
-	if response.AssignedProviderToken != "" {
-		t.Fatalf("v2 assigned_provider_token = %q, want empty: %+v", response.AssignedProviderToken, response)
+	if response.AssignedProviderToken == "" {
+		t.Fatalf("v2 assigned_provider_token empty; want freshly-minted token from self-heal: %+v", response)
+	}
+	if response.AssignedProviderToken == seedCleartext {
+		t.Fatalf("v2 self-heal returned the SAME cleartext as the seed; expected a freshly minted token")
 	}
 
-	provider, ok := h.Registry.Resolve("v2-duplicate-retain", response.AssignedID)
+	// DB invariant: seed row revoked, fresh row active.
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("token rows after v2 self-heal = %d, want 2: %#v", len(records), records)
+	}
+	for _, r := range records {
+		if r.ID == seedRecord.ID && !r.RevokedAt.Valid {
+			t.Fatalf("v2 seed row should be revoked after self-heal: %#v", r)
+		}
+		if r.ID != seedRecord.ID && r.RevokedAt.Valid {
+			t.Fatalf("v2 fresh row should be active after self-heal: %#v", r)
+		}
+	}
+
+	provider, ok := h.Registry.Resolve("v2-selfheal", response.AssignedID)
 	if !ok {
-		t.Fatalf("registry has no entry for assigned_id %q after v2 admit", response.AssignedID)
+		t.Fatalf("registry has no entry for assigned_id %q after v2 self-heal", response.AssignedID)
 	}
-	if provider.AuthState != pool.AuthBearerlessDuplicate {
-		t.Fatalf("v2 auth_state = %q, want %q", provider.AuthState, pool.AuthBearerlessDuplicate)
+	if provider.AuthState != pool.AuthSelfMinted {
+		t.Fatalf("v2 self-heal auth_state = %q, want %q (self-mint is routable)", provider.AuthState, pool.AuthSelfMinted)
 	}
 
-	// The R-7.9.7 defer MUST release the retention entry on the duplicate-
-	// admit terminal path. Without the release, AuthAttemptCount stays at 1
-	// and (with enough duplicates) reaches the 1024 bound and locks out
-	// legitimate provisional connects.
+	// The R-7.9.7 defer MUST release the retention entry on EVERY
+	// terminal path — including successful self-heal. Without the
+	// release, AuthAttemptCount stays at 1 and (with enough connects)
+	// reaches the 1024 bound and locks out legitimate provisional
+	// connects.
 	if got := h.Provider.AuthAttemptCount(); got != 0 {
-		t.Fatalf("auth-attempt retention count = %d, want 0 (duplicate-admit terminal path must release the entry — R-7.9.7 defer)", got)
+		t.Fatalf("auth-attempt retention count = %d, want 0 (self-heal terminal path must release the entry — R-7.9.7 defer)", got)
 	}
 }

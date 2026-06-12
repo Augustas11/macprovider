@@ -43,17 +43,17 @@ const (
 )
 
 type Server struct {
-	cfg       config.Config
-	tier2Mu   sync.RWMutex
-	tier2     config.Tier2Config
-	pool      *pool.Registry
-	log       zerolog.Logger
-	now       func() time.Time
-	newUUID   func() string
-	timers    sync.Map
-	pending   sync.Map
-	warmups   sync.Map
-	tokens    TokenValidator
+	cfg     config.Config
+	tier2Mu sync.RWMutex
+	tier2   config.Tier2Config
+	pool    *pool.Registry
+	log     zerolog.Logger
+	now     func() time.Time
+	newUUID func() string
+	timers  sync.Map
+	pending sync.Map
+	warmups sync.Map
+	tokens  TokenValidator
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
 	// issuer roles can be wired independently. Production wires the same
 	// concrete *auth.Store to both (see main.go), but tests can override
@@ -79,9 +79,22 @@ type Server struct {
 // TokenValidator handles inspection of a Bearer header on the WS connect.
 // Intentionally narrow — issuance is a separate concern (see TokenIssuer)
 // so test seams can mock validation independently.
+//
+// SPEC-003 v0.8.4 (fix-pass-5) added `ValidateAndMarkTokenUsed` to close
+// the TOCTOU window between `ValidateToken` and `MarkTokenUsed`: a
+// concurrent tokenless self-heal between the two could revoke the
+// legitimate provider's still-NULL row and mint a fresh bearer. The
+// atomic operation stamps `last_used_at` in the same DB statement that
+// validates the token, so `RevokeUnusedTokenForProvider` will never see
+// a NULL row for a bearer that has just validated.
+//
+// `ValidateToken` is retained as a separate method for read-only
+// validations that don't need to record use (operator tooling, status).
+// `MarkTokenUsed` is retained for backwards compatibility and tests.
 type TokenValidator interface {
 	ValidateToken(context.Context, string) (string, bool, error)
 	MarkTokenUsed(context.Context, string) error
+	ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error)
 }
 
 // TokenIssuer handles SPEC-003 v0.8 FR-C9.1 self-serve provisional token
@@ -97,14 +110,31 @@ type TokenIssuer interface {
 	// logged. On `auth.ErrActiveTokenAlreadyExists` (the partial
 	// unique index trapped a duplicate), the caller maps the error
 	// to admit-tokenless with AuthBearerlessDuplicate marking — see
-	// resolveProvisionalToken in this package and SPEC-003 v0.8.3
-	// FR-C9.4. The atomic mint-or-collide signal is the only
-	// behavior callers in this package depend on; the
-	// HasActiveTokenForProvider method on the concrete *auth.Store
-	// is retained for operator tooling but not part of this
-	// interface (v0.8.3 fix-pass-3 removed it after the SELECT-then-
-	// INSERT TOFU pattern was deleted from resolveProvisionalToken).
+	// resolveProvisionalToken in this package and SPEC-003 v0.8.4
+	// FR-C9.4 (composed self-heal + race-loss quarantine).
 	IssueToken(ctx context.Context, providerID, providerName string) (auth.TokenRecord, string, error)
+	// HasActiveTokenForProvider implements the FR-C9.4 strict-reject
+	// path: when true AND the active row's `last_used_at IS NOT NULL`
+	// (verified separately via RevokeUnusedTokenForProvider returning
+	// false), the server MUST refuse to mint a second token for the
+	// same provider_id and MUST close the tokenless connection. Closes
+	// the credential-capture attack flagged by the codex security
+	// audit on PR #44 — an attacker who declares a victim's
+	// provider_id on a tokenless connect cannot harvest a parallel
+	// bearer once the victim has authenticated once.
+	HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error)
+	// RevokeUnusedTokenForProvider implements SPEC-003 v0.8.3 FR-C9.4
+	// unused-token self-heal: atomically revokes the active row for
+	// `providerID` if its `last_used_at IS NULL`, returning true when
+	// a row was revoked. Called BEFORE HasActiveTokenForProvider in
+	// resolveProvisionalToken so a deploy-gap reconnect with an
+	// unused (never-authenticated) row self-heals into a clean
+	// re-mint instead of triggering the strict-reject path. A used
+	// token (last_used_at NOT NULL) is NOT touched — that case still
+	// follows the v0.8.1 strict-reject contract because the codex
+	// MAJOR-1 credential-capture vector requires an attacker to have
+	// authenticated at least once.
+	RevokeUnusedTokenForProvider(ctx context.Context, providerID string) (bool, error)
 }
 
 type providerAuth struct {
@@ -210,13 +240,13 @@ type pendingPreflight struct {
 
 func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger, opts ...Option) *Server {
 	s := &Server{
-		cfg:     cfg,
-		tier2:   cfg.Tier2,
-		pool:    registry,
-		log:     logger,
-		now:     func() time.Time { return time.Now().UTC() },
-		newUUID: func() string { return uuid.NewString() },
-		started: time.Now().UTC(),
+		cfg:         cfg,
+		tier2:       cfg.Tier2,
+		pool:        registry,
+		log:         logger,
+		now:         func() time.Time { return time.Now().UTC() },
+		newUUID:     func() string { return uuid.NewString() },
+		started:     time.Now().UTC(),
 		unauth:      make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
 		unauthPerIP: map[string]int{},
 		version:     "dev",
@@ -356,7 +386,15 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 		return providerAuth{}, false
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(authz, prefix))
-	providerID, ok, err := s.tokens.ValidateToken(r.Context(), token)
+	// SPEC-003 v0.8.4 (fix-pass-5) — validate-and-mark in one atomic
+	// DB operation. Pre-fix this was ValidateToken at upgrade + a
+	// separate MarkTokenUsed inside prepareProviderAdmission, leaving a
+	// TOCTOU window where a concurrent tokenless self-heal could revoke
+	// the still-NULL row and mint a fresh bearer for an attacker. The
+	// atomic UPDATE-RETURNING closes the window: once we have a non-
+	// empty providerID, the row's last_used_at IS NOT NULL, so any
+	// concurrent RevokeUnusedTokenForProvider skips it.
+	providerID, ok, err := s.tokens.ValidateAndMarkTokenUsed(r.Context(), token)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("provider token validation failed")
 		return providerAuth{}, false
@@ -406,86 +444,87 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 	}
 }
 
-// provisionalTokenOutcome captures the two possible results of a
-// tokenless admission's pre-ack mint decision.
+// provisionalTokenOutcome captures the three possible results of a
+// tokenless admission's pre-ack mint decision under the v0.8.4 composed
+// FR-C9.4 contract:
 //
-// Pre-v0.8.3 this enum included a third value `provisionalTokenRejectTOFU`
-// that triggered a hard close with CloseInvalidToken on duplicate-mint
-// attempts. v0.8.3 (DECISION_CRITERIA Entry 66) replaced that with
-// admit-tokenless so a settling-window deploy can ship the new
-// coordinator without bricking old-binary cohorts on reconnect. The
-// security property "at most one valid bearer per provider_id" is
-// preserved by the DB partial unique index. The auth state is now
-// carried separately via pool.AuthState so registry + routing + billing
-// can distinguish bearer-less-duplicate from other admit-tokenless
-// cases (see PR #69 codex security audit MAJOR-1 fix-pass-3).
+//   - Skip:        admit without minting, optionally with an AuthState
+//                  marker (BearerValidated / BearerlessDuplicate / empty).
+//   - Minted:      admit with a freshly-minted token in the ack frame.
+//   - RejectTOFU:  close the connection with CloseInvalidToken. Fires
+//                  when the existing row has last_used_at IS NOT NULL
+//                  (credential-capture closure) or a DB error blocked
+//                  the gate evaluation (fail closed).
+//
+// The auth state is carried separately via pool.AuthState so registry +
+// routing + billing can distinguish bearer-less-duplicate from other
+// admit-tokenless cases (PR #69 fix-pass-3 + fix-pass-4 + PR #78
+// composition).
 type provisionalTokenOutcome int
 
 const (
 	// provisionalTokenSkip — caller MUST NOT include assigned_provider_token
 	// in the ack and SHOULD proceed with admission. Triggers: no issuer
-	// configured, connect arrived with a validated Bearer, mint
-	// failed (DB error or duplicate-key collision against the partial
-	// unique index — see FR-C9.4 v0.8.3 settling-window discussion).
+	// configured, connect arrived with a validated Bearer, IssueToken DB
+	// error (admitted bearer-less, binary retries next reconnect), or
+	// IssueToken race-loss (admitted with AuthBearerlessDuplicate marking;
+	// non-routable, eviction-defended).
 	provisionalTokenSkip provisionalTokenOutcome = iota
 	// provisionalTokenMinted — caller MUST include the returned token in
 	// the ack frame so the binary can persist it (FR-C9.3).
 	provisionalTokenMinted
+	// provisionalTokenRejectTOFU — caller MUST close the connection with
+	// CloseInvalidToken / "invalid_token". Triggers: last_used_at IS NOT NULL
+	// on the existing row (strict TOFU credential-capture closure), or the
+	// self-heal / HasActive DB lookups returned an error (fail closed).
+	provisionalTokenRejectTOFU
 )
 
-// resolveProvisionalToken implements SPEC-003 v0.8.3 FR-C9.1 (mint) and
-// FR-C9.4 (TOFU via DB partial unique index). It is the single decision
-// point the v1 hello_ack and v2 auth_response paths both call before
-// constructing their ack frame.
+// resolveProvisionalToken implements SPEC-003 v0.8.4 FR-C9.1 (mint),
+// FR-C9.4 unused-token self-heal (PR #78), FR-C9.4 strict TOFU
+// (refuse second mint for a USED identity), and the v0.8.3 race-loss
+// admit-tokenless quarantine (PR #69, AuthBearerlessDuplicate). It is
+// the single decision point the v1 hello_ack and v2 auth_response
+// paths both call before constructing their ack frame.
 //
 // Returns (outcome, cleartextToken, authState):
-//   - outcome:        provisionalTokenSkip | provisionalTokenMinted
+//   - outcome:        provisionalTokenSkip | provisionalTokenMinted | provisionalTokenRejectTOFU
 //   - cleartextToken: populated only when outcome == provisionalTokenMinted
 //   - authState:      pool.AuthState assigned to the provider entry —
-//                     drives the registry eviction defense, buyer
-//                     routing exclusion, and billing exclusion.
+//                     drives registry eviction defense, buyer routing
+//                     exclusion, and billing exclusion.
 //
-// Algorithm:
-//  1. If the issuer is not wired: return Skip + authState=empty (legacy
-//     pre-FR-C9 mode; provider is treated as routable as before).
+// Algorithm (v0.8.4 composed):
+//  1. If the issuer is not wired: return Skip + empty authState (legacy
+//     pre-FR-C9 mode; provider is routable as before).
 //  2. If the connect arrived with a validated Bearer: return Skip +
-//     authState=BearerValidated.
-//  3. Attempt the mint. The partial unique index
-//     idx_provider_tokens_one_active_per_provider enforces "at most one
-//     unrevoked token per provider_id" at the DB layer.
-//  4. On success: return Minted + cleartext + authState=SelfMinted.
-//  5. On ErrActiveTokenAlreadyExists: return Skip + authState=
-//     BearerlessDuplicate. The connection is admitted bearer-less but
-//     pool.Registry.Register will refuse to evict an existing
-//     routable session for the same provider_id, and buyer routing +
-//     billing will exclude this entry. See the
-//     codex security MAJOR-1 fix in PR #69 fix-pass-3 (Entry 66
-//     postmortem).
-//  6. On other DB error: return Skip + authState=empty (treat as
-//     unmarked since this is a transient infra failure, not a
-//     contested identity).
+//     authState=BearerValidated (no mint needed).
+//  3. Call RevokeUnusedTokenForProvider:
+//     - (true, nil): self-heal fired — proceed to mint.
+//     - (false, nil): call HasActiveTokenForProvider; if true a USED
+//       row exists → return RejectTOFU (preserves v0.8.1 closure of
+//       codex MAJOR-1 credential-capture vector).
+//     - (_, err): fail closed, return RejectTOFU.
+//  4. Mint via IssueToken:
+//     - success: return Minted + cleartext + authState=SelfMinted.
+//     - ErrActiveTokenAlreadyExists: a concurrent connect won the race
+//       between our revoke and our INSERT. Return Skip + authState=
+//       BearerlessDuplicate. The connection is admitted bearer-less,
+//       but pool.Registry.Register refuses to evict an existing
+//       routable session, and buyer routing + billing exclude this
+//       entry (PR #69 fix-pass-3 + fix-pass-4).
+//     - other DB error: return Skip + empty authState (transient infra
+//       failure; binary retries next reconnect).
 //
-// Settling-window design (FR-C9.4, derived from the 2026-06-12 deploy
-// attempt — see DECISION_CRITERIA Entry 66):
-//
+// Settling-window posture (FR-C9.4):
 // validateProviderToken rejects all tokenless connects at the WS
-// upgrade gate when `RequireProviderTokens=true`, so this function is
+// upgrade gate when RequireProviderTokens=true, so this function is
 // only reached for tokenless admissions during the settling window
-// (flag=false). The unique index prevents an attacker from minting a
-// parallel bearer for someone else's provider_id; whoever races first
-// owns the bearer. Subsequent tokenless connects for the same
-// provider_id are admitted bearer-less but with AuthBearerlessDuplicate
-// marking, so they cannot capture pool slot, routing, or billing.
-// Pre-v0.8.3 the same call hard-rejected with CloseInvalidToken,
-// which bricked old-binary cohorts on reconnect (Entry 66).
+// (flag=false). The unique index prevents minting a parallel bearer
+// for someone else's provider_id. Whoever races first owns the
+// bearer; race-losers are quarantined as AuthBearerlessDuplicate.
 //
-// The security property "at most one valid bearer per provider_id" is
-// preserved by the DB constraint. The operator audits via
-// coordinator-cli list-tokens + the pool.AuthState column in /poolz
-// before flipping `RequireProviderTokens=true` — see the FR-C9.5
-// operator runbook for the proven-bearer-use check.
-//
-// `authParam` is renamed to disambiguate from the auth package.
+// authParam is renamed to disambiguate from the auth package import.
 func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, providerName string) (provisionalTokenOutcome, string, pool.AuthState) {
 	if s.issuer == nil {
 		return provisionalTokenSkip, "", ""
@@ -493,20 +532,47 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 	if authParam.validated {
 		return provisionalTokenSkip, "", pool.AuthBearerValidated
 	}
-	_, token, err := s.issuer.IssueToken(context.Background(), providerID, providerName)
+	ctx := context.Background()
+	selfHealed, err := s.issuer.RevokeUnusedTokenForProvider(ctx, providerID)
+	if err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 unused-token self-heal evaluation failed; closing tokenless connect (fail closed)")
+		return provisionalTokenRejectTOFU, "", ""
+	}
+	if selfHealed {
+		s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_self_heal").Msg("FR-C9.4 self-heal: revoked existing unused token for this provider_id; proceeding to mint a fresh one (SPEC-003 v0.8.4 deploy-gap recovery path)")
+	} else {
+		hasActive, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 TOFU gate evaluation failed; closing tokenless connect (fail closed)")
+			return provisionalTokenRejectTOFU, "", ""
+		}
+		if hasActive {
+			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_tofu_reject").Msg("FR-C9.4 TOFU: tokenless connect refused; an active USED token already exists for this provider_id (operator can revoke + retry if this is the legitimate provider after a used-token persist failure)")
+			return provisionalTokenRejectTOFU, "", ""
+		}
+	}
+	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
 	if err != nil {
 		if errors.Is(err, auth.ErrActiveTokenAlreadyExists) {
-			// FR-C9.4: admit tokenless but mark for the registry/
-			// routing/billing exclusion gates. The legitimate
-			// reconnecting-after-NAT-blip case lands here too; the
-			// operator clears it by revoking the stale row, after
-			// which the legitimate provider's next reconnect
-			// self-mints fresh.
-			s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 settling: active token already exists for this provider_id; admitting bearer-less-duplicate (non-routable; operator MUST revoke before legitimate provider can reconnect cleanly)")
+			// SPEC-003 v0.8.4 race-loss path: a concurrent tokenless
+			// connect won the IssueToken race after our self-heal /
+			// strict-reject gates passed. Admit bearer-less-duplicate;
+			// the registry eviction defense + routing/billing
+			// exclusion neutralize impact.
+			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_race_loss_admit_quarantined").Msg("FR-C9.4 race-loss: concurrent connect won IssueToken; admitting bearer-less-duplicate (non-routable; operator MUST revoke before legitimate provider can reconnect cleanly)")
 			return provisionalTokenSkip, "", pool.AuthBearerlessDuplicate
 		}
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.1 self-serve mint failed; admitting tokenless. Next reconnect will retry since no row was written.")
-		return provisionalTokenSkip, "", ""
+		// SPEC-003 v0.8.4 (fix-pass-5) — fail-closed on transient DB
+		// error. Previously this path returned (Skip, "", "") and the
+		// empty AuthState was treated as routable, which would amplify
+		// a token-store outage into a routing-admission DoS where
+		// attackers could be admitted as fully-routable empty-state
+		// sessions (codex security MAJOR-1 on fix-pass-4). Now we
+		// surface the failure via AuthMintFailed for /poolz observability
+		// and close the connection so the binary retries cleanly on
+		// next reconnect.
+		s.log.Warn().Err(err).Str("provider_id", providerID).Str("event", "fr_c9_1_mint_failed").Msg("FR-C9.1 self-serve mint failed (transient DB error); closing tokenless connect (fail closed)")
+		return provisionalTokenRejectTOFU, "", pool.AuthMintFailed
 	}
 	s.log.Info().Str("provider_id", providerID).Msg("FR-C9.1 self-serve provisional token minted on first tokenless admission")
 	return provisionalTokenMinted, token, pool.AuthSelfMinted
@@ -534,13 +600,18 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	if !ok {
 		return "", ""
 	}
-	// SPEC-003 v0.8.3 FR-C9.1/FR-C9.2 — attempt the self-serve mint and
-	// embed the token in hello_ack on success. On duplicate (a token
-	// already exists for this provider_id) admit tokenless without an
-	// ack token and mark the entry as bearer-less so the registry
-	// eviction defense (PR #69 fix-pass-3, security MAJOR-1) refuses
-	// to displace a routable session and routing/billing exclude it.
-	_, assignedProviderToken, authState := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
+	// SPEC-003 v0.8.4 FR-C9.1/FR-C9.2/FR-C9.4 — composed flow:
+	// self-heal-on-NULL (PR #78) + strict-reject-on-USED (PR #78) +
+	// race-loss admit-quarantined (PR #69). On RejectTOFU close;
+	// on Minted embed the token in hello_ack; on Skip admit with
+	// the provided AuthState (BearerValidated / BearerlessDuplicate /
+	// empty) and let the registry eviction defense + RoutingEligible
+	// gates take over.
+	outcome, assignedProviderToken, authState := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
+	if outcome == provisionalTokenRejectTOFU {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
 	entry.AuthState = authState
 	session := s.registerProviderSession(conn, entry)
 	if session == nil {
@@ -773,12 +844,15 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		// no-op delete.
 		s.authAttempts.release(authAttemptID)
 	}
-	// SPEC-003 v0.8.3 FR-C9.1/FR-C9.2 — v2 mirrors v1: attempt the
-	// self-serve mint, embed the token in auth_response on success;
-	// duplicate admits tokenless without an ack token and marks the
-	// entry as bearer-less. Same eviction-defense + non-routable
-	// gates as the v1 path (PR #69 fix-pass-3, security MAJOR-1).
-	_, assignedProviderToken, authState := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
+	// SPEC-003 v0.8.4 FR-C9.1/FR-C9.2/FR-C9.4 — v2 mirrors v1 composed
+	// flow: RejectTOFU closes; Minted embeds; Skip admits with the
+	// provided AuthState; eviction defense protects existing routable
+	// sessions from bearer-less duplicates.
+	outcome, assignedProviderToken, authState := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
+	if outcome == provisionalTokenRejectTOFU {
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
 	entry.AuthState = authState
 	session := s.registerProviderSession(conn, entry)
 	if session == nil {
@@ -845,13 +919,12 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			s.close(conn, CloseInvalidToken, "invalid_token")
 			return nil, false
 		}
-		if auth.validated {
-			if err := s.tokens.MarkTokenUsed(context.Background(), auth.token); err != nil {
-				s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("provider token usage update failed")
-				s.close(conn, CloseInvalidToken, "invalid_token")
-				return nil, false
-			}
-		}
+		// SPEC-003 v0.8.4 (fix-pass-5) — `last_used_at` is now stamped
+		// atomically by validateProviderToken's ValidateAndMarkTokenUsed
+		// call at WS upgrade. The previously-here MarkTokenUsed
+		// invocation was removed because it ran AFTER admission, leaving
+		// a TOCTOU window where a concurrent tokenless self-heal could
+		// revoke the row before the mark.
 	}
 	tier, closeCode, closeReason := s.admission.Admit(hello, pinned, s.connectedProvisional())
 	if closeCode != 0 {

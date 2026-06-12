@@ -244,18 +244,26 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 }
 
 // HasActiveTokenForProvider returns true when at least one unrevoked
-// token row exists for `providerID`. Retained on the concrete Store
-// (not on the TokenIssuer interface in `internal/ws`) for operator
-// tooling — e.g. a future `coordinator-cli list-tokens --filter
-// active` invocation, or pre-flag-flip audit scripts that want a
-// quick presence check without scanning the full table.
+// token row exists for `providerID`. Exposed on both the concrete Store
+// AND the `internal/ws.TokenIssuer` interface (v0.8.4 composition, PR #69
+// merge with PR #78) so `resolveProvisionalToken` can disambiguate
+// "no row at all (mint OK)" from "active row with last_used_at IS NOT
+// NULL (strict TOFU reject)" after `RevokeUnusedTokenForProvider`
+// returned (false, nil).
 //
-// The WS server's resolveProvisionalToken does NOT call this method;
-// in v0.8.3 (Entry 66) the SELECT-then-INSERT TOFU pattern was
-// replaced with relying on the partial unique index to atomically
-// trap duplicates at IssueToken time. Calling this method as a
-// pre-flight gate would reintroduce the TOCTOU window the v0.8.2
-// codex security re-audit (PR #44 MAJOR-1) closed.
+// Under v0.8.4 the TOCTOU concern the v0.8.2 codex security re-audit
+// (PR #44 MAJOR-1) flagged is no longer applicable: the partial unique
+// index `idx_provider_tokens_one_active_per_provider` remains the atomic
+// mint-or-collide invariant. This method is purely a read-only
+// disambiguation step that runs AFTER the self-heal write; the
+// subsequent `IssueToken` INSERT is what actually commits the
+// at-most-one-bearer rule. A concurrent reconnect that races between
+// our HasActive check and our INSERT is caught by the unique index
+// (returns `ErrActiveTokenAlreadyExists` → race-loss admit-quarantined
+// path).
+//
+// Also used for operator tooling — e.g. `coordinator-cli list-tokens`
+// presence checks and pre-flag-flip audit scripts.
 func (s *Store) HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error) {
 	providerID = strings.TrimSpace(providerID)
 	if providerID == "" {
@@ -270,6 +278,55 @@ func (s *Store) HasActiveTokenForProvider(ctx context.Context, providerID string
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// RevokeUnusedTokenForProvider implements SPEC-003 v0.8.3 FR-C9.4
+// unused-token self-heal. Atomically revokes the (at most one) active
+// row for `providerID` whose `last_used_at IS NULL`, returning
+// (true, nil) if a row was revoked and (false, nil) if no row matched.
+//
+// "At most one" is guaranteed by the partial unique index
+// `idx_provider_tokens_one_active_per_provider` installed in v0.8.2.
+// The UPDATE is a single statement, and SQLite WAL serializes
+// writers — a concurrent reconnect either revokes the row first
+// (we see RowsAffected=0) or arrives after we have revoked it
+// (also RowsAffected=0 on its side). The unique index is the
+// second-line defense for any IssueToken that races after revoke.
+//
+// Used by ws.resolveProvisionalToken to convert a deploy-gap /
+// first-mint-not-yet-used lockout into an in-band self-heal. A
+// (true, nil) return means the caller should proceed to IssueToken —
+// the provider gets a fresh row, the operator sees an
+// `fr_c9_4_self_heal` log line, no human intervention required.
+// A (false, nil) return means EITHER no active row at all OR the
+// active row has `last_used_at IS NOT NULL` (a used token, the
+// codex MAJOR-1 vector). The caller MUST then call
+// HasActiveTokenForProvider to disambiguate; if a row remains it is
+// a used-token-tokenless-reconnect and the caller MUST follow the
+// v0.8.1 strict-reject path.
+//
+// On DB error the caller MUST fail closed (reject the connect).
+func (s *Store) RevokeUnusedTokenForProvider(ctx context.Context, providerID string) (bool, error) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return false, fmt.Errorf("provider id is required")
+	}
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE provider_tokens
+		    SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+		  WHERE provider_id = ?
+		    AND revoked_at IS NULL
+		    AND last_used_at IS NULL`,
+		providerID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // PruneUnusedTokens deletes tokens whose `last_used_at` is NULL and
@@ -329,6 +386,46 @@ func (s *Store) MarkTokenUsed(ctx context.Context, token string) error {
 		return fmt.Errorf("no active token found")
 	}
 	return nil
+}
+
+// ValidateAndMarkTokenUsed atomically validates a bearer and stamps its
+// `last_used_at`. SPEC-003 v0.8.4 (fix-pass-5) — closes the TOCTOU
+// window between separate `ValidateToken` and `MarkTokenUsed` calls
+// that the codex code-review (PR #69 fix-pass-4) flagged: between the
+// two, a concurrent tokenless connect could see `last_used_at IS NULL`
+// and self-heal-revoke the legitimate row, then mint a fresh bearer
+// for the attacker. This atomic UPDATE-RETURNING closes the window by
+// stamping `last_used_at` in the same statement that the validation
+// reads from. SQLite WAL serializes writers; once this call returns
+// (providerID, true, nil), the row's `last_used_at` is set and any
+// subsequent `RevokeUnusedTokenForProvider` skips this row.
+//
+// Callers SHOULD use this instead of `ValidateToken` for any WS-connect
+// validation; legacy `ValidateToken` is retained for read-only paths
+// that don't need to record use (operator tooling, status checks).
+func (s *Store) ValidateAndMarkTokenUsed(ctx context.Context, token string) (string, bool, error) {
+	if token == "" {
+		return "", false, nil
+	}
+	hash := tokenHash(token)
+	var providerID string
+	err := s.db.QueryRowContext(ctx,
+		`UPDATE provider_tokens
+		    SET last_used_at = ?
+		  WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''
+		  RETURNING provider_id`,
+		nowString(), hash,
+	).Scan(&providerID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if providerID == "" {
+		return "", false, nil
+	}
+	return providerID, true, nil
 }
 
 func (s *Store) RevokeToken(ctx context.Context, tokenPrefix string) (TokenRecord, error) {

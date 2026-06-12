@@ -156,11 +156,11 @@ func TestIssueTokenRefusesConcurrentDuplicateForSameProviderID(t *testing.T) {
 
 	const racers = 16
 	var (
-		wg              sync.WaitGroup
-		startGate       = make(chan struct{})
-		successes       int32
-		dupRejections   int32
-		otherErrors     atomic.Value
+		wg            sync.WaitGroup
+		startGate     = make(chan struct{})
+		successes     int32
+		dupRejections int32
+		otherErrors   atomic.Value
 	)
 	for i := 0; i < racers; i++ {
 		wg.Add(1)
@@ -270,4 +270,95 @@ CREATE TABLE provider_tokens (
 	if active != 1 || revoked != 1 {
 		t.Fatalf("after migration: legacy-dup active=%d revoked=%d, want 1/1: %#v", active, revoked, records)
 	}
+}
+
+// SPEC-003 v0.8.3 FR-C9.4 unused-token self-heal — Store layer
+// contract for the three input states the resolveProvisionalToken
+// caller will encounter. Direct unit coverage on top of the
+// end-to-end ws-level tests so a future refactor that changes the
+// SQL/semantics of this primitive fails here loudly.
+func TestRevokeUnusedTokenForProvider(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	t.Run("no row → false, no error", func(t *testing.T) {
+		revoked, err := store.RevokeUnusedTokenForProvider(ctx, "nonexistent")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if revoked {
+			t.Fatalf("revoked = true, want false (no row exists)")
+		}
+	})
+
+	t.Run("unused row → true, row revoked", func(t *testing.T) {
+		seed, _, err := store.IssueToken(ctx, "unused-provider", "unused hostname")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		revoked, err := store.RevokeUnusedTokenForProvider(ctx, "unused-provider")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if !revoked {
+			t.Fatalf("revoked = false, want true (unused row should be self-healed)")
+		}
+		row, err := lookupTokenRow(ctx, t, store, seed.ID)
+		if err != nil {
+			t.Fatalf("get row post-revoke: %v", err)
+		}
+		if !row.RevokedAt.Valid {
+			t.Fatalf("row.RevokedAt = %v, want non-NULL after self-heal", row.RevokedAt)
+		}
+	})
+
+	t.Run("used row → false, row preserved", func(t *testing.T) {
+		seed, cleartext, err := store.IssueToken(ctx, "used-provider", "used hostname")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := store.MarkTokenUsed(ctx, cleartext); err != nil {
+			t.Fatalf("mark used: %v", err)
+		}
+		revoked, err := store.RevokeUnusedTokenForProvider(ctx, "used-provider")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if revoked {
+			t.Fatalf("revoked = true, want false (used row MUST NOT be auto-revoked — codex MAJOR-1 surface)")
+		}
+		row, err := lookupTokenRow(ctx, t, store, seed.ID)
+		if err != nil {
+			t.Fatalf("get row post-no-op: %v", err)
+		}
+		if row.RevokedAt.Valid {
+			t.Fatalf("row.RevokedAt = %v, want NULL (used row must not be touched)", row.RevokedAt)
+		}
+	})
+
+	t.Run("empty provider_id rejected", func(t *testing.T) {
+		_, err := store.RevokeUnusedTokenForProvider(ctx, "   ")
+		if err == nil {
+			t.Fatalf("err = nil, want non-nil for empty provider_id")
+		}
+	})
+}
+
+func lookupTokenRow(ctx context.Context, t *testing.T, store *auth.Store, id int64) (auth.TokenRecord, error) {
+	t.Helper()
+	rows, err := store.ListTokens(ctx)
+	if err != nil {
+		return auth.TokenRecord{}, err
+	}
+	for _, r := range rows {
+		if r.ID == id {
+			return r, nil
+		}
+	}
+	t.Fatalf("token id=%d not found in ListTokens output", id)
+	return auth.TokenRecord{}, nil
 }
