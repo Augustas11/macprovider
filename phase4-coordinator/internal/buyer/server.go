@@ -872,169 +872,46 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	routingRequestID := uuid.NewString()
 	originalRequestID := requestID
 	startedAt := s.now()
-	// state is allocated up-front so the logRowWithBilling closure
-	// captures the pointer — pre-1c the closure read mutable locals
-	// (routingDone, explicitRetries); post-1c those locals migrated
-	// into forwardState, but the closure still needs the live values
-	// at log-write time. Capturing *state preserves that contract
-	// without restructuring the closure-vs-helper boundary.
+	// state is allocated up-front so the billingRecorder captures the
+	// pointer — pre-1c the inline logRowWithBilling closure read
+	// mutable locals (routingDone, explicitRetries); post-1c those
+	// locals migrated into forwardState; M3-10 hoists the closure
+	// itself into *billingRecorder. The recorder still needs the live
+	// state values at log-write time, so it holds *forwardState.
 	state := &forwardState{
 		routingDone:   startedAt,
 		faultedRoutes: map[string]struct{}{},
 	}
-	requestLogModel := ""
-	requestLogStream := false
-	billingAttemptN := 0
-	logRowWithBilling := func(
-		providerAssignedID string,
-		providerID string,
-		status int,
-		promptTok, completionTok *int64,
-		errMsg, errCode string,
-		retried int,
-		estimatedCompTokens *int64,
-		faultFlag string,
-	) error {
-		if s.reqLog == nil {
-			return nil
-		}
-		attemptN := billingAttemptN
-		if providerAssignedID != "" {
-			defer func() {
-				billingAttemptN++
-			}()
-		}
-		row := requestlog.Row{
-			TSUtc:               startedAt,
-			RequestID:           originalRequestID,
-			Model:               requestLogModel,
-			ProviderAssignedID:  providerAssignedID,
-			PromptTokens:        promptTok,
-			CompletionTokens:    completionTok,
-			EstimatedCompTokens: estimatedCompTokens,
-			LatencyMs:           float64(time.Since(startedAt).Milliseconds()),
-			RoutingMs:           float64(state.routingDone.Sub(startedAt).Milliseconds()),
-			Status:              status,
-			Stream:              requestLogStream,
-			BuyerIP:             buyerIP(r.RemoteAddr),
-			Error:               sanitizeRequestLogText(errMsg),
-			ErrorCode:           errCode,
-			PrefHeader:          sanitizeRequestLogText(r.Header.Get("X-MacProvider-Pref")),
-			ProviderHeader:      sanitizeRequestLogText(r.Header.Get("X-MacProvider-Provider")),
-			Retried:             retried,
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-		defer cancel()
-		billingStore, billingCfg, billingSnapshotID := s.billingState()
-		if billingStore != nil && s.reqLogStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
-			stableProviderID := providerID
-			if stableProviderID == "" {
-				for _, p := range s.pool.Snapshot() {
-					if p.AssignedID == providerAssignedID {
-						stableProviderID = p.ProviderID
-						break
-					}
-				}
-			}
-			if stableProviderID == "" {
-				s.log.Warn().Str("request_id", originalRequestID).Str("provider_assigned_id", providerAssignedID).Msg("billing hot-path skipped without stable provider identity")
-				return fmt.Errorf("billing hot-path missing stable provider identity")
-			}
-			if faultFlag == "" {
-				faultFlag = billing.FaultNone
-			}
-			billingInput := billing.HotPathInput{
-				RequestID:           row.RequestID,
-				AttemptN:            attemptN,
-				ProviderAssignedID:  providerAssignedID,
-				ProviderID:          stableProviderID,
-				Model:               row.Model,
-				Status:              status,
-				Stream:              row.Stream,
-				TSUtc:               row.TSUtc,
-				PromptTokens:        promptTok,
-				CompletionTokens:    completionTok,
-				EstimatedCompTokens: estimatedCompTokens,
-				ErrorCode:           errCode,
-				FaultFlag:           faultFlag,
-				ConfigSnapshotID:    billingSnapshotID,
-				RateEntry:           billing.RateFor(billingCfg.RateCard, row.Model),
-				MultiplierPPM:       billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
-				ProviderShareBps:    billing.ParseShareBps(billingCfg.ProviderShare),
-			}
-			err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
-			if err != nil {
-				s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("billing hot-path insert failed")
-				fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-				defer fallbackCancel()
-				if fallbackErr := billingStore.WriteRequestLogWithIdentity(fallbackCtx, s.reqLogStore, row, billingInput); fallbackErr != nil {
-					s.log.Warn().Err(fallbackErr).Str("request_id", originalRequestID).Msg("request_log identity fallback insert failed")
-					return fmt.Errorf("billing hot-path insert failed: %w; fallback failed: %v", err, fallbackErr)
-				}
-			}
-			return nil
-		}
-		if err := s.reqLog.Insert(ctx, row); err != nil {
-			s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("request_log insert failed")
-			return err
-		}
-		return nil
-	}
-	logRow := func(
-		providerAssignedID string,
-		status int,
-		promptTok, completionTok *int64,
-		errMsg, errCode string,
-		retried int,
-	) {
-		_ = logRowWithBilling(providerAssignedID, "", status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
-	}
-	logBuyerFailure := func(status int, msg string) {
-		logRow("", status, nil, nil, msg, "", 0)
-	}
-	logProviderRow := func(
-		provider pool.Provider,
-		status int,
-		promptTok, completionTok *int64,
-		errMsg, errCode string,
-		retried int,
-	) error {
-		return logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
-	}
-	logProviderRowWithEstimate := func(
-		provider pool.Provider,
-		status int,
-		promptTok, completionTok *int64,
-		errMsg, errCode string,
-		retried int,
-		estimatedCompTokens *int64,
-	) error {
-		return logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone)
-	}
+	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
+	// closure now lives as *billingRecorder. setModel / setStream /
+	// setRequestID land before the first provider-bound recordRow call,
+	// preserving the pre-refactor closure's "latest value at fire time"
+	// semantics for what used to be captured outer-scope variables.
+	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID)
 	maxBodyBytes := s.maxChatBodyBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
-		logBuyerFailure(http.StatusBadRequest, "Could not read request body")
+		rec.logBuyerFailure(http.StatusBadRequest, "Could not read request body")
 		writeError(w, http.StatusBadRequest, "invalid_request", "Could not read request body")
 		return
 	}
-	requestLogModel = modelForRequestLog(body)
+	rec.setModel(modelForRequestLog(body))
 	if int64(len(body)) > maxBodyBytes {
-		logBuyerFailure(http.StatusRequestEntityTooLarge, "Request body too large")
+		rec.logBuyerFailure(http.StatusRequestEntityTooLarge, "Request body too large")
 		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
 		return
 	}
 	req, status, code, msg := validateChatRequest(body)
 	if status != 0 {
-		logBuyerFailure(status, msg)
+		rec.logBuyerFailure(status, msg)
 		writeError(w, status, code, msg)
 		return
 	}
-	requestLogModel = req.Model
-	requestLogStream = req.Stream
+	rec.setModel(req.Model)
+	rec.setStream(req.Stream)
 	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
 		if s.reqLogStore == nil {
-			logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
+			rec.logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
 			writeError(w, http.StatusServiceUnavailable, "idempotency_unavailable", "Idempotency-Key requires durable request logging")
 			return
 		}
@@ -1042,27 +919,28 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		reservedRequestID, replay, err := s.reqLogStore.ReserveIdempotencyKey(r.Context(), idempotencyKey, hex.EncodeToString(bodyHash[:]), originalRequestID, startedAt)
 		if err != nil {
 			if errors.Is(err, requestlog.ErrIdempotencyConflict) {
-				logBuyerFailure(http.StatusConflict, "Idempotency-Key was already used with a different request body")
+				rec.logBuyerFailure(http.StatusConflict, "Idempotency-Key was already used with a different request body")
 				writeError(w, http.StatusConflict, "idempotency_key_body_mismatch", "Idempotency-Key was already used with a different request body")
 				return
 			}
 			s.log.Warn().Err(err).Msg("idempotency reservation failed")
-			logBuyerFailure(http.StatusInternalServerError, "Could not reserve idempotency key")
+			rec.logBuyerFailure(http.StatusInternalServerError, "Could not reserve idempotency key")
 			writeError(w, http.StatusInternalServerError, "idempotency_reservation_failed", "Could not reserve idempotency key")
 			return
 		}
 		originalRequestID = reservedRequestID
 		requestID = reservedRequestID
 		routingRequestID = reservedRequestID
+		rec.setRequestID(reservedRequestID)
 		if replay {
 			w.Header().Set("X-Request-ID", reservedRequestID)
-			logBuyerFailure(http.StatusConflict, "Idempotency-Key request is already recorded")
+			rec.logBuyerFailure(http.StatusConflict, "Idempotency-Key request is already recorded")
 			writeError(w, http.StatusConflict, "idempotency_key_replayed", "Idempotency-Key request is already recorded")
 			return
 		}
 	}
 	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
-		logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
+		rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
 		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)
 		return
 	}
@@ -1076,6 +954,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// transport's view of "what retry am I on" without relying on
 	// closure-by-reference semantics that wouldn't survive the helper
 	// boundary.
+	//
+	// M3-10: logAttempt stays as a local closure because the
+	// estimated-prompt-token computation reads req.raw (the chat
+	// request body), which is local to handleChatCompletions. The
+	// closure delegates the actual row write to rec.recordRow, so the
+	// billing/request-log orchestration that ARCH-6 flagged still
+	// lives in *billingRecorder — only the per-attempt token-estimate
+	// adapter remains here.
 	logAttempt := func(provider pool.Provider, fallbackStatus int, attempt requestLogAttempt, retried int) {
 		status := attempt.Status
 		if status == 0 {
@@ -1085,7 +971,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			estimatedPrompt := int64(estimateTokens(req.raw))
 			attempt.PromptTokens = &estimatedPrompt
 		}
-		logRowWithBilling(provider.AssignedID, provider.ProviderID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, retried, attempt.EstimatedCompTokens, attempt.FaultFlag)
+		rec.recordRow(provider.AssignedID, provider.ProviderID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, retried, attempt.EstimatedCompTokens, attempt.FaultFlag)
 	}
 	shouldLogAttempt := func(attempt requestLogAttempt) bool {
 		return attempt.Status != 0 || attempt.PromptTokens != nil || attempt.CompletionTokens != nil || attempt.EstimatedCompTokens != nil || attempt.Error != "" || attempt.ErrorCode != ""
@@ -1093,7 +979,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	provider, routeErr := s.selectProvider(routingRequestID, req, r.Header)
 	if routeErr != nil {
 		state.routingDone = s.now()
-		logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
+		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
 		writeRouteError(w, routeErr)
 		return
 	}
@@ -1111,12 +997,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// does not survive transport boundaries.
 	if req.Stream {
 		excluded := map[string]struct{}{}
-		s.forwardStreamSequence(w, r, req, requestID, originalRequestID, externalRequestID, startedAt, state, excluded, logAttempt, shouldLogAttempt, logRow)
+		s.forwardStreamSequence(w, r, req, requestID, originalRequestID, externalRequestID, startedAt, state, excluded, rec, logAttempt, shouldLogAttempt)
 		return
 	}
 	if state.provider.IsWSTunneled() {
 		excluded := map[string]struct{}{}
-		shouldFallThroughToHTTP := s.forwardWSNonStreamSequence(w, r, req, requestID, originalRequestID, externalRequestID, startedAt, state, excluded, logAttempt, shouldLogAttempt, logRow)
+		shouldFallThroughToHTTP := s.forwardWSNonStreamSequence(w, r, req, requestID, originalRequestID, externalRequestID, startedAt, state, excluded, rec, logAttempt, shouldLogAttempt)
 		if !shouldFallThroughToHTTP {
 			return
 		}
@@ -1126,7 +1012,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		excluded[key] = struct{}{}
 	}
 	excluded[routeKey(state.provider)] = struct{}{}
-	s.forwardHTTPSequence(w, r, req, requestID, originalRequestID, startedAt, state, excluded, logProviderRow, logProviderRowWithEstimate, logRow)
+	s.forwardHTTPSequence(w, r, req, requestID, originalRequestID, startedAt, state, excluded, rec)
 }
 
 // forwardStreamSequence is the unified loop body for streaming requests
@@ -1156,15 +1042,15 @@ func (s *Server) forwardStreamSequence(
 	startedAt time.Time,
 	state *forwardState,
 	excluded map[string]struct{},
+	rec *billingRecorder,
 	logAttempt func(pool.Provider, int, requestLogAttempt, int),
 	shouldLogAttempt func(requestLogAttempt) bool,
-	logRow forwardLogRowFunc,
 ) {
 	failoverAttempted := false
 	for {
 		dispatchBody, err := dispatchBodyForProvider(req, state.provider)
 		if err != nil {
-			logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
+			rec.logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 			return
 		}
@@ -1237,7 +1123,7 @@ func (s *Server) forwardStreamSequence(
 			return
 		}
 		logAttempt(state.provider, tr.status, tr.attempt, state.explicitRetries)
-		nextRouteID, ok := s.advanceToNextProvider(w, r, req, state, excluded, logRow)
+		nextRouteID, ok := s.advanceToNextProvider(w, r, req, state, excluded, rec)
 		if !ok {
 			return
 		}
@@ -1267,15 +1153,15 @@ func (s *Server) forwardWSNonStreamSequence(
 	startedAt time.Time,
 	state *forwardState,
 	excluded map[string]struct{},
+	rec *billingRecorder,
 	logAttempt func(pool.Provider, int, requestLogAttempt, int),
 	shouldLogAttempt func(requestLogAttempt) bool,
-	logRow forwardLogRowFunc,
 ) (shouldFallThroughToHTTP bool) {
 	failoverAttempted := false
 	for {
 		dispatchBody, err := dispatchBodyForProvider(req, state.provider)
 		if err != nil {
-			logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
+			rec.logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 			return false
 		}
@@ -1306,7 +1192,7 @@ func (s *Server) forwardWSNonStreamSequence(
 				return false
 			}
 			logAttempt(state.provider, http.StatusGatewayTimeout, tr.attempt, state.explicitRetries)
-			_, ok := s.advanceToNextProvider(w, r, req, state, excluded, logRow)
+			_, ok := s.advanceToNextProvider(w, r, req, state, excluded, rec)
 			if !ok {
 				return false
 			}
@@ -1366,7 +1252,7 @@ func (s *Server) forwardWSNonStreamSequence(
 		s.pool.MarkState(state.provider.ProviderID, state.provider.AssignedID, pool.StateBusy)
 		excluded[routeKey(state.provider)] = struct{}{}
 		logAttempt(state.provider, http.StatusBadGateway, tr.attempt, state.explicitRetries)
-		if _, ok := s.advanceToNextProvider(w, r, req, state, excluded, logRow); !ok {
+		if _, ok := s.advanceToNextProvider(w, r, req, state, excluded, rec); !ok {
 			return false
 		}
 		if !state.provider.IsWSTunneled() {
@@ -1394,14 +1280,12 @@ func (s *Server) forwardHTTPSequence(
 	startedAt time.Time,
 	state *forwardState,
 	excluded map[string]struct{},
-	logProviderRow func(pool.Provider, int, *int64, *int64, string, string, int) error,
-	logProviderRowWithEstimate func(pool.Provider, int, *int64, *int64, string, string, int, *int64) error,
-	logRow forwardLogRowFunc,
+	rec *billingRecorder,
 ) {
 	for {
 		dispatchBody, err := dispatchBodyForProvider(req, state.provider)
 		if err != nil {
-			logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
+			rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 			return
 		}
@@ -1415,7 +1299,7 @@ func (s *Server) forwardHTTPSequence(
 		upReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, bytes.NewReader(dispatchBody))
 		if err != nil {
 			cancelAttempt()
-			logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
+			rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 			return
 		}
@@ -1427,13 +1311,13 @@ func (s *Server) forwardHTTPSequence(
 			_ = resp.Body.Close()
 			if readErr != nil {
 				cancelAttempt()
-				logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
+				rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return
 			}
 			promptTok, completionTok := tokenPointersFromChatResponse(respBody)
 			estimatedCompletion := s.observedCompletionTokensFromBytes(len(respBody))
-			if err := logProviderRowWithEstimate(state.provider, http.StatusOK, promptTok, completionTok, "", "", state.explicitRetries, estimatedCompletion); err != nil {
+			if err := rec.logProviderRowWithEstimate(state.provider, http.StatusOK, promptTok, completionTok, "", "", state.explicitRetries, estimatedCompletion); err != nil {
 				cancelAttempt()
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
@@ -1476,11 +1360,11 @@ func (s *Server) forwardHTTPSequence(
 		}
 		if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, status, err) {
 			if retryRequested && status == http.StatusGatewayTimeout {
-				logProviderRow(state.provider, http.StatusGatewayTimeout, nil, nil, "Selected provider timed out; buyer should retry", attempt.ErrorCode, state.explicitRetries)
+				rec.logProviderRow(state.provider, http.StatusGatewayTimeout, nil, nil, "Selected provider timed out; buyer should retry", attempt.ErrorCode, state.explicitRetries)
 				writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
 				return
 			}
-			logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", attempt.ErrorCode, state.explicitRetries)
+			rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", attempt.ErrorCode, state.explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
 			return
 		}
@@ -1494,8 +1378,8 @@ func (s *Server) forwardHTTPSequence(
 		if err != nil {
 			errMsg = err.Error()
 		}
-		logProviderRow(state.provider, failStatus, nil, nil, errMsg, attempt.ErrorCode, state.explicitRetries)
-		nextRouteID, ok := s.advanceToNextProvider(w, r, req, state, excluded, logRow)
+		rec.logProviderRow(state.provider, failStatus, nil, nil, errMsg, attempt.ErrorCode, state.explicitRetries)
+		nextRouteID, ok := s.advanceToNextProvider(w, r, req, state, excluded, rec)
 		if !ok {
 			return
 		}
@@ -1503,12 +1387,6 @@ func (s *Server) forwardHTTPSequence(
 		s.logRoutingDecision(nextRouteID, []pool.Provider{state.provider}, "retry", 0, 0, "retry_"+itoa(state.explicitRetries), state.provider.ProviderID)
 	}
 }
-
-// forwardLogRowFunc is the signature of the `logRow` closure inside
-// handleChatCompletions. Hoisted into a named type so advanceToNextProvider
-// can accept the closure as a parameter without re-spelling the
-// 7-parameter signature.
-type forwardLogRowFunc func(providerAssignedID string, status int, promptTok, completionTok *int64, errMsg, errCode string, retried int)
 
 // advanceToNextProvider performs the per-retry "pick a fresh provider,
 // dispatch the route-error response on no-candidate, bump explicitRetries
@@ -1520,6 +1398,11 @@ type forwardLogRowFunc func(providerAssignedID string, status int, promptTok, co
 // continue/break) because those vary across callsites. Sub-PRs 1b and 1c
 // unify the three transport loops into a single failover skeleton.
 //
+// M3-10 (ARCH-6 close-out): the route-error logRow that this helper
+// emits on no-candidate now routes through *billingRecorder, matching
+// the rest of the request-log/billing orchestration that the audit
+// hoisted out of inline closures.
+//
 // Returns (next provider, nextRouteID used for routing-decision logging,
 // ok). ok=false means a route error has already been written to w and
 // the caller MUST return from handleChatCompletions immediately.
@@ -1529,13 +1412,13 @@ func (s *Server) advanceToNextProvider(
 	req chatRequest,
 	state *forwardState,
 	excluded map[string]struct{},
-	logRow forwardLogRowFunc,
+	rec *billingRecorder,
 ) (nextRouteID string, ok bool) {
 	nextRouteID = uuid.NewString()
 	picked, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
 	if routeErr != nil {
 		state.routingDone = s.now()
-		logRow("", routeErr.status, nil, nil, routeErr.message, "", state.explicitRetries)
+		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", state.explicitRetries)
 		writeRouteError(w, routeErr)
 		return "", false
 	}
