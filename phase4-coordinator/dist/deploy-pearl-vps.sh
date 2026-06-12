@@ -30,11 +30,18 @@ EMAIL="${EMAIL:-augstar@gmail.com}"
 
 DIST_DIR="$(cd "$(dirname "$0")" && pwd)"
 BINARY="$DIST_DIR/coordinator-linux-amd64"
+CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
 NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"
 
-for f in "$BINARY" "$CONFIG" "$SERVICE" "$NGINX_SITE"; do
+# coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
+# FR-C9.4 strict-reject path still requires `coordinator-cli
+# revoke-token` for the used-token-persist-failure case; routine
+# prune-tokens / list-tokens also belong on Pearl). If absent, the
+# operator forgot to run build-linux.sh after the M2 update that
+# extended it. Fail closed — do NOT silently deploy with a stale CLI.
+for f in "$BINARY" "$CLI_BINARY" "$CONFIG" "$SERVICE" "$NGINX_SITE"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
@@ -148,6 +155,7 @@ $SSH 'if [ -x /opt/macprovider/coordinator ]; then
       fi'
 
 $SCP "$BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-linux-amd64"
+$SCP "$CLI_BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-cli-linux-amd64"
 $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:/tmp/coordinator.yaml"
 $SCP "$SERVICE" "$VPS_USER@$VPS_HOST:/tmp/macprovider-coordinator.service"
 $SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-coordinator-full.conf"
@@ -168,9 +176,16 @@ $SSH "if [ -f /opt/macprovider/coordinator.yaml ]; then
 
 $SSH "set -e
   install -o macprovider -g macprovider -m 0755 /tmp/coordinator-linux-amd64 /opt/macprovider/coordinator
+  # coordinator-cli is the operator-facing token-management tool. It's
+  # invoked manually (not under systemd) so it does NOT get a .prev
+  # snapshot — re-deploy is the rollback. Owned macprovider:macprovider
+  # so the operator runs it via 'sudo -u macprovider' for the same DB
+  # file-ownership posture as the daemon (the auth Store opens
+  # coordinator.db with the daemon's uid).
+  install -o macprovider -g macprovider -m 0755 /tmp/coordinator-cli-linux-amd64 /opt/macprovider/coordinator-cli
   install -o macprovider -g macprovider -m 0600 /tmp/coordinator.yaml /opt/macprovider/coordinator.yaml
   install -o root -g root -m 0644 /tmp/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
-  rm -f /tmp/coordinator-linux-amd64 /tmp/coordinator.yaml /tmp/macprovider-coordinator.service
+  rm -f /tmp/coordinator-linux-amd64 /tmp/coordinator-cli-linux-amd64 /tmp/coordinator.yaml /tmp/macprovider-coordinator.service
 "
 
 # nginx + Let's Encrypt strategy:
