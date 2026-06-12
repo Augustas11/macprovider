@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# build-linux.sh — produce a version-stamped linux/amd64 coordinator binary.
+# build-linux.sh — produce version-stamped linux/amd64 coordinator binaries:
+#   dist/coordinator-linux-amd64       — the long-running daemon (version-stamped)
+#   dist/coordinator-cli-linux-amd64   — operator token-management CLI
+#                                        (revoke-token / list-tokens /
+#                                         prune-tokens / revoke-and-kick)
 #
 # Refuses to build with uncommitted changes by default; set FORCE_DIRTY=1
 # to override (the resulting binary's version string will end in "-dirty"
@@ -40,3 +44,15 @@ OUT="dist/coordinator-linux-amd64"
 mkdir -p dist
 GOOS=linux GOARCH=amd64 go build -ldflags "-X main.version=${VERSION}" -o "$OUT" ./cmd/coordinator
 echo "built $OUT @ ${VERSION}"
+
+# coordinator-cli ships alongside the daemon so the operator has token
+# management (revoke-token, list-tokens, prune-tokens, revoke-and-kick)
+# available on Pearl without sqlite3 surgery. SPEC-003 v0.8.3 narrowed
+# the FR-C9.4 lockout class but did NOT eliminate it (used-token
+# persist-failure still requires manual revoke); the CLI also covers
+# routine prune-tokens / list-tokens. No version stamp — the CLI has
+# no main.version symbol; the deploy script logs which build it just
+# installed.
+CLI_OUT="dist/coordinator-cli-linux-amd64"
+GOOS=linux GOARCH=amd64 go build -o "$CLI_OUT" ./cmd/coordinator-cli
+echo "built $CLI_OUT @ ${VERSION}"
