@@ -467,9 +467,11 @@ func (r *Registry) Count() int {
 
 // HeartbeatHashVerifier verifies a (model_id, reported_hash) pair against
 // the SPEC-008 v0.3 §5.5 five-state enum. Injected into Registry via
-// WithHeartbeatHashVerifier so the pool package stays decoupled from the tier2
-// catalog package; the production wiring at internal/ws/server.go passes
-// tier2.VerifyProviderHash.
+// WithHeartbeatHashVerifier so the pool package stays decoupled from the
+// tier2 catalog package; post-M3-8d DI, the production wiring at
+// internal/ws/server.go binds the *tier2.Catalog instance passed via
+// ws.WithCatalog (default: tier2.Default()) so SIGHUP reload through
+// tier2.ConfigureDefaultStrict swaps the underlying state atomically.
 type HeartbeatHashVerifier func(modelID, reportedHash string) HashStatus
 
 // SwapEvent carries the per-swap data needed for the operator_model_swap audit

@@ -74,6 +74,10 @@ type Server struct {
 	version       string
 	// SPEC-002 v1.3.5 §7.9 — auth-attempt retention store, 1024 bound
 	authAttempts *authAttemptStore
+	// catalog holds an explicitly-injected tier2.Catalog for tests that
+	// want isolation from the package-singleton; nil means "use
+	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
+	catalog *tier2.Catalog
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
@@ -124,6 +128,16 @@ type providerAuth struct {
 }
 
 type Option func(*Server)
+
+// WithCatalog injects a specific tier2.Catalog instance for this server.
+// Default (nil/unset) is tier2.Default(), the package singleton, so production
+// wiring needs no change. Tests can pass an isolated *tier2.Catalog so they
+// no longer race against tier2.ResetForTest. M3-8d (audit TEST-4).
+func WithCatalog(c *tier2.Catalog) Option {
+	return func(s *Server) {
+		s.catalog = c
+	}
+}
 
 func WithTokenValidator(tokens TokenValidator) Option {
 	return func(s *Server) {
@@ -233,13 +247,30 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
-	if registry != nil {
-		pool.WithHeartbeatHashVerifier(tier2.VerifyProviderHash)(registry)
-	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	if registry != nil {
+		// M3-8d: route the heartbeat verifier through s.catalogRef() so a
+		// caller that overrides the catalog via WithCatalog (and the
+		// SIGHUP swap of tier2.Default()) is honored on every heartbeat
+		// rather than frozen at NewServer time.
+		pool.WithHeartbeatHashVerifier(func(modelID, reportedHash string) pool.HashStatus {
+			return s.catalogRef().VerifyProviderHash(modelID, reportedHash)
+		})(registry)
+	}
 	return s
+}
+
+// catalogRef returns the *tier2.Catalog this server reads through. Returns
+// the explicit override set by WithCatalog when present; otherwise the
+// package singleton via tier2.Default(). Safe under SIGHUP reload because
+// tier2.Default() is an atomic.Pointer load.
+func (s *Server) catalogRef() *tier2.Catalog {
+	if s.catalog != nil {
+		return s.catalog
+	}
+	return tier2.Default()
 }
 
 func (s *Server) Admission() *AdmissionManager {
@@ -260,7 +291,7 @@ func (s *Server) RefreshTier2HashStatuses() int {
 		})
 	}
 	return s.pool.UpdateHashStatuses(func(provider pool.Provider) pool.HashStatus {
-		next := tier2.VerifyProviderHash(provider.ModelID, provider.ModelHash)
+		next := s.catalogRef().VerifyProviderHash(provider.ModelID, provider.ModelHash)
 		if next != provider.HashStatus {
 			tier2.LogProviderHashStatus(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
 		}
@@ -888,7 +919,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	hashStatus := pool.HashStatus("")
 	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
-		hashStatus = tier2.VerifyProviderHash(hello.ModelID, hello.ModelHash)
+		hashStatus = s.catalogRef().VerifyProviderHash(hello.ModelID, hello.ModelHash)
 		tier2.LogProviderHashStatus(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
 		if tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
@@ -1405,7 +1436,7 @@ func (s *Server) tier2WarmupExcluded(provider pool.Provider) bool {
 	if tier2.ModelHashActive(cfg) {
 		status := provider.HashStatus
 		if status == "" {
-			status = tier2.VerifyProviderHash(provider.ModelID, provider.ModelHash)
+			status = s.catalogRef().VerifyProviderHash(provider.ModelID, provider.ModelHash)
 		}
 		if tier2.IsHashPredicateFailure(status, cfg.RequireHashVerified) {
 			return true
@@ -1908,7 +1939,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for i := range providers {
-			providers[i].HashStatus = tier2.VerifyProviderHash(providers[i].ModelID, providers[i].ModelHash)
+			providers[i].HashStatus = s.catalogRef().VerifyProviderHash(providers[i].ModelID, providers[i].ModelHash)
 		}
 	}
 	modelSet := map[string]struct{}{}
@@ -1953,7 +1984,7 @@ func (s *Server) providerTier2PolicyEligible(p pool.Provider, cfg config.Tier2Co
 	if !tier2.ConfigActive(cfg) {
 		return true
 	}
-	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(tier2.VerifyProviderHash(p.ModelID, p.ModelHash), cfg.RequireHashVerified) {
+	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(s.catalogRef().VerifyProviderHash(p.ModelID, p.ModelHash), cfg.RequireHashVerified) {
 		return false
 	}
 	if cfg.RequireEncryptedLeg && !p.EncryptedLeg {
