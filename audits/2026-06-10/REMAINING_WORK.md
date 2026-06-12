@@ -6,15 +6,15 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 
 ### [High] ARCH-1 — handleChatCompletions god-function with three diverging copies of failover state machine
 
-- **Status:** `PARTIAL`
-- **Recalibrated severity:** Medium — the live divergence bugs (state-marking + retry counter) are fixed and the most-duplicated extraction (advanceToNextProvider) is hoisted; remaining is structural duplication of three transport loops, not correctness drift
-- **Detail:** **Evidence** PR #36 (27559ae) fixed the two confirmed divergences (queue-full→StateBusy now happens in the streaming path, see `buyer/server.go:1109-1111`; explicitRetries++ unified inside `advanceToNextProvider`). PR #48 (8f18f5a, M2-1a) extracted `advanceToNextProvider` helper at `buyer/server.go:1377-1399`. PR #36 / #48 close two of the three milestone sub-tasks; M2-1b (transportResult + 3 classifiers) exists only as draft commit `de58b9a` and is not merged; M2-1c not yet open per handoff. **Original citation** Audit cited `buyer/server.go:840-1350` and three loops at 1056-1153, 1154-1245, 1246-1349. Current function still spans 487 lines (`handleChatCompletions` 869 → ~1356), with three loop bodies preserved at 1085-1170 (streaming), 1172-1257 (WS-tunnel non-streaming), and 1264-135...
+- **Status:** `PARTIAL_RESOLVED_DIFFERENTLY` (pending post-merge verification)
+- **Recalibrated severity:** Medium — the live divergence bugs (state-marking + retry counter) are fixed, and the M2-1c PR lands three transport-typed sequence helpers sharing the retry/failover/busy decision tree via *forwardState + transportResult flags. Final RESOLVED awaits post-merge audit verification.
+- **Detail:** **Evidence** PR #36 (27559ae) fixed the two confirmed divergences (queue-full→StateBusy now happens in the streaming path, see `buyer/server.go:1109-1111`; explicitRetries++ unified inside `advanceToNextProvider`). PR #48 (8f18f5a, M2-1a) extracted `advanceToNextProvider` helper. PR #61 (a2a1063, M2-1b) introduced `transportResult` + 3 classifiers at `buyer/transport_result.go`. M2-1c PR (this branch) collapses the three transport loops into three sequence helpers (`forwardStreamSequence`, `forwardWSNonStreamSequence`, `forwardHTTPSequence`) on *Server, each driven by `transportResult` flags + `*forwardState`. Per-transport rendering (HTTP body, SSE, WS-tunnel bridge) remains transport-specific; the retry/failover/busy/committed decision tree is shared. **Shape change vs original audit sketch** Audit asked for one `forwardWithFailover`; M2-1c lands three transport-typed helpers because success/error/SSE rendering paths are genuinely different. The audit's underlying intent — "every retry-semantics edit touches exactly one place per transport, not three near-duplicate inline loop bodies" — is met. **Original citation** Audit cited `buyer/server.go:840-1350` and three loops at 1056-1153, 1154-1245, 1246-1349.
 
 ### [High] CODE-1 — Drift across three copies of failover state machine (merged with ARCH-1)
 
-- **Status:** `PARTIAL`
+- **Status:** `PARTIAL_RESOLVED_DIFFERENTLY` (pending post-merge verification)
 - **Recalibrated severity:** Medium — same recalibration as ARCH-1 (merged finding)
-- **Detail:** **Evidence** Same as ARCH-1. PR #36 unified the two confirmed drift bugs; PR #48 extracted the per-retry tail into `advanceToNextProvider`. The three loop bodies still exist at `buyer/server.go:1085-1170`, `1172-1257`, `1264-1356`. **Original citation** §3.1 item 3 / §3.3 CODE-1 merged into ARCH-1 in the audit. **Fix delta** Drift correctness fixes shipped; structural deduplication partial. **Notes** See ARCH-1 for details.
+- **Detail:** **Evidence** Same as ARCH-1. PR #36 unified the two confirmed drift bugs; PR #48 extracted the per-retry tail into `advanceToNextProvider`; PR #61 (M2-1b) introduced `transportResult`; M2-1c PR (this branch) collapses the three loops into transport-typed sequence helpers sharing `*forwardState` + `transportResult` flags. **Original citation** §3.1 item 3 / §3.3 CODE-1 merged into ARCH-1 in the audit. **Fix delta** Drift correctness fixes shipped; structural deduplication completed via three-helper shape (per-transport rendering kept separate by design). **Notes** See ARCH-1 for details.
 
 ### [High] DEVE-2 — The 3am story — single Gmail channel co-hosted on VPS, no external check
 
@@ -109,7 +109,7 @@ Tasks that did not reach `RESOLVED` (each maps to one or more findings above; th
 | M2-3 | `PARTIAL` | SetMaxOpenConns(1) on coordinator stores |
 | QW-5 | `PARTIAL` | SetMaxOpenConns(1) on coordinator stores |
 | M1-6 | `PARTIAL` | Deploy-gate hardening |
-| M2-1 | `PARTIAL` | Extract single forwardWithFailover (strangler) |
+| M2-1 | `PARTIAL_RESOLVED_DIFFERENTLY` | M2-1c PR lands 3 transport-typed sequence helpers (forwardStreamSequence, forwardWSNonStreamSequence, forwardHTTPSequence) sharing *forwardState + transportResult flags — NOT the originally-sketched single forwardWithFailover, because success/error/SSE rendering is genuinely per-transport. Decision tree (retry/failover/busy/committed) is shared; rendering is not. Final RESOLVED disposition pending post-merge audit verification. |
 | M2-4 | `PARTIAL` | Gateway retention/archival + RO handle |
 | M3-9 | `PARTIAL` | Gateway server.go file split (Phase 1) |
 | M1-1 | `CODE_SHIPPED_OPERATOR_PENDING` | Wire provider tokens end-to-end |
