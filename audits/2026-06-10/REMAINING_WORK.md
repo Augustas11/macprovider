@@ -29,14 +29,8 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 
 ### [Medium] ARCH-3 — Uncapped *sql.DB handles on coordinator while money path takes BEGIN IMMEDIATE
 
-- **Status:** `NOT_RESOLVED`
-- **Detail:** **Evidence** `grep -rn 'SetMaxOpenConns' /Users/augstar/macprovider-poc/phase4-coordinator/` returns ZERO hits. Gateway still caps at 1 (`phase5-gateway/internal/storage/sqlite/store.go:38`). M2-3 was listed in §5 task table but no commit references it; no entry in any handoff doc says M2-3 shipped. **Original citation** `cmd/coordinator/main.go:47-59` — opens `tokenStore`, `reqLogStore`, `auditStore` in sequence (now lines 57-74 post-drift) with no SetMaxOpenConns call. Sub-handles for `admissionStore` and `billingStore` (lines 75-84) also derive from the unconfigured `reqLogStore.DB()`. **Fix delta** Suggested fix (`SetMaxOpenConns(1)` on each of the three handles) — not applied. **Notes** Latent risk until coordinator concurrency rises (currently single-coordinator). The buyer hot-pa...
-
-### [Medium] DOCS-4 — specs/README.md index 6 revisions stale on 3 of 12 spec families
-
 - **Status:** `PARTIAL`
-- **Recalibrated severity:** Low — drift admitted in-doc; partial mitigation acceptable
-- **Detail:** **Evidence** - `specs/README.md:1-16` lists SPEC-001 v1.3 (actual v1.4 per `SPEC-001-phase3-binary.md:3`), SPEC-003 v0.7 (actual v0.9.2 per `SPEC-003-open-onboarding.md:3`); SPEC-002, SPEC-006 etc. match. - `specs/README.md:18` now contains an explicit drift disclaimer: `**Version of record is line 3 of each spec; do not trust this index for compatibility decisions — read the spec header.** This index drifts; the spec headers do not. When in doubt, grep -m1 '^\*\*Version' specs/SPEC-*.md.` - M3-7 in §5 was `Specs index regen + CLAUDE.md/AGENTS version pointers` — handoff lists no PR shipped; CLAUDE.md side (DOCS-5) is in but index regen not committed. **Original citation** Audit §3.9 DOCS-4: 'specs/README.md indexes 3 of 12 spec families at versions ~6 revisions stale'. **Fix delta** Su...
+- **Detail:** **Evidence** PR #89 (commit `2501e11`) capped the `auditStore` and `authStore` (`internal/audit/store.go`, `internal/auth/tokens.go`) at `SetMaxOpenConns(1)`, mirroring the gateway pattern at `phase5-gateway/internal/storage/sqlite/store.go:38`. The `reqLogStore` cap was investigated and explicitly deferred: billing endpoints in `phase4-coordinator/internal/billing/endpoints.go` iterate `rows.Next()` in the outer cursor while issuing per-row sub-queries on the same `*sql.DB` (providers :132+:168, buyerEquivalentCredits :256+:294, reconcile :193-225 transitively); capping to 1 blocks the sub-queries forever. Test evidence: `TestProvidersEndpoint` hangs ~10 min then panics with `database/sql.(*DB).conn` stack traces under cap=1. Proper close-out requires a drain-rows-first handler refactor (build typed slice from `rows.Next()` before issuing per-row sub-queries), deferred to a separate PR. **Original citation** `cmd/coordinator/main.go:47-59` — opens `tokenStore`, `reqLogStore`, `auditStore` in sequence (now lines 57-74 post-drift). Sub-handles for `admissionStore` and `billingStore` (lines 75-84) also derive from the unconfigured `reqLogStore.DB()`. **Fix delta** Two of three handles now capped; `reqLogStore` (and the billing sub-handles that derive from it) remains uncapped pending the drain-rows-first refactor. **Notes** Latent risk until coordinator concurrency rises (currently single-coordinator). The buyer hot-pa...
 
 ### [Medium] PERF-1 — Gateway DB can never shrink (8 event tables + concurrency_reservations have RAISE(ABORT) BEFORE-DELETE triggers, no archival story)
 
@@ -76,11 +70,6 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 - **Status:** `DEFERRED`
 - **Detail:** **Evidence** - Deferral record: `audits/2026-06-10/MILESTONE_2_HANDOFF.md:117-150`: ``` ### M2-9 — cross-service integration test (TEST-6) Deferred to M3. Rationale: the audit's M2-9 spec calls for a new ... Recommend ticketing M2-9 as `M3-11` ... - **M3-11** (NEW) cross-service integration test — deferred from M2-9 ``` - Sticky header contract at `phase5-gateway/internal/router/server.go:1401-1405` (or its post-M3-9 location) and coordinator `internalBearerAuthorized` (`buyer/server.go:2754`) still has no cross-boundary `test/integration/` harness. - `phase5-gateway/internal/router/integration_test.go` exists but is within-gateway (mocks coordinator via `cfg.Coordinator.BuyerURL = "http://coordinator.test"` + httptest stubs at lines 43, 154, 184, 221, 271, 312, 349, 381). It does not e...
 
-### [Low] ARCH-5 — Cross-service duplication (sqlite DSN helper, bearer compare) — document conscious debt
-
-- **Status:** `NOT_RESOLVED`
-- **Detail:** **Evidence** `phase4-coordinator/internal/sqliteutil/dsn.go:8-23` and `phase5-gateway/internal/storage/sqlite/dsn.go:8-22` still hold byte-identical `WithPragmas`/`sqliteDSN` bodies (same four pragmas, same order). `grep -rn 'ARCH-5'` in *.md returns only the audit file itself; no documentation lookup of the conscious-debt rationale was added to OPS.md / coordinator README / gateway README. PR #50 (M2-8 OPS.md) shipped general ops docs but did not call this out. **Original citation** Audit asked these be documented as 'conscious-debt copies'. **Fix delta** No code change expected, but the *document* part of the recommendation was not done. Counts as not_resolved per the audit's own wording. **Notes** Low impact; mention-it-once fix.
-
 ### [Low] CODE-3 — Tier-2 trust disclosure parsed from untyped map[string]any with silent zero-fallbacks (Phase-1 fallback path)
 
 - **Status:** `NOT_RESOLVED`
@@ -101,11 +90,6 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 - **Status:** `NOT_RESOLVED`
 - **Detail:** **Evidence** - No PR found in `git log --grep` for SECU-6 specifically; not listed in any milestone handoff as targeted for this audit cycle. - §5 task table does not assign SECU-6 to M1/M2/M3. - Audit text already classifies as Low: "Buyer over-charge is correctly impossible (usageFromJSON caps at promptEstimate+max_tokens, server.go:2356-2369); the coordinator additionally clamps completion to byte-estimate (formula.go:214); the gateway settlement path lacks that cross-check. Residual: provider revenue gaming — compounded by XSEC-1." - XSEC-1 amplification reduces as PR #41+#44 close provider identity (provider gaming becomes attributable rather than anonymous), but the gateway settlement path's missing byte-estimate cross-check at `phase5-gateway/internal/router/server.go:1607-1611` ...
 
-### [Low] DOCS-7 — Version-drift cluster (README badge, gateway README SPEC-006 pin, SPEC-002 dep self-contradiction)
-
-- **Status:** `PARTIAL`
-- **Detail:** **Evidence** - README: PR #12 dropped the hardcoded v1.2.5 string; `README.md:13` now uses a dynamic shields.io badge (`shields.io/github/v/release/augustas11/macprovider`) and no body text contradicts it. Resolved. - Gateway README: `/Users/augstar/macprovider-poc/phase5-gateway/README.md:3` reads `Phase 5 gateway implementation for SPEC-006 v0.8.3.` Matches actual SPEC-006 v0.8.3 (specs/SPEC-006-buyer-api.md:3). Resolved. - SPEC-002 dep line: `specs/SPEC-002-coordinator.md:4` says `Depends on: SPEC-001 v1.3 (Phase 3 binary wire protocol, locked)`. SPEC-001 actual is v1.4 (specs/SPEC-001-phase3-binary.md:3, '1.4 (2026-06-12, custom model selection')). The audit-era self-contradiction line at v1.2.1 (line 50, changelog) is preserved as history; the current header is internally consisten...
-
 ### [Low] DEVE-7 — Coordinator secret handling weak half of asymmetric pattern (plaintext YAML, root-monitor)
 
 - **Status:** `CODE_SHIPPED_OPERATOR_PENDING`
@@ -122,8 +106,8 @@ Tasks that did not reach `RESOLVED` (each maps to one or more findings above; th
 
 | Task | Status | Title |
 |---|---|---|
-| M2-3 | `NOT_RESOLVED` | SetMaxOpenConns(1) on coordinator stores |
-| QW-5 | `NOT_RESOLVED` | SetMaxOpenConns(1) on coordinator stores |
+| M2-3 | `PARTIAL` | SetMaxOpenConns(1) on coordinator stores |
+| QW-5 | `PARTIAL` | SetMaxOpenConns(1) on coordinator stores |
 | M1-6 | `PARTIAL` | Deploy-gate hardening |
 | M2-1 | `PARTIAL` | Extract single forwardWithFailover (strangler) |
 | M2-4 | `PARTIAL` | Gateway retention/archival + RO handle |
@@ -168,7 +152,7 @@ Confirmed-as-deferred findings, tasks, and Open Questions.
 - **[Low]** PR #58 (Open Q4 ruling) still OPEN — ruling not on main — _Where:_ `PR #58 state=OPEN; beta/DECISION_CRITERIA.md Entry 63 on main is M3-5, not Q4`. _Why:_ Q4 ruled in PR body (archive-rotate to cold storage) but canonical decision-log entry has not landed. Future PERF-1 / M2-4 Part C work lacks authoritative on-main reference until #58 merges.
 - **[Low]** M3-1 follow-up: sargable RFC3339Nano comparison still pending — _Where:_ `phase4-coordinator/internal/requestlog/store.go (julianday predicate retained per MILESTONE_3_PHASE23_HANDOFF.md:64-68)`. _Why:_ RFC3339Nano writes are variable-width (`.` 0x2E < `Z` 0x5A) so lexicographic compare is silently wrong at fractional-second boundaries. PERF-3 batched-DELETE shipped, but the index is still defeated by julianday(). Low risk now; degrades as request_log grows.
 - **[Low]** Q3 (tier-2 posture) silently deferred — no DECISION_CRITERIA entry — _Where:_ `beta/DECISION_CRITERIA.md (no entry); MILESTONE_1_HANDOFF.md:55-65`. _Why:_ Operator instructed 'Defer Part C entirely' during M1 autopilot but the deferral survives only inside an audit handoff doc, not a dated decision-log entry. Same pattern as Q6. Future agent sessions can't grep DECISION_CRITERIA for tier-2 posture status.
-- **[Medium]** Verifier-surfaced: QW-5/M2-3 (`SetMaxOpenConns(1)` on coordinator) marked done in MILESTONE_2_HANDOFF.md but never shipped — _Where:_ `phase4-coordinator/cmd/coordinator/main.go:57-84`. _Why:_ Trivial three-line fix matching gateway's `internal/storage/sqlite/store.go:38` pattern; underlying ARCH-3 risk (latent SQLITE_BUSY tail-latency under coordinator write contention) is not yet mitigated.
+- **[Medium]** Verifier-surfaced: QW-5/M2-3 (`SetMaxOpenConns(1)` on coordinator) — _Where:_ `phase4-coordinator/cmd/coordinator/main.go:57-84`. _Why:_ Two of three handles now capped via PR #89 (`audit/store.go`, `auth/tokens.go`); third (`reqLogStore`) deadlocks billing endpoints under cap=1 — nested `rows.Next()` iteration with sub-queries on the same `*sql.DB` in `providers:132+168`, `buyerEquivalentCredits:256+294`, `reconcile:193-225` transitively — and is deferred behind a drain-rows-first refactor. ARCH-3 risk partially mitigated; full mitigation pending the refactor.
 
 ## Recommended re-audit cadence
 
