@@ -63,7 +63,7 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
     @Argument(help: "Target HuggingFace model ID or local path.")
     var targetModelID: String
 
-    @Flag(help: "Bypass the CLI-side cooldown soft guard.")
+    @Flag(help: "Bypass the CLI-side cooldown soft guard AND the local RAM fit guard (SPEC-001 v1.4 R-6.13.2): wontFit becomes a warning, tight is silenced, and HF-shape unknown fail-closed is overridden. Does NOT bypass --supported-models membership or server-side concurrency rejection.")
     var force = false
 
     @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
@@ -99,6 +99,46 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
         } catch let error as SupportedModelsValidationError {
             writeStderr("\(error)")
             throw ExitCode(2)
+        }
+
+        // Pre-flight RAM fit check per SPEC-001 v1.4 §6.13 (R-6.13.1 through
+        // R-6.13.5). Same name-parsing + headroom rules as SPEC-003 v0.9.1
+        // FR-D2.1 step 4 so a model accepted at install time is judged the
+        // same way here. `--force` bypasses both the wontFit hard-block and
+        // the tight-fit warning, and overrides the .unknown fail-closed gate
+        // for HF-shape ids (R-6.13.2).
+        switch ModelFit.evaluate(modelID: targetModelID, ramGB: ModelFit.detectRAMGB()) {
+        case let .wontFit(estGB, ramGB):
+            if options.force {
+                writeStderr("warning: target ~\(estGB) GB weights will not fit on \(ramGB) GB Mac; --force set, proceeding")
+            } else {
+                writeStderr("switch target \(targetModelID) (~\(estGB) GB weights) will not fit on \(ramGB) GB Mac. Re-issue with --force to override.")
+                throw ExitCode(2)
+            }
+        case let .tight(estGB, ramGB):
+            // Round-2 (codex code MINOR): match the comment — --force quiets
+            // the tight warning too. CI scripts use --force to mean "I know
+            // what I'm doing, don't shout."
+            if !options.force {
+                writeStderr("warning: tight fit — target ~\(estGB) GB weights on \(ramGB) GB Mac; may swap or OOM under load")
+            }
+        case .fits:
+            break
+        case let .unknown(reason):
+            // Round-2 (codex security MINOR): fail closed when the target
+            // *looks like* an HF id (contains '/' and isn't a local path)
+            // but the parser can't size it. Otherwise a malicious or
+            // oddly-named oversized repo bypasses the guard. Synthetic IDs
+            // like "old-model" / "A" used in tests, and local paths like
+            // "./checkpoints/foo", still skip the fit check as before.
+            let looksLikeHFID = targetModelID.contains("/")
+                && !targetModelID.hasPrefix(".")
+                && !targetModelID.hasPrefix("/")
+            if looksLikeHFID && !options.force {
+                writeStderr("could not size HF-style target \(targetModelID): \(reason). Re-issue with --force to override.")
+                throw ExitCode(2)
+            }
+            writeStderr("note: \(reason); skipping fit check")
         }
 
         if !options.force {
