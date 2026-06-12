@@ -88,6 +88,19 @@ log "step 1/9: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
 dig +short "$DOMAIN" | grep -q "$VPS_HOST" || { echo "DNS for $DOMAIN does not resolve to $VPS_HOST yet" >&2; exit 1; }
 
+# Previous-deploy bypass tombstone — if the last deploy used
+# FORCE_RESTART=1 (or got manually bypassed past the connected-provider
+# guard), step 1c or step 6c writes /var/lib/macprovider/last-deploy-bypass.json
+# below. Surface it here so the operator can audit before scping a new
+# binary. Does NOT exit — informational only. Remove the file once
+# audited by the operator.
+PREV_BYPASS=$($SSH 'cat /var/lib/macprovider/last-deploy-bypass.json 2>/dev/null || true')
+if [ -n "$PREV_BYPASS" ]; then
+  log "  NOTE: previous deploy left a bypass tombstone:"
+  printf '%s\n' "$PREV_BYPASS" | sed 's/^/    /'
+  log "  If audited, clear with: ssh <pearl> rm /var/lib/macprovider/last-deploy-bypass.json"
+fi
+
 log "step 1b/9: drift check vs live /opt/macprovider/coordinator.yaml"
 # Catches the silent-config-change hazard. The 2026-06-11 deploy caused
 # a brief outage because the local config dropped auth.require_provider_tokens
@@ -125,6 +138,43 @@ if ! DRIFT_DIFF=$(diff <(printf '%s\n' "$LOCAL_NORM") <(printf '%s\n' "$LIVE_NOR
 else
   echo "  ok: local config matches live (modulo secrets)"
 fi
+
+log "step 1c/9: early connected-provider check"
+# Mirror of step 6c, run BEFORE binary swap so a refusal does not leave
+# the operator with new code on disk and old code running. The full
+# script does the connected-provider check twice on purpose:
+#   - step 1c here: protects the longest part of the window (between
+#     step 4 binary install and step 7 restart, which spans certbot +
+#     nginx work and can take minutes); refusing here saves the scp.
+#   - step 6c just before restart: protects against providers that
+#     connected DURING the deploy itself (between step 1c and step 7).
+# Both honor FORCE_RESTART=1, which writes a sticky tombstone at
+# /var/lib/macprovider/last-deploy-bypass.json so the NEXT deploy
+# notices the operator override (see step 1's PREV_BYPASS surface).
+CONNECTED_COUNT_EARLY=$(curl -fsS --max-time 5 --max-filesize 65536 "https://$DOMAIN/healthz" 2>/dev/null \
+  | python3 -c "import sys,json; print(json.load(sys.stdin).get('pool_size', 0))" 2>/dev/null \
+  || echo 0)
+if [ "${CONNECTED_COUNT_EARLY:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
+  log "  REFUSING TO DEPLOY — $CONNECTED_COUNT_EARLY provider(s) currently connected."
+  log "  Restart at step 7 would trigger SPEC-001 § 6.5 drain on these providers."
+  log "  Refusing EARLY (pre-scp) so you don't leave a new binary on disk."
+  log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
+  exit 4
+fi
+if [ "${FORCE_RESTART:-0}" = "1" ] && [ "${CONNECTED_COUNT_EARLY:-0}" -gt 0 ]; then
+  TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  OP_HOST="${HOSTNAME:-unknown}"
+  $SSH "set -e
+        install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
+        cat > /tmp/last-deploy-bypass.json <<EOF
+{\"ts\":\"$TS_NOW\",\"service\":\"coordinator\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"1c\",\"metric\":\"connected_providers\",\"value\":$CONNECTED_COUNT_EARLY,\"operator_host\":\"$OP_HOST\"}
+EOF
+        install -o macprovider -g macprovider -m 0640 /tmp/last-deploy-bypass.json /var/lib/macprovider/last-deploy-bypass.json
+        rm -f /tmp/last-deploy-bypass.json
+        logger -t macprovider-deploy \"FORCE_RESTART=1 used at step 1c; connected=$CONNECTED_COUNT_EARLY\""
+  log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
+fi
+log "  ok: $CONNECTED_COUNT_EARLY connected providers (or FORCE_RESTART=1 set)"
 
 log "step 2/9: install certbot + nginx-snippets (apt)"
 $SSH 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -qq -y certbot python3-certbot-nginx >/dev/null' || {
@@ -247,14 +297,25 @@ $SSH "set -e
   systemctl reload nginx
 "
 
-log "step 6c/9: pre-restart safeguard (check for connected providers)"
+log "step 6c/9: pre-restart safeguard (late connected-provider check)"
 # Coordinator restart triggers SPEC-001 § 6.5 drain on all connected
 # providers. v1.1.3+ phase3-binary handles this gracefully (drops WS,
 # keeps serving direct traffic, reconnects after grace period). Older
 # phase3-binary (v1.1.2 and earlier) exits the process on drain — which
 # kills tunnel-direct buyer traffic. Until you can guarantee every
 # connected provider is on v1.1.3+, refuse to auto-restart with
-# connected providers unless the operator passes --force-restart.
+# connected providers unless the operator passes FORCE_RESTART=1.
+#
+# This is the LATE check — step 1c was the early one. Both exist on
+# purpose: a provider that wasn't connected at step 1c can have
+# connected during certbot/nginx work (step 2-6b is the longest part
+# of the script). The 2026-06-12 deploy had air5 connect mid-script
+# under exactly this shape; the operator manually jumped past this
+# step. The tombstone wired below + the early check + the PREV_BYPASS
+# surface at step 1 are the audit-trail trio that makes future
+# bypasses visible to the NEXT deploy. Manual jumps past this step
+# leave no trail beyond the absence of a completion marker — write
+# the bypass file by hand if jumping past, see message below.
 CONNECTED_COUNT=$(curl -fsS --max-time 5 --max-filesize 65536 "https://$DOMAIN/healthz" 2>/dev/null \
   | python3 -c "import sys,json; print(json.load(sys.stdin).get('pool_size', 0))" 2>/dev/null \
   || echo 0)
@@ -263,7 +324,23 @@ if [ "${CONNECTED_COUNT:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
   log "  Restart triggers drain; phase3-binary <= v1.1.2 exits the process"
   log "  on drain and breaks tunnel-direct buyer traffic."
   log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
+  log "  If you must JUMP past this step manually, please first write:"
+  log "    ssh <pearl> 'echo {\"ts\":\"\$(date -u +%FT%TZ)\",\"service\":\"coordinator\",\"reason\":\"manual_jump\",\"step\":\"6c\",\"metric\":\"connected_providers\",\"value\":$CONNECTED_COUNT,\"operator_host\":\"\$HOSTNAME\"} > /var/lib/macprovider/last-deploy-bypass.json'"
+  log "  so the next deploy surfaces the bypass at step 1."
   exit 4
+fi
+if [ "${FORCE_RESTART:-0}" = "1" ] && [ "${CONNECTED_COUNT:-0}" -gt 0 ]; then
+  TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  OP_HOST="${HOSTNAME:-unknown}"
+  $SSH "set -e
+        install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
+        cat > /tmp/last-deploy-bypass.json <<EOF
+{\"ts\":\"$TS_NOW\",\"service\":\"coordinator\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"6c\",\"metric\":\"connected_providers\",\"value\":$CONNECTED_COUNT,\"operator_host\":\"$OP_HOST\"}
+EOF
+        install -o macprovider -g macprovider -m 0640 /tmp/last-deploy-bypass.json /var/lib/macprovider/last-deploy-bypass.json
+        rm -f /tmp/last-deploy-bypass.json
+        logger -t macprovider-deploy \"FORCE_RESTART=1 used at step 6c; connected=$CONNECTED_COUNT\""
+  log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
 fi
 log "  ok: $CONNECTED_COUNT connected providers (or FORCE_RESTART=1 set)"
 
