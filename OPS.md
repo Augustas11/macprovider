@@ -104,6 +104,135 @@ matches the script (the path was inferred from `deploy-pearl-vps.sh`
 comments; the first real deploy should leave a `gateway.prev` artifact that
 either confirms or amends this section).
 
+### 3.1 Gateway DB archive-rotate (M2-4 Part C / PERF-1)
+
+The gateway's 9 `RAISE(ABORT) BEFORE DELETE` triggers
+(`phase5-gateway/internal/storage/sqlite/migrate.go:184-251`) keep the 8
+event tables + `concurrency_reservations` append-only forever per the Q4
+ruling (`beta/DECISION_CRITERIA.md` Entry 77, design at
+`audits/2026-06-10/Q4_ARCHIVE_ROTATE_DESIGN.md`). Disk pressure on Pearl
+is handled out-of-band by a rotation job that ships a clean snapshot of
+`gateway.db` to cold storage on a size or age threshold, then prunes old
+rows (rows older than `GATEWAY_ARCHIVE_PRUNE_DAYS`, default 7) from the
+live DB while temporarily dropping + recreating the per-table
+`*_no_delete` triggers inside a single `BEGIN IMMEDIATE; ... COMMIT;`
+transaction.
+
+All 9 tables are in scope. `concurrency_reservations` keeps a narrower
+prune predicate (`status <> 'active'`): non-active rows older than the
+cutoff are dropped, active rows are NEVER touched regardless of age.
+M2-4 Part B's per-row `DeleteTerminalQuotaReservations` on
+`quota_reservations` runs independently and unchanged — it handles the
+quota table, which has no BEFORE-DELETE trigger.
+
+**Files (shipped):**
+
+- `phase5-gateway/dist/archive-rotate.sh` — the rotation script. Uses
+  SQLite's `VACUUM INTO` for the snapshot (single-file, no WAL
+  artifacts), compresses with `zstd` (or `gzip` if zstd is missing),
+  drops a `.sha256` sidecar, optionally uploads to S3 if
+  `GATEWAY_ARCHIVE_S3_BUCKET` is set and `aws-cli` is on PATH, then
+  prunes the live DB. Exit codes: `0` success, `2` below threshold (no
+  rotation needed — timer treats as success), `3` rotation attempted but
+  live DB did not shrink (loud alert), `4` pre-flight failure.
+- `phase5-gateway/dist/archive-restore.sh` — forensic-restore path.
+  Verifies the `.sha256` checksum, decompresses, runs `PRAGMA
+  integrity_check`, refuses if the archive's `schema_migrations` max
+  version exceeds the binary's expected version (currently 1), and
+  installs to a tempfile target (default `/tmp/gateway-restored-<ts>.db`).
+  `--to-live` does the destructive replace-the-live-DB path; requires
+  `ASSUME_YES=1`. Snapshots the existing live DB to a `.pre-restore.<ts>`
+  sibling before swapping.
+- `phase5-gateway/dist/macprovider-archive-rotate.service` +
+  `macprovider-archive-rotate.timer` — daily check at 04:00 UTC ±15 min
+  jitter. Runs as `User=root` (needs `systemctl stop/start` on the
+  gateway). `SuccessExitStatus=0 2` so below-threshold checks don't
+  alert.
+- `phase5-gateway/dist/test/archive_rotate_test.sh` — integration tests
+  (T1–T6: below-threshold no-op, FORCE_ROTATE shrinks + preserves recent
+  rows + leaves `concurrency_reservations` untouched, forensic-restore
+  integrity, idempotent re-run, schema-mismatch refusal, append-only
+  trigger restored post-prune).
+
+**Operator install on Pearl (one-time):**
+
+```bash
+ssh pearl
+# Install scripts to /usr/local/sbin (root-owned parent dir). The
+# /opt/macprovider parent is owned by macprovider:macprovider per the
+# coordinator deploy — installing the root-run archive scripts there would
+# let a compromised macprovider user substitute the script before the next
+# timer fires (audit-iter-2 security HIGH).
+sudo install -o root -g root -m 0755 archive-rotate.sh /usr/local/sbin/macprovider-archive-rotate.sh
+sudo install -o root -g root -m 0755 archive-restore.sh /usr/local/sbin/macprovider-archive-restore.sh
+sudo install -o root -g root -m 0644 macprovider-archive-rotate.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 macprovider-archive-rotate.timer   /etc/systemd/system/
+# Archive dir is ROOT-owned 0700 — the gateway service (User=macprovider)
+# must NOT be able to substitute or unlink compliance archives. The rotation
+# job runs as root and writes here; the gateway never reads or writes it.
+sudo install -d -o root -g root -m 0700 /var/lib/macprovider-gateway-archive
+# /etc/macprovider/archive-rotate.env carries S3 credentials + bucket name +
+# thresholds. Required keys for the default REQUIRE_REMOTE=1 mode:
+#   GATEWAY_ARCHIVE_S3_BUCKET=macprovider-archives
+#   AWS_ACCESS_KEY_ID=<key>
+#   AWS_SECRET_ACCESS_KEY=<secret>
+#   AWS_DEFAULT_REGION=<region>
+# If the operator deliberately runs without cold storage (NOT recommended,
+# defeats the "tamper-evident archive lives off-host" Q4 contract):
+#   GATEWAY_ARCHIVE_REQUIRE_REMOTE=0
+sudo install -o root -g root -m 0600 /dev/stdin /etc/macprovider/archive-rotate.env <<EOF
+GATEWAY_ARCHIVE_S3_BUCKET=macprovider-archives
+AWS_DEFAULT_REGION=us-east-1
+# Set AWS creds here or via instance profile / IAM role.
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now macprovider-archive-rotate.timer
+# Smoke-test (DRY_RUN=1 prints actions only — no service stop, no prune):
+sudo DRY_RUN=1 GATEWAY_DB_PATH=/var/lib/macprovider/gateway.db \
+  /usr/local/sbin/macprovider-archive-rotate.sh || true
+# Verify the timer is scheduled:
+sudo systemctl list-timers macprovider-archive-rotate.timer
+# Tail the journal after the first natural fire (04:00 UTC + jitter):
+sudo journalctl -u macprovider-archive-rotate -n 50 --no-pager
+```
+
+**Exit-3 alert response.** If the rotation script logs `exit 3` (live DB did
+not shrink despite passing the size/age threshold), the archive WAS written
+to cold storage but the live DB is still oversize. Investigate before the
+next daily fire — typical causes are (a) no rows older than
+`GATEWAY_ARCHIVE_PRUNE_DAYS` (drop the threshold), (b) an unexpected table
+holding the bulk of bytes, or (c) WAL/SHM not checkpointed (force a sqlite3
+PRAGMA wal_checkpoint(TRUNCATE)).
+
+**Exit-4 cold-storage failure.** If the script logs `exit 4` with "REQUIRE_REMOTE=1
+but ..." the archive snapshot succeeded locally but cold-storage upload or
+readback failed; the live DB was NOT pruned and the gateway was not stopped.
+Restore S3 credentials / connectivity, then re-run with `FORCE_ROTATE=1`.
+
+**Restore (forensic):**
+
+```bash
+# Inspect an archive locally without touching the live DB.
+sudo /usr/local/sbin/macprovider-archive-restore.sh \
+  /var/lib/macprovider-gateway-archive/gateway-YYYYMMDDTHHMMSSZ.db.zst \
+  /tmp/forensic.db
+sqlite3 /tmp/forensic.db 'SELECT COUNT(*) FROM usage_events;'
+```
+
+**Restore (destructive — replaces live DB):**
+
+```bash
+sudo ASSUME_YES=1 /usr/local/sbin/macprovider-archive-restore.sh --to-live \
+  /var/lib/macprovider-gateway-archive/gateway-YYYYMMDDTHHMMSSZ.db.zst
+# All rows written to the live DB since the snapshot was taken are lost.
+# A copy of the pre-restore live DB is left at
+# /var/lib/macprovider/gateway.db.pre-restore.<ts>.
+```
+
+Document any `--to-live` use as an incident entry in
+`beta/DECISION_CRITERIA.md` per the Q4 design's restore-procedure
+section.
+
 ## 4. Settlement
 
 Billing settlement is handled by `phase4-coordinator/internal/billing`:
