@@ -64,6 +64,7 @@ type Server struct {
 	sticky                 map[string]stickyEntry
 	stickyMu               sync.Mutex
 	internalAuthKey        string
+	gatewayServiceToken    string
 	tier2Mu                sync.RWMutex
 	tier2                  config.Tier2Config
 	reqLog                 requestLogInserter
@@ -247,6 +248,24 @@ func WithInternalAuthKey(key string) Option {
 	}
 }
 
+// WithGatewayServiceToken sets the secondary credential accepted on
+// `/internal/*` paths (M3-2 / SECU-4 / codex PR #73 HIGH-1). When
+// non-empty, the gateway can call `/internal/routing` and
+// `/internal/sticky` with either this token OR the operator key. The
+// audit-log line emits `key=service_token|operator_key` so the operator
+// can watch the cutover and rotate operator_key once gateway-origin
+// calls stop reporting key=operator_key.
+//
+// IMPORTANT: this credential is intentionally NOT accepted on any
+// `/admin/*` or `/poolz` endpoint. That class of route is human-admin
+// only (per the codex audit), to ensure rotating operator_key does NOT
+// silently leak admin power to a service token.
+func WithGatewayServiceToken(token string) Option {
+	return func(s *Server) {
+		s.gatewayServiceToken = strings.TrimSpace(token)
+	}
+}
+
 func WithRelay(fn RelayFunc, timeout time.Duration) Option {
 	return func(s *Server) {
 		s.relay = fn
@@ -374,7 +393,7 @@ func (s *Server) InternalHandler() http.Handler {
 }
 
 func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
-	if !s.internalBearerAuthorized(r.Header) {
+	if !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal routing metadata requires coordinator authorization")
 		return
 	}
@@ -539,7 +558,7 @@ func (s *Server) observedModelHashEvidence() bool {
 }
 
 func (s *Server) handleInternalStickyDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.internalBearerAuthorized(r.Header) {
+	if !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal sticky purge requires coordinator authorization")
 		return
 	}
@@ -2720,8 +2739,43 @@ func hasInternalRoutingHeader(headers http.Header) bool {
 	return false
 }
 
+// internalBearerAuthorized guards the `/internal/routing` and
+// `/internal/sticky` paths the gateway calls upstream. It accepts
+// EITHER the operator key OR the gateway service token (M3-2 / SECU-4
+// dual-credential bridge per the codex PR #73 fix). BOTH candidates are
+// evaluated before branching to close the short-circuit timing oracle
+// the audit flagged as MEDIUM. The audit-log line carries which class
+// matched so the operator can watch the cutover.
+//
+// TODO(m3-2-cleanup): remove the operator-key fallback in a dedicated
+// PR once live audit logs show zero gateway-origin
+// `key=operator_key` for 30 days post-OperatorKey-rotation. Tracked in
+// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md.
 func (s *Server) internalBearerAuthorized(headers http.Header) bool {
-	return auth.BearerTokenMatchesHeader(headers, s.internalAuthKey)
+	return s.internalBearerAuthorizedRemote(headers, "")
+}
+
+// internalBearerAuthorizedRemote is the variant called from request
+// handlers that have a *http.Request available, so the audit-log line
+// can carry the originating address. The non-remote variant calls this
+// with an empty string for legacy in-band call sites that only have
+// headers (e.g., the buyer routing-eligibility check).
+func (s *Server) internalBearerAuthorizedRemote(headers http.Header, remoteAddr string) bool {
+	return s.internalBearerAuthorizedFull(headers, remoteAddr, "")
+}
+
+func (s *Server) internalBearerAuthorizedFull(headers http.Header, remoteAddr, path string) bool {
+	kind := auth.GatewayInternalBearerMatches(headers, s.internalAuthKey, s.gatewayServiceToken)
+	if kind == auth.BearerKindNone {
+		return false
+	}
+	s.log.Info().
+		Str("event", "internal_bearer_accepted").
+		Str("key", kind.String()).
+		Str("path", path).
+		Str("remote_addr", remoteAddr).
+		Msg("internal bearer accepted")
+	return true
 }
 
 func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig) (pool.Provider, *routeError) {
@@ -2830,6 +2884,11 @@ func (s *Server) effectiveHashStatus(p pool.Provider, cfg config.Tier2Config) po
 	if p.HashStatus != "" {
 		return p.HashStatus
 	}
+	// TODO(m3-8d-followup): legacy fallback uses the package-singleton shim
+	// (tier2.VerifyProviderHash → tier2.Default()) because buyer.Server is
+	// not yet threaded with an explicit *tier2.Catalog via DI. Migration is
+	// tracked separately (see beta/DECISION_CRITERIA.md); switching it here
+	// also unblocks t.Parallel() in internal/buyer/server_test.go.
 	return tier2.VerifyProviderHash(p.ModelID, p.ModelHash)
 }
 

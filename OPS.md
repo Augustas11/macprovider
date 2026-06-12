@@ -165,21 +165,72 @@ known M3 follow-up.
 
 ## 6. Key rotation
 
-The coordinator and gateway currently share an operator key:
-`auth.operator_key` in both `coordinator.yaml` and `gateway.yaml` (the
-gateway uses it as the bearer when calling coordinator `/internal/*`
-endpoints). M3-2 will split these; until then, a rotation is a coordinated
-edit:
+Post M3-2 (PR #73 + codex fixup), **three bearer-token classes** are in
+play:
+
+- `auth.operator_key` in `coordinator.yaml` — human-admin credential.
+  Accepted by `/admin/blacklist`, `/admin/promote`, `/admin/reject`,
+  `/admin/provisional`, `/poolz`, `/admin/ledger/*`,
+  `/admin/explorer/*`. The codex PR #73 HIGH-1 fix scoped these to
+  operator-key-only so a compromised gateway cannot pivot to
+  human-admin power.
+- `auth.gateway_service_token` in `coordinator.yaml` — service-to-service
+  credential the coordinator accepts on `/internal/routing` and
+  `/internal/sticky`. The operator key is ALSO accepted on those paths
+  as a backward-compat fallback until the cutover gate is met (see
+  `audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md`).
+- `coordinator.service_token` in `gateway.yaml` — outbound credential
+  the gateway sends on upstream `/internal/*` calls.
+
+Both coordinator-side fields support `env:NAME` indirection and now
+fail closed on missing/empty env var (codex PR #73 MED fix); the
+gateway side fails closed on the same pattern as of the same fix.
+
+### Post-M3-2 cutover procedure (one-time per fleet)
+
+1. Generate a fresh service token:
+   `head -c 32 /dev/urandom | base64`
+2. On Pearl, append it to `/etc/macprovider/coordinator.env` as
+   `GATEWAY_SERVICE_TOKEN=<value>` (root:macprovider 0640) — see step
+   6.1 below.
+3. Push the same value to each gateway's `gateway.yaml`
+   `coordinator.service_token` (also via env: indirection if the
+   gateway uses systemd-environment plumbing).
+4. `sudo systemctl reload macprovider-coordinator` so the coordinator
+   re-reads `gateway_service_token`.
+5. Restart each gateway so it sends the new service token upstream.
+6. Watch the audit log:
+   `journalctl -u macprovider-coordinator -f | grep internal_bearer_accepted`
+   Look for `key=service_token` on every gateway-origin internal hit.
+7. After **24h of zero** `key=operator_key` on gateway-origin hits,
+   rotate the legacy `operator_key` (steps below). Admin tooling
+   needs the new operator key; gateways do not, since they are now on
+   service token.
+
+### Rotating `operator_key` (human admin)
 
 1. Generate a fresh key:
    `head -c 32 /dev/urandom | base64`
-2. Edit `/opt/macprovider/coordinator.yaml` and
-   `/opt/macprovider/gateway.yaml` on Pearl — set the new key in both.
+2. Edit `/opt/macprovider/coordinator.yaml` (or
+   `/etc/macprovider/coordinator.env` if env-resolved) — set the new
+   key.
 3. `sudo systemctl reload macprovider-coordinator` (SIGHUP re-reads).
-4. `sudo systemctl restart macprovider-gateway` (gateway re-reads on
-   start).
-5. Verify: `curl -s -H "Authorization: Bearer $NEW_KEY"
+4. Verify: `curl -s -H "Authorization: Bearer $NEW_KEY"
    http://127.0.0.1:8444/poolz` returns the pool snapshot.
+
+### 6.1 `coordinator.env` permissions
+
+`/etc/macprovider/coordinator.env` holds `OPERATOR_KEY` and (optionally)
+`GATEWAY_SERVICE_TOKEN`. It is read by the coordinator unit (running
+as root → drops to macprovider via `User=`) and by the de-rooted
+monitor unit (running as macprovider). The required mode is **0640
+root:macprovider**. The deploy script enforces this when the file is
+present (codex PR #73 LOW fix). If you create the file by hand:
+
+```bash
+sudo install -o root -g macprovider -m 0640 /dev/null /etc/macprovider/coordinator.env
+sudoedit /etc/macprovider/coordinator.env
+```
 
 For **provider tokens** (M1-1 pinned-tier path, audit XSEC-1): the
 operator-issued tokens are stored hashed in the coordinator's `auth.tokens`

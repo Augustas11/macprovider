@@ -13,6 +13,10 @@ import (
 
 var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 
+// minAuditLogRetentionDays is the compliance floor for audit_log retention.
+// Operators may not set audit_log_retention_days below this value.
+const minAuditLogRetentionDays = 90
+
 type Config struct {
 	Listen                       ListenConfig                 `yaml:"listen"`
 	Pool                         PoolConfig                   `yaml:"pool"`
@@ -154,6 +158,15 @@ type CoordinatorAdvertisedVersion struct {
 
 type AuthConfig struct {
 	OperatorKey string `yaml:"operator_key"`
+	// GatewayServiceToken is the optional service-to-service credential
+	// the gateway uses when calling internal/admin coordinator endpoints
+	// (M3-2 / SECU-4). When set, the coordinator accepts EITHER
+	// OperatorKey OR GatewayServiceToken on the internal-bearer auth
+	// path; this allows the operator key to be rotated independently of
+	// the live gateway upstream credential. Empty = legacy-only
+	// (OperatorKey is the sole accepted credential), preserving
+	// pre-bridge behavior.
+	GatewayServiceToken string `yaml:"gateway_service_token"`
 	// RequireProviderTokens fails closed for public provider WebSocket
 	// exposure. Disable only for isolated local development or one-off
 	// migrations where anonymous pinned-provider admission is acceptable.
@@ -378,10 +391,50 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, err
 	}
+	if err := cfg.resolveEnv(); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// resolveEnv expands "env:NAME" sentinels in secret-bearing fields by
+// reading the named environment variable. Mirrors the gateway-side
+// resolver (M3-2 / DEVE-7) but is intentionally duplicated to avoid a
+// cross-module import; the audit recorded "intentional duplication" as
+// the house pattern for config plumbing.
+//
+// FAIL-CLOSED contract: when the YAML uses an env: sentinel and the
+// referenced variable is unset OR empty, Load returns an error. Silent
+// fall-through to "" would let the coordinator boot with an empty
+// operator_key in places where Validate's "must be set" guard does not
+// catch the substitution (e.g. future fields added to this resolver).
+func (c *Config) resolveEnv() error {
+	if v, err := resolveEnvValue("auth.operator_key", c.Auth.OperatorKey); err != nil {
+		return err
+	} else {
+		c.Auth.OperatorKey = v
+	}
+	if v, err := resolveEnvValue("auth.gateway_service_token", c.Auth.GatewayServiceToken); err != nil {
+		return err
+	} else {
+		c.Auth.GatewayServiceToken = v
+	}
+	return nil
+}
+
+func resolveEnvValue(field, v string) (string, error) {
+	if !strings.HasPrefix(v, "env:") {
+		return v, nil
+	}
+	name := strings.TrimPrefix(v, "env:")
+	resolved := os.Getenv(name)
+	if resolved == "" {
+		return "", fmt.Errorf("%s references env:%s but the environment variable is unset or empty", field, name)
+	}
+	return resolved, nil
 }
 
 func (c Config) HeartbeatInterval() time.Duration {
@@ -609,8 +662,8 @@ func (c Config) Validate() error {
 	if c.Storage.RequestLogRetentionDays <= 0 {
 		return fmt.Errorf("storage.request_log_retention_days must be > 0")
 	}
-	if c.Storage.AuditLogRetentionDays <= 0 {
-		return fmt.Errorf("storage.audit_log_retention_days must be > 0")
+	if c.Storage.AuditLogRetentionDays < minAuditLogRetentionDays {
+		return fmt.Errorf("storage.audit_log_retention_days must be >= %d (compliance floor)", minAuditLogRetentionDays)
 	}
 	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
 		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")

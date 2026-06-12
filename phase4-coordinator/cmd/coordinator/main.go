@@ -227,6 +227,7 @@ func main() {
 		buyer.WithTier2Config(cfg.Tier2),
 		buyer.WithLimitsConfig(cfg.Limits),
 		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
+		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithRequestLog(reqLogStore),
@@ -242,8 +243,9 @@ func main() {
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
-	billingHandler := billingStore.Handlers(
+	billingHandler := billingStore.HandlersWithBridge(
 		cfg.Auth.OperatorKey,
+		cfg.Auth.GatewayServiceToken,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
@@ -453,16 +455,21 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
 		return
 	}
-	if err := tier2.ConfigureStrict(cfg.Tier2, logger); err != nil {
+	// M3-8d (audit TEST-4): build a fresh *Catalog and atomically swap the
+	// package singleton, rather than mutating the in-place global. A reader
+	// holding the old pointer mid-VerifyProviderHash completes against the
+	// old (still-valid) catalog; the next call lands on the new one. If
+	// ConfigureStrict on the new *Catalog fails, the SIGHUP is rejected
+	// and the in-flight singleton is left untouched — same semantics as
+	// the pre-M3-8d in-place mutation, but without the SIGHUP-reload race
+	// the audit flagged on catalog.go:81-84.
+	//
+	// M3-8d fixup (codex MED): build + validate + require_hash_verified
+	// post-condition + swap now happen atomically inside
+	// ConfigureDefaultStrict so this path cannot be bypassed by a future
+	// caller skipping a step.
+	if _, err := tier2.ConfigureDefaultStrict(cfg.Tier2, logger); err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
-		return
-	}
-	if cfg.Tier2.RequireHashVerified && !tier2.Active() {
-		if tier2.Configured() {
-			logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires an active (non-expired) catalog; the current catalog has expired or failed to load")
-		} else {
-			logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires a configured catalog")
-		}
 		return
 	}
 	wsServer.SetTier2Config(cfg.Tier2)

@@ -194,6 +194,127 @@ func TestEmitterDoesNotPanicOnSQLiteFailure(t *testing.T) {
 	emitter(event)
 }
 
+// TestPruneBeforeBatchedDeletesCrossesBatchBoundary inserts 12,000 audit
+// rows across the cutoff (well above the 500-row pruneBatchSize) and
+// asserts the batched DELETE loop drains everything strictly older while
+// leaving the at/after rows intact. Regression guard for M3-1 / PERF-3.
+func TestPruneBeforeBatchedDeletesCrossesBatchBoundary(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	const each = 6000
+	for i := 0; i < each; i++ {
+		ts := cutoff.Add(-time.Duration(i+1) * time.Second)
+		if err := store.Insert(ctx, ts, "event", "p", `{"event":"event"}`); err != nil {
+			t.Fatalf("insert old %d: %v", i, err)
+		}
+	}
+	for i := 0; i < each; i++ {
+		ts := cutoff.Add(time.Duration(i) * time.Second)
+		if err := store.Insert(ctx, ts, "event", "p", `{"event":"event"}`); err != nil {
+			t.Fatalf("insert new %d: %v", i, err)
+		}
+	}
+
+	deleted, err := store.PruneBefore(ctx, cutoff)
+	if err != nil {
+		t.Fatalf("PruneBefore: %v", err)
+	}
+	if deleted != each {
+		t.Fatalf("deleted=%d want %d", deleted, each)
+	}
+	if got := countAuditRows(t, store); got != each {
+		t.Fatalf("remaining=%d want %d", got, each)
+	}
+}
+
+// TestPruneBeforeNoSQLiteBusyUnderConcurrentInsert proves the batched
+// DELETE keeps the write lock short enough for a concurrent inserter
+// (covered by busy_timeout) under contention. Regression guard for M3-1.
+func TestPruneBeforeNoSQLiteBusyUnderConcurrentInsert(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	cutoff := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	const old = 8000
+	for i := 0; i < old; i++ {
+		ts := cutoff.Add(-time.Duration(i+1) * time.Second)
+		if err := store.Insert(ctx, ts, "event", "p", `{"event":"event"}`); err != nil {
+			t.Fatalf("seed %d: %v", i, err)
+		}
+	}
+
+	stop := make(chan struct{})
+	writerErr := make(chan error, 1)
+	go func() {
+		base := cutoff.Add(time.Hour)
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				writerErr <- nil
+				return
+			default:
+			}
+			ts := base.Add(time.Duration(i) * time.Millisecond)
+			if err := store.Insert(ctx, ts, "event", "w", `{"event":"event"}`); err != nil {
+				writerErr <- err
+				return
+			}
+		}
+	}()
+
+	if _, err := store.PruneBefore(ctx, cutoff); err != nil {
+		close(stop)
+		<-writerErr
+		if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked") {
+			t.Fatalf("PruneBefore hit lock contention: %v", err)
+		}
+		t.Fatalf("PruneBefore: %v", err)
+	}
+	close(stop)
+	if err := <-writerErr; err != nil {
+		if strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked") {
+			t.Fatalf("concurrent writer hit lock contention: %v", err)
+		}
+		t.Fatalf("concurrent writer: %v", err)
+	}
+}
+
+// TestPruneBeforeUsesTsUtcIndex pins the DELETE's plan to
+// idx_audit_log_ts_utc via EXPLAIN QUERY PLAN. A planner regression
+// (index dropped or WHERE clause rewritten in a non-sargable way) would
+// surface here as a SCAN audit_log.
+func TestPruneBeforeUsesTsUtcIndex(t *testing.T) {
+	store := openTestStore(t)
+	defer store.Close()
+	ctx := context.Background()
+	rows, err := store.DB().QueryContext(ctx,
+		`EXPLAIN QUERY PLAN DELETE FROM audit_log WHERE rowid IN (SELECT rowid FROM audit_log WHERE julianday(ts_utc) < julianday(?) LIMIT ?)`,
+		time.Now().UTC().Format(time.RFC3339Nano), pruneBatchSize)
+	if err != nil {
+		t.Fatalf("explain: %v", err)
+	}
+	defer rows.Close()
+	var combined strings.Builder
+	for rows.Next() {
+		var id, parent, notUsed int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		combined.WriteString(detail)
+		combined.WriteString("\n")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("plan rows: %v", err)
+	}
+	plan := combined.String()
+	if !strings.Contains(plan, "idx_audit_log_ts_utc") {
+		t.Fatalf("plan does not reference idx_audit_log_ts_utc; full plan:\n%s", plan)
+	}
+}
+
 func openTestStore(t *testing.T) *Store {
 	t.Helper()
 	store, err := OpenStore(t.TempDir() + "/coordinator.db")

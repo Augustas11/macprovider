@@ -9,6 +9,11 @@ Type=simple
 User=macprovider
 Group=macprovider
 WorkingDirectory=/opt/macprovider
+# Env-file indirection for secrets referenced as env:NAME in coordinator.yaml
+# (M3-2 / DEVE-7 — parity with phase5-gateway). Mode 0640 root:macprovider
+# expected on the host. The "-" prefix tolerates a missing file so coordinator
+# instances that still inline secrets in YAML keep working.
+EnvironmentFile=-/etc/macprovider/coordinator.env
 
 # Binary + config paths
 ExecStart=/opt/macprovider/coordinator --config /opt/macprovider/coordinator.yaml

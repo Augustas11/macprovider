@@ -64,7 +64,17 @@ limits:
 
 auth:
   # 64 hex chars (256 bits). Generated with: openssl rand -hex 32
+  # In production, prefer the env-indirected form so the secret lives in
+  # /etc/macprovider/coordinator.env (mode 0640 root:macprovider) instead
+  # of YAML on disk (M3-2 / DEVE-7):
+  #   operator_key: env:OPERATOR_KEY
   operator_key: "REPLACE_ME_WITH_RANDOM_HEX_64"
+  # Optional service-to-service credential the gateway uses for upstream
+  # admin calls (M3-2 / SECU-4). When set, the coordinator accepts EITHER
+  # operator_key OR gateway_service_token on internal-bearer endpoints,
+  # so operator_key can be rotated independently. Leave unset to preserve
+  # pre-bridge behavior.
+  #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
   require_provider_tokens: true # Production/provider WS public exposure must require provider tokens.
 
 storage:

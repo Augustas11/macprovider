@@ -26,10 +26,6 @@ let package = Package(
             exact: "2.101.0"
         ),
         .package(
-            url: "https://github.com/apple/swift-log.git",
-            exact: "1.6.0"
-        ),
-        .package(
             url: "https://github.com/apple/swift-argument-parser.git",
             exact: "1.8.2"
         ),
@@ -57,7 +53,6 @@ let package = Package(
                 .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
                 .product(name: "NIO", package: "swift-nio"),
                 .product(name: "NIOHTTP1", package: "swift-nio"),
-                .product(name: "Logging", package: "swift-log"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "Yams", package: "Yams")
             ],

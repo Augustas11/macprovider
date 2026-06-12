@@ -67,6 +67,7 @@ Environment overrides:
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
   MACPROVIDER_NO_PROMPT=1        use defaults without interactive prompts
   MACPROVIDER_NO_LAUNCHD=1       skip launchd service install
+  MACPROVIDER_SKIP_HF_CHECK=1    skip HuggingFace lookup on custom model id
 USAGE
 }
 
@@ -275,9 +276,158 @@ model_default_for_ram() {
   fi
 }
 
+# SPEC-003 v0.9 FR-D2: enforce safe HuggingFace repo id format.
+# Path-component charset (A-Za-z0-9._-) plus a single "/" separator. Any
+# deviation from "org/name" is rejected — this id is interpolated into a URL
+# and a YAML field, so traversal/newlines/whitespace must not slip through.
+validate_hf_id() {
+  id="$1"
+  reject_newlines "model id" "$id"
+  case "$id" in
+    */*/*|*/) die 7 "model id must be in the form org/name (got: $id)" ;;
+    */*) ;;
+    *) die 7 "model id must be in the form org/name (got: $id)" ;;
+  esac
+  case "$id" in
+    *[!A-Za-z0-9._/-]*) die 7 "model id contains invalid characters; allowed: A-Z a-z 0-9 . _ - /" ;;
+  esac
+  case "$id" in
+    /*|*/) die 7 "model id must be in the form org/name (got: $id)" ;;
+  esac
+  # Round-2 hardening (codex code/security MAJOR): reject "." / ".." path
+  # components even though the charset filter allows them. Otherwise an id
+  # like "org/.." or "../name" passes the format check and could be
+  # path-normalized into the HF URL or later treated as a relative local
+  # model path by the binary.
+  hf_org="${id%/*}"
+  hf_name="${id##*/}"
+  case "$hf_org" in
+    .|..) die 7 "model id org segment cannot be \".\" or \"..\"" ;;
+  esac
+  case "$hf_name" in
+    .|..) die 7 "model id name segment cannot be \".\" or \"..\"" ;;
+  esac
+}
+
+# SPEC-003 v0.9 FR-D2: estimate weight size in GB from HF repo name.
+# Parses N params from "...3B...", "...7B...", "...1.7B..." patterns and a
+# quantization hint (4bit/8bit/bf16/fp16/q4/q8). Returns an integer GB to
+# stdout or empty if the name can't be parsed — callers treat empty as
+# "skip fit check, warn user".
+estimate_weights_gb_from_name() {
+  id="$1"
+  # Round-2 (codex code MAJOR): match "NxMB" Mixture-of-Experts shape FIRST
+  # (e.g. "Mixtral-8x7B" — 8 experts of 7B each, total ~56B params). The
+  # single-N pattern below would otherwise capture only the "7B" half and
+  # under-count memory by ~N×, letting the fit check pass a model that
+  # would OOM the host.
+  moe_match="$(printf "%s" "$id" | grep -oE '[0-9]+x[0-9]+(\.[0-9]+)?[Bb]' | head -n1)"
+  if [ -n "$moe_match" ]; then
+    experts="${moe_match%%x*}"
+    per_rest="${moe_match#*x}"
+    per_b="${per_rest%[Bb]}"
+    params_b="$(awk -v e="$experts" -v p="$per_b" 'BEGIN { printf "%g", e * p }')"
+  else
+    params_b="$(printf "%s" "$id" | grep -oE '[0-9]+(\.[0-9]+)?[Bb]' | head -n1 | tr -d 'Bb')"
+  fi
+  [ -n "$params_b" ] || return 0
+  quant_lc="$(printf "%s" "$id" | tr '[:upper:]' '[:lower:]')"
+  case "$quant_lc" in
+    *4bit*|*-q4*|*_q4*) bytes_per_param=0.5 ;;
+    *8bit*|*-q8*|*_q8*) bytes_per_param=1.0 ;;
+    *bf16*|*fp16*|*-f16*) bytes_per_param=2.0 ;;
+    *) bytes_per_param=2.0 ;;
+  esac
+  awk -v p="$params_b" -v b="$bytes_per_param" \
+    'BEGIN { gb = p * b; if (gb < 1) gb = 1; printf "%d", gb + 0.5 }'
+}
+
+# SPEC-003 v0.9 FR-D2: pre-install validation of a user-supplied HuggingFace
+# model id. Hard-blocks on inaccessible (401/403/404 — HF returns 401 for both
+# gated and nonexistent repos) and on non-MLX repos. Warns and prompts on
+# tight/over-RAM fit; user may override. Network errors downgrade to a
+# "skipped" warning so a flaky HF doesn't brick installs. All output goes to
+# stderr — caller's stdout is reserved for the chosen id.
+hf_check_model() {
+  id="$1"
+  ram_gb="$2"
+  if [ "${MACPROVIDER_SKIP_HF_CHECK:-0}" = "1" ]; then
+    log "Skipping HuggingFace check (MACPROVIDER_SKIP_HF_CHECK=1)."
+    return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    log "curl not found; skipping HuggingFace check."
+    return 0
+  fi
+  log "Checking model $id on HuggingFace…"
+  api_url="https://huggingface.co/api/models/$id"
+  # -f omitted so 4xx bodies still reach us; status is routed explicitly below.
+  body_and_code="$(curl -sSL -m 10 -o - -w '\n__HTTP_STATUS__%{http_code}' "$api_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
+  http_code="${body_and_code##*__HTTP_STATUS__}"
+  body="${body_and_code%__HTTP_STATUS__*}"
+  case "$http_code" in
+    200) ;;
+    401|403|404)
+      die 7 "model $id is not accessible on HuggingFace (private, gated, or doesn't exist). For a gated repo, use 'macprovider-cli models switch' post-install with HF_TOKEN set."
+      ;;
+    network_error)
+      log "WARNING: could not reach HuggingFace API; skipping fit check."
+      return 0
+      ;;
+    *)
+      log "WARNING: unexpected HuggingFace API status $http_code; skipping fit check."
+      return 0
+      ;;
+  esac
+
+  # MLX detection: mlx-community/* repos are mlx by convention, plus any repo
+  # that declares mlx as library_name or carries an "mlx" tag.
+  is_mlx=0
+  case "$id" in
+    mlx-community/*) is_mlx=1 ;;
+  esac
+  if [ "$is_mlx" -eq 0 ]; then
+    # Round-2 (codex code MINOR): flatten the body to one line before the
+    # tags regex. HF currently returns minified JSON, but a future format
+    # change to pretty-printed bodies would defeat the bracketed-class
+    # match because grep -E reads line-by-line.
+    flat_body="$(printf "%s" "$body" | tr -d '\n\r')"
+    if printf "%s" "$flat_body" | grep -qE '"library_name"[[:space:]]*:[[:space:]]*"mlx"|"tags"[[:space:]]*:[[:space:]]*\[[^]]*"mlx"'; then
+      is_mlx=1
+    fi
+  fi
+  if [ "$is_mlx" -eq 0 ]; then
+    die 7 "model $id is not an MLX repo. macprovider runs MLX-format models only. Pick an mlx-community/* variant or convert with mlx_lm.convert."
+  fi
+
+  est_gb="$(estimate_weights_gb_from_name "$id")"
+  if [ -z "$est_gb" ]; then
+    log "WARNING: could not estimate weight size from model name; skipping fit check."
+    return 0
+  fi
+  # Headroom: ~6 GB for macOS (3-4 GB) + Metal + mlx runtime + binary +
+  # KV cache. This matches the existing RAM-tier policy where the 7B (~4 GB)
+  # default targets 16 GB Macs, not 8 GB Macs.
+  comfortable_gb=$((est_gb + 6))
+  if [ "$ram_gb" -ge "$comfortable_gb" ]; then
+    log "Model fits: ~${est_gb} GB weights on ${ram_gb} GB Mac (working set ~${comfortable_gb} GB)."
+    return 0
+  fi
+  if [ "$ram_gb" -ge "$((est_gb + 2))" ]; then
+    log "WARNING: tight fit — ~${est_gb} GB weights on ${ram_gb} GB Mac; may swap or OOM under load."
+    prompt_yes_no "Proceed anyway? [y/N]" "N" || die 7 "aborted by user"
+    return 0
+  fi
+  log "WARNING: ~${est_gb} GB weights will not fit on ${ram_gb} GB Mac."
+  prompt_yes_no "Proceed anyway? [y/N]" "N" || die 7 "aborted by user"
+}
+
 choose_model() {
   ram_gb="$1"
   if [ -n "${MACPROVIDER_MODEL:-}" ]; then
+    # Env-var override is an explicit power-user path; validate format only,
+    # skip interactive HF prompts so CI / NO_PROMPT flows don't deadlock.
+    validate_hf_id "$MACPROVIDER_MODEL"
     printf "%s" "$MACPROVIDER_MODEL"
     return
   fi
@@ -293,6 +443,7 @@ choose_model() {
   printf "  1) mlx-community/Llama-3.2-3B-Instruct-4bit      ~2 GB, 8 GB Macs\n" >&2
   printf "  2) mlx-community/Qwen2.5-7B-Instruct-4bit        ~4 GB, 16 GB Macs\n" >&2
   printf "  3) mlx-community/Qwen2.5-14B-Instruct-4bit       ~8 GB, 24 GB+ Macs\n" >&2
+  printf "  c) custom HuggingFace MLX model id\n" >&2
   printf "Selection [default: %s]: " "$default_model" >&2
   read_line
   selection="$REPLY"
@@ -300,6 +451,15 @@ choose_model() {
     1) printf "mlx-community/Llama-3.2-3B-Instruct-4bit" ;;
     2) printf "mlx-community/Qwen2.5-7B-Instruct-4bit" ;;
     3) printf "mlx-community/Qwen2.5-14B-Instruct-4bit" ;;
+    c|C)
+      printf "HuggingFace model id (org/name): " >&2
+      read_line
+      custom_id="$REPLY"
+      [ -n "$custom_id" ] || die 7 "custom model id cannot be empty"
+      validate_hf_id "$custom_id"
+      hf_check_model "$custom_id" "$ram_gb" >&2
+      printf "%s" "$custom_id"
+      ;;
     "") printf "%s" "$default_model" ;;
     *) die 7 "invalid model selection" ;;
   esac

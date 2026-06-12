@@ -91,7 +91,21 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Storage.AuditLogRetentionDays = 0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_retention_days") {
-		t.Fatalf("audit log retention validation err=%v", err)
+		t.Fatalf("audit log retention=0 validation err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Storage.AuditLogRetentionDays = 89
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "compliance floor") {
+		t.Fatalf("audit log retention=89 (below 90-day floor) should fail; err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Storage.AuditLogRetentionDays = 90
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("audit log retention=90 should pass validation: %v", err)
 	}
 
 	cfg = Default()

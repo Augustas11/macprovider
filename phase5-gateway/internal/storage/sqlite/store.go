@@ -817,6 +817,17 @@ func (s *Store) LatestCapacitySignals(ctx context.Context) ([]storage.CapacitySi
 	return out, rows.Err()
 }
 
+// capacityTierDTO is the on-disk JSON shape for capacity_tier runtime_config rows.
+// Has the same field names and shape as the old fmt.Sprintf format
+// `{"tier":N,"signals":"..."}`, but encoding/json may produce different output
+// for characters like <, >, & and correctly handles backslashes, quotes,
+// control characters, and Unicode that the old %q verb encoded differently
+// (code-review finding CODE-6).
+type capacityTierDTO struct {
+	Tier    int    `json:"tier"`
+	Signals string `json:"signals"`
+}
+
 func (s *Store) GetCapacityTier(ctx context.Context) (storage.CapacityTier, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT value, updated_at FROM runtime_config WHERE key = 'capacity_tier'`)
 	var value string
@@ -827,24 +838,34 @@ func (s *Store) GetCapacityTier(ctx context.Context) (storage.CapacityTier, erro
 		}
 		return storage.CapacityTier{}, err
 	}
-	var tier storage.CapacityTier
-	if _, err := fmt.Sscanf(value, `{"tier":%d,"signals":%q}`, &tier.Tier, &tier.Signals); err != nil {
-		return storage.CapacityTier{}, err
+	var dto capacityTierDTO
+	if err := json.Unmarshal([]byte(value), &dto); err != nil {
+		// Legacy compat: old rows were written by fmt.Sprintf with %q, which
+		// produces Go-quoted strings (e.g., \xNN escapes) that json.Unmarshal
+		// rejects. Try the old format as a fallback so we can read existing rows.
+		var legacyTier int
+		var legacySignals string
+		if _, scanErr := fmt.Sscanf(value, `{"tier":%d,"signals":%q}`, &legacyTier, &legacySignals); scanErr == nil {
+			return storage.CapacityTier{Tier: legacyTier, Signals: legacySignals, UpdatedAt: decodeTime(updated)}, nil
+		}
+		return storage.CapacityTier{}, fmt.Errorf("decode capacity_tier: %w", err)
 	}
-	tier.UpdatedAt = decodeTime(updated)
-	return tier, nil
+	return storage.CapacityTier{Tier: dto.Tier, Signals: dto.Signals, UpdatedAt: decodeTime(updated)}, nil
 }
 
 func (s *Store) SetCapacityTier(ctx context.Context, tier storage.CapacityTier) error {
 	if tier.UpdatedAt.IsZero() {
 		tier.UpdatedAt = time.Now().UTC()
 	}
-	value := fmt.Sprintf(`{"tier":%d,"signals":%q}`, tier.Tier, tier.Signals)
-	_, err := s.db.ExecContext(ctx, `
+	value, err := json.Marshal(capacityTierDTO{Tier: tier.Tier, Signals: tier.Signals})
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO runtime_config(key, value, updated_at)
 		VALUES('capacity_tier', ?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-		value, encodeTime(tier.UpdatedAt))
+		string(value), encodeTime(tier.UpdatedAt))
 	return err
 }
 

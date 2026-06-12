@@ -1,7 +1,13 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.8.4 (2026-06-12, composed FR-C9.4 contract: self-heal on NULL row + strict-reject on USED row + race-loss admit-quarantined; supersedes both v0.8.3 drafts)
+**Version:** 0.9.2 (2026-06-12, FR-C9.4 composed contract + fix-pass-5 audit closure on top of v0.9.1 installer hardening)
 **Depends on:** SPEC-001 v1.3.1, SPEC-002 v1.3.5
+
+**Change log v0.9.2:** Merge-time composition of two independent SPEC-003 lines that landed concurrently. v0.9.1 (PR #67 main) shipped installer-side hardenings to FR-D2.1. v0.8.4 (PR #69 branch, see below) shipped the composed FR-C9.4 contract + fix-pass-5 audit closure. v0.9.2 is the union: the v0.9.1 FR-D2.1 changes are unchanged (no FR-C9 overlap), and the v0.8.4 FR-C9.4 contract is normative as written. The composed v0.9.2 contract adds three storage/pool primitives from fix-pass-5: `auth.Store.ValidateAndMarkTokenUsed` (atomic UPDATE-RETURNING closing the ValidateToken+MarkTokenUsed TOCTOU window), `pool.AuthMintFailed` enum (transient IssueToken DB-error → fail-closed RejectTOFU), and extended `pool.Registry.Register` eviction defense (non-Bearer-validated incoming MUST NOT replace existing routable Bearer-validated session). DECISION_CRITERIA Entry 76 captures the composition reasoning; Entries 74 (was 69, was 67), 75 (was 70, was 68) trace the renumber history through two merge cycles. Pearl operational state unchanged.
+
+**Change log v0.9.1:** Two installer-side R2/R3 hardenings surfaced by the parallel codex audits on PR #67. **(a) FR-D2.1 step 1 (format validation)** now MUST reject path components equal to `.` or `..` (split on `/`, reject either segment) in addition to the existing charset and shape checks. Prior wording said "no traversal/whitespace" in prose but the implementation relied on the charset filter alone, which permitted `org/..` and `../name`. **(b) FR-D2.1 step 4 (weight estimation)** now MUST match a Mixture-of-Experts `[0-9]+x[0-9]+(\.[0-9]+)?B` shape BEFORE the single `[0-9]+(\.[0-9]+)?B` shape. Otherwise an id like `Mixtral-8x7B-Instruct-4bit` is read as 7B and the fit check accepts a 56B model that would OOM the host. Headroom constants, quant table, and tier thresholds are unchanged.
+
+**Change log v0.9:** Extends FR-D2 with a fourth interactive option `c) custom HuggingFace MLX model id` so providers are no longer locked to the three RAM-tier defaults. The `c)` branch reads a free-form `org/name`, validates format (path-component charset, single slash, no traversal/whitespace/newlines), then queries `https://huggingface.co/api/models/<id>` to enforce two hard blocks and one soft check: (i) HTTP 401/403/404 → die with a single "not accessible" message (HF does not disclose existence to unauth'd callers, so these are indistinguishable from outside); (ii) repos that neither sit under `mlx-community/*` nor declare `library_name:"mlx"` / `"mlx"` in `tags` → die with "not an MLX repo"; (iii) RAM fit — weights estimated from the `[0-9]+(\.[0-9]+)?B` suffix and a `(4bit|8bit|bf16|fp16|q4|q8)` quant hint, then compared to detected RAM with a 6 GB headroom for the "comfortable" tier and a 2 GB headroom for the "tight" tier (matches the existing RAM-tier defaults where 7B targets 16 GB, not 8 GB). Tight/over-RAM cases warn-and-prompt; user may override. New env var `MACPROVIDER_SKIP_HF_CHECK=1` bypasses (i)/(ii)/(iii) for offline or self-mirrored installs. `MACPROVIDER_MODEL=` env override continues to skip the interactive prompts entirely (CI/`NO_PROMPT` path) but now also runs the format validator so a malformed env value fails fast. Coordinator/gateway are unaffected — no protocol change.
 
 **Change log v0.6:** Resolves cross-spec findings F-603-1 and F-603-2 from `specs/SPEC-CROSS-006-audit.md`: the installer visibility self-test now references SPEC-002 v1.1.4's coordinator-owned `GET /v1/pool/check`, and dependencies align to SPEC-001 v1.2.2 + SPEC-002 v1.1.4.
 
@@ -683,11 +689,82 @@ options:
 | 24 GB+ | Llama 3.2 3B, Qwen 2.5 7B, `mlx-community/Qwen2.5-14B-Instruct-4bit` (~8 GB) | Qwen 2.5 14B |
 
 The installer prints the model name, approximate download size, and
-estimated context window. The user selects by number. If the model is
-not already downloaded, the installer runs
+estimated context window. The user selects by number, or chooses
+`c)` to enter a custom HuggingFace model id (see FR-D2.1). If the
+model is not already downloaded, the installer runs
 `huggingface-cli download {model}` (or prints instructions if
 `huggingface-cli` is not installed). Model download is the longest
 step and is NOT included in the "2 minutes to pool" target.
+
+**FR-D2.1. install.sh custom-id branch (v0.9).**
+The interactive menu MUST offer a fourth option `c) custom
+HuggingFace MLX model id`. When selected, the installer reads a
+single line of input (the HF repo id) and applies the following gates
+in order:
+
+1. **Format**: id MUST match `org/name` with each component drawn
+   from `[A-Za-z0-9._-]+`, exactly one `/`, and no leading or
+   trailing `/`, whitespace, or newline. Additionally (v0.9.1, after
+   the charset and shape checks) neither segment may equal `.` or
+   `..` — the charset filter permits these by themselves, so the
+   installer MUST split on `/` and reject the literal `.` / `..`
+   values explicitly. Violations die with exit code 7 before any
+   network call.
+2. **HuggingFace existence**: installer issues
+   `GET https://huggingface.co/api/models/<id>` with a 10 s timeout.
+   - `200` → proceed to step 3.
+   - `401`, `403`, `404` → die with a single "not accessible
+     (private, gated, or doesn't exist)" message; the installer MUST
+     NOT distinguish these because HuggingFace does not disclose
+     existence to unauthenticated callers. The error MUST direct the
+     user to `macprovider-cli models switch` post-install with
+     `HF_TOKEN` set for the gated-repo path.
+   - Network error or unexpected status → log warning, skip
+     remaining checks, proceed.
+3. **MLX detection**: the repo qualifies if any of the following
+   holds — the id starts with `mlx-community/`, OR the API body
+   contains `"library_name":"mlx"`, OR the API body's `tags` array
+   contains the literal element `"mlx"`. Failure dies with "not an
+   MLX repo" and references `mlx_lm.convert` / `mlx-community/*`.
+4. **RAM fit**: weights are estimated as `params_b ×
+   bytes_per_param`. `params_b` is parsed from the repo name with
+   two patterns tried in order (v0.9.1):
+   - First, the Mixture-of-Experts shape
+     `[0-9]+x[0-9]+(\.[0-9]+)?B` (e.g. `Mixtral-8x7B`); when
+     matched, `params_b = experts × per_expert` (8 × 7 = 56 in the
+     example).
+   - Otherwise, the single-N shape `[0-9]+(\.[0-9]+)?B` from the
+     first match.
+   `bytes_per_param` is `0.5` (`4bit`/`q4`), `1.0` (`8bit`/`q8`),
+   or `2.0` (`bf16`/`fp16`/`-f16` or unknown).
+   - Comfortable: `ram_gb >= est_gb + 6` → log "fits", proceed.
+   - Tight: `ram_gb >= est_gb + 2` → log warning, prompt
+     `Proceed anyway? [y/N]`, default N.
+   - Won't fit: otherwise → log warning, prompt as above.
+   - If the name does not match the `B`-suffix pattern, log
+     "could not estimate weight size; skipping fit check" and
+     proceed.
+
+The headroom constants match the existing RAM-tier defaults: 7B
+(~4 GB weights) targets 16 GB Macs (`4 + 6 = 10 ≤ 16`), not 8 GB
+Macs (`4 + 6 = 10 > 8`, falls to tight tier).
+
+The env var `MACPROVIDER_SKIP_HF_CHECK=1` bypasses steps 2–4
+entirely for offline or self-mirrored installs. The format check
+(step 1) is always enforced. `MACPROVIDER_MODEL=<id>` continues to
+skip the interactive prompt and proceed straight to install, but
+SHOULD now also run the format check so malformed env values fail
+fast; the HF/MLX/fit checks are skipped on the env-override path so
+CI and `MACPROVIDER_NO_PROMPT=1` flows do not deadlock on an
+interactive yes/no prompt.
+
+All FR-D2.1 prompts and warnings MUST be written to stderr so the
+installer's stdout-captured model id remains clean.
+
+Coordinator and gateway behavior is unchanged: the coordinator
+already accepts arbitrary `supported_models` advertised in the
+provider's initial WS frame, so no protocol or schema change is
+required for this branch.
 
 **FR-D3. First-run self-test.**
 On first run (or when invoked via `macprovider-cli self-test`), the

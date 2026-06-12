@@ -213,7 +213,9 @@ func (s *Server) coordinatorRoutingMetadataFresh(ctx context.Context) (coordinat
 	if err != nil {
 		return metadata, false
 	}
-	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
+	// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
+	// OperatorKey so a not-yet-upgraded coordinator keeps accepting us.
+	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return metadata, false

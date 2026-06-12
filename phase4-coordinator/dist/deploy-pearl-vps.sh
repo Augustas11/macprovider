@@ -182,11 +182,29 @@ $SSH 'DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=nonin
 }
 
 log "step 3/9: create macprovider system user + dirs"
+# codex PR #73 fixup:
+#   - /var/lib/macprovider-monitor — writable carve-out for the de-rooted
+#     monitor under ProtectSystem=strict (HIGH-2 sandbox). Systemd would
+#     also create this via StateDirectory= at unit start, but creating it
+#     up-front guarantees correct ownership before the first activation.
+#   - /etc/macprovider — operator-rooted directory holding coordinator.env.
+#     The env file is read by the coordinator unit (root) and by the de-rooted
+#     monitor (macprovider). Mode 0750 lets macprovider read it via group;
+#     coordinator.env itself ships mode 0640 root:macprovider (LOW-fix).
 $SSH 'set -e
   id macprovider >/dev/null 2>&1 || useradd --system --home /opt/macprovider --shell /usr/sbin/nologin macprovider
   install -d -o macprovider -g macprovider -m 0755 /opt/macprovider
   install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider
   install -d -o macprovider -g macprovider -m 0750 /var/log/macprovider
+  install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider-monitor
+  install -d -o root -g macprovider -m 0750 /etc/macprovider
+  if [ -f /etc/macprovider/coordinator.env ]; then
+    chown root:macprovider /etc/macprovider/coordinator.env
+    chmod 0640 /etc/macprovider/coordinator.env
+    echo "  enforced coordinator.env perms: root:macprovider 0640"
+  else
+    echo "  /etc/macprovider/coordinator.env not yet present; operator must drop it with mode 0640 (root:macprovider)"
+  fi
 '
 
 log "step 4/9: upload binary + config + nginx site (with rollback snapshot)"

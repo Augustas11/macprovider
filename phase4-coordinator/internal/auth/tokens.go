@@ -68,6 +68,77 @@ func BearerTokenMatchesHeader(headers http.Header, expected string) bool {
 	return hmac.Equal(tokenHash[:], expectedHash[:])
 }
 
+// InternalBearerKind identifies WHICH credential class matched in
+// GatewayInternalBearerMatches. The audit-log call sites use this to
+// emit `event=internal_bearer_accepted key=<kind>` so the operator can
+// watch the M3-2 cutover for gateway-origin calls still landing under
+// operator_key. The zero value (BearerKindNone) means no match.
+type InternalBearerKind int
+
+const (
+	BearerKindNone InternalBearerKind = iota
+	BearerKindServiceToken
+	BearerKindOperatorKey
+)
+
+// String matches the JSON shape the operator filters on in journald.
+func (k InternalBearerKind) String() string {
+	switch k {
+	case BearerKindServiceToken:
+		return "service_token"
+	case BearerKindOperatorKey:
+		return "operator_key"
+	default:
+		return ""
+	}
+}
+
+// OperatorOnlyBearerMatches returns true when the request carries a
+// Bearer token that matches operatorKey. This is the credential class
+// for HUMAN-ADMIN endpoints (`/admin/blacklist`, `/admin/promote`,
+// `/admin/reject`, `/admin/ledger/*`, `/admin/explorer/*`, `/poolz`).
+// It deliberately does NOT accept gateway_service_token: the codex
+// security audit on PR #73 flagged that admin endpoints accepting the
+// service-token would silently grant human-admin power to the gateway
+// once the operator rotated the legacy operator_key.
+//
+// Empty operatorKey means DENY (M1-5 / SECU-5 preserved).
+func OperatorOnlyBearerMatches(headers http.Header, operatorKey string) bool {
+	return BearerTokenMatchesHeader(headers, operatorKey)
+}
+
+// GatewayInternalBearerMatches returns the matched credential kind when
+// the request's Bearer token matches EITHER the gateway service token
+// OR the operator key. This is the credential class for
+// SERVICE-TO-SERVICE endpoints (`/internal/routing`, `/internal/sticky`)
+// that the gateway calls upstream.
+//
+// BOTH candidates are evaluated BEFORE branching to close the
+// short-circuit timing oracle the codex security audit on PR #73
+// flagged as MEDIUM: an attacker could otherwise distinguish "service
+// token matched" vs "operator key matched" by measuring response
+// timing. Each candidate is constant-time compared via
+// BearerTokenMatchesHeader and only counted when non-empty so an empty
+// gateway_service_token can't widen the auth surface.
+//
+// Returns BearerKindServiceToken when service_token matches (preferred),
+// BearerKindOperatorKey when operator_key matches (legacy fallback),
+// BearerKindNone otherwise. service_token takes precedence so the
+// audit-log line reports the credential the gateway is supposed to be
+// using post-cutover.
+func GatewayInternalBearerMatches(headers http.Header, operatorKey, serviceToken string) InternalBearerKind {
+	serviceMatch := serviceToken != "" && BearerTokenMatchesHeader(headers, serviceToken)
+	operatorMatch := operatorKey != "" && BearerTokenMatchesHeader(headers, operatorKey)
+	switch {
+	case serviceMatch:
+		return BearerKindServiceToken
+	case operatorMatch:
+		return BearerKindOperatorKey
+	default:
+		return BearerKindNone
+	}
+}
+
 func OpenStore(path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("db path is required")

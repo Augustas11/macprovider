@@ -314,10 +314,7 @@ actor CoordinatorClient {
     private func connectAndRunTier2(socket: ProviderWebSocketTask) async throws {
         let authAttempt = Tier2AuthAttempt()
         try await send(await authInitialMessage(attempt: authAttempt))
-        let challenge: [String: Any]
-        do {
-            challenge = try await receiveAuthChallenge(from: socket)
-        } catch { throw error }
+        let challenge: [String: Any] = try await receiveAuthChallenge(from: socket)
         let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
         try await send(try await authProofMessage(challenge: challenge, attempt: authAttempt))
         let response = try await receiveAuthResponse(from: socket)
@@ -340,21 +337,8 @@ actor CoordinatorClient {
 
     private func connectAndRunLegacy(socket: ProviderWebSocketTask) async throws {
         tier2Session = nil
-        if wsTunneledMode {
-            inferenceRelay = InferenceRelay(
-                modelRuntime: modelRuntime,
-                providerStatus: providerStatus,
-                loadedModelID: loadedModelID,
-                warmSwapEnabled: warmSwapEnabled,
-                maxActiveRequests: maxActiveRequests,
-                maxBodyBytes: maxBodyBytes,
-                sendFrame: { payload in
-                    try await Self.send(payload, to: socket)
-                }
-            )
-        } else {
-            inferenceRelay = nil
-        }
+        // endpoint_url legacy mode — no relay needed.
+        inferenceRelay = nil
         try await send(await helloMessage())
         try await receiveLoop(socket)
     }

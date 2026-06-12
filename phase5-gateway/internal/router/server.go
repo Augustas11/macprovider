@@ -355,7 +355,9 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upReq.Header.Set("X-Request-ID", newUUID())
-	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
+	// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
+	// OperatorKey so a not-yet-upgraded coordinator keeps accepting us.
+	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 	resp, err := s.client.Do(upReq)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -538,7 +540,9 @@ func (s *Server) statusFromPoolz(ctx context.Context) (statusResponse, error) {
 	if err != nil {
 		return statusResponse{}, err
 	}
-	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
+	// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
+	// OperatorKey so a not-yet-upgraded coordinator keeps accepting us.
+	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 	resp, err := s.client.Do(req)
 	if err != nil {
 		s.flushStatusCache()
@@ -730,7 +734,7 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func writeError(w http.ResponseWriter, status int, typ, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "code": code}})
+	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "param": nil, "code": code}})
 }
 
 func copyCleanHeaders(dst, src http.Header) {

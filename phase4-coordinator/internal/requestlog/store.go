@@ -177,19 +177,80 @@ VALUES (?, ?, ?, ?)`,
 	return requestID, false, nil
 }
 
+// pruneBatchSize bounds a single retention DELETE to keep the write lock
+// short while billing's 6s hot path is sharing the same SQLite handle.
+// The pruner loops until a partial batch comes back. PERF-3 (M3-1): the
+// comparison stays on julianday() because every ts_utc / created_at_utc
+// write in this package uses time.RFC3339Nano, which strips trailing
+// zeros in the fractional seconds — variable widths break lexicographic
+// `<` ordering (".000…Z" sorts before "Z"). Normalizing writes to a
+// fixed-width format would touch the billing tables on the money path
+// and is deferred to a follow-up.
+const pruneBatchSize = 500
+
 func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, fmt.Errorf("store is closed")
 	}
 	cutoffText := cutoff.UTC().Format(time.RFC3339Nano)
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM request_idempotency_keys WHERE julianday(created_at_utc) < julianday(?)`, cutoffText); err != nil {
+	if err := pruneBatched(ctx, s.db, `DELETE FROM request_idempotency_keys WHERE rowid IN (SELECT rowid FROM request_idempotency_keys WHERE julianday(created_at_utc) < julianday(?) LIMIT ?)`, cutoffText); err != nil {
 		return 0, err
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM request_log WHERE julianday(ts_utc) < julianday(?)`, cutoffText)
-	if err != nil {
-		return 0, err
+	return pruneBatchedCounting(ctx, s.db, `DELETE FROM request_log WHERE rowid IN (SELECT rowid FROM request_log WHERE julianday(ts_utc) < julianday(?) LIMIT ?)`, cutoffText)
+}
+
+// pruneBatchYieldMs is the sleep between full batches so concurrent
+// writers can acquire the SQLite writer lock between iterations.
+const pruneBatchYieldMs = 10
+
+// pruneBatched runs the DELETE in capped batches and ignores the count.
+// Used for the idempotency-keys side where the original PruneBefore
+// signature only reported request_log deletions.
+func pruneBatched(ctx context.Context, db *sql.DB, query, cutoffText string) error {
+	for {
+		res, err := db.ExecContext(ctx, query, cutoffText, pruneBatchSize)
+		if err != nil {
+			return err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n < int64(pruneBatchSize) {
+			return nil
+		}
+		// Yield so concurrent writers can acquire the writer lock between full batches.
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pruneBatchYieldMs * time.Millisecond):
+		}
 	}
-	return result.RowsAffected()
+}
+
+// pruneBatchedCounting is the same loop, returning the total rows deleted.
+func pruneBatchedCounting(ctx context.Context, db *sql.DB, query, cutoffText string) (int64, error) {
+	var total int64
+	for {
+		res, err := db.ExecContext(ctx, query, cutoffText, pruneBatchSize)
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < int64(pruneBatchSize) {
+			return total, nil
+		}
+		// Yield so concurrent writers can acquire the writer lock between full batches.
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(pruneBatchYieldMs * time.Millisecond):
+		}
+	}
 }
 
 func (s *Store) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
