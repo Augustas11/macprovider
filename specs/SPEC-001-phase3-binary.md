@@ -2623,11 +2623,18 @@ processed a `models switch <X>` within the last 10 seconds MUST cause
 the next `macprovider-cli models switch <Y>` to exit code 6 with
 stderr containing `"swap on cooldown for"` and `"Re-issue with
 --force to bypass"` per SPEC-011 v0.5 R-3.1.4 / R-3.1.2 step 4. The
-same invocation with `--force` MUST bypass ONLY the cooldown soft
-guard and proceed to step 4 acceptance (or rejection on other
-grounds) per SPEC-011 v0.5 R-3.1.3. `--force` MUST NOT bypass the
-SPEC-010 R-3.6.3 pre-flight validation (verified by AC-18.2 path).
-Traces to SPEC-011 v0.5 R-3.1.2 / R-3.1.3 / R-3.1.4 and AC-24.
+same invocation with `--force` MUST bypass the cooldown soft guard
+per SPEC-011 v0.5 R-3.1.3 AND, as of v1.4, MUST ALSO bypass the
+§6.13 fit guard per R-6.13.2 (`.wontFit` becomes a warning, `.tight`
+is silenced, HF-shape `.unknown` fail-closed is overridden). The
+v1.3 spelling of this AC said "ONLY the cooldown soft guard"; v1.4
+explicitly supersedes that "ONLY" claim because PR #70 (R2) extended
+the override to the fit guard. `--force` MUST NOT bypass either the
+SPEC-010 R-3.6.3 pre-flight validation (verified by AC-18.2 path)
+or the server-side concurrency rejection (an in-flight load still
+returns `loadingInProgress` per SPEC-011 v0.5 R-3.1.x).
+Traces to SPEC-011 v0.5 R-3.1.2 / R-3.1.3 / R-3.1.4, AC-24, and
+v1.4 R-6.13.2.
 
 **AC-18.15. WS drop reconnect uses legacy `hello`, not v2.**
 A v1.3 binary `serve --enable-warm-swap` whose WebSocket connection
