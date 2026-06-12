@@ -310,3 +310,110 @@ func TestM2_1C_RowSequence_WSNonStreamingFailoverDoesNotBumpRetried(t *testing.T
 		t.Fatalf("rows[1].Retried = %d, want 0 (failover ≠ retry — must not bump explicitRetries)", rows[1].Retried)
 	}
 }
+
+// Scenario 5 (M2-1d): WS-non-streaming queue-full → advance → success.
+//
+// Pins the Q3 close-out from the post-merge architect verification of
+// PR #91. Pre-M2-1d the queue-full branch at server.go:1357-1367
+// inline-mutated state.explicitRetries / state.faultedProviders and
+// called selectProviderExcluding directly — bypassing the shared
+// advanceToNextProvider helper that M2-1a (PR #48) hoisted exactly to
+// centralize this mutation. M2-1d routes queue-full through
+// advanceToNextProvider; this test pins the resulting row sequence.
+//
+// CRITICAL pins (byte-identical to PR #91 baseline):
+//   - 2 logAttempt rows: (503 queue-full row, retried=0) then
+//     (200 success row, retried=1). Status 503 comes from
+//     wsEndHTTPStatus("error_queue_full") → ServiceUnavailable
+//     populated into attempt.Status at server.go:1669; logAttempt's
+//     "use attempt.Status when non-zero, else fallback" rule means
+//     the 502 fallback passed by the helper is overridden. This is
+//     identical to PR #91 baseline behaviour.
+//   - Queue-full IS treated as an explicit retry — explicitRetries
+//     bumps from 0 to 1 across the advance. This matches the pre-M2-1d
+//     behaviour at the removed server.go:1364-1365 inline
+//     state.explicitRetries++ / state.faultedProviders++ pair. Q3 is
+//     a structural/routing fix, NOT a semantic change — the billing
+//     ledger row sequence stays identical.
+//   - p1 must be marked StateBusy (queue-full classifier sets
+//     markBusy=true; the helper calls pool.MarkState before advancing).
+func TestM2_1D_RowSequence_WSNonStreamingQueueFullThroughAdvance(t *testing.T) {
+	const requestID = "eeeeeeee-5555-4555-8555-555555555555"
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 30, pool.TierProvisional, pool.InferencePathWSTunneled)
+	registerWithPath(registry, "p2", "s2", "model-a", pool.StateReady, 20000, 2, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:       1,
+			StickyTTLS:       1800,
+			StickyMaxEntries: 10000,
+		}),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, reqID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			if provider.ProviderID == "p1" {
+				// Drive into wsForwardQueueFull via end.Status="error_queue_full".
+				done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: reqID, Status: "error_queue_full"}
+				return &providerws.RelayStream{RequestID: reqID, Chunks: chunks, Done: done, Errors: errs}, nil
+			}
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: reqID, Seq: 0, Data: `{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: reqID, Status: "complete", ChunksSent: 1}
+			return &providerws.RelayStream{RequestID: reqID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-Request-ID": []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "p2" {
+		t.Fatalf("provider = %q, want p2 (after queue-full advance)", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	// p1 must have been MarkState(Busy) before the advance — markBusy=true
+	// classifier flag drives pool.MarkState in the queue-full helper branch.
+	if p1, ok := registry.Resolve("p1", ""); !ok || p1.State != pool.StateBusy {
+		t.Fatalf("p1 state = %v ok=%v, want StateBusy after queue-full", p1.State, ok)
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2 (queue-full then success): %#v", len(rows), rows)
+	}
+	// Pin: row 0 = p1 queue-full with 502 and retried=0
+	// (queue-full row is logged BEFORE advanceToNextProvider bumps
+	// explicitRetries — matches pre-M2-1d row order at server.go:1354).
+	if rows[0].ProviderAssignedID.String != "s1" {
+		t.Fatalf("rows[0].ProviderAssignedID = %q, want s1", rows[0].ProviderAssignedID.String)
+	}
+	if rows[0].Status != http.StatusServiceUnavailable {
+		t.Fatalf("rows[0].Status = %d, want 503 (wsEndHTTPStatus(error_queue_full))", rows[0].Status)
+	}
+	if rows[0].Retried != 0 {
+		t.Fatalf("rows[0].Retried = %d, want 0 (pre-advance)", rows[0].Retried)
+	}
+	// CRITICAL: row 1 = p2 success with 200 and retried=1.
+	// Queue-full IS an explicit retry — advanceToNextProvider bumps
+	// state.explicitRetries from 0 to 1, and the success row carries
+	// the bumped value. This is byte-identical to the pre-M2-1d
+	// inline state.explicitRetries++ at the removed server.go:1364.
+	// If this row has retried=0, the Q3 fix has accidentally treated
+	// queue-full as failover (no retry-bump) — billing ledger drift.
+	if rows[1].ProviderAssignedID.String != "s2" {
+		t.Fatalf("rows[1].ProviderAssignedID = %q, want s2", rows[1].ProviderAssignedID.String)
+	}
+	if rows[1].Status != http.StatusOK {
+		t.Fatalf("rows[1].Status = %d, want 200", rows[1].Status)
+	}
+	if rows[1].Retried != 1 {
+		t.Fatalf("rows[1].Retried = %d, want 1 (queue-full = explicit retry; must bump explicitRetries)", rows[1].Retried)
+	}
+}
