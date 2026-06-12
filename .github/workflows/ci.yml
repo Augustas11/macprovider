@@ -58,6 +58,40 @@ jobs:
       - name: make test-gateway
         run: make test-gateway
 
+  integration:
+    name: integration (cross-service)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Closes TEST-6 / M2-9 / M3-11 (audits/2026-06-10/REPO_AUDIT.md:117).
+    # Builds REAL coordinator + gateway binaries and exercises the
+    # gateway↔coordinator HTTP boundary that
+    # phase5-gateway/internal/router/integration_test.go currently
+    # mocks via httptest. Separate job from `coordinator` and `gateway`
+    # so a failure here can be diagnosed without scrolling past either
+    # service's own vet+test logs.
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: test/integration/go.mod
+          cache-dependency-path: test/integration/go.sum
+
+      - name: Run cross-service integration tests
+        working-directory: test/integration
+        # -count=1 disables the test cache (the harness builds REAL
+        # binaries from working-tree source; a cached pass would hide a
+        # bug in a freshly-touched coordinator/gateway file).
+        # -race catches data races in the harness goroutines (fake
+        # provider + log pumps).
+        run: go test -race -count=1 -timeout 5m ./...
+
   swift-tests:
     name: phase3-binary (swift test)
     runs-on: macos-15

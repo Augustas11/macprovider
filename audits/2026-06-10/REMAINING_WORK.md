@@ -65,11 +65,6 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 - **Status:** `CODE_SHIPPED_OPERATOR_PENDING`
 - **Detail:** **Evidence** - PR #73 (11f7c0c) `m3-2: operator-key split + coordinator env-file + de-root monitor (SECU-4 + DEVE-7)`. - New auth helpers in `phase4-coordinator/internal/auth/tokens.go`: `OperatorOnlyBearerMatches` (line 106) for human-admin endpoints, `GatewayInternalBearerMatches` (line 129) for service-to-service `/internal/*` paths with `BearerKindServiceToken` preferred over legacy `BearerKindOperatorKey` fallback. - `phase4-coordinator/internal/ws/server.go:2161` — `authorizedOperator` uses `OperatorOnlyBearerMatches` (operator-only, no service-token acceptance). Comment block 2138-2160 records codex security audit HIGH-1 reasoning: admin endpoints accepting service token would silently grant human-admin power to gateway post-rotation. - `phase4-coordinator/internal/billing/endpoi...
 
-### [Medium] TEST-6 — No cross-service integration test between gateway and coordinator
-
-- **Status:** `DEFERRED`
-- **Detail:** **Evidence** - Deferral record: `audits/2026-06-10/MILESTONE_2_HANDOFF.md:117-150`: ``` ### M2-9 — cross-service integration test (TEST-6) Deferred to M3. Rationale: the audit's M2-9 spec calls for a new ... Recommend ticketing M2-9 as `M3-11` ... - **M3-11** (NEW) cross-service integration test — deferred from M2-9 ``` - Sticky header contract at `phase5-gateway/internal/router/server.go:1401-1405` (or its post-M3-9 location) and coordinator `internalBearerAuthorized` (`buyer/server.go:2754`) still has no cross-boundary `test/integration/` harness. - `phase5-gateway/internal/router/integration_test.go` exists but is within-gateway (mocks coordinator via `cfg.Coordinator.BuyerURL = "http://coordinator.test"` + httptest stubs at lines 43, 154, 184, 221, 271, 312, 349, 381). It does not e...
-
 ### [Low] CODE-3 — Tier-2 trust disclosure parsed from untyped map[string]any with silent zero-fallbacks (Phase-1 fallback path)
 
 - **Status:** `NOT_RESOLVED`
@@ -111,7 +106,6 @@ Tasks that did not reach `RESOLVED` (each maps to one or more findings above; th
 | M1-7 | `CODE_SHIPPED_OPERATOR_PENDING` | Bump modernc.org/sqlite |
 | M3-2 | `CODE_SHIPPED_OPERATOR_PENDING` | Operator key split + de-root monitor |
 | M3-4 | `CODE_SHIPPED_OPERATOR_PENDING` | swift-nio bump + drop swift-log + Swift CI |
-| M2-9 | `DEFERRED` | Cross-service integration test |
 
 ## Operator-pending items (require human action, not code)
 
@@ -133,8 +127,6 @@ Code is merged; resolution depends on operator action on Pearl, in GitHub branch
 
 Confirmed-as-deferred findings, tasks, and Open Questions.
 
-- **TEST-6** (Medium) — No cross-service integration test between gateway and coordinator.
-- **M2-9** — Cross-service integration test.
 - **Q3** — Target tier-2 posture for this beta.
 
 ## New issues surfaced (severity-ordered)
