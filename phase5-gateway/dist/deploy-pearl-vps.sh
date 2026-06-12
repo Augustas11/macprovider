@@ -110,6 +110,17 @@ log "step 1/8: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
 dig +short "$DOMAIN" | grep -q "$VPS_HOST" || { echo "DNS for $DOMAIN does not resolve to $VPS_HOST yet" >&2; exit 1; }
 
+# Previous-deploy bypass tombstone — the coordinator script and this
+# script share /var/lib/macprovider/last-deploy-bypass.json. Surface
+# it here so the operator can audit before scping a new binary.
+# Does NOT exit — informational only.
+PREV_BYPASS=$($SSH 'cat /var/lib/macprovider/last-deploy-bypass.json 2>/dev/null || true')
+if [ -n "$PREV_BYPASS" ]; then
+  log "  NOTE: previous deploy left a bypass tombstone:"
+  printf '%s\n' "$PREV_BYPASS" | sed 's/^/    /'
+  log "  If audited, clear with: ssh <pearl> rm /var/lib/macprovider/last-deploy-bypass.json"
+fi
+
 log "step 2/8: confirm /etc/macprovider/gateway.env exists on Pearl"
 $SSH "test -f /etc/macprovider/gateway.env || { echo 'missing /etc/macprovider/gateway.env on Pearl' >&2; exit 1; }"
 
@@ -144,13 +155,36 @@ log "step 5/8: pre-restart safeguard (check for in-flight buyer requests)"
 # overrideable.
 # We use the gateway's own /healthz which includes a coarse in-flight metric
 # when available; if absent, fall back to nginx access-log activity.
+#
+# Both this script and the coordinator's deploy-pearl-vps.sh write the
+# bypass tombstone to the same path (/var/lib/macprovider/last-deploy-bypass.json)
+# so a subsequent deploy of either service surfaces the override at its
+# step 1. Manual jumps past this step are tracked the same way as
+# manual jumps past the coordinator's step 6c — write the file by hand
+# (the refusal message below has the command).
 INFLIGHT=$(curl -fsS --max-time 5 --max-filesize 65536 "https://$DOMAIN/healthz" 2>/dev/null \
   | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('in_flight_requests', d.get('inflight', 0)))" 2>/dev/null \
   || echo 0)
 if [ "${INFLIGHT:-0}" -gt 0 ] && [ "${FORCE_RESTART:-0}" != "1" ]; then
   log "  REFUSING TO RESTART — $INFLIGHT request(s) in flight."
   log "  To proceed anyway:  FORCE_RESTART=1 bash $0"
+  log "  If you must JUMP past this step manually, please first write:"
+  log "    ssh <pearl> 'echo {\"ts\":\"\$(date -u +%FT%TZ)\",\"service\":\"gateway\",\"reason\":\"manual_jump\",\"step\":\"5\",\"metric\":\"in_flight_requests\",\"value\":$INFLIGHT,\"operator_host\":\"\$HOSTNAME\"} > /var/lib/macprovider/last-deploy-bypass.json'"
+  log "  so the next deploy surfaces the bypass at step 1."
   exit 4
+fi
+if [ "${FORCE_RESTART:-0}" = "1" ] && [ "${INFLIGHT:-0}" -gt 0 ]; then
+  TS_NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  OP_HOST="${HOSTNAME:-unknown}"
+  $SSH "set -e
+        install -d -o macprovider -g macprovider -m 0750 /var/lib/macprovider 2>/dev/null || true
+        cat > /tmp/last-deploy-bypass.json <<EOF
+{\"ts\":\"$TS_NOW\",\"service\":\"gateway\",\"reason\":\"FORCE_RESTART=1\",\"step\":\"5\",\"metric\":\"in_flight_requests\",\"value\":$INFLIGHT,\"operator_host\":\"$OP_HOST\"}
+EOF
+        install -o macprovider -g macprovider -m 0640 /tmp/last-deploy-bypass.json /var/lib/macprovider/last-deploy-bypass.json
+        rm -f /tmp/last-deploy-bypass.json
+        logger -t macprovider-deploy \"FORCE_RESTART=1 used at gateway step 5; in_flight=$INFLIGHT\""
+  log "  AUDIT TRAIL: FORCE_RESTART=1 override written to /var/lib/macprovider/last-deploy-bypass.json"
 fi
 log "  ok: $INFLIGHT in-flight requests (or FORCE_RESTART=1 set)"
 
