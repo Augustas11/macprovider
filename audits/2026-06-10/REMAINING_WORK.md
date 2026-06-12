@@ -36,7 +36,7 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 
 - **Status:** `PARTIAL`
 - **Recalibrated severity:** Low — drift admitted in-doc; partial mitigation acceptable
-- **Detail:** **Evidence** - `specs/README.md:1-16` lists SPEC-001 v1.3 (actual v1.4 per `SPEC-001-phase3-binary.md:3`), SPEC-003 v0.7 (actual v0.9.2 per `SPEC-003-open-onboarding.md:3`); SPEC-002, SPEC-006 etc. match. - `specs/README.md:18` now contains an explicit drift disclaimer: `**Version of record is line 3 of each spec; do not trust this index for compatibility decisions — read the spec header.** This index drifts; the spec headers do not. When in doubt, grep -m1 '^\*\*Version' specs/SPEC-*.md.` - M3-7 in §5 was `Specs index regen + CLAUDE.md/AGENTS version pointers` — handoff lists no PR shipped; CLAUDE.md side (DOCS-5) is in but index regen not committed. **Original citation** Audit §3.9 DOCS-4: 'specs/README.md indexes 3 of 12 spec families at versions ~6 revisions stale'. **Fix delta** Su...
+- **Detail:** **Evidence** - `specs/README.md` now lists SPEC-001 v1.4 and SPEC-003 v0.9.2, matching their respective spec headers — regenerated in PR #89 (commit `2501e11`) A2. - `specs/README.md:18` contains an explicit drift disclaimer: `**Version of record is line 3 of each spec; do not trust this index for compatibility decisions — read the spec header.** This index drifts; the spec headers do not. When in doubt, grep -m1 '^\*\*Version' specs/SPEC-*.md.` - M3-7 scope was `Specs index regen + CLAUDE.md/AGENTS version pointers` — index regen landed in PR #89; CLAUDE.md/AGENTS version pointer part (DOCS-5) remains pending. **Original citation** Audit §3.9 DOCS-4: 'specs/README.md indexes 3 of 12 spec families at versions ~6 revisions stale'. **Fix delta** Su...
 
 ### [Medium] PERF-1 — Gateway DB can never shrink (8 event tables + concurrency_reservations have RAISE(ABORT) BEFORE-DELETE triggers, no archival story)
 
@@ -78,8 +78,8 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 
 ### [Low] ARCH-5 — Cross-service duplication (sqlite DSN helper, bearer compare) — document conscious debt
 
-- **Status:** `NOT_RESOLVED`
-- **Detail:** **Evidence** `phase4-coordinator/internal/sqliteutil/dsn.go:8-23` and `phase5-gateway/internal/storage/sqlite/dsn.go:8-22` still hold byte-identical `WithPragmas`/`sqliteDSN` bodies (same four pragmas, same order). `grep -rn 'ARCH-5'` in *.md returns only the audit file itself; no documentation lookup of the conscious-debt rationale was added to OPS.md / coordinator README / gateway README. PR #50 (M2-8 OPS.md) shipped general ops docs but did not call this out. **Original citation** Audit asked these be documented as 'conscious-debt copies'. **Fix delta** No code change expected, but the *document* part of the recommendation was not done. Counts as not_resolved per the audit's own wording. **Notes** Low impact; mention-it-once fix.
+- **Status:** `RESOLVED`
+- **Detail:** **Evidence** PR #89 (commit `2501e11`) A3 added ARCH-5 conscious-debt comments to both `phase4-coordinator/internal/sqliteutil/dsn.go:11-15` and `phase5-gateway/internal/storage/sqlite/dsn.go:11-15`, citing `audits/2026-06-10/REPO_AUDIT.md (ARCH-5)` in each. The document-it requirement the audit specified is now met. **Original citation** Audit asked these be documented as 'conscious-debt copies'. **Fix delta** Comment-level documentation shipped in PR #89. **Notes** No further action needed.
 
 ### [Low] CODE-3 — Tier-2 trust disclosure parsed from untyped map[string]any with silent zero-fallbacks (Phase-1 fallback path)
 
@@ -103,8 +103,8 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 
 ### [Low] DOCS-7 — Version-drift cluster (README badge, gateway README SPEC-006 pin, SPEC-002 dep self-contradiction)
 
-- **Status:** `PARTIAL`
-- **Detail:** **Evidence** - README: PR #12 dropped the hardcoded v1.2.5 string; `README.md:13` now uses a dynamic shields.io badge (`shields.io/github/v/release/augustas11/macprovider`) and no body text contradicts it. Resolved. - Gateway README: `/Users/augstar/macprovider-poc/phase5-gateway/README.md:3` reads `Phase 5 gateway implementation for SPEC-006 v0.8.3.` Matches actual SPEC-006 v0.8.3 (specs/SPEC-006-buyer-api.md:3). Resolved. - SPEC-002 dep line: `specs/SPEC-002-coordinator.md:4` says `Depends on: SPEC-001 v1.3 (Phase 3 binary wire protocol, locked)`. SPEC-001 actual is v1.4 (specs/SPEC-001-phase3-binary.md:3, '1.4 (2026-06-12, custom model selection')). The audit-era self-contradiction line at v1.2.1 (line 50, changelog) is preserved as history; the current header is internally consisten...
+- **Status:** `RESOLVED`
+- **Detail:** **Evidence** - README: PR #12 dropped the hardcoded v1.2.5 string; `README.md:13` now uses a dynamic shields.io badge. Resolved. - Gateway README: `phase5-gateway/README.md:3` reads `Phase 5 gateway implementation for SPEC-006 v0.8.3.` Matches actual SPEC-006 v0.8.3. Resolved. - SPEC-002 dep line: PR #89 (commit `2501e11`) A4 updated `specs/SPEC-002-coordinator.md:4` to `Depends on: SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + models browse + fit guard...)`. All three sub-items resolved. **Original citation** Audit §3.10 DOCS-7: version-drift cluster. **Fix delta** All three sub-items resolved across PRs #12, and #89. **Notes** No further action needed.
 
 ### [Low] DEVE-7 — Coordinator secret handling weak half of asymmetric pattern (plaintext YAML, root-monitor)
 
