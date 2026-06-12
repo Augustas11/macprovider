@@ -29,8 +29,8 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 
 ### [Medium] ARCH-3 — Uncapped *sql.DB handles on coordinator while money path takes BEGIN IMMEDIATE
 
-- **Status:** `NOT_RESOLVED`
-- **Detail:** **Evidence** `grep -rn 'SetMaxOpenConns' /Users/augstar/macprovider-poc/phase4-coordinator/` returns ZERO hits. Gateway still caps at 1 (`phase5-gateway/internal/storage/sqlite/store.go:38`). M2-3 was listed in §5 task table but no commit references it; no entry in any handoff doc says M2-3 shipped. **Original citation** `cmd/coordinator/main.go:47-59` — opens `tokenStore`, `reqLogStore`, `auditStore` in sequence (now lines 57-74 post-drift) with no SetMaxOpenConns call. Sub-handles for `admissionStore` and `billingStore` (lines 75-84) also derive from the unconfigured `reqLogStore.DB()`. **Fix delta** Suggested fix (`SetMaxOpenConns(1)` on each of the three handles) — not applied. **Notes** Latent risk until coordinator concurrency rises (currently single-coordinator). The buyer hot-pa...
+- **Status:** `PARTIAL`
+- **Detail:** **Evidence** PR #89 (commit `2501e11`) capped the `auditStore` and `authStore` (`internal/audit/store.go`, `internal/auth/tokens.go`) at `SetMaxOpenConns(1)`, mirroring the gateway pattern at `phase5-gateway/internal/storage/sqlite/store.go:38`. The `reqLogStore` cap was investigated and explicitly deferred: billing endpoints in `phase4-coordinator/internal/billing/endpoints.go` iterate `rows.Next()` in the outer cursor while issuing per-row sub-queries on the same `*sql.DB` (providers :132+:168, buyerEquivalentCredits :256+:294, reconcile :193-225 transitively); capping to 1 blocks the sub-queries forever. Test evidence: `TestProvidersEndpoint` hangs ~10 min then panics with `database/sql.(*DB).conn` stack traces under cap=1. Proper close-out requires a drain-rows-first handler refactor (build typed slice from `rows.Next()` before issuing per-row sub-queries), deferred to a separate PR. **Original citation** `cmd/coordinator/main.go:47-59` — opens `tokenStore`, `reqLogStore`, `auditStore` in sequence (now lines 57-74 post-drift). Sub-handles for `admissionStore` and `billingStore` (lines 75-84) also derive from the unconfigured `reqLogStore.DB()`. **Fix delta** Two of three handles now capped; `reqLogStore` (and the billing sub-handles that derive from it) remains uncapped pending the drain-rows-first refactor. **Notes** Latent risk until coordinator concurrency rises (currently single-coordinator). The buyer hot-pa...
 
 ### [Medium] DOCS-4 — specs/README.md index 6 revisions stale on 3 of 12 spec families
 
@@ -122,8 +122,8 @@ Tasks that did not reach `RESOLVED` (each maps to one or more findings above; th
 
 | Task | Status | Title |
 |---|---|---|
-| M2-3 | `NOT_RESOLVED` | SetMaxOpenConns(1) on coordinator stores |
-| QW-5 | `NOT_RESOLVED` | SetMaxOpenConns(1) on coordinator stores |
+| M2-3 | `PARTIAL` | SetMaxOpenConns(1) on coordinator stores |
+| QW-5 | `PARTIAL` | SetMaxOpenConns(1) on coordinator stores |
 | M1-6 | `PARTIAL` | Deploy-gate hardening |
 | M2-1 | `PARTIAL` | Extract single forwardWithFailover (strangler) |
 | M2-4 | `PARTIAL` | Gateway retention/archival + RO handle |
@@ -168,7 +168,7 @@ Confirmed-as-deferred findings, tasks, and Open Questions.
 - **[Low]** PR #58 (Open Q4 ruling) still OPEN — ruling not on main — _Where:_ `PR #58 state=OPEN; beta/DECISION_CRITERIA.md Entry 63 on main is M3-5, not Q4`. _Why:_ Q4 ruled in PR body (archive-rotate to cold storage) but canonical decision-log entry has not landed. Future PERF-1 / M2-4 Part C work lacks authoritative on-main reference until #58 merges.
 - **[Low]** M3-1 follow-up: sargable RFC3339Nano comparison still pending — _Where:_ `phase4-coordinator/internal/requestlog/store.go (julianday predicate retained per MILESTONE_3_PHASE23_HANDOFF.md:64-68)`. _Why:_ RFC3339Nano writes are variable-width (`.` 0x2E < `Z` 0x5A) so lexicographic compare is silently wrong at fractional-second boundaries. PERF-3 batched-DELETE shipped, but the index is still defeated by julianday(). Low risk now; degrades as request_log grows.
 - **[Low]** Q3 (tier-2 posture) silently deferred — no DECISION_CRITERIA entry — _Where:_ `beta/DECISION_CRITERIA.md (no entry); MILESTONE_1_HANDOFF.md:55-65`. _Why:_ Operator instructed 'Defer Part C entirely' during M1 autopilot but the deferral survives only inside an audit handoff doc, not a dated decision-log entry. Same pattern as Q6. Future agent sessions can't grep DECISION_CRITERIA for tier-2 posture status.
-- **[Medium]** Verifier-surfaced: QW-5/M2-3 (`SetMaxOpenConns(1)` on coordinator) marked done in MILESTONE_2_HANDOFF.md but never shipped — _Where:_ `phase4-coordinator/cmd/coordinator/main.go:57-84`. _Why:_ Trivial three-line fix matching gateway's `internal/storage/sqlite/store.go:38` pattern; underlying ARCH-3 risk (latent SQLITE_BUSY tail-latency under coordinator write contention) is not yet mitigated.
+- **[Medium]** Verifier-surfaced: QW-5/M2-3 (`SetMaxOpenConns(1)` on coordinator) — _Where:_ `phase4-coordinator/cmd/coordinator/main.go:57-84`. _Why:_ Two of three handles now capped via PR #89 (`audit/store.go`, `auth/tokens.go`); third (`reqLogStore`) deadlocks billing endpoints under cap=1 — nested `rows.Next()` iteration with sub-queries on the same `*sql.DB` in `providers:132+168`, `buyerEquivalentCredits:256+294`, `reconcile:193-225` transitively — and is deferred behind a drain-rows-first refactor. ARCH-3 risk partially mitigated; full mitigation pending the refactor.
 
 ## Recommended re-audit cadence
 
