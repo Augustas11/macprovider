@@ -5,6 +5,14 @@ import (
 	"strings"
 )
 
+// sqliteDSN builds a modernc.org/sqlite DSN with the project's standard
+// pragma set (busy_timeout, foreign_keys, WAL, synchronous=NORMAL).
+//
+// ARCH-5: this helper is byte-identical to phase4-coordinator/internal/
+// sqliteutil/dsn.go::WithPragmas. The duplication is intentional — gateway
+// and coordinator are deployed as independent Go modules, and introducing a
+// shared library would re-couple them on every DSN tweak. See audits/
+// 2026-06-10/REPO_AUDIT.md (ARCH-5) for the conscious-debt reasoning.
 func sqliteDSN(path string) string {
 	values := url.Values{}
 	for _, pragma := range []string{

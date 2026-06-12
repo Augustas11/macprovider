@@ -152,6 +152,13 @@ func OpenStore(path string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// QW-5 / M2-3 / ARCH-3: cap the pool at a single connection to match
+	// the gateway pattern (phase5-gateway/internal/storage/sqlite/store.go).
+	// SQLite serializes writers regardless; pinning the pool at 1 makes
+	// BEGIN IMMEDIATE contention explicit and eliminates a class of
+	// SQLITE_BUSY tail-latency on the coordinator money path.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	s := &Store{db: db}
 	if err := s.migrate(context.Background()); err != nil {
 		_ = db.Close()

@@ -33,6 +33,12 @@ func OpenStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// QW-5 / M2-3 / ARCH-3: cap the pool at a single connection (mirrors
+	// phase5-gateway/internal/storage/sqlite/store.go). Prevents implicit
+	// concurrent BEGIN IMMEDIATE on shared SQLite files and removes a
+	// latent SQLITE_BUSY source on the coordinator money path.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	s := &Store{db: db}
 	ctx := context.Background()
 	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
