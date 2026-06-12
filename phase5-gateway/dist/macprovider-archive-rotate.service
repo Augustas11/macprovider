@@ -1,0 +1,47 @@
+[Unit]
+Description=Mac Provider Gateway DB archive-rotate (M2-4 Part C / PERF-1)
+Documentation=https://github.com/Augustas11/macprovider/blob/main/audits/2026-06-10/Q4_ARCHIVE_ROTATE_DESIGN.md
+# Runs the archive-rotate script. The script stops/starts the gateway itself
+# inside its quiesce window, so this unit does NOT declare After= the gateway.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+# Must run as root because the script invokes systemctl stop/start on the
+# gateway and chown's the live DB file. The script otherwise uses
+# `sudo -u macprovider` semantics implicitly via owning the DB file directly.
+User=root
+Group=root
+EnvironmentFile=-/etc/macprovider/archive-rotate.env
+
+# Sensible defaults; override via /etc/macprovider/archive-rotate.env on Pearl.
+Environment=GATEWAY_DB_PATH=/var/lib/macprovider/gateway.db
+Environment=GATEWAY_ARCHIVE_DIR=/var/lib/macprovider-gateway-archive
+Environment=GATEWAY_SERVICE_NAME=macprovider-gateway
+
+ExecStart=/opt/macprovider/archive-rotate.sh
+
+# Security hardening — mirrors the gateway unit shape.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ReadWritePaths=/var/lib/macprovider /var/lib/macprovider-gateway-archive
+# Allow systemctl stop/start of the gateway by giving access to its PID file.
+# (The script delegates quiesce to systemctl which uses the system bus.)
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=macprovider-archive-rotate
+
+# Single-shot exit-status discipline: exit 2 ("below threshold") is treated as
+# success by the timer so the journal doesn't fill with spurious failures on
+# every daily check.
+SuccessExitStatus=0 2
+
+[Install]
+# Not installed directly; the .timer is the install target.

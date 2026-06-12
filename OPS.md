@@ -104,6 +104,91 @@ matches the script (the path was inferred from `deploy-pearl-vps.sh`
 comments; the first real deploy should leave a `gateway.prev` artifact that
 either confirms or amends this section).
 
+### 3.1 Gateway DB archive-rotate (M2-4 Part C / PERF-1)
+
+The gateway's 9 `RAISE(ABORT) BEFORE DELETE` triggers
+(`phase5-gateway/internal/storage/sqlite/migrate.go:184-251`) keep the 8
+event tables + `concurrency_reservations` append-only forever per the Q4
+ruling (`beta/DECISION_CRITERIA.md` Entry 77, design at
+`audits/2026-06-10/Q4_ARCHIVE_ROTATE_DESIGN.md`). Disk pressure on Pearl
+is handled out-of-band by a rotation job that ships a clean snapshot of
+`gateway.db` to cold storage on a size or age threshold, then prunes old
+rows (rows older than `GATEWAY_ARCHIVE_PRUNE_DAYS`, default 7) from the
+live DB while temporarily dropping + recreating the per-table
+`*_no_delete` triggers inside a single `BEGIN IMMEDIATE; ... COMMIT;`
+transaction. `concurrency_reservations` is intentionally NOT pruned by
+this path (M2-4 Part B's `DeleteTerminalQuotaReservations` owns it).
+
+**Files (shipped):**
+
+- `phase5-gateway/dist/archive-rotate.sh` — the rotation script. Uses
+  SQLite's `VACUUM INTO` for the snapshot (single-file, no WAL
+  artifacts), compresses with `zstd` (or `gzip` if zstd is missing),
+  drops a `.sha256` sidecar, optionally uploads to S3 if
+  `GATEWAY_ARCHIVE_S3_BUCKET` is set and `aws-cli` is on PATH, then
+  prunes the live DB. Exit codes: `0` success, `2` below threshold (no
+  rotation needed — timer treats as success), `3` rotation attempted but
+  live DB did not shrink (loud alert), `4` pre-flight failure.
+- `phase5-gateway/dist/archive-restore.sh` — forensic-restore path.
+  Verifies the `.sha256` checksum, decompresses, runs `PRAGMA
+  integrity_check`, refuses if the archive's `schema_migrations` max
+  version exceeds the binary's expected version (currently 1), and
+  installs to a tempfile target (default `/tmp/gateway-restored-<ts>.db`).
+  `--to-live` does the destructive replace-the-live-DB path; requires
+  `ASSUME_YES=1`. Snapshots the existing live DB to a `.pre-restore.<ts>`
+  sibling before swapping.
+- `phase5-gateway/dist/macprovider-archive-rotate.service` +
+  `macprovider-archive-rotate.timer` — daily check at 04:00 UTC ±15 min
+  jitter. Runs as `User=root` (needs `systemctl stop/start` on the
+  gateway). `SuccessExitStatus=0 2` so below-threshold checks don't
+  alert.
+- `phase5-gateway/dist/test/archive_rotate_test.sh` — integration tests
+  (T1–T6: below-threshold no-op, FORCE_ROTATE shrinks + preserves recent
+  rows + leaves `concurrency_reservations` untouched, forensic-restore
+  integrity, idempotent re-run, schema-mismatch refusal, append-only
+  trigger restored post-prune).
+
+**Operator install on Pearl (one-time):**
+
+```bash
+ssh pearl
+# Copy scripts + units into /opt/macprovider and /etc/systemd/system.
+sudo install -o root -g root -m 0755 archive-rotate.sh /opt/macprovider/archive-rotate.sh
+sudo install -o root -g root -m 0755 archive-restore.sh /opt/macprovider/archive-restore.sh
+sudo install -o root -g root -m 0644 macprovider-archive-rotate.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 macprovider-archive-rotate.timer   /etc/systemd/system/
+sudo install -d -o macprovider -g macprovider -m 0700 /var/lib/macprovider-gateway-archive
+# Optional /etc/macprovider/archive-rotate.env to set GATEWAY_ARCHIVE_S3_BUCKET, thresholds, etc.
+sudo systemctl daemon-reload
+sudo systemctl enable --now macprovider-archive-rotate.timer
+# Smoke-test (DRY_RUN=1 prints actions only):
+sudo DRY_RUN=1 GATEWAY_DB_PATH=/var/lib/macprovider/gateway.db /opt/macprovider/archive-rotate.sh || true
+```
+
+**Restore (forensic):**
+
+```bash
+# Inspect an archive locally without touching the live DB.
+sudo /opt/macprovider/archive-restore.sh \
+  /var/lib/macprovider-gateway-archive/gateway-YYYYMMDDTHHMMSSZ.db.zst \
+  /tmp/forensic.db
+sqlite3 /tmp/forensic.db 'SELECT COUNT(*) FROM usage_events;'
+```
+
+**Restore (destructive — replaces live DB):**
+
+```bash
+sudo ASSUME_YES=1 /opt/macprovider/archive-restore.sh --to-live \
+  /var/lib/macprovider-gateway-archive/gateway-YYYYMMDDTHHMMSSZ.db.zst
+# All rows written to the live DB since the snapshot was taken are lost.
+# A copy of the pre-restore live DB is left at
+# /var/lib/macprovider/gateway.db.pre-restore.<ts>.
+```
+
+Document any `--to-live` use as an incident entry in
+`beta/DECISION_CRITERIA.md` per the Q4 design's restore-procedure
+section.
+
 ## 4. Settlement
 
 Billing settlement is handled by `phase4-coordinator/internal/billing`:
