@@ -158,9 +158,13 @@ quota table, which has no BEFORE-DELETE trigger.
 
 ```bash
 ssh pearl
-# Copy scripts + units into /opt/macprovider and /etc/systemd/system.
-sudo install -o root -g root -m 0755 archive-rotate.sh /opt/macprovider/archive-rotate.sh
-sudo install -o root -g root -m 0755 archive-restore.sh /opt/macprovider/archive-restore.sh
+# Install scripts to /usr/local/sbin (root-owned parent dir). The
+# /opt/macprovider parent is owned by macprovider:macprovider per the
+# coordinator deploy — installing the root-run archive scripts there would
+# let a compromised macprovider user substitute the script before the next
+# timer fires (audit-iter-2 security HIGH).
+sudo install -o root -g root -m 0755 archive-rotate.sh /usr/local/sbin/macprovider-archive-rotate.sh
+sudo install -o root -g root -m 0755 archive-restore.sh /usr/local/sbin/macprovider-archive-restore.sh
 sudo install -o root -g root -m 0644 macprovider-archive-rotate.service /etc/systemd/system/
 sudo install -o root -g root -m 0644 macprovider-archive-rotate.timer   /etc/systemd/system/
 # Archive dir is ROOT-owned 0700 — the gateway service (User=macprovider)
@@ -185,7 +189,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now macprovider-archive-rotate.timer
 # Smoke-test (DRY_RUN=1 prints actions only — no service stop, no prune):
 sudo DRY_RUN=1 GATEWAY_DB_PATH=/var/lib/macprovider/gateway.db \
-  /opt/macprovider/archive-rotate.sh || true
+  /usr/local/sbin/macprovider-archive-rotate.sh || true
 # Verify the timer is scheduled:
 sudo systemctl list-timers macprovider-archive-rotate.timer
 # Tail the journal after the first natural fire (04:00 UTC + jitter):
@@ -209,7 +213,7 @@ Restore S3 credentials / connectivity, then re-run with `FORCE_ROTATE=1`.
 
 ```bash
 # Inspect an archive locally without touching the live DB.
-sudo /opt/macprovider/archive-restore.sh \
+sudo /usr/local/sbin/macprovider-archive-restore.sh \
   /var/lib/macprovider-gateway-archive/gateway-YYYYMMDDTHHMMSSZ.db.zst \
   /tmp/forensic.db
 sqlite3 /tmp/forensic.db 'SELECT COUNT(*) FROM usage_events;'
@@ -218,7 +222,7 @@ sqlite3 /tmp/forensic.db 'SELECT COUNT(*) FROM usage_events;'
 **Restore (destructive — replaces live DB):**
 
 ```bash
-sudo ASSUME_YES=1 /opt/macprovider/archive-restore.sh --to-live \
+sudo ASSUME_YES=1 /usr/local/sbin/macprovider-archive-restore.sh --to-live \
   /var/lib/macprovider-gateway-archive/gateway-YYYYMMDDTHHMMSSZ.db.zst
 # All rows written to the live DB since the snapshot was taken are lost.
 # A copy of the pre-restore live DB is left at

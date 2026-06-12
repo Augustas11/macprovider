@@ -256,11 +256,18 @@ drain_inflight() {
   fi
   local deadline=$(( $(date -u +%s) + GATEWAY_ARCHIVE_DRAIN_TIMEOUT_S ))
   local inflight
+  # Mitigation for the security-iter2 TOCTOU race: nothing prevents new
+  # buyer admissions between sampling-zero and systemctl stop. We require
+  # GATEWAY_ARCHIVE_DRAIN_STEADY_S consecutive seconds of zero count before
+  # we accept the drain as done — at the timer's 04:00 UTC fire window this
+  # is the cheapest mitigation that doesn't require a new gateway maintenance
+  # endpoint. New admissions still possible during the steady window, but
+  # the steady window catches transient zeroes between bursts. The full fix
+  # (admission barrier) is tracked separately as M2-4 Part C follow-up.
+  local steady_s="${GATEWAY_ARCHIVE_DRAIN_STEADY_S:-5}"
+  case "$steady_s" in ''|*[!0-9]*) steady_s=5 ;; esac
+  local steady_since=0
   while :; do
-    # Lock-free read: WAL mode + the read-only handle pattern lets us SELECT
-    # without contesting writers. Counts both active reservations and any
-    # quota_reservations still in 'active' state — both proxies for unsettled
-    # buyer work.
     inflight=$(sqlite3 -bail "$GATEWAY_DB_PATH" \
       "SELECT (SELECT COUNT(*) FROM concurrency_reservations WHERE status='active')
             + (SELECT COUNT(*) FROM quota_reservations WHERE status='active');" 2>/dev/null \
@@ -271,15 +278,30 @@ drain_inflight() {
         return 1
         ;;
     esac
+    local now_epoch
+    now_epoch=$(date -u +%s)
     if [ "$inflight" -eq 0 ]; then
-      log "drain ok: 0 active reservations"
-      return 0
+      if [ "$steady_since" -eq 0 ]; then
+        steady_since=$now_epoch
+        log "  drain steady-window opened (require ${steady_s}s of consecutive 0)"
+      fi
+      if [ "$(( now_epoch - steady_since ))" -ge "$steady_s" ]; then
+        log "drain ok: 0 active reservations for ${steady_s}s consecutive"
+        return 0
+      fi
+    else
+      if [ "$steady_since" -ne 0 ]; then
+        log "  drain steady-window reset (saw $inflight active)"
+      fi
+      steady_since=0
     fi
-    if [ "$(date -u +%s)" -ge "$deadline" ]; then
+    if [ "$now_epoch" -ge "$deadline" ]; then
       log "ERROR: drain timeout — $inflight active reservations after ${GATEWAY_ARCHIVE_DRAIN_TIMEOUT_S}s"
       return 1
     fi
-    log "  draining: $inflight active reservations, sleeping 2s"
+    if [ "$inflight" -gt 0 ]; then
+      log "  draining: $inflight active reservations, sleeping 2s"
+    fi
     sleep 2
   done
 }

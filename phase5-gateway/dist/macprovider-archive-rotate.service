@@ -19,7 +19,7 @@ Environment=GATEWAY_DB_PATH=/var/lib/macprovider/gateway.db
 Environment=GATEWAY_ARCHIVE_DIR=/var/lib/macprovider-gateway-archive
 Environment=GATEWAY_SERVICE_NAME=macprovider-gateway
 
-ExecStart=/opt/macprovider/archive-rotate.sh
+ExecStart=/usr/local/sbin/macprovider-archive-rotate.sh
 
 # Security hardening — mirrors the gateway unit shape.
 NoNewPrivileges=true
