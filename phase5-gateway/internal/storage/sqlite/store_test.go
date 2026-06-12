@@ -914,6 +914,49 @@ func TestCapacityTierRoundTripSpecialChars(t *testing.T) {
 	}
 }
 
+// TestCapacityTierLegacyFormatBackwardCompat documents that old fmt.Sprintf %q rows
+// containing \xNN escapes round-trip through the new json-based decoder via the
+// legacy fallback path. The old SetCapacityTier used fmt.Sprintf with %q which
+// produces Go-quoted strings (e.g., \x00 for NUL) that json.Unmarshal rejects.
+func TestCapacityTierLegacyFormatBackwardCompat(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	cases := []struct {
+		name    string
+		signals string
+	}{
+		{"normal_ascii", "cpu_high memory_low"},
+		{"nul_byte", string([]byte{'h', 'e', 'l', 'l', 'o', 0x00, 'w', 'o', 'r', 'l', 'd'})},
+		{"invalid_utf8", string([]byte{'b', 'a', 'd', 0xff, 0xfe, 's', 'e', 'q'})},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Write a row using the OLD fmt.Sprintf %q format directly into the DB,
+			// simulating rows that were created before the json migration.
+			legacyValue := fmt.Sprintf(`{"tier":%d,"signals":%q}`, 2, tc.signals)
+			_, err := store.db.ExecContext(ctx,
+				`INSERT OR REPLACE INTO runtime_config (key, value, updated_at) VALUES (?, ?, ?)`,
+				"capacity_tier", legacyValue, encodeTime(time.Now().UTC()))
+			if err != nil {
+				t.Fatalf("insert legacy row: %v", err)
+			}
+
+			got, err := store.GetCapacityTier(ctx)
+			if err != nil {
+				t.Fatalf("GetCapacityTier legacy row (%s): %v", tc.name, err)
+			}
+			if got.Tier != 2 {
+				t.Fatalf("Tier mismatch: got %d want 2", got.Tier)
+			}
+			if got.Signals != tc.signals {
+				t.Fatalf("Signals mismatch:\n got:  %q\n want: %q", got.Signals, tc.signals)
+			}
+		})
+	}
+}
+
 // BenchmarkAuthLookupWith10KKeys replaces the previous
 // TestAuthLookupP95UnderOneMillisecondWith10KKeys: a hard 1ms ceiling in
 // a unit test flakes under parallel load on CI (observed 13ms). The

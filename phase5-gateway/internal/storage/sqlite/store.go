@@ -818,10 +818,11 @@ func (s *Store) LatestCapacitySignals(ctx context.Context) ([]storage.CapacitySi
 }
 
 // capacityTierDTO is the on-disk JSON shape for capacity_tier runtime_config rows.
-// Matches the old fmt.Sprintf format `{"tier":N,"signals":"..."}` byte-for-byte
-// for signals that contain no JSON-special characters, and correctly handles
-// backslashes, quotes, control characters, and Unicode that the old %q verb
-// would have encoded differently (code-review finding CODE-6).
+// Has the same field names and shape as the old fmt.Sprintf format
+// `{"tier":N,"signals":"..."}`, but encoding/json may produce different output
+// for characters like <, >, & and correctly handles backslashes, quotes,
+// control characters, and Unicode that the old %q verb encoded differently
+// (code-review finding CODE-6).
 type capacityTierDTO struct {
 	Tier    int    `json:"tier"`
 	Signals string `json:"signals"`
@@ -839,7 +840,15 @@ func (s *Store) GetCapacityTier(ctx context.Context) (storage.CapacityTier, erro
 	}
 	var dto capacityTierDTO
 	if err := json.Unmarshal([]byte(value), &dto); err != nil {
-		return storage.CapacityTier{}, err
+		// Legacy compat: old rows were written by fmt.Sprintf with %q, which
+		// produces Go-quoted strings (e.g., \xNN escapes) that json.Unmarshal
+		// rejects. Try the old format as a fallback so we can read existing rows.
+		var legacyTier int
+		var legacySignals string
+		if _, scanErr := fmt.Sscanf(value, `{"tier":%d,"signals":%q}`, &legacyTier, &legacySignals); scanErr == nil {
+			return storage.CapacityTier{Tier: legacyTier, Signals: legacySignals, UpdatedAt: decodeTime(updated)}, nil
+		}
+		return storage.CapacityTier{}, fmt.Errorf("decode capacity_tier: %w", err)
 	}
 	return storage.CapacityTier{Tier: dto.Tier, Signals: dto.Signals, UpdatedAt: decodeTime(updated)}, nil
 }
