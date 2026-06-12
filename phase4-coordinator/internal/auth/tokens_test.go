@@ -32,6 +32,107 @@ func TestBearerTokenMatchesHeader(t *testing.T) {
 	}
 }
 
+// TestOperatorOnlyBearerMatches pins the codex PR #73 HIGH-1 fix at the
+// helper level: admin endpoints accept the operator key and ONLY the
+// operator key. Empty operator key denies (M1-5 / SECU-5).
+func TestOperatorOnlyBearerMatches(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer operator-secret")
+	if !auth.OperatorOnlyBearerMatches(headers, "operator-secret") {
+		t.Fatal("operator key not accepted")
+	}
+	if auth.OperatorOnlyBearerMatches(headers, "") {
+		t.Fatal("empty operator key accepted (M1-5 regression)")
+	}
+	// service token is structurally identical but must not be accepted
+	// by this helper; the gateway-internal class lives elsewhere.
+	headers.Set("Authorization", "Bearer service-secret")
+	if auth.OperatorOnlyBearerMatches(headers, "operator-secret") {
+		t.Fatal("service_token-shaped bearer matched operator-only helper")
+	}
+}
+
+// TestGatewayInternalBearerMatchesScoping pins the codex PR #73 HIGH-1
+// fix at the helper level for the gateway-internal class: BOTH the
+// operator key and the gateway service token are accepted. The kind
+// return identifies which one matched so the call-site can audit-log
+// correctly.
+func TestGatewayInternalBearerMatchesScoping(t *testing.T) {
+	cases := []struct {
+		name     string
+		bearer   string
+		want     auth.InternalBearerKind
+		wantName string
+	}{
+		{name: "service_token preferred", bearer: "service-secret", want: auth.BearerKindServiceToken, wantName: "service_token"},
+		{name: "operator_key fallback", bearer: "operator-secret", want: auth.BearerKindOperatorKey, wantName: "operator_key"},
+		{name: "no match", bearer: "wrong", want: auth.BearerKindNone, wantName: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set("Authorization", "Bearer "+tc.bearer)
+			got := auth.GatewayInternalBearerMatches(headers, "operator-secret", "service-secret")
+			if got != tc.want {
+				t.Fatalf("kind=%v want=%v", got, tc.want)
+			}
+			if got.String() != tc.wantName {
+				t.Fatalf("name=%q want=%q", got.String(), tc.wantName)
+			}
+		})
+	}
+}
+
+// TestGatewayInternalBearerMatchesEmptyConfigs ensures that an empty
+// gateway_service_token cannot widen the auth surface (matches the
+// invariant in M3-2 / SECU-4), and that an empty operator_key denies
+// even when the request's bearer is also empty.
+func TestGatewayInternalBearerMatchesEmptyConfigs(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer operator-secret")
+
+	// Empty service_token, valid operator_key → accept under operator.
+	if got := auth.GatewayInternalBearerMatches(headers, "operator-secret", ""); got != auth.BearerKindOperatorKey {
+		t.Fatalf("empty service_token broke operator fallback: %v", got)
+	}
+	// Empty operator_key, valid service_token → accept under service.
+	headers.Set("Authorization", "Bearer service-secret")
+	if got := auth.GatewayInternalBearerMatches(headers, "", "service-secret"); got != auth.BearerKindServiceToken {
+		t.Fatalf("empty operator_key broke service accept: %v", got)
+	}
+	// Both empty → always deny, even when the request also has empty bearer.
+	empty := http.Header{}
+	if got := auth.GatewayInternalBearerMatches(empty, "", ""); got != auth.BearerKindNone {
+		t.Fatalf("both empty configs admitted: %v", got)
+	}
+}
+
+// TestGatewayInternalBearerMatchesEvaluatesBoth asserts the MEDIUM
+// timing-oracle fix from codex PR #73: the helper must evaluate BOTH
+// credentials before branching. We can't directly observe the branch
+// at this level, but we can pin the public contract that no short-
+// circuit is exposed by checking the helper succeeds when EITHER
+// credential is correct and only the OTHER is configured. (A naive
+// implementation that broke on empty would fail one of these.)
+func TestGatewayInternalBearerMatchesEvaluatesBoth(t *testing.T) {
+	headers := http.Header{}
+	// service_token matches; operator_key is non-empty but unmatched.
+	headers.Set("Authorization", "Bearer svc")
+	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindServiceToken {
+		t.Fatalf("svc match: %v", got)
+	}
+	// operator_key matches; service_token is non-empty but unmatched.
+	headers.Set("Authorization", "Bearer op")
+	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindOperatorKey {
+		t.Fatalf("op match: %v", got)
+	}
+	// Neither matches.
+	headers.Set("Authorization", "Bearer nope")
+	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindNone {
+		t.Fatalf("nope: %v", got)
+	}
+}
+
 func TestTokenIssueValidateRevokeAndList(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {

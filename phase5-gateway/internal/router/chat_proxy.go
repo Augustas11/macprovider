@@ -208,7 +208,10 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if metadata, ok := s.coordinatorRoutingMetadata(upCtx); ok && metadata.Sticky.Enabled && metadata.Sticky.TTLSeconds == s.cfg.Routing.StickyTTLS {
-				upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
+				// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
+				// OperatorKey so a not-yet-upgraded coordinator keeps
+				// accepting us on the hot sticky-routing path.
+				upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 				upReq.Header.Set("X-MacProvider-Account", subject.AccountID)
 				upReq.Header.Set("X-MacProvider-Internal-Conv", s.deriveConversationKey(subject.AccountID, tag))
 			}

@@ -43,9 +43,18 @@ type PublicConfig struct {
 }
 
 type CoordinatorConfig struct {
-	BuyerURL          string `yaml:"buyer_url"`
-	OperatorURL       string `yaml:"operator_url"`
-	OperatorKey       string `yaml:"operator_key"`
+	BuyerURL    string `yaml:"buyer_url"`
+	OperatorURL string `yaml:"operator_url"`
+	OperatorKey string `yaml:"operator_key"`
+	// ServiceToken is the optional service-to-service credential the
+	// gateway sends on UPSTREAM calls to the coordinator (M3-2 /
+	// SECU-4). When set, it is preferred over OperatorKey on every
+	// outbound /poolz, /internal/*, /admin/* request; OperatorKey
+	// remains the fallback so an upgraded gateway can still talk to a
+	// not-yet-upgraded coordinator. Gateway's OWN admin-plane auth
+	// (operatorAuthorized) keeps using OperatorKey — that's the
+	// human-admin credential and is intentionally separate.
+	ServiceToken      string `yaml:"service_token"`
 	PoolzPollInterval int    `yaml:"poolz_poll_interval_s"`
 }
 
@@ -187,26 +196,60 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, err
 	}
-	cfg.resolveEnv()
+	if err := cfg.resolveEnv(); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
 }
 
-func (c *Config) resolveEnv() {
-	c.Coordinator.OperatorKey = resolveEnvValue(c.Coordinator.OperatorKey)
-	c.Auth.KeyHashSecret = resolveEnvValue(c.Auth.KeyHashSecret)
-	c.Auth.OAuth.GitHub.ClientID = resolveEnvValue(c.Auth.OAuth.GitHub.ClientID)
-	c.Auth.OAuth.GitHub.ClientSecret = resolveEnvValue(c.Auth.OAuth.GitHub.ClientSecret)
-	c.Auth.Demo.SigningSecret = resolveEnvValue(c.Auth.Demo.SigningSecret)
+// resolveEnv expands "env:NAME" sentinels in secret-bearing fields by
+// reading the named environment variable. This is intentionally
+// duplicated from the coordinator-side resolver at
+// phase4-coordinator/internal/config/config.go:410-422 to avoid a
+// cross-module import; the M3-2 audit recorded that as the house
+// pattern for config plumbing.
+//
+// FAIL-CLOSED contract (codex PR #73 MED fix): when the YAML uses an
+// env: sentinel and the referenced variable is unset OR empty, Load
+// returns an error. Pre-fix, the silent fall-through to "" let the
+// gateway boot with an empty ServiceToken — at which point
+// UpstreamCoordinatorBearer() silently fell back to OperatorKey,
+// defeating the M3-2 cutover the operator had configured. Matches the
+// coordinator-side fail-closed pattern.
+func (c *Config) resolveEnv() error {
+	for _, f := range []struct {
+		field string
+		dst   *string
+	}{
+		{"coordinator.operator_key", &c.Coordinator.OperatorKey},
+		{"coordinator.service_token", &c.Coordinator.ServiceToken},
+		{"auth.key_hash_secret", &c.Auth.KeyHashSecret},
+		{"auth.oauth.github.client_id", &c.Auth.OAuth.GitHub.ClientID},
+		{"auth.oauth.github.client_secret", &c.Auth.OAuth.GitHub.ClientSecret},
+		{"auth.demo.signing_secret", &c.Auth.Demo.SigningSecret},
+	} {
+		v, err := resolveEnvValue(f.field, *f.dst)
+		if err != nil {
+			return err
+		}
+		*f.dst = v
+	}
+	return nil
 }
 
-func resolveEnvValue(v string) string {
+func resolveEnvValue(field, v string) (string, error) {
 	if !strings.HasPrefix(v, "env:") {
-		return v
+		return v, nil
 	}
-	return os.Getenv(strings.TrimPrefix(v, "env:"))
+	name := strings.TrimPrefix(v, "env:")
+	resolved := os.Getenv(name)
+	if resolved == "" {
+		return "", fmt.Errorf("%s references env:%s but the environment variable is unset or empty", field, name)
+	}
+	return resolved, nil
 }
 
 func (c Config) Validate() error {
@@ -379,6 +422,26 @@ func requireURL(field, raw string) error {
 
 func (c Config) Address() string {
 	return fmt.Sprintf("%s:%d", c.Listen.BindAddress, c.Listen.Port)
+}
+
+// UpstreamCoordinatorBearer returns the credential the gateway should
+// send on UPSTREAM calls to the coordinator (M3-2 / SECU-4). Prefer
+// ServiceToken when set; fall back to OperatorKey for backward
+// compatibility with not-yet-upgraded coordinators. Empty return means
+// the gateway is misconfigured — Validate guarantees OperatorKey is
+// non-empty, so this only returns "" if a future caller bypasses Load.
+//
+// TODO(m3-2-cleanup): remove the OperatorKey fallback in a dedicated PR
+// once live coordinator audit logs show zero gateway-origin
+// `key=operator_key` for 30 days post-OperatorKey-rotation. Tracked in
+// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md. Until that gate is
+// met, removing the fallback would break the cutover for not-yet-
+// upgraded operators.
+func (c CoordinatorConfig) UpstreamCoordinatorBearer() string {
+	if c.ServiceToken != "" {
+		return c.ServiceToken
+	}
+	return c.OperatorKey
 }
 
 func (c Config) CoordinatorTimeout() time.Duration {

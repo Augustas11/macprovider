@@ -14,7 +14,18 @@ public:
 coordinator:
   buyer_url: http://127.0.0.1:8443
   operator_url: http://127.0.0.1:8444
+  # operator_key is the gateway's OWN human-admin credential (used by
+  # /admin/* on the gateway plane AND the legacy upstream credential).
+  # Required.
   operator_key: env:COORDINATOR_OPERATOR_KEY
+  # service_token is the optional service-to-service credential the
+  # gateway sends on UPSTREAM calls to the coordinator (M3-2 / SECU-4).
+  # When set, the gateway prefers it over operator_key for /poolz and
+  # /internal/* upstream calls; operator_key remains the fallback so an
+  # upgraded gateway can still talk to a not-yet-upgraded coordinator.
+  # Mint with: openssl rand -hex 32. Leave unset to preserve pre-bridge
+  # behavior (operator_key flows everywhere).
+  # service_token: env:COORDINATOR_SERVICE_TOKEN
   poolz_poll_interval_s: 10
 
 storage:

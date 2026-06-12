@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
+	"github.com/rs/zerolog"
 )
 
 type tokenValidator interface {
@@ -19,6 +21,19 @@ type tokenValidator interface {
 }
 
 func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
+	return s.HandlersWithBridge(operatorKey, "", tokenStore, requireProviderTokens, earningsRateLimitPerMin)
+}
+
+// HandlersWithBridge mounts the admin/provider handlers. The
+// `/admin/ledger/*` endpoints are operator-only (the codex security
+// audit on PR #73, HIGH-1, flagged that accepting gateway_service_token
+// here would silently grant the gateway human-admin power to read the
+// full billing ledger). The gatewayServiceToken parameter is retained
+// for backward compatibility with the M3-2 main.go wiring but is no
+// longer consulted by `/admin/*` paths — only the operator key is
+// accepted. Handlers (the legacy single-arg signature) is kept as a
+// thin shim so test fixtures and direct callers don't churn.
+func (s *Store) HandlersWithBridge(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int) http.Handler {
 	h := &handler{
 		store:                   s,
 		operatorKey:             operatorKey,
@@ -26,6 +41,7 @@ func (s *Store) Handlers(operatorKey string, tokenStore tokenValidator, requireP
 		requireProviderTokens:   requireProviderTokens,
 		earningsRateLimitPerMin: earningsRateLimitPerMin,
 		lastEarnings:            map[string][]time.Time{},
+		log:                     zerolog.New(os.Stdout).With().Timestamp().Logger(),
 	}
 	return http.HandlerFunc(h.serveHTTP)
 }
@@ -38,6 +54,7 @@ type handler struct {
 	earningsRateLimitPerMin int
 	mu                      sync.Mutex
 	lastEarnings            map[string][]time.Time
+	log                     zerolog.Logger
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -60,13 +77,20 @@ func (h *handler) admin(w http.ResponseWriter, r *http.Request, fn func(http.Res
 		writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 		return
 	}
-	// Fail closed when the operator key is unset (M1-5 / SECU-5). Previously
-	// an empty configured key allowed every caller, relying on config.Validate
-	// in main.go to refuse to start.
-	if h.operatorKey == "" || !auth.BearerTokenMatchesHeader(r.Header, h.operatorKey) {
+	// /admin/ledger/* is operator-only (codex PR #73 HIGH-1 fix). The
+	// gateway service token is intentionally NOT accepted here so a
+	// compromised gateway can't pivot to billing-ledger reads. Empty
+	// operator_key still means DENY (M1-5 / SECU-5).
+	if !auth.OperatorOnlyBearerMatches(r.Header, h.operatorKey) {
 		writeError(w, http.StatusForbidden, "forbidden", "operator key required")
 		return
 	}
+	h.log.Info().
+		Str("event", "internal_bearer_accepted").
+		Str("key", "operator_key").
+		Str("path", r.URL.Path).
+		Str("remote_addr", r.RemoteAddr).
+		Msg("internal bearer accepted")
 	fn(w, r)
 }
 
