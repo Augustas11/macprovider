@@ -1017,12 +1017,22 @@ func TestProviderTokenMustMatchHelloProviderID(t *testing.T) {
 	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
 		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
 	}
+	// SPEC-003 v0.8.4 (fix-pass-5) — `last_used_at` is stamped
+	// atomically by ValidateAndMarkTokenUsed at WS upgrade time, BEFORE
+	// the hello parse + provider_id mismatch check. The pre-fix-pass-5
+	// behavior was "stamp only on successful admission" but that left
+	// a TOCTOU window where a concurrent self-heal could revoke the
+	// row between ValidateToken and MarkTokenUsed. Under the atomic
+	// op, the token holder is credited at the moment they present a
+	// valid bearer; a subsequent provider_id mismatch closes the
+	// connection but the credit stands (it correctly records that
+	// the bearer was presented and validated by this coordinator).
 	records, err := store.ListTokens(context.Background())
 	if err != nil {
 		t.Fatalf("list tokens after mismatch: %v", err)
 	}
-	if len(records) != 1 || records[0].LastUsedAt.Valid {
-		t.Fatalf("records after mismatched auth = %#v, want last_used_at unset", records)
+	if len(records) != 1 || !records[0].LastUsedAt.Valid {
+		t.Fatalf("records after mismatched auth = %#v, want last_used_at set by atomic ValidateAndMarkTokenUsed (fix-pass-5 F)", records)
 	}
 }
 

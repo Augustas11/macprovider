@@ -23,12 +23,17 @@ import (
 // per-provider_id unique-constraint installed by
 // ensureActiveProviderIDUniqueness rejects the INSERT because an
 // unrevoked token already exists for the same provider_id. Callers
-// MUST treat this as a TOFU rejection — emitting it as a generic DB
-// error would let an attacker race the legitimate provider_id and
-// receive an "internal error" instead of the proper close code.
+// MUST distinguish this sentinel from generic DB errors so they can
+// apply SPEC-003 v0.8.3 FR-C9.4 admit-tokenless semantics (mark the
+// admission as AuthBearerlessDuplicate, exclude from routing/billing,
+// refuse to evict an existing routable session) rather than treating
+// it as an internal error.
 //
-// Pre-v0.8.2 this race was the credential-capture path the codex
-// security re-audit on PR #44 flagged as MAJOR-1.
+// Pre-v0.8.2 a race on the SELECT-then-INSERT TOFU pattern was the
+// credential-capture path the codex security re-audit on PR #44
+// flagged as MAJOR-1. The partial unique index added in v0.8.2 and
+// preserved in v0.8.3 (PR #69) closes that race; the wire-level
+// reject was replaced with admit-tokenless in v0.8.3 (Entry 66).
 var ErrActiveTokenAlreadyExists = errors.New("provider_token: active token already exists for provider_id")
 
 type Store struct {
@@ -201,7 +206,8 @@ CREATE INDEX IF NOT EXISTS idx_token_hash ON provider_tokens(token_hash);
 // the writes but does not retroactively serialize the reads. With this
 // partial unique index, the second INSERT fails with a constraint
 // violation and IssueToken returns ErrActiveTokenAlreadyExists, which
-// the caller translates to a TOFU rejection on the wire.
+// v0.8.3 (Entry 66) maps to admit-tokenless + AuthBearerlessDuplicate
+// on the wire (was: TOFU rejection / close).
 //
 // Pinned-tier operator-issued tokens use the same path; if an operator
 // runs `coordinator-cli issue-token` twice for the same provider_id
@@ -293,8 +299,9 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 		// token for the same provider_id. modernc.org/sqlite surfaces
 		// this as a constraint-failure error whose Error() string
 		// contains "UNIQUE constraint failed". Map to the sentinel so
-		// the WS server can close with CloseInvalidToken instead of
-		// leaking a generic DB error to the wire.
+		// the WS server can apply v0.8.3 admit-tokenless semantics
+		// (was: close with CloseInvalidToken) instead of leaking a
+		// generic DB error to the wire.
 		if isActiveProviderTokenConstraintFailure(err) {
 			return TokenRecord{}, "", ErrActiveTokenAlreadyExists
 		}
@@ -307,18 +314,27 @@ func (s *Store) IssueToken(ctx context.Context, providerID, providerName string)
 	return TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: createdAt}, token, nil
 }
 
-// HasActiveTokenForProvider implements SPEC-003 v0.8 FR-C9.4 TOFU
-// (trust-on-first-use): returns true when at least one unrevoked token
-// exists for `providerID`. The coordinator uses this to refuse minting a
-// second token for an already-known provisional `provider_id` — closing
-// the credential-capture vector flagged by the codex security audit on
-// PR #44, where an attacker could otherwise mint a parallel valid
-// bearer for someone else's declared provider_id during the settling
-// window.
+// HasActiveTokenForProvider returns true when at least one unrevoked
+// token row exists for `providerID`. Exposed on both the concrete Store
+// AND the `internal/ws.TokenIssuer` interface (v0.8.4 composition, PR #69
+// merge with PR #78) so `resolveProvisionalToken` can disambiguate
+// "no row at all (mint OK)" from "active row with last_used_at IS NOT
+// NULL (strict TOFU reject)" after `RevokeUnusedTokenForProvider`
+// returned (false, nil).
 //
-// Callers must treat (false, nil) as "OK to mint" and (true, nil) as
-// "MUST refuse tokenless admission". An error indicates the gate could
-// not be evaluated; the coordinator MUST fail closed in that case.
+// Under v0.8.4 the TOCTOU concern the v0.8.2 codex security re-audit
+// (PR #44 MAJOR-1) flagged is no longer applicable: the partial unique
+// index `idx_provider_tokens_one_active_per_provider` remains the atomic
+// mint-or-collide invariant. This method is purely a read-only
+// disambiguation step that runs AFTER the self-heal write; the
+// subsequent `IssueToken` INSERT is what actually commits the
+// at-most-one-bearer rule. A concurrent reconnect that races between
+// our HasActive check and our INSERT is caught by the unique index
+// (returns `ErrActiveTokenAlreadyExists` → race-loss admit-quarantined
+// path).
+//
+// Also used for operator tooling — e.g. `coordinator-cli list-tokens`
+// presence checks and pre-flag-flip audit scripts.
 func (s *Store) HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error) {
 	providerID = strings.TrimSpace(providerID)
 	if providerID == "" {
@@ -441,6 +457,46 @@ func (s *Store) MarkTokenUsed(ctx context.Context, token string) error {
 		return fmt.Errorf("no active token found")
 	}
 	return nil
+}
+
+// ValidateAndMarkTokenUsed atomically validates a bearer and stamps its
+// `last_used_at`. SPEC-003 v0.8.4 (fix-pass-5) — closes the TOCTOU
+// window between separate `ValidateToken` and `MarkTokenUsed` calls
+// that the codex code-review (PR #69 fix-pass-4) flagged: between the
+// two, a concurrent tokenless connect could see `last_used_at IS NULL`
+// and self-heal-revoke the legitimate row, then mint a fresh bearer
+// for the attacker. This atomic UPDATE-RETURNING closes the window by
+// stamping `last_used_at` in the same statement that the validation
+// reads from. SQLite WAL serializes writers; once this call returns
+// (providerID, true, nil), the row's `last_used_at` is set and any
+// subsequent `RevokeUnusedTokenForProvider` skips this row.
+//
+// Callers SHOULD use this instead of `ValidateToken` for any WS-connect
+// validation; legacy `ValidateToken` is retained for read-only paths
+// that don't need to record use (operator tooling, status checks).
+func (s *Store) ValidateAndMarkTokenUsed(ctx context.Context, token string) (string, bool, error) {
+	if token == "" {
+		return "", false, nil
+	}
+	hash := tokenHash(token)
+	var providerID string
+	err := s.db.QueryRowContext(ctx,
+		`UPDATE provider_tokens
+		    SET last_used_at = ?
+		  WHERE token_hash = ? AND revoked_at IS NULL AND provider_id <> ''
+		  RETURNING provider_id`,
+		nowString(), hash,
+	).Scan(&providerID)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if providerID == "" {
+		return "", false, nil
+	}
+	return providerID, true, nil
 }
 
 func (s *Store) RevokeToken(ctx context.Context, tokenPrefix string) (TokenRecord, error) {

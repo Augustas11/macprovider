@@ -184,7 +184,14 @@ func providerJSONL1Baseline() Provider {
 	}
 }
 
-func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
+// fix-pass-4 (PR #69): RoutingEligible is now exclusively about credential
+// trust + slot availability. HashStatus filtering moved to Tier-2-aware
+// buyer code (tier2ProviderExcludedStatus) so the operator-configurable
+// "ignore stale mismatches when hash enforcement is disabled" semantics
+// can be honored. The predicate must NOT exclude hash-mismatched providers
+// unconditionally — that would make a config-disabled inactive state
+// reject providers the operator chose to admit.
+func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	base := Provider{State: StateReady, SlotsFree: 1}
 	if !base.RoutingEligible() {
 		t.Fatal("zero hash status should preserve default routing eligibility")
@@ -194,13 +201,18 @@ func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
 	}
 	mismatch := base
 	mismatch.HashStatus = HashStatusMismatch
-	if mismatch.RoutingEligible() {
-		t.Fatal("hash_mismatch provider should not be routing eligible")
+	if !mismatch.RoutingEligible() {
+		t.Fatal("hash_mismatch must NOT be excluded by RoutingEligible — Tier-2 hash filtering is config-aware and lives elsewhere")
 	}
 	invalid := base
 	invalid.HashStatus = HashStatusInvalid
-	if invalid.RoutingEligible() {
-		t.Fatal("hash_invalid provider should not be routing eligible")
+	if !invalid.RoutingEligible() {
+		t.Fatal("hash_invalid must NOT be excluded by RoutingEligible — Tier-2 hash filtering is config-aware and lives elsewhere")
+	}
+	bearerless := base
+	bearerless.AuthState = AuthBearerlessDuplicate
+	if bearerless.RoutingEligible() {
+		t.Fatal("AuthBearerlessDuplicate MUST be excluded — SPEC-003 v0.8.3 FR-C9.4 credential trust gate")
 	}
 }
 
@@ -855,4 +867,109 @@ func legacyLoadingHeartbeatUpdate(modelID string, loading bool, at time.Time) He
 	update.Loading = loading
 	update.LoadingPresent = true
 	return update
+}
+
+// TestRegistryRefusesBearerlessDuplicateReplacement directly exercises the
+// pool.Registry eviction defense layer (SPEC-003 v0.8.3 fix-pass-3 codex
+// security MAJOR-1). Under v0.8.4 composition this layer is reached only
+// via the IssueToken race-loss path, but the layer must still refuse the
+// replacement deterministically. Doesn't depend on the WS handler so the
+// branch is unambiguously exercised regardless of the composed wire
+// contract.
+func TestRegistryRefusesBearerlessDuplicateReplacement(t *testing.T) {
+	registry := NewRegistry(nil)
+	existing := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-legitimate",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthBearerValidated,
+	}
+	if _, ok := registry.Register(existing, nil); !ok {
+		t.Fatal("legitimate Bearer-validated session: initial Register must succeed")
+	}
+	incoming := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-attacker",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthBearerlessDuplicate,
+	}
+	old, ok := registry.Register(incoming, nil)
+	if ok {
+		t.Fatalf("registry.Register(bearer-less duplicate) = (old=%v, ok=true), want (nil, false)", old)
+	}
+	if old != nil {
+		t.Fatalf("registry.Register(bearer-less duplicate) returned old=%v, want nil (no replacement should have happened)", old)
+	}
+	resolved, found := registry.Resolve("claimed-provider", "session-legitimate")
+	if !found {
+		t.Fatal("legitimate session resolution failed; eviction defense did not protect it")
+	}
+	if resolved.AssignedID != "session-legitimate" {
+		t.Fatalf("resolved.AssignedID = %q, want session-legitimate (AuthBearerlessDuplicate must not replace)", resolved.AssignedID)
+	}
+}
+
+// TestRegistryRefusesNonBearerReplacementOfRoutableBearerValidated directly
+// exercises the proven-session protection layer added in SPEC-003 v0.8.4
+// fix-pass-5 (codex security MAJOR-2). An incoming AuthSelfMinted session
+// MUST NOT be allowed to last-writer-wins evict an existing routable
+// AuthBearerValidated session, because that would let a concurrent
+// tokenless self-heal race displace a legitimate Bearer-validated provider.
+func TestRegistryRefusesNonBearerReplacementOfRoutableBearerValidated(t *testing.T) {
+	registry := NewRegistry(nil)
+	existing := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-legitimate",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthBearerValidated,
+	}
+	if _, ok := registry.Register(existing, nil); !ok {
+		t.Fatal("legitimate Bearer-validated session: initial Register must succeed")
+	}
+	incoming := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-self-mint",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthSelfMinted,
+	}
+	old, ok := registry.Register(incoming, nil)
+	if ok {
+		t.Fatalf("registry.Register(self-minted) over existing AuthBearerValidated = (old=%v, ok=true), want (nil, false)", old)
+	}
+	if old != nil {
+		t.Fatalf("registry.Register(self-minted) returned old=%v, want nil", old)
+	}
+	resolved, found := registry.Resolve("claimed-provider", "session-legitimate")
+	if !found || resolved.AssignedID != "session-legitimate" {
+		t.Fatal("legitimate Bearer-validated session was displaced by AuthSelfMinted; fix-pass-5 proven-session protection failed")
+	}
+
+	// Conversely: a NEW Bearer-validated incoming SHOULD be allowed to
+	// replace (legitimate provider reconnect with a valid Bearer is
+	// always trusted).
+	bearerReplacement := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-rebearer",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthBearerValidated,
+	}
+	_, ok = registry.Register(bearerReplacement, nil)
+	if !ok {
+		t.Fatal("legitimate AuthBearerValidated reconnect MUST be allowed to replace an existing AuthBearerValidated session")
+	}
 }

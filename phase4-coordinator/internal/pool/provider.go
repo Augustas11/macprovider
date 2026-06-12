@@ -17,6 +17,19 @@ type RecoveryReason string
 type HashStatus string
 type AttestationStatus string
 
+// AuthState records HOW a provider session was admitted. Added in
+// SPEC-003 v0.8.3 fix-pass-3 (codex security audit on PR #69 MAJOR-1)
+// so the post-PR-#69 admit-tokenless-on-duplicate behavior can be
+// distinguished from a legitimate self-mint or Bearer-validated
+// session for routing, billing, and operator audit purposes. The zero
+// value (empty string) is intentionally "no special marking" so
+// pre-FR-C9 providers and pinned-tier admissions don't need to set it
+// explicitly; the registry, routing, and billing all treat empty +
+// AuthBearerValidated + AuthSelfMinted as routable. Only
+// AuthBearerlessDuplicate triggers the eviction-defense + non-routable
+// gates.
+type AuthState string
+
 const (
 	StateReady       State = "ready"
 	StateBusy        State = "busy"
@@ -45,6 +58,35 @@ const (
 	AttestationStatusStale       AttestationStatus = "attestation_stale"
 	AttestationStatusUnsupported AttestationStatus = "unsupported"
 	AttestationStatusNotRequired AttestationStatus = "not_required"
+
+	// AuthBearerValidated — connect arrived with a Bearer header that
+	// auth.Store.ValidateToken matched. Post-flag-flip this is the
+	// only admitted state.
+	AuthBearerValidated AuthState = "bearer_validated"
+	// AuthSelfMinted — connect arrived tokenless and the coordinator
+	// minted a fresh provider_tokens row + returned the cleartext in
+	// the ack frame (FR-C9.1). Provider can persist it and reconnect
+	// authenticated next time.
+	AuthSelfMinted AuthState = "self_minted"
+	// AuthBearerlessDuplicate — connect arrived tokenless for a
+	// provider_id that already has an unrevoked token row in
+	// provider_tokens (FR-C9.4 v0.8.3). The connection is admitted
+	// (the v0.8.2 hard-reject was a deploy brick — see Entry 66) but
+	// excluded from routing + billing + cannot evict an existing
+	// session for the same provider_id. Operator MUST revoke the
+	// stale row before the legitimate provider can reconnect cleanly.
+	AuthBearerlessDuplicate AuthState = "bearerless_duplicate"
+	// AuthMintFailed — FR-C9.1 mint attempted but a non-constraint DB
+	// error occurred (transient infrastructure failure, not race-loss).
+	// SPEC-003 v0.8.4 (fix-pass-5) marks the session distinctly from
+	// the pre-FR-C9 / no-issuer empty state so /poolz observers can
+	// distinguish "FR-C9 wanted to mint but the DB failed" from
+	// "FR-C9 isn't enabled here." The wire treatment is fail-closed
+	// (RejectTOFU) because admitting an empty-AuthState session as
+	// fully routable would amplify a DB-error storm into a routing
+	// admission DoS. See codex security audit MAJOR-1 on PR #69
+	// fix-pass-4 + architect Recommended Followup 4.
+	AuthMintFailed AuthState = "mint_failed"
 )
 
 type Provider struct {
@@ -62,6 +104,16 @@ type Provider struct {
 	ModelLoadTimeMs       int64         `json:"model_load_time_ms,omitempty"`
 	EndpointURL           string        `json:"endpoint_url"`
 	Tier                  Tier          `json:"tier"`
+	// AuthState records how the connect was admitted. Empty string
+	// preserves pre-v0.8.3 behavior (routable, billable). Set to
+	// AuthBearerlessDuplicate by the duplicate-tokenless admit path
+	// in resolveProvisionalToken; set to AuthSelfMinted on a fresh
+	// FR-C9.1 mint; set to AuthBearerValidated when the connect
+	// carried a Bearer header that matched a stored token. The
+	// Registry uses this to refuse evicting a routable session in
+	// favor of a bearer-less duplicate; buyer routing + billing use
+	// it to exclude bearer-less duplicates from money paths.
+	AuthState             AuthState     `json:"auth_state,omitempty"`
 	InferencePath         InferencePath `json:"inference_path"`
 	AdmittedAt            time.Time     `json:"admitted_at"`
 	HTTPForwardingOnly    bool          `json:"http_forwarding_only,omitempty"`
@@ -114,8 +166,26 @@ type Tier2Session struct {
 	StartedAt          time.Time
 }
 
+// RoutingEligible is the single authority on whether a session may receive
+// buyer traffic and serve as a billing identity. It captures credential trust
+// (was this session admitted with a credential we trust?) and slot
+// availability — NOT Tier-2 hash enforcement, which is operator-configurable
+// and lives in Tier-2-aware buyer code.
+//
+// SPEC-003 v0.8.3 FR-C9.4 — bearer-less duplicate sessions are registered in
+// the pool (so they're operator-visible in /poolz) but excluded from routing.
+// The provider on the other end thinks they're admitted but receives no buyer
+// traffic and accrues no billing identity under the claimed provider_id. The
+// legitimate holder of the token row remains routable.
+//
+// HashStatus filtering used to live here as a defense-in-depth gate. Fix-pass-4
+// removed it: when Tier-2 hash enforcement is disabled, hash-mismatched
+// providers must still route, and a non-config-aware predicate cannot model
+// that. Buyer routing (chat completions, /v1/models, hard-pin) calls
+// tier2ProviderExcludedStatus alongside RoutingEligible() to enforce hash
+// when active.
 func (p Provider) RoutingEligible() bool {
-	if p.HashStatus == HashStatusMismatch || p.HashStatus == HashStatusInvalid {
+	if p.AuthState == AuthBearerlessDuplicate {
 		return false
 	}
 	return p.State == StateReady && p.SlotsFree > 0
@@ -188,10 +258,62 @@ func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
 	return p, ok
 }
 
-func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
+// Register installs a provider session, replacing any prior session
+// for the same provider_id. Returns (oldConn, registered):
+//   - registered==true: session installed; oldConn is the displaced
+//     connection (nil if no prior session existed) and the caller
+//     SHOULD close it after the new ack frame is written.
+//   - registered==false: registration was REFUSED. Caller MUST NOT
+//     proceed and MUST close `conn` with CloseInvalidToken /
+//     "invalid_token". This branch fires on two SPEC-003 v0.8.4 FR-C9.4
+//     defense layers:
+//
+//     1. **Bearer-less duplicate rule (fix-pass-3):** an incoming
+//        AuthBearerlessDuplicate is refused whenever a session already
+//        exists for the same provider_id — no incoming bearer-less
+//        connection may displace any other session.
+//
+//     2. **Proven-session protection (fix-pass-5):** an incoming
+//        non-Bearer-validated session (AuthSelfMinted / AuthMintFailed /
+//        empty) is refused whenever the existing session is a routing-
+//        eligible AuthBearerValidated session. Without this rule, a
+//        concurrent tokenless self-heal during a victim's first-mint
+//        window could mint a fresh bearer and then register as
+//        AuthSelfMinted, last-writer-wins evicting the victim's
+//        validated session (security audit, PR #69 fix-pass-5 MAJOR-2).
+//        Bearer-validated incoming connects always succeed because
+//        their proof-of-bearer is independently strong.
+//
+// The DB partial unique index alone prevents the attacker from minting
+// a parallel bearer, but does NOT prevent these two pool-slot capture
+// shapes. These checks close them at the registry layer.
+func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn, registered bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if existing := r.providers[p.ProviderID]; existing != nil {
+		// SPEC-003 v0.8.4 FR-C9.4 — refuse to evict ANY existing
+		// session in favor of a bearer-less duplicate. This closes the
+		// pool-slot capture vector from the PR #69 codex security audit
+		// MAJOR-1. A legitimate reconnect after a NAT blip will find
+		// the existing session already reaped (readProviderLoop
+		// cleanup); only an attacker racing while the legitimate
+		// provider is still in the pool would hit this branch.
+		if p.AuthState == AuthBearerlessDuplicate {
+			return nil, false
+		}
+		// SPEC-003 v0.8.4 FR-C9.4 (fix-pass-5) — protect proven
+		// (Bearer-validated, routing-eligible) sessions from non-
+		// Bearer-validated replacement. Under composition, a tokenless
+		// connect that hits self-heal becomes AuthSelfMinted; without
+		// this check, the attacker could last-writer-wins evict the
+		// legitimate Bearer-validated session. A legitimate provider
+		// reconnect with a valid Bearer always wins because their
+		// AuthState is AuthBearerValidated.
+		if existing.AuthState == AuthBearerValidated &&
+			existing.RoutingEligible() &&
+			p.AuthState != AuthBearerValidated {
+			return nil, false
+		}
 		old = existing.conn
 		delete(r.sessions, existing.AssignedID)
 		// M2-5: this is a session replacement (same provider_id, new
@@ -221,7 +343,7 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 	delete(r.breakerFaults, p.ProviderID)
 	delete(r.recoveryHolds, p.ProviderID)
 	delete(r.lastBreakerRecoveries, p.ProviderID)
-	return old
+	return old, true
 }
 
 // recordSeenModelLocked records a model id under a provider's set,

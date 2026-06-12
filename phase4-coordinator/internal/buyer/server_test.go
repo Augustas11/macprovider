@@ -4521,3 +4521,151 @@ func TestDefaultConfigPreservesBaselineProviderSelection(t *testing.T) {
 		}
 	}
 }
+
+// registerBearerlessDuplicate registers a provider in the AuthBearerlessDuplicate
+// state — slot-holding, StateReady, but never routable per
+// pool.Provider.RoutingEligible(). Mirrors the v1.2.5 bearer-less reconnect case
+// that v0.8.3 admits and quarantines.
+func registerBearerlessDuplicate(registry *pool.Registry, providerID, assignedID, modelID, endpointURL string) {
+	now := time.Now().UTC()
+	registry.Register(&pool.Provider{
+		ProviderID:            providerID,
+		AssignedID:            assignedID,
+		Hostname:              providerID + ".local",
+		ModelID:               modelID,
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		EndpointURL:           endpointURL,
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       now,
+		LastActivityAt:        now,
+		ConnectedAt:           now,
+		BinaryVersion:         "0.1.0",
+		AuthState:             pool.AuthBearerlessDuplicate,
+	}, nil)
+}
+
+// TestChatCompletionsExcludesAuthBearerlessDuplicate verifies that a provider in
+// AuthBearerlessDuplicate state is NEVER routable, even though it holds a slot
+// and reports StateReady. Regression for fix-pass-4: the buyer routing path must
+// delegate to pool.Provider.RoutingEligible() — the single authority —
+// rather than a local slot/state-only predicate.
+func TestChatCompletionsExcludesAuthBearerlessDuplicate(t *testing.T) {
+	upstreamHit := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerBearerlessDuplicate(registry, "p1", "session-1", "model-a", upstream.URL)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503; body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamHit {
+		t.Fatalf("upstream MUST NOT be invoked for AuthBearerlessDuplicate provider — billing identity would accrue under unauthenticated provider_id")
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != "" {
+		t.Fatalf("X-MacProvider-Provider = %q, want empty (no candidate)", got)
+	}
+}
+
+// TestChatCompletionsPinnedHeaderRejectsAuthBearerlessDuplicate verifies the
+// hard-pin path (X-MacProvider-Provider header) also rejects bearer-less
+// duplicates. Fix-pass-4 target site: validatePinnedProviderForRequest.
+func TestChatCompletionsPinnedHeaderRejectsAuthBearerlessDuplicate(t *testing.T) {
+	upstreamHit := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamHit = true
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerBearerlessDuplicate(registry, "p1", "session-1", "model-a", upstream.URL)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	body := []byte(`{"model":"model-a","messages":[{"role":"user","content":"hi"}],"stream":false}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("X-MacProvider-Provider", "p1")
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("pinned status = %d, want 503; body=%s", rr.Code, rr.Body.String())
+	}
+	if upstreamHit {
+		t.Fatalf("pinned upstream MUST NOT be invoked for AuthBearerlessDuplicate provider")
+	}
+}
+
+// TestModelsExcludesAuthBearerlessDuplicateFromCapacity verifies the
+// /v1/models surface does not advertise capacity (provider count, total slots)
+// from bearer-less duplicates. They hold slots but must not be reflected in
+// publicly-advertised network capacity.
+func TestModelsExcludesAuthBearerlessDuplicateFromCapacity(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "good", EndpointURL: "https://good.example"},
+		{ProviderID: "bad", EndpointURL: "https://bad.example"},
+	})
+	// One Bearer-validated provider (counted) + one bearer-less duplicate (excluded).
+	register(registry, "good", "session-good", "model-a", pool.StateReady, 20000, 1)
+	registerBearerlessDuplicate(registry, "bad", "session-bad", "model-a", "https://bad.example")
+
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			ID            string `json:"id"`
+			ProviderCount int    `json:"provider_count"`
+			TotalSlots    int    `json:"total_slots"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	var modelA struct {
+		ProviderCount int
+		TotalSlots    int
+		found         bool
+	}
+	for _, m := range resp.Data {
+		if m.ID == "model-a" {
+			modelA.ProviderCount = m.ProviderCount
+			modelA.TotalSlots = m.TotalSlots
+			modelA.found = true
+		}
+	}
+	if !modelA.found {
+		t.Fatalf("model-a not in response; body=%s", rr.Body.String())
+	}
+	if modelA.ProviderCount != 1 {
+		t.Fatalf("provider_count = %d, want 1 (good only; bad is AuthBearerlessDuplicate)", modelA.ProviderCount)
+	}
+	if modelA.TotalSlots != 1 {
+		t.Fatalf("total_slots = %d, want 1 (good only)", modelA.TotalSlots)
+	}
+}

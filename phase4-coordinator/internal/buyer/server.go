@@ -421,7 +421,7 @@ func (s *Server) internalTier2Metadata() map[string]any {
 		providers := s.pool.Snapshot()
 		var verified, mismatched, uncatalogued int
 		for _, p := range providers {
-			if !baseRoutingEligible(p) {
+			if !hasAvailableSlot(p) {
 				continue
 			}
 			switch s.effectiveHashStatus(p, cfg) {
@@ -745,10 +745,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	pillarAActive := tier2.ModelHashActive(cfg)
 	tier2Active := tier2.ConfigActive(cfg)
 	for _, p := range providers {
-		if pillarAActive && !baseRoutingEligible(p) {
+		if pillarAActive && !p.RoutingEligible() {
 			continue
 		}
-		if !pillarAActive && p.State != pool.StateReady {
+		if !pillarAActive && (p.State != pool.StateReady || p.AuthState == pool.AuthBearerlessDuplicate) {
 			continue
 		}
 		excluded := tier2Active && s.tier2ProviderExcludedForConfig(p, cfg)
@@ -811,7 +811,7 @@ func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provi
 	modelProviders := make([]pool.Provider, 0)
 	catalogUnavailable := false
 	for _, p := range providers {
-		if !baseRoutingEligible(p) || !modelIDEqual(p.ModelID, entry.ID) {
+		if !hasAvailableSlot(p) || !modelIDEqual(p.ModelID, entry.ID) {
 			continue
 		}
 		status := s.effectiveHashStatus(p, cfg)
@@ -2260,7 +2260,7 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 		if _, skip := excluded[routeKey(p)]; skip {
 			continue
 		}
-		if !s.providerMatchesRequest(p, req.Model, class) || !baseRoutingEligible(p) {
+		if !s.providerMatchesRequest(p, req.Model, class) || !p.RoutingEligible() {
 			continue
 		}
 		if p.MaxContextTokens < estimatedTokens {
@@ -2785,7 +2785,7 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 	if p.MaxContextTokens < estimatedTokens {
 		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
 	}
-	if !baseRoutingEligible(p) {
+	if !p.RoutingEligible() {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
 	if s.tier2ProviderExcluded(p) {
@@ -2834,7 +2834,18 @@ func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, 
 	return p, nil
 }
 
-func baseRoutingEligible(p pool.Provider) bool {
+// hasAvailableSlot reports providers occupying a routable slot. Used by
+// observability sites that branch on HashStatus and need to count
+// mismatched/uncatalogued providers (which RoutingEligible excludes from
+// routing entirely). Bearer-less duplicates are excluded here too —
+// they hold a slot but are never legitimate.
+//
+// For routing decisions, use pool.Provider.RoutingEligible() — that is the
+// single authority on whether a provider may receive traffic.
+func hasAvailableSlot(p pool.Provider) bool {
+	if p.AuthState == pool.AuthBearerlessDuplicate {
+		return false
+	}
 	return p.State == pool.StateReady && p.SlotsFree > 0
 }
 
