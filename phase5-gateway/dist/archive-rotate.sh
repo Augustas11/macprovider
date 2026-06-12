@@ -234,43 +234,52 @@ reassert_triggers_idempotent() {
   sqlite3 "$GATEWAY_DB_PATH" "$sql"
 }
 
-# Drain pre-stop: poll /healthz for in_flight_requests and only stop when it
-# reaches 0 or the timeout elapses. Mirrors deploy-pearl-vps.sh step 5 shape.
+# Drain pre-stop: count active concurrency_reservations in the live DB and
+# wait until they reach 0 (or the timeout elapses) before issuing systemctl
+# stop. The gateway gates every buyer money-path request through
+# ReserveConcurrency() before forwarding to the coordinator and releases on
+# response completion — so an active reservation IS an in-flight request that
+# may still settle usage_events/audit_events on the way out.
+#
+# Why not /healthz? Because /healthz today only returns {status,version} (see
+# phase5-gateway/internal/router/server.go:292) — it does NOT surface
+# in_flight_requests. Polling sqlite is gauge-equivalent, lock-free under
+# WAL-mode reads, and avoids touching the gateway binary in this PR.
+#
 # Closes the security-auditor HIGH on rotation killing in-flight streaming
-# settlement.
+# settlement (iteration 1) + the iteration-2 follow-up that the previous
+# /healthz drain was a no-op because the JSON field doesn't exist.
 drain_inflight() {
   if [ "$DRY_RUN" = "1" ]; then
-    log "DRY_RUN: would drain in-flight requests via $GATEWAY_HEALTHZ_URL"
-    return 0
-  fi
-  if ! command -v curl >/dev/null 2>&1; then
-    log "WARN: curl not present — skipping in-flight drain (assuming caller knows the system is quiet)"
+    log "DRY_RUN: would drain in-flight requests via active concurrency_reservations"
     return 0
   fi
   local deadline=$(( $(date -u +%s) + GATEWAY_ARCHIVE_DRAIN_TIMEOUT_S ))
-  local inflight body
+  local inflight
   while :; do
-    body=$(curl -fsS --max-time 5 --max-filesize 65536 "$GATEWAY_HEALTHZ_URL" 2>/dev/null || true)
-    if [ -z "$body" ]; then
-      log "WARN: /healthz unreachable during drain — proceeding (gateway likely already down)"
-      return 0
-    fi
-    inflight=$(printf '%s' "$body" | python3 -c "import sys,json
-try: d=json.load(sys.stdin)
-except Exception: print(0); sys.exit(0)
-print(d.get('in_flight_requests', d.get('inflight', 0)))" 2>/dev/null || echo 0)
+    # Lock-free read: WAL mode + the read-only handle pattern lets us SELECT
+    # without contesting writers. Counts both active reservations and any
+    # quota_reservations still in 'active' state — both proxies for unsettled
+    # buyer work.
+    inflight=$(sqlite3 -bail "$GATEWAY_DB_PATH" \
+      "SELECT (SELECT COUNT(*) FROM concurrency_reservations WHERE status='active')
+            + (SELECT COUNT(*) FROM quota_reservations WHERE status='active');" 2>/dev/null \
+      || echo "ERR")
     case "$inflight" in
-      ''|*[!0-9]*) inflight=0 ;;
+      ''|*[!0-9]*)
+        log "ERROR: drain probe failed (sqlite returned '$inflight') — refusing to stop gateway"
+        return 1
+        ;;
     esac
     if [ "$inflight" -eq 0 ]; then
-      log "drain ok: 0 in-flight requests"
+      log "drain ok: 0 active reservations"
       return 0
     fi
     if [ "$(date -u +%s)" -ge "$deadline" ]; then
-      log "ERROR: drain timeout — $inflight requests still in flight after ${GATEWAY_ARCHIVE_DRAIN_TIMEOUT_S}s"
+      log "ERROR: drain timeout — $inflight active reservations after ${GATEWAY_ARCHIVE_DRAIN_TIMEOUT_S}s"
       return 1
     fi
-    log "  draining: $inflight in-flight requests, sleeping 2s"
+    log "  draining: $inflight active reservations, sleeping 2s"
     sleep 2
   done
 }
@@ -356,11 +365,32 @@ fi
 
 TS=$(utc_ts)
 mkdir -p "$GATEWAY_ARCHIVE_DIR"
-# Tighten archive-dir permissions. The runbook installs this dir as root:root
-# 0700 so the gateway service (User=macprovider) cannot substitute or unlink
-# archive files. Don't chown here (script may run as a different uid in tests);
-# just enforce 0700 mode.
+# Tighten archive-dir perms + ownership. Goal: the gateway service
+# (User=macprovider) MUST NOT be able to substitute or unlink archive files,
+# even though it owns the live DB. Mode 0700 alone is insufficient if the
+# directory is owned by macprovider. When this script runs as root (the
+# production path), enforce root:root ownership; under REQUIRE_REMOTE=1
+# (production), abort if the dir is owned by anything other than root.
 chmod 0700 "$GATEWAY_ARCHIVE_DIR" 2>/dev/null || true
+if [ "$(id -u)" = "0" ]; then
+  chown root:root "$GATEWAY_ARCHIVE_DIR" 2>/dev/null || true
+fi
+if [ "$GATEWAY_ARCHIVE_REQUIRE_REMOTE" = "1" ]; then
+  # Stat the owner uid; in BSD stat use -f %u, GNU stat use -c %u.
+  if stat -c %u "$GATEWAY_ARCHIVE_DIR" >/dev/null 2>&1; then
+    DIR_UID=$(stat -c %u "$GATEWAY_ARCHIVE_DIR")
+  else
+    DIR_UID=$(stat -f %u "$GATEWAY_ARCHIVE_DIR")
+  fi
+  if [ "$DIR_UID" != "0" ]; then
+    log "ERROR: $GATEWAY_ARCHIVE_DIR is owned by uid=$DIR_UID, not root (uid=0)."
+    log "       In production (GATEWAY_ARCHIVE_REQUIRE_REMOTE=1) the archive"
+    log "       directory must be root-owned so the gateway service user cannot"
+    log "       substitute or unlink compliance archives. Fix with:"
+    log "         sudo chown root:root $GATEWAY_ARCHIVE_DIR"
+    exit 4
+  fi
+fi
 
 SNAPSHOT_PATH="$GATEWAY_ARCHIVE_DIR/gateway-${TS}.db"
 ARCHIVE_PATH="${SNAPSHOT_PATH}.${COMPRESS_EXT}"
@@ -425,20 +455,33 @@ if [ -n "$GATEWAY_ARCHIVE_S3_BUCKET" ]; then
       fi
       log "WARN: s3 upload failed (REQUIRE_REMOTE=0); archive remains in $GATEWAY_ARCHIVE_DIR"
     else
-      # Upload checksum too, then readback-verify that the remote object is
-      # actually fetchable. `aws s3api head-object` returns 0 only when the
-      # object exists and the principal can read it.
-      aws s3 cp "$CHECKSUM_PATH" "s3://$GATEWAY_ARCHIVE_S3_BUCKET/" --only-show-errors \
-        || log "WARN: s3 checksum upload failed (archive upload succeeded)"
+      # Upload checksum too. Under REQUIRE_REMOTE=1 the checksum is part of the
+      # cold-storage contract — archive-restore.sh refuses to install without
+      # the sidecar (closes iteration-2 HIGH on .sha256 being optional).
+      if ! aws s3 cp "$CHECKSUM_PATH" "s3://$GATEWAY_ARCHIVE_S3_BUCKET/" --only-show-errors; then
+        if [ "$GATEWAY_ARCHIVE_REQUIRE_REMOTE" = "1" ]; then
+          log "ERROR: GATEWAY_ARCHIVE_REQUIRE_REMOTE=1 but s3 .sha256 upload failed — refusing to prune"
+          log "       (archive landed remotely but the checksum sidecar that archive-restore.sh"
+          log "        requires by default did not — restore would refuse the archive)"
+          exit 4
+        fi
+        log "WARN: s3 checksum upload failed (archive upload succeeded, REQUIRE_REMOTE=0)"
+      fi
       if [ "$GATEWAY_ARCHIVE_REQUIRE_REMOTE" = "1" ]; then
-        log "verifying remote readback (head-object)"
+        log "verifying remote readback (head-object on both archive + checksum)"
         if ! aws s3api head-object \
               --bucket "$GATEWAY_ARCHIVE_S3_BUCKET" \
               --key "$(basename "$ARCHIVE_PATH")" >/dev/null 2>&1; then
           log "ERROR: head-object failed on remote archive — refusing to prune"
           exit 4
         fi
-        log "  remote readback OK"
+        if ! aws s3api head-object \
+              --bucket "$GATEWAY_ARCHIVE_S3_BUCKET" \
+              --key "$(basename "$CHECKSUM_PATH")" >/dev/null 2>&1; then
+          log "ERROR: head-object failed on remote .sha256 sidecar — refusing to prune"
+          exit 4
+        fi
+        log "  remote readback OK (archive + sidecar)"
       fi
     fi
   else

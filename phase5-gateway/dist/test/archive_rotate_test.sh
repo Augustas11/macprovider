@@ -57,6 +57,10 @@ CREATE TABLE capacity_signal_events (event_id TEXT PRIMARY KEY, signal TEXT, val
 CREATE TABLE signup_events (event_id TEXT PRIMARY KEY, account_id TEXT, client_ip TEXT, provider TEXT, created_at TEXT);
 CREATE TABLE demo_session_events (event_id TEXT PRIMARY KEY, client_ip TEXT, created_at TEXT);
 CREATE TABLE concurrency_reservations (account_id TEXT, request_id TEXT, status TEXT, expires_at TEXT, created_at TEXT, released_at TEXT DEFAULT '', PRIMARY KEY (account_id, request_id));
+-- quota_reservations has no BEFORE-DELETE trigger (M2-4 Part B owns it via
+-- DeleteTerminalQuotaReservations). The drain probe reads this table to
+-- count active reservations, so it must exist in the test seed.
+CREATE TABLE quota_reservations (account_id TEXT, request_id TEXT, window_date TEXT, reserved_tokens INTEGER, settled_tokens INTEGER DEFAULT 0, status TEXT, expires_at TEXT, created_at TEXT, settled_at TEXT DEFAULT '', PRIMARY KEY (account_id, request_id));
 
 CREATE TRIGGER usage_events_no_delete BEFORE DELETE ON usage_events BEGIN SELECT RAISE(ABORT, 'usage_events are append-only'); END;
 CREATE TRIGGER feedback_events_no_delete BEFORE DELETE ON feedback_events BEGIN SELECT RAISE(ABORT, 'feedback_events are append-only'); END;

@@ -116,8 +116,14 @@ is handled out-of-band by a rotation job that ships a clean snapshot of
 rows (rows older than `GATEWAY_ARCHIVE_PRUNE_DAYS`, default 7) from the
 live DB while temporarily dropping + recreating the per-table
 `*_no_delete` triggers inside a single `BEGIN IMMEDIATE; ... COMMIT;`
-transaction. `concurrency_reservations` is intentionally NOT pruned by
-this path (M2-4 Part B's `DeleteTerminalQuotaReservations` owns it).
+transaction.
+
+All 9 tables are in scope. `concurrency_reservations` keeps a narrower
+prune predicate (`status <> 'active'`): non-active rows older than the
+cutoff are dropped, active rows are NEVER touched regardless of age.
+M2-4 Part B's per-row `DeleteTerminalQuotaReservations` on
+`quota_reservations` runs independently and unchanged — it handles the
+quota table, which has no BEFORE-DELETE trigger.
 
 **Files (shipped):**
 
