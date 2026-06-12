@@ -33,9 +33,12 @@ import (
 // WriteHotPath / WriteRequestLogWithIdentity is unchanged.
 //
 // Mutation contract:
-//   - attemptN auto-increments on each successful recordRow call that
-//     names a provider (providerAssignedID != ""), matching the
-//     pre-refactor `defer billingAttemptN++` semantics.
+//   - attemptN auto-increments on every provider-bound recordRow call
+//     (providerAssignedID != ""), regardless of write outcome — the
+//     deferred increment fires even when the hot-path or fallback
+//     write errors. Matches the pre-refactor `defer billingAttemptN++`
+//     semantics: the counter tracks provider-bound record attempts,
+//     not successful row writes.
 //   - model / stream / requestID are setters called from
 //     handleChatCompletions as the request parses (the closure read
 //     these by-reference from outer scope; the recorder updates the
