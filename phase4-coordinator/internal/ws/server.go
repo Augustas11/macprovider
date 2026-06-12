@@ -43,17 +43,17 @@ const (
 )
 
 type Server struct {
-	cfg       config.Config
-	tier2Mu   sync.RWMutex
-	tier2     config.Tier2Config
-	pool      *pool.Registry
-	log       zerolog.Logger
-	now       func() time.Time
-	newUUID   func() string
-	timers    sync.Map
-	pending   sync.Map
-	warmups   sync.Map
-	tokens    TokenValidator
+	cfg     config.Config
+	tier2Mu sync.RWMutex
+	tier2   config.Tier2Config
+	pool    *pool.Registry
+	log     zerolog.Logger
+	now     func() time.Time
+	newUUID func() string
+	timers  sync.Map
+	pending sync.Map
+	warmups sync.Map
+	tokens  TokenValidator
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
 	// issuer roles can be wired independently. Production wires the same
 	// concrete *auth.Store to both (see main.go), but tests can override
@@ -95,13 +95,26 @@ type TokenIssuer interface {
 	// IssueToken returns (record, cleartext_token, err); only the
 	// cleartext is used in the ack frame, the record is logged.
 	IssueToken(ctx context.Context, providerID, providerName string) (auth.TokenRecord, string, error)
-	// HasActiveTokenForProvider implements FR-C9.4 TOFU: when true, the
-	// server MUST refuse to mint a second token for the same provider_id
-	// and MUST close the tokenless connection. Closes the
-	// credential-capture attack flagged by the codex security audit on
-	// PR #44 — without TOFU, an attacker could spam tokenless connects
-	// declaring a victim's provider_id and harvest a valid bearer.
+	// HasActiveTokenForProvider implements FR-C9.4 TOFU: when true AND
+	// the active row's `last_used_at IS NOT NULL`, the server MUST
+	// refuse to mint a second token for the same provider_id and MUST
+	// close the tokenless connection. Closes the credential-capture
+	// attack flagged by the codex security audit on PR #44 — without
+	// TOFU, an attacker could spam tokenless connects declaring a
+	// victim's provider_id and harvest a valid bearer.
 	HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error)
+	// RevokeUnusedTokenForProvider implements SPEC-003 v0.8.3 FR-C9.4
+	// unused-token self-heal: atomically revokes the active row for
+	// `providerID` if its `last_used_at IS NULL`, returning true when
+	// a row was revoked. Called BEFORE HasActiveTokenForProvider in
+	// resolveProvisionalToken so a deploy-gap reconnect with an
+	// unused (never-authenticated) row self-heals into a clean
+	// re-mint instead of triggering the strict-reject path. A used
+	// token (last_used_at NOT NULL) is NOT touched — that case still
+	// follows the v0.8.1 strict-reject contract because the codex
+	// MAJOR-1 credential-capture vector requires an attacker to have
+	// authenticated at least once.
+	RevokeUnusedTokenForProvider(ctx context.Context, providerID string) (bool, error)
 }
 
 type providerAuth struct {
@@ -207,13 +220,13 @@ type pendingPreflight struct {
 
 func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger, opts ...Option) *Server {
 	s := &Server{
-		cfg:     cfg,
-		tier2:   cfg.Tier2,
-		pool:    registry,
-		log:     logger,
-		now:     func() time.Time { return time.Now().UTC() },
-		newUUID: func() string { return uuid.NewString() },
-		started: time.Now().UTC(),
+		cfg:         cfg,
+		tier2:       cfg.Tier2,
+		pool:        registry,
+		log:         logger,
+		now:         func() time.Time { return time.Now().UTC() },
+		newUUID:     func() string { return uuid.NewString() },
+		started:     time.Now().UTC(),
 		unauth:      make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
 		unauthPerIP: map[string]int{},
 		version:     "dev",
@@ -428,43 +441,60 @@ const (
 	provisionalTokenRejectTOFU
 )
 
-// resolveProvisionalToken implements SPEC-003 v0.8 FR-C9.1 (mint) and
-// FR-C9.4 TOFU (refuse second mint for a known provider_id). It is the
-// single decision point the v1 hello_ack and v2 auth_response paths both
-// call before constructing their ack frame.
+// resolveProvisionalToken implements SPEC-003 v0.8.3 FR-C9.1 (mint),
+// FR-C9.4 strict TOFU (refuse second mint for a USED identity), and
+// FR-C9.4 unused-token self-heal (auto-revoke + remint when the
+// existing row was never used). It is the single decision point the
+// v1 hello_ack and v2 auth_response paths both call before
+// constructing their ack frame.
 //
-// Algorithm:
+// Algorithm (v0.8.3):
 //  1. If the issuer is not wired OR the connect already validated a
 //     Bearer: return Skip — no mint needed, no token in ack.
-//  2. Query HasActiveTokenForProvider. If TRUE: return RejectTOFU —
-//     attacker (or a confused legitimate retry) is trying to mint a
-//     parallel credential for an already-claimed provider_id.
-//  3. Mint. On success: return Minted + cleartext.
-//  4. On mint failure (DB error): return Skip and log — the connection
-//     is admitted tokenless, the operator notices via the warning log,
-//     and the binary's next connect retries cleanly (because
-//     HasActiveTokenForProvider will still be false).
+//  2. Call RevokeUnusedTokenForProvider. If it returns (true, nil):
+//     log fr_c9_4_self_heal and proceed to step 4 — the gate is now
+//     clear and the partial unique index lets IssueToken succeed.
+//  3. If it returned (false, nil): call HasActiveTokenForProvider. If
+//     it returns true, a USED token exists — return RejectTOFU. This
+//     preserves the v0.8.1 closure of the codex MAJOR-1 credential-
+//     capture vector (the attacker had to authenticate to count as
+//     "used"; if they did, this gate fires and they cannot get a
+//     parallel token).
+//  4. Mint. On success: return Minted + cleartext.
+//  5. On mint failure (DB error): if ErrActiveTokenAlreadyExists, a
+//     concurrent reconnect won the race — return RejectTOFU. Other
+//     errors: return Skip and log; the connection is admitted
+//     tokenless and the binary retries next connect.
 //
-// On HasActiveTokenForProvider DB error: FAIL CLOSED with RejectTOFU.
-// We MUST NOT mint in the dark when the gate could not be evaluated —
-// that's the same posture validateProviderToken adopts when
-// ValidateToken errors.
-// authState is the renamed parameter for the providerAuth argument. The
-// auth.ErrActiveTokenAlreadyExists reference below needs the imported
-// auth package, but the parameter previously named `auth` shadowed it.
+// On any storage error in step 2 or 3: FAIL CLOSED with RejectTOFU.
+// We MUST NOT mint in the dark when the gate could not be evaluated.
+//
+// authState is the renamed parameter for the providerAuth argument.
+// The auth.ErrActiveTokenAlreadyExists reference below needs the
+// imported auth package, but the parameter previously named `auth`
+// shadowed it.
 func (s *Server) resolveProvisionalToken(authState providerAuth, providerID, providerName string) (provisionalTokenOutcome, string) {
 	if s.issuer == nil || authState.validated {
 		return provisionalTokenSkip, ""
 	}
 	ctx := context.Background()
-	hasActive, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
+	selfHealed, err := s.issuer.RevokeUnusedTokenForProvider(ctx, providerID)
 	if err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 TOFU gate evaluation failed; closing tokenless connect (fail closed)")
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 unused-token self-heal evaluation failed; closing tokenless connect (fail closed)")
 		return provisionalTokenRejectTOFU, ""
 	}
-	if hasActive {
-		s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 TOFU: tokenless connect refused; an active token already exists for this provider_id (operator can revoke + retry if this is the legitimate provider after a persist failure)")
-		return provisionalTokenRejectTOFU, ""
+	if selfHealed {
+		s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_self_heal").Msg("FR-C9.4 self-heal: revoked existing unused token for this provider_id; proceeding to mint a fresh one (SPEC-003 v0.8.3 deploy-gap recovery path)")
+	} else {
+		hasActive, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 TOFU gate evaluation failed; closing tokenless connect (fail closed)")
+			return provisionalTokenRejectTOFU, ""
+		}
+		if hasActive {
+			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_tofu_reject").Msg("FR-C9.4 TOFU: tokenless connect refused; an active USED token already exists for this provider_id (operator can revoke + retry if this is the legitimate provider after a used-token persist failure)")
+			return provisionalTokenRejectTOFU, ""
+		}
 	}
 	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
 	if err != nil {
