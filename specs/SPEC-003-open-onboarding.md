@@ -1,7 +1,9 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.9 (2026-06-12, installer custom-model branch under FR-D2)
+**Version:** 0.9.1 (2026-06-12, FR-D2.1 step 4 picks up MoE NxMB parser + installer traversal hardening)
 **Depends on:** SPEC-001 v1.3.1, SPEC-002 v1.3.5
+
+**Change log v0.9.1:** Two installer-side R2/R3 hardenings surfaced by the parallel codex audits on PR #67. **(a) FR-D2.1 step 1 (format validation)** now MUST reject path components equal to `.` or `..` (split on `/`, reject either segment) in addition to the existing charset and shape checks. Prior wording said "no traversal/whitespace" in prose but the implementation relied on the charset filter alone, which permitted `org/..` and `../name`. **(b) FR-D2.1 step 4 (weight estimation)** now MUST match a Mixture-of-Experts `[0-9]+x[0-9]+(\.[0-9]+)?B` shape BEFORE the single `[0-9]+(\.[0-9]+)?B` shape. Otherwise an id like `Mixtral-8x7B-Instruct-4bit` is read as 7B and the fit check accepts a 56B model that would OOM the host. Headroom constants, quant table, and tier thresholds are unchanged.
 
 **Change log v0.9:** Extends FR-D2 with a fourth interactive option `c) custom HuggingFace MLX model id` so providers are no longer locked to the three RAM-tier defaults. The `c)` branch reads a free-form `org/name`, validates format (path-component charset, single slash, no traversal/whitespace/newlines), then queries `https://huggingface.co/api/models/<id>` to enforce two hard blocks and one soft check: (i) HTTP 401/403/404 → die with a single "not accessible" message (HF does not disclose existence to unauth'd callers, so these are indistinguishable from outside); (ii) repos that neither sit under `mlx-community/*` nor declare `library_name:"mlx"` / `"mlx"` in `tags` → die with "not an MLX repo"; (iii) RAM fit — weights estimated from the `[0-9]+(\.[0-9]+)?B` suffix and a `(4bit|8bit|bf16|fp16|q4|q8)` quant hint, then compared to detected RAM with a 6 GB headroom for the "comfortable" tier and a 2 GB headroom for the "tight" tier (matches the existing RAM-tier defaults where 7B targets 16 GB, not 8 GB). Tight/over-RAM cases warn-and-prompt; user may override. New env var `MACPROVIDER_SKIP_HF_CHECK=1` bypasses (i)/(ii)/(iii) for offline or self-mirrored installs. `MACPROVIDER_MODEL=` env override continues to skip the interactive prompts entirely (CI/`NO_PROMPT` path) but now also runs the format validator so a malformed env value fails fast. Coordinator/gateway are unaffected — no protocol change.
 
@@ -654,8 +656,12 @@ in order:
 
 1. **Format**: id MUST match `org/name` with each component drawn
    from `[A-Za-z0-9._-]+`, exactly one `/`, and no leading or
-   trailing `/`, whitespace, or newline. Violations die with exit
-   code 7 before any network call.
+   trailing `/`, whitespace, or newline. Additionally (v0.9.1, after
+   the charset and shape checks) neither segment may equal `.` or
+   `..` — the charset filter permits these by themselves, so the
+   installer MUST split on `/` and reject the literal `.` / `..`
+   values explicitly. Violations die with exit code 7 before any
+   network call.
 2. **HuggingFace existence**: installer issues
    `GET https://huggingface.co/api/models/<id>` with a 10 s timeout.
    - `200` → proceed to step 3.
@@ -673,10 +679,16 @@ in order:
    contains the literal element `"mlx"`. Failure dies with "not an
    MLX repo" and references `mlx_lm.convert` / `mlx-community/*`.
 4. **RAM fit**: weights are estimated as `params_b ×
-   bytes_per_param`, where `params_b` is parsed from the first
-   `[0-9]+(\.[0-9]+)?B` substring in the repo name and
-   `bytes_per_param` is `0.5` (`4bit`/`q4`), `1.0`
-   (`8bit`/`q8`), or `2.0` (`bf16`/`fp16`/`-f16` or unknown).
+   bytes_per_param`. `params_b` is parsed from the repo name with
+   two patterns tried in order (v0.9.1):
+   - First, the Mixture-of-Experts shape
+     `[0-9]+x[0-9]+(\.[0-9]+)?B` (e.g. `Mixtral-8x7B`); when
+     matched, `params_b = experts × per_expert` (8 × 7 = 56 in the
+     example).
+   - Otherwise, the single-N shape `[0-9]+(\.[0-9]+)?B` from the
+     first match.
+   `bytes_per_param` is `0.5` (`4bit`/`q4`), `1.0` (`8bit`/`q8`),
+   or `2.0` (`bf16`/`fp16`/`-f16` or unknown).
    - Comfortable: `ram_gb >= est_gb + 6` → log "fits", proceed.
    - Tight: `ram_gb >= est_gb + 2` → log warning, prompt
      `Proceed anyway? [y/N]`, default N.
