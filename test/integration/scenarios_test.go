@@ -223,38 +223,43 @@ func TestInternalBearerOperatorKeyFallbackAccepted(t *testing.T) {
 // freely round-robin and a 50% portion of runs would hit the OTHER
 // provider — making the test reliably fail on drift.
 // TestStickyHeaderForwardedToCoordinator pins the gateway's
-// sticky-header forwarding contract directly. The gateway sets
-// X-MacProvider-Internal-Conv + X-MacProvider-Account on its upstream
-// /v1/chat/completions call when sticky is enabled AND the buyer sent
-// X-MacProvider-Conversation (chat_proxy.go:203-217). The coordinator's
-// hasInternalRoutingHeader returns true if EITHER X-MacProvider-Account
-// OR any X-MacProvider-Internal-* is present (buyer/server.go:2758-2771),
-// triggering internalBearerAuthorized which emits the audit log line
+// sticky-header forwarding contract directly via TWO independent
+// assertions:
+//
+// Assertion A — X-MacProvider-Internal-Conv forwarded with conv: key:
+// applySticky (buyer/server.go:2529) reads X-MacProvider-Internal-Conv
+// and requires its value to start with "conv:" before proceeding
+// (buyer/server.go:2534). On the first request there is no sticky
+// entry yet, so stickyLookup returns false/not_found and the
+// coordinator logs `event=routing_decision reason=sticky_miss_not_found`.
+// This line is emitted ONLY when the header was forwarded with the
+// correct conv: prefix. A rename of X-MacProvider-Internal-Conv causes
+// applySticky to get an empty key → fails the HasPrefix("conv:") guard
+// → returns silently → NO sticky_miss_not_found log → assertion fails.
+//
+// Assertion B — gateway sends service-token Bearer upstream:
+// hasInternalRoutingHeader (buyer/server.go:2758) returns true when
+// X-MacProvider-Account OR any X-MacProvider-Internal-* header is
+// present, triggering internalBearerAuthorized which emits
 // `event=internal_bearer_accepted key=service_token path=""`.
+// Counting one line per chat request proves the service-token Bearer
+// was sent upstream on every sticky request (M3-2 cutover-watch
+// contract). Note: this assertion does NOT independently prove
+// X-MacProvider-Internal-Conv was forwarded — X-MacProvider-Account
+// alone is sufficient to trigger it; Assertion A closes that gap.
 //
-// So the assertion shape "every sticky chat request produces an
-// `internal_bearer_accepted` audit log line" deterministically pins:
-//   - gateway is forwarding the sticky-routing headers (else
-//     hasInternalRoutingHeader is false → no audit log)
-//   - gateway is sending the service token Bearer upstream (else
-//     internalBearerAuthorized rejects → 401 → no audit log)
-//   - coordinator is logging the credential class correctly (M3-2
-//     cutover-watch contract)
+// Together, A+B pin all three forwarding contracts TEST-6 cites:
+// (1) X-MacProvider-Internal-Conv forwarded with conv: key (A),
+// (2) X-MacProvider-Account forwarded (B, indirectly via auth path),
+// (3) service-token Bearer forwarded upstream (B).
 //
-// A rename of X-MacProvider-Internal-Conv (or a regression that
-// dropped the upstream auth header) breaks this audit log emission
-// — the test catches it on every PR.
-//
-// Why this shape instead of asserting `reason=sticky_hit` on
-// routing_decision: applySticky returns SILENTLY when the
-// sticky-stored provider is already at sort index 0
-// (buyer/server.go:2546-2548), which is what happens with our
-// equal-metric fake providers under deterministic routing. The
-// gateway's "did I forward the sticky-routing headers" contract is
-// what TEST-6 actually cites; sticky's POSITIONAL effect on the
-// coordinator routing decision is exercised by
-// phase4-coordinator/internal/buyer/server_test.go (e.g.
-// TestStickyAffinityDoesNotOverrideOutsideObjectiveEpsilon).
+// Why not assert `reason=sticky_hit` on routing_decision: applySticky
+// returns SILENTLY when the sticky-stored provider is already at sort
+// index 0 (buyer/server.go:2546-2548), which is what happens with our
+// equal-metric fake providers under deterministic routing. sticky_miss_not_found
+// on the FIRST request is the faithful signal. sticky's POSITIONAL
+// effect is exercised by phase4-coordinator/internal/buyer/server_test.go
+// (e.g. TestStickyAffinityDoesNotOverrideOutsideObjectiveEpsilon).
 func TestStickyHeaderForwardedToCoordinator(t *testing.T) {
 	s := newScenario(t, scenarioOpts{
 		seedAccount:      true,
@@ -291,19 +296,31 @@ func TestStickyHeaderForwardedToCoordinator(t *testing.T) {
 			totalHits, totalRequests)
 	}
 
-	// Gateway's sticky-header forwarding contract: for EACH chat
-	// request, the gateway should have triggered the coordinator's
-	// internalBearerAuthorized → internal_bearer_accepted audit log
-	// (because the gateway sent X-MacProvider-Account +
-	// X-MacProvider-Internal-Conv, making hasInternalRoutingHeader
-	// return true).
-	//
-	// Count audit-log lines emitted from the BUYER-port chat path
-	// (path=""), distinguishing them from the gateway's metadata
-	// fetches (path="/internal/routing"). A regression that broke
-	// sticky-header forwarding would yield 0 such lines (the chat
-	// path's hasInternalRoutingHeader check returns false → no audit
-	// log) — the test catches it.
+	// Assertion A: X-MacProvider-Internal-Conv forwarded with conv: prefix.
+	// applySticky reads X-MacProvider-Internal-Conv and requires its value
+	// to start with "conv:" (buyer/server.go:2534). On the first request
+	// (no sticky entry yet) it logs routing_decision with
+	// reason=sticky_miss_not_found. This line ONLY appears when the
+	// header was forwarded with the correct value. A rename or drop of
+	// X-MacProvider-Internal-Conv causes applySticky to return silently
+	// (empty key fails the HasPrefix guard) → NO sticky_miss_not_found
+	// → assertion fails.
+	stickyMissLine := s.coordLogBuf.awaitContains(
+		time.Now().Add(3*time.Second),
+		`"event":"routing_decision"`,
+		`"reason":"sticky_miss_not_found"`,
+	)
+	if stickyMissLine == "" {
+		t.Fatalf("expected routing_decision reason=sticky_miss_not_found log line (proves X-MacProvider-Internal-Conv was forwarded with conv: prefix); got none. Captured lines: %v",
+			s.coordLogBuf.snapshot())
+	}
+
+	// Assertion B: service-token Bearer forwarded upstream on every chat
+	// request. hasInternalRoutingHeader returns true when X-MacProvider-Account
+	// OR any X-MacProvider-Internal-* is present, triggering
+	// internalBearerAuthorized which emits internal_bearer_accepted.
+	// Count lines from the BUYER-port chat path (path=""), excluding
+	// the gateway's /internal/routing metadata fetches.
 	//
 	// Wait briefly for log goroutine to flush, then count.
 	deadline := time.Now().Add(3 * time.Second)
@@ -330,7 +347,7 @@ func TestStickyHeaderForwardedToCoordinator(t *testing.T) {
 		}
 	}
 	if count < totalRequests {
-		t.Fatalf("expected >=%d internal_bearer_accepted audit log lines for chat path; got %d. This means the gateway did not forward sticky-routing headers (X-MacProvider-Account / X-MacProvider-Internal-Conv) on at least one request — sticky drift. Captured lines: %v",
+		t.Fatalf("expected >=%d internal_bearer_accepted audit log lines for chat path; got %d. This means the gateway did not send the service-token Bearer upstream on at least one request. Captured lines: %v",
 			totalRequests, count, s.coordLogBuf.snapshot())
 	}
 
