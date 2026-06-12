@@ -63,7 +63,7 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
     @Argument(help: "Target HuggingFace model ID or local path.")
     var targetModelID: String
 
-    @Flag(help: "Bypass the CLI-side cooldown soft guard.")
+    @Flag(help: "Bypass the CLI-side cooldown soft guard AND the local RAM fit guard (SPEC-001 v1.4 R-6.13.2): wontFit becomes a warning, tight is silenced, and HF-shape unknown fail-closed is overridden. Does NOT bypass --supported-models membership or server-side concurrency rejection.")
     var force = false
 
     @Option(help: "YAML config path. Overrides MACPROVIDER_CONFIG.")
@@ -101,11 +101,12 @@ struct ModelsSwitchCommand: AsyncParsableCommand {
             throw ExitCode(2)
         }
 
-        // Pre-flight RAM fit check. Uses the same name-parsing + headroom
-        // rules as the installer (SPEC-003 v0.9 FR-D2.1 step 4) so a model
-        // accepted at install time is judged the same way here. `--force`
-        // bypasses both the wontFit hard-block and the tight-fit warning,
-        // and also overrides the round-2 fail-closed-on-unknown gate below.
+        // Pre-flight RAM fit check per SPEC-001 v1.4 §6.13 (R-6.13.1 through
+        // R-6.13.5). Same name-parsing + headroom rules as SPEC-003 v0.9.1
+        // FR-D2.1 step 4 so a model accepted at install time is judged the
+        // same way here. `--force` bypasses both the wontFit hard-block and
+        // the tight-fit warning, and overrides the .unknown fail-closed gate
+        // for HF-shape ids (R-6.13.2).
         switch ModelFit.evaluate(modelID: targetModelID, ramGB: ModelFit.detectRAMGB()) {
         case let .wontFit(estGB, ramGB):
             if options.force {
