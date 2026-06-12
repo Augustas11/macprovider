@@ -124,24 +124,26 @@ public protocol HTTPFetcher: Sendable {
 }
 
 public final class URLSessionHTTPFetcher: NSObject, HTTPFetcher, URLSessionTaskDelegate, @unchecked Sendable {
-    private let requestTimeout: TimeInterval
-    private let resourceTimeout: TimeInterval
-
-    // Lazy so self is fully initialized before URLSession captures it as
-    // the delegate. Plain let-init from the initializer body trips
-    // "Property not initialized at super.init call" because the delegate
-    // self-reference requires super.init() to run first.
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.ephemeral
-        config.timeoutIntervalForRequest = self.requestTimeout
-        config.timeoutIntervalForResource = self.resourceTimeout
-        return URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }()
+    // Implicitly-unwrapped optional so we can assign after super.init() and
+    // pass self as the delegate. `URLSession(delegate:)` requires self to
+    // be fully constructed, so a let-property initialized inline trips
+    // "Property not initialized at super.init call".
+    private var session: URLSession!
 
     public init(timeoutSeconds: TimeInterval = 15, resourceTimeoutSeconds: TimeInterval = 30) {
-        self.requestTimeout = timeoutSeconds
-        self.resourceTimeout = resourceTimeoutSeconds
         super.init()
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = timeoutSeconds
+        config.timeoutIntervalForResource = resourceTimeoutSeconds
+        self.session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }
+
+    // R3 (Codex code MINOR): URLSession with a delegate retains the
+    // delegate, which is self. invalidateAndCancel breaks the cycle on
+    // deinit. Optional `?` guards the (impossible) case where init failed
+    // before session was assigned.
+    deinit {
+        session?.invalidateAndCancel()
     }
 
     public func fetch(url: URL, headers: [String: String]) async throws -> (Data, Int) {
