@@ -93,10 +93,10 @@ EOF
 }
 
 run_rotate() {
-  # Run the rotate script in test-mode env: no systemctl will be found in PATH
-  # inside the rotate context unless the host has it, which is fine because
-  # the script's quiesce_gateway() degrades to a no-op if the unit isn't
-  # registered. We also point it at our isolated workdir.
+  # Run the rotate script in test-mode env. Two opt-outs are required vs prod:
+  #   - GATEWAY_ARCHIVE_ALLOW_NO_SYSTEMCTL=1: there is no real systemd unit in
+  #     the test env, so allow the script to skip its fail-closed quiesce gate.
+  #   - GATEWAY_ARCHIVE_REQUIRE_REMOTE=0: no S3 in the test env.
   local db="$1"
   local archive_dir="$2"
   shift; shift
@@ -104,6 +104,8 @@ run_rotate() {
     GATEWAY_ARCHIVE_DIR="$archive_dir" \
     GATEWAY_SERVICE_NAME="nonexistent-archive-rotate-test-service" \
     GATEWAY_ARCHIVE_PRUNE_DAYS=7 \
+    GATEWAY_ARCHIVE_ALLOW_NO_SYSTEMCTL=1 \
+    GATEWAY_ARCHIVE_REQUIRE_REMOTE=0 \
     "$@" \
     bash "$ROTATE_SH"
 }
@@ -207,12 +209,15 @@ test_force_rotate_prunes_old() {
   assert_eq "$old_count" "0" "old audit_events row pruned from live" || ok=0
   assert_eq "$new_count" "1" "recent audit_events row preserved in live" || ok=0
 
-  # concurrency_reservations is NOT touched by archive-rotate (M2-4 Part B owns it).
+  # concurrency_reservations: old NON-active rows ARE pruned per audit
+  # iteration 1 architect feedback (PERF-1 covers all 9 tables). Active rows
+  # are NEVER pruned regardless of age. Seeded: old-cr-1 status=released,
+  # new-cr-1 status=active.
   local cr_old cr_new
   cr_old=$(sqlite3 "$db" "SELECT COUNT(*) FROM concurrency_reservations WHERE request_id='old-cr-1';")
   cr_new=$(sqlite3 "$db" "SELECT COUNT(*) FROM concurrency_reservations WHERE request_id='new-cr-1';")
-  assert_eq "$cr_old" "1" "concurrency_reservations untouched (old row remains)" || ok=0
-  assert_eq "$cr_new" "1" "concurrency_reservations untouched (new row remains)" || ok=0
+  assert_eq "$cr_old" "0" "concurrency_reservations: old non-active row pruned" || ok=0
+  assert_eq "$cr_new" "1" "concurrency_reservations: recent active row preserved" || ok=0
 
   rm -rf "$w"
   record_result "T2_force_rotate_prunes_old" "$ok"
@@ -335,13 +340,81 @@ test_append_only_invariant_restored() {
     echo "  FAIL: trigger did not fire (sqlite output: $err)"
     ok=0
   fi
-  # Verify trigger row count == 8 (one per event table, restored).
+  # Verify trigger row count: 8 event tables + concurrency_reservations = 9.
   local trigger_count
-  trigger_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE '%_events_no_delete';")
-  assert_eq "$trigger_count" "8" "all 8 event-table no-delete triggers present" || ok=0
+  trigger_count=$(sqlite3 "$db" "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name LIKE '%_no_delete';")
+  assert_eq "$trigger_count" "9" "all 9 no-delete triggers present (8 events + concurrency_reservations)" || ok=0
+  # And explicitly check concurrency_reservations rejects DELETE on its
+  # remaining active row.
+  err=$(sqlite3 "$db" "DELETE FROM concurrency_reservations WHERE request_id='new-cr-1';" 2>&1 || true)
+  if echo "$err" | grep -q "cannot be deleted"; then
+    echo "  ok:   concurrency_reservations_no_delete trigger refuses post-rotate DELETE"
+  else
+    echo "  FAIL: concurrency trigger did not fire (sqlite output: $err)"
+    ok=0
+  fi
 
   rm -rf "$w"
   record_result "T6_append_only_invariant_restored" "$ok"
+}
+
+# ---- T7: fail-closed quiesce when systemd unit missing ---------------------
+
+test_fail_closed_quiesce() {
+  echo "==> T7: fail-closed when systemd unit missing (no ALLOW_NO_SYSTEMCTL)"
+  local w; w=$(mk_workdir)
+  local db="$w/gateway.db"
+  seed_db "$db"
+
+  # Run WITHOUT GATEWAY_ARCHIVE_ALLOW_NO_SYSTEMCTL=1 — the script should
+  # refuse to prune because the named service is not registered.
+  set +e
+  GATEWAY_DB_PATH="$db" \
+    GATEWAY_ARCHIVE_DIR="$w/archive" \
+    GATEWAY_SERVICE_NAME="definitely-not-a-real-service-xyz" \
+    GATEWAY_ARCHIVE_PRUNE_DAYS=7 \
+    GATEWAY_ARCHIVE_REQUIRE_REMOTE=0 \
+    FORCE_ROTATE=1 \
+    bash "$ROTATE_SH" 2>"$w/r.stderr"
+  local rc=$?
+  set -e
+
+  local ok=1
+  assert_eq "$rc" "4" "rotate refuses with exit 4 (fail-closed quiesce)" || { ok=0; cat "$w/r.stderr"; }
+
+  rm -rf "$w"
+  record_result "T7_fail_closed_quiesce" "$ok"
+}
+
+# ---- T8: require-remote without S3 -> exit 4 -------------------------------
+
+test_require_remote_without_s3() {
+  echo "==> T8: GATEWAY_ARCHIVE_REQUIRE_REMOTE=1 without GATEWAY_ARCHIVE_S3_BUCKET -> exit 4"
+  local w; w=$(mk_workdir)
+  local db="$w/gateway.db"
+  seed_db "$db"
+
+  set +e
+  GATEWAY_DB_PATH="$db" \
+    GATEWAY_ARCHIVE_DIR="$w/archive" \
+    GATEWAY_SERVICE_NAME="nonexistent-archive-rotate-test-service" \
+    GATEWAY_ARCHIVE_PRUNE_DAYS=7 \
+    GATEWAY_ARCHIVE_ALLOW_NO_SYSTEMCTL=1 \
+    GATEWAY_ARCHIVE_REQUIRE_REMOTE=1 \
+    FORCE_ROTATE=1 \
+    bash "$ROTATE_SH" 2>"$w/r.stderr"
+  local rc=$?
+  set -e
+
+  local ok=1
+  assert_eq "$rc" "4" "rotate refuses with exit 4 (require-remote pre-flight)" || { ok=0; cat "$w/r.stderr"; }
+  # Live DB must NOT be touched on pre-flight failure.
+  local n
+  n=$(sqlite3 "$db" "SELECT COUNT(*) FROM usage_events WHERE request_id='old-u-1';")
+  assert_eq "$n" "1" "live DB old row preserved (no prune on pre-flight fail)" || ok=0
+
+  rm -rf "$w"
+  record_result "T8_require_remote_without_s3" "$ok"
 }
 
 # ---- run -------------------------------------------------------------------
@@ -357,6 +430,8 @@ test_restore_forensic
 test_idempotent_rerun
 test_schema_mismatch_refused
 test_append_only_invariant_restored
+test_fail_closed_quiesce
+test_require_remote_without_s3
 
 echo
 echo "== summary =="

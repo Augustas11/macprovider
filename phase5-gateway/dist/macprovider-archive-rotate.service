@@ -34,6 +34,12 @@ ReadWritePaths=/var/lib/macprovider /var/lib/macprovider-gateway-archive
 # Allow systemctl stop/start of the gateway by giving access to its PID file.
 # (The script delegates quiesce to systemctl which uses the system bus.)
 
+# Resource caps — mirrors the gateway unit shape so a runaway zstd -19 -T0 on
+# a multi-GiB DB cannot starve the rest of the Pearl-class host. ZSTD_NBTHREADS
+# can be bounded via the script env if the operator wants tighter bounds.
+MemoryMax=1G
+TasksMax=64
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=macprovider-archive-rotate

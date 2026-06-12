@@ -157,13 +157,47 @@ sudo install -o root -g root -m 0755 archive-rotate.sh /opt/macprovider/archive-
 sudo install -o root -g root -m 0755 archive-restore.sh /opt/macprovider/archive-restore.sh
 sudo install -o root -g root -m 0644 macprovider-archive-rotate.service /etc/systemd/system/
 sudo install -o root -g root -m 0644 macprovider-archive-rotate.timer   /etc/systemd/system/
-sudo install -d -o macprovider -g macprovider -m 0700 /var/lib/macprovider-gateway-archive
-# Optional /etc/macprovider/archive-rotate.env to set GATEWAY_ARCHIVE_S3_BUCKET, thresholds, etc.
+# Archive dir is ROOT-owned 0700 — the gateway service (User=macprovider)
+# must NOT be able to substitute or unlink compliance archives. The rotation
+# job runs as root and writes here; the gateway never reads or writes it.
+sudo install -d -o root -g root -m 0700 /var/lib/macprovider-gateway-archive
+# /etc/macprovider/archive-rotate.env carries S3 credentials + bucket name +
+# thresholds. Required keys for the default REQUIRE_REMOTE=1 mode:
+#   GATEWAY_ARCHIVE_S3_BUCKET=macprovider-archives
+#   AWS_ACCESS_KEY_ID=<key>
+#   AWS_SECRET_ACCESS_KEY=<secret>
+#   AWS_DEFAULT_REGION=<region>
+# If the operator deliberately runs without cold storage (NOT recommended,
+# defeats the "tamper-evident archive lives off-host" Q4 contract):
+#   GATEWAY_ARCHIVE_REQUIRE_REMOTE=0
+sudo install -o root -g root -m 0600 /dev/stdin /etc/macprovider/archive-rotate.env <<EOF
+GATEWAY_ARCHIVE_S3_BUCKET=macprovider-archives
+AWS_DEFAULT_REGION=us-east-1
+# Set AWS creds here or via instance profile / IAM role.
+EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now macprovider-archive-rotate.timer
-# Smoke-test (DRY_RUN=1 prints actions only):
-sudo DRY_RUN=1 GATEWAY_DB_PATH=/var/lib/macprovider/gateway.db /opt/macprovider/archive-rotate.sh || true
+# Smoke-test (DRY_RUN=1 prints actions only — no service stop, no prune):
+sudo DRY_RUN=1 GATEWAY_DB_PATH=/var/lib/macprovider/gateway.db \
+  /opt/macprovider/archive-rotate.sh || true
+# Verify the timer is scheduled:
+sudo systemctl list-timers macprovider-archive-rotate.timer
+# Tail the journal after the first natural fire (04:00 UTC + jitter):
+sudo journalctl -u macprovider-archive-rotate -n 50 --no-pager
 ```
+
+**Exit-3 alert response.** If the rotation script logs `exit 3` (live DB did
+not shrink despite passing the size/age threshold), the archive WAS written
+to cold storage but the live DB is still oversize. Investigate before the
+next daily fire — typical causes are (a) no rows older than
+`GATEWAY_ARCHIVE_PRUNE_DAYS` (drop the threshold), (b) an unexpected table
+holding the bulk of bytes, or (c) WAL/SHM not checkpointed (force a sqlite3
+PRAGMA wal_checkpoint(TRUNCATE)).
+
+**Exit-4 cold-storage failure.** If the script logs `exit 4` with "REQUIRE_REMOTE=1
+but ..." the archive snapshot succeeded locally but cold-storage upload or
+readback failed; the live DB was NOT pruned and the gateway was not stopped.
+Restore S3 credentials / connectivity, then re-run with `FORCE_ROTATE=1`.
 
 **Restore (forensic):**
 
