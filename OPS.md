@@ -199,13 +199,32 @@ gateway side fails closed on the same pattern as of the same fix.
 4. `sudo systemctl reload macprovider-coordinator` so the coordinator
    re-reads `gateway_service_token`.
 5. Restart each gateway so it sends the new service token upstream.
-6. Watch the audit log:
-   `journalctl -u macprovider-coordinator -f | grep internal_bearer_accepted`
-   Look for `key=service_token` on every gateway-origin internal hit.
-7. After **24h of zero** `key=operator_key` on gateway-origin hits,
-   rotate the legacy `operator_key` (steps below). Admin tooling
-   needs the new operator key; gateways do not, since they are now on
-   service token.
+6. Watch the audit log on the BRIDGE paths only — `/internal/*`:
+   ```
+   journalctl -u macprovider-coordinator -f | \
+     grep -E 'internal_bearer_accepted.*"path":"/internal/'
+   ```
+   Look for `"key":"service_token"` on every gateway-origin
+   `/internal/*` hit. (The bridge paths are `/internal/routing` and
+   `/internal/sticky`; they fire on buyer disclosure + sticky-route
+   maintenance.)
+7. After **24h of zero** `"key":"operator_key"` on gateway-origin
+   `/internal/*` hits, rotate the legacy `operator_key` (steps below).
+   Cutover-countdown one-liner:
+   ```
+   journalctl -u macprovider-coordinator --since "24h ago" | \
+     grep -E 'internal_bearer_accepted.*"key":"operator_key".*"path":"/internal/' | \
+     wc -l    # must be 0 before rotating
+   ```
+   Admin tooling needs the new operator key; gateways do not, since
+   they are now on service token.
+
+   **Note on `/poolz`:** the gateway polls `/poolz` every 10s for
+   pool-state caching. `/poolz` is an admin-scoped endpoint (per
+   codex PR #73 HIGH-1 fix) so its bearer is `operator_key` —
+   forever. That is by design: `/poolz` audit-log lines with
+   `"key":"operator_key","path":"/poolz"` are NOT cutover-blocking
+   and must be excluded from the countdown grep above.
 
 ### Rotating `operator_key` (human admin)
 
