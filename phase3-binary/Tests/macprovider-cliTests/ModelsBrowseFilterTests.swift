@@ -90,7 +90,22 @@ final class ModelsBrowseFilterTests: XCTestCase {
         XCTAssertEqual(sanitizeForTable("a\nb"), "a\u{FFFD}b")
         XCTAssertEqual(sanitizeForTable("\u{001B}[31mRED"), "\u{FFFD}[31mRED")
         XCTAssertEqual(sanitizeForTable("DEL\u{007F}suffix"), "DEL\u{FFFD}suffix")
-        // Unicode above the C0/C1 range is preserved.
+        // Unicode above the C1 range is preserved (printable + extended).
         XCTAssertEqual(sanitizeForTable("mlx-community/Käse-7B"), "mlx-community/Käse-7B")
+    }
+
+    // R3 (Codex code + security MINOR): C1 controls (U+0080-U+009F) — most
+    // notably U+009B Control Sequence Introducer — can paint terminal
+    // escape sequences on some emulators. R2 only sanitized C0+DEL; R3
+    // extends to the C1 range.
+    func testSanitizeForTableReplacesC1Controls() {
+        // U+009B CSI is the dangerous one: behaves as the start of an
+        // ANSI escape sequence on emulators that honor 8-bit C1.
+        XCTAssertEqual(sanitizeForTable("evil\u{009B}31mRED"), "evil\u{FFFD}31mRED")
+        // Boundary cases.
+        XCTAssertEqual(sanitizeForTable("\u{0080}"), "\u{FFFD}")
+        XCTAssertEqual(sanitizeForTable("\u{009F}"), "\u{FFFD}")
+        // Just above the C1 range MUST pass through.
+        XCTAssertEqual(sanitizeForTable("\u{00A0}safe"), "\u{00A0}safe")
     }
 }

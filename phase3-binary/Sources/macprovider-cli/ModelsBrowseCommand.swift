@@ -73,15 +73,22 @@ struct ModelsBrowseCommand: AsyncParsableCommand {
     }
 }
 
-/// Round-2 hardening (codex security NIT): HF-returned ids are user content
-/// (anyone can publish to HuggingFace). Strip control characters (including
-/// embedded tab and newline) so a malicious model name can't break our
-/// tab-separated rendering or paint terminal escape sequences.
+/// HF-returned ids are user content (anyone can publish to HuggingFace).
+/// Strip C0 controls (U+0000-U+001F), DEL (U+007F), AND C1 controls
+/// (U+0080-U+009F) so a malicious model name can't break the tab-separated
+/// rendering or paint terminal escape sequences. R2 originally covered
+/// C0+DEL only; R3 extends to C1 after the Codex round-2 audit flagged
+/// U+009B CSI as an escape vector. Above U+009F (printable Unicode +
+/// bidi/zero-width controls) is preserved — bidi attacks are a separate
+/// homoglyph concern and would need a different mitigation than
+/// substitution.
 func sanitizeForTable(_ raw: String) -> String {
     var out = String()
     out.reserveCapacity(raw.count)
     for scalar in raw.unicodeScalars {
-        if scalar.value < 0x20 || scalar.value == 0x7F {
+        let isC0OrDel = scalar.value < 0x20 || scalar.value == 0x7F
+        let isC1 = (0x80...0x9F).contains(scalar.value)
+        if isC0OrDel || isC1 {
             out.unicodeScalars.append(Unicode.Scalar(0xFFFD)!)
         } else {
             out.unicodeScalars.append(scalar)
