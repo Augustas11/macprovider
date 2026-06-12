@@ -13,6 +13,10 @@ import (
 
 var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 
+// minAuditLogRetentionDays is the compliance floor for audit_log retention.
+// Operators may not set audit_log_retention_days below this value.
+const minAuditLogRetentionDays = 90
+
 type Config struct {
 	Listen                       ListenConfig                 `yaml:"listen"`
 	Pool                         PoolConfig                   `yaml:"pool"`
@@ -609,8 +613,8 @@ func (c Config) Validate() error {
 	if c.Storage.RequestLogRetentionDays <= 0 {
 		return fmt.Errorf("storage.request_log_retention_days must be > 0")
 	}
-	if c.Storage.AuditLogRetentionDays <= 0 {
-		return fmt.Errorf("storage.audit_log_retention_days must be > 0")
+	if c.Storage.AuditLogRetentionDays < minAuditLogRetentionDays {
+		return fmt.Errorf("storage.audit_log_retention_days must be >= %d (compliance floor)", minAuditLogRetentionDays)
 	}
 	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
 		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")
