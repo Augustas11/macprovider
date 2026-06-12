@@ -461,20 +461,15 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 	// and the in-flight singleton is left untouched — same semantics as
 	// the pre-M3-8d in-place mutation, but without the SIGHUP-reload race
 	// the audit flagged on catalog.go:81-84.
-	next := tier2.NewCatalog()
-	if err := next.ConfigureStrict(cfg.Tier2, logger); err != nil {
+	//
+	// M3-8d fixup (codex MED): build + validate + require_hash_verified
+	// post-condition + swap now happen atomically inside
+	// ConfigureDefaultStrict so this path cannot be bypassed by a future
+	// caller skipping a step.
+	if _, err := tier2.ConfigureDefaultStrict(cfg.Tier2, logger); err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
 		return
 	}
-	if cfg.Tier2.RequireHashVerified && !next.Active() {
-		if next.Configured() {
-			logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires an active (non-expired) catalog; the current catalog has expired or failed to load")
-		} else {
-			logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires a configured catalog")
-		}
-		return
-	}
-	tier2.SetDefault(next)
 	wsServer.SetTier2Config(cfg.Tier2)
 	buyerServer.SetTier2Config(cfg.Tier2)
 	if len(billingStores) > 0 && billingStores[0] != nil {

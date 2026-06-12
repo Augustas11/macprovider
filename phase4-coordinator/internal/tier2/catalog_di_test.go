@@ -2,7 +2,7 @@
 // Verifies that:
 //   * Independent *Catalog instances do not share state.
 //   * VerifyProviderHash is race-free across them under -race.
-//   * SetDefault is an atomic pointer swap — readers in flight against the
+//   * setDefault is an atomic pointer swap — readers in flight against the
 //     old singleton complete cleanly and the next call sees the new one.
 package tier2
 
@@ -78,7 +78,7 @@ func TestCatalogParallel(t *testing.T) {
 	wg.Wait()
 }
 
-// TestSetDefaultAtomicSwap verifies that SetDefault is a safe pointer swap
+// TestSetDefaultAtomicSwap verifies that setDefault is a safe pointer swap
 // under concurrent readers. One goroutine swaps the package singleton
 // repeatedly between two pre-configured *Catalog instances while a second
 // goroutine drives VerifyProviderHash through Default() in a tight loop.
@@ -94,7 +94,7 @@ func TestSetDefaultAtomicSwap(t *testing.T) {
 	// Save and restore the package singleton so this test does not bleed
 	// into other tests in the same binary.
 	prev := Default()
-	defer SetDefault(prev)
+	defer setDefaultForTest(prev)
 
 	hashA := "1111111111111111111111111111111111111111111111111111111111111111"
 	hashB := "2222222222222222222222222222222222222222222222222222222222222222"
@@ -114,7 +114,7 @@ func TestSetDefaultAtomicSwap(t *testing.T) {
 
 	v1 := mkCatalog(hashA)
 	v2 := mkCatalog(hashB)
-	SetDefault(v1)
+	setDefaultForTest(v1)
 
 	var stop atomic.Bool
 	var swaps, reads atomic.Uint64
@@ -129,9 +129,9 @@ func TestSetDefaultAtomicSwap(t *testing.T) {
 		for !stop.Load() {
 			toggle = !toggle
 			if toggle {
-				SetDefault(v2)
+				setDefaultForTest(v2)
 			} else {
-				SetDefault(v1)
+				setDefaultForTest(v1)
 			}
 			swaps.Add(1)
 		}
@@ -221,17 +221,17 @@ func TestCatalogIndependentInstances(t *testing.T) {
 }
 
 // TestDefaultIsAtomicPointer asserts that Default() does not return nil even
-// before any explicit Configure call, and that SetDefault(nil) is rejected.
+// before any explicit Configure call, and that setDefault(nil) is rejected.
 func TestDefaultIsAtomicPointer(t *testing.T) {
 	prev := Default()
-	defer SetDefault(prev)
+	defer setDefaultForTest(prev)
 
 	if prev == nil {
 		t.Fatal("Default() returned nil at package init")
 	}
-	SetDefault(nil)
+	setDefaultForTest(nil)
 	if Default() != prev {
-		t.Fatal("SetDefault(nil) replaced the singleton")
+		t.Fatal("setDefault(nil) replaced the singleton")
 	}
 }
 

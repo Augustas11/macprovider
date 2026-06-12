@@ -104,11 +104,18 @@ func NewCatalog() *Catalog {
 	return &Catalog{}
 }
 
-// PoolHeartbeatVerifier returns a pool.RegistryOption that wires c's
+// FixedPoolHeartbeatVerifier returns a pool.RegistryOption that wires c's
 // VerifyProviderHash as the registry's HeartbeatHashVerifier. Lives in
 // tier2 (not pool) because pool cannot import tier2 without a cycle.
 // Equivalent to pool.WithHeartbeatHashVerifier(c.VerifyProviderHash).
-func PoolHeartbeatVerifier(c *Catalog) pool.RegistryOption {
+//
+// Semantics: this captures the *Catalog pointer eagerly. SIGHUP reload swaps
+// the package-singleton via ConfigureDefaultStrict, but a verifier wired
+// against an explicit *Catalog instance keeps pointing at that instance even
+// after a global swap. Correct for tests passing isolated catalogs; for
+// production callers that want late-binding to the current singleton, capture
+// tier2.Default() per invocation rather than passing it once.
+func FixedPoolHeartbeatVerifier(c *Catalog) pool.RegistryOption {
 	return pool.WithHeartbeatHashVerifier(c.VerifyProviderHash)
 }
 
@@ -126,20 +133,62 @@ func init() {
 // ws.Server default option, buyer.Server) reads through this so legacy call
 // sites that have not been threaded with an explicit *Catalog continue to
 // work. The pointer can be swapped atomically by SIGHUP reload via
-// SetDefault below.
+// ConfigureDefaultStrict below.
 func Default() *Catalog {
 	return defaultCatalog.Load()
 }
 
-// SetDefault atomically swaps the package-singleton Catalog. The SIGHUP
-// reload path calls this with a freshly-configured *Catalog so an in-flight
-// VerifyProviderHash on the previous singleton never observes a torn read.
+// setDefault atomically swaps the package-singleton Catalog. Unexported on
+// purpose (M3-8d audit MEDIUM): a generic exported pointer-swap on a
+// security-sensitive path (model-hash verification) is protected only by
+// convention — any future caller could install an empty or stale catalog
+// and bypass reload validation. Production code must go through
+// ConfigureDefaultStrict, which builds + validates + swaps internally.
 // nil is rejected (leaves the previous singleton unchanged).
-func SetDefault(c *Catalog) {
+func setDefault(c *Catalog) {
 	if c == nil {
 		return
 	}
 	defaultCatalog.Store(c)
+}
+
+// setDefaultForTest is for tier2 package tests only; do not use from
+// production code. Same behavior as setDefault, but its name makes the
+// test-only intent explicit at every call site.
+func setDefaultForTest(c *Catalog) {
+	setDefault(c)
+}
+
+// ConfigureDefaultStrict builds a fresh *Catalog, runs ConfigureStrict
+// against cfg, enforces the require_hash_verified post-condition, and only
+// then atomically swaps the new catalog into the package singleton. On any
+// failure it returns the error without touching the existing default —
+// same SIGHUP-rejection semantics as ConfigureStrict on an explicit
+// *Catalog, but with the build + validate + swap encapsulated so callers
+// cannot install an unvalidated catalog by skipping a step.
+//
+// M3-8d fixup (codex MED): this replaces the previously-exported
+// SetDefault(*Catalog) shim. SetDefault was a generic atomic pointer-swap
+// on a security-sensitive path (model-hash verification), protected only
+// by convention — any future caller could install an empty or stale
+// catalog and bypass reload validation. The swap is now an
+// implementation detail of this function plus setDefaultForTest.
+//
+// Returns the newly-installed *Catalog on success for callers that want a
+// handle to it (e.g. for an immediate Active() / Configured() probe).
+func ConfigureDefaultStrict(cfg config.Tier2Config, logger zerolog.Logger) (*Catalog, error) {
+	next := NewCatalog()
+	if err := next.ConfigureStrict(cfg, logger); err != nil {
+		return nil, err
+	}
+	if cfg.RequireHashVerified && !next.Active() {
+		if next.Configured() {
+			return nil, fmt.Errorf("tier2 config reload rejected: require_hash_verified requires an active (non-expired) catalog; the current catalog has expired or failed to load")
+		}
+		return nil, fmt.Errorf("tier2 config reload rejected: require_hash_verified requires a configured catalog")
+	}
+	setDefault(next)
+	return next, nil
 }
 
 // Configure loads and activates a signed catalog on c. Preserves the previous

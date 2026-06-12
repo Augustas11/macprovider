@@ -2819,6 +2819,11 @@ func (s *Server) effectiveHashStatus(p pool.Provider, cfg config.Tier2Config) po
 	if p.HashStatus != "" {
 		return p.HashStatus
 	}
+	// TODO(m3-8d-followup): legacy fallback uses the package-singleton shim
+	// (tier2.VerifyProviderHash → tier2.Default()) because buyer.Server is
+	// not yet threaded with an explicit *tier2.Catalog via DI. Migration is
+	// tracked separately (see beta/DECISION_CRITERIA.md); switching it here
+	// also unblocks t.Parallel() in internal/buyer/server_test.go.
 	return tier2.VerifyProviderHash(p.ModelID, p.ModelHash)
 }
 
