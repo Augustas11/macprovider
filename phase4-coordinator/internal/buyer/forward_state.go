@@ -8,16 +8,30 @@ import (
 
 // forwardState collects the per-request state that the three transport
 // loops mutate as they advance through retry attempts. M2-1c (this PR)
-// threads this through the single failover skeleton in
-// forwardWithFailover (replacing the three transport-specific loop
-// bodies at handleChatCompletions:1085-1170 / :1172-1257 / :1264-1356
-// with one driven by transportResult flags + forwardState).
+// threads this through three sequence-helper methods on *Server
+// (forwardStreamSequence, forwardWSNonStreamSequence,
+// forwardHTTPSequence) that share retry/failover/busy-marking
+// decisions driven off transportResult flags + *forwardState. The
+// three pre-refactor loop bodies at handleChatCompletions:1085-1170 /
+// :1172-1257 / :1264-1356 collapse into thin dispatchers that call
+// the appropriate sequence helper.
+//
+// Final-shape note: the M2-1B_DESIGN.md sketch referred to a single
+// `forwardWithFailover` helper; M2-1c lands three transport-typed
+// sequence helpers instead, because success/error/SSE rendering is
+// genuinely different per transport (HTTP body read+write, SSE
+// streaming, WS-tunneled bridge). The three helpers DO share the
+// retry/failover/busy decision tree through *forwardState +
+// transportResult flags — every retry-semantics edit now touches a
+// single helper per transport, not three near-duplicate inline loop
+// bodies. See audits/2026-06-10/REMAINING_WORK.md ARCH-1/CODE-1 for
+// the "RESOLVED_DIFFERENTLY" status disposition.
 //
 // Shape locked in audits/2026-06-10/M2-1B_DESIGN.md §forwardState — five
 // fields, no per-loop scratch (excluded, failoverAttempted). The
-// per-loop scratch intentionally stays in the unified loop's local
-// scope because each call into forwardWithFailover handles exactly one
-// transport sequence; scratch does not survive transport boundaries.
+// per-loop scratch intentionally stays in each helper's local scope
+// because each helper handles exactly one transport sequence; scratch
+// does not survive transport boundaries.
 //
 // Audit refs: REPO_AUDIT.md §3.1 item 3 (ARCH-1 / CODE-1),
 // REMAINING_WORK.md M2-1.

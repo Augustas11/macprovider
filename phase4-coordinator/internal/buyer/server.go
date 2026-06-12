@@ -1455,6 +1455,17 @@ func (s *Server) forwardHTTPSequence(
 			attempt.ErrorCode = spec001StatusFromBody(respBody)
 		}
 		cancelAttempt()
+		// classifyHTTPResult is the canonical translation of the
+		// (resp, err) pair into transportResult.status (with the
+		// nil-response → 502 normalisation) and tr.retryable. The HTTP
+		// failure path keeps its inline shouldRetry + logProviderRow
+		// shape because logProviderRow vs logAttempt differ in
+		// caller-supplied message wording (the HTTP-specific
+		// "provider_timeout" / "provider_error" disambiguation lives
+		// here, not in the classifier). Using tr.status downstream
+		// pulls the status-derivation contract into one place across
+		// HTTP/streaming/WS.
+		tr := classifyHTTPResult(resp, err, attempt)
 		s.log.Warn().Err(err).Int("status", status).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("provider request failed")
 		if status != 0 {
 			s.handleProviderFailure(state.provider, status)
@@ -1469,10 +1480,12 @@ func (s *Server) forwardHTTPSequence(
 			writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
 			return
 		}
-		failStatus := status
-		if failStatus == 0 {
-			failStatus = http.StatusBadGateway
-		}
+		// tr.status already encodes the nil-response → 502 normalisation
+		// the pre-refactor code did inline (failStatus := status; if
+		// failStatus == 0 { failStatus = http.StatusBadGateway }). Read
+		// it from the classifier so HTTP and streaming/WS paths share
+		// the same status-derivation contract.
+		failStatus := tr.status
 		errMsg := "Selected provider failed; buyer should retry"
 		if err != nil {
 			errMsg = err.Error()

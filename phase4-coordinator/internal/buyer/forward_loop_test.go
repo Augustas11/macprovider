@@ -2,10 +2,20 @@ package buyer_test
 
 // M2-1c regression suite — pins the attempt_n / logAttempt row sequence
 // in the four scenarios called out in audits/2026-06-10/REPO_AUDIT.md
-// §3.1 item 3 (ARCH-1 / CODE-1) as the byte-identity gate for the
-// strangler refactor that collapses the three transport loops into
-// forwardWithFailover. Any drift here means the billing ledger format
-// has shifted under the refactor — orchestrator must STOP and review.
+// §3.1 item 3 (ARCH-1 / CODE-1) as the highest-risk billing-ledger
+// invariants for the strangler refactor that collapses the three
+// transport loops into three transport-typed sequence helpers
+// (forwardStreamSequence, forwardWSNonStreamSequence,
+// forwardHTTPSequence) sharing transportResult + *forwardState.
+//
+// Scope: this suite pins ROW SEQUENCE invariants (count, provider
+// assignment, status code, retried column) — not full byte-identity
+// across every request_log column. Routing_ms, billing attempt_n,
+// stream/buyer_ip/error column content remain covered by the broader
+// buyer test suite (TestRequestLogBuyerMultiAttemptRows et al.). Any
+// drift here means the billing-ledger row sequence or retry
+// accounting has shifted under the refactor — orchestrator MUST STOP
+// and review.
 //
 // The four scenarios:
 //
