@@ -32,12 +32,6 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 - **Status:** `PARTIAL`
 - **Detail:** **Evidence** PR #89 (commit `2501e11`) capped the `auditStore` and `authStore` (`internal/audit/store.go`, `internal/auth/tokens.go`) at `SetMaxOpenConns(1)`, mirroring the gateway pattern at `phase5-gateway/internal/storage/sqlite/store.go:38`. The `reqLogStore` cap was investigated and explicitly deferred: billing endpoints in `phase4-coordinator/internal/billing/endpoints.go` iterate `rows.Next()` in the outer cursor while issuing per-row sub-queries on the same `*sql.DB` (providers :132+:168, buyerEquivalentCredits :256+:294, reconcile :193-225 transitively); capping to 1 blocks the sub-queries forever. Test evidence: `TestProvidersEndpoint` hangs ~10 min then panics with `database/sql.(*DB).conn` stack traces under cap=1. Proper close-out requires a drain-rows-first handler refactor (build typed slice from `rows.Next()` before issuing per-row sub-queries), deferred to a separate PR. **Original citation** `cmd/coordinator/main.go:47-59` — opens `tokenStore`, `reqLogStore`, `auditStore` in sequence (now lines 57-74 post-drift). Sub-handles for `admissionStore` and `billingStore` (lines 75-84) also derive from the unconfigured `reqLogStore.DB()`. **Fix delta** Two of three handles now capped; `reqLogStore` (and the billing sub-handles that derive from it) remains uncapped pending the drain-rows-first refactor. **Notes** Latent risk until coordinator concurrency rises (currently single-coordinator). The buyer hot-pa...
 
-### [Medium] DOCS-4 — specs/README.md index 6 revisions stale on 3 of 12 spec families
-
-- **Status:** `PARTIAL`
-- **Recalibrated severity:** Low — drift admitted in-doc; partial mitigation acceptable
-- **Detail:** **Evidence** - `specs/README.md` now lists SPEC-001 v1.4 and SPEC-003 v0.9.2, matching their respective spec headers — regenerated in PR #89 (commit `2501e11`) A2. - `specs/README.md:18` contains an explicit drift disclaimer: `**Version of record is line 3 of each spec; do not trust this index for compatibility decisions — read the spec header.** This index drifts; the spec headers do not. When in doubt, grep -m1 '^\*\*Version' specs/SPEC-*.md.` - M3-7 scope was `Specs index regen + CLAUDE.md/AGENTS version pointers` — index regen landed in PR #89; CLAUDE.md/AGENTS version pointer part (DOCS-5) remains pending. **Original citation** Audit §3.9 DOCS-4: 'specs/README.md indexes 3 of 12 spec families at versions ~6 revisions stale'. **Fix delta** Su...
-
 ### [Medium] PERF-1 — Gateway DB can never shrink (8 event tables + concurrency_reservations have RAISE(ABORT) BEFORE-DELETE triggers, no archival story)
 
 - **Status:** `PARTIAL`
@@ -76,11 +70,6 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 - **Status:** `DEFERRED`
 - **Detail:** **Evidence** - Deferral record: `audits/2026-06-10/MILESTONE_2_HANDOFF.md:117-150`: ``` ### M2-9 — cross-service integration test (TEST-6) Deferred to M3. Rationale: the audit's M2-9 spec calls for a new ... Recommend ticketing M2-9 as `M3-11` ... - **M3-11** (NEW) cross-service integration test — deferred from M2-9 ``` - Sticky header contract at `phase5-gateway/internal/router/server.go:1401-1405` (or its post-M3-9 location) and coordinator `internalBearerAuthorized` (`buyer/server.go:2754`) still has no cross-boundary `test/integration/` harness. - `phase5-gateway/internal/router/integration_test.go` exists but is within-gateway (mocks coordinator via `cfg.Coordinator.BuyerURL = "http://coordinator.test"` + httptest stubs at lines 43, 154, 184, 221, 271, 312, 349, 381). It does not e...
 
-### [Low] ARCH-5 — Cross-service duplication (sqlite DSN helper, bearer compare) — document conscious debt
-
-- **Status:** `RESOLVED`
-- **Detail:** **Evidence** PR #89 (commit `2501e11`) A3 added ARCH-5 conscious-debt comments to both `phase4-coordinator/internal/sqliteutil/dsn.go:11-15` and `phase5-gateway/internal/storage/sqlite/dsn.go:11-15`, citing `audits/2026-06-10/REPO_AUDIT.md (ARCH-5)` in each. The document-it requirement the audit specified is now met. **Original citation** Audit asked these be documented as 'conscious-debt copies'. **Fix delta** Comment-level documentation shipped in PR #89. **Notes** No further action needed.
-
 ### [Low] CODE-3 — Tier-2 trust disclosure parsed from untyped map[string]any with silent zero-fallbacks (Phase-1 fallback path)
 
 - **Status:** `NOT_RESOLVED`
@@ -100,11 +89,6 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 
 - **Status:** `NOT_RESOLVED`
 - **Detail:** **Evidence** - No PR found in `git log --grep` for SECU-6 specifically; not listed in any milestone handoff as targeted for this audit cycle. - §5 task table does not assign SECU-6 to M1/M2/M3. - Audit text already classifies as Low: "Buyer over-charge is correctly impossible (usageFromJSON caps at promptEstimate+max_tokens, server.go:2356-2369); the coordinator additionally clamps completion to byte-estimate (formula.go:214); the gateway settlement path lacks that cross-check. Residual: provider revenue gaming — compounded by XSEC-1." - XSEC-1 amplification reduces as PR #41+#44 close provider identity (provider gaming becomes attributable rather than anonymous), but the gateway settlement path's missing byte-estimate cross-check at `phase5-gateway/internal/router/server.go:1607-1611` ...
-
-### [Low] DOCS-7 — Version-drift cluster (README badge, gateway README SPEC-006 pin, SPEC-002 dep self-contradiction)
-
-- **Status:** `RESOLVED`
-- **Detail:** **Evidence** - README: PR #12 dropped the hardcoded v1.2.5 string; `README.md:13` now uses a dynamic shields.io badge. Resolved. - Gateway README: `phase5-gateway/README.md:3` reads `Phase 5 gateway implementation for SPEC-006 v0.8.3.` Matches actual SPEC-006 v0.8.3. Resolved. - SPEC-002 dep line: PR #89 (commit `2501e11`) A4 updated `specs/SPEC-002-coordinator.md:4` to `Depends on: SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + models browse + fit guard...)`. All three sub-items resolved. **Original citation** Audit §3.10 DOCS-7: version-drift cluster. **Fix delta** All three sub-items resolved across PRs #12, and #89. **Notes** No further action needed.
 
 ### [Low] DEVE-7 — Coordinator secret handling weak half of asymmetric pattern (plaintext YAML, root-monitor)
 
