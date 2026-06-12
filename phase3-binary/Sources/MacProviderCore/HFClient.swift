@@ -123,27 +123,20 @@ public protocol HTTPFetcher: Sendable {
     func fetch(url: URL, headers: [String: String]) async throws -> (Data, Int)
 }
 
-public final class URLSessionHTTPFetcher: NSObject, HTTPFetcher, URLSessionTaskDelegate, @unchecked Sendable {
-    // Implicitly-unwrapped optional so we can assign after super.init() and
-    // pass self as the delegate. `URLSession(delegate:)` requires self to
-    // be fully constructed, so a let-property initialized inline trips
-    // "Property not initialized at super.init call".
-    private var session: URLSession!
+public final class URLSessionHTTPFetcher: HTTPFetcher, @unchecked Sendable {
+    // No delegate on the session itself, so no retain cycle. The cross-
+    // origin redirect guard lives on a per-task delegate object created
+    // in fetch() and held only for the duration of that request — this
+    // supersedes the R3 self-as-delegate + deinit pattern, which couldn't
+    // actually fire (URLSession retained self, so refcount never hit zero
+    // and deinit never ran).
+    private let session: URLSession
 
     public init(timeoutSeconds: TimeInterval = 15, resourceTimeoutSeconds: TimeInterval = 30) {
-        super.init()
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = timeoutSeconds
         config.timeoutIntervalForResource = resourceTimeoutSeconds
-        self.session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-    }
-
-    // R3 (Codex code MINOR): URLSession with a delegate retains the
-    // delegate, which is self. invalidateAndCancel breaks the cycle on
-    // deinit. Optional `?` guards the (impossible) case where init failed
-    // before session was assigned.
-    deinit {
-        session?.invalidateAndCancel()
+        self.session = URLSession(configuration: config)
     }
 
     public func fetch(url: URL, headers: [String: String]) async throws -> (Data, Int) {
@@ -151,22 +144,24 @@ public final class URLSessionHTTPFetcher: NSObject, HTTPFetcher, URLSessionTaskD
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
-        let (data, response) = try await session.data(for: request)
+        let guardDelegate = HFRedirectGuard()
+        let (data, response) = try await session.data(for: request, delegate: guardDelegate)
         guard let http = response as? HTTPURLResponse else {
             throw HFClientError.badResponse
         }
         return (data, http.statusCode)
     }
+}
 
-    // MARK: URLSessionTaskDelegate
-    //
-    // Round-2 hardening (codex security MINOR): URLSession's default behavior
-    // forwards the `Authorization` header on cross-origin redirects. If HF
-    // (or an HTTPS-terminating edge) returns a 3xx to an attacker-controlled
-    // host, the bearer HF_TOKEN would leak. We refuse any redirect whose
-    // scheme+host doesn't match the original request — that's the bare
-    // minimum that lets HuggingFace's own canonicalization redirects work
-    // while blocking the leak.
+/// Per-task URLSession delegate that refuses any redirect whose scheme+host
+/// doesn't match the original request. Required so the HF_TOKEN bearer
+/// header cannot leak to an attacker-controlled origin via a 3xx — same
+/// guarantee as the R2 session-level delegate, but without the retain cycle.
+public final class HFRedirectGuard: NSObject, URLSessionTaskDelegate {
+    public override init() {
+        super.init()
+    }
+
     public func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
