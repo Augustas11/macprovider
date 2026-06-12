@@ -184,7 +184,14 @@ func providerJSONL1Baseline() Provider {
 	}
 }
 
-func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
+// fix-pass-4 (PR #69): RoutingEligible is now exclusively about credential
+// trust + slot availability. HashStatus filtering moved to Tier-2-aware
+// buyer code (tier2ProviderExcludedStatus) so the operator-configurable
+// "ignore stale mismatches when hash enforcement is disabled" semantics
+// can be honored. The predicate must NOT exclude hash-mismatched providers
+// unconditionally — that would make a config-disabled inactive state
+// reject providers the operator chose to admit.
+func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	base := Provider{State: StateReady, SlotsFree: 1}
 	if !base.RoutingEligible() {
 		t.Fatal("zero hash status should preserve default routing eligibility")
@@ -194,13 +201,18 @@ func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
 	}
 	mismatch := base
 	mismatch.HashStatus = HashStatusMismatch
-	if mismatch.RoutingEligible() {
-		t.Fatal("hash_mismatch provider should not be routing eligible")
+	if !mismatch.RoutingEligible() {
+		t.Fatal("hash_mismatch must NOT be excluded by RoutingEligible — Tier-2 hash filtering is config-aware and lives elsewhere")
 	}
 	invalid := base
 	invalid.HashStatus = HashStatusInvalid
-	if invalid.RoutingEligible() {
-		t.Fatal("hash_invalid provider should not be routing eligible")
+	if !invalid.RoutingEligible() {
+		t.Fatal("hash_invalid must NOT be excluded by RoutingEligible — Tier-2 hash filtering is config-aware and lives elsewhere")
+	}
+	bearerless := base
+	bearerless.AuthState = AuthBearerlessDuplicate
+	if bearerless.RoutingEligible() {
+		t.Fatal("AuthBearerlessDuplicate MUST be excluded — SPEC-003 v0.8.3 FR-C9.4 credential trust gate")
 	}
 }
 

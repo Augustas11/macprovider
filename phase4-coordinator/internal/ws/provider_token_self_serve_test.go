@@ -379,8 +379,14 @@ func TestSelfServeProvisionalTokenEvictionDefenseProtectsRoutableSession(t *test
 	if !ok {
 		t.Fatalf("legitimate session evicted (registry has no entry for assigned_id %q): eviction defense failed", legitAssigned)
 	}
-	if legit.AuthState == pool.AuthBearerlessDuplicate {
-		t.Fatalf("legitimate auth_state corrupted to bearerless_duplicate")
+	// fix-pass-4 (code MINOR-1): positively lock the Bearer-validated state.
+	// The prior assertion only checked the negation (not AuthBearerlessDuplicate);
+	// future regressions could land an empty AuthState (pre-FR-C9 conflation)
+	// and still pass. The legitimate Bearer-token connect MUST resolve to
+	// AuthBearerValidated.
+	if legit.AuthState != pool.AuthBearerValidated {
+		t.Fatalf("legitimate auth_state = %q, want %q (Bearer-validated must be positively locked, not just non-duplicate)",
+			legit.AuthState, pool.AuthBearerValidated)
 	}
 }
 
@@ -511,5 +517,80 @@ func TestSelfServeProvisionalTokenAdmitsTokenlessOnAuthResponseV2WhenActiveToken
 	}
 	if active != 1 {
 		t.Fatalf("v2 active rows for v2-duplicate = %d, want 1: %#v", active, records)
+	}
+}
+
+// fix-pass-4 (code MINOR-2) — variant of
+// TestSelfServeProvisionalTokenAdmitsTokenlessOnAuthResponseV2WhenActiveTokenExists
+// that supplies SPEC-010 catalog fields in the initial frame. This forces
+// retainSpec010=true (R-7.9.6) — the auth-attempt retention store reserves an
+// entry that MUST be released on the duplicate-admit terminal path. The
+// non-catalog variant exercises only retainSpec010=false (no reserve, nothing
+// to clean up), so this variant locks the retention-cleanup invariant on the
+// admit-tokenless code path.
+func TestSelfServeProvisionalTokenAdmitsTokenlessOnAuthResponseV2WhenActiveTokenExistsRetentionCleanup(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	_, _, err = store.IssueToken(context.Background(), "v2-duplicate-retain", "v2-duplicate-retain hostname")
+	if err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
+		cfg.Auth.RequireProviderTokens = false
+		cfg.Providers = nil
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial tokenless v2 duplicate: %v", err)
+	}
+	defer conn.Close()
+
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	providerPublic := base64.RawURLEncoding.EncodeToString(providerPublicRaw)
+	// SPEC-010 catalog fields force retainSpec010=true so the auth-attempt
+	// retention store reserves an entry. The duplicate-admit path must
+	// release it.
+	initial := validAuthInitial("v2-duplicate-retain", providerPublic)
+	initial["supported_models"] = []string{
+		"mlx-community/Qwen2.5-7B-Instruct-4bit",
+	}
+	initial["publishes_supported_models"] = true
+
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth_request initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "v2-duplicate-retain", nil)
+	response := readAuthResponse(t, conn)
+
+	if response.Status != "accepted" {
+		t.Fatalf("auth_response.status = %q, want accepted: %+v", response.Status, response)
+	}
+	if response.AssignedProviderToken != "" {
+		t.Fatalf("v2 assigned_provider_token = %q, want empty: %+v", response.AssignedProviderToken, response)
+	}
+
+	provider, ok := h.Registry.Resolve("v2-duplicate-retain", response.AssignedID)
+	if !ok {
+		t.Fatalf("registry has no entry for assigned_id %q after v2 admit", response.AssignedID)
+	}
+	if provider.AuthState != pool.AuthBearerlessDuplicate {
+		t.Fatalf("v2 auth_state = %q, want %q", provider.AuthState, pool.AuthBearerlessDuplicate)
+	}
+
+	// The R-7.9.7 defer MUST release the retention entry on the duplicate-
+	// admit terminal path. Without the release, AuthAttemptCount stays at 1
+	// and (with enough duplicates) reaches the 1024 bound and locks out
+	// legitimate provisional connects.
+	if got := h.Provider.AuthAttemptCount(); got != 0 {
+		t.Fatalf("auth-attempt retention count = %d, want 0 (duplicate-admit terminal path must release the entry — R-7.9.7 defer)", got)
 	}
 }

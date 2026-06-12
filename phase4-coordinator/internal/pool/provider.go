@@ -155,16 +155,25 @@ type Tier2Session struct {
 	StartedAt          time.Time
 }
 
+// RoutingEligible is the single authority on whether a session may receive
+// buyer traffic and serve as a billing identity. It captures credential trust
+// (was this session admitted with a credential we trust?) and slot
+// availability — NOT Tier-2 hash enforcement, which is operator-configurable
+// and lives in Tier-2-aware buyer code.
+//
+// SPEC-003 v0.8.3 FR-C9.4 — bearer-less duplicate sessions are registered in
+// the pool (so they're operator-visible in /poolz) but excluded from routing.
+// The provider on the other end thinks they're admitted but receives no buyer
+// traffic and accrues no billing identity under the claimed provider_id. The
+// legitimate holder of the token row remains routable.
+//
+// HashStatus filtering used to live here as a defense-in-depth gate. Fix-pass-4
+// removed it: when Tier-2 hash enforcement is disabled, hash-mismatched
+// providers must still route, and a non-config-aware predicate cannot model
+// that. Buyer routing (chat completions, /v1/models, hard-pin) calls
+// tier2ProviderExcludedStatus alongside RoutingEligible() to enforce hash
+// when active.
 func (p Provider) RoutingEligible() bool {
-	if p.HashStatus == HashStatusMismatch || p.HashStatus == HashStatusInvalid {
-		return false
-	}
-	// SPEC-003 v0.8.3 FR-C9.4 — bearer-less duplicate sessions are
-	// registered in the pool (so they're operator-visible in /poolz)
-	// but excluded from routing. The provider on the other end thinks
-	// they're admitted but receives no buyer traffic and accrues no
-	// billing identity under the claimed provider_id. The legitimate
-	// holder of the token row remains routable.
 	if p.AuthState == AuthBearerlessDuplicate {
 		return false
 	}
