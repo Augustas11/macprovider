@@ -1344,27 +1344,31 @@ func (s *Server) forwardWSNonStreamSequence(
 			}
 			return true
 		}
-		// Queue full: markBusy + retryable=true. Inline-advance path
-		// (NOT via advanceToNextProvider — preserves pre-refactor
-		// server.go:1244-1253 behaviour where queue-full uses
-		// selectProviderExcluding directly without logRow on success).
-		if tr.markBusy {
-			s.pool.MarkState(state.provider.ProviderID, state.provider.AssignedID, pool.StateBusy)
-			excluded[routeKey(state.provider)] = struct{}{}
-			logAttempt(state.provider, http.StatusBadGateway, tr.attempt, state.explicitRetries)
-		}
-		var routeErr *routeError
-		nextProvider, routeErr := s.selectProviderExcluding(uuid.NewString(), req, r.Header, excluded)
-		if routeErr != nil {
-			state.routingDone = s.now()
-			logRow("", routeErr.status, nil, nil, routeErr.message, "", state.explicitRetries)
-			writeRouteError(w, routeErr)
+		// Queue full: markBusy + retryable=true. The audit (post-merge
+		// verification of PR #91 — Q3 BLOCKING) called out the prior
+		// inline state mutation here as the concrete shared-state
+		// bypass that kept ARCH-1 / CODE-1 at PARTIAL_RESOLVED_DIFFERENTLY.
+		// M2-1d routes this path through advanceToNextProvider so the
+		// "pick next provider + bump explicitRetries/faultedProviders"
+		// tail lives in exactly one place — same as the timeout branch
+		// above and the two siblings (forwardStreamSequence,
+		// forwardHTTPSequence).
+		//
+		// Byte-identical to PR #91 baseline: classifier sets markBusy=true
+		// only on wsForwardQueueFull (the only case that falls through to
+		// this point), so the unconditional MarkState + excluded-add +
+		// logAttempt block here matches the pre-1d guarded behaviour.
+		// advanceToNextProvider performs the identical mutation order
+		// (selectProviderExcluding → routingDone → explicitRetries++ →
+		// faultedProviders++ → state.provider = next) as the prior inline
+		// block, preserving the request_log row sequence the billing
+		// ledger keys off (verified by forward_loop_test.go scenario 5).
+		s.pool.MarkState(state.provider.ProviderID, state.provider.AssignedID, pool.StateBusy)
+		excluded[routeKey(state.provider)] = struct{}{}
+		logAttempt(state.provider, http.StatusBadGateway, tr.attempt, state.explicitRetries)
+		if _, ok := s.advanceToNextProvider(w, r, req, state, excluded, logRow); !ok {
 			return false
 		}
-		state.provider = nextProvider
-		state.routingDone = s.now()
-		state.explicitRetries++
-		state.faultedProviders++
 		if !state.provider.IsWSTunneled() {
 			return true
 		}
