@@ -2047,42 +2047,40 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// authorizedOperator returns true when the request's Bearer token matches
-// EITHER the configured operator key (the legacy human-admin credential)
-// OR the configured gateway service token (M3-2 / SECU-4 — the new
-// service-to-service credential the gateway uses for upstream admin
-// calls). Both candidates are compared in constant time via
-// BearerTokenMatchesHeader; missing-but-configured keys are skipped so an
-// empty gateway_service_token doesn't widen the auth surface.
+// authorizedOperator returns true when the request's Bearer token
+// matches the configured operator key. This guards HUMAN-ADMIN
+// endpoints (`/poolz`, `/admin/blacklist`, `/admin/promote`,
+// `/admin/reject`, `/admin/provisional`) and intentionally does NOT
+// accept gateway_service_token: the codex security audit on PR #73
+// (HIGH-1) flagged that admin endpoints accepting the service-token
+// silently grant human-admin power to the gateway once the operator
+// rotates the legacy operator_key. Operator-class endpoints are
+// reachable only from a human operator's machine, so the legacy single
+// credential is sufficient and the dual-credential bridge stays scoped
+// to the `/internal/*` paths the gateway actually calls.
 //
-// Empty operator_key still means DENY on the legacy path (M1-5 / SECU-5
-// preserved): if neither candidate is configured AND non-matching, the
-// call is unauthorized. Audit-log emits the matched credential kind
-// ("operator_key" vs "service_token") so the operator can watch the
-// migration cutover and rotate operator_key once gateway-origin calls
-// stop showing key=operator_key.
+// Empty operator_key still means DENY (M1-5 / SECU-5 preserved). The
+// service-to-service `/internal/*` paths under buyer.Server use the
+// auth.GatewayInternalBearerMatches helper instead, which accepts
+// either credential class and emits its own audit-log line.
+//
+// TODO(m3-2-cleanup): the buyer-side gateway-internal bridge still
+// accepts the OperatorKey fallback. Tracked for removal in
+// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md once live audit
+// logs show zero gateway-origin `key=operator_key` for 30 days post-
+// rotation. Until then, removing the fallback would break the cutover
+// for operators who still pin the legacy single credential.
 func (s *Server) authorizedOperator(r *http.Request) bool {
-	if s.cfg.Auth.GatewayServiceToken != "" &&
-		auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.GatewayServiceToken) {
-		s.log.Info().
-			Str("event", "internal_bearer_accepted").
-			Str("key", "service_token").
-			Str("path", r.URL.Path).
-			Str("remote_addr", r.RemoteAddr).
-			Msg("internal bearer accepted")
-		return true
+	if !auth.OperatorOnlyBearerMatches(r.Header, s.cfg.Auth.OperatorKey) {
+		return false
 	}
-	if s.cfg.Auth.OperatorKey != "" &&
-		auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.OperatorKey) {
-		s.log.Info().
-			Str("event", "internal_bearer_accepted").
-			Str("key", "operator_key").
-			Str("path", r.URL.Path).
-			Str("remote_addr", r.RemoteAddr).
-			Msg("internal bearer accepted")
-		return true
-	}
-	return false
+	s.log.Info().
+		Str("event", "internal_bearer_accepted").
+		Str("key", "operator_key").
+		Str("path", r.URL.Path).
+		Str("remote_addr", r.RemoteAddr).
+		Msg("internal bearer accepted")
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

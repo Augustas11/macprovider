@@ -227,6 +227,7 @@ func main() {
 		buyer.WithTier2Config(cfg.Tier2),
 		buyer.WithLimitsConfig(cfg.Limits),
 		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
+		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithRequestLog(reqLogStore),

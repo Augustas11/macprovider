@@ -501,22 +501,15 @@ func parseWindow(r *http.Request, defaultHours, maxDays int) (windowRange, error
 }
 
 func (h *Handler) authorized(r *http.Request) bool {
-	// M3-2 / SECU-4 bridge: accept EITHER gateway_service_token (preferred
-	// when configured, the new service-to-service credential) OR
-	// operator_key (legacy human-admin credential). Each candidate is
-	// only counted when non-empty so an empty gateway_service_token can't
-	// widen the auth surface.
-	if h.cfg.Auth.GatewayServiceToken != "" &&
-		auth.BearerTokenMatchesHeader(r.Header, h.cfg.Auth.GatewayServiceToken) {
-		h.logBearerAccepted(r, "service_token")
-		return true
+	// /admin/explorer/* is operator-only (codex PR #73 HIGH-1 fix). The
+	// gateway service token is intentionally NOT accepted here so a
+	// compromised gateway can't pivot to full explorer reads. Empty
+	// operator_key still means DENY (M1-5 / SECU-5).
+	if !auth.OperatorOnlyBearerMatches(r.Header, h.cfg.Auth.OperatorKey) {
+		return false
 	}
-	if h.cfg.Auth.OperatorKey != "" &&
-		auth.BearerTokenMatchesHeader(r.Header, h.cfg.Auth.OperatorKey) {
-		h.logBearerAccepted(r, "operator_key")
-		return true
-	}
-	return false
+	h.logBearerAccepted(r, "operator_key")
+	return true
 }
 
 // logBearerAccepted is the audit-log line the operator watches during

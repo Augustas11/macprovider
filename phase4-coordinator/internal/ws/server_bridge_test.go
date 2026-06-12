@@ -13,21 +13,28 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// TestPoolzAcceptsServiceTokenAndAuditLogs locks in the M3-2 / SECU-4
-// bridge: when gateway_service_token is configured, /poolz accepts
-// EITHER credential and emits an audit-log line tagged with which one
-// matched. The operator watches the journal for
-// event=internal_bearer_accepted lines and rotates operator_key once
-// every gateway-origin call reports key=service_token.
-func TestPoolzAcceptsServiceTokenAndAuditLogs(t *testing.T) {
+// TestPoolzAdminEndpointIsOperatorOnly locks in the codex PR #73 HIGH-1
+// fix: `/poolz` is human-admin and must NOT accept the gateway service
+// token. Accepting it would silently grant the gateway human-admin
+// power once the operator rotates the legacy operator_key — the exact
+// inverted-scope failure the audit identified.
+//
+// Pre-fix (M3-2 dual-credential bridge applied uniformly): /poolz
+// accepted both operator_key AND gateway_service_token.
+// Post-fix:
+//
+//   - operator_key   → 200, audit-log key=operator_key
+//   - service_token  → 401, no audit-log line
+//   - bogus bearer   → 401, no audit-log line
+func TestPoolzAdminEndpointIsOperatorOnly(t *testing.T) {
 	tests := []struct {
-		name        string
-		bearer      string
-		wantStatus  int
-		wantLogKey  string // "" means no audit-log line expected
+		name       string
+		bearer     string
+		wantStatus int
+		wantLogKey string // "" means no audit-log line expected
 	}{
 		{name: "operator_key accepted", bearer: "operator-secret", wantStatus: http.StatusOK, wantLogKey: "operator_key"},
-		{name: "service_token accepted", bearer: "service-secret", wantStatus: http.StatusOK, wantLogKey: "service_token"},
+		{name: "service_token rejected on admin path", bearer: "service-secret", wantStatus: http.StatusUnauthorized, wantLogKey: ""},
 		{name: "unknown bearer rejected", bearer: "wrong", wantStatus: http.StatusUnauthorized, wantLogKey: ""},
 	}
 	for _, tc := range tests {
@@ -71,7 +78,8 @@ func TestPoolzAcceptsServiceTokenAndAuditLogs(t *testing.T) {
 			if !strings.Contains(logs, `"event":"internal_bearer_accepted"`) || !strings.Contains(logs, wantKey) {
 				t.Fatalf("audit log missing %q or wrong key; got: %s", wantKey, logs)
 			}
-			// Negative: the OTHER kind must NOT show up.
+			// Negative: the OTHER kind must NOT show up. /poolz never
+			// audits service_token because it never accepts service_token.
 			otherKey := "operator_key"
 			if tc.wantLogKey == "operator_key" {
 				otherKey = "service_token"
