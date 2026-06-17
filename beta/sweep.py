@@ -164,6 +164,7 @@ def run_cell(
     body: dict,
     concurrency: int,
     timeout_s: float,
+    headers: dict | None = None,
 ) -> dict[str, Any]:
     """Fire `concurrency` parallel streamed requests for one grid cell.
 
@@ -174,7 +175,7 @@ def run_cell(
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=concurrency) as pool:
         futures = [
-            pool.submit(fire_stream, url, model, body, timeout_s)
+            pool.submit(fire_stream, url, model, body, timeout_s, headers)
             for _ in range(concurrency)
         ]
         results = [f.result() for f in concurrent.futures.as_completed(futures)]
@@ -292,6 +293,12 @@ def main() -> int:
         help="If set, run an additional pass with this max_tokens value (e.g. 1024)",
     )
     ap.add_argument(
+        "--max-tokens", type=int, default=None,
+        help=f"Decode length (max_tokens) per request. Default {DEFAULT_MAX_TOKENS}. "
+             "Lower it (e.g. 48) for fast runs on slow/constrained nodes — the context "
+             "ceiling is driven by prefill, not decode length.",
+    )
+    ap.add_argument(
         "--contexts", default=None,
         help="Comma-separated context targets in tokens to override the default grid "
              "(e.g. '1000,2000,4000')",
@@ -313,23 +320,51 @@ def main() -> int:
              "that merely misses the TTFT gate (slow but no errors) does NOT stop the "
              "sweep — only real request failures do.",
     )
+    ap.add_argument(
+        "--model", default=None,
+        help="Override the model id sent in each request (default: the `model:` "
+             "from --config). On the coordinator/gateway path this also pins the "
+             "provider: only the provider serving this model can fulfill the request.",
+    )
+    ap.add_argument(
+        "--api-key", default=None,
+        help="Bearer key for the gateway path (e.g. mp_...). If omitted, falls back "
+             "to --api-key-file when that file exists. Leave unset for a direct local "
+             "provider endpoint (no auth).",
+    )
+    ap.add_argument(
+        "--api-key-file", default=str(Path.home() / ".config/macprovider/buyer-api-key"),
+        help="File to read the bearer key from when --api-key is not given. "
+             "Default: ~/.config/macprovider/buyer-api-key. Ignored if absent "
+             "(direct/local runs send no auth).",
+    )
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
     cfg = load_config_relaxed(Path(args.config))
-    model = cfg.get("model", "mlx-community/Llama-3.2-3B-Instruct-4bit")
+    model = args.model or cfg.get("model", "mlx-community/Llama-3.2-3B-Instruct-4bit")
     timeout_s = float(cfg.get("timeout_s", 180))
     db_path = BETA_DIR / cfg.get("db_path", "runs.sqlite")
     reports_dir = BETA_DIR / cfg.get("reports_dir", "reports")
 
     url = args.base_url.rstrip("/") + "/v1/chat/completions"
 
+    # Resolve bearer auth: explicit --api-key wins, else read --api-key-file if it
+    # exists. No key -> headers=None -> direct/local provider path (Leg 1, no auth).
+    api_key = args.api_key
+    if not api_key:
+        key_path = Path(args.api_key_file)
+        if key_path.is_file():
+            api_key = key_path.read_text().strip()
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+
     context_targets = parse_int_list(args.contexts) if args.contexts else DEFAULT_CONTEXT_TARGETS
     concurrencies = parse_int_list(args.concurrency) if args.concurrency else DEFAULT_CONCURRENCIES
 
     # Determine max_tokens passes
-    max_tokens_list = [DEFAULT_MAX_TOKENS]
-    if args.decode_control and args.decode_control != DEFAULT_MAX_TOKENS:
+    base_max_tokens = args.max_tokens or DEFAULT_MAX_TOKENS
+    max_tokens_list = [base_max_tokens]
+    if args.decode_control and args.decode_control != base_max_tokens:
         max_tokens_list.append(args.decode_control)
 
     # Build the full grid
@@ -344,6 +379,7 @@ def main() -> int:
 
     print(f"sweep: model={model}")
     print(f"sweep: endpoint={url}")
+    print(f"sweep: auth={'bearer ' + api_key[:6] + '…' if api_key else 'none (direct/local)'}")
     print(f"sweep: gate_ttft_ms={args.gate_ttft_ms}")
     print(f"sweep: grid = {len(context_targets)} contexts × {len(concurrencies)} concurrencies"
           f" × {len(max_tokens_list)} decode pass(es) = {n_cells} cells")
@@ -384,7 +420,7 @@ def main() -> int:
 
             print(f"[{i:>3}/{n_cells}] ctx={ctx:>6} conc={conc} max_tokens={mt} ... ", end="", flush=True)
 
-            cell_result = run_cell(url, model, body, conc, timeout_s)
+            cell_result = run_cell(url, model, body, conc, timeout_s, headers)
             agg = aggregate_cell(cell_result, args.gate_ttft_ms)
 
             row: dict[str, Any] = {

@@ -194,12 +194,12 @@ def strip_leaks_model(text: str, model_id: str) -> str:
     return regex.sub("", text or "")
 
 
-def fire_nonstream(url: str, model: str, body: dict, timeout: float) -> dict:
+def fire_nonstream(url: str, model: str, body: dict, timeout: float, headers: dict | None = None) -> dict:
     """POST a non-streaming request. Returns a metrics dict."""
     payload = {"model": model, "stream": False, **body}
     t0 = time.monotonic()
     try:
-        r = requests.post(url, json=payload, timeout=timeout)
+        r = requests.post(url, json=payload, timeout=timeout, headers=headers)
     except requests.RequestException as e:
         return {"error": f"{type(e).__name__}: {e}", "total_ms": (time.monotonic() - t0) * 1000}
     total_ms = (time.monotonic() - t0) * 1000
@@ -233,7 +233,7 @@ def fire_nonstream(url: str, model: str, body: dict, timeout: float) -> dict:
     return out
 
 
-def fire_stream(url: str, model: str, body: dict, timeout: float) -> dict:
+def fire_stream(url: str, model: str, body: dict, timeout: float, headers: dict | None = None) -> dict:
     """POST a streaming request, parse SSE. Returns a metrics dict with TTFT."""
     payload = {"model": model, **body, "stream": True}
     t0 = time.monotonic()
@@ -244,7 +244,7 @@ def fire_stream(url: str, model: str, body: dict, timeout: float) -> dict:
     error: str | None = None
 
     try:
-        with requests.post(url, json=payload, timeout=timeout, stream=True) as r:
+        with requests.post(url, json=payload, timeout=timeout, stream=True, headers=headers) as r:
             http_status = r.status_code
             if r.status_code != 200:
                 return {
