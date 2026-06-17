@@ -20,6 +20,11 @@
 #   T7 — malformed env ref ("env:" / "env:1bad")       -> FAIL (clear message)
 #   T8 — operator_key absent                           -> FAIL
 #   T9 — env-indirected key does NOT mask a real C2 timer inversion -> FAIL on C2
+#   T10 — gateway operator_key inline placeholder      -> FAIL (symmetric guard)
+#   T11 — gateway operator_key env:NAME unset          -> pass, "deferred to runtime"
+#   T12 — gateway operator_key absent                  -> FAIL (gateway requires it)
+#   T13 — gateway service_token present + placeholder  -> FAIL
+#   T14 — gateway service_token absent                 -> silent (optional field)
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -60,13 +65,19 @@ routing:
 EOF
 }
 
-# Write a minimal gateway.yaml carrying the one key the C2 cross-check reads.
+# Write a minimal gateway.yaml carrying the key the C2 cross-check reads plus
+# the coordinator.operator_key the gateway-credential check now validates.
+# $2 = coordinator_request_seconds, $3 = operator_key value (verbatim),
+# $4 = service_token line (verbatim, including key) or "" to omit it entirely.
 write_gw() {
-  local wd="$1" gwt="${2:-300}"
-  cat > "$wd/gateway.yaml" <<EOF
-timeouts:
-  coordinator_request_seconds: $gwt
-EOF
+  local wd="$1" gwt="${2:-300}" opkey="${3:-env:COORDINATOR_OPERATOR_KEY}" svc="${4:-}"
+  {
+    echo "coordinator:"
+    echo "  operator_key: $opkey"
+    [ -n "$svc" ] && echo "  $svc"
+    echo "timeouts:"
+    echo "  coordinator_request_seconds: $gwt"
+  } > "$wd/gateway.yaml"
 }
 
 # Run the gate; capture combined output in OUT and exit code in RC. Any extra
@@ -93,6 +104,15 @@ assert_contains() { # $1 substring, $2 test name
   else
     FAIL=$((FAIL+1)); FAIL_NAMES+=("$2"); echo "  FAIL: $2 — output missing: $1"
     printf '%s\n' "$OUT" | sed 's/^/      | /'
+  fi
+}
+
+assert_absent() { # $1 substring that must NOT appear, $2 test name
+  if printf '%s' "$OUT" | grep -qF "$1"; then
+    FAIL=$((FAIL+1)); FAIL_NAMES+=("$2"); echo "  FAIL: $2 — output should not contain: $1"
+    printf '%s\n' "$OUT" | sed 's/^/      | /'
+  else
+    PASS=$((PASS+1)); echo "  ok: $2 (absent: $1)"
   fi
 }
 
@@ -196,6 +216,67 @@ test_env_ref_does_not_mask_c2_inversion() {
   rm -rf "$wd"
 }
 
+test_gateway_operator_key_inline_placeholder_fails() {
+  # The residual gap the runtime can't catch: an inline placeholder is
+  # non-empty so the gateway boots and silently fails upstream auth.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\""                      # coordinator side clean
+  write_gw "$wd" 300 "\"REPLACE_ME_WITH_RANDOM_HEX_64\""
+  run_check "$wd"
+  assert_exit 1 "T10 gateway operator_key placeholder -> FAIL"
+  assert_contains "gateway operator_key is a PLACEHOLDER" "T10 message"
+  rm -rf "$wd"
+}
+
+test_gateway_operator_key_env_unset_deferred() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\""
+  write_gw "$wd" 300 "env:COORDINATOR_OPERATOR_KEY"
+  run_check "$wd" COORDINATOR_OPERATOR_KEY=
+  assert_exit 0 "T11 gateway operator_key env:NAME (unset) does not false-fail"
+  assert_contains "gateway operator_key deferred to runtime" "T11 deferred message"
+  rm -rf "$wd"
+}
+
+test_gateway_operator_key_absent_fails() {
+  # gateway operator_key is required by config.go Validate.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\""
+  cat > "$wd/gateway.yaml" <<EOF
+coordinator:
+  operator_url: http://127.0.0.1:8444
+timeouts:
+  coordinator_request_seconds: 300
+EOF
+  run_check "$wd"
+  assert_exit 1 "T12 gateway operator_key absent -> FAIL"
+  assert_contains "gateway operator_key missing" "T12 missing message"
+  rm -rf "$wd"
+}
+
+test_gateway_service_token_placeholder_fails() {
+  # service_token, when set, is preferred over operator_key for upstream
+  # calls — a placeholder there silently breaks auth too.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\""
+  write_gw "$wd" 300 "env:COORDINATOR_OPERATOR_KEY" 'service_token: "REPLACE_ME"'
+  run_check "$wd" COORDINATOR_OPERATOR_KEY=
+  assert_exit 1 "T13 gateway service_token placeholder -> FAIL"
+  assert_contains "gateway service_token is a PLACEHOLDER" "T13 message"
+  rm -rf "$wd"
+}
+
+test_gateway_service_token_absent_is_silent() {
+  # Optional field: absence must not emit a missing/FAIL line for it.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\""
+  write_gw "$wd" 300 "\"$HEX64\""   # no service_token line at all
+  run_check "$wd"
+  assert_exit 0 "T14 gateway service_token absent -> pass"
+  assert_absent "service_token" "T14 optional service_token stays silent"
+  rm -rf "$wd"
+}
+
 # ---- run -------------------------------------------------------------------
 
 echo "== check-deploy-config.sh tests =="
@@ -211,6 +292,11 @@ test_inline_placeholder_fails
 test_malformed_env_ref_fails
 test_missing_key_fails
 test_env_ref_does_not_mask_c2_inversion
+test_gateway_operator_key_inline_placeholder_fails
+test_gateway_operator_key_env_unset_deferred
+test_gateway_operator_key_absent_fails
+test_gateway_service_token_placeholder_fails
+test_gateway_service_token_absent_is_silent
 
 echo
 echo "== summary =="
