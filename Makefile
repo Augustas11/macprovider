@@ -5,11 +5,11 @@
 # keep CI and local on the same targets. CI jobs use the per-service
 # targets below to preserve parallel jobs and failure isolation.
 
-.PHONY: test test-coordinator test-gateway test-integration \
+.PHONY: test test-coordinator test-gateway test-integration test-dist \
         vet vet-coordinator vet-gateway \
         build-linux check fmt
 
-test: test-coordinator test-gateway test-integration
+test: test-coordinator test-gateway test-integration test-dist
 
 test-coordinator:
 	cd phase4-coordinator && go test ./...
@@ -25,6 +25,13 @@ test-gateway:
 # the M3-2 internalBearerAuthorized dual-credential gate.
 test-integration:
 	cd test/integration && go test -race -count=1 -timeout 5m ./...
+
+# Deploy-tooling tests (bash + python3, no Go build). Guards the fail-closed
+# pre-deploy gate in phase4-coordinator/dist/check-deploy-config.sh — notably
+# that an env:NAME-indirected secret is deferred to runtime rather than
+# false-failing the gate (the 2026-06-17 regression that forced SKIP_C2_CHECK=1).
+test-dist:
+	bash phase4-coordinator/dist/test/check_deploy_config_test.sh
 
 vet: vet-coordinator vet-gateway vet-integration
 

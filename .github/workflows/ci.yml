@@ -92,6 +92,27 @@ jobs:
         # provider + log pumps).
         run: go test -race -count=1 -timeout 5m ./...
 
+  dist-tooling:
+    name: deploy tooling (check-deploy-config gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Guards the fail-closed C2 pre-deploy gate
+    # (phase4-coordinator/dist/check-deploy-config.sh), also invoked by
+    # phase5-gateway/dist/deploy-pearl-vps.sh. Bash + python3 only — no Go
+    # build — so it stays a fast, isolated job. Closes the 2026-06-17
+    # regression where an env:NAME-indirected operator_key false-failed the
+    # gate and pushed operators into SKIP_C2_CHECK=1.
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: make test-dist
+        run: make test-dist
+
   swift-tests:
     name: phase3-binary (swift test)
     runs-on: macos-15
