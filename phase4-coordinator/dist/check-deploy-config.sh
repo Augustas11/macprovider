@@ -116,6 +116,22 @@ def check_hex_secret(label, raw):
 # --- operator_key (inline literal or env:NAME deferred to runtime) ---
 check_hex_secret("coordinator operator_key", g(coord, "operator_key"))
 
+# --- gateway credentials (same hazard class as the coordinator key) ---
+# Only checkable when the gateway config is present (not coordinator-only
+# SKIP_C2_CHECK mode). operator_key is REQUIRED by the gateway (config.go
+# Validate); service_token is OPTIONAL — preferred over operator_key for
+# upstream calls when set — so it is validated only when present. The gateway
+# runtime already fails closed on an unset/empty env:NAME or an empty
+# operator_key (config.go resolveEnvValue + Validate); the residual gap is an
+# INLINE placeholder, which is non-empty and so boots with a junk credential
+# that silently fails gateway->coordinator auth. That is what this catches,
+# symmetric to the coordinator operator_key check above.
+if gw:
+    check_hex_secret("gateway operator_key", g(gw, "operator_key"))
+    gw_service_token = g(gw, "service_token")
+    if gw_service_token is not None:
+        check_hex_secret("gateway service_token", gw_service_token)
+
 # --- require_provider_tokens ---
 # Security-sensitive: the binary default is `true` (fail-closed), but a
 # pre-existing fleet without issued provider tokens needs `false` to keep
