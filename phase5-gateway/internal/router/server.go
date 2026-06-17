@@ -540,9 +540,12 @@ func (s *Server) statusFromPoolz(ctx context.Context) (statusResponse, error) {
 	if err != nil {
 		return statusResponse{}, err
 	}
-	// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
-	// OperatorKey so a not-yet-upgraded coordinator keeps accepting us.
-	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
+	// /poolz is OPERATOR-ONLY on the coordinator (OperatorOnlyBearerMatches):
+	// it rejects the service_token. Unlike the /internal/* upstream calls,
+	// this poll must send OperatorKey directly, NOT UpstreamCoordinatorBearer()
+	// (which prefers ServiceToken once the M3-2 cutover sets it). Validate
+	// guarantees OperatorKey is non-empty.
+	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		s.flushStatusCache()

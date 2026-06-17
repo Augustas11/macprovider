@@ -798,6 +798,74 @@ func TestStatusRedactionAndPoolzCacheFlush(t *testing.T) {
 	}
 }
 
+// TestPoolzPollUsesOperatorKeyNotServiceToken pins the auth-path fix: the
+// /v1/status poll of the coordinator's /poolz endpoint must authenticate
+// with OperatorKey, NOT UpstreamCoordinatorBearer(). /poolz is operator-only
+// on the coordinator (OperatorOnlyBearerMatches) and rejects the service
+// token. After the M3-2 service-token cutover set coordinator.service_token,
+// UpstreamCoordinatorBearer() began preferring the service token, so the poll
+// got 401 and the gateway reported coordinator-down with an empty pool.
+//
+// This test configures BOTH service_token and operator_key (distinct values)
+// and asserts the /poolz request carries Bearer <operator_key>. As a low-cost
+// guard it also drives the /v1/sticky DELETE (an /internal/* call) and
+// confirms that path still sends Bearer <service_token> via
+// UpstreamCoordinatorBearer() — i.e. the fix is scoped to /poolz only.
+func TestPoolzPollUsesOperatorKeyNotServiceToken(t *testing.T) {
+	const operatorKey = "op-key-distinct"
+	const serviceToken = "svc-token-distinct"
+
+	var poolzAuth, stickyAuth string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/poolz"):
+			poolzAuth = r.Header.Get("Authorization")
+			// Mirror the coordinator: operator-only, rejects service token.
+			if poolzAuth != "Bearer "+operatorKey {
+				return responseWithBody(http.StatusUnauthorized, nil, `{}`), nil
+			}
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{
+				"pool":[{"model_id":"llama","state":"ready","slots_free":1,"slots_total":2,"max_context_tokens":8192}],
+				"summary":{"total_providers":1,"ready":1,"total_slots":2,"free_slots":1}
+			}`), nil
+		case strings.HasSuffix(r.URL.Path, "/internal/sticky"):
+			stickyAuth = r.Header.Get("Authorization")
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"purged":true,"entries":0}`), nil
+		default:
+			return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{}`), nil
+		}
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.OperatorURL = "http://operator.test"
+		cfg.Coordinator.OperatorKey = operatorKey
+		cfg.Coordinator.ServiceToken = serviceToken
+		cfg.Routing.StickyEnabled = true
+	}, WithHTTPClient(client))
+
+	// /poolz poll must use the operator key, never the service token.
+	_ = assertStatus(t, h, http.MethodGet, "/v1/status", "", "", "", http.StatusOK)
+	if poolzAuth != "Bearer "+operatorKey {
+		t.Fatalf("/poolz Authorization = %q, want %q", poolzAuth, "Bearer "+operatorKey)
+	}
+	if poolzAuth == "Bearer "+serviceToken {
+		t.Fatalf("/poolz leaked the service token: %q", poolzAuth)
+	}
+
+	// /internal/* calls must still use UpstreamCoordinatorBearer() (service
+	// token when set) — the fix is scoped to /poolz only.
+	fullKey := createAccountAndKey(t, store, cfg, "acct_poolz_scope")
+	del := httptest.NewRequest(http.MethodDelete, "/v1/sticky", nil)
+	del.Header.Set("Authorization", "Bearer "+fullKey)
+	delResp := httptest.NewRecorder()
+	h.ServeHTTP(delResp, del)
+	if delResp.Code != http.StatusOK {
+		t.Fatalf("sticky delete status=%d body=%s", delResp.Code, delResp.Body.String())
+	}
+	if stickyAuth != "Bearer "+serviceToken {
+		t.Fatalf("/internal/sticky Authorization = %q, want %q", stickyAuth, "Bearer "+serviceToken)
+	}
+}
+
 func TestAggregateStatusIdleWhenCoordinatorReachableWithNoReadyProviders(t *testing.T) {
 	out := aggregateStatus(decodePoolz(t, `{
 		"pool":[
