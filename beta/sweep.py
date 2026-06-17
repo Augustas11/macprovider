@@ -305,6 +305,14 @@ def main() -> int:
         "--dry-run", action="store_true",
         help="Print the grid plan (cells, prompt sizes) without sending any requests",
     )
+    ap.add_argument(
+        "--stop-on-fail", action="store_true",
+        help="Abort the sweep as soon as a cell returns request errors (n_err > 0), "
+             "which on a memory-constrained node almost always means OOM. Protects a "
+             "collaborator's box from being re-slammed by every heavier cell. A cell "
+             "that merely misses the TTFT gate (slow but no errors) does NOT stop the "
+             "sweep — only real request failures do.",
+    )
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -367,8 +375,10 @@ def main() -> int:
     conn = open_db(db_path)
 
     failures = 0
+    attempted = 0
     try:
         for i, (ctx, conc, mt) in enumerate(cells, 1):
+            attempted = i
             body = build_padded_prompt(ctx, mt)
             ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -406,11 +416,26 @@ def main() -> int:
             if not agg["feasible"]:
                 failures += 1
 
+            if args.stop_on_fail and agg["n_err"] > 0:
+                print()
+                print(
+                    f"sweep: --stop-on-fail tripped at cell {i}/{n_cells} "
+                    f"(ctx={ctx} conc={conc} max_tokens={mt}, n_err={agg['n_err']}). "
+                    f"Aborting before heavier cells re-slam the node."
+                )
+                print(
+                    f"sweep: {n_cells - i} cells skipped. Resume the remainder with "
+                    f"narrowed --contexts/--concurrency once the node has recovered."
+                )
+                break
+
     finally:
         conn.close()
 
     print()
-    print(f"sweep: done. {n_cells - failures}/{n_cells} cells feasible.")
+    skipped = n_cells - attempted
+    skip_note = f" ({skipped} skipped via --stop-on-fail)" if skipped > 0 else ""
+    print(f"sweep: done. {attempted - failures}/{attempted} attempted cells feasible{skip_note}.")
     print(f"sweep: sweep_id={sweep_id}")
     print(f"sweep: run `python beta/sweep_report.py --sweep-id {sweep_id}` to render the heatmap")
     return 0 if failures == 0 else 1
