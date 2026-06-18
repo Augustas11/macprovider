@@ -1543,3 +1543,259 @@ Notes:
 ### Step 9 readiness verdict
 
 READY TO PROCEED TO STEP 10.
+
+---
+
+## Round 18 audit (Codex on 79d48ca — Step 10 round 1)
+
+**Audited:** commit 79d48ca on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 10, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 1 CRITICAL / 2 MAJOR / 1 MINOR / 0 QUESTION
+**Step 10 readiness:** FIX REQUIRED
+
+### Executive summary
+
+Step 10's core row lifecycle is mostly in place. `AutotuneCommand.run()` inserts a provisional `tune_runs` row with `exit_reason = 'internal_error'` and `ended_at_utc = NULL`, then updates the same row on the normal, interrupted, no-feasible, budget-exhausted, pre-warm integrity, provider-conflict, and unexpected-error branches. The DispatchSource signal callbacks are flag-only, the raw `exit_reason` values match SPEC-013, Stage 2 partial budget exhaustion persists JSON plus recipe hash, and the full Swift suite passed with the expected 363 executed tests and 2 skipped integration-gated tests.
+
+The blocker is the LOCKED Step 7 file check. `Stage1Iterator.swift` is not additive-only: Step 10 changes the nil `candidatesBySize` fallback from `Array(candidates.reversed())` to `candidates`, and updates an existing Stage1Iterator test to pass an explicit `candidatesBySize` value. That violates the stated Step 10 constraint that locked Stage 1 changes are limited to new defaulted init parameters and boundary poll points.
+
+I also found two lifecycle gaps that should be fixed before Step 11 acceptance testing: cancellation is not re-polled after Stage 2 before recommendation emission / `--apply` / final `.ok`, and thrown `ProviderDrainer.drain(...)` failures are finalized as `internal_error` instead of the requested `provider_conflict`. The remaining issue is a resilience bug in `MachineFingerprinter.ramGB()`: sysctl failure returns `0`, not the documented minimum of `1`.
+
+### Findings
+
+#### Category A: Signal handler async-signal-safety
+
+(no findings)
+
+Verification notes:
+- `AutotuneSignalSources.init(flag:)` creates SIGINT and SIGTERM `DispatchSourceSignal`s, and each `setEventHandler` body only calls `flag.set()` (`phase3-binary/Sources/macprovider-cli/AutotuneRuntimeSupport.swift:31-41`).
+- The handlers do not print, write files, touch SQLite, allocate dates, or log.
+- `signal(SIGINT, SIG_IGN)` and `signal(SIGTERM, SIG_IGN)` are installed after the event handlers are wired and before `resume()` (`AutotuneRuntimeSupport.swift:36-47`).
+- `deinit` cancels both DispatchSourceSignal objects (`AutotuneRuntimeSupport.swift:50-53`).
+- Synthetic interrupt coverage exists: `testInterruptionFlagCancelsLoopAtNextPoll` pre-sets the flag and asserts exit 130 before Stage 1, and `testInterruptedSetsTuneRunExitReason` asserts `exit_reason == "interrupted"` plus `endedAtUTC == nil` (`AutotuneCommandRunTests.swift:136-158`).
+
+#### Category B: Cooperative interruption polling
+
+**B.1 (MAJOR) - interruption can be ignored after Stage 2 and before `--apply` / final `.ok`.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:381-416`.
+- **What:** After `Stage2HillClimb.run(...)` returns, `run()` immediately builds/emits the recommendation, optionally calls `applyConfig(...)`, and finalizes `exitReason: .ok` without another `cancellationReason()` poll. A SIGINT/SIGTERM that arrives in this interval can still apply config and persist `ok`.
+- **Why:** The prompt explicitly requires polling between major substeps, including before `--apply`. This is a known-classifiable interrupted exit, so finalizing it as `ok` is a lifecycle contract gap.
+- **Recommendation:** Poll after Stage 2 returns and again immediately before `applyConfig(...)`; on `.interrupted`, update the run with `endedAtUTC: nil`, `exitReason: .interrupted`, no apply, and exit 130. Add a unit test that flips the injected flag after Stage 2 and before apply.
+
+Verification notes:
+- The shared `cancellationReason` closure distinguishes `.interrupted` from `.budgetExhausted` (`AutotuneCommand.swift:144-152`).
+- Stage 1 polls at candidate boundaries and maps `.interrupted` to exit 130 / `endedAtUTC: nil` (`Stage1Iterator.swift:195-203`; `AutotuneCommand.swift:263-280`).
+- Stage 2 polls at cell boundaries and maps `.interrupted` to exit 130 / `endedAtUTC: nil` (`Stage2HillClimb.swift:117-129`; `AutotuneCommand.swift:337-363`).
+
+#### Category C: Wall-clock budget enforcement (FR-H.4 / AC-13)
+
+(no findings)
+
+Verification notes:
+- `startedAt` is sampled before DB open and before machine fingerprinting, and `deadline = startedAt.addingTimeInterval(TimeInterval(maxDuration))` (`AutotuneCommand.swift:128-130`).
+- The deadline check uses injected `dependencies.now() > deadline` (`AutotuneCommand.swift:144-152`).
+- Pre-Stage-1 and mid-Stage-1 budget exhaustion emit a no-recommendation JSON surface and persist `budget_exhausted_no_model_selected` with nil recommendation/hash (`AutotuneCommand.swift:214-227`, `:267-280`).
+- Mid-Stage-2 budget exhaustion after a feasible best calls `finalizePartial`, emits `partial: true`, persists JSON plus recipe hash, and exits non-zero (`Stage2HillClimb.swift:123-127`; `AutotuneCommand.swift:342-363`).
+- If the Stage 2 budget trips before any feasible cell, Step 10 maps it to `no_feasible` through `Stage2HillClimbError.noFeasibleCell(reason: "budget exhausted before any Stage 2 cell completed")` (`Stage2HillClimb.swift:123-127`; `AutotuneCommand.swift:364-377`).
+
+#### Category D: tune_runs row lifecycle (FR-G.2)
+
+(no findings beyond B.1 and J.1)
+
+Verification notes:
+- The provisional insert uses `endedAtUTC: nil`, nil recommendation/hash, `applied: false`, and `exitReason: AutotuneExitReason.internalError.rawValue` (`AutotuneCommand.swift:180-200`).
+- `AutotuneDB.updateRun(...)` is a real `UPDATE tune_runs SET ... WHERE run_id = ?`, not delete+insert (`AutotuneDB.swift:188-211`).
+- Known Stage 1/2 classified exits call `updateRun(...)` with the expected enum values; unexpected thrown errors after the provisional insert are updated to `.internalError` (`AutotuneCommand.swift:210-420`).
+- `interrupted` paths use `endedAt: nil`; non-interrupted classified paths use `dependencies.now()` for `endedAt` (`AutotuneCommand.swift:210-227`, `:263-377`, `:410-420`).
+- `config_error` exists in the enum but Step 10 does not emit a row for parse-time or DB-open errors, which is consistent with the prompt's note that this value may be reserved/unreachable in v1 setup paths.
+
+#### Category E: tune_runs.applied semantics
+
+(no findings)
+
+Verification notes:
+- `applied` starts false and flips true only after `dependencies.applyConfig(...)` returns successfully (`AutotuneCommand.swift:139-141`, `:396-407`).
+- Apply failure writes an error to stderr, leaves `applied = false`, and still finalizes `exitReason: .ok` because the recommendation remains valid (`AutotuneCommand.swift:404-416`).
+- Tests cover successful apply invocation, `applied = 1`, and failed apply leaving `exitReason == "ok"` plus `applied == 0` (`AutotuneCommandRunTests.swift:160-190`).
+
+#### Category F: exit_reason enum coverage
+
+(no findings beyond J.1)
+
+Verification notes:
+- `AutotuneExitReason` contains the nine normative values with correct raw strings: `ok`, `interrupted`, `no_feasible`, `budget_exhausted_no_model_selected`, `budget_exhausted_with_partial_recommendation`, `pre_warm_integrity_failure`, `provider_conflict`, `config_error`, and `internal_error` (`AutotuneDB.swift:23-34`).
+- `insertRun` validates raw exit reasons before binding (`AutotuneDB.swift:35-39`, `:148-176`).
+
+#### Category G: candidatesBySize derivation (FR-H.4)
+
+(no findings in `AutotuneCommand`; see M.1 for the LOCKED Stage 1 edit)
+
+Verification notes:
+- Default-list runs return `defaultCandidates` filtered to the plan and sorted ascending by `sizeB` (`AutotuneCommand.swift:457-466`).
+- Operator override runs return nil (`AutotuneCommand.swift:457-461`).
+- Tests cover sorted default order and nil under `--candidate-models` (`AutotuneCommandRunTests.swift:107-134`).
+
+#### Category H: FR-H.4 size-ordered terminal output
+
+(no findings)
+
+Verification notes:
+- The all-infeasible branch zips Stage 1's surfaced trial reasons with `Self.candidatesBySize(for: plan) ?? plan.candidates` and prints the first entry as `(<smallest>)` (`AutotuneCommand.swift:281-299`, `:520-528`).
+- `testTerminalOutputForAllInfeasibleLeadsWithSmallestSize` asserts the 1B line precedes the 3B line and that the smallest label is printed (`AutotuneCommandRunTests.swift:202-224`).
+
+#### Category I: --apply integration with ConfigApplier
+
+(no findings)
+
+Verification notes:
+- Production dependencies expand the optional `--config` path or fall back to `AppConfig.defaultConfigPath`, then construct `ConfigApplier(configPath:)` with that URL (`AutotuneCommand.swift:838-845`).
+- On success, `result.summary` is written to stdout; if `--apply` and not `--drain`, the launchd restart hint is written to stderr (`AutotuneCommand.swift:396-403`).
+- On apply failure, the error goes to stderr, `applied` remains false, and finalization continues (`AutotuneCommand.swift:404-416`).
+
+#### Category J: --drain integration with ProviderDrainer
+
+**J.1 (MAJOR) - thrown drain failures finalize as `internal_error` instead of `provider_conflict`.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:230-245`, `:417-420`; `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:212-224`.
+- **What:** The conflict+`--drain` branch handles a returned `.portStillOpen` as `provider_conflict`, but if `ProviderDrainer.drain(...)` throws - for example launchctl bootout failure or foreground SIGTERM failure - the error bypasses the conflict branch and lands in the generic catch, which updates the run to `internal_error`.
+- **Why:** The audit prompt requires drain failure to stay classified as `provider_conflict`; it is still a conflict scenario and is known/classifiable.
+- **Recommendation:** Wrap `drainConflict(...)` in `do/catch` inside the conflict branch, update the run with `exitReason: .providerConflict`, print a conflict/drain failure message to stderr, and exit non-zero. Add a test that injects a throwing `drainConflict` closure and asserts `provider_conflict`.
+
+Verification notes:
+- Successful drain continues to Stage 1 and is tested by `testDrainFlagInvokesProviderDrainerOnConflict` (`AutotuneCommandRunTests.swift:193-200`).
+- `.portStillOpen` is handled as `provider_conflict` (`AutotuneCommand.swift:238-243`).
+
+#### Category K: MachineFingerprinter (resilience)
+
+**K.1 (MINOR) - RAM sysctl fallback returns `0` instead of the documented minimum `1`.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/AutotuneRuntimeSupport.swift:56-73`.
+- **What:** `ramGB()` returns `0` when `sysctlbyname("hw.memsize", ...)` fails or returns zero. The `max(1, ...)` clamp only applies to successful nonzero sysctl results.
+- **Why:** This keeps `machine_ram_gb` non-null but can persist an impossible RAM tier and poison `recipe_hash` machine sensitivity for fallback runs. The prompt expected failure fallback to produce at least `1`.
+- **Recommendation:** Return `1` on sysctl failure/zero, or make the sysctl reader injectable and test both success and failure paths.
+
+Verification notes:
+- Chip fallback is `"unknown"` and OS version uses `ProcessInfo.processInfo.operatingSystemVersionString` (`AutotuneRuntimeSupport.swift:57-63`).
+- Binary version uses `CoordinatorClient.binaryVersion` (`AutotuneRuntimeSupport.swift:57-63`).
+- I found no tests covering `MachineFingerprinter` fallback paths.
+
+#### Category L: partial: Bool additive field
+
+(no findings)
+
+Verification notes:
+- `RecommendationCore.partial` defaults to `false` (`RecommendationEmitter.swift:27-35`).
+- The terminal warning is inserted only when `partial == true` (`RecommendationEmitter.swift:149-170`).
+- JSON omits `partial` when false and encodes it only when true (`RecommendationEmitter.swift:359-378`).
+- `recipeHashInput(_:)` does not include `partial`, so measurement quality stays out of the recipe identity (`RecommendationEmitter.swift:104-125`).
+- `implementation-notes.html` documents `"partial": true` as a SPEC-013 v0.4 candidate addition (`phase3-binary/implementation-notes.html:113-121`).
+
+#### Category M: LOCKED file additive-only check (Stage1Iterator + Stage2HillClimb)
+
+**M.1 (CRITICAL) - Stage1Iterator locked-file diff is not additive-only.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:166-178`; `phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:112-123`; diff command `git diff a9da9e5 -- phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift`.
+- **What:** Step 10 changes the existing nil fallback from `self.candidatesBySize = candidatesBySize ?? Array(candidates.reversed())` to `self.candidatesBySize = candidatesBySize ?? candidates`. It also edits the existing all-infeasible Stage 1 test to pass `candidatesBySize: ["1b", "14b", "32b"]` instead of leaving the old nil-default behavior under test.
+- **Why:** The prompt's locked-file rule allows new defaulted init parameters and new boundary poll points only. Changing existing nil fallback semantics is a non-additive behavioral change in a Step 7 LOCKED file, and modifying an existing test to accept the new behavior violates the "only adds new cancellation tests" anti-regression check.
+- **Recommendation:** Restore the locked nil fallback behavior and keep Step 10's default-list behavior in `AutotuneCommand` by always passing explicit `candidatesBySize` for default-list runs. If operator override needs input-order error surfaces, add that through the caller's explicit argument or a new additive API path without changing the locked nil default. Restore the pre-existing Stage1Iterator test expectation and add separate new tests for Step 10 behavior.
+
+Verification notes:
+- The same `git diff a9da9e5 -- Stage1Iterator.swift` also shows additive enum cases, a defaulted `cancellationReason` init parameter, and a candidate-boundary poll; those parts are consistent with Step 10.
+- The required `git diff 022e8a3 -- phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift` check is additive for the requested surface: it adds Equatable conformance, new error cases, a defaulted `cancellationReason`, a cell-boundary poll, and `finalizePartial`; it does not remove or rename the locked run API.
+
+#### Category N: Anti-regression on Steps 1-9
+
+(no findings beyond M.1)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: 363 tests executed, 2 skipped, 0 failures.
+- Step 10 modified only one pre-existing test file under `phase3-binary/Tests/macprovider-cliTests`: `Stage1IteratorTests.swift`. That modification is not purely additive because it changes an existing all-infeasible test's setup (`git diff --name-status 79d48ca^ 79d48ca -- phase3-binary/Tests/macprovider-cliTests`).
+- `git diff --check 79d48ca^ 79d48ca` reported no whitespace errors.
+
+#### Category O: Forward-compatibility (Step 11)
+
+(no findings)
+
+Verification notes:
+- `AutotuneRunDependencies` exposes injectable seams for time, run ID, interrupt flag, signal-source install, machine fingerprinting, DB creation, conflict detection/drain/restore, Stage 1, Stage 2, recommendation emission, config apply, and stdout/stderr (`AutotuneCommand.swift:772-789`).
+- The new `AutotuneCommandRunTests` use those seams to exercise lifecycle paths without real providers (`AutotuneCommandRunTests.swift:249-324`).
+- `tune_runs.recipe_hash` is populated from `EmittedRecommendation.recipeHash` on normal and partial recommendation paths (`AutotuneCommand.swift:342-363`, `:392-416`).
+
+#### Category P: Anything else
+
+(no findings)
+
+Verification notes:
+- `phase3-binary/implementation-notes.html` documents the Step 10 signal pattern, provisional row tripwire, budget/partial behavior, candidatesBySize derivation, apply semantics, and report-only v2 decision (`implementation-notes.html:90-139`).
+- The commit message records the intended UPDATE finalization decision and the test commands.
+
+### Step 10 readiness verdict
+
+FIX REQUIRED.
+
+---
+
+## Round 19 audit (Codex on fdb07ff — Step 10 round 2 closure verification)
+
+**Audited:** commit fdb07ff on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 10, round 2 of N
+**Date:** 2026-06-18
+**Closure summary:** 4 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED across the 4 round-1 findings
+**Round-2 findings:** 0 CRITICAL anti-regression / 0 MAJOR new / 0 MINOR new
+**Step 10 readiness:** READY TO PROCEED TO STEP 11
+
+### Executive summary
+
+Commit fdb07ff closes all four Round 18 findings. The highest-risk M.1 LOCKED-file check is clean: `git diff a9da9e5 fdb07ff -- phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift` restores the nil fallback to `candidatesBySize ?? Array(candidates.reversed())`, and the remaining diff is additive-only for the Step 10 surface: new interruption/budget error cases, a defaulted cancellation callback, and a candidate-boundary poll. The Step 7 all-infeasible test again relies on nil `candidatesBySize` rather than passing it explicitly.
+
+The B.1, J.1, and K.1 closures also match the requested behavior. The new cancellation gates are after the Stage 2 `do/catch` and before `applyConfig`, the drain failure catch is scoped to `drainConflict(...)` inside the conflict branch and finalizes as `provider_conflict`, and `MachineFingerprinter.ramGB()` now returns `1` on sysctl failure while preserving the success-path `max(1, ...)` clamp. I found no new precision gap in the fix-pass. `swift test --package-path phase3-binary` passed with 366 executed tests, 2 skipped, and 0 failures.
+
+### Round-1 finding closures
+
+**M.1 (CRITICAL) — CLOSED.** The LOCKED `Stage1Iterator` nil fallback is restored at `Stage1Iterator.swift:185` to `candidatesBySize ?? Array(candidates.reversed())`. The diff from the Step 7 lock point (`git diff a9da9e5 fdb07ff -- .../Stage1Iterator.swift`) contains only additive Step 10 changes: `.interrupted`, `.budgetExhaustedNoModelSelected`, equality/description support, a defaulted `cancellationReason` init parameter, and the candidate-boundary poll. The Step 7 all-infeasible test at `Stage1IteratorTests.swift:112-122` no longer passes `candidatesBySize` explicitly. `AutotuneCommand.candidatesBySize(for:)` now returns non-nil for both plan sources: default plans sort selected defaults by ascending `sizeB`, and explicit plans return `plan.candidates` in input order (`AutotuneCommand.swift:491-508`). The renamed test `testCandidatesBySizeReturnsInputOrderForOperatorOverride` asserts `["a", "b"]`.
+
+**B.1 (MAJOR) — CLOSED.** `AutotuneCommand.run()` now polls `cancellationReason() == .interrupted` immediately after `dependencies.runStage2(...)` returns and after the Stage 2 error catch (`AutotuneCommand.swift:395-403`). It then polls a second time at the top of `if apply { ... }`, before calling `dependencies.applyConfig(...)` (`AutotuneCommand.swift:420-429`). Both paths update the run with `endedAt: nil`, `exitReason: .interrupted`, and throw `ExitCode(130)`. `testInterruptionAfterStage2CancelsBeforeApply` flips the flag after the injected `runStage2` returns and asserts exit 130, `applyCalls == 0`, `exit_reason == "interrupted"`, and nil `endedAtUTC`.
+
+**J.1 (MAJOR) — CLOSED.** The conflict + `--drain` branch wraps only `dependencies.drainConflict(conflict, port, TimeInterval(drainGrace))` in a `do/catch` (`AutotuneCommand.swift:245-252`). On throw it samples `endedAt`, updates the run as `.providerConflict`, writes stderr containing `--drain failed`, and throws `ExitCode(1)`. The no-conflict path and the surrounding conflict branch are not swallowed by this catch, and `updateRun(...)` failures inside the catch still propagate rather than being reclassified. `testDrainConflictThrowFinalizesAsProviderConflict` injects a throwing `drainConflict` closure and asserts `provider_conflict` plus the stderr message.
+
+**K.1 (MINOR) — CLOSED.** `MachineFingerprinter.ramGB()` now returns `1` when `sysctlbyname("hw.memsize", ...)` fails or returns zero (`AutotuneRuntimeSupport.swift:66-78`). The success path still clamps with `max(1, ...)`. `testMachineFingerprinterRAMNeverReturnsZero` samples the real fingerprinter and asserts `ramGB >= 1`, which is sufficient to lock the no-zero contract for this pass.
+
+### Round-2 new findings
+
+#### Category Z-CLOSURE
+
+(no findings)
+
+Verification notes:
+- All four Round 18 findings are closed.
+- The Stage1Iterator LOCKED-file diff is additive-only relative to `a9da9e5`.
+- The Stage2HillClimb LOCKED-file diff is additive-only relative to `022e8a3`: Equatable conformance, new cancellation/budget error cases, defaulted cancellation callback, cell-boundary poll, and partial-finalization helper.
+
+#### Category R-REGRESSION-V10F1
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: 366 tests executed, 2 skipped, 0 failures.
+- The three new regression-lock tests passed: `testInterruptionAfterStage2CancelsBeforeApply`, `testDrainConflictThrowFinalizesAsProviderConflict`, and `testMachineFingerprinterRAMNeverReturnsZero`.
+- The renamed operator-override test preserves the same run-level derivation path (`parse` -> `candidatePlan()` -> `candidatesBySize(for:)`) while asserting input-order output instead of nil.
+- The reverted Step 7 all-infeasible test still exercises the nil fallback end-to-end.
+
+#### Category N-NEWGAPS-V10F1
+
+(no findings)
+
+Verification notes:
+- The post-Stage-2 cancellation poll is outside and after the Stage 2 catch block, so it does not interfere with the budget-exhausted partial recommendation path.
+- The pre-apply cancellation poll is before `applyConfig(...)`, not inside its async work.
+- The drain catch boundary is limited to `drainConflict(...)`; it does not catch the whole conflict branch.
+- Explicit `--candidate-models a,b` now passes `["a", "b"]` as the explicit surface order rather than relying on the locked nil fallback.
+- The MachineFingerprinter test is host-dependent but acceptable for v1 because it locks the public no-zero sample contract.
+
+#### Category O-OTHER-V10F1
+
+(no findings)
+
+### Step 10 readiness verdict
+
+READY TO PROCEED TO STEP 11.
