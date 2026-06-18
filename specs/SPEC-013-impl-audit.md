@@ -858,3 +858,62 @@ Verification notes:
 ### Step 6 readiness verdict
 
 NARROW V2 REQUIRED.
+
+---
+
+## Round 11 audit (Codex on dcd7f63 — Step 6 round 3 closure verification)
+
+**Audited:** commit dcd7f63 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 6, round 3 of N
+**Date:** 2026-06-18
+**Closure summary:** 1 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED for N.1
+**Round-3 findings:** 0 CRITICAL anti-regression / 0 MAJOR new / 0 MINOR new
+**Step 6 readiness:** READY TO PROCEED TO STEP 7
+
+### Executive summary
+
+Commit dcd7f63 closes Round 10 N.1. The two vague integrity markers, `"incomplete metadata"` and `"invalid or corrupted"`, are no longer in the production integrity list; the list is now 13 markers. The two new negative-lock tests feed the exact benign lines from Round 10 and assert `.transient`, so either broad marker would flip the matching test to `.integrity` and fail.
+
+Anti-regression passed. `swift test --package-path phase3-binary` executed 299 tests, skipped 2 integration-gated tests, and reported 0 failures. The four Round 9 closure tests still pass under the narrower marker list, and the remaining 13 markers still cover SPEC-013 FR-D.2's named integrity examples.
+
+### Round-2 finding closures
+
+**N.1 (MAJOR) — CLOSED.** `ProviderPreWarmer.integrityMarkers` now omits `"incomplete metadata"` and `"invalid or corrupted"` while retaining the anchored safetensors loader markers `"invalid json header"` and `"invalid json metadata"` (`phase3-binary/Sources/macprovider-cli/ProviderPreWarmer.swift:164-207`). The new tests `testPreWarmerClassifiesIncompleteMetadataDownloadErrorAsTransient` and `testPreWarmerClassifiesCacheRebuildHintAsTransient` feed `Download failed: incomplete metadata in Hugging Face API response; retry later` and `cache index invalid or corrupted; rebuild cache and retry`, respectively, and assert `.transient` (`phase3-binary/Tests/macprovider-cliTests/ProviderPreWarmerTests.swift:270-326`). Because classification is a lowercased substring match, reintroducing either removed marker would make the corresponding test return `.integrity` and fail.
+
+### Round-3 new findings
+
+#### Category Z-CLOSURE
+
+(no findings)
+
+Verification notes:
+- The integrity list is 13 markers: 7 signature/hash/checksum markers, 4 missing-tokenizer markers, and 2 safetensors loader markers.
+- SPEC-013 FR-D.2 coverage remains present: signature mismatch via `"signature mismatch"`; weight hash mismatch via `"hash mismatch"`; missing `tokenizer.json` via the four tokenizer markers; safetensors header/metadata corruption via `"invalid json header"` and `"invalid json metadata"`; tampering signals via the signature/hash/checksum class.
+- The four Round 9 closure tests still pass in the full suite: `testPreWarmerClassifiesConfigurationFileMissingTokenizerAsIntegrity`, `testPreWarmerClassifiesInvalidJsonHeaderAsIntegrity`, `testPreWarmerClassifiesMixedCaseIntegrityCorrectly`, and `testPreWarmerLoadDurationReflectsInjectedClock`.
+
+#### Category R-REGRESSION-V06F2
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: 299 tests executed, 2 skipped, 0 failures.
+- `ProviderPreWarmerTests` executed 13 tests, including the 4 Round 9 closure tests and the 2 Round 10 negative-lock tests, with 0 failures.
+- No Step 1-5 suite failures were observed in the full package test run.
+
+#### Category N-NEWGAPS-V06F2
+
+(no findings)
+
+Verification notes:
+- Local spot-checks in `mlx-swift`, `mlx-swift-examples`, and `swift-transformers` found the active MLX provider load path in `LLMModelFactory._load` calls `loadWeights`, which enumerates `.safetensors` files and calls `MLX.loadArrays(url:)`; that path's concrete malformed safetensors strings are `[load_safetensors] Invalid json header ...` and `[load_safetensors] Invalid json metadata ...`, both still covered.
+- A build-visible `swift-transformers` `WeightsError.invalidFile` string says `The weights file is invalid or corrupted.`, but `rg` found no call chain from the audited MLX provider load path to `Weights.from(fileURL:)`; it is therefore not a concrete Step 6 precision gap for this implementation.
+- The removed strings now correctly classify the Round 10 benign HF API metadata and cache rebuild examples as transient.
+
+#### Category O-OTHER-V06F2
+
+(no findings)
+
+### Step 6 readiness verdict
+
+READY TO PROCEED TO STEP 7.
