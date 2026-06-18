@@ -320,3 +320,192 @@ Verification notes:
 ### Step 3 readiness verdict
 
 READY TO PROCEED TO STEP 4.
+
+---
+
+## Round 5 audit (Codex on 994c7ee — Step 4 round 1)
+
+**Audited:** commit 994c7ee on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 4, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 0 CRITICAL / 2 MAJOR / 2 MINOR / 1 QUESTION
+**Step 4 readiness:** FIX REQUIRED
+
+### Executive summary
+
+FIX REQUIRED. Step 4 is additive and correctly introduces the intended foreground provider lifecycle primitive without wiring it into `AutotuneCommand.run()` yet. The broad shape matches SPEC-013: `start()` owns one `RunningProvider`, always assembles `serve --no-join`, `waitForReady()` separates readiness from later measurement timing, and `stop()` is SIGTERM-only with no SIGKILL, `Process.interrupt()`, or `Darwin.kill` escalation.
+
+The blocking issues are in process/readiness edge paths. First, the `process.run()` failure cleanup path can hang because it calls `finishLogging()`, which drains pipe read ends when the subprocess never launched and the pipe write ends may still be open. Second, `waitForReady()` returns `.ready` immediately on HTTP 200 before running the post-request process-exit check, leaving the high-risk "200 then exited before return" race unhandled. These are Step 4 contract gaps, so Step 5 should wait for a fix pass.
+
+`swift test --package-path phase3-binary` passed on 2026-06-18 with 266 XCTest tests, 1 skipped integration-gated test, and 0 failures; the Swift Testing runner passed with 0 tests. `git diff --check 994c7ee^ 994c7ee` produced no whitespace errors. No d-inference source was inspected.
+
+### Findings
+
+#### Category A: Single-provider invariant (load-bearing)
+
+**A.1 (QUESTION) — `stop()` leaves a stuck process as `current` but reports no hard stop failure.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/CandidateProviderRunner.swift` lines 176-202
+- **What:** If the grace window expires while the process is still alive, `stop()` returns without clearing `current`; the next `start()` will throw `alreadyRunning`. If the process is alive but no longer holding the port, no warning is emitted because the warning is port-only.
+- **Why:** This preserves the no-overlap invariant, but Step 7 iteration will effectively halt on the next candidate unless it treats `alreadyRunning` after `stop()` as a stuck-provider failure.
+- **Recommendation:** Keep SIGTERM-only behavior, but decide in the fix pass or Step 7 whether `stop()` should surface a status/result for "process still alive" so callers can record a clear trial/run failure instead of discovering it via the next `start()`.
+
+Verification notes:
+- `start()` checks and mutates `current` under `stateLock` and rejects a live existing process at lines 75-83.
+- `clearCurrentIfSame(_:)` uses object identity under lock at lines 295-305, so concurrent `stop()` calls do not double-clear or double-close the same provider.
+- `testStartRejectsSecondRunningProvider` proves a second sequential `start()` is rejected while the first stub provider is alive.
+
+#### Category B: Process lifecycle correctness
+
+**B.1 (MAJOR) — Spawn-failure cleanup can hang while draining never-launched pipes.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/CandidateProviderRunner.swift` lines 121-126 and 378-382
+- **What:** On `process.run()` failure, the catch block calls `running.finishLogging()`. Because `process.isRunning` is false, `finishLogging()` calls `readDataToEndOfFile()` on stdout/stderr pipe read handles. For a process that never launched, the pipe write ends can still be open in the parent, so the read waits for EOF that may never arrive.
+- **Why:** A missing, non-executable, or otherwise unspawnable provider binary can hang `start()` instead of throwing. That is a process-lifecycle contract gap and can block autotune before Step 7 has a chance to classify the candidate/run failure.
+- **Recommendation:** Split cleanup modes. On spawn failure, clear readability handlers and close/sync the log handle without draining read ends, or explicitly close the pipe write handles before any `readDataToEndOfFile()` attempt. Add a regression test with an invalid provider path that proves `start()` returns/throws promptly.
+- **Evidence:** A local Swift reproduction using a missing executable, a `Pipe`, and `readDataToEndOfFile()` after `run()` threw printed `run threw` and then timed out after 2 seconds.
+
+Verification notes:
+- Successful spawn uses `Process` directly because the runner needs lifetime control; the existing `runProcess` helpers in `SelfUpdate.swift` and `UninstallCommand.swift` are one-shot `run()` + `waitUntilExit()` wrappers and are not suitable for this owned-live-process case.
+- Pipe readability handlers weakly reference `running`, avoiding a direct closure retain cycle.
+
+#### Category C: Async HTTP polling correctness (FR-D.1 measurement isolation)
+
+**C.1 (MAJOR) — `waitForReady()` skips the post-request exit check on HTTP 200.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/CandidateProviderRunner.swift` lines 148-153 and 162-168
+- **What:** The loop checks `process.isRunning` before the HTTP request and after non-ready responses/errors, but the HTTP 200 path returns `.ready` immediately at line 152. If the provider exits after producing the 200 response but before `waitForReady()` returns, the method can report `.ready` for an already-dead process.
+- **Why:** The prompt calls the process-exit race in `waitForReady()` one of the highest-risk surfaces. Step 7 will rely on `.ready` to start measurement; returning ready for an exited process can misclassify a startup/runtime failure as a later probe failure.
+- **Recommendation:** After receiving HTTP 200, re-check `provider.process.isRunning` before returning `.ready`; if it has exited, call `clearCurrentIfSame(provider)` and return `.processExited(rc:stderrTail:)`. Add a stub test that serves one `/v1/models` 200 response and exits immediately.
+
+Verification notes:
+- `Task.sleep(nanoseconds:)` is used directly at line 170, so caller cancellation can propagate.
+- Request timeout is set per HTTP attempt at line 146, preserving a bounded polling cadence separate from Step 7's later measurement window.
+
+#### Category D: Stop/grace correctness (FR-E.1 launchd-safety)
+
+(no findings)
+
+Verification notes:
+- `stop()` uses `process.terminate()` only; grep found no `Process.interrupt()`, `Darwin.kill`, `kill(`, or `SIGKILL` in `CandidateProviderRunner.swift`.
+- The foreground runner does not call `launchctl`; SPEC-013 FR-E.1 launchd `bootout/bootstrap` remains a separate Step 5 responsibility.
+- `isPortOpen(_:)` closes its socket descriptor with `defer { close(descriptor) }` at lines 318-323.
+
+#### Category E: Argv assembly (FR-B.1 alignment with PR #105 + FR-E.2)
+
+**E.1 (MINOR) — Runner invalid-knob tests cover only `kvBits`.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/CandidateProviderRunnerTests.swift` lines 38-49
+- **What:** `testServeArgumentsRejectInvalidKnobs` asserts only `.invalidKvBits(5)`. It does not cover invalid port, invalid max context, or invalid max batch for the runner's own `serveArguments()` validation.
+- **Why:** The implementation validates all four classes at lines 233-244, and existing serve-command tests cover related production knob validation, so this is not a runtime defect. It is still a Step 4 test gap because the audit prompt explicitly asks this runner test to cover each invalid input class.
+- **Recommendation:** Extend the test to assert `.invalidPort`, `.invalidMaxContext`, and `.invalidMaxBatch` directly against `CandidateProviderRunner.serveArguments(...)`.
+
+Verification notes:
+- `serveArguments()` always includes `serve --no-join --model <model> --port <port>` and appends only non-nil optional knob flags.
+- `model` is passed as an argv array element, not shell-interpolated, so shell injection is not introduced by model IDs.
+
+#### Category F: Resource hygiene
+
+(no findings beyond B.1)
+
+Verification notes:
+- Normal successful-start cleanup clears both readability handlers before log finalization at lines 378-380.
+- `ProcessOutputTail` is lock-protected for append/snapshot, and stderr remainder is appended before the final snapshot on process-exit cleanup.
+- The known resource-lifetime blocker is the spawn-failure pipe-drain path reported as B.1.
+
+#### Category G: Anti-regression
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed with 266 XCTest tests, 1 skipped integration-gated test, and 0 failures.
+- `git show --name-only --format='' 994c7ee` lists only `CandidateProviderRunner.swift`, `CandidateProviderRunnerTests.swift`, and `implementation-notes.html`.
+- `git diff --check 994c7ee^ 994c7ee` produced no whitespace errors.
+
+#### Category H: Forward-compatibility (Step 5, 6, 7, 10)
+
+(no findings beyond A.1/C.1)
+
+Verification notes:
+- Step 5 external provider conflict detection is not implemented here and remains a separate pre-flight before invoking the runner.
+- Step 6 pre-warm can wrap the runner without changing the runner's lifecycle surface.
+- Step 7 gets the intended `start -> waitForReady -> stop` primitive, but should not consume Step 4 until B.1 and C.1 are fixed.
+- Step 10 signal handling can call the synchronous `stop()` path, subject to the A.1 stuck-process status question.
+
+#### Category I: Anything else
+
+**I.1 (MINOR) — Log filenames can collide within the same second.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/CandidateProviderRunner.swift` lines 275-277
+- **What:** Log filenames use safe model name, port, and `Int(Date().timeIntervalSince1970)`. Two starts for the same model and port within one second produce the same path and the later `Data().write(..., .atomic)` truncates the earlier log.
+- **Why:** Normal autotune candidates are expected to take longer than one second, so this is low probability. It becomes more plausible around fast spawn failures or future tests that exercise repeated starts.
+- **Recommendation:** Include a UUID, nanosecond timestamp, or monotonically increasing per-run counter in the log filename.
+
+Verification notes:
+- `safeModelName(_:)` conservatively maps non-filesystem-safe characters to `-`.
+- The new `spec013-autotune-step4` implementation-notes section accurately describes the Step 4 design, SIGTERM-only stop policy, and skipped real-binary integration test.
+
+### Step 4 readiness verdict
+
+FIX REQUIRED.
+
+---
+
+## Round 6 audit (Codex on 4bcef89 — Step 4 round 2 closure verification)
+
+**Audited:** commit 4bcef89 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 4, round 2 of N
+**Date:** 2026-06-18
+**Closure summary:** 5 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED across the 5 round-1 findings
+**Round-2 findings:** 0 CRITICAL anti-regression / 0 MAJOR new / 0 MINOR new
+**Step 4 readiness:** READY TO PROCEED TO STEP 5
+
+### Executive summary
+
+READY TO PROCEED TO STEP 5. Commit 4bcef89 closes all five round-1 findings without weakening the unchanged Step 4 lifecycle surface. The audited Step 4 source, tests, and implementation notes are unchanged between 4bcef89 and current HEAD e043876; the only committed file after 4bcef89 is the round-2 prompt file.
+
+`swift test --package-path phase3-binary` passed on 2026-06-18: 273 tests executed, 1 integration-gated test skipped, 0 failures. The new CandidateProviderRunner tests executed and passed, including the missing-binary start path, the immediate-exit-after-200 readiness path, the StopResult happy path, the three argv validation additions, and the same-second log filename collision test. No SIGKILL escalation, `Process.interrupt()`, `Darwin.kill`, or `kill(` call was introduced in the Step 4 runner.
+
+### Round-1 finding closures
+
+**B.1 (MAJOR) — CLOSED.** The spawn-failure catch path in `CandidateProviderRunner.start()` now calls `running.discardLogging(reason:)` instead of `finishLogging()`. `discardLogging` clears both stdout and stderr readability handlers, writes a `process spawn failed: ...` note, synchronizes and closes the log file, and does not call `readDataToEndOfFile()`. The regression test `testStartFailsPromptlyWithMissingBinary` uses a randomized `/nonexistent/...` binary path, calls `start()` synchronously, asserts a thrown error, and asserts elapsed time is under 1 second; the test passed in 0.007 seconds in the requested suite run.
+
+**C.1 (MAJOR) — CLOSED.** The HTTP 200 branch in `waitForReady()` now checks `provider.process.isRunning` before `return .ready`; on false it calls `clearCurrentIfSame(provider)` and returns `.processExited(rc: Int(provider.process.terminationStatus), stderrTail: provider.stderrTail.snapshot())`, matching the pre-loop exit-path fields and invariant cleanup. `testWaitForReadyHandlesImmediateExitAfterFirstResponse` uses an executable Python stub that validates `serve --no-join`, binds the requested port, responds once with HTTP 200 and a `/v1/models` payload, closes the socket, and exits immediately. The test intentionally accepts `.ready` or `.processExited` but rejects `.timeout`, which is contract-meaningful for the round-1 regression class.
+
+**A.1 (QUESTION) — CLOSED.** `stop(graceSeconds:)` now returns `StopResult` with `.stopped` and `.stuck(pid:)`, and the method is marked `@discardableResult`, so existing ignored-return callers still compile and passed the full test suite. `.stuck(pid:)` is returned only after the grace loop and only when `provider.process.isRunning` remains true; port-only-held cases still log the port warning but return `.stopped` if the process exited and `clearCurrentIfSame(provider)` succeeds. `testStopReturnsStoppedForNeverStartedRunner` covers the never-started happy path, and leaving deterministic stuck-path coverage to later integration is acceptable for this round.
+
+**E.1 (MINOR) — CLOSED.** The fix-pass added `testServeArgumentsRejectInvalidPort`, `testServeArgumentsRejectInvalidMaxContext`, and `testServeArgumentsRejectInvalidMaxBatch`. The port test covers both 0 and 65_536 and asserts `.invalidPort(...)`; the max-context and max-batch tests pass zero values and assert `.invalidMaxContext(0)` and `.invalidMaxBatch(0)`. The original invalid kv-bits test remains in place.
+
+**I.1 (MINOR) — CLOSED.** `logFileURL(model:port:in:)` now creates a fresh `UUID().uuidString.prefix(8)` inside each call and appends it to the second-resolution timestamp, so the suffix is not cached. `testLogFileURLsDoNotCollideWithinOneSecond` builds two URLs in immediate succession for the same model and port and asserts distinct last path components. The test accessor is production-visible but explicitly named `logFileURLForTesting`, and I do not see a Step 4 contract risk from that naming-only exposure.
+
+### Round-2 new findings
+
+#### Category Z-CLOSURE
+
+(no findings)
+
+#### Category R-REGRESSION-V04F1
+
+(no findings)
+
+Spot-checks:
+- The single-provider invariant and lock discipline remain intact: `start()` still checks/mutates `current` under `stateLock`, `currentProviderIfAny()` remains lock-protected, and `clearCurrentIfSame(_:)` still clears only the same `RunningProvider` identity before finalizing logs.
+- The `stop()` core logic remains SIGTERM-only: terminate, poll process/port until grace expiry, log a port-held warning, clear current only when the process exits, and now return `.stopped` or `.stuck(pid:)`.
+- `serveArguments(...)` assembly remains unchanged except for added tests; it still emits `serve --no-join --model <model> --port <port>` plus optional knob flags after validation.
+- `finishLogging()` remains the normal cleanup path and is unchanged in behavior; `discardLogging(reason:)` is a sibling used only for spawn-failure cleanup.
+
+#### Category N-NEWGAPS-V04F1
+
+(no findings)
+
+Spot-checks:
+- `discardLogging(reason:)` clears both readability handlers, writes the failure note, synchronizes and closes the log file, and has the `closed` guard.
+- The post-200 process-exit check still has a tiny race between `isRunning` and returning `.ready`, but this is the practical residual race described in the prompt and is acceptable for Step 4.
+- `.stuck(pid:)` reads `processIdentifier` only when `isRunning` is true at the end of the grace window, so the PID validity assumption is acceptable.
+- The 8-character UUID suffix supplies enough entropy for the expected concurrent-start scale.
+- The Python stub's `#!/usr/bin/env python3` dependency is acceptable for the macOS/Xcode-oriented test environment.
+
+#### Category O-OTHER-V04F1
+
+(no findings)
+
+### Step 4 readiness verdict
+
+READY TO PROCEED TO STEP 5.
