@@ -1,10 +1,10 @@
 # SPEC-013 — `macprovider-cli autotune` subcommand
 
-**Version:** 0.1 (initial draft)
-**Status:** Draft (pre round-1 audit)
+**Version:** 0.2 (round-1 audit response)
+**Status:** Draft (pre round-2 audit)
 **Date drafted:** 2026-06-18
 **Depends on:** SPEC-001 v1.4 (`macprovider-cli serve` flags `--kv-bits`, `--max-context`, `--max-batch` per PR #105), SPEC-010 v1.5 (provider-advertised `supported_models[]` shape, model id semantics)
-**Companion to (LOCKED):** SPEC-002 v1.3.5 (no coordinator-side change required), SPEC-003 v0.9.2 (autotune is invoked before / between `macprovider-cli serve` lifetimes; not part of install flow)
+**Companion to (LOCKED):** SPEC-002 v1.3.5 (no coordinator-side change required), SPEC-003 v0.9.2 (autotune is invoked before / between `macprovider-cli serve` lifetimes; not part of install flow; SPEC-013 v0.2 binds the launchd label and drain sequence to SPEC-003 §FR-C5)
 **Related (future):** SPEC-011 v0.5 (warm-swap; opt-in coupling deferred to v2 — see §11)
 
 SPEC-013 is operator-facing CLI surface only. It MUST NOT modify any
@@ -16,6 +16,131 @@ pre-SPEC-013.
 ---
 
 ## Change log
+
+### v0.2 (2026-06-18) — round-1 audit response
+
+Codex round 1 (`specs/SPEC-013-audit.md`) returned `0 CRITICAL / 7
+MAJOR / 11 MINOR / 2 QUESTION`. v0.2 closes all 7 MAJORs, 10 of
+11 MINORs, and both QUESTIONs. The product framing (§1) and the
+two-stage architecture (§3) are unchanged; the round-1 verdict
+explicitly preserved both.
+
+**MAJORs closed:**
+
+- **A.1 fix** (fallbacks contradicted STOP-on-first-feasible):
+  FR-F.1 and FR-F.2 no longer emit "fallbacks" as
+  metrics-bearing entries (which would have required a
+  separate fallback-probing pass that contradicted the
+  largest-first STOP rule). The recommendation now emits an
+  `alternates` list of NAME-ONLY smaller candidate IDs from
+  the input list — operators who want to manually downsize
+  invoke a follow-up `autotune --candidate-models <id>`. AC-1
+  and AC-2 are updated.
+- **D.1 fix** (`models pull` was a bigger missing precondition
+  than v0.1 admitted; the current binary has no `pull`
+  subcommand and no locked HF-offline contract): FR-D
+  rewritten to make the OPERATIVE requirement "candidate
+  weights MUST be cache-warm before the feasibility probe
+  begins" and to make load-fetch latency normative-excluded
+  from the gate-ttft-ms metric. The HOW is implementation
+  choice, deferred to the implementing PR. The `models pull`
+  subcommand shape is no longer a SPEC-013 v1 normative
+  dependency; it remains a recommended mechanism and a
+  follow-on SPEC may formalize it.
+- **E.1 fix** (launchd label `com.macprovider.cli` was
+  wrong): FR-E.1 now binds to SPEC-003 v0.9.2's actual label
+  `live.streamvc.macprovider` and plist path
+  `~/Library/LaunchAgents/live.streamvc.macprovider.plist`.
+  The drain sequence is `launchctl bootout
+  gui/$UID/live.streamvc.macprovider` to stop and
+  `launchctl bootstrap gui/$UID <plist>` to restore. AC-6 is
+  extended to cover the launchd-managed install path.
+- **F.1 fix** (`--apply` wrote keys the binary doesn't read):
+  FR-F.3 owned-key list updated to match the actual
+  `Config.swift` parser
+  (`max_context_override` instead of `max_context_tokens`,
+  `max_concurrency_override` instead of `max_batch`). The
+  FR-F.2 JSON `knobs` object now uses these YAML key names
+  so a `--json` output is round-trippable into config.yaml.
+  The terminal output's `serve_command` retains the CLI flag
+  names per PR #105.
+- **F.2 fix** (recipe_hash format ambiguous + canonicalization
+  undefined): hash format pinned to
+  `sha256:<64-lowercase-hex>` (32 bytes = 64 hex chars). The
+  canonicalization profile is pinned to RFC 8785 JSON
+  Canonicalization Scheme (JCS). The hash input domain is
+  explicitly enumerated (machine, inputs.target_context,
+  inputs.candidate_models, recommendation.model,
+  recommendation.knobs); timestamps, run_id, and observed
+  metrics are explicitly excluded.
+- **G.1 fix** (`tune_trials.stage` migration was not valid
+  SQLite): migration SQL now spelled out as
+  `ALTER TABLE tune_trials ADD COLUMN stage INTEGER NOT NULL
+  DEFAULT 1`. New inserts MUST set `stage = 1` (Stage 1
+  probe) or `stage = 2` (Stage 2 cell) explicitly. AC-16 is
+  unchanged in shape; the migration step is now stated as a
+  prerequisite, not an in-test step.
+- **J.1 fix** (no AC proved operator-supplied order is
+  honored without internal rerank — the load-bearing
+  biggest-fit guard had no test): new AC-17 explicitly tests
+  `--candidate-models 1B,32B` on a Mac where both fit;
+  recommendation MUST be 1B (operator-supplied order wins).
+
+**MINORs closed (10 of 11):**
+
+- B.1: `--max-context-axis` semantics defined (absolute caps,
+  each ≥ `--target-context`, sorted ascending, invalid cells
+  fail at flag-parse time).
+- C.1: §7 CLI summary kv-bits default fixed to `unset,4,8`
+  (matching FR-B.1); representation of `unset` defined for
+  flags, JSON, SQL, and terminal output.
+- F.3: backup naming changed to `bak-<unix-ts>-<counter>` with
+  no overwrite (implementation MUST find the lowest available
+  counter starting at 0).
+- G.2: retention sweep MUST run inside a single SQLite
+  transaction after the new `tune_runs` row is created.
+- H.1: `--resume` removed from the §7 flag summary (still
+  deferred to v2 per §11).
+- J.2: new AC-18 covers non-default `--max-context-axis`.
+- J.3: new AC-19 covers `--max-model-size` alone trimming the
+  default list; `tune_runs.exit_reason` value set is now an
+  explicit normative enum.
+- K.1: OQ-B and OQ-D get quantitative thresholds (minimum
+  discriminable tps gap at n=3; Stage-1 false-fit /
+  false-reject rates).
+- L.1: §12 prototype migration note rewritten — the prototype
+  has no explicit pre-download step; the prototype's "weights
+  must already be present or candidate fails during load"
+  behavior is what FR-D replaces.
+- M.1: companion-spec note added — SPEC-010 §11 and SPEC-011
+  §8/§11 still cite "SPEC-013" with the recommended-catalog
+  meaning; v0.2 documents the renumber (SPEC-013 = autotune,
+  recommended catalog is now provisionally SPEC-014) and
+  flags a follow-up docs patch.
+
+**MINOR deferred to v0.3 (post-lock):**
+
+- M.2 documentation checklist (`beta/DECISION_CRITERIA.md`
+  entry, SPEC-003 install note, PR #103 disposition): v0.2
+  adds a short post-lock checklist to §13, but the
+  decision-log entry and SPEC-003 patch are out-of-PR work
+  the operator performs at lock time.
+
+**QUESTIONs resolved:**
+
+- D.2 (signature vs network failure handling): v0.2 picks
+  asymmetric — transient failures (network down, disk full)
+  advance to the next candidate per FR-D.2; integrity
+  failures (signature mismatch, hash mismatch) ABORT the
+  whole run with a security-relevant exit code. The two
+  failure classes are distinguished in the `notes` column
+  and in the FR-F.2 JSON.
+- K.2 (thermal/order effects): v0.2 adds OQ-E flagging this
+  as a v0.2 open question pending the air5 n=3 data. v1's
+  current behavior (deterministic axis order, no thermal
+  pacing) is preserved; if the data shows heat-soak bias on
+  later cells, v0.3 may randomize cell order or add a
+  cooldown policy.
 
 ### v0.1 (2026-06-18) — initial draft
 
@@ -164,7 +289,11 @@ for each (kv_bits, max_batch, [optional small ctx neighborhood]):
 best knob cell  ──>  RECOMMENDATION
                      model = chosen
                      knobs = best knob cell
-                     fallbacks = smaller candidates that ALSO fit
+                     alternates = NAME-ONLY list of smaller
+                                  candidates from the input list
+                                  (not probed; operator may
+                                  manually pin via a follow-up
+                                  autotune --candidate-models)
 ```
 
 Stage 1 spends the budget on a **fit decision**, not on
@@ -217,8 +346,10 @@ RECOMMENDATION
   --max-batch:     1
   median tok/s:    4.9  (n=3 replicates)
   p95 TTFT:        4.2s
-  fallbacks (if you'd rather serve a smaller model):
-    2. mlx-community/Llama-3.2-1B-Instruct-4bit  (9.7 tok/s)
+  alternates (smaller candidates from your input list, not probed):
+    - mlx-community/Llama-3.2-1B-Instruct-4bit
+  To try a smaller alternate instead:
+    macprovider-cli autotune --candidate-models mlx-community/Llama-3.2-1B-Instruct-4bit
 
 To apply this to your config and restart serve:
   macprovider-cli autotune --apply
@@ -439,78 +570,157 @@ dependency on a workflow that is otherwise fully local.
 
 ---
 
-### 5.4 Pre-download integration
+### 5.4 Pre-warm (replaces v0.1's "pre-download" framing)
 
-**FR-D.1. Pre-download via `models pull <id>`.**
+**FR-D.1. Cache-warm prerequisite + measurement isolation.**
 `autotune` MUST ensure each candidate's weights are present in the
-HuggingFace cache before invoking `macprovider-cli serve` for that
-candidate. v1 picks **option (a)** from the prompt: `autotune`
-invokes `macprovider-cli models pull <id>` as an explicit
-operator-visible step before each candidate's feasibility probe.
+local HuggingFace cache BEFORE the feasibility probe begins
+measuring tps / TTFT. This is the operative requirement: a
+candidate evaluated against a cold cache is unmeasurable because
+mlx-swift's load path is on the critical path of the first
+request, and a slow network fetch would inflate TTFT and falsely
+reject feasible models.
 
-The rationale for this over option (b) ("flip the binary into
-temporary online mode during tune"):
+There are two implementation shapes; v1 leaves the choice to the
+implementing PR and binds only the measurement-isolation
+contract:
 
-- **Explicit and observable.** A failed download is a discrete
-  failure with a discrete subcommand at the top of the trace, not a
-  silent stretch of online-mode behavior buried inside a serve
-  process.
-- **No new global state on the binary.** Option (b) requires
-  `macprovider-cli serve` to grow a "temporarily-online" runtime
-  mode and a transition contract for it. That is more surface area
-  to test and ship than a sibling subcommand.
-- **Composable.** Operators can pre-pull the candidate list manually
-  (`macprovider-cli models pull <id>` for each) and then run
-  `autotune` in a network-isolated environment. Option (b) makes
-  this awkward.
-- **Matches existing ergonomics.** `pull` / `download` is the
-  conventional CLI shape; SPEC-003 v0.9.2 already exposes a model
-  selection prompt at install time and operators expect a
-  per-model fetch surface.
+- **Shape A (preferred): explicit `models pull <id>`.**
+  `autotune` invokes a sibling subcommand (e.g.
+  `macprovider-cli models pull <id>` if one is added or already
+  exists at implementation time) that fetches weights into the
+  same HF cache the runtime reads from. The pull subcommand's
+  contract — cache target, gated-repo handling, partial-download
+  recovery, progress, cancellation, exit codes — is OUT OF SCOPE
+  for SPEC-013 v1; the autotune SPEC's only normative requirement
+  is "weights are present when the probe begins." Defining
+  `models pull` rigorously is a follow-on (potentially SPEC-013
+  v0.3 or a sibling SPEC).
+- **Shape B: rely on the runtime's online-fallback during load.**
+  The current `ModelRuntime` (per
+  `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift`) first
+  checks the local HF snapshot path and falls back to
+  `LLMModelFactory.shared.configuration(id:)`, which can fetch
+  online. An implementation MAY rely on this fallback **iff** it
+  separately tracks the load wall-clock and excludes it from the
+  feasibility metrics computed by FR-A.3. Concretely: the autotune
+  MUST measure cold-cache load time as a separate metric, MUST
+  warm the cache (by running one disposable request to completion,
+  or by waiting for the load to finish before starting the
+  measurement window), and MUST NOT count load-fetch wall-clock
+  inside the gate-ttft-ms decision. The first-measured request
+  MUST land on warm weights.
 
-**Normative dependency.** SPEC-013 v1 implicitly requires the
-`macprovider-cli models pull <id>` subcommand to exist. If it does
-not exist at implementation time, the implementing PR MUST add it;
-the SPEC for that subcommand is short enough to fit alongside the
-autotune work (a one-screen `pull` subcommand that flips HF online
-mode for the duration of one fetch and writes weights to the same
-HF cache the runtime reads from). The autotune SPEC does NOT
-normatively specify the `pull` subcommand's flags beyond the call
-shape `macprovider-cli models pull <id>`.
+**Normative contract** (regardless of shape):
 
-**FR-D.2. Pre-download failure is candidate-level fatal.**
-If `models pull <id>` fails for a candidate (network down, weights
-missing from HF, signature mismatch, disk full), that candidate is
-recorded as infeasible-with-reason and `autotune` advances to the
-next candidate. The autotune run does NOT fail unless EVERY
-candidate fails pre-download (in which case FR-H.4 applies).
+1. Cold-cache weight fetch latency MUST NOT contribute to the
+   gate-ttft-ms feasibility decision (FR-A.3).
+2. A weight fetch failure MUST be recorded with a discrete reason
+   distinguishable from a load-time runtime error and from a
+   gate-miss (operator-visible).
+3. The autotune MUST NOT silently switch HF cache locations
+   between runs (would invalidate per-machine recipe replay).
+
+`autotune` does NOT, in v1, normatively require any new
+subcommand on the binary. Shape A is the recommended ergonomics;
+Shape B is permitted with the measurement-isolation guard.
+
+**FR-D.2. Failure classification: transient vs integrity.**
+Pre-warm failures split into two classes with asymmetric handling
+(round-1 audit QUESTION D.2 resolved here):
+
+- **Transient failures.** Network down, HTTP 5xx from HF, disk
+  full, partial download interrupted, gated-repo access denied
+  for the current credentials. Record the candidate as infeasible
+  with `notes = "pre-warm transient: <reason>"`, advance to the
+  next candidate. The autotune run fails only if EVERY candidate
+  hits a transient failure (FR-H.4 applies).
+- **Integrity failures.** Signature mismatch, weight hash
+  mismatch, repository contents inconsistent with the expected
+  shape (e.g. missing tokenizer.json), or any tampering signal.
+  These are security-relevant and MUST NOT be silently advanced
+  past. The autotune MUST ABORT the whole run with a distinct
+  non-zero exit code (`exit_reason =
+  'pre_warm_integrity_failure'`), write a `tune_runs` row, and
+  emit the offending candidate's reason on stderr. Operator must
+  investigate before re-running.
+
+The two classes MUST be distinguishable in `tune_trials.notes` and
+in the FR-F.2 JSON. An implementation that classifies all
+pre-warm failures as transient (the v0.1 wording) is a contract
+violation in v0.2.
 
 ---
 
 ### 5.5 Provider-conflict safety
 
 **FR-E.1. Pre-flight: refuse if `serve` already running.**
-Before starting any candidate provider, `autotune` MUST check for an
-existing `macprovider-cli serve` process and an existing listener on
-the configured `--port` (default 18080). If either is present:
+Before starting any candidate provider, `autotune` MUST check for
+an existing `macprovider-cli serve` process and an existing
+listener on the configured `--port` (default 18080). The check MUST
+cover BOTH install paths:
 
-- Default: refuse with a clear error, naming the conflicting PID
-  and the suggested remediation (`--drain` opt-in, or a manual
-  `launchctl unload` for launchd-managed installs, or simply
-  killing the process).
-- With `--drain`: `autotune` gracefully stops the live serve
-  (matching SPEC-011 v0.5 §3.4 drain semantics if warm-swap is
-  enabled, otherwise a clean process stop), runs the tune, then
-  either (a) restores the original serve config at the end (default
-  behavior) or (b) applies the new recommendation if `--apply` was
-  also passed.
+- **launchd-managed install** (per SPEC-003 v0.9.2 §FR-C5,
+  the dominant operator install path):
+  - launchd label: `live.streamvc.macprovider`
+  - plist path:
+    `~/Library/LaunchAgents/live.streamvc.macprovider.plist`
+  - check method: `launchctl list | awk '/live.streamvc.macprovider/'`
+    (matches the existing pattern in
+    `phase3-binary/dist/install.sh` line ~923)
+- **foreground / manually-run process**: PID match on
+  `macprovider-cli serve` argv plus port-listener check on
+  `127.0.0.1:<--port>`. The argv-match grep MUST exclude the
+  autotune process itself (an `autotune` invocation has
+  `macprovider-cli autotune ...` in its argv, not
+  `macprovider-cli serve ...`; the match SHOULD use
+  whole-word `serve` to avoid false positives).
+
+On conflict, the behavior is:
+
+- **Default (no `--drain`):** refuse with a clear error naming
+  the conflicting install path (`launchd-managed` or
+  `foreground-PID-<n>`) and the suggested remediation: pass
+  `--drain` to stop-then-tune (and optionally `--apply` to
+  install the new recipe), or manually stop the process
+  yourself.
+- **With `--drain`:** stop the live serve gracefully, run the
+  tune, then either (a) restore the original serve config and
+  restart at the end (default behavior — autotune is a
+  diagnostic that does not change the operator's serving
+  posture) or (b) apply the new recommendation if `--apply`
+  was also passed (the recipe-replacement path).
+
+**Drain sequence on the launchd-managed install path** (binding
+to SPEC-003 v0.9.2 §FR-C5):
+
+1. `launchctl bootout gui/$UID/live.streamvc.macprovider` to stop
+   the live service. SPEC-003's plist has
+   `KeepAlive.SuccessfulExit = false`, so bootout reliably stops
+   without auto-restart.
+2. Poll for `port_is_free(--port)` with a `--drain-grace` timeout
+   (default 30s). If the port is not free in time, abort with
+   a clear error — do NOT escalate to SIGKILL on a
+   launchd-managed install (the operator's launchd state would
+   become inconsistent with the SPEC-003 install).
+3. Run the full autotune.
+4. On exit, restore by either:
+   - Default (no `--apply`): `launchctl bootstrap gui/$UID
+     ~/Library/LaunchAgents/live.streamvc.macprovider.plist`,
+     leaving the operator's pre-tune config in place.
+   - `--apply`: write the new config (per FR-F.3), then
+     `launchctl bootstrap` to bring the new config live.
+
+**Drain sequence on the foreground process path:**
+SIGTERM the foreground PID, poll for port-free (same grace
+period), restart the foreground process at exit only if the
+operator explicitly opted in via a separate `--restart-foreground`
+flag (default: do nothing — the operator ran the foreground
+process manually and can restart it manually).
 
 `--drain` is an explicit opt-in. v1 MUST NOT auto-drain — buyer
 traffic is on the line and an unconfirmed drain is the wrong
-default. The check MUST cover both the launchd-managed install
-(`com.macprovider.cli` plist) and a manually-run foreground
-process; the launchd-managed install's drain MUST restore the plist
-state on exit (unless `--apply` says otherwise).
+default.
 
 **FR-E.2. `--no-join` is the default tuning mode.**
 While autotune is running, candidate providers MUST start with
@@ -548,15 +758,31 @@ able to `tee` it). The block MUST include:
 - The recommended knob settings as concrete `--kv-bits`,
   `--max-batch`, `--max-context` values (with `--max-context` set to
   the operator's `--target-context` unless FR-B.1's max-context
-  axis was opted into and a different cell won).
+  axis was opted into and a different cell won). The `--kv-bits`
+  value is printed as `unset` when the unquantized-baseline cell
+  wins (no `--kv-bits` flag emitted in the serve command line).
 - The target context the recommendation was tuned for.
 - The replicated median tps and p95 TTFT, with the replicate count.
-- Fallbacks: every smaller candidate from the candidate list that
-  ALSO passed Stage 1 feasibility, with its Stage-1 single-replicate
-  tps. Operators who want to manually choose a smaller / faster
-  model see what's available without re-running.
+- An `alternates` list: NAME-ONLY model IDs from the input
+  candidate list that are SMALLER than the chosen model (and were
+  not probed, per the FR-A.2 STOP-on-first-feasible rule). No
+  metrics. The list provides operators a copy-paste path to
+  manually downsize via `autotune --candidate-models <id>`. If the
+  chosen model is the smallest in the input list, the alternates
+  list is empty.
 - The exact `macprovider-cli serve` command line that the
-  recommendation reduces to, copy-pasteable.
+  recommendation reduces to, copy-pasteable. CLI flag names are
+  used here (`--kv-bits`, `--max-context`, `--max-batch`) so the
+  line is a literal shell command. The YAML config keys
+  (`kv_bits`, `max_context_override`, `max_concurrency_override`,
+  per FR-F.3) are SEPARATE from these CLI flag names; the
+  `serve_command` line is for shell paste, the `knobs` JSON
+  object is for `--apply` round-trip.
+
+Round-1 audit A.1 closure: the `alternates` list replaces v0.1's
+`fallbacks` (which was contradictory — STOP-on-first-feasible
+means no smaller candidate was ever probed, so fallback metrics
+were structurally impossible to emit).
 
 **FR-F.2. JSON output (`--json`).**
 With `--json`, the recommendation surface MUST also be emitted as
@@ -565,7 +791,7 @@ additive fields):
 
 ```json
 {
-  "spec_version": "SPEC-013 v0.1",
+  "spec_version": "SPEC-013 v0.2",
   "run_id": "<uuid>",
   "started_at": "2026-06-18T12:34:56Z",
   "ended_at": "2026-06-18T13:01:22Z",
@@ -594,8 +820,8 @@ additive fields):
     "target_context": 4000,
     "knobs": {
       "kv_bits": 4,
-      "max_batch": 1,
-      "max_context": 4000
+      "max_concurrency_override": 1,
+      "max_context_override": 4000
     },
     "tps_median": 2.1,
     "ttft_p95_ms": 19500,
@@ -603,17 +829,9 @@ additive fields):
     "serve_command":
       "macprovider-cli serve --model mlx-community/Qwen2.5-Coder-7B-Instruct-4bit --kv-bits 4 --max-batch 1 --max-context 4000"
   },
-  "fallbacks": [
-    {
-      "model": "mlx-community/Llama-3.2-3B-Instruct-4bit",
-      "tps_stage1": 4.9,
-      "rank": 4
-    },
-    {
-      "model": "mlx-community/Llama-3.2-1B-Instruct-4bit",
-      "tps_stage1": 9.7,
-      "rank": 5
-    }
+  "alternates": [
+    "mlx-community/Llama-3.2-3B-Instruct-4bit",
+    "mlx-community/Llama-3.2-1B-Instruct-4bit"
   ],
   "infeasible": [
     {
@@ -626,20 +844,73 @@ additive fields):
       "model": "mlx-community/Qwen2.5-14B-Instruct-4bit",
       "rank": 2,
       "reason":
-        "ttft p95 23500ms > gate 60000ms passed but n_err=1 streaming abort"
+        "ttft p95 95234ms > gate 60000ms"
     }
   ],
-  "recipe_hash": "sha256:<32-byte-hex>",
+  "recipe_hash": "sha256:<64-lowercase-hex>",
   "db_path": "/Users/op/.config/macprovider/autotune.sqlite"
 }
 ```
 
-The JSON schema is the canonical format for `console.streamvc.live`
-ingestion. The `recipe_hash` is a SHA-256 over the canonical-JSON
-form of `{machine, inputs, recommendation.knobs, recommendation.model}`
-and is the v2 sticky identifier for "this Mac + this recipe."
-v1-side it has no semantic use beyond display; it MUST still be
-emitted so v2 ingestion is back-compatible.
+Schema notes (round-1 audit F.1 + F.2 closures):
+
+- `recommendation.knobs` uses YAML KEY NAMES
+  (`kv_bits`, `max_concurrency_override`, `max_context_override`),
+  not CLI flag names. This makes the `--json` output
+  round-trippable into `~/.config/macprovider/config.yaml` per
+  FR-F.3. Two-token name mapping:
+  | YAML key                    | CLI flag (in `serve_command`) | mlx-swift wire site            |
+  |-----------------------------|-------------------------------|--------------------------------|
+  | `kv_bits` (4 \| 8 \| null)  | `--kv-bits {4,8}` (omitted if null) | `GenerateParameters.kvBits` |
+  | `max_context_override`      | `--max-context <N>`           | `GenerateParameters.maxKVSize` + 413 gate |
+  | `max_concurrency_override`  | `--max-batch <N>`             | `AsyncSemaphore(value: maxBatch)` |
+- `kv_bits` is `null` (JSON) / `NULL` (SQL) / omitted (YAML) /
+  the literal string `unset` (terminal display) when the
+  unquantized-baseline cell wins.
+- `alternates` is a flat array of NAME-ONLY HF model IDs, in
+  the same order as the input `candidate_models` list, filtered
+  to entries SMALLER than the chosen model and not probed (per
+  the STOP-on-first-feasible rule in FR-A.2). Empty if the
+  chosen model is the smallest in the input list.
+- `recipe_hash` is `sha256:<64-lowercase-hex>` — 32 bytes,
+  hex-encoded, 64 ASCII chars in `[0-9a-f]`, with the literal
+  prefix `sha256:`. The hash input is the **RFC 8785 JSON
+  Canonicalization Scheme (JCS)** serialization of:
+
+  ```json
+  {
+    "binary_version": "<machine.binary_version>",
+    "candidate_models": ["<inputs.candidate_models, in input order>"],
+    "chip": "<machine.chip>",
+    "model": "<recommendation.model>",
+    "knobs": {
+      "kv_bits": <value or null>,
+      "max_concurrency_override": <value>,
+      "max_context_override": <value>
+    },
+    "ram_gb": <machine.ram_gb>,
+    "target_context": <inputs.target_context>
+  }
+  ```
+
+  Keys sorted lexicographically per JCS, no whitespace, integers
+  without trailing zeros, `null` for omitted `kv_bits`. Fields
+  EXCLUDED from the hash: `run_id`, `started_at`, `ended_at`,
+  `os_version`, `stage1_replicates`, `stage2_replicates`,
+  `gate_ttft_ms`, `tps_tie_epsilon`, `tps_median`, `ttft_p95_ms`,
+  `replicates`, `alternates`, `infeasible`, `db_path`,
+  `serve_command`. The hash identifies a "machine + recipe"
+  tuple, NOT an observation; two runs that produce the same
+  recommendation on the same machine MUST hash identically even
+  if their measured tps differs.
+- `spec_version` is the canonical identity of the producing
+  spec ("SPEC-013 v0.2"); v0.3+ MAY add fields additively but
+  MUST NOT remove or retype existing fields.
+- `recommendation` is `null` (not `{}`) when no model was
+  selected (all-infeasible, budget-exhausted-pre-Stage-2, or
+  pre-warm integrity-aborted). Ingestion contract:
+  `recommendation === null` MUST be handled before reading
+  inner fields.
 
 **FR-F.3. `--apply`: write to config.**
 `--apply` is the only mode in which `autotune` writes to
@@ -648,26 +919,55 @@ emitted so v2 ingestion is back-compatible.
 1. Be opt-in. v1's default is "show the recommendation, do nothing."
 2. Atomically write the new config (temp-file + rename). Concurrent
    reads MUST never see a half-written YAML.
-3. Save the prior config as `~/.config/macprovider/config.yaml.bak-<unix-ts>`.
-   The backup path MUST appear in stdout so the operator can revert.
+3. Save the prior config as
+   `~/.config/macprovider/config.yaml.bak-<unix-ts>-<counter>`
+   where `<counter>` is the lowest non-negative integer such that
+   the resulting path does not exist (start at 0; increment until
+   free). The backup write MUST NOT overwrite an existing file —
+   if a collision occurs at every counter from 0 to 65535, abort
+   with an error. The backup path MUST appear in stdout so the
+   operator can revert. (Round-1 audit F.3 closure: nanosecond
+   timestamps are race-prone on macOS HFS+; the counter approach
+   is collision-safe and deterministic.)
 4. Be idempotent: applying the same recommendation twice produces
    the same config and the same (empty) diff against the saved
    backup.
 5. Modify ONLY the keys SPEC-013 owns:
-   `model`, `kv_bits`, `max_context_tokens`, `max_batch`. All other
-   YAML keys (coordinator_endpoint, provider_token, log paths, etc.)
-   MUST be carried through verbatim. `autotune` is not a config
-   rewrite tool.
+   `model`, `kv_bits`, `max_context_override`,
+   `max_concurrency_override`. All other YAML keys
+   (`coordinator_endpoint`, `provider_token`, log paths, etc.) MUST
+   be carried through verbatim with comments + ordering preserved
+   where the YAML library allows. `autotune` is not a config
+   rewrite tool. (Round-1 audit F.1 closure: the prior v0.1 key
+   names `max_context_tokens` and `max_batch` were the CLI FLAG
+   names; the actual YAML keys per
+   `phase3-binary/Sources/MacProviderCore/Config.swift` lines
+   239-241 are `max_context_override` and
+   `max_concurrency_override`. An implementation that wrote the
+   flag names would leave the recipe unapplied because the
+   binary's config parser would not read them.)
 6. Print a single line summarizing what changed, e.g.
-   `applied: model=Qwen-7B kv_bits=4 max_batch=1 max_context=4000
-   (backup at ...)`.
+   `applied: model=Qwen-7B kv_bits=4 max_concurrency_override=1
+   max_context_override=4000 (backup at ...)`.
 
-`--apply` does NOT restart the launchd service. If the operator's
-`macprovider-cli serve` was running under launchd, they MUST
-manually run `launchctl unload ... && launchctl load ...` (or the
-equivalent SPEC-003 v0.9.2 install-script helper if one exists) to
-pick up the new config. SPEC-013 v1 does NOT depend on or trigger
-SPEC-011 warm-swap for this.
+`--apply` does NOT restart the launchd service by itself. If the
+operator passed `--drain` alongside `--apply` per FR-E.1, the
+drain sequence handles the restart at exit (launchctl bootstrap
+brings up the new config). If `--apply` was used WITHOUT
+`--drain`, the operator MUST manually restart for the new config
+to take effect — `--apply` prints a follow-up hint to stderr in
+this case:
+
+```
+applied: ... (backup at ~/.config/macprovider/config.yaml.bak-1718712345-0)
+hint: to apply the new recipe live, restart the serve process:
+  launchctl bootout gui/$UID/live.streamvc.macprovider && \
+    launchctl bootstrap gui/$UID ~/Library/LaunchAgents/live.streamvc.macprovider.plist
+```
+
+SPEC-013 v1 does NOT depend on or trigger SPEC-011 warm-swap for
+this — `--enable-warm-swap` is off by default per SPEC-011 §3.1
+and SPEC-013 stays out of that opt-in.
 
 ---
 
@@ -706,17 +1006,39 @@ CREATE INDEX IF NOT EXISTS idx_tune_trials_run_id ON tune_trials(run_id);
 CREATE INDEX IF NOT EXISTS idx_tune_trials_ts ON tune_trials(ts_utc);
 ```
 
-The `stage` column is a SPEC-013 v0.1 addition; v1 implementations
-MUST `ALTER TABLE ADD COLUMN stage` if upgrading from a prototype
-DB. Default value is `1` for existing rows so historical reports
-don't crash.
+The `stage` column is a SPEC-013 v0.2 addition. v1 implementations
+upgrading from a prototype DB MUST run the migration:
+
+```sql
+ALTER TABLE tune_trials ADD COLUMN stage INTEGER NOT NULL DEFAULT 1;
+```
+
+(Round-1 audit G.1 closure: the v0.1 wording said "ALTER TABLE ADD
+COLUMN stage" without the `DEFAULT 1` clause; SQLite rejects
+adding a NOT NULL column to a populated table unless a non-NULL
+default is supplied, so the v0.1 migration would have failed on
+any prototype DB. The migration must be idempotent — implementers
+SHOULD wrap in a `try ... ignore "duplicate column"` pattern
+matching the prototype's `_ADDITIVE_TUNE_COLUMNS` ALTER loop.)
+
+After migration, ALL new inserts into `tune_trials` MUST set
+`stage` explicitly: `stage = 1` for Stage 1 feasibility probes,
+`stage = 2` for Stage 2 hill-climb cells. The DEFAULT 1 is for
+backfill of existing prototype rows only; relying on the default
+in new code is a contract violation (would silently misattribute
+Stage 2 cells as Stage 1 probes).
 
 **Retention.** The DB MUST keep AT LEAST the most recent N runs by
 default (default `N = 50`; operator-overridable via
-`--retain-runs N`). Older runs are dropped on each new run start
-(scope: delete `tune_trials` and `tune_runs` rows whose `run_id` is
-not in the most recent N). `N >= 1` MUST be enforced; setting to 0
-or negative is an error at flag-parse time.
+`--retain-runs N`). Older runs are dropped at the START of each
+new autotune run, AFTER the new `tune_runs` row has been written.
+The retention sweep MUST execute as a SINGLE SQLite transaction
+covering both `tune_trials` and `tune_runs` deletes (round-1
+audit G.2 closure: a non-transactional sweep that crashes between
+the `tune_trials` delete and the `tune_runs` delete leaves orphan
+trials or orphan runs, breaking report consistency). `N >= 1` MUST
+be enforced; setting to 0 or negative is an error at flag-parse
+time.
 
 The DB path defaults to `~/.config/macprovider/autotune.sqlite`
 (NOT the prototype's `beta/runs.sqlite` location, which is a
@@ -746,13 +1068,33 @@ CREATE TABLE IF NOT EXISTS tune_runs (
     recommendation_json TEXT,                -- NULL if no feasible recommendation
     recipe_hash TEXT,                        -- NULL if no recommendation
     applied INTEGER NOT NULL DEFAULT 0,      -- 1 iff --apply was used
-    exit_reason TEXT                         -- 'ok' | 'interrupted' | 'no_feasible' | error msg
+    exit_reason TEXT NOT NULL                -- normative enum, see below
 );
 ```
 
 The `recipe_hash` is the FR-F.2 hash. Two `tune_runs` rows with the
 same `recipe_hash` represent the same machine + recipe; this is the
 v2 sticky comparison key.
+
+**`exit_reason` is a normative enum** (round-1 audit J.3 closure
+— v0.1's "or error msg" tail was too loose). Valid values:
+
+| value | meaning | recommendation_json |
+|---|---|---|
+| `ok` | Stage 1 chose a model; Stage 2 produced a recommendation | non-NULL |
+| `interrupted` | SIGINT or SIGTERM stopped the run | NULL if pre-Stage-2; non-NULL with `partial=true` if mid-Stage-2 |
+| `no_feasible` | every candidate failed Stage 1 feasibility | NULL |
+| `budget_exhausted_no_model_selected` | `--max-duration` hit during Stage 1 | NULL |
+| `budget_exhausted_with_partial_recommendation` | `--max-duration` hit during Stage 2; best-so-far emitted | non-NULL with `partial=true` |
+| `pre_warm_integrity_failure` | FR-D.2 integrity-failure abort | NULL |
+| `provider_conflict` | FR-E.1 refused (no `--drain`) | NULL |
+| `config_error` | flag-parse error, DB-open error, or other pre-run setup failure | NULL |
+| `internal_error` | unexpected exception with stack trace in `notes` of a partial row | NULL |
+
+Free-form error strings are NOT permitted in `exit_reason`. The
+operator-visible error message goes to stderr + the last
+`tune_trials.notes` row; `exit_reason` is the machine-readable
+classification. Wrappers and reports SHOULD switch on this enum.
 
 ---
 
@@ -777,13 +1119,22 @@ Stage 1 candidates that the prior crashed run already proved
 infeasible (best-effort optimization; out of scope for v0.1's
 normative contract — see §11). v0.1 default behavior is full rerun.
 
-**FR-H.3. Network down during pre-download.**
-A failed `models pull` for candidate K marks K infeasible with
-reason "pre-download failed: <error>" and advances to candidate K+1.
-The run only fails if EVERY candidate fails pre-download (then
-FR-H.4 applies). This way, an operator running autotune with the
-2 largest models pre-cached and a flaky network still gets a
-working recommendation from the smaller cached candidates.
+**FR-H.3. Network down during pre-warm.**
+A failed pre-warm fetch (Shape A `models pull` exit non-zero, or
+Shape B's online-fallback HTTP failure) for candidate K is
+classified per FR-D.2:
+- **Transient class** (network down, HTTP 5xx, disk full): mark K
+  infeasible with reason `"pre-warm transient: <error>"`,
+  advance to candidate K+1. The run only fails-with-no-feasible
+  if EVERY candidate hits a transient pre-warm failure (then
+  FR-H.4 applies). This way, an operator running autotune with
+  the 2 largest models pre-cached and a flaky network still gets
+  a working recommendation from the smaller cached candidates.
+- **Integrity class** (signature mismatch, hash mismatch): ABORT
+  the whole run with `exit_reason =
+  'pre_warm_integrity_failure'` per FR-D.2; do not advance to
+  smaller candidates because the security-relevant failure mode
+  warrants operator investigation.
 
 **FR-H.4. All-infeasible: surface most-informative reason.**
 Per FR-A.4. The error message MUST lead with the SMALLEST candidate
@@ -872,28 +1223,49 @@ above. The actual flag set is:
 ```
 macprovider-cli autotune
   --target-context <N>           target context in tokens (default 2000)
-  --candidate-models <csv>       override default ordered list
+  --candidate-models <csv>       override default ordered list (operator order is contract)
   --max-model-size <Nb>          trim default list above this size
   --min-model-size <Nb>          trim default list below this size
-  --kv-bits-axis <csv>           Stage 2 kv-bits cells (default '4,8')
+  --kv-bits-axis <csv>           Stage 2 kv-bits cells (default 'unset,4,8'; 'unset' = no flag)
   --max-batch-axis <csv>         Stage 2 max-batch cells (default '1,2')
-  --max-context-axis <csv>       Stage 2 max-context cells (default '' = target only)
+  --max-context-axis <csv>       Stage 2 max-context cells; absolute token caps,
+                                 sorted ascending, each >= --target-context
+                                 (default empty = use target only)
   --stage1-replicates <N>        default 1
   --stage2-replicates <N>        default 3
   --gate-ttft-ms <N>             default 60000
   --tps-tie-epsilon <F>          default 0.02
   --max-duration <seconds>       default 7200
+  --drain-grace <seconds>        FR-E.1 drain grace (default 30)
   --port <N>                     local provider port (default 18080)
   --db-path <path>               default ~/.config/macprovider/autotune.sqlite
   --retain-runs <N>              default 50
   --json                         emit recommendation as JSON
   --apply                        write recommendation to config.yaml
   --drain                        if `serve` is running, drain it before tuning
-  --resume                       skip candidates known infeasible from a prior crashed run (v2)
+  --restart-foreground           after `--drain` of a foreground process, restart it at exit
+                                 (no effect on launchd-managed installs)
   --dry-run                      print the candidate plan and exit
   --report-only                  re-render the latest run's report and exit
   -v / --verbose                 stream per-trial details to stderr
 ```
+
+Round-1 audit closures: C.1 (kv-bits default now `unset,4,8`
+matching FR-B.1), H.1 (`--resume` removed; still deferred to v2
+per §11), B.1 (`--max-context-axis` semantics inlined).
+
+The `unset` token in `--kv-bits-axis` means "evaluate a cell with
+no `--kv-bits` flag passed to `serve`" (the mlx-swift unquantized
+KV-cache baseline). Representation across surfaces:
+
+| surface | `unset` representation |
+|---|---|
+| `--kv-bits-axis` CSV | the literal string `unset` |
+| FR-F.2 JSON `knobs.kv_bits` | `null` |
+| `tune_trials.kv_bits` SQL | `NULL` |
+| YAML config `kv_bits` (via `--apply`) | key omitted entirely |
+| terminal display | the literal string `unset` |
+| `serve_command` line | `--kv-bits` flag omitted entirely |
 
 The flag shape MAY change in v0.2 based on audit feedback. The
 SEMANTICS in §5 are the normative surface.
@@ -913,15 +1285,16 @@ maintain).
 Configure candidate list `[X, Y, Z]` where X is infeasible (oversized
 candidate id pointing at a too-large model) and Y is feasible. The
 run MUST select Y, NOT iterate to Z, NOT emit a Z trial row, and the
-RECOMMENDATION block MUST name Y. The fallbacks list MUST be empty
-in this case (only Z would be a fallback, and the iteration didn't
-reach it).
+RECOMMENDATION block MUST name Y. The `alternates` list MUST
+contain exactly `[Z]` (the smaller candidate not probed; name only,
+no metrics).
 
 **AC-2. Largest-first iteration ITERATES past infeasible.**
 Configure candidate list `[X, Y, Z]` where X is infeasible at the
 target context, Y is infeasible, Z is feasible. The run MUST emit
 infeasibility rows for X and Y (with `notes` populated) and select
-Z. RECOMMENDATION names Z; fallbacks list is empty.
+Z. RECOMMENDATION names Z; `alternates` is empty (Z is the
+smallest in the list).
 
 **AC-3. All-infeasible exits non-zero with smallest-first reason.**
 Configure a candidate list where every candidate is infeasible at the
@@ -949,10 +1322,24 @@ prototype's `_is_new_best` semantics verbatim.
 **AC-6. Provider-conflict pre-flight refuses by default.**
 With a `macprovider-cli serve` already running on the configured
 port, `autotune` (no `--drain`) MUST refuse with a clear error
-naming the existing PID and the `--drain` opt-in. The DB MUST NOT
-have a `tune_runs` row written. Exit code MUST be non-zero and
-distinct from the all-infeasible exit code (so wrappers can
-distinguish).
+naming the existing install path (`launchd-managed` or
+`foreground-PID-<n>`) and the `--drain` opt-in. The
+`tune_runs.exit_reason` MUST be `'provider_conflict'`. This AC
+MUST cover BOTH install paths:
+
+- **launchd-managed case:** with `live.streamvc.macprovider`
+  loaded via `launchctl bootstrap`, autotune detects it via
+  `launchctl list` and refuses; with `--drain`, autotune runs
+  `launchctl bootout gui/$UID/live.streamvc.macprovider`,
+  completes the tune, and either restarts the original config
+  (no `--apply`) or applies + restarts (with `--apply`).
+- **foreground case:** with `macprovider-cli serve ...`
+  running in a separate shell as the operator's PID, autotune
+  detects via argv-match-on-`serve` (not `autotune` — the
+  argv-match grep MUST NOT match the autotune process itself);
+  with `--drain` and `--restart-foreground`, autotune SIGTERMs,
+  tunes, and restarts the foreground process via the original
+  argv.
 
 **AC-7. `--no-join` is set on every candidate.**
 The implementation MUST always pass `--no-join` (or its equivalent
@@ -971,15 +1358,23 @@ succeeded, otherwise `'no_feasible'`.
 
 **AC-9. `--apply` is atomic + backs up + idempotent.**
 With `--apply`, a successful run MUST:
-- Write the new `config.yaml` atomically (test asserts the file is
-  either fully old or fully new at every observation moment, never
-  half-written, via an `flock`-equivalent or a temp-file-rename
-  trace).
-- Save the prior config as `config.yaml.bak-<unix-ts>` with file
-  contents byte-identical to the pre-apply config.
-- Modify ONLY keys SPEC-013 owns. A test asserts every non-owned key
-  (e.g. `coordinator_endpoint`, `provider_token`) is byte-identical
-  pre/post.
+- Write the new `config.yaml` atomically via a temp-file-rename
+  trace (the test asserts the rename target either matches the
+  pre-apply contents or the post-apply contents at every
+  observable moment, never a partial write).
+- Save the prior config as
+  `config.yaml.bak-<unix-ts>-<counter>` with file contents
+  byte-identical to the pre-apply config. With two `--apply`
+  runs in the same wall-clock second, the second backup MUST
+  have `<counter>` greater than the first; neither backup is
+  overwritten.
+- Modify ONLY the four keys SPEC-013 owns (`model`, `kv_bits`,
+  `max_context_override`, `max_concurrency_override`). A test
+  asserts every non-owned key (e.g. `coordinator_endpoint`,
+  `provider_token`) is byte-identical pre/post and that the
+  binary's `Config.swift` parser actually reads the four owned
+  keys from the post-apply file (catches the v0.1 bug where
+  the spec named flag-names instead of YAML-key-names).
 - Re-running with the same recommendation produces zero diff
   against the saved backup (idempotence).
 
@@ -999,12 +1394,31 @@ present with the documented type. Additive fields are allowed in
 v0.2+; field removal or type change is a SPEC bump.
 
 **AC-12. Recipe hash determinism.**
-Two `autotune` runs on the same machine with the same flags
-producing the same recommendation MUST emit the same `recipe_hash`.
-A run on a different RAM tier (e.g. 8 GB vs 16 GB) producing
-even-coincidentally-the-same recommendation MUST emit a different
-`recipe_hash` (because `machine.ram_gb` is part of the canonical
-JSON the hash covers).
+The `recipe_hash` MUST satisfy three properties simultaneously:
+
+1. **Reproducible same-machine.** Two `autotune` runs on the same
+   machine + same `binary_version` + same flags producing the
+   same recommendation emit IDENTICAL `recipe_hash`, even though
+   observed tps/ttft and run_id/timestamps differ between the
+   two runs (the hash input domain excludes observations).
+2. **Reproducible cross-implementation.** A reference vector
+   (fixed machine + inputs + recommendation, JSON pre-computed)
+   is hashed by both an Option-A (Swift) and an Option-B
+   (Python) implementation; both produce IDENTICAL hash. This
+   tests the RFC 8785 JCS canonicalization.
+3. **Sensitive to machine.** Two runs on different RAM tiers
+   (e.g. 8 GB vs 16 GB) producing coincidentally-the-same
+   recommendation `model + knobs + target_context` emit
+   DIFFERENT `recipe_hash` (because `machine.ram_gb` is in the
+   hash input).
+4. **Sensitive to binary.** Same machine, same recommendation,
+   different `machine.binary_version` → DIFFERENT hash. This
+   is the v2 sticky's "did this Mac's recipe drift after a
+   binary update?" signal.
+
+The format MUST be `sha256:<64-lowercase-hex>`; a test asserts
+the prefix is exactly `sha256:`, the suffix matches `^[0-9a-f]{64}$`,
+and no upper-case characters appear.
 
 **AC-13. Wall-clock budget enforcement.**
 With `--max-duration 60` (very small), the run MUST exit
@@ -1033,7 +1447,54 @@ Stage 1 probes MUST be recorded with `stage = 1`; Stage 2 cells MUST
 be recorded with `stage = 2`. A test asserts the row count per
 stage matches the expected: stage 1 count = (candidates iterated
 until chosen model); stage 2 count = (kv_bits axis size × max_batch
-axis size × max_context axis size).
+axis size × max_context axis size). A separate test verifies the
+v0.2 migration SQL (`ALTER TABLE tune_trials ADD COLUMN stage
+INTEGER NOT NULL DEFAULT 1`) runs successfully against a populated
+prototype DB and that existing rows acquire `stage = 1`.
+
+**AC-17. Operator-supplied order is honored verbatim (no internal
+rerank).** [round-1 J.1 closure — load-bearing biggest-fit guard]
+Configure
+`--candidate-models mlx-community/Llama-3.2-1B-Instruct-4bit,mlx-community/Qwen2.5-32B-Instruct-4bit`
+on hardware where BOTH models are feasible at the target context.
+The recommendation MUST be the 1B model — because the operator's
+supplied order put 1B first, even though 32B is the larger model
+and would have won under the default-list largest-first ordering.
+A test asserts:
+- `tune_trials` has exactly ONE stage-1 row (for 1B) — the 32B
+  was never probed, because Stage 1 STOPped on first feasible
+  per FR-A.2.
+- The recommendation's `model` field is the 1B model id.
+- `alternates` is empty (no candidates SMALLER than the chosen
+  1B in the input list).
+- A failure mode this catches: an implementation that
+  pre-sorts `--candidate-models` by parameter-count-descending
+  before Stage 1 iteration would (wrongly) pick 32B and pass
+  AC-14/AC-15 — only AC-17 detects this. The biggest-fit
+  guarantee depends entirely on operator-supplied order being
+  the contract per FR-A.1.
+
+**AC-18. Optional `--max-context-axis` evaluates extra cells and
+can win.** [round-1 J.2 closure]
+With `--target-context 4000 --max-context-axis 4000,8000`,
+configure a mock provider whose 8000-cell produces higher median
+tps than the 4000-cell (within feasibility). The recommendation's
+`knobs.max_context_override` MUST be 8000 (the winning cell). A
+test asserts: `tune_trials` has 2 Stage-2 cell rows per
+(kv_bits, max_batch) combination, and the recommendation reflects
+the winning cell. Invalid `--max-context-axis 2000,4000` (the
+2000 cell is below `--target-context 4000`) MUST fail at
+flag-parse time with a clear error and `exit_reason = 'config_error'`.
+
+**AC-19. `--max-model-size` alone trims the default list.** [round-1
+J.3 closure]
+With `--max-model-size 8B` and no `--candidate-models`, the
+iteration MUST start at the 7B candidate (the 32B and 14B
+defaults are trimmed). A test asserts the first probed candidate
+is `mlx-community/Qwen2.5-Coder-7B-Instruct-4bit` and no probe
+of the 14B or 32B occurs (no `tune_trials` row with those model
+IDs). Combined with `--min-model-size 3B`, the iteration MUST
+also skip the 1B entry.
 
 ---
 
@@ -1053,11 +1514,15 @@ too aggressive (real differences will be flattened to "tie"); if
 real difference). v0.2 picks whichever bound the data supports.
 
 **OQ-B. `stage2_replicates` recommended default.**
-v0.1 uses `3`, balancing wall-clock against noise. Air5 n=3 data
-will tell us whether 3 is sufficient to discriminate cells whose
-true tps gap is within `TPS_TIE_EPSILON`. If discrimination is
-poor at n=3, v0.2 raises the default to 5 (Stage 2 wall-clock grows
-linearly; the NFR-1 budget table absorbs the change).
+v0.1 uses `3`, balancing wall-clock against noise. Quantitative
+decision rule (round-1 K.1 closure): at the chosen replicate
+count, the **minimum discriminable tps gap** (the smallest delta
+that the median-of-N comparison can reliably distinguish from
+noise, at 90% confidence) MUST be ≤ `TPS_TIE_EPSILON × measured
+median tps`. If air5 n=3 data shows minimum-discriminable-gap >
+TPS_TIE_EPSILON × median across the typical Stage 2 cell set,
+v0.3 raises the default to 5 (Stage 2 wall-clock grows linearly;
+the NFR-1 budget table absorbs the change).
 
 **OQ-C. Should `kv_bits` remain a search axis or become a fixed
 default?**
@@ -1071,13 +1536,35 @@ fixation (a future MLX-swift version changing the kv-bits trade-off)
 is higher than the cost of one extra cell.
 
 **OQ-D. Does Stage 1 fit-determination need N > 1 replicates?**
-v0.1 uses `stage1_replicates = 1` (cheap probe). If air5 n=3 data
-shows that single-trial fit decisions are unstable (one probe rules
-a model feasible while the next probe rules the same model
-infeasible at the same context), v0.2 raises the default to N=2 or
-N=3. The wall-clock cost is meaningful in Stage 1 (the iteration
-runs across the whole candidate list), so the change requires real
-evidence.
+v0.1 uses `stage1_replicates = 1` (cheap probe). Quantitative
+decision rule (round-1 K.1 closure): single-trial Stage 1 fit
+determination is "stable enough" iff measured **false-fit rate**
+(rules a model feasible at N=1 but infeasible at N=3) ≤ 5% AND
+**false-reject rate** (rules infeasible at N=1 but feasible at
+N=3) ≤ 5% across the air5 candidate set. If air5 n=3 data shows
+either rate > 5%, v0.3 raises the default to N=2 (or to N=3 if
+the rate exceeds 15%). The wall-clock cost is meaningful in
+Stage 1 (the iteration runs across the whole candidate list), so
+the change requires real evidence.
+
+**OQ-E. Thermal / cell-order bias in Stage 2.** [round-1 K.2
+closure — new in v0.2]
+NFR-2 v1 has no explicit thermal pacing, and Stage 2's deterministic
+axis order means later cells run on a hotter machine than earlier
+cells. If air5 n=3 data shows the keep-best decision is biased
+toward earlier-tested cells (i.e. cell-order rather than cell-quality
+drives the recommendation), v0.3 will need ONE of:
+- randomized cell order (with the seed recorded in `tune_runs` for
+  replay)
+- a fixed inter-cell cooldown delay (e.g. 30s idle between cells)
+- a thermal-state probe before each cell that pauses until the
+  Mac is thermally-quiet
+
+Decision threshold: if the same Stage 2 cell set, evaluated in
+reverse order, would produce a DIFFERENT keep-best winner more
+than 5% of the time on air5 n=3 data, the bias is load-bearing
+and v0.3 must address it. v0.2 ships the deterministic order
+unchanged pending the data; operators are warned in §6 NFR-2.
 
 ---
 
@@ -1138,6 +1625,57 @@ The successor SPEC for items 1, 4, 5 is provisionally SPEC-014 (the
 recommended-catalog surface anticipated by SPEC-011 §8). SPEC-013 v2
 and SPEC-014 v1 ship together if they ship at all.
 
+**Cross-spec renumber note** (round-1 audit M.1 closure):
+SPEC-010 §11 and SPEC-011 §8/§11 still cite "SPEC-013" with the
+recommended-catalog meaning, written before SPEC-013 was claimed
+for autotune. The renumber assignment is now:
+
+- **SPEC-013** (this spec) = autotune.
+- **SPEC-014** (provisional, not yet drafted) = coordinator-served
+  recommended catalog (the "future" referenced by SPEC-011 §8).
+
+A follow-up documentation-only patch SHOULD update the
+SPEC-010 and SPEC-011 cross-references when convenient (not a
+v1 blocker because the locked specs' references are
+forward-looking-aspirational, not normative). The patch
+candidates are:
+
+- SPEC-010 §11 (line ~1328): rewrite "SPEC-013 (future)" → "SPEC-014 (provisional)"
+- SPEC-011 §8 table row "Recommended catalog ... SPEC-013 (future)": same
+- SPEC-011 §11 references the same — same.
+
+This SPEC-013 v0.2 takes the number for autotune unambiguously.
+
+### Post-lock documentation checklist
+
+When SPEC-013 v0.2 (or a successor v0.x) reaches LOCK status, the
+operator SHOULD complete the following lifecycle updates as
+out-of-PR documentation work (round-1 audit M.2 — listed but
+deferred from the binding contract):
+
+1. Append a decision-log entry to `beta/DECISION_CRITERIA.md`
+   summarizing: the locked biggest-fit decision, the chosen
+   implementation shape (Option A Swift-native vs Option B
+   Python wrapper), what shipped in v1, what was deferred to v2
+   (recommended catalog, recipe attestation,
+   sticky-affinity-from-recipes, warm-swap-driven tuning).
+2. Add a one-line note to SPEC-003 v0.9.2's onboarding flow:
+   "after install, consider running `macprovider-cli autotune`
+   to find the best model for your Mac." (SPEC-003 is locked,
+   so this is a v0.10 candidate or a CLAUDE.md addition.)
+3. Patch the cross-spec renumber per the note above (SPEC-010,
+   SPEC-011).
+4. Close PR #103 (the Python prototype on
+   `spike/provider-model-autotune`) — either by rebasing onto
+   the SPEC-013 v1 implementing PR (Option B) or by closing as
+   superseded (Option A).
+5. Update `specs/README.md` SPEC-013 row to "LOCKED" when
+   appropriate.
+
+These steps are not v1 implementation work; they are spec /
+project-memory hygiene that the operator performs when the spec
+locks.
+
 ---
 
 ## 12. Migration note from the PR #103 prototype
@@ -1163,10 +1701,20 @@ survives, what changes, and what is rejected.
   Stage 2 (FR-B.2). This is the part of the prototype that earns
   its keep — it's a small, well-validated piece of decision logic
   the v0.1 SPEC inherits.
-- **HF offline-mode handling.** The prototype's pre-download via
-  external `pip install` / cache pre-warm is replaced by FR-D.1's
-  `macprovider-cli models pull <id>`, but the principle (model
-  weights must be on disk before `serve` starts) is the same.
+- **Cold-cache load classification.** The prototype does NOT have
+  an explicit pre-download step — `evaluate_candidate` starts
+  `serve`, waits for `/v1/models`, and records load failures
+  (offline-mode error, cache miss, OOM) as infeasible trial
+  rows via `_tail_log`. SPEC-013 v0.2 FR-D replaces this
+  implicit-cold-cache behavior with an explicit pre-warm
+  prerequisite + measurement-isolation contract. What survives
+  is the failure-classification PATTERN — both spec and
+  prototype record load failures with a discriminated reason in
+  `notes`; what changes is that the spec REQUIRES weights to be
+  cache-warm BEFORE measurement, where the prototype lets the
+  load happen during the measurement window.
+  (Round-1 audit L.1 closure: v0.1's wording overstated the
+  prototype's pre-download surface — the prototype has none.)
 - **`--replicates N` aggregation.** Median tps + p95 TTFT,
   strict-all-feasible. SPEC-013 v1 names the two stage-specific
   flags (`--stage1-replicates`, `--stage2-replicates`) but the
