@@ -180,6 +180,49 @@ final class AutotuneDB {
         }
     }
 
+    /// Mark the winning Stage 2 cell for a given run by setting
+    /// `kept = 1` on the single row matching the run's stage-2 winner
+    /// knobs. All other Stage 2 rows for the same run retain
+    /// `kept = 0`. Idempotent.
+    ///
+    /// Added in Step 8 round-1 audit response (D.1 MAJOR closure):
+    /// the prior pattern of computing `kept` per-insert during Stage 2
+    /// iteration left multiple rows with `kept = 1` for runs where
+    /// later cells outperformed earlier baselines. SPEC-013 §5.7 FR-G.1
+    /// requires only the final winning Stage 2 cell to carry
+    /// `kept = 1`.
+    func markStage2WinnerCell(
+        runID: String,
+        kvBits: Int?,
+        maxBatch: Int,
+        maxContextCap: Int
+    ) throws {
+        let kvBitsClause: String
+        if kvBits == nil {
+            kvBitsClause = "kv_bits IS NULL"
+        } else {
+            kvBitsClause = "kv_bits = ?"
+        }
+        let sql = """
+        UPDATE tune_trials SET kept = 1
+        WHERE run_id = ? AND stage = 2 AND \(kvBitsClause)
+              AND max_batch = ? AND max_context_cap = ?
+        """
+        try withStatement(sql) { statement in
+            var bindIndex: Int32 = 1
+            try bind(runID, at: bindIndex, in: statement)
+            bindIndex += 1
+            if let kvBits {
+                try bind(kvBits, at: bindIndex, in: statement)
+                bindIndex += 1
+            }
+            try bind(maxBatch, at: bindIndex, in: statement)
+            bindIndex += 1
+            try bind(maxContextCap, at: bindIndex, in: statement)
+            try stepDone(statement)
+        }
+    }
+
     func applyRetentionInTransaction(retainRuns: Int) throws {
         guard retainRuns >= 1 else {
             throw AutotuneDBError.invalidRetention(retainRuns)

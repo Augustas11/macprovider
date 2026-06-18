@@ -102,6 +102,7 @@ struct Stage2HillClimb {
     func run() async throws -> Stage2HillClimbResult {
         var trialRows: [AutotuneTrialRow] = []
         var best: BestCell?
+        var bestRowIndex: Int?
         var failureReasons: [String] = []
 
         for kvBits in kvBitsAxis {
@@ -123,28 +124,37 @@ struct Stage2HillClimb {
                         replicates: stage2Replicates
                     )
 
-                    let isNewBest: Bool
                     switch probeResult {
                     case .feasible(let medianTPS, let p95TTFTMS, _):
-                        isNewBest = Self.isNewBest(
+                        if Self.isNewBest(
                             tps: medianTPS,
                             ttft: p95TTFTMS,
                             bestTPS: best?.tps,
                             bestTTFT: best?.ttft,
                             tpsTieEpsilon: tpsTieEpsilon
-                        )
-                        if isNewBest {
+                        ) {
                             best = BestCell(knobs: knobs, tps: medianTPS, ttft: p95TTFTMS)
+                            // Stamped at insert-time below; the actual
+                            // `kept = 1` DB write happens AFTER the loop
+                            // per D.1 closure (see below).
+                            bestRowIndex = trialRows.count
                         }
                     case .infeasible(let reason, _, _):
-                        isNewBest = false
                         failureReasons.append("\(Self.describe(knobs)): \(reason)")
                     }
 
+                    // Round-1 audit D.1 (MAJOR) closure: the prior code
+                    // passed `kept: isNewBest(...)` at insert time, which
+                    // left multiple Stage 2 rows with `kept = 1` for runs
+                    // where later cells outperformed earlier baselines.
+                    // SPEC-013 §5.7 FR-G.1 requires only the FINAL winning
+                    // Stage 2 cell to carry `kept = 1`. We now insert every
+                    // row with `kept = false`, then update the winning row
+                    // via `markStage2WinnerCell` once iteration completes.
                     let row = makeTrialRow(
                         knobs: knobs,
                         result: probeResult,
-                        kept: isNewBest
+                        kept: false
                     )
                     try autotuneDB.insertTrial(row)
                     trialRows.append(row)
@@ -157,6 +167,20 @@ struct Stage2HillClimb {
                 ? "no Stage 2 cells were evaluated"
                 : failureReasons.joined(separator: " | ")
             throw Stage2HillClimbError.noFeasibleCell(reason: summary)
+        }
+
+        // D.1 closure: stamp the FINAL winner's row with `kept = 1`. The
+        // UPDATE matches the (run_id, stage=2, knobs) compound; idempotent.
+        try autotuneDB.markStage2WinnerCell(
+            runID: runID,
+            kvBits: best.knobs.kvBits,
+            maxBatch: best.knobs.maxBatch,
+            maxContextCap: best.knobs.maxContext
+        )
+        // Mirror the DB update in the in-memory trial rows so callers
+        // reading `cellTrials` see consistent kept semantics.
+        if let bestRowIndex {
+            trialRows[bestRowIndex].kept = true
         }
 
         return Stage2HillClimbResult(

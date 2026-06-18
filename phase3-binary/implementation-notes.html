@@ -1575,5 +1575,63 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     TPS tie-epsilon non-replacement.</li>
   </ul>
 </div>
+<div class="entry">
+  <time>2026-06-18 (Step 8 round-1 audit response)</time>
+  <p><strong>Round-1 codex audit closures</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 14; verdict was FIX REQUIRED with 0 CRITICAL / 1 MAJOR / 1
+  MINOR / 0 QUESTION).</p>
+  <p><strong>D.1 MAJOR fix</strong> (multiple Stage 2 rows had
+  <code>kept = true</code>). The prior code computed
+  <code>kept</code> at insertion time based on <code>isNewBest</code>,
+  which left every cell that became "running best" with
+  <code>kept = 1</code> in the DB. SPEC-013 §5.7 FR-G.1 requires only
+  the FINAL winning Stage 2 cell to carry <code>kept = 1</code>.</p>
+  <p>Fix: added <code>AutotuneDB.markStage2WinnerCell(runID:kvBits:maxBatch:maxContextCap:)</code>
+  — an idempotent SQL UPDATE matching the (run_id, stage=2, knobs)
+  compound. <code>Stage2HillClimb.run()</code> now inserts every row
+  with <code>kept = false</code> during the loop, tracks the winning
+  row's array index via <code>bestRowIndex</code>, and after the loop
+  (a) calls <code>markStage2WinnerCell</code> with the winner's knobs
+  (b) mutates <code>trialRows[bestRowIndex].kept = true</code> so
+  callers reading <code>cellTrials</code> see consistent semantics.</p>
+  <p>Test updates:
+  <code>testStage2HillClimbAppliesIsNewBestThroughputPrimary</code>
+  flipped from <code>[true, true]</code> to
+  <code>[false, true]</code>;
+  <code>testStage2HillClimbAppliesIsNewBestTTFTTiebreak</code> same
+  flip;
+  <code>testStage2HillClimbPersistsAllCellTrialsWithStageTwo</code>
+  now explicitly asserts
+  <code>rows.map(\.kept) == [false, true, false, false]</code> AND
+  <code>rows.filter(\.kept).count == 1</code> as a regression-lock on
+  the exactly-one-winner invariant.</p>
+  <p><strong>J.1 MINOR fix</strong> (direct <code>isNewBest</code>
+  edge-branch tests missing). Added 5 new tests targeting the
+  prototype's documented but untested branches:
+  <code>testIsNewBestAcceptsPositiveTPSWhenBestTPSIsZero</code>,
+  <code>testIsNewBestRejectsZeroTPSWhenBestTPSIsZero</code>,
+  <code>testIsNewBestWinsTieBandWhenBestTTFTIsNil</code>,
+  <code>testIsNewBestHoldsWhenBothTTFTsAreNilInTieBand</code>,
+  <code>testIsNewBestHoldsWhenNewTTFTIsNilInTieBand</code>. These
+  exercise the <code>bestTPS &lt;= 0</code> branch (both
+  positive-new and zero-new cases) and the tie-band branches where
+  either or both TTFTs are nil — matching the Python prototype's
+  <code>ttft is not None and (best_ttft is None or ttft &lt; best_ttft)</code>
+  shape.</p>
+  <p><strong>AutotuneDB additive method note</strong>: Step 3 is
+  locked at d0029e9, but adding <code>markStage2WinnerCell</code> is
+  a purely additive method that does not alter any locked behavior.
+  The same pattern Step 5 used to extract <code>PortProbe.swift</code>
+  from Step 4 applies. The new method follows the existing
+  <code>insertTrial</code> / <code>insertRun</code> /
+  <code>applyRetentionInTransaction</code> idioms (private
+  <code>withStatement</code> + <code>bind</code> helpers, throws on
+  SQLite errors).</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 322/322
+  (317 baseline + 5 new from this fix-pass), with 2 skipped
+  integration-gated tests.</p>
+</div>
 </section>
 </body></html>

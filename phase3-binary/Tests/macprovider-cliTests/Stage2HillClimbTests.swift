@@ -46,7 +46,11 @@ final class Stage2HillClimbTests: XCTestCase {
 
         XCTAssertEqual(result.winningKnobs, WinningKnobs(kvBits: 4, maxBatch: 1, maxContext: 2_000))
         XCTAssertEqual(result.medianTPS, 12)
-        XCTAssertEqual(result.cellTrials.map(\.kept), [true, true])
+        // Round-1 audit D.1 (MAJOR) closure: only the FINAL winner row
+        // carries `kept = true`. Cell A (kv_bits=nil) was the running
+        // best at iteration time but cell B (kv_bits=4) won on
+        // throughput; only B's row keeps kept=true.
+        XCTAssertEqual(result.cellTrials.map(\.kept), [false, true])
     }
 
     func testStage2HillClimbAppliesIsNewBestTTFTTiebreak() async throws {
@@ -66,7 +70,8 @@ final class Stage2HillClimbTests: XCTestCase {
 
         XCTAssertEqual(result.winningKnobs, WinningKnobs(kvBits: 4, maxBatch: 1, maxContext: 2_000))
         XCTAssertEqual(result.p95TTFTMS, 800)
-        XCTAssertEqual(result.cellTrials.map(\.kept), [true, true])
+        // D.1 closure: only the final TTFT-tiebreak winner has kept=true.
+        XCTAssertEqual(result.cellTrials.map(\.kept), [false, true])
     }
 
     func testStage2HillClimbRejectsCellWhenAnyReplicateInfeasible() async throws {
@@ -156,6 +161,14 @@ final class Stage2HillClimbTests: XCTestCase {
             WinningKnobs(kvBits: 4, maxBatch: 1, maxContext: 2_000),
             WinningKnobs(kvBits: 4, maxBatch: 2, maxContext: 2_000),
         ])
+        // Round-1 audit D.1 (MAJOR) closure: exactly ONE Stage 2 row
+        // in a run carries `kept = true` — the FINAL winning cell.
+        // TPS values [10, 11, 9, 10.5] mean cell 2 (kv_bits=nil,
+        // max_batch=2) wins by isNewBest at row 1 and is never
+        // displaced (9 and 10.5 don't beat 11).
+        XCTAssertEqual(rows.map(\.kept), [false, true, false, false])
+        XCTAssertEqual(rows.filter(\.kept).count, 1,
+                       "exactly one Stage 2 row per run MUST have kept = true")
     }
 
     func testStage2HillClimbHonorsTPSTieEpsilon() async throws {
@@ -177,6 +190,61 @@ final class Stage2HillClimbTests: XCTestCase {
         XCTAssertEqual(result.winningKnobs, WinningKnobs(kvBits: nil, maxBatch: 1, maxContext: 2_000))
         XCTAssertEqual(result.medianTPS, 10)
         XCTAssertEqual(result.cellTrials.map(\.kept), [true, false])
+    }
+
+    // MARK: - Round-1 audit J.1 closure: direct isNewBest edge-branch tests
+
+    /// Round-1 J.1 closure: when `bestTPS == 0` (the unmeasurable-prior
+    /// edge), `isNewBest` should accept any positive TPS as the new
+    /// best per the prototype's `if best_tps <= 0: return tps > 0`.
+    func testIsNewBestAcceptsPositiveTPSWhenBestTPSIsZero() {
+        XCTAssertTrue(Stage2HillClimb.isNewBest(
+            tps: 0.1, ttft: nil, bestTPS: 0, bestTTFT: nil
+        ))
+        XCTAssertTrue(Stage2HillClimb.isNewBest(
+            tps: 5.0, ttft: 1_000, bestTPS: 0, bestTTFT: 500
+        ))
+    }
+
+    /// Round-1 J.1 closure: when `bestTPS == 0` AND new TPS is also 0
+    /// (or negative), `isNewBest` MUST return false. Asymmetric edge —
+    /// without this, the zero-vs-zero case would incorrectly return
+    /// true via the relGap path (0 / 0 division would crash).
+    func testIsNewBestRejectsZeroTPSWhenBestTPSIsZero() {
+        XCTAssertFalse(Stage2HillClimb.isNewBest(
+            tps: 0, ttft: nil, bestTPS: 0, bestTTFT: nil
+        ))
+        XCTAssertFalse(Stage2HillClimb.isNewBest(
+            tps: -1.0, ttft: nil, bestTPS: 0, bestTTFT: nil
+        ))
+    }
+
+    /// Round-1 J.1 closure: in the tie band, when `bestTTFT == nil`
+    /// (e.g. best had unmeasurable TTFT) and new ttft IS measurable,
+    /// new wins per the prototype's `ttft is not None and (best_ttft
+    /// is None or ...)`.
+    func testIsNewBestWinsTieBandWhenBestTTFTIsNil() {
+        // tps 10 vs 10.05 = 0.5% gap, within 2% epsilon.
+        XCTAssertTrue(Stage2HillClimb.isNewBest(
+            tps: 10.05, ttft: 800, bestTPS: 10, bestTTFT: nil
+        ))
+    }
+
+    /// Round-1 J.1 closure: in the tie band, when BOTH TTFTs are nil,
+    /// neither wins (best holds — the first feasible incumbent wins
+    /// true ties).
+    func testIsNewBestHoldsWhenBothTTFTsAreNilInTieBand() {
+        XCTAssertFalse(Stage2HillClimb.isNewBest(
+            tps: 10.05, ttft: nil, bestTPS: 10, bestTTFT: nil
+        ))
+    }
+
+    /// Round-1 J.1 closure: in the tie band, when only new TTFT is
+    /// nil (best has measurable TTFT), best holds.
+    func testIsNewBestHoldsWhenNewTTFTIsNilInTieBand() {
+        XCTAssertFalse(Stage2HillClimb.isNewBest(
+            tps: 10.05, ttft: nil, bestTPS: 10, bestTTFT: 800
+        ))
     }
 
     private func makeHillClimb(

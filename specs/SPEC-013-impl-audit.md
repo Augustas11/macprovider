@@ -1124,3 +1124,133 @@ Verification notes:
 ### Step 7 readiness verdict
 
 READY TO PROCEED TO STEP 8.
+
+---
+
+## Round 14 audit (Codex on 118599e — Step 8 round 1)
+
+**Audited:** commit 118599e on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 8, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 0 CRITICAL / 1 MAJOR / 1 MINOR / 0 QUESTION
+**Step 8 readiness:** FIX REQUIRED
+
+### Executive summary
+
+The load-bearing Category A check passed: `Stage2HillClimb.isNewBest` is a faithful Swift port of PR #103 prototype `_is_new_best`. It rejects nil TPS, accepts the first feasible baseline, handles `best_tps <= 0`, uses strict `relGap > epsilon` for throughput wins, and only replaces inside the tie band when the new TTFT is present and strictly lower. The three isNewBest scenario tests use correct gaps: 12 vs 10 is a 20% throughput win, 10.1 vs 10 is a 1% tie-band TTFT win, and 10.05 vs 10 is a 0.5% tie-band non-replacement when TTFT is worse.
+
+The main blocker is persistence semantics for `tune_trials.kept`. The implementation writes `kept = true` for every cell that becomes best at evaluation time, so a later winner leaves earlier rows marked kept. The Step 8 prompt's FR-G.1 interpretation requires only the final winning Stage 2 cell to have `kept = true` and all other cells to have `kept = false`; the tests currently lock the opposite behavior for throughput and TTFT replacement cases.
+
+Anti-regression passed. `swift test --package-path phase3-binary` executed 317 tests, skipped 2 integration-gated tests, and reported 0 failures. Because the persisted `kept` field can mislead Step 9 reporting if it scans `tune_trials`, Step 8 is not ready to proceed as-is.
+
+### Findings
+
+#### Category A: isNewBest semantics port
+
+(no findings)
+
+Verification notes:
+- Prototype reference: `origin/spike/provider-model-autotune:beta/autotune.py` lines containing `_is_new_best` implement `tps is None -> False`, `best is None -> True`, `best.get("tps") or 0.0`, `best_tps <= 0 -> tps > 0`, `rel_gap > TPS_TIE_EPSILON -> True`, and tie-band TTFT replacement only when `ttft is not None and (best_ttft is None or ttft < best_ttft)`.
+- Swift matches branch-for-branch at `phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:172-200`. The split `if let ttft, let bestTTFT { return ttft < bestTTFT }` plus `if ttft != nil { return true }` is equivalent to Python's `ttft is not None and (best_ttft is None or ttft < best_ttft)`.
+- Equal TPS/equal TTFT and tie-band/equal TTFT both return false because the Swift branch uses strict `<`, matching the prototype.
+- Tests at `phase3-binary/Tests/macprovider-cliTests/Stage2HillClimbTests.swift:32-69` and `:161-179` exercise throughput-primary replacement, TTFT tie-break replacement, and epsilon non-replacement with correct relative gaps.
+
+#### Category B: Strict-all-feasible per cell (FR-B.2)
+
+(no findings)
+
+Verification notes:
+- `Stage2Prober.probe` normalizes replicate count to at least 1, collects TTFT/TPS only for passing requests, and returns `.infeasible` with nil aggregate metrics whenever `nErr > 0` (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:315-413`).
+- The four FR-A.3 gate classes are covered in the prober path: HTTP 2xx check (`:354-358`), TTFT gate check (`:366-370`), stop-token leak check (`:359-365`), and provider exit before/during probing (`:329-344`, `:374-390`).
+- `testStage2HillClimbRejectsCellWhenAnyReplicateInfeasible` configures an infeasible first cell with `stage2Replicates: 3` and asserts `fits == false`, nil TPS/TTFT aggregates, `replicatesN == 3`, and nil persisted throughput (`phase3-binary/Tests/macprovider-cliTests/Stage2HillClimbTests.swift:72-95`).
+
+#### Category C: Cartesian product determinism
+
+(no findings)
+
+Verification notes:
+- The nested loops are deterministic: `kvBitsAxis` outer, `maxBatchAxis` middle, `maxContextAxis` inner (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:107-153`).
+- The persistence/order test reads rows by `ORDER BY id ASC` and asserts `[nil, nil, 4, 4]` for kv bits and `[1, 2, 1, 2]` for max batch, matching that loop order (`phase3-binary/Tests/macprovider-cliTests/Stage2HillClimbTests.swift:127-158`, `:230-237`).
+- `phase3-binary/implementation-notes.html:1553-1557` documents the same axis order.
+
+#### Category D: AutotuneDB persistence
+
+**D.1 (MAJOR) - Stage 2 persists transient best rows as `kept = true`, not only the final winning cell.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:126-149`, `:232-249`; `phase3-binary/Tests/macprovider-cliTests/Stage2HillClimbTests.swift:47-49`, `:67-69`.
+- **What:** `isNewBest` is computed before each insert and passed directly to `makeTrialRow(kept:)`. If cell A is the first feasible baseline and cell B later becomes the winner, both rows are persisted with `kept = true`. The throughput and TTFT replacement tests explicitly assert `[true, true]`.
+- **Why:** The Step 8 prompt interprets SPEC-013 FR-G.1 as requiring Stage 2's final winning cell row to get `kept = true` and all other rows to get `kept = false`. Multiple kept rows can silently mislead Step 9 if recommendation reporting reconstructs the winner from `tune_trials.kept` rather than `Stage2HillClimbResult.winningKnobs`.
+- **Recommendation:** Persist one final winner marker only. The least invasive fix is to evaluate all cells, determine `best`, then insert rows with `kept = (row cell == final best)`; alternatively update the previously inserted incumbent row to `kept = false` whenever a later cell wins. Update the replacement tests to expect `[false, true]` and add a DB assertion that exactly one Stage 2 row in a run has `kept = true`.
+
+Verification notes:
+- Other required fields are populated correctly in code: `stage = 2`, stable `runID`, per-cell `kvBits`, per-cell `maxContextCap`, per-cell `maxBatch`, `replicatesN = stage2Replicates`, nil aggregate metrics on infeasible rows, and non-nil median/p95 metrics on feasible rows (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:232-249`).
+- `testStage2HillClimbPersistsAllCellTrialsWithStageTwo` asserts row count, `stage`, `kvBits`, `maxBatch`, `maxContextCap`, `replicatesN`, and prober order (`phase3-binary/Tests/macprovider-cliTests/Stage2HillClimbTests.swift:146-158`), but not runID, model, targetContext, measuredPromptTokens, maxTokens, fits, nErr, kept, notes, or aggregate metrics.
+
+#### Category E: noFeasibleCell error
+
+(no findings)
+
+Verification notes:
+- `Stage2HillClimbError.noFeasibleCell(reason:)` is distinct from Stage 1 errors and includes a descriptive `CustomStringConvertible` surface (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:18-26`).
+- The all-infeasible path joins per-cell failure reasons and throws only after all cells are evaluated (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:139-159`).
+- `testStage2HillClimbAllCellsInfeasibleThrowsNoFeasibleCell` asserts the specific error case, both failure reason fragments, and the Stage 2 description prefix (`phase3-binary/Tests/macprovider-cliTests/Stage2HillClimbTests.swift:98-124`).
+- Step 10 still owns mapping this error to `tune_runs.exit_reason`; no Step 8 code commits to a new enum value.
+
+#### Category F: Provider lifecycle per cell
+
+(no findings)
+
+Verification notes:
+- `Stage2HillClimb.run()` calls `runnerFactory()` inside the innermost cell loop (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:107-116`), so each cell receives a fresh runner instance.
+- `Stage2Prober.probe` starts the provider with the cell's `kvBits`, `maxContext`, and `maxBatch`, then stops it in `defer` (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:318-327`).
+- Because each probe call awaits completion before the next loop iteration, the prior provider's defer-stop runs before the next cell starts.
+
+#### Category G: SSE/TTFT measurement reuse
+
+(no findings)
+
+Verification notes:
+- Stage 2 duplicates rather than shares Stage 1's SSE helper code, but the core parser/measurement shape is aligned: same endpoint, streamed request body, first non-empty `delta.content` or `choices[0].text` as TTFT boundary, generated text accumulation, whitespace token approximation, and p95/median helpers (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:497-593`; `phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:416-512`).
+- The notable Stage 2 difference is intentional for strict-all-feasible per-cell semantics: TTFT over gate increments `nErr` immediately and causes the cell to become infeasible with nil aggregates (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:366-399`).
+
+#### Category H: Anti-regression on Steps 1-7
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: 317 tests executed, 2 skipped, 0 failures.
+- `Stage2HillClimbTests` executed 7 tests with 0 failures.
+- `git diff --stat 118599e^ 118599e` shows exactly 3 changed files: added `Stage2HillClimb.swift`, added `Stage2HillClimbTests.swift`, and modified `implementation-notes.html`. No existing Step 1-7 production sources were modified in the Step 8 commit.
+
+#### Category I: Forward-compatibility (Steps 9, 10)
+
+(no findings)
+
+Verification notes:
+- `Stage2HillClimbResult` exposes `selectedModel`, `winningKnobs`, `medianTPS`, `p95TTFTMS`, `replicates`, and `cellTrials`, which is enough for Step 9's recommendation surface if Step 9 consumes the result object directly (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:9-16`).
+- Step 10 can wire Stage 1 to Stage 2 cleanly by passing `Stage1IteratorResult.selectedModel` into `Stage2HillClimb.selectedModel`; the Step 8 commit intentionally leaves CLI runtime wiring untouched.
+- D.1 remains the Step 9/10 handoff risk if later reporting uses DB `kept` rows instead of the result object.
+
+#### Category J: Test fixtures
+
+**J.1 (MINOR) - Direct `isNewBest` edge-branch tests are incomplete.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/Stage2HillClimbTests.swift:7-180`; `phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:172-200`.
+- **What:** The seven tests cover baseline selection, throughput replacement, TTFT replacement, strict infeasible rejection, all-infeasible error reporting, persistence/order, and epsilon non-replacement. They do not directly test `bestTPS <= 0` or the tie-band branch where `bestTTFT == nil`.
+- **Why:** The production hill-climb usually stores feasible `Double` metrics, so these edges are unlikely in normal flow. Still, they are explicit prototype branches, and a future refactor of the static helper could break them without failing Step 8 tests.
+- **Recommendation:** Add direct static-helper tests for `bestTPS: 0` with positive/non-positive new TPS and tie-band `ttft != nil, bestTTFT: nil`. The `kv_bits = nil` winning case is already covered by the first-baseline and epsilon-hold tests.
+
+Verification notes:
+- Each named test exercises more than "did not throw": the assertions check winner knobs, metrics, persisted row count/fields, error payload, or cell order.
+- `testStage2HillClimbPersistsAllCellTrialsWithStageTwo` should be expanded in the D.1 fix-pass to assert the full row set, especially exactly-one final `kept`.
+
+#### Category K: Anything else
+
+(no findings)
+
+Verification notes:
+- `phase3-binary/implementation-notes.html:1545-1577` accurately describes the dormant Step 8 scope, deterministic axis order, `WinningKnobs`, keep-best rule, strict infeasible behavior, and test coverage at a high level.
+- Naming divergence is acceptable: Stage 1 iterates candidate models, while Stage 2 hill-climbs knobs within the chosen model.
+
+### Step 8 readiness verdict
+
+FIX REQUIRED.
