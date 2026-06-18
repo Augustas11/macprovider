@@ -24,6 +24,19 @@ protocol Stage1PreWarming {
     ) async throws -> PreWarmResult
 }
 
+/// Round-1 audit G.1 (MINOR) acknowledgement: this conformance adapts
+/// the production `ProviderPreWarmer` (which requires a concrete
+/// `CandidateProviderRunner` for Step 6's defer-stop pattern) to the
+/// `Stage1PreWarming` protocol the iterator depends on.
+///
+/// **Test guidance:** the cast below makes the protocol boundary leaky
+/// for one specific combination — injecting a FAKE
+/// `Stage1ProviderRunning` into the REAL `ProviderPreWarmer` would
+/// throw `invalidInjectedRunner`. Tests should NOT do this; instead
+/// inject a fake `Stage1PreWarming` directly (as
+/// `Stage1IteratorTests` does). Production code always passes a
+/// `CandidateProviderRunner` via the iterator's `RunnerFactory`, so
+/// the cast succeeds in practice.
 extension ProviderPreWarmer: Stage1PreWarming {
     func prewarmAndProbe(
         model: String,
@@ -109,6 +122,7 @@ struct Stage1Iterator {
     private let autotuneDB: AutotuneDB
     private let runID: String
     private let candidates: [String]
+    private let candidatesBySize: [String]
     private let targetContext: Int
     private let gateTTFTMS: Int
     private let stage1Replicates: Int
@@ -122,6 +136,7 @@ struct Stage1Iterator {
         autotuneDB: AutotuneDB,
         runID: String = UUID().uuidString,
         candidates: [String],
+        candidatesBySize: [String]? = nil,
         targetContext: Int,
         gateTTFTMS: Int,
         stage1Replicates: Int,
@@ -136,6 +151,26 @@ struct Stage1Iterator {
         self.autotuneDB = autotuneDB
         self.runID = runID
         self.candidates = candidates
+        // Closes round-1 audit E.1 (CRITICAL): the prior code surfaced
+        // `failureReasons.last`, which only equals the smallest candidate
+        // when iteration order is largest-first. SPEC-013 FR-A.1 explicitly
+        // allows the operator to override iteration order (the AC-17
+        // `["1b", "32b"]` case), but FR-H.4 still requires the SMALLEST
+        // MODEL's reason to surface first — independent of iteration order.
+        //
+        // `candidatesBySize` provides the orthogonal "size order" lookup
+        // (smallest first). Step 10 will pass `AutotuneCommand`'s default
+        // candidate list sorted by `sizeB` ascending; for operator-supplied
+        // lists, the caller passes the same operator list sorted by SizeB
+        // (using the FR-A.4 metadata available in
+        // `AutotuneCommand.defaultCandidates` or a parsed equivalent).
+        //
+        // Fallback when `candidatesBySize` is nil: treat `candidates` as
+        // largest-first (the default-list convention per FR-C.1) and
+        // reverse to get smallest-first. This preserves the prior behavior
+        // for the default-list path while letting operator-override paths
+        // pass an explicit size order.
+        self.candidatesBySize = candidatesBySize ?? Array(candidates.reversed())
         self.targetContext = targetContext
         self.gateTTFTMS = gateTTFTMS
         self.stage1Replicates = stage1Replicates
@@ -146,7 +181,10 @@ struct Stage1Iterator {
 
     func run() async throws -> Stage1IteratorResult {
         var trialRows: [AutotuneTrialRow] = []
-        var failureReasons: [String] = []
+        // Closes round-1 audit E.1: track failure reasons keyed by candidate
+        // ID so we can look up smallest-by-SIZE at the end, independent of
+        // iteration order.
+        var failureReasonsByCandidate: [String: String] = [:]
 
         for candidate in candidates {
             let preWarmRunner = try runnerFactory()
@@ -159,17 +197,32 @@ struct Stage1Iterator {
 
             switch preWarmResult {
             case .failed(.integrity, let reason):
+                // Closes round-1 audit F.1 (MAJOR): the prior code threw
+                // immediately without writing a trial row, losing the
+                // security-relevant integrity-failure evidence from
+                // tune_trials. SPEC-013 §5.7 FR-G.1 says "every trial is
+                // recorded." Insert the row BEFORE throwing.
+                let integrityReason = "pre-warm integrity: \(reason)"
+                let row = makeTrialRow(
+                    model: candidate,
+                    measuredPromptTokens: nil,
+                    result: .infeasible(reason: integrityReason, nErr: 1),
+                    kept: false
+                )
+                try autotuneDB.insertTrial(row)
+                trialRows.append(row)
                 throw Stage1IteratorError.preWarmIntegrityFailure(
                     model: candidate,
                     reason: reason,
                     exitReason: .preWarmIntegrityFailure
                 )
             case .failed(.transient, let reason):
-                failureReasons.append(reason)
+                let transientReason = "pre-warm transient: \(reason)"
+                failureReasonsByCandidate[candidate] = transientReason
                 let row = makeTrialRow(
                     model: candidate,
                     measuredPromptTokens: nil,
-                    result: .infeasible(reason: "pre-warm transient: \(reason)", nErr: 1),
+                    result: .infeasible(reason: transientReason, nErr: 1),
                     kept: false
                 )
                 try autotuneDB.insertTrial(row)
@@ -188,11 +241,17 @@ struct Stage1Iterator {
                 gateTTFTMS: gateTTFTMS,
                 replicates: stage1Replicates
             )
+            // Closes round-1 audit H.1 (MINOR): SPEC-013 §5.7 FR-G.1's
+            // tune_trials.kept comment says "Stage 2 only; 0 in Stage 1".
+            // Stage 1 rows MUST always set kept = false; Step 9's
+            // recommendation surface derives the chosen model from
+            // Stage1IteratorResult.selectedModel, not from
+            // tune_trials.kept.
             let row = makeTrialRow(
                 model: candidate,
                 measuredPromptTokens: Stage1Prober.promptTokenEstimate(targetContext: targetContext),
                 result: probeResult,
-                kept: probeResult.isFeasible
+                kept: false
             )
             try autotuneDB.insertTrial(row)
             trialRows.append(row)
@@ -205,14 +264,27 @@ struct Stage1Iterator {
                     exitReason: .ok
                 )
             case .infeasible(let reason, _):
-                failureReasons.append(reason)
+                failureReasonsByCandidate[candidate] = reason
             }
         }
 
-        let surfaced = failureReasons.last ?? "no candidates were evaluated"
+        // Closes round-1 audit E.1 (CRITICAL): surface the SMALLEST
+        // candidate (by size order, NOT iteration order) per FR-A.4 /
+        // FR-H.4. Walk `candidatesBySize` (smallest-first) and pick the
+        // first one that has a failure recorded; emit the full list in
+        // size order so the caller can print "even <smallest>: <reason>"
+        // followed by each larger candidate's reason.
+        let smallestFailed = candidatesBySize.first { failureReasonsByCandidate[$0] != nil }
+        let surfaced: String
+        if let smallest = smallestFailed, let reason = failureReasonsByCandidate[smallest] {
+            surfaced = "\(smallest): \(reason)"
+        } else {
+            surfaced = "no candidates were evaluated"
+        }
+        let reasonsBySize = candidatesBySize.compactMap { failureReasonsByCandidate[$0] }
         throw Stage1IteratorError.noFeasible(
             reason: surfaced,
-            trials: failureReasons,
+            trials: reasonsBySize,
             exitReason: .noFeasible
         )
     }

@@ -85,7 +85,12 @@ final class Stage1IteratorTests: XCTestCase {
             XCTAssertEqual(exitReason, .preWarmIntegrityFailure)
         }
 
-        XCTAssertEqual(try trialModels(at: dbURL), [])
+        // Round-1 audit F.1 (MAJOR) closure: integrity-abort path now
+        // RECORDS the offending candidate's trial row before throwing,
+        // per SPEC-013 §5.7 FR-G.1 ("every trial is recorded"). Candidate
+        // 2 ("model-b") is still never reached (the abort throws after
+        // candidate 1's row insertion).
+        XCTAssertEqual(try trialModels(at: dbURL), ["model-a"])
         XCTAssertEqual(prewarmer.models, ["model-a"])
         XCTAssertEqual(prober.probedModels, [])
     }
@@ -105,6 +110,10 @@ final class Stage1IteratorTests: XCTestCase {
         ])
 
         do {
+            // Default candidate list is largest-first per FR-C.1, so the
+            // iterator's default `candidatesBySize` (nil → reversed) gives
+            // ["1b", "14b", "32b"] — smallest-first. The surfaced reason
+            // and the size-ordered trials list MUST reflect this.
             _ = try await makeIterator(
                 db: db,
                 candidates: ["32b", "14b", "1b"],
@@ -116,13 +125,72 @@ final class Stage1IteratorTests: XCTestCase {
             guard case .noFeasible(let reason, let trials, let exitReason) = error else {
                 return XCTFail("expected noFeasible, got \(error)")
             }
-            XCTAssertEqual(reason, "1b leaked stop token")
-            XCTAssertEqual(trials, ["32b too slow", "14b too slow", "1b leaked stop token"])
+            // Round-1 audit E.1 closure: surfaced reason now includes the
+            // smallest candidate's name (FR-H.4 "even <smallest> failed"
+            // semantics) and the `trials` list is in size order
+            // (smallest-first) for the caller to print in order.
+            XCTAssertEqual(reason, "1b: 1b leaked stop token")
+            XCTAssertEqual(trials, ["1b leaked stop token", "14b too slow", "32b too slow"])
             XCTAssertEqual(exitReason, .noFeasible)
-            XCTAssertTrue(error.description.hasPrefix("no_feasible: 1b leaked stop token"))
+            XCTAssertTrue(error.description.hasPrefix("no_feasible: 1b: 1b leaked stop token"))
         }
 
+        // All three rows recorded in tune_trials, in ITERATION order
+        // (largest-first per the operator-supplied list).
         XCTAssertEqual(try trialModels(at: dbURL), ["32b", "14b", "1b"])
+    }
+
+    /// Round-1 audit E.1 (CRITICAL) regression lock: when the operator
+    /// passes a SMALLEST-FIRST list via `--candidate-models 1b,32b` AND
+    /// both fail, FR-H.4 still requires the SMALLEST candidate's reason
+    /// to surface first — independent of iteration order. The prior
+    /// `failureReasons.last` code would have surfaced 32b's reason
+    /// (LARGEST), silently violating FR-A.4 / FR-H.4 under an AC-17-shaped
+    /// override.
+    func testStage1IteratorAllInfeasibleWithOperatorOverrideSurfacesSmallestBySize() async throws {
+        let dbURL = try temporaryDBURL()
+        let db = try AutotuneDB(path: dbURL.path)
+        let prewarmer = StubPreWarmer(results: [
+            "1b": .warmed(cacheState: .alreadyCached, loadDurationSec: 0.1),
+            "32b": .warmed(cacheState: .alreadyCached, loadDurationSec: 0.1),
+        ])
+        let prober = StubStage1Prober(results: [
+            "1b": .infeasible(reason: "1b leaked stop token", nErr: 1),
+            "32b": .infeasible(reason: "32b OOM during probe", nErr: 1),
+        ])
+
+        do {
+            // Operator override: iteration order is 1b, 32b (the AC-17
+            // shape). Size order (smallest-first) is also [1b, 32b].
+            // Both fail.
+            _ = try await Stage1Iterator(
+                candidateProviderRunner: { StubProviderRunner() },
+                providerPreWarmer: prewarmer,
+                autotuneDB: db,
+                runID: "test-run",
+                candidates: ["1b", "32b"],
+                candidatesBySize: ["1b", "32b"],
+                targetContext: 2_000,
+                gateTTFTMS: 60_000,
+                stage1Replicates: 1,
+                port: 18_080,
+                prober: prober
+            ).run()
+            XCTFail("expected no feasible error")
+        } catch let error as Stage1IteratorError {
+            guard case .noFeasible(let reason, let trials, _) = error else {
+                return XCTFail("expected noFeasible, got \(error)")
+            }
+            // The CRITICAL contract: 1b's reason (smallest) leads, NOT
+            // 32b's. Under the prior `failureReasons.last` code, this
+            // would have asserted "32b OOM during probe" — the silent
+            // FR-H.4 violation.
+            XCTAssertEqual(reason, "1b: 1b leaked stop token")
+            XCTAssertEqual(trials, ["1b leaked stop token", "32b OOM during probe"])
+        }
+
+        // Iteration order preserved in tune_trials.
+        XCTAssertEqual(try trialModels(at: dbURL), ["1b", "32b"])
     }
 
     func testStage1IteratorHonorsOperatorOrderForACSeventeen() async throws {
@@ -196,11 +264,106 @@ final class Stage1IteratorTests: XCTestCase {
         XCTAssertEqual(nErr, 1)
     }
 
+    // MARK: - Round-1 audit fix tests
+
+    /// Round-1 D.1 closure: HTTP non-2xx responses MUST classify as
+    /// infeasible. The prior SSE parser handled this correctly but
+    /// without a regression-lock test.
+    func testStage1ProberClassifiesHTTPNon2xxAsInfeasible() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try non2xxProviderScript(statusCode: 503, statusMessage: "Service Unavailable").path,
+            logDirectory: try temporaryDirectory(name: "stage1-non2xx-logs")
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 5, stopGraceSeconds: 1).probe(
+            model: "model-a",
+            port: port,
+            runner: runner,
+            targetContext: 64,
+            gateTTFTMS: 60_000,
+            replicates: 1
+        )
+
+        guard case .infeasible(let reason, let nErr) = result else {
+            return XCTFail("expected infeasible, got \(result)")
+        }
+        XCTAssertTrue(reason.contains("HTTP 503"), reason)
+        XCTAssertEqual(nErr, 1)
+    }
+
+    /// Round-1 D.1 closure: completions-style `choices[0].text` SSE
+    /// payloads MUST be accepted as content (alongside the chat-style
+    /// `choices[0].delta.content`).
+    func testStage1ProberAcceptsCompletionsStyleTextSSE() async throws {
+        let port = try unusedPort()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try completionsTextSSEProviderScript(responseText: "completions-style content").path,
+            logDirectory: try temporaryDirectory(name: "stage1-completions-text-logs")
+        )
+
+        let result = try await Stage1Prober(readyTimeoutSec: 5, stopGraceSeconds: 1).probe(
+            model: "model-a",
+            port: port,
+            runner: runner,
+            targetContext: 64,
+            gateTTFTMS: 60_000,
+            replicates: 1
+        )
+
+        guard case .feasible(let medianTPS, _) = result else {
+            return XCTFail("expected feasible, got \(result)")
+        }
+        XCTAssertGreaterThan(medianTPS, 0)
+    }
+
+    /// Round-1 K.1 closure: persistence-field assertion. The iterator
+    /// MUST write Stage 1 rows with `stage = 1`, `replicates_n = stage1Replicates`,
+    /// `max_context_cap = targetContext`, `kv_bits = NULL`,
+    /// `max_batch = NULL`, AND `kept = 0` (Stage 1 leaves `kept` to
+    /// Step 9's recommendation surface per FR-G.1 schema comment;
+    /// closes round-1 audit H.1 too).
+    func testStage1IteratorPersistsFullStage1FieldSet() async throws {
+        let dbURL = try temporaryDBURL()
+        let db = try AutotuneDB(path: dbURL.path)
+        let prewarmer = StubPreWarmer(results: [
+            "1b": .warmed(cacheState: .alreadyCached, loadDurationSec: 0.1),
+        ])
+        let prober = StubStage1Prober(results: [
+            "1b": .feasible(medianTPS: 10, p95TTFTMS: 100),
+        ])
+
+        _ = try await makeIterator(
+            db: db,
+            candidates: ["1b"],
+            prewarmer: prewarmer,
+            prober: prober,
+            stage1Replicates: 3,
+            targetContext: 4_000
+        ).run()
+
+        let row = try assertSingleTrialRow(at: dbURL)
+        XCTAssertEqual(row.stage, 1, "Stage 1 rows MUST set stage = 1 (AC-16 contract)")
+        XCTAssertEqual(row.runID, "stage1-test-run")
+        XCTAssertEqual(row.replicatesN, 3)
+        XCTAssertEqual(row.maxContextCap, 4_000)
+        XCTAssertNil(row.kvBits, "Stage 1 leaves kv_bits to Stage 2 cells")
+        XCTAssertNil(row.maxBatch, "Stage 1 leaves max_batch to Stage 2 cells")
+        // Round-1 H.1 closure: SPEC-013 §5.7 FR-G.1's tune_trials.kept
+        // schema comment reserves kept for Stage 2; the chosen model is
+        // surfaced via Stage1IteratorResult.selectedModel, not via kept.
+        XCTAssertFalse(row.kept, "Stage 1 rows MUST have kept = false per FR-G.1 schema comment")
+        XCTAssertTrue(row.fits)
+        XCTAssertEqual(row.nErr, 0)
+    }
+
     private func makeIterator(
         db: AutotuneDB,
         candidates: [String],
         prewarmer: StubPreWarmer,
-        prober: StubStage1Prober
+        prober: StubStage1Prober,
+        stage1Replicates: Int = 1,
+        targetContext: Int = 2_000
     ) -> Stage1Iterator {
         Stage1Iterator(
             candidateProviderRunner: { StubProviderRunner() },
@@ -208,13 +371,203 @@ final class Stage1IteratorTests: XCTestCase {
             autotuneDB: db,
             runID: "stage1-test-run",
             candidates: candidates,
-            targetContext: 2_000,
+            targetContext: targetContext,
             gateTTFTMS: 60_000,
-            stage1Replicates: 1,
+            stage1Replicates: stage1Replicates,
             port: 18_080,
             prober: prober,
             readyTimeoutSec: 1,
             now: { Date(timeIntervalSince1970: 1_781_740_800) }
+        )
+    }
+
+    /// Round-1 D.1 fixture: HTTP server that returns a non-2xx status
+    /// for every chat completions request (after responding 200 to
+    /// /v1/models so waitForReady completes).
+    private func non2xxProviderScript(statusCode: Int, statusMessage: String) throws -> URL {
+        let directory = try temporaryDirectory(name: "stage1-non2xx-provider")
+        let scriptURL = directory.appendingPathComponent("non2xx-provider")
+        let script = """
+        #!/usr/bin/env python3
+        import socket, sys
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage1 non2xx provider ready", flush=True)
+
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            body = '{"error":"non-2xx test fixture"}'
+            client.sendall((
+                f"HTTP/1.1 \(statusCode) \(statusMessage)\\r\\n"
+                "Content-Type: application/json\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    /// Round-1 D.1 fixture: SSE stream that uses `choices[0].text`
+    /// (completions API style) instead of `choices[0].delta.content`
+    /// (chat API style). Both shapes must be accepted by the parser.
+    private func completionsTextSSEProviderScript(responseText: String) throws -> URL {
+        let directory = try temporaryDirectory(name: "stage1-completions-text-provider")
+        let scriptURL = directory.appendingPathComponent("completions-text-provider")
+        let escapedText = responseText
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+        let script = """
+        #!/usr/bin/env python3
+        import json, socket, sys
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("expected serve --no-join\\n")
+            sys.exit(2)
+        port = int(args[args.index("--port") + 1])
+
+        server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        server.bind(("127.0.0.1", port))
+        server.listen(16)
+        print("stage1 completions-text provider ready", flush=True)
+
+        response_text = '\(escapedText)'
+
+        while True:
+            client, _ = server.accept()
+            request = client.recv(65536).decode("utf-8", "ignore")
+            if "GET /v1/models " in request:
+                body = '{"object":"list","data":[{"id":"stub","object":"model"}]}'
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: application/json\\r\\n"
+                    f"Content-Length: {len(body)}\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                    f"{body}"
+                ).encode())
+                client.close()
+                continue
+            if "POST /v1/chat/completions " in request:
+                client.sendall((
+                    "HTTP/1.1 200 OK\\r\\n"
+                    "Content-Type: text/event-stream\\r\\n"
+                    "Cache-Control: no-cache\\r\\n"
+                    "Connection: close\\r\\n"
+                    "\\r\\n"
+                ).encode())
+                # Send a comment line (SSE heartbeat) — parser must skip.
+                client.sendall(b": keep-alive\\n\\n")
+                # Send a malformed `data:` JSON line — parser must skip
+                # gracefully without crashing.
+                client.sendall(b"data: not-valid-json\\n\\n")
+                # The "text" shape used by the completions API.
+                chunk = json.dumps({"choices":[{"text":response_text}]})
+                client.sendall(f"data: {chunk}\\n\\n".encode())
+                client.sendall(b"data: [DONE]\\n\\n")
+                client.close()
+                continue
+            body = "not found"
+            client.sendall((
+                "HTTP/1.1 404 Not Found\\r\\n"
+                f"Content-Length: {len(body)}\\r\\n"
+                "Connection: close\\r\\n"
+                "\\r\\n"
+                f"{body}"
+            ).encode())
+            client.close()
+        """
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
+    }
+
+    /// Round-1 K.1 helper: read a single trial row's full field set from
+    /// the DB for persistence-field assertion.
+    private func assertSingleTrialRow(at url: URL) throws -> AutotuneTrialRow {
+        let handle = try openSQLite(at: url)
+        defer { sqlite3_close(handle) }
+
+        let sql = """
+        SELECT ts_utc, run_id, stage, model, target_context,
+               measured_prompt_tokens, max_tokens, agg_throughput_tps,
+               ttft_p95_ms, fits, n_err, kept, notes,
+               kv_bits, max_context_cap, max_batch, replicates_n
+        FROM tune_trials
+        ORDER BY id ASC
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK,
+              let statement
+        else {
+            throw NSError(domain: "Stage1IteratorTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "prepare failed"])
+        }
+        defer { sqlite3_finalize(statement) }
+
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw NSError(domain: "Stage1IteratorTests", code: 2, userInfo: [NSLocalizedDescriptionKey: "expected one row"])
+        }
+
+        func intOrNil(_ column: Int32) -> Int? {
+            if sqlite3_column_type(statement, column) == SQLITE_NULL { return nil }
+            return Int(sqlite3_column_int64(statement, column))
+        }
+        func doubleOrNil(_ column: Int32) -> Double? {
+            if sqlite3_column_type(statement, column) == SQLITE_NULL { return nil }
+            return sqlite3_column_double(statement, column)
+        }
+        func stringOrNil(_ column: Int32) -> String? {
+            if sqlite3_column_type(statement, column) == SQLITE_NULL { return nil }
+            guard let cString = sqlite3_column_text(statement, column) else { return nil }
+            return String(cString: cString)
+        }
+
+        return AutotuneTrialRow(
+            tsUTC: stringOrNil(0) ?? "",
+            runID: stringOrNil(1) ?? "",
+            stage: intOrNil(2) ?? 0,
+            model: stringOrNil(3) ?? "",
+            targetContext: intOrNil(4) ?? 0,
+            measuredPromptTokens: intOrNil(5),
+            maxTokens: intOrNil(6) ?? 0,
+            aggThroughputTPS: doubleOrNil(7),
+            ttftP95MS: doubleOrNil(8),
+            fits: (intOrNil(9) ?? 0) == 1,
+            nErr: intOrNil(10) ?? 0,
+            kept: (intOrNil(11) ?? 0) == 1,
+            notes: stringOrNil(12),
+            kvBits: intOrNil(13),
+            maxContextCap: intOrNil(14),
+            maxBatch: intOrNil(15),
+            replicatesN: intOrNil(16)
         )
     }
 

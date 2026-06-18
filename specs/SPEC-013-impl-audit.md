@@ -917,3 +917,137 @@ Verification notes:
 ### Step 6 readiness verdict
 
 READY TO PROCEED TO STEP 7.
+
+---
+
+## Round 12 audit (Codex on 98d7079 — Step 7 round 1)
+
+**Audited:** commit 98d7079 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 7, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 1 CRITICAL / 1 MAJOR / 4 MINOR / 0 QUESTION
+**Step 7 readiness:** FIX REQUIRED
+
+### Executive summary
+
+Step 7 preserves the load-bearing biggest-fit iteration contract for the normal success path. `Stage1Iterator.run()` stores the constructor's `candidates` array unchanged, iterates `for candidate in candidates`, and returns immediately on the first feasible probe. The AC-17 unit test is meaningful: it supplies `["1b", "32b"]` with both candidates feasible and asserts only `1b` is pre-warmed, probed, and persisted.
+
+The blocker is the all-infeasible failure-reason contract. `failureReasons.last` only surfaces the smallest candidate when the input order is largest-first. SPEC-013 also requires explicit operator order to be honored verbatim, including a manifestly small-first list, so the current code can surface the largest candidate's reason first in a valid AC-17-style override. That is a silent FR-A.4 / FR-H.4 violation and must be fixed before Step 8.
+
+Full anti-regression passed. `swift test --package-path phase3-binary` executed 306 tests, skipped 2 integration-gated tests, and reported 0 failures.
+
+### Findings
+
+#### Category A: FR-A.1 / AC-17 operator-order contract
+
+(no findings)
+
+Verification notes:
+- `Stage1Iterator.init` assigns `self.candidates = candidates`, preserving the caller-provided Swift array value (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:119-145` at 98d7079).
+- `run()` iterates `for candidate in candidates` with no sort, filter, size parse, or re-rank helper in the file (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:147-218` at 98d7079).
+- `testStage1IteratorHonorsOperatorOrderForACSeventeen` makes both `"1b"` and `"32b"` feasible, passes `["1b", "32b"]`, and asserts the selected model, prewarmer list, prober list, and DB rows are all only `"1b"` (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:128-151` at 98d7079). A size-descending internal sort would select/probe `"32b"` and fail this test.
+
+#### Category B: FR-A.2 STOP-on-first-feasible
+
+(no findings)
+
+Verification notes:
+- The `.feasible` branch returns `Stage1IteratorResult` immediately and includes the feasible row in `trials` (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:191-206` at 98d7079).
+- `testStage1IteratorStopsOnFirstFeasible` uses `[model-a infeasible, model-b feasible, model-c feasible]` and asserts only `model-a` and `model-b` are probed/persisted (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:8-34` at 98d7079).
+
+#### Category C: FR-A.3 four-condition feasibility gate
+
+(no findings)
+
+Verification notes:
+- HTTP 2xx is required before accepting a replicate (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:365-370` at 98d7079).
+- TTFT p95 uses sorted `ceil(n * 0.95) - 1`, rejects only when `p95 > gate`, so equality is feasible (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:402-408`, `505-509` at 98d7079).
+- Stop-token leak detection scans the full generated text for `<|im_end|>`, `<|endoftext|>`, and `<|eot_id|>` (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:286-287`, `371-373` at 98d7079).
+- Process exits before readiness and during per-request peeks are converted to infeasible results (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:343-356`, `377-391` at 98d7079).
+
+#### Category D: SSE parsing correctness
+
+**D.1 (MINOR) — SSE parser does not lock common non-happy streaming edge cases.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:449-503` at 98d7079; `phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:153-197` at 98d7079.
+- **What:** The parser handles the common OpenAI-compatible `data: {"choices":[{"delta":{"content":"..."}}]}` shape and also `choices[0].text`. It skips comments, blank lines, role-only deltas, malformed JSON, and `[DONE]` without crashing. The test suite only exercises the happy SSE payload through the stop-token and TTFT tests.
+- **Why:** This is acceptable for v1 but leaves no regression lock for HTTP non-2xx, malformed `data:` JSON, comment/heartbeat lines, or completions-style `choices[0].text`. A future parser tightening could silently turn valid OpenAI-compatible streams into "no content."
+- **Recommendation:** Add focused prober tests for HTTP 503 -> infeasible, malformed JSON/comment lines -> skipped gracefully, and `choices[0].text` -> content accepted.
+
+#### Category E: FR-A.4 / FR-H.4 smallest-first error
+
+**E.1 (CRITICAL) — `failureReasons.last` can surface the largest candidate first for a valid operator-supplied order.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:149`, `207-217` at 98d7079; `phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:93-126` at 98d7079.
+- **What:** All-infeasible surfacing uses `failureReasons.last`. That returns the smallest candidate only when iteration order is largest-first. SPEC-013 FR-A.1 explicitly says the operator may override order entirely and the implementation must honor even a manifestly wrong `"1B first, then 32B"` order. SPEC-013 FR-H.4 separately requires the error message to lead with the smallest failed candidate, not the last evaluated candidate.
+- **Why:** With a valid operator override like `["1b", "32b"]` where both fail, `failureReasons.last` would lead with the `32b` reason. That is exactly the severity-definition example for a silent FR-A.4 / FR-H.4 violation: the largest candidate's reason is surfaced first. The existing test only uses `["32b", "14b", "1b"]`, so it passes by tautology and does not catch the AC-17-style override case.
+- **Recommendation:** Track failure reasons by candidate identity and surface the smallest-by-size/model-order diagnostic independently from iteration order. If no reliable size metadata exists in Step 7, make the size-order source explicit by passing the default size ordering or parsed candidate metadata into the iterator. Add a regression test with `candidates: ["1b", "32b"]`, both infeasible, expecting the `1b` reason first while still preserving evaluation order.
+
+#### Category F: FR-D.2 integrity-vs-transient cascade
+
+**F.1 (MAJOR) — Integrity abort records no trial row, and the test locks that absence.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:160-166` at 98d7079; `phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:60-91` at 98d7079.
+- **What:** On `.failed(.integrity, reason)`, the iterator throws `preWarmIntegrityFailure` immediately before calling `makeTrialRow` or `autotuneDB.insertTrial`. The test then asserts `trialModels(at: dbURL) == []`.
+- **Why:** The audit prompt's FR-D.2/FR-G.1 check expects the offending candidate's trial to be recorded before abort so reporting can preserve the candidate and reason. The current code loses the integrity failure from `tune_trials`; Step 10 may later write the `tune_runs` row, but Step 7's dormant primitive has no persisted per-candidate evidence for this security-relevant abort.
+- **Recommendation:** Insert a Stage 1 `tune_trials` row for integrity pre-warm failures before throwing, with `fits = false`, `n_err = 1`, `kept = false`, and `notes = "pre-warm integrity: <reason>"` or an equivalent distinct prefix. Flip the test to assert that row exists and that the second candidate is still never pre-warmed/probed.
+
+#### Category G: DI / Protocol design
+
+**G.1 (MINOR) — Production pre-warmer conformance leaks a concrete runner downcast.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:27-43` at 98d7079.
+- **What:** `ProviderPreWarmer: Stage1PreWarming` accepts `Stage1ProviderRunning` but immediately downcasts to `CandidateProviderRunner`, throwing `invalidInjectedRunner` otherwise.
+- **Why:** Tests avoid this by injecting a fake `Stage1PreWarming`, and production passes a real `CandidateProviderRunner`, so this is not a functional blocker. It does make the protocol boundary weaker than it looks and can surprise any future test that combines the real prewarmer with a fake runner.
+- **Recommendation:** Either keep the cast but document that the production adapter requires `CandidateProviderRunner`, or make `ProviderPreWarmer` generic/abstract over the runner methods it actually needs.
+
+#### Category H: AutotuneDB persistence
+
+**H.1 (MINOR) — Stage 1 feasible rows set `kept = true` despite the schema comment saying Stage 2 owns kept.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:191-196`, `247-265` at 98d7079; `specs/SPEC-013-cli-autotune.md:1057-1060`.
+- **What:** `makeTrialRow` accepts `kept`, and the iterator passes `kept: probeResult.isFeasible`, so the first feasible Stage 1 row is persisted with `kept = true`.
+- **Why:** The audit prompt's Category H expects the first feasible row to be kept, but SPEC-013 FR-G.1's schema comment says `kept` is "Stage 2 only; 0 in Stage 1." This is a spec/prompt tension, not a runtime correctness blocker for Step 7. It should be resolved before Step 9 reporting depends on `kept` semantics.
+- **Recommendation:** Pick one interpretation before wiring recommendation reporting. If Stage 1 chosen-model rows should be discoverable via `kept`, update the normative schema comment. If `kept` is Stage 2-only, persist Stage 1 `kept = false` and derive the chosen model from `Stage1IteratorResult.selectedModel` / Step 10 run metadata.
+
+Verification notes:
+- Stage is hard-coded to `1`, `runID` is stable across rows, `kvBits` and `maxBatch` are `nil`, `maxContextCap` equals `targetContext`, and `replicatesN = stage1Replicates` (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:247-265` at 98d7079).
+- `git show 98d7079 -- phase3-binary/Sources/macprovider-cli/AutotuneDB.swift` produced no diff; Step 7 does not modify the DB schema.
+
+#### Category I: Anti-regression on Steps 1-6
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: 306 tests executed, 2 skipped, 0 failures.
+- `git diff --stat 0f76bcf 98d7079 -- phase3-binary/Sources/` shows only the new `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift` source file under `Sources`.
+- Existing Step 4 and Step 6 production APIs are extended by protocol conformances in the new file; no existing source method signatures are changed by the Step 7 commit.
+
+#### Category J: Forward-compatibility (Steps 8, 9, 10)
+
+(no findings)
+
+Verification notes:
+- `Stage1IteratorResult` exposes `selectedModel`, `trials`, and `exitReason`, enough for Step 8 to receive the chosen model and Step 9 to use the returned trial metrics (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:62-66` at 98d7079).
+- `Stage1Prober` starts a fresh runner and stops it in `defer`, preserving the Step 6 disposable pre-warm / fresh probe-provider lifecycle (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:324-341` at 98d7079).
+- Step 10 still owns `AutotuneCommand.run()` wiring, `tune_runs`, signal handling, and final output; Step 7 remains dormant as intended.
+
+#### Category K: Test fixtures and coverage
+
+**K.1 (MINOR) — Stage 1 persistence fields are only partially asserted.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:8-151`, `334-362` at 98d7079.
+- **What:** Iterator tests query persisted `model` and one transient `notes` value, but do not assert `stage = 1`, `run_id`, `fits`, `n_err`, `kept`, `replicates_n`, `target_context`, or metric fields.
+- **Why:** The production `makeTrialRow` currently sets most of these correctly, but a future regression could write `stage = 0` or lose `replicates_n` without failing the Step 7 test suite. AC-16 is explicitly about `tune_trials.stage`.
+- **Recommendation:** Add a row-reader helper for full `AutotuneTrialRow`-relevant columns and assert at least one infeasible row, one transient row, and one feasible row have the expected Stage 1 fields.
+
+Verification notes:
+- The seven required tests exist and exercise the named high-level contracts: stop-on-first-feasible, transient advancement, integrity abort, all-infeasible reason surfacing, AC-17 operator order, stop-token leak detection, and TTFT gate miss.
+- Gaps remaining: HTTP non-2xx, malformed SSE JSON, zero replicates, and full persisted field assertions.
+
+#### Category O: Anything else
+
+(no findings)
+
+Verification notes:
+- The Step 7 implementation-notes section accurately describes the dormant iterator/prober, operator-order preservation, fresh probe provider, SSE TTFT measurement, Stage 1 persistence, and test coverage at a high level (`phase3-binary/implementation-notes.html` section `spec013-autotune-step7` at 98d7079).
+- The per-row ISO8601 formatter allocation is a minor performance detail and not material for Stage 1 candidate counts.
+
+### Step 7 readiness verdict
+
+FIX REQUIRED.

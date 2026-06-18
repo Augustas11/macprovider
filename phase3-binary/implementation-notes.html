@@ -1480,5 +1480,66 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     detection, and TTFT gate misses.</li>
   </ul>
 </div>
+<div class="entry">
+  <time>2026-06-18 (Step 7 round-1 audit response)</time>
+  <p><strong>Round-1 codex audit closures</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 12; verdict was FIX REQUIRED with 1 CRITICAL / 1 MAJOR /
+  4 MINOR / 0 QUESTION).</p>
+  <p><strong>E.1 CRITICAL fix</strong> (failureReasons.last only
+  surfaces smallest model under largest-first iteration; under operator
+  override [1b, 32b] both failing, it returned 32b's reason — silent
+  FR-A.4 / FR-H.4 violation). Added an orthogonal
+  <code>candidatesBySize: [String]?</code> init parameter (default:
+  caller list reversed). The all-infeasible throw now walks
+  <code>candidatesBySize</code> smallest-first to find the first failed
+  candidate and surfaces its reason. New regression test
+  <code>testStage1IteratorAllInfeasibleWithOperatorOverrideSurfacesSmallestBySize</code>
+  passes <code>["1b", "32b"]</code> as both iteration AND size order,
+  both fail, asserts the surfaced reason is "1b: 1b leaked stop token"
+  (not "32b OOM during probe"). Existing test
+  <code>testStage1IteratorAllInfeasibleSurfacesSmallestFirstReason</code>
+  updated to match the new contract (surfaced reason now includes the
+  candidate name prefix; trials list is size-ordered).</p>
+  <p><strong>F.1 MAJOR fix</strong> (integrity abort lost per-candidate
+  trial evidence). Pre-warm integrity branch now writes the trial row
+  with notes="pre-warm integrity: &lt;reason&gt;" BEFORE throwing per
+  FR-G.1 "every trial is recorded." Test
+  <code>testStage1IteratorAbortsOnIntegrity</code> flipped from
+  asserting <code>trialModels == []</code> to
+  <code>trialModels == ["model-a"]</code>.</p>
+  <p><strong>H.1 MINOR fix</strong> (Stage 1 row kept=true conflicted
+  with SPEC FR-G.1 schema comment "Stage 2 only; 0 in Stage 1").
+  Stage1Iterator now always passes <code>kept: false</code> for Stage 1
+  rows; Step 9 derives the chosen model from
+  <code>Stage1IteratorResult.selectedModel</code> rather than
+  <code>tune_trials.kept</code>.</p>
+  <p><strong>D.1 MINOR fix</strong> (SSE parser edge cases untested).
+  Added <code>testStage1ProberClassifiesHTTPNon2xxAsInfeasible</code>
+  (HTTP 503 → infeasible with "HTTP 503" in reason) and
+  <code>testStage1ProberAcceptsCompletionsStyleTextSSE</code> (OpenAI
+  completions API <code>choices[0].text</code> shape → feasible). The
+  completions-style fixture also exercises SSE comment lines and
+  malformed JSON <code>data:</code> payloads, locking the parser's
+  graceful-skip behavior.</p>
+  <p><strong>K.1 MINOR fix</strong> (Stage 1 persistence fields partly
+  asserted). Added
+  <code>testStage1IteratorPersistsFullStage1FieldSet</code> that reads
+  the row from the DB via a new <code>assertSingleTrialRow</code>
+  helper and asserts every Stage 1-relevant column: stage=1, runID,
+  fits, nErr, kept=false, replicatesN, maxContextCap=targetContext,
+  kvBits=nil, maxBatch=nil. A future regression that writes stage=0
+  or loses replicates_n would fail this test.</p>
+  <p><strong>G.1 MINOR fix</strong> (ProviderPreWarmer DI cast leaks).
+  Added a documentation block on the <code>extension
+  ProviderPreWarmer: Stage1PreWarming</code> explaining the
+  production-only cast and steering test authors to inject a fake
+  <code>Stage1PreWarming</code> directly rather than combining a real
+  prewarmer with a fake runner.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 310/310
+  (306 baseline + 4 new from this fix-pass), with 2 skipped
+  integration-gated tests.</p>
+</div>
 </section>
 </body></html>
