@@ -1120,4 +1120,44 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   </ul>
 </div>
 </section>
+<section id="spec013-autotune-step4"><h2>SPEC-013 autotune Step 4 - provider lifecycle runner</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added <code>CandidateProviderRunner</code> as a standalone lifecycle
+    primitive. It is not called from <code>AutotuneCommand.run()</code> yet;
+    Step 7 will own runtime wiring after provider-conflict and pre-warm work
+    land.</li>
+    <li>The runner resolves the production provider binary from the current
+    executable path (<code>Bundle.main.executablePath</code>, falling back to
+    <code>CommandLine.arguments[0]</code>) and does not add any
+    <code>--provider-bin</code> operator flag. Tests use constructor injection
+    to supply a stub binary path.</li>
+    <li><code>start</code> assembles
+    <code>serve --no-join --model &lt;id&gt; --port &lt;N&gt;</code> plus optional
+    <code>--kv-bits</code>, <code>--max-context</code>, and
+    <code>--max-batch</code> knobs, validates the knob domain, and rejects
+    a second start while the current provider process is still running.</li>
+    <li>Provider stdout and stderr are teed into per-trial logs under
+    <code>~/.cache/macprovider/autotune-logs/</code> using safe model names in
+    the filename. Stderr is also tailed in memory so
+    <code>waitForReady</code> can return process-exit diagnostics.</li>
+    <li><code>waitForReady</code> polls
+    <code>http://127.0.0.1:&lt;port&gt;/v1/models</code> until HTTP 200,
+    process exit, or timeout. This deliberately measures readiness separately
+    from later request timing so Step 7 can preserve FR-D.1 measurement
+    isolation.</li>
+    <li><code>stop</code> is SIGTERM-only for v1. It waits for process exit and
+    port release through the grace window and logs a warning if the port remains
+    held. It never escalates to SIGKILL; foreground-restart escalation, if any,
+    is deferred to the Step 5 foreground path.</li>
+    <li>Deferred integration: a real-binary lifecycle test exists but is skipped
+    unless <code>MACPROVIDER_INTEGRATION_TEST=1</code>,
+    <code>MACPROVIDER_INTEGRATION_PROVIDER_BIN</code>, and
+    <code>MACPROVIDER_INTEGRATION_MODEL</code> are set. Unit coverage uses a
+    compiled Swift stub provider so Step 4 does not require a real model
+    fixture.</li>
+  </ul>
+</div>
+</section>
 </body></html>
