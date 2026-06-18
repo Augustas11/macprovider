@@ -1093,4 +1093,31 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   </ul>
 </div>
 </section>
+<section id="spec013-autotune-step3"><h2>SPEC-013 autotune Step 3 - SQLite DB layer</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added <code>AutotuneDB</code> as a Swift-native wrapper over macOS
+    system <code>libsqlite3</code> via the Swift <code>SQLite3</code> module.
+    No new top-level Swift package dependency or YAML-backed SQLite wrapper was
+    introduced.</li>
+    <li>The DB opens <code>~/.config/macprovider/autotune.sqlite</code> by
+    default, with callers able to pass the parsed <code>--db-path</code>
+    override. Opening a fresh path creates the SPEC-013 v0.3
+    <code>tune_trials</code> and <code>tune_runs</code> tables.</li>
+    <li><code>tune_trials.stage</code> is created as
+    <code>INTEGER NOT NULL DEFAULT 1</code>, and the same
+    <code>ALTER TABLE ... ADD COLUMN</code> migration is run idempotently with
+    duplicate-column errors ignored to support prototype DBs.</li>
+    <li><code>tune_runs.exit_reason</code> is stored as text because SQLite has
+    no native enum type. The normative SPEC-013 enum is enforced in the
+    application layer before insert.</li>
+    <li>Retention is exposed as
+    <code>applyRetentionInTransaction(retainRuns:)</code>. It enforces
+    <code>N &gt;= 1</code> and deletes stale rows from both
+    <code>tune_trials</code> and <code>tune_runs</code> inside one SQLite
+    transaction after the new <code>tune_runs</code> row exists.</li>
+  </ul>
+</div>
+</section>
 </body></html>
