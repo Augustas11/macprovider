@@ -1051,3 +1051,76 @@ Verification notes:
 ### Step 7 readiness verdict
 
 FIX REQUIRED.
+
+---
+
+## Round 13 audit (Codex on a9da9e5 — Step 7 round 2 closure verification)
+
+**Audited:** commit a9da9e5 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 7, round 2 of N
+**Date:** 2026-06-18
+**Closure summary:** 6 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED across the 6 round-1 findings
+**Round-2 findings:** 0 CRITICAL anti-regression / 0 MAJOR new / 1 MINOR new
+**Step 7 readiness:** READY TO PROCEED TO STEP 8
+
+### Executive summary
+
+Commit a9da9e5 closes all six Round 12 findings. The load-bearing E.1 fix no longer derives the all-infeasible surface from iteration order; it records failures by candidate identity and walks `candidatesBySize` smallest-first for the leading reason and `trials` list. The STOP-on-first-feasible path still returns immediately on the first feasible probe, and Stage 1 rows now consistently use `kept = false` while surfacing the selected model through `Stage1IteratorResult.selectedModel`.
+
+Full anti-regression passed. `swift test --package-path phase3-binary` executed 310 tests, skipped 2 integration-gated tests, and reported 0 failures. Round 2 found one non-blocking API brittleness issue: future Step 10 wiring must pass explicit `candidatesBySize` for operator overrides, because the nil fallback assumes the default largest-first list. This is documented and test-covered for the explicit path, so it is a Step 10 handoff risk, not a Step 7 blocker.
+
+### Round-1 finding closures
+
+**E.1 (CRITICAL) — CLOSED.** `Stage1Iterator.init` now accepts `candidatesBySize: [String]?` and falls back to `Array(candidates.reversed())` only for the default largest-first convention (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:133-173`). `run()` stores failures in `failureReasonsByCandidate`, then computes `smallestFailed` by walking `candidatesBySize` and emits both the leading `"<candidate>: <reason>"` surface and the size-ordered `trials` list from that same order (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:182-289`). The default-list test now asserts `1b: 1b leaked stop token` and `["1b leaked stop token", "14b too slow", "32b too slow"]`; the new operator-override test passes `candidates: ["1b", "32b"]` plus `candidatesBySize: ["1b", "32b"]`, makes both fail, and asserts the `1b` reason leads (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:98-194`).
+
+**F.1 (MAJOR) — CLOSED.** The `.failed(.integrity, reason)` branch now builds a `pre-warm integrity: <reason>` row, calls `autotuneDB.insertTrial(row)`, appends the row, and only then throws `preWarmIntegrityFailure` (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:198-218`). `testStage1IteratorAbortsOnIntegrity` asserts the offending model row exists, `trialModels(at:) == ["model-a"]`, while `prewarmer.models == ["model-a"]` and `prober.probedModels == []`, so the second candidate remains unvisited (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:60-96`).
+
+**H.1 (MINOR) — CLOSED.** The probe row creation path always passes `kept: false`, including for feasible rows (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:244-255`). `makeTrialRow` still returns `Stage1IteratorResult(selectedModel: candidate, ...)` immediately on feasibility, so Step 9 can consume the chosen model without relying on Stage 1 `tune_trials.kept` (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:259-265`). `testStage1IteratorPersistsFullStage1FieldSet` asserts `row.kept == false` for a feasible Stage 1 row (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:320-358`).
+
+**D.1 (MINOR) — CLOSED.** The fix-pass adds the two requested prober tests. `testStage1ProberClassifiesHTTPNon2xxAsInfeasible` serves `/v1/models` as ready, then returns HTTP 503 for the chat completion request and asserts an infeasible result containing `HTTP 503` (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:269-293`, `384-435`). `testStage1ProberAcceptsCompletionsStyleTextSSE` uses a fixture that sends `: keep-alive`, `data: not-valid-json`, a valid `choices[0].text` chunk, then `[DONE]`, and asserts feasibility (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:295-318`, `437-511`). The parser skips non-`data:` comment lines, skips malformed JSON through `try?`, and accepts both `delta.content` and `text` content shapes (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:521-575`).
+
+**K.1 (MINOR) — CLOSED.** `assertSingleTrialRow` directly selects `ts_utc, run_id, stage, model, target_context, measured_prompt_tokens, max_tokens, agg_throughput_tps, ttft_p95_ms, fits, n_err, kept, notes, kv_bits, max_context_cap, max_batch, replicates_n` from SQLite and maps columns 0 through 16 into `AutotuneTrialRow` without an index shift (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:513-571`). The new test asserts `stage = 1`, `runID = "stage1-test-run"`, `fits = true`, `nErr = 0`, `kept = false`, `replicatesN = 3`, `maxContextCap = 4_000`, `kvBits = nil`, and `maxBatch = nil`, so regressions such as `stage = 0` or lost `replicates_n` would fail (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:326-358`).
+
+**G.1 (MINOR) — CLOSED.** The `ProviderPreWarmer: Stage1PreWarming` extension is runtime-identical except for documentation. The new doc block explicitly states the production adapter requires a concrete `CandidateProviderRunner`, explains the `invalidInjectedRunner` fake-runner edge, and directs tests to inject fake `Stage1PreWarming` instead (`phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:27-40`).
+
+### Round-2 new findings
+
+#### Category Z-CLOSURE
+
+(no findings)
+
+Verification notes:
+- All six Round 12 closures are implemented in the claimed commit and are covered by the new or updated tests named in the round-2 prompt.
+- `phase3-binary/implementation-notes.html` has a Step 7 round-1 audit-response entry documenting E.1, F.1, H.1, D.1, K.1, G.1, and the 310-test anti-regression result (`phase3-binary/implementation-notes.html:1484-1540`).
+
+#### Category R-REGRESSION-V07F1
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: 310 tests executed, 2 skipped, 0 failures.
+- `Stage1IteratorTests` executed 11 tests with 0 failures, including the 7 original Step 7 tests plus the 4 audit-response tests.
+- The AC-17 guard remains meaningful: `testStage1IteratorHonorsOperatorOrderForACSeventeen` still passes `["1b", "32b"]`, makes both feasible, and asserts only `1b` is selected, pre-warmed, probed, and persisted (`phase3-binary/Tests/macprovider-cliTests/Stage1IteratorTests.swift:196-219`).
+- No Step 1-6 suite failures were observed in the full package test run.
+
+#### Category N-NEWGAPS-V07F1
+
+**N.1 (MINOR) — `candidatesBySize` is a brittle handoff contract for future Step 10 wiring.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:133-173`, `phase3-binary/Sources/macprovider-cli/Stage1Iterator.swift:271-284`, `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift:119-149`.
+- **What:** The E.1 closure is correct when callers pass the new explicit `candidatesBySize` parameter for operator overrides. However, the nil fallback assumes `candidates` is the default largest-first list and reverses it. If a future Step 10 caller passes an operator-supplied smallest-first list as `candidates` but omits `candidatesBySize`, all-infeasible diagnostics will lead with the largest failed candidate again. The explicit override test covers the correct usage, but the API does not make omission impossible.
+- **Why:** This does not break Step 7 today because Stage 1 is still a dormant primitive and `AutotuneCommand.run()` has not wired `Stage1Iterator` yet. The comment at initialization documents the required Step 10 behavior, and `AutotuneCommand.defaultCandidates` already carries `sizeB` metadata for default candidates. The risk is future integration drift at the boundary between `AutotuneCommand.candidatePlan()` and `Stage1Iterator`.
+- **Recommendation:** In Step 10, derive and pass explicit smallest-first `candidatesBySize` for every `Stage1Iterator` call, including `--candidate-models` overrides. Add a Step 10 integration test where `--candidate-models 1b,32b` makes both fail and asserts the all-infeasible surface still leads with `1b`. If size metadata is unavailable for arbitrary operator IDs, require the caller to preserve the operator's explicit size order or document the limitation in the Step 10 error surface.
+
+#### Category O-OTHER-V07F1
+
+(no findings)
+
+Verification notes:
+- A `candidatesBySize` entry not present in `candidates` is ignored by the dictionary lookup and walk, which is graceful.
+- A `candidatesBySize` list missing a failed candidate omits that candidate from the size-ordered failure surface. This is part of the same API handoff risk as N.1 rather than a separate Step 7 defect.
+- If integrity-row insertion itself throws, the caller sees the DB insertion failure instead of `preWarmIntegrityFailure`. That preserves the more immediate persistence failure and is acceptable for v1.
+
+### Step 7 readiness verdict
+
+READY TO PROCEED TO STEP 8.
