@@ -36,6 +36,57 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     for a partial tuner.</p>
     <p><strong>Open questions:</strong> none blocking Step 1.</p>
   </div>
+  <div class="entry">
+    <time>2026-06-18 (Step 1 round-1 audit response)</time>
+    <p><strong>Round-1 codex audit closures</strong> (full report:
+    <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>;
+    verdict was FIX REQUIRED with 0 CRITICAL / 1 MAJOR / 3 MINOR).</p>
+    <p><strong>A.4 MAJOR fix</strong> (silent empty-cell drop in
+    <code>--max-context-axis</code>, e.g. <code>4000,,8000</code> parsed as
+    <code>[4000, 8000]</code> instead of throwing). Added
+    <code>parseCSVStrict(_:flag:)</code> that uses
+    <code>split(omittingEmptySubsequences: false)</code> and throws
+    <code>ValidationError</code> on any empty cell with a clear flag-named
+    message. The empty-default case (<code>--max-context-axis ""</code> mapping
+    to <code>[--target-context]</code> per FR-B.1) is preserved by checking the
+    raw string for emptiness before calling the strict parser.</p>
+    <p><strong>B.5 MINOR fix</strong> (same bug class in
+    <code>--candidate-models</code>): explicit candidate parse path now uses
+    <code>parseCSVStrict</code> too, surfacing operator typos like
+    <code>one,,two</code> at flag-parse time. The two other axis parsers
+    (<code>parseKvBitsAxis</code>, <code>parsePositiveIntAxis</code>) also
+    moved to the strict helper for consistency, though their per-token
+    int/keyword validators would also have rejected empty cells eventually.</p>
+    <p><strong>B.2 MINOR fix</strong> (redundant validation in <code>run()</code>):
+    removed the duplicate <code>validateBasicInputs()</code> call from
+    <code>run()</code>. ArgumentParser already invokes the
+    <code>validate()</code> protocol method at parse time. Added a
+    <code>_ = try candidatePlan()</code> call to <code>validate()</code> so
+    explicit-list parse errors surface at flag-parse time instead of being
+    deferred to <code>run()</code>.</p>
+    <p><strong>C.2 MINOR fix</strong> (test coverage gaps): added 8 new tests
+    pinning the FR-B.1 sort, duplicate rejection, empty-default, and
+    empty-cell behavior; the FR-B.5 candidate-models empty-cell behavior; an
+    AC-17-prep test using explicit <code>1B,32B</code> order (failing under
+    any future parser-level re-rank); a dry-run line-list test asserting
+    candidate order via the new testable <code>dryRunLines</code> helper;
+    and a <code>--restart-foreground</code> parse test. Test count for
+    AutotuneCommandTests rose from 5 to 13; full
+    <code>phase3-binary</code> suite rose from 245 to 253 tests, all
+    passing.</p>
+    <p><strong>Refactor:</strong> extracted <code>dryRunLines(_:)</code> from
+    <code>printDryRun(_:)</code> so tests can assert on candidate order
+    without capturing stdout. <code>printDryRun</code> remains the
+    operator-facing surface; the new helper is used by tests and by future
+    JSON/report serializers in Steps 9+.</p>
+    <p><strong>Anti-regression:</strong>
+    <code>swift test --package-path phase3-binary</code> passes
+    253/253. The smoke checks codex flagged
+    (<code>--max-context-axis 4000,,8000</code> and
+    <code>--candidate-models one,,two</code>) now exit with the
+    documented <code>ValidationError</code> (ArgumentParser exit code
+    64).</p>
+  </div>
 </section>
 
 <section id="spec008-phase2-provider-b6">

@@ -92,10 +92,14 @@ struct AutotuneCommand: ParsableCommand {
 
     mutating func validate() throws {
         try validateBasicInputs()
+        // Surface --candidate-models parse errors (e.g. empty cells from
+        // typos like `a,,b`) at flag-parse time per FR-A.1 / FR-B.1
+        // "reject invalid cells at flag-parse time." candidatePlan() is a
+        // pure function; the call here is just a parse-time gate.
+        _ = try candidatePlan()
     }
 
     func run() throws {
-        try validateBasicInputs()
         let plan = try candidatePlan()
 
         if dryRun {
@@ -114,7 +118,7 @@ struct AutotuneCommand: ParsableCommand {
 
     func candidatePlan() throws -> AutotunePlan {
         if let candidateModels, !candidateModels.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            let models = Self.parseCSV(candidateModels)
+            let models = try Self.parseCSVStrict(candidateModels, flag: "--candidate-models")
             guard !models.isEmpty else {
                 throw ValidationError("--candidate-models must contain at least one model id")
             }
@@ -149,17 +153,27 @@ struct AutotuneCommand: ParsableCommand {
         if let warning = plan.warning {
             FileHandle.standardError.write(Data(("\(warning)\n").utf8))
         }
-        print("autotune: dry run")
-        print("autotune: target_context=\(targetContext)")
-        print("autotune: candidates (\(plan.source.description)):")
-        for (index, model) in plan.candidates.enumerated() {
-            print("  \(index + 1). \(model)")
+        for line in dryRunLines(plan) {
+            print(line)
         }
-        print("autotune: stage1_replicates=\(stage1Replicates) stage2_replicates=\(stage2Replicates)")
-        print("autotune: gate_ttft_ms=\(gateTTFTMS) tps_tie_epsilon=\(tpsTieEpsilon)")
-        print("autotune: kv_bits_axis=\(kvBitsAxis) max_batch_axis=\(maxBatchAxis) max_context_axis=\(maxContextAxis.isEmpty ? "<target-context>" : maxContextAxis)")
-        print("autotune: port=\(port) db_path=\(dbPath) retain_runs=\(retainRuns)")
-        print("[dry-run] would evaluate Stage 1 candidates in this order and then hill-climb knobs only within the first feasible model.")
+    }
+
+    /// Builds the dry-run line list for stdout. Exposed so tests can assert
+    /// content (especially candidate order) without capturing stdout.
+    func dryRunLines(_ plan: AutotunePlan) -> [String] {
+        var lines: [String] = []
+        lines.append("autotune: dry run")
+        lines.append("autotune: target_context=\(targetContext)")
+        lines.append("autotune: candidates (\(plan.source.description)):")
+        for (index, model) in plan.candidates.enumerated() {
+            lines.append("  \(index + 1). \(model)")
+        }
+        lines.append("autotune: stage1_replicates=\(stage1Replicates) stage2_replicates=\(stage2Replicates)")
+        lines.append("autotune: gate_ttft_ms=\(gateTTFTMS) tps_tie_epsilon=\(tpsTieEpsilon)")
+        lines.append("autotune: kv_bits_axis=\(kvBitsAxis) max_batch_axis=\(maxBatchAxis) max_context_axis=\(maxContextAxis.isEmpty ? "<target-context>" : maxContextAxis)")
+        lines.append("autotune: port=\(port) db_path=\(dbPath) retain_runs=\(retainRuns)")
+        lines.append("[dry-run] would evaluate Stage 1 candidates in this order and then hill-climb knobs only within the first feasible model.")
+        return lines
     }
 
     private func validateBasicInputs() throws {
@@ -195,10 +209,30 @@ struct AutotuneCommand: ParsableCommand {
         _ = try Self.parseMaxContextAxis(maxContextAxis, targetContext: targetContext)
     }
 
+    /// Tolerant CSV split: trims each token and DROPS empty tokens.
+    /// Use for fields where empty cells are operator-irrelevant noise.
+    /// Do NOT use for FR-validated lists; use `parseCSVStrict` instead.
     static func parseCSV(_ raw: String) -> [String] {
         raw.split(separator: ",")
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
+    }
+
+    /// Strict CSV split for FR-validated lists. Preserves empty subsequences
+    /// (so a stray comma produces an empty token) and rejects empty tokens
+    /// with a clear error naming the flag. Closes round-1 audit A.4 / B.5:
+    /// `parseCSV` silently dropped empty cells, allowing
+    /// `--max-context-axis 4000,,8000` and `--candidate-models a,,b` to
+    /// parse as 2-element lists instead of throwing.
+    static func parseCSVStrict(_ raw: String, flag: String) throws -> [String] {
+        let tokens = raw.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        for token in tokens {
+            if token.isEmpty {
+                throw ValidationError("\(flag) contains an empty cell; check for stray commas")
+            }
+        }
+        return tokens
     }
 
     static func parseSizeB(_ raw: String) throws -> Double {
@@ -216,7 +250,7 @@ struct AutotuneCommand: ParsableCommand {
     }
 
     static func parseKvBitsAxis(_ raw: String) throws -> [Int?] {
-        let cells = parseCSV(raw)
+        let cells = try parseCSVStrict(raw, flag: "--kv-bits-axis")
         guard !cells.isEmpty else {
             throw ValidationError("--kv-bits-axis must contain at least one cell")
         }
@@ -232,7 +266,7 @@ struct AutotuneCommand: ParsableCommand {
     }
 
     static func parsePositiveIntAxis(_ raw: String, flag: String) throws -> [Int] {
-        let cells = parseCSV(raw)
+        let cells = try parseCSVStrict(raw, flag: flag)
         guard !cells.isEmpty else {
             throw ValidationError("\(flag) must contain at least one cell")
         }
@@ -245,10 +279,14 @@ struct AutotuneCommand: ParsableCommand {
     }
 
     static func parseMaxContextAxis(_ raw: String, targetContext: Int) throws -> [Int] {
-        let cells = parseCSV(raw)
-        guard !cells.isEmpty else {
+        // Empty raw value (the default) maps to a single cell at --target-context
+        // per FR-B.1's "empty default treated as [--target-context]" rule. We
+        // check the raw form here so a literal empty string is OK while a
+        // stray-comma form like "," or "4000,,8000" still fails strict parse.
+        if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             return [targetContext]
         }
+        let cells = try parseCSVStrict(raw, flag: "--max-context-axis")
         let values = try cells.map { cell in
             guard let value = Int(cell), value > 0 else {
                 throw ValidationError("--max-context-axis cells must be positive integers")
