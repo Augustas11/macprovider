@@ -367,3 +367,63 @@ Recommendation: Update the stale comments/prose to v0.2/v1 wording and make NFR-
 - All 19 round-1 findings have explicit closure verdicts.
 - Required code spot-checks were performed: `Config.swift`, install artifacts, `ModelRuntime.swift`, and PR #103 `beta/autotune.py`.
 - No d-inference source was inspected.
+
+---
+
+## Round 3 audit (Codex on v0.3 — LOCK confirmation)
+
+**Audited:** SPEC-013 v0.3 (specs/SPEC-013-cli-autotune.md)
+**Auditor model:** Codex / GPT-5
+**Audit round:** 3 of N (LOCK confirmation)
+**Date:** 2026-06-18
+**Closure summary:** 4 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED across the 4 round-2 findings
+**Round-3 findings:** 0 CRITICAL anti-regression / 0 MAJOR new / 1 MINOR new
+**Lock verdict:** LOCK
+
+### Executive summary
+
+Verdict: **LOCK.** v0.3 closes the four round-2 cleanup findings without weakening the locked biggest-fit, ordered-candidate, local-only, or backward-compatible surfaces. The Shape A / Shape B pre-warm wording is now shape-neutral across FR-D.1, NFR-4, and AC-8, and the required code spot-check still supports the runtime-online-fallback description: `ModelRuntime.configuration(for:)` first checks a local HF snapshot and then falls back to `LLMModelFactory.shared.configuration(id:)`.
+
+I found one new MINOR version-drift issue in the FR-F.2 JSON/spec-version text: the v0.3 document still shows `"SPEC-013 v0.2"` as the producing spec example in one live recommendation surface. This does not block LOCK because the adjacent v0.3 SQL comment already states that writers emit their own producing version, but it should be corrected in the implementation PR or the next editorial spec touch.
+
+### Round-2 finding closures
+
+**N-D.1 — CLOSED.** v0.3 rewords NFR-4 to allow only the HuggingFace pre-warm fetch path selected by FR-D.1, explicitly covering both Shape A (`models pull` or equivalent) and Shape B (runtime online fallback during model load). The carve-out is scoped to an `autotune` run and to weight fetches only, so it does not reopen telemetry or recipe-upload egress. AC-8 is now shape-neutral and testable: Shape A mocks the pull/equivalent fetch, Shape B blocks HuggingFace egress at the network-mock layer, and both variants must classify the failure as pre-warm rather than measurement or generic load failure.
+
+**Z-B.1 — CLOSED.** FR-B.1 now contains the `--max-context-axis` parse contract directly: positive integer absolute token caps, sorted ascending before evaluation, each cell at least `--target-context`, invalid/duplicate cells rejected at flag-parse time with `config_error`, and the empty default treated as `[--target-context]`. The §7 / §5 conflict rule is explicit: §7 is reference-only and FR-B.1 wins, so the prior non-normative-placement gap is closed.
+
+**N-OQ-E.1 — CLOSED.** OQ-E now defines a measurable repeat protocol: at least 10 paired forward/reverse Stage 2 runs on air5, 60s idle between paired runs, compare keep-best winners per pair, and trigger v0.4 mitigation if `mismatch_pairs / 10 > 0.05` (one or more mismatches in the minimum 10-pair run). Ten pairs has marginal statistical power, but the spec is honest that this is a minimum and permits more pairs to tighten the confidence interval; for a v1 open-question gate, the protocol is sufficiently measurable.
+
+**O.1 — CLOSED.** All four named drift sites were updated: the `tune_runs.spec_version` SQL comment now uses a v0.3 example plus "writer emits its own producing version"; FR-H.2 now says the future `--resume` optimization is deferred from v1 and that v1 defaults to full rerun; NFR-3 now references `.bak-<unix-ts>-<counter>` with the collision-safe counter rationale; and §7 replaces "MAY change in v0.2" with a future-v0.x refinement rule preserving §5 semantics.
+
+### Round-3 new findings
+
+#### Category Z-CLOSURE
+
+(no findings)
+
+#### Category N-NEWGAPS-V03
+
+(no findings)
+
+#### Category R-REGRESSION-V03
+
+(no findings)
+
+Anti-regression spot-checks passed for the prompt's named surfaces. FR-D.1 still defines Shape A and Shape B as implementation choices under one measurement-isolation contract; FR-D.2 still splits transient pre-warm failures from integrity aborts; FR-F.3 still owns exactly `model`, `kv_bits`, `max_context_override`, and `max_concurrency_override`; FR-G.1 still uses the valid SQLite `stage INTEGER NOT NULL DEFAULT 1` migration; and AC-17 still proves operator-supplied order is honored verbatim with no internal rerank.
+
+#### Category O-OTHER-V03
+
+##### O-V03.1 FR-F.2 spec-version example still says v0.2 inside v0.3 [MINOR]
+
+Location: `specs/SPEC-013-cli-autotune.md` §5.6 FR-F.2, JSON example and `spec_version` bullet.
+
+What: The v0.3 document still shows `"spec_version": "SPEC-013 v0.2"` in the recommendation JSON example and says the canonical producing spec is `"SPEC-013 v0.2"`.
+
+Why it matters: v0.3 fixed the SQL comment to say the writer emits its own producing version, but an implementer copying the FR-F.2 JSON block literally could emit stale v0.2 identity from a v0.3 implementation. This is narrow documentation drift, not a behavior or architecture blocker.
+
+Recommendation: Change both FR-F.2 occurrences to either `"SPEC-013 v0.3"` or a placeholder such as `"SPEC-013 v<producing-version>"` with the existing rule that writers emit their own producing version.
+
+### Lock readiness
+
+**LOCK.** SPEC-013 v0.3 may be locked as-is. The four round-2 findings are closed, there are no CRITICAL anti-regressions and no MAJOR new precision gaps, and the single new MINOR is editorial version drift that does not block the implementing PR.

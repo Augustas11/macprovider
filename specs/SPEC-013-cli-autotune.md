@@ -850,7 +850,7 @@ additive fields):
 
 ```json
 {
-  "spec_version": "SPEC-013 v0.2",
+  "spec_version": "SPEC-013 v<producing-version>",
   "run_id": "<uuid>",
   "started_at": "2026-06-18T12:34:56Z",
   "ended_at": "2026-06-18T13:01:22Z",
@@ -963,8 +963,10 @@ Schema notes (round-1 audit F.1 + F.2 closures):
   recommendation on the same machine MUST hash identically even
   if their measured tps differs.
 - `spec_version` is the canonical identity of the producing
-  spec ("SPEC-013 v0.2"); v0.3+ MAY add fields additively but
-  MUST NOT remove or retype existing fields.
+  spec; writers emit their own producing version (e.g. an
+  implementation built against SPEC-013 v0.3 emits
+  `"SPEC-013 v0.3"`). Future v0.x revisions MAY add fields
+  additively but MUST NOT remove or retype existing fields.
 - `recommendation` is `null` (not `{}`) when no model was
   selected (all-infeasible, budget-exhausted-pre-Stage-2, or
   pre-warm integrity-aborted). Ingestion contract:
