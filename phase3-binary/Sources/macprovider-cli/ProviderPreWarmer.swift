@@ -135,7 +135,34 @@ struct ProviderPreWarmer {
         return .transient
     }
 
+    /// Integrity-class markers: substrings whose presence in
+    /// `stderrTail` (case-insensitively lower-cased) classifies a
+    /// pre-warm failure as repository-shape / tampering / corruption
+    /// rather than transient (network / disk).
+    ///
+    /// SPEC-013 §5.4 FR-D.2 lists these examples: signature mismatch,
+    /// weight hash mismatch, repository contents inconsistent with
+    /// expected shape (e.g. missing tokenizer.json), or any
+    /// tampering signal.
+    ///
+    /// Round-1 audit B.1 (CRITICAL) closure: the prior `"missing
+    /// tokenizer.json"` marker did NOT match the actual
+    /// swift-transformers Hub error string `"Required configuration
+    /// file missing: tokenizer.json"` (colon breaks the substring
+    /// match), so the SPEC-named integrity case was silently
+    /// advancing as transient. We now keep BOTH the colon-bearing
+    /// variants (the real dependency strings, found in
+    /// .build/checkouts/swift-transformers/Sources/Hub/Hub.swift)
+    /// AND the original marker as a fallback for variant phrasings.
+    ///
+    /// Round-1 audit B.2 (MAJOR) closure: added safetensors loader
+    /// corruption markers from
+    /// .build/checkouts/mlx-swift/Source/Cmlx/mlx/mlx/io/safetensors.cpp
+    /// and the MLX load path. These signal corrupted or tampered
+    /// repository content (asymmetric FR-D.2 risk model biases
+    /// toward integrity here).
     private static let integrityMarkers = [
+        // Signature / hash / checksum markers (round-0 set)
         "signature mismatch",
         "hash mismatch",
         "manifest verification failed",
@@ -143,6 +170,25 @@ struct ProviderPreWarmer {
         "checksum mismatch",
         "signature verification failed",
         "checksum signature invalid",
+
+        // Missing-tokenizer markers (B.1 closure):
+        // the actual swift-transformers error string is
+        // "Required configuration file missing: tokenizer.json"
+        // — lowercased, it doesn't contain the bare phrase
+        // "missing tokenizer.json" because of the colon.
         "missing tokenizer.json",
+        "configuration file missing: tokenizer.json",
+        "missing: tokenizer.json",
+        "missing required tokenizer files",
+
+        // Malformed safetensors / loader markers (B.2 closure):
+        // mlx-swift's safetensors reader throws strings like
+        // "[load_safetensors] Invalid json header length ..." and
+        // "[load_safetensors] Invalid json metadata ..." when the
+        // weight file is corrupted or tampered.
+        "invalid json header",
+        "invalid json metadata",
+        "incomplete metadata",
+        "invalid or corrupted",
     ]
 }

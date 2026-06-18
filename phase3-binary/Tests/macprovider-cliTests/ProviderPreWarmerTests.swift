@@ -166,6 +166,155 @@ final class ProviderPreWarmerTests: XCTestCase {
         XCTAssertFalse(try isPortOpen(port), "timeout cleanup should stop the hanging provider")
     }
 
+    // MARK: - Round-1 audit fix tests
+
+    /// Round-1 B.1 CRITICAL closure: the actual swift-transformers
+    /// missing-tokenizer error string is
+    /// "Required configuration file missing: tokenizer.json" (with
+    /// the colon), which the prior `"missing tokenizer.json"` marker
+    /// did NOT catch. Verify the new colon-bearing markers fix this.
+    func testPreWarmerClassifiesConfigurationFileMissingTokenizerAsIntegrity() async throws {
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try failingProviderScript(
+                message: "Required configuration file missing: tokenizer.json",
+                rc: 1
+            ).path,
+            logDirectory: try temporaryDirectory(name: "prewarm-tokenizer-logs")
+        )
+        let prewarmer = ProviderPreWarmer(
+            cacheChecker: HuggingFaceCacheChecker(cacheRoot: try temporaryDirectory(name: "hf-tokenizer")),
+            stopGraceSeconds: 1
+        )
+
+        let result = try await prewarmer.prewarmAndProbe(
+            model: "mlx-community/MissingTokenizerModel-4bit",
+            port: try unusedPort(),
+            runner: runner,
+            readyTimeoutSec: 5
+        )
+
+        guard case .failed(let failureClass, _) = result else {
+            return XCTFail("expected failed result, got \(result)")
+        }
+        XCTAssertEqual(failureClass, .integrity,
+                       "missing tokenizer.json is an FR-D.2 named integrity class")
+    }
+
+    /// Round-1 B.2 MAJOR closure: malformed safetensors / weight
+    /// loader errors (from mlx-swift's safetensors reader) signal
+    /// corrupted or tampered repository content. The asymmetric
+    /// FR-D.2 risk model biases toward integrity here.
+    func testPreWarmerClassifiesInvalidJsonHeaderAsIntegrity() async throws {
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try failingProviderScript(
+                message: "[load_safetensors] Invalid json header length 0",
+                rc: 1
+            ).path,
+            logDirectory: try temporaryDirectory(name: "prewarm-corrupt-weights-logs")
+        )
+        let prewarmer = ProviderPreWarmer(
+            cacheChecker: HuggingFaceCacheChecker(cacheRoot: try temporaryDirectory(name: "hf-corrupt-weights")),
+            stopGraceSeconds: 1
+        )
+
+        let result = try await prewarmer.prewarmAndProbe(
+            model: "mlx-community/CorruptWeightsModel-4bit",
+            port: try unusedPort(),
+            runner: runner,
+            readyTimeoutSec: 5
+        )
+
+        guard case .failed(let failureClass, _) = result else {
+            return XCTFail("expected failed result, got \(result)")
+        }
+        XCTAssertEqual(failureClass, .integrity,
+                       "Invalid json header signals corrupted/tampered weights")
+    }
+
+    /// Round-1 B.3 MINOR: case-insensitive integrity match should
+    /// classify a mixed-case integrity error correctly. Pins the
+    /// `.lowercased()` semantics.
+    func testPreWarmerClassifiesMixedCaseIntegrityCorrectly() async throws {
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try failingProviderScript(
+                message: "SIGNATURE Mismatch on Model Weights",
+                rc: 1
+            ).path,
+            logDirectory: try temporaryDirectory(name: "prewarm-mixed-case-logs")
+        )
+        let prewarmer = ProviderPreWarmer(
+            cacheChecker: HuggingFaceCacheChecker(cacheRoot: try temporaryDirectory(name: "hf-mixed-case")),
+            stopGraceSeconds: 1
+        )
+
+        let result = try await prewarmer.prewarmAndProbe(
+            model: "mlx-community/MixedCaseModel-4bit",
+            port: try unusedPort(),
+            runner: runner,
+            readyTimeoutSec: 5
+        )
+
+        guard case .failed(let failureClass, _) = result else {
+            return XCTFail("expected failed result, got \(result)")
+        }
+        XCTAssertEqual(failureClass, .integrity)
+    }
+
+    /// Round-1 E.1 MINOR closure: `now` injection is the mechanism
+    /// for stable load-duration assertions. This test uses a
+    /// deterministic clock that advances by a known amount and
+    /// verifies `loadDurationSec` reflects it. Without this test, a
+    /// future regression that records the end time BEFORE
+    /// `waitForReady` returns (or always returns 0) would pass the
+    /// `>= 0` assertion in the existing happy-path tests.
+    func testPreWarmerLoadDurationReflectsInjectedClock() async throws {
+        let cacheRoot = try temporaryDirectory(name: "hf-clock-test")
+        try writeCachedModelFixture(
+            cacheRoot: cacheRoot,
+            modelID: "mlx-community/ClockTestModel-4bit",
+            revision: "main",
+            filename: "model.safetensors"
+        )
+
+        // The clock advances by 7s between the two `now()` calls in
+        // ProviderPreWarmer (one before runner.start, one when
+        // returning .warmed). The stub provider serves /v1/models 200
+        // quickly so real wall-clock barely contributes.
+        var clockTicks = 0
+        let injectedNow: () -> Date = {
+            defer { clockTicks += 1 }
+            switch clockTicks {
+            case 0: return Date(timeIntervalSince1970: 1_000_000)
+            case 1: return Date(timeIntervalSince1970: 1_000_007)
+            default: return Date(timeIntervalSince1970: 1_000_007)
+            }
+        }
+
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try readyStubProviderScript().path,
+            logDirectory: try temporaryDirectory(name: "prewarm-clock-logs")
+        )
+        let prewarmer = ProviderPreWarmer(
+            cacheChecker: HuggingFaceCacheChecker(cacheRoot: cacheRoot),
+            stopGraceSeconds: 1,
+            now: injectedNow
+        )
+
+        let result = try await prewarmer.prewarmAndProbe(
+            model: "mlx-community/ClockTestModel-4bit",
+            port: try unusedPort(),
+            runner: runner,
+            readyTimeoutSec: 5
+        )
+
+        guard case .warmed(let cacheState, let loadDurationSec) = result else {
+            return XCTFail("expected warmed result, got \(result)")
+        }
+        XCTAssertEqual(cacheState, .alreadyCached)
+        XCTAssertEqual(loadDurationSec, 7.0, accuracy: 0.001,
+                       "loadDurationSec MUST reflect the injected clock delta (7s)")
+    }
+
     private func writeCachedModelFixture(
         cacheRoot: URL,
         modelID: String,
