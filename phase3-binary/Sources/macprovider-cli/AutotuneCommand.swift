@@ -1,0 +1,890 @@
+import ArgumentParser
+import Darwin
+import Foundation
+import MacProviderCore
+
+struct AutotuneCommand: AsyncParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "autotune",
+        abstract: "Find the biggest feasible model for this Mac and recommend serve knobs."
+    )
+
+    @Option(help: "Target context in tokens.")
+    var targetContext = 2000
+
+    @Option(help: "Override default ordered model list as comma-separated HuggingFace model IDs. Operator order is preserved.")
+    var candidateModels: String?
+
+    @Option(help: "Trim the default list above this model size, e.g. 16B. Ignored when --candidate-models is set.")
+    var maxModelSize: String?
+
+    @Option(help: "Trim the default list below this model size, e.g. 7B. Ignored when --candidate-models is set.")
+    var minModelSize: String?
+
+    @Option(help: "Stage 2 KV-cache bit cells. Use 'unset' for no --kv-bits flag.")
+    var kvBitsAxis = "unset,4,8"
+
+    @Option(help: "Stage 2 max-batch cells.")
+    var maxBatchAxis = "1,2"
+
+    @Option(help: "Stage 2 max-context cells as absolute token caps. Empty means target-context only.")
+    var maxContextAxis = ""
+
+    @Option(help: "Stage 1 replicates per candidate.")
+    var stage1Replicates = 1
+
+    @Option(help: "Stage 2 replicates per knob cell.")
+    var stage2Replicates = 3
+
+    @Option(name: .customLong("gate-ttft-ms"), help: "Maximum p95 TTFT in milliseconds for feasibility.")
+    var gateTTFTMS = 60_000
+
+    @Option(help: "Relative throughput tie band for TTFT tiebreak.")
+    var tpsTieEpsilon = 0.02
+
+    @Option(help: "Hard wall-clock budget in seconds.")
+    var maxDuration = 7_200
+
+    @Option(help: "Grace period in seconds for draining or stopping providers.")
+    var drainGrace = 30
+
+    @Option(help: "Local provider port for candidate probes.")
+    var port = 18_080
+
+    @Option(help: "SQLite database path.")
+    var dbPath = Self.defaultDBPath
+
+    @Option(help: "YAML config path for --apply. Defaults to ~/.config/macprovider/config.yaml.")
+    var config: String?
+
+    @Option(help: "Number of recent autotune runs to retain.")
+    var retainRuns = 50
+
+    @Flag(name: .customLong("json"), help: "Emit recommendation as JSON.")
+    var emitJSON = false
+
+    @Flag(help: "Write the final recommendation to config.yaml.")
+    var apply = false
+
+    @Flag(help: "Drain an already-running serve process before tuning.")
+    var drain = false
+
+    @Flag(help: "After draining a foreground serve process, restart it at exit.")
+    var restartForeground = false
+
+    @Flag(help: "Print the candidate plan and exit without serving.")
+    var dryRun = false
+
+    @Flag(help: "Re-render the latest persisted report and exit.")
+    var reportOnly = false
+
+    @Flag(name: [.short, .long], help: "Stream per-trial details to stderr.")
+    var verbose = false
+
+    static let defaultCandidates: [AutotuneCandidate] = [
+        AutotuneCandidate(modelID: "mlx-community/Qwen2.5-32B-Instruct-4bit", sizeB: 32),
+        AutotuneCandidate(modelID: "mlx-community/Qwen2.5-14B-Instruct-4bit", sizeB: 14),
+        AutotuneCandidate(modelID: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit", sizeB: 7),
+        AutotuneCandidate(modelID: "mlx-community/Llama-3.2-3B-Instruct-4bit", sizeB: 3),
+        AutotuneCandidate(modelID: "mlx-community/Llama-3.2-1B-Instruct-4bit", sizeB: 1),
+    ]
+
+    static var defaultDBPath: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".config/macprovider/autotune.sqlite")
+            .path
+    }
+
+    mutating func validate() throws {
+        try validateBasicInputs()
+        // Surface --candidate-models parse errors (e.g. empty cells from
+        // typos like `a,,b`) at flag-parse time per FR-A.1 / FR-B.1
+        // "reject invalid cells at flag-parse time." candidatePlan() is a
+        // pure function; the call here is just a parse-time gate.
+        _ = try candidatePlan()
+    }
+
+    func run() async throws {
+        try await run(dependencies: .production)
+    }
+
+    func run(dependencies: AutotuneRunDependencies) async throws {
+        let plan = try candidatePlan()
+
+        if dryRun {
+            printDryRun(plan)
+            return
+        }
+
+        if reportOnly {
+            FileHandle.standardError.write(Data(("autotune --report-only is a v2 feature.\n").utf8))
+            throw ExitCode(2)
+        }
+
+        if let warning = plan.warning {
+            dependencies.writeStderr("\(warning)\n")
+        }
+
+        let runID = dependencies.makeRunID()
+        let startedAt = dependencies.now()
+        let deadline = startedAt.addingTimeInterval(TimeInterval(maxDuration))
+        let interruptFlag = dependencies.makeInterruptFlag()
+        let signalSources = dependencies.installSignalSources(interruptFlag)
+        defer {
+            _ = signalSources
+        }
+
+        let machine = dependencies.machineFingerprint()
+        let db = try dependencies.makeDB(dbPath)
+        var recommendationJSON: String?
+        var recipeHash: String?
+        var applied = false
+        var restoredConflict: ProviderConflict = .none
+
+        let cancellationReason: () -> AutotuneCancellationReason? = {
+            if interruptFlag.isSet() {
+                return .interrupted
+            }
+            if dependencies.now() > deadline {
+                return .budgetExhausted
+            }
+            return nil
+        }
+
+        func updateRun(
+            endedAt: Date?,
+            exitReason: AutotuneExitReason,
+            recommendationJSON: String? = recommendationJSON,
+            recipeHash: String? = recipeHash,
+            applied: Bool = applied
+        ) throws {
+            try db.updateRun(
+                runID: runID,
+                endedAtUTC: endedAt.map(Self.iso8601UTC),
+                recommendationJSON: recommendationJSON,
+                recipeHash: recipeHash,
+                applied: applied,
+                exitReason: exitReason
+            )
+        }
+
+        func emit(_ inputs: RecommendationInputs) throws -> EmittedRecommendation {
+            let emitted = try dependencies.emitRecommendation(inputs)
+            dependencies.writeStdout("\(emitted.terminalBlock)\n")
+            if emitJSON {
+                dependencies.writeStdout("\(emitted.jsonString)\n")
+            }
+            return emitted
+        }
+
+        let candidatesJSON = try Self.jsonString(plan.candidates)
+        try db.insertRun(AutotuneRunRow(
+            runID: runID,
+            startedAtUTC: Self.iso8601UTC(startedAt),
+            endedAtUTC: nil,
+            specVersion: Self.specVersion,
+            binaryVersion: machine.binaryVersion,
+            machineRAMGB: machine.ramGB,
+            machineChip: machine.chip,
+            machineOSVersion: machine.osVersion,
+            targetContext: targetContext,
+            candidateModelsJSON: candidatesJSON,
+            stage1Replicates: stage1Replicates,
+            stage2Replicates: stage2Replicates,
+            gateTTFTMS: gateTTFTMS,
+            tpsTieEpsilon: tpsTieEpsilon,
+            recommendationJSON: nil,
+            recipeHash: nil,
+            applied: false,
+            exitReason: AutotuneExitReason.internalError.rawValue
+        ))
+        try db.applyRetentionInTransaction(retainRuns: retainRuns)
+
+        defer {
+            if restoredConflict != .none {
+                _ = try? dependencies.restoreConflict(restoredConflict, restartForeground)
+            }
+        }
+
+        do {
+            if cancellationReason() == .interrupted {
+                try updateRun(endedAt: nil, exitReason: .interrupted)
+                throw ExitCode(130)
+            }
+            if cancellationReason() == .budgetExhausted {
+                let endedAt = dependencies.now()
+                let inputs = recommendationInputs(
+                    plan: plan,
+                    machine: machine,
+                    runID: runID,
+                    startedAt: startedAt,
+                    endedAt: endedAt,
+                    recommendation: nil,
+                    infeasible: []
+                )
+                _ = try emit(inputs)
+                try updateRun(endedAt: endedAt, exitReason: .budgetExhaustedNoModelSelected, recommendationJSON: nil, recipeHash: nil)
+                throw ExitCode(1)
+            }
+
+            let conflict = try dependencies.detectConflict()
+            if conflict != .none {
+                guard drain else {
+                    let endedAt = dependencies.now()
+                    try updateRun(endedAt: endedAt, exitReason: .providerConflict, recommendationJSON: nil, recipeHash: nil)
+                    dependencies.writeStderr("autotune: provider conflict: \(Self.describe(conflict)); rerun with --drain to stop it first.\n")
+                    throw ExitCode(1)
+                }
+                // Round-1 audit J.1 MAJOR fix: drain failures (e.g. launchctl
+                // bootout failure, foreground SIGTERM failure) are still a
+                // conflict scenario and must classify as .providerConflict,
+                // not .internalError. The prior code let drainConflict's
+                // thrown errors fall through to the generic catch which
+                // finalized as internal_error.
+                let drainResult: ProviderDrainResult
+                do {
+                    drainResult = try dependencies.drainConflict(conflict, port, TimeInterval(drainGrace))
+                } catch {
+                    let endedAt = dependencies.now()
+                    try updateRun(endedAt: endedAt, exitReason: .providerConflict, recommendationJSON: nil, recipeHash: nil)
+                    dependencies.writeStderr("autotune: provider conflict: --drain failed: \(error)\n")
+                    throw ExitCode(1)
+                }
+                if case .portStillOpen(let heldPort) = drainResult {
+                    let endedAt = dependencies.now()
+                    try updateRun(endedAt: endedAt, exitReason: .providerConflict, recommendationJSON: nil, recipeHash: nil)
+                    dependencies.writeStderr("autotune: provider conflict: port \(heldPort) still open after --drain.\n")
+                    throw ExitCode(1)
+                }
+                restoredConflict = conflict
+            }
+
+            let stage1: Stage1IteratorResult
+            do {
+                stage1 = try await dependencies.runStage1(AutotuneStage1Request(
+                    db: db,
+                    runID: runID,
+                    candidates: plan.candidates,
+                    candidatesBySize: Self.candidatesBySize(for: plan),
+                    targetContext: targetContext,
+                    gateTTFTMS: gateTTFTMS,
+                    stage1Replicates: stage1Replicates,
+                    port: port,
+                    drainGrace: drainGrace,
+                    cancellationReason: cancellationReason
+                ))
+            } catch let error as Stage1IteratorError {
+                switch error {
+                case .interrupted:
+                    try updateRun(endedAt: nil, exitReason: .interrupted, recommendationJSON: nil, recipeHash: nil)
+                    throw ExitCode(130)
+                case .budgetExhaustedNoModelSelected:
+                    let endedAt = dependencies.now()
+                    let inputs = recommendationInputs(
+                        plan: plan,
+                        machine: machine,
+                        runID: runID,
+                        startedAt: startedAt,
+                        endedAt: endedAt,
+                        recommendation: nil,
+                        infeasible: []
+                    )
+                    _ = try emit(inputs)
+                    try updateRun(endedAt: endedAt, exitReason: .budgetExhaustedNoModelSelected, recommendationJSON: nil, recipeHash: nil)
+                    throw ExitCode(1)
+                case .noFeasible(_, let trials, _):
+                    let endedAt = dependencies.now()
+                    let infeasible = Self.infeasibleEntries(
+                        reasonsBySurfaceOrder: trials,
+                        candidatesBySurfaceOrder: Self.candidatesBySize(for: plan) ?? plan.candidates
+                    )
+                    let inputs = recommendationInputs(
+                        plan: plan,
+                        machine: machine,
+                        runID: runID,
+                        startedAt: startedAt,
+                        endedAt: endedAt,
+                        recommendation: nil,
+                        infeasible: infeasible
+                    )
+                    _ = try emit(inputs)
+                    try updateRun(endedAt: endedAt, exitReason: .noFeasible, recommendationJSON: nil, recipeHash: nil)
+                    dependencies.writeStderr(Self.noFeasibleMessage(infeasible: infeasible))
+                    throw ExitCode(1)
+                case .preWarmIntegrityFailure(let model, let reason, _):
+                    let endedAt = dependencies.now()
+                    let inputs = recommendationInputs(
+                        plan: plan,
+                        machine: machine,
+                        runID: runID,
+                        startedAt: startedAt,
+                        endedAt: endedAt,
+                        recommendation: nil,
+                        infeasible: [InfeasibleEntry(model: model, rank: 1, reason: "pre-warm integrity: \(reason)")]
+                    )
+                    _ = try emit(inputs)
+                    try updateRun(endedAt: endedAt, exitReason: .preWarmIntegrityFailure, recommendationJSON: nil, recipeHash: nil)
+                    dependencies.writeStderr("autotune: pre-warm integrity failure for \(model): \(reason)\n")
+                    throw ExitCode(1)
+                default:
+                    throw error
+                }
+            }
+
+            let stage2: Stage2HillClimbResult
+            do {
+                stage2 = try await dependencies.runStage2(AutotuneStage2Request(
+                    db: db,
+                    runID: runID,
+                    selectedModel: stage1.selectedModel,
+                    kvBitsAxis: try Self.parseKvBitsAxis(kvBitsAxis),
+                    maxBatchAxis: try Self.parsePositiveIntAxis(maxBatchAxis, flag: "--max-batch-axis"),
+                    maxContextAxis: try Self.parseMaxContextAxis(maxContextAxis, targetContext: targetContext),
+                    targetContext: targetContext,
+                    gateTTFTMS: gateTTFTMS,
+                    stage2Replicates: stage2Replicates,
+                    tpsTieEpsilon: tpsTieEpsilon,
+                    port: port,
+                    drainGrace: drainGrace,
+                    cancellationReason: cancellationReason
+                ))
+            } catch let error as Stage2HillClimbError {
+                switch error {
+                case .interrupted:
+                    try updateRun(endedAt: nil, exitReason: .interrupted, recommendationJSON: nil, recipeHash: nil)
+                    throw ExitCode(130)
+                case .budgetExhaustedWithPartialRecommendation(let partial):
+                    let endedAt = dependencies.now()
+                    let recommendation = Self.recommendation(from: partial, targetContext: targetContext, partial: true)
+                    let inputs = recommendationInputs(
+                        plan: plan,
+                        machine: machine,
+                        runID: runID,
+                        startedAt: startedAt,
+                        endedAt: endedAt,
+                        recommendation: recommendation,
+                        infeasible: []
+                    )
+                    let emitted = try emit(inputs)
+                    recommendationJSON = emitted.jsonString
+                    recipeHash = emitted.recipeHash
+                    try updateRun(
+                        endedAt: endedAt,
+                        exitReason: .budgetExhaustedWithPartialRecommendation,
+                        recommendationJSON: emitted.jsonString,
+                        recipeHash: emitted.recipeHash
+                    )
+                    throw ExitCode(1)
+                case .noFeasibleCell(let reason):
+                    let endedAt = dependencies.now()
+                    let inputs = recommendationInputs(
+                        plan: plan,
+                        machine: machine,
+                        runID: runID,
+                        startedAt: startedAt,
+                        endedAt: endedAt,
+                        recommendation: nil,
+                        infeasible: [InfeasibleEntry(model: stage1.selectedModel, rank: 1, reason: reason)]
+                    )
+                    _ = try emit(inputs)
+                    try updateRun(endedAt: endedAt, exitReason: .noFeasible, recommendationJSON: nil, recipeHash: nil)
+                    throw ExitCode(1)
+                }
+            }
+
+            // Round-1 audit B.1 MAJOR fix: poll cancellation after Stage 2
+            // returns to catch SIGINT/SIGTERM that arrived between the last
+            // Stage 2 cell boundary and recommendation emission. Without
+            // this poll, an interrupt in this window would still apply
+            // config and finalize as .ok.
+            if cancellationReason() == .interrupted {
+                try updateRun(endedAt: nil, exitReason: .interrupted, recommendationJSON: nil, recipeHash: nil)
+                throw ExitCode(130)
+            }
+
+            let endedAt = dependencies.now()
+            let recommendation = Self.recommendation(from: stage2, targetContext: targetContext, partial: false)
+            let inputs = recommendationInputs(
+                plan: plan,
+                machine: machine,
+                runID: runID,
+                startedAt: startedAt,
+                endedAt: endedAt,
+                recommendation: recommendation,
+                infeasible: []
+            )
+            let emitted = try emit(inputs)
+            recommendationJSON = emitted.jsonString
+            recipeHash = emitted.recipeHash
+
+            if apply {
+                // Round-1 audit B.1 MAJOR fix (continued): re-poll before
+                // applyConfig so an interrupt that arrived during emission
+                // does not still write to disk.
+                if cancellationReason() == .interrupted {
+                    try updateRun(endedAt: nil, exitReason: .interrupted, recommendationJSON: nil, recipeHash: nil)
+                    throw ExitCode(130)
+                }
+                do {
+                    let result = try dependencies.applyConfig(recommendation, endedAt, config)
+                    applied = true
+                    dependencies.writeStdout("\(result.summary)\n")
+                    if !drain {
+                        dependencies.writeStderr("\(RecommendationEmitter.launchdRestartHint())\n")
+                    }
+                } catch {
+                    applied = false
+                    dependencies.writeStderr("autotune: apply failed; recommendation remains valid: \(error)\n")
+                }
+            }
+
+            try updateRun(
+                endedAt: endedAt,
+                exitReason: .ok,
+                recommendationJSON: emitted.jsonString,
+                recipeHash: emitted.recipeHash,
+                applied: applied
+            )
+        } catch let exit as ExitCode {
+            throw exit
+        } catch {
+            try? updateRun(endedAt: dependencies.now(), exitReason: .internalError, recommendationJSON: nil, recipeHash: nil, applied: false)
+            throw error
+        }
+    }
+
+    func candidatePlan() throws -> AutotunePlan {
+        if let candidateModels, !candidateModels.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let models = try Self.parseCSVStrict(candidateModels, flag: "--candidate-models")
+            guard !models.isEmpty else {
+                throw ValidationError("--candidate-models must contain at least one model id")
+            }
+            let warning: String? = (maxModelSize != nil || minModelSize != nil)
+                ? "warning: --candidate-models supplied; ignoring --max-model-size/--min-model-size"
+                : nil
+            return AutotunePlan(candidates: models, source: .explicit, warning: warning)
+        }
+
+        let maxSize = try maxModelSize.map(Self.parseSizeB)
+        let minSize = try minModelSize.map(Self.parseSizeB)
+        if let minSize, let maxSize, minSize > maxSize {
+            throw ValidationError("--min-model-size must be <= --max-model-size")
+        }
+
+        let filtered = Self.defaultCandidates.filter { candidate in
+            if let maxSize, candidate.sizeB > maxSize {
+                return false
+            }
+            if let minSize, candidate.sizeB < minSize {
+                return false
+            }
+            return true
+        }
+        guard !filtered.isEmpty else {
+            throw ValidationError("model-size filters removed every default candidate")
+        }
+        return AutotunePlan(candidates: filtered.map(\.modelID), source: .defaultList, warning: nil)
+    }
+
+    static let specVersion = "SPEC-013 v0.3"
+
+    static func candidatesBySize(for plan: AutotunePlan) -> [String]? {
+        switch plan.source {
+        case .defaultList:
+            let selected = Set(plan.candidates)
+            return defaultCandidates
+                .filter { selected.contains($0.modelID) }
+                .sorted { $0.sizeB < $1.sizeB }
+                .map(\.modelID)
+        case .explicit:
+            // Round-1 audit M.1 CRITICAL fix: operator overrides have no
+            // size metadata in v1, so pass the input order EXPLICITLY as
+            // the error-surface order. This preserves the LOCKED Stage 7
+            // iterator's nil-fallback semantics (reversed) while letting
+            // operator-override runs surface infeasibles in the order the
+            // operator typed them. The LOCKED fallback is never triggered
+            // from production code now.
+            return plan.candidates
+        }
+    }
+
+    private func recommendationInputs(
+        plan: AutotunePlan,
+        machine: MachineFingerprint,
+        runID: String,
+        startedAt: Date,
+        endedAt: Date,
+        recommendation: RecommendationCore?,
+        infeasible: [InfeasibleEntry]
+    ) -> RecommendationInputs {
+        RecommendationInputs(
+            specVersion: Self.specVersion,
+            runID: runID,
+            startedAt: startedAt,
+            endedAt: endedAt,
+            machine: machine,
+            targetContext: targetContext,
+            candidateModels: plan.candidates,
+            stage1Replicates: stage1Replicates,
+            stage2Replicates: stage2Replicates,
+            gateTTFTMS: gateTTFTMS,
+            tpsTieEpsilon: tpsTieEpsilon,
+            recommendation: recommendation,
+            infeasible: infeasible,
+            dbPath: dbPath
+        )
+    }
+
+    private static func recommendation(
+        from stage2: Stage2HillClimbResult,
+        targetContext: Int,
+        partial: Bool
+    ) -> RecommendationCore {
+        RecommendationCore(
+            model: stage2.selectedModel,
+            targetContext: targetContext,
+            knobs: stage2.winningKnobs,
+            tpsMedian: stage2.medianTPS,
+            ttftP95MS: stage2.p95TTFTMS,
+            replicates: stage2.replicates,
+            partial: partial
+        )
+    }
+
+    private static func infeasibleEntries(
+        reasonsBySurfaceOrder: [String],
+        candidatesBySurfaceOrder: [String]
+    ) -> [InfeasibleEntry] {
+        zip(candidatesBySurfaceOrder, reasonsBySurfaceOrder).enumerated().map { index, pair in
+            InfeasibleEntry(model: pair.0, rank: index + 1, reason: pair.1)
+        }
+    }
+
+    private static func noFeasibleMessage(infeasible: [InfeasibleEntry]) -> String {
+        var lines = ["autotune: no candidate fits this Mac."]
+        for entry in infeasible {
+            let label = entry.rank == 1 ? "\(Self.shortModelLabel(entry.model)) (smallest)" : Self.shortModelLabel(entry.model)
+            lines.append("  \(label): \(entry.reason)")
+        }
+        lines.append("hint: lower --target-context or pass --candidate-models with a smaller model.")
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private static func shortModelLabel(_ model: String) -> String {
+        if let candidate = defaultCandidates.first(where: { $0.modelID == model }) {
+            return "\(Int(candidate.sizeB))B"
+        }
+        return model
+    }
+
+    private static func describe(_ conflict: ProviderConflict) -> String {
+        switch conflict {
+        case .none:
+            return "none"
+        case .launchdManaged(let pid):
+            return "launchd-managed\(pid.map { " pid \($0)" } ?? "")"
+        case .foreground(let pid, _):
+            return "foreground-PID-\(pid)"
+        }
+    }
+
+    private static func jsonString(_ strings: [String]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: strings, options: [])
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private static func iso8601UTC(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        return formatter.string(from: date)
+    }
+
+    func printDryRun(_ plan: AutotunePlan) {
+        if let warning = plan.warning {
+            FileHandle.standardError.write(Data(("\(warning)\n").utf8))
+        }
+        for line in dryRunLines(plan) {
+            print(line)
+        }
+    }
+
+    /// Builds the dry-run line list for stdout. Exposed so tests can assert
+    /// content (especially candidate order) without capturing stdout.
+    func dryRunLines(_ plan: AutotunePlan) -> [String] {
+        var lines: [String] = []
+        lines.append("autotune: dry run")
+        lines.append("autotune: target_context=\(targetContext)")
+        lines.append("autotune: candidates (\(plan.source.description)):")
+        for (index, model) in plan.candidates.enumerated() {
+            lines.append("  \(index + 1). \(model)")
+        }
+        lines.append("autotune: stage1_replicates=\(stage1Replicates) stage2_replicates=\(stage2Replicates)")
+        lines.append("autotune: gate_ttft_ms=\(gateTTFTMS) tps_tie_epsilon=\(tpsTieEpsilon)")
+        lines.append("autotune: kv_bits_axis=\(kvBitsAxis) max_batch_axis=\(maxBatchAxis) max_context_axis=\(maxContextAxis.isEmpty ? "<target-context>" : maxContextAxis)")
+        lines.append("autotune: port=\(port) db_path=\(dbPath) retain_runs=\(retainRuns)")
+        lines.append("[dry-run] would evaluate Stage 1 candidates in this order and then hill-climb knobs only within the first feasible model.")
+        return lines
+    }
+
+    private func validateBasicInputs() throws {
+        guard targetContext > 0 else {
+            throw ValidationError("--target-context must be >= 1")
+        }
+        guard stage1Replicates >= 1 else {
+            throw ValidationError("--stage1-replicates must be >= 1")
+        }
+        guard stage2Replicates >= 1 else {
+            throw ValidationError("--stage2-replicates must be >= 1")
+        }
+        guard gateTTFTMS > 0 else {
+            throw ValidationError("--gate-ttft-ms must be > 0")
+        }
+        guard tpsTieEpsilon >= 0 else {
+            throw ValidationError("--tps-tie-epsilon must be >= 0")
+        }
+        guard maxDuration > 0 else {
+            throw ValidationError("--max-duration must be > 0")
+        }
+        guard drainGrace >= 0 else {
+            throw ValidationError("--drain-grace must be >= 0")
+        }
+        guard port > 0 && port <= 65_535 else {
+            throw ValidationError("--port must be in 1...65535")
+        }
+        guard retainRuns >= 1 else {
+            throw ValidationError("--retain-runs must be >= 1")
+        }
+        _ = try Self.parseKvBitsAxis(kvBitsAxis)
+        _ = try Self.parsePositiveIntAxis(maxBatchAxis, flag: "--max-batch-axis")
+        _ = try Self.parseMaxContextAxis(maxContextAxis, targetContext: targetContext)
+    }
+
+    /// Tolerant CSV split: trims each token and DROPS empty tokens.
+    /// Use for fields where empty cells are operator-irrelevant noise.
+    /// Do NOT use for FR-validated lists; use `parseCSVStrict` instead.
+    static func parseCSV(_ raw: String) -> [String] {
+        raw.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    /// Strict CSV split for FR-validated lists. Preserves empty subsequences
+    /// (so a stray comma produces an empty token) and rejects empty tokens
+    /// with a clear error naming the flag. Closes round-1 audit A.4 / B.5:
+    /// `parseCSV` silently dropped empty cells, allowing
+    /// `--max-context-axis 4000,,8000` and `--candidate-models a,,b` to
+    /// parse as 2-element lists instead of throwing.
+    static func parseCSVStrict(_ raw: String, flag: String) throws -> [String] {
+        let tokens = raw.split(separator: ",", omittingEmptySubsequences: false)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        for token in tokens {
+            if token.isEmpty {
+                throw ValidationError("\(flag) contains an empty cell; check for stray commas")
+            }
+        }
+        return tokens
+    }
+
+    static func parseSizeB(_ raw: String) throws -> Double {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let suffixStripped: String
+        if trimmed.lowercased().hasSuffix("b") {
+            suffixStripped = String(trimmed.dropLast())
+        } else {
+            suffixStripped = trimmed
+        }
+        guard let value = Double(suffixStripped), value > 0 else {
+            throw ValidationError("model size must be a positive value like 7B")
+        }
+        return value
+    }
+
+    static func parseKvBitsAxis(_ raw: String) throws -> [Int?] {
+        let cells = try parseCSVStrict(raw, flag: "--kv-bits-axis")
+        guard !cells.isEmpty else {
+            throw ValidationError("--kv-bits-axis must contain at least one cell")
+        }
+        return try cells.map { cell in
+            if cell.lowercased() == "unset" {
+                return nil
+            }
+            guard let value = Int(cell), value == 4 || value == 8 else {
+                throw ValidationError("--kv-bits-axis cells must be unset, 4, or 8")
+            }
+            return value
+        }
+    }
+
+    static func parsePositiveIntAxis(_ raw: String, flag: String) throws -> [Int] {
+        let cells = try parseCSVStrict(raw, flag: flag)
+        guard !cells.isEmpty else {
+            throw ValidationError("\(flag) must contain at least one cell")
+        }
+        return try cells.map { cell in
+            guard let value = Int(cell), value > 0 else {
+                throw ValidationError("\(flag) cells must be positive integers")
+            }
+            return value
+        }
+    }
+
+    static func parseMaxContextAxis(_ raw: String, targetContext: Int) throws -> [Int] {
+        // Empty raw value (the default) maps to a single cell at --target-context
+        // per FR-B.1's "empty default treated as [--target-context]" rule. We
+        // check the raw form here so a literal empty string is OK while a
+        // stray-comma form like "," or "4000,,8000" still fails strict parse.
+        if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return [targetContext]
+        }
+        let cells = try parseCSVStrict(raw, flag: "--max-context-axis")
+        let values = try cells.map { cell in
+            guard let value = Int(cell), value > 0 else {
+                throw ValidationError("--max-context-axis cells must be positive integers")
+            }
+            guard value >= targetContext else {
+                throw ValidationError("--max-context-axis cell \(value) is below --target-context \(targetContext)")
+            }
+            return value
+        }.sorted()
+        guard Set(values).count == values.count else {
+            throw ValidationError("--max-context-axis must not contain duplicate cells")
+        }
+        return values
+    }
+}
+
+struct AutotuneCandidate: Equatable {
+    let modelID: String
+    let sizeB: Double
+}
+
+struct AutotunePlan: Equatable {
+    enum Source: Equatable, CustomStringConvertible {
+        case defaultList
+        case explicit
+
+        var description: String {
+            switch self {
+            case .defaultList:
+                return "largest-first default list"
+            case .explicit:
+                return "operator-supplied order"
+            }
+        }
+    }
+
+    let candidates: [String]
+    let source: Source
+    let warning: String?
+}
+
+struct AutotuneStage1Request {
+    var db: AutotuneDB
+    var runID: String
+    var candidates: [String]
+    var candidatesBySize: [String]?
+    var targetContext: Int
+    var gateTTFTMS: Int
+    var stage1Replicates: Int
+    var port: Int
+    var drainGrace: Int
+    var cancellationReason: () -> AutotuneCancellationReason?
+}
+
+struct AutotuneStage2Request {
+    var db: AutotuneDB
+    var runID: String
+    var selectedModel: String
+    var kvBitsAxis: [Int?]
+    var maxBatchAxis: [Int]
+    var maxContextAxis: [Int]
+    var targetContext: Int
+    var gateTTFTMS: Int
+    var stage2Replicates: Int
+    var tpsTieEpsilon: Double
+    var port: Int
+    var drainGrace: Int
+    var cancellationReason: () -> AutotuneCancellationReason?
+}
+
+struct AutotuneRunDependencies {
+    var now: () -> Date
+    var makeRunID: () -> String
+    var makeInterruptFlag: () -> AutotuneInterruptFlag
+    var installSignalSources: (AutotuneInterruptFlag) -> AnyObject?
+    var machineFingerprint: () -> MachineFingerprint
+    var makeDB: (String) throws -> AutotuneDB
+    var detectConflict: () throws -> ProviderConflict
+    var drainConflict: (ProviderConflict, Int, TimeInterval) throws -> ProviderDrainResult
+    var restoreConflict: (ProviderConflict, Bool) throws -> ProviderRestoreResult
+    var runStage1: (AutotuneStage1Request) async throws -> Stage1IteratorResult
+    var runStage2: (AutotuneStage2Request) async throws -> Stage2HillClimbResult
+    var emitRecommendation: (RecommendationInputs) throws -> EmittedRecommendation
+    var applyConfig: (RecommendationCore, Date, String?) throws -> ConfigApplier.AppliedConfig
+    var writeStdout: (String) -> Void
+    var writeStderr: (String) -> Void
+
+    static var production: AutotuneRunDependencies {
+        AutotuneRunDependencies(
+        now: Date.init,
+        makeRunID: { UUID().uuidString },
+        makeInterruptFlag: AutotuneInterruptFlag.init,
+        installSignalSources: { AutotuneSignalSources(flag: $0) },
+        machineFingerprint: { MachineFingerprinter().sample() },
+        makeDB: { try AutotuneDB(path: $0) },
+        detectConflict: { try ProviderConflictDetector().detect() },
+        drainConflict: { conflict, port, grace in
+            try ProviderDrainer().drain(conflict, port: port, graceSeconds: grace)
+        },
+        restoreConflict: { conflict, restartForeground in
+            try ProviderDrainer().restore(conflict, restartForeground: restartForeground)
+        },
+        runStage1: { request in
+            try await Stage1Iterator(
+                candidateProviderRunner: { try CandidateProviderRunner() },
+                providerPreWarmer: ProviderPreWarmer(stopGraceSeconds: Double(request.drainGrace)),
+                autotuneDB: request.db,
+                runID: request.runID,
+                candidates: request.candidates,
+                candidatesBySize: request.candidatesBySize,
+                targetContext: request.targetContext,
+                gateTTFTMS: request.gateTTFTMS,
+                stage1Replicates: request.stage1Replicates,
+                port: request.port,
+                prober: Stage1Prober(stopGraceSeconds: Double(request.drainGrace)),
+                cancellationReason: request.cancellationReason
+            ).run()
+        },
+        runStage2: { request in
+            try await Stage2HillClimb(
+                candidateProviderRunner: { try CandidateProviderRunner() },
+                prober: Stage2Prober(stopGraceSeconds: Double(request.drainGrace)),
+                autotuneDB: request.db,
+                selectedModel: request.selectedModel,
+                kvBitsAxis: request.kvBitsAxis,
+                maxBatchAxis: request.maxBatchAxis,
+                maxContextAxis: request.maxContextAxis,
+                targetContext: request.targetContext,
+                gateTTFTMS: request.gateTTFTMS,
+                stage2Replicates: request.stage2Replicates,
+                tpsTieEpsilon: request.tpsTieEpsilon,
+                port: request.port,
+                runID: request.runID,
+                cancellationReason: request.cancellationReason
+            ).run()
+        },
+        emitRecommendation: { try RecommendationEmitter().build($0) },
+        applyConfig: { recommendation, now, configPath in
+            let rawPath = configPath ?? AppConfig.defaultConfigPath
+            let expanded = ConfigLoader.expandTilde(rawPath)
+            return try ConfigApplier(configPath: URL(fileURLWithPath: expanded)).apply(
+                recommendation: recommendation,
+                now: now
+            )
+        },
+        writeStdout: { FileHandle.standardOutput.write(Data($0.utf8)) },
+        writeStderr: { FileHandle.standardError.write(Data($0.utf8)) }
+        )
+    }
+}

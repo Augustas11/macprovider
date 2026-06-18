@@ -17,6 +17,342 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 <p class=meta>Status: <strong>3h local soak PASS · M4 parity validation pending</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
+<section id="spec013-autotune-step1">
+  <h2>SPEC-013 design decisions — Step 1 autotune scaffold (2026-06-18)</h2>
+  <div class="entry">
+    <time>2026-06-18</time>
+    <p><strong>Scope:</strong> added the Swift-native
+    <code>macprovider-cli autotune</code> parser scaffold and
+    <code>--dry-run</code> candidate-plan output only. Runtime tuning,
+    SQLite persistence, provider lifecycle, <code>serve --no-join</code>,
+    and <code>--apply</code> remain future step work.</p>
+    <p><strong>Design decisions:</strong> the default candidate list is encoded
+    as a local Swift constant in SPEC-013 FR-C.1 order. Dry-run applies
+    <code>--max-model-size</code>/<code>--min-model-size</code> only to that
+    default list; explicit <code>--candidate-models</code> preserves operator
+    order exactly and emits the required size-flag warning.</p>
+    <p><strong>Deviations:</strong> none for Step 1. Non-dry-run execution exits
+    with a clear "not implemented yet" error so the scaffold cannot be mistaken
+    for a partial tuner.</p>
+    <p><strong>Open questions:</strong> none blocking Step 1.</p>
+  </div>
+  <div class="entry">
+    <time>2026-06-18 (Step 1 round-1 audit response)</time>
+    <p><strong>Round-1 codex audit closures</strong> (full report:
+    <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>;
+    verdict was FIX REQUIRED with 0 CRITICAL / 1 MAJOR / 3 MINOR).</p>
+    <p><strong>A.4 MAJOR fix</strong> (silent empty-cell drop in
+    <code>--max-context-axis</code>, e.g. <code>4000,,8000</code> parsed as
+    <code>[4000, 8000]</code> instead of throwing). Added
+    <code>parseCSVStrict(_:flag:)</code> that uses
+    <code>split(omittingEmptySubsequences: false)</code> and throws
+    <code>ValidationError</code> on any empty cell with a clear flag-named
+    message. The empty-default case (<code>--max-context-axis ""</code> mapping
+    to <code>[--target-context]</code> per FR-B.1) is preserved by checking the
+    raw string for emptiness before calling the strict parser.</p>
+    <p><strong>B.5 MINOR fix</strong> (same bug class in
+    <code>--candidate-models</code>): explicit candidate parse path now uses
+    <code>parseCSVStrict</code> too, surfacing operator typos like
+    <code>one,,two</code> at flag-parse time. The two other axis parsers
+    (<code>parseKvBitsAxis</code>, <code>parsePositiveIntAxis</code>) also
+    moved to the strict helper for consistency, though their per-token
+    int/keyword validators would also have rejected empty cells eventually.</p>
+    <p><strong>B.2 MINOR fix</strong> (redundant validation in <code>run()</code>):
+    removed the duplicate <code>validateBasicInputs()</code> call from
+    <code>run()</code>. ArgumentParser already invokes the
+    <code>validate()</code> protocol method at parse time. Added a
+    <code>_ = try candidatePlan()</code> call to <code>validate()</code> so
+    explicit-list parse errors surface at flag-parse time instead of being
+    deferred to <code>run()</code>.</p>
+    <p><strong>C.2 MINOR fix</strong> (test coverage gaps): added 8 new tests
+    pinning the FR-B.1 sort, duplicate rejection, empty-default, and
+    empty-cell behavior; the FR-B.5 candidate-models empty-cell behavior; an
+    AC-17-prep test using explicit <code>1B,32B</code> order (failing under
+    any future parser-level re-rank); a dry-run line-list test asserting
+    candidate order via the new testable <code>dryRunLines</code> helper;
+    and a <code>--restart-foreground</code> parse test. Test count for
+    AutotuneCommandTests rose from 5 to 13; full
+    <code>phase3-binary</code> suite rose from 245 to 253 tests, all
+    passing.</p>
+    <p><strong>Refactor:</strong> extracted <code>dryRunLines(_:)</code> from
+    <code>printDryRun(_:)</code> so tests can assert on candidate order
+    without capturing stdout. <code>printDryRun</code> remains the
+    operator-facing surface; the new helper is used by tests and by future
+    JSON/report serializers in Steps 9+.</p>
+    <p><strong>Anti-regression:</strong>
+    <code>swift test --package-path phase3-binary</code> passes
+    253/253. The smoke checks codex flagged
+    (<code>--max-context-axis 4000,,8000</code> and
+    <code>--candidate-models one,,two</code>) now exit with the
+    documented <code>ValidationError</code> (ArgumentParser exit code
+    64).</p>
+  </div>
+<div class="entry" id="spec013-autotune-step10">
+  <time>2026-06-18</time>
+  <p><strong>SPEC-013 Step 10 integration wiring.</strong> Wired
+  <code>AutotuneCommand.run()</code> through provider-conflict preflight,
+  Stage 1, Stage 2, <code>RecommendationEmitter</code>, optional
+  <code>ConfigApplier</code>, and final <code>tune_runs</code> persistence.
+  The production path constructs the existing Step 4-9 components through a
+  small dependency surface so unit tests can exercise run lifecycle behavior
+  without starting real providers.</p>
+  <p><strong>Signal handling pattern.</strong> SIGINT and SIGTERM are handled
+  with <code>DispatchSource.makeSignalSource(signal:queue:)</code> on a
+  dedicated <code>autotune.signal</code> queue. The event handler only sets an
+  <code>NSLock</code>-guarded <code>AutotuneInterruptFlag</code>; database
+  updates, provider cleanup, and process exit happen cooperatively at the next
+  Stage 1 candidate or Stage 2 cell poll. This avoids doing nontrivial cleanup
+  work in the signal callback.</p>
+  <p><strong>Provisional-row tripwire.</strong> Every run inserts its
+  <code>tune_runs</code> row before retention with
+  <code>exit_reason = 'internal_error'</code> and
+  <code>ended_at_utc = NULL</code>. Normal and classified failure exits update
+  that same row in place; DELETE+INSERT was rejected so readers never observe
+  the run ID disappearing mid-lifecycle. Interrupted exits explicitly leave
+  <code>ended_at_utc</code> NULL per FR-G.2.</p>
+  <p><strong>Wall-clock budget and partial recommendations.</strong>
+  <code>--max-duration</code> is enforced by the same cooperative poll. Stage 1
+  exhaustion updates <code>budget_exhausted_no_model_selected</code> with no
+  persisted recommendation. Stage 2 exhaustion after at least one feasible cell
+  finalizes the best-so-far cell, emits a partial terminal warning, persists
+  <code>budget_exhausted_with_partial_recommendation</code>, and adds
+  <code>"partial": true</code> inside the JSON <code>recommendation</code>
+  object. That JSON field is intentionally omitted on normal runs and is a
+  SPEC-013 v0.4 candidate addition.</p>
+  <p><strong>candidatesBySize derivation.</strong> Default-list runs pass
+  <code>AutotuneCommand.defaultCandidates</code> sorted by ascending
+  <code>sizeB</code> into <code>Stage1Iterator(candidatesBySize:)</code>, so
+  all-infeasible output leads with the smallest model. Operator
+  <code>--candidate-models</code> overrides pass the input order EXPLICITLY
+  (Round-1 audit M.1 CRITICAL fix — see audit-response entry below).</p>
+  <p><strong>Apply and report-only decisions.</strong> <code>applied = 1</code>
+  is written only after <code>--apply</code> succeeds. Apply failure does not
+  change <code>exit_reason = 'ok'</code> because the recommendation remains
+  valid; the CLI reports the apply error and persists <code>applied = 0</code>.
+  <code>--report-only</code> remains a v2 feature and exits with code 2 after
+  printing a clear message.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter
+  'AutotuneCommandTests|AutotuneCommandRunTests|AutotuneDBTests|Stage1IteratorTests|Stage2HillClimbTests|RecommendationEmitterTests|ConfigApplierTests'</code>
+  passes 81/81 affected tests, 0 failures.</p>
+</div>
+<div class="entry">
+  <time>2026-06-18</time>
+  <p><strong>Round-1 audit response (1 CRITICAL + 2 MAJOR + 1 MINOR closed;
+  Round 18 at specs/SPEC-013-impl-audit.md).</strong> Codex round-1 audit
+  on commit 79d48ca returned 1 CRITICAL / 2 MAJOR / 1 MINOR / 0 QUESTION
+  with verdict FIX REQUIRED. This fix-pass closes all 4 findings.</p>
+  <p><strong>M.1 CRITICAL (LOCKED-file diff was not additive)</strong>:
+  Step 10 had changed the LOCKED <code>Stage1Iterator</code> nil fallback
+  from <code>candidatesBySize ?? Array(candidates.reversed())</code> to
+  <code>candidatesBySize ?? candidates</code> AND modified an existing
+  Step 7 test to pass <code>candidatesBySize</code> explicitly. Both edits
+  violate the Step 7 LOCK contract. Reverted the iterator's nil fallback
+  to <code>Array(candidates.reversed())</code> (the LOCKED form) AND
+  reverted the Step 7 test setup. Then changed
+  <code>AutotuneCommand.candidatesBySize(for:)</code> to ALWAYS return
+  non-nil — for operator overrides, it now returns
+  <code>plan.candidates</code> (input order) explicitly. The LOCKED
+  fallback semantics is preserved but never triggered from production.
+  The Step 10 derivation test was renamed from
+  <code>testCandidatesBySizeIsNilWhenOperatorOverride</code> to
+  <code>testCandidatesBySizeReturnsInputOrderForOperatorOverride</code>
+  to lock the new contract.</p>
+  <p><strong>B.1 MAJOR (interruption ignored after Stage 2)</strong>:
+  added two cooperative-cancellation poll points in
+  <code>AutotuneCommand.run()</code> — one immediately after
+  <code>Stage2HillClimb.run(...)</code> returns, and another right before
+  <code>dependencies.applyConfig(...)</code>. Either poll routes an
+  in-flight interrupt to the <code>updateRun(endedAtUTC: nil,
+  exitReason: .interrupted)</code> + <code>ExitCode(130)</code> path.
+  New regression-lock test
+  <code>testInterruptionAfterStage2CancelsBeforeApply</code> wraps the
+  injected <code>runStage2</code> closure to flip the interrupt flag
+  AFTER Stage 2 returns; the test asserts
+  <code>applyCalls == 0</code>, exit code 130, and the row's
+  <code>exit_reason == "interrupted"</code> with
+  <code>endedAtUTC == nil</code>.</p>
+  <p><strong>J.1 MAJOR (drain failures finalize as internal_error)</strong>:
+  wrapped <code>dependencies.drainConflict(...)</code> in a do/catch inside
+  the conflict branch. On throw, the run finalizes as
+  <code>provider_conflict</code> (still a conflict scenario,
+  known-classifiable per FR-G.2), prints a clear stderr message, and
+  exits non-zero. New regression-lock test
+  <code>testDrainConflictThrowFinalizesAsProviderConflict</code> injects
+  a throwing <code>drainConflict</code> closure and asserts
+  <code>exit_reason == "provider_conflict"</code> and the stderr message
+  contains <code>--drain failed</code>.</p>
+  <p><strong>K.1 MINOR (RAM sysctl fallback returns 0)</strong>: changed
+  <code>MachineFingerprinter.ramGB()</code> to return <code>1</code> (the
+  documented minimum) on sysctl failure or zero memsize. Zero is impossible
+  for any real machine and poisons <code>recipe_hash</code>
+  machine-sensitivity for fallback runs. New regression-lock test
+  <code>testMachineFingerprinterRAMNeverReturnsZero</code> samples the real
+  fingerprinter and asserts <code>ramGB >= 1</code>.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 366/366
+  (363 baseline + 3 new from this fix-pass), with 2 skipped
+  integration-gated tests, 0 failures.</p>
+</div>
+<div class="entry" id="spec013-autotune-step11">
+  <time>2026-06-18</time>
+  <p><strong>SPEC-013 Step 11 acceptance test suite.</strong> Added explicit
+  AC-tagged tests under
+  <code>phase3-binary/Tests/macprovider-cliTests/AutotuneACTests/</code>.
+  Each method name includes the AC number and each method comment cites the
+  authoritative SPEC-013 line range.</p>
+  <ul>
+    <li><code>AutotuneAC_Stage1Tests.swift</code>:
+    <code>testAC1LargestFirstIterationStopsOnFirstFeasible</code>,
+    <code>testAC2LargestFirstIterationIteratesPastInfeasible</code>,
+    <code>testAC3AllInfeasibleExitsNonZeroWithSmallestFirstReason</code>,
+    <code>testAC7NoJoinIsSetOnEveryCandidate</code>,
+    <code>testAC8PreWarmTransientFailureAdvancesToNextCandidate</code>,
+    <code>testAC8PreWarmIntegrityFailureAbortsTheWholeRun</code>,
+    <code>testAC14DefaultCandidateListIsHonored</code>,
+    <code>testAC15OperatorOverrideBeatsSizeFlags</code>,
+    <code>testAC17OperatorOrderHonoredVerbatim</code>,
+    <code>testAC19MaxModelSizeAloneTrimsTheDefaultList</code>, and
+    <code>testAC19MaxAndMinModelSizeTrimsBothEnds</code>.</li>
+    <li><code>AutotuneAC_Stage2Tests.swift</code>:
+    <code>testAC4Stage2UsesMedianAndStrictAllFeasible</code>,
+    <code>testAC5TPSTiebreakByTTFT</code>,
+    <code>testAC16TuneTrialsStagePopulatesCorrectly</code>,
+    <code>testAC18MaxContextAxisEvaluatesExtraCellsAndCanWin</code>, and
+    <code>testAC18InvalidMaxContextAxisFailsAtFlagParseTime</code>.</li>
+    <li><code>AutotuneAC_LifecycleTests.swift</code>:
+    <code>testAC10CtrlCCleanup</code>,
+    <code>testAC13WallClockBudgetEnforcementMidStage1</code>, and
+    <code>testAC13WallClockBudgetEnforcementMidStage2</code>.</li>
+    <li><code>AutotuneAC_OutputTests.swift</code>:
+    <code>testAC9ApplyIsAtomicAndBacksUpAndIsIdempotent</code>,
+    <code>testAC11JSONOutputSchemaStability</code>, and
+    <code>testAC12RecipeHashDeterminism</code>.</li>
+    <li><code>AutotuneAC_IntegrationTests.swift</code>:
+    <code>testAC6ProviderConflictPreFlightRefusesLaunchdByDefault</code>
+    and
+    <code>testAC6ProviderConflictPreFlightRefusesForegroundByDefault</code>.</li>
+  </ul>
+  <p><strong>Integration gating:</strong> AC-6 is gated by the environment
+  variable <code>AUTOTUNE_INTEGRATION_TESTS=1</code>, matching the Step 11
+  prompt's explicit env-var contract rather than adding a package flag. The
+  skipped tests print one diagnostic line before throwing
+  <code>XCTSkip</code>.</p>
+  <p><strong>AC-8 Shape A exclusion:</strong> Step 6 selected Shape B
+  (runtime online-fallback pre-warm classification), so the AC-8 Shape A
+  subprocess/pull variant remains out of scope for the v1 suite. The added
+  tests exercise transient and integrity classifications through the Stage 1
+  pre-warmer seam.</p>
+  <p><strong>AC-7 decision:</strong> the suite uses the allowed unit-test
+  variant by asserting <code>CandidateProviderRunner.serveArguments</code>
+  includes exactly one <code>--no-join</code> in every candidate argv. The
+  coordinator pool observation remains an integration expansion point. A
+  skipped placeholder for the real-subprocess + coordinator-pool variant
+  lives in <code>AutotuneAC_IntegrationTests</code> for v2 (added in the
+  round-1 audit response per E.1).</p>
+  <p><strong>AC-6 scope clarification:</strong> the AC-6 tests in
+  <code>AutotuneAC_IntegrationTests.swift</code> are
+  <em>conflict-to-exit_reason mapping tests</em> that inject
+  <code>detectConflict</code> and assert <code>run()</code> routes to
+  <code>provider_conflict</code> + non-zero exit. They are NOT real
+  detection-path tests — actual <code>launchctl list</code> /
+  foreground argv detection is exercised at the unit-level by
+  <code>ProviderConflictDetectorTests</code> from Step 5. A skipped
+  placeholder for a full real-subprocess AC-6 sweep lives alongside the
+  mapping tests for v2 (added in the round-1 audit response per A.1).</p>
+  <p><strong>AC-17 accepted v1 deviation (round-1 audit C.1 closure):</strong>
+  SPEC-013 FR-F.1 requires <code>alternates</code> to list candidates
+  SMALLER than the chosen model. v1's
+  <code>RecommendationEmitter.alternates(...)</code> uses position-based
+  slicing (the slice of <code>candidateModels</code> AFTER the chosen
+  index). This is CORRECT for the default-list largest-first input order
+  but mis-surfaces alternates for arbitrary operator orders. For
+  <code>--candidate-models 1b,32b</code> with 1B chosen, v1 lists 32B as
+  an "alternate" even though 32B is LARGER than 1B.
+  <code>testAC17OperatorOrderHonoredVerbatim</code> LOCKS this v1
+  position-based behavior (<code>alternates == [32B]</code>) and
+  documents the deviation in both method-level and in-line comments.
+  <strong>SPEC-013 v0.4 candidate fix path:</strong> plumb size-parsed
+  ordering into <code>RecommendationInputs</code> via an additive
+  <code>candidatesBySize</code> field; <code>AutotuneCommand</code>
+  derives it via an HF-ID size extractor (the existing
+  <code>parseSizeB</code> can be extended to scan for the
+  <code>\d+B</code> substring in arbitrary model ids). The
+  <code>AutotuneCommand.candidatesBySize(for:)</code> seam already
+  exists. C.2 audit QUESTION resolved as: defer to v0.4 to keep v1 BUILD
+  scope tight; the deviation is observable only for non-default
+  operator orders, never for default-list runs.</p>
+  <p><strong>Current verification:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 390/390
+  (366 baseline + 24 new from this step), with 4 skipped (2 baseline + 2
+  AC-6 integration-gated), 0 failures.</p>
+  <p><strong>After Step 11 LOCKS — post-build checklist</strong> (round-1
+  audit H.1 closure):</p>
+  <ol>
+    <li><strong>SPEC-003 install note</strong>: add a brief cross-reference
+    in <code>specs/SPEC-003-open-onboarding.md</code> §3 (Integration
+    narrative) or §6 (Interface contracts) noting that
+    <code>macprovider-cli autotune</code> is part of the installed
+    CLI surface after SPEC-003's install.sh. This edit belongs on the
+    SPEC PR branch <code>spec/cli-autotune-v1</code> (PR #108), NOT on
+    this impl branch — touching SPECs from the impl PR would conflict
+    with the SPEC PR's diff. Done locally as a 2026-06-18 entry on
+    PR #108 before that PR merges.</li>
+    <li><strong>beta/DECISION_CRITERIA.md entry</strong>: Entry 78
+    recording the SPEC-013 BUILD pattern + 21-round cross-model
+    audit-loop discipline. Landed in commit ... (see Entry 78 below
+    in the file for the full text).</li>
+    <li><strong>PR #103 disposition</strong>: the prototype spike at
+    <code>origin/spike/provider-model-autotune</code>. The v1 SPEC-013
+    surface incorporates the prototype's <code>_is_new_best</code>
+    semantics (Step 8) and a faithful port of its keep-best logic; the
+    spike branch can either (a) be closed once the v1 impl PR merges
+    (no further use) or (b) stay open as a reference for the v0.4
+    work items (size-parsed alternates, real-subprocess AC-6/AC-7
+    integration). Operator choice; defaults to (a) unless v0.4 work
+    starts soon.</li>
+    <li><strong>Push <code>feat/cli-autotune-impl</code></strong> to
+    the <code>Augustas11/macprovider</code> remote (per the per-repo
+    git credential helper at <code>.git/config</code>). Requires
+    operator authorization per the careful-actions rule.</li>
+    <li><strong>Open the implementation PR</strong> separate from the
+    SPEC PR #108. The impl PR depends on #108 merging first (the impl
+    references <code>specs/SPEC-013-cli-autotune.md</code> + the
+    impl audit history file <code>specs/SPEC-013-impl-audit.md</code>).
+    Order: #108 SPEC merge → push impl branch → open impl PR with
+    "Closes the SPEC-013 build per the audit history at Round 21."</li>
+  </ol>
+</div>
+</section>
+
+<section id="spec013-autotune-step2">
+  <h2>SPEC-013 design decisions — Step 2 serve --no-join (2026-06-18)</h2>
+  <div class="entry">
+    <time>2026-06-18</time>
+    <p><strong>Scope:</strong> added the additive
+    <code>macprovider-cli serve --no-join</code> flag required by
+    SPEC-013 FR-E.2. The flag only disables coordinator WebSocket
+    participation; model loading, local HTTP serving, supported-models
+    preflight, warm-swap control socket setup, and all existing
+    no-flag <code>serve</code> behavior stay on the existing path.</p>
+    <p><strong>Design decisions:</strong> coordinator construction now flows
+    through a tiny testable guard. When <code>--no-join</code> is set, the
+    guard returns <code>nil</code> before invoking the factory, so no
+    <code>CoordinatorClient</code> instance exists, no WS session can start,
+    and signal/defer cleanup has no coordinator object to drain. When the
+    flag is absent, the guard invokes the same factory and preserves the
+    pre-Step-2 construction/start/stop sequence.</p>
+    <p><strong>Deviations:</strong> none for Step 2. The resolved
+    <code>coordinator_url</code> remains visible in the startup config print
+    if configured; <code>--no-join</code> is a runtime join suppression, not
+    a config mutation.</p>
+    <p><strong>Verification:</strong> added focused
+    <code>ServeCommandTests</code> coverage proving the flag parses, the
+    no-join branch does not invoke the coordinator factory, and the default
+    serve path still invokes that factory.</p>
+  </div>
+</section>
+
 <section id="spec008-phase2-provider-b6">
   <h2>SPEC-008 Phase 2 provider B6 encrypted-leg support (2026-05-31)</h2>
   <div class="entry">
@@ -991,6 +1327,669 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     drain-reconnect verification was not available in this session, so no
     v1.2.3 tag was created.</li>
   </ul>
+</div>
+</section>
+<section id="spec013-autotune-step3"><h2>SPEC-013 autotune Step 3 - SQLite DB layer</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added <code>AutotuneDB</code> as a Swift-native wrapper over macOS
+    system <code>libsqlite3</code> via the Swift <code>SQLite3</code> module.
+    No new top-level Swift package dependency or YAML-backed SQLite wrapper was
+    introduced.</li>
+    <li>The DB opens <code>~/.config/macprovider/autotune.sqlite</code> by
+    default, with callers able to pass the parsed <code>--db-path</code>
+    override. Opening a fresh path creates the SPEC-013 v0.3
+    <code>tune_trials</code> and <code>tune_runs</code> tables.</li>
+    <li><code>tune_trials.stage</code> is created as
+    <code>INTEGER NOT NULL DEFAULT 1</code>, and the same
+    <code>ALTER TABLE ... ADD COLUMN</code> migration is run idempotently with
+    duplicate-column errors ignored to support prototype DBs.</li>
+    <li><code>tune_runs.exit_reason</code> is stored as text because SQLite has
+    no native enum type. The normative SPEC-013 enum is enforced in the
+    application layer before insert.</li>
+    <li>Retention is exposed as
+    <code>applyRetentionInTransaction(retainRuns:)</code>. It enforces
+    <code>N &gt;= 1</code> and deletes stale rows from both
+    <code>tune_trials</code> and <code>tune_runs</code> inside one SQLite
+    transaction after the new <code>tune_runs</code> row exists.</li>
+  </ul>
+</div>
+</section>
+<section id="spec013-autotune-step4"><h2>SPEC-013 autotune Step 4 - provider lifecycle runner</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added <code>CandidateProviderRunner</code> as a standalone lifecycle
+    primitive. It is not called from <code>AutotuneCommand.run()</code> yet;
+    Step 7 will own runtime wiring after provider-conflict and pre-warm work
+    land.</li>
+    <li>The runner resolves the production provider binary from the current
+    executable path (<code>Bundle.main.executablePath</code>, falling back to
+    <code>CommandLine.arguments[0]</code>) and does not add any
+    <code>--provider-bin</code> operator flag. Tests use constructor injection
+    to supply a stub binary path.</li>
+    <li><code>start</code> assembles
+    <code>serve --no-join --model &lt;id&gt; --port &lt;N&gt;</code> plus optional
+    <code>--kv-bits</code>, <code>--max-context</code>, and
+    <code>--max-batch</code> knobs, validates the knob domain, and rejects
+    a second start while the current provider process is still running.</li>
+    <li>Provider stdout and stderr are teed into per-trial logs under
+    <code>~/.cache/macprovider/autotune-logs/</code> using safe model names in
+    the filename. Stderr is also tailed in memory so
+    <code>waitForReady</code> can return process-exit diagnostics.</li>
+    <li><code>waitForReady</code> polls
+    <code>http://127.0.0.1:&lt;port&gt;/v1/models</code> until HTTP 200,
+    process exit, or timeout. This deliberately measures readiness separately
+    from later request timing so Step 7 can preserve FR-D.1 measurement
+    isolation.</li>
+    <li><code>stop</code> is SIGTERM-only for v1. It waits for process exit and
+    port release through the grace window and logs a warning if the port remains
+    held. It never escalates to SIGKILL; foreground-restart escalation, if any,
+    is deferred to the Step 5 foreground path.</li>
+    <li>Deferred integration: a real-binary lifecycle test exists but is skipped
+    unless <code>MACPROVIDER_INTEGRATION_TEST=1</code>,
+    <code>MACPROVIDER_INTEGRATION_PROVIDER_BIN</code>, and
+    <code>MACPROVIDER_INTEGRATION_MODEL</code> are set. Unit coverage uses a
+    compiled Swift stub provider so Step 4 does not require a real model
+    fixture.</li>
+  </ul>
+</div>
+<div class="entry">
+  <time>2026-06-18 (Step 4 round-1 audit response)</time>
+  <p><strong>Round-1 codex audit closures</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 5; verdict was FIX REQUIRED with 0 CRITICAL / 2 MAJOR / 2 MINOR /
+  1 QUESTION).</p>
+  <p><strong>B.1 MAJOR fix</strong> (<code>process.run()</code> failure
+  cleanup hangs draining never-launched pipes). The catch path now calls
+  a new <code>RunningProvider.discardLogging(reason:)</code> that closes
+  the log file with a brief "process spawn failed" note WITHOUT calling
+  <code>readDataToEndOfFile()</code>. Pipe write ends remain open in the
+  parent for a never-launched process, so the prior drain waited for an
+  EOF that never arrived (codex reproduced a 2-second hang locally with a
+  missing binary). New test
+  <code>testStartFailsPromptlyWithMissingBinary</code> locks the
+  &lt; 1-second contract; the fixed code returns in ~10ms.</p>
+  <p><strong>C.1 MAJOR fix</strong> (<code>waitForReady</code> skipped the
+  post-200 process-exit check). <code>waitForReady</code> now re-checks
+  <code>provider.process.isRunning</code> after receiving HTTP 200 and
+  before returning <code>.ready</code>. If the process exited between the
+  response and the check, returns
+  <code>.processExited(rc:stderrTail:)</code> instead. New test
+  <code>testWaitForReadyHandlesImmediateExitAfterFirstResponse</code>
+  uses a Python stub that responds 200 and immediately exits; the runner
+  produces <code>.ready</code> or <code>.processExited</code> but NEVER
+  <code>.timeout</code> (the pre-fix silent-hang regression class).</p>
+  <p><strong>A.1 QUESTION resolution</strong>. <code>stop()</code> now
+  returns a <code>StopResult</code> enum with <code>.stopped</code> and
+  <code>.stuck(pid:)</code> cases (marked
+  <code>@discardableResult</code> so existing callers compile unchanged).
+  The <code>.stuck</code> variant lets Step 7 record a clear failure
+  instead of discovering it via the next <code>start()</code> failing
+  with <code>alreadyRunning</code>. Still NO SIGKILL escalation in v1;
+  <code>current</code> intentionally stays set so the single-provider
+  invariant holds.</p>
+  <p><strong>E.1 MINOR fix</strong> (argv validation tests covered only
+  <code>kvBits</code>). Added <code>testServeArgumentsRejectInvalidPort</code>,
+  <code>testServeArgumentsRejectInvalidMaxContext</code>, and
+  <code>testServeArgumentsRejectInvalidMaxBatch</code> against
+  <code>CandidateProviderRunner.serveArguments(...)</code>.</p>
+  <p><strong>I.1 MINOR fix</strong> (log filename collision within one
+  second). Filenames now append the first 8 chars of a UUID:
+  <code>&lt;model&gt;-&lt;port&gt;-&lt;unix-ts&gt;-&lt;uuid8&gt;.log</code>.
+  New test <code>testLogFileURLsDoNotCollideWithinOneSecond</code>
+  verifies two consecutive builds for the same (model, port) produce
+  distinct paths.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 273/273
+  (266 baseline + 7 new from this fix-pass) with 1 skipped
+  integration-gated test.</p>
+</div>
+</section>
+<section id="spec013-autotune-step5"><h2>SPEC-013 autotune Step 5 - provider conflict pre-flight</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added <code>ProviderConflictDetector</code> for the two SPEC-013
+    FR-E.1 install paths. The launchd path reads
+    <code>launchctl list</code> output and detects the exact
+    <code>live.streamvc.macprovider</code> label, preserving the PID column
+    when launchctl reports one and allowing <code>nil</code> for inactive
+    jobs.</li>
+    <li>The foreground path scans process snapshots as argv arrays and only
+    matches an argv element whose executable basename is
+    <code>macprovider-cli</code> followed immediately by a whole-word
+    <code>serve</code> subcommand. It deliberately rejects
+    <code>autotune</code> argv and substring cases such as
+    <code>-serve-helper</code>, avoiding self-matches and helper false
+    positives.</li>
+    <li>Detector dependency injection is closure-based:
+    <code>launchctlList: () throws -&gt; String</code> and
+    <code>processList: () throws -&gt; [(pid: Int32, argv: [String])]</code>.
+    Production defaults call <code>/bin/launchctl list</code> and use Darwin
+    process APIs (<code>proc_listpids</code> plus
+    <code>sysctl(KERN_PROCARGS2)</code>) for snapshots; unit tests provide
+    deterministic stubs.</li>
+    <li>Added <code>ProviderDrainer</code> with injected launchctl runner,
+    signal sender, process-running probe, port probe, foreground restarter,
+    and warning writer. Production launchd drain uses
+    <code>launchctl bootout gui/$UID/live.streamvc.macprovider</code>;
+    launchd restore uses <code>launchctl bootstrap gui/$UID
+    ~/Library/LaunchAgents/live.streamvc.macprovider.plist</code>.</li>
+    <li>Foreground drain sends exactly <code>SIGTERM</code> to the detected
+    PID and never escalates to <code>SIGKILL</code> in v1. It waits through
+    the grace window for both port release and process exit; if the port is
+    free but the process still exists, the drain can succeed with a warning
+    because the autotune port is safe to reuse while the operator still gets
+    visibility into the stuck foreground process.</li>
+    <li>Foreground restore remains opt-in via the already-parsed
+    <code>--restart-foreground</code> flag. When true, the original argv
+    captured by the detector is re-spawned; when false, restore returns a
+    skipped result and leaves manual restart to the operator.</li>
+    <li>Extracted the localhost TCP probe into <code>MacProviderPortProbe</code>
+    so <code>CandidateProviderRunner</code> and <code>ProviderDrainer</code>
+    share the same <code>127.0.0.1:&lt;port&gt;</code> connect check.</li>
+    <li>No Step 5 code is called from <code>AutotuneCommand.run()</code> yet.
+    Step 7 owns pre-flight wiring and Step 10 owns post-tune restore wiring,
+    per the BUILD prompt sequencing.</li>
+  </ul>
+</div>
+<div class="entry">
+  <time>2026-06-18 (Step 5 round-1 audit response)</time>
+  <p><strong>Round-1 codex audit closures</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 7; verdict was READY TO PROCEED with 0 CRITICAL / 0 MAJOR / 4
+  MINOR / 0 QUESTION). Codex's recommendation was to proceed; this
+  fix-pass closes 3 of 4 MINORs because they're cheap test-coverage
+  locks, matching the Step 1 discipline. The 4th MINOR (H.1 restore
+  idempotency) is a Step 10 forward-compat note and is tracked for
+  Step 10's wiring rather than fixed here.</p>
+  <p><strong>G.1 MINOR fix</strong> (inactive launchd PID parsing
+  untested). Added
+  <code>testParseLaunchdManagedInactivePIDReturnsNil</code> in
+  <code>ProviderConflictDetectorTests</code> that exercises
+  <code>parseLaunchdManagedPID(from:)</code> with a
+  <code>-\t-\tlive.streamvc.macprovider</code> line and asserts
+  <code>(found: true, pid: nil)</code>.</p>
+  <p><strong>G.2 MINOR fix</strong> (helper-binary false-positive
+  class untested). Added
+  <code>testHelperBinaryDoesNotMatchForegroundServe</code> with a
+  process list containing
+  <code>["/usr/local/bin/macprovider-cli-helper", "serve"]</code>;
+  the <code>lastPathComponent == "macprovider-cli"</code> check
+  correctly rejects, and the test now pins the behavior.
+  Complements
+  <code>testServeSubstringDoesNotMatchForegroundServe</code> (which
+  covered the subcommand-like name class).</p>
+  <p><strong>G.3 MINOR fix</strong> (SIGKILL-disabled warning path
+  untested). Added
+  <code>testForegroundDrainEmitsNoSIGKILLWarningWhenProcessRemainsAfterGrace</code>
+  in <code>ProviderDrainerTests</code> that injects
+  <code>processIsRunning: {_ in true}</code>,
+  <code>portIsOpen: {_ in false}</code>, and a recording warning
+  writer; asserts the warning fires, includes the stuck PID, and
+  names the v1 no-SIGKILL policy.</p>
+  <p><strong>H.1 MINOR</strong> (restore idempotency) — DEFERRED to
+  Step 10. The drainer's <code>restore(.launchdManaged)</code>
+  calls <code>launchctl bootstrap</code> unconditionally; a second
+  restore after a successful bootstrap will fail because the
+  service is already loaded. Step 10's signal handler / failure
+  cleanup will own the call-once discipline. Captured as a
+  forward-compat note rather than fixed in Step 5 code.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes
+  286/286 (283 baseline + 3 new from this fix-pass), with 2 skipped
+  integration-gated tests.</p>
+</div>
+</section>
+<section id="spec013-autotune-step6"><h2>SPEC-013 autotune Step 6 - Shape B pre-warm</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Selected SPEC-013 FR-D.1 <strong>Shape B</strong> for v1:
+    autotune relies on the existing <code>ModelRuntime.configuration(for:)</code>
+    online fallback during <code>serve</code> load instead of adding a new
+    <code>macprovider-cli models pull &lt;id&gt;</code> subcommand. Shape A's
+    new pull contract remains out of scope for SPEC-013 v1.</li>
+    <li>Added <code>HuggingFaceCacheChecker</code>, a heuristic local-cache
+    detector for standard HuggingFace hub paths such as
+    <code>~/.cache/huggingface/hub/models--mlx-community--Llama-3.2-1B-Instruct-4bit/snapshots/&lt;revision&gt;/</code>.
+    It reports cached when any snapshot directory exists with at least one
+    file. Tests inject a temporary cache root so no operator cache is read.</li>
+    <li>Added <code>ProviderPreWarmer</code> as a dormant Step 6 wrapper around
+    <code>CandidateProviderRunner</code>. It records whether the model was
+    already cached before spawn, calls <code>start</code>, waits for
+    readiness, measures load wall-clock from start to ready, and always calls
+    <code>stop(graceSeconds:)</code> after probing. It is not wired into
+    <code>AutotuneCommand.run()</code>; Step 7 owns trial iteration and
+    gate-ttft measurement.</li>
+    <li>FR-D.1 measurement isolation is preserved by construction: Step 6
+    measures only the disposable load/readiness phase. Step 7's feasibility
+    request window starts after <code>ProviderPreWarmer</code> returns
+    <code>.warmed</code>, so cold-cache fetch time is excluded from
+    gate-ttft-ms.</li>
+    <li>FR-D.2 classification is encoded in <code>PreWarmResult</code>.
+    Provider exits whose stderr tail contains integrity markers such as
+    <code>signature mismatch</code>, <code>hash mismatch</code>,
+    <code>manifest verification failed</code>, <code>weight verification failed</code>,
+    checksum/signature-verification failures, or <code>missing tokenizer.json</code>
+    return <code>.failed(.integrity, ...)</code>. Other exits and readiness
+    timeouts return <code>.failed(.transient, ...)</code>.</li>
+    <li>Added <code>ProviderPreWarmerTests</code> for HF cache fixtures,
+    cached and cold-cache ready paths, transient network failure,
+    integrity failure, and readiness timeout cleanup.</li>
+  </ul>
+</div>
+<div class="entry">
+  <time>2026-06-18 (Step 6 round-1 audit response)</time>
+  <p><strong>Round-1 codex audit closures</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 9; verdict was FIX REQUIRED with 1 CRITICAL / 1 MAJOR /
+  2 MINOR / 0 QUESTION).</p>
+  <p><strong>B.1 CRITICAL fix</strong> (missing-tokenizer integrity marker
+  did not match the actual swift-transformers error string). The prior
+  marker <code>"missing tokenizer.json"</code> did not catch the real
+  Hub error <code>"Required configuration file missing: tokenizer.json"</code>
+  because of the colon — so the SPEC-named integrity failure was
+  silently classifying as transient and Step 7 would have advanced
+  instead of aborting with <code>exit_reason = 'pre_warm_integrity_failure'</code>.
+  Added the colon-bearing variants:
+  <code>"configuration file missing: tokenizer.json"</code>,
+  <code>"missing: tokenizer.json"</code>, and
+  <code>"missing required tokenizer files"</code>. Kept the original
+  marker as fallback for variant phrasings. New test
+  <code>testPreWarmerClassifiesConfigurationFileMissingTokenizerAsIntegrity</code>
+  feeds the exact Hub error string to the stub provider and asserts
+  the classification is <code>.integrity</code>.</p>
+  <p><strong>B.2 MAJOR fix</strong> (malformed safetensors / weight loader
+  errors had no integrity markers). Added markers from the mlx-swift
+  safetensors reader:
+  <code>"invalid json header"</code>, <code>"invalid json metadata"</code>,
+  <code>"incomplete metadata"</code>, and <code>"invalid or corrupted"</code>.
+  These signal corrupted or tampered repository content — the
+  asymmetric FR-D.2 risk model biases toward integrity. New test
+  <code>testPreWarmerClassifiesInvalidJsonHeaderAsIntegrity</code>
+  feeds <code>"[load_safetensors] Invalid json header length 0"</code>
+  and asserts <code>.integrity</code>.</p>
+  <p><strong>B.3 MINOR fix</strong> (classification tests covered only one
+  integrity marker). Added
+  <code>testPreWarmerClassifiesMixedCaseIntegrityCorrectly</code>
+  that feeds <code>"SIGNATURE Mismatch on Model Weights"</code> and
+  pins the case-insensitive <code>.lowercased()</code> matcher
+  semantics. Combined with B.1 and B.2's new tests, the integrity-
+  classification suite now covers signature, tokenizer-missing,
+  and safetensors-corruption marker classes.</p>
+  <p><strong>E.1 MINOR fix</strong> (<code>now</code> injection unused in
+  duration assertions). Added
+  <code>testPreWarmerLoadDurationReflectsInjectedClock</code> that
+  injects a deterministic <code>now()</code> closure advancing by 7s
+  between the start and end calls, then asserts
+  <code>loadDurationSec == 7.0</code> (accuracy 0.001). A regression
+  that records the end time before <code>waitForReady</code> returns
+  or always returns 0 would fail this test.</p>
+  <p><strong>G.2 resolved</strong> (defer-stop after .warmed was
+  intentional). Round-1 confirmed the disposable-load-phase design:
+  Step 6 stops the provider before returning .warmed, and Step 7 will
+  start a fresh provider against the now-warm cache for trial
+  measurement. The cold fetch is excluded because Step 6 has already
+  warmed the HF cache; the second readiness wait is still outside
+  gate-ttft-ms per the BUILD prompt's Step 7 sequence. Not a bug.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 297/297
+  (293 baseline + 4 new from this fix-pass), with 2 skipped
+  integration-gated tests.</p>
+</div>
+<div class="entry">
+  <time>2026-06-18 (Step 6 round-2 audit response)</time>
+  <p><strong>Round-2 codex audit closure</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 10; verdict was NARROW V2 REQUIRED with 4 CLOSED on
+  round-1 findings but 1 MAJOR NEW finding (N.1) on the expanded
+  marker list).</p>
+  <p><strong>N.1 MAJOR fix</strong> (two unanchored markers from the
+  round-1 fix could over-classify benign transient lines).
+  Round-1's fix-pass added <code>"incomplete metadata"</code> and
+  <code>"invalid or corrupted"</code> as broad integrity markers,
+  but codex correctly noted these could match plausible benign
+  transient lines like
+  <code>"Download failed: incomplete metadata in Hugging Face API response; retry later"</code>
+  or
+  <code>"cache index invalid or corrupted; rebuild cache and retry"</code>.
+  Under the asymmetric FR-D.2 risk model, transient-as-integrity
+  over-aborts recoverable runs — a MAJOR precision gap.</p>
+  <p>Both vague markers REMOVED from the integrity list (15 → 13
+  patterns). The remaining safetensors-context markers
+  <code>"invalid json header"</code> and
+  <code>"invalid json metadata"</code> stay because they're
+  anchored to the loader's actual output context
+  (<code>[load_safetensors] Invalid json header ...</code>) and
+  are unlikely to appear in transient/network/cache contexts.</p>
+  <p>Two new NEGATIVE-LOCK tests pin the benign-line behavior:
+  <code>testPreWarmerClassifiesIncompleteMetadataDownloadErrorAsTransient</code>
+  feeds the HF API metadata line and asserts <code>.transient</code>;
+  <code>testPreWarmerClassifiesCacheRebuildHintAsTransient</code>
+  feeds the cache rebuild hint and asserts <code>.transient</code>.
+  These regression-lock against any future broad-marker
+  reintroduction.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 299/299
+  (297 baseline + 2 new negative locks; the 4 round-1 closure tests
+  still pass under the narrower marker list). 2 skipped
+  integration-gated tests.</p>
+  <p><strong>Final marker count: 13.</strong> Distribution:
+  signature/hash/checksum class (7), missing-tokenizer class
+  (4), safetensors header/metadata corruption (2). All anchored
+  to SPEC-013 §5.4 FR-D.2's named examples or to specific mlx-swift
+  loader output strings.</p>
+</div>
+</section>
+<section id="spec013-autotune-step7"><h2>SPEC-013 autotune Step 7 - Stage 1 feasibility iteration</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added dormant <code>Stage1Iterator</code> and <code>Stage1Prober</code>.
+    The iterator consumes the candidate list exactly as supplied and never
+    sorts or re-ranks internally; it stops on the first candidate whose
+    Stage 1 probe passes, preserving FR-A.1 / AC-17 operator order.</li>
+    <li>Stage 1 composition now follows the Step 6 Shape B lifecycle:
+    pre-warm with <code>ProviderPreWarmer</code>, abort immediately on
+    integrity-class failures with
+    <code>pre_warm_integrity_failure</code>, record transient pre-warm
+    failures as infeasible trial rows, then start a fresh provider for
+    measurement after the warm-cache readiness phase.</li>
+    <li><code>Stage1Prober</code> starts a fresh
+    <code>CandidateProviderRunner</code>, waits for readiness, fires
+    streamed <code>/v1/chat/completions</code> requests with a deterministic
+    padded prompt sized to about 80 percent of target context, measures
+    time-to-first-content-delta from SSE <code>data:</code> lines, checks
+    p95 TTFT against <code>gate-ttft-ms</code>, rejects common stop-token
+    leaks, and records provider exits as infeasible.</li>
+    <li>Stage 1 trial persistence uses the existing
+    <code>AutotuneTrialRow</code> and <code>AutotuneDB.insertTrial</code>
+    path with <code>stage=1</code>. This step does not insert
+    <code>tune_runs</code>; Step 10 still owns full runtime wiring and the
+    final run-row write.</li>
+    <li>Added focused tests for first-feasible stop behavior, transient
+    pre-warm advancement, integrity abort, all-infeasible smallest-candidate
+    reason surfacing, the critical AC-17 operator-order lock, stop-token leak
+    detection, and TTFT gate misses.</li>
+  </ul>
+</div>
+<div class="entry">
+  <time>2026-06-18 (Step 7 round-1 audit response)</time>
+  <p><strong>Round-1 codex audit closures</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 12; verdict was FIX REQUIRED with 1 CRITICAL / 1 MAJOR /
+  4 MINOR / 0 QUESTION).</p>
+  <p><strong>E.1 CRITICAL fix</strong> (failureReasons.last only
+  surfaces smallest model under largest-first iteration; under operator
+  override [1b, 32b] both failing, it returned 32b's reason — silent
+  FR-A.4 / FR-H.4 violation). Added an orthogonal
+  <code>candidatesBySize: [String]?</code> init parameter (default:
+  caller list reversed). The all-infeasible throw now walks
+  <code>candidatesBySize</code> smallest-first to find the first failed
+  candidate and surfaces its reason. New regression test
+  <code>testStage1IteratorAllInfeasibleWithOperatorOverrideSurfacesSmallestBySize</code>
+  passes <code>["1b", "32b"]</code> as both iteration AND size order,
+  both fail, asserts the surfaced reason is "1b: 1b leaked stop token"
+  (not "32b OOM during probe"). Existing test
+  <code>testStage1IteratorAllInfeasibleSurfacesSmallestFirstReason</code>
+  updated to match the new contract (surfaced reason now includes the
+  candidate name prefix; trials list is size-ordered).</p>
+  <p><strong>F.1 MAJOR fix</strong> (integrity abort lost per-candidate
+  trial evidence). Pre-warm integrity branch now writes the trial row
+  with notes="pre-warm integrity: &lt;reason&gt;" BEFORE throwing per
+  FR-G.1 "every trial is recorded." Test
+  <code>testStage1IteratorAbortsOnIntegrity</code> flipped from
+  asserting <code>trialModels == []</code> to
+  <code>trialModels == ["model-a"]</code>.</p>
+  <p><strong>H.1 MINOR fix</strong> (Stage 1 row kept=true conflicted
+  with SPEC FR-G.1 schema comment "Stage 2 only; 0 in Stage 1").
+  Stage1Iterator now always passes <code>kept: false</code> for Stage 1
+  rows; Step 9 derives the chosen model from
+  <code>Stage1IteratorResult.selectedModel</code> rather than
+  <code>tune_trials.kept</code>.</p>
+  <p><strong>D.1 MINOR fix</strong> (SSE parser edge cases untested).
+  Added <code>testStage1ProberClassifiesHTTPNon2xxAsInfeasible</code>
+  (HTTP 503 → infeasible with "HTTP 503" in reason) and
+  <code>testStage1ProberAcceptsCompletionsStyleTextSSE</code> (OpenAI
+  completions API <code>choices[0].text</code> shape → feasible). The
+  completions-style fixture also exercises SSE comment lines and
+  malformed JSON <code>data:</code> payloads, locking the parser's
+  graceful-skip behavior.</p>
+  <p><strong>K.1 MINOR fix</strong> (Stage 1 persistence fields partly
+  asserted). Added
+  <code>testStage1IteratorPersistsFullStage1FieldSet</code> that reads
+  the row from the DB via a new <code>assertSingleTrialRow</code>
+  helper and asserts every Stage 1-relevant column: stage=1, runID,
+  fits, nErr, kept=false, replicatesN, maxContextCap=targetContext,
+  kvBits=nil, maxBatch=nil. A future regression that writes stage=0
+  or loses replicates_n would fail this test.</p>
+  <p><strong>G.1 MINOR fix</strong> (ProviderPreWarmer DI cast leaks).
+  Added a documentation block on the <code>extension
+  ProviderPreWarmer: Stage1PreWarming</code> explaining the
+  production-only cast and steering test authors to inject a fake
+  <code>Stage1PreWarming</code> directly rather than combining a real
+  prewarmer with a fake runner.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 310/310
+  (306 baseline + 4 new from this fix-pass), with 2 skipped
+  integration-gated tests.</p>
+</div>
+</section>
+<section id="spec013-autotune-step8"><h2>SPEC-013 autotune Step 8 - Stage 2 knob hill-climb</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added dormant <code>Stage2HillClimb</code> and
+    <code>Stage2Prober</code>. Step 8 intentionally does not call them from
+    <code>AutotuneCommand.run()</code>; Step 10 still owns Stage 1 + Stage 2
+    runtime wiring.</li>
+    <li>The hill-climb evaluates the knob Cartesian product in deterministic
+    order: <code>kv_bits</code> outer, <code>max_batch</code> middle,
+    <code>max_context</code> inner. Each cell asks the injected runner factory
+    for a fresh provider runner and records exactly one
+    <code>tune_trials</code> row with <code>stage=2</code>.</li>
+    <li><code>WinningKnobs</code> carries the selected
+    <code>kvBits</code>, <code>maxBatch</code>, and
+    <code>maxContext</code>. <code>nil</code> <code>kvBits</code> means the
+    mlx-swift default, matching the Step 8 <code>unset</code> axis cell.</li>
+    <li>The keep-best rule is a Swift port of PR #103's
+    <code>_is_new_best</code>: throughput wins above the configured relative
+    epsilon, cells inside the epsilon tie band use lower TTFT as the
+    tiebreaker, and unmeasurable TPS never wins.</li>
+    <li><code>Stage2Prober</code> mirrors <code>Stage1Prober</code>'s
+    provider lifecycle and SSE parsing shape but starts the provider with the
+    current cell's knobs. Stage 2 applies strict-all-feasible semantics:
+    HTTP errors, stop-token leaks, provider exits, request failures, or any
+    replicate exceeding the TTFT gate make the whole cell infeasible and no
+    median TPS / p95 TTFT is persisted for that row.</li>
+    <li>Added focused tests for baseline winner selection, throughput-primary
+    replacement, TTFT tiebreak replacement, strict replicate failure handling,
+    all-cells-infeasible error reporting, stage-2 persistence fields, and
+    TPS tie-epsilon non-replacement.</li>
+  </ul>
+</div>
+<div class="entry">
+  <time>2026-06-18 (Step 8 round-1 audit response)</time>
+  <p><strong>Round-1 codex audit closures</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 14; verdict was FIX REQUIRED with 0 CRITICAL / 1 MAJOR / 1
+  MINOR / 0 QUESTION).</p>
+  <p><strong>D.1 MAJOR fix</strong> (multiple Stage 2 rows had
+  <code>kept = true</code>). The prior code computed
+  <code>kept</code> at insertion time based on <code>isNewBest</code>,
+  which left every cell that became "running best" with
+  <code>kept = 1</code> in the DB. SPEC-013 §5.7 FR-G.1 requires only
+  the FINAL winning Stage 2 cell to carry <code>kept = 1</code>.</p>
+  <p>Fix: added <code>AutotuneDB.markStage2WinnerCell(runID:kvBits:maxBatch:maxContextCap:)</code>
+  — an idempotent SQL UPDATE matching the (run_id, stage=2, knobs)
+  compound. <code>Stage2HillClimb.run()</code> now inserts every row
+  with <code>kept = false</code> during the loop, tracks the winning
+  row's array index via <code>bestRowIndex</code>, and after the loop
+  (a) calls <code>markStage2WinnerCell</code> with the winner's knobs
+  (b) mutates <code>trialRows[bestRowIndex].kept = true</code> so
+  callers reading <code>cellTrials</code> see consistent semantics.</p>
+  <p>Test updates:
+  <code>testStage2HillClimbAppliesIsNewBestThroughputPrimary</code>
+  flipped from <code>[true, true]</code> to
+  <code>[false, true]</code>;
+  <code>testStage2HillClimbAppliesIsNewBestTTFTTiebreak</code> same
+  flip;
+  <code>testStage2HillClimbPersistsAllCellTrialsWithStageTwo</code>
+  now explicitly asserts
+  <code>rows.map(\.kept) == [false, true, false, false]</code> AND
+  <code>rows.filter(\.kept).count == 1</code> as a regression-lock on
+  the exactly-one-winner invariant.</p>
+  <p><strong>J.1 MINOR fix</strong> (direct <code>isNewBest</code>
+  edge-branch tests missing). Added 5 new tests targeting the
+  prototype's documented but untested branches:
+  <code>testIsNewBestAcceptsPositiveTPSWhenBestTPSIsZero</code>,
+  <code>testIsNewBestRejectsZeroTPSWhenBestTPSIsZero</code>,
+  <code>testIsNewBestWinsTieBandWhenBestTTFTIsNil</code>,
+  <code>testIsNewBestHoldsWhenBothTTFTsAreNilInTieBand</code>,
+  <code>testIsNewBestHoldsWhenNewTTFTIsNilInTieBand</code>. These
+  exercise the <code>bestTPS &lt;= 0</code> branch (both
+  positive-new and zero-new cases) and the tie-band branches where
+  either or both TTFTs are nil — matching the Python prototype's
+  <code>ttft is not None and (best_ttft is None or ttft &lt; best_ttft)</code>
+  shape.</p>
+  <p><strong>AutotuneDB additive method note</strong>: Step 3 is
+  locked at d0029e9, but adding <code>markStage2WinnerCell</code> is
+  a purely additive method that does not alter any locked behavior.
+  The same pattern Step 5 used to extract <code>PortProbe.swift</code>
+  from Step 4 applies. The new method follows the existing
+  <code>insertTrial</code> / <code>insertRun</code> /
+  <code>applyRetentionInTransaction</code> idioms (private
+  <code>withStatement</code> + <code>bind</code> helpers, throws on
+  SQLite errors).</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 322/322
+  (317 baseline + 5 new from this fix-pass), with 2 skipped
+  integration-gated tests.</p>
+</div>
+</section>
+<section id="spec013-autotune-step9"><h2>SPEC-013 autotune Step 9 - Recommendation surface</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added dormant <code>RecommendationEmitter</code>. Step 9 intentionally
+    does not call it from <code>AutotuneCommand.run()</code>; Step 10 owns
+    Stage 1 + Stage 2 + recommendation/config wiring.</li>
+    <li>The emitter returns the operator-facing terminal
+    <code>RECOMMENDATION</code> block, pretty JSON schema output, computed
+    <code>recipe_hash</code>, alternates, and copy-pasteable
+    <code>macprovider-cli serve</code> command as a pure value. Nil
+    <code>kvBits</code> renders as <code>unset</code> in terminal output,
+    emits JSON <code>null</code>, and omits <code>--kv-bits</code> from the
+    serve command.</li>
+    <li>Added a small vendored <code>RFC8785JCS</code> encoder for the Step 9
+    hash domain. It sorts object keys by UTF-16 code unit order, emits no
+    whitespace, preserves array order, renders integer numbers directly, and
+    handles the string escaping needed for the SPEC-013 recipe input. The
+    reference vector hash is locked to
+    <code>sha256:eb5f8f90c09c2bbcec0dca6f42c203c25a7a8d403a734c6a81379b14ad702f9d</code>,
+    computed from the prompt's literal canonical JSON bytes with
+    <code>shasum -a 256</code>.</li>
+    <li>Added standalone <code>ConfigApplier</code> for <code>--apply</code>.
+    It creates counter-based backups
+    <code>config.yaml.bak-&lt;unix-ts&gt;-&lt;counter&gt;</code>, writes backup
+    and config files through same-directory temp files, and commits each write
+    with POSIX <code>rename</code> rather than
+    <code>FileManager.replaceItem</code>.</li>
+    <li>Yams 5.1 is used to parse and validate existing YAML before mutation.
+    Because emitting through Yams drops comments/order, the applier uses a
+    constrained top-level key rewrite for SPEC-013's four owned keys
+    (<code>model</code>, <code>kv_bits</code>,
+    <code>max_context_override</code>, and
+    <code>max_concurrency_override</code>) so unrelated lines, comments, and
+    ordering are preserved for the operator config shape this binary reads.
+    This is intentionally not a general YAML rewrite engine.</li>
+    <li>Added focused tests for terminal output, JSON schema fields,
+    alternates slicing, nil-recommendation JSON null, hash format and
+    determinism, the literal JCS reference vector, backup counter collisions,
+    non-owned config preservation, nil <code>kv_bits</code> omission,
+    idempotence, atomic temp+rename observability, and launchd restart hint
+    content.</li>
+  </ul>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter 'RecommendationEmitterTests|ConfigApplierTests'</code>
+  passes 22/22 new Step 9 tests.</p>
+</div>
+<div class="entry">
+  <time>2026-06-18</time>
+  <p><strong>Round-1 audit response (4 MINOR + 1 QUESTION closed; Round 16 at
+  specs/SPEC-013-impl-audit.md).</strong> Codex round-1 audit on commit
+  292b2f9 returned 0 CRITICAL / 0 MAJOR / 4 MINOR / 1 QUESTION with verdict
+  READY TO PROCEED TO STEP 10. The independent <code>printf | shasum -a 256</code>
+  cross-check on the A.7 reference vector matched the baked test literal
+  (<code>eb5f8f90c09c2bbcec0dca6f42c203c25a7a8d403a734c6a81379b14ad702f9d</code>),
+  so the JCS encoder is cross-implementation-deterministic. This fix-pass
+  closes all 5 findings to satisfy the "until 0 findings" loop discipline.</p>
+  <p><strong>B.1 QUESTION (nil-recommendation recipe_hash policy)</strong>:
+  pre-committed the Step 10 persistence contract by making
+  <code>EmittedRecommendation.recipeHash</code> optional. When the run's
+  recommendation is nil, the emitter now returns <code>recipeHash = nil</code>
+  and the JSON output emits literal <code>"recipe_hash": null</code> (matching
+  the <code>tune_runs.recipe_hash</code> schema comment "NULL if no
+  recommendation"). Step 10's <code>tune_runs</code> persistence will store
+  NULL accordingly. New test
+  <code>testRecipeHashIsNilWhenRecommendationIsNil</code> locks both
+  invariants.</p>
+  <p><strong>E.1 MINOR (JSON schema test only spot-checks nested objects)</strong>:
+  rewrote <code>testJSONOutputMatchesSpec013Schema</code> to walk every
+  documented nested key, assert primitive types, and use
+  <code>Set(dict.keys) == &lt;expected&gt;</code> as an additive-only
+  regression-lock. The test now covers
+  <code>machine.{ram_gb, chip, os_version, binary_version}</code>,
+  <code>inputs.{target_context, candidate_models, stage1_replicates,
+  stage2_replicates, gate_ttft_ms, tps_tie_epsilon}</code>,
+  <code>recommendation.{model, target_context, knobs, tps_median, ttft_p95_ms,
+  replicates, serve_command}</code>,
+  <code>recommendation.knobs.{kv_bits, max_concurrency_override,
+  max_context_override}</code>, the alternates string array, and
+  <code>infeasible[].{model, rank, reason}</code>. ISO-8601 timestamp shape is
+  asserted via regex (<code>^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$</code>).</p>
+  <p><strong>G.1 MINOR (TOCTOU between fileExists check and rename)</strong>:
+  replaced the stat-then-create backup pattern with exclusive-create-write.
+  <code>writeBackupExclusively</code> opens each candidate with
+  <code>O_CREAT | O_EXCL | O_WRONLY</code>; on <code>EEXIST</code> it retries
+  the next counter, on success it writes the original bytes directly to the
+  exclusively-opened FD. No temp+rename for backups (the config write still
+  uses atomic temp+rename per FR-F.3). A concurrent autotune can no longer
+  overwrite a pre-existing backup. New test
+  <code>testApplyBackupUsesExclusiveCreateAgainstTOCTOURace</code> pre-creates
+  backups at counters 0-3, applies, and asserts (a) the new backup lands at
+  counter 4, (b) all 4 pre-existing backup files retain their original byte
+  content unchanged. A new error case
+  <code>backupWriteFailed(destination:, errno:)</code> reports any non-EEXIST
+  open or write failure.</p>
+  <p><strong>I.1 MINOR (AC-9 preservation tests too weak)</strong>: added
+  two stronger tests. <code>testApplyPreservesNonOwnedLinesByteIdentically</code>
+  uses a fixture with leading/trailing/block/inline comments, blank lines, and
+  ordering sentinels; it splits pre and post into lines, filters out the 4
+  owned keys, and asserts the remaining line arrays are byte-identical.
+  <code>testApplyResultIsParseableByConfigLoader</code> runs the post-apply
+  file through the binary's actual <code>MacProviderCore.ConfigLoader.load</code>
+  and asserts <code>loaded.{model, kvBitsOverride, maxContextOverride,
+  maxConcurrencyOverride}</code> resolve to the recommendation values. This
+  catches a future parser/key-name drift that the spot-check tests would
+  miss.</p>
+  <p><strong>K.1 MINOR (launchd hint test only checks bootout/bootstrap)</strong>:
+  renamed <code>testLaunchdRestartHintIncludesBootoutAndBootstrap</code> to
+  <code>testLaunchdRestartHintIncludesAllRequiredSubstrings</code> and added
+  assertions for the plist path
+  (<code>~/Library/LaunchAgents/live.streamvc.macprovider.plist</code>) and
+  the service identifier (<code>gui/$UID/live.streamvc.macprovider</code>).</p>
+  <p><strong>testApplyWriteIsAtomic adjustment</strong>: the test now asserts
+  <code>tempPaths.count == 1</code> (was 2) since the backup write no longer
+  uses the temp+rename path. The config write still uses temp+rename and the
+  spy <code>tempFileNamer</code> closure exercises it.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 348/348 (344
+  baseline + 4 new from this fix-pass), with 2 skipped integration-gated
+  tests, 0 failures.</p>
 </div>
 </section>
 </body></html>
