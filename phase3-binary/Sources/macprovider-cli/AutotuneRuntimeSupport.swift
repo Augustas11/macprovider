@@ -67,8 +67,13 @@ struct MachineFingerprinter {
         var memsize: UInt64 = 0
         var size = MemoryLayout<UInt64>.size
         let rc = sysctlbyname("hw.memsize", &memsize, &size, nil, 0)
+        // Round-1 audit K.1 MINOR fix: return the documented minimum 1
+        // (not 0) on sysctl failure or zero memsize. A zero ram_gb violates
+        // the FR-G.2 schema "machine_ram_gb NOT NULL" intent (NULL would
+        // be honest about the failure, 0 is impossible-machine which
+        // poisons recipe_hash machine-sensitivity for fallback runs).
         guard rc == 0, memsize > 0 else {
-            return 0
+            return 1
         }
         return max(1, Int((Double(memsize) / pow(1024.0, 3.0)).rounded()))
     }

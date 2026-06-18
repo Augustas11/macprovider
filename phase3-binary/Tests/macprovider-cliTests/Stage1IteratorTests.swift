@@ -110,14 +110,13 @@ final class Stage1IteratorTests: XCTestCase {
         ])
 
         do {
-            // Step 10 passes the default candidate list's orthogonal
-            // smallest-first order explicitly. nil is reserved for operator
-            // overrides where v1 has no size metadata and falls back to
-            // input order.
+            // Default candidate list is largest-first per FR-C.1, so the
+            // iterator's default `candidatesBySize` (nil → reversed) gives
+            // ["1b", "14b", "32b"] — smallest-first. The surfaced reason
+            // and the size-ordered trials list MUST reflect this.
             _ = try await makeIterator(
                 db: db,
                 candidates: ["32b", "14b", "1b"],
-                candidatesBySize: ["1b", "14b", "32b"],
                 prewarmer: prewarmer,
                 prober: prober
             ).run()

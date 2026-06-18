@@ -118,11 +118,17 @@ final class AutotuneCommandRunTests: XCTestCase {
         ])
     }
 
-    func testCandidatesBySizeIsNilWhenOperatorOverride() throws {
+    // Round-1 audit M.1 CRITICAL fix: operator override now returns input
+    // order explicitly so the LOCKED Stage1Iterator nil fallback (reversed)
+    // is preserved but never triggered from production code. The pre-fix
+    // behavior (return nil) silently relied on the LOCKED fallback to mean
+    // "input order" — but the LOCKED fallback semantics is
+    // `Array(candidates.reversed())`, not `candidates`.
+    func testCandidatesBySizeReturnsInputOrderForOperatorOverride() throws {
         let command = try AutotuneCommand.parse(["--candidate-models", "a,b", "--dry-run"])
         let plan = try command.candidatePlan()
 
-        XCTAssertNil(AutotuneCommand.candidatesBySize(for: plan))
+        XCTAssertEqual(AutotuneCommand.candidatesBySize(for: plan), ["a", "b"])
     }
 
     func testInterruptionFlagCancelsLoopAtNextPoll() async throws {
@@ -156,6 +162,63 @@ final class AutotuneCommandRunTests: XCTestCase {
         let row = try fixture.runRow()
         XCTAssertEqual(row.exitReason, "interrupted")
         XCTAssertNil(row.endedAtUTC)
+    }
+
+    // Round-1 audit B.1 MAJOR regression-lock: an interrupt arriving AFTER
+    // Stage 2 returns but BEFORE recommendation emission / apply must be
+    // honored, not silently swallowed by finalizing as `ok`.
+    func testInterruptionAfterStage2CancelsBeforeApply() async throws {
+        let fixture = try Fixture(testCase: self)
+        let command = try fixture.command(["--apply"])
+        let flag = AutotuneInterruptFlag()
+        var deps = fixture.dependencies()
+        deps.makeInterruptFlag = { flag }
+        let originalRunStage2 = deps.runStage2
+        deps.runStage2 = { request in
+            let result = try await originalRunStage2(request)
+            flag.set()
+            return result
+        }
+
+        let exitCode = try await assertExit { try await command.run(dependencies: deps) }
+
+        XCTAssertEqual(exitCode, ExitCode(130))
+        XCTAssertEqual(fixture.applyCalls, 0, "--apply must not be called when interrupted after Stage 2")
+        let row = try fixture.runRow()
+        XCTAssertEqual(row.exitReason, "interrupted")
+        XCTAssertNil(row.endedAtUTC)
+    }
+
+    // Round-1 audit J.1 MAJOR regression-lock: a drain failure (e.g.
+    // launchctl bootout throws) classifies as `provider_conflict`, not
+    // `internal_error`. It is still a conflict scenario, known-classifiable
+    // per FR-G.2.
+    func testDrainConflictThrowFinalizesAsProviderConflict() async throws {
+        let fixture = try Fixture(testCase: self)
+        let command = try fixture.command(["--drain"])
+        var deps = fixture.dependencies()
+        deps.detectConflict = { .foreground(pid: 123, argv: ["macprovider-cli", "serve"]) }
+        deps.drainConflict = { _, _, _ in
+            throw NSError(domain: "DrainTest", code: 42, userInfo: [
+                NSLocalizedDescriptionKey: "launchctl bootout failed",
+            ])
+        }
+
+        let exitCode = try await assertExit { try await command.run(dependencies: deps) }
+
+        XCTAssertEqual(exitCode, ExitCode(1))
+        let row = try fixture.runRow()
+        XCTAssertEqual(row.exitReason, "provider_conflict")
+        XCTAssertTrue(fixture.stderr.contains("--drain failed"), fixture.stderr)
+    }
+
+    // Round-1 audit K.1 MINOR regression-lock: machine_ram_gb fallback
+    // never drops to 0 — when sysctl fails or returns zero, the
+    // documented minimum is 1 (FR-G.2 schema NOT NULL + recipe_hash
+    // machine-sensitivity intent).
+    func testMachineFingerprinterRAMNeverReturnsZero() {
+        let sample = MachineFingerprinter().sample()
+        XCTAssertGreaterThanOrEqual(sample.ramGB, 1)
     }
 
     func testApplyFlagInvokesConfigApplier() async throws {

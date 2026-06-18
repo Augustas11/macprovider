@@ -235,7 +235,21 @@ struct AutotuneCommand: AsyncParsableCommand {
                     dependencies.writeStderr("autotune: provider conflict: \(Self.describe(conflict)); rerun with --drain to stop it first.\n")
                     throw ExitCode(1)
                 }
-                let drainResult = try dependencies.drainConflict(conflict, port, TimeInterval(drainGrace))
+                // Round-1 audit J.1 MAJOR fix: drain failures (e.g. launchctl
+                // bootout failure, foreground SIGTERM failure) are still a
+                // conflict scenario and must classify as .providerConflict,
+                // not .internalError. The prior code let drainConflict's
+                // thrown errors fall through to the generic catch which
+                // finalized as internal_error.
+                let drainResult: ProviderDrainResult
+                do {
+                    drainResult = try dependencies.drainConflict(conflict, port, TimeInterval(drainGrace))
+                } catch {
+                    let endedAt = dependencies.now()
+                    try updateRun(endedAt: endedAt, exitReason: .providerConflict, recommendationJSON: nil, recipeHash: nil)
+                    dependencies.writeStderr("autotune: provider conflict: --drain failed: \(error)\n")
+                    throw ExitCode(1)
+                }
                 if case .portStillOpen(let heldPort) = drainResult {
                     let endedAt = dependencies.now()
                     try updateRun(endedAt: endedAt, exitReason: .providerConflict, recommendationJSON: nil, recipeHash: nil)
@@ -378,6 +392,16 @@ struct AutotuneCommand: AsyncParsableCommand {
                 }
             }
 
+            // Round-1 audit B.1 MAJOR fix: poll cancellation after Stage 2
+            // returns to catch SIGINT/SIGTERM that arrived between the last
+            // Stage 2 cell boundary and recommendation emission. Without
+            // this poll, an interrupt in this window would still apply
+            // config and finalize as .ok.
+            if cancellationReason() == .interrupted {
+                try updateRun(endedAt: nil, exitReason: .interrupted, recommendationJSON: nil, recipeHash: nil)
+                throw ExitCode(130)
+            }
+
             let endedAt = dependencies.now()
             let recommendation = Self.recommendation(from: stage2, targetContext: targetContext, partial: false)
             let inputs = recommendationInputs(
@@ -394,6 +418,13 @@ struct AutotuneCommand: AsyncParsableCommand {
             recipeHash = emitted.recipeHash
 
             if apply {
+                // Round-1 audit B.1 MAJOR fix (continued): re-poll before
+                // applyConfig so an interrupt that arrived during emission
+                // does not still write to disk.
+                if cancellationReason() == .interrupted {
+                    try updateRun(endedAt: nil, exitReason: .interrupted, recommendationJSON: nil, recipeHash: nil)
+                    throw ExitCode(130)
+                }
                 do {
                     let result = try dependencies.applyConfig(recommendation, endedAt, config)
                     applied = true
@@ -458,14 +489,23 @@ struct AutotuneCommand: AsyncParsableCommand {
     static let specVersion = "SPEC-013 v0.3"
 
     static func candidatesBySize(for plan: AutotunePlan) -> [String]? {
-        guard plan.source == .defaultList else {
-            return nil
+        switch plan.source {
+        case .defaultList:
+            let selected = Set(plan.candidates)
+            return defaultCandidates
+                .filter { selected.contains($0.modelID) }
+                .sorted { $0.sizeB < $1.sizeB }
+                .map(\.modelID)
+        case .explicit:
+            // Round-1 audit M.1 CRITICAL fix: operator overrides have no
+            // size metadata in v1, so pass the input order EXPLICITLY as
+            // the error-surface order. This preserves the LOCKED Stage 7
+            // iterator's nil-fallback semantics (reversed) while letting
+            // operator-override runs surface infeasibles in the order the
+            // operator typed them. The LOCKED fallback is never triggered
+            // from production code now.
+            return plan.candidates
         }
-        let selected = Set(plan.candidates)
-        return defaultCandidates
-            .filter { selected.contains($0.modelID) }
-            .sorted { $0.sizeB < $1.sizeB }
-            .map(\.modelID)
     }
 
     private func recommendationInputs(

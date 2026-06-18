@@ -123,9 +123,8 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   <code>AutotuneCommand.defaultCandidates</code> sorted by ascending
   <code>sizeB</code> into <code>Stage1Iterator(candidatesBySize:)</code>, so
   all-infeasible output leads with the smallest model. Operator
-  <code>--candidate-models</code> overrides pass <code>nil</code>; v1 has no
-  size metadata for arbitrary IDs, so the error surface falls back to operator
-  input order.</p>
+  <code>--candidate-models</code> overrides pass the input order EXPLICITLY
+  (Round-1 audit M.1 CRITICAL fix — see audit-response entry below).</p>
   <p><strong>Apply and report-only decisions.</strong> <code>applied = 1</code>
   is written only after <code>--apply</code> succeeds. Apply failure does not
   change <code>exit_reason = 'ok'</code> because the recommendation remains
@@ -136,6 +135,64 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   <code>swift test --package-path phase3-binary --filter
   'AutotuneCommandTests|AutotuneCommandRunTests|AutotuneDBTests|Stage1IteratorTests|Stage2HillClimbTests|RecommendationEmitterTests|ConfigApplierTests'</code>
   passes 81/81 affected tests, 0 failures.</p>
+</div>
+<div class="entry">
+  <time>2026-06-18</time>
+  <p><strong>Round-1 audit response (1 CRITICAL + 2 MAJOR + 1 MINOR closed;
+  Round 18 at specs/SPEC-013-impl-audit.md).</strong> Codex round-1 audit
+  on commit 79d48ca returned 1 CRITICAL / 2 MAJOR / 1 MINOR / 0 QUESTION
+  with verdict FIX REQUIRED. This fix-pass closes all 4 findings.</p>
+  <p><strong>M.1 CRITICAL (LOCKED-file diff was not additive)</strong>:
+  Step 10 had changed the LOCKED <code>Stage1Iterator</code> nil fallback
+  from <code>candidatesBySize ?? Array(candidates.reversed())</code> to
+  <code>candidatesBySize ?? candidates</code> AND modified an existing
+  Step 7 test to pass <code>candidatesBySize</code> explicitly. Both edits
+  violate the Step 7 LOCK contract. Reverted the iterator's nil fallback
+  to <code>Array(candidates.reversed())</code> (the LOCKED form) AND
+  reverted the Step 7 test setup. Then changed
+  <code>AutotuneCommand.candidatesBySize(for:)</code> to ALWAYS return
+  non-nil — for operator overrides, it now returns
+  <code>plan.candidates</code> (input order) explicitly. The LOCKED
+  fallback semantics is preserved but never triggered from production.
+  The Step 10 derivation test was renamed from
+  <code>testCandidatesBySizeIsNilWhenOperatorOverride</code> to
+  <code>testCandidatesBySizeReturnsInputOrderForOperatorOverride</code>
+  to lock the new contract.</p>
+  <p><strong>B.1 MAJOR (interruption ignored after Stage 2)</strong>:
+  added two cooperative-cancellation poll points in
+  <code>AutotuneCommand.run()</code> — one immediately after
+  <code>Stage2HillClimb.run(...)</code> returns, and another right before
+  <code>dependencies.applyConfig(...)</code>. Either poll routes an
+  in-flight interrupt to the <code>updateRun(endedAtUTC: nil,
+  exitReason: .interrupted)</code> + <code>ExitCode(130)</code> path.
+  New regression-lock test
+  <code>testInterruptionAfterStage2CancelsBeforeApply</code> wraps the
+  injected <code>runStage2</code> closure to flip the interrupt flag
+  AFTER Stage 2 returns; the test asserts
+  <code>applyCalls == 0</code>, exit code 130, and the row's
+  <code>exit_reason == "interrupted"</code> with
+  <code>endedAtUTC == nil</code>.</p>
+  <p><strong>J.1 MAJOR (drain failures finalize as internal_error)</strong>:
+  wrapped <code>dependencies.drainConflict(...)</code> in a do/catch inside
+  the conflict branch. On throw, the run finalizes as
+  <code>provider_conflict</code> (still a conflict scenario,
+  known-classifiable per FR-G.2), prints a clear stderr message, and
+  exits non-zero. New regression-lock test
+  <code>testDrainConflictThrowFinalizesAsProviderConflict</code> injects
+  a throwing <code>drainConflict</code> closure and asserts
+  <code>exit_reason == "provider_conflict"</code> and the stderr message
+  contains <code>--drain failed</code>.</p>
+  <p><strong>K.1 MINOR (RAM sysctl fallback returns 0)</strong>: changed
+  <code>MachineFingerprinter.ramGB()</code> to return <code>1</code> (the
+  documented minimum) on sysctl failure or zero memsize. Zero is impossible
+  for any real machine and poisons <code>recipe_hash</code>
+  machine-sensitivity for fallback runs. New regression-lock test
+  <code>testMachineFingerprinterRAMNeverReturnsZero</code> samples the real
+  fingerprinter and asserts <code>ramGB >= 1</code>.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 366/366
+  (363 baseline + 3 new from this fix-pass), with 2 skipped
+  integration-gated tests, 0 failures.</p>
 </div>
 </section>
 

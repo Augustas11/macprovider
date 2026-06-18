@@ -171,11 +171,18 @@ struct Stage1Iterator {
         // MODEL's reason to surface first — independent of iteration order.
         //
         // `candidatesBySize` provides the orthogonal "size order" lookup
-        // (smallest first). Step 10 passes `AutotuneCommand`'s default
-        // candidate list sorted by `sizeB` ascending. When it is nil, v1
-        // treats the operator-supplied input order as the only available
-        // error-surface order because no size metadata exists.
-        self.candidatesBySize = candidatesBySize ?? candidates
+        // (smallest first). Step 10 will pass `AutotuneCommand`'s default
+        // candidate list sorted by `sizeB` ascending; for operator-supplied
+        // lists, the caller passes the same operator list sorted by SizeB
+        // (using the FR-A.4 metadata available in
+        // `AutotuneCommand.defaultCandidates` or a parsed equivalent).
+        //
+        // Fallback when `candidatesBySize` is nil: treat `candidates` as
+        // largest-first (the default-list convention per FR-C.1) and
+        // reverse to get smallest-first. This preserves the prior behavior
+        // for the default-list path while letting operator-override paths
+        // pass an explicit size order.
+        self.candidatesBySize = candidatesBySize ?? Array(candidates.reversed())
         self.targetContext = targetContext
         self.gateTTFTMS = gateTTFTMS
         self.stage1Replicates = stage1Replicates
