@@ -201,11 +201,14 @@ def aggregate_cell(
     total_completion_tokens = 0
     prompt_tokens_list: list[int] = []
     any_leak = False
+    error_pairs: dict[tuple[Any, str], str] = {}
 
     for r in results:
         is_err = bool(r.get("error")) or (r.get("http_status") is not None and r["http_status"] != 200)
         if is_err:
             n_err += 1
+            err_str = r.get("error") or f"HTTP {r.get('http_status')}"
+            error_pairs.setdefault((r.get("http_status"), err_str[:80]), err_str)
         else:
             n_ok += 1
             if r.get("ttft_ms") is not None:
@@ -233,6 +236,12 @@ def aggregate_cell(
         int(statistics.median(prompt_tokens_list)) if prompt_tokens_list else None
     )
 
+    notes: str | None = None
+    if error_pairs:
+        notes = " | ".join(list(error_pairs.values())[:3])
+        if len(notes) > 200:
+            notes = notes[:197] + "..."
+
     feasible = (
         n_err == 0
         and (ttft_p95_ms is not None and ttft_p95_ms <= gate_ttft_ms)
@@ -246,6 +255,7 @@ def aggregate_cell(
         "ttft_p95_ms": ttft_p95_ms,
         "measured_prompt_tokens": measured_prompt_tokens,
         "feasible": int(feasible),
+        "notes": notes,
     }
 
 
@@ -436,7 +446,7 @@ def main() -> int:
                 "n_ok": agg["n_ok"],
                 "n_err": agg["n_err"],
                 "feasible": agg["feasible"],
-                "notes": None,
+                "notes": agg["notes"],
             }
             write_cell_row(conn, row)
 
