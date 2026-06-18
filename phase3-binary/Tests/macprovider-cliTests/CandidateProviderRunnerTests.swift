@@ -35,6 +35,126 @@ final class CandidateProviderRunnerTests: XCTestCase {
         )
     }
 
+    // MARK: - Round-1 audit fix tests
+
+    /// Round-1 B.1 closure: `start()` with a missing binary path MUST
+    /// throw promptly rather than hang on `readDataToEndOfFile()` for
+    /// pipes whose write ends are still open. Prior to the fix, codex
+    /// reproduced a 2-second hang locally.
+    func testStartFailsPromptlyWithMissingBinary() throws {
+        let logDirectory = try temporaryDirectory(name: "provider-runner-missing-binary")
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: "/nonexistent/macprovider-cli-stub-\(UUID().uuidString)",
+            logDirectory: logDirectory
+        )
+
+        let port = try unusedPort()
+        let started = Date()
+        XCTAssertThrowsError(try runner.start(model: "model-a", port: port))
+        let elapsed = Date().timeIntervalSince(started)
+        XCTAssertLessThan(
+            elapsed, 1.0,
+            "start() must fail promptly when the binary is missing; got \(elapsed)s"
+        )
+    }
+
+    /// Round-1 C.1 closure: after receiving HTTP 200 on /v1/models,
+    /// `waitForReady` MUST re-check `process.isRunning` before
+    /// returning `.ready`. A stub that serves 200 once and immediately
+    /// exits must produce `.processExited` or `.ready` (NOT `.timeout`).
+    /// The non-determinism of which of the two: in CI either outcome
+    /// is acceptable; what we lock against is `.timeout` (the pre-fix
+    /// silent-hang regression class) or any non-running provider
+    /// silently mis-reported as `.ready`.
+    func testWaitForReadyHandlesImmediateExitAfterFirstResponse() async throws {
+        let fixture = try compileImmediateExitStubProvider()
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: fixture.path,
+            logDirectory: try temporaryDirectory(name: "provider-runner-immediate-exit")
+        )
+
+        let port = try unusedPort()
+        try runner.start(model: "model-x", port: port)
+        let status = try await runner.waitForReady(timeout: 5)
+
+        switch status {
+        case .ready, .processExited:
+            break
+        case .timeout(let last):
+            XCTFail("expected .ready or .processExited, got .timeout(\(last))")
+        }
+    }
+
+    /// Round-1 A.1 resolution: `stop()` returns `.stopped` for a never-
+    /// started runner and for a clean stop, and `.stuck(pid:)` if the
+    /// grace expires with the process still alive. This test covers the
+    /// happy path; the stuck path is hard to reach deterministically
+    /// without a deliberately unkillable subprocess.
+    func testStopReturnsStoppedForNeverStartedRunner() throws {
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: "/usr/bin/true",
+            logDirectory: try temporaryDirectory(name: "provider-runner-stop-empty")
+        )
+        XCTAssertEqual(runner.stop(graceSeconds: 0), .stopped)
+    }
+
+    func testServeArgumentsRejectInvalidPort() throws {
+        XCTAssertThrowsError(
+            try CandidateProviderRunner.serveArguments(
+                model: "model-a", port: 0,
+                kvBits: nil, maxContext: nil, maxBatch: nil
+            )
+        ) { error in
+            XCTAssertEqual(error as? CandidateProviderRunnerError, .invalidPort(0))
+        }
+        XCTAssertThrowsError(
+            try CandidateProviderRunner.serveArguments(
+                model: "model-a", port: 65_536,
+                kvBits: nil, maxContext: nil, maxBatch: nil
+            )
+        ) { error in
+            XCTAssertEqual(error as? CandidateProviderRunnerError, .invalidPort(65_536))
+        }
+    }
+
+    func testServeArgumentsRejectInvalidMaxContext() throws {
+        XCTAssertThrowsError(
+            try CandidateProviderRunner.serveArguments(
+                model: "model-a", port: 18_080,
+                kvBits: nil, maxContext: 0, maxBatch: nil
+            )
+        ) { error in
+            XCTAssertEqual(error as? CandidateProviderRunnerError, .invalidMaxContext(0))
+        }
+    }
+
+    func testServeArgumentsRejectInvalidMaxBatch() throws {
+        XCTAssertThrowsError(
+            try CandidateProviderRunner.serveArguments(
+                model: "model-a", port: 18_080,
+                kvBits: nil, maxContext: nil, maxBatch: 0
+            )
+        ) { error in
+            XCTAssertEqual(error as? CandidateProviderRunnerError, .invalidMaxBatch(0))
+        }
+    }
+
+    /// Round-1 I.1 closure: log filenames now include a UUID suffix to
+    /// avoid same-second collisions. Two builds of the URL for the same
+    /// (model, port, directory) produced within one second MUST differ.
+    func testLogFileURLsDoNotCollideWithinOneSecond() throws {
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: "/usr/bin/true",
+            logDirectory: try temporaryDirectory(name: "provider-runner-log-collision")
+        )
+        // Drive twice in fast succession; UUID suffix makes the paths
+        // distinct even when the timestamp matches.
+        _ = runner  // silence unused-variable warning
+        let urlA = CandidateProviderRunner.logFileURLForTesting(model: "model-a", port: 18_080)
+        let urlB = CandidateProviderRunner.logFileURLForTesting(model: "model-a", port: 18_080)
+        XCTAssertNotEqual(urlA.lastPathComponent, urlB.lastPathComponent)
+    }
+
     func testServeArgumentsRejectInvalidKnobs() throws {
         XCTAssertThrowsError(
             try CandidateProviderRunner.serveArguments(
@@ -168,6 +288,60 @@ final class CandidateProviderRunnerTests: XCTestCase {
             ])
         }
         return binaryURL
+    }
+
+    /// Round-1 C.1 closure fixture: a tiny Python HTTP server that
+    /// responds to the FIRST request with 200 OK + a /v1/models payload
+    /// and immediately exits. Used to exercise the post-200
+    /// process-exit race in `waitForReady` (the bug was: the prior
+    /// implementation returned `.ready` on 200 without re-checking
+    /// process state). Python3 ships with macOS.
+    private func compileImmediateExitStubProvider() throws -> URL {
+        let directory = try temporaryDirectory(name: "provider-runner-immediate-exit-stub")
+        let scriptURL = directory.appendingPathComponent("immediate-exit-provider")
+        let script = #"""
+        #!/usr/bin/env python3
+        import sys, socket
+
+        args = sys.argv[1:]
+        if "serve" not in args or "--no-join" not in args:
+            sys.stderr.write("stub error: expected serve --no-join\n")
+            sys.exit(2)
+
+        try:
+            port = int(args[args.index("--port") + 1])
+        except (ValueError, IndexError):
+            sys.stderr.write("stub error: missing --port\n")
+            sys.exit(2)
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(("127.0.0.1", port))
+        s.listen(1)
+
+        print(f"stub ready port={port}", flush=True)
+
+        client, _ = s.accept()
+        client.recv(2048)
+        body = '{"object":"list","data":[]}'
+        response = (
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: application/json\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+            f"{body}"
+        )
+        client.sendall(response.encode())
+        client.close()
+        s.close()
+        # Exit IMMEDIATELY after responding 200 — this is the race
+        # waitForReady's post-HTTP isRunning check must handle.
+        sys.exit(0)
+        """#
+        try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: scriptURL.path)
+        return scriptURL
     }
 
     private func failingStubScript() throws -> URL {

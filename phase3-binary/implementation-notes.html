@@ -1159,5 +1159,56 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     fixture.</li>
   </ul>
 </div>
+<div class="entry">
+  <time>2026-06-18 (Step 4 round-1 audit response)</time>
+  <p><strong>Round-1 codex audit closures</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 5; verdict was FIX REQUIRED with 0 CRITICAL / 2 MAJOR / 2 MINOR /
+  1 QUESTION).</p>
+  <p><strong>B.1 MAJOR fix</strong> (<code>process.run()</code> failure
+  cleanup hangs draining never-launched pipes). The catch path now calls
+  a new <code>RunningProvider.discardLogging(reason:)</code> that closes
+  the log file with a brief "process spawn failed" note WITHOUT calling
+  <code>readDataToEndOfFile()</code>. Pipe write ends remain open in the
+  parent for a never-launched process, so the prior drain waited for an
+  EOF that never arrived (codex reproduced a 2-second hang locally with a
+  missing binary). New test
+  <code>testStartFailsPromptlyWithMissingBinary</code> locks the
+  &lt; 1-second contract; the fixed code returns in ~10ms.</p>
+  <p><strong>C.1 MAJOR fix</strong> (<code>waitForReady</code> skipped the
+  post-200 process-exit check). <code>waitForReady</code> now re-checks
+  <code>provider.process.isRunning</code> after receiving HTTP 200 and
+  before returning <code>.ready</code>. If the process exited between the
+  response and the check, returns
+  <code>.processExited(rc:stderrTail:)</code> instead. New test
+  <code>testWaitForReadyHandlesImmediateExitAfterFirstResponse</code>
+  uses a Python stub that responds 200 and immediately exits; the runner
+  produces <code>.ready</code> or <code>.processExited</code> but NEVER
+  <code>.timeout</code> (the pre-fix silent-hang regression class).</p>
+  <p><strong>A.1 QUESTION resolution</strong>. <code>stop()</code> now
+  returns a <code>StopResult</code> enum with <code>.stopped</code> and
+  <code>.stuck(pid:)</code> cases (marked
+  <code>@discardableResult</code> so existing callers compile unchanged).
+  The <code>.stuck</code> variant lets Step 7 record a clear failure
+  instead of discovering it via the next <code>start()</code> failing
+  with <code>alreadyRunning</code>. Still NO SIGKILL escalation in v1;
+  <code>current</code> intentionally stays set so the single-provider
+  invariant holds.</p>
+  <p><strong>E.1 MINOR fix</strong> (argv validation tests covered only
+  <code>kvBits</code>). Added <code>testServeArgumentsRejectInvalidPort</code>,
+  <code>testServeArgumentsRejectInvalidMaxContext</code>, and
+  <code>testServeArgumentsRejectInvalidMaxBatch</code> against
+  <code>CandidateProviderRunner.serveArguments(...)</code>.</p>
+  <p><strong>I.1 MINOR fix</strong> (log filename collision within one
+  second). Filenames now append the first 8 chars of a UUID:
+  <code>&lt;model&gt;-&lt;port&gt;-&lt;unix-ts&gt;-&lt;uuid8&gt;.log</code>.
+  New test <code>testLogFileURLsDoNotCollideWithinOneSecond</code>
+  verifies two consecutive builds for the same (model, port) produce
+  distinct paths.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 273/273
+  (266 baseline + 7 new from this fix-pass) with 1 skipped
+  integration-gated test.</p>
+</div>
 </section>
 </body></html>

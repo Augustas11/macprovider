@@ -7,6 +7,17 @@ enum ReadyStatus: Equatable {
     case timeout(lastError: String)
 }
 
+/// Outcome of `CandidateProviderRunner.stop(graceSeconds:)`. Closes round-1
+/// audit A.1 (QUESTION): the prior void return forced Step 7 to discover
+/// stuck providers via the next `start()` failing with `alreadyRunning`. The
+/// explicit `.stuck` case lets the caller record a clear failure or decide
+/// whether to escalate (Step 5's launchd path may, Step 7's iteration will
+/// not — v1 forbids SIGKILL).
+enum StopResult: Equatable {
+    case stopped
+    case stuck(pid: Int32)
+}
+
 enum CandidateProviderRunnerError: Error, Equatable, CustomStringConvertible {
     case alreadyRunning(pid: Int32)
     case notStarted
@@ -122,7 +133,14 @@ final class CandidateProviderRunner {
             try process.run()
             current = running
         } catch {
-            running.finishLogging()
+            // Closes round-1 audit B.1 (MAJOR): the prior `finishLogging()`
+            // call drained pipe read ends via `readDataToEndOfFile()`. When
+            // `process.run()` throws BEFORE fork/exec, the pipe write ends
+            // are still open in the parent, so the read waits for an EOF
+            // that never arrives — a 2-second hang in codex's local repro
+            // for a missing-binary case. `discardLogging` does NOT drain
+            // the pipes; their FDs close on `Pipe` deinit.
+            running.discardLogging(reason: "\(error)")
             throw error
         }
     }
@@ -149,6 +167,22 @@ final class CandidateProviderRunner {
                 let (_, response) = try await session.data(for: request)
                 if let http = response as? HTTPURLResponse {
                     if http.statusCode == 200 {
+                        // Closes round-1 audit C.1 (MAJOR): the prior code
+                        // returned `.ready` immediately on HTTP 200 without
+                        // re-checking process state. If the provider serves
+                        // /v1/models 200 and then crashes before
+                        // `waitForReady` returns, Step 7 would begin
+                        // measurement against a dead process and
+                        // misclassify the startup failure as a probe failure.
+                        // The post-200 isRunning check fails fast as
+                        // `.processExited` in that race.
+                        if !provider.process.isRunning {
+                            clearCurrentIfSame(provider)
+                            return .processExited(
+                                rc: Int(provider.process.terminationStatus),
+                                stderrTail: provider.stderrTail.snapshot()
+                            )
+                        }
                         return .ready
                     }
                     lastError = "HTTP \(http.statusCode)"
@@ -173,9 +207,10 @@ final class CandidateProviderRunner {
         return .timeout(lastError: lastError)
     }
 
-    func stop(graceSeconds: Double) {
+    @discardableResult
+    func stop(graceSeconds: Double) -> StopResult {
         guard let provider = currentProviderIfAny() else {
-            return
+            return .stopped
         }
 
         if provider.process.isRunning {
@@ -199,7 +234,15 @@ final class CandidateProviderRunner {
 
         if !provider.process.isRunning {
             clearCurrentIfSame(provider)
+            return .stopped
         }
+        // Closes round-1 audit A.1 (QUESTION): the prior void return left
+        // the caller to discover stuck providers via the next start()
+        // failing with `alreadyRunning`. Returning .stuck lets Step 7
+        // record a clear failure. NO SIGKILL escalation in v1 per the
+        // BUILD prompt; `current` intentionally stays set so the next
+        // start() honors the single-provider invariant.
+        return .stuck(pid: provider.process.processIdentifier)
     }
 
     func activeLogFileURL() -> URL? {
@@ -273,8 +316,20 @@ final class CandidateProviderRunner {
     }
 
     private static func logFileURL(model: String, port: Int, in directory: URL) -> URL {
+        // Round-1 audit I.1 (MINOR) closure: prior filename had only
+        // second-resolution timestamp, so two starts of the same
+        // model+port within one second collided and the second
+        // `.atomic` write truncated the first log. Appending the first
+        // 8 chars of a UUID gives ~32 bits of disambiguation per second.
         let timestamp = Int(Date().timeIntervalSince1970)
-        return directory.appendingPathComponent("\(safeModelName(model))-\(port)-\(timestamp).log")
+        let suffix = UUID().uuidString.prefix(8)
+        return directory.appendingPathComponent("\(safeModelName(model))-\(port)-\(timestamp)-\(suffix).log")
+    }
+
+    /// Test accessor for the log filename derivation; verifies the
+    /// UUID-suffix collision resistance from round-1 audit I.1.
+    static func logFileURLForTesting(model: String, port: Int) -> URL {
+        logFileURL(model: model, port: port, in: defaultLogDirectory)
     }
 
     private func currentProvider() throws -> RunningProvider {
@@ -391,6 +446,27 @@ private final class RunningProvider: @unchecked Sendable {
             if !stderrRemainder.isEmpty {
                 logFileHandle.write(stderrRemainder)
             }
+            logFileHandle.synchronizeFile()
+            logFileHandle.closeFile()
+            closed = true
+        }
+    }
+
+    /// Cleanup variant for the spawn-failure path: the subprocess never
+    /// launched, so the pipe write ends are still open in the parent.
+    /// Draining the read ends via `readDataToEndOfFile()` (as
+    /// `finishLogging()` would) hangs waiting for an EOF that never
+    /// arrives. This variant clears readability handlers and closes the
+    /// log file with a short failure note. Pipe FDs close on `Pipe`
+    /// deinit when the `RunningProvider` is released.
+    /// Closes round-1 audit B.1 (MAJOR).
+    func discardLogging(reason: String) {
+        stdoutPipe.fileHandleForReading.readabilityHandler = nil
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        logQueue.sync {
+            guard !closed else { return }
+            let line = "process spawn failed: \(reason)\n"
+            logFileHandle.write(Data(line.utf8))
             logFileHandle.synchronizeFile()
             logFileHandle.closeFile()
             closed = true
