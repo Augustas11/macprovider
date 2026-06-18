@@ -194,6 +194,67 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   (363 baseline + 3 new from this fix-pass), with 2 skipped
   integration-gated tests, 0 failures.</p>
 </div>
+<div class="entry" id="spec013-autotune-step11">
+  <time>2026-06-18</time>
+  <p><strong>SPEC-013 Step 11 acceptance test suite.</strong> Added explicit
+  AC-tagged tests under
+  <code>phase3-binary/Tests/macprovider-cliTests/AutotuneACTests/</code>.
+  Each method name includes the AC number and each method comment cites the
+  authoritative SPEC-013 line range.</p>
+  <ul>
+    <li><code>AutotuneAC_Stage1Tests.swift</code>:
+    <code>testAC1LargestFirstIterationStopsOnFirstFeasible</code>,
+    <code>testAC2LargestFirstIterationIteratesPastInfeasible</code>,
+    <code>testAC3AllInfeasibleExitsNonZeroWithSmallestFirstReason</code>,
+    <code>testAC7NoJoinIsSetOnEveryCandidate</code>,
+    <code>testAC8PreWarmTransientFailureAdvancesToNextCandidate</code>,
+    <code>testAC8PreWarmIntegrityFailureAbortsTheWholeRun</code>,
+    <code>testAC14DefaultCandidateListIsHonored</code>,
+    <code>testAC15OperatorOverrideBeatsSizeFlags</code>,
+    <code>testAC17OperatorOrderHonoredVerbatim</code>,
+    <code>testAC19MaxModelSizeAloneTrimsTheDefaultList</code>, and
+    <code>testAC19MaxAndMinModelSizeTrimsBothEnds</code>.</li>
+    <li><code>AutotuneAC_Stage2Tests.swift</code>:
+    <code>testAC4Stage2UsesMedianAndStrictAllFeasible</code>,
+    <code>testAC5TPSTiebreakByTTFT</code>,
+    <code>testAC16TuneTrialsStagePopulatesCorrectly</code>,
+    <code>testAC18MaxContextAxisEvaluatesExtraCellsAndCanWin</code>, and
+    <code>testAC18InvalidMaxContextAxisFailsAtFlagParseTime</code>.</li>
+    <li><code>AutotuneAC_LifecycleTests.swift</code>:
+    <code>testAC10CtrlCCleanup</code>,
+    <code>testAC13WallClockBudgetEnforcementMidStage1</code>, and
+    <code>testAC13WallClockBudgetEnforcementMidStage2</code>.</li>
+    <li><code>AutotuneAC_OutputTests.swift</code>:
+    <code>testAC9ApplyIsAtomicAndBacksUpAndIsIdempotent</code>,
+    <code>testAC11JSONOutputSchemaStability</code>, and
+    <code>testAC12RecipeHashDeterminism</code>.</li>
+    <li><code>AutotuneAC_IntegrationTests.swift</code>:
+    <code>testAC6ProviderConflictPreFlightRefusesLaunchdByDefault</code>
+    and
+    <code>testAC6ProviderConflictPreFlightRefusesForegroundByDefault</code>.</li>
+  </ul>
+  <p><strong>Integration gating:</strong> AC-6 is gated by the environment
+  variable <code>AUTOTUNE_INTEGRATION_TESTS=1</code>, matching the Step 11
+  prompt's explicit env-var contract rather than adding a package flag. The
+  skipped tests print one diagnostic line before throwing
+  <code>XCTSkip</code>.</p>
+  <p><strong>AC-8 Shape A exclusion:</strong> Step 6 selected Shape B
+  (runtime online-fallback pre-warm classification), so the AC-8 Shape A
+  subprocess/pull variant remains out of scope for the v1 suite. The added
+  tests exercise transient and integrity classifications through the Stage 1
+  pre-warmer seam.</p>
+  <p><strong>AC-7 decision:</strong> the suite uses the allowed unit-test
+  variant by asserting <code>CandidateProviderRunner.serveArguments</code>
+  includes exactly one <code>--no-join</code> in every candidate argv. The
+  coordinator pool observation remains an integration expansion point, not a
+  default local test.</p>
+  <p><strong>Current verification:</strong>
+  <code>swift test --package-path phase3-binary --filter AutotuneAC</code>
+  runs 24 AC tests with 2 integration skips and 1 strict AC-17 failure:
+  the locked emitter currently reports the later explicit 32B candidate as an
+  alternate after choosing the operator-first 1B candidate, while SPEC-013
+  lines 1571-1573 require <code>alternates</code> to be empty.</p>
+</div>
 </section>
 
 <section id="spec013-autotune-step2">
