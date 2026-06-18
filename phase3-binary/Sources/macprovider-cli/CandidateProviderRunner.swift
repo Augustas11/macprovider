@@ -219,13 +219,13 @@ final class CandidateProviderRunner {
 
         let deadline = Date().addingTimeInterval(max(0, graceSeconds))
         while Date() < deadline {
-            if !provider.process.isRunning && !Self.isPortOpen(provider.port) {
+            if !provider.process.isRunning && !MacProviderPortProbe.isOpen(provider.port) {
                 break
             }
             Thread.sleep(forTimeInterval: 0.1)
         }
 
-        let portHeld = Self.isPortOpen(provider.port)
+        let portHeld = MacProviderPortProbe.isOpen(provider.port)
         if portHeld {
             let warning = "warning: candidate provider port \(provider.port) remained held after \(graceSeconds)s grace"
             provider.appendLogLine(warning)
@@ -370,25 +370,6 @@ final class CandidateProviderRunner {
             .path
     }
 
-    private static func isPortOpen(_ port: Int) -> Bool {
-        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
-        guard descriptor >= 0 else {
-            return false
-        }
-        defer { close(descriptor) }
-
-        var address = sockaddr_in()
-        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-        address.sin_family = sa_family_t(AF_INET)
-        address.sin_port = in_port_t(port).bigEndian
-        address.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
-
-        return withUnsafePointer(to: &address) { pointer in
-            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { socketAddress in
-                connect(descriptor, socketAddress, socklen_t(MemoryLayout<sockaddr_in>.size)) == 0
-            }
-        }
-    }
 }
 
 private final class RunningProvider: @unchecked Sendable {

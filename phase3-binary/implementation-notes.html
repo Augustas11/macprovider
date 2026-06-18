@@ -1211,4 +1211,53 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   integration-gated test.</p>
 </div>
 </section>
+<section id="spec013-autotune-step5"><h2>SPEC-013 autotune Step 5 - provider conflict pre-flight</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added <code>ProviderConflictDetector</code> for the two SPEC-013
+    FR-E.1 install paths. The launchd path reads
+    <code>launchctl list</code> output and detects the exact
+    <code>live.streamvc.macprovider</code> label, preserving the PID column
+    when launchctl reports one and allowing <code>nil</code> for inactive
+    jobs.</li>
+    <li>The foreground path scans process snapshots as argv arrays and only
+    matches an argv element whose executable basename is
+    <code>macprovider-cli</code> followed immediately by a whole-word
+    <code>serve</code> subcommand. It deliberately rejects
+    <code>autotune</code> argv and substring cases such as
+    <code>-serve-helper</code>, avoiding self-matches and helper false
+    positives.</li>
+    <li>Detector dependency injection is closure-based:
+    <code>launchctlList: () throws -&gt; String</code> and
+    <code>processList: () throws -&gt; [(pid: Int32, argv: [String])]</code>.
+    Production defaults call <code>/bin/launchctl list</code> and use Darwin
+    process APIs (<code>proc_listpids</code> plus
+    <code>sysctl(KERN_PROCARGS2)</code>) for snapshots; unit tests provide
+    deterministic stubs.</li>
+    <li>Added <code>ProviderDrainer</code> with injected launchctl runner,
+    signal sender, process-running probe, port probe, foreground restarter,
+    and warning writer. Production launchd drain uses
+    <code>launchctl bootout gui/$UID/live.streamvc.macprovider</code>;
+    launchd restore uses <code>launchctl bootstrap gui/$UID
+    ~/Library/LaunchAgents/live.streamvc.macprovider.plist</code>.</li>
+    <li>Foreground drain sends exactly <code>SIGTERM</code> to the detected
+    PID and never escalates to <code>SIGKILL</code> in v1. It waits through
+    the grace window for both port release and process exit; if the port is
+    free but the process still exists, the drain can succeed with a warning
+    because the autotune port is safe to reuse while the operator still gets
+    visibility into the stuck foreground process.</li>
+    <li>Foreground restore remains opt-in via the already-parsed
+    <code>--restart-foreground</code> flag. When true, the original argv
+    captured by the detector is re-spawned; when false, restore returns a
+    skipped result and leaves manual restart to the operator.</li>
+    <li>Extracted the localhost TCP probe into <code>MacProviderPortProbe</code>
+    so <code>CandidateProviderRunner</code> and <code>ProviderDrainer</code>
+    share the same <code>127.0.0.1:&lt;port&gt;</code> connect check.</li>
+    <li>No Step 5 code is called from <code>AutotuneCommand.run()</code> yet.
+    Step 7 owns pre-flight wiring and Step 10 owns post-tune restore wiring,
+    per the BUILD prompt sequencing.</li>
+  </ul>
+</div>
+</section>
 </body></html>
