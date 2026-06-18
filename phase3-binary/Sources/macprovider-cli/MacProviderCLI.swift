@@ -73,6 +73,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Option(help: "Maximum concurrent in-flight inferences. Defaults to 1 (single-slot, the only safe value while mlx-swift parallel generation remains unproven). Lifting this above 1 is an autotune knob — the binary itself does not enforce safety beyond the AsyncSemaphore. Overrides MACPROVIDER_MAX_CONCURRENCY_OVERRIDE and config key max_concurrency_override.")
     var maxBatch: Int?
 
+    @Flag(help: "Run only the local HTTP server; do not establish a coordinator WebSocket session.")
+    var noJoin = false
+
     static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
         if resolved.supportedModels != nil {
             do {
@@ -119,6 +122,14 @@ struct ServeCommand: AsyncParsableCommand {
             ).utf8))
             throw ExitCode(2)
         }
+    }
+
+    static func makeCoordinatorClient(
+        noJoin: Bool,
+        factory: () -> CoordinatorClient?
+    ) -> CoordinatorClient? {
+        guard !noJoin else { return nil }
+        return factory()
     }
 
     func run() async throws {
@@ -174,12 +185,14 @@ struct ServeCommand: AsyncParsableCommand {
             modelHash: await modelRuntime.loadedModelHash
         )
         await modelRuntime.setProviderStatus(providerStatus)
-        let coordinatorClient = CoordinatorClient(
-            config: resolved,
-            modelRuntime: modelRuntime,
-            providerStatus: providerStatus,
-            attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
-        )
+        let coordinatorClient = Self.makeCoordinatorClient(noJoin: noJoin) {
+            CoordinatorClient(
+                config: resolved,
+                modelRuntime: modelRuntime,
+                providerStatus: providerStatus,
+                attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
+            )
+        }
         let controlSocket: ControlSocketServer?
         if resolved.enableWarmSwap {
             let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)

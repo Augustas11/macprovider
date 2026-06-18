@@ -89,6 +89,34 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   </div>
 </section>
 
+<section id="spec013-autotune-step2">
+  <h2>SPEC-013 design decisions — Step 2 serve --no-join (2026-06-18)</h2>
+  <div class="entry">
+    <time>2026-06-18</time>
+    <p><strong>Scope:</strong> added the additive
+    <code>macprovider-cli serve --no-join</code> flag required by
+    SPEC-013 FR-E.2. The flag only disables coordinator WebSocket
+    participation; model loading, local HTTP serving, supported-models
+    preflight, warm-swap control socket setup, and all existing
+    no-flag <code>serve</code> behavior stay on the existing path.</p>
+    <p><strong>Design decisions:</strong> coordinator construction now flows
+    through a tiny testable guard. When <code>--no-join</code> is set, the
+    guard returns <code>nil</code> before invoking the factory, so no
+    <code>CoordinatorClient</code> instance exists, no WS session can start,
+    and signal/defer cleanup has no coordinator object to drain. When the
+    flag is absent, the guard invokes the same factory and preserves the
+    pre-Step-2 construction/start/stop sequence.</p>
+    <p><strong>Deviations:</strong> none for Step 2. The resolved
+    <code>coordinator_url</code> remains visible in the startup config print
+    if configured; <code>--no-join</code> is a runtime join suppression, not
+    a config mutation.</p>
+    <p><strong>Verification:</strong> added focused
+    <code>ServeCommandTests</code> coverage proving the flag parses, the
+    no-join branch does not invoke the coordinator factory, and the default
+    serve path still invokes that factory.</p>
+  </div>
+</section>
+
 <section id="spec008-phase2-provider-b6">
   <h2>SPEC-008 Phase 2 provider B6 encrypted-leg support (2026-05-31)</h2>
   <div class="entry">
