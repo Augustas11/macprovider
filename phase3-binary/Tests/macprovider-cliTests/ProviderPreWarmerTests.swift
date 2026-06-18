@@ -260,6 +260,72 @@ final class ProviderPreWarmerTests: XCTestCase {
         XCTAssertEqual(failureClass, .integrity)
     }
 
+    // MARK: - Round-2 audit N.1 closure (false-positive negative locks)
+
+    /// Round-2 N.1 closure: a benign Hugging Face API metadata error
+    /// (transient/recoverable) MUST classify as `.transient`, not
+    /// `.integrity`. The prior fix-pass added a too-broad
+    /// `"incomplete metadata"` marker that would have over-aborted
+    /// runs hitting this transient class.
+    func testPreWarmerClassifiesIncompleteMetadataDownloadErrorAsTransient() async throws {
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try failingProviderScript(
+                message: "Download failed: incomplete metadata in Hugging Face API response; retry later",
+                rc: 1
+            ).path,
+            logDirectory: try temporaryDirectory(name: "prewarm-hf-incomplete-logs")
+        )
+        let prewarmer = ProviderPreWarmer(
+            cacheChecker: HuggingFaceCacheChecker(cacheRoot: try temporaryDirectory(name: "hf-incomplete")),
+            stopGraceSeconds: 1
+        )
+
+        let result = try await prewarmer.prewarmAndProbe(
+            model: "mlx-community/IncompleteMetadataModel-4bit",
+            port: try unusedPort(),
+            runner: runner,
+            readyTimeoutSec: 5
+        )
+
+        guard case .failed(let failureClass, _) = result else {
+            return XCTFail("expected failed result, got \(result)")
+        }
+        XCTAssertEqual(failureClass, .transient,
+                       "HF API metadata download errors must remain transient (recoverable on next candidate)")
+    }
+
+    /// Round-2 N.1 closure: a benign local cache corruption line
+    /// (transient/local-state recoverable) MUST classify as
+    /// `.transient`. The prior fix-pass added a too-broad
+    /// `"invalid or corrupted"` marker that would have over-aborted
+    /// runs hitting this advanceable failure class.
+    func testPreWarmerClassifiesCacheRebuildHintAsTransient() async throws {
+        let runner = try CandidateProviderRunner(
+            providerBinaryPath: try failingProviderScript(
+                message: "cache index invalid or corrupted; rebuild cache and retry",
+                rc: 1
+            ).path,
+            logDirectory: try temporaryDirectory(name: "prewarm-cache-rebuild-logs")
+        )
+        let prewarmer = ProviderPreWarmer(
+            cacheChecker: HuggingFaceCacheChecker(cacheRoot: try temporaryDirectory(name: "hf-cache-rebuild")),
+            stopGraceSeconds: 1
+        )
+
+        let result = try await prewarmer.prewarmAndProbe(
+            model: "mlx-community/CacheRebuildModel-4bit",
+            port: try unusedPort(),
+            runner: runner,
+            readyTimeoutSec: 5
+        )
+
+        guard case .failed(let failureClass, _) = result else {
+            return XCTFail("expected failed result, got \(result)")
+        }
+        XCTAssertEqual(failureClass, .transient,
+                       "local cache rebuild hints must remain transient (not repository tampering)")
+    }
+
     /// Round-1 E.1 MINOR closure: `now` injection is the mechanism
     /// for stable load-duration assertions. This test uses a
     /// deterministic clock that advances by a known amount and

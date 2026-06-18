@@ -694,3 +694,167 @@ Verification notes:
 ### Step 5 readiness verdict
 
 READY TO PROCEED TO STEP 6.
+
+---
+
+## Round 9 audit (Codex on e7bfab5 — Step 6 round 1)
+
+**Audited:** commit e7bfab5 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 6, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 1 CRITICAL / 1 MAJOR / 2 MINOR / 0 QUESTION
+**Step 6 readiness:** FIX REQUIRED
+
+### Executive summary
+
+FIX REQUIRED. The Step 6 shape choice is internally consistent: this implementation intentionally treats `ProviderPreWarmer` as a disposable Shape B load/readiness probe, stops the provider before returning `.warmed`, and leaves Step 7 to start a fresh provider against the now-warm cache. That is not a G.2 design bug by itself; it is documented in `implementation-notes.html`, asserted by the new tests, and compatible with the BUILD prompt's Step 7 sequence of `pre-warm + start + wait-for-ready + fire`.
+
+The blocker is FR-D.2 classification. The marker list covers the literal phrase `missing tokenizer.json`, but the actual Swift/HF dependency path can emit `Required configuration file missing: tokenizer.json`, which does not contain that marker because of the colon. Missing `tokenizer.json` is the SPEC's named repository-shape integrity example, so this can classify a named integrity failure as transient and let Step 7 advance to the next candidate.
+
+Anti-regression passed. `swift test --package-path phase3-binary` passed on 2026-06-18 with 293 tests executed, 2 tests skipped, and 0 failures.
+
+### Findings
+
+#### Category A: FR-D.1 measurement isolation
+
+(no findings)
+
+Verification notes:
+- `ProviderPreWarmer.prewarmAndProbe` records `started` before `runner.start`, waits for `waitForReady`, and returns `.warmed(cacheState:, loadDurationSec:)` only after readiness.
+- `loadDurationSec` is only carried in `PreWarmResult`; Step 6 is not wired into `AutotuneCommand.run()` and nothing in the commit feeds it into gate TTFT.
+- The production default for `now` is `Date.init`.
+
+#### Category B: FR-D.2 transient vs integrity classification
+
+**B.1 (CRITICAL) — Actual missing-tokenizer errors can miss the integrity marker and be classified transient.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/ProviderPreWarmer.swift:138`; `phase3-binary/.build/checkouts/swift-transformers/Sources/Hub/Hub.swift:69`; `phase3-binary/.build/checkouts/swift-transformers/Sources/Hub/Hub.swift:260`; `phase3-binary/.build/checkouts/mlx-swift-examples/Libraries/MLXLMCommon/Tokenizer.swift:51`.
+- **What:** Step 6 matches `"missing tokenizer.json"`. The dependency path for a local model directory with no `tokenizer.json` throws `configurationMissing("tokenizer.json")`, whose localized description is `Required configuration file missing: tokenizer.json`. The lowercased text `required configuration file missing: tokenizer.json` does not contain `missing tokenizer.json`.
+- **Why:** SPEC-013 FR-D.2 explicitly names missing `tokenizer.json` as an integrity-class repository-shape failure. If the provider writes the dependency error to stderr, `failureClass(for:)` returns `.transient`, so Step 7 would advance instead of aborting with `exit_reason = 'pre_warm_integrity_failure'`.
+- **Recommendation:** Add markers for the real dependency strings, at minimum `configuration file missing: tokenizer.json`, `missing: tokenizer.json`, `file not found: tokenizer.json`, and `missing required tokenizer files`. Add unit tests proving mixed-case and colon-bearing missing-tokenizer stderr classify as `.integrity`.
+
+**B.2 (MAJOR) — Known malformed-weight loader strings are outside the integrity marker set.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/ProviderPreWarmer.swift:138`; `phase3-binary/.build/checkouts/mlx-swift-examples/Libraries/MLXLMCommon/Load.swift:74`; `phase3-binary/.build/checkouts/mlx-swift/Source/Cmlx/mlx/mlx/io/safetensors.cpp:214`; `phase3-binary/.build/checkouts/mlx-swift/Source/Cmlx/mlx/mlx/io/safetensors.cpp:223`.
+- **What:** MLX loads every `.safetensors` file through `loadArrays`; the vendored MLX safetensors reader throws strings such as `[load_safetensors] Invalid json header length ...` and `[load_safetensors] Invalid json metadata ...`. Public safetensors implementations also surface header/metadata corruption strings such as invalid header deserialization and incomplete metadata. None include Step 6's current hash/signature/checksum markers.
+- **Why:** A malformed weights file can be a partial-download transient, but it can also be corrupted or tampered repository content. The current classifier has no way to distinguish it and defaults to `.transient`, which is the wrong bias for a plausible integrity signal under the asymmetric FR-D.2 risk model.
+- **Recommendation:** Classify concrete malformed safetensors/load-header strings as integrity, or introduce a narrower `.integrity` marker set for corrupted local artifact text: `invalid json header`, `invalid json metadata`, `invalid header`, `incomplete metadata`, `file not fully covered`, and `invalid or corrupted`. Add regression coverage for at least one malformed-weight stderr sample.
+
+**B.3 (MINOR) — Classification tests cover only one integrity marker.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/ProviderPreWarmerTests.swift:95`; `phase3-binary/Tests/macprovider-cliTests/ProviderPreWarmerTests.swift:119`; `phase3-binary/Tests/macprovider-cliTests/ProviderPreWarmerTests.swift:143`.
+- **What:** Tests cover network transient, lowercase `signature mismatch`, and timeout transient, but not missing tokenizer, mixed-case integrity text, malformed safetensors text, or short-marker false positives such as `no hash mismatch detected`.
+- **Why:** The missing-tokenizer gap above would have been caught by a dependency-shaped test string. Case-insensitive behavior is intended but not locked.
+- **Recommendation:** Add table-driven classification tests for every SPEC-named integrity example and one false-positive guard if the short `hash mismatch` marker remains.
+
+#### Category C: HuggingFaceCacheChecker correctness
+
+(no findings)
+
+Verification notes:
+- `repositoryDirectory(for:)` maps `mlx-community/Llama-3.2-1B-Instruct-4bit` to `models--mlx-community--Llama-3.2-1B-Instruct-4bit`, matching the HF cache reference layout.
+- Hugging Face documents `snapshots/<commit>/` entries as symlinks to `../../blobs/{hash}` and also permits copied files when symlinks are unavailable; `containsAnyFile` accepts either regular files or symlinks.
+- The partial-download false positive is not outcome-breaking because a broken snapshot still fails during provider load and reaches the FR-D.2 classifier.
+
+#### Category D: Provider lifecycle wrapping
+
+(no findings)
+
+Verification notes:
+- `defer { runner.stop(graceSeconds:) }` executes on `.warmed`, `.failed`, thrown `start`, and cancellation paths.
+- Step 4's `stop()` returns `.stopped` when never started, so the throw-before-start path is safe.
+- The wrapper preserves v1's no-SIGKILL rule by delegating only to `CandidateProviderRunner.stop`.
+
+#### Category E: Test fixtures
+
+**E.1 (MINOR) — `now` injection is not used to make load-duration assertions deterministic.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/ProviderPreWarmerTests.swift:47`; `phase3-binary/Tests/macprovider-cliTests/ProviderPreWarmerTests.swift:63`; `phase3-binary/Tests/macprovider-cliTests/ProviderPreWarmerTests.swift:91`.
+- **What:** The happy/cold path tests use the production clock and assert only `loadDurationSec >= 0`.
+- **Why:** The injection exists specifically to make timing stable; the current assertions would not catch a future change that records the end time before readiness or always returns zero.
+- **Recommendation:** Add a tiny deterministic clock fixture and assert a known positive duration for at least one `.warmed` path.
+
+#### Category F: Anti-regression
+
+(no findings)
+
+Verification notes:
+- `git show e7bfab5 --stat` changes only `ProviderPreWarmer.swift`, `ProviderPreWarmerTests.swift`, and `implementation-notes.html`; production Step 1-5 files are not modified by the Step 6 commit.
+- `swift test --package-path phase3-binary` passed: 293 tests executed, 2 tests skipped, 0 failures.
+
+#### Category G: Forward-compatibility (Step 7, 10)
+
+(no findings)
+
+Verification notes:
+- G.2 status: intended restart-with-warm-cache behavior, not a design bug in Step 6. `ProviderPreWarmer.swift:109` stops the provider before the caller receives `.warmed`; `ProviderPreWarmerTests.swift:64` and `:92` assert the port is closed; `implementation-notes.html:1327` says the wrapper always calls `stop`, and `:1332` calls this a disposable load/readiness phase.
+- Step 7 must therefore start a new provider, wait for readiness, fire trial requests, and stop. The cold fetch is excluded because Step 6 has already warmed the HF cache; the second readiness wait is still outside gate-ttft-ms per the BUILD prompt's Step 7 sequence.
+- `PreWarmResult` is sufficient for Step 7's branch shape: `.warmed`, `.failed(.transient, ...)`, and `.failed(.integrity, ...)`.
+
+#### Category H: Anything else
+
+(no findings)
+
+Verification notes:
+- NFR-4 is respected for Step 6: Shape B's only external egress is the runtime's HuggingFace online fallback during model load.
+- The strict clean-room boundary was preserved; no d-inference source was inspected.
+
+### Step 6 readiness verdict
+
+FIX REQUIRED.
+
+---
+
+## Round 10 audit (Codex on 682abe8 — Step 6 round 2 closure verification)
+
+**Audited:** commit 682abe8 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 6, round 2 of N
+**Date:** 2026-06-18
+**Closure summary:** 4 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED across the 4 round-1 findings
+**Round-2 findings:** 0 CRITICAL anti-regression / 1 MAJOR new / 0 MINOR new
+**Step 6 readiness:** NARROW V2 REQUIRED
+
+### Executive summary
+
+Commit 682abe8 closes all 4 Round 9 findings. The missing-tokenizer classifier now matches the actual swift-transformers Hub error string, malformed safetensors header/metadata strings now classify as integrity, mixed-case matching is regression-tested, and the injected clock now has a deterministic 7-second duration assertion.
+
+Anti-regression passed: `swift test --package-path phase3-binary` executed 297 tests, skipped 2 integration-gated tests, and reported 0 failures. However, the expanded 15-marker integrity list introduced one new precision gap: the unanchored `"incomplete metadata"` and `"invalid or corrupted"` markers are broad enough to classify plausible non-weight, retryable metadata/cache errors as integrity. Under the prompt's false-positive rule, this is a MAJOR new finding and Step 6 needs a narrow V2 before Step 7.
+
+### Round-1 finding closures
+
+**B.1 (CRITICAL) — CLOSED.** `ProviderPreWarmer` lowercases stderr and now includes `"configuration file missing: tokenizer.json"` plus `"missing: tokenizer.json"` and `"missing required tokenizer files"`, while keeping the original `"missing tokenizer.json"` fallback. The actual local dependency string is `Required configuration file missing: tokenizer.json` from `phase3-binary/.build/checkouts/swift-transformers/Sources/Hub/Hub.swift:69` and `:260-262`, and the new test `testPreWarmerClassifiesConfigurationFileMissingTokenizerAsIntegrity` feeds that exact string and asserts `.integrity`.
+
+**B.2 (MAJOR) — CLOSED.** The marker list now includes `"invalid json header"` and `"invalid json metadata"`, which match the mlx-swift safetensors reader strings at `phase3-binary/.build/checkouts/mlx-swift/Source/Cmlx/mlx/mlx/io/safetensors.cpp:213-214` and `:221-223`. The new test `testPreWarmerClassifiesInvalidJsonHeaderAsIntegrity` uses the actual shape `"[load_safetensors] Invalid json header length 0"` and asserts `.integrity`. mlx-swift is MIT-licensed (`phase3-binary/.build/checkouts/mlx-swift/LICENSE`), so this check did not violate the d-inference clean-room boundary.
+
+**B.3 (MINOR) — CLOSED.** `testPreWarmerClassifiesMixedCaseIntegrityCorrectly` feeds `"SIGNATURE Mismatch on Model Weights"` and asserts `.integrity`. Because production classification lowercases `stderrTail` before `contains` checks, this test locks the intended case-insensitive matcher behavior.
+
+**E.1 (MINOR) — CLOSED.** `testPreWarmerLoadDurationReflectsInjectedClock` injects a `now` closure that returns `1_000_000` on the first call and `1_000_007` on the second call, then asserts `loadDurationSec == 7.0` with accuracy `0.001`. A regression that takes the end timestamp before readiness returns, or always returns zero, would fail this assertion.
+
+### Round-2 new findings
+
+#### Category Z-CLOSURE
+
+(no findings)
+
+#### Category R-REGRESSION-V06F1
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: 297 tests executed, 2 skipped, 0 failures.
+- The Step 6 happy-path, cold-cache, network-transient, signature-mismatch-integrity, timeout-transient, and four new audit-response tests all passed in `ProviderPreWarmerTests`.
+- No Step 4 / Step 5 suite failures were observed in the full package test run.
+
+#### Category N-NEWGAPS-V06F1
+
+**N.1 (MAJOR) — Broad unanchored integrity markers can over-classify plausible non-weight metadata/cache errors.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/ProviderPreWarmer.swift:130-133`; `phase3-binary/Sources/macprovider-cli/ProviderPreWarmer.swift:189-192`.
+- **What:** The classifier applies every marker as a case-insensitive substring to the full provider stderr tail. The new `"invalid json header"` and `"invalid json metadata"` markers are anchored enough to the mlx safetensors loader's actual strings. The new tokenizer markers are also specific. But `"incomplete metadata"` and `"invalid or corrupted"` are not anchored to safetensors, weights, tokenizer files, or repository-shape context.
+- **Why:** A benign or retryable provider-exit line such as `Download failed: incomplete metadata in Hugging Face API response; retry later` would match `"incomplete metadata"`. A local cache-maintenance line such as `cache index invalid or corrupted; rebuild cache and retry` would match `"invalid or corrupted"`. Those lines are plausibly transient/local-state failures rather than repository tampering, but this code would return `.integrity` and over-abort the candidate. The asymmetric FR-D.2 model tolerates some transient-as-integrity risk, but the prompt explicitly treats a plausible benign matching line as a MAJOR precision gap.
+- **Recommendation:** Narrow these markers to concrete model-artifact contexts, for example require safetensors/weights/load context (`"[load_safetensors] invalid json header"`, `"[load_safetensors] invalid json metadata"`, `"weights file is invalid or corrupted"`) or remove `"incomplete metadata"` unless paired with a safetensors-specific phrase. Add negative tests proving benign metadata/cache lines remain `.transient`.
+
+#### Category O-OTHER-V06F1
+
+(no findings)
+
+### Step 6 readiness verdict
+
+NARROW V2 REQUIRED.

@@ -185,10 +185,24 @@ struct ProviderPreWarmer {
         // mlx-swift's safetensors reader throws strings like
         // "[load_safetensors] Invalid json header length ..." and
         // "[load_safetensors] Invalid json metadata ..." when the
-        // weight file is corrupted or tampered.
+        // weight file is corrupted or tampered. These two phrases
+        // are anchored to the safetensors loader's actual output
+        // and are unlikely to appear in transient/network/cache
+        // contexts.
+        //
+        // Round-2 audit N.1 (MAJOR) closure: the prior list also
+        // included "incomplete metadata" and "invalid or
+        // corrupted" — both too vague. A benign transient line
+        // like "Download failed: incomplete metadata in
+        // Hugging Face API response; retry later" or "cache index
+        // invalid or corrupted; rebuild cache and retry" would
+        // match and over-abort an advanceable transient failure.
+        // Asymmetric FR-D.2 still biases toward integrity, but
+        // not so broad as to misclassify HF API metadata errors or
+        // cache rebuild prompts. The two markers below stay because
+        // they're anchored to the safetensors loader's actual
+        // output context.
         "invalid json header",
         "invalid json metadata",
-        "incomplete metadata",
-        "invalid or corrupted",
     ]
 }

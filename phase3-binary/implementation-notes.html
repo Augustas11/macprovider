@@ -1404,5 +1404,48 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   (293 baseline + 4 new from this fix-pass), with 2 skipped
   integration-gated tests.</p>
 </div>
+<div class="entry">
+  <time>2026-06-18 (Step 6 round-2 audit response)</time>
+  <p><strong>Round-2 codex audit closure</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 10; verdict was NARROW V2 REQUIRED with 4 CLOSED on
+  round-1 findings but 1 MAJOR NEW finding (N.1) on the expanded
+  marker list).</p>
+  <p><strong>N.1 MAJOR fix</strong> (two unanchored markers from the
+  round-1 fix could over-classify benign transient lines).
+  Round-1's fix-pass added <code>"incomplete metadata"</code> and
+  <code>"invalid or corrupted"</code> as broad integrity markers,
+  but codex correctly noted these could match plausible benign
+  transient lines like
+  <code>"Download failed: incomplete metadata in Hugging Face API response; retry later"</code>
+  or
+  <code>"cache index invalid or corrupted; rebuild cache and retry"</code>.
+  Under the asymmetric FR-D.2 risk model, transient-as-integrity
+  over-aborts recoverable runs — a MAJOR precision gap.</p>
+  <p>Both vague markers REMOVED from the integrity list (15 → 13
+  patterns). The remaining safetensors-context markers
+  <code>"invalid json header"</code> and
+  <code>"invalid json metadata"</code> stay because they're
+  anchored to the loader's actual output context
+  (<code>[load_safetensors] Invalid json header ...</code>) and
+  are unlikely to appear in transient/network/cache contexts.</p>
+  <p>Two new NEGATIVE-LOCK tests pin the benign-line behavior:
+  <code>testPreWarmerClassifiesIncompleteMetadataDownloadErrorAsTransient</code>
+  feeds the HF API metadata line and asserts <code>.transient</code>;
+  <code>testPreWarmerClassifiesCacheRebuildHintAsTransient</code>
+  feeds the cache rebuild hint and asserts <code>.transient</code>.
+  These regression-lock against any future broad-marker
+  reintroduction.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 299/299
+  (297 baseline + 2 new negative locks; the 4 round-1 closure tests
+  still pass under the narrower marker list). 2 skipped
+  integration-gated tests.</p>
+  <p><strong>Final marker count: 13.</strong> Distribution:
+  signature/hash/checksum class (7), missing-tokenizer class
+  (4), safetensors header/metadata corruption (2). All anchored
+  to SPEC-013 §5.4 FR-D.2's named examples or to specific mlx-swift
+  loader output strings.</p>
+</div>
 </section>
 </body></html>
