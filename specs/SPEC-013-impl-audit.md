@@ -145,3 +145,88 @@ Verification notes:
 ### Step 1 readiness verdict
 
 READY TO PROCEED TO STEP 2.
+
+---
+
+## Round 3 audit (Codex on ffb00fb — Step 2 round 1)
+
+**Audited:** commit ffb00fb on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 2, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 0 CRITICAL / 0 MAJOR / 0 MINOR / 0 QUESTION
+**Step 2 readiness:** READY TO PROCEED TO STEP 3
+
+### Executive summary
+
+READY TO PROCEED TO STEP 3. Step 2 implements `serve --no-join` to the SPEC-013 FR-E.2 contract without changing the default serve path beyond the required optional coordinator propagation. The guard at `ServeCommand.makeCoordinatorClient(noJoin:factory:)` returns `nil` before invoking the factory when `--no-join` is set, so `CoordinatorClient.init` cannot run and no coordinator WebSocket session can start. With the flag absent, the same factory path is invoked, preserving the existing coordinator-client construction branch.
+
+The highest-risk optional-propagation surface is clean. A literal grep for direct `coordinatorClient.start`, `coordinatorClient.stop`, `coordinatorClient.drainAndExit`, `coordinatorClient!`, and generic `coordinatorClient.` usage in the CLI sources/tests returned 0 matches; the live call sites use `coordinatorClient?.start()`, `coordinatorClient?.stop()`, and `coordinatorClient?.drainAndExit(...)`. `swift test --package-path phase3-binary` passed on 2026-06-18 with 256 XCTest tests, 0 failures, and the Swift Testing runner passed with 0 tests.
+
+CLI help verification showed `serve --help` still exposes PR #105 flags (`--kv-bits`, `--max-context`, `--max-batch`), SPEC-011 flags (`--enable-warm-swap`, `--ctl-socket-path`), and the new `--no-join` flag. `serve --no-join --enable-warm-swap --help` exited 0, confirming the new flag does not conflict with the warm-swap parser surface.
+
+### Findings
+
+#### Category A: SPEC-013 FR-E.2 coverage for Step 2 scope
+
+(no findings)
+
+Verification notes:
+- `phase3-binary/Sources/macprovider-cli/MacProviderCLI.swift` lines 127-132 short-circuit before invoking the coordinator factory when `noJoin` is true.
+- The local serving path remains after model/runtime setup and is not gated on `noJoin`: the `HTTPServer` is still constructed at line 217 and run at line 227.
+- Shutdown uses `coordinatorClient?.drainAndExit(...)` at line 315, so no shutdown state update can flow when no coordinator client exists.
+- `noJoin` is declared as `var noJoin = false` at lines 76-77, and `ServeCommandTests.testDefaultServePathInvokesCoordinatorClientFactory` proves the default path still invokes the factory.
+- `phase3-binary/.build/debug/macprovider-cli serve --help` includes `--no-join`.
+
+#### Category B: Code quality (Swift idioms)
+
+(no findings)
+
+Verification notes:
+- The static closure factory is small and testable, and `ServeCommandTests.testNoJoinSkipsCoordinatorClientInstantiation` proves the closure is not invoked on the no-join branch.
+- Optional propagation is complete at the audited call sites: `coordinatorClient?.start()` at line 216, `coordinatorClient?.stop()` at line 222, and `coordinatorClient?.drainAndExit(...)` at line 315.
+- `installTerminationHandlers` accepts `CoordinatorClient?` at lines 305-307 and does not force unwrap it.
+- The help string matches the local `@Flag(help:)` style used by sibling command files.
+- The Step 2 diff introduces no force unwraps outside type syntax, and `coordinatorClient` is a `let` constant, so there is no async reassignment race.
+
+#### Category C: Test coverage
+
+(no findings)
+
+Verification notes:
+- `ServeCommandTests.testNoJoinFlagParses` covers the parser surface.
+- `ServeCommandTests.testNoJoinSkipsCoordinatorClientInstantiation` covers FR-E.2 sub-bullet 1 by proving the factory is not called.
+- `ServeCommandTests.testDefaultServePathInvokesCoordinatorClientFactory` locks the default no-flag anti-regression behavior.
+- Live no-join model-serving and SIGTERM smoke coverage remains an acceptable integration deferral for Step 7/Step 5 because Step 2 cannot exercise real serving without loading model weights; the commit's `Not-tested:` trailer records that gap.
+- `swift test --package-path phase3-binary` passed 256 tests with 0 failures.
+
+#### Category D: Anti-regression on the existing serve path
+
+(no findings)
+
+Verification notes:
+- The `MacProviderCLI.swift` diff is limited to adding the flag, adding the testable coordinator factory guard, replacing coordinator construction with the guard call, and making the existing start/stop/drain call sites optional.
+- Warm-swap control socket setup remains independent of the coordinator client and still executes before `coordinatorClient?.start()` when `resolved.enableWarmSwap` is true.
+- `phase3-binary/.build/debug/macprovider-cli serve --help` still contains `--kv-bits`, `--max-context`, `--max-batch`, `--enable-warm-swap`, `--ctl-socket-path`, and `--no-join`.
+- `phase3-binary/.build/debug/macprovider-cli serve --no-join --enable-warm-swap --help` exited 0.
+
+#### Category E: Forward-compatibility
+
+(no findings)
+
+Verification notes:
+- Step 7 can spawn `serve --no-join` and probe local HTTP because the no-join guard suppresses only coordinator-client construction/start, not model/runtime/server setup.
+- Step 5 drain work remains unconstrained by Step 2: coordinator drain is a no-op for no-join providers, and any future local HTTP drain behavior can be added separately.
+
+#### Category O: Anything else
+
+(no findings)
+
+Verification notes:
+- `phase3-binary/implementation-notes.html` adds a `spec013-autotune-step2` section that accurately describes scope, guard design, deviations, and verification.
+- The Step 2 commit message uses the repo's Lore-style trailers and records the relevant test/help checks.
+- No d-inference source was inspected.
+
+### Step 2 readiness verdict
+
+READY TO PROCEED TO STEP 3.
