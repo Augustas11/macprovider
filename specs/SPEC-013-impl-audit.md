@@ -1318,3 +1318,228 @@ Verification notes:
 ### Step 8 readiness verdict
 
 READY TO PROCEED TO STEP 9.
+
+---
+
+## Round 16 audit (Codex on 292b2f9 — Step 9 round 1)
+
+**Audited:** commit 292b2f9 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 9, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 0 CRITICAL / 0 MAJOR / 4 MINOR / 1 QUESTION
+**Step 9 readiness:** READY TO PROCEED TO STEP 10
+
+### Executive summary
+
+Step 9's highest-risk JCS path is acceptable for the SPEC-013 hash domain. `RFC8785JCS` sorts object keys by UTF-16 code units, preserves array order, emits no whitespace, renders hash-domain integers directly as decimal `Int`, preserves JSON `null`, leaves `/` unescaped in model IDs, and feeds UTF-8 canonical bytes directly into `CryptoKit.SHA256` with lowercase hex. The required independent reference-vector check matched the baked test literal: `printf '%s' '<A.7 JSON>' | shasum -a 256` returned `eb5f8f90c09c2bbcec0dca6f42c203c25a7a8d403a734c6a81379b14ad702f9d`.
+
+The custom `ConfigApplier` design also satisfies the intended v1 operator-config shape: it validates existing YAML with Yams, rewrites only top-level owned keys, omits `kv_bits` when the unquantized cell wins, writes temp files adjacent to the destination, and commits with POSIX `rename`. I found no AC-9/AC-11/AC-12 blocker. The remaining issues are non-blocking: one documented concurrent-backup race, two test-strength gaps around schema/config preservation, one narrow launchd-hint assertion gap, and one nil-recommendation hash-policy question for Step 10's DB persistence.
+
+Verification passed. `swift test --package-path phase3-binary` executed 344 tests, skipped 2 integration-gated tests, and reported 0 failures. Step 9 stays standalone: commit 292b2f9 adds only the three new Step 9 source files, two new test files, and implementation notes; it does not wire `AutotuneCommand.run()`.
+
+### Findings
+
+#### Category A: RFC 8785 JCS encoder correctness
+
+(no findings)
+
+Verification notes:
+- Object keys are sorted by `lhs.utf16.lexicographicallyPrecedes(rhs.utf16)` (`phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift:16-18`, `:44-46`), matching RFC 8785's UTF-16 code-unit ordering requirement.
+- The encoder builds objects and arrays with only `{}`, `[]`, `:`, and `,` separators and no spaces/newlines/tabs (`RFC8785JCS.swift:22-26`).
+- Hash-domain numbers are `case int(Int)` and render through `String(int)`, so `4`, `4000`, and `131072` do not route through `Double` or scientific notation (`RFC8785JCS.swift:29-30`).
+- `kv_bits == nil` becomes the literal JSON token `null` in the hash input (`RecommendationEmitter.swift:103-108`; `RecommendationEmitterTests.swift:188-216`).
+- `/` is not escaped because `escapeString` only special-cases quote, backslash, named control escapes, remaining controls, and U+FFFD (`RFC8785JCS.swift:48-75`). The A.7 model IDs therefore hash as unescaped HF paths.
+- Array order is preserved by mapping array elements in source order (`RFC8785JCS.swift:25-26`).
+- The independent reference-vector command returned `eb5f8f90c09c2bbcec0dca6f42c203c25a7a8d403a734c6a81379b14ad702f9d`, matching the literal `sha256:eb5f8f90c09c2bbcec0dca6f42c203c25a7a8d403a734c6a81379b14ad702f9d` asserted in `testRecipeHashMatchesReferenceVector` (`RecommendationEmitterTests.swift:134-142`). This is not tautological with the Swift encoder.
+
+#### Category B: recipe_hash domain isolation
+
+**B.1 (QUESTION) — nil-recommendation `recipe_hash` policy needs an explicit Step 10 decision before DB persistence.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/RecommendationEmitter.swift:95-121`, `:261-277`; `specs/SPEC-013-cli-autotune.md:1124-1131`.
+- **What:** When `recommendation == nil`, Step 9 still emits a non-empty recipe hash by hashing a degenerate JCS object with `"model": null` and `"knobs": null`. The JSON schema section requires a `recipe_hash` field, but the DB schema comment says `recipe_hash TEXT -- NULL if no recommendation`.
+- **Why:** This does not break Step 9's standalone JSON surface, and the Step 9 prompt calls this branch ambiguous. Step 10, however, will persist `tune_runs.recipe_hash`; persisting the degenerate hash would disagree with the DB comment, while forcing NULL would make `EmittedRecommendation.recipeHash` too eager for the no-recommendation branch.
+- **Recommendation:** In Step 10, choose and test the persistence contract explicitly. If DB rows should store NULL on no recommendation, keep the JSON field as Step 9 emits it only if the spec owner accepts that JSON/DB divergence; otherwise make the emitted recipe hash optional or encode `null` in JSON too.
+
+Verification notes:
+- The hash input includes exactly `binary_version`, `candidate_models`, `chip`, `knobs`, `model`, `ram_gb`, and `target_context` (`RecommendationEmitter.swift:100-121`).
+- Excluded observation/run fields are not referenced by `recipeHashInput`: `run_id`, timestamps, `os_version`, replicate/gate/tie parameters, measured TPS/TTFT, alternates, infeasible, `db_path`, and `serve_command` stay out of the hash domain.
+- `testRecipeHashIgnoresObservationFields` varies `runID`, `startedAt`, `endedAt`, `tpsMedian`, `ttftP95MS`, and `replicates` and asserts identical hashes (`RecommendationEmitterTests.swift:145-164`).
+- RAM and binary-version sensitivity are covered by `testRecipeHashSensitiveToMachineRAM` and `testRecipeHashSensitiveToBinaryVersion` (`RecommendationEmitterTests.swift:166-186`).
+
+#### Category C: SHA-256 + format wrapping
+
+(no findings)
+
+Verification notes:
+- `RFC8785JCS.sha256Hex` hashes `Data(canonical.utf8)`, not a hex string or UTF-16 representation (`RFC8785JCS.swift:38-41`).
+- Hex output uses `%02x`, and `RecommendationEmitter.recipeHash` adds the literal lowercase `sha256:` prefix (`RFC8785JCS.swift:41`; `RecommendationEmitter.swift:95-98`).
+- `testJSONOutputRecipeHashFormat` asserts `^sha256:[0-9a-f]{64}$` and lowercasing (`RecommendationEmitterTests.swift:127-132`).
+
+#### Category D: Terminal block (FR-F.1)
+
+(no findings)
+
+Verification notes:
+- The emitted block includes model, target context, YAML-key knob names, measured median TPS/p95 TTFT/replicate count, alternates, serve command, run ID, and DB path (`RecommendationEmitter.swift:149-177`; `RecommendationEmitterTests.swift:6-23`).
+- Step 9 returns strings and does not print to stderr/stdout; Step 10 owns destinations (`RecommendationEmitter.swift:57-85`).
+- Nil `kv_bits` renders as `unset` and omits `--kv-bits` from both returned serve command and terminal block (`RecommendationEmitter.swift:154`, `:196-219`; `RecommendationEmitterTests.swift:25-41`).
+- The nil-recommendation branch emits a clear `NO RECOMMENDATION` block, lists infeasibles in input order, and omits the serve command (`RecommendationEmitter.swift:129-146`; `RecommendationEmitterTests.swift:43-58`).
+
+#### Category E: --json schema (FR-F.2)
+
+**E.1 (MINOR) — JSON schema regression test spot-checks nested objects instead of asserting the full documented field/type set.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/RecommendationEmitterTests.swift:92-115`; implementation at `phase3-binary/Sources/macprovider-cli/RecommendationEmitter.swift:241-402`.
+- **What:** `testJSONOutputMatchesSpec013Schema` verifies top-level fields and the recommendation knob names, but only asserts that `machine`, `inputs`, `alternates`, `infeasible`, and `recipe_hash` are non-nil. It does not assert every documented nested key and type for `machine`, `inputs`, `infeasible[]`, recommendation measurements, or ISO timestamp shape.
+- **Why:** Manual inspection shows the implementation currently encodes the required fields, so this is not a Step 9 schema bug. The test is weaker than AC-11's stated "every documented field is present with the documented type" regression bar and could miss a future nested-field removal.
+- **Recommendation:** Expand the test to walk the decoded JSON and assert exact required keys plus primitive types for `machine`, `inputs`, `recommendation`, `recommendation.knobs`, `infeasible[]`, and the top-level timestamp strings.
+
+Verification notes:
+- The implementation encodes `spec_version`, `run_id`, `started_at`, `ended_at`, `machine`, `inputs`, nullable `recommendation`, `alternates`, `infeasible`, `recipe_hash`, and `db_path` (`RecommendationEmitter.swift:247-278`).
+- JSON knob names are the YAML keys `kv_bits`, `max_concurrency_override`, and `max_context_override`, and nil `kv_bits` uses JSON `null` (`RecommendationEmitter.swift:374-389`).
+- Alternates are the slice after the chosen model, empty when the chosen model is last, and empty when the chosen model is not found (`RecommendationEmitter.swift:180-194`; `RecommendationEmitterTests.swift:60-90`). The not-found behavior is intentionally undefined by the spec and harmless for Step 9.
+
+#### Category F: kv_bits nil propagation (cross-cutting)
+
+(no findings)
+
+Verification notes:
+- Terminal display uses `kv_bits: unset` (`RecommendationEmitter.swift:154`).
+- Serve command construction omits `--kv-bits` when nil (`RecommendationEmitter.swift:196-219`).
+- JSON output encodes `"kv_bits": null` (`RecommendationEmitter.swift:380-386`).
+- JCS hash input encodes `"kv_bits":null` (`RecommendationEmitter.swift:103-108`; `RecommendationEmitterTests.swift:209-216`).
+- Config apply omits the YAML `kv_bits:` line when nil (`ConfigApplier.swift:119-124`, `:143-155`, `:167-176`; `ConfigApplierTests.swift:73-89`).
+- Apply summary uses `kv_bits=unset` (`ConfigApplier.swift:198-200`).
+
+#### Category G: ConfigApplier backup counter (FR-F.3)
+
+**G.1 (MINOR) — backup path selection has a TOCTOU overwrite window under concurrent applies.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/ConfigApplier.swift:84-104`.
+- **What:** `firstAvailableBackupPath` uses `fileExists` to select the first free `config.yaml.bak-<unix-ts>-<counter>`, then `atomicWrite` writes a temp file and calls POSIX `rename` to the selected destination. If another autotune process creates the same backup path between the existence check and `rename`, `rename` will replace that destination.
+- **Why:** The single-process counter behavior is correct and tested, but FR-F.3 says backup writes must never overwrite existing files. The Step 9 audit prompt classifies this specific stat-then-create race as MINOR for v1, but it is still a real concurrent-apply limitation.
+- **Recommendation:** Use an exclusive destination creation strategy for backups, such as `open(O_CREAT | O_EXCL)` followed by writing the backup bytes, or a macOS exclusive rename primitive where available, and retry the next counter on `EEXIST`.
+
+Verification notes:
+- Counter 0 and collision increment are tested (`ConfigApplierTests.swift:6-26`).
+- Exhaustion is testable through `maxBackupCounter` and covered with counters 0...1 (`ConfigApplierTests.swift:28-42`).
+- The implementation tries counters from 0 through 65,535 by default and throws `backupCollisionsExhausted` if all are occupied (`ConfigApplier.swift:30-37`, `:84-99`).
+
+#### Category H: ConfigApplier atomic write (FR-F.3)
+
+(no findings)
+
+Verification notes:
+- Temp files are constructed in the same directory as the destination (`ConfigApplier.swift:101-104`, `:203-206`).
+- The final commit uses POSIX `rename`, not `FileManager.replaceItem` (`ConfigApplier.swift:101-112`).
+- The atomic-write test spies temp names for both backup and config writes and asserts temp files are gone after successful renames (`ConfigApplierTests.swift:110-132`).
+
+#### Category I: ConfigApplier non-owned key preservation (FR-F.3, AC-9)
+
+**I.1 (MINOR) — AC-9 preservation tests do not prove byte-identical non-owned coverage or parser round-trip.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift:44-71`; `phase3-binary/Sources/MacProviderCore/Config.swift:239-241`.
+- **What:** `testApplyPreservesNonOwnedKeysVerbatim` uses three `contains` assertions for selected non-owned snippets, and `testApplyMutatesOnlyFourOwnedKeys` compares a simple dictionary of keyed lines. There is no test that extracts every non-owned pre/post byte span and proves byte identity, and no test that the binary's `Config.swift` parser reads the post-apply owned values.
+- **Why:** Manual implementation inspection is favorable: non-owned raw lines are appended unchanged, top-level owned keys are the only recognized rewrite targets, and nil `kv_bits` is omitted. Still, AC-9 explicitly calls for byte-identical non-owned keys and a parser round-trip; the shipped tests can miss ordering/comment drift outside the three snippets and can miss a future parser-key mismatch.
+- **Recommendation:** Add a fixture with comments before/after non-owned keys, blank lines, and ordering sentinels; compare all non-owned lines byte-for-byte pre/post. Then parse the post-apply file through `Config.swift`'s loader and assert `model`, `kv_bits`, `max_context_override`, and `max_concurrency_override` resolve to the recommendation values.
+
+Verification notes:
+- The rewrite algorithm validates YAML with Yams, scans raw text line by line, rewrites only non-indented exact owned top-level keys, appends non-owned `rawLine` unchanged, inserts missing owned non-nil keys, and omits nil `kv_bits` (`ConfigApplier.swift:73-82`, `:115-185`).
+- Existing tests cover selected non-owned snippets, the four changed owned keys, nil `kv_bits` omission, and idempotence (`ConfigApplierTests.swift:44-108`).
+- Duplicate owned keys remain undefined; the last YAML value would normally win in a parser, while the rewriter sees each owned line. This is a SPEC-silent edge and not a Step 9 blocker for normal generated config.
+
+#### Category J: Idempotency (FR-F.3, AC-9)
+
+(no findings)
+
+Verification notes:
+- `testApplyIsIdempotent` compares the full post-apply config after two identical applies and excludes only the expected backup-path/counter difference (`ConfigApplierTests.swift:91-108`).
+- The second backup contains the first post-apply config, and the first backup remains the original config (`ConfigApplierTests.swift:105-107`).
+
+#### Category K: launchd restart hint (FR-F.3)
+
+**K.1 (MINOR) — launchd hint test does not assert all required substrings.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/ConfigApplierTests.swift:134-139`; implementation at `phase3-binary/Sources/macprovider-cli/RecommendationEmitter.swift:87-92`.
+- **What:** `testLaunchdRestartHintIncludesBootoutAndBootstrap` asserts only `launchctl bootout` and `launchctl bootstrap`. The implementation currently also includes `~/Library/LaunchAgents/live.streamvc.macprovider.plist` and `live.streamvc.macprovider`, but the test would not catch a future regression that drops either path/service token.
+- **Why:** FR-F.3 requires the hint to contain both commands, the plist path, and the service identifier. Step 10 will decide stderr routing, so Step 9 only needs the helper content to be locked.
+- **Recommendation:** Extend the test to assert `~/Library/LaunchAgents/live.streamvc.macprovider.plist` and `live.streamvc.macprovider` in addition to bootout/bootstrap.
+
+Verification notes:
+- Step 9 only returns the hint string; it does not print, so stdout/stderr routing remains correctly deferred to Step 10 (`RecommendationEmitter.swift:87-92`).
+
+#### Category L: Anti-regression on Steps 1-8
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: 344 tests executed, 2 skipped, 0 failures.
+- `git diff --name-status 292b2f9^ 292b2f9` shows exactly the Step 9 surface: three added source files, two added test files, and implementation-notes changes.
+- `AutotuneCommand.run()`, Stage1Iterator, Stage2HillClimb, AutotuneDB, ProviderPreWarmer, and CandidateProviderRunner are not modified by commit 292b2f9.
+
+#### Category M: Forward-compatibility (Step 10)
+
+(no findings beyond B.1)
+
+Verification notes:
+- `RecommendationEmitter.build(_:)` is a pure value-returning seam that exposes terminal text, JSON, recipe hash, alternates, and serve command for Step 10 (`RecommendationEmitter.swift:57-85`; `EmittedRecommendation` at `:42-48`).
+- `ConfigApplier.apply` is standalone and can be called by Step 10 only under `--apply` (`ConfigApplier.swift:40-65`).
+- `EmittedRecommendation.recipeHash` is accessible for future `tune_runs.recipe_hash` persistence (`RecommendationEmitter.swift:42-48`, `:78-84`).
+- With nil recommendation, `build(_:)` still returns terminal text and JSON with `"recommendation": null` (`RecommendationEmitter.swift:129-146`, `:269-273`; `RecommendationEmitterTests.swift:117-125`). Step 10 must not call `ConfigApplier.apply` in that branch.
+
+#### Category N: Anything else
+
+(no findings)
+
+Verification notes:
+- `phase3-binary/implementation-notes.html` documents Step 9's dormant scope, the JCS choices, the reference-vector hash, Yams validation plus custom top-level rewrite, backup/temp+rename behavior, and the 22 Step 9 tests (`phase3-binary/implementation-notes.html:1637-1683`).
+- Naming is consistent with the Step 9 surface: `RecommendationEmitter`, `RFC8785JCS`, `ConfigApplier`, and `EmittedRecommendation`.
+- The commit's two `Rejected:` decisions are reflected in implementation notes: JSONEncoder-only hashing is replaced by RFC8785 JCS, and Yams emission is rejected in favor of validation plus constrained raw-text rewriting.
+
+### Step 9 readiness verdict
+
+READY TO PROCEED TO STEP 10.
+
+---
+
+## Round 17 audit (Codex on d6c634c — Step 9 round 2 closure verification)
+
+**Audited:** commit d6c634c on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 9, round 2 of N
+**Date:** 2026-06-18
+**Closure summary:** 5 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED across the 5 round-1 findings
+**Round-2 findings:** 0 CRITICAL anti-regression / 0 MAJOR new / 0 MINOR new
+**Step 9 readiness:** READY TO PROCEED TO STEP 10
+
+### Executive summary
+
+Commit d6c634c closes all five Round 16 findings. The nil-recommendation hash policy is now explicit and internally consistent: `EmittedRecommendation.recipeHash` is optional, `RecommendationEmitter.recipeHash(_:)` returns nil before building the JCS hash when no recommendation exists, and `JSONRoot.encode(to:)` emits literal JSON null via `encodeNil(forKey: .recipeHash)`, not the string `"null"`. Existing recipe-hash tests remain on non-nil recommendation inputs and still cover the reference vector plus observation-field exclusion and sensitivity properties.
+
+The new exclusive backup path is acceptable for Step 9. `writeBackupExclusively` preserves the prior `<config>.bak-<unix-ts>-<counter>` naming scheme while replacing stat-then-rename with `open(O_CREAT | O_EXCL | O_WRONLY, 0o644)`, retries on `EEXIST`, reports non-`EEXIST` open/write failures through `backupWriteFailed`, and writes through a manual loop that handles `EINTR` and partial writes. The `n == 0` case has no explicit break, but this fd is a regular file opened for blocking writes; for a positive remaining count, a repeated zero-byte write would be pathological rather than a practical v1 risk. I do not consider it a new Step 9 finding.
+
+Verification passed. `swift test --package-path phase3-binary` executed 348 tests, skipped 2 integration-gated tests, and reported 0 failures.
+
+### Round-1 finding closures
+
+**B.1 (QUESTION) — CLOSED.** `EmittedRecommendation.recipeHash` is now `String?` (`RecommendationEmitter.swift:42-48`), and `RecommendationEmitter.recipeHash(_:)` returns nil before computing the hash when `inputs.recommendation == nil` (`RecommendationEmitter.swift:95-100`). `JSONRoot.recipeHash` is also optional, and the encoder's else branch calls `encodeNil(forKey: .recipeHash)` (`RecommendationEmitter.swift:244-284`), which produces literal `null` in the emitted JSON field. `testRecipeHashIsNilWhenRecommendationIsNil` asserts both `XCTAssertNil(emitted.recipeHash)` and `root["recipe_hash"] is NSNull` (`RecommendationEmitterTests.swift:164-173`). Existing hash properties still exercise non-nil recommendations: `testRecipeHashMatchesReferenceVector` compares the baked `sha256:` value, and the observation/sensitivity tests compare optional values produced from recommendation-bearing inputs (`RecommendationEmitterTests.swift:194-245`).
+
+**E.1 (MINOR) — CLOSED.** `testJSONOutputMatchesSpec013Schema` now asserts primitive values/types for documented nested fields, exact key sets for `machine`, `inputs`, `recommendation`, `recommendation.knobs`, and `infeasible[0]`, ISO-8601 shape for both timestamps, and documented alternates/infeasible ordering/content (`RecommendationEmitterTests.swift:92-162`). This closes the prior nested-schema spot-check gap and intentionally catches undocumented additive fields through `Set(keys)` assertions.
+
+**G.1 (MINOR) — CLOSED.** `writeBackupExclusively` constructs the same `config.yaml.bak-<unix-ts>-<counter>` candidate path, opens it with `O_CREAT | O_EXCL | O_WRONLY` and `0o644`, returns on successful write, retries only on `EEXIST`, and throws `ConfigApplierError.backupWriteFailed(destination:, errno:)` for other open/write failures (`ConfigApplier.swift:86-131`). `writeAll` uses `base.advanced(by: written)` and `data.count - written`, retries `EINTR`, and advances `written += n` for partial writes. `testApplyBackupUsesExclusiveCreateAgainstTOCTOURace` pre-creates counters 0 through 3, verifies the new backup lands at counter 4, and asserts all pre-existing backup contents remain unchanged (`ConfigApplierTests.swift:134-154`). The adjusted atomic-write test correctly expects one temp path because only the config write still uses temp+rename (`ConfigApplierTests.swift:111-132`).
+
+**I.1 (MINOR) — CLOSED.** `ConfigApplierTests` now imports `MacProviderCore` (`ConfigApplierTests.swift:1-4`). `testApplyPreservesNonOwnedLinesByteIdentically` uses comments, blank lines, an inline comment, and a SPEC-013 marker, then compares filtered non-owned line arrays pre/post (`ConfigApplierTests.swift:156-185`). The helper removes only non-indented top-level owned lines for `model`, `kv_bits`, `max_context_override`, and `max_concurrency_override`; indented same-name lines remain in the preserved non-owned set (`ConfigApplierTests.swift:248-262`). `testApplyResultIsParseableByConfigLoader` loads the post-apply file through `ConfigLoader.load(cli:environment:)` and asserts the four runtime config values resolve to the recommendation values (`ConfigApplierTests.swift:187-199`).
+
+**K.1 (MINOR) — CLOSED.** The renamed `testLaunchdRestartHintIncludesAllRequiredSubstrings` asserts `launchctl bootout`, `launchctl bootstrap`, `~/Library/LaunchAgents/live.streamvc.macprovider.plist`, and `gui/$UID/live.streamvc.macprovider` (`ConfigApplierTests.swift:202-209`). The implementation still contains those substrings in the returned hint (`RecommendationEmitter.swift:87-92`).
+
+### Round-2 new findings
+
+No new findings in Category Z-CLOSURE, R-REGRESSION-V09F1, N-NEWGAPS-V09F1, or O-OTHER-V09F1.
+
+Notes:
+- `writeAll` has correct pointer arithmetic for partial writes and `EINTR` retry. It does not special-case `n == 0`, but for this blocking regular-file backup fd the loop is acceptable as-is for v1.
+- Optional recipe hash encoding uses `encodeNil`, so nil emits JSON null. The load-bearing Step 10 seam is the returned `EmittedRecommendation.recipeHash`; there is no static cache or alternate state path in Step 9.
+- Concurrent backup attempts on the same timestamp/counter now resolve through `O_EXCL`: one process creates the counter path and another observes `EEXIST` and retries the next counter.
+- The non-owned-line helper would preserve indented owned-key-named lines rather than filter them. That is appropriate for this top-level-only rewriter and not a real concern for SPEC-013's operator config shape.
+- `phase3-binary/implementation-notes.html` includes the Round 1 audit-response entry documenting all five closures and the 348/2/0 anti-regression result (`implementation-notes.html:1684-1756`).
+
+### Step 9 readiness verdict
+
+READY TO PROCEED TO STEP 10.
