@@ -42,7 +42,7 @@ struct InfeasibleEntry {
 struct EmittedRecommendation {
     var terminalBlock: String
     var jsonString: String
-    var recipeHash: String
+    var recipeHash: String?
     var alternates: [String]
     var serveCommand: String
 }
@@ -92,7 +92,10 @@ struct RecommendationEmitter {
         """
     }
 
-    static func recipeHash(_ inputs: RecommendationInputs) throws -> String {
+    static func recipeHash(_ inputs: RecommendationInputs) throws -> String? {
+        guard inputs.recommendation != nil else {
+            return nil
+        }
         let value = recipeHashInput(inputs)
         return "sha256:\(try RFC8785JCS.sha256Hex(of: value))"
     }
@@ -242,7 +245,7 @@ private struct JSONRoot: Encodable {
     var inputs: RecommendationInputs
     var alternates: [String]
     var serveCommand: String
-    var recipeHash: String
+    var recipeHash: String?
 
     enum CodingKeys: String, CodingKey {
         case specVersion = "spec_version"
@@ -273,7 +276,11 @@ private struct JSONRoot: Encodable {
         }
         try container.encode(alternates, forKey: .alternates)
         try container.encode(inputs.infeasible.map(InfeasibleJSON.init), forKey: .infeasible)
-        try container.encode(recipeHash, forKey: .recipeHash)
+        if let recipeHash {
+            try container.encode(recipeHash, forKey: .recipeHash)
+        } else {
+            try container.encodeNil(forKey: .recipeHash)
+        }
         try container.encode(inputs.dbPath, forKey: .dbPath)
     }
 

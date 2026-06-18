@@ -1681,5 +1681,79 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   <code>swift test --package-path phase3-binary --filter 'RecommendationEmitterTests|ConfigApplierTests'</code>
   passes 22/22 new Step 9 tests.</p>
 </div>
+<div class="entry">
+  <time>2026-06-18</time>
+  <p><strong>Round-1 audit response (4 MINOR + 1 QUESTION closed; Round 16 at
+  specs/SPEC-013-impl-audit.md).</strong> Codex round-1 audit on commit
+  292b2f9 returned 0 CRITICAL / 0 MAJOR / 4 MINOR / 1 QUESTION with verdict
+  READY TO PROCEED TO STEP 10. The independent <code>printf | shasum -a 256</code>
+  cross-check on the A.7 reference vector matched the baked test literal
+  (<code>eb5f8f90c09c2bbcec0dca6f42c203c25a7a8d403a734c6a81379b14ad702f9d</code>),
+  so the JCS encoder is cross-implementation-deterministic. This fix-pass
+  closes all 5 findings to satisfy the "until 0 findings" loop discipline.</p>
+  <p><strong>B.1 QUESTION (nil-recommendation recipe_hash policy)</strong>:
+  pre-committed the Step 10 persistence contract by making
+  <code>EmittedRecommendation.recipeHash</code> optional. When the run's
+  recommendation is nil, the emitter now returns <code>recipeHash = nil</code>
+  and the JSON output emits literal <code>"recipe_hash": null</code> (matching
+  the <code>tune_runs.recipe_hash</code> schema comment "NULL if no
+  recommendation"). Step 10's <code>tune_runs</code> persistence will store
+  NULL accordingly. New test
+  <code>testRecipeHashIsNilWhenRecommendationIsNil</code> locks both
+  invariants.</p>
+  <p><strong>E.1 MINOR (JSON schema test only spot-checks nested objects)</strong>:
+  rewrote <code>testJSONOutputMatchesSpec013Schema</code> to walk every
+  documented nested key, assert primitive types, and use
+  <code>Set(dict.keys) == &lt;expected&gt;</code> as an additive-only
+  regression-lock. The test now covers
+  <code>machine.{ram_gb, chip, os_version, binary_version}</code>,
+  <code>inputs.{target_context, candidate_models, stage1_replicates,
+  stage2_replicates, gate_ttft_ms, tps_tie_epsilon}</code>,
+  <code>recommendation.{model, target_context, knobs, tps_median, ttft_p95_ms,
+  replicates, serve_command}</code>,
+  <code>recommendation.knobs.{kv_bits, max_concurrency_override,
+  max_context_override}</code>, the alternates string array, and
+  <code>infeasible[].{model, rank, reason}</code>. ISO-8601 timestamp shape is
+  asserted via regex (<code>^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$</code>).</p>
+  <p><strong>G.1 MINOR (TOCTOU between fileExists check and rename)</strong>:
+  replaced the stat-then-create backup pattern with exclusive-create-write.
+  <code>writeBackupExclusively</code> opens each candidate with
+  <code>O_CREAT | O_EXCL | O_WRONLY</code>; on <code>EEXIST</code> it retries
+  the next counter, on success it writes the original bytes directly to the
+  exclusively-opened FD. No temp+rename for backups (the config write still
+  uses atomic temp+rename per FR-F.3). A concurrent autotune can no longer
+  overwrite a pre-existing backup. New test
+  <code>testApplyBackupUsesExclusiveCreateAgainstTOCTOURace</code> pre-creates
+  backups at counters 0-3, applies, and asserts (a) the new backup lands at
+  counter 4, (b) all 4 pre-existing backup files retain their original byte
+  content unchanged. A new error case
+  <code>backupWriteFailed(destination:, errno:)</code> reports any non-EEXIST
+  open or write failure.</p>
+  <p><strong>I.1 MINOR (AC-9 preservation tests too weak)</strong>: added
+  two stronger tests. <code>testApplyPreservesNonOwnedLinesByteIdentically</code>
+  uses a fixture with leading/trailing/block/inline comments, blank lines, and
+  ordering sentinels; it splits pre and post into lines, filters out the 4
+  owned keys, and asserts the remaining line arrays are byte-identical.
+  <code>testApplyResultIsParseableByConfigLoader</code> runs the post-apply
+  file through the binary's actual <code>MacProviderCore.ConfigLoader.load</code>
+  and asserts <code>loaded.{model, kvBitsOverride, maxContextOverride,
+  maxConcurrencyOverride}</code> resolve to the recommendation values. This
+  catches a future parser/key-name drift that the spot-check tests would
+  miss.</p>
+  <p><strong>K.1 MINOR (launchd hint test only checks bootout/bootstrap)</strong>:
+  renamed <code>testLaunchdRestartHintIncludesBootoutAndBootstrap</code> to
+  <code>testLaunchdRestartHintIncludesAllRequiredSubstrings</code> and added
+  assertions for the plist path
+  (<code>~/Library/LaunchAgents/live.streamvc.macprovider.plist</code>) and
+  the service identifier (<code>gui/$UID/live.streamvc.macprovider</code>).</p>
+  <p><strong>testApplyWriteIsAtomic adjustment</strong>: the test now asserts
+  <code>tempPaths.count == 1</code> (was 2) since the backup write no longer
+  uses the temp+rename path. The config write still uses temp+rename and the
+  spy <code>tempFileNamer</code> closure exercises it.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes 348/348 (344
+  baseline + 4 new from this fix-pass), with 2 skipped integration-gated
+  tests, 0 failures.</p>
+</div>
 </section>
 </body></html>

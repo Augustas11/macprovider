@@ -6,6 +6,7 @@ enum ConfigApplierError: Error, Equatable, CustomStringConvertible {
     case backupCollisionsExhausted
     case invalidYAML(String)
     case atomicRenameFailed(source: String, destination: String, errno: Int32)
+    case backupWriteFailed(destination: String, errno: Int32)
     case stringEncodingFailed(String)
 
     var description: String {
@@ -16,6 +17,8 @@ enum ConfigApplierError: Error, Equatable, CustomStringConvertible {
             return "invalid YAML: \(message)"
         case .atomicRenameFailed(let source, let destination, let errno):
             return "atomic rename failed from \(source) to \(destination): errno \(errno)"
+        case .backupWriteFailed(let destination, let errno):
+            return "backup write failed for \(destination): errno \(errno)"
         case .stringEncodingFailed(let path):
             return "failed to encode YAML for \(path)"
         }
@@ -50,8 +53,7 @@ struct ConfigApplier {
         try validateYAML(originalText)
 
         let unixTS = Int(now.timeIntervalSince1970)
-        let backupPath = try firstAvailableBackupPath(unixTS: unixTS, fileManager: fileManager)
-        try atomicWrite(originalData, to: backupPath, unixTS: unixTS)
+        let backupPath = try writeBackupExclusively(originalData, unixTS: unixTS)
 
         let updatedText = try updatedConfigText(originalText, recommendation: recommendation)
         guard let updatedData = updatedText.data(using: .utf8) else {
@@ -81,21 +83,51 @@ struct ConfigApplier {
         }
     }
 
-    private func firstAvailableBackupPath(
-        unixTS: Int,
-        fileManager: FileManager
-    ) throws -> URL {
+    private func writeBackupExclusively(_ data: Data, unixTS: Int) throws -> URL {
         guard maxBackupCounter >= 0 else {
             throw ConfigApplierError.backupCollisionsExhausted
         }
+        let directory = configPath.deletingLastPathComponent()
         for counter in 0...maxBackupCounter {
-            let candidate = configPath.deletingLastPathComponent()
+            let candidate = directory
                 .appendingPathComponent("\(configPath.lastPathComponent).bak-\(unixTS)-\(counter)")
-            if !fileManager.fileExists(atPath: candidate.path) {
+            let fd = candidate.path.withCString { open($0, O_CREAT | O_EXCL | O_WRONLY, 0o644) }
+            if fd >= 0 {
+                defer { _ = close(fd) }
+                try writeAll(fd: fd, data: data, destination: candidate.path)
                 return candidate
+            }
+            let openErrno = errno
+            if openErrno != EEXIST {
+                throw ConfigApplierError.backupWriteFailed(
+                    destination: candidate.path,
+                    errno: openErrno
+                )
             }
         }
         throw ConfigApplierError.backupCollisionsExhausted
+    }
+
+    private func writeAll(fd: Int32, data: Data, destination: String) throws {
+        try data.withUnsafeBytes { rawBuffer in
+            guard let base = rawBuffer.baseAddress else {
+                return
+            }
+            var written = 0
+            while written < data.count {
+                let n = write(fd, base.advanced(by: written), data.count - written)
+                if n < 0 {
+                    if errno == EINTR {
+                        continue
+                    }
+                    throw ConfigApplierError.backupWriteFailed(
+                        destination: destination,
+                        errno: errno
+                    )
+                }
+                written += n
+            }
+        }
     }
 
     private func atomicWrite(_ data: Data, to destination: URL, unixTS: Int) throws {

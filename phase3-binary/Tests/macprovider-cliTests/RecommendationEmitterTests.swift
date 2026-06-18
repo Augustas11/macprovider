@@ -95,23 +95,82 @@ final class RecommendationEmitterTests: XCTestCase {
 
         XCTAssertEqual(root["spec_version"] as? String, "SPEC-013 v0.3")
         XCTAssertEqual(root["run_id"] as? String, "run-123")
-        XCTAssertEqual(root["started_at"] as? String, "2026-06-18T12:34:56Z")
-        XCTAssertEqual(root["ended_at"] as? String, "2026-06-18T13:01:22Z")
         XCTAssertEqual(root["db_path"] as? String, "/tmp/autotune.sqlite")
-        XCTAssertNotNil(root["machine"] as? [String: Any])
-        XCTAssertNotNil(root["inputs"] as? [String: Any])
-        XCTAssertNotNil(root["alternates"] as? [String])
-        XCTAssertNotNil(root["infeasible"] as? [[String: Any]])
         XCTAssertNotNil(root["recipe_hash"] as? String)
 
+        let startedAt = try XCTUnwrap(root["started_at"] as? String)
+        let endedAt = try XCTUnwrap(root["ended_at"] as? String)
+        let iso8601 = #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$"#
+        XCTAssertNotNil(startedAt.range(of: iso8601, options: .regularExpression),
+                        "started_at must be ISO 8601 with Z: \(startedAt)")
+        XCTAssertNotNil(endedAt.range(of: iso8601, options: .regularExpression),
+                        "ended_at must be ISO 8601 with Z: \(endedAt)")
+
+        let machine = try XCTUnwrap(root["machine"] as? [String: Any])
+        XCTAssertEqual(machine["ram_gb"] as? Int, 16)
+        XCTAssertEqual(machine["chip"] as? String, "Apple M2")
+        XCTAssertEqual(machine["os_version"] as? String, "macOS 26.3.1")
+        XCTAssertEqual(machine["binary_version"] as? String, "1.4.0")
+        XCTAssertEqual(Set(machine.keys), ["ram_gb", "chip", "os_version", "binary_version"])
+
+        let inputsJSON = try XCTUnwrap(root["inputs"] as? [String: Any])
+        XCTAssertEqual(inputsJSON["target_context"] as? Int, 4_000)
+        XCTAssertEqual(inputsJSON["candidate_models"] as? [String], makeInputs().candidateModels)
+        XCTAssertEqual(inputsJSON["stage1_replicates"] as? Int, 1)
+        XCTAssertEqual(inputsJSON["stage2_replicates"] as? Int, 3)
+        XCTAssertEqual(inputsJSON["gate_ttft_ms"] as? Int, 60_000)
+        XCTAssertEqual(inputsJSON["tps_tie_epsilon"] as? Double, 0.02)
+        XCTAssertEqual(Set(inputsJSON.keys), [
+            "target_context", "candidate_models", "stage1_replicates",
+            "stage2_replicates", "gate_ttft_ms", "tps_tie_epsilon",
+        ])
+
         let recommendation = try XCTUnwrap(root["recommendation"] as? [String: Any])
+        XCTAssertEqual(recommendation["model"] as? String,
+                       "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        XCTAssertEqual(recommendation["target_context"] as? Int, 4_000)
+        XCTAssertEqual(recommendation["tps_median"] as? Double, 2.1)
+        XCTAssertEqual(recommendation["ttft_p95_ms"] as? Double, 19_500)
+        XCTAssertEqual(recommendation["replicates"] as? Int, 3)
+        XCTAssertEqual(recommendation["serve_command"] as? String, emitted.serveCommand)
+        XCTAssertEqual(Set(recommendation.keys), [
+            "model", "target_context", "knobs", "tps_median",
+            "ttft_p95_ms", "replicates", "serve_command",
+        ])
+
         let knobs = try XCTUnwrap(recommendation["knobs"] as? [String: Any])
         XCTAssertEqual(knobs["kv_bits"] as? Int, 4)
         XCTAssertEqual(knobs["max_concurrency_override"] as? Int, 1)
         XCTAssertEqual(knobs["max_context_override"] as? Int, 4_000)
         XCTAssertNil(knobs["max_batch"])
         XCTAssertNil(knobs["max_context"])
-        XCTAssertEqual(recommendation["serve_command"] as? String, emitted.serveCommand)
+        XCTAssertEqual(Set(knobs.keys), ["kv_bits", "max_concurrency_override", "max_context_override"])
+
+        let alternates = try XCTUnwrap(root["alternates"] as? [String])
+        XCTAssertEqual(alternates, [
+            "mlx-community/Llama-3.2-3B-Instruct-4bit",
+            "mlx-community/Llama-3.2-1B-Instruct-4bit",
+        ])
+
+        let infeasible = try XCTUnwrap(root["infeasible"] as? [[String: Any]])
+        XCTAssertEqual(infeasible.count, 1)
+        XCTAssertEqual(infeasible[0]["model"] as? String,
+                       "mlx-community/Qwen2.5-32B-Instruct-4bit")
+        XCTAssertEqual(infeasible[0]["rank"] as? Int, 1)
+        XCTAssertEqual(infeasible[0]["reason"] as? String, "provider exited rc=137")
+        XCTAssertEqual(Set(infeasible[0].keys), ["model", "rank", "reason"])
+    }
+
+    func testRecipeHashIsNilWhenRecommendationIsNil() throws {
+        var inputs = makeInputs()
+        inputs.recommendation = nil
+
+        let emitted = try RecommendationEmitter().build(inputs)
+        let root = try jsonObject(emitted.jsonString)
+
+        XCTAssertNil(emitted.recipeHash)
+        XCTAssertTrue(root["recipe_hash"] is NSNull,
+                      "JSON recipe_hash must be null when recommendation is nil")
     }
 
     func testJSONOutputRecommendationFieldIsNullWhenNotSelected() throws {
@@ -127,8 +186,9 @@ final class RecommendationEmitterTests: XCTestCase {
     func testJSONOutputRecipeHashFormat() throws {
         let emitted = try RecommendationEmitter().build(makeInputs())
         let pattern = #"^sha256:[0-9a-f]{64}$"#
-        XCTAssertNotNil(emitted.recipeHash.range(of: pattern, options: .regularExpression))
-        XCTAssertEqual(emitted.recipeHash, emitted.recipeHash.lowercased())
+        let recipeHash = try XCTUnwrap(emitted.recipeHash)
+        XCTAssertNotNil(recipeHash.range(of: pattern, options: .regularExpression))
+        XCTAssertEqual(recipeHash, recipeHash.lowercased())
     }
 
     func testRecipeHashMatchesReferenceVector() throws {

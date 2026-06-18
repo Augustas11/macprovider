@@ -1,4 +1,5 @@
 import Foundation
+import MacProviderCore
 import XCTest
 @testable import macprovider_cli
 
@@ -123,19 +124,88 @@ final class ConfigApplierTests: XCTestCase {
 
         _ = try applier.apply(recommendation: recommendation(), now: fixture.now)
 
-        XCTAssertEqual(tempPaths.count, 2)
+        XCTAssertEqual(tempPaths.count, 1, "only the config write uses temp+rename; backup is exclusive-create")
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.configURL.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.configURL.deletingLastPathComponent()
             .appendingPathComponent("config.yaml.bak-1718712345-0").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: tempPaths[0].path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: tempPaths[1].path))
     }
 
-    func testLaunchdRestartHintIncludesBootoutAndBootstrap() {
+    func testApplyBackupUsesExclusiveCreateAgainstTOCTOURace() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+        let directory = fixture.configURL.deletingLastPathComponent()
+
+        for counter in 0...3 {
+            try Data("collision-\(counter)".utf8).write(
+                to: directory.appendingPathComponent("config.yaml.bak-1718712345-\(counter)")
+            )
+        }
+
+        let applied = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now)
+
+        XCTAssertEqual(applied.backupPath.lastPathComponent, "config.yaml.bak-1718712345-4")
+        for counter in 0...3 {
+            let preExisting = directory.appendingPathComponent("config.yaml.bak-1718712345-\(counter)")
+            XCTAssertEqual(try String(contentsOf: preExisting), "collision-\(counter)",
+                           "pre-existing backup at counter \(counter) must not be overwritten")
+        }
+        XCTAssertEqual(try String(contentsOf: applied.backupPath), sampleConfig())
+    }
+
+    func testApplyPreservesNonOwnedLinesByteIdentically() throws {
+        let fixture = try ConfigFixture()
+        let configWithSentinels = """
+        # leading comment
+        coordinator_endpoint: https://coordinator.example
+
+        # block comment about provider
+        provider_token: keep-me  # inline keepalive
+
+        log_path: /tmp/provider.log
+        # trailing comment
+        auto_update_enabled: true
+
+        # SPEC-013 zone — owned keys below this line
+        model: old-model
+        kv_bits: 8
+        max_context_override: 2000
+        max_concurrency_override: 2
+
+        """
+        try fixture.writeConfig(configWithSentinels)
+
+        _ = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now)
+        let post = try String(contentsOf: fixture.configURL)
+
+        let preNonOwned = nonOwnedLines(configWithSentinels)
+        let postNonOwned = nonOwnedLines(post)
+        XCTAssertEqual(preNonOwned, postNonOwned,
+                       "non-owned lines (incl. comments + blanks) must be byte-identical pre/post")
+    }
+
+    func testApplyResultIsParseableByConfigLoader() throws {
+        let fixture = try ConfigFixture()
+        try fixture.writeConfig(sampleConfig())
+
+        _ = try fixture.applier().apply(recommendation: recommendation(), now: fixture.now)
+
+        let cli = CLIOverrides(configPath: fixture.configURL.path)
+        let loaded = try ConfigLoader.load(cli: cli, environment: [:])
+
+        XCTAssertEqual(loaded.model, "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit")
+        XCTAssertEqual(loaded.kvBitsOverride, 4)
+        XCTAssertEqual(loaded.maxContextOverride, 4_000)
+        XCTAssertEqual(loaded.maxConcurrencyOverride, 1)
+    }
+
+    func testLaunchdRestartHintIncludesAllRequiredSubstrings() {
         let hint = RecommendationEmitter.launchdRestartHint()
 
         XCTAssertTrue(hint.contains("launchctl bootout"))
         XCTAssertTrue(hint.contains("launchctl bootstrap"))
+        XCTAssertTrue(hint.contains("~/Library/LaunchAgents/live.streamvc.macprovider.plist"))
+        XCTAssertTrue(hint.contains("gui/$UID/live.streamvc.macprovider"))
     }
 
     private func sampleConfig() -> String {
@@ -173,6 +243,22 @@ final class ConfigApplierTests: XCTestCase {
             result[key] = String(line)
         }
         return result
+    }
+
+    private func nonOwnedLines(_ text: String) -> [String] {
+        let ownedKeys: Set<String> = [
+            "model", "kv_bits", "max_context_override", "max_concurrency_override",
+        ]
+        return text.split(separator: "\n", omittingEmptySubsequences: false).compactMap { sub in
+            let line = String(sub)
+            guard let first = line.first, !first.isWhitespace else {
+                return line
+            }
+            let isOwned = ownedKeys.contains { key in
+                line == "\(key):" || line.hasPrefix("\(key): ") || line.hasPrefix("\(key):#")
+            }
+            return isOwned ? nil : line
+        }
     }
 }
 
