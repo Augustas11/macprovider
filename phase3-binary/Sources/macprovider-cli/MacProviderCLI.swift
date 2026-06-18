@@ -10,7 +10,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }

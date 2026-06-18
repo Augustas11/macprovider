@@ -17,6 +17,27 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 <p class=meta>Status: <strong>3h local soak PASS · M4 parity validation pending</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
+<section id="spec013-autotune-step1">
+  <h2>SPEC-013 design decisions — Step 1 autotune scaffold (2026-06-18)</h2>
+  <div class="entry">
+    <time>2026-06-18</time>
+    <p><strong>Scope:</strong> added the Swift-native
+    <code>macprovider-cli autotune</code> parser scaffold and
+    <code>--dry-run</code> candidate-plan output only. Runtime tuning,
+    SQLite persistence, provider lifecycle, <code>serve --no-join</code>,
+    and <code>--apply</code> remain future step work.</p>
+    <p><strong>Design decisions:</strong> the default candidate list is encoded
+    as a local Swift constant in SPEC-013 FR-C.1 order. Dry-run applies
+    <code>--max-model-size</code>/<code>--min-model-size</code> only to that
+    default list; explicit <code>--candidate-models</code> preserves operator
+    order exactly and emits the required size-flag warning.</p>
+    <p><strong>Deviations:</strong> none for Step 1. Non-dry-run execution exits
+    with a clear "not implemented yet" error so the scaffold cannot be mistaken
+    for a partial tuner.</p>
+    <p><strong>Open questions:</strong> none blocking Step 1.</p>
+  </div>
+</section>
+
 <section id="spec008-phase2-provider-b6">
   <h2>SPEC-008 Phase 2 provider B6 encrypted-leg support (2026-05-31)</h2>
   <div class="entry">
