@@ -1259,5 +1259,52 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
     per the BUILD prompt sequencing.</li>
   </ul>
 </div>
+<div class="entry">
+  <time>2026-06-18 (Step 5 round-1 audit response)</time>
+  <p><strong>Round-1 codex audit closures</strong> (full report:
+  <a href="../specs/SPEC-013-impl-audit.md">specs/SPEC-013-impl-audit.md</a>
+  § Round 7; verdict was READY TO PROCEED with 0 CRITICAL / 0 MAJOR / 4
+  MINOR / 0 QUESTION). Codex's recommendation was to proceed; this
+  fix-pass closes 3 of 4 MINORs because they're cheap test-coverage
+  locks, matching the Step 1 discipline. The 4th MINOR (H.1 restore
+  idempotency) is a Step 10 forward-compat note and is tracked for
+  Step 10's wiring rather than fixed here.</p>
+  <p><strong>G.1 MINOR fix</strong> (inactive launchd PID parsing
+  untested). Added
+  <code>testParseLaunchdManagedInactivePIDReturnsNil</code> in
+  <code>ProviderConflictDetectorTests</code> that exercises
+  <code>parseLaunchdManagedPID(from:)</code> with a
+  <code>-\t-\tlive.streamvc.macprovider</code> line and asserts
+  <code>(found: true, pid: nil)</code>.</p>
+  <p><strong>G.2 MINOR fix</strong> (helper-binary false-positive
+  class untested). Added
+  <code>testHelperBinaryDoesNotMatchForegroundServe</code> with a
+  process list containing
+  <code>["/usr/local/bin/macprovider-cli-helper", "serve"]</code>;
+  the <code>lastPathComponent == "macprovider-cli"</code> check
+  correctly rejects, and the test now pins the behavior.
+  Complements
+  <code>testServeSubstringDoesNotMatchForegroundServe</code> (which
+  covered the subcommand-like name class).</p>
+  <p><strong>G.3 MINOR fix</strong> (SIGKILL-disabled warning path
+  untested). Added
+  <code>testForegroundDrainEmitsNoSIGKILLWarningWhenProcessRemainsAfterGrace</code>
+  in <code>ProviderDrainerTests</code> that injects
+  <code>processIsRunning: {_ in true}</code>,
+  <code>portIsOpen: {_ in false}</code>, and a recording warning
+  writer; asserts the warning fires, includes the stuck PID, and
+  names the v1 no-SIGKILL policy.</p>
+  <p><strong>H.1 MINOR</strong> (restore idempotency) — DEFERRED to
+  Step 10. The drainer's <code>restore(.launchdManaged)</code>
+  calls <code>launchctl bootstrap</code> unconditionally; a second
+  restore after a successful bootstrap will fail because the
+  service is already loaded. Step 10's signal handler / failure
+  cleanup will own the call-once discipline. Captured as a
+  forward-compat note rather than fixed in Step 5 code.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary</code> passes
+  286/286 (283 baseline + 3 new from this fix-pass), with 2 skipped
+  integration-gated tests.</p>
+</div>
 </section>
 </body></html>

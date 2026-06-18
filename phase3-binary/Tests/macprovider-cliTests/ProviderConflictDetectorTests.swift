@@ -71,6 +71,31 @@ final class ProviderConflictDetectorTests: XCTestCase {
 
         _ = try ProviderConflictDetector.defaultLaunchctlList()
     }
+
+    // MARK: - Round-1 audit fix tests (detector scope)
+
+    /// Round-1 G.1 closure: `launchctl list` may report a loaded but
+    /// inactive job with PID `-`. The parser already returns
+    /// `(found: true, pid: nil)` for this case; this test pins the
+    /// behavior against future refactors.
+    func testParseLaunchdManagedInactivePIDReturnsNil() {
+        let output = "-\t-\tlive.streamvc.macprovider\n"
+        let parsed = ProviderConflictDetector.parseLaunchdManagedPID(from: output)
+        XCTAssertTrue(parsed.found)
+        XCTAssertNil(parsed.pid)
+    }
+
+    /// Round-1 G.2 closure: a helper binary like
+    /// `/path/macprovider-cli-helper serve` is the OTHER false-positive
+    /// class the prompt named. `lastPathComponent != "macprovider-cli"`
+    /// already rejects it; this test pins the behavior.
+    func testHelperBinaryDoesNotMatchForegroundServe() throws {
+        let detector = ProviderConflictDetector(
+            launchctlList: { "" },
+            processList: { [(pid: 9001, argv: ["/usr/local/bin/macprovider-cli-helper", "serve"])] }
+        )
+        XCTAssertEqual(try detector.detect(), .none)
+    }
 }
 
 final class ProviderDrainerTests: XCTestCase {
@@ -132,6 +157,38 @@ final class ProviderDrainerTests: XCTestCase {
         XCTAssertEqual(calls.count, 1)
         XCTAssertEqual(calls[0].0, "/bin/launchctl")
         XCTAssertEqual(calls[0].1, ["bootstrap", "gui/502", plistURL.path])
+    }
+
+    // MARK: - Round-1 audit fix tests (drainer scope)
+
+    /// Round-1 G.3 closure: the foreground drain MUST emit the SIGKILL-
+    /// disabled warning when grace expires with the process still
+    /// running. The injected warning writer captures the message.
+    func testForegroundDrainEmitsNoSIGKILLWarningWhenProcessRemainsAfterGrace() throws {
+        var signals: [(Int32, Int32)] = []
+        var warnings: [String] = []
+        let drainer = ProviderDrainer(
+            signalSender: { pid, signal in
+                signals.append((pid, signal))
+                return 0
+            },
+            processIsRunning: { _ in true },   // stays alive past grace
+            portIsOpen: { _ in false },        // port is free though
+            warningWriter: { message in warnings.append(message) }
+        )
+
+        let result = try drainer.drain(
+            .foreground(pid: 7_777, argv: ["/usr/local/bin/macprovider-cli", "serve"]),
+            port: 18_080,
+            graceSeconds: 0
+        )
+
+        XCTAssertEqual(result, .drained)  // port-free wins the result enum
+        XCTAssertEqual(signals.count, 1)
+        XCTAssertEqual(signals[0].1, SIGTERM)
+        XCTAssertEqual(warnings.count, 1)
+        XCTAssertTrue(warnings[0].contains("pid 7777"), "warning should name the stuck PID; got \(warnings[0])")
+        XCTAssertTrue(warnings[0].contains("SIGKILL is disabled in v1"), "warning should name the v1 SIGKILL policy; got \(warnings[0])")
     }
 
     func testForegroundRestoreSkipsUnlessRestartForegroundIsTrue() throws {
