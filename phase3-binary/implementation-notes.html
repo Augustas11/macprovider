@@ -289,17 +289,38 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   <p><strong>After Step 11 LOCKS — post-build checklist</strong> (round-1
   audit H.1 closure):</p>
   <ol>
-    <li>SPEC-003 install note appended to the spec referencing the
-    locked autotune surface.</li>
-    <li><code>beta/DECISION_CRITERIA.md</code> entry recording the
-    BUILD pattern + cross-model audit-loop discipline that landed
-    SPEC-013.</li>
-    <li>PR #103 disposition (close or rebase the spike into the
-    landed v1 surface).</li>
-    <li>Push <code>feat/cli-autotune-impl</code> to the
-    <code>Augustas11/macprovider</code> remote (per the per-repo git
-    credential helper).</li>
-    <li>Open the implementation PR separate from the SPEC PR #108.</li>
+    <li><strong>SPEC-003 install note</strong>: add a brief cross-reference
+    in <code>specs/SPEC-003-open-onboarding.md</code> §3 (Integration
+    narrative) or §6 (Interface contracts) noting that
+    <code>macprovider-cli autotune</code> is part of the installed
+    CLI surface after SPEC-003's install.sh. This edit belongs on the
+    SPEC PR branch <code>spec/cli-autotune-v1</code> (PR #108), NOT on
+    this impl branch — touching SPECs from the impl PR would conflict
+    with the SPEC PR's diff. Done locally as a 2026-06-18 entry on
+    PR #108 before that PR merges.</li>
+    <li><strong>beta/DECISION_CRITERIA.md entry</strong>: Entry 78
+    recording the SPEC-013 BUILD pattern + 21-round cross-model
+    audit-loop discipline. Landed in commit ... (see Entry 78 below
+    in the file for the full text).</li>
+    <li><strong>PR #103 disposition</strong>: the prototype spike at
+    <code>origin/spike/provider-model-autotune</code>. The v1 SPEC-013
+    surface incorporates the prototype's <code>_is_new_best</code>
+    semantics (Step 8) and a faithful port of its keep-best logic; the
+    spike branch can either (a) be closed once the v1 impl PR merges
+    (no further use) or (b) stay open as a reference for the v0.4
+    work items (size-parsed alternates, real-subprocess AC-6/AC-7
+    integration). Operator choice; defaults to (a) unless v0.4 work
+    starts soon.</li>
+    <li><strong>Push <code>feat/cli-autotune-impl</code></strong> to
+    the <code>Augustas11/macprovider</code> remote (per the per-repo
+    git credential helper at <code>.git/config</code>). Requires
+    operator authorization per the careful-actions rule.</li>
+    <li><strong>Open the implementation PR</strong> separate from the
+    SPEC PR #108. The impl PR depends on #108 merging first (the impl
+    references <code>specs/SPEC-013-cli-autotune.md</code> + the
+    impl audit history file <code>specs/SPEC-013-impl-audit.md</code>).
+    Order: #108 SPEC merge → push impl branch → open impl PR with
+    "Closes the SPEC-013 build per the audit history at Round 21."</li>
   </ol>
 </div>
 </section>
