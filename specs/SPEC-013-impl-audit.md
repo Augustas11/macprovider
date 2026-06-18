@@ -230,3 +230,93 @@ Verification notes:
 ### Step 2 readiness verdict
 
 READY TO PROCEED TO STEP 3.
+
+---
+
+## Round 4 audit (Codex on d0029e9 — Step 3 round 1)
+
+**Audited:** commit d0029e9 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 3, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 0 CRITICAL / 0 MAJOR / 0 MINOR / 0 QUESTION
+**Step 3 readiness:** READY TO PROCEED TO STEP 4
+
+### Executive summary
+
+READY TO PROCEED TO STEP 4. Step 3 implements the additive `AutotuneDB` SQLite writer surface for SPEC-013 FR-G.1 and FR-G.2 without wiring runtime autotune execution yet. The audited schema covers every required `tune_trials` and `tune_runs` column, creates both required trial indexes, adds the v0.3 `stage INTEGER NOT NULL DEFAULT 1` migration, and enforces the 9-value `exit_reason` enum at the application layer before inserting run rows.
+
+The transactional-retention and C-interop surfaces are clean. `applyRetentionInTransaction(retainRuns:)` rejects `N < 1` before opening a transaction, runs `BEGIN IMMEDIATE TRANSACTION`, deletes stale `tune_trials` before stale `tune_runs`, commits on success, and rolls back on error. Every successful `sqlite3_prepare_v2` is finalized through `defer`, every opened DB handle is closed in `deinit` or on migration/open failure, and the only string-interpolated retention SQL value is the already-typed `Int` `retainRuns`.
+
+`swift test --package-path phase3-binary` passed on 2026-06-18 with 260 XCTest tests, 0 failures, including the 4 new `AutotuneDBTests`; the Swift Testing runner also passed with 0 tests. `git diff --check d0029e9^ d0029e9` produced no whitespace errors. No d-inference source was inspected.
+
+### Findings
+
+#### Category A: SPEC-013 FR-G.1 / FR-G.2 schema coverage
+
+(no findings)
+
+Verification notes:
+- `phase3-binary/Sources/macprovider-cli/AutotuneDB.swift` lines 210-262 create `tune_trials` and `tune_runs` with all FR-G.1 / FR-G.2 columns, matching required types, nullability, and defaults.
+- `tune_trials.stage` is created at line 216 as `INTEGER NOT NULL DEFAULT 1`, and `additiveTrialColumns` repeats the same migration definition at lines 354-356 for prototype DB upgrades.
+- Required indexes `idx_tune_trials_run_id` and `idx_tune_trials_ts` are created at lines 238-239 with `CREATE INDEX IF NOT EXISTS`.
+- `AutotuneExitReason` lines 24-33 contains exactly the 9 normative values: `ok`, `interrupted`, `no_feasible`, `budget_exhausted_no_model_selected`, `budget_exhausted_with_partial_recommendation`, `pre_warm_integrity_failure`, `provider_conflict`, `config_error`, and `internal_error`.
+- `AutotuneCommand.defaultDBPath` resolves to `~/.config/macprovider/autotune.sqlite` at `phase3-binary/Sources/macprovider-cli/AutotuneCommand.swift` lines 87-90, and `AutotuneDB.init(path:)` uses that default at line 86 while preserving `:memory:` for tests.
+- The prototype reference on `origin/spike/provider-model-autotune` uses the expected idempotent additive-column loop for `kv_bits`, `max_context_cap`, `max_batch`, and `replicates_n`; Step 3 correctly extends that shape for SPEC v0.3 `stage`.
+
+#### Category B: Transactional retention sweep (FR-G.1)
+
+(no findings)
+
+Verification notes:
+- `applyRetentionInTransaction(retainRuns:)` rejects `retainRuns < 1` before `BEGIN` at lines 183-188.
+- The transaction sequence is `BEGIN IMMEDIATE TRANSACTION`, stale-run selection ordered by `started_at_utc DESC, run_id DESC`, `DELETE FROM tune_trials`, `DELETE FROM tune_runs`, and `COMMIT` at lines 188-203.
+- The rollback path at lines 204-206 preserves the original error while attempting `ROLLBACK`.
+- The string-interpolated `LIMIT -1 OFFSET \(retainRuns)` at line 193 is fed only by the typed `Int` parameter after the `>= 1` guard; no untrusted string reaches interpolated SQL.
+- `AutotuneDBTests.testRetentionSweepDeletesOldestRunsAndTrialsTransactionally` inserts 52 run/trial pairs, retains 50, proves the two oldest run IDs are gone from both tables, and checks for zero orphan trials.
+
+#### Category C: C-interop correctness
+
+(no findings)
+
+Verification notes:
+- `withStatement` lines 279-288 wraps every successful `sqlite3_prepare_v2` in `defer { sqlite3_finalize(statement) }`, covering normal return and throw paths from the statement body.
+- `init(path:)` lines 95-111 closes a partially opened handle on open failure and calls `close()` before rethrowing migration failures.
+- `deinit` lines 114-116 and `close()` lines 340-345 close the owned SQLite handle exactly once for normal object lifetime.
+- Text binds use the local Swift SQLite idiom `SQLITE_TRANSIENT` defined at line 363 as `unsafeBitCast(-1, to: sqlite3_destructor_type.self)`, so bound Swift strings are copied before their lifetimes can end.
+- Integer, double, null, and error-message bridging are straightforward: `sqlite3_bind_int64`, `sqlite3_bind_double`, `sqlite3_bind_null`, and copied `sqlite3_errmsg` strings at lines 297-351.
+
+#### Category D: Anti-regression
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed with 260 XCTest tests, 0 failures; Swift Testing reported 0 tests.
+- `AutotuneDBTests` contributed 4 passing tests: fresh schema creation, prototype-stage migration, transactional retention, and invalid `exit_reason` rejection.
+- `phase3-binary/Package.swift` did not add a third-party dependency; `SQLite3` is imported as the system SQLite module in `AutotuneDB.swift`.
+- Grepping `phase3-binary/Sources` for `SQLite3` / `sqlite3_` found Step 3 is the first production SQLite consumer in this package, so there was no prior local SQLite wrapper idiom to preserve.
+- The new file is additive and no existing source file calls `AutotuneDB` yet, matching the Step 3 no-runtime-wiring boundary.
+
+#### Category E: Forward-compatibility
+
+(no findings)
+
+Verification notes:
+- `AutotuneTrialRow` lines 42-60 exposes every FR-G.1 field Step 7 and Step 11 will need, including explicit `stage`, nullable metrics, serving knobs, and `replicatesN`.
+- `AutotuneRunRow` lines 62-81 exposes every FR-G.2 field Step 9 and Step 10 will need, including nullable `recommendationJSON`, nullable `recipeHash`, `applied`, and `exitReason`.
+- `insertTrial(_:)` and `insertRun(_:)` bind all struct fields into explicit column lists, reducing risk if future migrations append columns.
+- The commit message directive correctly warns later runtime steps to call `insertRun` before retention and to set `tune_trials.stage` explicitly for every trial.
+
+#### Category O: Anything else
+
+(no findings)
+
+Verification notes:
+- `phase3-binary/implementation-notes.html` lines 1096-1122 accurately records the Step 3 design choices: system SQLite, default DB path, idempotent `stage` migration, application-layer enum enforcement, and transactional retention.
+- The commit message follows the repo Lore trailer convention and records the third-party SQLite wrapper rejection plus test claims.
+- The duplicate-column-ignore behavior at `AutotuneDB.swift` lines 233-236 and 271-276 is intentionally redundant on fresh DBs and required for prototype-upgrade compatibility.
+- The audit remained read-only for implementation code; only this Round 4 report section was appended.
+
+### Step 3 readiness verdict
+
+READY TO PROCEED TO STEP 4.
