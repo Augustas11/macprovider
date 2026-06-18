@@ -1799,3 +1799,190 @@ Verification notes:
 ### Step 10 readiness verdict
 
 READY TO PROCEED TO STEP 11.
+
+---
+
+## Round 20 audit (Codex on 254d651 — Step 11 round 1)
+
+**Audited:** commit 254d651 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 11, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 0 CRITICAL / 2 MAJOR / 3 MINOR / 1 QUESTION
+**Step 11 readiness:** FIX REQUIRED
+
+### Executive summary
+
+Step 11's broad AC-tagged unit coverage is present: I found 24 `testAC...` methods across the five new `AutotuneACTests` files, with named coverage for AC-1 through AC-19 and non-tautological assertions for the expected run rows, recommendation fields, parser failures, lifecycle rows, and output surfaces. The highest-risk anti-regression check is clean: `git diff fdb07ff..254d651 -- phase3-binary/Sources/` is empty, and `swift test --package-path phase3-binary` passed with 390 tests executed, 4 skipped, and 0 failures.
+
+The build is not ready for post-build yet because two Step 11 contract/documentation gaps remain. The AC-6 tests are integration-gated but still inject `detectConflict` rather than spawning/detecting real provider processes, so they assert a proxy command reaction rather than the documented launchd/foreground detection path. The AC-17 test comment and in-line assertion document the accepted v1 alternates deviation, but the Step 11 implementation-notes section contradicts that by calling it a strict AC-17 failure and omits the v0.4 fix path required by the prompt.
+
+I also found three lower-severity documentation/coverage-shape issues: the AC-8 test comments do not document the Shape A exclusion, the AC-7 real-subprocess/coordinator-pool placeholder is absent despite the prompt calling for it, and implementation-notes does not record the post-build checklist. These are not source-lock violations, but they should be cleaned up before locking Step 11.
+
+### Findings
+
+#### Category A: Per-AC coverage (AC-1 through AC-19)
+
+**A.1 (MAJOR) - AC-6 tests assert an injected proxy conflict, not the documented integration contract.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/AutotuneACTests/AutotuneAC_IntegrationTests.swift:6-39`; `specs/SPEC-013-cli-autotune.md:1404-1424`.
+- **What:** `testAC6ProviderConflictPreFlightRefusesLaunchdByDefault` and `testAC6ProviderConflictPreFlightRefusesForegroundByDefault` are gated by `AUTOTUNE_INTEGRATION_TESTS=1`, but when enabled they still set `deps.detectConflict = { .launchdManaged(pid: 123) }` or `.foreground(...)`. They do not spawn a real `macprovider-cli serve`, do not exercise `launchctl list`, and do not exercise foreground argv detection.
+- **Why:** AC-6 is specifically about refusing when a provider is already running on the configured port and covering both install paths. The Step 11 prompt also says both AC-6 tests should spawn real subprocesses. The current tests only prove that `AutotuneCommand.run()` maps an already-supplied conflict enum to `provider_conflict`, a proxy surface already covered elsewhere.
+- **Recommendation:** Replace or supplement these gated AC-6 tests with real integration harnesses: launchd-managed detection via a test plist/`launchctl` flow where feasible, and foreground detection via a real spawned `macprovider-cli serve` process. Keep the injected tests as fast unit coverage only if useful, but do not count them as the AC-6 integration lock.
+
+Verification notes:
+- AC-1, AC-2, AC-3, AC-4, AC-5, AC-8, AC-9, AC-10, AC-11, AC-12, AC-13, AC-14, AC-15, AC-16, AC-17, AC-18, and AC-19 have named AC methods with line-range comments and specific assertions.
+- `rg -n "func testAC" phase3-binary/Tests/macprovider-cliTests/AutotuneACTests | wc -l` returns 24.
+- AC-17 intentionally locks the v1 position-based alternates behavior at `AutotuneAC_Stage1Tests.swift:251-253`; see Category C.
+
+#### Category B: Integration gating
+
+(no findings)
+
+Verification notes:
+- `AutotuneAC_IntegrationTests.setUpWithError()` skips unless `ProcessInfo.processInfo.environment["AUTOTUNE_INTEGRATION_TESTS"] == "1"` (`AutotuneAC_IntegrationTests.swift:6-10`), so polarity is correct.
+- The default full test run reported 4 skipped tests: 2 AC-6 tests plus the 2 pre-existing integration-gated tests.
+- Env-var spelling is exactly `AUTOTUNE_INTEGRATION_TESTS`.
+
+#### Category C: AC-17 v1 deviation documentation
+
+**C.1 (MAJOR) - implementation-notes does not document the AC-17 accepted deviation consistently or name the v0.4 fix path.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/AutotuneACTests/AutotuneAC_Stage1Tests.swift:219-253`; `phase3-binary/implementation-notes.html:251-256`.
+- **What:** The AC-17 method comment and in-line assertion comment are comprehensive: they name FR-F.1's smaller-candidates rule, the v1 position-based slice, the 1B/32B behavior, and the v0.4 candidate fix. The Step 11 implementation-notes section does not match them. It says the AC run has "1 strict AC-17 failure" because 32B appears as an alternate, and it does not name the v0.4 size-parsed-ordering fix path.
+- **Why:** The prompt makes implementation-notes one of the three required AC-17 documentation surfaces. A future reader would see the test passing while implementation-notes still describes the behavior as a strict failure, which defeats the purpose of locking a known v1 limitation.
+- **Recommendation:** Update the `spec013-autotune-step11` implementation-notes entry to explicitly say Step 11 accepts and locks the v1 position-based alternates behavior for operator order, 32B appears as an alternate for chosen 1B, FR-F.1 requires `[]`, and SPEC-013 v0.4 should plumb size-parsed ordering into the emitter.
+
+**C.2 (QUESTION) - Should AC-17 be tightened now instead of deferred to v0.4?**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/AutotuneACTests/AutotuneAC_Stage1Tests.swift:251-253`; `specs/SPEC-013-cli-autotune.md:1571-1573`.
+- **What:** The test intentionally asserts `alternates == [thirtyTwoB]`, while SPEC-013 requires no smaller candidates after choosing 1B, i.e. `[]`.
+- **Why:** This is a documented v1 limitation in the test, but it is also the one AC-17 assertion that knowingly locks behavior outside the locked spec.
+- **Recommendation:** Operator call: either keep the v1 deviation and fix only documentation now, or bump to a v0.4 fix-pass that adds a model-size extractor/order seam and changes AC-17 to assert `[]`.
+
+Verification notes:
+- `git diff fdb07ff..254d651 -- phase3-binary/Sources/` is empty, so Step 11 itself does not modify the locked source surface.
+- The literal prompt check `git diff d6c634c..254d651 -- phase3-binary/Sources/macprovider-cli/RecommendationEmitter.swift` is non-empty because that range spans audited Step 10 partial-recommendation additions, not just Step 11. I did not classify that as a Step 11 source-lock violation; the Step 11 boundary and final locked-source boundary are empty.
+
+#### Category D: AC-8 Shape A scope decision
+
+**D.1 (MINOR) - AC-8 Shape A exclusion is documented in implementation-notes but not in the AC-8 method comments.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/AutotuneACTests/AutotuneAC_Stage1Tests.swift:107-173`; `phase3-binary/implementation-notes.html:241-245`.
+- **What:** implementation-notes states that Shape A is out of scope for v1 and that the tests exercise Shape B transient/integrity classifications. The two AC-8 method comments only say "Shape B transient" and "Integrity-class"; they do not document that Shape A is intentionally excluded.
+- **Why:** Category D requires the Shape A exclusion to be documented in both implementation-notes and the AC-8 test comments, so the current test file leaves the scope decision less discoverable.
+- **Recommendation:** Add one short method-level or shared test comment near the AC-8 tests explaining that Step 6 selected Shape B and Shape A remains out of scope for v1.
+
+Verification notes:
+- The Shape B transient test advances from candidate 1 to candidate 2, records the transient note, and exits `ok` (`AutotuneAC_Stage1Tests.swift:107-140`).
+- The Shape B integrity test records only candidate 1 and exits `pre_warm_integrity_failure` (`AutotuneAC_Stage1Tests.swift:143-173`).
+
+#### Category E: AC-7 unit vs integration
+
+**E.1 (MINOR) - AC-7 real-subprocess/coordinator-pool integration placeholder is absent.**
+- **Location:** `phase3-binary/Tests/macprovider-cliTests/AutotuneACTests/AutotuneAC_Stage1Tests.swift:86-104`; `phase3-binary/Tests/macprovider-cliTests/AutotuneACTests/AutotuneAC_IntegrationTests.swift:1-41`; `phase3-binary/implementation-notes.html:246-250`.
+- **What:** Step 11 has `testAC7NoJoinIsSetOnEveryCandidate`, but it directly calls `CandidateProviderRunner.serveArguments(...)` for three model IDs. `AutotuneAC_IntegrationTests.swift` contains only the two AC-6 methods; there is no AC-7 skipped placeholder or real-subprocess/coordinator-pool test.
+- **Why:** The prompt asks for a unit variant plus an integration placeholder for AC-7. The unit assertion is non-tautological for argv construction, but it does not record argv via a mock runner and it does not cover the coordinator-pool observation called out in SPEC-013 lines 1429-1432.
+- **Recommendation:** Add a skipped AC-7 integration placeholder or update the prompt/implementation-notes to explicitly defer it. If kept in Step 11, prefer a harness that starts candidate serve processes with `--no-join` and verifies the coordinator pool remains unaffected.
+
+#### Category F: Fixture reuse vs duplication
+
+(no findings)
+
+Verification notes:
+- `AutotuneACTestFixture.dependencies()` uses the existing `AutotuneRunDependencies` seam: time/run ID, signal-source, DB creation, conflict detection/drain/restore, Stage 1/2 runners, recommendation emission, config apply, and stdout/stderr (`AutotuneAC_Stage1Tests.swift:336-392`).
+- The fixture does not introduce a parallel command runner; it injects the same dependency structure used by `AutotuneCommandRunTests`.
+
+#### Category G: Anti-regression on Steps 1-10
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: `Executed 390 tests, with 4 tests skipped and 0 failures`.
+- `git diff fdb07ff..254d651 -- phase3-binary/Sources/` produced no output.
+- `git diff 254d651^ 254d651 -- phase3-binary/Sources/` also produced no output.
+- `git diff --name-status 254d651^ 254d651 -- phase3-binary/Tests/macprovider-cliTests` lists only the five new `AutotuneACTests` files; no Step 1-10 test file was modified.
+
+#### Category H: Forward-compatibility (post-build checklist)
+
+**H.1 (MINOR) - implementation-notes does not document the post-build checklist as the next operator action.**
+- **Location:** `phase3-binary/implementation-notes.html:197-257`; commit message for `254d651`.
+- **What:** The commit message lists the next actions: SPEC-003 install note, `beta/DECISION_CRITERIA.md` entry, PR #103 disposition, push branch, and open implementation PR. The Step 11 implementation-notes entry does not include that checklist.
+- **Why:** Category H.2 requires implementation-notes to document the post-build checklist. Keeping it only in the commit message makes the next-action trail less durable for readers using implementation-notes as the build log.
+- **Recommendation:** Add a short "After Step 11 locks" paragraph to the `spec013-autotune-step11` entry with the five post-build items.
+
+#### Category I: Anything else
+
+(no findings)
+
+Verification notes:
+- The five new files are organized by Stage 1, Stage 2, lifecycle, output, and integration concerns.
+- There are duplicate AC numbers only where expected: AC-6 has launchd/foreground variants, AC-8 has transient/integrity variants, AC-13 has Stage 1/Stage 2 budget variants, AC-18 has valid/invalid variants, and AC-19 has max-only/max+min variants.
+
+### Step 11 readiness verdict
+
+FIX REQUIRED.
+
+---
+
+## Round 21 audit (Codex on e4f7bc3 — Step 11 round 2 closure verification)
+
+**Audited:** commit e4f7bc3 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 11, round 2 of N
+**Date:** 2026-06-18
+**Closure summary:** 6 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED across the 6 round-1 findings
+**Round-2 findings:** 0 CRITICAL anti-regression / 0 MAJOR new / 0 MINOR new
+**Step 11 readiness:** READY TO PROCEED TO POST-BUILD
+
+### Executive summary
+
+Commit e4f7bc3 closes all six Round 20 findings without touching locked source. The fix-pass is limited to the Step 11 AC test files and `implementation-notes.html`; `git diff fdb07ff..e4f7bc3 -- phase3-binary/Sources/` produced no output.
+
+The anti-regression run passed with the expected count: `swift test --package-path phase3-binary` executed 393 tests, with 7 skipped and 0 failures. The increase from 390/4 to 393/7 matches the three new always-skipping real-subprocess placeholders, and the env-enabled integration-class check confirmed the two AC-6 mapping tests pass while those three placeholders skip from their own `XCTSkip` messages.
+
+### Round-1 finding closures
+
+**A.1 (MAJOR) — CLOSED.** The two AC-6 tests are now named `testAC6ProviderConflictMappingLaunchdManaged` and `testAC6ProviderConflictMappingForeground`, and their method comments explicitly call them mapping tests rather than real launchd/foreground detection tests. The top-of-file comment records the audit-driven split between injected mapping coverage and deferred real-subprocess coverage. The three placeholders exist in `AutotuneAC_IntegrationTests.swift`: `testAC6RealSubprocessLaunchdDetection`, `testAC6RealSubprocessForegroundDetection`, and `testAC7RealSubprocessNoJoinPlusCoordinatorPoolUnaffected`. Each placeholder's method body unconditionally throws `XCTSkip` with an AC-specific v2-expansion reason and a pointer to existing unit coverage.
+
+**C.1 (MAJOR) — CLOSED.** The previous implementation-notes text describing "1 strict AC-17 failure" is gone. The Step 11 notes now frame AC-17 as an accepted v1 limitation, name the concrete case (`--candidate-models 1b,32b` with 1B chosen gives v1 `alternates == [32B]` while the spec requires `[]`), and name the v0.4 fix path: plumb size-parsed ordering into recommendation inputs through `candidatesBySize` and extend the existing `parseSizeB` approach for arbitrary HF IDs. `testAC17OperatorOrderHonoredVerbatim` and its inline alternates assertion remain consistent with those notes.
+
+**C.2 (QUESTION) — CLOSED.** The implementation-notes explicitly resolve the question as a v0.4 deferral: keep v1 BUILD scope tight because the deviation is observable only for non-default operator orders, not default-list runs. That is a clear operator decision rather than an unresolved audit question.
+
+**D.1 (MINOR) — CLOSED.** Both AC-8 methods now document the Shape A exclusion. `testAC8PreWarmTransientFailureAdvancesToNextCandidate` names Step 6's Shape B selection and says the pull/subcommand Shape A variant is out of scope for v1; `testAC8PreWarmIntegrityFailureAbortsTheWholeRun` carries the same scope decision for the integrity abort branch.
+
+**E.1 (MINOR) — CLOSED.** `testAC7RealSubprocessNoJoinPlusCoordinatorPoolUnaffected` exists in `AutotuneAC_IntegrationTests.swift`. It always skips once the integration class gate is enabled, names the AC-7 real-subprocess plus coordinator-pool observation as a v2 expansion, and points at `testAC7NoJoinIsSetOnEveryCandidate` in `AutotuneAC_Stage1Tests` as the existing unit-level argv-construction guard.
+
+**H.1 (MINOR) — CLOSED.** The Step 11 implementation-notes entry now includes an "After Step 11 LOCKS — post-build checklist" section with all five required items: SPEC-003 install note, `beta/DECISION_CRITERIA.md` entry, PR #103 disposition, push `feat/cli-autotune-impl`, and open the implementation PR separate from SPEC PR #108.
+
+### Round-2 new findings
+
+#### Category Z-CLOSURE
+
+(no findings)
+
+Verification notes:
+- All six Round 20 items are closed as described above.
+- `git show e4f7bc3` changes only `AutotuneAC_IntegrationTests.swift`, `AutotuneAC_Stage1Tests.swift`, and `implementation-notes.html`.
+
+#### Category R-REGRESSION-V11F1
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: `Executed 393 tests, with 7 tests skipped and 0 failures`.
+- Default environment behavior is correct: the two AC-6 mapping tests still skip when `AUTOTUNE_INTEGRATION_TESTS` is unset because the whole `AutotuneACIntegrationTests` class is gated.
+- `AUTOTUNE_INTEGRATION_TESTS=1 swift test --package-path phase3-binary --filter AutotuneACIntegrationTests` passed: the two mapping tests executed and passed, while the three placeholders skipped individually with their own v2-expansion messages.
+
+#### Category N-NEWGAPS-V11F1
+
+(no findings)
+
+Verification notes:
+- Placeholder skip messages name AC-6 or AC-7, state the v2 integration expansion reason, and point at existing unit coverage (`ProviderConflictDetectorTests` for AC-6; `AutotuneAC_Stage1Tests` for AC-7).
+- The placeholder methods are not env-gated internally; when the class gate passes, each method reaches its own unconditional `XCTSkip`.
+- `git diff fdb07ff..e4f7bc3 -- phase3-binary/Sources/` is empty.
+
+#### Category O-OTHER-V11F1
+
+(no findings)
+
+### Step 11 readiness verdict
+
+READY TO PROCEED TO POST-BUILD.
