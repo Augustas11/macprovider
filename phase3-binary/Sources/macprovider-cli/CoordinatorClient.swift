@@ -45,10 +45,33 @@ private let providerWebSocketSession: URLSession = {
 
 extension URLSessionWebSocketTask: ProviderWebSocketTask {}
 
+// Guards a CheckedContinuation so it resumes exactly once. URLSession's
+// pongReceiveHandler can fire more than once on a connection abort (observed
+// in the field: NSPOSIXErrorDomain Code=53 "Software caused connection
+// abort"), which previously double-resumed the continuation and tripped a
+// SWIFT TASK CONTINUATION MISUSE fatalError — crashing the whole provider on
+// a single transient WS blip. NSLock-guarded flag matches the @unchecked
+// Sendable idiom used elsewhere in this file (CaffeinateSleepAssertion).
+private final class ResumeOnceGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+    /// Returns true exactly once — for the first caller. All later calls
+    /// return false so the continuation is never resumed twice.
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if resumed { return false }
+        resumed = true
+        return true
+    }
+}
+
 extension URLSessionWebSocketTask {
     func sendPing() async throws {
+        let once = ResumeOnceGuard()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sendPing { error in
+                guard once.claim() else { return }
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
