@@ -125,11 +125,25 @@ CREATE TABLE IF NOT EXISTS tune_trials (
     fits INTEGER NOT NULL DEFAULT 0,
     n_err INTEGER NOT NULL DEFAULT 0,
     kept INTEGER NOT NULL DEFAULT 0,
-    notes TEXT
+    notes TEXT,
+    kv_bits INTEGER,
+    max_context_cap INTEGER,
+    max_batch INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_tune_trials_run_id ON tune_trials(run_id);
 CREATE INDEX IF NOT EXISTS idx_tune_trials_ts ON tune_trials(ts_utc);
 """
+
+# Columns added after the initial spike for the richer per-hardware-recipe
+# search (PR #105 exposed --kv-bits / --max-context / --max-batch as serve
+# flags). On an existing DB the CREATE TABLE IF NOT EXISTS above is a no-op,
+# so we additively ALTER each new column in; the try/except handles "duplicate
+# column" without needing SQLite 3.35+'s IF NOT EXISTS clause.
+_ADDITIVE_TUNE_COLUMNS = (
+    ("kv_bits", "INTEGER"),
+    ("max_context_cap", "INTEGER"),
+    ("max_batch", "INTEGER"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +153,11 @@ CREATE INDEX IF NOT EXISTS idx_tune_trials_ts ON tune_trials(ts_utc);
 def open_db(db_path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path)
     conn.executescript(TUNE_SCHEMA)
+    for col, sql_type in _ADDITIVE_TUNE_COLUMNS:
+        try:
+            conn.execute(f"ALTER TABLE tune_trials ADD COLUMN {col} {sql_type}")
+        except sqlite3.OperationalError:
+            pass  # already added on a prior run
     conn.commit()
     return conn
 
@@ -147,10 +166,12 @@ def write_trial_row(conn: sqlite3.Connection, row: dict) -> None:
     conn.execute(
         """INSERT INTO tune_trials
                (ts_utc, run_id, model, target_context, measured_prompt_tokens,
-                max_tokens, agg_throughput_tps, ttft_p95_ms, fits, n_err, kept, notes)
+                max_tokens, agg_throughput_tps, ttft_p95_ms, fits, n_err, kept, notes,
+                kv_bits, max_context_cap, max_batch)
            VALUES
                (:ts_utc, :run_id, :model, :target_context, :measured_prompt_tokens,
-                :max_tokens, :agg_throughput_tps, :ttft_p95_ms, :fits, :n_err, :kept, :notes)""",
+                :max_tokens, :agg_throughput_tps, :ttft_p95_ms, :fits, :n_err, :kept, :notes,
+                :kv_bits, :max_context_cap, :max_batch)""",
         row,
     )
     conn.commit()
@@ -200,15 +221,30 @@ def start_provider(
     model: str,
     port: int,
     log_path: Path,
+    kv_bits: int | None = None,
+    max_context_cap: int | None = None,
+    max_batch: int | None = None,
 ) -> subprocess.Popen:
     """Launch `macprovider-cli serve --model <model> --port <port>` in background.
 
     stdout/stderr are teed to log_path so a load failure / OOM leaves evidence.
     The process is started in its own session so we can signal the whole group.
+    Optional serving knobs (kv_bits, max_context_cap, max_batch) are passed to
+    the binary only when set, so older binaries without those flags still work
+    for the default search path.
     """
     log_fh = log_path.open("wb")
+    cmd = [provider_bin, "serve", "--model", model, "--port", str(port)]
+    # Optional serving knobs (PR #105). Each is appended only when set so an
+    # older binary still works for the default-flag path.
+    if kv_bits is not None:
+        cmd += ["--kv-bits", str(kv_bits)]
+    if max_context_cap is not None:
+        cmd += ["--max-context", str(max_context_cap)]
+    if max_batch is not None:
+        cmd += ["--max-batch", str(max_batch)]
     proc = subprocess.Popen(
-        [provider_bin, "serve", "--model", model, "--port", str(port)],
+        cmd,
         stdout=log_fh,
         stderr=subprocess.STDOUT,
         start_new_session=True,
@@ -261,8 +297,12 @@ def evaluate_candidate(
     gate_ttft_ms: float,
     log_dir: Path,
     verbose: bool,
+    kv_bits: int | None = None,
+    max_context_cap: int | None = None,
+    max_batch: int | None = None,
 ) -> dict[str, Any]:
-    """Start provider for `model`, fire a workload at `context`, stop provider.
+    """Start provider for `model` (with the optional serving knobs applied),
+    fire a workload at `context`, stop provider.
 
     Always stops the provider before returning (success or failure path), so the
     caller can move straight to the next candidate. Returns:
@@ -271,13 +311,17 @@ def evaluate_candidate(
     base_url = f"http://127.0.0.1:{port}"
     chat_url = base_url + "/v1/chat/completions"
     safe_model = model.replace("/", "_")
-    log_path = log_dir / f"provider-{safe_model}-ctx{context}.log"
+    knob_tag = _knob_tag(kv_bits, max_context_cap, max_batch)
+    log_path = log_dir / f"provider-{safe_model}-ctx{context}{knob_tag}.log"
 
     # Defensive: ensure nothing is already bound before we start.
     if port_is_listening(port):
         stop_provider(port)
 
-    proc = start_provider(provider_bin, model, port, log_path)
+    proc = start_provider(
+        provider_bin, model, port, log_path,
+        kv_bits=kv_bits, max_context_cap=max_context_cap, max_batch=max_batch,
+    )
     try:
         ready, note = wait_for_ready(base_url, proc, ready_timeout)
         if not ready:
@@ -323,6 +367,20 @@ def evaluate_candidate(
     finally:
         # INVARIANT: stop the provider before returning, always.
         stop_provider(port)
+
+
+def _knob_tag(kv_bits: int | None, max_context_cap: int | None, max_batch: int | None) -> str:
+    """Compact tag suffix for log filenames and printed trial lines when any
+    optional serving knob is set. Returns "" if all are None (preserves the
+    pre-PR-105 log filenames + line shape exactly)."""
+    parts = []
+    if kv_bits is not None:
+        parts.append(f"kv{kv_bits}")
+    if max_context_cap is not None:
+        parts.append(f"mx{max_context_cap}")
+    if max_batch is not None:
+        parts.append(f"mb{max_batch}")
+    return ("-" + "-".join(parts)) if parts else ""
 
 
 def _tail_log(log_path: Path, n_chars: int = 240) -> str:
@@ -603,6 +661,29 @@ def main() -> int:
                     help="Print the candidate plan and exit. Serves nothing.")
     ap.add_argument("--report-only", action="store_true",
                     help="Render the HTML report for the latest run_id and exit.")
+    # Optional serving-knob axes (require a macprovider-cli binary built from
+    # main with PR #105 — older binaries will fail load and the trial will be
+    # recorded as INFEASIBLE, which is correct behavior). Each axis defaults
+    # to a single null value so omitting all three preserves the original
+    # model x context candidate space exactly.
+    ap.add_argument(
+        "--kv-bits-options", default=None,
+        help="Comma-separated kv-bits values (e.g. '4,8') to hill-climb over. "
+             "Forwarded to `macprovider-cli serve --kv-bits N`. Omit to leave "
+             "KV-cache precision at the model default (single trial per axis).",
+    )
+    ap.add_argument(
+        "--max-context-options", default=None,
+        help="Comma-separated provider max-context caps (e.g. '4000,8000') to "
+             "hill-climb over. Forwarded to `macprovider-cli serve --max-context N`. "
+             "This is the SERVER-SIDE cap (bounds KV-cache size); distinct from "
+             "--contexts which is the per-request prompt size axis.",
+    )
+    ap.add_argument(
+        "--max-batch-options", default=None,
+        help="Comma-separated max-batch values (e.g. '1,2') to hill-climb over. "
+             "Forwarded to `macprovider-cli serve --max-batch N`. Default is 1.",
+    )
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -626,10 +707,32 @@ def main() -> int:
 
     models = parse_str_list(args.models) if args.models else list(DEFAULT_MODELS)
     contexts = parse_int_list(args.contexts) if args.contexts else list(DEFAULT_CONTEXTS)
+    # Optional serving-knob axes — each defaults to [None] (single "unset"
+    # value, no flag passed), so omitting all three preserves the original
+    # model x context candidate space exactly.
+    kv_bits_axis: list[int | None] = (
+        parse_int_list(args.kv_bits_options) if args.kv_bits_options else [None]
+    )
+    max_context_axis: list[int | None] = (
+        parse_int_list(args.max_context_options) if args.max_context_options else [None]
+    )
+    max_batch_axis: list[int | None] = (
+        parse_int_list(args.max_batch_options) if args.max_batch_options else [None]
+    )
 
-    # Candidate config space = model x context, deterministic order.
-    candidates = [(m, c) for m in models for c in contexts]
+    # Candidate config space = model x context x kv_bits x max_context_cap x
+    # max_batch, deterministic order. When all optional axes are unset this
+    # collapses back to the original model x context shape (one row per pair).
+    candidates = [
+        (m, c, kv, mx, mb)
+        for m in models
+        for c in contexts
+        for kv in kv_bits_axis
+        for mx in max_context_axis
+        for mb in max_batch_axis
+    ]
     n = len(candidates)
+    knobs_active = any(a != [None] for a in (kv_bits_axis, max_context_axis, max_batch_axis))
 
     print("autotune: provider-side model hill-climb (keep/revert)")
     print(f"autotune: provider_bin={args.provider_bin}")
@@ -637,12 +740,23 @@ def main() -> int:
           f"ready_timeout={args.ready_timeout:.0f}s  gate_ttft={args.gate_ttft_ms:.0f}ms")
     print(f"autotune: models = {models}")
     print(f"autotune: contexts = {contexts}")
-    print(f"autotune: candidate space = {len(models)} models x {len(contexts)} contexts = {n} configs")
+    if knobs_active:
+        print(f"autotune: kv_bits axis = {kv_bits_axis}")
+        print(f"autotune: max_context axis = {max_context_axis}")
+        print(f"autotune: max_batch axis = {max_batch_axis}")
+    print(f"autotune: candidate space = {n} configs")
     print()
-    print(f"{'#':>3}  {'model':<48}  {'target_ctx':>10}")
-    print("-" * 68)
-    for i, (m, c) in enumerate(candidates, 1):
-        print(f"{i:>3}  {m:<48}  {c:>10}")
+    if knobs_active:
+        print(f"{'#':>3}  {'model':<48}  {'ctx':>5}  {'kv':>3}  {'maxctx':>6}  {'mb':>3}")
+        print("-" * 78)
+        for i, (m, c, kv, mx, mb) in enumerate(candidates, 1):
+            print(f"{i:>3}  {m:<48}  {c:>5}  {str(kv if kv is not None else '-'):>3}  "
+                  f"{str(mx if mx is not None else '-'):>6}  {str(mb if mb is not None else '-'):>3}")
+    else:
+        print(f"{'#':>3}  {'model':<48}  {'target_ctx':>10}")
+        print("-" * 68)
+        for i, (m, c, _kv, _mx, _mb) in enumerate(candidates, 1):
+            print(f"{i:>3}  {m:<48}  {c:>10}")
 
     if args.dry_run:
         print()
@@ -681,9 +795,10 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _cleanup_and_exit)
 
     try:
-        for i, (model, context) in enumerate(candidates, 1):
+        for i, (model, context, kv_bits, max_context_cap, max_batch) in enumerate(candidates, 1):
             ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            print(f"[{i}/{n}] model={model.split('/')[-1]} ctx={context} ... ",
+            knob_str = _knob_tag(kv_bits, max_context_cap, max_batch)
+            print(f"[{i}/{n}] model={model.split('/')[-1]} ctx={context}{knob_str} ... ",
                   end="", flush=True)
 
             metrics = evaluate_candidate(
@@ -697,6 +812,9 @@ def main() -> int:
                 gate_ttft_ms=args.gate_ttft_ms,
                 log_dir=log_dir,
                 verbose=args.verbose,
+                kv_bits=kv_bits,
+                max_context_cap=max_context_cap,
+                max_batch=max_batch,
             )
 
             fits = metrics["fits"]
@@ -708,8 +826,12 @@ def main() -> int:
             if fits and tps is not None:
                 if best is None or tps > best["tps"]:
                     kept = 1
-                    best = {"model": model, "context": context, "tps": tps,
-                            "ttft": metrics["ttft_p95_ms"]}
+                    best = {
+                        "model": model, "context": context, "tps": tps,
+                        "ttft": metrics["ttft_p95_ms"],
+                        "kv_bits": kv_bits, "max_context_cap": max_context_cap,
+                        "max_batch": max_batch,
+                    }
                     verdict = "NEW BEST"
                 else:
                     verdict = (f"kept best={best['model'].split('/')[-1]}@{best['context']} "
@@ -735,6 +857,9 @@ def main() -> int:
                 "n_err": metrics["n_err"],
                 "kept": kept,
                 "notes": metrics["notes"],
+                "kv_bits": kv_bits,
+                "max_context_cap": max_context_cap,
+                "max_batch": max_batch,
             }
             write_trial_row(conn, row)
 
@@ -748,8 +873,11 @@ def main() -> int:
         print()
         # --- Declare the winner ---
         if best is not None:
+            knob_suffix = _knob_tag(
+                best.get("kv_bits"), best.get("max_context_cap"), best.get("max_batch")
+            )
             print("=" * 68)
-            print(f"WINNER: {best['model']} @ ctx={best['context']} "
+            print(f"WINNER: {best['model']} @ ctx={best['context']}{knob_suffix} "
                   f"-> {best['tps']:.1f} tok/s (ttft {fmt_val(best['ttft'], 0)} ms)")
             print("=" * 68)
         else:
