@@ -1634,4 +1634,52 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   integration-gated tests.</p>
 </div>
 </section>
+<section id="spec013-autotune-step9"><h2>SPEC-013 autotune Step 9 - Recommendation surface</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added dormant <code>RecommendationEmitter</code>. Step 9 intentionally
+    does not call it from <code>AutotuneCommand.run()</code>; Step 10 owns
+    Stage 1 + Stage 2 + recommendation/config wiring.</li>
+    <li>The emitter returns the operator-facing terminal
+    <code>RECOMMENDATION</code> block, pretty JSON schema output, computed
+    <code>recipe_hash</code>, alternates, and copy-pasteable
+    <code>macprovider-cli serve</code> command as a pure value. Nil
+    <code>kvBits</code> renders as <code>unset</code> in terminal output,
+    emits JSON <code>null</code>, and omits <code>--kv-bits</code> from the
+    serve command.</li>
+    <li>Added a small vendored <code>RFC8785JCS</code> encoder for the Step 9
+    hash domain. It sorts object keys by UTF-16 code unit order, emits no
+    whitespace, preserves array order, renders integer numbers directly, and
+    handles the string escaping needed for the SPEC-013 recipe input. The
+    reference vector hash is locked to
+    <code>sha256:eb5f8f90c09c2bbcec0dca6f42c203c25a7a8d403a734c6a81379b14ad702f9d</code>,
+    computed from the prompt's literal canonical JSON bytes with
+    <code>shasum -a 256</code>.</li>
+    <li>Added standalone <code>ConfigApplier</code> for <code>--apply</code>.
+    It creates counter-based backups
+    <code>config.yaml.bak-&lt;unix-ts&gt;-&lt;counter&gt;</code>, writes backup
+    and config files through same-directory temp files, and commits each write
+    with POSIX <code>rename</code> rather than
+    <code>FileManager.replaceItem</code>.</li>
+    <li>Yams 5.1 is used to parse and validate existing YAML before mutation.
+    Because emitting through Yams drops comments/order, the applier uses a
+    constrained top-level key rewrite for SPEC-013's four owned keys
+    (<code>model</code>, <code>kv_bits</code>,
+    <code>max_context_override</code>, and
+    <code>max_concurrency_override</code>) so unrelated lines, comments, and
+    ordering are preserved for the operator config shape this binary reads.
+    This is intentionally not a general YAML rewrite engine.</li>
+    <li>Added focused tests for terminal output, JSON schema fields,
+    alternates slicing, nil-recommendation JSON null, hash format and
+    determinism, the literal JCS reference vector, backup counter collisions,
+    non-owned config preservation, nil <code>kv_bits</code> omission,
+    idempotence, atomic temp+rename observability, and launchd restart hint
+    content.</li>
+  </ul>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter 'RecommendationEmitterTests|ConfigApplierTests'</code>
+  passes 22/22 new Step 9 tests.</p>
+</div>
+</section>
 </body></html>
