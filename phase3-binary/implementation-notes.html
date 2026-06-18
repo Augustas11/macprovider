@@ -1542,4 +1542,38 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   integration-gated tests.</p>
 </div>
 </section>
+<section id="spec013-autotune-step8"><h2>SPEC-013 autotune Step 8 - Stage 2 knob hill-climb</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added dormant <code>Stage2HillClimb</code> and
+    <code>Stage2Prober</code>. Step 8 intentionally does not call them from
+    <code>AutotuneCommand.run()</code>; Step 10 still owns Stage 1 + Stage 2
+    runtime wiring.</li>
+    <li>The hill-climb evaluates the knob Cartesian product in deterministic
+    order: <code>kv_bits</code> outer, <code>max_batch</code> middle,
+    <code>max_context</code> inner. Each cell asks the injected runner factory
+    for a fresh provider runner and records exactly one
+    <code>tune_trials</code> row with <code>stage=2</code>.</li>
+    <li><code>WinningKnobs</code> carries the selected
+    <code>kvBits</code>, <code>maxBatch</code>, and
+    <code>maxContext</code>. <code>nil</code> <code>kvBits</code> means the
+    mlx-swift default, matching the Step 8 <code>unset</code> axis cell.</li>
+    <li>The keep-best rule is a Swift port of PR #103's
+    <code>_is_new_best</code>: throughput wins above the configured relative
+    epsilon, cells inside the epsilon tie band use lower TTFT as the
+    tiebreaker, and unmeasurable TPS never wins.</li>
+    <li><code>Stage2Prober</code> mirrors <code>Stage1Prober</code>'s
+    provider lifecycle and SSE parsing shape but starts the provider with the
+    current cell's knobs. Stage 2 applies strict-all-feasible semantics:
+    HTTP errors, stop-token leaks, provider exits, request failures, or any
+    replicate exceeding the TTFT gate make the whole cell infeasible and no
+    median TPS / p95 TTFT is persisted for that row.</li>
+    <li>Added focused tests for baseline winner selection, throughput-primary
+    replacement, TTFT tiebreak replacement, strict replicate failure handling,
+    all-cells-infeasible error reporting, stage-2 persistence fields, and
+    TPS tie-epsilon non-replacement.</li>
+  </ul>
+</div>
+</section>
 </body></html>
