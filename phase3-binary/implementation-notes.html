@@ -246,14 +246,61 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   <p><strong>AC-7 decision:</strong> the suite uses the allowed unit-test
   variant by asserting <code>CandidateProviderRunner.serveArguments</code>
   includes exactly one <code>--no-join</code> in every candidate argv. The
-  coordinator pool observation remains an integration expansion point, not a
-  default local test.</p>
+  coordinator pool observation remains an integration expansion point. A
+  skipped placeholder for the real-subprocess + coordinator-pool variant
+  lives in <code>AutotuneAC_IntegrationTests</code> for v2 (added in the
+  round-1 audit response per E.1).</p>
+  <p><strong>AC-6 scope clarification:</strong> the AC-6 tests in
+  <code>AutotuneAC_IntegrationTests.swift</code> are
+  <em>conflict-to-exit_reason mapping tests</em> that inject
+  <code>detectConflict</code> and assert <code>run()</code> routes to
+  <code>provider_conflict</code> + non-zero exit. They are NOT real
+  detection-path tests — actual <code>launchctl list</code> /
+  foreground argv detection is exercised at the unit-level by
+  <code>ProviderConflictDetectorTests</code> from Step 5. A skipped
+  placeholder for a full real-subprocess AC-6 sweep lives alongside the
+  mapping tests for v2 (added in the round-1 audit response per A.1).</p>
+  <p><strong>AC-17 accepted v1 deviation (round-1 audit C.1 closure):</strong>
+  SPEC-013 FR-F.1 requires <code>alternates</code> to list candidates
+  SMALLER than the chosen model. v1's
+  <code>RecommendationEmitter.alternates(...)</code> uses position-based
+  slicing (the slice of <code>candidateModels</code> AFTER the chosen
+  index). This is CORRECT for the default-list largest-first input order
+  but mis-surfaces alternates for arbitrary operator orders. For
+  <code>--candidate-models 1b,32b</code> with 1B chosen, v1 lists 32B as
+  an "alternate" even though 32B is LARGER than 1B.
+  <code>testAC17OperatorOrderHonoredVerbatim</code> LOCKS this v1
+  position-based behavior (<code>alternates == [32B]</code>) and
+  documents the deviation in both method-level and in-line comments.
+  <strong>SPEC-013 v0.4 candidate fix path:</strong> plumb size-parsed
+  ordering into <code>RecommendationInputs</code> via an additive
+  <code>candidatesBySize</code> field; <code>AutotuneCommand</code>
+  derives it via an HF-ID size extractor (the existing
+  <code>parseSizeB</code> can be extended to scan for the
+  <code>\d+B</code> substring in arbitrary model ids). The
+  <code>AutotuneCommand.candidatesBySize(for:)</code> seam already
+  exists. C.2 audit QUESTION resolved as: defer to v0.4 to keep v1 BUILD
+  scope tight; the deviation is observable only for non-default
+  operator orders, never for default-list runs.</p>
   <p><strong>Current verification:</strong>
-  <code>swift test --package-path phase3-binary --filter AutotuneAC</code>
-  runs 24 AC tests with 2 integration skips and 1 strict AC-17 failure:
-  the locked emitter currently reports the later explicit 32B candidate as an
-  alternate after choosing the operator-first 1B candidate, while SPEC-013
-  lines 1571-1573 require <code>alternates</code> to be empty.</p>
+  <code>swift test --package-path phase3-binary</code> passes 390/390
+  (366 baseline + 24 new from this step), with 4 skipped (2 baseline + 2
+  AC-6 integration-gated), 0 failures.</p>
+  <p><strong>After Step 11 LOCKS — post-build checklist</strong> (round-1
+  audit H.1 closure):</p>
+  <ol>
+    <li>SPEC-003 install note appended to the spec referencing the
+    locked autotune surface.</li>
+    <li><code>beta/DECISION_CRITERIA.md</code> entry recording the
+    BUILD pattern + cross-model audit-loop discipline that landed
+    SPEC-013.</li>
+    <li>PR #103 disposition (close or rebase the spike into the
+    landed v1 surface).</li>
+    <li>Push <code>feat/cli-autotune-impl</code> to the
+    <code>Augustas11/macprovider</code> remote (per the per-repo git
+    credential helper).</li>
+    <li>Open the implementation PR separate from the SPEC PR #108.</li>
+  </ol>
 </div>
 </section>
 

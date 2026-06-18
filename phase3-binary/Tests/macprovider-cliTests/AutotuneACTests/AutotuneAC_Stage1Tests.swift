@@ -105,6 +105,12 @@ final class AutotuneACStage1Tests: XCTestCase {
     }
 
     /// AC-8: Shape B transient pre-warm failure advances to the next candidate; SPEC-013 lines 1434-1461.
+    ///
+    /// Shape A exclusion: SPEC-013 Step 6 selected Shape B (runtime online-fallback
+    /// classification via `ProviderPreWarmer` + `HuggingFaceCacheChecker`). The AC-8
+    /// Shape A variant (invokes `macprovider-cli models pull <id>` or equivalent
+    /// subcommand) is out of scope for the v1 implementation surface. This test
+    /// exercises Shape B's transient classification only.
     func testAC8PreWarmTransientFailureAdvancesToNextCandidate() async throws {
         let fixture = try AutotuneACTestFixture(testCase: self)
         let command = try fixture.command(["--candidate-models", "candidate-1,candidate-2"])
@@ -141,6 +147,11 @@ final class AutotuneACStage1Tests: XCTestCase {
     }
 
     /// AC-8: Integrity-class pre-warm failure aborts the run; SPEC-013 lines 1434-1461.
+    ///
+    /// Shape A exclusion: same as `testAC8PreWarmTransientFailureAdvancesToNextCandidate` —
+    /// Shape B is the implemented surface; Shape A's subcommand-based pull is out
+    /// of scope for v1. This test exercises Shape B's integrity classification
+    /// (signature/hash mismatch surfaces an abort, not an advance).
     func testAC8PreWarmIntegrityFailureAbortsTheWholeRun() async throws {
         let fixture = try AutotuneACTestFixture(testCase: self)
         let command = try fixture.command(["--candidate-models", "candidate-1,candidate-2"])
