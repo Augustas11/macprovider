@@ -80,6 +80,8 @@ struct Stage1IteratorResult {
 
 enum Stage1IteratorError: Error, Equatable, CustomStringConvertible {
     case invalidInjectedRunner
+    case interrupted
+    case budgetExhaustedNoModelSelected
     case providerNotReady(model: String, reason: String)
     case preWarmIntegrityFailure(model: String, reason: String, exitReason: AutotuneExitReason)
     case noFeasible(reason: String, trials: [String], exitReason: AutotuneExitReason)
@@ -88,6 +90,10 @@ enum Stage1IteratorError: Error, Equatable, CustomStringConvertible {
         switch self {
         case .invalidInjectedRunner:
             return "Stage1Iterator production pre-warmer requires CandidateProviderRunner"
+        case .interrupted:
+            return "interrupted"
+        case .budgetExhaustedNoModelSelected:
+            return AutotuneExitReason.budgetExhaustedNoModelSelected.rawValue
         case .providerNotReady(let model, let reason):
             return "Stage 1 provider for \(model) was not ready: \(reason)"
         case .preWarmIntegrityFailure(let model, let reason, let exitReason):
@@ -100,6 +106,10 @@ enum Stage1IteratorError: Error, Equatable, CustomStringConvertible {
     static func == (lhs: Stage1IteratorError, rhs: Stage1IteratorError) -> Bool {
         switch (lhs, rhs) {
         case (.invalidInjectedRunner, .invalidInjectedRunner):
+            return true
+        case (.interrupted, .interrupted):
+            return true
+        case (.budgetExhaustedNoModelSelected, .budgetExhaustedNoModelSelected):
             return true
         case (.providerNotReady(let lm, let lr), .providerNotReady(let rm, let rr)):
             return lm == rm && lr == rr
@@ -129,6 +139,7 @@ struct Stage1Iterator {
     private let port: Int
     private let readyTimeoutSec: TimeInterval
     private let now: () -> Date
+    private let cancellationReason: () -> AutotuneCancellationReason?
 
     init(
         candidateProviderRunner: @escaping RunnerFactory,
@@ -143,7 +154,8 @@ struct Stage1Iterator {
         port: Int,
         prober: Stage1Probing = Stage1Prober(),
         readyTimeoutSec: TimeInterval = 120,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        cancellationReason: @escaping () -> AutotuneCancellationReason? = { nil }
     ) {
         self.runnerFactory = candidateProviderRunner
         self.providerPreWarmer = providerPreWarmer
@@ -159,24 +171,18 @@ struct Stage1Iterator {
         // MODEL's reason to surface first — independent of iteration order.
         //
         // `candidatesBySize` provides the orthogonal "size order" lookup
-        // (smallest first). Step 10 will pass `AutotuneCommand`'s default
-        // candidate list sorted by `sizeB` ascending; for operator-supplied
-        // lists, the caller passes the same operator list sorted by SizeB
-        // (using the FR-A.4 metadata available in
-        // `AutotuneCommand.defaultCandidates` or a parsed equivalent).
-        //
-        // Fallback when `candidatesBySize` is nil: treat `candidates` as
-        // largest-first (the default-list convention per FR-C.1) and
-        // reverse to get smallest-first. This preserves the prior behavior
-        // for the default-list path while letting operator-override paths
-        // pass an explicit size order.
-        self.candidatesBySize = candidatesBySize ?? Array(candidates.reversed())
+        // (smallest first). Step 10 passes `AutotuneCommand`'s default
+        // candidate list sorted by `sizeB` ascending. When it is nil, v1
+        // treats the operator-supplied input order as the only available
+        // error-surface order because no size metadata exists.
+        self.candidatesBySize = candidatesBySize ?? candidates
         self.targetContext = targetContext
         self.gateTTFTMS = gateTTFTMS
         self.stage1Replicates = stage1Replicates
         self.port = port
         self.readyTimeoutSec = readyTimeoutSec
         self.now = now
+        self.cancellationReason = cancellationReason
     }
 
     func run() async throws -> Stage1IteratorResult {
@@ -187,6 +193,15 @@ struct Stage1Iterator {
         var failureReasonsByCandidate: [String: String] = [:]
 
         for candidate in candidates {
+            switch cancellationReason() {
+            case .interrupted:
+                throw Stage1IteratorError.interrupted
+            case .budgetExhausted:
+                throw Stage1IteratorError.budgetExhaustedNoModelSelected
+            case .none:
+                break
+            }
+
             let preWarmRunner = try runnerFactory()
             let preWarmResult = try await providerPreWarmer.prewarmAndProbe(
                 model: candidate,

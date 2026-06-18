@@ -110,13 +110,14 @@ final class Stage1IteratorTests: XCTestCase {
         ])
 
         do {
-            // Default candidate list is largest-first per FR-C.1, so the
-            // iterator's default `candidatesBySize` (nil → reversed) gives
-            // ["1b", "14b", "32b"] — smallest-first. The surfaced reason
-            // and the size-ordered trials list MUST reflect this.
+            // Step 10 passes the default candidate list's orthogonal
+            // smallest-first order explicitly. nil is reserved for operator
+            // overrides where v1 has no size metadata and falls back to
+            // input order.
             _ = try await makeIterator(
                 db: db,
                 candidates: ["32b", "14b", "1b"],
+                candidatesBySize: ["1b", "14b", "32b"],
                 prewarmer: prewarmer,
                 prober: prober
             ).run()
@@ -360,6 +361,7 @@ final class Stage1IteratorTests: XCTestCase {
     private func makeIterator(
         db: AutotuneDB,
         candidates: [String],
+        candidatesBySize: [String]? = nil,
         prewarmer: StubPreWarmer,
         prober: StubStage1Prober,
         stage1Replicates: Int = 1,
@@ -371,6 +373,7 @@ final class Stage1IteratorTests: XCTestCase {
             autotuneDB: db,
             runID: "stage1-test-run",
             candidates: candidates,
+            candidatesBySize: candidatesBySize,
             targetContext: targetContext,
             gateTTFTMS: 60_000,
             stage1Replicates: stage1Replicates,

@@ -31,6 +31,7 @@ struct RecommendationCore {
     var tpsMedian: Double
     var ttftP95MS: Double
     var replicates: Int
+    var partial: Bool = false
 }
 
 struct InfeasibleEntry {
@@ -164,6 +165,9 @@ struct RecommendationEmitter {
             "",
             "alternates (smaller candidates from input list, not probed):",
         ]
+        if recommendation.partial {
+            lines.insert("warning: partial recommendation; wall-clock budget exhausted before Stage 2 completed.", at: 1)
+        }
         if alternates.isEmpty {
             lines.append("  - none")
         } else {
@@ -357,6 +361,7 @@ private struct RecommendationJSON: Encodable {
         case ttftP95MS = "ttft_p95_ms"
         case replicates
         case serveCommand = "serve_command"
+        case partial
     }
 
     func encode(to encoder: Encoder) throws {
@@ -368,6 +373,9 @@ private struct RecommendationJSON: Encodable {
         try container.encode(recommendation.ttftP95MS, forKey: .ttftP95MS)
         try container.encode(recommendation.replicates, forKey: .replicates)
         try container.encode(serveCommand, forKey: .serveCommand)
+        if recommendation.partial {
+            try container.encode(true, forKey: .partial)
+        }
     }
 }
 

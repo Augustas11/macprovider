@@ -87,6 +87,56 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
     documented <code>ValidationError</code> (ArgumentParser exit code
     64).</p>
   </div>
+<div class="entry" id="spec013-autotune-step10">
+  <time>2026-06-18</time>
+  <p><strong>SPEC-013 Step 10 integration wiring.</strong> Wired
+  <code>AutotuneCommand.run()</code> through provider-conflict preflight,
+  Stage 1, Stage 2, <code>RecommendationEmitter</code>, optional
+  <code>ConfigApplier</code>, and final <code>tune_runs</code> persistence.
+  The production path constructs the existing Step 4-9 components through a
+  small dependency surface so unit tests can exercise run lifecycle behavior
+  without starting real providers.</p>
+  <p><strong>Signal handling pattern.</strong> SIGINT and SIGTERM are handled
+  with <code>DispatchSource.makeSignalSource(signal:queue:)</code> on a
+  dedicated <code>autotune.signal</code> queue. The event handler only sets an
+  <code>NSLock</code>-guarded <code>AutotuneInterruptFlag</code>; database
+  updates, provider cleanup, and process exit happen cooperatively at the next
+  Stage 1 candidate or Stage 2 cell poll. This avoids doing nontrivial cleanup
+  work in the signal callback.</p>
+  <p><strong>Provisional-row tripwire.</strong> Every run inserts its
+  <code>tune_runs</code> row before retention with
+  <code>exit_reason = 'internal_error'</code> and
+  <code>ended_at_utc = NULL</code>. Normal and classified failure exits update
+  that same row in place; DELETE+INSERT was rejected so readers never observe
+  the run ID disappearing mid-lifecycle. Interrupted exits explicitly leave
+  <code>ended_at_utc</code> NULL per FR-G.2.</p>
+  <p><strong>Wall-clock budget and partial recommendations.</strong>
+  <code>--max-duration</code> is enforced by the same cooperative poll. Stage 1
+  exhaustion updates <code>budget_exhausted_no_model_selected</code> with no
+  persisted recommendation. Stage 2 exhaustion after at least one feasible cell
+  finalizes the best-so-far cell, emits a partial terminal warning, persists
+  <code>budget_exhausted_with_partial_recommendation</code>, and adds
+  <code>"partial": true</code> inside the JSON <code>recommendation</code>
+  object. That JSON field is intentionally omitted on normal runs and is a
+  SPEC-013 v0.4 candidate addition.</p>
+  <p><strong>candidatesBySize derivation.</strong> Default-list runs pass
+  <code>AutotuneCommand.defaultCandidates</code> sorted by ascending
+  <code>sizeB</code> into <code>Stage1Iterator(candidatesBySize:)</code>, so
+  all-infeasible output leads with the smallest model. Operator
+  <code>--candidate-models</code> overrides pass <code>nil</code>; v1 has no
+  size metadata for arbitrary IDs, so the error surface falls back to operator
+  input order.</p>
+  <p><strong>Apply and report-only decisions.</strong> <code>applied = 1</code>
+  is written only after <code>--apply</code> succeeds. Apply failure does not
+  change <code>exit_reason = 'ok'</code> because the recommendation remains
+  valid; the CLI reports the apply error and persists <code>applied = 0</code>.
+  <code>--report-only</code> remains a v2 feature and exits with code 2 after
+  printing a clear message.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter
+  'AutotuneCommandTests|AutotuneCommandRunTests|AutotuneDBTests|Stage1IteratorTests|Stage2HillClimbTests|RecommendationEmitterTests|ConfigApplierTests'</code>
+  passes 81/81 affected tests, 0 failures.</p>
+</div>
 </section>
 
 <section id="spec013-autotune-step2">

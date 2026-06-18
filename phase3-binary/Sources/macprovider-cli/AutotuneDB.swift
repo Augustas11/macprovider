@@ -39,7 +39,7 @@ enum AutotuneExitReason: String, CaseIterable {
     }
 }
 
-struct AutotuneTrialRow {
+struct AutotuneTrialRow: Equatable {
     var tsUTC: String
     var runID: String
     var stage: Int
@@ -176,6 +176,39 @@ final class AutotuneDB {
             try bind(row.recipeHash, at: 16, in: statement)
             try bind(row.applied ? 1 : 0, at: 17, in: statement)
             try bind(row.exitReason, at: 18, in: statement)
+            try stepDone(statement)
+        }
+    }
+
+    /// Updates the provisional `tune_runs` row written at run start.
+    ///
+    /// Step 10 keeps this as a true UPDATE rather than DELETE+INSERT so
+    /// `run_id` remains stable and any concurrent/reporting reader never
+    /// observes the row disappear between lifecycle states.
+    func updateRun(
+        runID: String,
+        endedAtUTC: String?,
+        recommendationJSON: String?,
+        recipeHash: String?,
+        applied: Bool,
+        exitReason: AutotuneExitReason
+    ) throws {
+        let sql = """
+        UPDATE tune_runs
+        SET ended_at_utc = ?,
+            recommendation_json = ?,
+            recipe_hash = ?,
+            applied = ?,
+            exit_reason = ?
+        WHERE run_id = ?
+        """
+        try withStatement(sql) { statement in
+            try bind(endedAtUTC, at: 1, in: statement)
+            try bind(recommendationJSON, at: 2, in: statement)
+            try bind(recipeHash, at: 3, in: statement)
+            try bind(applied ? 1 : 0, at: 4, in: statement)
+            try bind(exitReason.rawValue, at: 5, in: statement)
+            try bind(runID, at: 6, in: statement)
             try stepDone(statement)
         }
     }

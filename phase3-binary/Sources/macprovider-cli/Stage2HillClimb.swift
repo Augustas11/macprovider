@@ -6,7 +6,7 @@ struct WinningKnobs: Equatable {
     var maxContext: Int
 }
 
-struct Stage2HillClimbResult {
+struct Stage2HillClimbResult: Equatable {
     var selectedModel: String
     var winningKnobs: WinningKnobs
     var medianTPS: Double
@@ -16,10 +16,16 @@ struct Stage2HillClimbResult {
 }
 
 enum Stage2HillClimbError: Error, Equatable, CustomStringConvertible {
+    case interrupted
+    case budgetExhaustedWithPartialRecommendation(Stage2HillClimbResult)
     case noFeasibleCell(reason: String)
 
     var description: String {
         switch self {
+        case .interrupted:
+            return "interrupted"
+        case .budgetExhaustedWithPartialRecommendation:
+            return AutotuneExitReason.budgetExhaustedWithPartialRecommendation.rawValue
         case .noFeasibleCell(let reason):
             return "Stage 2 found no feasible knob cell: \(reason)"
         }
@@ -66,6 +72,7 @@ struct Stage2HillClimb {
     private let port: Int
     private let runID: String
     private let now: () -> Date
+    private let cancellationReason: () -> AutotuneCancellationReason?
 
     init(
         candidateProviderRunner: @escaping RunnerFactory,
@@ -81,7 +88,8 @@ struct Stage2HillClimb {
         tpsTieEpsilon: Double = 0.02,
         port: Int,
         runID: String = UUID().uuidString,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        cancellationReason: @escaping () -> AutotuneCancellationReason? = { nil }
     ) {
         self.runnerFactory = candidateProviderRunner
         self.prober = prober
@@ -97,6 +105,7 @@ struct Stage2HillClimb {
         self.port = port
         self.runID = runID
         self.now = now
+        self.cancellationReason = cancellationReason
     }
 
     func run() async throws -> Stage2HillClimbResult {
@@ -108,6 +117,18 @@ struct Stage2HillClimb {
         for kvBits in kvBitsAxis {
             for maxBatch in maxBatchAxis {
                 for maxContext in maxContextAxis {
+                    switch cancellationReason() {
+                    case .interrupted:
+                        throw Stage2HillClimbError.interrupted
+                    case .budgetExhausted:
+                        if let partial = try finalizePartial(best: best, bestRowIndex: bestRowIndex, trialRows: trialRows) {
+                            throw Stage2HillClimbError.budgetExhaustedWithPartialRecommendation(partial)
+                        }
+                        throw Stage2HillClimbError.noFeasibleCell(reason: "budget exhausted before any Stage 2 cell completed")
+                    case .none:
+                        break
+                    }
+
                     let knobs = WinningKnobs(
                         kvBits: kvBits,
                         maxBatch: maxBatch,
@@ -190,6 +211,34 @@ struct Stage2HillClimb {
             p95TTFTMS: best.ttft,
             replicates: stage2Replicates,
             cellTrials: trialRows
+        )
+    }
+
+    private func finalizePartial(
+        best: BestCell?,
+        bestRowIndex: Int?,
+        trialRows: [AutotuneTrialRow]
+    ) throws -> Stage2HillClimbResult? {
+        guard let best else {
+            return nil
+        }
+        try autotuneDB.markStage2WinnerCell(
+            runID: runID,
+            kvBits: best.knobs.kvBits,
+            maxBatch: best.knobs.maxBatch,
+            maxContextCap: best.knobs.maxContext
+        )
+        var rows = trialRows
+        if let bestRowIndex {
+            rows[bestRowIndex].kept = true
+        }
+        return Stage2HillClimbResult(
+            selectedModel: selectedModel,
+            winningKnobs: best.knobs,
+            medianTPS: best.tps,
+            p95TTFTMS: best.ttft,
+            replicates: stage2Replicates,
+            cellTrials: rows
         )
     }
 
