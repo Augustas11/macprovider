@@ -509,3 +509,188 @@ Spot-checks:
 ### Step 4 readiness verdict
 
 READY TO PROCEED TO STEP 5.
+
+---
+
+## Round 7 audit (Codex on d40a6f7 — Step 5 round 1)
+
+**Audited:** commit d40a6f7 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 5, round 1 of N
+**Date:** 2026-06-18
+**Total findings:** 0 CRITICAL / 0 MAJOR / 4 MINOR / 0 QUESTION
+**Step 5 readiness:** READY TO PROCEED TO STEP 6
+
+### Executive summary
+
+READY TO PROCEED TO STEP 6. I found no CRITICAL or MAJOR contract violations in the Step 5 provider-conflict primitives. The launchd label byte-matches SPEC-003, SPEC-013, the plist template, install.sh, UninstallCommand, and SelfUpdate as `live.streamvc.macprovider`; bootout uses the service target form `gui/<uid>/live.streamvc.macprovider`, while bootstrap correctly uses domain target `gui/<uid>` plus plist path. Foreground detection uses argv-element matching rather than substring grep and excludes argv containing the exact `autotune` subcommand, so the self-refusal class is covered by implementation and tests.
+
+The side-effect surface is closure-injected for the drainer and injectable at the detector snapshot boundaries. I found no real launchctl mutation, real signal delivery, real restart, or real socket dependency in the Step 5 unit tests; the only real launchctl call is behind the integration-gated test. No SIGKILL escalation, `Process.interrupt()`, or `kill(_, SIGKILL)` path exists in the Step 5 implementation; `SIGKILL` appears only in the v1-disabled warning text.
+
+Verification: `swift test --package-path phase3-binary` passed on 2026-06-18 with 283 tests executed, 2 tests skipped, and 0 failures. The Step 4 anti-regression filter also passed: `swift test --package-path phase3-binary --filter CandidateProviderRunnerTests` executed 13 tests, skipped 1 integration-gated test, and had 0 failures.
+
+### Findings
+
+#### Category A: launchd detection correctness (FR-E.1)
+
+(no findings)
+
+Verification notes:
+- `ProviderConflictDetector.launchdLabel` is `live.streamvc.macprovider` at `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:11`.
+- The same byte string appears in SPEC-003 at `specs/SPEC-003-open-onboarding.md:346`, `:426`, and `:870`; SPEC-013 at `specs/SPEC-013-cli-autotune.md:724`; the plist template at `phase3-binary/dist/launchd-plist-template.plist:7`; install.sh at `phase3-binary/dist/install.sh:749` and `:923`; UninstallCommand at `phase3-binary/Sources/macprovider-cli/UninstallCommand.swift:23`; and SelfUpdate at `phase3-binary/Sources/macprovider-cli/SelfUpdate.swift:207` and `:217`.
+- `parseLaunchdManagedPID(from:)` tokenizes on space or tab, requires whole-field equality for the label, returns the first field as PID, and returns nil for `-`, matching the expected launchctl list shapes.
+- `defaultLaunchctlList()` executes `/bin/launchctl list`, captures stdout only, waits for exit, and throws on non-zero status.
+
+#### Category B: foreground detection correctness (FR-E.2 self-exclusion)
+
+(no findings)
+
+Verification notes:
+- `isForegroundServe(argv:)` at `ProviderConflictDetector.swift:56` rejects any argv array containing the exact `autotune` element before scanning for a `macprovider-cli` executable basename followed immediately by exact `serve`.
+- Whole-word correctness is preserved: `macprovider-cli-helper` does not pass the executable basename check, and `serve-helper` / `serve-foo` do not pass the exact subcommand check.
+- `defaultProcessList()` uses `proc_listpids` plus `sysctl(CTL_KERN, KERN_PROCARGS2, pid)` and bounds-checks index movement while parsing argc, exec path, null padding, and argv strings.
+
+#### Category C: Drain correctness (FR-E.1)
+
+(no findings)
+
+Verification notes:
+- Launchd drain calls the injected launchctl runner with `["bootout", "gui/<uid>/live.streamvc.macprovider"]` at `ProviderConflictDetector.swift:217`, matching SPEC-013's service-target drain command at `specs/SPEC-013-cli-autotune.md:756`.
+- Foreground drain sends exactly `SIGTERM` via the injected `signalSender` at `ProviderConflictDetector.swift:219`.
+- Drain polling waits for port-free and, on foreground conflicts, process exit; if the foreground process remains after grace, the warning explicitly says SIGKILL is disabled in v1.
+
+#### Category D: Restore correctness (FR-E.1)
+
+(no findings)
+
+Verification notes:
+- Launchd restore calls `["bootstrap", "gui/<uid>", plistURL.path]` at `ProviderConflictDetector.swift:236`, matching the bootstrap domain-target + plist syntax in SPEC-013 and install.sh.
+- The default plist path is `~/Library/LaunchAgents/live.streamvc.macprovider.plist` at `ProviderConflictDetector.swift:193`, byte-aligned with SPEC-003, SPEC-013, install.sh, UninstallCommand, and SelfUpdate.
+- Foreground restore is opt-in through `restartForeground`; otherwise it returns `.skipped`.
+
+#### Category E: DI surface completeness
+
+(no findings)
+
+Verification notes:
+- `ProviderDrainer` injects all side effects named in the prompt: launchctl execution, signal sending, process-running probe, port probe, foreground restart, and warning writer.
+- The detector injects the effectful snapshot boundaries: launchctl list output and process list output.
+- The Step 5 unit tests use stubs for launchctl, signal, port, process-running, and foreground restart effects. The real launchctl list path is integration-gated behind `MACPROVIDER_INTEGRATION_TEST=1`.
+
+#### Category F: Anti-regression on Step 4
+
+(no findings)
+
+Verification notes:
+- `CandidateProviderRunner.stop(graceSeconds:)` now calls `MacProviderPortProbe.isOpen(provider.port)` at `CandidateProviderRunner.swift:222` and `:228`; no other runner behavior changed in the Step 5 diff.
+- The deleted private `isPortOpen(_:)` body is byte-equivalent in behavior to `MacProviderPortProbe.isOpen(_:)` in `PortProbe.swift:4`.
+- `PortProbe.swift` is in the same `macprovider_cli` target/module, so the runner needs no new module import.
+- `swift test --package-path phase3-binary --filter CandidateProviderRunnerTests` passed with 13 tests executed, 1 skipped, 0 failures.
+
+#### Category G: Test coverage
+
+**G.1 (MINOR) — Inactive launchd PID parsing lacks a direct unit test.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:39`; `phase3-binary/Tests/macprovider-cliTests/ProviderConflictDetectorTests.swift:7`
+- **What:** The parser correctly returns `(found: true, pid: nil)` for launchctl rows whose PID field is `-`, but the test suite does not pin that inactive-service case.
+- **Why:** Inactive loaded jobs are an expected launchctl list variant and Step 5's enum explicitly allows `launchdManaged(pid: nil)`. The implementation is straightforward and reviewed as correct, so this is a coverage gap, not a blocker.
+- **Recommendation:** Add a detector test with `-\t-\tlive.streamvc.macprovider` and assert `.launchdManaged(pid: nil)`.
+
+**G.2 (MINOR) — Helper-binary foreground false-positive coverage is incomplete.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:61`; `phase3-binary/Tests/macprovider-cliTests/ProviderConflictDetectorTests.swift:54`
+- **What:** `testServeSubstringDoesNotMatchForegroundServe` covers a subcommand-like `-serve-helper` argument, but it does not cover a helper executable such as `/path/macprovider-cli-helper serve`.
+- **Why:** The implementation rejects helper executables via `lastPathComponent == "macprovider-cli"`, so runtime behavior is correct. The missing test leaves one of the prompt's named false-positive classes unpinned.
+- **Recommendation:** Add a second argv fixture for `["/path/macprovider-cli-helper", "serve"]` and assert `.none`.
+
+**G.3 (MINOR) — The SIGKILL-disabled warning path is not unit-tested.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:224`; `phase3-binary/Tests/macprovider-cliTests/ProviderConflictDetectorTests.swift:95`
+- **What:** Foreground drain tests verify `SIGTERM`, but no test stubs `processIsRunning` as true after grace and asserts the injected `warningWriter` receives the v1 no-SIGKILL warning.
+- **Why:** The implementation contains the warning and never escalates, so this is not a discipline violation. The warning is operator-visible behavior for the stuck foreground path and should be regression-pinned.
+- **Recommendation:** Add a foreground drain test with `portIsOpen: { _ in false }`, `processIsRunning: { _ in true }`, and an injected warning recorder.
+
+#### Category H: Forward-compatibility
+
+**H.1 (MINOR) — Launchd restore is not idempotent by itself.**
+- **Location:** `phase3-binary/Sources/macprovider-cli/ProviderConflictDetector.swift:231`
+- **What:** `restore(.launchdManaged)` always calls `launchctl bootstrap gui/<uid> <plist>` and returns `.restored` only if launchctl succeeds. A second restore after the service has already been bootstrapped will likely throw from launchctl.
+- **Why:** Step 10 owns lifecycle cleanup and can ensure restore is called once or can tolerate already-loaded launchctl failures. This is not a Step 5 blocker, but the primitive does not provide an idempotent "ensure restored" contract.
+- **Recommendation:** When Step 10 wires restore, either call it exactly once per successful drain or handle the already-loaded launchctl status as a non-fatal restore outcome.
+
+Verification notes:
+- `ProviderConflict` gives Step 7 enough information to branch on launchd-managed versus foreground and include foreground PID/argv details where needed.
+- `restore(.none)` returns `.skipped`, and foreground restore is safely gated by `restartForeground`.
+
+#### Category I: Anything else
+
+(no findings)
+
+Verification notes:
+- `MacProviderPortProbe` as a single-static-method enum is consistent with the local Swift namespace style.
+- The implementation-notes `spec013-autotune-step5` section accurately describes launchd detection, argv matching, DI closures, bootout/bootstrap targets, SIGTERM-only foreground drain, and the Step 7/Step 10 wiring boundary.
+- The strict clean-room boundary was preserved; no d-inference source was inspected.
+
+### Step 5 readiness verdict
+
+READY TO PROCEED TO STEP 6.
+
+---
+
+## Round 8 audit (Codex on 3adddbf — Step 5 round 2 closure verification)
+
+**Audited:** commit 3adddbf on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 5, round 2 of N
+**Date:** 2026-06-18
+**Closure summary:** 3 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED / 1 DEFERRED across the 4 round-1 findings
+**Round-2 findings:** 0 CRITICAL anti-regression / 0 MAJOR new / 0 MINOR new
+**Step 5 readiness:** READY TO PROCEED TO STEP 6
+
+### Executive summary
+
+READY TO PROCEED TO STEP 6. Commit 3adddbf closes G.1, G.2, and G.3 with real behavior-pinning tests rather than tautological object construction. Each test exercises the exact Step 5 contract that Round 7 identified as under-covered: inactive launchd PID parsing, helper-binary foreground false-positive rejection, and the no-SIGKILL warning path when a foreground process remains alive after grace.
+
+H.1 remains intentionally deferred, and the deferral is sound for Step 5. The implementation-notes entry explicitly records that `restore(.launchdManaged)` is not call-idempotent by itself and assigns the call-once lifecycle discipline to Step 10, which is the wiring layer that will know whether cleanup has already run. Anti-regression checks passed: `git diff d40a6f7 3adddbf -- phase3-binary/Sources/` is empty, and `swift test --package-path phase3-binary` executed 286 tests with 2 skipped and 0 failures.
+
+### Round-1 finding closures
+
+**G.1 (MINOR) — CLOSED.** `testParseLaunchdManagedInactivePIDReturnsNil` lives in `ProviderConflictDetectorTests` and feeds `"-\t-\tlive.streamvc.macprovider\n"` directly to `ProviderConflictDetector.parseLaunchdManagedPID(from:)`. It asserts both halves of the parser contract with `XCTAssertTrue(parsed.found)` and `XCTAssertNil(parsed.pid)`. This is meaningful coverage: if future parser changes stop treating `-` as a loaded-but-inactive launchd row, the test will fail.
+
+**G.2 (MINOR) — CLOSED.** `testHelperBinaryDoesNotMatchForegroundServe` lives in `ProviderConflictDetectorTests`, constructs a detector with a process list containing `["/usr/local/bin/macprovider-cli-helper", "serve"]`, and asserts `try detector.detect()` returns `.none`. This is not tautological because it reaches the detector's argv scanner; changing `isForegroundServe(argv:)` from `lastPathComponent == "macprovider-cli"` to substring matching would make the helper binary look like a foreground serve process and fail this test.
+
+**G.3 (MINOR) — CLOSED.** `testForegroundDrainEmitsNoSIGKILLWarningWhenProcessRemainsAfterGrace` lives in `ProviderDrainerTests` and uses the required DI surface: `signalSender` records SIGTERM, `processIsRunning: { _ in true }` keeps the process stuck, `portIsOpen: { _ in false }` makes the port-free path win, and `warningWriter` records the operator warning. It asserts `.drained`, one SIGTERM send, one warning, and warning text containing both `pid 7777` and `SIGKILL is disabled in v1`. This pins the visible no-SIGKILL policy without requiring real signals or sockets.
+
+**H.1 (MINOR) — DEFERRED.** Commit 3adddbf does not change `restore(.launchdManaged)`, and that is appropriate for this Step 5 fix-pass. The new `implementation-notes.html` entry precisely states that a second `launchctl bootstrap` after successful restore can fail because the service is already loaded, then assigns the call-once discipline to Step 10's signal-handler / failure-cleanup wiring. Step 10 is the right owner because it decides lifecycle cleanup sequencing; Step 5 only provides the primitive.
+
+### Round-2 new findings
+
+#### Category Z-CLOSURE
+
+(no findings)
+
+Verification notes:
+- G.1, G.2, and G.3 are closed by tests that would fail under the named regressions.
+- H.1 is not over-closed or hidden; it is explicitly documented as a Step 10 forward-compat obligation.
+
+#### Category R-REGRESSION-V05F1
+
+(no findings)
+
+Verification notes:
+- `git diff d40a6f7 3adddbf -- phase3-binary/Sources/` is empty, confirming no production source change in the fix-pass.
+- `swift test --package-path phase3-binary` passed on 2026-06-18: 286 tests executed, 2 tests skipped, 0 failures.
+
+#### Category N-NEWGAPS-V05F1
+
+(no findings)
+
+Verification notes:
+- Test placement is correct: the parser and helper-binary tests are in `ProviderConflictDetectorTests`; the warning-path test is in `ProviderDrainerTests`.
+- The warning test uses all necessary injectors for this path: `signalSender`, `processIsRunning`, `portIsOpen`, and `warningWriter`.
+- The new tests are behavior-sensitive rather than tautological: they exercise parser output, detector classification, signal/warning side effects, and drain result selection.
+
+#### Category O-OTHER-V05F1
+
+(no findings)
+
+### Step 5 readiness verdict
+
+READY TO PROCEED TO STEP 6.
