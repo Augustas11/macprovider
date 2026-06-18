@@ -1286,8 +1286,31 @@ func (s *Server) writeServerMessage(conn net.Conn, op gobwas.OpCode, payload []b
 	return wsutil.WriteServerMessage(conn, op, payload)
 }
 
+// deadlineRefreshingWriter refreshes conn's write deadline before every write.
+// It is handed to wsutil.ControlFrameHandler as the reply destination so that
+// reactive PONG/Close frames — which gobwas writes synchronously from the read
+// goroutine (wsutil ControlHandler.HandlePing / HandleClose) — always get a
+// fresh deadline. Socket write deadlines are absolute and are never cleared
+// after a successful write, so without this an idle provider's PONG inherits
+// the stale deadline left by the last runWriter send (~WriteTimeoutS old) and
+// fails instantly with `i/o timeout`, tearing down an otherwise healthy
+// session in readProviderLoop. See readClientData.
+type deadlineRefreshingWriter struct {
+	s    *Server
+	conn net.Conn
+}
+
+func (w deadlineRefreshingWriter) Write(p []byte) (int, error) {
+	w.s.setWriteDeadline(w.conn)
+	return w.conn.Write(p)
+}
+
 func (s *Server) readClientData(conn net.Conn) ([]byte, gobwas.OpCode, error) {
-	controlHandler := wsutil.ControlFrameHandler(conn, gobwas.StateServerSide)
+	// Route control-frame replies through deadlineRefreshingWriter so a PONG
+	// (or echoed Close) written from this read goroutine never inherits the
+	// stale write deadline left by the last runWriter send. The Reader still
+	// reads from the raw conn; only reply writes are wrapped.
+	controlHandler := wsutil.ControlFrameHandler(deadlineRefreshingWriter{s: s, conn: conn}, gobwas.StateServerSide)
 	rd := wsutil.Reader{
 		Source:          conn,
 		State:           gobwas.StateServerSide,
