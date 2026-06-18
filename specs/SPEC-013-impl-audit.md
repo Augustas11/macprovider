@@ -1254,3 +1254,67 @@ Verification notes:
 ### Step 8 readiness verdict
 
 FIX REQUIRED.
+
+---
+
+## Round 15 audit (Codex on 022e8a3 — Step 8 round 2 closure verification)
+
+**Audited:** commit 022e8a3 on branch feat/cli-autotune-impl
+**Auditor model:** Codex / GPT-5
+**Audit round:** Step 8, round 2 of N
+**Date:** 2026-06-18
+**Closure summary:** 2 CLOSED / 0 PARTIAL / 0 NOT CLOSED / 0 OVER-CLOSED across the 2 round-1 findings
+**Round-2 findings:** 0 CRITICAL anti-regression / 0 MAJOR new / 0 MINOR new
+**Step 8 readiness:** READY TO PROCEED TO STEP 9
+
+### Executive summary
+
+Commit 022e8a3 closes both Round 14 findings. D.1 is closed by moving Stage 2 winner persistence to a post-loop marker update: all rows are inserted with `kept = false`, the final winner is tracked by row index, and `AutotuneDB.markStage2WinnerCell(runID:kvBits:maxBatch:maxContextCap:)` marks only the final winning knob cell in SQLite while the in-memory `cellTrials` row is updated to match. J.1 is closed by five direct `isNewBest` edge-branch tests covering `bestTPS <= 0` and the nil-TTFT tie-band branches.
+
+The highest-risk new surface, `markStage2WinnerCell`, is acceptable. Its SQL handles `kv_bits` NULL with `IS NULL`, uses `kv_bits = ?` only for non-NULL values, binds all operator data through the existing SQLite helpers, and matches by `run_id`, `stage = 2`, `kv_bits`, `max_batch`, and `max_context_cap`. Full anti-regression passed: `swift test --package-path phase3-binary` executed 322 tests, skipped 2 integration-gated tests, and reported 0 failures.
+
+### Round-1 finding closures
+
+**D.1 (MAJOR) — CLOSED.** `Stage2HillClimb.run()` now records `bestRowIndex` when a feasible cell becomes the current best, inserts every trial row with `kept: false`, and only after the Cartesian product completes calls `autotuneDB.markStage2WinnerCell` with the final winner's knobs (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:102-184`). If every cell is infeasible, the `guard let best else` path throws `.noFeasibleCell` before the marker call, so no winner row is fabricated (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:165-179`).
+
+`markStage2WinnerCell` uses a constant SQL-clause choice for `kv_bits`: nil emits `kv_bits IS NULL`; non-nil emits `kv_bits = ?` (`phase3-binary/Sources/macprovider-cli/AutotuneDB.swift:194-210`). Bind arithmetic is correct in both branches. The nil branch binds `run_id` at 1, skips `kv_bits`, binds `max_batch` at 2, and binds `max_context_cap` at 3. The non-nil branch binds `run_id` at 1, `kv_bits` at 2, `max_batch` at 3, and `max_context_cap` at 4 (`phase3-binary/Sources/macprovider-cli/AutotuneDB.swift:211-222`). The `UPDATE` predicate is limited to `run_id`, `stage = 2`, the appropriate `kv_bits` clause, `max_batch`, and `max_context_cap`, so it matches the intended Stage 2 winner row for the run; repeated calls set the same row's `kept` to 1 again. The persistence regression test asserts the four Stage 2 rows remain in deterministic order and exactly one row has `kept = true`, specifically `[false, true, false, false]` for the winning nil-`kv_bits`/`max_batch=2` cell (`phase3-binary/Tests/macprovider-cliTests/Stage2HillClimbTests.swift:132-171`).
+
+**J.1 (MINOR) — CLOSED.** The fix-pass adds the five requested direct helper tests. `testIsNewBestAcceptsPositiveTPSWhenBestTPSIsZero` asserts positive new TPS wins when `bestTPS` is zero; `testIsNewBestRejectsZeroTPSWhenBestTPSIsZero` asserts zero and negative new TPS do not win; `testIsNewBestWinsTieBandWhenBestTTFTIsNil` asserts a measurable new TTFT wins inside the TPS tie band against nil incumbent TTFT; `testIsNewBestHoldsWhenBothTTFTsAreNilInTieBand` asserts both-unmeasurable TTFT keeps the incumbent; and `testIsNewBestHoldsWhenNewTTFTIsNilInTieBand` asserts nil new TTFT does not displace a measurable incumbent TTFT (`phase3-binary/Tests/macprovider-cliTests/Stage2HillClimbTests.swift:195-248`). These tests target the explicit branches in `Stage2HillClimb.isNewBest` at `bestTPS <= 0` and `abs(relGap) <= tpsTieEpsilon` (`phase3-binary/Sources/macprovider-cli/Stage2HillClimb.swift:196-225`).
+
+### Round-2 new findings
+
+#### Category Z-CLOSURE
+
+(no findings)
+
+Verification notes:
+- D.1 is not cosmetic: the DB insertion path no longer writes transient `kept = true`, and the post-loop `UPDATE` uses `kv_bits IS NULL` for nil rather than `kv_bits = NULL`.
+- J.1 is covered by five non-tautological tests that assert the named true/false outcomes against the static helper.
+
+#### Category R-REGRESSION-V08F1
+
+(no findings)
+
+Verification notes:
+- `swift test --package-path phase3-binary` passed: 322 tests executed, 2 skipped, 0 failures.
+- `Stage2HillClimbTests` executed 12 tests with 0 failures, including the 5 new direct `isNewBest` edge tests.
+- The Step 3 `AutotuneDB` change is additive: commit 022e8a3 adds `markStage2WinnerCell` without changing existing `insertTrial`, `insertRun`, retention, schema, or bind helper signatures (`git diff --name-only 022e8a3^ 022e8a3` shows the expected Step 8 files plus the audit report).
+- `phase3-binary/implementation-notes.html` has the Step 8 round-1 audit-response entry documenting the D.1/J.1 closures and the claimed 322-test anti-regression result (`phase3-binary/implementation-notes.html:1578-1634`).
+
+#### Category N-NEWGAPS-V08F1
+
+(no findings)
+
+Verification notes:
+- SQL injection surface is closed: typed values are bound with the existing `withStatement`/`bind` helpers; the only interpolated SQL is the constant `kv_bits IS NULL` vs `kv_bits = ?` clause.
+- In-memory consistency is preserved by mutating `trialRows[bestRowIndex].kept = true` after the DB marker update.
+- The no-feasible-cell edge does not call `markStage2WinnerCell`; the method call is below the `guard let best else { throw ... }` block.
+- The method is idempotent by SQL semantics: matching the same row and setting `kept = 1` again does not create extra rows or additional kept states.
+
+#### Category O-OTHER-V08F1
+
+(no findings)
+
+### Step 8 readiness verdict
+
+READY TO PROCEED TO STEP 9.
