@@ -49,7 +49,7 @@ type providerSession struct {
 	providerID string
 	assignedID string
 	conn       net.Conn
-	writeCh    chan []byte
+	writeCh    chan providerFrame
 	writeLimit time.Duration
 	closeOnce  sync.Once
 	writeMu    sync.Mutex
@@ -59,6 +59,24 @@ type providerSession struct {
 	httpOnly   bool
 	tier2Mu    sync.Mutex
 	tier2      *pool.Tier2Session
+}
+
+// providerFrame is the unit of work consumed by runWriter. Two kinds exist:
+//
+//   - text payloads (raw == false): JSON-ish coordinator → provider control
+//     messages (hello_ack, auth_response, inference_request, cancel_request,
+//     drain, etc.); written via wsutil.WriteServerText.
+//
+//   - pre-baked raw WS frames (raw == true): reactive PONG / Close-echo replies
+//     and server-initiated Close frames. Captured upstream as the exact bytes
+//     gobwas would have emitted (header + body) and written via a single
+//     conn.Write so they cannot interleave with a text frame.
+//
+// The single runWriter goroutine has exclusive ownership of all post-handshake
+// conn writes; every other caller MUST go through send / enqueueRaw.
+type providerFrame struct {
+	raw     bool
+	payload []byte
 }
 
 type encryptedInferenceRequest struct {
@@ -95,16 +113,25 @@ func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize
 		providerID: providerID,
 		assignedID: assignedID,
 		conn:       conn,
-		writeCh:    make(chan []byte, bufferSize),
+		writeCh:    make(chan providerFrame, bufferSize),
 		writeLimit: writeLimit,
 		active:     map[string]*relayActive{},
 	}
 }
 
 func (ps *providerSession) runWriter() {
-	for payload := range ps.writeCh {
+	for f := range ps.writeCh {
 		_ = ps.conn.SetWriteDeadline(time.Now().Add(ps.writeLimit))
-		if err := wsutil.WriteServerText(ps.conn, payload); err != nil {
+		var err error
+		if f.raw {
+			// Single Write of an already-framed control reply. The header and
+			// body were assembled into f.payload upstream so they cannot be
+			// split across goroutines mid-frame.
+			_, err = ps.conn.Write(f.payload)
+		} else {
+			err = wsutil.WriteServerText(ps.conn, f.payload)
+		}
+		if err != nil {
 			ps.failAll(ErrRelayClosed)
 			_ = ps.conn.Close()
 			return
@@ -123,13 +150,26 @@ func (ps *providerSession) close() {
 }
 
 func (ps *providerSession) send(payload []byte) error {
+	return ps.enqueueFrame(providerFrame{payload: payload})
+}
+
+// enqueueRaw queues a pre-baked WS frame (header + body, already assembled by
+// the caller) for runWriter to emit with a single conn.Write. Used by the
+// post-handshake control-frame handler and by server-initiated Close paths so
+// reactive PONG / Close / shutdown frames cannot interleave with an in-flight
+// text frame from the writer.
+func (ps *providerSession) enqueueRaw(rawFrame []byte) error {
+	return ps.enqueueFrame(providerFrame{raw: true, payload: rawFrame})
+}
+
+func (ps *providerSession) enqueueFrame(f providerFrame) error {
 	ps.writeMu.Lock()
 	defer ps.writeMu.Unlock()
 	if ps.closed {
 		return ErrRelayClosed
 	}
 	select {
-	case ps.writeCh <- payload:
+	case ps.writeCh <- f:
 		return nil
 	default:
 		return ErrRelayBackpressure

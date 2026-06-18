@@ -450,7 +450,7 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 		}
 	}()
 
-	payload, op, err := s.readClientData(conn)
+	payload, op, err := s.readClientData(conn, s.directControlReply(conn))
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_hello: read")
 		return
@@ -665,7 +665,10 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 	b, err := json.Marshal(ack)
 	if err != nil {
-		s.close(conn, CloseInvalidHello, "invalid_hello: ack")
+		// runWriter is already running for `session`; route the Close through
+		// it instead of writing directly to conn so we don't race an in-flight
+		// frame on the wire.
+		s.closeSession(session, CloseInvalidHello, "invalid_hello: ack")
 		return "", ""
 	}
 	if err := session.send(b); err != nil {
@@ -789,7 +792,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 
 	s.setReadDeadline(conn, s.cfg.ProviderWSHandshakeTimeout())
-	proofPayload, op, err := s.readClientData(conn)
+	proofPayload, op, err := s.readClientData(conn, s.directControlReply(conn))
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_auth_request: read")
 		return "", ""
@@ -918,7 +921,10 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 	rawResponse, err := json.Marshal(response)
 	if err != nil {
-		s.close(conn, CloseInvalidHello, "invalid_auth_response")
+		// runWriter is already running for `session`; route the Close through
+		// it instead of writing directly to conn so we don't race an in-flight
+		// frame on the wire.
+		s.closeSession(session, CloseInvalidHello, "invalid_auth_response")
 		return "", ""
 	}
 	if err := session.send(rawResponse); err != nil {
@@ -1117,9 +1123,26 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *p
 }
 
 func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) {
+	// Resolve the session once so reactive PONG / Close-echo writes funnel
+	// through session.enqueueRaw — i.e. through the single runWriter goroutine.
+	// Without this, gobwas's ControlHandler would emit reply frames directly to
+	// conn from THIS read goroutine, racing runWriter mid-text-frame and
+	// corrupting WS framing on the wire. The race is invisible to -race because
+	// net.TCPConn.Write itself is internally locked; the corruption lives one
+	// layer up at the WS framing boundary.
+	//
+	// Fallback to directControlReply when no session is registered (only
+	// reachable from tests that drive readProviderLoop without a sessions-map
+	// entry) — keeps the historical behaviour for those callers.
+	var controlReply func([]byte) error
+	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
+		controlReply = session.enqueueRaw
+	} else {
+		controlReply = s.directControlReply(conn)
+	}
 	for {
 		s.setReadDeadline(conn, s.cfg.HeartbeatMissThreshold())
-		payload, op, err := s.readClientData(conn)
+		payload, op, err := s.readClientData(conn, controlReply)
 		if err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider websocket read failed")
 			return
@@ -1174,6 +1197,29 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 	// deploy's invalid_token rejection of M4/M1) are visible in the journal.
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
 	_ = s.writeServerMessage(conn, gobwas.OpClose, gobwas.NewCloseFrameBody(code, reason))
+}
+
+// closeSession is the post-handshake equivalent of close: it enqueues a Close
+// frame through the providerSession's writer (so it serializes with any
+// in-flight text frame from runWriter instead of racing it on the wire) and
+// schedules conn.Close after a short grace period so runWriter can actually
+// flush the frame before the TCP conn dies. Callers MUST use this instead of
+// close(session.conn, ...) once runWriter is running — i.e. after
+// registerProviderSession has returned.
+func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, reason string) {
+	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
+	body := gobwas.NewCloseFrameBody(code, reason)
+	var buf bytes.Buffer
+	if err := gobwas.WriteFrame(&buf, gobwas.NewCloseFrame(body)); err != nil {
+		// Writing to bytes.Buffer cannot realistically fail; fall back to a
+		// hard conn.Close so the session still tears down.
+		_ = session.conn.Close()
+		return
+	}
+	_ = session.enqueueRaw(buf.Bytes())
+	time.AfterFunc(100*time.Millisecond, func() {
+		_ = session.conn.Close()
+	})
 }
 
 func (s *Server) reserveUnauthenticatedConn() bool {
@@ -1286,31 +1332,56 @@ func (s *Server) writeServerMessage(conn net.Conn, op gobwas.OpCode, payload []b
 	return wsutil.WriteServerMessage(conn, op, payload)
 }
 
-// deadlineRefreshingWriter refreshes conn's write deadline before every write.
-// It is handed to wsutil.ControlFrameHandler as the reply destination so that
-// reactive PONG/Close frames — which gobwas writes synchronously from the read
-// goroutine (wsutil ControlHandler.HandlePing / HandleClose) — always get a
-// fresh deadline. Socket write deadlines are absolute and are never cleared
-// after a successful write, so without this an idle provider's PONG inherits
-// the stale deadline left by the last runWriter send (~WriteTimeoutS old) and
-// fails instantly with `i/o timeout`, tearing down an otherwise healthy
-// session in readProviderLoop. See readClientData.
-type deadlineRefreshingWriter struct {
-	s    *Server
-	conn net.Conn
-}
-
-func (w deadlineRefreshingWriter) Write(p []byte) (int, error) {
-	w.s.setWriteDeadline(w.conn)
-	return w.conn.Write(p)
-}
-
-func (s *Server) readClientData(conn net.Conn) ([]byte, gobwas.OpCode, error) {
-	// Route control-frame replies through deadlineRefreshingWriter so a PONG
-	// (or echoed Close) written from this read goroutine never inherits the
-	// stale write deadline left by the last runWriter send. The Reader still
-	// reads from the raw conn; only reply writes are wrapped.
-	controlHandler := wsutil.ControlFrameHandler(deadlineRefreshingWriter{s: s, conn: conn}, gobwas.StateServerSide)
+// readClientData reads the next data frame from conn, handling any inbound
+// control frames inline. Control-frame replies (PONG, Close echo, protocol-
+// error Close) are assembled into a single contiguous frame and delivered via
+// controlReply.
+//
+// Two reply paths exist:
+//
+//   - Pre-handshake (handleConn / handleV2Conn before a providerSession has
+//     been registered): callers pass directControlReply, which writes the
+//     assembled frame straight to conn after re-arming the write deadline.
+//     No runWriter exists yet, so there is no goroutine to race against.
+//
+//   - Post-handshake (readProviderLoop): callers pass session.enqueueRaw, so
+//     the assembled frame is serialized through writeCh and emitted by the
+//     single runWriter goroutine. This closes the framing-corruption hazard
+//     where gobwas's ControlHandler would otherwise write header+payload in
+//     two separate conn.Write calls that could interleave with an in-flight
+//     coordinator→provider text frame (inference_request, cancel_request, …).
+//
+// We capture into a bytes.Buffer rather than writing through ControlHandler's
+// destination directly because HandlePing/HandleClose emit the frame as
+// TWO underlying Writes (one for the header, one for the body). Buffering
+// folds them into a single payload runWriter (or directControlReply) can ship
+// with one conn.Write — the unit of atomicity at the WS framing layer.
+func (s *Server) readClientData(conn net.Conn, controlReply func([]byte) error) ([]byte, gobwas.OpCode, error) {
+	controlHandler := func(hdr gobwas.Header, src io.Reader) error {
+		var buf bytes.Buffer
+		h := wsutil.ControlHandler{
+			Src: src,
+			Dst: &buf,
+			// src is the enclosing wsutil.Reader which already unmasks the
+			// frame payload as it Reads. ControlHandler's own cipher reader
+			// would XOR a second time and corrupt the bytes — match the
+			// invariant wsutil.ControlFrameHandler relies on.
+			DisableSrcCiphering: true,
+			State:               gobwas.StateServerSide,
+		}
+		handleErr := h.Handle(hdr)
+		// Always attempt delivery if any reply bytes were assembled. HandleClose
+		// returns a wsutil.ClosedError after the echo write succeeds, and the
+		// internal protocol-error path returns its error after writing a Close
+		// frame — in both cases the bytes still belong on the wire.
+		if buf.Len() > 0 {
+			reply := append([]byte(nil), buf.Bytes()...)
+			if err := controlReply(reply); err != nil && handleErr == nil {
+				handleErr = err
+			}
+		}
+		return handleErr
+	}
 	rd := wsutil.Reader{
 		Source:          conn,
 		State:           gobwas.StateServerSide,
@@ -1338,6 +1409,21 @@ func (s *Server) readClientData(conn net.Conn) ([]byte, gobwas.OpCode, error) {
 		}
 		payload, err := io.ReadAll(&rd)
 		return payload, hdr.OpCode, err
+	}
+}
+
+// directControlReply is the pre-handshake reply path. Writes the fully-assembled
+// control frame straight to conn after re-arming the write deadline. Socket
+// write deadlines are absolute and are never cleared after a successful write,
+// so an idle handshake conn's reactive PONG would otherwise inherit a stale,
+// expired deadline and fail instantly with i/o timeout. Used only before a
+// providerSession (and its runWriter) exists; once registerProviderSession has
+// started runWriter the post-handshake reply path is session.enqueueRaw.
+func (s *Server) directControlReply(conn net.Conn) func([]byte) error {
+	return func(frame []byte) error {
+		s.setWriteDeadline(conn)
+		_, err := conn.Write(frame)
+		return err
 	}
 }
 
