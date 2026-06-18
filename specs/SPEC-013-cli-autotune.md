@@ -1,7 +1,7 @@
 # SPEC-013 — `macprovider-cli autotune` subcommand
 
-**Version:** 0.2 (round-1 audit response)
-**Status:** Draft (pre round-2 audit)
+**Version:** 0.3 (round-2 audit response — LOCK candidate)
+**Status:** Draft (pre round-3 closure-confirmation audit)
 **Date drafted:** 2026-06-18
 **Depends on:** SPEC-001 v1.4 (`macprovider-cli serve` flags `--kv-bits`, `--max-context`, `--max-batch` per PR #105), SPEC-010 v1.5 (provider-advertised `supported_models[]` shape, model id semantics)
 **Companion to (LOCKED):** SPEC-002 v1.3.5 (no coordinator-side change required), SPEC-003 v0.9.2 (autotune is invoked before / between `macprovider-cli serve` lifetimes; not part of install flow; SPEC-013 v0.2 binds the launchd label and drain sequence to SPEC-003 §FR-C5)
@@ -16,6 +16,41 @@ pre-SPEC-013.
 ---
 
 ## Change log
+
+### v0.3 (2026-06-18) — round-2 audit response (LOCK candidate)
+
+Codex round 2 (`specs/SPEC-013-audit.md` § Round 2) returned
+`17 CLOSED / 1 PARTIAL / 0 NOT CLOSED / 1 OVER-CLOSED` on the
+round-1 findings and `0 CRITICAL anti-regression / 1 MAJOR new /
+3 MINOR new`. Verdict: LOCK READY; codex recommended a narrow
+v0.3 closing the 4 new findings before implementation. v0.3
+closes all 4. No architecture change.
+
+- **N-D.1 fix (MAJOR — Shape B vs `models pull`-only wording
+  inconsistency):** v0.2 permitted FR-D Shape B (rely on the
+  runtime's online fallback during load + measurement
+  isolation), but NFR-4's egress carve-out and AC-8 still
+  spoke only of `macprovider-cli models pull <id>` failures.
+  v0.3 reworords NFR-4's egress exception to "the
+  HuggingFace pre-warm fetch path selected by FR-D.1, whether
+  explicit `models pull` or runtime online fallback" and
+  updates AC-8 to test the implementation's selected pre-warm
+  mechanism (with explicit Shape A / Shape B variants).
+- **Z-B.1 fix (PARTIAL → CLOSED — `--max-context-axis` parse
+  rules were in non-normative §7 but not in binding FR-B.1):**
+  v0.3 lifts the parse rules (absolute token caps, sorted
+  ascending, each cell ≥ `--target-context`, flag-parse-time
+  rejection of invalid cells) into FR-B.1 as a normative
+  paragraph.
+- **N-OQ-E.1 fix (MINOR — OQ-E thermal threshold lacked a
+  repeat protocol):** v0.3 adds a sampling protocol (minimum
+  10 paired forward/reverse runs on air5; mismatch rate over
+  pairs is the metric).
+- **O.1 fix (MINOR — residual v0.1-era wording drift in live
+  text):** v0.3 closes four discrete drift sites — the
+  `tune_runs.spec_version` SQL comment, FR-H.2's "v0.1
+  normative contract" prose, NFR-3's stale `.bak-<unix-ts>`
+  pattern, and §7's "MAY change in v0.2" disclaimer.
 
 ### v0.2 (2026-06-18) — round-1 audit response
 
@@ -487,6 +522,30 @@ of:
   This axis is OPTIONAL in v1; the recommended `max_context` in the
   output equals `--target-context` unless the operator opted into
   the axis and a different cell won.
+
+  **`--max-context-axis` parse rules (NORMATIVE — round-2 Z-B.1
+  closure).** When the operator passes `--max-context-axis <csv>`,
+  the implementation MUST:
+
+  - Parse the value as a comma-separated list of positive integers
+    interpreted as ABSOLUTE token caps (not deltas relative to
+    `--target-context`).
+  - Sort the parsed cells in ascending order before evaluation.
+  - Reject any cell whose value is strictly less than
+    `--target-context` at FLAG-PARSE TIME (before any DB write,
+    before any provider spawn), exiting non-zero with
+    `tune_runs.exit_reason = 'config_error'` and a stderr message
+    naming the offending cell and the `--target-context` floor.
+  - Reject duplicate cells (after sort) at flag-parse time with
+    the same `config_error` exit.
+  - Treat an EMPTY axis (the default) as the single-cell case
+    `[--target-context]`; the recommended `max_context_override`
+    equals `--target-context` and FR-F.3's `--apply` writes that
+    value.
+
+  These parse rules are part of the binding FR-B.1 contract; the
+  §7 CLI summary is reference-only and any §7-vs-FR-B.1 conflict
+  is resolved in FR-B.1's favor.
 
 Each cell MUST be evaluated with `stage2_replicates` replicates
 (default 3 — **OPEN QUESTION OQ-B** pending air5 n=3 data) at the
@@ -1054,7 +1113,7 @@ CREATE TABLE IF NOT EXISTS tune_runs (
     run_id TEXT PRIMARY KEY,
     started_at_utc TEXT NOT NULL,
     ended_at_utc TEXT,                       -- NULL if interrupted
-    spec_version TEXT NOT NULL,              -- 'SPEC-013 v0.1'
+    spec_version TEXT NOT NULL,              -- e.g. 'SPEC-013 v0.3'; writer emits its own producing version
     binary_version TEXT NOT NULL,
     machine_ram_gb INTEGER NOT NULL,
     machine_chip TEXT NOT NULL,
@@ -1114,10 +1173,10 @@ provider, port released, DB in a consistent state.
 A crashed run leaves its `tune_runs.ended_at_utc` as NULL and any
 written `tune_trials` rows as-is. Rerun is safe: a fresh `run_id`
 opens a fresh `tune_runs` row; the old run's data is preserved and
-reusable by reporting. The operator MAY pass `--resume` to skip
-Stage 1 candidates that the prior crashed run already proved
-infeasible (best-effort optimization; out of scope for v0.1's
-normative contract — see §11). v0.1 default behavior is full rerun.
+reusable by reporting. A future `--resume` flag could skip Stage 1
+candidates that the prior crashed run already proved infeasible
+(best-effort optimization; deferred from v1's normative contract
+— see §11). v1 default behavior is full rerun.
 
 **FR-H.3. Network down during pre-warm.**
 A failed pre-warm fetch (Shape A `models pull` exit non-zero, or
@@ -1188,8 +1247,10 @@ thermal pacing.
 
 **NFR-3. Reversibility.**
 Pre-tune `~/.config/macprovider/config.yaml` is ALWAYS recoverable
-via the `.bak-<unix-ts>` file written by `--apply` (FR-F.3). If
-`--apply` was not used, the config was not touched. There is no
+via the `.bak-<unix-ts>-<counter>` file written by `--apply` per
+FR-F.3 (collision-safe; the counter ensures two `--apply` runs in
+the same wall-clock second never overwrite each other's backup).
+If `--apply` was not used, the config was not touched. There is no
 case in which an autotune run renders the prior config
 unrecoverable.
 
@@ -1205,13 +1266,28 @@ fingerprint (`ram_gb`, `chip`, `os_version`, `binary_version`)
 appears in `tune_runs.machine_*` columns and in the FR-F.2 JSON
 output for local consumption by `console.streamvc.live` (when the
 operator chooses to share that JSON), but `autotune` itself
-performs no network egress except `models pull <id>` to
-HuggingFace.
+performs no network egress except the **HuggingFace pre-warm
+fetch path selected by FR-D.1** — i.e. either:
+
+- **Shape A:** explicit `macprovider-cli models pull <id>` (or
+  equivalent operator-invoked fetch) per FR-D.1.
+- **Shape B:** the runtime's online fallback during model load
+  (`LLMModelFactory.shared.configuration(id:)` reaches HuggingFace
+  when the local snapshot is not cached) per FR-D.1's
+  measurement-isolation contract.
+
+Both shapes egress only to HuggingFace and only for weight
+fetches — no telemetry, no observability beacons, no recipe
+upload. An implementation that performs ANY other network egress
+during a `autotune` run is a contract violation. (Round-2 N-D.1
+closure.)
 
 The coordinator-side recipe registry is v2 territory — see §11.
 Even when it ships, it MUST be opt-in. The v1 design intentionally
 keeps the recipe wholly local so operators can run autotune on
-private/air-gapped Macs.
+private/air-gapped Macs (which by definition will use Shape A
+with pre-staged weights, since Shape B's online fallback would
+fail with a transient-class pre-warm error per FR-D.2).
 
 ---
 
@@ -1267,8 +1343,12 @@ KV-cache baseline). Representation across surfaces:
 | terminal display | the literal string `unset` |
 | `serve_command` line | `--kv-bits` flag omitted entirely |
 
-The flag shape MAY change in v0.2 based on audit feedback. The
-SEMANTICS in §5 are the normative surface.
+§7 is REFERENCE-ONLY; the SEMANTICS in §5 (especially the FR-B.1
+`--max-context-axis` parse rules and the §5.6 / §5.7 owned-key
+sets) are the normative surface. Any conflict between §7 and §5
+is resolved in §5's favor at implementation time. The flag shape
+above MAY be refined in a future v0.x as long as the §5 semantics
+are preserved.
 
 ---
 
@@ -1349,12 +1429,34 @@ observe any provider connection during the autotune run (verified
 via an integration test that watches the coordinator's
 `/admin/pool/check` or equivalent).
 
-**AC-8. Pre-download failure advances to next candidate.**
-With `macprovider-cli models pull <id>` mocked to fail for candidate
-1, the run MUST emit an infeasibility row for candidate 1 with notes
-containing the pull error message and proceed to candidate 2. The
-`tune_runs.exit_reason` MUST be `'ok'` IFF some candidate
-succeeded, otherwise `'no_feasible'`.
+**AC-8. Pre-warm failure advances to next candidate (shape-neutral).**
+The test MUST exercise the implementation's selected pre-warm
+mechanism per FR-D.1 — NOT a specific subcommand name (round-2
+N-D.1 closure). Both Shape A and Shape B implementations MUST
+satisfy this AC; the test harness MUST provide a fixture that
+forces a transient-class pre-warm failure for candidate 1
+without specifying HOW:
+
+- **Shape A variant** (the implementation invokes
+  `macprovider-cli models pull <id>` or equivalent): mock the
+  pull subcommand to exit non-zero (e.g. simulated HTTP 503).
+- **Shape B variant** (the implementation relies on the runtime
+  online-fallback): block egress to HuggingFace at the
+  network-mock layer so the runtime's online fetch fails during
+  load; the autotune MUST classify this as a Shape-B pre-warm
+  failure (not as a load-runtime-error) by inspecting the
+  failure mode against FR-D.1's measurement-isolation contract.
+
+In either variant, the run MUST emit an infeasibility row for
+candidate 1 with `notes` containing the pre-warm error message
+and the transient/integrity classification (per FR-D.2), proceed
+to candidate 2, and end with `tune_runs.exit_reason = 'ok'` IFF
+some candidate succeeded, otherwise `'no_feasible'`. A separate
+test variant MUST force a Shape A INTEGRITY-class failure
+(simulated signature mismatch); per FR-D.2, the whole run MUST
+abort with `exit_reason = 'pre_warm_integrity_failure'` —
+this asymmetric handling distinguishes AC-8 from the simpler
+"advance on any pull failure" pattern.
 
 **AC-9. `--apply` is atomic + backs up + idempotent.**
 With `--apply`, a successful run MUST:
@@ -1563,8 +1665,24 @@ drives the recommendation), v0.3 will need ONE of:
 Decision threshold: if the same Stage 2 cell set, evaluated in
 reverse order, would produce a DIFFERENT keep-best winner more
 than 5% of the time on air5 n=3 data, the bias is load-bearing
-and v0.3 must address it. v0.2 ships the deterministic order
-unchanged pending the data; operators are warned in §6 NFR-2.
+and v0.4 must address it.
+
+**Sampling protocol** (round-2 N-OQ-E.1 closure). Measure by
+running the same Stage 2 cell set in FORWARD and REVERSE order
+for at least **10 paired runs** on air5 (one forward run + one
+reverse run = one pair). Between paired runs, idle the machine
+for at least 60s to dissipate heat soak from the prior run.
+Compare keep-best winners per pair; if `mismatch_pairs / 10 >
+0.05` (i.e. ≥ 1 mismatch in 10 pairs), the bias is load-bearing
+and v0.4 must add ONE of randomized cell order (with the seed
+recorded in `tune_runs` for replay), a fixed inter-cell cooldown
+delay, or a thermal-state probe + pause-until-quiet gate. 10
+pairs is the minimum; the operator MAY run more pairs to tighten
+the confidence interval but the 5% threshold and pair-mismatch
+metric are normative.
+
+v1 ships the deterministic order unchanged pending the data;
+operators are warned in §6 NFR-2.
 
 ---
 

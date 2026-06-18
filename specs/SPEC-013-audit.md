@@ -247,3 +247,123 @@ Recommendation: add a short "post-lock documentation/update checklist" or captur
 - Every category A-M has a section.
 - Every finding includes severity, location, what, why, and recommendation.
 - No d-inference source was inspected.
+
+---
+
+## Round 2 audit (Codex on v0.2)
+
+**Audited:** SPEC-013 v0.2 (specs/SPEC-013-cli-autotune.md)
+**Auditor model:** Codex / GPT-5
+**Audit round:** 2 of N
+**Date:** 2026-06-18
+**Closure summary:** 17 CLOSED / 1 PARTIAL / 0 NOT CLOSED / 1 OVER-CLOSED across 7 MAJOR + 10 MINOR + 2 QUESTION round-1 findings
+**Round-2 findings:** 0 CRITICAL anti-regression / 1 MAJOR new / 3 MINOR new
+
+### Executive summary
+
+Verdict: **LOCK READY under the round-2 threshold, with one narrow v0.3 cleanup strongly recommended before implementation.**
+
+v0.2 closes the substance of the round-1 audit. The biggest-fit framing, STOP-on-first-feasible model iteration, in-model Stage 2 hill-climb, operator-supplied order contract, config-key mapping, launchd label, SQLite `stage` migration, and deterministic recipe hash are now implementable. The code spot-checks support the key factual repairs: `Config.swift` reads `max_context_override`, `max_concurrency_override`, and `kv_bits`; the install artifacts use `live.streamvc.macprovider`; `ModelRuntime.configuration(for:)` checks the local HF snapshot before falling back to `LLMModelFactory.shared.configuration(id:)`; and the PR #103 prototype starts `serve` / waits for `/v1/models` rather than pre-downloading weights.
+
+The remaining round-2 issue is a new precision gap introduced by the D.1 closure. FR-D now permits Shape B, where autotune relies on the runtime's online fallback during model load, but NFR-4 and AC-8 still speak as if the only allowed pre-warm network path is `macprovider-cli models pull`. That is not a product or architecture failure, but it is a day-one contract conflict for the implementing PR. The other findings are minor editorial/testability cleanups.
+
+### Round-1 finding closures
+
+A.1 -> CLOSED. v0.2 replaces metrics-bearing `fallbacks` with name-only `alternates` in §3 and FR-F.1/FR-F.2 (lines 292-296, 766-785, 870-874). AC-1 now expects `[Z]` as an unprobed smaller alternate and explicitly forbids a Z trial row (lines 1284-1290), so the STOP-on-first-feasible failure mode is closed.
+
+D.1 -> OVER-CLOSED. The original missing `models pull` precondition is no longer load-bearing: FR-D.1 makes the operative contract "weights are present before measurement" and permits Shape A or Shape B (lines 575-626), matching the current runtime fallback behavior in `ModelRuntime.swift` lines 559-566 and 622-641. However, that Shape B closure introduces the new N-D.1 precision gap below because NFR-4 and AC-8 still assume the only pre-warm network/failure surface is `models pull`.
+
+E.1 -> CLOSED. FR-E.1 now binds to `live.streamvc.macprovider`, `~/Library/LaunchAgents/live.streamvc.macprovider.plist`, `launchctl bootout`, and `launchctl bootstrap` (lines 663-712). The code spot-check matches: `install.sh` renders the same label at lines 748-749, loads the plist via launchctl at lines 728-729, detects it at line 923, and the plist template has `KeepAlive.SuccessfulExit = false` at lines 25-28.
+
+F.1 -> CLOSED. FR-F.2 and FR-F.3 now use YAML key names `kv_bits`, `max_context_override`, and `max_concurrency_override` (lines 857-866, 935-947). `Config.swift` confirms those are parsed at lines 239-241. The JSON surface and CLI `serve_command` keep CLI flag names separate, which closes the "apply writes unread keys" failure mode.
+
+F.2 -> CLOSED. `recipe_hash` is now `sha256:<64-lowercase-hex>`, with RFC 8785 JCS and an explicit input domain that excludes run IDs, timestamps, observations, alternates, infeasible rows, DB path, and serve command (lines 875-905). The hash input fields all exist in the FR-F.2 schema, and AC-12 requires same-machine, cross-implementation, machine-sensitive, and binary-sensitive test vectors (lines 1396-1421).
+
+G.1 -> CLOSED. The migration is now spelled as valid SQLite: `ALTER TABLE tune_trials ADD COLUMN stage INTEGER NOT NULL DEFAULT 1` (lines 1009-1022). New inserts must set `stage` explicitly to 1 or 2 (lines 1024-1029), and AC-16 verifies both row counts and migration against a populated prototype DB (lines 1445-1453).
+
+J.1 -> CLOSED. AC-17 now tests an intentionally wrong operator order, `1B,32B`, on hardware where both are feasible and requires the 1B recommendation with exactly one Stage 1 row (lines 1455-1475). An implementation that internally re-sorts by parameter count would fail this AC.
+
+B.1 -> PARTIAL. v0.2 adds useful semantics for `--max-context-axis`: §7 says values are absolute token caps, sorted ascending, and each must be `>= --target-context` (lines 1231-1233), and AC-18 checks an invalid below-target cell at flag-parse time (lines 1477-1487). The binding FR-B.1 text still only says "small neighborhood" and points to operator opt-in (lines 484-489), while §7 declares itself non-normative (lines 1218-1221). See Z-B.1.
+
+C.1 -> CLOSED. The CLI summary now defaults `--kv-bits-axis` to `unset,4,8` and defines `unset` across flag, JSON, SQL, YAML, terminal, and `serve_command` surfaces (lines 1229, 1257-1268). FR-B.1 also includes the unset-default cell (lines 477-479).
+
+F.3 -> CLOSED. FR-F.3 now requires `config.yaml.bak-<unix-ts>-<counter>`, picks the lowest free counter, forbids overwrite, and aborts after counter exhaustion (lines 922-931). AC-9 directly tests two applies in the same wall-clock second and requires distinct counters (lines 1365-1370).
+
+G.2 -> CLOSED. Retention now keeps at least N runs, enforces `N >= 1`, and requires a single SQLite transaction covering both `tune_trials` and `tune_runs` deletes (lines 1031-1041). This closes the orphan-summary/orphan-trials crash window named in round 1.
+
+H.1 -> CLOSED. `--resume` is removed from the §7 flag summary (lines 1223-1251), and §11 keeps resume deferred as v2 optimization (line 1622). FR-H.2 still mentions the future flag as best-effort/out-of-scope, but the v0.1 issue was the advertised v1 CLI surface.
+
+J.2 -> CLOSED. AC-18 now exercises a non-default `--max-context-axis 4000,8000` path, requires an 8000 winning cell to appear in `recommendation.knobs.max_context_override`, verifies extra Stage 2 rows, and rejects a below-target axis at flag-parse time (lines 1477-1487).
+
+J.3 -> CLOSED. AC-19 covers `--max-model-size` alone trimming the default list (lines 1489-1497), and `tune_runs.exit_reason` is now a closed enum with no free-form strings (lines 1079-1097). The enum covers the budget-exhausted cases used by AC-13.
+
+K.1 -> CLOSED. OQ-B now defines a 90% confidence minimum-discriminable-gap threshold tied to `TPS_TIE_EPSILON` (lines 1516-1525), and OQ-D defines false-fit / false-reject thresholds with concrete default-change outcomes (lines 1538-1548). The thresholds are measurable from the planned air5 replication data.
+
+L.1 -> CLOSED. §12 now correctly says the prototype has no explicit pre-download step; `evaluate_candidate` starts `serve`, waits for `/v1/models`, and records load failures as trial notes (lines 1704-1717). The PR #103 branch confirms this behavior in `beta/autotune.py` lines 294-344 and 880-948.
+
+M.1 -> CLOSED. §11 now explicitly renumbers SPEC-013 as autotune and provisional SPEC-014 as the coordinator-served recommended catalog (lines 1624-1647). A repo search found no existing `SPEC-014-*.md`; the remaining SPEC-010/SPEC-011 references are listed as follow-up documentation patches.
+
+D.2 -> CLOSED. FR-D.2 splits transient failures from integrity failures, advances only on transient pre-warm failures, and aborts the whole run for signature/hash/tampering/shape failures with `exit_reason = 'pre_warm_integrity_failure'` (lines 628-650). FR-H.3 repeats the same split for operational recovery (lines 1122-1137).
+
+K.2 -> CLOSED. v0.2 adds OQ-E for thermal/cell-order bias and preserves deterministic v1 order pending data (lines 1550-1567). The round-1 question was whether the spec should surface the design choice; it now does. See N-OQ-E.1 for a minor measurement-procedure gap inside the new OQ.
+
+### Round-2 new findings
+
+#### Category Z-CLOSURE
+
+##### Z-B.1 `--max-context-axis` semantics are still partly outside the binding FR [MINOR]
+Location: §5.2 FR-B.1 lines 484-489; §7 lines 1218-1233; AC-18 lines 1477-1487.
+
+What: v0.2 defines the useful `--max-context-axis` parse rules in §7, but §7 says it is reference-only and "the normative surface is the FRs above." FR-B.1 itself does not say values are absolute caps, sorted ascending, or rejected when below `--target-context`; only AC-18 locks the below-target rejection case.
+
+Why it matters: the main escape hatch now works in tests, but an implementer reading only the binding FR can still choose a different parse/order rule for valid values. This is not a lock blocker because AC-18 catches the highest-risk invalid-cell case, but it leaves the B.1 closure less clean than the change log claims.
+
+Recommendation: Move the §7 parse sentence into FR-B.1: "`--max-context-axis` is a comma-separated list of absolute token caps, sorted ascending after parse, each value MUST be >= `--target-context`; invalid cells fail at flag-parse time with `config_error`."
+
+#### Category R-REGRESSION
+
+(no findings)
+
+Anti-regression spot-checks passed for the unchanged surfaces named in the prompt: FR-A still stops on first feasible and uses input order (lines 394-430); FR-B.2 still uses throughput primary plus TTFT tie-break within `TPS_TIE_EPSILON` (lines 495-511); FR-C still keeps the curated local default list and operator overrides (lines 523-569); FR-E.2 remains an implementation precondition for `--no-join` (lines 725-745); NFR-1/2/3 retain the local, single-provider, reversible tuning posture (lines 1150-1199); NFR-4 still preserves the no-telemetry/no-upload invariant (lines 1201-1214), with the Shape B egress wording gap filed separately as N-D.1; and AC-1 through AC-5, AC-7, AC-8, AC-10, AC-11, AC-13, AC-14, and AC-15 still test the intended v0.1 behavior after the `fallbacks` -> `alternates` edit.
+
+#### Category N-NEWGAPS
+
+##### N-D.1 Shape B pre-warm conflicts with the remaining `models pull`-only wording [MAJOR]
+Location: §5.4 FR-D.1 lines 588-626; §5.8 FR-H.3 lines 1122-1125; §6 NFR-4 lines 1201-1209; §8 AC-8 lines 1352-1357.
+
+What: FR-D.1 now permits Shape B: rely on `ModelRuntime`'s online fallback during load, measure load time separately, and start the first measured request only after weights are warm. FR-H.3 also names "Shape B's online-fallback HTTP failure." But NFR-4 still says autotune performs no network egress except `models pull <id>` to HuggingFace, and AC-8 tests only a mocked `macprovider-cli models pull <id>` failure.
+
+Why it matters: D.1's original failure mode is closed, but the closure leaves two inconsistent implementation contracts. A Shape B implementation would satisfy FR-D.1 yet violate the literal NFR-4 egress exception and would not have a matching pre-warm-failure AC. A Shape A implementation is fine, but v0.2 explicitly says Shape B is permitted, so the spec needs to make the egress and test contract shape-neutral.
+
+Recommendation: Reword NFR-4 to allow "the HuggingFace pre-warm fetch path selected by FR-D.1, whether explicit `models pull` or runtime online fallback" and update AC-8 to run against the implementation's selected pre-warm mechanism. If both shapes remain allowed, AC-8 should have Shape A and Shape B variants or a fixture abstraction that fails the pre-warm step before measurement regardless of mechanism.
+
+##### N-OQ-E.1 Thermal/order threshold lacks a repeat protocol [MINOR]
+Location: §9 OQ-E lines 1550-1567.
+
+What: OQ-E defines a quantitative threshold: reverse-order evaluation producing a different keep-best winner more than 5% of the time. It does not specify the sampling protocol: how many forward/reverse repeats, whether the same cell set is interleaved or blocked, and how the planned air5 n=3 data can estimate a "more than 5%" event rate.
+
+Why it matters: This does not block v1 because OQ-E is explicitly pending data and deterministic order is preserved. It does affect whether the operator can close the OQ without relitigating methodology.
+
+Recommendation: Add one sentence: "Measure by running the same Stage 2 cell set in forward and reverse order for at least N paired runs on air5; compare keep-best winners per pair; if mismatches / pairs > 0.05, v0.3 must add randomization or cooldown."
+
+#### Category O-OTHER
+
+##### O.1 Residual v0.1 / pre-v0.2 wording drift remains in live normative text [MINOR]
+Location: §5.7 FR-G.2 line 1057; §5.8 FR-H.2 lines 1117-1120; §6 NFR-3 line 1191; §7 line 1270.
+
+What: Several live v0.2 sections still carry stale wording: the `tune_runs.spec_version` SQL comment says `'SPEC-013 v0.1'` while FR-F.2 emits `"SPEC-013 v0.2"`; FR-H.2 says `--resume` is "out of scope for v0.1's normative contract" and "v0.1 default behavior"; NFR-3 still names `.bak-<unix-ts>` instead of the new collision-safe `.bak-<unix-ts>-<counter>`; and §7 says "The flag shape MAY change in v0.2" inside the v0.2 draft.
+
+Why it matters: These are not behavioral blockers because the surrounding sections are clear. They do create avoidable audit noise and can mislead implementers copying schema comments or lifecycle prose into tests.
+
+Recommendation: Update the stale comments/prose to v0.2/v1 wording and make NFR-3 reference the exact FR-F.3 backup pattern.
+
+### Lock readiness
+
+**LOCK READY.** Round 2 found no CRITICAL anti-regressions and only one MAJOR new precision gap. Under the prompt's lock-readiness rule, the operator may lock v0.2 or roll a narrow v0.3. I recommend a narrow v0.3 that fixes N-D.1 plus the three MINORs before implementation, because all fixes are localized prose/test-contract edits and do not change the architecture.
+
+### Self-verification
+
+- The new section was appended after the round-1 report; round-1 sections were not edited.
+- All 19 round-1 findings have explicit closure verdicts.
+- Required code spot-checks were performed: `Config.swift`, install artifacts, `ModelRuntime.swift`, and PR #103 `beta/autotune.py`.
+- No d-inference source was inspected.
