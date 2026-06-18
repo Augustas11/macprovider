@@ -366,16 +366,75 @@ actor CoordinatorClient {
         try await receiveLoop(socket)
     }
 
+    // Receive/handle decoupling (provider WS drain fix). Previously this loop
+    // ran `await socket.receive()` then `await handle(message)` serially on the
+    // CoordinatorClient actor. While handle() suspended — drain's
+    // waitUntilDrained (up to drainTimeoutSeconds), warm_up's two state_update
+    // writes, acceptCoordinatorSession's token-persist + state_update, or an
+    // InferenceRelay actor hop — the actor could not re-enter the loop to call
+    // the next receive(). The OS WS read buffer backed up, TCP backpressure made
+    // the coordinator's heartbeat/control writes block and time out (~30-48s),
+    // and the coordinator dropped the session. A constrained provider thus never
+    // held a steady `ready` heartbeat.
+    //
+    // The fix splits receiving from handling across two structured child tasks:
+    //   - the receive task does only `socket.receive()` -> `continuation.yield`
+    //     and loops straight back, so the socket is always drained promptly;
+    //   - one drainer task consumes the stream and calls handle() serially,
+    //     preserving inbound frame ordering (control/heartbeat frames are no
+    //     longer blocked by inference handling, which spawns its own child Task
+    //     in InferenceRelay and returns quickly).
+    // The inbox is .unbounded: AsyncStream.yield never suspends, so it never
+    // re-introduces producer backpressure, and unbounded never drops a control
+    // frame (a bounded buffering policy would silently drop cancel/drain/
+    // inference frames). On any handle() throw (e.g. CoordinatorDrainComplete or
+    // a send failure) the drainer rethrows; the first child to finish ends the
+    // connection and the group cancels its sibling, so the error unwinds to
+    // runReconnectLoop exactly as before.
     private func receiveLoop(_ socket: ProviderWebSocketTask) async throws {
-        while !Task.isCancelled {
-            let message: URLSessionWebSocketTask.Message
+        let (inbox, continuation) = AsyncStream.makeStream(
+            of: URLSessionWebSocketTask.Message.self,
+            bufferingPolicy: .unbounded
+        )
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            // Receive task: keep the socket drained. Captures `socket` and
+            // `continuation` (both Sendable), never `self`, so nothing here
+            // hops onto the actor and stalls the next receive().
+            group.addTask {
+                defer { continuation.finish() }
+                while !Task.isCancelled {
+                    let message: URLSessionWebSocketTask.Message
+                    do {
+                        message = try await socket.receive()
+                    } catch {
+                        Self.keepaliveDebug("ws_receive_error error=\(error)")
+                        throw error
+                    }
+                    continuation.yield(message)
+                }
+            }
+
+            // Drainer task: serial handle() preserves frame ordering. The actor
+            // hop on self.handle is the serialization point and is race-free.
+            group.addTask { [self] in
+                for await message in inbox {
+                    try Task.checkCancellation()
+                    try await handle(message)
+                }
+            }
+
+            // The first child to finish (normal end or throw) ends the
+            // connection; cancel the sibling and unwind. Rethrowing here
+            // carries CoordinatorDrainComplete / receive errors to
+            // runReconnectLoop unchanged.
             do {
-                message = try await socket.receive()
+                try await group.next()
             } catch {
-                Self.keepaliveDebug("ws_receive_error error=\(error)")
+                group.cancelAll()
                 throw error
             }
-            try await handle(message)
+            group.cancelAll()
         }
     }
 
@@ -657,18 +716,58 @@ actor CoordinatorClient {
         try await sendStateUpdate(state: nil, reason: reason)
     }
 
+    // Provider WS keepalive fix. The coordinator advertises heartbeat_interval_s
+    // (typically 30) and we previously slept the FULL interval before the first
+    // keepalive, then on each tick sent a WebSocket control PING followed by a
+    // heartbeat. That kept a constrained provider out of the `ready` pool via a
+    // connect -> i/o-timeout -> disconnect -> reconnect loop, for two reasons
+    // confirmed against the coordinator code:
+    //
+    //   1. A provider->coordinator WS control PING is actively harmful here. The
+    //      coordinator's gobwas reader auto-writes a PONG to the raw conn
+    //      (server.go readClientData / ControlFrameHandler), but the coordinator
+    //      only ever sets the connection write deadline inside its runWriter
+    //      text-frame path (relay.go:106, write_timeout_s=10) and never clears
+    //      it. Once the connection has been idle past that absolute 10s deadline,
+    //      the PONG write fails immediately with "write tcp ... i/o timeout" and
+    //      the coordinator drops the session. So the PING we sent to keep the
+    //      link alive was the very thing triggering the disconnect — which is
+    //      why the drop cadence tracked our ping period.
+    //   2. The coordinator does not count provider control frames as liveness:
+    //      readProviderLoop ignores any non-text frame (server.go:1127) and only
+    //      text frames refresh activity. A PING would not have kept us alive even
+    //      without bug (1).
+    //
+    // The fix: send a heartbeat TEXT frame on a short sub-interval tick and send
+    // no control pings. A text frame routes through the coordinator's runWriter,
+    // which sets a FRESH write deadline before writing, and reaches handleMessage
+    // which refreshes liveness. The tick is capped well under the coordinator's
+    // 10s write deadline (and any proxy idle timeout) so the connection never
+    // sits idle long enough for the stale-deadline write to fire. The since-last
+    // metrics window is still rolled only on the full coordinator interval
+    // (resetWindow), so heartbeat metrics are unchanged from before.
+    private static let keepaliveTickCeilingSeconds = 5
     private func startHeartbeat(intervalSeconds: Int) {
         heartbeatTask?.cancel()
-        Self.keepaliveDebug("heartbeat_start interval_s=\(intervalSeconds)")
+        let tickSeconds = max(1, min(intervalSeconds, Self.keepaliveTickCeilingSeconds))
+        Self.keepaliveDebug("heartbeat_start interval_s=\(intervalSeconds) tick_s=\(tickSeconds)")
         heartbeatTask = Task { [weak self] in
+            var secondsSinceWindowReset = 0
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(intervalSeconds) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: UInt64(tickSeconds) * 1_000_000_000)
                 if Task.isCancelled {
                     return
                 }
+                secondsSinceWindowReset += tickSeconds
+                // Roll the metrics window only on the full coordinator interval;
+                // intermediate ticks are keepalive heartbeats that report the
+                // same accumulating window without resetting it.
+                let rollWindow = secondsSinceWindowReset >= intervalSeconds
+                if rollWindow {
+                    secondsSinceWindowReset = 0
+                }
                 do {
-                    try await self?.sendWebSocketPing()
-                    try await self?.sendHeartbeat()
+                    try await self?.sendHeartbeat(resetWindow: rollWindow)
                 } catch {
                     Self.keepaliveDebug("keepalive_send_error error=\(error)")
                     await self?.closeWebSocketAfterKeepaliveFailure()
@@ -676,12 +775,6 @@ actor CoordinatorClient {
                 }
             }
         }
-    }
-
-    private func sendWebSocketPing() async throws {
-        guard let webSocket else { throw CancellationError() }
-        try await webSocket.sendPing()
-        Self.keepaliveDebug("ws_ping")
     }
 
     private func closeWebSocketAfterKeepaliveFailure() {
@@ -779,8 +872,13 @@ actor CoordinatorClient {
         await providerStatus.setState(.ready)
     }
 
-    private func sendHeartbeat() async throws {
-        let snapshot = await providerStatus.snapshot(resetWindow: true)
+    // resetWindow=true rolls the since-last metrics window (the coordinator-
+    // interval heartbeat). Intermediate keepalive heartbeats (sent on the short
+    // sub-interval tick to keep the connection alive) pass resetWindow=false so
+    // the since-last window stays aligned to the full coordinator interval and
+    // metrics are unchanged from the prior single-heartbeat-per-interval cadence.
+    private func sendHeartbeat(resetWindow: Bool = true) async throws {
+        let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         var payload: [String: Any] = [
             "type": "heartbeat",
             "status": snapshot.status.rawValue,

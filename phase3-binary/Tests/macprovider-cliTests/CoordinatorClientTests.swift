@@ -240,7 +240,13 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertNil(capturedRequest, "delegate must call completion with nil to refuse the redirect")
     }
 
-    func testCoordinatorSessionSendsWebSocketPingBeforeHeartbeat() async throws {
+    // Keepalive sends a heartbeat TEXT frame on the sub-interval tick and sends
+    // NO WebSocket control ping. A provider->coordinator control PING triggers
+    // the coordinator's auto-PONG write onto a stale (never-cleared) write
+    // deadline, which fails with i/o timeout and drops the session; control
+    // frames also do not count as liveness on the coordinator. So keepalive must
+    // be a text heartbeat, never a ping. See startHeartbeat doc-comment.
+    func testCoordinatorSessionKeepaliveSendsHeartbeatTextFrameAndNoPing() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
@@ -274,8 +280,11 @@ final class CoordinatorClientTests: XCTestCase {
         } catch is CancellationError {
         }
 
-        XCTAssertGreaterThanOrEqual(socket.pingCountSnapshot(), 1)
+        // A heartbeat text frame is emitted on the keepalive tick (interval 1s,
+        // tick capped at <= interval, fires inside the 1.2s receive window)...
         XCTAssertTrue(socket.sentFrames().contains { $0["type"] as? String == "heartbeat" })
+        // ...and no WebSocket control ping is ever sent.
+        XCTAssertEqual(socket.pingCountSnapshot(), 0)
     }
 
     func testHelloIncludesModelHashWhenAvailable() async throws {
