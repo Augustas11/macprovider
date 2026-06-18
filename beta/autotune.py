@@ -63,6 +63,7 @@ import argparse
 import html
 import signal
 import sqlite3
+import statistics
 import subprocess
 import sys
 import time
@@ -143,6 +144,10 @@ _ADDITIVE_TUNE_COLUMNS = (
     ("kv_bits", "INTEGER"),
     ("max_context_cap", "INTEGER"),
     ("max_batch", "INTEGER"),
+    # Number of replicate requests fired per trial (default 1 = original
+    # single-shot behavior). Median tps/ttft are recorded in
+    # agg_throughput_tps / ttft_p95_ms so existing reports keep working.
+    ("replicates_n", "INTEGER"),
 )
 
 
@@ -167,11 +172,11 @@ def write_trial_row(conn: sqlite3.Connection, row: dict) -> None:
         """INSERT INTO tune_trials
                (ts_utc, run_id, model, target_context, measured_prompt_tokens,
                 max_tokens, agg_throughput_tps, ttft_p95_ms, fits, n_err, kept, notes,
-                kv_bits, max_context_cap, max_batch)
+                kv_bits, max_context_cap, max_batch, replicates_n)
            VALUES
                (:ts_utc, :run_id, :model, :target_context, :measured_prompt_tokens,
                 :max_tokens, :agg_throughput_tps, :ttft_p95_ms, :fits, :n_err, :kept, :notes,
-                :kv_bits, :max_context_cap, :max_batch)""",
+                :kv_bits, :max_context_cap, :max_batch, :replicates_n)""",
         row,
     )
     conn.commit()
@@ -300,6 +305,7 @@ def evaluate_candidate(
     kv_bits: int | None = None,
     max_context_cap: int | None = None,
     max_batch: int | None = None,
+    replicates: int = 1,
 ) -> dict[str, Any]:
     """Start provider for `model` (with the optional serving knobs applied),
     fire a workload at `context`, stop provider.
@@ -337,36 +343,96 @@ def evaluate_candidate(
                 "notes": full_note[:480],
             }
 
-        # Provider is up. Fire one streamed request at the target context.
+        # Provider is up. Fire `replicates` streamed requests against the same
+        # loaded provider; aggregate by MEDIAN (robust to single-trial flakes
+        # like a momentary swap pressure spike). When --replicates=1 this is
+        # identical to the original single-shot behavior; when >1 the cell is
+        # treated as feasible only if EVERY replicate is feasible — strict, as
+        # befits a recipe meant to be applied as a recommendation.
         body = build_padded_prompt(context, max_tokens)
-        wall_t0 = time.monotonic()
-        result = fire_stream(chat_url, model, body, request_timeout)
-        wall_seconds = time.monotonic() - wall_t0
+        per_replicate: list[tuple[dict, dict]] = []  # (agg, result)
+        for _ in range(max(1, replicates)):
+            wall_t0 = time.monotonic()
+            result = fire_stream(chat_url, model, body, request_timeout)
+            wall_seconds = time.monotonic() - wall_t0
+            cell = {"wall_seconds": wall_seconds, "results": [result]}
+            agg = aggregate_cell(cell, gate_ttft_ms)
+            per_replicate.append((agg, result))
 
-        # Reuse sweep.aggregate_cell with a single-result "cell". It computes
-        # agg_throughput_tps (completion tokens / wall), ttft_p95, n_err, and a
-        # feasibility flag (n_err==0 AND ttft within gate AND no stop-token leak).
-        cell = {"wall_seconds": wall_seconds, "results": [result]}
-        agg = aggregate_cell(cell, gate_ttft_ms)
+        tps_values = [a["agg_throughput_tps"] for a, _ in per_replicate
+                      if a["agg_throughput_tps"] is not None]
+        ttft_values = [a["ttft_p95_ms"] for a, _ in per_replicate
+                       if a["ttft_p95_ms"] is not None]
+        all_feasible = all(a["feasible"] for a, _ in per_replicate)
+        total_n_err = sum(a["n_err"] for a, _ in per_replicate)
 
-        notes = None
-        if agg["n_err"]:
-            err = result.get("error") or f"HTTP {result.get('http_status')}"
-            notes = f"request error: {str(err)[:200]}"
-        elif not agg["feasible"]:
-            notes = f"missed gate: ttft_p95={agg['ttft_p95_ms']}ms > {gate_ttft_ms}ms"
+        median_tps = statistics.median(tps_values) if tps_values else None
+        median_ttft = statistics.median(ttft_values) if ttft_values else None
+        # measured_prompt_tokens is a property of the prompt + tokenizer, not
+        # of the load; take the first non-null value across replicates.
+        measured_prompt_tokens = next(
+            (a["measured_prompt_tokens"] for a, _ in per_replicate
+             if a["measured_prompt_tokens"] is not None),
+            None,
+        )
+
+        # Build notes from any errors / gate-misses across the replicates.
+        # Dedupe up to 3 distinct messages, then cap total length.
+        notes: str | None = None
+        err_msgs: list[str] = []
+        for a, r in per_replicate:
+            if a["n_err"]:
+                err = r.get("error") or f"HTTP {r.get('http_status')}"
+                err_msgs.append(f"err: {str(err)[:120]}")
+            elif not a["feasible"]:
+                err_msgs.append(f"missed gate ttft={a['ttft_p95_ms']:.0f}ms")
+        if err_msgs:
+            uniq = list(dict.fromkeys(err_msgs))[:3]
+            notes = (" | ".join(uniq))[:240]
 
         return {
-            "fits": int(agg["feasible"]),
-            "n_err": agg["n_err"],
-            "agg_throughput_tps": agg["agg_throughput_tps"],
-            "ttft_p95_ms": agg["ttft_p95_ms"],
-            "measured_prompt_tokens": agg["measured_prompt_tokens"],
+            "fits": int(all_feasible),
+            "n_err": total_n_err,
+            "agg_throughput_tps": median_tps,
+            "ttft_p95_ms": median_ttft,
+            "measured_prompt_tokens": measured_prompt_tokens,
             "notes": notes,
         }
     finally:
         # INVARIANT: stop the provider before returning, always.
         stop_provider(port)
+
+
+# Throughput tie band for the keep-best decision. Two trials whose tps differ
+# by no more than this fraction of the current best are treated as a tie and
+# decided by TTFT (lower is better). 2% absorbs the per-trial measurement
+# noise we observed in the air5 24-trial run without falsely declaring
+# materially-different configs equivalent.
+TPS_TIE_EPSILON = 0.02
+
+
+def _is_new_best(tps: float | None, ttft: float | None, best: dict | None) -> bool:
+    """Decide whether the current trial should replace `best`.
+
+    Throughput is the primary criterion; TTFT is the tiebreaker inside the
+    TPS_TIE_EPSILON band. None tps means "not measurable" -> never a new best.
+    """
+    if tps is None:
+        return False
+    if best is None:
+        return True
+    best_tps = best.get("tps") or 0.0
+    if best_tps <= 0:
+        return tps > 0
+    rel_gap = (tps - best_tps) / best_tps
+    if rel_gap > TPS_TIE_EPSILON:
+        return True
+    if abs(rel_gap) <= TPS_TIE_EPSILON:
+        # Effectively tied throughput; decide by TTFT (lower is better).
+        best_ttft = best.get("ttft")
+        if ttft is not None and (best_ttft is None or ttft < best_ttft):
+            return True
+    return False
 
 
 def _knob_tag(kv_bits: int | None, max_context_cap: int | None, max_batch: int | None) -> str:
@@ -684,6 +750,15 @@ def main() -> int:
         help="Comma-separated max-batch values (e.g. '1,2') to hill-climb over. "
              "Forwarded to `macprovider-cli serve --max-batch N`. Default is 1.",
     )
+    ap.add_argument(
+        "--replicates", type=int, default=1,
+        help="Number of requests to fire against EACH loaded candidate (default 1). "
+             "When >1 the cell's recorded tps/ttft are the MEDIAN across replicates and "
+             "the cell is feasible only if EVERY replicate is feasible. Use 3+ when "
+             "publishing a recipe — single-trial measurements can drift 10–15%% just "
+             "from background CPU/GPU contention. Provider is loaded once per cell and "
+             "reused across its replicates (no extra model-load cost).",
+    )
     ap.add_argument("--verbose", "-v", action="store_true")
     args = ap.parse_args()
 
@@ -737,7 +812,8 @@ def main() -> int:
     print("autotune: provider-side model hill-climb (keep/revert)")
     print(f"autotune: provider_bin={args.provider_bin}")
     print(f"autotune: port={args.port}  max_tokens={args.max_tokens}  "
-          f"ready_timeout={args.ready_timeout:.0f}s  gate_ttft={args.gate_ttft_ms:.0f}ms")
+          f"ready_timeout={args.ready_timeout:.0f}s  gate_ttft={args.gate_ttft_ms:.0f}ms  "
+          f"replicates={args.replicates}")
     print(f"autotune: models = {models}")
     print(f"autotune: contexts = {contexts}")
     if knobs_active:
@@ -815,16 +891,23 @@ def main() -> int:
                 kv_bits=kv_bits,
                 max_context_cap=max_context_cap,
                 max_batch=max_batch,
+                replicates=args.replicates,
             )
 
             fits = metrics["fits"]
             tps = metrics["agg_throughput_tps"]
 
             # --- keep / revert decision ---
+            # Tiebreak on TTFT when throughputs are within TPS_TIE_EPSILON
+            # (default 2% relative). Without this, two trials posting the same
+            # tok/s but different TTFT would let the EARLIER trial win even if
+            # the later one is operationally-better. Air5 showed this exactly:
+            # 1B kv=8 mb=1 (10.9 tps, 3.8s ttft) was kept over 1B kv=8 mb=2
+            # (10.9 tps, 3.0s ttft) — the kept config had the worse TTFT.
             kept = 0
             verdict = ""
             if fits and tps is not None:
-                if best is None or tps > best["tps"]:
+                if _is_new_best(tps, metrics["ttft_p95_ms"], best):
                     kept = 1
                     best = {
                         "model": model, "context": context, "tps": tps,
@@ -860,6 +943,7 @@ def main() -> int:
                 "kv_bits": kv_bits,
                 "max_context_cap": max_context_cap,
                 "max_batch": max_batch,
+                "replicates_n": args.replicates,
             }
             write_trial_row(conn, row)
 
