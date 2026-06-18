@@ -1448,4 +1448,37 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   loader output strings.</p>
 </div>
 </section>
+<section id="spec013-autotune-step7"><h2>SPEC-013 autotune Step 7 - Stage 1 feasibility iteration</h2>
+<div class="entry">
+  <time>2026-06-18</time>
+  <ul>
+    <li>Added dormant <code>Stage1Iterator</code> and <code>Stage1Prober</code>.
+    The iterator consumes the candidate list exactly as supplied and never
+    sorts or re-ranks internally; it stops on the first candidate whose
+    Stage 1 probe passes, preserving FR-A.1 / AC-17 operator order.</li>
+    <li>Stage 1 composition now follows the Step 6 Shape B lifecycle:
+    pre-warm with <code>ProviderPreWarmer</code>, abort immediately on
+    integrity-class failures with
+    <code>pre_warm_integrity_failure</code>, record transient pre-warm
+    failures as infeasible trial rows, then start a fresh provider for
+    measurement after the warm-cache readiness phase.</li>
+    <li><code>Stage1Prober</code> starts a fresh
+    <code>CandidateProviderRunner</code>, waits for readiness, fires
+    streamed <code>/v1/chat/completions</code> requests with a deterministic
+    padded prompt sized to about 80 percent of target context, measures
+    time-to-first-content-delta from SSE <code>data:</code> lines, checks
+    p95 TTFT against <code>gate-ttft-ms</code>, rejects common stop-token
+    leaks, and records provider exits as infeasible.</li>
+    <li>Stage 1 trial persistence uses the existing
+    <code>AutotuneTrialRow</code> and <code>AutotuneDB.insertTrial</code>
+    path with <code>stage=1</code>. This step does not insert
+    <code>tune_runs</code>; Step 10 still owns full runtime wiring and the
+    final run-row write.</li>
+    <li>Added focused tests for first-feasible stop behavior, transient
+    pre-warm advancement, integrity abort, all-infeasible smallest-candidate
+    reason surfacing, the critical AC-17 operator-order lock, stop-token leak
+    detection, and TTFT gate misses.</li>
+  </ul>
+</div>
+</section>
 </body></html>
