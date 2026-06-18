@@ -30,6 +30,12 @@ public struct AppConfig: Equatable, Sendable {
     public var logFile: String?
     public var maxContextOverride: Int?
     public var maxConcurrencyOverride: Int?
+    // SPEC-013 (autoresearch serving knobs): KV-cache quantization bits
+    // forwarded to mlx-swift `GenerateParameters.kvBits`. nil ⇒ no
+    // quantization (mlx-swift default). Triple-exposed: yaml key
+    // `kv_bits`, env `MACPROVIDER_KV_BITS`, CLI `--kv-bits`. Validated
+    // to be 4 or 8 (the values mlx-swift accepts) at serve preflight.
+    public var kvBitsOverride: Int?
     public var drainTimeoutSeconds: Int
     public var warmupEnabled: Bool
     public var maxRequestBodyBytes: Int
@@ -68,6 +74,7 @@ public struct AppConfig: Equatable, Sendable {
             logFile: nil,
             maxContextOverride: nil,
             maxConcurrencyOverride: nil,
+            kvBitsOverride: nil,
             drainTimeoutSeconds: 30,
             warmupEnabled: true,
             maxRequestBodyBytes: 10 * 1024 * 1024,
@@ -98,6 +105,11 @@ public struct CLIOverrides: Equatable, Sendable {
     public var ctlSocketPath: String?
     public var switchStatePath: String?
     public var providerToken: String?
+    // SPEC-013 autoresearch serving knobs. nil ⇒ defer to env / YAML /
+    // built-in default (the latter mirrors prior single-slot behavior).
+    public var kvBits: Int?
+    public var maxContext: Int?
+    public var maxBatch: Int?
 
     public init(
         port: Int? = nil,
@@ -113,7 +125,10 @@ public struct CLIOverrides: Equatable, Sendable {
         swapDrainTimeoutSeconds: Int? = nil,
         ctlSocketPath: String? = nil,
         switchStatePath: String? = nil,
-        providerToken: String? = nil
+        providerToken: String? = nil,
+        kvBits: Int? = nil,
+        maxContext: Int? = nil,
+        maxBatch: Int? = nil
     ) {
         self.port = port
         self.model = model
@@ -129,6 +144,9 @@ public struct CLIOverrides: Equatable, Sendable {
         self.ctlSocketPath = ctlSocketPath
         self.switchStatePath = switchStatePath
         self.providerToken = providerToken
+        self.kvBits = kvBits
+        self.maxContext = maxContext
+        self.maxBatch = maxBatch
     }
 }
 
@@ -220,6 +238,7 @@ public enum ConfigLoader {
         try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
         try assign(&config.maxContextOverride, from: dict, key: "max_context_override", expected: "integer")
         try assign(&config.maxConcurrencyOverride, from: dict, key: "max_concurrency_override", expected: "integer")
+        try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
         try assign(&config.warmupEnabled, from: dict, key: "warmup_enabled", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: dict, key: "max_request_body_bytes", expected: "integer")
@@ -251,6 +270,7 @@ public enum ConfigLoader {
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
         try assign(&config.maxContextOverride, from: environment, env: "MACPROVIDER_MAX_CONTEXT_OVERRIDE", expected: "integer")
         try assign(&config.maxConcurrencyOverride, from: environment, env: "MACPROVIDER_MAX_CONCURRENCY_OVERRIDE", expected: "integer")
+        try assign(&config.kvBitsOverride, from: environment, env: "MACPROVIDER_KV_BITS", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: environment, env: "MACPROVIDER_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.warmupEnabled, from: environment, env: "MACPROVIDER_WARMUP_ENABLED", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: environment, env: "MACPROVIDER_MAX_REQUEST_BODY_BYTES", expected: "integer")
@@ -308,6 +328,15 @@ public enum ConfigLoader {
         }
         if let providerToken = cli.providerToken {
             config.providerToken = providerToken
+        }
+        if let kvBits = cli.kvBits {
+            config.kvBitsOverride = kvBits
+        }
+        if let maxContext = cli.maxContext {
+            config.maxContextOverride = maxContext
+        }
+        if let maxBatch = cli.maxBatch {
+            config.maxConcurrencyOverride = maxBatch
         }
         return config
     }

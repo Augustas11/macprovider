@@ -53,7 +53,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private let stopTokenFilter: StopTokenFilter
     private var currentModelHash: String?
     private let maxContextTokens: Int
-    private let inferenceGate = AsyncSemaphore(value: 1)
+    // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
+    // quantization (mlx-swift default). maxBatch defaults to 1, the
+    // pre-knob behavior; lifting above 1 widens the autotune search.
+    private let kvBitsOverride: Int?
+    private let inferenceGate: AsyncSemaphore
+    private let maxBatch: Int
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     private var providerStatus: ProviderStatus?
@@ -79,11 +84,16 @@ actor ModelRuntime: ModelRuntimeServing {
     init(
         modelID: String?,
         maxContextTokensOverride: Int? = nil,
+        kvBitsOverride: Int? = nil,
+        maxBatch: Int = 1,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30
     ) async throws {
         self.currentModelID = modelID
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
+        self.kvBitsOverride = kvBitsOverride
+        self.maxBatch = max(1, maxBatch)
+        self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.loader = { targetModelID in
@@ -121,6 +131,8 @@ actor ModelRuntime: ModelRuntimeServing {
         modelID: String?,
         modelHash: String? = nil,
         maxContextTokensOverride: Int? = nil,
+        kvBitsOverride: Int? = nil,
+        maxBatch: Int = 1,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
@@ -133,6 +145,9 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentModelHash = modelHash
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
+        self.kvBitsOverride = kvBitsOverride
+        self.maxBatch = max(1, maxBatch)
+        self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
@@ -202,6 +217,20 @@ actor ModelRuntime: ModelRuntimeServing {
 
     nonisolated func swapDrainTimeoutForTest() -> Int {
         swapDrainTimeoutSeconds
+    }
+
+    // SPEC-013 autoresearch serving knobs: test-only accessors so test
+    // suites can confirm CLI flag values reached the runtime.
+    func kvBitsOverrideForTest() -> Int? {
+        kvBitsOverride
+    }
+
+    func maxBatchForTest() -> Int {
+        maxBatch
+    }
+
+    func maxContextTokensForTest() -> Int {
+        maxContextTokens
     }
 
     private func transitionToLoading(target: String) throws {
@@ -346,6 +375,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
+        let kvBitsOverride = kvBitsOverride
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         return try await Self.withDrainCancellation(drainCancelled) {
@@ -360,6 +390,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
                         maxTokens: request.maxTokens,
+                        maxKVSize: maxContextTokens,
+                        kvBits: kvBitsOverride,
                         temperature: Float(request.temperature),
                         topP: Float(request.topP)
                     )
@@ -418,6 +450,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
+        let kvBitsOverride = kvBitsOverride
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         return try await Self.withDrainCancellation(drainCancelled) {
@@ -432,6 +465,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
                         maxTokens: request.maxTokens,
+                        maxKVSize: maxContextTokens,
+                        kvBits: kvBitsOverride,
                         temperature: Float(request.temperature),
                         topP: Float(request.topP)
                     )
@@ -531,7 +566,7 @@ actor ModelRuntime: ModelRuntimeServing {
         return LLMModelFactory.shared.configuration(id: modelID)
     }
 
-    private static func validatePromptTokenCount(_ promptTokens: Int, maxContextTokens: Int) throws {
+    static func validatePromptTokenCount(_ promptTokens: Int, maxContextTokens: Int) throws {
         guard promptTokens <= maxContextTokens else {
             throw APIError(
                 status: 413,
