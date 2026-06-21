@@ -38,12 +38,13 @@ coordinator URL.
 
 ## Phase status
 
-- **Phase 1A (this PR):** scaffold, AUTH-3 fail-CLOSED loader, AUTH-1
+- **Phase 1A:** scaffold, AUTH-3 fail-CLOSED loader, AUTH-1
   sign-in, AUTH-2 401/403/404 identical copy, stale-config guard,
   Surface A (Machine: header strip, counters row, needs-attention).
-- **Phase 1B (not yet implemented):** Surface B (Setup & Updates +
-  GitHub Releases feed with CORS/rate-limit fail-loud). Sidebar items
-  for Setup, Earn, Monitoring, and Identity currently render a
-  one-line "Coming in Phase 1B/1C" stub so navigation works end-to-end.
-- **Phase 1C (not yet implemented):** Surfaces C/D/E + sidebar polish
-  + `check-bundle.sh` build-time grep guard.
+- **Phase 1B:** Surface B (Setup & Updates: requirements grid,
+  RAM-to-model sizing card, numbered setup steps, GitHub Releases
+  feed with rate-limit + CORS fail-loud).
+- **Phase 1C (not yet implemented):** Surfaces C (Earn) / D
+  (Monitoring placeholder) / E (Identity) + `check-bundle.sh`
+  build-time grep guard. Sidebar items for Earn, Monitoring, and
+  Identity render a one-line "Coming in Phase 1C" stub.

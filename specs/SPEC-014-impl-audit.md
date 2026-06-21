@@ -124,3 +124,30 @@ Status: CLOSED
 
 (no findings)
 
+---
+
+# Phase 1B audit — round 2 closure verification
+
+**Audited:** working tree on branch feat/spec-014-provider-portal (uncommitted)
+**Auditor model:** Codex / GPT-5
+**Audit round:** Phase 1B, round 2 of N
+**Date:** 2026-06-21
+**Round 1 findings status:** C.4 CLOSED, H.1 CLOSED
+**New findings:** 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 MINOR / 0 QUESTION
+**Phase 1B readiness:** READY TO COMMIT
+
+## C.4 closure
+
+Status: CLOSED
+
+Step 3 now cites only `SPEC-013 §6 / NFR-4`, with no `SPEC-003 §6.2` suffix. Step 1 still cites `SPEC-003 §4 / FR-C2`, and Step 2 still cites `SPEC-003 §4 / FR-C4 (per SPEC-003 §6.2)`; SPEC-003 §6.2 was rechecked and does not list `autotune`.
+
+## H.1 closure
+
+Status: CLOSED
+
+The Phase 1B `.snippet code` rule and `.release-card pre.rel-body` rule now both use `background:var(--bg)`. A diff-only hex-literal sweep over Phase 1B CSS additions returned no matches, so the closure edits did not introduce any new raw hex literal in the added Phase 1B CSS.
+
+## New findings (round 2)
+
+(no findings)

@@ -252,6 +252,39 @@
     .unavail-card p { color:var(--muted); font-size:13px; line-height:1.6; }
     .unavail-card code { background:#0a0b0e; border:1px solid var(--border2); padding:2px 6px; border-radius:4px; font-size:12px; color:var(--text); }
 
+    /* Surface B */
+    .section { margin-bottom:22px; }
+    .section-h { font-size:13px; color:var(--muted); margin:0 0 10px 0; text-transform:uppercase; letter-spacing:.5px; font-weight:500; }
+    .section-sub { font-size:12px; color:var(--muted); margin:0 0 12px 0; }
+    .grid-4 { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); }
+    .req-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+    .req-card .req-lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+    .req-card .req-val { font-size:14px; }
+    .sizing-card { background:var(--surface); border:1px solid var(--border2); border-radius:10px; padding:16px 18px; border-left:2px solid var(--accent); }
+    .sizing-card table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+    .sizing-card th, .sizing-card td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
+    .sizing-card th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.4px; }
+    .sizing-card .hint-foot { font-size:12px; color:var(--muted); margin-top:10px; }
+    .step-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+    .step-card + .step-card { margin-top:10px; }
+    .step-card .step-h { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+    .step-card .step-num { background:var(--accent-dim); color:var(--text); border-radius:50%; width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; }
+    .step-card .step-title { font-size:14px; font-weight:600; }
+    .step-card .step-body { font-size:13px; color:var(--muted); margin:4px 0 8px 0; line-height:1.5; }
+    .step-card .step-cite { font-size:11px; color:var(--hint); margin-top:6px; }
+    .snippet { display:flex; align-items:center; gap:8px; }
+    .snippet code { flex:1; background:var(--bg); border:1px solid var(--border2); padding:7px 10px; border-radius:6px; font-size:12px; overflow-x:auto; white-space:nowrap; }
+    .release-list { display:flex; flex-direction:column; gap:10px; }
+    .release-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+    .release-card .rel-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .release-card .rel-tag { font-size:13px; }
+    .release-card .rel-date { font-size:12px; color:var(--muted); }
+    .release-card .rel-spacer { flex:1; }
+    .release-card details { margin-top:8px; }
+    .release-card summary { font-size:12px; color:var(--muted); cursor:pointer; user-select:none; }
+    .release-card pre.rel-body { white-space:pre-wrap; word-break:break-word; max-height:200px; overflow:auto; background:var(--bg); border:1px solid var(--border2); border-radius:6px; padding:10px; font-size:12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin:8px 0; }
+    .release-card .rel-cta { margin-top:8px; }
+
     /* Mobile */
     @media (max-width: 720px) {
       .shell { flex-direction:column; }
@@ -295,6 +328,10 @@
       return "/providers/" + encodeURIComponent(providerId) + "/earnings";
     }
 
+    var RELEASES_HOST = "https://api.github.com";
+    var RELEASES_TTL_MS = 5 * 60 * 1000;
+    var RELEASES_MAX_ENTRIES = 12;
+
     /* =====================================================================
      * State container
      * ===================================================================== */
@@ -312,6 +349,7 @@
       copyEcho: null,
       configError: null,
       flagFalse: false,
+      releases: { list: null, ts: 0, err: null, inflight: false, rateLimited: false },
     };
 
     var timers = {
@@ -533,6 +571,59 @@
     }
 
     /* =====================================================================
+     * GitHub Releases feed (§4.2 B.3, §5.1 table (a), §5.4 thresholds)
+     *
+     * Cross-origin to api.github.com. The bundle never reads the
+     * browser-suppressed CORS allow-origin response header as
+     * application data — a successful, readable fetch IS the CORS
+     * confirmation. Fail-loud on rate-limit
+     * (X-RateLimit-Remaining: 0) and on fetch() rejection.
+     * ===================================================================== */
+    function releasesFetch() {
+      if (!state.cfg) return Promise.resolve();
+      if (state.releases.inflight) return Promise.resolve();
+      if (state.releases.list && (Date.now() - state.releases.ts) < RELEASES_TTL_MS) {
+        return Promise.resolve();
+      }
+      state.releases.inflight = true;
+      render();
+      var url = RELEASES_HOST + "/repos/" + state.cfg.releases_repo_owner_name + "/releases";
+      return fetch(url, { cache: "no-store" })
+        .then(function (resp) {
+          var remaining = null;
+          try { remaining = resp.headers.get("X-RateLimit-Remaining"); } catch (_) {}
+          if (remaining === "0") {
+            state.releases.rateLimited = true;
+            state.releases.err = "GitHub API rate limit reached — release feed paused; refresh later.";
+            return null;
+          }
+          state.releases.rateLimited = false;
+          if (!resp.ok) {
+            state.releases.err = "HTTP " + resp.status + " from GitHub Releases.";
+            return null;
+          }
+          return resp.json().then(function (arr) {
+            if (!Array.isArray(arr)) {
+              state.releases.err = "Unexpected GitHub Releases response shape.";
+              return;
+            }
+            state.releases.list = arr;
+            state.releases.ts = Date.now();
+            state.releases.err = null;
+          }).catch(function () {
+            state.releases.err = "Malformed JSON from GitHub Releases.";
+          });
+        })
+        .catch(function () {
+          state.releases.err = "GitHub Releases unavailable — release feed disabled; see SPEC-014 Open Q2.";
+        })
+        .then(function () {
+          state.releases.inflight = false;
+          render();
+        });
+    }
+
+    /* =====================================================================
      * Auth rejection handling (§2.2 + §2.3 stale-config guard)
      * ===================================================================== */
     function handleAuthRejection(status, surface) {
@@ -582,6 +673,7 @@
       state.session = null;
       state.pool = { data: null, ts: 0, err: null, inflight: false };
       state.earn = { data: null, ts: 0, err: null, inflight: false };
+      state.releases = { list: null, ts: 0, err: null, inflight: false, rateLimited: false };
       state.authFailBySurface = {};
       state.proxyMissing = false;
       state.signinErr = null;
@@ -799,7 +891,7 @@
       if (state.route === "machine") {
         pane.appendChild(renderMachine());
       } else if (state.route === "setup") {
-        pane.appendChild(renderStub("Phase 1B", "Setup & Updates"));
+        pane.appendChild(renderSetup());
       } else if (state.route === "earn") {
         pane.appendChild(renderStub("Phase 1C", "Earn"));
       } else if (state.route === "monitoring") {
@@ -834,6 +926,8 @@
             render();
             if (it.id === "machine") {
               earnFetch("machine");
+            } else if (it.id === "setup") {
+              releasesFetch();
             }
           },
         }, it.label);
@@ -864,6 +958,164 @@
         el("h1", { class: "surface-title" }, title),
         el("div", { class: "panel" },
           el("p", null, "Coming in ", phaseLabel, ".")));
+    }
+
+    function snippetNode(text, key) {
+      var codeEl = el("code", { class: "mono" }, text);
+      var copied = state.copyEcho === key;
+      var btn = el("button", {
+        class: "copy-btn",
+        onclick: function () { copyText(text, key); },
+      }, copied ? "Copied" : "Copy");
+      return el("div", { class: "snippet" }, codeEl, btn);
+    }
+
+    /* ---- Surface B — Setup & Updates ---- */
+    function renderSetup() {
+      var wrap = el("div", null);
+      wrap.appendChild(el("h1", { class: "surface-title" }, "Setup & Updates"));
+      wrap.appendChild(renderRequirementsGrid());
+      wrap.appendChild(renderSizingCard());
+      wrap.appendChild(renderSetupSteps());
+      wrap.appendChild(renderReleasesFeed());
+      return wrap;
+    }
+
+    function renderRequirementsGrid() {
+      var rows = [
+        { lbl: "Hardware", val: "Apple Silicon Mac (M1, M2, M3, M4)" },
+        { lbl: "OS",       val: "macOS 14 (Sonoma) or later" },
+        { lbl: "Disk",     val: "~4-8 GB free disk space" },
+        { lbl: "Network",  val: "Internet connection" },
+      ];
+      var cards = rows.map(function (r) {
+        return el("div", { class: "req-card" },
+          el("div", { class: "req-lbl" }, r.lbl),
+          el("div", { class: "req-val" }, r.val));
+      });
+      return el("div", { class: "section" },
+        el("h2", { class: "section-h" }, "Requirements"),
+        el("p", { class: "section-sub" }, "SPEC-003 §5 / FR-D1."),
+        el("div", { class: "grid-4" }, cards));
+    }
+
+    function renderSizingCard() {
+      var rows = [
+        ["8 GB",   "Llama 3.2 3B",                  "Llama 3.2 3B"],
+        ["16 GB",  "Llama 3.2 3B / Qwen 2.5 7B",    "Qwen 2.5 7B"],
+        ["24 GB+", "+ Qwen 2.5 14B",                "Qwen 2.5 14B"],
+      ];
+      var thead = el("thead", null,
+        el("tr", null,
+          el("th", null, "RAM"),
+          el("th", null, "Recommended model"),
+          el("th", null, "Default")));
+      var tbody = el("tbody", null,
+        rows.map(function (r) {
+          return el("tr", null,
+            el("td", null, r[0]),
+            el("td", null, r[1]),
+            el("td", null, r[2]));
+        }));
+      return el("div", { class: "section" },
+        el("h2", { class: "section-h" }, "RAM-to-model sizing"),
+        el("p", { class: "section-sub" }, "SPEC-003 §5 / FR-D2 + FR-D2.1."),
+        el("div", { class: "sizing-card" },
+          el("table", null, thead, tbody),
+          el("div", { class: "hint-foot" }, "FR-D2 is a recommendation, not a hard requirement.")));
+    }
+
+    function renderSetupSteps() {
+      var steps = [
+        {
+          n: 1,
+          title: "Install",
+          body: "Run the install script once per Mac. The script writes the binary, the LaunchAgent, and the default config under ~/.config/macprovider/.",
+          snip: "curl -fsSL https://get.streamvc.live/install.sh | bash",
+          key: "step1-install",
+          cite: "SPEC-003 §4 / FR-C2.",
+        },
+        {
+          n: 2,
+          title: "Verify routable",
+          body: "Inspect local provider state — provider_id, tier, last admission. Run this after install and any time the Machine surface here shows offline.",
+          snip: "macprovider-cli status",
+          key: "step2-status",
+          cite: "SPEC-003 §4 / FR-C4 (per SPEC-003 §6.2).",
+        },
+        {
+          n: 3,
+          title: "(Optional) Autotune",
+          body: "Run before serving to pick conservative kv-bits / context / batch values. The portal does not render any autotune output — SPEC-013 §6 / NFR-4 forbids non-HF egress during autotune.",
+          snip: "macprovider-cli autotune",
+          key: "step3-autotune",
+          cite: "SPEC-013 §6 / NFR-4.",
+        },
+      ];
+      var cards = steps.map(function (s) {
+        return el("div", { class: "step-card" },
+          el("div", { class: "step-h" },
+            el("span", { class: "step-num" }, String(s.n)),
+            el("span", { class: "step-title" }, s.title)),
+          el("div", { class: "step-body" }, s.body),
+          snippetNode(s.snip, s.key),
+          el("div", { class: "step-cite" }, s.cite));
+      });
+      return el("div", { class: "section" },
+        el("h2", { class: "section-h" }, "Setup steps"),
+        cards);
+    }
+
+    function renderReleasesFeed() {
+      var owner = state.cfg.releases_repo_owner_name;
+      var section = el("div", { class: "section" },
+        el("h2", { class: "section-h" }, "Releases — " + owner),
+        el("p", { class: "section-sub" },
+          "GitHub Releases for ",
+          el("code", { class: "mono" }, owner),
+          ". Cached in memory for 5 minutes."));
+      if (state.releases.err) {
+        section.appendChild(el("div", { class: "banner bad" }, state.releases.err));
+      }
+      var hasList = state.releases.list && state.releases.list.length;
+      if (!hasList && state.releases.inflight) {
+        section.appendChild(el("div", { class: "panel" },
+          el("p", null, "Loading releases…")));
+      } else if (!hasList && !state.releases.err) {
+        section.appendChild(el("div", { class: "panel" },
+          el("p", null, "No releases yet.")));
+      } else if (hasList) {
+        var list = el("div", { class: "release-list" });
+        var entries = state.releases.list.slice(0, RELEASES_MAX_ENTRIES);
+        entries.forEach(function (r) { list.appendChild(renderReleaseCard(r)); });
+        section.appendChild(list);
+      }
+      return section;
+    }
+
+    function renderReleaseCard(r) {
+      var tag = (r && (r.tag_name || r.name)) ? (r.tag_name || r.name) : "(untagged)";
+      var date = "";
+      if (r && typeof r.published_at === "string" && r.published_at.length >= 10) {
+        date = r.published_at.slice(0, 10);
+      }
+      var body = (r && typeof r.body === "string") ? r.body : "";
+      var cardKids = [
+        el("div", { class: "rel-head" },
+          el("span", { class: "rel-tag mono" }, tag),
+          el("span", { class: "rel-spacer" }),
+          date ? el("span", { class: "rel-date" }, date) : null),
+      ];
+      if (body) {
+        cardKids.push(el("details", null,
+          el("summary", null, "Release notes"),
+          el("pre", { class: "rel-body mono" }, body)));
+      }
+      var updateCmd = "macprovider-cli update";
+      cardKids.push(el("div", { class: "rel-cta" },
+        snippetNode(updateCmd, "rel-update-" + tag)));
+      cardKids.push(el("div", { class: "step-cite" }, "SPEC-003 §4 / FR-C3 (per §6.2)."));
+      return el("div", { class: "release-card" }, cardKids);
     }
 
     /* ---- Surface A — Machine ---- */
