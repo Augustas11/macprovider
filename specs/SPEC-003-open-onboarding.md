@@ -1,7 +1,9 @@
 # SPEC-003 — Open Onboarding: Distribution, Lifecycle & Onboarding UX
 
-**Version:** 0.9.2 (2026-06-12, FR-C9.4 composed contract + fix-pass-5 audit closure on top of v0.9.1 installer hardening)
-**Depends on:** SPEC-001 v1.3.1, SPEC-002 v1.3.5
+**Version:** 0.10 (2026-06-21, FR-C10 — pair_ot minting policy on provisional admission, SPEC-014 v0.2 upstream amendment)
+**Depends on:** SPEC-001 v1.5, SPEC-002 v1.3.5
+
+**Change log v0.10:** Adds **FR-C10**, the coordinator-side emission policy for SPEC-001 v1.5's `pair_ot` / `claim_url` and ownership-status wire surfaces. The amendment exists because the downstream SPEC-014 v0.2 GitHub-auth design identified a protocol-owner split: SPEC-001 owns the field and frame shape, SPEC-003 owns the open-onboarding coordinator mint policy, and SPEC-014 consumes both through its portal and bind flows. The SPEC-014 round-1 A.1 audit found that putting this policy in the GitHub-auth spec would cross the spec boundary, so FR-C10 is written as the sibling of FR-C9's existing `assigned_provider_token` mint contract rather than as a downstream-only implementation note. L-1 baseline preservation is explicit: deployments with `GITHUB_OAUTH_ENABLED=false` or unset MUST NOT emit `pair_ot`, `claim_url`, `ownership_event`, or `needs_claim`; the additive SPEC-001 v1.5 wire fields exist but remain absent on the wire unless the deployment opts into the new surfaces. FR-C10 keeps FR-C9 unchanged and piggybacks only on the same admission that minted a fresh `assigned_provider_token`. Dual-path delivery follows FR-C9's v1/v2 discipline: if the gate passes, the coordinator fills the optional fields defined by SPEC-001 v1.5 §6.5.1 for v1 `hello_ack` or §6.7.2.1 for proof-stage-accepted v2 `auth_response`. Ownership change and migration hints use SPEC-001 v1.5 §6.12 (`ownership_event` / `ownership_status`) and §6.5.2 (`needs_claim`) without redefining those wire shapes.
 
 **Change log v0.9.2:** Merge-time composition of two independent SPEC-003 lines that landed concurrently. v0.9.1 (PR #67 main) shipped installer-side hardenings to FR-D2.1. v0.8.4 (PR #69 branch, see below) shipped the composed FR-C9.4 contract + fix-pass-5 audit closure. v0.9.2 is the union: the v0.9.1 FR-D2.1 changes are unchanged (no FR-C9 overlap), and the v0.8.4 FR-C9.4 contract is normative as written. The composed v0.9.2 contract adds three storage/pool primitives from fix-pass-5: `auth.Store.ValidateAndMarkTokenUsed` (atomic UPDATE-RETURNING closing the ValidateToken+MarkTokenUsed TOCTOU window), `pool.AuthMintFailed` enum (transient IssueToken DB-error → fail-closed RejectTOFU), and extended `pool.Registry.Register` eviction defense (non-Bearer-validated incoming MUST NOT replace existing routable Bearer-validated session). DECISION_CRITERIA Entry 76 captures the composition reasoning; Entries 74 (was 69, was 67), 75 (was 70, was 68) trace the renumber history through two merge cycles. Pearl operational state unchanged.
 
@@ -633,6 +635,76 @@ Old binaries that cannot parse `assigned_provider_token` will silently drop the 
 
 **FR-C9.6. install.sh is NOT modified.**
 The bootstrap pipe `curl https://get.streamvc.live/install.sh | bash` continues to write a tokenless `config.yaml`. Token acquisition happens automatically on the first WS connect after install. This preserves the single-shell-pipe UX that the open-onboarding tier exists to provide; gating provisional token issuance on operator action would re-create the very approval bottleneck Q2 was about removing.
+
+**FR-C10. `pair_ot` minting policy on provisional admission.**
+
+On every WS connect that the coordinator admits through the FR-C9 self-mint path (the same connect that mints a fresh `assigned_provider_token`), the coordinator MUST additionally evaluate the FR-C10 emission gate. The gate has three conjunctive conditions:
+
+1. **The deployment opts into the GitHub-ownership surfaces.** The coordinator process environment variable `GITHUB_OAUTH_ENABLED` is exactly `"true"`. When the variable is `"false"` or unset, FR-C10 MUST NOT emit `pair_ot`, `claim_url`, `ownership_event`, or `needs_claim`, regardless of any other condition. This preserves the L-1 baseline for operators who do not deploy the downstream portal consumer.
+2. **The connecting `provider_id` has no GitHub-bound ownership record.** The coordinator's ownership store has zero `provider_ownership` rows for the connecting `provider_id`. v0.10 treats any row as owned; a future operator-unlink amendment may define revocation semantics, but FR-C10 does not invent them. The ownership anti-check, FR-C9 provider-token insert, and `pair_ots` insert MUST be one commit-or-rollback transactional decision so the coordinator cannot mint pairing material against stale ownership state.
+3. **This is the same connect that minted a fresh `assigned_provider_token` per FR-C9.1/FR-C9.2.** FR-C10 piggybacks on the FR-C9 mint event. The coordinator MUST NOT emit `pair_ot` on a reconnect that did not mint a fresh provider token, including reconnects by already-tokened providers. The post-first-connect refresh path is HTTP `POST /v1/install/pair/refresh`; FR-C10 does not add or imply a binary-to-coordinator WS refresh request.
+
+When all three conditions hold, the coordinator MUST:
+
+- Generate a fresh `pair_ot` value: 32 bytes from a cryptographically secure random source, encoded as lowercase hex. Store it in the `pair_ots` table with `expires_at = now + 600 seconds` and `used_at = NULL`. The `pair_ot` is not a provider, buyer, browser, or operator credential; it authorizes only one downstream ownership-bind attempt through authenticated routes.
+- Compute `claim_url` as the literal `<PORTAL_BASE_URL>/claim?ot=<pair_ot>`, using the coordinator startup config value `PORTAL_BASE_URL`. If `PORTAL_BASE_URL` is unset or invalid while `GITHUB_OAUTH_ENABLED=true`, the coordinator MUST fail closed at startup; the FR-C10 ack emission path may rely on the parsed value being valid.
+- Emit the pairing material on the ack frame by populating the fields whose wire placement is defined by SPEC-001 v1.5 §6.5.1 for v1 `hello_ack` or SPEC-001 v1.5 §6.7.2.1 for proof-stage-accepted v2 `auth_response`, following the same dual-path discipline as FR-C9.2's `assigned_provider_token`.
+
+When any of the three conditions fails, the coordinator MUST NOT emit `pair_ot` or `claim_url` on the ack. The ack frame is otherwise unchanged from FR-C9's emission: `assigned_provider_token` may still be emitted when FR-C9 minted it, and all pre-v0.10 fields retain their existing semantics.
+
+**FR-C10.1. `ownership_event {event: "bound"}` emission.**
+
+After a successful `POST /v1/auth/me/providers/bind` transaction commits, the coordinator MUST emit an `ownership_event` server-pushed frame to the connected provider's WS session for the bound `provider_id` within 5 seconds of commit. The frame's wire shape is defined by SPEC-001 v1.5 §6.12, and the event value for this flow is `event: "bound"`.
+
+If the provider's WS session is offline at bind time, the coordinator SHOULD enqueue the event in a provider-ID-keyed outbox for best-effort delivery on the next reconnect. The queued notification is not security-critical and MAY be discarded by an implementation-defined retention policy; the persisted local claim URL path owned by the downstream consumer remains the eventually consistent fallback for a Mac that was offline at bind time.
+
+`event: "unbound"` is RESERVED for a later operator-unlink flow. FR-C10.1 does NOT require emitting `event: "unbound"` in the v0.10 timeframe.
+
+**FR-C10.2. `needs_claim: true` migration signal.**
+
+On each WS admission where all of the following hold, the coordinator MUST emit `needs_claim: true` on the next periodic ownership status frame for that WS session, using the status carrier defined by SPEC-001 v1.5 §6.5.2 and §6.12:
+
+1. `GITHUB_OAUTH_ENABLED` is exactly `"true"`.
+2. The connecting `provider_id` has a non-revoked provider-token row under the existing FR-C9 / SPEC-002 token store.
+3. The ownership store has zero `provider_ownership` rows for that `provider_id`.
+
+The coordinator MAY emit `needs_claim: true` exactly once per WS session and MAY omit the field on subsequent status frames. The coordinator MUST NOT emit `needs_claim: true` after it has sent `ownership_event {event: "bound"}` for the same `provider_id` in the same coordinator process lifetime. If `GITHUB_OAUTH_ENABLED` is `"false"` or unset, the coordinator MUST NOT emit `needs_claim` under any condition.
+
+**FR-C10.3. Storage primitives.**
+
+Coordinator implementations MUST add the following primitives to `auth.Store` or an equivalent coordinator-owned storage layer. These primitives extend the same coordinator-side storage boundary that already owns provider-token validation and minting; they do not expose a buyer or browser API surface.
+
+```go
+MintAdmissionTokenAndPairOT(ctx context.Context, providerID, providerName string) (providerToken string, pairOT string, pairOTExpiresAt time.Time, err error)
+MintPairOT(ctx context.Context, providerID string) (token string, expiresAt time.Time, err error)
+BurnPairOT(ctx context.Context, token string) (providerID string, err error)
+HasOwnership(ctx context.Context, providerID string) (bool, error)
+```
+
+- `MintAdmissionTokenAndPairOT` is the WS-admission primitive used by FR-C10. It MUST perform the FR-C9 provider-token insert, the ownership anti-check, and the `pair_ots` insert in one database transaction. If the ownership anti-check finds a `provider_ownership` row, the operation MUST roll back and return an `ErrOwnershipExists`-class result without minting `providerToken` or `pairOT`; the caller treats this as an FR-C10 gate miss and continues the plain FR-C9 provider-token mint/admission path without pairing fields. If the `pair_ots` insert fails, the operation MUST roll back the compound transaction so the caller can fall back to a plain FR-C9 provider-token mint/admission without leaving a half-created pair-OT decision. Implementations MAY satisfy this with an explicit transaction wrapper rather than this exact function name, but the single-transaction semantics are mandatory.
+- `MintPairOT` atomically inserts one row into `pair_ots` for the given `providerID`, with a fresh CSPRNG token and `expires_at = now + 600 seconds`. The token MUST be single-use; `used_at` starts as `NULL`.
+- `BurnPairOT` performs the burn-first conditional update for a single token and returns the bound `providerID` on success. If no unexpired, unused row matches, it returns a distinct `ErrPairOTInvalid`-class error. The HTTP route and session behavior that consume this primitive are downstream concerns and are not republished here.
+- `HasOwnership` returns true when a `provider_ownership` row exists for the supplied `providerID`.
+
+These primitives are coordinator-side internal API. They MUST NOT be exposed on any HTTP route directly and MUST NOT be reachable from buyer or browser code except through the downstream consumer's authenticated routes.
+
+**FR-C10.4. Failure modes and back-pressure.**
+
+If the FR-C10 pair-OT half of the compound mint fails (DB error, disk full, entropy failure, config invariant violation, or any equivalent storage failure), the coordinator MUST fall back to the plain FR-C9 provider-token mint/admission path, admit the WS connect without `pair_ot` or `claim_url` on the ack, and log the failure at WARN level with `provider_id` and a redacted cause. This deliberately degrades to "the user can claim later through the HTTP refresh path" rather than rejecting an otherwise valid open-onboarding connect.
+
+Rate limiting of WS-path `pair_ot` mints is out of scope for FR-C10 because the FR-C9 connect admission path already bounds first-tokenless admissions. HTTP refresh-path rate limits are owned by the downstream consumer and are not duplicated here.
+
+**FR-C10.5. Test obligations.**
+
+Coordinator implementations MUST cover at minimum:
+
+- First tokenless admission emits `pair_ot` and `claim_url` when `GITHUB_OAUTH_ENABLED=true`, FR-C9 minted `assigned_provider_token`, and no ownership row exists.
+- A bind/ownership creation racing first-tokenless admission yields either a committed ownership row with no `pair_ot` mint or a committed admission compound mint before ownership exists; it MUST NOT commit a provider-token insert and then mint `pair_ot` after ownership becomes true.
+- The same admission with `GITHUB_OAUTH_ENABLED=false` or unset emits neither `pair_ot` nor `claim_url` and emits no ownership frames.
+- Reconnect of an already-tokened provider with no `provider_ownership` row emits `needs_claim: true` once per WS session and does not emit `pair_ot` or `claim_url` on the ack.
+- Reconnect of a bound provider emits neither `pair_ot` nor `needs_claim`.
+- FR-C10 pair-OT mint failure falls back to plain FR-C9 admission, admits the WS connect without the pairing ack fields, and logs a warning.
+- `ownership_event {event: "bound"}` is delivered within 5 seconds of bind commit to a connected provider; when the provider is offline and the implementation supports the provider-ID-keyed outbox, queued delivery on next reconnect is best-effort and may fall back to the persisted local claim URL path.
 
 ---
 
