@@ -97,3 +97,30 @@ Recommendation: Preserve the per-surface auth-failure counter across auth-reject
 - Phase 1C work (Surfaces C/D/E, `check-bundle.sh`).
 - d-inference internals (clean-room).
 - Operator nginx / DNS / Pearl VPS deployment topology (Open Q7).
+
+---
+
+# Round 2 — closure verification
+
+**Audited:** working tree on branch feat/spec-014-portal-phase-1a (uncommitted)
+**Auditor model:** Codex / GPT-5
+**Audit round:** Phase 1A, round 2 of N
+**Date:** 2026-06-21
+**Round 1 findings status:** A.2 CLOSED, C.4 CLOSED
+**New findings:** 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 MINOR / 0 QUESTION
+**Phase 1A readiness:** READY TO COMMIT
+
+## A.2 closure
+Status: CLOSED
+
+`validateConfig()` now treats any `require_provider_tokens !== true` value as flag-false at index.html line ~411, and `loadConfig()` no longer stores that branch in `state.configError`, so the dedicated unavailable page is reachable. The unavailable copy cites SPEC-002 FR-P12 and SPEC-005 §11.5 at index.html line ~746, and an in-memory fetch-spy check confirmed `false`, `"true"`, `1`, and `null` make only `/portal-config.json` with no `/v1/pool/check`, earnings, or GitHub calls.
+
+## C.4 closure
+Status: CLOSED
+
+`submitSignIn()` no longer resets `state.authFailBySurface`, while successful authenticated 2xx responses reset the relevant surface counter and `signOut()` clears it explicitly at index.html line ~453 and line ~580. A two-retry harness confirmed the first 403 shows only the identical sign-in rejection copy, and the second consecutive 403 on the same surface also renders `signinMisconfigNotice`.
+
+## New findings (round 2)
+
+(no findings)
+
