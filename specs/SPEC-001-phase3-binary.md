@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.4 (2026-06-12, custom model selection — installer + `models browse` + fit guard)
+**Version:** 1.5 (2026-06-21, additive pair_ot + claim_url ack fields + ownership_event frame + needs_claim signal for SPEC-014 v0.2 downstream consumer)
 **Revision:** v1.3.1 adds the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,26 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.5:**
+- **v1.5 (2026-06-21, pair_ot / claim_url wire additions):** Adds
+  backwards-compatible coordinator-to-binary wire surfaces needed by the
+  SPEC-014 v0.2 GitHub-account binding flow. First, `hello_ack` may carry
+  optional `pair_ot` and `claim_url` fields alongside the
+  `assigned_provider_token` placement established by SPEC-003 FR-C9.3.
+  Second, a proof-stage-accepted v2 `auth_response` may carry the same two
+  optional fields, while challenge and rejection-shaped auth frames remain
+  ineligible for usable pairing material. Third, the server-push channel
+  gains `ownership_event` and `ownership_status` server-push frames, with
+  `needs_claim` carried by `ownership_status`. This amendment
+  exists because the SPEC-014 v0.2 round-1 A.1 audit found that those
+  WebSocket field shapes belong in SPEC-001, the protocol owner, rather
+  than in the downstream GitHub-auth consumer spec. L-1 baseline preservation is explicit: a v1.4
+  binary or coordinator that omits these fields is byte-identical to current
+  behavior, and v1.5 readers MUST treat absent fields as "no pairing signal."
+  SPEC-001 v1.5 defines wire shape only. The emission policy for when the
+  coordinator chooses to include the new fields is owned by the separate
+  SPEC-003 v0.10 FR-C10 amendment.
 
 **Change log v1.4:**
 - **v1.4 (2026-06-12, custom model selection):** Closes architect MAJOR-1 from the parallel codex audit on the installer-custom-model PR series (PRs #67/#70/#72): the previously implicit "user picks any MLX model that fits" surface is now normative.
@@ -1237,6 +1257,50 @@ SHOULD log a warning: "A newer version is available (vX.Y.Z). Run
 'macprovider-cli update' to upgrade." The coordinator does NOT enforce
 the version — providers running older binaries continue to function.
 
+#### 6.5.1. `pair_ot` and `claim_url` on `hello_ack` (NEW in v1.5)
+
+`hello_ack` MAY include two optional GitHub-claim pairing fields in the
+same ack object as `assigned_provider_token` from SPEC-003 FR-C9.3:
+
+```json
+{
+  "type": "hello_ack",
+  "coordinator_version": 1,
+  "assigned_id": "provider-pool-id",
+  "heartbeat_interval_s": 30,
+  "tier": "provisional",
+  "recommended_binary_version": "1.5.0",
+  "assigned_provider_token": "<64-hex-token>",
+  "pair_ot": "<opaque-token>",
+  "claim_url": "https://portal.example/claim?ot=<opaque-token>"
+}
+```
+
+| Field | JSON type | Required | Encoding / meaning |
+|---|---|---|---|
+| `pair_ot` | string | No | Opaque pairing token matching `^[A-Za-z0-9_\-]{1,256}$`. It is not a provider credential and conveys only the ability to attempt a provider-ownership bind in a downstream auth flow. |
+| `claim_url` | string | No | HTTPS URL of the form `https://<portal-host>/claim?ot=<pair_ot>`. The `ot` query value MUST be the same opaque token carried in `pair_ot`. |
+
+The reference coordinator wire struct is the existing `HelloAck` in
+`phase4-coordinator/internal/ws/messages.go`, with the additive Go fields:
+
+```go
+PairOT   string `json:"pair_ot,omitempty"`
+ClaimURL string `json:"claim_url,omitempty"`
+```
+
+Both fields are OPTIONAL and use `omitempty` semantics. Absence means
+"no pairing material on this ack" and MUST be treated identically to
+SPEC-001 v1.4 behavior. The coordinator-side emission policy is defined
+by SPEC-003 v0.10 FR-C10; SPEC-001 v1.5 defines only the field names,
+types, encodings, and compatibility obligations.
+
+Compatibility: pre-v1.5 Swift binaries ignore unknown `hello_ack` keys
+under the same `Codable` / `decodeIfPresent` discipline used for
+SPEC-003 FR-C9.3's `assigned_provider_token`. A v1.5 binary connected
+to a v1.4 coordinator sees absent optionals and behaves exactly as it
+does today.
+
 #### Capacity heartbeat (P->C) — sent every `heartbeat_interval_s`
 ```json
 {
@@ -1260,6 +1324,40 @@ Static fields (`model_id`, `model_params_b`, `ram_gb`, `max_context_tokens`,
 `max_concurrency`) are repeated in every heartbeat so the coordinator can
 re-establish state after a coordinator restart without requiring a new
 handshake.
+
+#### 6.5.2. `needs_claim` coordinator status signal (NEW in v1.5)
+
+`needs_claim` is an optional coordinator-to-provider boolean status
+signal carried by the §6.12 `ownership_status` frame. It is C->P only;
+the provider-to-coordinator capacity heartbeat above MUST NOT carry
+`needs_claim`.
+
+```json
+{
+  "type": "ownership_status",
+  "provider_id": "p_01HK4Z3VYE...",
+  "needs_claim": true
+}
+```
+
+| Field | JSON type | Required | Default when absent | Meaning |
+|---|---|---|---|---|
+| `needs_claim` | boolean | No | `false` | A coordinator-to-binary status signal that this connected provider should surface a user claim / ownership-binding action. |
+
+SPEC-001 v1.5 owns this carrier placement: `needs_claim` is an
+`ownership_status` field, not a provider heartbeat field and not a
+binary-to-coordinator request. SPEC-003 v0.10 FR-C10 owns only the
+emission policy: when the coordinator sends the status frame, whether it
+is one-shot per WebSocket session, and when it must be suppressed after
+a successful ownership event.
+
+This field does not add any binary-to-coordinator request field, and
+SPEC-001 v1.5 does not define a WebSocket refresh request for pairing
+tokens. Compatibility: pre-v1.5 binaries ignore the unknown key on a
+recognized C->P frame or handle an unknown C->P frame per §6.5
+`nak code=unknown_message_type`. A v1.5 binary MUST treat an absent
+`needs_claim` field as `false`, preserving SPEC-001 v1.4 behavior
+byte-for-byte when the coordinator omits the field.
 
 #### State update (P->C) — sent on state change, independent of heartbeat
 ```json
@@ -1774,6 +1872,45 @@ R-6.7.6 If the binary re-sends `supported_models[]` or
 be byte-identical to the initial-stage values per SPEC-010 v1.5
 R-3.1.10.
 
+#### 6.7.2.1. `pair_ot` and `claim_url` on accepted `auth_response` (NEW in v1.5)
+
+The v2 proof-stage-accepted `auth_response` MAY include the same optional
+pairing fields defined for `hello_ack` in §6.5.1:
+
+```json
+{
+  "type": "auth_response",
+  "accepted": true,
+  "assigned_provider_token": "<64-hex-token>",
+  "pair_ot": "<opaque-token>",
+  "claim_url": "https://portal.example/claim?ot=<opaque-token>"
+}
+```
+
+| Field | JSON type | Required | Encoding / meaning |
+|---|---|---|---|
+| `pair_ot` | string | No | Opaque pairing token matching `^[A-Za-z0-9_\-]{1,256}$`. |
+| `claim_url` | string | No | HTTPS URL of the form `https://<portal-host>/claim?ot=<pair_ot>`. |
+
+The reference coordinator wire struct is the existing `AuthResponse` in
+`phase4-coordinator/internal/ws/messages.go`, with the additive Go fields:
+
+```go
+PairOT   string `json:"pair_ot,omitempty"`
+ClaimURL string `json:"claim_url,omitempty"`
+```
+
+These fields are valid only on proof-stage-accepted `auth_response`
+frames. They MUST NOT appear on `auth_challenge` frames or on
+rejection-shaped `auth_response` frames; a rejected handshake carrying
+usable pairing material is a protocol violation. The coordinator-side
+conditions for including the fields on an accepted response are defined
+by SPEC-003 v0.10 FR-C10.
+
+Compatibility matches §6.5.1: pre-v1.5 Swift binaries ignore unknown
+accepted-response keys, and v1.5 binaries treat absent fields from a v1.4
+coordinator as empty optionals with no behavior change.
+
 #### 6.7.3. Two opt-ins, four matrix cells
 
 R-6.7.7 The binary MUST treat SPEC-010 catalog publication and
@@ -2004,6 +2141,81 @@ SPEC-011 v0.5 R-3.1.4 and R-3.1.3 references are unchanged at the
 SPEC-011 layer.
 
 ---
+
+### 6.12. Ownership server-pushed frames (NEW in v1.5)
+
+SPEC-001 v1.5 defines two coordinator-to-provider ownership frames on
+the existing server-push WebSocket channel used by §6.5 coordinator
+commands and status coordination. `ownership_event` reports a concrete
+ownership metadata change. `ownership_status` reports current ownership
+status hints that do not themselves represent a completed ownership
+change.
+
+#### 6.12.1. `ownership_event`
+
+`ownership_event` is a coordinator-to-provider frame on the existing
+server-push WebSocket channel used by §6.5 coordinator commands and
+status coordination. It notifies a connected binary that ownership
+metadata for its `provider_id` changed in the coordinator.
+
+```json
+{
+  "type": "ownership_event",
+  "provider_id": "p_01HK4Z3VYE...",
+  "github_login": "octocat",
+  "event": "bound"
+}
+```
+
+| Field | JSON type | Required | Description |
+|---|---|---|---|
+| `type` | string | Yes | Exactly `"ownership_event"`. |
+| `provider_id` | string | Yes | Provider identifier whose ownership metadata changed. |
+| `github_login` | string | Yes | GitHub login associated with the ownership change. |
+| `event` | string | Yes | `"bound"` or `"unbound"`. |
+
+`event: "bound"` is the v1.5 value consumed by the current downstream
+GitHub-auth flow. `event: "unbound"` is reserved for a post-v1.5
+operator-unlink flow; v1.5 binaries that receive `"unbound"` SHOULD log
+the event and otherwise ignore it unless a later spec defines local
+cleanup behavior. The coordinator-side conditions for emitting each
+variant are defined by SPEC-003 v0.10 FR-C10; SPEC-001 v1.5 defines the
+frame shape only.
+
+Forward compatibility: a pre-v1.5 binary that does not decode
+`ownership_event` SHOULD handle it as an unknown coordinator message
+using the existing §6.5 `nak code=unknown_message_type` extensibility
+path while continuing to heartbeat and serve traffic.
+
+#### 6.12.2. `ownership_status`
+
+`ownership_status` is a coordinator-to-provider status frame for
+ownership-related hints that are not ownership changes. It carries the
+`needs_claim` signal defined in §6.5.2.
+
+```json
+{
+  "type": "ownership_status",
+  "provider_id": "p_01HK4Z3VYE...",
+  "needs_claim": true
+}
+```
+
+| Field | JSON type | Required | Description |
+|---|---|---|---|
+| `type` | string | Yes | Exactly `"ownership_status"`. |
+| `provider_id` | string | Yes | Provider identifier whose ownership status is described. |
+| `needs_claim` | boolean | No | Optional claim-needed hint. Absent means `false`; see §6.5.2. |
+
+`ownership_status` MUST NOT carry `github_login` because it does not
+assert a GitHub owner. The coordinator-side conditions for emitting this
+frame are defined by SPEC-003 v0.10 FR-C10; SPEC-001 v1.5 defines the
+frame shape only.
+
+Forward compatibility: a pre-v1.5 binary that does not decode
+`ownership_status` SHOULD handle it as an unknown coordinator message
+using the existing §6.5 `nak code=unknown_message_type` extensibility
+path while continuing to heartbeat and serve traffic.
 
 ### 6.13. `models switch` RAM fit guard (NEW in v1.4)
 
