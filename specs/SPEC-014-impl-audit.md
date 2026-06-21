@@ -151,3 +151,114 @@ The Phase 1B `.snippet code` rule and `.release-card pre.rel-body` rule now both
 ## New findings (round 2)
 
 (no findings)
+
+---
+
+# Phase 1C audit — round 1
+
+**Audited:** working tree on branch feat/spec-014-provider-portal (uncommitted Phase 1C)
+**Auditor model:** Codex / GPT-5
+**Audit round:** Phase 1C, round 1 of N
+**Date:** 2026-06-21
+**Total findings:** 0 CRITICAL / 0 HIGH / 1 MEDIUM / 0 MINOR / 0 QUESTION
+**Phase 1C readiness:** FIX REQUIRED
+**check-bundle.sh status:** FAILS
+**Single-PR readiness:** BLOCKED
+
+---
+
+## Executive summary
+
+Phase 1C's portal surfaces are aligned with the locked SPEC-014 v0.8 contract. Surface C renders only the three aggregate credit cards plus the literal fiat-rail-deferred card; Surface D is a single static placeholder and adds no surface-triggered fetch or remote-loading element; Surface E renders only `provider_id`, tier, state, and coordinator base URL, with hardware/runtime and rotation/removal called out as deferred. Sidebar polish is also intact: Earn navigation warms the earnings cache with surface key `"earn"`, API Docs has both `noopener` and `noreferrer`, mobile close behavior remains wired, and sign-out clears pool, earn, releases, auth-failure state, and timers.
+
+The only blocker is in `check-bundle.sh` self-protection. The script functionally exits 0 on the current bundle, exits 1 on a temp bundle containing `/poolz`, and exits 2 when `index.html` is missing. However, its own comments and failure messages contain literal `operator-key` / `operator_key` strings that match the required `operator[_-]?key` grep under a reasonable external scanner. That is a MEDIUM build-guard contract miss, not a portal runtime privacy leak.
+
+Static verification evidence collected: `frontdoor/provider-portal/check-bundle.sh` printed `check-bundle: OK`; synthetic temp-script checks returned exit 1 for `/poolz` and exit 2 for missing `index.html`; targeted greps found no browser storage, no operator-keyed routes in `index.html`, no multi-machine copy, no fiat withdrawal UX, no `Access-Control-Allow-Origin`, no external `<script src>`, stylesheet link, `<img>`, or `<iframe>`; extracted inline JS passed `node --check`.
+
+## Category A: Surface C — Earn
+
+(no findings)
+
+## Category B: Surface D — Monitoring
+
+(no findings)
+
+## Category C: Surface E — Identity
+
+(no findings)
+
+## Category D: Sidebar polish
+
+(no findings)
+
+## Category E: check-bundle.sh
+
+### E.5  Guard script self-matches the operator-key pattern   MEDIUM
+Location: check-bundle.sh line 5-50
+
+The build guard correctly splits the operator route literals (`"/po""olz"`, `"/adm""in/blacklist"`, etc.) and splits the runtime regex assignment as `op_key_pat="oper""ator[_-]?key"`. But the script's own comments and failure messages still contain literal strings that match the same required external grep pattern:
+
+- `operator-key` in comments and the route failure message.
+- `operator_key` in the comment and operator-key failure message.
+
+Evidence: `grep -Eni 'operator[_-]?key|/poolz|/admin/blacklist|/admin/provisional|/admin/promote|/admin/reject|/admin/ledger|your fleet|your machines|across machines|all machines|N machines|N/M|x3|machine grid' frontdoor/provider-portal/check-bundle.sh` matched lines 5, 13, 29, 30, 41, 46, and 50. This violates the Phase 1C audit requirement that the script's own source must not contain a literal that would match its own grep when an external tool scans the script file.
+
+The current bundle scan still works: the script printed `check-bundle: OK` on the current `index.html`, returned exit 1 on a temp `index.html` containing `/poolz`, and returned exit 2 when run from a temp directory without `index.html`. The miss is self-protection under external guard scans, so MEDIUM matches the audit severity definition.
+
+Recommendation: split or reword every script-source occurrence that matches `operator[_-]?key`, including comments and echo text, while preserving the emitted `FAIL [8(b)]: ...` semantics.
+
+## Category F: Phase 1A + 1B regression check
+
+(no findings)
+
+## Category G: Privacy ACs (§8(d))
+
+(no findings)
+
+The only buyer-shaped text match in `index.html` is the required Surface D placeholder bullet naming the future privacy-redaction policy gap for buyer prompts, completions, identity, API keys, and IPs. It is not a rendered buyer field or data source.
+
+## Category H: DOM hygiene + bundle hygiene + grep guards
+
+(no findings)
+
+## Category I: README + deploy quality
+
+(no findings)
+
+## Category O: Anything else
+
+(no findings)
+
+## Out of scope
+
+- Spec edits (SPEC-014 / SPEC-005 / SPEC-002 LOCKED).
+- v0.2 work (Surface D real cards; C.3/C.4; E rotation; A.1 update pill; notification opt-ins).
+- d-inference internals.
+- Operator deployment topology (Q7).
+- The `.github/workflows/` CI YAML — operator follow-up after squash-merge.
+
+---
+
+# Phase 1C audit — round 2 closure verification
+
+**Audited:** working tree on branch feat/spec-014-provider-portal (uncommitted)
+**Auditor model:** Codex / GPT-5
+**Audit round:** Phase 1C, round 2 of N
+**Date:** 2026-06-21
+**Round 1 findings status:** E.5 CLOSED
+**New findings:** 0 CRITICAL / 0 HIGH / 0 MEDIUM / 0 MINOR / 0 QUESTION
+**Phase 1C readiness:** READY TO COMMIT
+**check-bundle.sh status:** PASSES
+**Single-PR readiness:** READY TO OPEN PR
+
+## Closed findings
+
+### E.5  Guard script self-matches the operator-key pattern   CLOSED
+
+The self-protection fix closes E.5. The exact external source scan now returns no matches for `operator[_-]?key`, the privileged route literals, or the AC 8(f) multi-machine strings in `frontdoor/provider-portal/check-bundle.sh`; the same combined scan over `index.html` and `check-bundle.sh` also returns no matches.
+
+Behavior is unchanged where required: `./frontdoor/provider-portal/check-bundle.sh` prints `check-bundle: OK` and exits 0 on the current bundle; a temp bundle containing `/poolz` exits 1 and prints `FAIL [8(b)]: bundle references privileged-key route: /poolz`; and a temp script directory with no `index.html` exits 2 with the missing-bundle message. A synthetic coverage loop also confirmed exit 1 for every BUILD prompt constraint-6 prohibited string: all six privileged routes, both `operator-key` / `operator_key` spellings, and all eight AC 8(f) multi-machine strings.
+
+## New findings
+
+(no findings)
