@@ -1,0 +1,5 @@
+{
+  "coordinator_base_url": "https://coordinator.streamvc.live",
+  "releases_repo_owner_name": "Augustas11/macprovider",
+  "require_provider_tokens": true
+}

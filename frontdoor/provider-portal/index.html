@@ -1,0 +1,1028 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MacProvider — Provider Portal</title>
+  <style>
+    :root {
+      --bg:#0c0d10;
+      --sb:#111316;
+      --surface:#16181d;
+      --border:#252830;
+      --border2:#323743;
+      --text:#e1e3e8;
+      --muted:#878d99;
+      --hint:#4a5060;
+      --accent:#7c6af6;
+      --accent-dim:rgba(124,106,246,.14);
+      --ok:#22c55e;
+      --warn:#f59e0b;
+      --bad:#ef4444;
+      color-scheme:dark;
+    }
+    * { box-sizing:border-box; }
+    html, body { margin:0; padding:0; background:var(--bg); color:var(--text); height:100%; }
+    body {
+      font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+      -webkit-font-smoothing:antialiased;
+    }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color:var(--accent); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    button { font:inherit; color:inherit; cursor:pointer; }
+
+    /* App shell */
+    .shell { display:flex; min-height:100vh; }
+    .sidebar {
+      width:220px; flex:0 0 220px;
+      background:var(--sb);
+      border-right:1px solid var(--border);
+      display:flex; flex-direction:column;
+      padding:18px 0;
+    }
+    .brand {
+      padding:0 18px 14px 18px;
+      font-weight:600; letter-spacing:.2px;
+      border-bottom:1px solid var(--border);
+      margin-bottom:10px;
+    }
+    .brand .brand-sub { display:block; color:var(--muted); font-weight:400; font-size:12px; margin-top:2px; }
+    .nav { display:flex; flex-direction:column; gap:2px; padding:6px 8px; }
+    .nav-item {
+      display:block; width:100%; text-align:left;
+      background:transparent; border:0;
+      color:var(--text); padding:8px 12px; border-radius:6px;
+      font-size:13px;
+    }
+    .nav-item:hover { background:var(--accent-dim); }
+    .nav-item.active { background:var(--accent-dim); color:var(--text); border-left:2px solid var(--accent); padding-left:10px; }
+    .nav-spacer { flex:1; }
+    .nav-footer {
+      padding:10px 12px; border-top:1px solid var(--border);
+      display:flex; flex-direction:column; gap:6px; font-size:13px;
+    }
+    .nav-footer a, .nav-footer button { color:var(--muted); }
+    .nav-footer button {
+      background:transparent; border:0; padding:6px 0; text-align:left;
+    }
+    .nav-footer button:hover { color:var(--text); }
+
+    .main {
+      flex:1; display:flex; flex-direction:column;
+      min-width:0;
+    }
+    .topbar {
+      padding:14px 24px; border-bottom:1px solid var(--border);
+      display:none;
+      align-items:center; gap:12px;
+      background:var(--sb);
+    }
+    .hamburger {
+      background:transparent; border:1px solid var(--border2);
+      color:var(--text); padding:6px 10px; border-radius:6px;
+    }
+    .surface-pane { padding:24px; flex:1; overflow:auto; }
+
+    .scrim {
+      display:none;
+      position:fixed; inset:0;
+      background:rgba(0,0,0,.45);
+      z-index:40;
+    }
+
+    /* Cards */
+    .card {
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:16px 18px;
+    }
+    .card h3 { margin:0 0 4px 0; font-size:13px; color:var(--muted); font-weight:500; }
+    .card .val { font-size:24px; font-weight:600; letter-spacing:-.2px; }
+    .card .sub { font-size:12px; color:var(--muted); margin-top:6px; }
+
+    /* Surface A */
+    .surface-title { font-size:18px; font-weight:600; margin:0 0 14px 0; }
+    .headstrip {
+      display:flex; flex-wrap:wrap; gap:10px 18px;
+      align-items:center;
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:14px 18px;
+      margin-bottom:18px;
+    }
+    .headstrip .field { display:flex; flex-direction:column; gap:2px; }
+    .headstrip .field .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+    .headstrip .field .vl { font-size:14px; }
+    .headstrip .spacer { flex:1; }
+    .headstrip .refresh-btn {
+      background:var(--accent-dim); border:1px solid var(--border2);
+      color:var(--text); padding:6px 12px; border-radius:6px;
+      font-size:13px;
+    }
+    .headstrip .refresh-btn:disabled { opacity:.5; cursor:default; }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:12px; }
+    .pill.online { background:rgba(34,197,94,.14); color:var(--ok); }
+    .pill.offline { background:rgba(239,68,68,.14); color:var(--bad); }
+    .pill.unknown { background:rgba(135,141,153,.14); color:var(--muted); }
+    .stamp { font-size:12px; color:var(--muted); }
+    .stamp.stale { color:var(--warn); }
+
+    .counters {
+      display:grid; gap:14px;
+      grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
+      margin-bottom:18px;
+    }
+    .counters .card .val.dim { color:var(--muted); font-size:18px; }
+
+    .panel {
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:16px 18px;
+    }
+    .panel h2 { margin:0 0 10px 0; font-size:14px; color:var(--muted); font-weight:500; letter-spacing:.3px; text-transform:uppercase; }
+    .row {
+      display:flex; flex-direction:column; gap:8px;
+      padding:12px;
+      border:1px solid var(--border);
+      border-radius:8px;
+      background:var(--bg);
+    }
+    .row + .row { margin-top:10px; }
+    .row .row-title { font-size:14px; }
+    .row .row-hint { font-size:13px; color:var(--muted); }
+    .row .row-cta {
+      display:flex; align-items:center; gap:10px;
+      margin-top:4px;
+    }
+    .row .row-cta code {
+      background:#0a0b0e; border:1px solid var(--border2);
+      padding:5px 8px; border-radius:6px; font-size:12px;
+    }
+    .row .copy-btn {
+      background:transparent; border:1px solid var(--border2);
+      color:var(--text); padding:5px 10px; border-radius:6px;
+      font-size:12px;
+    }
+    .row .copy-btn:hover { background:var(--accent-dim); }
+    .row .copy-ok { color:var(--ok); font-size:12px; }
+    .row.muted {
+      color:var(--muted);
+      background:transparent;
+      border-style:dashed;
+    }
+
+    /* Banners */
+    .banner {
+      border-radius:10px;
+      padding:12px 16px;
+      margin-bottom:16px;
+      border:1px solid;
+      font-size:13px;
+      line-height:1.5;
+    }
+    .banner.bad {
+      background:rgba(239,68,68,.10);
+      border-color:rgba(239,68,68,.5);
+      color:#fecaca;
+    }
+    .banner.warn {
+      background:rgba(245,158,11,.10);
+      border-color:rgba(245,158,11,.5);
+      color:#fde68a;
+    }
+
+    /* Sign-in */
+    .signin-wrap {
+      min-height:100vh;
+      display:flex; align-items:center; justify-content:center;
+      padding:24px;
+    }
+    .signin-card {
+      width:100%; max-width:420px;
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:28px 26px;
+    }
+    .signin-card h1 { margin:0 0 4px 0; font-size:18px; }
+    .signin-card .h-sub { color:var(--muted); font-size:13px; margin-bottom:18px; }
+    .signin-field { display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
+    .signin-field label { font-size:12px; color:var(--muted); }
+    .signin-field input {
+      background:var(--bg);
+      border:1px solid var(--border2);
+      color:var(--text);
+      border-radius:8px; padding:9px 11px;
+      font:inherit;
+    }
+    .signin-field input:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .signin-submit {
+      width:100%; background:var(--accent); border:0; color:#fff;
+      padding:10px; border-radius:8px; font-weight:600;
+      margin-top:6px;
+    }
+    .signin-submit:hover { filter:brightness(1.08); }
+    .signin-err { color:var(--bad); font-size:13px; margin-top:10px; }
+    .signin-misconfig {
+      margin-top:14px; padding:10px 12px;
+      border:1px solid rgba(245,158,11,.5);
+      background:rgba(245,158,11,.10);
+      color:#fde68a;
+      border-radius:8px; font-size:12px; line-height:1.5;
+    }
+
+    /* Unavailable mode */
+    .unavail-wrap {
+      min-height:100vh;
+      display:flex; align-items:center; justify-content:center;
+      padding:24px;
+    }
+    .unavail-card {
+      width:100%; max-width:560px;
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:28px 26px;
+    }
+    .unavail-card h1 { margin:0 0 8px 0; font-size:18px; color:var(--warn); }
+    .unavail-card p { color:var(--muted); font-size:13px; line-height:1.6; }
+    .unavail-card code { background:#0a0b0e; border:1px solid var(--border2); padding:2px 6px; border-radius:4px; font-size:12px; color:var(--text); }
+
+    /* Mobile */
+    @media (max-width: 720px) {
+      .shell { flex-direction:column; }
+      .topbar { display:flex; }
+      .sidebar {
+        position:fixed; top:0; left:0; bottom:0;
+        width:240px;
+        z-index:50;
+        transform:translateX(-100%);
+        transition:transform .18s ease;
+      }
+      .sidebar.open { transform:translateX(0); }
+      .scrim.show { display:block; }
+      .surface-pane { padding:16px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+    "use strict";
+
+    /* =====================================================================
+     * Constants / thresholds (SPEC-014 §5.4)
+     * ===================================================================== */
+    var POOL_POLL_MS = 30 * 1000;
+    var EARN_POLL_MS = 60 * 1000;
+    var EARN_CACHE_TTL_MS = 60 * 1000;
+    var STALE_FACTOR = 2; // stamp flips to "stale" past STALE_FACTOR x cadence
+    var STAMP_TICK_MS = 1000;
+
+    var ALLOWED_CONFIG_KEYS = [
+      "coordinator_base_url",
+      "releases_repo_owner_name",
+      "require_provider_tokens"
+    ];
+    var REPO_OWNER_NAME_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+    var POOL_PATH = "/v1/pool/check";
+    function earningsPath(providerId) {
+      return "/providers/" + encodeURIComponent(providerId) + "/earnings";
+    }
+
+    /* =====================================================================
+     * State container
+     * ===================================================================== */
+    var state = {
+      cfg: null,
+      session: null,
+      route: "machine",
+      pool: { data: null, ts: 0, err: null, inflight: false },
+      earn: { data: null, ts: 0, err: null, inflight: false },
+      authFailBySurface: {},
+      proxyMissing: false,
+      sidebarOpen: false,
+      signinErr: null,
+      signinMisconfigNotice: null,
+      copyEcho: null,
+      configError: null,
+      flagFalse: false,
+    };
+
+    var timers = {
+      pool: null,
+      earn: null,
+      stamp: null,
+    };
+
+    /* =====================================================================
+     * DOM helpers — text-only, never assigns markup from user data
+     * ===================================================================== */
+    function el(tag, attrs) {
+      var node = document.createElement(tag);
+      if (attrs) {
+        for (var k in attrs) {
+          if (!Object.prototype.hasOwnProperty.call(attrs, k)) continue;
+          var v = attrs[k];
+          if (v === null || v === undefined || v === false) continue;
+          if (k === "class") node.className = v;
+          else if (k === "style") node.setAttribute("style", v);
+          else if (k.indexOf("on") === 0 && typeof v === "function") {
+            node.addEventListener(k.slice(2), v);
+          } else if (k === "for") node.setAttribute("for", v);
+          else if (k === "value") node.value = v;
+          else if (typeof v === "boolean") {
+            if (v) node.setAttribute(k, "");
+          } else {
+            node.setAttribute(k, String(v));
+          }
+        }
+      }
+      for (var i = 2; i < arguments.length; i++) {
+        var child = arguments[i];
+        if (child === null || child === undefined || child === false) continue;
+        if (Array.isArray(child)) {
+          for (var j = 0; j < child.length; j++) appendChild(node, child[j]);
+        } else {
+          appendChild(node, child);
+        }
+      }
+      return node;
+    }
+    function appendChild(parent, child) {
+      if (child === null || child === undefined || child === false) return;
+      if (child instanceof Node) parent.appendChild(child);
+      else parent.appendChild(document.createTextNode(String(child)));
+    }
+    function clear(node) {
+      while (node.firstChild) node.removeChild(node.firstChild);
+    }
+
+    /* =====================================================================
+     * AUTH-3 — operator-declared deployment mode loader (fail-CLOSED)
+     * ===================================================================== */
+    function loadConfig() {
+      return fetch("/portal-config.json", { cache: "no-store" })
+        .then(function (resp) {
+          if (!resp.ok) {
+            throw new Error("non-200:" + resp.status);
+          }
+          return resp.json().catch(function () {
+            throw new Error("malformed-json");
+          });
+        })
+        .then(function (raw) {
+          var validated = validateConfig(raw);
+          state.cfg = validated;
+          return validated;
+        })
+        .catch(function (err) {
+          var info = describeConfigError(err);
+          if (info.kind !== "flag-false") {
+            state.configError = info;
+          }
+          throw err;
+        });
+    }
+
+    function validateConfig(raw) {
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new Error("not-object");
+      }
+      var keys = Object.keys(raw);
+      for (var i = 0; i < keys.length; i++) {
+        if (ALLOWED_CONFIG_KEYS.indexOf(keys[i]) === -1) {
+          throw new Error("unknown-key:" + keys[i]);
+        }
+      }
+      var cbu = raw.coordinator_base_url;
+      if (typeof cbu !== "string" || cbu.length === 0) {
+        throw new Error("invalid-coordinator_base_url");
+      }
+      var rro = raw.releases_repo_owner_name;
+      if (typeof rro !== "string" || rro.length === 0 || !REPO_OWNER_NAME_RE.test(rro)) {
+        throw new Error("invalid-releases_repo_owner_name");
+      }
+      if (raw.require_provider_tokens !== true) {
+        state.flagFalse = true;
+        throw new Error("flag-false");
+      }
+      return {
+        coordinator_base_url: cbu,
+        releases_repo_owner_name: rro,
+        require_provider_tokens: true,
+      };
+    }
+
+    function describeConfigError(err) {
+      var msg = err && err.message ? err.message : String(err);
+      if (msg === "flag-false") return { kind: "flag-false" };
+      if (msg.indexOf("unknown-key:") === 0) {
+        return { kind: "unknown-key", key: msg.slice("unknown-key:".length) };
+      }
+      if (msg === "not-object") return { kind: "not-object" };
+      if (msg === "malformed-json") return { kind: "malformed-json" };
+      if (msg.indexOf("invalid-") === 0) return { kind: "invalid-field", field: msg.slice("invalid-".length) };
+      if (msg.indexOf("non-200:") === 0) return { kind: "non-200", status: msg.slice("non-200:".length) };
+      return { kind: "fetch-failed" };
+    }
+
+    /* =====================================================================
+     * Same-origin fetch with proxy fail-loud (§3 + Open Q9)
+     * ===================================================================== */
+    function coordFetch(pathAndQuery, opts) {
+      opts = opts || {};
+      var headers = {};
+      if (opts.auth && state.session && state.session.provider_token) {
+        headers["Authorization"] = "Bearer " + state.session.provider_token;
+      }
+      headers["Accept"] = "application/json";
+      return fetch(pathAndQuery, {
+        method: "GET",
+        headers: headers,
+        cache: "no-store",
+      })
+        .then(function (resp) {
+          var surface = opts.surface;
+          if (resp.ok) {
+            if (opts.auth && surface) state.authFailBySurface[surface] = 0;
+            return resp.json().then(function (j) { return { ok: true, status: resp.status, body: j }; });
+          }
+          if (opts.auth && surface && (resp.status === 401 || resp.status === 403 || resp.status === 404)) {
+            state.authFailBySurface[surface] = (state.authFailBySurface[surface] || 0) + 1;
+          }
+          return { ok: false, status: resp.status, body: null };
+        })
+        .catch(function (e) {
+          if (!state.proxyMissing) {
+            state.proxyMissing = true;
+            render();
+          }
+          throw e;
+        });
+    }
+
+    /* =====================================================================
+     * Pool poll (§5.4: 30 s + manual refresh)
+     * ===================================================================== */
+    function poolCheck() {
+      if (!state.session) return Promise.resolve();
+      if (state.pool.inflight) return Promise.resolve();
+      state.pool.inflight = true;
+      render();
+      var pid = state.session.provider_id;
+      var url = POOL_PATH + "?provider_id=" + encodeURIComponent(pid);
+      return coordFetch(url, { auth: false })
+        .then(function (r) {
+          state.pool.inflight = false;
+          if (r.ok) {
+            state.pool.data = r.body;
+            state.pool.ts = Date.now();
+            state.pool.err = null;
+          } else {
+            state.pool.err = { status: r.status };
+          }
+          render();
+        })
+        .catch(function () {
+          state.pool.inflight = false;
+          render();
+        });
+    }
+
+    /* =====================================================================
+     * Earnings fetch (§5.4: 60 s cadence + 60 s cache TTL)
+     * ===================================================================== */
+    function earnFetch(surface, opts) {
+      opts = opts || {};
+      if (!state.session) return Promise.resolve();
+      var now = Date.now();
+      if (!opts.force && state.earn.data && (now - state.earn.ts) < EARN_CACHE_TTL_MS) {
+        return Promise.resolve();
+      }
+      if (state.earn.inflight) return Promise.resolve();
+      state.earn.inflight = true;
+      render();
+      var pid = state.session.provider_id;
+      return coordFetch(earningsPath(pid), { auth: true, surface: surface || "machine" })
+        .then(function (r) {
+          state.earn.inflight = false;
+          if (r.ok) {
+            state.earn.data = r.body;
+            state.earn.ts = Date.now();
+            state.earn.err = null;
+            render();
+            return;
+          }
+          if (r.status === 401 || r.status === 403 || r.status === 404) {
+            handleAuthRejection(r.status, surface || "machine");
+            return;
+          }
+          state.earn.err = { status: r.status };
+          render();
+        })
+        .catch(function () {
+          state.earn.inflight = false;
+          render();
+        });
+    }
+
+    /* =====================================================================
+     * Auth rejection handling (§2.2 + §2.3 stale-config guard)
+     * ===================================================================== */
+    function handleAuthRejection(status, surface) {
+      var failCount = state.authFailBySurface[surface] || 0;
+      var misconfig = failCount >= 2;
+      stopPollers();
+      state.session = null;
+      state.earn = { data: null, ts: 0, err: null, inflight: false };
+      state.pool = { data: null, ts: 0, err: null, inflight: false };
+      if (status === 401) {
+        state.signinErr = signInRejectedCopy();
+      } else {
+        state.signinErr = signInRejectedCopy();
+      }
+      state.signinMisconfigNotice = misconfig ? misconfigNoticeCopy() : null;
+      render();
+    }
+    function signInRejectedCopy() {
+      return "Sign-in rejected. Please verify your provider_id and provider_token and try again.";
+    }
+    function misconfigNoticeCopy() {
+      return "Your deployment may be misconfigured — ask your operator to verify portal-config.json against the coordinator's auth.require_provider_tokens setting.";
+    }
+
+    /* =====================================================================
+     * Pollers + stamp tick
+     * ===================================================================== */
+    function startPollers() {
+      stopPollers();
+      timers.pool = setInterval(function () { poolCheck(); }, POOL_POLL_MS);
+      timers.earn = setInterval(function () { earnFetch("machine"); }, EARN_POLL_MS);
+      timers.stamp = setInterval(function () { renderStampOnly(); }, STAMP_TICK_MS);
+      poolCheck();
+      earnFetch("machine", { force: true });
+    }
+    function stopPollers() {
+      if (timers.pool) { clearInterval(timers.pool); timers.pool = null; }
+      if (timers.earn) { clearInterval(timers.earn); timers.earn = null; }
+      if (timers.stamp) { clearInterval(timers.stamp); timers.stamp = null; }
+    }
+
+    /* =====================================================================
+     * Sign-out
+     * ===================================================================== */
+    function signOut() {
+      stopPollers();
+      state.session = null;
+      state.pool = { data: null, ts: 0, err: null, inflight: false };
+      state.earn = { data: null, ts: 0, err: null, inflight: false };
+      state.authFailBySurface = {};
+      state.proxyMissing = false;
+      state.signinErr = null;
+      state.signinMisconfigNotice = null;
+      state.route = "machine";
+      state.sidebarOpen = false;
+      render();
+    }
+
+    /* =====================================================================
+     * Sign-in submit
+     * ===================================================================== */
+    function submitSignIn(providerId, providerToken) {
+      var pid = (providerId || "").trim();
+      var tok = (providerToken || "").trim();
+      if (!pid || !tok) {
+        state.signinErr = "Both provider_id and provider_token are required.";
+        render();
+        return;
+      }
+      state.session = { provider_id: pid, provider_token: tok };
+      state.signinErr = null;
+      state.signinMisconfigNotice = null;
+      state.route = "machine";
+      render();
+      startPollers();
+    }
+
+    /* =====================================================================
+     * Copy-to-clipboard
+     * ===================================================================== */
+    function copyText(text, key) {
+      var done = function () {
+        state.copyEcho = key;
+        render();
+        setTimeout(function () {
+          if (state.copyEcho === key) {
+            state.copyEcho = null;
+            render();
+          }
+        }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
+      } else {
+        fallbackCopy(text);
+        done();
+      }
+    }
+    function fallbackCopy(text) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "absolute";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch (_) {}
+      document.body.removeChild(ta);
+    }
+
+    /* =====================================================================
+     * Renderers
+     * ===================================================================== */
+    function render() {
+      var root = document.getElementById("app");
+      if (!root) return;
+      clear(root);
+      if (state.configError) {
+        root.appendChild(renderUnavailable_Config(state.configError));
+        return;
+      }
+      if (state.flagFalse) {
+        root.appendChild(renderUnavailable_FlagFalse());
+        return;
+      }
+      if (!state.cfg) {
+        root.appendChild(renderLoading());
+        return;
+      }
+      if (!state.session) {
+        root.appendChild(renderSignIn());
+        return;
+      }
+      root.appendChild(renderShell());
+    }
+
+    function renderLoading() {
+      return el("div", { class: "signin-wrap" },
+        el("div", { class: "signin-card" },
+          el("p", { class: "h-sub" }, "Loading portal configuration…")));
+    }
+
+    function renderUnavailable_Config(errInfo) {
+      var heading = el("h1", null, "Portal unavailable");
+      var body;
+      switch (errInfo.kind) {
+        case "non-200":
+          body = el("p", null,
+            "The portal could not load ",
+            el("code", null, "/portal-config.json"),
+            " (HTTP status ", errInfo.status,
+            "). The operator must deploy this file at the portal host root before the portal can be used.");
+          break;
+        case "fetch-failed":
+          body = el("p", null,
+            "The portal could not fetch ",
+            el("code", null, "/portal-config.json"),
+            ". The operator must deploy this file at the portal host root before the portal can be used.");
+          break;
+        case "malformed-json":
+          body = el("p", null,
+            "The file ",
+            el("code", null, "/portal-config.json"),
+            " is not valid JSON. Fix the file and reload.");
+          break;
+        case "not-object":
+          body = el("p", null,
+            el("code", null, "/portal-config.json"),
+            " must be a JSON object with the keys ",
+            el("code", null, "coordinator_base_url"),
+            ", ",
+            el("code", null, "releases_repo_owner_name"),
+            ", and ",
+            el("code", null, "require_provider_tokens"),
+            ".");
+          break;
+        case "unknown-key":
+          body = el("p", null,
+            el("code", null, "/portal-config.json"),
+            " contains an unknown top-level key ",
+            el("code", null, errInfo.key),
+            ". Only ",
+            el("code", null, "coordinator_base_url"),
+            ", ",
+            el("code", null, "releases_repo_owner_name"),
+            ", and ",
+            el("code", null, "require_provider_tokens"),
+            " are permitted.");
+          break;
+        case "invalid-field":
+          body = el("p", null,
+            "The ",
+            el("code", null, errInfo.field),
+            " value in ",
+            el("code", null, "/portal-config.json"),
+            " is not valid. Refer to the example file and reload.");
+          break;
+        default:
+          body = el("p", null,
+            "The portal could not load ",
+            el("code", null, "/portal-config.json"),
+            ".");
+      }
+      return el("div", { class: "unavail-wrap" },
+        el("div", { class: "unavail-card" },
+          heading,
+          body,
+          el("p", null, "See SPEC-014 §2.3 (AUTH-3) for the deployment-mode loader contract.")));
+    }
+
+    function renderUnavailable_FlagFalse() {
+      return el("div", { class: "unavail-wrap" },
+        el("div", { class: "unavail-card" },
+          el("h1", null, "Portal unavailable"),
+          el("p", null,
+            "The portal needs the coordinator to run with ",
+            el("code", null, "auth.require_provider_tokens=true"),
+            ". SPEC-002 FR-P12 defines the flag and its enforcement semantics; SPEC-005 §11.5 is the binding route-disablement clause that disables ",
+            el("code", null, "GET /providers/{id}/earnings"),
+            " at the route layer in ",
+            el("code", null, "false"),
+            " mode."),
+          el("p", null,
+            "The current deployment runs with this flag set to ",
+            el("code", null, "false"),
+            ", which means the portal has no callable data path. Ask the operator to flip the coordinator config and re-deploy.")));
+    }
+
+    function renderSignIn() {
+      var pidInput = el("input", { type: "text", id: "pid", autocomplete: "off", spellcheck: "false" });
+      var tokInput = el("input", { type: "password", id: "tok", autocomplete: "off", spellcheck: "false" });
+      var form = el("form", {
+        onsubmit: function (e) { e.preventDefault(); submitSignIn(pidInput.value, tokInput.value); },
+      },
+        el("div", { class: "signin-field" },
+          el("label", { for: "pid" }, "provider_id"),
+          pidInput),
+        el("div", { class: "signin-field" },
+          el("label", { for: "tok" }, "provider_token"),
+          tokInput),
+        el("button", { type: "submit", class: "signin-submit" }, "Sign in"));
+      var card = el("div", { class: "signin-card" },
+        el("h1", null, "MacProvider — Provider Portal"),
+        el("p", { class: "h-sub" },
+          "Sign in with your provider_id and provider_token. Both values live on this Mac at ",
+          el("code", null, "~/.config/macprovider/")),
+        form,
+        state.signinErr ? el("div", { class: "signin-err" }, state.signinErr) : null,
+        state.signinMisconfigNotice
+          ? el("div", { class: "signin-misconfig" }, state.signinMisconfigNotice)
+          : null);
+      return el("div", { class: "signin-wrap" }, card);
+    }
+
+    function renderShell() {
+      var sidebar = renderSidebar();
+      var topbar = el("div", { class: "topbar" },
+        el("button", { class: "hamburger", onclick: function () { state.sidebarOpen = !state.sidebarOpen; render(); } }, "☰ Menu"),
+        el("span", null, "MacProvider — Provider Portal"));
+      var pane = el("div", { class: "surface-pane" });
+      if (state.proxyMissing) {
+        pane.appendChild(renderProxyMissingBanner());
+      }
+      if (state.route === "machine") {
+        pane.appendChild(renderMachine());
+      } else if (state.route === "setup") {
+        pane.appendChild(renderStub("Phase 1B", "Setup & Updates"));
+      } else if (state.route === "earn") {
+        pane.appendChild(renderStub("Phase 1C", "Earn"));
+      } else if (state.route === "monitoring") {
+        pane.appendChild(renderStub("Phase 1C", "Monitoring"));
+      } else if (state.route === "identity") {
+        pane.appendChild(renderStub("Phase 1C", "Identity"));
+      }
+      var scrim = el("div", {
+        class: "scrim" + (state.sidebarOpen ? " show" : ""),
+        onclick: function () { state.sidebarOpen = false; render(); },
+      });
+      return el("div", { class: "shell" },
+        sidebar,
+        el("div", { class: "main" }, topbar, pane),
+        scrim);
+    }
+
+    function renderSidebar() {
+      var items = [
+        { id: "machine",    label: "Machine" },
+        { id: "setup",      label: "Setup & Updates" },
+        { id: "earn",       label: "Earn" },
+        { id: "monitoring", label: "Monitoring" },
+        { id: "identity",   label: "Identity" },
+      ];
+      var navNodes = items.map(function (it) {
+        return el("button", {
+          class: "nav-item" + (state.route === it.id ? " active" : ""),
+          onclick: function () {
+            state.route = it.id;
+            state.sidebarOpen = false;
+            render();
+            if (it.id === "machine") {
+              earnFetch("machine");
+            }
+          },
+        }, it.label);
+      });
+      return el("aside", { class: "sidebar" + (state.sidebarOpen ? " open" : "") },
+        el("div", { class: "brand" },
+          "MacProvider",
+          el("span", { class: "brand-sub" }, "Provider Portal")),
+        el("nav", { class: "nav" }, navNodes),
+        el("div", { class: "nav-spacer" }),
+        el("div", { class: "nav-footer" },
+          el("a", { href: "https://api.streamvc.live/docs", target: "_blank", rel: "noopener noreferrer" }, "↗ API Docs"),
+          el("button", { onclick: signOut }, "⏋ Sign out")));
+    }
+
+    function renderProxyMissingBanner() {
+      return el("div", { class: "banner bad" },
+        el("strong", null, "Same-origin proxy missing. "),
+        "The portal expects the operator's reverse proxy on this origin to forward ",
+        el("code", null, "/v1/pool/check"),
+        " and ",
+        el("code", null, "/providers/{id}/earnings"),
+        " to the coordinator. See SPEC-014 §3 and Open Q9.");
+    }
+
+    function renderStub(phaseLabel, title) {
+      return el("div", null,
+        el("h1", { class: "surface-title" }, title),
+        el("div", { class: "panel" },
+          el("p", null, "Coming in ", phaseLabel, ".")));
+    }
+
+    /* ---- Surface A — Machine ---- */
+    function renderMachine() {
+      var wrap = el("div", null);
+      wrap.appendChild(el("h1", { class: "surface-title" }, "Machine"));
+      wrap.appendChild(renderHeadstrip());
+      wrap.appendChild(renderCounters());
+      wrap.appendChild(renderNeedsAttention());
+      return wrap;
+    }
+
+    function renderHeadstrip() {
+      var pool = state.pool.data;
+      var tier = pool && pool.tier ? pool.tier : "—";
+      var stt = pool && pool.state ? pool.state : "—";
+      var pillCls, pillTxt;
+      if (!pool) {
+        pillCls = "pill unknown"; pillTxt = "Loading…";
+      } else if (pool.state === "ready" || pool.state === "draining") {
+        pillCls = "pill online"; pillTxt = "Online";
+      } else {
+        pillCls = "pill offline"; pillTxt = "Offline";
+      }
+      var stamp = renderStampNode();
+      var refreshBtn = el("button", {
+        class: "refresh-btn",
+        disabled: state.pool.inflight,
+        onclick: function () { poolCheck(); },
+      }, state.pool.inflight ? "Refreshing…" : "Refresh");
+      return el("div", { class: "headstrip", id: "headstrip" },
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "provider_id"),
+          el("span", { class: "vl mono" }, state.session.provider_id)),
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "tier"),
+          el("span", { class: "vl" }, tier)),
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "state"),
+          el("span", { class: "vl" }, stt)),
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "status"),
+          el("span", { class: pillCls }, pillTxt)),
+        el("div", { class: "spacer" }),
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "pool poll"),
+          el("span", { class: "stamp", id: "pool-stamp" }, stamp)),
+        refreshBtn);
+    }
+
+    function renderStampNode() {
+      return computeStampText();
+    }
+    function computeStampText() {
+      if (!state.pool.ts) return "No successful poll yet";
+      var ageMs = Date.now() - state.pool.ts;
+      if (ageMs > STALE_FACTOR * POOL_POLL_MS) {
+        return "stale";
+      }
+      var secs = Math.max(0, Math.floor(ageMs / 1000));
+      return "Last refreshed " + secs + "s ago";
+    }
+    function renderStampOnly() {
+      var node = document.getElementById("pool-stamp");
+      if (!node) return;
+      clear(node);
+      var txt = computeStampText();
+      node.appendChild(document.createTextNode(txt));
+      if (txt === "stale") {
+        if (!node.classList.contains("stale")) node.classList.add("stale");
+      } else {
+        if (node.classList.contains("stale")) node.classList.remove("stale");
+      }
+    }
+
+    function renderCounters() {
+      var d = state.earn.data;
+      var loading = state.earn.inflight && !d;
+      var totalTxt = d && typeof d.total_credits === "number" ? fmtInt(d.total_credits) : (loading ? "…" : "—");
+      var curTxt = d && typeof d.current_window_credits === "number" ? fmtInt(d.current_window_credits) : (loading ? "…" : "—");
+      var lp = d && d.last_payout_ready ? d.last_payout_ready : null;
+      var lpVal = lp && typeof lp.provider_credits === "number" ? fmtInt(lp.provider_credits) : (loading ? "…" : "—");
+      var lpSub = lp && lp.window_start_utc && lp.window_end_utc
+        ? (lp.window_start_utc + " → " + lp.window_end_utc)
+        : null;
+      var errSub = state.earn.err
+        ? "Earnings request returned HTTP " + state.earn.err.status + "."
+        : null;
+      return el("div", { class: "counters" },
+        el("div", { class: "card" },
+          el("h3", null, "Lifetime credits"),
+          el("div", { class: "val mono" }, totalTxt),
+          el("div", { class: "sub" }, "total_credits"),
+          errSub ? el("div", { class: "sub" }, errSub) : null),
+        el("div", { class: "card" },
+          el("h3", null, "Current window"),
+          el("div", { class: "val mono" }, curTxt),
+          el("div", { class: "sub" }, "current_window_credits")),
+        el("div", { class: "card" },
+          el("h3", null, "Last payout-ready window"),
+          el("div", { class: "val mono" }, lpVal),
+          el("div", { class: "sub" }, "last_payout_ready.provider_credits"),
+          lpSub ? el("div", { class: "sub mono" }, lpSub) : null));
+    }
+
+    function renderNeedsAttention() {
+      var st = state.pool.data ? state.pool.data.state : null;
+      var panelBody;
+      if (st === "unavailable" || st === "unknown") {
+        var rowTitle = "This machine is currently " + st + ".";
+        var hint = "Run macprovider-cli status to inspect local state; if the binary is healthy, re-check in a few seconds.";
+        var cmd = "macprovider-cli status";
+        var copyKey = "cli-status";
+        var copyBtn = el("button", {
+          class: "copy-btn",
+          onclick: function () { copyText(cmd, copyKey); },
+        }, "Copy");
+        var echo = state.copyEcho === copyKey ? el("span", { class: "copy-ok" }, "Copied") : null;
+        panelBody = el("div", { class: "row" },
+          el("div", { class: "row-title" }, rowTitle),
+          el("div", { class: "row-hint" }, hint),
+          el("div", { class: "row-cta" },
+            el("code", { class: "mono" }, cmd),
+            copyBtn,
+            echo));
+      } else {
+        panelBody = el("div", { class: "row muted" },
+          el("div", null, "Nothing to do — this Mac looks healthy."));
+      }
+      return el("div", { class: "panel" },
+        el("h2", null, "Needs attention"),
+        panelBody);
+    }
+
+    /* =====================================================================
+     * Formatting
+     * ===================================================================== */
+    function fmtInt(n) {
+      if (typeof n !== "number" || !isFinite(n)) return "—";
+      try { return n.toLocaleString("en-US"); } catch (_) { return String(n); }
+    }
+
+    /* =====================================================================
+     * Bootstrap
+     * ===================================================================== */
+    function bootstrap() {
+      render();
+      loadConfig().then(function () {
+        render();
+      }, function () {
+        render();
+      });
+    }
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", bootstrap);
+    } else {
+      bootstrap();
+    }
+  </script>
+</body>
+</html>
