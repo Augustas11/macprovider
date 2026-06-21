@@ -3,11 +3,14 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
 )
@@ -61,6 +64,28 @@ func TestRevokeAndKickRejectsMismatchedProviderOverride(t *testing.T) {
 	}
 }
 
+func TestListPairOTMints_Exits0_OnPopulatedLog(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
+	store, err := auth.OpenStore(dbPath)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	if err := store.LogPairOTMint(context.Background(), "provider-a", "127.0.0.1", "test-agent", http.StatusOK, time.Date(2026, 6, 21, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("log mint: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
+	output := captureStdout(t, func() {
+		if err := listPairOTMints([]string{"--db", dbPath, "--provider-id", "provider-a"}); err != nil {
+			t.Fatalf("listPairOTMints: %v", err)
+		}
+	})
+	if !strings.Contains(output, "provider-a") || !strings.Contains(output, "200") {
+		t.Fatalf("output = %q, want provider-a and 200", output)
+	}
+}
+
 func issueCLITestToken(t *testing.T, providerID string) (string, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "coordinator.db")
@@ -74,4 +99,24 @@ func issueCLITestToken(t *testing.T, providerID string) (string, string) {
 		t.Fatalf("issue token: %v", err)
 	}
 	return dbPath, record.TokenPrefix
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stdout = w
+	fn()
+	if err := w.Close(); err != nil {
+		t.Fatalf("close writer: %v", err)
+	}
+	os.Stdout = orig
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("read stdout: %v", err)
+	}
+	return string(out)
 }

@@ -31,6 +31,8 @@ func main() {
 		err = revokeAndKick(os.Args[2:])
 	case "prune-tokens":
 		err = pruneTokens(os.Args[2:])
+	case "list-pair-ot-mints":
+		err = listPairOTMints(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -259,6 +261,36 @@ func pruneTokens(args []string) error {
 	return nil
 }
 
+func listPairOTMints(args []string) error {
+	fs := flag.NewFlagSet("list-pair-ot-mints", flag.ExitOnError)
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	providerID := fs.String("provider-id", "", "optional provider_id filter")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	rows, err := store.ListPairOTMintLog(context.Background(), *providerID)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		sourceIP := ""
+		if row.SourceIP.Valid {
+			sourceIP = row.SourceIP.String
+		}
+		userAgent := ""
+		if row.UserAgent.Valid {
+			userAgent = row.UserAgent.String
+		}
+		fmt.Printf("%d\t%s\t%d\t%s\t%s\t%s\n", row.ID, row.ProviderID, row.Outcome, row.TS, sourceIP, userAgent)
+	}
+	return nil
+}
+
 func resolvePruneCutoff(s string) (time.Time, error) {
 	if d, err := time.ParseDuration(s); err == nil {
 		return time.Now().UTC().Add(-d), nil
@@ -270,5 +302,5 @@ func resolvePruneCutoff(s string) (time.Time, error) {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|list-tokens|revoke-and-kick|prune-tokens> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints> [flags]")
 }

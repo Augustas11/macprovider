@@ -27,7 +27,9 @@ import (
 )
 
 // version is overridden at build time via
-//   go build -ldflags "-X main.version=$(git describe --always --dirty --tags)"
+//
+//	go build -ldflags "-X main.version=$(git describe --always --dirty --tags)"
+//
 // (see scripts/build-linux.sh). Defaults to "dev" for local `go run`.
 var version = "dev"
 
@@ -105,6 +107,7 @@ func main() {
 	// interface layer (codex architect review on PR #44, interface
 	// segregation MINOR).
 	wsOpts = append(wsOpts, providerws.WithTokenIssuer(tokenStore))
+	wsOpts = append(wsOpts, providerws.WithGitHubAuthStore(tokenStore))
 	if cfg.Auth.RequireProviderTokens {
 		logger.Info().Msg("provider WS token validation REQUIRED (auth.require_provider_tokens=true)")
 	} else {
@@ -266,6 +269,7 @@ func main() {
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
+	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
 
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
@@ -393,6 +397,36 @@ func startAdmissionRetentionPruner(ctx context.Context, mgr admissionPruner, ret
 	logger.Info().Time("next_prune_at", nextRun).Int("retention_days", retentionDays).Msg("admission state retention pruner armed")
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
+}
+
+type githubAuthStatePruner interface {
+	PruneGitHubAuthState(context.Context, time.Time) error
+}
+
+func startGitHubAuthStatePruner(ctx context.Context, store githubAuthStatePruner, logger zerolog.Logger) {
+	if store == nil {
+		return
+	}
+	prune := func() {
+		now := time.Now().UTC()
+		if err := store.PruneGitHubAuthState(ctx, now); err != nil {
+			logger.Warn().Err(err).Msg("github auth state prune failed")
+		}
+	}
+	prune()
+	logger.Info().Time("next_prune_at", time.Now().UTC().Add(time.Hour)).Msg("github auth state pruner armed")
+	go func() {
+		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		for {
 			select {

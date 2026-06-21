@@ -60,12 +60,14 @@ type Server struct {
 	// mint behavior (e.g. mintFailingStore) without touching the
 	// validator. Codex architect review on PR #44 flagged the
 	// interface-segregation regression of mixing both on TokenValidator.
-	issuer    TokenIssuer
-	admission *AdmissionManager
-	sessions  sync.Map
-	started   time.Time
-	explorer  http.Handler
-	unauth    chan struct{}
+	issuer      TokenIssuer
+	authStore   *auth.Store
+	githubOAuth githubOAuthClient
+	admission   *AdmissionManager
+	sessions    sync.Map
+	started     time.Time
+	explorer    http.Handler
+	unauth      chan struct{}
 	// unauthPerIP counts concurrent unauthenticated WS handshakes by remote IP.
 	// Defense-in-depth against nginx limit_conn evasion: one host can still
 	// burn the global 64-slot semaphore without per-IP shaping (M1-4 / SECU-1).
@@ -173,6 +175,18 @@ func WithTokenValidator(tokens TokenValidator) Option {
 func WithTokenIssuer(issuer TokenIssuer) Option {
 	return func(s *Server) {
 		s.issuer = issuer
+	}
+}
+
+func WithGitHubAuthStore(store *auth.Store) Option {
+	return func(s *Server) {
+		s.authStore = store
+	}
+}
+
+func WithGitHubOAuthClient(client githubOAuthClient) Option {
+	return func(s *Server) {
+		s.githubOAuth = client
 	}
 }
 
@@ -342,6 +356,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/provisional", s.handleAdminProvisional)
 	mux.HandleFunc("/admin/promote/", s.handleAdminPromote)
 	mux.HandleFunc("/admin/reject/", s.handleAdminReject)
+	if s.cfg.Auth.GitHubOAuth.Enabled {
+		mux.HandleFunc("/v1/auth/github/start", s.handleGitHubStart)
+		mux.HandleFunc("/v1/auth/github/callback", s.handleGitHubCallback)
+		mux.HandleFunc("/v1/auth/me/providers", s.handleAuthMeProviders)
+		mux.HandleFunc("/v1/auth/me/providers/bind", s.handleAuthMeProvidersBind)
+		mux.HandleFunc("/v1/auth/logout", s.handleAuthLogout)
+		mux.HandleFunc("/v1/install/pair/refresh", s.handleInstallPairRefresh)
+		return s.redactedRequestLogMiddleware(mux)
+	}
 	return mux
 }
 
@@ -480,12 +503,12 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 // FR-C9.4 contract:
 //
 //   - Skip:        admit without minting, optionally with an AuthState
-//                  marker (BearerValidated / BearerlessDuplicate / empty).
+//     marker (BearerValidated / BearerlessDuplicate / empty).
 //   - Minted:      admit with a freshly-minted token in the ack frame.
 //   - RejectTOFU:  close the connection with CloseInvalidToken. Fires
-//                  when the existing row has last_used_at IS NOT NULL
-//                  (credential-capture closure) or a DB error blocked
-//                  the gate evaluation (fail closed).
+//     when the existing row has last_used_at IS NOT NULL
+//     (credential-capture closure) or a DB error blocked
+//     the gate evaluation (fail closed).
 //
 // The auth state is carried separately via pool.AuthState so registry +
 // routing + billing can distinguish bearer-less-duplicate from other
@@ -522,8 +545,8 @@ const (
 //   - outcome:        provisionalTokenSkip | provisionalTokenMinted | provisionalTokenRejectTOFU
 //   - cleartextToken: populated only when outcome == provisionalTokenMinted
 //   - authState:      pool.AuthState assigned to the provider entry —
-//                     drives registry eviction defense, buyer routing
-//                     exclusion, and billing exclusion.
+//     drives registry eviction defense, buyer routing
+//     exclusion, and billing exclusion.
 //
 // Algorithm (v0.8.4 composed):
 //  1. If the issuer is not wired: return Skip + empty authState (legacy
@@ -533,19 +556,19 @@ const (
 //  3. Call RevokeUnusedTokenForProvider:
 //     - (true, nil): self-heal fired — proceed to mint.
 //     - (false, nil): call HasActiveTokenForProvider; if true a USED
-//       row exists → return RejectTOFU (preserves v0.8.1 closure of
-//       codex MAJOR-1 credential-capture vector).
+//     row exists → return RejectTOFU (preserves v0.8.1 closure of
+//     codex MAJOR-1 credential-capture vector).
 //     - (_, err): fail closed, return RejectTOFU.
 //  4. Mint via IssueToken:
 //     - success: return Minted + cleartext + authState=SelfMinted.
 //     - ErrActiveTokenAlreadyExists: a concurrent connect won the race
-//       between our revoke and our INSERT. Return Skip + authState=
-//       BearerlessDuplicate. The connection is admitted bearer-less,
-//       but pool.Registry.Register refuses to evict an existing
-//       routable session, and buyer routing + billing exclude this
-//       entry (PR #69 fix-pass-3 + fix-pass-4).
+//     between our revoke and our INSERT. Return Skip + authState=
+//     BearerlessDuplicate. The connection is admitted bearer-less,
+//     but pool.Registry.Register refuses to evict an existing
+//     routable session, and buyer routing + billing exclude this
+//     entry (PR #69 fix-pass-3 + fix-pass-4).
 //     - other DB error: return Skip + empty authState (transient infra
-//       failure; binary retries next reconnect).
+//     failure; binary retries next reconnect).
 //
 // Settling-window posture (FR-C9.4):
 // validateProviderToken rejects all tokenless connects at the WS
@@ -556,18 +579,18 @@ const (
 // bearer; race-losers are quarantined as AuthBearerlessDuplicate.
 //
 // authParam is renamed to disambiguate from the auth package import.
-func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, providerName string) (provisionalTokenOutcome, string, pool.AuthState) {
+func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, providerName string) (provisionalTokenOutcome, string, string, string, pool.AuthState) {
 	if s.issuer == nil {
-		return provisionalTokenSkip, "", ""
+		return provisionalTokenSkip, "", "", "", ""
 	}
 	if authParam.validated {
-		return provisionalTokenSkip, "", pool.AuthBearerValidated
+		return provisionalTokenSkip, "", "", "", pool.AuthBearerValidated
 	}
 	ctx := context.Background()
 	selfHealed, err := s.issuer.RevokeUnusedTokenForProvider(ctx, providerID)
 	if err != nil {
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 unused-token self-heal evaluation failed; closing tokenless connect (fail closed)")
-		return provisionalTokenRejectTOFU, "", ""
+		return provisionalTokenRejectTOFU, "", "", "", ""
 	}
 	if selfHealed {
 		s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_self_heal").Msg("FR-C9.4 self-heal: revoked existing unused token for this provider_id; proceeding to mint a fresh one (SPEC-003 v0.8.4 deploy-gap recovery path)")
@@ -575,12 +598,29 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 		hasActive, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
 		if err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 TOFU gate evaluation failed; closing tokenless connect (fail closed)")
-			return provisionalTokenRejectTOFU, "", ""
+			return provisionalTokenRejectTOFU, "", "", "", ""
 		}
 		if hasActive {
 			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_tofu_reject").Msg("FR-C9.4 TOFU: tokenless connect refused; an active USED token already exists for this provider_id (operator can revoke + retry if this is the legitimate provider after a used-token persist failure)")
-			return provisionalTokenRejectTOFU, "", ""
+			return provisionalTokenRejectTOFU, "", "", "", ""
 		}
+	}
+	if s.cfg.Auth.GitHubOAuth.Enabled && s.authStore != nil {
+		mint, err := s.authStore.MintAdmissionTokenAndPairOT(ctx, providerID, providerName, s.now())
+		if err == nil {
+			claimURL := ""
+			if mint.Paired {
+				claimURL = s.claimURL(mint.PairOT)
+			}
+			s.log.Info().Str("provider_id", providerID).Msg("FR-C9.1 self-serve provisional token minted on first tokenless admission")
+			return provisionalTokenMinted, mint.ProviderToken, mint.PairOT, claimURL, pool.AuthSelfMinted
+		}
+		if errors.Is(err, auth.ErrActiveTokenAlreadyExists) {
+			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_race_loss_admit_quarantined").Msg("FR-C9.4 race-loss: concurrent connect won IssueToken; admitting bearer-less-duplicate (non-routable; operator MUST revoke before legitimate provider can reconnect cleanly)")
+			return provisionalTokenSkip, "", "", "", pool.AuthBearerlessDuplicate
+		}
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C10 pair_ot compound mint failed; closing tokenless connect (fail closed)")
+		return provisionalTokenRejectTOFU, "", "", "", pool.AuthMintFailed
 	}
 	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
 	if err != nil {
@@ -591,7 +631,7 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 			// the registry eviction defense + routing/billing
 			// exclusion neutralize impact.
 			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_race_loss_admit_quarantined").Msg("FR-C9.4 race-loss: concurrent connect won IssueToken; admitting bearer-less-duplicate (non-routable; operator MUST revoke before legitimate provider can reconnect cleanly)")
-			return provisionalTokenSkip, "", pool.AuthBearerlessDuplicate
+			return provisionalTokenSkip, "", "", "", pool.AuthBearerlessDuplicate
 		}
 		// SPEC-003 v0.8.4 (fix-pass-5) — fail-closed on transient DB
 		// error. Previously this path returned (Skip, "", "") and the
@@ -603,10 +643,10 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 		// and close the connection so the binary retries cleanly on
 		// next reconnect.
 		s.log.Warn().Err(err).Str("provider_id", providerID).Str("event", "fr_c9_1_mint_failed").Msg("FR-C9.1 self-serve mint failed (transient DB error); closing tokenless connect (fail closed)")
-		return provisionalTokenRejectTOFU, "", pool.AuthMintFailed
+		return provisionalTokenRejectTOFU, "", "", "", pool.AuthMintFailed
 	}
 	s.log.Info().Str("provider_id", providerID).Msg("FR-C9.1 self-serve provisional token minted on first tokenless admission")
-	return provisionalTokenMinted, token, pool.AuthSelfMinted
+	return provisionalTokenMinted, token, "", "", pool.AuthSelfMinted
 }
 
 func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
@@ -638,7 +678,7 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	// the provided AuthState (BearerValidated / BearerlessDuplicate /
 	// empty) and let the registry eviction defense + RoutingEligible
 	// gates take over.
-	outcome, assignedProviderToken, authState := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		return "", ""
@@ -662,6 +702,8 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 		AssignedProviderToken:    assignedProviderToken,
+		PairOT:                   pairOT,
+		ClaimURL:                 claimURL,
 	}
 	b, err := json.Marshal(ack)
 	if err != nil {
@@ -882,7 +924,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	// flow: RejectTOFU closes; Minted embeds; Skip admits with the
 	// provided AuthState; eviction defense protects existing routable
 	// sessions from bearer-less duplicates.
-	outcome, assignedProviderToken, authState := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		return "", ""
@@ -904,6 +946,8 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 		AssignedProviderToken:    assignedProviderToken,
+		PairOT:                   pairOT,
+		ClaimURL:                 claimURL,
 		Tier2Session: &AuthTier2Session{
 			EncryptedLeg: AuthEncryptedLegSession{
 				Enabled:            true,

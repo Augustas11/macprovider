@@ -35,6 +35,11 @@ import (
 // preserved in v0.8.3 (PR #69) closes that race; the wire-level
 // reject was replaced with admit-tokenless in v0.8.3 (Entry 66).
 var ErrActiveTokenAlreadyExists = errors.New("provider_token: active token already exists for provider_id")
+var ErrOwnershipExists = errors.New("provider ownership already exists")
+var ErrPairOTInvalid = errors.New("pair_ot invalid")
+var ErrPairOTAlreadyOwned = errors.New("pair_ot provider already owned by another account")
+var ErrSessionInvalid = errors.New("mp_session invalid")
+var ErrPendingPairOTMissing = errors.New("pending pair_ot missing")
 
 type Store struct {
 	db *sql.DB
@@ -50,6 +55,63 @@ type TokenRecord struct {
 	CreatedAt    string
 	RevokedAt    sql.NullString
 	LastUsedAt   sql.NullString
+}
+
+type PairOTMint struct {
+	PairOT    string
+	ClaimURL  string
+	ExpiresAt time.Time
+}
+
+type AdmissionPairMint struct {
+	TokenRecord   TokenRecord
+	ProviderToken string
+	PairOT        string
+	ExpiresAt     time.Time
+	Paired        bool
+}
+
+type OAuthState struct {
+	ReturnTo      string
+	PendingPairOT sql.NullString
+	ExpiresAt     string
+}
+
+type MPSession struct {
+	ID                  string
+	GitHubUserID        int64
+	GitHubLogin         string
+	LastSeenAt          time.Time
+	LastSetCookieAt     time.Time
+	PendingPairOT       sql.NullString
+	PendingPairOTExpiry sql.NullString
+}
+
+type OwnedProvider struct {
+	ProviderID string `json:"provider_id"`
+	ClaimedAt  string `json:"claimed_at"`
+	LastSeenAt string `json:"last_seen_at"`
+}
+
+type BindResult struct {
+	ProviderID  string
+	GitHubLogin string
+	ClaimedAt   string
+}
+
+type PairOTMintLogRecord struct {
+	ID         int64
+	ProviderID string
+	SourceIP   sql.NullString
+	UserAgent  sql.NullString
+	Outcome    int
+	TS         string
+}
+
+type PairOTRefreshResult struct {
+	Mint        PairOTMint
+	RetryAfter  int
+	RateLimited bool
 }
 
 func BearerTokenMatchesHeader(headers http.Header, expected string) bool {
@@ -200,7 +262,72 @@ CREATE INDEX IF NOT EXISTS idx_token_hash ON provider_tokens(token_hash);
 	if err := s.ensureProviderIDColumn(ctx); err != nil {
 		return err
 	}
-	return s.ensureActiveProviderIDUniqueness(ctx)
+	if err := s.ensureActiveProviderIDUniqueness(ctx); err != nil {
+		return err
+	}
+	return s.ensureGitHubAuthSchema(ctx)
+}
+
+func (s *Store) ensureGitHubAuthSchema(ctx context.Context) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS github_identities (
+			github_user_id INTEGER PRIMARY KEY,
+			github_login TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+			last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+		)`,
+		`CREATE TABLE IF NOT EXISTS provider_ownership (
+			provider_id TEXT PRIMARY KEY,
+			github_user_id INTEGER NOT NULL REFERENCES github_identities(github_user_id),
+			claimed_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_ownership_github ON provider_ownership(github_user_id)`,
+		`CREATE TABLE IF NOT EXISTS pair_ots (
+			id TEXT PRIMARY KEY,
+			provider_id TEXT NOT NULL,
+			expires_at TEXT NOT NULL,
+			used_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pair_ots_provider ON pair_ots(provider_id)`,
+		`CREATE TABLE IF NOT EXISTS mp_sessions (
+			id TEXT PRIMARY KEY,
+			github_user_id INTEGER NOT NULL REFERENCES github_identities(github_user_id),
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+			last_seen_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+			last_setcookie_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+			pending_pair_ot TEXT,
+			pending_pair_ot_expires_at TEXT
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_sessions_user ON mp_sessions(github_user_id)`,
+		`CREATE TABLE IF NOT EXISTS oauth_states (
+			state TEXT PRIMARY KEY,
+			return_to TEXT NOT NULL,
+			pending_pair_ot TEXT,
+			expires_at TEXT NOT NULL,
+			created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+		)`,
+		`CREATE TABLE IF NOT EXISTS pair_ot_mint_log (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			provider_id TEXT NOT NULL,
+			source_ip TEXT,
+			user_agent TEXT,
+			outcome INTEGER NOT NULL,
+			ts TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_mint_log_provider_ts ON pair_ot_mint_log(provider_id, ts)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // ensureActiveProviderIDUniqueness installs the SPEC-003 v0.8.2 partial
@@ -571,6 +698,477 @@ func (s *Store) ListTokens(ctx context.Context) ([]TokenRecord, error) {
 	return records, rows.Err()
 }
 
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
+func (s *Store) UpsertGitHubIdentity(ctx context.Context, githubUserID int64, login string, now time.Time) error {
+	login = strings.TrimSpace(login)
+	if githubUserID <= 0 || login == "" {
+		return fmt.Errorf("github identity requires id and login")
+	}
+	nowText := timeText(now)
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO github_identities (github_user_id, github_login, created_at, last_seen_at)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(github_user_id) DO UPDATE SET github_login = excluded.github_login, last_seen_at = excluded.last_seen_at`,
+		githubUserID, login, nowText, nowText)
+	return err
+}
+
+func (s *Store) CreateOAuthState(ctx context.Context, state, returnTo string, pendingPairOT *string, now time.Time) error {
+	if state == "" || returnTo == "" {
+		return fmt.Errorf("oauth state and return_to are required")
+	}
+	var pending any
+	if pendingPairOT != nil {
+		pending = *pendingPairOT
+	}
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO oauth_states (state, return_to, pending_pair_ot, expires_at, created_at)
+VALUES (?, ?, ?, ?, ?)`,
+		state, returnTo, pending, timeText(now.Add(10*time.Minute)), timeText(now))
+	return err
+}
+
+func (s *Store) ConsumeOAuthState(ctx context.Context, state string, now time.Time) (OAuthState, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return OAuthState{}, false, err
+	}
+	defer tx.Rollback()
+	var out OAuthState
+	err = tx.QueryRowContext(ctx, `
+DELETE FROM oauth_states
+ WHERE state = ? AND expires_at > ?
+RETURNING return_to, pending_pair_ot, expires_at`,
+		state, timeText(now)).Scan(&out.ReturnTo, &out.PendingPairOT, &out.ExpiresAt)
+	if err == sql.ErrNoRows {
+		return OAuthState{}, false, nil
+	}
+	if err != nil {
+		return OAuthState{}, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return OAuthState{}, false, err
+	}
+	return out, true, nil
+}
+
+func (s *Store) CreateMPSession(ctx context.Context, githubUserID int64, pendingPairOT sql.NullString, now time.Time) (string, error) {
+	sessionID, err := randomHex(32)
+	if err != nil {
+		return "", err
+	}
+	var pending any
+	var pendingExpires any
+	if pendingPairOT.Valid && pendingPairOT.String != "" {
+		pending = pendingPairOT.String
+		pendingExpires = timeText(now.Add(10 * time.Minute))
+	}
+	nowText := timeText(now)
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO mp_sessions (id, github_user_id, created_at, last_seen_at, last_setcookie_at, pending_pair_ot, pending_pair_ot_expires_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		sessionID, githubUserID, nowText, nowText, nowText, pending, pendingExpires)
+	return sessionID, err
+}
+
+func (s *Store) LoadMPSession(ctx context.Context, id string, now time.Time) (MPSession, bool, error) {
+	var sess MPSession
+	var lastSeen, lastSet string
+	err := s.db.QueryRowContext(ctx, `
+SELECT s.id, s.github_user_id, g.github_login, s.last_seen_at, s.last_setcookie_at, s.pending_pair_ot, s.pending_pair_ot_expires_at
+  FROM mp_sessions s
+  JOIN github_identities g ON g.github_user_id = s.github_user_id
+ WHERE s.id = ? AND s.last_seen_at >= ?`,
+		id, timeText(now.AddDate(0, 0, -30))).Scan(&sess.ID, &sess.GitHubUserID, &sess.GitHubLogin, &lastSeen, &lastSet, &sess.PendingPairOT, &sess.PendingPairOTExpiry)
+	if err == sql.ErrNoRows {
+		return MPSession{}, false, nil
+	}
+	if err != nil {
+		return MPSession{}, false, err
+	}
+	sess.LastSeenAt = parseTimeOrZero(lastSeen)
+	sess.LastSetCookieAt = parseTimeOrZero(lastSet)
+	return sess, true, nil
+}
+
+func (s *Store) TouchMPSession(ctx context.Context, id string, now time.Time, reissuedCookie bool) error {
+	if reissuedCookie {
+		_, err := s.db.ExecContext(ctx, `UPDATE mp_sessions SET last_seen_at = ?, last_setcookie_at = ? WHERE id = ?`, timeText(now), timeText(now), id)
+		return err
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE mp_sessions SET last_seen_at = ? WHERE id = ?`, timeText(now), id)
+	return err
+}
+
+func (s *Store) DeleteMPSession(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM mp_sessions WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) ListOwnedProviders(ctx context.Context, githubUserID int64) ([]OwnedProvider, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT provider_id, claimed_at FROM provider_ownership WHERE github_user_id = ? ORDER BY claimed_at, provider_id`, githubUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OwnedProvider
+	for rows.Next() {
+		var p OwnedProvider
+		if err := rows.Scan(&p.ProviderID, &p.ClaimedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) HasOwnership(ctx context.Context, providerID string) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(1) FROM provider_ownership WHERE provider_id = ?`, providerID).Scan(&n)
+	return n > 0, err
+}
+
+func (s *Store) MintAdmissionTokenAndPairOT(ctx context.Context, providerID, providerName string, now time.Time) (AdmissionPairMint, error) {
+	providerID = strings.TrimSpace(providerID)
+	providerName = strings.TrimSpace(providerName)
+	if providerID == "" || providerName == "" {
+		return AdmissionPairMint{}, fmt.Errorf("provider id and name are required")
+	}
+	providerToken, err := randomHex(32)
+	if err != nil {
+		return AdmissionPairMint{}, err
+	}
+	pairOT, err := randomHex(32)
+	if err != nil {
+		return AdmissionPairMint{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return AdmissionPairMint{}, err
+	}
+	defer tx.Rollback()
+	hash := tokenHash(providerToken)
+	prefix := providerToken[:tokenDisplayPrefixLength]
+	nowText := timeText(now)
+	res, err := tx.ExecContext(ctx, `INSERT INTO provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at) VALUES (?, ?, ?, ?, ?)`, hash, prefix, providerID, providerName, nowText)
+	if err != nil {
+		if isActiveProviderTokenConstraintFailure(err) {
+			return AdmissionPairMint{}, ErrActiveTokenAlreadyExists
+		}
+		return AdmissionPairMint{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return AdmissionPairMint{}, err
+	}
+	var owned int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(1) FROM provider_ownership WHERE provider_id = ?`, providerID).Scan(&owned); err != nil {
+		return AdmissionPairMint{}, err
+	}
+	out := AdmissionPairMint{
+		TokenRecord:   TokenRecord{ID: id, TokenPrefix: prefix, ProviderID: providerID, ProviderName: providerName, CreatedAt: nowText},
+		ProviderToken: providerToken,
+	}
+	if owned == 0 {
+		out.PairOT = pairOT
+		out.ExpiresAt = now.Add(10 * time.Minute).UTC()
+		out.Paired = true
+		if _, err := tx.ExecContext(ctx, `INSERT INTO pair_ots (id, provider_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, pairOT, providerID, timeText(out.ExpiresAt), nowText); err != nil {
+			return AdmissionPairMint{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return AdmissionPairMint{}, err
+	}
+	return out, nil
+}
+
+func (s *Store) MintPairOT(ctx context.Context, providerID string, now time.Time) (PairOTMint, error) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return PairOTMint{}, fmt.Errorf("provider id is required")
+	}
+	pairOT, err := randomHex(32)
+	if err != nil {
+		return PairOTMint{}, err
+	}
+	expires := now.Add(10 * time.Minute).UTC()
+	_, err = s.db.ExecContext(ctx, `INSERT INTO pair_ots (id, provider_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, pairOT, providerID, timeText(expires), timeText(now))
+	if err != nil {
+		return PairOTMint{}, err
+	}
+	return PairOTMint{PairOT: pairOT, ExpiresAt: expires}, nil
+}
+
+func (s *Store) CountRecentSuccessfulPairOTRefreshMints(ctx context.Context, providerID string, since time.Time) (int, sql.NullString, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT ts FROM pair_ot_mint_log WHERE provider_id = ? AND outcome = 200 AND ts >= ? ORDER BY ts ASC`, providerID, timeText(since))
+	if err != nil {
+		return 0, sql.NullString{}, err
+	}
+	defer rows.Close()
+	count := 0
+	var oldest sql.NullString
+	for rows.Next() {
+		var ts string
+		if err := rows.Scan(&ts); err != nil {
+			return 0, sql.NullString{}, err
+		}
+		if count == 0 {
+			oldest = sql.NullString{String: ts, Valid: true}
+		}
+		count++
+	}
+	return count, oldest, rows.Err()
+}
+
+func (s *Store) MintPairOTRefresh(ctx context.Context, providerID, sourceIP, userAgent string, now time.Time) (PairOTRefreshResult, error) {
+	providerID = strings.TrimSpace(providerID)
+	if providerID == "" {
+		return PairOTRefreshResult{}, fmt.Errorf("provider id is required")
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return PairOTRefreshResult{}, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return PairOTRefreshResult{}, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
+
+	rows, err := conn.QueryContext(ctx, `SELECT ts FROM pair_ot_mint_log WHERE provider_id = ? AND outcome = 200 AND ts >= ? ORDER BY ts ASC`, providerID, timeText(now.Add(-time.Hour)))
+	if err != nil {
+		return PairOTRefreshResult{}, err
+	}
+	count := 0
+	var oldest sql.NullString
+	for rows.Next() {
+		var ts string
+		if err := rows.Scan(&ts); err != nil {
+			rows.Close()
+			return PairOTRefreshResult{}, err
+		}
+		if count == 0 {
+			oldest = sql.NullString{String: ts, Valid: true}
+		}
+		count++
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return PairOTRefreshResult{}, err
+	}
+	rows.Close()
+
+	if count >= 5 {
+		if _, err := conn.ExecContext(ctx, `INSERT INTO pair_ot_mint_log (provider_id, source_ip, user_agent, outcome, ts) VALUES (?, ?, ?, ?, ?)`,
+			providerID, nullString(sourceIP), nullString(userAgent), http.StatusTooManyRequests, timeText(now)); err != nil {
+			return PairOTRefreshResult{}, err
+		}
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			return PairOTRefreshResult{}, err
+		}
+		committed = true
+		return PairOTRefreshResult{RetryAfter: retryAfterSeconds(oldest, now), RateLimited: true}, nil
+	}
+
+	pairOT, err := randomHex(32)
+	if err != nil {
+		return PairOTRefreshResult{}, err
+	}
+	expires := now.Add(10 * time.Minute).UTC()
+	if _, err := conn.ExecContext(ctx, `INSERT INTO pair_ots (id, provider_id, expires_at, created_at) VALUES (?, ?, ?, ?)`, pairOT, providerID, timeText(expires), timeText(now)); err != nil {
+		return PairOTRefreshResult{}, err
+	}
+	if _, err := conn.ExecContext(ctx, `INSERT INTO pair_ot_mint_log (provider_id, source_ip, user_agent, outcome, ts) VALUES (?, ?, ?, ?, ?)`,
+		providerID, nullString(sourceIP), nullString(userAgent), http.StatusOK, timeText(now)); err != nil {
+		return PairOTRefreshResult{}, err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return PairOTRefreshResult{}, err
+	}
+	committed = true
+	return PairOTRefreshResult{Mint: PairOTMint{PairOT: pairOT, ExpiresAt: expires}}, nil
+}
+
+func (s *Store) ConsumePendingPairOT(ctx context.Context, sessionID string, now time.Time) (string, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var pairOT string
+	nowText := timeText(now)
+	err = tx.QueryRowContext(ctx, `
+SELECT pending_pair_ot
+  FROM mp_sessions
+ WHERE id = ?
+   AND pending_pair_ot IS NOT NULL
+   AND pending_pair_ot_expires_at > ?`, sessionID, nowText).Scan(&pairOT)
+	if err == sql.ErrNoRows {
+		return "", ErrPendingPairOTMissing
+	}
+	if err != nil {
+		return "", err
+	}
+	res, err := tx.ExecContext(ctx, `
+UPDATE mp_sessions
+   SET pending_pair_ot = NULL,
+       pending_pair_ot_expires_at = NULL
+ WHERE id = ?
+   AND pending_pair_ot = ?
+   AND pending_pair_ot_expires_at > ?`, sessionID, pairOT, nowText)
+	if err != nil {
+		return "", err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return "", err
+	}
+	if affected == 0 {
+		return "", ErrPendingPairOTMissing
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return pairOT, nil
+}
+
+func (s *Store) LogPairOTMint(ctx context.Context, providerID, sourceIP, userAgent string, outcome int, now time.Time) error {
+	if providerID == "" {
+		providerID = "unknown"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO pair_ot_mint_log (provider_id, source_ip, user_agent, outcome, ts) VALUES (?, ?, ?, ?, ?)`,
+		providerID, nullString(sourceIP), nullString(userAgent), outcome, timeText(now))
+	return err
+}
+
+func (s *Store) ListPairOTMintLog(ctx context.Context, providerID string) ([]PairOTMintLogRecord, error) {
+	query := `SELECT id, provider_id, source_ip, user_agent, outcome, ts FROM pair_ot_mint_log`
+	args := []any{}
+	if strings.TrimSpace(providerID) != "" {
+		query += ` WHERE provider_id = ?`
+		args = append(args, strings.TrimSpace(providerID))
+	}
+	query += ` ORDER BY ts DESC, id DESC`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PairOTMintLogRecord
+	for rows.Next() {
+		var r PairOTMintLogRecord
+		if err := rows.Scan(&r.ID, &r.ProviderID, &r.SourceIP, &r.UserAgent, &r.Outcome, &r.TS); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) BindPairOT(ctx context.Context, sessionID, pairOT string, now time.Time, enqueue func(BindResult) error) (BindResult, error) {
+	pairOT = strings.TrimSpace(pairOT)
+	if pairOT == "" {
+		return BindResult{}, ErrPendingPairOTMissing
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return BindResult{}, err
+	}
+	defer tx.Rollback()
+	nowText := timeText(now)
+	var providerID string
+	err = tx.QueryRowContext(ctx, `
+UPDATE pair_ots
+   SET used_at = ?
+ WHERE id = ?
+   AND used_at IS NULL
+   AND expires_at > ?
+RETURNING provider_id`, nowText, pairOT, nowText).Scan(&providerID)
+	if err == sql.ErrNoRows {
+		return BindResult{}, ErrPairOTInvalid
+	}
+	if err != nil {
+		return BindResult{}, err
+	}
+	var githubUserID int64
+	var githubLogin string
+	err = tx.QueryRowContext(ctx, `
+SELECT s.github_user_id, g.github_login
+  FROM mp_sessions s
+  JOIN github_identities g ON g.github_user_id = s.github_user_id
+ WHERE s.id = ? AND s.last_seen_at >= ?`,
+		sessionID, timeText(now.AddDate(0, 0, -30))).Scan(&githubUserID, &githubLogin)
+	if err == sql.ErrNoRows {
+		return BindResult{}, ErrSessionInvalid
+	}
+	if err != nil {
+		return BindResult{}, err
+	}
+	claimedAt := nowText
+	err = tx.QueryRowContext(ctx, `
+INSERT INTO provider_ownership (provider_id, github_user_id, claimed_at)
+VALUES (?, ?, ?)
+ON CONFLICT(provider_id) DO NOTHING
+RETURNING claimed_at`, providerID, githubUserID, claimedAt).Scan(&claimedAt)
+	if err == sql.ErrNoRows {
+		var existingUserID int64
+		err = tx.QueryRowContext(ctx, `SELECT github_user_id, claimed_at FROM provider_ownership WHERE provider_id = ?`, providerID).Scan(&existingUserID, &claimedAt)
+		if err != nil {
+			return BindResult{}, err
+		}
+		if existingUserID != githubUserID {
+			if commitErr := tx.Commit(); commitErr != nil {
+				return BindResult{}, commitErr
+			}
+			return BindResult{}, ErrPairOTAlreadyOwned
+		}
+	} else if err != nil {
+		return BindResult{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE mp_sessions SET last_seen_at = ? WHERE id = ?`, nowText, sessionID); err != nil {
+		return BindResult{}, err
+	}
+	result := BindResult{ProviderID: providerID, GitHubLogin: githubLogin, ClaimedAt: claimedAt}
+	if enqueue != nil {
+		if err := enqueue(result); err != nil {
+			return BindResult{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return BindResult{}, err
+	}
+	return result, nil
+}
+
+func (s *Store) PruneGitHubAuthState(ctx context.Context, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+DELETE FROM pair_ots WHERE expires_at < ?;
+DELETE FROM oauth_states WHERE expires_at < ?;
+UPDATE mp_sessions
+   SET pending_pair_ot = NULL,
+       pending_pair_ot_expires_at = NULL
+ WHERE pending_pair_ot IS NOT NULL
+   AND pending_pair_ot_expires_at < ?;
+DELETE FROM mp_sessions WHERE last_seen_at < ?;
+DELETE FROM pair_ot_mint_log WHERE ts < ?;`,
+		timeText(now.Add(-24*time.Hour)),
+		timeText(now.Add(-24*time.Hour)),
+		timeText(now),
+		timeText(now.AddDate(0, 0, -30)),
+		timeText(now.AddDate(0, 0, -90)),
+	)
+	return err
+}
+
 func (s *Store) tokenByID(ctx context.Context, id int64) (TokenRecord, error) {
 	var r TokenRecord
 	err := s.db.QueryRowContext(ctx, `SELECT id, token_prefix, provider_id, provider_name, created_at, revoked_at, last_used_at FROM provider_tokens WHERE id = ?`, id).
@@ -611,6 +1209,46 @@ func tokenHash(token string) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func randomHex(n int) (string, error) {
+	raw := make([]byte, n)
+	if _, err := rand.Read(raw); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(raw), nil
+}
+
 func nowString() string {
 	return time.Now().UTC().Format("2006-01-02T15:04:05Z")
+}
+
+func timeText(t time.Time) string {
+	return t.UTC().Format("2006-01-02T15:04:05Z")
+}
+
+func parseTimeOrZero(s string) time.Time {
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.UTC()
+}
+
+func nullString(v string) sql.NullString {
+	v = strings.TrimSpace(v)
+	return sql.NullString{String: v, Valid: v != ""}
+}
+
+func retryAfterSeconds(oldest sql.NullString, now time.Time) int {
+	if !oldest.Valid {
+		return 3600
+	}
+	oldestAt, err := time.Parse(time.RFC3339, oldest.String)
+	if err != nil {
+		return 3600
+	}
+	retryAfter := int(oldestAt.Add(time.Hour).Sub(now).Seconds())
+	if retryAfter < 1 {
+		return 1
+	}
+	return retryAfter
 }
