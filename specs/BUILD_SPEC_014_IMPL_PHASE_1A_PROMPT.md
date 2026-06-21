@@ -55,8 +55,14 @@ Run in **Codex CLI** via `omc ask codex` from session root
 (one new HTML file ~700-900 lines including inline JS + CSS, one
 small JSON example file).
 
-Branch: `feat/spec-014-portal-phase-1a` (operator must create + check
-out before pasting). Codex MUST NOT create a new branch.
+Branch: `feat/spec-014-provider-portal` — the single unified branch
+that carries the SPEC commit, all three implementation phases
+(1A/1B/1C), their IMPL audit prompts, and their audit outputs.
+The operator creates + checks out before pasting. Codex MUST NOT
+create a new branch. **All three phases land as ONE PR**; the
+audit gates between phases stop merges *within* this branch
+(commit fixes until 0 CRITICAL/HIGH/MEDIUM, then proceed to the
+next phase), not separate PRs.
 
 ---
 
@@ -520,8 +526,11 @@ via `omc ask codex` IMPL audit (separate prompt) before commit.
   smaller appends that extend the same `index.html` file.
 - After Phase 1A LOCKs (IMPL audit returns 0 CRITICAL / 0 HIGH /
   0 MEDIUM via `specs/AUDIT_SPEC_014_IMPL_PHASE_1A_PROMPT.md`),
-  commit on the feature branch and open the PR. Do NOT cascade
-  to Phase 1B in the same PR — each phase is a separate PR per
-  the project audit-loop rule (memory: `feedback-build-audit-loop`).
-- Phase 1B prompt is drafted only after Phase 1A LOCKs and
-  merges, mirroring the SPEC-001 / SPEC-002 sequential discipline.
+  the operator proceeds to Phase 1B on the SAME branch
+  (`feat/spec-014-provider-portal`). No PR is opened between
+  phases. The single PR opens after Phase 1C LOCKs.
+- Audit-loop discipline (memory: `feedback-build-audit-loop`)
+  still binds: fix findings + re-audit until 0 CRITICAL/HIGH/
+  MEDIUM BEFORE moving to the next phase. The discipline lives
+  inside the branch as additional commits, not as additional
+  PRs.

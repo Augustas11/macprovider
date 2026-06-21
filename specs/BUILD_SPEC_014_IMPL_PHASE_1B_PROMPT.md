@@ -7,12 +7,19 @@ the static requirements grid, the RAM-to-model sizing card, the
 numbered setup steps with copy-to-clipboard CTAs, and the GitHub
 Releases-driven version feed with rate-limit + CORS handling.
 
-**Prerequisite:** Phase 1A merged to `main`. Branch off `main` into
-`feat/spec-014-portal-phase-1b`. The bundle at
-`frontdoor/provider-portal/index.html` already contains the AUTH-3
-loader, the sign-in screen, the AUTH-2 fetch layer, Surface A, and
-stub renderers for B/C/D/E. Phase 1B replaces the B stub with the
-real surface.
+**Prerequisite:** Phase 1A LOCKED (IMPL audit returned 0 CRITICAL /
+0 HIGH / 0 MEDIUM) on branch `feat/spec-014-provider-portal`. Stay
+on that SAME branch — Phase 1B commits land on top of the Phase 1A
+commits. The bundle at `frontdoor/provider-portal/index.html`
+already contains the AUTH-3 loader, the sign-in screen, the AUTH-2
+fetch layer, Surface A, and stub renderers for B/C/D/E. Phase 1B
+replaces the B stub with the real surface.
+
+**One PR for the whole SPEC-014 effort.** Phases 1A/1B/1C all
+land on `feat/spec-014-provider-portal` and ship as a single PR
+opened after Phase 1C LOCKs. Audit gates between phases stop
+forward progress *within* the branch (commit fixes until clean,
+then move on), not separate PRs.
 
 **Scope: SPEC-014 §11 Phase 1B only.** Concretely:
 - §4.2 B.1 requirements grid (4 cards, FR-D1 verbatim).
@@ -57,8 +64,8 @@ Run in **Codex CLI** via `omc ask codex` from session root
 `/Users/augstar/macprovider-poc`. Expected wall-clock: ~60-90 min
 (append ~200-300 lines to `index.html`).
 
-Branch: `feat/spec-014-portal-phase-1b` (operator creates + checks
-out before pasting). Codex MUST NOT create a new branch.
+Branch: `feat/spec-014-provider-portal` (already checked out from
+Phase 1A; do NOT create or switch to a new branch).
 
 ---
 
@@ -67,8 +74,11 @@ out before pasting). Codex MUST NOT create a new branch.
 
 You are implementing Phase 1B of SPEC-014 v0.8 in the single-file
 web bundle at /Users/augstar/macprovider-poc/frontdoor/provider-portal/.
-SPEC-014 v0.8 is LOCKED. Phase 1A is on `main` (read its commit to
-understand the existing scaffolding before you start editing).
+SPEC-014 v0.8 is LOCKED. Phase 1A is the most recent commit on
+`feat/spec-014-provider-portal` (locked by IMPL audit gate; read
+`git log --oneline` and the latest commit's diff to understand
+the existing scaffolding before you start editing). Phase 1B
+commits ADD to that same branch — do NOT branch or push.
 
 You will edit ONLY this file:
 
@@ -450,6 +460,6 @@ via `omc ask codex` IMPL audit (separate prompt) before commit.
 - Expected wall-clock: 60-90 min for Codex GPT-5 on a fresh
   context. Phase 1B is a smaller append than Phase 1A.
 - After Phase 1B LOCKs (IMPL audit returns 0 CRITICAL / 0 HIGH /
-  0 MEDIUM), commit on the feature branch and open the PR. Do
-  NOT cascade to Phase 1C in the same PR.
-- Phase 1C prompt drafts only after Phase 1B LOCKs and merges.
+  0 MEDIUM), the operator proceeds to Phase 1C on the SAME branch
+  (`feat/spec-014-provider-portal`). No PR opens between phases.
+- The single PR opens after Phase 1C LOCKs.

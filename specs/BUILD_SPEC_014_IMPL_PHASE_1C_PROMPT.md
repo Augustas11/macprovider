@@ -7,12 +7,18 @@ polish (sign-out / external API Docs / mobile collapse), and adds
 the build-time grep guard `check-bundle.sh` that AC 8(b) + 8(f)
 require to be wired into CI before merge.
 
-**Prerequisite:** Phase 1B merged to `main`. Branch off `main` into
-`feat/spec-014-portal-phase-1c`. The bundle at
-`frontdoor/provider-portal/index.html` already contains AUTH-3 +
-sign-in + AUTH-2 + Surface A (Phase 1A) and Surface B (Phase 1B).
-Phase 1C replaces the C/D/E stubs with real surfaces and adds one
-new file.
+**Prerequisite:** Phase 1B LOCKED (IMPL audit returned 0 CRITICAL /
+0 HIGH / 0 MEDIUM) on branch `feat/spec-014-provider-portal`. Stay
+on that SAME branch — Phase 1C commits land on top of the Phase 1A
++ 1B commits. The bundle at `frontdoor/provider-portal/index.html`
+already contains AUTH-3 + sign-in + AUTH-2 + Surface A (Phase 1A)
+and Surface B (Phase 1B). Phase 1C replaces the C/D/E stubs with
+real surfaces and adds one new file.
+
+**Last phase before the PR.** Phases 1A/1B/1C all land on
+`feat/spec-014-provider-portal` as commits; the single PR for the
+whole SPEC-014 effort opens AFTER Phase 1C LOCKs (its IMPL audit
+returns 0 CRITICAL/HIGH/MEDIUM and `check-bundle.sh` exits 0).
 
 **Scope: SPEC-014 §11 Phase 1C only.** Concretely:
 - §4.3 Surface C (Earn): C.1 credit totals row (3 cards) +
@@ -62,8 +68,8 @@ Run in **Codex CLI** via `omc ask codex` from session root
 (append ~150-250 lines to `index.html`; one new ~50-line shell
 script).
 
-Branch: `feat/spec-014-portal-phase-1c` (operator creates + checks
-out before pasting). Codex MUST NOT create a new branch.
+Branch: `feat/spec-014-provider-portal` (already checked out from
+Phases 1A + 1B; do NOT create or switch to a new branch).
 
 ---
 
@@ -72,8 +78,12 @@ out before pasting). Codex MUST NOT create a new branch.
 
 You are implementing Phase 1C of SPEC-014 v0.8 in the single-file
 web bundle at /Users/augstar/macprovider-poc/frontdoor/provider-portal/.
-SPEC-014 v0.8 is LOCKED. Phases 1A and 1B are on `main` (read
-their commits to understand the existing bundle before you start).
+SPEC-014 v0.8 is LOCKED. Phases 1A and 1B are the most recent
+commits on `feat/spec-014-provider-portal` (both locked by their
+IMPL audit gates; read `git log --oneline` and the latest two
+commits' diffs to understand the existing bundle before you start
+editing). Phase 1C commits ADD to that same branch — do NOT
+branch or push.
 
 You will create/edit ONLY these files:
 
@@ -457,10 +467,15 @@ via `omc ask codex` IMPL audit (separate prompt) before commit.
 - Expected wall-clock: 45-75 min for Codex GPT-5 on a fresh
   context. Phase 1C is a slightly smaller append than Phase 1B.
 - After Phase 1C LOCKs (IMPL audit returns 0 CRITICAL / 0 HIGH /
-  0 MEDIUM), commit on the feature branch, open the PR, and on
-  squash-merge add a `.github/workflows/` (or equivalent CI hook)
-  that runs `frontdoor/provider-portal/check-bundle.sh` on PRs
-  touching `frontdoor/provider-portal/**`. AC 8(b) + 8(f) call
-  for a CI step; without it the guard is not enforced.
+  0 MEDIUM AND `check-bundle.sh` exits 0), open the SINGLE PR
+  for the whole SPEC-014 effort from `feat/spec-014-provider-portal`
+  → `main`. The PR carries: the SPEC commit, all Phase 1A/1B/1C
+  implementation commits, all IMPL audit prompts, and all IMPL
+  audit outputs.
+- On squash-merge, add a `.github/workflows/` (or equivalent CI
+  hook) in a follow-up PR that runs
+  `frontdoor/provider-portal/check-bundle.sh` on PRs touching
+  `frontdoor/provider-portal/**`. AC 8(b) + 8(f) call for a CI
+  step; without it the guard is not enforced.
 - v0.2 reopens after Open Qs land their owning-spec amendments;
   do NOT cascade into v0.2 work from a Phase 1C PR.
