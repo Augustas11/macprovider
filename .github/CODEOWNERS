@@ -1,0 +1,12 @@
+# Sensitive money/auth paths require repository-owner review.
+phase4-coordinator/internal/billing/** @Augustas11
+phase4-coordinator/internal/buyer/** @Augustas11
+phase4-coordinator/internal/auth/** @Augustas11
+phase4-coordinator/internal/requestlog/** @Augustas11
+phase5-gateway/internal/router/** @Augustas11
+phase5-gateway/internal/auth/** @Augustas11
+
+# CI gate controls for the sensitive paths.
+.github/CODEOWNERS @Augustas11
+.github/workflows/ci.yml @Augustas11
+Makefile @Augustas11
