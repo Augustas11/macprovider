@@ -123,7 +123,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
 
-    static let binaryVersion = "1.3.1"
+    static let binaryVersion = "1.5.0"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -159,6 +159,7 @@ actor CoordinatorClient {
     // without taking another dependency on the loader.
     private let configPath: String
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
+    private let pairingController: PairingController
     private var inferenceRelay: InferenceRelay?
     private var tier2Session: Tier2ProviderSession?
     private var webSocket: ProviderWebSocketTask?
@@ -177,9 +178,13 @@ actor CoordinatorClient {
         attestationGenerator: Tier2AttestationTokenGenerating = ManagedDeviceAttestationGenerator(),
         webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
+        pairingController: PairingController? = nil,
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
     ) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
+            return nil
+        }
+        guard url.scheme == "wss" else {
             return nil
         }
         self.coordinatorURL = url
@@ -208,6 +213,7 @@ actor CoordinatorClient {
         }
         self.configPath = config.configPath
         self.sleepAssertionFactory = sleepAssertionFactory
+        self.pairingController = pairingController ?? PairingController(configPath: config.configPath)
         self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
     }
@@ -476,6 +482,10 @@ actor CoordinatorClient {
         switch type {
         case "hello_ack":
             try await acceptCoordinatorSession(dict, reason: "coordinator hello_ack received")
+        case "ownership_event":
+            try await handleOwnershipEvent(dict)
+        case "ownership_status":
+            try await handleOwnershipStatus(dict)
         case "preflight":
             try await handlePreflight(dict)
         case "inference_request":
@@ -520,6 +530,33 @@ actor CoordinatorClient {
     func handleCoordinatorPayloadForTest(_ payload: [String: Any]) async throws {
         let data = try JSONSerialization.data(withJSONObject: payload)
         try await handle(.string(String(decoding: data, as: UTF8.self)))
+    }
+
+    func acceptAuthResponseForTest(_ response: [String: Any], session: Tier2ProviderSession) async throws {
+        try await acceptAuthResponse(response, session: session)
+    }
+
+    private func handleOwnershipEvent(_ payload: [String: Any]) async throws {
+        guard let providerID = payload["provider_id"] as? String,
+              providerID == self.providerID,
+              let login = payload["github_login"] as? String,
+              let rawEvent = payload["event"] as? String,
+              let event = OwnershipEventKind(rawValue: rawEvent)
+        else {
+            try await sendNAK(inReplyTo: "ownership_event", code: "invalid_message", message: "Invalid ownership_event frame")
+            return
+        }
+        try pairingController.handleOwnershipEvent(OwnershipEventFrame(providerID: providerID, githubLogin: login, event: event))
+    }
+
+    private func handleOwnershipStatus(_ payload: [String: Any]) async throws {
+        guard let providerID = payload["provider_id"] as? String, providerID == self.providerID else {
+            try await sendNAK(inReplyTo: "ownership_status", code: "invalid_message", message: "Invalid ownership_status frame")
+            return
+        }
+        if payload["needs_claim"] as? Bool == true {
+            try pairingController.handleNeedsClaim()
+        }
     }
 
     func sendHeartbeatForTest() async throws {
@@ -695,6 +732,15 @@ actor CoordinatorClient {
         // Awaited so that persist-before-adopt holds: see
         // adoptAssignedProviderTokenIfPresent doc-comment.
         await adoptAssignedProviderTokenIfPresent(payload)
+        do {
+            try pairingController.handlePairingMaterial(
+                pairOT: payload["pair_ot"] as? String,
+                claimURL: payload["claim_url"] as? String,
+                portalBaseURL: payload["portal_base_url"] as? String
+            )
+        } catch {
+            Self.emitClaimURLHandoffEvent(error: error)
+        }
         let interval = max(Self.intValue(payload["heartbeat_interval_s"]) ?? 30, 1)
         await providerStatus.setCoordinatorSession(
             connected: true,
@@ -714,6 +760,20 @@ actor CoordinatorClient {
         sleepAssertion = sleepAssertionFactory()
         startHeartbeat(intervalSeconds: interval)
         try await sendStateUpdate(state: nil, reason: reason)
+    }
+
+    private static func emitClaimURLHandoffEvent(error: Error) {
+        let payload = [
+            "event": "claim_url_handoff_failed",
+            "error": String(describing: error),
+        ]
+        do {
+            var data = try JSONSerialization.data(withJSONObject: payload, options: [])
+            data.append(0x0A)
+            FileHandle.standardError.write(data)
+        } catch {
+            FileHandle.standardError.write(Data("{\"event\":\"claim_url_handoff_failed\"}\n".utf8))
+        }
     }
 
     // Provider WS keepalive fix. The coordinator advertises heartbeat_interval_s
