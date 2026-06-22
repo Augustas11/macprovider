@@ -1445,11 +1445,16 @@ func TestPoolzShapeUnchangedForL1Provider(t *testing.T) {
 		if len(got.Pool) == 0 || got.Pool[0]["provider_id"] != "m4-anon" {
 			return false
 		}
+		if got.Pool[0]["canary_fail_count"] != float64(0) {
+			t.Fatalf("canary_fail_count = %#v, want 0 in /poolz provider: %s", got.Pool[0]["canary_fail_count"], body)
+		}
 		for _, key := range []string{
 			"supported_models",
 			"publishes_supported_models",
 			"last_loading_state",
 			"loading_started_at",
+			"canary_last_checked_at",
+			"canary_last_failed_at",
 		} {
 			if _, ok := got.Pool[0][key]; ok {
 				t.Fatalf("L-1 /poolz provider unexpectedly included %q: %s", key, body)

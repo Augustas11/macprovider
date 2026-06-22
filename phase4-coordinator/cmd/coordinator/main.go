@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"net/http"
@@ -68,6 +69,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	canaryStore, err := setupCanarySanctionStore(context.Background(), cfg, reqLogStore.DB(), registry)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "canary sanction storage: %v\n", err)
+		os.Exit(1)
+	}
 	auditStore, err := audit.OpenStore(cfg.Storage.DBPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "audit log storage: %v\n", err)
@@ -94,6 +100,9 @@ func main() {
 	wsOpts := []providerws.Option{}
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
+	if canaryStore != nil {
+		wsOpts = append(wsOpts, providerws.WithCanarySanctionStore(canaryStore))
+	}
 	// SPEC-003 v0.8 FR-C9.1 — the token validator is always wired now,
 	// even when require_provider_tokens=false, because the same store
 	// is the issuance backend for self-serve provisional tokens. Pre-
@@ -334,6 +343,22 @@ func main() {
 
 type requestLogPruner interface {
 	PruneBefore(context.Context, time.Time) (int64, error)
+}
+
+func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB, registry *pool.Registry) (providerws.CanarySanctionStore, error) {
+	if !cfg.Pool.CanaryEnabled {
+		return nil, nil
+	}
+	store, err := providerws.NewSQLiteCanarySanctionStore(db)
+	if err != nil {
+		return nil, err
+	}
+	canarySanctions, err := store.LoadCanarySanctions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load canary sanctions: %w", err)
+	}
+	registry.LoadCanarySanctions(canarySanctions)
+	return store, nil
 }
 
 func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {

@@ -21,6 +21,15 @@ pool:
   degraded_probe_after_502: true
   breaker_failure_threshold: 2
   breaker_window_s: 120
+  canary_enabled: false
+  canary_interval_s: 300
+  canary_timeout_s: 30
+  canary_max_tokens: 8
+  canary_failure_threshold: 3
+  # Required when canary_enabled is true. Keep deployment-specific and rotate periodically.
+  # canary_challenges:
+  #   - prompt: "<private operator challenge prompt containing {nonce}>"
+  #     expected: "<private expected answer containing {nonce}>"
 
 routing:
   preflight_threshold_tokens: 4096
