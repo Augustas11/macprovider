@@ -25,6 +25,31 @@ func TestProviderTokensRequiredByDefault(t *testing.T) {
 	}
 }
 
+func TestCanaryValidationRequiresPrivateChallengeBankWhenEnabled(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Pool.CanaryEnabled = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "canary_challenges") {
+		t.Fatalf("enabled canary without challenges validation err=%v", err)
+	}
+
+	cfg.Pool.CanaryChallenges = []CanaryChallengeConfig{{
+		Prompt:   "Which US state uses postal abbreviation VT?",
+		Expected: "Vermont-{nonce}",
+	}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "{nonce}") {
+		t.Fatalf("challenge without prompt nonce validation err=%v", err)
+	}
+
+	cfg.Pool.CanaryChallenges = []CanaryChallengeConfig{{
+		Prompt:   "Which US state uses postal abbreviation VT? Append -{nonce}.",
+		Expected: "Vermont-{nonce}",
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("enabled canary with private challenge bank should validate: %v", err)
+	}
+}
+
 func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"

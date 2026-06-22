@@ -46,6 +46,7 @@ const (
 
 	RecoveryReasonBreaker         RecoveryReason = "breaker"
 	RecoveryReasonProviderFailure RecoveryReason = "provider_failure"
+	RecoveryReasonCanary          RecoveryReason = "canary"
 
 	HashStatusVerified           HashStatus = "hash_verified"
 	HashStatusMismatch           HashStatus = "hash_mismatch"
@@ -90,20 +91,20 @@ const (
 )
 
 type Provider struct {
-	ProviderID            string        `json:"provider_id"`
-	AssignedID            string        `json:"assigned_id"`
-	Hostname              string        `json:"hostname"`
-	ModelID               string        `json:"model_id"`
-	ModelParamsB          float64       `json:"model_params_b"`
-	RAMGB                 int           `json:"ram_gb"`
-	MaxContextTokens      int           `json:"max_context_tokens"`
-	MaxConcurrency        int           `json:"max_concurrency"`
-	SlotsFree             int           `json:"slots_free"`
-	SlotsTotal            int           `json:"slots_total"`
-	ThroughputTPSEstimate float64       `json:"throughput_tps_estimate"`
-	ModelLoadTimeMs       int64         `json:"model_load_time_ms,omitempty"`
-	EndpointURL           string        `json:"endpoint_url"`
-	Tier                  Tier          `json:"tier"`
+	ProviderID            string  `json:"provider_id"`
+	AssignedID            string  `json:"assigned_id"`
+	Hostname              string  `json:"hostname"`
+	ModelID               string  `json:"model_id"`
+	ModelParamsB          float64 `json:"model_params_b"`
+	RAMGB                 int     `json:"ram_gb"`
+	MaxContextTokens      int     `json:"max_context_tokens"`
+	MaxConcurrency        int     `json:"max_concurrency"`
+	SlotsFree             int     `json:"slots_free"`
+	SlotsTotal            int     `json:"slots_total"`
+	ThroughputTPSEstimate float64 `json:"throughput_tps_estimate"`
+	ModelLoadTimeMs       int64   `json:"model_load_time_ms,omitempty"`
+	EndpointURL           string  `json:"endpoint_url"`
+	Tier                  Tier    `json:"tier"`
 	// AuthState records how the connect was admitted. Empty string
 	// preserves pre-v0.8.3 behavior (routable, billable). Set to
 	// AuthBearerlessDuplicate by the duplicate-tokenless admit path
@@ -113,12 +114,12 @@ type Provider struct {
 	// Registry uses this to refuse evicting a routable session in
 	// favor of a bearer-less duplicate; buyer routing + billing use
 	// it to exclude bearer-less duplicates from money paths.
-	AuthState             AuthState     `json:"auth_state,omitempty"`
-	InferencePath         InferencePath `json:"inference_path"`
-	AdmittedAt            time.Time     `json:"admitted_at"`
-	HTTPForwardingOnly    bool          `json:"http_forwarding_only,omitempty"`
-	State                 State         `json:"state"`
-	LastHeartbeatAt       time.Time     `json:"last_heartbeat_at"`
+	AuthState          AuthState     `json:"auth_state,omitempty"`
+	InferencePath      InferencePath `json:"inference_path"`
+	AdmittedAt         time.Time     `json:"admitted_at"`
+	HTTPForwardingOnly bool          `json:"http_forwarding_only,omitempty"`
+	State              State         `json:"state"`
+	LastHeartbeatAt    time.Time     `json:"last_heartbeat_at"`
 	// LastActivityAt is the timestamp of the most recent inbound frame of any
 	// kind (heartbeat OR in-flight inference response). The liveness monitor
 	// uses this — not LastHeartbeatAt — so a provider actively streaming a
@@ -133,6 +134,13 @@ type Provider struct {
 	// AttestationStatus is informational unless tier2.require_attestation is
 	// enabled. The zero value represents a legacy provider with no claim.
 	AttestationStatus AttestationStatus `json:"attestation_status,omitempty"`
+	// CanaryFailCount is the current consecutive nonce-echo canary failure
+	// count for this live session. Zero is omitted from generic Provider JSON
+	// to preserve L-1 default wire compatibility; /poolz adds the field
+	// explicitly for every provider.
+	CanaryFailCount     int        `json:"canary_fail_count,omitempty"`
+	CanaryLastCheckedAt *time.Time `json:"canary_last_checked_at,omitempty"`
+	CanaryLastFailedAt  *time.Time `json:"canary_last_failed_at,omitempty"`
 
 	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
 	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.
@@ -213,6 +221,7 @@ type Registry struct {
 	seenModelsByProvider  map[string]map[string]struct{}
 	breakerFaults         map[string][]time.Time
 	recoveryHolds         map[string]recoveryHold
+	canarySanctions       map[string]canarySanction
 	lastBreakerRecoveries map[string]time.Time
 	maxProvider           int
 	hashVerifier          HeartbeatHashVerifier
@@ -231,6 +240,19 @@ type recoveryHold struct {
 	reason     RecoveryReason
 }
 
+type canarySanction struct {
+	failCount     int
+	lastCheckedAt *time.Time
+	lastFailedAt  *time.Time
+}
+
+type CanarySanctionSnapshot struct {
+	ProviderID    string
+	FailCount     int
+	LastCheckedAt *time.Time
+	LastFailedAt  *time.Time
+}
+
 func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Registry {
 	endpoints := make(map[string]config.ProviderConfig, len(providers))
 	for _, p := range providers {
@@ -243,12 +265,51 @@ func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Reg
 		seenModelsByProvider:  map[string]map[string]struct{}{},
 		breakerFaults:         map[string][]time.Time{},
 		recoveryHolds:         map[string]recoveryHold{},
+		canarySanctions:       map[string]canarySanction{},
 		lastBreakerRecoveries: map[string]time.Time{},
 	}
 	for _, opt := range opts {
 		opt(r)
 	}
 	return r
+}
+
+func (r *Registry) LoadCanarySanctions(snapshots []CanarySanctionSnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, snapshot := range snapshots {
+		if strings.TrimSpace(snapshot.ProviderID) == "" || snapshot.FailCount <= 0 {
+			continue
+		}
+		r.canarySanctions[snapshot.ProviderID] = canarySanction{
+			failCount:     snapshot.FailCount,
+			lastCheckedAt: cloneTimePtr(snapshot.LastCheckedAt),
+			lastFailedAt:  cloneTimePtr(snapshot.LastFailedAt),
+		}
+	}
+}
+
+func (r *Registry) CanarySanctions() []CanarySanctionSnapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]CanarySanctionSnapshot, 0, len(r.canarySanctions))
+	for providerID, sanction := range r.canarySanctions {
+		out = append(out, CanarySanctionSnapshot{
+			ProviderID:    providerID,
+			FailCount:     sanction.failCount,
+			LastCheckedAt: cloneTimePtr(sanction.lastCheckedAt),
+			LastFailedAt:  cloneTimePtr(sanction.lastFailedAt),
+		})
+	}
+	return out
+}
+
+func cloneTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	cloned := *t
+	return &cloned
 }
 
 func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
@@ -260,29 +321,31 @@ func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
 
 // Register installs a provider session, replacing any prior session
 // for the same provider_id. Returns (oldConn, registered):
+//
 //   - registered==true: session installed; oldConn is the displaced
 //     connection (nil if no prior session existed) and the caller
 //     SHOULD close it after the new ack frame is written.
+//
 //   - registered==false: registration was REFUSED. Caller MUST NOT
 //     proceed and MUST close `conn` with CloseInvalidToken /
 //     "invalid_token". This branch fires on two SPEC-003 v0.8.4 FR-C9.4
 //     defense layers:
 //
 //     1. **Bearer-less duplicate rule (fix-pass-3):** an incoming
-//        AuthBearerlessDuplicate is refused whenever a session already
-//        exists for the same provider_id — no incoming bearer-less
-//        connection may displace any other session.
+//     AuthBearerlessDuplicate is refused whenever a session already
+//     exists for the same provider_id — no incoming bearer-less
+//     connection may displace any other session.
 //
 //     2. **Proven-session protection (fix-pass-5):** an incoming
-//        non-Bearer-validated session (AuthSelfMinted / AuthMintFailed /
-//        empty) is refused whenever the existing session is a routing-
-//        eligible AuthBearerValidated session. Without this rule, a
-//        concurrent tokenless self-heal during a victim's first-mint
-//        window could mint a fresh bearer and then register as
-//        AuthSelfMinted, last-writer-wins evicting the victim's
-//        validated session (security audit, PR #69 fix-pass-5 MAJOR-2).
-//        Bearer-validated incoming connects always succeed because
-//        their proof-of-bearer is independently strong.
+//     non-Bearer-validated session (AuthSelfMinted / AuthMintFailed /
+//     empty) is refused whenever the existing session is a routing-
+//     eligible AuthBearerValidated session. Without this rule, a
+//     concurrent tokenless self-heal during a victim's first-mint
+//     window could mint a fresh bearer and then register as
+//     AuthSelfMinted, last-writer-wins evicting the victim's
+//     validated session (security audit, PR #69 fix-pass-5 MAJOR-2).
+//     Bearer-validated incoming connects always succeed because
+//     their proof-of-bearer is independently strong.
 //
 // The DB partial unique index alone prevents the attacker from minting
 // a parallel bearer, but does NOT prevent these two pool-slot capture
@@ -343,6 +406,7 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn, registere
 	delete(r.breakerFaults, p.ProviderID)
 	delete(r.recoveryHolds, p.ProviderID)
 	delete(r.lastBreakerRecoveries, p.ProviderID)
+	r.applyCanarySanctionLocked(p)
 	return old, true
 }
 
@@ -431,6 +495,9 @@ func (r *Registry) MarkDegradedForRecovery(providerID, assignedID string, reason
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
+	if hold, held := r.recoveryHolds[providerID]; held && hold.assignedID == assignedID && hold.reason == RecoveryReasonCanary {
+		return false
+	}
 	r.setStateLocked(p, StateDegraded)
 	r.recoveryHolds[providerID] = recoveryHold{assignedID: assignedID, reason: reason}
 	return true
@@ -450,6 +517,9 @@ func (r *Registry) MarkRecovered(providerID, assignedID string, at time.Time) bo
 	if !held || hold.assignedID != assignedID {
 		return false
 	}
+	if hold.reason == RecoveryReasonCanary {
+		return false
+	}
 	r.setStateLocked(p, StateReady)
 	delete(r.breakerFaults, providerID)
 	delete(r.recoveryHolds, providerID)
@@ -457,6 +527,13 @@ func (r *Registry) MarkRecovered(providerID, assignedID string, at time.Time) bo
 		r.lastBreakerRecoveries[providerID] = at
 	}
 	return true
+}
+
+func (r *Registry) CanaryRecoveryEligible(providerID, assignedID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	hold, held := r.recoveryHolds[providerID]
+	return held && hold.assignedID == assignedID && hold.reason == RecoveryReasonCanary
 }
 
 type BreakerTripState string
@@ -471,6 +548,100 @@ type BreakerFaultResult struct {
 	Count     int
 	Threshold int
 	Tripped   BreakerTripState
+}
+
+type CanaryTripState string
+
+const (
+	CanaryTripNone        CanaryTripState = ""
+	CanaryTripDegraded    CanaryTripState = "degraded"
+	CanaryTripUnavailable CanaryTripState = "unavailable"
+)
+
+type CanaryResult struct {
+	Current         bool
+	Passed          bool
+	Count           int
+	Threshold       int
+	Tier            Tier
+	Tripped         CanaryTripState
+	SanctionCleared bool
+}
+
+func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool, at time.Time, threshold int) CanaryResult {
+	if threshold <= 0 {
+		threshold = 3
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return CanaryResult{Threshold: threshold}
+	}
+	if p.State == StateDraining || p.State == StateUnavailable {
+		return CanaryResult{Current: true, Passed: passed, Threshold: threshold, Tier: p.Tier}
+	}
+	if hold, held := r.recoveryHolds[providerID]; held && hold.assignedID == assignedID && hold.reason == RecoveryReasonCanary && p.State != StateDegraded {
+		return CanaryResult{Current: true, Passed: passed, Threshold: threshold, Tier: p.Tier}
+	}
+	checkedAt := at
+	p.CanaryLastCheckedAt = &checkedAt
+	result := CanaryResult{
+		Current:   true,
+		Passed:    passed,
+		Threshold: threshold,
+		Tier:      p.Tier,
+	}
+	if passed {
+		p.CanaryFailCount = 0
+		if _, held := r.canarySanctions[providerID]; held {
+			result.SanctionCleared = true
+		}
+		delete(r.canarySanctions, providerID)
+		if hold, held := r.recoveryHolds[providerID]; held && hold.assignedID == assignedID && hold.reason == RecoveryReasonCanary {
+			result.SanctionCleared = true
+			delete(r.recoveryHolds, providerID)
+			r.setStateLocked(p, StateReady)
+		}
+		result.Count = 0
+		return result
+	}
+	p.CanaryFailCount++
+	failedAt := at
+	p.CanaryLastFailedAt = &failedAt
+	result.Count = p.CanaryFailCount
+	if result.Count < threshold {
+		return result
+	}
+	if p.Tier == TierProvisional {
+		r.setStateLocked(p, StateUnavailable)
+		result.Tripped = CanaryTripUnavailable
+		return result
+	}
+	r.setStateLocked(p, StateDegraded)
+	r.recoveryHolds[providerID] = recoveryHold{assignedID: assignedID, reason: RecoveryReasonCanary}
+	r.canarySanctions[providerID] = canarySanction{
+		failCount:     p.CanaryFailCount,
+		lastCheckedAt: p.CanaryLastCheckedAt,
+		lastFailedAt:  p.CanaryLastFailedAt,
+	}
+	result.Tripped = CanaryTripDegraded
+	return result
+}
+
+func (r *Registry) applyCanarySanctionLocked(p *Provider) {
+	sanction, ok := r.canarySanctions[p.ProviderID]
+	if !ok || p.Tier != TierPinned {
+		return
+	}
+	p.CanaryFailCount = sanction.failCount
+	p.CanaryLastCheckedAt = sanction.lastCheckedAt
+	p.CanaryLastFailedAt = sanction.lastFailedAt
+	r.setStateLocked(p, StateDegraded)
+	r.recoveryHolds[p.ProviderID] = recoveryHold{assignedID: p.AssignedID, reason: RecoveryReasonCanary}
 }
 
 func (r *Registry) RecordBreakerFault(providerID, assignedID string, at time.Time, threshold int, window time.Duration) BreakerFaultResult {

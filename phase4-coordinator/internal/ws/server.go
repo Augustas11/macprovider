@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"strconv"
@@ -43,17 +45,20 @@ const (
 )
 
 type Server struct {
-	cfg     config.Config
-	tier2Mu sync.RWMutex
-	tier2   config.Tier2Config
-	pool    *pool.Registry
-	log     zerolog.Logger
-	now     func() time.Time
-	newUUID func() string
-	timers  sync.Map
-	pending sync.Map
-	warmups sync.Map
-	tokens  TokenValidator
+	cfg             config.Config
+	tier2Mu         sync.RWMutex
+	tier2           config.Tier2Config
+	pool            *pool.Registry
+	log             zerolog.Logger
+	now             func() time.Time
+	newUUID         func() string
+	timers          sync.Map
+	pending         sync.Map
+	warmups         sync.Map
+	canaries        sync.Map
+	canaryDue       sync.Map
+	canarySanctions CanarySanctionStore
+	tokens          TokenValidator
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
 	// issuer roles can be wired independently. Production wires the same
 	// concrete *auth.Store to both (see main.go), but tests can override
@@ -212,6 +217,12 @@ func WithAdmissionStore(store AdmissionStateStore) Option {
 	}
 }
 
+func WithCanarySanctionStore(store CanarySanctionStore) Option {
+	return func(s *Server) {
+		s.canarySanctions = store
+	}
+}
+
 // WithAuthAttemptRetentionBound overrides the default 1024-bound
 // on the SPEC-002 v1.3.5 §7.9 auth-attempt retention store.
 // INTENDED USE: tests that exercise the AC-K.16 retention-bound
@@ -292,6 +303,9 @@ func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger
 		pool.WithHeartbeatHashVerifier(func(modelID, reportedHash string) pool.HashStatus {
 			return s.catalogRef().VerifyProviderHash(modelID, reportedHash)
 		})(registry)
+	}
+	if cfg.Pool.CanaryEnabled && registry != nil {
+		go s.runCanaryLoop()
 	}
 	return s
 }
@@ -1717,6 +1731,403 @@ func (s *Server) runHTTPWarmupGateAttempt(ctx context.Context, provider pool.Pro
 	return warmupPayloadHasOutput(raw) && warmupCompletionUsagePassed(raw)
 }
 
+func (s *Server) runCanaryLoop() {
+	s.runCanarySweep()
+	ticker := time.NewTicker(s.canarySweepCadence())
+	defer ticker.Stop()
+	for range ticker.C {
+		s.runCanarySweep()
+	}
+}
+
+func (s *Server) runCanarySweep() {
+	now := s.now()
+	activeKeys := map[string]struct{}{}
+	for _, provider := range shuffledProviders(s.pool.Snapshot()) {
+		dueKey := provider.ProviderID
+		activeKeys[dueKey] = struct{}{}
+		if !s.canaryProbeEligible(provider) {
+			continue
+		}
+		nextDue, scheduled := s.canaryDue.Load(dueKey)
+		if !scheduled {
+			s.scheduleNextCanaryProbe(dueKey, now)
+			continue
+		}
+		if due, ok := nextDue.(time.Time); ok && now.Before(due) {
+			continue
+		}
+		key := sessionKey(provider.ProviderID, provider.AssignedID)
+		if _, loaded := s.canaries.LoadOrStore(key, struct{}{}); loaded {
+			continue
+		}
+		go func(provider pool.Provider, key, dueKey string) {
+			defer s.canaries.Delete(key)
+			if s.runCanaryProbe(provider) {
+				s.scheduleNextCanaryProbe(dueKey, s.now())
+			}
+		}(provider, key, dueKey)
+	}
+	s.canaryDue.Range(func(key, _ any) bool {
+		typedKey, ok := key.(string)
+		if !ok {
+			s.canaryDue.Delete(key)
+			return true
+		}
+		if _, active := activeKeys[typedKey]; !active {
+			s.canaryDue.Delete(key)
+		}
+		return true
+	})
+}
+
+func (s *Server) scheduleNextCanaryProbe(key string, from time.Time) {
+	s.canaryDue.Store(key, from.Add(jitteredCanaryInterval(s.canaryInterval())))
+}
+
+func (s *Server) canaryProbeEligible(provider pool.Provider) bool {
+	if s.pool.CanaryRecoveryEligible(provider.ProviderID, provider.AssignedID) {
+		if provider.State != pool.StateDegraded {
+			return false
+		}
+	} else if !provider.RoutingEligible() {
+		return false
+	}
+	if provider.SlotsFree <= 0 {
+		return false
+	}
+	if s.warmupGatePending(provider.ProviderID) {
+		return false
+	}
+	if provider.IsWSTunneled() {
+		_, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)
+		return ok
+	}
+	return strings.TrimSpace(provider.EndpointURL) != ""
+}
+
+type canaryProbeOutcome string
+
+const (
+	canaryProbePass canaryProbeOutcome = "pass"
+	canaryProbeFail canaryProbeOutcome = "fail"
+	canaryProbeSkip canaryProbeOutcome = "skip"
+)
+
+func (s *Server) runCanaryProbe(provider pool.Provider) bool {
+	outcome := s.runCanaryProbeAttempt(provider)
+	if outcome == canaryProbeSkip {
+		s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary skipped")
+		return false
+	}
+	passed := outcome == canaryProbePass
+	checkedAt := s.now()
+	result := s.pool.RecordCanaryResult(provider.ProviderID, provider.AssignedID, passed, checkedAt, s.canaryFailureThreshold())
+	if !result.Current {
+		return false
+	}
+	if passed {
+		if result.SanctionCleared {
+			s.deleteCanarySanction(provider.ProviderID)
+		}
+		if result.Count == 0 {
+			s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary passed")
+		}
+		return true
+	}
+	event := s.log.Warn().
+		Str("provider_id", provider.ProviderID).
+		Int("canary_fail_count", result.Count).
+		Int("canary_failure_threshold", result.Threshold)
+	if result.Tripped != pool.CanaryTripNone {
+		event = event.Str("canary_trip", string(result.Tripped))
+	}
+	event.Msg("provider canary failed")
+	switch result.Tripped {
+	case pool.CanaryTripUnavailable:
+		if result.Tier == pool.TierProvisional && s.admission != nil {
+			s.admission.Reject(provider.ProviderID, "canary failures")
+		}
+		if session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); ok {
+			s.closeSession(session, CloseBanned, "canary_failed")
+		}
+	case pool.CanaryTripDegraded:
+		s.saveCanarySanction(pool.CanarySanctionSnapshot{
+			ProviderID:    provider.ProviderID,
+			FailCount:     result.Count,
+			LastCheckedAt: &checkedAt,
+			LastFailedAt:  &checkedAt,
+		})
+		s.log.Warn().Str("provider_id", provider.ProviderID).Msg("provider held degraded after canary threshold")
+	}
+	return true
+}
+
+func (s *Server) saveCanarySanction(snapshot pool.CanarySanctionSnapshot) {
+	if s.canarySanctions == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.canarySanctions.UpsertCanarySanction(ctx, snapshot); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", snapshot.ProviderID).Msg("canary sanction persistence failed")
+	}
+}
+
+func (s *Server) deleteCanarySanction(providerID string) {
+	if s.canarySanctions == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.canarySanctions.DeleteCanarySanction(ctx, providerID); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("canary sanction deletion failed")
+	}
+}
+
+func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryProbeOutcome {
+	body, expected, err := s.buildCanaryBody(provider.ModelID, s.canaryMaxTokens())
+	if err != nil {
+		return canaryProbeSkip
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.canaryTimeout())
+	defer cancel()
+	if !provider.IsWSTunneled() {
+		return s.runHTTPCanaryProbeAttempt(ctx, provider, body, expected)
+	}
+	return s.runWSCanaryProbeAttempt(ctx, provider, body, expected)
+}
+
+func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Provider, body []byte, expected string) canaryProbeOutcome {
+	if s.tier2WarmupExcluded(provider) {
+		return canaryProbeSkip
+	}
+	requestID := s.newUUID()
+	relay, err := s.DispatchInference(ctx, provider, requestID, body, false)
+	if err != nil {
+		return canaryProbeSkip
+	}
+	chunks := relay.Chunks
+	var output strings.Builder
+	for {
+		select {
+		case chunk, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			output.WriteString(canaryChunkContent(chunk.Data))
+		case end := <-relay.Done:
+			if end.Status != "complete" {
+				return canaryProbeFail
+			}
+			if canaryAnswerMatches(output.String(), expected) {
+				return canaryProbePass
+			}
+			return canaryProbeFail
+		case <-relay.Errors:
+			return canaryProbeFail
+		case <-ctx.Done():
+			return canaryProbeFail
+		}
+	}
+}
+
+func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Provider, body []byte, expected string) canaryProbeOutcome {
+	endpoint := strings.TrimRight(strings.TrimSpace(provider.EndpointURL), "/")
+	if endpoint == "" {
+		return canaryProbeSkip
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return canaryProbeSkip
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := providerhttp.Client.Do(req)
+	if err != nil {
+		return canaryProbeFail
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return canaryProbeFail
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return canaryProbeFail
+	}
+	if canaryAnswerMatches(strings.Join(canaryPayloadContents(raw), ""), expected) {
+		return canaryProbePass
+	}
+	return canaryProbeFail
+}
+
+func (s *Server) buildCanaryBody(modelID string, maxTokens int) ([]byte, string, error) {
+	return buildCanaryBody(modelID, maxTokens, s.cfg.Pool.CanaryChallenges)
+}
+
+func buildCanaryBody(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig) ([]byte, string, error) {
+	random, err := randomBytes(5)
+	if err != nil {
+		return nil, "", err
+	}
+	return buildCanaryBodyFromRandom(modelID, maxTokens, challenges, random)
+}
+
+func buildCanaryBodyFromRandom(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig, random []byte) ([]byte, string, error) {
+	if len(challenges) == 0 {
+		return nil, "", errors.New("canary challenge bank is empty")
+	}
+	if len(random) < 5 {
+		return nil, "", errors.New("canary random seed too short")
+	}
+	challenge := challenges[int(random[4])%len(challenges)]
+	promptTemplate := strings.TrimSpace(challenge.Prompt)
+	expectedTemplate := strings.TrimSpace(challenge.Expected)
+	if promptTemplate == "" || expectedTemplate == "" {
+		return nil, "", errors.New("canary challenge prompt and expected must not be empty")
+	}
+	if !strings.Contains(promptTemplate, "{nonce}") || !strings.Contains(expectedTemplate, "{nonce}") {
+		return nil, "", errors.New("canary challenge prompt and expected must contain {nonce}")
+	}
+	nonce := strings.ToUpper(hex.EncodeToString(random[:4]))
+	content := strings.ReplaceAll(promptTemplate, "{nonce}", nonce)
+	expected := strings.ReplaceAll(expectedTemplate, "{nonce}", nonce)
+	body, err := json.Marshal(map[string]any{
+		"model": modelID,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": content,
+		}},
+		"max_tokens": maxTokens,
+		"stream":     false,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return body, expected, nil
+}
+
+func canaryAnswerMatches(output, expected string) bool {
+	return strings.TrimSpace(output) == expected
+}
+
+func jitteredCanaryInterval(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	spread := int64(base)
+	offset, err := randomInt64(spread)
+	if err != nil {
+		return base
+	}
+	return base/2 + time.Duration(offset)
+}
+
+func shuffledProviders(providers []pool.Provider) []pool.Provider {
+	shuffled := append([]pool.Provider(nil), providers...)
+	for i := len(shuffled) - 1; i > 0; i-- {
+		j, err := randomInt(i + 1)
+		if err != nil {
+			return shuffled
+		}
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	}
+	return shuffled
+}
+
+func randomInt(max int) (int, error) {
+	n, err := randomInt64(int64(max))
+	return int(n), err
+}
+
+func randomInt64(max int64) (int64, error) {
+	if max <= 0 {
+		return 0, errors.New("random bound must be positive")
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(max))
+	if err != nil {
+		return 0, err
+	}
+	return n.Int64(), nil
+}
+
+func canaryChunkContent(data string) string {
+	var out strings.Builder
+	hasDataLines := false
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		hasDataLines = true
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		out.WriteString(strings.Join(canaryPayloadContents([]byte(payload)), ""))
+	}
+	if hasDataLines {
+		return out.String()
+	}
+	return strings.Join(canaryPayloadContents([]byte(data)), "")
+}
+
+func canaryPayloadContents(raw []byte) []string {
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+			Delta struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"delta"`
+			Text json.RawMessage `json:"text"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil
+	}
+	var out []string
+	for _, choice := range resp.Choices {
+		out = append(out, rawJSONTextValues(choice.Message.Content)...)
+		out = append(out, rawJSONTextValues(choice.Delta.Content)...)
+		out = append(out, rawJSONTextValues(choice.Text)...)
+	}
+	return out
+}
+
+func rawJSONTextValues(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	return textValues(value)
+}
+
+func textValues(value any) []string {
+	switch v := value.(type) {
+	case string:
+		return []string{v}
+	case []any:
+		var out []string
+		for _, item := range v {
+			out = append(out, textValues(item)...)
+		}
+		return out
+	case map[string]any:
+		var out []string
+		for _, key := range []string{"text", "content"} {
+			out = append(out, textValues(v[key])...)
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 func warmupGatePassed(end InferenceResponseEnd, observedOutput bool) bool {
 	if end.Status != "complete" {
 		return false
@@ -2115,6 +2526,49 @@ func (s *Server) degradedBackoff() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func (s *Server) canaryInterval() time.Duration {
+	seconds := s.cfg.Pool.CanaryIntervalS
+	if seconds <= 0 {
+		seconds = config.Default().Pool.CanaryIntervalS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Server) canarySweepCadence() time.Duration {
+	cadence := s.canaryInterval() / 10
+	if cadence < time.Second {
+		return time.Second
+	}
+	if cadence > 30*time.Second {
+		return 30 * time.Second
+	}
+	return cadence
+}
+
+func (s *Server) canaryTimeout() time.Duration {
+	seconds := s.cfg.Pool.CanaryTimeoutS
+	if seconds <= 0 {
+		seconds = config.Default().Pool.CanaryTimeoutS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Server) canaryMaxTokens() int {
+	tokens := s.cfg.Pool.CanaryMaxTokens
+	if tokens <= 0 {
+		tokens = config.Default().Pool.CanaryMaxTokens
+	}
+	return tokens
+}
+
+func (s *Server) canaryFailureThreshold() int {
+	threshold := s.cfg.Pool.CanaryFailureThreshold
+	if threshold <= 0 {
+		threshold = config.Default().Pool.CanaryFailureThreshold
+	}
+	return threshold
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -2209,11 +2663,22 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	type poolzProvider struct {
+		pool.Provider
+		CanaryFailCount int `json:"canary_fail_count"`
+	}
+	poolz := make([]poolzProvider, 0, len(providers))
+	for _, provider := range providers {
+		poolz = append(poolz, poolzProvider{
+			Provider:        provider,
+			CanaryFailCount: provider.CanaryFailCount,
+		})
+	}
 	_ = json.NewEncoder(w).Encode(struct {
-		Pool    []pool.Provider `json:"pool"`
+		Pool    []poolzProvider `json:"pool"`
 		Summary any             `json:"summary"`
 	}{
-		Pool:    providers,
+		Pool:    poolz,
 		Summary: summary,
 	})
 }
