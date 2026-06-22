@@ -17,6 +17,35 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 <p class=meta>Status: <strong>3h local soak PASS · M4 parity validation pending</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
+<section id="spec015-receipts-step1">
+  <h2>SPEC-015 design decisions — Step 1 JCS canonicalizer extensions (2026-06-22)</h2>
+  <div class="entry">
+    <time>2026-06-22</time>
+    <p><strong>Scope:</strong> extended <code>RFC8785JCS</code> for
+    SPEC-015 v0.1.3 receipt hashing prerequisites only: NFC normalization for
+    JSON string values and RFC 8785 / ECMAScript JSON-number rendering for
+    finite <code>Double</code> values.</p>
+    <p><strong>Number-format decision:</strong> Swift's native
+    <code>String(Double)</code> and <code>JSONSerialization</code> do not match
+    RFC 8785 for required cases such as <code>-0.0</code>,
+    <code>1.0</code>, <code>1e20</code>, and <code>1.1</code>. The
+    implementation delegates only the numeric string rendering to the
+    platform JavaScriptCore ECMAScript engine via <code>JSON.stringify(n)</code>
+    after rejecting NaN and infinities. This keeps the existing in-house JCS
+    object/array/string/int path intact while using the same ECMAScript number
+    semantics RFC 8785 normatively references.</p>
+    <p><strong>NFC decision:</strong> normalization is applied to JSON string
+    values immediately before escaping. Object keys are not normalized; the
+    receipt and prompt/output canonical object keys are fixed ASCII names, and
+    preserving key bytes avoids changing existing key-order semantics.</p>
+    <p><strong>Deviations:</strong> none for Step 1. No receipt signing,
+    Keychain, coordinator, or gateway behavior is implemented in this step.</p>
+    <p><strong>Open questions:</strong> if a future Linux provider binary is
+    introduced, the JavaScriptCore dependency will need a replacement
+    ECMAScript-compatible dtoa implementation or a platform abstraction.</p>
+  </div>
+</section>
+
 <section id="spec013-autotune-step1">
   <h2>SPEC-013 design decisions — Step 1 autotune scaffold (2026-06-18)</h2>
   <div class="entry">
