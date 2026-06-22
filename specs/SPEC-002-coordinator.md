@@ -1,7 +1,19 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.3.5 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 + SPEC-001 v1.3 absorption)
+**Version:** 1.4 (2026-06-22, SPEC-015 v0.1.3 /poolz receipt pubkey absorption)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9)
+
+**Change log v1.4:**
+- **v1.4 (2026-06-22, SPEC-015 v0.1.3 absorption):** Adds two
+  parser/consumer-optional fields to each `/poolz` provider row:
+  `receipt_pubkey` and `receipt_pubkey_prev`. `receipt_pubkey` is a
+  nullable standard padded base64 ed25519 public key string; null means
+  the provider did not publish a SPEC-001 v1.6 receipt pubkey.
+  `receipt_pubkey_prev` is null outside key-rotation grace windows or
+  an object carrying `pubkey`, `rotated_at`, and `expires_at` during
+  the SPEC-015 v0.1.3 reconnect-based rotation grace window. This is a
+  `/poolz` JSON shape absorption only; durable receipt-key storage is
+  deferred to future specs.
 
 **Change log v1.3.5:**
 - **v1.3.5 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 + SPEC-001 v1.3 absorption):** Adds coordinator-side surface for three now-LOCKED companion specs. SPEC-010 v1.5 adds the `Provider` data-model extension (`SupportedModels[]`, `PublishesSupportedModels`); opt-in `/v1/status.supported_models` echo per R-3.3.3 / AC-21. SPEC-011 v0.5 adds heartbeat parsing for optional `model_hash` + `loading: bool` per R-3.3.0 / R-3.3.1; REPLACES the locked `ApplyHeartbeat` hash-clearing semantics with a two-path (legacy clear / SPEC-011 re-verify) contract at `phase4-coordinator/internal/pool/provider.go:411-432`; adds NEW §7.10 audit-log infrastructure + normative `operator_model_swap` event schema. ALSO adds a new normative §7.8 v2 `auth_request` provider handshake section — the v2 contract has been in code since SPEC-002 v1.2.x but was never normatively documented in SPEC-002; v1.3.5 closes that gap on the coordinator side (matching SPEC-001 v1.3 §6.7 binary-side closure). ALSO adds a new normative §7.9 auth-attempt lifecycle section (10-minute timeout per `s.now().Add(10 * time.Minute)` at server.go:355; per-attempt state release on success/reject/expiry/disconnect); takes over as the source of truth from SPEC-010 v1.5 R-3.1.10 clauses 1 and 5 per SPEC-010 §6.2 transition note. L-1 baseline preserved literally: a v1.3 binary in the unset/unset cell continues to be accepted and processed exactly as a pre-SPEC-010/SPEC-011 binary per SPEC-001 v1.3 §6.7.3 cell 1 and SPEC-010 §4.1 back-compat analysis. NO new buyer HTTP surface; NO routing-behavior change; NO Tier-2 (SPEC-008) expansion; NO change to existing FR-P* numbering or AC numbering.
@@ -1326,7 +1338,13 @@ Response:
       "last_heartbeat_at": "2026-05-27T14:30:00Z",
       "connected_at": "2026-05-27T12:00:00Z",
       "binary_version": "0.1.0",
-      "endpoint_url": "https://m4.streamvc.live"
+      "endpoint_url": "https://m4.streamvc.live",
+      "receipt_pubkey": "<base64-32-byte-ed25519>" | null,
+      "receipt_pubkey_prev": null | {
+        "pubkey": "<base64-32-byte-ed25519>",
+        "rotated_at": "2026-06-22T12:00:00Z",
+        "expires_at": "2026-06-29T12:00:00Z"
+      }
     }
   ],
   "summary": {
@@ -1350,6 +1368,16 @@ Response:
 ```
 
 The `summary` block is the SPEC-006 v0.3 gateway input for `/v1/status`; the detailed `pool` array is operator-only and MUST NOT be exposed to buyers by the gateway.
+
+SPEC-015 v0.1.3 adds the two receipt fields shown above as the SPEC-002
+v1.4 absorption. `receipt_pubkey` is `null` when the provider did not
+publish SPEC-001 v1.6 `auth_request.provider_receipt_public_key`;
+otherwise it is the provider's current standard padded base64 32-byte
+ed25519 receipt public key. `receipt_pubkey_prev` is `null` outside the
+SPEC-015 rotation grace window; during that window it carries the prior
+pubkey plus coordinator UTC timestamps `rotated_at` and `expires_at`.
+Both fields are additive to the provider row and consumers MUST tolerate
+their absence when reading pre-v1.4 coordinator responses.
 
 Returns HTTP 401 if the operator key is missing or invalid.
 
@@ -2334,7 +2362,9 @@ No authentication. Returns coordinator health (FR-O1).
 #### GET /poolz
 
 Requires `Authorization: Bearer <operator-key>`. Returns full pool
-state (FR-O2). See FR-O2 for response schema.
+state (FR-O2). See FR-O2 for response schema, including the optional
+SPEC-015 v0.1.3 `receipt_pubkey` and `receipt_pubkey_prev` provider
+row fields.
 
 **401 Unauthorized** if operator key missing or invalid.
 

@@ -1,6 +1,6 @@
 # SPEC-001 — Phase 3 Binary: Mac Provider Inference CLI
 
-**Version:** 1.5 (2026-06-21, additive pair_ot + claim_url ack fields + ownership_event frame + needs_claim signal for SPEC-014 v0.2 downstream consumer)
+**Version:** 1.6 (2026-06-22, SPEC-015 v0.1.3 receipt pubkey auth_request absorption)
 **Revision:** v1.3.1 adds the `provider_token` (yaml, top-level) /
 `MACPROVIDER_PROVIDER_TOKEN` (env) / `--provider-token` (CLI) config key
 and mandates the binary attach `Authorization: Bearer <token>` on the
@@ -14,6 +14,15 @@ handshake starts. Backwards-compatible: a v1.3.1 binary with no
 behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
+
+**Change log v1.6:**
+- **v1.6 (2026-06-22, SPEC-015 v0.1.3 absorption):** Adds one
+  parser-optional field to the v2 `auth_request` initial-stage frame:
+  `provider_receipt_public_key`. The field carries the provider's
+  standard padded base64-encoded 32-byte ed25519 receipt public key for
+  SPEC-015 v0.1.3 non-streaming inference receipts. This is additive
+  only: the field is NOT required by parsers, absent values preserve
+  pre-v1.6 behavior, and the v2 proof-stage frame is unchanged.
 
 **Change log v1.5:**
 - **v1.5 (2026-06-21, pair_ot / claim_url wire additions):** Adds
@@ -1782,6 +1791,7 @@ The initial-stage frame field table is the SPEC-010 v1.5 §3.1.A table:
 | Binary version | `binary_version` | string | REQUIRED by `parseAuthInitial` | |
 | Endpoint URL | `endpoint_url` | string pointer (nullable) | optional | |
 | Provider ECDH public key | `provider_ecdh_public_key` | string base64 | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2 |
+| Provider receipt public key | `provider_receipt_public_key` | string standard padded base64 of 32-byte ed25519 public key | optional, ADDED by SPEC-015 v0.1.3 / SPEC-001 v1.6 | parser-optional; initial-stage only; absent means the provider is not receipt-issuing |
 | Tier-2 capabilities | `tier2_capabilities` | object `{encrypted_leg: bool, attestation: bool, aead_suites: []string}` | REQUIRED by `parseAuthInitial` | SPEC-008 Tier-2 |
 | Supported models | `supported_models` | array of strings | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.1 through R-3.1.9 and R-3.6.1 through R-3.6.3 |
 | Publishes supported models | `publishes_supported_models` | bool | optional, ADDED by SPEC-010 v1.5 | rules per SPEC-010 v1.5 R-3.1.6 and R-3.6.4 |
@@ -1937,6 +1947,22 @@ reconnect after a warm-swap-in-flight.
 R-6.7.10 A pre-v1.3 (v1.2.x) binary uses legacy `hello` on first
 connect; the coordinator accepts both paths per SPEC-010 v1.5 §3.1 and
 SPEC-011 v0.5 R-3.8.3 compatibility notes.
+
+#### 6.7.5. SPEC-015 receipt pubkey initial-stage field (NEW in v1.6)
+
+SPEC-015 v0.1.3 §7.2 adds the optional initial-stage field
+`provider_receipt_public_key` to publish the provider's receipt
+verification key for non-streaming inference receipts. When present,
+the field value MUST be standard padded base64 of exactly 32 bytes of
+ed25519 public key material. The coordinator parser MUST accept an
+absent field so pre-v1.6 binaries continue to admit; an absent field
+means the provider is not receipt-issuing for SPEC-015 v0.1.x.
+
+The field is valid on the v2 `auth_request` initial-stage frame only.
+The proof-stage field table in §6.7.2 is unchanged; the binary MUST NOT
+echo `provider_receipt_public_key` on proof-stage frames. SPEC-015
+v0.1.3 deliberately restricts this absorption to one additive field and
+does not introduce any receipt-specific WebSocket control frame.
 
 ### 6.8. Warm-swap opt-in gate + runtime state machine (NEW in v1.3)
 

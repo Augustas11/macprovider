@@ -1,7 +1,14 @@
 # SPEC-006 - Buyer API Gateway: Mac Provider's first public buyer surface
 
-**Version:** 0.8.3 (2026-05-31, context-cancel reservation refund invariant)
+**Version:** 0.9 (2026-06-22, SPEC-015 v0.1.3 receipt response-header allowlist absorption)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.4, SPEC-003 v0.7, SPEC-004 v0.2
+
+**Change log v0.9:**
+- SPEC-015 v0.1.3 absorption: adds `X-MacProvider-Receipt` to the
+  documented response-pass-through allowlist so the gateway forwards
+  provider-issued non-streaming inference receipt headers unchanged.
+  The inbound buyer request header strip rules are unchanged, and no
+  second receipt-related `X-MacProvider-*` response header is added.
 
 **Change log v0.8.3:**
 - Enumerates the § 17.7 context-cancel refund invariant already enforced by gateway code: cancelled or timed-out buyer connections at quota or concurrency reservation gates MUST refund reservations before return and MUST NOT write a 500 to the dead connection.
@@ -1082,6 +1089,11 @@ The gateway MUST strip these upstream coordinator response headers before return
 - `X-MacProvider-Route`
 - any response header starting with `X-MacProvider-` that is not on a documented response-pass-through allowlist
 
+The documented response-pass-through allowlist is:
+
+- `X-MacProvider-Receipt`, emitted by SPEC-015 v0.1.3 non-streaming
+  receipt-capable providers and forwarded unchanged by the gateway.
+
 The gateway MUST reject immediately with 503 when no provider slot is immediately available.
 
 The gateway MUST NOT queue buyer requests waiting for future capacity.
@@ -1734,6 +1746,11 @@ The explicit outbound strip list is:
 - `X-MacProvider-Provider`
 - `X-MacProvider-Route`
 - any other `X-MacProvider-*` response header not on a documented response-pass-through allowlist
+
+The documented response-pass-through allowlist is:
+
+- `X-MacProvider-Receipt`, emitted by SPEC-015 v0.1.3 non-streaming
+  receipt-capable providers and forwarded unchanged by the gateway.
 
 The gateway MAY expose a public request ID.
 
