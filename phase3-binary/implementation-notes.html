@@ -2082,5 +2082,47 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   passes 11/11 new Step 3 tests, including signed-header self-verification
   and byte-exact Unicode tool-call argument commitment.</p>
 </div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 4 non-streaming receipt emission.</strong>
+  Added an opt-in receipt runtime gate via <code>--enable-receipts</code>,
+  <code>enable_receipts</code>, and
+  <code>MACPROVIDER_ENABLE_RECEIPTS</code>. The serve command only constructs
+  a <code>ReceiptBuilder</code> when receipts are enabled and a provider ID is
+  configured; startup generation owns first key creation, while response-time
+  signing requires an existing current key and omits the header if the keypair
+  is absent.</p>
+  <p>Non-streaming successful chat completions now attach
+  <code>X-MacProvider-Receipt</code> before the JSON body is written. The
+  receipt commits the parsed request source, output content, finish reason,
+  completion-token count, measured first-token latency in milliseconds, and
+  current Unix timestamp.
+  The null-usage <code>model_not_loaded</code> path emits a receipt with
+  empty content, <code>finish_reason</code> <code>error</code>, and
+  <code>tokens_out</code> <code>0</code>. Other API errors and pre-keypair
+  states omit the header.</p>
+  <p>Streaming/SSE remains receipt-free. Header construction is split into
+  JSON and SSE helpers; tests assert JSON can carry the receipt header while
+  the SSE header set remains byte-stable and contains no
+  <code>X-MacProvider-*</code> headers. Receipt headers larger than 4096 bytes
+  fail closed with an internal receipt-construction error instead of writing a
+  body with an oversized or partial header.</p>
+  <p>The first Step 4 audit found three implementation gaps: generic
+  inference failures synthesized as <code>model_not_loaded</code> bypassed the
+  null-usage receipt path; <code>ttft_ms</code> used request-to-completion
+  latency instead of first-token latency; and tests covered helper seams
+  without exercising the real <code>/v1/chat/completions</code> handler. The
+  fix routes generic failures and early non-streaming
+  <code>model_not_loaded</code> validation failures through the same API-error
+  receipt branch, records first non-empty token emission in the model runtime,
+  and adds raw-socket NIO handler tests for success, missing-key omission,
+  null-usage error emission, early validation failure emission, and streaming
+  header omission.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter 'HTTPServerReceiptTests|ServeCommandTests|ReceiptBuilderTests|ReceiptKeyStoreTests'</code>
+  passes 55/55 focused tests. Full
+  <code>swift test --package-path phase3-binary</code> passes 470 tests with 7
+  skipped integration-gated tests and 0 failures.</p>
+</div>
 </section>
 </body></html>

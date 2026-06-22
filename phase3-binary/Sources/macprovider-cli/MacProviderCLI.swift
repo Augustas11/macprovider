@@ -51,6 +51,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("enable-warm-swap"), inversion: .prefixedNo, help: "Opt into the operator-pushed warm model swap workflow (SPEC-011 v0.5). Default off. When off, the binary follows the SPEC-001 v1.2.4 synchronous-load path; no control socket is opened.")
     var enableWarmSwap: Bool?
 
+    @Flag(name: .customLong("enable-receipts"), inversion: .prefixedNo, help: "Opt into SPEC-015 non-streaming receipt emission. Default off for v0.1.x rollout.")
+    var enableReceipts: Bool?
+
     @Option(help: "Drain timeout in seconds for an in-flight warm swap (SPEC-011 v0.5 §3.4 / §3.9). Default 30. Only meaningful when --enable-warm-swap is set.")
     var swapDrainTimeoutSeconds: Int?
 
@@ -145,6 +148,7 @@ struct ServeCommand: AsyncParsableCommand {
                 supportedModels: SupportedModels.parseCSV(supportedModels),
                 publishesSupportedModels: publishSupportedModels,
                 enableWarmSwap: enableWarmSwap,
+                enableReceipts: enableReceipts,
                 swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
                 ctlSocketPath: ctlSocketPath,
                 switchStatePath: switchStatePath,
@@ -214,7 +218,13 @@ struct ServeCommand: AsyncParsableCommand {
             controlSocket = nil
         }
         await coordinatorClient?.start()
-        let server = HTTPServer(config: resolved, modelRuntime: modelRuntime, providerStatus: providerStatus)
+        let receiptBuilder = try Self.makeReceiptBuilder(config: resolved)
+        let server = HTTPServer(
+            config: resolved,
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            receiptBuilder: receiptBuilder
+        )
         let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket)
         defer {
             Task {
@@ -226,6 +236,19 @@ struct ServeCommand: AsyncParsableCommand {
         try withExtendedLifetime(terminationHandlers) {
             try server.run()
         }
+    }
+
+    static func makeReceiptBuilder(
+        config: AppConfig,
+        keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
+    ) throws -> ReceiptBuilder? {
+        guard config.enableReceipts,
+              let providerID = config.providerID,
+              !providerID.isEmpty else {
+            return nil
+        }
+        _ = try keyStore.loadOrGenerate(providerId: providerID)
+        return ReceiptBuilder(keyStore: keyStore)
     }
 }
 
@@ -346,4 +369,5 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  kv_bits: \(config.kvBitsOverride.map(String.init) ?? "<unset, mlx default>")")
     print("  max_context: \(config.maxContextOverride.map(String.init) ?? "<unset, per-tier default>")")
     print("  max_batch: \(config.maxConcurrencyOverride.map(String.init) ?? "1")")
+    print("  enable_receipts: \(config.enableReceipts)")
 }

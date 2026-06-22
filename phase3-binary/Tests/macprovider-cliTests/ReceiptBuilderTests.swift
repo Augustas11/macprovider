@@ -62,8 +62,31 @@ final class ReceiptBuilderTests: XCTestCase {
             XCTAssertEqual(error as? ReceiptBuilder.Error, .nonASCIIModelId)
         }
     }
+
+    func testBuildRequiresExistingCurrentKey() throws {
+        let builder = ReceiptBuilder(keyStore: EmptyReceiptKeyStore())
+
+        XCTAssertThrowsError(try builder.build(
+            providerId: "provider-a",
+            input: ReceiptInput(
+                modelId: "fixture-model",
+                request: PromptCanonicalizerTests.fixtureRequest(),
+                outputContent: "",
+                outputToolCalls: nil,
+                finishReason: "error",
+                ttftMs: 0,
+                tokensOut: 0,
+                unixTsSeconds: 1
+            )
+        )) { error in
+            XCTAssertEqual(
+                error as? ReceiptBuilder.Error,
+                .missingCurrentReceiptKey(providerId: "provider-a")
+            )
+        }
+    }
 }
-private final class FixedReceiptKeyStore: ReceiptKeyStoring {
+private final class FixedReceiptKeyStore: ReceiptKeyStoring, @unchecked Sendable {
     private let key: Curve25519.Signing.PrivateKey
 
     init(key: Curve25519.Signing.PrivateKey) {
@@ -76,6 +99,20 @@ private final class FixedReceiptKeyStore: ReceiptKeyStoring {
 
     func loadCurrent(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
         key
+    }
+
+    func storeNew(providerId: String, privateKey: Curve25519.Signing.PrivateKey) throws {}
+
+    func swapToCurrent(providerId: String, newKey: Curve25519.Signing.PrivateKey) throws {}
+}
+
+private final class EmptyReceiptKeyStore: ReceiptKeyStoring, @unchecked Sendable {
+    func loadOrGenerate(providerId: String) throws -> Curve25519.Signing.PrivateKey {
+        Curve25519.Signing.PrivateKey()
+    }
+
+    func loadCurrent(providerId: String) throws -> Curve25519.Signing.PrivateKey? {
+        nil
     }
 
     func storeNew(providerId: String, privateKey: Curve25519.Signing.PrivateKey) throws {}

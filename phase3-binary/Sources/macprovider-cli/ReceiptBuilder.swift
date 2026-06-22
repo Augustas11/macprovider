@@ -12,7 +12,7 @@ struct ReceiptInput {
     let tokensOut: Int64
     let unixTsSeconds: Int64
 }
-struct ReceiptBuilder {
+struct ReceiptBuilder: Sendable {
     let keyStore: ReceiptKeyStoring
 
     init(keyStore: ReceiptKeyStoring) {
@@ -33,7 +33,9 @@ struct ReceiptBuilder {
             throw Error.negativeInteger("unix_ts")
         }
 
-        let key = try keyStore.loadOrGenerate(providerId: providerId)
+        guard let key = try keyStore.loadCurrent(providerId: providerId) else {
+            throw Error.missingCurrentReceiptKey(providerId: providerId)
+        }
         let tuple = try tupleObject(input: input, publicKey: key.publicKey)
         let canonicalTuple = try RFC8785JCS.canonicalString(tuple)
         let signature = try key.signature(for: Data(canonicalTuple.utf8))
@@ -74,6 +76,7 @@ struct ReceiptBuilder {
     }
 
     enum Error: Swift.Error, Equatable {
+        case missingCurrentReceiptKey(providerId: String)
         case nonASCIIModelId
         case negativeInteger(String)
         case integerOutOfRange(String)

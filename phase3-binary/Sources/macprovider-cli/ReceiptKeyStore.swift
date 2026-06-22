@@ -2,7 +2,7 @@ import CryptoKit
 import Foundation
 import Security
 
-protocol ReceiptKeyStoring {
+protocol ReceiptKeyStoring: Sendable {
     func loadOrGenerate(providerId: String) throws -> Curve25519.Signing.PrivateKey
     func loadCurrent(providerId: String) throws -> Curve25519.Signing.PrivateKey?
     func storeNew(providerId: String, privateKey: Curve25519.Signing.PrivateKey) throws
@@ -25,9 +25,9 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring {
     static let previousRetention: TimeInterval = 7 * 24 * 60 * 60
 
     private static let mutationLock = NSLock()
-    private let now: () -> Date
+    private let now: @Sendable () -> Date
 
-    init(now: @escaping () -> Date = Date.init) {
+    init(now: @escaping @Sendable () -> Date = { Date() }) {
         self.now = now
     }
 

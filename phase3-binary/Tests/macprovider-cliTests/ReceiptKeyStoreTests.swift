@@ -103,8 +103,8 @@ final class ReceiptKeyStoreTests: XCTestCase {
     }
 
     func testLoadOrGenerateDeletesPreviousKeyOlderThanSevenDays() throws {
-        var currentDate = Date(timeIntervalSince1970: 1_800_000_000)
-        let store = InMemoryReceiptKeyStore(now: { currentDate })
+        let clock = ReceiptTestClock(Date(timeIntervalSince1970: 1_800_000_000))
+        let store = InMemoryReceiptKeyStore(now: { @Sendable in clock.now() })
         let first = try store.loadOrGenerate(providerId: "provider-a")
         try store.swapToCurrent(providerId: "provider-a", newKey: Curve25519.Signing.PrivateKey())
 
@@ -113,7 +113,7 @@ final class ReceiptKeyStoreTests: XCTestCase {
             first.rawRepresentation
         )
 
-        currentDate = currentDate.addingTimeInterval(KeychainReceiptKeyStore.previousRetention + 1)
+        clock.advance(by: KeychainReceiptKeyStore.previousRetention + 1)
         _ = try store.loadOrGenerate(providerId: "provider-a")
 
         XCTAssertNil(store.previousKeyForTest(providerId: "provider-a"))
@@ -146,5 +146,26 @@ final class ReceiptKeyStoreTests: XCTestCase {
         XCTAssertEqual(query[kSecAttrSynchronizable as String] as? Bool, false)
         XCTAssertEqual(query[kSecValueData as String] as? Data, key.rawRepresentation)
         XCTAssertEqual(key.rawRepresentation.count, 32)
+    }
+}
+
+private final class ReceiptTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Date
+
+    init(_ value: Date) {
+        self.value = value
+    }
+
+    func now() -> Date {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+
+    func advance(by interval: TimeInterval) {
+        lock.lock()
+        value = value.addingTimeInterval(interval)
+        lock.unlock()
     }
 }

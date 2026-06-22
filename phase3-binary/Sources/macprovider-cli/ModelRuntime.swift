@@ -359,6 +359,7 @@ actor ModelRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> CompletionResult {
+        let completionStartedAt = Date()
         let snapshot = await currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
@@ -395,7 +396,11 @@ actor ModelRuntime: ModelRuntimeServing {
                         temperature: Float(request.temperature),
                         topP: Float(request.topP)
                     )
-                    let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                    let firstToken = FirstTokenRecorder()
+                    let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
+                        if !tokens.isEmpty {
+                            firstToken.recordIfMissing()
+                        }
                         if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
                             return GenerateDisposition.stop
                         }
@@ -421,7 +426,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         content: filtered.text,
                         finishReason: finishReason,
                         promptTokens: result.promptTokenCount,
-                        completionTokens: result.generationTokenCount
+                        completionTokens: result.generationTokenCount,
+                        ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt)
                     )
                 }
             }
@@ -825,6 +831,43 @@ struct CompletionResult: Sendable {
     let finishReason: String
     let promptTokens: Int
     let completionTokens: Int
+    let ttftMilliseconds: Int64?
+
+    init(
+        content: String,
+        finishReason: String,
+        promptTokens: Int,
+        completionTokens: Int,
+        ttftMilliseconds: Int64? = nil
+    ) {
+        self.content = content
+        self.finishReason = finishReason
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.ttftMilliseconds = ttftMilliseconds
+    }
+}
+
+private final class FirstTokenRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var timestamp: Date?
+
+    func recordIfMissing(now: Date = Date()) {
+        lock.lock()
+        if timestamp == nil {
+            timestamp = now
+        }
+        lock.unlock()
+    }
+
+    func elapsedMilliseconds(since start: Date) -> Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let timestamp else {
+            return nil
+        }
+        return max(0, Int64(timestamp.timeIntervalSince(start) * 1000))
+    }
 }
 
 private extension ChatMessage {
