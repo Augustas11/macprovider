@@ -177,3 +177,47 @@ jobs:
       - name: Run Swift tests
         working-directory: phase3-binary
         run: swift test --parallel
+
+  ci-required:
+    name: ci-required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - coordinator
+      - gateway
+      - integration
+      - spec-014-v0-2-gate
+      - dist-tooling
+      - swift-tests
+    if: always()
+    steps:
+      - name: Require all CI jobs
+        shell: bash
+        env:
+          COORDINATOR_RESULT: ${{ needs.coordinator.result }}
+          GATEWAY_RESULT: ${{ needs.gateway.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          SPEC_014_RESULT: ${{ needs.spec-014-v0-2-gate.result }}
+          DIST_TOOLING_RESULT: ${{ needs.dist-tooling.result }}
+          SWIFT_TESTS_RESULT: ${{ needs.swift-tests.result }}
+        run: |
+          set -euo pipefail
+
+          failed=0
+          for check in \
+            "phase4-coordinator (go vet + test):${COORDINATOR_RESULT}" \
+            "phase5-gateway (go vet + test):${GATEWAY_RESULT}" \
+            "integration (cross-service):${INTEGRATION_RESULT}" \
+            "spec-014-v0-2-gate:${SPEC_014_RESULT}" \
+            "deploy tooling (check-deploy-config gate):${DIST_TOOLING_RESULT}" \
+            "phase3-binary (swift test):${SWIFT_TESTS_RESULT}"
+          do
+            name="${check%%:*}"
+            result="${check#*:}"
+            if [ "$result" != "success" ]; then
+              printf '%s result=%s\n' "$name" "$result" >&2
+              failed=1
+            fi
+          done
+
+          exit "$failed"
