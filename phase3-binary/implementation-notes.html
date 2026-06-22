@@ -2145,5 +2145,58 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   <code>swift test --package-path phase3-binary</code> passes 473 tests with 7
   skipped integration-gated tests and 0 failures.</p>
 </div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 7 manual receipt-key rotation.</strong>
+  Added <code>macprovider-cli rotate-key</code> for operator-triggered receipt
+  signing-key rotation. The command resolves config with receipts enabled,
+  requires a stable <code>provider_id</code>, and sends a provider-bound
+  <code>rotate_receipt_key_request</code> over the local serve control socket;
+  standalone rotation is intentionally rejected when no receipt-enabled
+  <code>serve</code> process owns the live coordinator session.</p>
+  <p>The serve process generates the fresh ed25519 candidate in memory only,
+  stops its current coordinator WebSocket, reconnects through the existing v2
+  auth path with the candidate public key in
+  <code>auth_request.provider_receipt_public_key</code>, and commits
+  <code>swapToCurrent</code> only after coordinator auth acceptance. The
+  coordinator stages changed receipt keys during auth and publishes them only
+  after the provider's post-commit <code>state_update</code>, so local commit
+  failure leaves <code>/poolz</code> on the old key without a rollback wire flag,
+  and coordinator sessions with a pending receipt key are non-routable until
+  that publication <code>state_update</code> lands. Candidate rejection,
+  candidate timeout, and pre-commit failures await bounded old-key session
+  restoration before returning failure. Once <code>swapToCurrent</code> succeeds,
+  the provider must still publish the committed key through a post-auth
+  <code>state_update</code> before <code>rotate-key</code> reports success; if
+  that first state update fails, the provider reconnects with the committed
+  new key and waits for that restored session to publish. If post-commit
+  recovery also times out, the error is explicit that the local key has already
+  changed and coordinator publication is unconfirmed.</p>
+  <p>Rotation requests reject concurrent in-process rotations and the control
+  server rejects mismatched <code>provider_id</code> frames before touching the
+  coordinator session. The control socket does not wrap the side-effecting
+  rotation in an opaque timeout; bounded failure lives in the coordinator
+  client's candidate-auth timeout before Keychain commit plus the same bounded
+  timeout for restore attempts, and the foreground command keeps a 180-second
+  client-side receive guard that covers the worst-case candidate plus restore
+  sequence. On candidate-auth expiry, the coordinator client
+  cancels the candidate socket, attempts old-key session restoration within the
+  rotation timeout, and binds all candidate and restore auth writes to their
+  specific sockets so stale rotation tasks cannot publish onto the restored
+  session. The control result includes a machine-readable
+  <code>committed_unconfirmed</code> status so the foreground command preserves
+  the difference between rollback-safe rejection and local commit with
+  unconfirmed coordinator publication.</p>
+  <p><strong>Anti-regression:</strong>
+  focused <code>CoordinatorClientTests</code> rotation coverage passes for
+  timeout cancellation, bounded restore timeout, concurrent rejection,
+  post-commit state-update failure, committed-but-unconfirmed recovery failure,
+  control-boundary status preservation, and rejected-candidate old-key restore. Full
+  <code>swift test</code> passes 489 tests with 7 skipped integration-gated
+  tests and 0 failures. Coverage also includes control-socket request/result
+  framing, provider-id mismatch rejection, disabled-process rejection,
+  candidate commit-after-accept, rejection leaves current unchanged, and the
+  rotation auth initial frame overrides the old published receipt pubkey.</p>
+</div>
 </section>
 </body></html>

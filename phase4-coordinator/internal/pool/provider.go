@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"strings"
@@ -137,6 +138,11 @@ type Provider struct {
 	// Previous receipt pubkey retained during the SPEC-015 rotation grace
 	// window. /poolz owns the public JSON projection.
 	ReceiptPubkeyPrev *ReceiptPubkeyPrevious `json:"-"`
+	// PendingReceiptPubkey is a changed receipt key accepted during v2 auth but
+	// not yet published to /poolz. The provider publishes it only after its
+	// post-auth state_update, which the provider sends after local Keychain
+	// commit.
+	PendingReceiptPubkey []byte `json:"-"`
 	// AttestationStatus is informational unless tier2.require_attestation is
 	// enabled. The zero value represents a legacy provider with no claim.
 	AttestationStatus AttestationStatus `json:"attestation_status,omitempty"`
@@ -201,11 +207,15 @@ type ReceiptPubkeyPrevious struct {
 // HashStatus filtering used to live here as a defense-in-depth gate. Fix-pass-4
 // removed it: when Tier-2 hash enforcement is disabled, hash-mismatched
 // providers must still route, and a non-config-aware predicate cannot model
-// that. Buyer routing (chat completions, /v1/models, hard-pin) calls
-// tier2ProviderExcludedStatus alongside RoutingEligible() to enforce hash
-// when active.
+// that. Buyer routing (chat completions, hard-pin) calls RoutingEligible()
+// alongside tier2ProviderExcludedStatus to enforce hash policy. Catalog and
+// health surfaces separately exclude pending receipt-key publication while
+// preserving ready providers that are temporarily out of free slots.
 func (p Provider) RoutingEligible() bool {
 	if p.AuthState == AuthBearerlessDuplicate {
+		return false
+	}
+	if len(p.PendingReceiptPubkey) > 0 {
 		return false
 	}
 	return p.State == StateReady && p.SlotsFree > 0
@@ -246,6 +256,10 @@ type Registry struct {
 // at a time); reaching this cap silently drops further model IDs.
 // M2-5 / PERF-5.
 const maxSeenModelsPerProvider = 32
+
+// ReceiptRotationGrace is the SPEC-015 overlap window during which buyers may
+// validate receipts signed by the previous provider receipt key.
+const ReceiptRotationGrace = 7 * 24 * time.Hour
 
 type recoveryHold struct {
 	assignedID string
@@ -363,9 +377,30 @@ func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
 // a parallel bearer, but does NOT prevent these two pool-slot capture
 // shapes. These checks close them at the registry layer.
 func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn, registered bool) {
+	return r.RegisterAt(p, conn, time.Now().UTC())
+}
+
+// RegisterAt is Register with an injected coordinator clock for tests and
+// server-level time control.
+func (r *Registry) RegisterAt(p *Provider, conn net.Conn, now time.Time) (old net.Conn, registered bool) {
+	old, registered, _ = r.RegisterAtDetailed(p, conn, now)
+	return old, registered
+}
+
+type RegisterRefusal string
+
+const (
+	RegisterRefusalNone                       RegisterRefusal = ""
+	RegisterRefusalBearerlessDuplicate        RegisterRefusal = "bearerless_duplicate"
+	RegisterRefusalBearerDowngrade            RegisterRefusal = "bearer_downgrade"
+	RegisterRefusalReceiptRotationGraceActive RegisterRefusal = "receipt_rotation_grace_active"
+)
+
+func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time) (old net.Conn, registered bool, refusal RegisterRefusal) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing := r.providers[p.ProviderID]; existing != nil {
+	existing := r.providers[p.ProviderID]
+	if existing != nil {
 		// SPEC-003 v0.8.4 FR-C9.4 — refuse to evict ANY existing
 		// session in favor of a bearer-less duplicate. This closes the
 		// pool-slot capture vector from the PR #69 codex security audit
@@ -374,7 +409,7 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn, registere
 		// cleanup); only an attacker racing while the legitimate
 		// provider is still in the pool would hit this branch.
 		if p.AuthState == AuthBearerlessDuplicate {
-			return nil, false
+			return nil, false, RegisterRefusalBearerlessDuplicate
 		}
 		// SPEC-003 v0.8.4 FR-C9.4 (fix-pass-5) — protect proven
 		// (Bearer-validated, routing-eligible) sessions from non-
@@ -387,7 +422,10 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn, registere
 		if existing.AuthState == AuthBearerValidated &&
 			existing.RoutingEligible() &&
 			p.AuthState != AuthBearerValidated {
-			return nil, false
+			return nil, false, RegisterRefusalBearerDowngrade
+		}
+		if r.stageReceiptPublicationLocked(existing, p, now) == RegisterRefusalReceiptRotationGraceActive {
+			return nil, false, RegisterRefusalReceiptRotationGraceActive
 		}
 		old = existing.conn
 		delete(r.sessions, existing.AssignedID)
@@ -400,6 +438,10 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn, registere
 		// the new one and ModelKnown would over-report. (Codex code-audit
 		// 2026-06-11 #47.)
 		delete(r.seenModelsByProvider, p.ProviderID)
+	} else {
+		if r.stageReceiptPublicationLocked(nil, p, now) == RegisterRefusalReceiptRotationGraceActive {
+			return nil, false, RegisterRefusalReceiptRotationGraceActive
+		}
 	}
 	p.conn = conn
 	if p.Tier == "" {
@@ -419,7 +461,106 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn, registere
 	delete(r.recoveryHolds, p.ProviderID)
 	delete(r.lastBreakerRecoveries, p.ProviderID)
 	r.applyCanarySanctionLocked(p)
-	return old, true
+	return old, true, RegisterRefusalNone
+}
+
+func (r *Registry) stageReceiptPublicationLocked(existing, incoming *Provider, now time.Time) RegisterRefusal {
+	now = now.UTC()
+	incomingKey := cloneBytes(incoming.ReceiptPubkey)
+	incomingPrev := activeReceiptPubkeyPrev(incoming, now)
+	incoming.ReceiptPubkey = nil
+	incoming.PendingReceiptPubkey = nil
+	incoming.ReceiptPubkeyPrev = nil
+	if existing == nil {
+		if incomingPrev != nil {
+			incoming.ReceiptPubkey = cloneBytes(incomingKey)
+			incoming.ReceiptPubkeyPrev = cloneReceiptPubkeyPrevious(incomingPrev)
+			return RegisterRefusalNone
+		}
+		incoming.PendingReceiptPubkey = cloneBytes(incomingKey)
+		return RegisterRefusalNone
+	}
+	activePrev := activeReceiptPubkeyPrev(existing, now)
+	if len(incomingKey) == 0 {
+		return RegisterRefusalNone
+	}
+	if len(existing.ReceiptPubkey) == 0 {
+		if len(existing.PendingReceiptPubkey) > 0 {
+			if bytes.Equal(existing.PendingReceiptPubkey, incomingKey) {
+				incoming.PendingReceiptPubkey = cloneBytes(existing.PendingReceiptPubkey)
+				return RegisterRefusalNone
+			}
+			return RegisterRefusalReceiptRotationGraceActive
+		}
+		incoming.PendingReceiptPubkey = cloneBytes(incomingKey)
+		return RegisterRefusalNone
+	}
+	if bytes.Equal(existing.ReceiptPubkey, incomingKey) {
+		incoming.ReceiptPubkey = cloneBytes(existing.ReceiptPubkey)
+		incoming.ReceiptPubkeyPrev = cloneReceiptPubkeyPrevious(activePrev)
+		return RegisterRefusalNone
+	}
+	if len(existing.PendingReceiptPubkey) > 0 {
+		if bytes.Equal(existing.PendingReceiptPubkey, incomingKey) {
+			incoming.ReceiptPubkey = cloneBytes(existing.ReceiptPubkey)
+			incoming.ReceiptPubkeyPrev = cloneReceiptPubkeyPrevious(activePrev)
+			incoming.PendingReceiptPubkey = cloneBytes(existing.PendingReceiptPubkey)
+			return RegisterRefusalNone
+		}
+		return RegisterRefusalReceiptRotationGraceActive
+	}
+	if activePrev != nil {
+		return RegisterRefusalReceiptRotationGraceActive
+	}
+	incoming.PendingReceiptPubkey = cloneBytes(incomingKey)
+	incoming.ReceiptPubkey = cloneBytes(existing.ReceiptPubkey)
+	return RegisterRefusalNone
+}
+
+func activeReceiptPubkeyPrev(p *Provider, now time.Time) *ReceiptPubkeyPrevious {
+	if p == nil || p.ReceiptPubkeyPrev == nil || !now.Before(p.ReceiptPubkeyPrev.ExpiresAt) {
+		return nil
+	}
+	return p.ReceiptPubkeyPrev
+}
+
+func (r *Registry) commitPendingReceiptPubkeyLocked(p *Provider, now time.Time) {
+	now = now.UTC()
+	if p.ReceiptPubkeyPrev != nil && !now.Before(p.ReceiptPubkeyPrev.ExpiresAt) {
+		p.ReceiptPubkeyPrev = nil
+	}
+	if len(p.PendingReceiptPubkey) == 0 {
+		return
+	}
+	if len(p.ReceiptPubkey) > 0 && !bytes.Equal(p.ReceiptPubkey, p.PendingReceiptPubkey) {
+		p.ReceiptPubkeyPrev = &ReceiptPubkeyPrevious{
+			Pubkey:    cloneBytes(p.ReceiptPubkey),
+			RotatedAt: now,
+			ExpiresAt: now.Add(ReceiptRotationGrace),
+		}
+	}
+	p.ReceiptPubkey = cloneBytes(p.PendingReceiptPubkey)
+	p.PendingReceiptPubkey = nil
+}
+
+func cloneReceiptPubkeyPrevious(prev *ReceiptPubkeyPrevious) *ReceiptPubkeyPrevious {
+	if prev == nil {
+		return nil
+	}
+	return &ReceiptPubkeyPrevious{
+		Pubkey:    cloneBytes(prev.Pubkey),
+		RotatedAt: prev.RotatedAt,
+		ExpiresAt: prev.ExpiresAt,
+	}
+}
+
+func cloneBytes(in []byte) []byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
 }
 
 // recordSeenModelLocked records a model id under a provider's set,
@@ -987,6 +1128,7 @@ type StateUpdate struct {
 	State      State
 	SlotsFree  *int
 	SlotsTotal *int
+	At         time.Time
 }
 
 func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateUpdate) (*Provider, bool) {
@@ -1005,6 +1147,11 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 	if update.SlotsTotal != nil {
 		p.SlotsTotal = *update.SlotsTotal
 	}
+	at := update.At
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	r.commitPendingReceiptPubkeyLocked(p, at)
 	cp := *p
 	return &cp, true
 }

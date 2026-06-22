@@ -607,7 +607,9 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	for _, p := range providers {
 		switch p.State {
 		case pool.StateReady:
-			resp.PoolReady++
+			if p.AuthState != pool.AuthBearerlessDuplicate && len(p.PendingReceiptPubkey) == 0 {
+				resp.PoolReady++
+			}
 		case pool.StateDegraded, pool.StateBusy:
 			resp.PoolDegraded++
 		case pool.StateDraining:
@@ -748,7 +750,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if pillarAActive && !p.RoutingEligible() {
 			continue
 		}
-		if !pillarAActive && (p.State != pool.StateReady || p.AuthState == pool.AuthBearerlessDuplicate) {
+		if !pillarAActive && (p.State != pool.StateReady || p.AuthState == pool.AuthBearerlessDuplicate || len(p.PendingReceiptPubkey) > 0) {
 			continue
 		}
 		excluded := tier2Active && s.tier2ProviderExcludedForConfig(p, cfg)

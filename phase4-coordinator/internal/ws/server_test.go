@@ -477,7 +477,7 @@ func TestProviderAuthV2ProofAbsentSpec010Accepted(t *testing.T) {
 	}
 }
 
-func TestProviderAuthV2InitialReceiptPublicKeyAdmitsAndStoresPubkey(t *testing.T) {
+func TestProviderAuthV2InitialReceiptPublicKeyPublishesAfterStateUpdate(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""
 	})
@@ -505,7 +505,12 @@ func TestProviderAuthV2InitialReceiptPublicKeyAdmitsAndStoresPubkey(t *testing.T
 	}
 	eventually(t, func() bool {
 		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
-		return ok && bytes.Equal(provider.ReceiptPubkey, receiptPubkey)
+		return ok && provider.ReceiptPubkey == nil && bytes.Equal(provider.PendingReceiptPubkey, receiptPubkey) && !provider.RoutingEligible()
+	})
+	writeStateUpdate(t, conn, "ready")
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
+		return ok && bytes.Equal(provider.ReceiptPubkey, receiptPubkey) && provider.PendingReceiptPubkey == nil && provider.RoutingEligible()
 	})
 }
 
@@ -541,9 +546,18 @@ func TestPoolzReceiptPubkeyForV16Provider(t *testing.T) {
 		got = fetchPoolz(t, h.HTTP.URL)
 		return len(got.Pool) == 1 && got.Pool[0].ProviderID == "m4-anon"
 	})
-	if got.Pool[0].ReceiptPubkey == nil {
-		t.Fatalf("receipt_pubkey = nil, want populated")
+	if got.Pool[0].ReceiptPubkey != nil {
+		t.Fatalf("receipt_pubkey = %q before state_update, want nil", *got.Pool[0].ReceiptPubkey)
 	}
+	if got.Pool[0].ReceiptPubkeyPrev != nil {
+		t.Fatalf("receipt_pubkey_prev = %+v, want nil", got.Pool[0].ReceiptPubkeyPrev)
+	}
+
+	writeStateUpdate(t, conn, "ready")
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil
+	})
 	want := base64.StdEncoding.EncodeToString(receiptPubkey)
 	if *got.Pool[0].ReceiptPubkey != want {
 		t.Fatalf("receipt_pubkey = %q, want %q", *got.Pool[0].ReceiptPubkey, want)
@@ -1577,9 +1591,9 @@ func TestPoolzReceiptPubkeyPrevShape(t *testing.T) {
 
 	current := bytes.Repeat([]byte{0x11}, 32)
 	previous := bytes.Repeat([]byte{0x22}, 32)
-	rotatedAt := time.Unix(1770000000, 0).UTC()
-	expiresAt := rotatedAt.Add(7 * 24 * time.Hour)
-	_, registered := h.Registry.Register(&pool.Provider{
+	rotatedAt := time.Now().UTC()
+	expiresAt := rotatedAt.Add(pool.ReceiptRotationGrace)
+	_, registered := h.Registry.RegisterAt(&pool.Provider{
 		ProviderID:      "m4-anon",
 		AssignedID:      "assigned-receipt-prev",
 		State:           pool.StateReady,
@@ -1596,7 +1610,7 @@ func TestPoolzReceiptPubkeyPrevShape(t *testing.T) {
 			RotatedAt: rotatedAt,
 			ExpiresAt: expiresAt,
 		},
-	}, nil)
+	}, nil, rotatedAt)
 	if !registered {
 		t.Fatalf("provider was not registered")
 	}
@@ -1623,6 +1637,264 @@ func TestPoolzReceiptPubkeyPrevShape(t *testing.T) {
 	}
 	if prev.ExpiresAt != expiresAt.Unix() {
 		t.Fatalf("receipt_pubkey_prev.expires_at = %d, want %d", prev.ExpiresAt, expiresAt.Unix())
+	}
+}
+
+func TestProviderAuthV2ReceiptRotationMovesPriorPubkeyToPrevious(t *testing.T) {
+	clock := newLockedTime(time.Now().UTC())
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithNow(clock.Now),
+	}, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	oldPubkey := bytes.Repeat([]byte{0x31}, 32)
+	newPubkey := bytes.Repeat([]byte{0x32}, 32)
+	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
+	defer oldConn.Close()
+
+	rotatedAt := clock.Now().Add(100 * time.Second)
+	clock.Set(rotatedAt)
+	newConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, newPubkey)
+	defer newConn.Close()
+
+	var got poolzResponse
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(newPubkey)
+	})
+	prev := got.Pool[0].ReceiptPubkeyPrev
+	if prev == nil {
+		t.Fatalf("receipt_pubkey_prev = nil, want previous key")
+	}
+	if want := base64.StdEncoding.EncodeToString(oldPubkey); prev.Pubkey != want {
+		t.Fatalf("receipt_pubkey_prev.pubkey = %q, want %q", prev.Pubkey, want)
+	}
+	if prev.RotatedAt != rotatedAt.Unix() {
+		t.Fatalf("receipt_pubkey_prev.rotated_at = %d, want %d", prev.RotatedAt, rotatedAt.Unix())
+	}
+	if want := rotatedAt.Add(pool.ReceiptRotationGrace).Unix(); prev.ExpiresAt != want {
+		t.Fatalf("receipt_pubkey_prev.expires_at = %d, want %d", prev.ExpiresAt, want)
+	}
+}
+
+func TestProviderAuthV2ReceiptRotationRejectsSecondChangeDuringPreviousGrace(t *testing.T) {
+	clock := newLockedTime(time.Now().UTC())
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithNow(clock.Now),
+	}, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	oldPubkey := bytes.Repeat([]byte{0x61}, 32)
+	firstRotationPubkey := bytes.Repeat([]byte{0x62}, 32)
+	secondRotationPubkey := bytes.Repeat([]byte{0x63}, 32)
+	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
+	defer oldConn.Close()
+
+	rotatedAt := clock.Now().Add(100 * time.Second)
+	clock.Set(rotatedAt)
+	firstRotationConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, firstRotationPubkey)
+	defer firstRotationConn.Close()
+
+	secondConn, response := authV2ProviderWithReceiptKeyExpectResponseAndMaybeStateUpdate(t, h.HTTP.URL, secondRotationPubkey, true)
+	defer secondConn.Close()
+	if response.Status != "rejected" || response.Error == nil || response.Error.Code != "receipt_rotation_grace_active" {
+		t.Fatalf("second rotation auth_response = %+v", response)
+	}
+
+	var got poolzResponse
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(firstRotationPubkey)
+	})
+	prev := got.Pool[0].ReceiptPubkeyPrev
+	if prev == nil {
+		t.Fatalf("receipt_pubkey_prev = nil, want old key")
+	}
+	if want := base64.StdEncoding.EncodeToString(oldPubkey); prev.Pubkey != want {
+		t.Fatalf("receipt_pubkey_prev.pubkey = %q, want %q", prev.Pubkey, want)
+	}
+}
+
+func TestProviderAuthV2ReceiptKeyOmissionClearsLiveReceiptTrustState(t *testing.T) {
+	clock := newLockedTime(time.Now().UTC())
+	var logBuffer bytes.Buffer
+	h := newProviderHarnessWithServerOptionsAndLogger(t, nil, []providerws.Option{
+		providerws.WithNow(clock.Now),
+	}, zerolog.New(&logBuffer), func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	oldPubkey := bytes.Repeat([]byte{0x71}, 32)
+	newPubkey := bytes.Repeat([]byte{0x72}, 32)
+	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
+	defer oldConn.Close()
+
+	rotatedAt := clock.Now().Add(100 * time.Second)
+	clock.Set(rotatedAt)
+	newConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, newPubkey)
+	defer newConn.Close()
+
+	omitConn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial omit key: %v", err)
+	}
+	defer omitConn.Close()
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	if err := wsutil.WriteClientText(omitConn, mustJSON(initial)); err != nil {
+		t.Fatalf("write omit-key auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, omitConn)
+	writeAuthProof(t, omitConn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, omitConn)
+	if response.Status != "accepted" {
+		t.Fatalf("omit-key auth_response = %+v", response)
+	}
+	writeStateUpdate(t, omitConn, "ready")
+	logText := logBuffer.String()
+	if !strings.Contains(logText, `"receipt_omitted":true`) || !strings.Contains(logText, `"reason":"no_keypair"`) {
+		t.Fatalf("missing receipt omission log fields: %s", logText)
+	}
+
+	got := fetchPoolz(t, h.HTTP.URL)
+	if len(got.Pool) != 1 {
+		t.Fatalf("poolz rows after omit reconnect: %+v", got.Pool)
+	}
+	if got.Pool[0].ReceiptPubkey != nil {
+		t.Fatalf("receipt_pubkey = %q after omit reconnect, want nil", *got.Pool[0].ReceiptPubkey)
+	}
+	if got.Pool[0].ReceiptPubkeyPrev != nil {
+		t.Fatalf("receipt_pubkey_prev = %+v after omit reconnect, want nil", got.Pool[0].ReceiptPubkeyPrev)
+	}
+
+	republishConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, newPubkey)
+	defer republishConn.Close()
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(newPubkey) && got.Pool[0].ReceiptPubkeyPrev == nil
+	})
+}
+
+func TestProviderAuthV2InitialReceiptCandidateWithoutStateUpdateDoesNotPublish(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	candidatePubkey := bytes.Repeat([]byte{0x53}, 32)
+	candidateConn, response := authV2ProviderWithReceiptKeyExpectResponseAndMaybeStateUpdate(t, h.HTTP.URL, candidatePubkey, false)
+	defer candidateConn.Close()
+	if response.Status != "accepted" {
+		t.Fatalf("candidate auth_response = %+v", response)
+	}
+
+	var got poolzResponse
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ProviderID == "m4-anon"
+	})
+	if got.Pool[0].ReceiptPubkey != nil {
+		t.Fatalf("receipt_pubkey = %q before initial state_update, want nil", *got.Pool[0].ReceiptPubkey)
+	}
+	if got.Pool[0].ReceiptPubkeyPrev != nil {
+		t.Fatalf("receipt_pubkey_prev = %+v before initial state_update, want nil", got.Pool[0].ReceiptPubkeyPrev)
+	}
+	if got.Summary.Ready != 0 || got.Summary.FreeSlots != 0 {
+		t.Fatalf("pending initial candidate summary = %+v, want no buyer-usable ready/free capacity", got.Summary)
+	}
+	healthz := fetchProviderHealthz(t, h.HTTP.URL)
+	if healthz.PoolSize != 1 || healthz.PoolReady != 0 || healthz.PoolPolicyReady != 0 {
+		t.Fatalf("pending initial candidate healthz = %+v, want visible but not ready/policy-ready", healthz)
+	}
+	provider, ok := h.Registry.Resolve("m4-anon", response.AssignedID)
+	if !ok || !bytes.Equal(provider.PendingReceiptPubkey, candidatePubkey) || provider.RoutingEligible() {
+		t.Fatalf("pending initial provider = %+v, ok=%v; want pending and non-routable", provider, ok)
+	}
+}
+
+func TestProviderAuthV2ReceiptRotationCandidateWithoutStateUpdateDoesNotPublish(t *testing.T) {
+	clock := newLockedTime(time.Now().UTC())
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithNow(clock.Now),
+	}, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	oldPubkey := bytes.Repeat([]byte{0x51}, 32)
+	candidatePubkey := bytes.Repeat([]byte{0x52}, 32)
+	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
+	defer oldConn.Close()
+
+	rotatedAt := clock.Now().Add(100 * time.Second)
+	clock.Set(rotatedAt)
+	candidateConn, response := authV2ProviderWithReceiptKeyExpectResponseAndMaybeStateUpdate(t, h.HTTP.URL, candidatePubkey, false)
+	defer candidateConn.Close()
+	if response.Status != "accepted" {
+		t.Fatalf("candidate auth_response = %+v", response)
+	}
+
+	var got poolzResponse
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(oldPubkey)
+	})
+	if got.Pool[0].ReceiptPubkeyPrev != nil {
+		t.Fatalf("receipt_pubkey_prev = %+v, want nil before post-commit state_update", got.Pool[0].ReceiptPubkeyPrev)
+	}
+	if got.Summary.Ready != 0 || got.Summary.FreeSlots != 0 {
+		t.Fatalf("pending rotation summary = %+v, want no buyer-usable ready/free capacity", got.Summary)
+	}
+	provider, ok := h.Registry.Resolve("m4-anon", response.AssignedID)
+	if !ok || !bytes.Equal(provider.PendingReceiptPubkey, candidatePubkey) || provider.RoutingEligible() {
+		t.Fatalf("pending rotation provider = %+v, ok=%v; want pending and non-routable", provider, ok)
+	}
+
+	oldRestoreConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
+	defer oldRestoreConn.Close()
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(oldPubkey) && got.Pool[0].ReceiptPubkeyPrev == nil
+	})
+}
+
+func TestProviderAuthV2ReceiptRotationPurgesPreviousAfterGraceWindow(t *testing.T) {
+	clock := newLockedTime(time.Now().UTC())
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithNow(clock.Now),
+	}, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	oldPubkey := bytes.Repeat([]byte{0x41}, 32)
+	newPubkey := bytes.Repeat([]byte{0x42}, 32)
+	firstConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
+	defer firstConn.Close()
+
+	rotatedAt := clock.Now().Add(100 * time.Second)
+	clock.Set(rotatedAt)
+	rotatedConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, newPubkey)
+	defer rotatedConn.Close()
+
+	var got poolzResponse
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(newPubkey) && got.Pool[0].ReceiptPubkeyPrev != nil
+	})
+
+	clock.Set(rotatedAt.Add(pool.ReceiptRotationGrace + time.Second))
+
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ReceiptPubkey != nil && *got.Pool[0].ReceiptPubkey == base64.StdEncoding.EncodeToString(newPubkey)
+	})
+	if got.Pool[0].ReceiptPubkeyPrev != nil {
+		t.Fatalf("receipt_pubkey_prev = %+v, want nil after grace window", got.Pool[0].ReceiptPubkeyPrev)
 	}
 }
 
@@ -2640,6 +2912,30 @@ type poolzReceiptPubkeyPrev struct {
 	ExpiresAt int64  `json:"expires_at"`
 }
 
+type providerHealthzResponse struct {
+	PoolSize        int `json:"pool_size"`
+	PoolReady       int `json:"pool_ready"`
+	PoolPolicyReady int `json:"pool_policy_ready"`
+}
+
+func fetchProviderHealthz(t *testing.T, serverURL string) providerHealthzResponse {
+	t.Helper()
+	resp, err := http.Get(serverURL + "/healthz")
+	if err != nil {
+		t.Fatalf("healthz: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Fatalf("healthz status=%d body=%s", resp.StatusCode, body)
+	}
+	var got providerHealthzResponse
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("healthz json: %v", err)
+	}
+	return got
+}
+
 func fetchPoolz(t *testing.T, serverURL string) poolzResponse {
 	t.Helper()
 	_, got := fetchPoolzRaw(t, serverURL)
@@ -2699,7 +2995,17 @@ func newProviderHarnessWithServerOptions(t *testing.T, validator providerws.Toke
 	return newProviderHarnessWithOptions(t, validator, serverOpts, opts...)
 }
 
+func newProviderHarnessWithServerOptionsAndLogger(t *testing.T, validator providerws.TokenValidator, serverOpts []providerws.Option, logger zerolog.Logger, opts ...func(*config.Config)) providerHarness {
+	t.Helper()
+	return newProviderHarnessWithOptionsAndLogger(t, validator, serverOpts, logger, opts...)
+}
+
 func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValidator, serverOpts []providerws.Option, opts ...func(*config.Config)) providerHarness {
+	t.Helper()
+	return newProviderHarnessWithOptionsAndLogger(t, validator, serverOpts, zerolog.Nop(), opts...)
+}
+
+func newProviderHarnessWithOptionsAndLogger(t *testing.T, validator providerws.TokenValidator, serverOpts []providerws.Option, logger zerolog.Logger, opts ...func(*config.Config)) providerHarness {
 	t.Helper()
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "test-operator-key"
@@ -2729,7 +3035,7 @@ func newProviderHarnessWithOptions(t *testing.T, validator providerws.TokenValid
 			allServerOpts = append(allServerOpts, providerws.WithTokenIssuer(issuer))
 		}
 	}
-	server := providerws.NewServer(cfg, registry, zerolog.Nop(), allServerOpts...)
+	server := providerws.NewServer(cfg, registry, logger, allServerOpts...)
 	return providerHarness{
 		HTTP:     httptest.NewServer(server.Handler()),
 		Provider: server,
@@ -2870,6 +3176,84 @@ func dialAndAuthV2Provider(t *testing.T, h providerHarness) (net.Conn, string) {
 		t.Fatalf("auth_response = %+v", response)
 	}
 	return conn, challenge.AssignedID
+}
+
+func writeStateUpdate(t *testing.T, conn net.Conn, state string) {
+	t.Helper()
+	msg := map[string]any{
+		"type":   "state_update",
+		"state":  state,
+		"reason": "test state update",
+		"since":  "2026-06-22T00:00:00Z",
+		"metrics_snapshot": map[string]any{
+			"slots_free":  1,
+			"slots_total": 1,
+		},
+	}
+	if err := wsutil.WriteClientText(conn, mustJSON(msg)); err != nil {
+		t.Fatalf("write state_update: %v", err)
+	}
+}
+
+func authV2ProviderWithReceiptKey(t *testing.T, serverURL string, receiptPubkey []byte) net.Conn {
+	t.Helper()
+	conn, response := authV2ProviderWithReceiptKeyExpectResponse(t, serverURL, receiptPubkey)
+	if response.Status != "accepted" {
+		conn.Close()
+		t.Fatalf("auth_response = %+v", response)
+	}
+	return conn
+}
+
+func authV2ProviderWithReceiptKeyExpectResponse(t *testing.T, serverURL string, receiptPubkey []byte) (net.Conn, providerws.AuthResponse) {
+	t.Helper()
+	return authV2ProviderWithReceiptKeyExpectResponseAndMaybeStateUpdate(t, serverURL, receiptPubkey, true)
+}
+
+func authV2ProviderWithReceiptKeyExpectResponseAndMaybeStateUpdate(t *testing.T, serverURL string, receiptPubkey []byte, sendStateUpdate bool) (net.Conn, providerws.AuthResponse) {
+	t.Helper()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(serverURL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	initial := validAuthInitialWithFreshKey(t, "m4-anon")
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPubkey)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		conn.Close()
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status == "accepted" && response.AssignedID != challenge.AssignedID {
+		conn.Close()
+		t.Fatalf("auth_response assigned_id = %q, want %q", response.AssignedID, challenge.AssignedID)
+	}
+	if response.Status == "accepted" && sendStateUpdate {
+		writeStateUpdate(t, conn, "ready")
+	}
+	return conn, response
+}
+
+type lockedTime struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newLockedTime(now time.Time) *lockedTime {
+	return &lockedTime{now: now}
+}
+
+func (l *lockedTime) Now() time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.now
+}
+
+func (l *lockedTime) Set(now time.Time) {
+	l.mu.Lock()
+	l.now = now
+	l.mu.Unlock()
 }
 
 func readAuthChallenge(t *testing.T, conn net.Conn) providerws.AuthChallenge {

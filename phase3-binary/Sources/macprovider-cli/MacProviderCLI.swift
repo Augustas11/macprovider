@@ -11,7 +11,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, RotateKeyCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -202,12 +202,29 @@ struct ServeCommand: AsyncParsableCommand {
             )
         }
         let controlSocket: ControlSocketServer?
-        if resolved.enableWarmSwap {
+        let receiptRotator: (@Sendable () async throws -> Void)?
+        if resolved.enableReceipts,
+           let providerID = resolved.providerID,
+           !providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let coordinatorClient {
+            receiptRotator = {
+                try await RotateKeyCommand.rotateActiveProvider(
+                    providerID: providerID,
+                    keyStore: receiptKeyStore,
+                    coordinatorClient: coordinatorClient
+                )
+            }
+        } else {
+            receiptRotator = nil
+        }
+        if resolved.enableWarmSwap || receiptRotator != nil {
             let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
             controlSocket = ControlSocketServer(
                 socketPath: socketURL,
                 modelRuntime: modelRuntime,
-                supportedModels: resolved.supportedModels
+                supportedModels: resolved.supportedModels,
+                receiptRotator: receiptRotator,
+                receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines)
             )
             do {
                 try await controlSocket?.start()

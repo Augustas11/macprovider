@@ -1306,11 +1306,52 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   storage seam and serializer contract needed to expose a simulated grace
   window safely.</p>
   <p><strong>Anti-regression:</strong>
-  <code>go test ./internal/ws -run 'Test(PoolzReceiptPubkeyForV16Provider|PoolzReceiptPubkeyNullForPreV16Provider|PoolzReceiptPubkeyPrevShape|PoolzShapeUnchangedForL1Provider|PoolzDefaultOmitsTier2HashFieldsAfterWSAdmission|ProviderAuthV2InitialReceiptPublicKeyAdmitsAndStoresPubkey)' -count=1 -v</code>
+  <code>go test ./internal/ws -run 'Test(PoolzReceiptPubkeyForV16Provider|PoolzReceiptPubkeyNullForPreV16Provider|PoolzReceiptPubkeyPrevShape|PoolzShapeUnchangedForL1Provider|PoolzDefaultOmitsTier2HashFieldsAfterWSAdmission|ProviderAuthV2InitialReceiptPublicKeyPublishesAfterStateUpdate)' -count=1 -v</code>
   passes. <code>go test ./internal/ws ./internal/pool -count=1</code> passes.
   Coverage includes v1.6 current key exposure, explicit nulls for pre-v1.6
   rows, documented previous-key shape, and existing additive /poolz
   compatibility.</p>
+</div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 7 receipt pubkey rotation detection.</strong>
+  The v2 auth path now stages incoming <code>provider_receipt_public_key</code>
+  values as pending receipt-key publication. The staged key is not visible in
+  <code>/poolz</code> at <code>auth_response</code> time, and pending-key sessions
+  are excluded from <code>Provider.RoutingEligible()</code> so buyer traffic cannot
+  receive new-key receipts before <code>/poolz</code> publishes that key. The
+  registry publishes it on the provider's first post-auth
+  <code>state_update</code>, which the provider sends after local Keychain commit.
+  On rotation publication it moves
+  the prior raw pubkey into <code>receipt_pubkey_prev</code>, stamps
+  <code>rotated_at</code> with coordinator time, and sets
+  <code>expires_at = rotated_at + 7 days</code>.</p>
+  <p>There is no rollback wire flag. An accepted candidate that never sends
+  the post-commit <code>state_update</code> remains unpublished, so reconnecting
+  with the old key preserves the old <code>/poolz</code> trust state. Because
+  <code>/poolz</code> exposes a single previous-key slot, the registry rejects a
+  second changed key while either a pending rotation or an unexpired
+  previous-key grace window exists. The rejection happens inside the registry
+  lock and the v2 auth path surfaces it as
+  <code>receipt_rotation_grace_active</code>.</p>
+  <p>Missing receipt keys on reconnect clear the live session's receipt-key
+  state, so parser-optional pre-v1.6/no-key reconnects remain admitted, emit
+  <code>receipt_omitted=true reason=no_keypair</code>, and expose
+  <code>receipt_pubkey: null</code> in <code>/poolz</code> until a later reconnect
+  sends a key and its post-auth <code>state_update</code> publishes it.
+  When the same current key reconnects after the grace window expires,
+  <code>receipt_pubkey_prev</code> is purged. The public <code>/poolz</code>
+  serializer also filters expired previous-key blocks against the server clock
+  at read time. No durable coordinator storage was introduced.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>go test ./internal/ws ./internal/pool -run 'TestProviderAuthV2ReceiptRotation|TestProviderAuthV2ReceiptKeyOmission|TestProviderAuthV2InitialReceipt|TestRoutingEligibleIgnoresHashStatus|TestPoolzReceiptPubkey|TestRegistry' -count=1</code>
+  passes. Full <code>go test ./... -count=1</code> passes. Coverage exercises
+  staged v2 auth admission, non-routable pending-key sessions, post-commit
+  publication, current/previous <code>/poolz</code> projection after rotation,
+  uncommitted candidate non-publication, second-rotation rejection during
+  active grace, missing-key
+  clearing to <code>receipt_pubkey: null</code> plus omission logging, and
+  read-time purge after the 7-day grace window.</p>
 </div>
 </section>
 </body></html>

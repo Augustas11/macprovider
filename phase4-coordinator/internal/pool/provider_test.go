@@ -228,6 +228,11 @@ func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	if bearerless.RoutingEligible() {
 		t.Fatal("AuthBearerlessDuplicate MUST be excluded — SPEC-003 v0.8.3 FR-C9.4 credential trust gate")
 	}
+	pendingReceiptKey := base
+	pendingReceiptKey.PendingReceiptPubkey = []byte("pending")
+	if pendingReceiptKey.RoutingEligible() {
+		t.Fatal("pending receipt pubkey sessions must be excluded from routing until state_update publishes the key")
+	}
 }
 
 func TestRecordCanaryResultTripsProvisionalUnavailable(t *testing.T) {

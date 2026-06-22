@@ -766,6 +766,23 @@ func TestHealthzMountedOnBuyerHandler(t *testing.T) {
 	}
 }
 
+func TestHealthzExcludesPendingReceiptCandidateFromReadyCapacity(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerPendingReceiptCandidate(t, registry, "p1", "session-1", "model-a")
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_size":1`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_ready":0`)) {
+		t.Fatalf("pending receipt candidate must remain visible but not ready capacity; body=%s", rr.Body.String())
+	}
+}
+
 func TestHealthzReportsInjectedVersion(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithVersion("v1.3.0-7-gabcdef0"))
@@ -3792,6 +3809,40 @@ func register(registry *pool.Registry, providerID, assignedID, modelID string, s
 	registerWithEndpoint(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, "https://"+providerID+".example", 20)
 }
 
+func registerPendingReceiptCandidate(t *testing.T, registry *pool.Registry, providerID, assignedID, modelID string) {
+	t.Helper()
+	_, registered, refusal := registry.RegisterAtDetailed(&pool.Provider{
+		ProviderID:            providerID,
+		AssignedID:            assignedID,
+		Hostname:              providerID + ".local",
+		ModelID:               modelID,
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		EndpointURL:           "https://" + providerID + ".example",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       time.Now().UTC(),
+		LastActivityAt:        time.Now().UTC(),
+		ConnectedAt:           time.Now().UTC(),
+		BinaryVersion:         "0.1.0",
+		AuthState:             pool.AuthBearerValidated,
+		ReceiptPubkey:         bytes.Repeat([]byte{0x61}, 32),
+	}, nil, time.Now().UTC())
+	if !registered || refusal != pool.RegisterRefusalNone {
+		t.Fatalf("register pending receipt candidate: registered=%v refusal=%v", registered, refusal)
+	}
+	provider, ok := registry.Resolve(providerID, assignedID)
+	if !ok || provider.RoutingEligible() || len(provider.PendingReceiptPubkey) == 0 {
+		t.Fatalf("pending receipt candidate = %+v ok=%v; want visible but non-routable", provider, ok)
+	}
+}
+
 func registerWithHashStatus(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, hashStatus pool.HashStatus) {
 	registerWithHashStatusEndpoint(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, "https://"+providerID+".example", hashStatus)
 }
@@ -4667,5 +4718,32 @@ func TestModelsExcludesAuthBearerlessDuplicateFromCapacity(t *testing.T) {
 	}
 	if modelA.TotalSlots != 1 {
 		t.Fatalf("total_slots = %d, want 1 (good only)", modelA.TotalSlots)
+	}
+}
+
+func TestModelsExcludesPendingReceiptCandidateFromCapacity(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "pending", EndpointURL: "https://pending.example"}})
+	registerPendingReceiptCandidate(t, registry, "pending", "session-pending", "model-a")
+
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	for _, m := range resp.Data {
+		if m.ID == "model-a" {
+			t.Fatalf("pending receipt candidate must not be advertised as model capacity; body=%s", rr.Body.String())
+		}
 	}
 }

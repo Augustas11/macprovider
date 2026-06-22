@@ -12,6 +12,22 @@ final class ControlSocketTests: XCTestCase {
         try assertRoundTrip(.statusRequest)
     }
 
+    func testEncodeDecodeRotateReceiptKeyRequest() throws {
+        try assertRoundTrip(.rotateReceiptKeyRequest(providerID: "provider-a"))
+    }
+
+    func testEncodeDecodeRotateReceiptKeyResultAccepted() throws {
+        try assertRoundTrip(.rotateReceiptKeyResult(status: .accepted, error: nil))
+    }
+
+    func testEncodeDecodeRotateReceiptKeyResultRejected() throws {
+        try assertRoundTrip(.rotateReceiptKeyResult(status: .rejected, error: "rotation failed"))
+    }
+
+    func testEncodeDecodeRotateReceiptKeyResultCommittedUnconfirmed() throws {
+        try assertRoundTrip(.rotateReceiptKeyResult(status: .committedUnconfirmed, error: "publication unconfirmed"))
+    }
+
     func testEncodeDecodeSwitchAckAccepted() throws {
         try assertRoundTrip(.switchAck(accepted: true, reason: nil, currentTarget: nil, secondsRemaining: nil))
     }
@@ -86,6 +102,12 @@ final class ControlSocketTests: XCTestCase {
         }
     }
 
+    func testDecodeRejectsRotateReceiptKeyRequestMissingProviderID() {
+        XCTAssertThrowsError(try ControlSocketCodec.decode(Data(#"{"type":"rotate_receipt_key_request"}"#.utf8))) { error in
+            XCTAssertEqual(error as? ControlSocketError, .missingRequiredField("provider_id"))
+        }
+    }
+
     func testDecodeRejectsSwitchRequestMissingTarget() {
         XCTAssertThrowsError(try ControlSocketCodec.decode(Data(#"{"type":"switch_request","requested_at_ms":1}"#.utf8))) { error in
             XCTAssertEqual(error as? ControlSocketError, .missingRequiredField("target_model_id"))
@@ -107,6 +129,99 @@ final class ControlSocketTests: XCTestCase {
         XCTAssertTrue(text.contains("mlx-community/Llama"))
         XCTAssertFalse(text.contains("mlx-community\\/Llama"))
     }
+
+    func testServerHandlesReceiptRotationRequest() async throws {
+        let socketPath = try makeSocketPath()
+        let rotated = LockedBool()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "ready-model"),
+            receiptRotator: { rotated.set(true) },
+            receiptRotationProviderID: "provider-a",
+            idleTimeoutSeconds: 0.2
+        )
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.rotateReceiptKeyRequest(providerID: "provider-a"))
+        let response = try await connection.receive(timeout: 1)
+        await connection.close()
+        await server.stop()
+
+        XCTAssertEqual(response, .rotateReceiptKeyResult(status: .accepted, error: nil))
+        XCTAssertTrue(rotated.get())
+    }
+
+    func testServerRejectsReceiptRotationWhenDisabled() async throws {
+        let socketPath = try makeSocketPath()
+        let server = makeServer(socketPath: socketPath, modelRuntime: makeRuntime(modelID: "ready-model"))
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.rotateReceiptKeyRequest(providerID: "provider-a"))
+        let response = try await connection.receive(timeout: 1)
+        await connection.close()
+        await server.stop()
+
+        guard case let .rotateReceiptKeyResult(status, error) = response else {
+            return XCTFail("unexpected response: \(response)")
+        }
+        XCTAssertEqual(status, .rejected)
+        XCTAssertTrue(error?.contains("not enabled") == true, error ?? "nil")
+    }
+
+
+    func testServerWaitsForReceiptRotationCompletionBeforeResponding() async throws {
+        let socketPath = try makeSocketPath()
+        let rotated = LockedBool()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "ready-model"),
+            receiptRotator: {
+                try await Task.sleep(nanoseconds: 50_000_000)
+                rotated.set(true)
+            },
+            receiptRotationProviderID: "provider-a",
+            idleTimeoutSeconds: 0.2
+        )
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.rotateReceiptKeyRequest(providerID: "provider-a"))
+        let response = try await connection.receive(timeout: 1)
+        await connection.close()
+        await server.stop()
+
+        XCTAssertEqual(response, .rotateReceiptKeyResult(status: .accepted, error: nil))
+        XCTAssertTrue(rotated.get())
+    }
+
+    func testServerRejectsReceiptRotationProviderIDMismatch() async throws {
+        let socketPath = try makeSocketPath()
+        let rotated = LockedBool()
+        let server = ControlSocketServer(
+            socketPath: socketPath,
+            modelRuntime: makeRuntime(modelID: "ready-model"),
+            receiptRotator: { rotated.set(true) },
+            receiptRotationProviderID: "provider-b",
+            idleTimeoutSeconds: 0.2
+        )
+        try await server.start()
+
+        let connection = try await ControlSocketClient.connect(socketPath: socketPath)
+        try await connection.send(.rotateReceiptKeyRequest(providerID: "provider-a"))
+        let response = try await connection.receive(timeout: 1)
+        await connection.close()
+        await server.stop()
+
+        guard case let .rotateReceiptKeyResult(status, error) = response else {
+            return XCTFail("unexpected response: \(response)")
+        }
+        XCTAssertEqual(status, .rejected)
+        XCTAssertTrue(error?.contains("provider_id mismatch") == true, error ?? "nil")
+        XCTAssertFalse(rotated.get())
+    }
+
 
     func testServerBindsAndAcceptsConnection() async throws {
         let socketPath = try makeSocketPath()
@@ -340,4 +455,21 @@ final class ControlSocketTests: XCTestCase {
 
 private enum ControlSocketTestError: Error {
     case unexpectedContainerLoader
+}
+
+private final class LockedBool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set(_ value: Bool) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+
+    func get() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
 }
