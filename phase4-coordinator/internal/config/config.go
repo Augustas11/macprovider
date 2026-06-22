@@ -58,16 +58,27 @@ type PoolConfig struct {
 	WakeGapThresholdS       int `yaml:"wake_gap_threshold_s"`
 	// WakeGapThresholdMs, when > 0, overrides WakeGapThresholdS for
 	// millisecond-precision test scenarios. Not for production use.
-	WakeGapThresholdMs      int  `yaml:"wake_gap_threshold_ms"`
-	WarmupFallbackS         int  `yaml:"warmup_fallback_s"`
-	WarmupGateEnabled       bool `yaml:"warmup_gate_enabled"`
-	WarmupGateTimeoutS      int  `yaml:"warmup_gate_timeout_s"`
-	WarmupGateMaxTokens     int  `yaml:"warmup_gate_max_tokens"`
-	DegradedBackoffS        int  `yaml:"degraded_backoff_s"`
-	DegradedMaxRetries      int  `yaml:"degraded_max_retries"`
-	DegradedProbeAfter502   bool `yaml:"degraded_probe_after_502"`
-	BreakerFailureThreshold int  `yaml:"breaker_failure_threshold"`
-	BreakerWindowS          int  `yaml:"breaker_window_s"`
+	WakeGapThresholdMs      int                     `yaml:"wake_gap_threshold_ms"`
+	WarmupFallbackS         int                     `yaml:"warmup_fallback_s"`
+	WarmupGateEnabled       bool                    `yaml:"warmup_gate_enabled"`
+	WarmupGateTimeoutS      int                     `yaml:"warmup_gate_timeout_s"`
+	WarmupGateMaxTokens     int                     `yaml:"warmup_gate_max_tokens"`
+	DegradedBackoffS        int                     `yaml:"degraded_backoff_s"`
+	DegradedMaxRetries      int                     `yaml:"degraded_max_retries"`
+	DegradedProbeAfter502   bool                    `yaml:"degraded_probe_after_502"`
+	BreakerFailureThreshold int                     `yaml:"breaker_failure_threshold"`
+	BreakerWindowS          int                     `yaml:"breaker_window_s"`
+	CanaryEnabled           bool                    `yaml:"canary_enabled"`
+	CanaryIntervalS         int                     `yaml:"canary_interval_s"`
+	CanaryTimeoutS          int                     `yaml:"canary_timeout_s"`
+	CanaryMaxTokens         int                     `yaml:"canary_max_tokens"`
+	CanaryFailureThreshold  int                     `yaml:"canary_failure_threshold"`
+	CanaryChallenges        []CanaryChallengeConfig `yaml:"canary_challenges"`
+}
+
+type CanaryChallengeConfig struct {
+	Prompt   string `yaml:"prompt"`
+	Expected string `yaml:"expected"`
 }
 
 type RoutingConfig struct {
@@ -273,6 +284,11 @@ func Default() Config {
 			DegradedProbeAfter502:   true,
 			BreakerFailureThreshold: 2,
 			BreakerWindowS:          120,
+			CanaryEnabled:           false,
+			CanaryIntervalS:         300,
+			CanaryTimeoutS:          30,
+			CanaryMaxTokens:         8,
+			CanaryFailureThreshold:  3,
 		},
 		Routing: RoutingConfig{
 			PreflightThresholdTokens:      4096,
@@ -621,6 +637,22 @@ func (c Config) Validate() error {
 	}
 	if c.Pool.BreakerFailureThreshold <= 0 || c.Pool.BreakerWindowS <= 0 {
 		return fmt.Errorf("pool breaker settings must be > 0")
+	}
+	if c.Pool.CanaryEnabled && (c.Pool.CanaryIntervalS <= 0 || c.Pool.CanaryTimeoutS <= 0 || c.Pool.CanaryMaxTokens <= 0 || c.Pool.CanaryFailureThreshold <= 0) {
+		return fmt.Errorf("pool canary settings must be > 0 when enabled")
+	}
+	if c.Pool.CanaryEnabled {
+		if len(c.Pool.CanaryChallenges) == 0 {
+			return fmt.Errorf("pool canary_challenges must not be empty when enabled")
+		}
+		for i, challenge := range c.Pool.CanaryChallenges {
+			if strings.TrimSpace(challenge.Prompt) == "" || strings.TrimSpace(challenge.Expected) == "" {
+				return fmt.Errorf("pool canary_challenges[%d] prompt and expected must not be empty", i)
+			}
+			if !strings.Contains(challenge.Prompt, "{nonce}") || !strings.Contains(challenge.Expected, "{nonce}") {
+				return fmt.Errorf("pool canary_challenges[%d] prompt and expected must contain {nonce}", i)
+			}
+		}
 	}
 	if c.Admission.ProvisionalAdmissionRatePerHour <= 0 {
 		return fmt.Errorf("admission.provisional_admission_rate_per_hour must be > 0")
