@@ -2054,5 +2054,33 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   baseline + 4 new from this fix-pass), with 2 skipped integration-gated
   tests, 0 failures.</p>
 </div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 3 receipt canonicalization and signing.</strong>
+  Added a receipt prompt-source capture beside the existing parsed serving
+  fields so inference defaults remain unchanged while receipts commit to the
+  protocol-visible request JSON. <code>PromptCanonicalizer</code> emits the
+  exact 16-key prompt object from SPEC-015 section 4.2, with absent fields as
+  JSON null, five-key message objects, normalized CRLF/bare-CR text content,
+  content-part handling, function-tool handling, and tool-call argument strings
+  kept as strings. <code>OutputCanonicalizer</code> emits the exact 3-key
+  output object from section 5.1 and rejects finish reasons outside the v0.1.x
+  allowlist.</p>
+  <p><code>ReceiptBuilder</code> constructs the seven-field tuple, rejects
+  non-ASCII model IDs and negative integer fields, signs the UTF-8
+  <code>JCS(T)</code> bytes with the current provider receipt key, and returns
+  the standard padded base64 header
+  <code>&lt;base64(JCS(T))&gt;.&lt;base64(SIG)&gt;</code>. The pinned prompt
+  fixture hash is
+  <code>a762aef8cf64fd65f05096e7f98010804a1c4e8fb07f0a1ea7616f1cde2663cd</code>;
+  the pinned output fixture hash is
+  <code>9693532507cf1a58e91969588a3d987d8715e8a25dc1037b1f8d6e6980ed43c3</code>;
+  the null-usage error output hash is
+  <code>1bc371f568ecc23722dd522a5d00854589c78fcc9a2bebdb3523c5d8b9010b76</code>.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter 'PromptCanonicalizerTests|OutputCanonicalizerTests|ReceiptBuilderTests'</code>
+  passes 11/11 new Step 3 tests, including signed-header self-verification
+  and byte-exact Unicode tool-call argument commitment.</p>
+</div>
 </section>
 </body></html>

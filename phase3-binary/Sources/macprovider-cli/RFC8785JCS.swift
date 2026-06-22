@@ -7,6 +7,7 @@ enum RFC8785JCS {
         case object([String: Value])
         case array([Value])
         case string(String)
+        case rawString(String)
         case int(Int)
         case double(Double)
         case bool(Bool)
@@ -28,6 +29,8 @@ enum RFC8785JCS {
             return try "[\(array.map { try canonicalString($0) }.joined(separator: ","))]"
         case .string(let string):
             return escapeString(string, normalizeNFC: true)
+        case .rawString(let string):
+            return escapeString(string, normalizeNFC: false)
         case .int(let int):
             return String(int)
         case .double(let double):
