@@ -1271,5 +1271,24 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   <code>catalog_path</code>, <code>catalog_public_key</code>,
   <code>require_hash_verified:true</code>, and all Pillar D controls.</p>
 </div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 5 receipt key auth parsing.</strong>
+  The v2 initial-stage <code>auth_request</code> parser accepts optional
+  <code>provider_receipt_public_key</code>, validates it as standard padded
+  base64 that decodes to exactly 32 bytes, and keeps the decoded ed25519 public
+  key bytes on the admitted <code>pool.Provider</code>. Absent field remains
+  accepted for pre-v1.6 providers; invalid base64 and wrong-length values are
+  rejected at auth parse time with <code>provider_receipt_public_key</code> as
+  the bad field.</p>
+  <p>No proof-stage receipt-key field was added and no new WebSocket control
+  frame was introduced. Rotation and <code>/poolz</code> exposure are left to
+  later SPEC-015 steps; this step only preserves the parsed current key on the
+  in-memory provider record.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>go test ./internal/ws ./internal/pool</code> passes. Coverage includes
+  absent-field compatibility, valid 32-byte pubkey storage, invalid base64
+  rejection, wrong-length rejection, and full v2 auth admission storage.</p>
+</div>
 </section>
 </body></html>

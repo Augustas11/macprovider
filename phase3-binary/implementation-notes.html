@@ -2124,5 +2124,26 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   <code>swift test --package-path phase3-binary</code> passes 470 tests with 7
   skipped integration-gated tests and 0 failures.</p>
 </div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 5 auth-frame receipt key publication.</strong>
+  Bumped the provider binary version to <code>1.6.0</code> and added optional
+  initial-stage <code>auth_request.provider_receipt_public_key</code>
+  emission. The field is injected into <code>CoordinatorClient</code> as a
+  precomputed standard padded base64 value so the proof-stage frame remains
+  unchanged and tests can exercise degraded/no-keypair omission without live
+  Keychain access.</p>
+  <p>The serve command now prepares the receipt key runtime before joining the
+  coordinator when <code>--enable-receipts</code> is active. The same
+  <code>KeychainReceiptKeyStore</code> feeds both the auth-frame public key and
+  the HTTP <code>ReceiptBuilder</code>, avoiding a split-brain key identity
+  between coordinator publication and response signing.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter 'CoordinatorClientTests|ServeCommandTests'</code>
+  passes 51/51 focused tests, including initial-stage receipt-key emission,
+  proof-stage omission, and shared key-store public-key derivation. Full
+  <code>swift test --package-path phase3-binary</code> passes 473 tests with 7
+  skipped integration-gated tests and 0 failures.</p>
+</div>
 </section>
 </body></html>

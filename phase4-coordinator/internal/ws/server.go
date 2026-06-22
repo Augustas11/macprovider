@@ -903,6 +903,9 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 
 	entry.EncryptedLeg = true
 	entry.AttestationStatus = attestationStatus
+	if len(initial.ProviderReceiptPubkey) > 0 {
+		entry.ReceiptPubkey = append([]byte(nil), initial.ProviderReceiptPubkey...)
+	}
 	// SPEC-002 v1.3.5 §3.X.1 / §3.X.2 + SPEC-010 v1.5 R-3.3.1 /
 	// R-3.3.2 — populate the catalog onto Provider. The fallback
 	// synthesis [ModelID] applies when supported_models was

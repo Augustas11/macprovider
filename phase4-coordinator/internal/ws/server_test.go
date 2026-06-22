@@ -477,6 +477,38 @@ func TestProviderAuthV2ProofAbsentSpec010Accepted(t *testing.T) {
 	}
 }
 
+func TestProviderAuthV2InitialReceiptPublicKeyAdmitsAndStoresPubkey(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	receiptPubkey := bytes.Repeat([]byte{0x42}, 32)
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPubkey)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+	eventually(t, func() bool {
+		provider, ok := h.Registry.Resolve("m4-anon", challenge.AssignedID)
+		return ok && bytes.Equal(provider.ReceiptPubkey, receiptPubkey)
+	})
+}
+
 func TestProviderAuthV2RejectsMissingRequiredAttestation(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""

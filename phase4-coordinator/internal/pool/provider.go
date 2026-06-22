@@ -131,6 +131,9 @@ type Provider struct {
 	ModelHash      string     `json:"model_hash,omitempty"`
 	HashStatus     HashStatus `json:"hash_status,omitempty"`
 	EncryptedLeg   bool       `json:"encrypted_leg,omitempty"`
+	// SPEC-015 v0.1.3 / SPEC-001 v1.6 — raw ed25519 public key bytes
+	// populated from auth_request.provider_receipt_public_key when present.
+	ReceiptPubkey []byte `json:"-"`
 	// AttestationStatus is informational unless tier2.require_attestation is
 	// enabled. The zero value represents a legacy provider with no claim.
 	AttestationStatus AttestationStatus `json:"attestation_status,omitempty"`

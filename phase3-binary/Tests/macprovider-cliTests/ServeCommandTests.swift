@@ -1,4 +1,5 @@
 import ArgumentParser
+import Foundation
 import MacProviderCore
 import XCTest
 @testable import macprovider_cli
@@ -72,5 +73,18 @@ final class ServeCommandTests: XCTestCase {
 
         XCTAssertNotNil(try store.loadCurrent(providerId: "provider-a"))
         XCTAssertNotNil(builder)
+    }
+
+    func testReceiptRuntimePublishesCurrentKeyPublicBytes() throws {
+        var config = AppConfig.defaults()
+        config.enableReceipts = true
+        config.providerID = "provider-a"
+        let store = InMemoryReceiptKeyStore()
+
+        let runtime = try ServeCommand.makeReceiptRuntime(config: config, keyStore: store)
+        let current = try XCTUnwrap(store.loadCurrent(providerId: "provider-a"))
+
+        XCTAssertNotNil(runtime.builder)
+        XCTAssertEqual(runtime.publicKeyBase64, Data(current.publicKey.rawRepresentation).base64EncodedString())
     }
 }

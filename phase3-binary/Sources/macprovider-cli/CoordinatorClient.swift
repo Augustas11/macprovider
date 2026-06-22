@@ -123,7 +123,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
 
-    static let binaryVersion = "1.5.0"
+    static let binaryVersion = "1.6.0"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -139,6 +139,7 @@ actor CoordinatorClient {
     private let supportedModels: [String]?
     private let publishesSupportedModels: Bool
     private let warmSwapEnabled: Bool
+    private let providerReceiptPublicKey: String?
     private let reconnectGraceNanoseconds: UInt64
     private let connectAndRunOverride: (@Sendable () async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
@@ -179,7 +180,8 @@ actor CoordinatorClient {
         webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         pairingController: PairingController? = nil,
-        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
+        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
+        providerReceiptPublicKey: String? = nil
     ) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
             return nil
@@ -204,6 +206,7 @@ actor CoordinatorClient {
         self.supportedModels = config.supportedModels
         self.publishesSupportedModels = config.publishesSupportedModels
         self.warmSwapEnabled = config.enableWarmSwap
+        self.providerReceiptPublicKey = providerReceiptPublicKey
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
         self.attestationGenerator = attestationGenerator
         self.webSocketFactory = webSocketFactory
@@ -1040,6 +1043,9 @@ actor CoordinatorClient {
         message["supported_models"] = resolvedCatalog
         if publishesSupportedModels {
             message["publishes_supported_models"] = true
+        }
+        if let providerReceiptPublicKey, !providerReceiptPublicKey.isEmpty {
+            message["provider_receipt_public_key"] = providerReceiptPublicKey
         }
         if let endpointURL {
             message["endpoint_url"] = endpointURL

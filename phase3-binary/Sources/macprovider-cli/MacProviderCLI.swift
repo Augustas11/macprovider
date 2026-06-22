@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Darwin
 import Dispatch
 import Foundation
@@ -189,12 +190,15 @@ struct ServeCommand: AsyncParsableCommand {
             modelHash: await modelRuntime.loadedModelHash
         )
         await modelRuntime.setProviderStatus(providerStatus)
+        let receiptKeyStore = KeychainReceiptKeyStore()
+        let receiptRuntime = try Self.makeReceiptRuntime(config: resolved, keyStore: receiptKeyStore)
         let coordinatorClient = Self.makeCoordinatorClient(noJoin: noJoin) {
             CoordinatorClient(
                 config: resolved,
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
-                attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
+                attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath),
+                providerReceiptPublicKey: receiptRuntime.publicKeyBase64
             )
         }
         let controlSocket: ControlSocketServer?
@@ -218,12 +222,11 @@ struct ServeCommand: AsyncParsableCommand {
             controlSocket = nil
         }
         await coordinatorClient?.start()
-        let receiptBuilder = try Self.makeReceiptBuilder(config: resolved)
         let server = HTTPServer(
             config: resolved,
             modelRuntime: modelRuntime,
             providerStatus: providerStatus,
-            receiptBuilder: receiptBuilder
+            receiptBuilder: receiptRuntime.builder
         )
         let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket)
         defer {
@@ -242,13 +245,23 @@ struct ServeCommand: AsyncParsableCommand {
         config: AppConfig,
         keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
     ) throws -> ReceiptBuilder? {
+        try makeReceiptRuntime(config: config, keyStore: keyStore).builder
+    }
+
+    static func makeReceiptRuntime(
+        config: AppConfig,
+        keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
+    ) throws -> (builder: ReceiptBuilder?, publicKeyBase64: String?) {
         guard config.enableReceipts,
               let providerID = config.providerID,
               !providerID.isEmpty else {
-            return nil
+            return (nil, nil)
         }
-        _ = try keyStore.loadOrGenerate(providerId: providerID)
-        return ReceiptBuilder(keyStore: keyStore)
+        let privateKey = try keyStore.loadOrGenerate(providerId: providerID)
+        return (
+            ReceiptBuilder(keyStore: keyStore),
+            Data(privateKey.publicKey.rawRepresentation).base64EncodedString()
+        )
     }
 }
 

@@ -777,7 +777,49 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["aead_suites"] as? [String], [Tier2ProviderSession.aeadSuite])
     }
 
-    func testBinaryVersion_AdvertisesSPEC001V15AcrossHandshakeFrames() async throws {
+    func testAuthInitialIncludesReceiptPublicKeyWhenConfigured() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let receiptPublicKey = Data(repeating: 0x42, count: 32).base64EncodedString()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerReceiptPublicKey: receiptPublicKey
+        )
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+
+        XCTAssertEqual(auth["stage"] as? String, "initial")
+        XCTAssertEqual(auth["provider_receipt_public_key"] as? String, receiptPublicKey)
+    }
+
+    func testAuthInitialOmitsReceiptPublicKeyWhenUnavailableAndProofNeverIncludesIt() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let attempt = Tier2AuthAttempt()
+
+        let auth = await client.authInitialMessage(attempt: attempt)
+        let proof = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "auth-test",
+            "attestation_challenge": Data(repeating: 0x11, count: 32).base64URLUnpadded(),
+        ], attempt: attempt)
+
+        XCTAssertNil(auth["provider_receipt_public_key"])
+        XCTAssertNil(proof["provider_receipt_public_key"])
+    }
+
+    func testBinaryVersion_AdvertisesSPEC001V16AcrossHandshakeFrames() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
             modelID: "model-a",
@@ -790,10 +832,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.5.0")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.5.0")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.5.0")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.5.0")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.6.0")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.6.0")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.6.0")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.6.0")
     }
 
     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
@@ -1209,7 +1251,8 @@ final class CoordinatorClientTests: XCTestCase {
         modelRuntime: ModelRuntime? = nil,
         attestationGenerator: Tier2AttestationTokenGenerating = StaticAttestationGenerator(token: nil),
         pairingController: PairingController? = nil,
-        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
+        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
+        providerReceiptPublicKey: String? = nil
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
@@ -1234,7 +1277,8 @@ final class CoordinatorClientTests: XCTestCase {
             attestationGenerator: attestationGenerator,
             sleepAssertionFactory: { nil },
             pairingController: pairingController,
-            connectAndRunOverride: connectAndRunOverride
+            connectAndRunOverride: connectAndRunOverride,
+            providerReceiptPublicKey: providerReceiptPublicKey
         ))
     }
 
