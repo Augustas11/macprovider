@@ -10,7 +10,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -247,7 +247,7 @@ struct StatusCommand: AsyncParsableCommand {
         )
         let status = try await LocalStatusClient.fetch(port: resolved.port)
         let latest = try? await SelfUpdate(currentVersion: CoordinatorClient.binaryVersion, releasesAPIURL: nil).latestVersionCached()
-        print(LocalStatusFormatter.format(status, latestVersion: latest))
+        print(LocalStatusFormatter.format(status, latestVersion: latest, ownerLogin: OwnerFileReader.githubLogin(configPath: resolved.configPath)))
     }
 }
 

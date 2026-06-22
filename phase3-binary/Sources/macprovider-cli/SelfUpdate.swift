@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import MacProviderCore
 
 struct SelfUpdate {
     static let defaultReleasesAPIURL = "https://api.github.com/repos/Augustas11/macprovider/releases/latest"
@@ -412,12 +413,13 @@ struct LocalStatusClient {
 }
 
 struct LocalStatusFormatter {
-    static func format(_ status: [String: Any], latestVersion: String? = nil) -> String {
+    static func format(_ status: [String: Any], latestVersion: String? = nil, ownerLogin: String? = nil) -> String {
         let capacity = status["capacity"] as? [String: Any] ?? [:]
         let coordinator = status["coordinator"] as? [String: Any] ?? [:]
         let version = status["binary_version"] as? String ?? CoordinatorClient.binaryVersion
         let uptime = humanDuration(status["uptime_s"] as? Int ?? 0)
         let connected = (coordinator["connected"] as? Bool) == true ? "yes" : "no"
+        let ownerLine = ownerLogin.map { "\($0) (github.com/\($0))" } ?? "(unclaimed — run `macprovider-cli claim`)"
         let latestLine: String
         if let latestVersion {
             let comparison = SelfUpdate.compareSemver(version, latestVersion)
@@ -432,6 +434,8 @@ struct LocalStatusFormatter {
         macprovider-cli v\(version)
 
         Local:
+          Provider ID:  \(string(status["provider_id"]))
+          Owner: \(ownerLine)
           Model:       \(string(status["model"]))
           Status:      \(string(status["status"]))
           Uptime:      \(uptime)
@@ -465,5 +469,33 @@ struct LocalStatusFormatter {
             return "\(hours)h \(minutes)m"
         }
         return "\(minutes)m \(seconds % 60)s"
+    }
+}
+
+enum OwnerFileReader {
+    static func githubLogin(configPath: String) -> String? {
+        let claimURLFile = ClaimURLFile(configPath: configPath)
+        guard let body = try? String(contentsOf: claimURLFile.ownerURL, encoding: .utf8) else {
+            return nil
+        }
+        for line in body.split(separator: "\n", omittingEmptySubsequences: true) {
+            let parts = line.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
+            if parts.count == 2, parts[0] == "github_login" {
+                let login = String(parts[1])
+                return isValidGitHubLogin(login) ? login : nil
+            }
+        }
+        return nil
+    }
+
+    private static func isValidGitHubLogin(_ login: String) -> Bool {
+        guard (1...39).contains(login.utf8.count),
+              !login.hasPrefix("-"),
+              !login.hasSuffix("-")
+        else {
+            return false
+        }
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-")
+        return login.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 }
