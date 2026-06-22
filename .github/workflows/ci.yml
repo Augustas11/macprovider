@@ -78,7 +78,10 @@ jobs:
           persist-credentials: false
 
       - name: Set up Go
-        uses: actions/setup-go@v6
+        # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
+        # when upgrading instead of trusting the mutable tag in this required
+        # pairing/security gate.
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
         with:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum
@@ -91,6 +94,42 @@ jobs:
         # -race catches data races in the harness goroutines (fake
         # provider + log pumps).
         run: go test -race -count=1 -timeout 5m ./...
+
+  spec-014-v0-2-gate:
+    name: spec-014-v0-2-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # SPEC-014 v0.2 Phase 2E gate: keep the GitHub-auth pairing surface
+    # deployable only when the portal bundle guard and live pairing
+    # integration scenarios both pass. The workflow already runs on every
+    # PR and main push; this job is intentionally present for all runs so
+    # branch protection can require a stable job name.
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
+        # when upgrading instead of trusting the mutable tag in this required
+        # pairing/security gate.
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version-file: test/integration/go.mod
+          cache-dependency-path: test/integration/go.sum
+
+      - name: Verify Node runtime for portal probe
+        run: node --version
+
+      - name: Run provider portal bundle guard
+        run: bash frontdoor/provider-portal/check-bundle.sh
+
+      - name: Run SPEC-014 v0.2 pairing scenarios
+        working-directory: test/integration
+        run: go test -race -count=1 -timeout 5m ./spec_014_v0_2_pairing
 
   dist-tooling:
     name: deploy tooling (check-deploy-config gate)
