@@ -420,15 +420,17 @@ sudo -u macprovider /opt/macprovider/coordinator-cli issue-token \
 ```
 
 Send the token to the provider operator over a secure channel; they place
-it as `auth.provider_token: <token>` in their `macprovider.yaml` (and
-`chmod 0600 macprovider.yaml`), then restart the provider.
+it as top-level `provider_token: <token>` in their macprovider config
+(normally `~/.config/macprovider/config.yaml`, mode 0600), then restart
+the provider.
 
 Stranger-tier (curl|bash open-onboarding) — **self-serve provisional**
 is the production path per SPEC-003 v0.8.x. The coordinator mints a
 fresh `provider_token` on every tokenless provisional admission and
 returns it in the v1 `hello_ack` and v2 `auth_response` frames; the
-binary persists it atomically to `~/.config/macprovider/macprovider.yaml`
-(mode 0600). Next reconnect carries it as `Authorization: Bearer`.
+binary persists it atomically to top-level `provider_token:` in
+`~/.config/macprovider/config.yaml` (mode 0600). Next reconnect carries
+it as `Authorization: Bearer`.
 No operator action is required for the open-onboarding tier under
 `auth.require_provider_tokens=false`. After the flag flip (FR-C9.5
 compatibility cutoff), tokenless connects are rejected at the auth
