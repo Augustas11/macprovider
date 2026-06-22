@@ -28,13 +28,20 @@ per [SPEC-014](../../specs/SPEC-014-provider-portal.md).
      `^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$`).
    - `require_provider_tokens` — strict boolean `true`. The portal
      refuses to start in any other mode (SPEC-014 §2.4 and §2.3).
+   - `github_oauth_enabled` — strict boolean. Leave `false` for v0.1
+     paste-token behavior; set to `true` AFTER deploying a coordinator
+     with `GITHUB_OAUTH_ENABLED=true` and the v0.2 schema migrations
+     applied. If this is true without coordinator support, the portal
+     fails loud per SPEC-014 v0.2 §10.
    The loader rejects any unknown top-level key.
 2. Host `index.html` alongside an operator-owned reverse proxy on the
    SAME origin that forwards `/v1/pool/check` and
    `/providers/{id}/earnings` to the coordinator (SPEC-014 §3 +
-   Open Q9). If the proxy is missing, the portal renders a loud red
-   banner naming §3 / Open Q9 and refuses to fall back to an absolute
-   coordinator URL.
+   Open Q9). For GitHub auth mode, also forward `/v1/auth/github/*`,
+   `/v1/auth/me/*`, `/v1/auth/logout`, and
+   `/v1/install/pair/refresh`. If the proxy is missing, the portal
+   renders a loud red banner naming §3 / Open Q9 and refuses to fall
+   back to an absolute coordinator URL.
 3. Run `./check-bundle.sh` (locally or in CI) before serving. The
    script exits 0 on a clean bundle.
 
@@ -58,8 +65,10 @@ operator step (see SPEC-014 §10.4 operator runbook).
   SAME session, the sign-in screen adds a stale-config notice.
 - **AUTH-3 (deployment-mode loader):** fail-CLOSED loader for
   `/portal-config.json`. Missing file, non-200, malformed JSON,
-  unknown top-level key, non-`true` `require_provider_tokens` →
-  unavailable page with zero further network calls.
+  unknown top-level key, non-`true` `require_provider_tokens`, or
+  non-boolean `github_oauth_enabled` → unavailable page with zero
+  further network calls. When `github_oauth_enabled` is omitted, it
+  defaults to `false`.
 
 ## Phase status
 

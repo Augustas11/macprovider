@@ -54,8 +54,8 @@ type PoolConfig struct {
 	// chunks count as activity and keep the socket alive. Decoupled from
 	// routing.failover_timeout_s (which governs replacement selection, not
 	// liveness). Defaults to 90s (3x the 30s heartbeat interval).
-	HeartbeatMissThresholdS int  `yaml:"heartbeat_miss_threshold_s"`
-	WakeGapThresholdS       int  `yaml:"wake_gap_threshold_s"`
+	HeartbeatMissThresholdS int `yaml:"heartbeat_miss_threshold_s"`
+	WakeGapThresholdS       int `yaml:"wake_gap_threshold_s"`
 	// WakeGapThresholdMs, when > 0, overrides WakeGapThresholdS for
 	// millisecond-precision test scenarios. Not for production use.
 	WakeGapThresholdMs      int  `yaml:"wake_gap_threshold_ms"`
@@ -170,7 +170,17 @@ type AuthConfig struct {
 	// RequireProviderTokens fails closed for public provider WebSocket
 	// exposure. Disable only for isolated local development or one-off
 	// migrations where anonymous pinned-provider admission is acceptable.
-	RequireProviderTokens bool `yaml:"require_provider_tokens"`
+	RequireProviderTokens bool              `yaml:"require_provider_tokens"`
+	GitHubOAuth           GitHubOAuthConfig `yaml:"github_oauth"`
+}
+
+type GitHubOAuthConfig struct {
+	Enabled             bool   `yaml:"enabled"`
+	ClientID            string `yaml:"client_id"`
+	ClientSecret        string `yaml:"client_secret"`
+	RedirectURI         string `yaml:"redirect_uri"`
+	PortalBaseURL       string `yaml:"portal_base_url"`
+	SessionCookieDomain string `yaml:"session_cookie_domain"`
 }
 
 type StorageConfig struct {
@@ -287,10 +297,10 @@ func Default() Config {
 			MaxChatRequestBodyBytes: 1 << 20,
 		},
 		WS: WSConfig{
-			WriteBufferSize:        64,
-			HandshakeTimeoutS:      10,
-			WriteTimeoutS:          10,
-			MaxFrameBytes:          4 << 20,
+			WriteBufferSize:             64,
+			HandshakeTimeoutS:           10,
+			WriteTimeoutS:               10,
+			MaxFrameBytes:               4 << 20,
 			MaxUnauthenticatedConn:      64,
 			MaxUnauthenticatedConnPerIP: 4,
 		},
@@ -422,6 +432,33 @@ func (c *Config) resolveEnv() error {
 	} else {
 		c.Auth.GatewayServiceToken = v
 	}
+	if raw, ok := os.LookupEnv("GITHUB_OAUTH_ENABLED"); ok {
+		switch raw {
+		case "true":
+			c.Auth.GitHubOAuth.Enabled = true
+		case "false":
+			c.Auth.GitHubOAuth.Enabled = false
+		default:
+			return fmt.Errorf("GITHUB_OAUTH_ENABLED must be \"true\" or \"false\"")
+		}
+	}
+	if c.Auth.GitHubOAuth.Enabled {
+		if v := strings.TrimSpace(os.Getenv("GITHUB_OAUTH_CLIENT_ID")); v != "" {
+			c.Auth.GitHubOAuth.ClientID = v
+		}
+		if v := strings.TrimSpace(os.Getenv("GITHUB_OAUTH_CLIENT_SECRET")); v != "" {
+			c.Auth.GitHubOAuth.ClientSecret = v
+		}
+		if v := strings.TrimSpace(os.Getenv("GITHUB_OAUTH_REDIRECT_URI")); v != "" {
+			c.Auth.GitHubOAuth.RedirectURI = v
+		}
+		if v := strings.TrimSpace(os.Getenv("PORTAL_BASE_URL")); v != "" {
+			c.Auth.GitHubOAuth.PortalBaseURL = strings.TrimRight(v, "/")
+		}
+		if v := strings.TrimSpace(os.Getenv("MP_SESSION_COOKIE_DOMAIN")); v != "" {
+			c.Auth.GitHubOAuth.SessionCookieDomain = v
+		}
+	}
 	return nil
 }
 
@@ -514,6 +551,9 @@ func (c Config) ProviderByID() map[string]ProviderConfig {
 func (c Config) Validate() error {
 	if c.Auth.OperatorKey == "" {
 		return fmt.Errorf("auth.operator_key must be set")
+	}
+	if err := c.validateGitHubOAuth(); err != nil {
+		return err
 	}
 	if c.WS.WriteBufferSize <= 0 {
 		return fmt.Errorf("ws.write_buffer_size must be > 0")
@@ -695,6 +735,35 @@ func (c Config) Validate() error {
 			if err := ValidateEndpointURL(p.EndpointURL); err != nil {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
+		}
+	}
+	return nil
+}
+
+func (c Config) validateGitHubOAuth() error {
+	oauth := c.Auth.GitHubOAuth
+	if !oauth.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(oauth.ClientID) == "" {
+		return fmt.Errorf("GITHUB_OAUTH_CLIENT_ID must be set when GITHUB_OAUTH_ENABLED=true")
+	}
+	if strings.TrimSpace(oauth.ClientSecret) == "" {
+		return fmt.Errorf("GITHUB_OAUTH_CLIENT_SECRET must be set when GITHUB_OAUTH_ENABLED=true")
+	}
+	redirect, err := url.Parse(strings.TrimSpace(oauth.RedirectURI))
+	if err != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.Path != "/v1/auth/github/callback" || redirect.RawQuery != "" || redirect.Fragment != "" {
+		return fmt.Errorf("GITHUB_OAUTH_REDIRECT_URI must be https://.../v1/auth/github/callback when GITHUB_OAUTH_ENABLED=true")
+	}
+	portal, err := url.Parse(strings.TrimSpace(oauth.PortalBaseURL))
+	if err != nil || portal.Scheme != "https" || portal.Host == "" || portal.Path != "" || portal.RawQuery != "" || portal.Fragment != "" || portal.User != nil {
+		return fmt.Errorf("PORTAL_BASE_URL must be https://<host>[:<port>] with no path or query when GITHUB_OAUTH_ENABLED=true")
+	}
+	if oauth.SessionCookieDomain != "" {
+		domain := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(oauth.SessionCookieDomain)), ".")
+		host := strings.ToLower(portal.Hostname())
+		if domain == "" || host != domain && !strings.HasSuffix(host, "."+domain) {
+			return fmt.Errorf("MP_SESSION_COOKIE_DOMAIN must match PORTAL_BASE_URL host scope")
 		}
 	}
 	return nil

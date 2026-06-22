@@ -452,7 +452,7 @@ final class EndToEndAcceptanceTests: XCTestCase {
         recorder: CoordinatorFrameRecorder = CoordinatorFrameRecorder()
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = modelID
         config.supportedModels = supportedModels

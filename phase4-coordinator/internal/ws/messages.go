@@ -38,6 +38,8 @@ type HelloAck struct {
 	// reconnect carries Bearer. Note: top-level, NOT nested under
 	// `auth:` — codex audit on PR #44 caught the prior spec/code drift.
 	AssignedProviderToken string `json:"assigned_provider_token,omitempty"`
+	PairOT                string `json:"pair_ot,omitempty"`
+	ClaimURL              string `json:"claim_url,omitempty"`
 }
 
 type AuthRequest struct {
@@ -104,6 +106,15 @@ type AuthResponse struct {
 	// when a tokenless provisional provider was just self-minted on this
 	// connect. Never present on rejection-shaped responses.
 	AssignedProviderToken string `json:"assigned_provider_token,omitempty"`
+	PairOT                string `json:"pair_ot,omitempty"`
+	ClaimURL              string `json:"claim_url,omitempty"`
+}
+
+type OwnershipEvent struct {
+	Type        string `json:"type"`
+	ProviderID  string `json:"provider_id"`
+	GitHubLogin string `json:"github_login"`
+	Event       string `json:"event"`
 }
 
 type AuthResponseError struct {

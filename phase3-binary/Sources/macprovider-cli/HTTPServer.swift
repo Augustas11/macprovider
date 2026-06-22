@@ -22,6 +22,7 @@ struct HTTPServer {
                     channel.pipeline.addHandler(
                         RouterHandler(
                             modelID: config.model,
+                            providerID: config.providerID,
                             coordinatorURL: config.coordinatorURL,
                             modelRuntime: modelRuntime,
                             providerStatus: providerStatus,
@@ -44,6 +45,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias OutboundOut = HTTPServerResponsePart
 
     private let modelID: String?
+    private let providerID: String?
     private let coordinatorURL: String?
     private let modelRuntime: ModelRuntime
     private let providerStatus: ProviderStatus
@@ -55,6 +57,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 
     init(
         modelID: String?,
+        providerID: String?,
         coordinatorURL: String?,
         modelRuntime: ModelRuntime,
         providerStatus: ProviderStatus,
@@ -62,6 +65,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         maxBodyBytes: Int
     ) {
         self.modelID = modelID
+        self.providerID = providerID
         self.coordinatorURL = coordinatorURL
         self.modelRuntime = modelRuntime
         self.providerStatus = providerStatus
@@ -180,10 +184,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private func handleStatus(context: ChannelHandlerContext) {
         let writer = ResponseWriter(context: context)
         let providerStatus = providerStatus
+        let providerID = providerID
         let coordinatorURL = coordinatorURL
-        Task.detached { @Sendable [providerStatus, writer, coordinatorURL] in
+        Task.detached { @Sendable [providerStatus, writer, providerID, coordinatorURL] in
             let snapshot = await providerStatus.snapshot()
-            writer.writeJSON(status: .ok, body: Self.statusResponse(snapshot, coordinatorURL: coordinatorURL))
+            writer.writeJSON(status: .ok, body: Self.statusResponse(snapshot, providerID: providerID, coordinatorURL: coordinatorURL))
         }
     }
 
@@ -430,9 +435,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         ]
     }
 
-    private static func statusResponse(_ snapshot: ProviderSnapshot, coordinatorURL: String?) -> [String: Any] {
+    private static func statusResponse(_ snapshot: ProviderSnapshot, providerID: String?, coordinatorURL: String?) -> [String: Any] {
         [
             "binary_version": CoordinatorClient.binaryVersion,
+            "provider_id": jsonNullable(providerID),
             "status": snapshot.status.rawValue,
             "model": snapshot.modelID ?? NSNull(),
             "model_loaded": snapshot.modelLoaded,

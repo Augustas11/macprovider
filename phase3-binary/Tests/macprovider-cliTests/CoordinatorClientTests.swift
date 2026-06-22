@@ -109,7 +109,7 @@ final class CoordinatorClientTests: XCTestCase {
     func testWebSocketConnectAttachesBearerAuthorizationWhenTokenConfigured_v1Plaintext() async throws {
         let token = "test-token-deadbeef-deadbeef-deadbeef"
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "model-a"
         config.wsTunneledMode = false
@@ -143,7 +143,7 @@ final class CoordinatorClientTests: XCTestCase {
     func testWebSocketConnectAttachesBearerAuthorizationWhenTokenConfigured_v2Tier2() async throws {
         let token = "tier2-token-cafebabe-cafebabe-cafebabe"
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "model-a"
         config.wsTunneledMode = true
@@ -177,7 +177,7 @@ final class CoordinatorClientTests: XCTestCase {
 
     func testWebSocketConnectOmitsAuthorizationWhenTokenUnset() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "model-a"
         config.wsTunneledMode = false
@@ -248,7 +248,7 @@ final class CoordinatorClientTests: XCTestCase {
     // be a text heartbeat, never a ping. See startHeartbeat doc-comment.
     func testCoordinatorSessionKeepaliveSendsHeartbeatTextFrameAndNoPing() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "model-a"
         config.wsTunneledMode = false
@@ -315,6 +315,184 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
 
         XCTAssertNil(hello["model_hash"])
+    }
+
+    func testWSScheme_MustBeWSS_NotWS() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let runtime = try await ModelRuntime(modelID: nil)
+        var insecure = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        insecure.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        insecure.providerID = "provider-test"
+        insecure.model = "model-a"
+
+        XCTAssertNil(CoordinatorClient(config: insecure, modelRuntime: runtime, providerStatus: status))
+
+        var secure = insecure
+        secure.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        XCTAssertNotNil(CoordinatorClient(config: secure, modelRuntime: runtime, providerStatus: status))
+    }
+
+    func testRequestPairOT_NeverEmitted_OnAdmissionFrames() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        let helloJSON = Self.jsonString(await client.helloMessage())
+        let authJSON = Self.jsonString(await client.authInitialMessage(attempt: Tier2AuthAttempt()))
+
+        XCTAssertFalse(helloJSON.contains("request_pair_ot"), helloJSON)
+        XCTAssertFalse(authJSON.contains("request_pair_ot"), authJSON)
+    }
+
+    func testHelloAckPairingMaterial_WritesClaimURLBeforeFailedOpen() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let dir = try Self.makeTemporaryDirectory(prefix: "coordinator-claim-")
+        let claimFile = ClaimURLFile(directory: dir)
+        let pairingController = PairingController(
+            claimURLFile: claimFile,
+            browserOpener: BrowserOpener(
+                hasControllingTTY: { true },
+                environment: { _ in nil },
+                spawn: { _ in throw BrowserOpenError.spawnFailed(errno: 9) }
+            )
+        )
+        let client = try await makeClient(status: status, recorder: recorder, pairingController: pairingController)
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "hello_ack",
+            "assigned_id": "assigned-a",
+            "heartbeat_interval_s": 30,
+            "pair_ot": "PAIRSECRET",
+            "claim_url": "https://portal.example/claim?ot=PAIRSECRET",
+            "portal_base_url": "https://portal.example",
+        ])
+
+        let record = try XCTUnwrap(claimFile.read())
+        XCTAssertEqual(record.pairOT, "PAIRSECRET")
+        XCTAssertEqual(record.claimURL, "https://portal.example/claim?ot=PAIRSECRET")
+        let attrs = try FileManager.default.attributesOfItem(atPath: claimFile.fileURL.path)
+        XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+    }
+
+    func testAcceptedAuthResponsePairingMaterial_WritesClaimURL() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let dir = try Self.makeTemporaryDirectory(prefix: "coordinator-auth-claim-")
+        let claimFile = ClaimURLFile(directory: dir)
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            pairingController: PairingController(
+                claimURLFile: claimFile,
+                browserOpener: BrowserOpener(hasControllingTTY: { false })
+            )
+        )
+        let session = try Tier2ProviderSession(
+            providerID: "provider-test",
+            assignedID: "assigned-v2",
+            selectedAEAD: Tier2ProviderSession.aeadSuite,
+            keyID: "kid-test",
+            c2pKey: Data(repeating: 0x11, count: 32),
+            p2cKey: Data(repeating: 0x22, count: 32),
+            c2pNonceBase: Data(repeating: 0x33, count: 4),
+            p2cNonceBase: Data(repeating: 0x44, count: 4)
+        )
+
+        try await client.acceptAuthResponseForTest([
+            "type": "auth_response",
+            "version": 2,
+            "status": "accepted",
+            "assigned_id": "assigned-v2",
+            "heartbeat_interval_s": 30,
+            "pair_ot": "PAIRV2",
+            "claim_url": "https://portal.example/claim?ot=PAIRV2",
+            "tier2_session": [
+                "encrypted_leg": [
+                    "enabled": true,
+                    "alg": Tier2ProviderSession.aeadSuite,
+                    "kid": "kid-test",
+                ],
+            ],
+        ], session: session)
+
+        let record = try XCTUnwrap(claimFile.read())
+        XCTAssertEqual(record.pairOT, "PAIRV2")
+        XCTAssertEqual(record.claimURL, "https://portal.example/claim?ot=PAIRV2")
+    }
+
+    func testOwnershipStatusNeedsClaim_WritesStubWithoutOpeningBrowser() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let dir = try Self.makeTemporaryDirectory(prefix: "coordinator-needs-claim-")
+        let claimFile = ClaimURLFile(directory: dir)
+        let opened = LockedBox(false)
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            pairingController: PairingController(
+                claimURLFile: claimFile,
+                browserOpener: BrowserOpener(hasControllingTTY: { true }, spawn: { _ in opened.set(true) })
+            )
+        )
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "ownership_status",
+            "provider_id": "provider-test",
+            "needs_claim": true,
+        ])
+
+        XCTAssertEqual(try String(contentsOf: claimFile.fileURL, encoding: .utf8), "needs_refresh=true\n")
+        XCTAssertFalse(opened.get())
+    }
+
+    func testOwnershipEventBound_DeletesClaimURLAndWritesOwner() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let dir = try Self.makeTemporaryDirectory(prefix: "coordinator-owner-")
+        let claimFile = ClaimURLFile(directory: dir)
+        try claimFile.write(pairOT: "PAIR", claimURL: "https://portal.example/claim?ot=PAIR", expiresAt: Date().addingTimeInterval(600))
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            pairingController: PairingController(claimURLFile: claimFile, browserOpener: BrowserOpener(hasControllingTTY: { false }))
+        )
+
+        try await client.handleCoordinatorPayloadForTest([
+            "type": "ownership_event",
+            "provider_id": "provider-test",
+            "github_login": "octo-user",
+            "event": "bound",
+        ])
+
+        XCTAssertFalse(FileManager.default.fileExists(atPath: claimFile.fileURL.path))
+        XCTAssertEqual(try String(contentsOf: claimFile.ownerURL, encoding: .utf8), "github_login=octo-user\n")
+        let attrs = try FileManager.default.attributesOfItem(atPath: claimFile.ownerURL.path)
+        XCTAssertEqual((attrs[.posixPermissions] as? NSNumber)?.intValue, 0o600)
     }
 
     func testHeartbeatDisabledModeOmitsBothFields() async throws {
@@ -599,9 +777,28 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["aead_suites"] as? [String], [Tier2ProviderSession.aeadSuite])
     }
 
+    func testBinaryVersion_AdvertisesSPEC001V15AcrossHandshakeFrames() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let attempt = Tier2AuthAttempt()
+
+        let hello = await client.helloMessage()
+        let auth = await client.authInitialMessage(attempt: attempt)
+
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.5.0")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.5.0")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.5.0")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.5.0")
+    }
+
     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "model-id-from-snapshot"
         config.supportedModels = nil
@@ -628,7 +825,7 @@ final class CoordinatorClientTests: XCTestCase {
 
     func testAuthInitialEmitsExplicitCatalogWhenSet() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "A"
         config.supportedModels = ["A", "B"]
@@ -655,7 +852,7 @@ final class CoordinatorClientTests: XCTestCase {
 
     func testAuthInitialOmitsPublishesWhenFalse() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "A"
         config.supportedModels = ["A", "B"]
@@ -682,7 +879,7 @@ final class CoordinatorClientTests: XCTestCase {
 
     func testHelloMessageUnchangedByPhase1A() async throws {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "A"
         config.supportedModels = ["A", "B"]
@@ -718,7 +915,7 @@ final class CoordinatorClientTests: XCTestCase {
             capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
         )
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "model-a"
         config.wsTunneledMode = true
@@ -985,6 +1182,12 @@ final class CoordinatorClientTests: XCTestCase {
         try! JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
     }
 
+    private static func makeTemporaryDirectory(prefix: String) throws -> URL {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("\(prefix)\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
     private static func minimalDERSequenceBase64URL() -> String {
         Data([0x30, 0x03, 0x02, 0x01, 0x05]).base64URLUnpadded()
     }
@@ -1005,10 +1208,11 @@ final class CoordinatorClientTests: XCTestCase {
         enableWarmSwap: Bool = false,
         modelRuntime: ModelRuntime? = nil,
         attestationGenerator: Tier2AttestationTokenGenerating = StaticAttestationGenerator(token: nil),
+        pairingController: PairingController? = nil,
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
-        config.coordinatorURL = "ws://127.0.0.1:8444/ws/provider"
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
         config.providerID = "provider-test"
         config.model = "model-a"
         config.drainTimeoutSeconds = drainTimeoutSeconds
@@ -1029,6 +1233,7 @@ final class CoordinatorClientTests: XCTestCase {
             reconnectGraceNanoseconds: reconnectGraceNanoseconds,
             attestationGenerator: attestationGenerator,
             sleepAssertionFactory: { nil },
+            pairingController: pairingController,
             connectAndRunOverride: connectAndRunOverride
         ))
     }
@@ -1065,6 +1270,33 @@ final class CoordinatorClientTests: XCTestCase {
 
 private enum CoordinatorClientTestError: Error {
     case unexpectedContainerLoader
+}
+
+final class LockedBox<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Value
+
+    init(_ value: Value) {
+        self.value = value
+    }
+
+    func set(_ value: Value) {
+        lock.lock()
+        self.value = value
+        lock.unlock()
+    }
+
+    func update(_ body: (inout Value) -> Void) {
+        lock.lock()
+        body(&value)
+        lock.unlock()
+    }
+
+    func get() -> Value {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
 }
 
 private actor SwapLoaderGate {

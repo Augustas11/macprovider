@@ -4,6 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <title>MacProvider — Provider Portal</title>
+  <script>
+    const PAIR_OT_CAPTURED = (function() {
+      if (location.pathname !== "/claim") return null;
+      const u = new URL(location.href);
+      const ot = u.searchParams.get("ot");
+      history.replaceState({}, "", "/claim");
+      return ot;
+    })();
+  </script>
   <style>
     :root {
       --bg:#0c0d10;
@@ -234,6 +243,24 @@
       color:#fde68a;
       border-radius:8px; font-size:12px; line-height:1.5;
     }
+    .signin-guide { margin-top:14px; color:var(--muted); font-size:13px; text-align:center; }
+    .github-btn {
+      display:block; width:100%;
+      background:var(--accent); border:0; color:#fff;
+      padding:10px; border-radius:8px; font-weight:600;
+      text-align:center;
+    }
+    .github-btn:hover { filter:brightness(1.08); text-decoration:none; }
+    .claim-card h1 { color:var(--text); }
+    .claim-card .claim-ok { color:var(--ok); font-size:13px; margin-top:10px; }
+    .provider-list { display:flex; flex-direction:column; gap:10px; }
+    .provider-row {
+      display:flex; justify-content:space-between; align-items:center; gap:12px;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:8px; padding:12px 14px; width:100%; text-align:left;
+    }
+    .provider-row:hover { background:var(--accent-dim); }
+    .provider-row .sub { color:var(--muted); font-size:12px; }
 
     /* Unavailable mode */
     .unavail-wrap {
@@ -334,7 +361,8 @@
     var ALLOWED_CONFIG_KEYS = [
       "coordinator_base_url",
       "releases_repo_owner_name",
-      "require_provider_tokens"
+      "require_provider_tokens",
+      "github_oauth_enabled"
     ];
     var REPO_OWNER_NAME_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
@@ -365,6 +393,10 @@
       configError: null,
       flagFalse: false,
       releases: { list: null, ts: 0, err: null, inflight: false, rateLimited: false },
+      githubAuthState: "idle",
+      githubProviders: [],
+      cookieFetch: null,
+      claim: { phase: "idle", error: null, result: null },
     };
 
     var timers = {
@@ -465,10 +497,14 @@
         state.flagFalse = true;
         throw new Error("flag-false");
       }
+      if (Object.prototype.hasOwnProperty.call(raw, "github_oauth_enabled") && typeof raw.github_oauth_enabled !== "boolean") {
+        throw new Error("invalid-github_oauth_enabled");
+      }
       return {
         coordinator_base_url: cbu,
         releases_repo_owner_name: rro,
         require_provider_tokens: true,
+        github_oauth_enabled: raw.github_oauth_enabled === true,
       };
     }
 
@@ -520,6 +556,57 @@
         });
     }
 
+    function makeCookieFetch() {
+      return function cookieFetch(pathAndQuery, opts) {
+        opts = opts || {};
+        var supplied = opts.headers || {};
+        var headers = { "Accept": "application/json", "Content-Type": "application/json" };
+        for (var k in supplied) {
+          if (!Object.prototype.hasOwnProperty.call(supplied, k)) continue;
+          if (String(k).toLowerCase() === "authorization") continue;
+          headers[k] = supplied[k];
+        }
+        return fetch(pathAndQuery, {
+          method: opts.method || "GET",
+          headers: headers,
+          body: opts.body,
+          cache: "no-store",
+          credentials: "include",
+        }).catch(function (e) {
+          if (!state.proxyMissing) {
+            state.proxyMissing = true;
+            render();
+          }
+          throw e;
+        });
+      };
+    }
+
+    function cookieJSON(pathAndQuery, opts) {
+      if (!state.cookieFetch) state.cookieFetch = makeCookieFetch();
+      return state.cookieFetch(pathAndQuery, opts).then(function (resp) {
+        return readJSONResponse(resp);
+      });
+    }
+
+    function readJSONResponse(resp) {
+      return resp.text().then(function (txt) {
+        var body = null;
+        if (txt) {
+          try { body = JSON.parse(txt); } catch (_) { body = null; }
+        }
+        return { ok: resp.ok, status: resp.status, body: body };
+      });
+    }
+
+    window.__macproviderPortalAuthProbe = function () {
+      return {
+        mode: state.cfg && state.cfg.github_oauth_enabled ? "cookie" : "paste",
+        pasteAuth: coordFetch,
+        cookieAuth: state.cookieFetch || undefined,
+      };
+    };
+
     /* =====================================================================
      * Pool poll (§5.4: 30 s + manual refresh)
      * ===================================================================== */
@@ -530,7 +617,10 @@
       render();
       var pid = state.session.provider_id;
       var url = POOL_PATH + "?provider_id=" + encodeURIComponent(pid);
-      return coordFetch(url, { auth: false })
+      var fetchResult = state.cfg && state.cfg.github_oauth_enabled
+        ? cookieJSON(url, { method: "GET" })
+        : coordFetch(url, { auth: false });
+      return fetchResult
         .then(function (r) {
           state.pool.inflight = false;
           if (r.ok) {
@@ -562,7 +652,10 @@
       state.earn.inflight = true;
       render();
       var pid = state.session.provider_id;
-      return coordFetch(earningsPath(pid), { auth: true, surface: surface || "machine" })
+      var fetchResult = state.cfg && state.cfg.github_oauth_enabled
+        ? cookieJSON(earningsPath(pid), { method: "GET" })
+        : coordFetch(earningsPath(pid), { auth: true, surface: surface || "machine" });
+      return fetchResult
         .then(function (r) {
           state.earn.inflight = false;
           if (r.ok) {
@@ -573,7 +666,11 @@
             return;
           }
           if (r.status === 401 || r.status === 403 || r.status === 404) {
-            handleAuthRejection(r.status, surface || "machine");
+            if (state.cfg && state.cfg.github_oauth_enabled && r.status === 401) {
+              githubSessionExpired("/" + "?p=" + encodeURIComponent(pid));
+            } else {
+              handleAuthRejection(r.status, surface || "machine");
+            }
             return;
           }
           state.earn.err = { status: r.status };
@@ -684,6 +781,13 @@
      * Sign-out
      * ===================================================================== */
     function signOut() {
+      if (state.cfg && state.cfg.github_oauth_enabled) {
+        stopPollers();
+        cookieJSON("/v1/auth/logout", { method: "POST", body: "{}" })
+          .catch(function () { return null; })
+          .then(function () { location.reload(); });
+        return;
+      }
       stopPollers();
       state.session = null;
       state.pool = { data: null, ts: 0, err: null, inflight: false };
@@ -715,6 +819,162 @@
       state.route = "machine";
       render();
       startPollers();
+    }
+
+    /* =====================================================================
+     * GitHub auth mode
+     * ===================================================================== */
+    function githubStartURL(returnTo, pairOT) {
+      var url = "/v1/auth/github/start?return_to=" + encodeURIComponent(returnTo);
+      if (pairOT) url += "&pair_ot=" + encodeURIComponent(pairOT);
+      return url;
+    }
+
+    function startGitHubOAuth(returnTo, pairOT) {
+      location.assign(githubStartURL(returnTo, pairOT));
+    }
+
+    function initializeGitHubMode() {
+      state.cookieFetch = makeCookieFetch();
+      state.githubAuthState = "loading";
+      render();
+      if (location.pathname === "/claim") {
+        return handleClaimRoute();
+      }
+      return loadGitHubHome();
+    }
+
+    function loadGitHubHome() {
+      state.githubAuthState = "loading";
+      state.claim = { phase: "idle", error: null, result: null };
+      stopPollers();
+      state.session = null;
+      render();
+      return cookieJSON("/v1/auth/me/providers", { method: "GET" })
+        .then(function (r) {
+          if (r.status === 401) {
+            state.githubAuthState = "signin";
+            render();
+            return;
+          }
+          if (!r.ok) {
+            state.githubAuthState = "signin";
+            if (r.status === 404 || r.status >= 500) state.proxyMissing = true;
+            render();
+            return;
+          }
+          var providers = r.body && Array.isArray(r.body.providers) ? r.body.providers : [];
+          state.githubProviders = providers;
+          if (providers.length === 0) {
+            state.githubAuthState = "waiting";
+            state.route = "machine";
+            render();
+            return;
+          }
+          var wanted = new URL(location.href).searchParams.get("p");
+          var selected = null;
+          for (var i = 0; i < providers.length; i++) {
+            if (providers[i] && providers[i].provider_id === wanted) selected = providers[i];
+          }
+          if (!selected && providers.length === 1) selected = providers[0];
+          if (!selected) {
+            state.githubAuthState = "providers";
+            state.route = "machine";
+            render();
+            return;
+          }
+          selectGitHubProvider(selected.provider_id, false);
+        })
+        .catch(function () {
+          state.githubAuthState = "signin";
+          render();
+        });
+    }
+
+    function selectGitHubProvider(providerId, pushRoute) {
+      state.session = { provider_id: providerId, provider_token: null };
+      state.githubAuthState = "dashboard";
+      state.route = "machine";
+      state.pool = { data: null, ts: 0, err: null, inflight: false };
+      state.earn = { data: null, ts: 0, err: null, inflight: false };
+      if (pushRoute) {
+        history.pushState({}, "", "/?p=" + encodeURIComponent(providerId));
+      }
+      render();
+      startPollers();
+    }
+
+    function githubSessionExpired(returnTo) {
+      stopPollers();
+      state.session = null;
+      state.githubAuthState = "signin";
+      render();
+      startGitHubOAuth(returnTo || "/", null);
+    }
+
+    function handleClaimRoute() {
+      state.githubAuthState = "claim";
+      state.claim = { phase: "checking", error: null, result: null };
+      render();
+      return cookieJSON("/v1/auth/me/providers", { method: "GET" })
+        .then(function (r) {
+          if (r.status === 401) {
+            startGitHubOAuth("/claim", PAIR_OT_CAPTURED);
+            return;
+          }
+          if (!r.ok) {
+            if (isProxyMisconfigurationStatus(r.status)) {
+              state.proxyMissing = true;
+              state.claim = { phase: "error", error: "proxy_missing", result: null };
+            } else {
+              state.claim = { phase: "error", error: "bad_request", result: null };
+            }
+            render();
+            return;
+          }
+          return bindClaim();
+        })
+        .catch(function () {
+          state.claim = { phase: "error", error: "network", result: null };
+          render();
+        });
+    }
+
+    function bindClaim() {
+      state.claim = { phase: "binding", error: null, result: null };
+      render();
+      var body = PAIR_OT_CAPTURED ? { pair_ot: PAIR_OT_CAPTURED } : {};
+      return cookieJSON("/v1/auth/me/providers/bind", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }).then(function (r) {
+        if (r.ok) {
+          state.claim = { phase: "success", error: null, result: r.body || {} };
+          render();
+          setTimeout(function () { location.assign("/"); }, 2000);
+          return;
+        }
+        if (r.status === 401) {
+          startGitHubOAuth("/claim", PAIR_OT_CAPTURED);
+          return;
+        }
+        if (isProxyMisconfigurationStatus(r.status)) {
+          state.proxyMissing = true;
+          state.claim = { phase: "error", error: "proxy_missing", result: null };
+          render();
+          return;
+        }
+        var code = r.body && r.body.error ? r.body.error : "bad_request";
+        state.claim = { phase: "error", error: code, result: null };
+        render();
+      }).catch(function () {
+        state.claim = { phase: "error", error: "network", result: null };
+        render();
+      });
+    }
+
+    function isProxyMisconfigurationStatus(status) {
+      return status === 404 || status >= 500;
     }
 
     /* =====================================================================
@@ -769,6 +1029,22 @@
         root.appendChild(renderLoading());
         return;
       }
+      if (state.cfg.github_oauth_enabled) {
+        if (state.githubAuthState === "signin") {
+          root.appendChild(renderGitHubSignIn());
+          return;
+        }
+        if (state.githubAuthState === "claim") {
+          root.appendChild(renderClaim());
+          return;
+        }
+        if (state.githubAuthState === "waiting" || state.githubAuthState === "providers" || state.githubAuthState === "dashboard") {
+          root.appendChild(renderShell());
+          return;
+        }
+        root.appendChild(renderLoading());
+        return;
+      }
       if (!state.session) {
         root.appendChild(renderSignIn());
         return;
@@ -814,6 +1090,8 @@
             el("code", null, "releases_repo_owner_name"),
             ", and ",
             el("code", null, "require_provider_tokens"),
+            ", and optionally ",
+            el("code", null, "github_oauth_enabled"),
             ".");
           break;
         case "unknown-key":
@@ -827,6 +1105,8 @@
             el("code", null, "releases_repo_owner_name"),
             ", and ",
             el("code", null, "require_provider_tokens"),
+            ", plus optional ",
+            el("code", null, "github_oauth_enabled"),
             " are permitted.");
           break;
         case "invalid-field":
@@ -894,6 +1174,85 @@
       return el("div", { class: "signin-wrap" }, card);
     }
 
+    function renderGitHubSignIn() {
+      var button = el("button", {
+        class: "github-btn",
+        onclick: function () { startGitHubOAuth("/", null); },
+      }, "Continue with GitHub");
+      var card = el("div", { class: "signin-card" },
+        el("h1", null, "MacProvider — Provider Portal"),
+        el("p", { class: "h-sub" }, "Sign in to view Macs linked to your GitHub account."),
+        button,
+        state.proxyMissing
+          ? el("div", { class: "signin-misconfig" }, "github_oauth_enabled is true but the coordinator has no GitHub OAuth endpoints. Set the flag to false or deploy the v0.2 coordinator.")
+          : null,
+        el("div", { class: "signin-guide" },
+          "New here? ",
+          el("a", { href: "#install-guide" }, "See the install guide")));
+      return el("div", { class: "signin-wrap" }, card);
+    }
+
+    function renderClaim() {
+      var phase = state.claim.phase;
+      var cardKids = [el("h1", null, "Link this Mac")];
+      if (state.proxyMissing) {
+        cardKids.push(renderProxyMissingBanner());
+      }
+      if (phase === "checking" || phase === "binding") {
+        cardKids.push(el("p", { class: "h-sub" }, phase === "checking" ? "Checking your GitHub session…" : "Linking this Mac to your account…"));
+      } else if (phase === "success") {
+        var result = state.claim.result || {};
+        cardKids.push(
+          el("p", { class: "h-sub" }, "This Mac is linked."),
+          el("div", { class: "claim-ok" }, "GitHub: ", result.github_login || "linked"),
+          el("div", { class: "claim-ok mono" }, "Provider: ", result.provider_id || "unknown"),
+          el("p", { class: "h-sub" }, "Redirecting to your dashboard…"));
+      } else {
+        var msg = "Something went wrong. Try running macprovider-cli claim again.";
+        var withCopy = false;
+        if (state.claim.error === "pair_ot_invalid") {
+          msg = "This link expired. Run `macprovider-cli claim` on your Mac for a fresh link.";
+          withCopy = true;
+        } else if (state.claim.error === "already_owned") {
+          msg = "This Mac is already linked to a different account. Contact the operator to unlink.";
+        } else if (state.claim.error === "proxy_missing") {
+          msg = "github_oauth_enabled is true but the coordinator has no GitHub OAuth endpoints. Set the flag to false or deploy the v0.2 coordinator.";
+        }
+        cardKids.push(el("p", { class: "h-sub" }, msg));
+        if (withCopy) {
+          cardKids.push(snippetNode("macprovider-cli claim", "claim-refresh"));
+        }
+      }
+      return el("div", { class: "signin-wrap" },
+        el("div", { class: "signin-card claim-card" }, cardKids));
+    }
+
+    function renderWaitingForMac() {
+      return el("div", null,
+        el("h1", { class: "surface-title" }, "Machine"),
+        el("div", { class: "panel" },
+          el("h2", null, "Waiting for a Mac to come online"),
+          el("p", null, "Install MacProvider on a Mac. After install, your Mac will auto-open a browser to link itself."),
+          snippetNode("curl -fsSL https://get.streamvc.live/install.sh | bash", "waiting-install")));
+    }
+
+    function renderProviderChooser() {
+      var rows = state.githubProviders.map(function (p) {
+        var pid = p && p.provider_id ? p.provider_id : "";
+        return el("button", {
+          class: "provider-row",
+          onclick: function () { selectGitHubProvider(pid, true); },
+        },
+          el("span", { class: "mono" }, pid),
+          el("span", { class: "sub" }, p && p.last_seen_at ? ("last seen " + p.last_seen_at) : "select"));
+      });
+      return el("div", null,
+        el("h1", { class: "surface-title" }, "Machine"),
+        el("div", { class: "panel" },
+          el("h2", null, "Choose a Mac"),
+          el("div", { class: "provider-list" }, rows)));
+    }
+
     function renderShell() {
       var sidebar = renderSidebar();
       var topbar = el("div", { class: "topbar" },
@@ -904,7 +1263,13 @@
         pane.appendChild(renderProxyMissingBanner());
       }
       if (state.route === "machine") {
-        pane.appendChild(renderMachine());
+        if (state.cfg && state.cfg.github_oauth_enabled && state.githubAuthState === "waiting") {
+          pane.appendChild(renderWaitingForMac());
+        } else if (state.cfg && state.cfg.github_oauth_enabled && state.githubAuthState === "providers" && !state.session) {
+          pane.appendChild(renderProviderChooser());
+        } else {
+          pane.appendChild(renderMachine());
+        }
       } else if (state.route === "setup") {
         pane.appendChild(renderSetup());
       } else if (state.route === "earn") {
@@ -927,11 +1292,15 @@
     function renderSidebar() {
       var items = [
         { id: "machine",    label: "Machine" },
-        { id: "setup",      label: "Setup & Updates" },
-        { id: "earn",       label: "Earn" },
-        { id: "monitoring", label: "Monitoring" },
-        { id: "identity",   label: "Identity" },
       ];
+      if (!(state.cfg && state.cfg.github_oauth_enabled && !state.session)) {
+        items.push(
+          { id: "setup",      label: "Setup & Updates" },
+          { id: "earn",       label: "Earn" },
+          { id: "monitoring", label: "Monitoring" },
+          { id: "identity",   label: "Identity" }
+        );
+      }
       var navNodes = items.map(function (it) {
         return el("button", {
           class: "nav-item" + (state.route === it.id ? " active" : ""),
@@ -967,6 +1336,14 @@
         el("code", null, "/v1/pool/check"),
         " and ",
         el("code", null, "/providers/{id}/earnings"),
+        ", plus ",
+        el("code", null, "/v1/auth/github/*"),
+        ", ",
+        el("code", null, "/v1/auth/me/*"),
+        ", ",
+        el("code", null, "/v1/auth/logout"),
+        ", and ",
+        el("code", null, "/v1/install/pair/refresh"),
         " to the coordinator. See SPEC-014 §3 and Open Q9.");
     }
 
@@ -1362,11 +1739,21 @@
     function bootstrap() {
       render();
       loadConfig().then(function () {
+        if (state.cfg && state.cfg.github_oauth_enabled) {
+          initializeGitHubMode();
+          return;
+        }
         render();
       }, function () {
         render();
       });
     }
+
+    window.addEventListener("popstate", function () {
+      if (state.cfg && state.cfg.github_oauth_enabled) {
+        loadGitHubHome();
+      }
+    });
 
     if (document.readyState === "loading") {
       document.addEventListener("DOMContentLoaded", bootstrap);
