@@ -46,6 +46,40 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
   </div>
 </section>
 
+<section id="spec015-receipts-step2">
+  <h2>SPEC-015 design decisions — Step 2 receipt Keychain lifecycle (2026-06-22)</h2>
+  <div class="entry">
+    <time>2026-06-22</time>
+    <p><strong>Scope:</strong> added <code>ReceiptKeyStoring</code>,
+    <code>KeychainReceiptKeyStore</code>, and
+    <code>InMemoryReceiptKeyStore</code>. The production store uses the
+    SPEC-015 service/account/accessible/synchronizable attributes exactly and
+    stores only the 32-byte raw ed25519 private key. The public key remains
+    derived from the private key and is not persisted separately.</p>
+    <p><strong>Race decision:</strong> <code>loadOrGenerate</code> follows the
+    insert-or-load contract: read current, generate only on not-found, attempt
+    add, and on duplicate discard the generated candidate and reload the
+    winning Keychain item.</p>
+    <p><strong>Rotation-slot decision:</strong> <code>swapToCurrent</code>
+    serializes process-local mutations, copies the current key to the
+    <code>.prev</code> service, then replaces the current value. macOS Keychain
+    does not expose a multi-item transaction; the implementation orders writes
+    so the previous key is copied before the current slot changes and rolls
+    back the copied <code>.prev</code> item if replacing current fails.</p>
+    <p><strong>Testability:</strong> the in-memory store implements the same
+    protocol with an injectable clock so race convergence, byte-equivalent key
+    reloads, <code>.prev</code> movement, and 7-day stale previous-key cleanup
+    are mechanically testable without touching the real login Keychain.</p>
+    <p><strong>Deviations:</strong> no serve startup, receipt signing, auth
+    frame publication, coordinator parsing, or gateway forwarding is wired in
+    this step.</p>
+    <p><strong>Open questions:</strong> if future rotation requires crash-proof
+    cross-process atomicity between current and previous Keychain items, the
+    rotation flow will need a small state marker or single-item envelope rather
+    than two independent generic-password records.</p>
+  </div>
+</section>
+
 <section id="spec013-autotune-step1">
   <h2>SPEC-013 design decisions — Step 1 autotune scaffold (2026-06-18)</h2>
   <div class="entry">
