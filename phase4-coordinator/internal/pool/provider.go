@@ -134,6 +134,9 @@ type Provider struct {
 	// SPEC-015 v0.1.3 / SPEC-001 v1.6 — raw ed25519 public key bytes
 	// populated from auth_request.provider_receipt_public_key when present.
 	ReceiptPubkey []byte `json:"-"`
+	// Previous receipt pubkey retained during the SPEC-015 rotation grace
+	// window. /poolz owns the public JSON projection.
+	ReceiptPubkeyPrev *ReceiptPubkeyPrevious `json:"-"`
 	// AttestationStatus is informational unless tier2.require_attestation is
 	// enabled. The zero value represents a legacy provider with no claim.
 	AttestationStatus AttestationStatus `json:"attestation_status,omitempty"`
@@ -175,6 +178,12 @@ type Tier2Session struct {
 	RequestsDispatched uint64
 	KeyID              string
 	StartedAt          time.Time
+}
+
+type ReceiptPubkeyPrevious struct {
+	Pubkey    []byte
+	RotatedAt time.Time
+	ExpiresAt time.Time
 }
 
 // RoutingEligible is the single authority on whether a session may receive

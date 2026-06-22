@@ -1290,5 +1290,27 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   absent-field compatibility, valid 32-byte pubkey storage, invalid base64
   rejection, wrong-length rejection, and full v2 auth admission storage.</p>
 </div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 6 /poolz receipt key exposure.</strong>
+  The operator <code>/poolz</code> provider-row projection now emits explicit
+  nullable <code>receipt_pubkey</code> and <code>receipt_pubkey_prev</code>
+  fields. Current receipt pubkeys are encoded as standard padded base64 from
+  the raw 32-byte value captured during v2 auth; legacy/pre-v1.6 providers
+  serialize both receipt fields as JSON <code>null</code>.</p>
+  <p>The registry keeps previous receipt pubkeys as internal raw bytes plus
+  rotation timestamps. The public <code>/poolz</code> shape converts the grace
+  window object to <code>{pubkey, rotated_at, expires_at}</code> with Unix
+  seconds for the timestamps, matching SPEC-015 §7.5.1 and §8.1. Rotation
+  mechanics remain deferred to the next SPEC-015 step; this step adds the
+  storage seam and serializer contract needed to expose a simulated grace
+  window safely.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>go test ./internal/ws -run 'Test(PoolzReceiptPubkeyForV16Provider|PoolzReceiptPubkeyNullForPreV16Provider|PoolzReceiptPubkeyPrevShape|PoolzShapeUnchangedForL1Provider|PoolzDefaultOmitsTier2HashFieldsAfterWSAdmission|ProviderAuthV2InitialReceiptPublicKeyAdmitsAndStoresPubkey)' -count=1 -v</code>
+  passes. <code>go test ./internal/ws ./internal/pool -count=1</code> passes.
+  Coverage includes v1.6 current key exposure, explicit nulls for pre-v1.6
+  rows, documented previous-key shape, and existing additive /poolz
+  compatibility.</p>
+</div>
 </section>
 </body></html>

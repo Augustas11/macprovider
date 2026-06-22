@@ -509,6 +509,50 @@ func TestProviderAuthV2InitialReceiptPublicKeyAdmitsAndStoresPubkey(t *testing.T
 	})
 }
 
+func TestPoolzReceiptPubkeyForV16Provider(t *testing.T) {
+	h := newProviderHarness(t, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("provider keypair: %v", err)
+	}
+	receiptPubkey := bytes.Repeat([]byte{0x57}, 32)
+	initial := validAuthInitial("m4-anon", base64.RawURLEncoding.EncodeToString(providerPublicRaw))
+	initial["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(receiptPubkey)
+	if err := wsutil.WriteClientText(conn, mustJSON(initial)); err != nil {
+		t.Fatalf("write auth initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "m4-anon", nil)
+	response := readAuthResponse(t, conn)
+	if response.Status != "accepted" {
+		t.Fatalf("auth_response = %+v", response)
+	}
+
+	var got poolzResponse
+	eventually(t, func() bool {
+		got = fetchPoolz(t, h.HTTP.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ProviderID == "m4-anon"
+	})
+	if got.Pool[0].ReceiptPubkey == nil {
+		t.Fatalf("receipt_pubkey = nil, want populated")
+	}
+	want := base64.StdEncoding.EncodeToString(receiptPubkey)
+	if *got.Pool[0].ReceiptPubkey != want {
+		t.Fatalf("receipt_pubkey = %q, want %q", *got.Pool[0].ReceiptPubkey, want)
+	}
+	if got.Pool[0].ReceiptPubkeyPrev != nil {
+		t.Fatalf("receipt_pubkey_prev = %+v, want nil", got.Pool[0].ReceiptPubkeyPrev)
+	}
+}
+
 func TestProviderAuthV2RejectsMissingRequiredAttestation(t *testing.T) {
 	h := newProviderHarness(t, func(cfg *config.Config) {
 		cfg.Providers[0].EndpointURL = ""
@@ -1494,6 +1538,92 @@ func TestPoolzShapeUnchangedForL1Provider(t *testing.T) {
 		}
 		return true
 	})
+}
+
+func TestPoolzReceiptPubkeyNullForPreV16Provider(t *testing.T) {
+	ts := newProviderServer(t)
+	defer ts.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(ts.URL))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	assertHelloAck(t, conn)
+
+	var body []byte
+	var got poolzResponse
+	eventually(t, func() bool {
+		body, got = fetchPoolzRaw(t, ts.URL)
+		return len(got.Pool) == 1 && got.Pool[0].ProviderID == "m4-anon"
+	})
+	if got.Pool[0].ReceiptPubkey != nil {
+		t.Fatalf("receipt_pubkey = %q, want nil", *got.Pool[0].ReceiptPubkey)
+	}
+	if got.Pool[0].ReceiptPubkeyPrev != nil {
+		t.Fatalf("receipt_pubkey_prev = %+v, want nil", got.Pool[0].ReceiptPubkeyPrev)
+	}
+	if !bytes.Contains(body, []byte(`"receipt_pubkey":null`)) {
+		t.Fatalf("poolz omitted explicit receipt_pubkey null: %s", body)
+	}
+	if !bytes.Contains(body, []byte(`"receipt_pubkey_prev":null`)) {
+		t.Fatalf("poolz omitted explicit receipt_pubkey_prev null: %s", body)
+	}
+}
+
+func TestPoolzReceiptPubkeyPrevShape(t *testing.T) {
+	h := newProviderHarness(t)
+	defer h.HTTP.Close()
+
+	current := bytes.Repeat([]byte{0x11}, 32)
+	previous := bytes.Repeat([]byte{0x22}, 32)
+	rotatedAt := time.Unix(1770000000, 0).UTC()
+	expiresAt := rotatedAt.Add(7 * 24 * time.Hour)
+	_, registered := h.Registry.Register(&pool.Provider{
+		ProviderID:      "m4-anon",
+		AssignedID:      "assigned-receipt-prev",
+		State:           pool.StateReady,
+		ModelID:         "mlx-community/Qwen2.5-7B-Instruct-4bit",
+		SlotsFree:       1,
+		SlotsTotal:      1,
+		EndpointURL:     "https://m4.streamvc.live",
+		ConnectedAt:     rotatedAt,
+		LastHeartbeatAt: rotatedAt,
+		LastActivityAt:  rotatedAt,
+		ReceiptPubkey:   current,
+		ReceiptPubkeyPrev: &pool.ReceiptPubkeyPrevious{
+			Pubkey:    previous,
+			RotatedAt: rotatedAt,
+			ExpiresAt: expiresAt,
+		},
+	}, nil)
+	if !registered {
+		t.Fatalf("provider was not registered")
+	}
+
+	got := fetchPoolz(t, h.HTTP.URL)
+	if len(got.Pool) != 1 {
+		t.Fatalf("pool length = %d, want 1", len(got.Pool))
+	}
+	if got.Pool[0].ReceiptPubkey == nil {
+		t.Fatalf("receipt_pubkey = nil, want populated")
+	}
+	if want := base64.StdEncoding.EncodeToString(current); *got.Pool[0].ReceiptPubkey != want {
+		t.Fatalf("receipt_pubkey = %q, want %q", *got.Pool[0].ReceiptPubkey, want)
+	}
+	prev := got.Pool[0].ReceiptPubkeyPrev
+	if prev == nil {
+		t.Fatalf("receipt_pubkey_prev = nil, want object")
+	}
+	if want := base64.StdEncoding.EncodeToString(previous); prev.Pubkey != want {
+		t.Fatalf("receipt_pubkey_prev.pubkey = %q, want %q", prev.Pubkey, want)
+	}
+	if prev.RotatedAt != rotatedAt.Unix() {
+		t.Fatalf("receipt_pubkey_prev.rotated_at = %d, want %d", prev.RotatedAt, rotatedAt.Unix())
+	}
+	if prev.ExpiresAt != expiresAt.Unix() {
+		t.Fatalf("receipt_pubkey_prev.expires_at = %d, want %d", prev.ExpiresAt, expiresAt.Unix())
+	}
 }
 
 func TestStateUpdateCyclesProviderState(t *testing.T) {
@@ -2487,13 +2617,15 @@ func TestProviderHelloRejectsV1WhenEncryptedLegRequired(t *testing.T) {
 
 type poolzResponse struct {
 	Pool []struct {
-		ProviderID    string `json:"provider_id"`
-		State         string `json:"state"`
-		SlotsFree     int    `json:"slots_free"`
-		SlotsTotal    int    `json:"slots_total"`
-		Endpoint      string `json:"endpoint_url"`
-		Tier          string `json:"tier"`
-		InferencePath string `json:"inference_path"`
+		ProviderID        string                  `json:"provider_id"`
+		State             string                  `json:"state"`
+		SlotsFree         int                     `json:"slots_free"`
+		SlotsTotal        int                     `json:"slots_total"`
+		Endpoint          string                  `json:"endpoint_url"`
+		Tier              string                  `json:"tier"`
+		InferencePath     string                  `json:"inference_path"`
+		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
+		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
 	} `json:"pool"`
 	Summary struct {
 		TotalProviders int `json:"total_providers"`
@@ -2502,7 +2634,19 @@ type poolzResponse struct {
 	} `json:"summary"`
 }
 
+type poolzReceiptPubkeyPrev struct {
+	Pubkey    string `json:"pubkey"`
+	RotatedAt int64  `json:"rotated_at"`
+	ExpiresAt int64  `json:"expires_at"`
+}
+
 func fetchPoolz(t *testing.T, serverURL string) poolzResponse {
+	t.Helper()
+	_, got := fetchPoolzRaw(t, serverURL)
+	return got
+}
+
+func fetchPoolzRaw(t *testing.T, serverURL string) ([]byte, poolzResponse) {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodGet, serverURL+"/poolz", nil)
 	if err != nil {
@@ -2518,11 +2662,15 @@ func fetchPoolz(t *testing.T, serverURL string) poolzResponse {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("poolz status=%d body=%s", resp.StatusCode, body)
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read poolz: %v", err)
+	}
 	var got poolzResponse
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+	if err := json.Unmarshal(body, &got); err != nil {
 		t.Fatalf("poolz json: %v", err)
 	}
-	return got
+	return body, got
 }
 
 type providerHarness struct {

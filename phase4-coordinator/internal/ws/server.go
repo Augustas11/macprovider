@@ -2666,15 +2666,37 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	type poolzReceiptPubkeyPrev struct {
+		Pubkey    string `json:"pubkey"`
+		RotatedAt int64  `json:"rotated_at"`
+		ExpiresAt int64  `json:"expires_at"`
+	}
 	type poolzProvider struct {
 		pool.Provider
-		CanaryFailCount int `json:"canary_fail_count"`
+		CanaryFailCount   int                     `json:"canary_fail_count"`
+		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
+		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
 	}
 	poolz := make([]poolzProvider, 0, len(providers))
 	for _, provider := range providers {
+		var receiptPubkey *string
+		if len(provider.ReceiptPubkey) > 0 {
+			encoded := base64.StdEncoding.EncodeToString(provider.ReceiptPubkey)
+			receiptPubkey = &encoded
+		}
+		var receiptPubkeyPrev *poolzReceiptPubkeyPrev
+		if provider.ReceiptPubkeyPrev != nil {
+			receiptPubkeyPrev = &poolzReceiptPubkeyPrev{
+				Pubkey:    base64.StdEncoding.EncodeToString(provider.ReceiptPubkeyPrev.Pubkey),
+				RotatedAt: provider.ReceiptPubkeyPrev.RotatedAt.Unix(),
+				ExpiresAt: provider.ReceiptPubkeyPrev.ExpiresAt.Unix(),
+			}
+		}
 		poolz = append(poolz, poolzProvider{
-			Provider:        provider,
-			CanaryFailCount: provider.CanaryFailCount,
+			Provider:          provider,
+			CanaryFailCount:   provider.CanaryFailCount,
+			ReceiptPubkey:     receiptPubkey,
+			ReceiptPubkeyPrev: receiptPubkeyPrev,
 		})
 	}
 	_ = json.NewEncoder(w).Encode(struct {
