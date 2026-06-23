@@ -3,6 +3,8 @@ package resolver
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -69,8 +72,8 @@ var (
 	// request. SPEC-015 §10.5 bounds the verifier to that exact URL; same-host
 	// redirects to /poolz, /telemetry, /analytics, etc. would otherwise be silently
 	// followed by net/http after the first response.
-	ErrRedirectOffPath    = errors.New("redirect target path differs from the original receipt-keys request")
-	ErrFetchFailed        = errors.New("receipt key fetch failed")
+	ErrRedirectOffPath = errors.New("redirect target path differs from the original receipt-keys request")
+	ErrFetchFailed     = errors.New("receipt key fetch failed")
 )
 
 var providerIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -367,7 +370,47 @@ func configuredClient(client *http.Client, coordinatorHost, requestPath string) 
 		}
 		return nil
 	}
+	if roots := extraTLSRootsFromEnv(); roots != nil {
+		configured.Transport = transportWithRootCAs(configured.Transport, roots)
+	}
 	return &configured
+}
+
+func extraTLSRootsFromEnv() *x509.CertPool {
+	path := os.Getenv("MACPROVIDER_VERIFY_TLS_CA_FILE")
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(data) {
+		return nil
+	}
+	return pool
+}
+
+func transportWithRootCAs(base http.RoundTripper, roots *x509.CertPool) http.RoundTripper {
+	var transport *http.Transport
+	if base == nil {
+		transport = http.DefaultTransport.(*http.Transport).Clone()
+	} else if typed, ok := base.(*http.Transport); ok {
+		transport = typed.Clone()
+	} else {
+		return base
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{RootCAs: roots}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+		transport.TLSClientConfig.RootCAs = roots
+	}
+	return transport
 }
 
 func normalizeCoordinator(raw string) (coordinatorTarget, error) {

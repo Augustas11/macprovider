@@ -73,8 +73,9 @@ type diskPrevious struct {
 var writeFileAtomic = writeFileAtomicImpl
 
 // Open returns a Cache rooted at path, creating parent directories as needed.
-// When path is empty, Open uses $XDG_CONFIG_HOME/macprovider/verify-cache.jsonl,
-// falling back to ~/.config/macprovider/verify-cache.jsonl.
+// When path is empty, Open uses $MACPROVIDER_CACHE_DIR/verify-cache.jsonl,
+// then $XDG_CONFIG_HOME/macprovider/verify-cache.jsonl, falling back to
+// ~/.config/macprovider/verify-cache.jsonl.
 func Open(path string) (*Cache, error) {
 	resolved, err := resolvePath(path)
 	if err != nil {
@@ -185,6 +186,11 @@ func (c *Cache) Path() string {
 }
 
 func resolvePath(path string) (string, error) {
+	if path == "" {
+		if cacheDir := os.Getenv("MACPROVIDER_CACHE_DIR"); cacheDir != "" {
+			path = filepath.Join(cacheDir, "verify-cache.jsonl")
+		}
+	}
 	if path == "" {
 		base := os.Getenv("XDG_CONFIG_HOME")
 		if base == "" {

@@ -193,13 +193,26 @@ func TestPutReplacesSameTuple(t *testing.T) {
 }
 
 func TestOpenDefaultPathHonorsXDGAndHomeFallback(t *testing.T) {
-	xdg := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", xdg)
+	cacheDir := t.TempDir()
+	t.Setenv("MACPROVIDER_CACHE_DIR", cacheDir)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 	c, err := Open("")
+	if err != nil {
+		t.Fatalf("Open with MACPROVIDER_CACHE_DIR: %v", err)
+	}
+	want := filepath.Join(cacheDir, "verify-cache.jsonl")
+	if c.Path() != want {
+		t.Fatalf("MACPROVIDER_CACHE_DIR path = %q, want %q", c.Path(), want)
+	}
+
+	xdg := t.TempDir()
+	t.Setenv("MACPROVIDER_CACHE_DIR", "")
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	c, err = Open("")
 	if err != nil {
 		t.Fatalf("Open with XDG: %v", err)
 	}
-	want := filepath.Join(xdg, "macprovider", "verify-cache.jsonl")
+	want = filepath.Join(xdg, "macprovider", "verify-cache.jsonl")
 	if c.Path() != want {
 		t.Fatalf("XDG path = %q, want %q", c.Path(), want)
 	}

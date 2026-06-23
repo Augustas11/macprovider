@@ -4,6 +4,7 @@
 
 The cache is JSON-Lines at:
 
+- `$MACPROVIDER_CACHE_DIR/verify-cache.jsonl` when `MACPROVIDER_CACHE_DIR` is set.
 - `$XDG_CONFIG_HOME/macprovider/verify-cache.jsonl` when `XDG_CONFIG_HOME` is set.
 - `$HOME/.config/macprovider/verify-cache.jsonl` otherwise.
 
