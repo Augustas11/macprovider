@@ -34,3 +34,16 @@ func TestConstants(t *testing.T) {
 		})
 	}
 }
+
+// TestStep1ExactConstants pins the exact Step 1 scaffold-stage values per the
+// IMPL prompt. These constants change at Step 10 (final acceptance: BinaryVersion
+// becomes 1.0.0; MaxSPECVersion bumps if SPEC-015 evolves). Any other change
+// MUST be intentional and flagged in a SPEC-015 v0.2.x audit.
+func TestStep1ExactConstants(t *testing.T) {
+	if BinaryVersion != "0.1.0-step1-scaffold" {
+		t.Fatalf("BinaryVersion = %q, want %q (Step 1 scaffold pin per BUILD prompt)", BinaryVersion, "0.1.0-step1-scaffold")
+	}
+	if MaxSPECVersion != "0.2.4" {
+		t.Fatalf("MaxSPECVersion = %q, want %q (matches LOCKED SPEC-015 v0.2.4)", MaxSPECVersion, "0.2.4")
+	}
+}
