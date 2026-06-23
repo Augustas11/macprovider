@@ -149,9 +149,15 @@ func TestBundleModeStrictnessAndStdin(t *testing.T) {
 		want int
 	}{
 		{name: "well formed valid bundle", body: fixture.bundleJSON(testProviderID), args: []string{"--bundle", "-"}, want: exitValid},
+		{name: "missing bundle version", body: fmt.Sprintf(`{"receipt":%q,"request":{},"response":{}}`, fixture.header), args: []string{"--bundle", "-"}, want: exitDataErr},
 		{name: "bundle version wrong", body: `{"bundle_version":99,"receipt":"x","request":{},"response":{}}`, args: []string{"--bundle", "-"}, want: exitDataErr},
+		{name: "bundle version two", body: `{"bundle_version":2,"receipt":"x","request":{},"response":{}}`, args: []string{"--bundle", "-"}, want: exitDataErr},
+		{name: "bundle version string", body: `{"bundle_version":"1","receipt":"x","request":{},"response":{}}`, args: []string{"--bundle", "-"}, want: exitDataErr},
+		{name: "bundle version bool", body: `{"bundle_version":true,"receipt":"x","request":{},"response":{}}`, args: []string{"--bundle", "-"}, want: exitDataErr},
 		{name: "unknown top level key", body: `{"bundle_version":1,"receipt":"x","request":{},"response":{},"foo":1}`, args: []string{"--bundle", "-"}, want: exitDataErr},
 		{name: "missing receipt", body: `{"bundle_version":1,"request":{},"response":{}}`, args: []string{"--bundle", "-"}, want: exitDataErr},
+		{name: "missing request", body: fmt.Sprintf(`{"bundle_version":1,"receipt":%q,"response":{}}`, fixture.header), args: []string{"--bundle", "-"}, want: exitDataErr},
+		{name: "missing response", body: fmt.Sprintf(`{"bundle_version":1,"receipt":%q,"request":{}}`, fixture.header), args: []string{"--bundle", "-"}, want: exitDataErr},
 		{name: "json not parseable", body: `{`, args: []string{"--bundle", "-"}, want: exitDataErr},
 	}
 	for _, tt := range tests {
@@ -245,6 +251,13 @@ func TestFlagInteractionMatrixRows(t *testing.T) {
 			status: http.StatusOK, wantCode: exitValid, wantCalls: 0,
 		},
 		{
+			name: "--quiet --explain suppresses stderr",
+			args: func(serverURL string) []string {
+				return headerArgs(serverURL, fixture, "--provider-id", testProviderID, "--pubkey", pubkey, "--offline", "--quiet", "--explain")
+			},
+			status: http.StatusOK, wantCode: exitValid, wantCalls: 0, wantStderrEmpty: true,
+		},
+		{
 			name:   "--bundle stdin",
 			args:   func(serverURL string) []string { return []string{"--bundle", "-", "--coordinator", serverURL} },
 			body:   fixture.bundleJSON(testProviderID),
@@ -308,11 +321,47 @@ func TestFlagInteractionMatrixRows(t *testing.T) {
 					t.Fatalf("missing warning %q in stdout=%q stderr=%q", tt.wantWarning, stdout.String(), stderr.String())
 				}
 			}
-			if tt.name == "--explain after valid" && !strings.Contains(stderr.String(), "A `valid` result from `macprovider verify` proves **exactly this**") {
-				t.Fatalf("--explain text missing from stderr=%q", stderr.String())
+			if tt.name == "--explain after valid" && !strings.HasSuffix(stderr.String(), explainText+"\n") {
+				t.Fatalf("--explain text mismatch; stderr=%q want suffix=%q", stderr.String(), explainText+"\n")
 			}
 		})
 	}
+}
+
+func TestNonDefaultCoordinatorWarningJSON(t *testing.T) {
+	fixture := newCLIFixture(t, makeKey(44), cliNow.Unix())
+	var calls int32
+	server := receiptKeyServer(t, fixture.pub, http.StatusOK, &calls)
+	defer server.Close()
+
+	stdout, stderr, c := buffersAndCache(t)
+	code := run(headerArgs(server.URL, fixture, "--provider-id", testProviderID, "--json"), nil, stdout, stderr, getenvNone, runConfig{
+		httpClient: server.Client(),
+		cache:      c,
+		now:        func() time.Time { return cliNow },
+	})
+	if code != exitValid {
+		t.Fatalf("exit=%d want=%d stdout=%q stderr=%q", code, exitValid, stdout.String(), stderr.String())
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("calls=%d want=1", got)
+	}
+	var decoded struct {
+		Warnings []struct {
+			Kind            string `json:"kind"`
+			CoordinatorHost string `json:"coordinator_host"`
+		} `json:"warnings"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &decoded); err != nil {
+		t.Fatalf("invalid JSON: %v in %q", err, stdout.String())
+	}
+	wantHost := normalizedCoordinatorHost(server.URL)
+	for _, warning := range decoded.Warnings {
+		if warning.Kind == "non_default_coordinator" && warning.CoordinatorHost == wantHost {
+			return
+		}
+	}
+	t.Fatalf("missing non_default_coordinator warning for %q in stdout=%q", wantHost, stdout.String())
 }
 
 func TestProviderIDHeaderMode404IsInconclusive(t *testing.T) {
@@ -373,7 +422,9 @@ func TestUsageBoundaries(t *testing.T) {
 		{name: "pubkey malformed base64", args: append(headerArgs("https://example.test", fixture, "--provider-id", testProviderID), "--pubkey", "not-base64!@#"), want: exitUsage},
 		{name: "pubkey wrong length", args: append(headerArgs("https://example.test", fixture, "--provider-id", testProviderID), "--pubkey", base64.StdEncoding.EncodeToString(make([]byte, 31))), want: exitUsage},
 		{name: "bundle no provider id no pubkey", args: []string{"--bundle", "-"}, body: fixture.bundleJSON(""), want: exitUsage, wantMessage: "--provider-id"},
+		{name: "bundle stdin no provider id no pubkey", args: []string{"--bundle", "-"}, body: fixture.bundleJSON(""), want: exitUsage, wantMessage: "--provider-id"},
 		{name: "matching cache recovers provider id", args: headerArgs("https://example.test", fixture, "--offline"), want: exitValid},
+		{name: "ambiguous cache falls through to missing provider id", args: headerArgs("https://example.test", fixture), want: exitUsage, wantMessage: "--provider-id"},
 		{name: "header hashes pubkey no provider id is valid with null provider", args: headerArgs("https://example.test", fixture, "--pubkey", pubkey, "--json"), want: exitValid, wantMessage: `"provider_id":null`},
 	}
 	for _, tt := range tests {
@@ -384,12 +435,62 @@ func TestUsageBoundaries(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if tt.name == "ambiguous cache falls through to missing provider id" {
+				for _, providerID := range []string{"provider-a", "provider-b"} {
+					if err := c.Put(normalizedCoordinatorHost("https://example.test"), providerID, cache.ResolverResponse{ProviderID: providerID, ReceiptPubkey: fixture.pub}); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			code := run(tt.args, strings.NewReader(tt.body), stdout, stderr, getenvNone, runConfig{cache: c, now: func() time.Time { return cliNow }})
 			if code != tt.want {
 				t.Fatalf("exit=%d want=%d stdout=%q stderr=%q", code, tt.want, stdout.String(), stderr.String())
 			}
 			if tt.wantMessage != "" && !strings.Contains(stdout.String()+stderr.String(), tt.wantMessage) {
 				t.Fatalf("missing %q in stdout=%q stderr=%q", tt.wantMessage, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestCLIReceiptParseBoundariesExit65(t *testing.T) {
+	fixture := newCLIFixture(t, makeKey(51), cliNow.Unix())
+	validLengthSignature := base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))
+	tests := []struct {
+		name string
+		args []string
+		body string
+	}{
+		{
+			name: "receipt header no dot",
+			args: []string{
+				"--receipt", "no-dot-anywhere",
+				"--prompt-hash", fixture.promptHash,
+				"--output-hash", fixture.outputHash,
+				"--provider-id", testProviderID,
+			},
+		},
+		{
+			name: "receipt tuple malformed base64",
+			args: []string{
+				"--receipt", "%%%%." + validLengthSignature,
+				"--prompt-hash", fixture.promptHash,
+				"--output-hash", fixture.outputHash,
+				"--provider-id", testProviderID,
+			},
+		},
+		{
+			name: "bundle embedded receipt no dot",
+			args: []string{"--bundle", "-", "--provider-id", testProviderID},
+			body: `{"bundle_version":1,"receipt":"no-dot-anywhere","request":{},"response":{}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stdout, stderr, c := buffersAndCache(t)
+			code := run(tt.args, strings.NewReader(tt.body), stdout, stderr, getenvNone, runConfig{cache: c, now: func() time.Time { return cliNow }})
+			if code != exitDataErr {
+				t.Fatalf("exit=%d want=%d stdout=%q stderr=%q", code, exitDataErr, stdout.String(), stderr.String())
 			}
 		})
 	}

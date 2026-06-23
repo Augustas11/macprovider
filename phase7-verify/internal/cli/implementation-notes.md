@@ -25,6 +25,14 @@ receipt parse failures discovered while resolving provider identity.
 
 `json.Decoder.DisallowUnknownFields()` enforces strict bundle top-level parsing.
 
+The top-level `Run` wrapper also recovers an unexpected panic as `70`
+(`EX_SOFTWARE`) and prints `internal error`. That path is a last-resort safety
+net only. Documented verifier outcomes take precedence through ordinary control
+flow: `0` valid, `1` invalid, `2` inconclusive, `64` usage errors, and `65`
+input-format errors. No observed CLI invocation path intentionally produces
+`70`; seeing it means an implementation bug escaped the typed error/result
+mapping above.
+
 ## JSON vs Human Output
 
 Step 7 intentionally keeps output minimal. `--json` calls `json.Marshal` on
