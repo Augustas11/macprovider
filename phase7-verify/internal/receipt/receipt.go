@@ -47,7 +47,14 @@ var (
 var (
 	promptHashPattern     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	providerPubkeyPattern = regexp.MustCompile(`^[A-Za-z0-9+/]{43}=$`)
-	requiredTupleKeys     = []string{
+	// base64SegmentPattern: pre-decode allowlist for header base64 segments.
+	// Rejects CR/LF/whitespace/control characters that the stdlib base64 decoder
+	// would silently strip. SPEC-015 §3.4 ("No whitespace, no other delimiters,
+	// no trailing characters") forbids these. The tuple segment is variable
+	// length but MUST be a multiple of 4 with correct padding placement;
+	// validation is applied per-segment in validateBase64Segment.
+	base64SegmentPattern = regexp.MustCompile(`^[A-Za-z0-9+/]*={0,2}$`)
+	requiredTupleKeys    = []string{
 		"model_id",
 		"prompt_hash",
 		"output_hash",
@@ -73,6 +80,23 @@ func Parse(headerValue string) (Parsed, error) {
 	sigPart := headerValue[dot+1:]
 	if strings.IndexByte(sigPart, '.') >= 0 {
 		return Parsed{}, ErrHeaderShape
+	}
+
+	// Pre-decode segment validation. The stdlib base64 decoder silently strips
+	// CR and LF (and ignores other whitespace under some configurations); SPEC-015
+	// §3.4 forbids ANY whitespace in the wire value, so we MUST reject those
+	// bytes before they ever reach DecodeString.
+	if err := validateBase64Segment(tuplePart); err != nil {
+		return Parsed{}, fmt.Errorf("%w: tuple: %v", ErrBase64Decode, err)
+	}
+	// Signature segment must be exactly 88 chars (the base64-encoded length of
+	// 64 raw bytes with standard padding). Reject other lengths early so we get
+	// a clean ErrSigLength rather than a confusing decode failure.
+	if len(sigPart) != ed25519SignatureBase64Len {
+		return Parsed{}, fmt.Errorf("%w: signature segment length %d, want %d", ErrSigLength, len(sigPart), ed25519SignatureBase64Len)
+	}
+	if err := validateBase64Segment(sigPart); err != nil {
+		return Parsed{}, fmt.Errorf("%w: signature: %v", ErrBase64Decode, err)
 	}
 
 	tupleRaw, err := base64.StdEncoding.DecodeString(tuplePart)
@@ -228,9 +252,67 @@ func decodeTopLevelObject(raw []byte) (map[string]json.RawMessage, error) {
 	return fields, nil
 }
 
+// ed25519SignatureBase64Len is the exact length of a 64-byte ed25519 signature
+// encoded as standard padded base64. SPEC-015 §3.4 pins the wire signature
+// segment to this exact length; reject anything else early.
+const ed25519SignatureBase64Len = 88
+
+// validateBase64Segment rejects any byte outside the standard base64 alphabet
+// plus padding. SPEC-015 §3.4 forbids whitespace; the stdlib base64 decoder
+// silently strips CR and LF, so we MUST pre-validate to enforce the spec
+// invariant. Also requires the total length to be a positive multiple of 4
+// (canonical padding placement).
+func validateBase64Segment(segment string) error {
+	if len(segment) == 0 {
+		return fmt.Errorf("segment empty")
+	}
+	if len(segment)%4 != 0 {
+		return fmt.Errorf("segment length %d is not a multiple of 4", len(segment))
+	}
+	if !base64SegmentPattern.MatchString(segment) {
+		// Identify which byte is offending so the error message is actionable.
+		for i, b := range []byte(segment) {
+			switch {
+			case b >= 'A' && b <= 'Z':
+			case b >= 'a' && b <= 'z':
+			case b >= '0' && b <= '9':
+			case b == '+' || b == '/':
+			case b == '=':
+				// '=' is only valid in the trailing padding; the overall
+				// pattern enforces "any A-Za-z0-9+/ then 0-2 trailing ="
+				// so a mid-segment '=' fails here too.
+				return fmt.Errorf("invalid '=' at byte %d (not trailing padding)", i)
+			default:
+				return fmt.Errorf("invalid base64 byte 0x%02x at offset %d", b, i)
+			}
+		}
+		// Pattern didn't match but the byte-wise scan found no specific issue —
+		// likely a padding-placement violation.
+		return fmt.Errorf("base64 padding placement invalid")
+	}
+	return nil
+}
+
+// isASCII reports whether s contains only ASCII bytes (0x00-0x7F).
+// SPEC-015 §3.1 requires model_id to be ASCII-only and verifiers MUST reject
+// any receipt whose model_id contains a non-ASCII byte.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
+}
+
 func validateTuple(tuple Tuple) error {
 	if tuple.ModelID == "" {
-		return fmt.Errorf("%w: model_id", ErrTupleWrongType)
+		return fmt.Errorf("%w: model_id (empty)", ErrTupleWrongType)
+	}
+	if !isASCII(tuple.ModelID) {
+		// SPEC-015 §3.1: model_id is ASCII-only; verifier MUST reject
+		// any tuple whose model_id contains a non-ASCII byte.
+		return fmt.Errorf("%w: model_id contains non-ASCII byte", ErrTupleWrongType)
 	}
 	if !promptHashPattern.MatchString(tuple.PromptHash) {
 		return fmt.Errorf("%w: prompt_hash", ErrTupleWrongType)
