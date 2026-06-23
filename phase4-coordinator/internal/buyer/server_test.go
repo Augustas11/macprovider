@@ -4838,3 +4838,69 @@ func TestModelsExcludesPendingReceiptCandidateFromCapacity(t *testing.T) {
 		}
 	}
 }
+
+// Round-1 audit H2: receipt header MUST be capped at 4096 ASCII bytes
+// and contain no CR/LF/NUL. A misbehaving provider that emits a 1 MB
+// header would otherwise punch through nginx's 8 KiB upstream limit and
+// turn into a 502 at the gateway. The coordinator now strips oversize
+// or non-ASCII values before forwarding.
+func TestHTTPForwardingStripsOversizedReceiptHeader(t *testing.T) {
+	oversized := strings.Repeat("A", 4097) + "." + strings.Repeat("B", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", oversized)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x63}, 32))
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("receipt header = %q, want stripped for oversized value", got)
+	}
+}
+
+func TestHTTPForwardingStripsReceiptHeaderWithNonPrintableBytes(t *testing.T) {
+	// Note: Go's net/http normalizes CR/LF to spaces on the upstream
+	// response before we see it, so smuggling-style CRLF injection is
+	// already defended at the transport layer. The cases below cover
+	// the bytes that DO reach the coordinator unchanged: NUL and
+	// non-ASCII bytes (multi-byte UTF-8). normalizeReceiptHeaderValue
+	// must strip both.
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"nul", "good\x00bad"},
+		{"non_ascii", "good\xc3\xa9bad"},
+		{"del", "good\x7fbad"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-MacProvider-Receipt", body)
+				_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+			}))
+			defer upstream.Close()
+
+			registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+			registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x64}, 32))
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+			if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+				t.Fatalf("receipt header = %q, want stripped for non-printable bytes (%s)", got, tc.name)
+			}
+		})
+	}
+}
