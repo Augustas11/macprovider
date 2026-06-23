@@ -70,8 +70,20 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Assert zero external dependencies
-        run: test ! -s phase7-verify/go.sum || (echo "phase7-verify go.sum must be empty (no external deps)"; exit 1)
+      - name: Assert dependency allowlist (only golang.org/x/text permitted, per SPEC-015 v0.2 §10.3 NFC normalization exception)
+        run: |
+          # Whitelist: golang.org/x/text — required for NFC normalization in
+          # phase7-verify/internal/jcs/. No other external modules are permitted
+          # per the BUILD prompt's "Dependencies (HARD constraint)" section.
+          # The audit prompt cross-checks this allowlist.
+          DISALLOWED=$(grep -v '^golang\.org/x/text \|^golang\.org/x/text/' phase7-verify/go.sum | grep -v '^$' || true)
+          if [ -n "$DISALLOWED" ]; then
+            echo "phase7-verify/go.sum contains entries outside the allowlist:"
+            echo "$DISALLOWED"
+            echo ""
+            echo "Allowlist: golang.org/x/text only."
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v6
