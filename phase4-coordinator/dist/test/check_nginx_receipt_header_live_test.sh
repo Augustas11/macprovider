@@ -2,8 +2,20 @@
 set -euo pipefail
 
 if [ -z "${SPEC015_NGINX_ECHO_URL:-}" ]; then
-  echo "skip: set SPEC015_NGINX_ECHO_URL to an nginx-fronted echo endpoint to verify a 4096-byte X-MacProvider-Receipt header"
-  exit 0
+  # Round-2 audit M-R2: previously the script exited 0 silently when no
+  # echo URL was configured, which made `make test-dist` and the AC-15
+  # manifest claim coverage they did not actually provide in CI. The
+  # static buffer check (check_nginx_receipt_buffers_test.sh) remains the
+  # load-bearing assertion in CI. This live check is the operator-runbook
+  # smoke against a real nginx; it must either be wired with an echo
+  # endpoint, or explicitly opted out via SPEC015_NGINX_LIVE_OPTIONAL=1
+  # so the silent-skip behavior is a deliberate choice.
+  if [ "${SPEC015_NGINX_LIVE_OPTIONAL:-}" = "1" ]; then
+    echo "skip: SPEC015_NGINX_LIVE_OPTIONAL=1 — operator-runbook smoke not exercised in this run"
+    exit 0
+  fi
+  echo "FAIL: SPEC015_NGINX_ECHO_URL is unset (set it to an nginx-fronted echo endpoint, or pass SPEC015_NGINX_LIVE_OPTIONAL=1 to opt out)" >&2
+  exit 1
 fi
 
 HEADERS="$(mktemp -t spec015-nginx-headers.XXXXXX)"

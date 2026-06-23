@@ -2675,6 +2675,12 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}{TotalProviders: len(providers)}
 	cfg := s.tier2Config()
 	for _, p := range providers {
+		// SPEC-015 §7 / TestProviderAuthV2ReceiptRotationCandidateWithout
+		// StateUpdateDoesNotPublish: FreeSlots aggregates buyer-usable
+		// capacity only, gated by providerPublishedReady, so a pending
+		// rotation does NOT contribute. TotalSlots stays top-level because
+		// it represents absolute fleet capacity for capacity planning.
+		// The two summary fields have intentionally different semantics.
 		if providerPublishedReady(p) {
 			summary.Ready++
 			summary.FreeSlots += p.SlotsFree

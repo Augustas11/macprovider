@@ -371,7 +371,15 @@ actor CoordinatorClient {
         receiptRotationInFlight = true
         defer { receiptRotationInFlight = false }
 
+        // Round-2 audit M14: give any in-flight non-streaming inference a
+        // bounded window to finish so the receipt it carries (signed with
+        // the OLD key) lands on the buyer before we tear the socket down
+        // and swap keys. Without this drain, a buyer mid-request sees a
+        // dropped session with no receipt even though the provider
+        // produced one. The budget mirrors drainTimeoutSeconds so it
+        // composes with the existing shutdown path.
         if let activeRunTask = runTask {
+            _ = await inferenceRelay?.waitUntilIdle(timeoutSeconds: max(1, drainTimeoutSeconds))
             activeRunTask.cancel()
             webSocket?.cancel(with: .goingAway, reason: nil)
             await activeRunTask.value

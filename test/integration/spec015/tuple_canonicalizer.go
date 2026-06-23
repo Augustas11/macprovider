@@ -40,7 +40,7 @@ func IndependentTupleCanonicalForm(tupleData []byte) ([]byte, error) {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		keyBytes, err := json.Marshal(key)
+		keyBytes, err := marshalJSONNoHTMLEscape(key)
 		if err != nil {
 			return nil, fmt.Errorf("encode tuple key %s: %w", key, err)
 		}
@@ -59,10 +59,17 @@ func IndependentTupleCanonicalForm(tupleData []byte) ([]byte, error) {
 // canonicalTupleValue handles the closed shape of v0.1.x receipt tuples
 // (string and int fields only — §4.3). Non-integer numbers are rejected
 // because the SPEC pins ttft_ms / tokens_out / unix_ts as int64.
+//
+// Strings are encoded WITHOUT Go's default HTML escaping (<, >, &,
+// U+2028, U+2029 stay as raw UTF-8) so the byte stream matches the
+// Swift-side RFC 8785 §3.2.2.2 string escape rules. Otherwise this
+// "independent" canonicalizer would falsely fail the drift check on
+// any v0.2 string field carrying those characters even when Swift was
+// emitting RFC-correct bytes.
 func canonicalTupleValue(v any) ([]byte, error) {
 	switch typed := v.(type) {
 	case string:
-		return json.Marshal(typed)
+		return marshalJSONNoHTMLEscape(typed)
 	case float64:
 		if typed != float64(int64(typed)) {
 			return nil, fmt.Errorf("tuple value %v is not an integer", typed)
@@ -71,6 +78,24 @@ func canonicalTupleValue(v any) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unsupported tuple value type %T", v)
 	}
+}
+
+// marshalJSONNoHTMLEscape encodes v as JSON without escaping <, >, &,
+// U+2028, U+2029 (Go's encoding/json escapes these by default for
+// browser-safe embedding). json.Encoder appends a trailing newline; we
+// trim it so the result matches json.Marshal's no-newline contract.
+func marshalJSONNoHTMLEscape(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	out := buf.Bytes()
+	if n := len(out); n > 0 && out[n-1] == '\n' {
+		out = out[:n-1]
+	}
+	return out, nil
 }
 
 // AssertTupleCanonicalizationMatches re-canonicalizes the buyer-observed

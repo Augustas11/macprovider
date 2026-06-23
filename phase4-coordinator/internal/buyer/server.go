@@ -1588,15 +1588,27 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
 				faultFlag = billing.FaultBreakerQualifying
 			}
-			checkedBody, err := guard.CheckNonStreamingBody(body.Bytes())
+			originalBody := body.Bytes()
+			checkedBody, err := guard.CheckNonStreamingBody(originalBody)
 			if err != nil {
 				writeError(w, http.StatusBadGateway, "tier2_output_encoding_invalid", "Provider returned invalid Tier2 output encoding")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding"}
 			}
+			// Round-2 audit HIGH: PillarD enforceOutputCap may truncate the
+			// completion. The provider signed end.Receipt over the original
+			// bytes; if we forward the truncated body alongside the receipt,
+			// the buyer-side verifier will recompute a different output_hash
+			// and reject. Drop the receipt header in that case — the buyer
+			// still gets the truncated 200 OK body, just without an
+			// integrity attestation that no longer applies.
+			receiptValue := end.Receipt
+			if !bytes.Equal(checkedBody, originalBody) {
+				receiptValue = ""
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
-			setReceiptHeaderForProvider(w.Header(), end.Receipt, provider)
+			setReceiptHeaderForProvider(w.Header(), receiptValue, provider)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(checkedBody)
 			promptTok, completionTok := tokenPointersFromUsageObject(end.Usage)

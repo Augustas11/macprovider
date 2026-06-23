@@ -2479,6 +2479,111 @@ func TestChatCompletionsWSTunneledTier2StreamingSizeCapTruncatesAndStops(t *test
 	}
 }
 
+// Round-2 audit HIGH (M11 close-out): the WS-tunneled receipt forwarding
+// path landed in C1's fix without an end-to-end test. These three cases
+// pin the contract:
+//   - end.Receipt is forwarded as X-MacProvider-Receipt when the
+//     provider's pubkey is published on /poolz;
+//   - the receipt is stripped when no pubkey is published;
+//   - the receipt is stripped when PillarD mutates the buyer-visible body,
+//     because the provider's signature no longer applies to the bytes the
+//     buyer receives. The third case is the integrity gap the previous
+//     round-2 HIGH flagged.
+func TestChatCompletionsWSTunneledForwardsReceiptFromInferenceResponseEnd(t *testing.T) {
+	const receipt = "trusted.ws.receipt"
+	registry := pool.NewRegistry(nil)
+	registerWithPathConnReceiptPubkey(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled, nil, bytes.Repeat([]byte{0x65}, 32))
+	slotsFree := 1
+	registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","choices":[{"message":{"content":"ok"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Receipt: receipt}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != receipt {
+		t.Fatalf("receipt header = %q, want %q", got, receipt)
+	}
+}
+
+func TestChatCompletionsWSTunneledStripsReceiptWhenProviderHasNoReceiptPubkey(t *testing.T) {
+	const receipt = "spoofed.ws.receipt"
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","choices":[{"message":{"content":"ok"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Receipt: receipt}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("receipt header = %q, want stripped because provider has no published receipt pubkey", got)
+	}
+}
+
+func TestChatCompletionsWSTunneledStripsReceiptWhenPillarDTruncatesBody(t *testing.T) {
+	const receipt = "originalbytes.signed.receipt"
+	registry := pool.NewRegistry(nil)
+	registerWithPathConnReceiptPubkey(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled, nil, bytes.Repeat([]byte{0x66}, 32))
+	slotsFree := 1
+	registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: time.Now().UTC()})
+	tier2Cfg := config.Default().Tier2
+	tier2Cfg.BehavioralSafetyEnabled = true
+	tier2Cfg.OutputSizeCapBytes = 8
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(tier2Cfg),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","choices":[{"message":{"content":"this content is longer than the cap and will get truncated"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Receipt: receipt}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("truncated")) {
+		t.Fatalf("body was not truncated by PillarD: %s", rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("receipt header = %q, want stripped because PillarD mutated the body the provider signed", got)
+	}
+}
+
 func TestChatCompletionsWSTunneledTimeoutReturns504(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
