@@ -92,7 +92,7 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring {
     private func cleanupExpiredPrevious(providerId: String) throws {
         let query = Self.baseQuery(providerId: providerId, service: Self.previousService)
             .merging([
-                kSecReturnAttributes as String: true,
+                kSecReturnAttributes as String: kCFBooleanTrue as Any,
                 kSecMatchLimit as String: kSecMatchLimitOne,
             ]) { _, new in new }
 
@@ -119,7 +119,7 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring {
     private func loadKey(providerId: String, service: String) throws -> Curve25519.Signing.PrivateKey? {
         let query = Self.baseQuery(providerId: providerId, service: service)
             .merging([
-                kSecReturnData as String: true,
+                kSecReturnData as String: kCFBooleanTrue as Any,
                 kSecMatchLimit as String: kSecMatchLimitOne,
             ]) { _, new in new }
 
@@ -167,6 +167,7 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring {
             [
                 kSecValueData as String: privateKey.rawRepresentation,
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                kSecAttrSynchronizable as String: false,
             ] as CFDictionary
         )
         switch status {
@@ -194,8 +195,6 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring {
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: providerId,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecAttrSynchronizable as String: false,
         ]
     }
 
@@ -207,6 +206,7 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring {
         baseQuery(providerId: providerId, service: service)
             .merging([
                 kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+                kSecAttrSynchronizable as String: false,
                 kSecValueData as String: privateKey.rawRepresentation,
             ]) { _, new in new }
     }

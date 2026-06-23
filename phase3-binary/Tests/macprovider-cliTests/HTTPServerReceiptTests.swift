@@ -281,6 +281,10 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertEqual(parsed.tuple["ttft_ms"] as? Int, 12)
         XCTAssertEqual(parsed.tuple["unix_ts"] as? Int, 1_800_000_000)
         XCTAssertEqual(
+            parsed.tuple["prompt_hash"] as? String,
+            try PromptCanonicalizer.promptHash(for: request)
+        )
+        XCTAssertEqual(
             parsed.tuple["output_hash"] as? String,
             try OutputCanonicalizer.outputHash(content: "answer", toolCalls: nil, finishReason: "stop")
         )

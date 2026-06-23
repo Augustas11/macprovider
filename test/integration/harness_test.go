@@ -47,6 +47,7 @@ package integration
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -70,8 +71,8 @@ import (
 
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
-	_ "modernc.org/sqlite"
 	"gopkg.in/yaml.v3"
+	_ "modernc.org/sqlite"
 )
 
 // Built binary paths populated by TestMain. Each scenario shells out to
@@ -176,33 +177,33 @@ func allocatePort(t *testing.T) int {
 // path so each scenario can drive HTTP requests and inspect billing
 // rows.
 type scenario struct {
-	t              *testing.T
-	tempDir        string
-	coordinatorDB  string
-	gatewayDB      string
-	coordYAML      string
-	gatewayYAML    string
-	operatorKey    string
-	serviceToken   string
-	keyHashSecret  string
-	demoSecret     string
-	apiKey         string // mp_... full API key (only seeded for chat scenarios)
-	accountID      string
-	gatewayBaseURL       string
-	coordBuyerURL        string // http://127.0.0.1:<port>
-	coordProvURL         string // http://127.0.0.1:<port> (provider/admin/ws port)
-	providerID           string
-	providerEndpointURL  string // http://127.0.0.1:<port> — first fake provider HTTP
-	providerToken        string // pre-issued via coordinator-cli for first provider
-	providerSlots        []struct {
+	t                   *testing.T
+	tempDir             string
+	coordinatorDB       string
+	gatewayDB           string
+	coordYAML           string
+	gatewayYAML         string
+	operatorKey         string
+	serviceToken        string
+	keyHashSecret       string
+	demoSecret          string
+	apiKey              string // mp_... full API key (only seeded for chat scenarios)
+	accountID           string
+	gatewayBaseURL      string
+	coordBuyerURL       string // http://127.0.0.1:<port>
+	coordProvURL        string // http://127.0.0.1:<port> (provider/admin/ws port)
+	providerID          string
+	providerEndpointURL string // http://127.0.0.1:<port> — first fake provider HTTP
+	providerToken       string // pre-issued via coordinator-cli for first provider
+	providerSlots       []struct {
 		ID  string
 		URL string
 	}
 	fakeProvs   []*fakeProvider
 	coordLogBuf *logBuffer // populated when captureCoordLogs=true
-	cancelAll      context.CancelFunc
-	fakeProv       *fakeProvider
-	procWG         sync.WaitGroup
+	cancelAll   context.CancelFunc
+	fakeProv    *fakeProvider
+	procWG      sync.WaitGroup
 }
 
 type scenarioOpts struct {
@@ -240,6 +241,10 @@ type scenarioOpts struct {
 	// scenario to inspect. Used by log-class assertion scenarios that
 	// pin `internal_bearer_accepted key=<service_token|operator_key>`.
 	captureCoordLogs bool
+	// receiptEnabledProvider, when true, makes the fake provider emit a
+	// SPEC-015-shaped non-streaming receipt header so the gateway and
+	// coordinator boundary can be tested without mocking either service.
+	receiptEnabledProvider bool
 }
 
 func newScenario(t *testing.T, opts scenarioOpts) *scenario {
@@ -363,6 +368,9 @@ func newScenario(t *testing.T, opts scenarioOpts) *scenario {
 	if !opts.skipProvider {
 		for i, slot := range providerSlots {
 			fp := newFakeProvider(t, slot.ID, slot.Port, s.coordProvURL, providerTokens[i])
+			if opts.receiptEnabledProvider {
+				fp.enableReceipts()
+			}
 			fp.start(ctx)
 			s.fakeProvs = append(s.fakeProvs, fp)
 			s.waitForProviderReady(slot.ID)
@@ -458,22 +466,22 @@ func (s *scenario) writeCoordinatorYAML(buyerPort, provPort int, stickyEnabled b
 			"provisional_retention_days":          30,
 		},
 		"tier2": map[string]any{
-			"observe_enabled":                      false,
-			"require_hash_verified":                false,
-			"require_encrypted_leg":                false,
-			"encrypted_leg_aead":                   "A256GCM",
-			"encrypted_leg_rekey_after_requests":   10000,
-			"encrypted_leg_rekey_after_seconds":    3600,
-			"require_attestation":                  false,
-			"attestation_max_age_s":                600,
-			"behavioral_safety_enabled":            false,
-			"output_size_cap_bytes":                0,
-			"output_bytes_per_token_ceiling":       16,
-			"default_output_size_cap_bytes":        1048576,
-			"encoding_validation_enabled":          false,
-			"response_time_anomaly_enabled":        false,
-			"response_time_anomaly_factor":         5.0,
-			"response_time_anomaly_min_ms":         10000,
+			"observe_enabled":                    false,
+			"require_hash_verified":              false,
+			"require_encrypted_leg":              false,
+			"encrypted_leg_aead":                 "A256GCM",
+			"encrypted_leg_rekey_after_requests": 10000,
+			"encrypted_leg_rekey_after_seconds":  3600,
+			"require_attestation":                false,
+			"attestation_max_age_s":              600,
+			"behavioral_safety_enabled":          false,
+			"output_size_cap_bytes":              0,
+			"output_bytes_per_token_ceiling":     16,
+			"default_output_size_cap_bytes":      1048576,
+			"encoding_validation_enabled":        false,
+			"response_time_anomaly_enabled":      false,
+			"response_time_anomaly_factor":       5.0,
+			"response_time_anomaly_min_ms":       10000,
 		},
 		"auth": map[string]any{
 			"operator_key":            s.operatorKey,
@@ -575,26 +583,26 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 			},
 		},
 		"quotas": map[string]any{
-			"account_daily_tokens":          1000000,
-			"demo_daily_tokens_per_ip":      10000,
-			"demo_sessions_per_ip_per_hour": 10,
-			"account_concurrency":           4,
-			"demo_concurrency":              4,
+			"account_daily_tokens":           1000000,
+			"demo_daily_tokens_per_ip":       10000,
+			"demo_sessions_per_ip_per_hour":  10,
+			"account_concurrency":            4,
+			"demo_concurrency":               4,
 			"signup_accounts_per_ip_per_day": 3,
-			"reaper_interval_hours":         24,
-			"reservation_max_age_hours":     24,
+			"reaper_interval_hours":          24,
+			"reservation_max_age_hours":      24,
 		},
 		"limits": map[string]any{
-			"max_tokens_per_request":     4096,
+			"max_tokens_per_request":      4096,
 			"demo_max_tokens_per_request": 512,
-			"max_feedback_comment_bytes": 2000,
-			"request_body_bytes":         1048576,
+			"max_feedback_comment_bytes":  2000,
+			"request_body_bytes":          1048576,
 		},
 		"capacity": map[string]any{
-			"monthly_budget_usd":                 500,
-			"ready_provider_degraded_threshold":  1,
-			"projected_cost_tier1_percent":       80,
-			"tier_cooldown_seconds":              3600,
+			"monthly_budget_usd":                500,
+			"ready_provider_degraded_threshold": 1,
+			"projected_cost_tier1_percent":      80,
+			"tier_cooldown_seconds":             3600,
 		},
 		"timeouts": map[string]any{
 			"coordinator_request_seconds":        60,
@@ -911,17 +919,22 @@ func (s *scenario) chatRequest(headers map[string]string, body string) (int, htt
 // serves OpenAI-shaped chat completions on the endpoint port.
 // Cancellation tears both halves down.
 type fakeProvider struct {
-	t             *testing.T
-	providerID    string
-	providerToken string
-	httpPort      int
-	wsURL         string
-	hServer       *http.Server
-	hReady        chan struct{}
-	stopOnce      sync.Once
-	stopped       chan struct{}
-	hitMu         sync.Mutex
-	hits          int // /v1/chat/completions hit count, for sticky verification
+	t                *testing.T
+	providerID       string
+	providerToken    string
+	httpPort         int
+	wsURL            string
+	hServer          *http.Server
+	receiptEnabled   bool
+	receiptPubkey    ed25519.PublicKey
+	receiptPrivkey   ed25519.PrivateKey
+	lastRequestBody  []byte
+	lastResponseBody []byte
+	hReady           chan struct{}
+	stopOnce         sync.Once
+	stopped          chan struct{}
+	hitMu            sync.Mutex
+	hits             int // /v1/chat/completions hit count, for sticky verification
 }
 
 // Hits returns the number of /v1/chat/completions requests this fake
@@ -931,6 +944,12 @@ func (p *fakeProvider) Hits() int {
 	p.hitMu.Lock()
 	defer p.hitMu.Unlock()
 	return p.hits
+}
+
+func (p *fakeProvider) LastReceiptBodies() ([]byte, []byte) {
+	p.hitMu.Lock()
+	defer p.hitMu.Unlock()
+	return append([]byte(nil), p.lastRequestBody...), append([]byte(nil), p.lastResponseBody...)
 }
 
 func newFakeProvider(t *testing.T, providerID string, httpPort int, coordProvURL, providerToken string) *fakeProvider {
@@ -954,6 +973,17 @@ func newFakeProvider(t *testing.T, providerID string, httpPort int, coordProvURL
 	}
 }
 
+func (p *fakeProvider) enableReceipts() {
+	p.t.Helper()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		p.t.Fatalf("generate fake receipt key: %v", err)
+	}
+	p.receiptEnabled = true
+	p.receiptPubkey = pub
+	p.receiptPrivkey = priv
+}
+
 const fakeCompletionBody = `{
   "id":"chatcmpl-fake-integration",
   "object":"chat.completion",
@@ -963,6 +993,200 @@ const fakeCompletionBody = `{
   "choices":[{"index":0,"message":{"role":"assistant","content":"hello from fake provider"},"finish_reason":"stop"}]
 }`
 
+func (p *fakeProvider) buildReceiptHeader(requestBody, responseBody []byte) (string, error) {
+	promptHash, err := spec015CanonicalPromptHash(requestBody)
+	if err != nil {
+		return "", fmt.Errorf("canonical prompt hash: %w", err)
+	}
+	outputHash, err := spec015CanonicalOutputHash(responseBody)
+	if err != nil {
+		return "", fmt.Errorf("canonical output hash: %w", err)
+	}
+	tuple := fmt.Sprintf(
+		`{"model_id":"llama-3.2-3b-instruct","output_hash":"%s","prompt_hash":"%s","provider_pubkey":"%s","tokens_out":12,"ttft_ms":0,"unix_ts":%d}`,
+		outputHash,
+		promptHash,
+		base64.StdEncoding.EncodeToString(p.receiptPubkey),
+		time.Now().Unix(),
+	)
+	signature := ed25519.Sign(p.receiptPrivkey, []byte(tuple))
+	return base64.StdEncoding.EncodeToString([]byte(tuple)) + "." + base64.StdEncoding.EncodeToString(signature), nil
+}
+
+func spec015CanonicalPromptHash(requestBody []byte) (string, error) {
+	var raw map[string]any
+	if err := json.Unmarshal(requestBody, &raw); err != nil {
+		return "", err
+	}
+	messages, err := canonicalPromptMessages(raw["messages"])
+	if err != nil {
+		return "", err
+	}
+	object := map[string]any{
+		"model":             raw["model"],
+		"messages":          messages,
+		"tools":             canonicalPromptTools(raw["tools"]),
+		"temperature":       valueOrNil(raw, "temperature"),
+		"top_p":             valueOrNil(raw, "top_p"),
+		"max_tokens":        valueOrNil(raw, "max_tokens"),
+		"stop":              valueOrNil(raw, "stop"),
+		"seed":              valueOrNil(raw, "seed"),
+		"response_format":   valueOrNil(raw, "response_format"),
+		"tool_choice":       valueOrNil(raw, "tool_choice"),
+		"presence_penalty":  valueOrNil(raw, "presence_penalty"),
+		"frequency_penalty": valueOrNil(raw, "frequency_penalty"),
+		"logit_bias":        valueOrNil(raw, "logit_bias"),
+		"logprobs":          valueOrNil(raw, "logprobs"),
+		"top_logprobs":      valueOrNil(raw, "top_logprobs"),
+		"n":                 valueOrNil(raw, "n"),
+	}
+	return spec015JCSHash(object)
+}
+
+func canonicalPromptMessages(value any) ([]any, error) {
+	rawMessages, ok := value.([]any)
+	if !ok {
+		return nil, fmt.Errorf("messages has type %T, want array", value)
+	}
+	messages := make([]any, 0, len(rawMessages))
+	for _, item := range rawMessages {
+		message, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("message has type %T, want object", item)
+		}
+		content, err := canonicalPromptContent(message["content"])
+		if err != nil {
+			return nil, err
+		}
+		messages = append(messages, map[string]any{
+			"role":         valueOrNil(message, "role"),
+			"content":      content,
+			"name":         valueOrNil(message, "name"),
+			"tool_call_id": valueOrNil(message, "tool_call_id"),
+			"tool_calls":   canonicalPromptToolCalls(message["tool_calls"]),
+		})
+	}
+	return messages, nil
+}
+
+func canonicalPromptContent(value any) (any, error) {
+	switch typed := value.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		return normalizeSpec015LineEndings(typed), nil
+	case []any:
+		parts := make([]any, 0, len(typed))
+		for _, item := range typed {
+			object, ok := item.(map[string]any)
+			if !ok {
+				return nil, fmt.Errorf("content part has type %T, want object", item)
+			}
+			kind, _ := object["type"].(string)
+			switch kind {
+			case "text":
+				text, _ := object["text"].(string)
+				parts = append(parts, map[string]any{"type": "text", "text": normalizeSpec015LineEndings(text)})
+			case "image_url":
+				parts = append(parts, map[string]any{"type": "image_url", "image_url": object["image_url"]})
+			case "input_audio":
+				parts = append(parts, map[string]any{"type": "input_audio", "input_audio": object["input_audio"]})
+			default:
+				return nil, fmt.Errorf("unsupported content part type %q", kind)
+			}
+		}
+		return parts, nil
+	default:
+		return nil, fmt.Errorf("content has type %T, want string, array, or null", value)
+	}
+}
+
+func canonicalPromptTools(value any) any {
+	if value == nil {
+		return nil
+	}
+	return value
+}
+
+func canonicalPromptToolCalls(value any) any {
+	if value == nil {
+		return nil
+	}
+	return value
+}
+
+func spec015CanonicalOutputHash(responseBody []byte) (string, error) {
+	var response struct {
+		Choices []struct {
+			Message struct {
+				Content   string `json:"content"`
+				ToolCalls any    `json:"tool_calls"`
+			} `json:"message"`
+			FinishReason string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(responseBody, &response); err != nil {
+		return "", err
+	}
+	if len(response.Choices) == 0 {
+		return "", errors.New("response has no choices")
+	}
+	choice := response.Choices[0]
+	object := map[string]any{
+		"content":       normalizeSpec015LineEndings(choice.Message.Content),
+		"tool_calls":    choice.Message.ToolCalls,
+		"finish_reason": choice.FinishReason,
+	}
+	return spec015JCSHash(object)
+}
+
+func valueOrNil(values map[string]any, key string) any {
+	if value, ok := values[key]; ok {
+		return value
+	}
+	return nil
+}
+
+func normalizeSpec015LineEndings(value string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(value, "\r\n", "\n"), "\r", "\n")
+}
+
+func spec015JCSHash(value any) (string, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(data)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func readyStateUpdate() map[string]any {
+	return map[string]any{
+		"type":  "state_update",
+		"state": "ready",
+		"metrics_snapshot": map[string]any{
+			"model_id":                   "llama-3.2-3b-instruct",
+			"model_params_b":             3.0,
+			"ram_gb":                     16,
+			"max_context_tokens":         8192,
+			"max_concurrency":            2,
+			"slots_free":                 2,
+			"slots_total":                2,
+			"throughput_tps_estimate":    20.0,
+			"requests_served_since_last": 0,
+			"avg_latency_ms_since_last":  0.0,
+			"throughput_tps_since_last":  0.0,
+		},
+	}
+}
+
+func chatBodyRequestsStream(body []byte) bool {
+	var envelope struct {
+		Stream bool `json:"stream"`
+	}
+	return json.Unmarshal(body, &envelope) == nil && envelope.Stream
+}
+
 func (p *fakeProvider) start(ctx context.Context) {
 	p.t.Helper()
 	// Inference HTTP endpoint — the coordinator hits this in legacy
@@ -970,13 +1194,30 @@ func (p *fakeProvider) start(ctx context.Context) {
 	// return the canned completion.
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
-		// Drain body to keep the connection clean.
-		_, _ = io.Copy(io.Discard, r.Body)
+		requestBody, _ := io.ReadAll(r.Body)
 		p.hitMu.Lock()
 		p.hits++
+		p.lastRequestBody = append([]byte(nil), requestBody...)
+		p.lastResponseBody = []byte(fakeCompletionBody)
 		p.hitMu.Unlock()
+		if chatBodyRequestsStream(requestBody) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n"))
+			_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl-fake-integration\",\"object\":\"chat.completion.chunk\",\"created\":1780000000,\"model\":\"llama-3.2-3b-instruct\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n"))
+			_, _ = w.Write([]byte("data: [DONE]\n\n"))
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("X-MacProvider-Completion-Tokens", "12")
+		if p.receiptEnabled {
+			receipt, err := p.buildReceiptHeader(requestBody, []byte(fakeCompletionBody))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("X-MacProvider-Receipt", receipt)
+		}
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte(fakeCompletionBody))
 	})
@@ -1034,7 +1275,7 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 	}
 	dialer := gobwas.Dialer{
 		Timeout: 5 * time.Second,
-		Header: gobwas.HandshakeHeaderHTTP(header),
+		Header:  gobwas.HandshakeHeaderHTTP(header),
 	}
 	deadline := time.Now().Add(10 * time.Second)
 	var conn net.Conn
@@ -1053,33 +1294,107 @@ func (p *fakeProvider) runWS(ctx context.Context) {
 	defer conn.Close()
 
 	endpointURL := fmt.Sprintf("http://127.0.0.1:%d", p.httpPort)
-	hello := map[string]any{
-		"type":                    "hello",
-		"version":                 1,
-		"tier":                    1,
-		"provider_id":             p.providerID,
-		"hostname":                "fake-provider",
-		"model_id":                "llama-3.2-3b-instruct",
-		"model_params_b":          3.0,
-		"ram_gb":                  16,
-		"max_context_tokens":      8192,
-		"max_concurrency":         2,
-		"throughput_tps_estimate": 20.0,
-		"binary_version":          "1.0.0-fake",
-		"attestation":             nil,
-		"endpoint_url":            endpointURL,
-	}
-	if err := writeJSONFrame(conn, hello); err != nil {
-		p.t.Errorf("hello write: %v", err)
-		return
-	}
+	if p.receiptEnabled {
+		providerECDH := make([]byte, 32)
+		if _, err := rand.Read(providerECDH); err != nil {
+			p.t.Errorf("provider ecdh key: %v", err)
+			return
+		}
+		initial := map[string]any{
+			"type":                        "auth_request",
+			"version":                     2,
+			"stage":                       "initial",
+			"provider_id":                 p.providerID,
+			"hostname":                    "fake-provider",
+			"model_id":                    "llama-3.2-3b-instruct",
+			"model_params_b":              3.0,
+			"ram_gb":                      16,
+			"max_context_tokens":          8192,
+			"max_concurrency":             2,
+			"throughput_tps_estimate":     20.0,
+			"binary_version":              "1.6.0-fake",
+			"endpoint_url":                endpointURL,
+			"provider_ecdh_public_key":    base64.RawURLEncoding.EncodeToString(providerECDH),
+			"provider_receipt_public_key": base64.StdEncoding.EncodeToString(p.receiptPubkey),
+			"supported_models":            []string{"llama-3.2-3b-instruct"},
+			"publishes_supported_models":  true,
+			"tier2_capabilities":          map[string]any{"encrypted_leg": true, "attestation": false, "aead_suites": []string{"A256GCM"}},
+		}
+		if err := writeJSONFrame(conn, initial); err != nil {
+			p.t.Errorf("auth initial write: %v", err)
+			return
+		}
+		challengePayload, _, err := wsutil.ReadServerData(conn)
+		if err != nil {
+			p.t.Errorf("read auth_challenge: %v", err)
+			return
+		}
+		var challenge struct {
+			AuthAttemptID string `json:"auth_attempt_id"`
+		}
+		if err := json.Unmarshal(challengePayload, &challenge); err != nil {
+			p.t.Errorf("decode auth_challenge: %v", err)
+			return
+		}
+		proof := map[string]any{
+			"type":                       "auth_request",
+			"version":                    2,
+			"stage":                      "proof",
+			"auth_attempt_id":            challenge.AuthAttemptID,
+			"provider_id":                p.providerID,
+			"attestation_token":          nil,
+			"supported_models":           []string{"llama-3.2-3b-instruct"},
+			"publishes_supported_models": true,
+		}
+		if err := writeJSONFrame(conn, proof); err != nil {
+			p.t.Errorf("auth proof write: %v", err)
+			return
+		}
+		responsePayload, _, err := wsutil.ReadServerData(conn)
+		if err != nil {
+			p.t.Errorf("read auth_response: %v", err)
+			return
+		}
+		var response struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(responsePayload, &response); err != nil || response.Status != "accepted" {
+			p.t.Errorf("auth_response = %s err=%v", string(responsePayload), err)
+			return
+		}
+		if err := writeJSONFrame(conn, readyStateUpdate()); err != nil {
+			p.t.Errorf("state_update write: %v", err)
+			return
+		}
+	} else {
+		hello := map[string]any{
+			"type":                    "hello",
+			"version":                 1,
+			"tier":                    1,
+			"provider_id":             p.providerID,
+			"hostname":                "fake-provider",
+			"model_id":                "llama-3.2-3b-instruct",
+			"model_params_b":          3.0,
+			"ram_gb":                  16,
+			"max_context_tokens":      8192,
+			"max_concurrency":         2,
+			"throughput_tps_estimate": 20.0,
+			"binary_version":          "1.0.0-fake",
+			"attestation":             nil,
+			"endpoint_url":            endpointURL,
+		}
+		if err := writeJSONFrame(conn, hello); err != nil {
+			p.t.Errorf("hello write: %v", err)
+			return
+		}
 
-	// Read hello_ack — once we get it the coordinator considers the
-	// provider admitted. We don't need to validate the ack contents;
-	// the /poolz wait loop on the test side is the source of truth.
-	if _, _, err := wsutil.ReadServerData(conn); err != nil {
-		p.t.Errorf("read hello_ack: %v", err)
-		return
+		// Read hello_ack — once we get it the coordinator considers the
+		// provider admitted. We don't need to validate the ack contents;
+		// the /poolz wait loop on the test side is the source of truth.
+		if _, _, err := wsutil.ReadServerData(conn); err != nil {
+			p.t.Errorf("read hello_ack: %v", err)
+			return
+		}
 	}
 
 	// Start heartbeat loop + inbound message reader. The reader has
@@ -1159,10 +1474,10 @@ type requestLogRow struct {
 // in the money-path scenario. Columns match
 // phase5-gateway/internal/storage/sqlite/migrate.go:68-79.
 type usageEventRow struct {
-	AccountID        string
-	TotalTokens      int64
-	Outcome          string
-	TokenSource      string
+	AccountID   string
+	TotalTokens int64
+	Outcome     string
+	TokenSource string
 }
 
 // readLatestUsageEvent opens the gateway SQLite DB and returns the
@@ -1219,4 +1534,3 @@ func (s *scenario) readLatestRequestLog() (requestLogRow, bool) {
 	}
 	return row, true
 }
-

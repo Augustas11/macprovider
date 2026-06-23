@@ -1324,6 +1324,7 @@ func (s *Server) forwardHTTPSequence(
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
 			}
+			copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
 			w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 			if w.Header().Get("Content-Type") == "" {
 				w.Header().Set("Content-Type", "application/json")
@@ -1342,7 +1343,25 @@ func (s *Server) forwardHTTPSequence(
 			status = resp.StatusCode
 			respBody, _ := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 			_ = resp.Body.Close()
-			attempt.ErrorCode = spec001StatusFromBody(respBody)
+			attempt.ErrorCode = nullUsageProviderErrorCode(respBody)
+			if attempt.ErrorCode != "" && providerReceiptEligible(state.provider) {
+				if err := rec.logProviderRow(state.provider, status, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries); err != nil {
+					cancelAttempt()
+					writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+					return
+				}
+				copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
+				w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+				if w.Header().Get("Content-Type") == "" {
+					w.Header().Set("Content-Type", "application/json")
+				}
+				w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+				w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+				w.WriteHeader(status)
+				_, _ = w.Write(respBody)
+				cancelAttempt()
+				return
+			}
 		}
 		cancelAttempt()
 		// classifyHTTPResult is the canonical translation of the
@@ -3239,6 +3258,34 @@ func estimateTokens(raw json.RawMessage) int {
 		return 1
 	}
 	return n
+}
+
+func copyReceiptHeaderForProvider(dst, src http.Header, provider pool.Provider) {
+	if !providerReceiptEligible(provider) {
+		return
+	}
+	if receipt := strings.TrimSpace(src.Get("X-MacProvider-Receipt")); receipt != "" {
+		dst.Set("X-MacProvider-Receipt", receipt)
+	}
+}
+
+func providerReceiptEligible(provider pool.Provider) bool {
+	return len(provider.ReceiptPubkey) > 0
+}
+
+func nullUsageProviderErrorCode(body []byte) string {
+	if code := spec001StatusFromBody(body); code != "" {
+		return code
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	return spec001EndStatus(envelope.Error.Code)
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

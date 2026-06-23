@@ -941,6 +941,86 @@ func TestChatCompletionsRoutesNonStreamingRequest(t *testing.T) {
 	}
 }
 
+func TestHTTPForwardingStripsReceiptFromProviderWithoutPublishedReceiptKey(t *testing.T) {
+	const spoofedReceipt = "spoofed.receipt"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", spoofedReceipt)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("receipt header = %q, want stripped for provider without receipt pubkey", got)
+	}
+}
+
+func TestHTTPForwardingPassesReceiptFromProviderWithPublishedReceiptKey(t *testing.T) {
+	const receipt = "trusted.receipt"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", receipt)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x61}, 32))
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != receipt {
+		t.Fatalf("receipt header = %q, want %q", got, receipt)
+	}
+}
+
+func TestHTTPForwardingPassesTrustedNullUsageReceipt(t *testing.T) {
+	const receipt = "trusted.null-usage.receipt"
+	body := []byte(`{"error":{"message":"model not loaded","type":"api_error","param":null,"code":"error_model_not_loaded"}}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", receipt)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write(body)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x62}, 32))
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != receipt {
+		t.Fatalf("receipt header = %q, want %q", got, receipt)
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != "p1" {
+		t.Fatalf("provider header = %q", got)
+	}
+	if got := rr.Header().Get("X-MacProvider-Route"); got != "session-1" {
+		t.Fatalf("route header = %q", got)
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("error_model_not_loaded")) {
+		t.Fatalf("body = %s, want provider error body", rr.Body.String())
+	}
+}
+
 func TestRequestLogNilGuard(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -3906,6 +3986,12 @@ func registerWithEndpoint(registry *pool.Registry, providerID, assignedID, model
 	registerWithEndpointConn(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, nil)
 }
 
+func registerWithEndpointReceiptPubkey(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, receiptPubkey []byte) {
+	registerWithPathConnReceiptPubkey(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, pool.TierPinned, pool.InferencePathHTTPForwarding, nil, receiptPubkey)
+	slotsFree := slotsTotal
+	registry.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{State: state, SlotsFree: &slotsFree, At: time.Now().UTC()})
+}
+
 func registerWithEndpointConn(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, conn net.Conn) {
 	registerWithPathConn(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, pool.TierPinned, pool.InferencePathHTTPForwarding, conn)
 }
@@ -3915,6 +4001,10 @@ func registerWithPath(registry *pool.Registry, providerID, assignedID, modelID s
 }
 
 func registerWithPathConn(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, tier pool.Tier, path pool.InferencePath, conn net.Conn) {
+	registerWithPathConnReceiptPubkey(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, tier, path, conn, nil)
+}
+
+func registerWithPathConnReceiptPubkey(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, tier pool.Tier, path pool.InferencePath, conn net.Conn, receiptPubkey []byte) {
 	registry.Register(&pool.Provider{
 		ProviderID:            providerID,
 		AssignedID:            assignedID,
@@ -3934,6 +4024,7 @@ func registerWithPathConn(registry *pool.Registry, providerID, assignedID, model
 		LastHeartbeatAt:       time.Now().UTC(),
 		ConnectedAt:           time.Now().UTC(),
 		BinaryVersion:         "0.1.0",
+		ReceiptPubkey:         append([]byte(nil), receiptPubkey...),
 	}, conn)
 }
 

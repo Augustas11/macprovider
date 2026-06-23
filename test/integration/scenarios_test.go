@@ -1,11 +1,14 @@
 package integration
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	spec015 "github.com/augstar/macprovider-integration/spec015"
 )
 
 // TestHappyPathChatCompletion exercises the full
@@ -24,13 +27,16 @@ import (
 func TestHappyPathChatCompletion(t *testing.T) {
 	s := newScenario(t, scenarioOpts{seedAccount: true})
 
-	status, _, body := s.chatRequest(nil, `{
+	status, headers, body := s.chatRequest(nil, `{
 		"model":"llama-3.2-3b-instruct",
 		"max_tokens":32,
 		"messages":[{"role":"user","content":"hello"}]
 	}`)
 	if status != http.StatusOK {
 		t.Fatalf("chat status=%d body=%s", status, string(body))
+	}
+	if got := headers.Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("pre-v1.6 fake provider response exposed receipt header %q", got)
 	}
 	var chat map[string]any
 	if err := json.Unmarshal(body, &chat); err != nil {
@@ -90,6 +96,65 @@ func TestHappyPathChatCompletion(t *testing.T) {
 // time compare, or accidentally widened the accepted-credential set,
 // would silently pass the within-gateway suite. This scenario catches
 // it on every PR.
+
+func TestSpec015ReceiptEnabledCrossServiceHeaderVerifies(t *testing.T) {
+	s := newScenario(t, scenarioOpts{seedAccount: true, receiptEnabledProvider: true})
+
+	status, headers, body := s.chatRequest(nil, `{
+		"model":"llama-3.2-3b-instruct",
+		"max_tokens":32,
+		"messages":[{"role":"user","content":"SPEC-015 cross-service receipt"}]
+	}`)
+	if status != http.StatusOK {
+		t.Fatalf("chat status=%d body=%s", status, string(body))
+	}
+	header := headers.Get("X-MacProvider-Receipt")
+	if header == "" {
+		t.Fatalf("receipt-enabled cross-service response omitted X-MacProvider-Receipt")
+	}
+	reqBody, respBody := s.fakeProv.LastReceiptBodies()
+	if len(reqBody) == 0 || len(respBody) == 0 {
+		t.Fatalf("fake provider did not capture receipt hash inputs")
+	}
+	verified, err := spec015.VerifyReceiptAgainstPoolzTrust(header, spec015.PoolzReceiptTrust{
+		ReceiptPubkey: base64.StdEncoding.EncodeToString(s.fakeProv.receiptPubkey),
+	})
+	if err != nil {
+		t.Fatalf("receipt did not verify against provider poolz trust: %v", err)
+	}
+	if verified.KeySource != "current" {
+		t.Fatalf("receipt verified with %q key, want current", verified.KeySource)
+	}
+	if got, want := verified.Tuple["provider_pubkey"], base64.StdEncoding.EncodeToString(s.fakeProv.receiptPubkey); got != want {
+		t.Fatalf("provider_pubkey=%v want %s", got, want)
+	}
+	if got := verified.Tuple["model_id"]; got != "llama-3.2-3b-instruct" {
+		t.Fatalf("model_id=%v", got)
+	}
+	if got := int(verified.Tuple["tokens_out"].(float64)); got != 12 {
+		t.Fatalf("tokens_out=%d want 12", got)
+	}
+	wantPromptHash, err := spec015CanonicalPromptHash(reqBody)
+	if err != nil {
+		t.Fatalf("canonical prompt hash: %v", err)
+	}
+	if got := verified.Tuple["prompt_hash"]; got != wantPromptHash {
+		t.Fatalf("prompt_hash=%v want %s", got, wantPromptHash)
+	}
+	wantOutputHash, err := spec015CanonicalOutputHash(respBody)
+	if err != nil {
+		t.Fatalf("canonical output hash: %v", err)
+	}
+	if got := verified.Tuple["output_hash"]; got != wantOutputHash {
+		t.Fatalf("output_hash=%v want %s", got, wantOutputHash)
+	}
+	for _, header := range []string{"X-MacProvider-Foo", "X-MacProvider-Receipt-Pending", "X-MacProvider-Completion-Tokens"} {
+		if got := headers.Get(header); got != "" {
+			t.Fatalf("buyer response exposed %s=%q", header, got)
+		}
+	}
+}
+
 func TestInternalBearerWrongTokenRejected(t *testing.T) {
 	s := newScenario(t, scenarioOpts{skipProvider: true})
 

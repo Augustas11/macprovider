@@ -1,0 +1,7 @@
+# SPEC-015 AC-9 locked OpenAI Python SDK fixture.
+# Regenerate in a networked environment with:
+#   pip-compile --generate-hashes --output-file=requirements.lock requirements.txt
+#
+# The runner uses pip --require-hashes so this file must contain hashes
+# before the env-gated SDK compatibility smoke can install dependencies.
+openai==1.30.1
