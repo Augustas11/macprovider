@@ -189,8 +189,14 @@ func TestTupleFormatChecks(t *testing.T) {
 			want:   ErrTupleWrongType,
 		},
 		{
+			// JSON escape form: build the JSON with the literal 6-char escape
+			// sequence é (LATIN SMALL LETTER E WITH ACUTE) inside the
+			// "model_id" string. json.Decoder unescapes it to UTF-8 bytes c3 a9
+			// before isASCII runs, so the verifier-side check must reject just
+			// like the raw-UTF-8 form. The "\\u00e9" Go-source token is 6 chars
+			// at runtime ("é"), which is the JSON unicode escape.
 			name:   "model_id non-ASCII via JSON \\u escape",
-			header: valid(`"model_id":"café","output_hash":"` + strings.Repeat("b", 64) + `","prompt_hash":"` + strings.Repeat("a", 64) + `","provider_pubkey":"` + validPubkey + `","tokens_out":4,"ttft_ms":123,"unix_ts":1800000000`),
+			header: valid(`"model_id":"caf` + "\\u00e9" + `","output_hash":"` + strings.Repeat("b", 64) + `","prompt_hash":"` + strings.Repeat("a", 64) + `","provider_pubkey":"` + validPubkey + `","tokens_out":4,"ttft_ms":123,"unix_ts":1800000000`),
 			want:   ErrTupleWrongType,
 		},
 	}

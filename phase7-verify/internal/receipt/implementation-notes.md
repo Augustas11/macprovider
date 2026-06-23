@@ -78,9 +78,14 @@ error that directly maps to a §10.4.2 invalid reason is
   whitespace or trailing newline.
 - Syntactically valid JSON with noncanonical key order is accepted by `Parse`
   and rejected by `Verify` unless it was signed as-is.
-- `model_id` must be non-empty. The verifier does not enforce ASCII in Step 3;
-  v0.2 keeps ASCII as a producer-side invariant and preserves tuple bytes for
-  signature verification.
+- `model_id` must be non-empty AND ASCII-only. Per SPEC-015 §3.1, conformant
+  verifiers MUST reject any tuple whose `model_id` contains a byte `>= 0x80`.
+  `validateTuple` calls `isASCII` (`receipt.go:299-305`) on the unescaped
+  `model_id` string before any other field check; raw UTF-8 bytes and JSON
+  `\uXXXX` escapes that decode to non-ASCII both produce `ErrTupleWrongType`.
+  Note: signature verification still receives the unmodified tuple bytes,
+  so the rejection happens at the parse layer — the producer's signed bytes
+  are preserved verbatim through `Parsed.TupleRaw`.
 - `prompt_hash` and `output_hash` must be exactly 64 lowercase hex characters.
 - `provider_pubkey` must be standard padded base64 matching
   `^[A-Za-z0-9+/]{43}=$` and decode to 32 bytes.
