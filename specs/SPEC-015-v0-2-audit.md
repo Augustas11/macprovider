@@ -569,3 +569,81 @@ None.
 The round-3 roots are closed in substance: C10's exit-code contradiction is fixed in §10.4/§10.4.3/§10.4.4, C11's warning enum is fixed, C12's algorithm framing is fixed, and A9's architectural choice is made. The remaining issue is narrow but still lock-blocking for automation: §10.4.1 still hints that absent provider identity can become `inconclusive`, and §10.1 still assigns the old `provider_id_unresolvable` top-level reason to §10.7 404 despite the enum and endpoint wording using `provider_id_not_in_pool`.
 
 **Effective severity:** MAJOR. One text-only fix pass should be enough; no security redesign or resolver architecture change is needed.
+
+## Lens: code — round 5 by Codex
+
+**Verdict:** READY TO LOCK
+
+**Counts:** 0 CRITICAL, 0 MAJOR, 0 MINOR, 0 QUESTIONS
+
+**Round-4 resolution check:** CF8 / C13 are resolved in v0.2.4. §10.1 now assigns the §10.7 HTTP 404 path to top-level `reason: "provider_id_not_in_pool"` (lines 1500-1503 and 1539-1544), matching the exhaustive §10.4.2 `inconclusive` reason enum (lines 1818-1825) and §10.7 error wording (lines 2114-2121). §10.4.1 now says absent bundle `provider_id` follows the strict §10.4 fallback order and exits `64` when no provider id is obtainable without `--pubkey` (lines 1784-1792), matching §10.4 provider-id requirements (lines 1712-1749), §10.4.3 exit-code semantics (lines 1882-1905), and the §10.4.4 flag matrix (lines 1925-1941).
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+None.
+
+### MINOR findings
+
+None.
+
+### QUESTIONS
+
+None.
+
+## Lens: security — round 5 by Codex
+
+**Verdict:** READY TO LOCK
+
+**Counts:** 0 CRITICAL, 0 MAJOR, 0 MINOR, 0 QUESTIONS
+
+**Round-4 resolution check:** The v0.2.4 text-only fix does not re-open the security posture that was already READY TO LOCK in round 4. `inconclusive` remains first-class and cannot be collapsed into `valid` for unrooted pubkeys (§10.1 lines 1476-1489). Missing provider identity without `--pubkey` is still a parse-time usage error, not a trust-root verdict (§10.1 lines 1507-1512; §10.4 lines 1723-1729). Authoritative key mismatch and out-of-window previous-key matches remain `invalid` (§10.1 lines 1514-1537; §10.2.1 lines 1627-1653). Stale cache still cannot produce `valid` (§10.2 lines 1571-1581). The live network surface remains limited to `GET /v1/receipt-keys/<provider_id>` with no telemetry, no `/poolz` fallback, no retries, and visible non-default coordinator warnings (§10.5 lines 1953-1986). §10.6 continues to avoid overclaiming model attestation, timestamp honesty, privacy, absolute pubkey trust, replay resistance, or receipt uniqueness.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+None.
+
+### MINOR findings
+
+None.
+
+### QUESTIONS
+
+None.
+
+## Lens: architect — round 5 by Codex
+
+**Verdict:** READY TO LOCK
+
+**Counts:** 0 CRITICAL, 0 MAJOR, 0 MINOR, 0 QUESTIONS
+
+**Round-4 resolution check:** CF8 / A10 are resolved. v0.2.4 fully reifies the strict provider-id architecture: the resolver is addressed by `provider_id`; the verifier must not scan providers by pubkey bytes; absent provider identity without explicit `--pubkey` exits `64`; `provider_id_unresolvable` is warning-only for explicit-pubkey verification when the live divergence check cannot be addressed; and `provider_id_not_in_pool` is the sole top-level reason for the §10.7 404 retired/unknown-provider case. The named consistency surface is now aligned across §10.1, §10.4.1, §10.4.2 reason enums, §10.4.4 flag matrix, and §10.7. The BUILD-prompt deferrals remain intact: no bulk verification, no receipt explorer, no model-hash binding, no hardware trust root, no cross-provider chain verification, no TUF/on-chain trust-root signing, and no buyer SDK integration landed in v0.2.4.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+None.
+
+### MINOR findings
+
+None.
+
+### QUESTIONS
+
+None.
+
+## Convergent findings — round 5 by Codex
+
+No new convergent findings.
+
+CF8 is closed: the round-4 code and architect lenses converged on stale provider-id wording, and v0.2.4 removes both stale clauses without introducing a replacement ambiguity. All three round-5 lenses are READY TO LOCK with 0 CRITICAL and 0 MAJOR findings.

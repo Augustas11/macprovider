@@ -1,7 +1,9 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.2.4 (2026-06-23, round-4 codex audit fix pass — LOCK candidate)
+**Version:** 0.2.4 (2026-06-23, buyer-side verification — LOCKED)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver), SPEC-005 v0.3, SPEC-006 v0.9, SPEC-008 v0.3, SPEC-011 v0.5, SPEC-013 v0.3
+
+**Lock state:** Round-5 codex audit returned `READY TO LOCK` 0/0/0/0 across all three lenses (code, security, architect) on 2026-06-23 — see `specs/SPEC-015-v0-2-audit.md`. Five-round audit history captured 5 CRITICAL + 11 MAJOR + 6 MINOR findings, all resolved. CF6 confirmed round-1 CRITICALs (CF1 trust-root architecture, CF2 time-window validity, CF3 schema strictness) structurally closed, not papered over.
 
 **Change log v0.2.4:**
 - Round-4 codex audit fix pass (round 4 verdicts: security
