@@ -1,0 +1,2 @@
+# SPEC-015 AC-9 pinned OpenAI Python SDK fixture.
+openai==1.30.1

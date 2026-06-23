@@ -2222,4 +2222,21 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   and streaming suppression.</p>
 </div>
 </section>
+
+<section id="spec015-receipts-step10">
+  <h2>SPEC-015 design decisions — Step 10 SDK compatibility, nginx buffers, and receipt perf (2026-06-23)</h2>
+  <div class="entry">
+    <time>2026-06-23</time>
+    <p><strong>Scope:</strong> added <code>ReceiptPerfTests</code> as the provider-side
+    SPEC-015 AC-16 guard. The benchmark measures 1000 invocations of
+    <code>ReceiptBuilder.build</code> after warmup against a 1024-token output payload,
+    covering JCS tuple construction, SHA-256 hashing, and ed25519 signing.</p>
+    <p><strong>Performance decision:</strong> the test asserts p95 below 5 ms using the
+    same receipt builder path used by the HTTP server, with deterministic key material
+    supplied through the existing key-store protocol to avoid Keychain variance.</p>
+    <p><strong>Deviations:</strong> none for provider runtime behavior; Step 10 adds a
+    regression benchmark only.</p>
+    <p><strong>Open questions:</strong> none blocking AC-16. The assertion is scoped to Apple Silicon/arm64 as the locked AC specifies; other architectures still measure the path and skip with the measured p95.</p>
+  </div>
+</section>
 </body></html>

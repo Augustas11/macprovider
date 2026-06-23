@@ -61,6 +61,20 @@ base_url = https://api.streamvc.live/v1
 api_key = <mp_* key>
 ```
 
+SPEC-015 receipt compatibility live checks are opt-in because they require a running provider, coordinator, gateway, and valid API key. Run these from the repo root:
+
+```sh
+(
+  cd test/integration && \
+  SPEC015_SDK_COMPAT_LIVE=1 \
+  MACPROVIDER_SPEC015_GATEWAY_URL=https://api.streamvc.live \
+  MACPROVIDER_SPEC015_API_KEY=$MP_API_KEY \
+    go test . -run TestSpec015SDKCompatLiveRunner -count=1
+)
+
+SPEC015_NGINX_ECHO_URL='https://api.streamvc.live/operator-echo-url' make test-dist
+```
+
 ## Deployment To Pearl
 
 Templates:

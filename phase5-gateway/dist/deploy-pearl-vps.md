@@ -44,6 +44,22 @@ curl -i -H "Authorization: Bearer <key>" \
   https://api.streamvc.live/v1/models           # 200 with valid key
 ```
 
+SPEC-015 receipt checks after provider/coordinator/gateway are all live. Run these from the repo root:
+
+```bash
+(
+  cd test/integration && \
+  SPEC015_SDK_COMPAT_LIVE=1 \
+  MACPROVIDER_SPEC015_GATEWAY_URL=https://api.streamvc.live \
+  MACPROVIDER_SPEC015_API_KEY=$MP_API_KEY \
+    go test . -run TestSpec015SDKCompatLiveRunner -count=1
+)
+
+SPEC015_NGINX_ECHO_URL='https://api.streamvc.live/operator-echo-url' make test-dist
+```
+
+The nginx echo URL must be replaced with an operator-controlled endpoint that returns the received `X-MacProvider-Receipt` response header byte-for-byte; leave it unset for the default static deploy-config gate.
+
 ## Rollback
 
 One command — relies on the `.prev` snapshot the deploy script keeps:

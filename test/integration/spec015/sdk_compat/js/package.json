@@ -1,0 +1,8 @@
+{
+  "name": "macprovider-spec015-sdk-compat",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "openai": "4.52.7"
+  }
+}

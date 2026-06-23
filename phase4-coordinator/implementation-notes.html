@@ -1374,4 +1374,26 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   detection after receipt pubkey publication.</p>
 </div>
 </section>
+
+<section id="spec015-receipts-step10">
+  <h2>SPEC-015 design decisions — Step 10 coordinator nginx receipt buffers (2026-06-23)</h2>
+  <div class="entry">
+    <time>2026-06-23</time>
+    <p><strong>Scope:</strong> configured the coordinator deploy nginx template to
+    preserve SPEC-015 receipt-sized headers and added the deploy gate
+    <code>phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh</code> and the env-gated live curl echo check <code>phase4-coordinator/dist/test/check_nginx_receipt_header_live_test.sh</code>.</p>
+    <p><strong>Path decision:</strong> the build prompt names
+    <code>deploy/nginx/coordinator.streamvc.live.conf</code>, but this repository stores
+    deployable nginx templates under <code>phase4-coordinator/dist/</code>. The Step 10
+    change therefore lands in
+    <code>phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf</code> and is wired
+    through <code>make test-dist</code>.</p>
+    <p><strong>Buffer decision:</strong> the static deploy gate strips comments before matching active directives. <code>large_client_header_buffers 4 8k</code>,
+    <code>proxy_buffer_size 8k</code>, and <code>proxy_buffers 4 8k</code> exceed the 4096-byte
+    receipt cap while preserving existing timeout/body-size behavior.</p>
+    <p><strong>Open questions:</strong> Pearl deployment still requires the normal operator
+    rollout after PR merge; this step only updates and tests the repo-owned deploy
+    template.</p>
+  </div>
+</section>
 </body></html>
