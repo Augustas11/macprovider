@@ -6,6 +6,8 @@ enum ReceiptOmissionReason: String, CaseIterable {
     case modelSwapViolation = "model_swap_violation"
     case preTokenCancel = "pre_token_cancel"
     case streamingRequest = "streaming_request"
+    case constructionFailed = "construction_failed"
+    case writeFailed = "write_failed"
 }
 
 private final class ReceiptAuditSink: @unchecked Sendable {

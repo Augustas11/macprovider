@@ -246,6 +246,22 @@ public struct APIError: Error, Sendable {
 
 private func optionalInt(_ raw: Any?, key: String) throws -> Int? {
     guard let raw, !(raw is NSNull) else { return nil }
+    if let number = raw as? NSNumber {
+        if CFGetTypeID(number) == CFBooleanGetTypeID() {
+            throw APIError(status: 400, message: "\(key) must be an integer", code: "invalid_request")
+        }
+        let objCType = String(cString: number.objCType)
+        if objCType == "f" || objCType == "d" {
+            let double = number.doubleValue
+            guard double.rounded(.towardZero) == double,
+                  double >= Double(Int.min),
+                  double <= Double(Int.max) else {
+                throw APIError(status: 400, message: "\(key) must be an integer", code: "invalid_request")
+            }
+            return number.intValue
+        }
+        return number.intValue
+    }
     guard let int = raw as? Int else {
         throw APIError(status: 400, message: "\(key) must be an integer", code: "invalid_request")
     }

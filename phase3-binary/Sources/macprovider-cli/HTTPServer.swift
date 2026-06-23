@@ -239,10 +239,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         try request.validateModelMatches(snapshot.modelID)
                     }
                     let completion = try await modelRuntime.complete(request)
+                    let unixTsSeconds = Int64(Date().timeIntervalSince1970)
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
                     let response = Self.chatCompletionResponse(request: request, completion: completion)
                     let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
-                    let unixTsSeconds = Int64(Date().timeIntervalSince1970)
                     let receipt = try Self.receiptHeaderResult(
                         providerID: providerID,
                         receiptBuilder: receiptBuilder,
@@ -256,8 +256,14 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                     switch receipt {
                     case .issued(let header):
-                        ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: Int64(completion.completionTokens), ttftMs: ttftMs, unixTs: unixTsSeconds)
-                        writer.writeJSON(status: .ok, body: response, extraHeaders: [(Self.receiptHeaderName, header)])
+                        let tokensOut = Int64(completion.completionTokens)
+                        writer.writeJSON(status: .ok, body: response, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
+                            if delivered {
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
+                            } else {
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                            }
+                        }
                     case .omitted(let reason):
                         ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
                         writer.writeJSON(status: .ok, body: response)
@@ -266,28 +272,34 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                     ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .modelSwapViolation)
                     writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
-                } catch let error as APIError {
+                } catch let apiErr as APIError {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                     do {
                         let receipt = try Self.errorReceiptHeaderResult(
                             providerID: providerID,
                             receiptBuilder: receiptBuilder,
                             request: request,
-                            error: error,
+                            error: apiErr,
                             startedAt: startedAt
                         )
                         switch receipt {
                         case .issued(let header, let ttftMs, let unixTs):
-                            ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
-                            writer.writeAPIError(error, extraHeaders: [(Self.receiptHeaderName, header)])
+                            writer.writeAPIError(apiErr, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
+                                if delivered {
+                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                } else {
+                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                }
+                            }
                         case .omitted(let reason):
                             ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
-                            writer.writeAPIError(error)
+                            writer.writeAPIError(apiErr)
                         case .notReceiptEligible:
-                            writer.writeAPIError(error)
+                            writer.writeAPIError(apiErr)
                         }
                     } catch {
-                        writer.writeAPIError(Self.receiptConstructionError())
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                        writer.writeAPIError(apiErr)
                     }
                 } catch {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
@@ -303,8 +315,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         )
                         switch receipt {
                         case .issued(let header, let ttftMs, let unixTs):
-                            ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
-                            writer.writeAPIError(apiError, extraHeaders: [(Self.receiptHeaderName, header)])
+                            writer.writeAPIError(apiError, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
+                                if delivered {
+                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                } else {
+                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                }
+                            }
                         case .omitted(let reason):
                             ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
                             writer.writeAPIError(apiError)
@@ -312,11 +329,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             writer.writeAPIError(apiError)
                         }
                     } catch {
-                        writer.writeAPIError(Self.receiptConstructionError())
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                        writer.writeAPIError(apiError)
                     }
                 }
             }
-        } catch let error as APIError {
+        } catch let parseError as APIError {
             Task { [providerStatus] in
                 await providerStatus.recordError()
             }
@@ -327,24 +345,30 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         providerID: providerID,
                         receiptBuilder: receiptBuilder,
                         request: request,
-                        error: error,
+                        error: parseError,
                         startedAt: requestAcceptedAt
                     )
                     switch receipt {
                     case .issued(let header, let ttftMs, let unixTs):
-                        ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
-                        writer.writeAPIError(error, extraHeaders: [(Self.receiptHeaderName, header)])
+                        writer.writeAPIError(parseError, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
+                            if delivered {
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                            } else {
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                            }
+                        }
                     case .omitted(let reason):
                         ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
-                        writer.writeAPIError(error)
+                        writer.writeAPIError(parseError)
                     case .notReceiptEligible:
-                        writer.writeAPIError(error)
+                        writer.writeAPIError(parseError)
                     }
                 } catch {
-                    writer.writeAPIError(Self.receiptConstructionError())
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                    writer.writeAPIError(parseError)
                 }
             } else {
-                writeAPIError(context: context, error)
+                writeAPIError(context: context, parseError)
             }
         } catch {
             Task { [providerStatus] in
@@ -780,21 +804,36 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 private struct ResponseWriter: @unchecked Sendable {
     let context: ChannelHandlerContext
 
-    func writeJSON(status: HTTPResponseStatus, body: Any, extraHeaders: [(String, String)] = []) {
+    func writeJSON(
+        status: HTTPResponseStatus,
+        body: Any,
+        extraHeaders: [(String, String)] = [],
+        completion: (@Sendable (Bool) -> Void)? = nil
+    ) {
         do {
             let data = try encodeJSONObject(body)
             context.eventLoop.execute {
-                writeRawJSON(context: context, status: status, data: data, extraHeaders: extraHeaders)
+                writeRawJSON(context: context, status: status, data: data, extraHeaders: extraHeaders, completion: completion)
             }
         } catch {
             context.eventLoop.execute {
                 context.close(promise: nil)
             }
+            completion?(false)
         }
     }
 
-    func writeAPIError(_ error: APIError, extraHeaders: [(String, String)] = []) {
-        writeJSON(status: HTTPResponseStatus(statusCode: error.status), body: error.envelope, extraHeaders: extraHeaders)
+    func writeAPIError(
+        _ error: APIError,
+        extraHeaders: [(String, String)] = [],
+        completion: (@Sendable (Bool) -> Void)? = nil
+    ) {
+        writeJSON(
+            status: HTTPResponseStatus(statusCode: error.status),
+            body: error.envelope,
+            extraHeaders: extraHeaders,
+            completion: completion
+        )
     }
 
     func startSSE() {
@@ -833,7 +872,8 @@ private func writeRawJSON(
     context: ChannelHandlerContext,
     status: HTTPResponseStatus,
     data: Data,
-    extraHeaders: [(String, String)] = []
+    extraHeaders: [(String, String)] = [],
+    completion: (@Sendable (Bool) -> Void)? = nil
 ) {
     let headers = makeJSONResponseHeaders(dataLength: data.count, extraHeaders: extraHeaders)
     let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
@@ -842,8 +882,17 @@ private func writeRawJSON(
     var buffer = context.channel.allocator.buffer(capacity: data.count)
     buffer.writeBytes(data)
     context.write(NIOAny(HTTPServerResponsePart.body(.byteBuffer(buffer))), promise: nil)
-    context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil)), promise: nil)
-    context.close(promise: nil)
+    let endPromise = context.eventLoop.makePromise(of: Void.self)
+    context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil)), promise: endPromise)
+    endPromise.futureResult.whenComplete { result in
+        switch result {
+        case .success:
+            completion?(true)
+        case .failure:
+            completion?(false)
+        }
+        context.close(promise: nil)
+    }
 }
 
 private func writeRawSSEHead(context: ChannelHandlerContext) {

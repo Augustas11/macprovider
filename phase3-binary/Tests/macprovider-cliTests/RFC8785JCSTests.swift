@@ -75,6 +75,48 @@ final class RFC8785JCSTests: XCTestCase {
         )
     }
 
+    func testReplacementCharacterIsEmittedAsRawUTF8PerRFC8785() throws {
+        XCTAssertEqual(
+            try RFC8785JCS.canonicalString(.string("hi\u{FFFD}")),
+            "\"hi\u{FFFD}\""
+        )
+        XCTAssertEqual(
+            try RFC8785JCS.canonicalString(.rawString("k\u{FFFD}")),
+            "\"k\u{FFFD}\""
+        )
+    }
+
+    func testControlCharactersBeyondU001FAreEmittedAsRawUTF8() throws {
+        XCTAssertEqual(
+            try RFC8785JCS.canonicalString(.string("x\u{007F}y")),
+            "\"x\u{007F}y\""
+        )
+        XCTAssertEqual(
+            try RFC8785JCS.canonicalString(.string("x\u{0080}y")),
+            "\"x\u{0080}y\""
+        )
+    }
+
+    func testAdditionalRFC8785ECMAScriptDoubleVectors() throws {
+        let cases: [(Double, String)] = [
+            (-1.1, "-1.1"),
+            (0.000001, "0.000001"),
+            (9.999999999999997e22, "9.999999999999997e+22"),
+            (1.7976931348623157e308, "1.7976931348623157e+308"),
+            (5e-324, "5e-324"),
+            (-0.1, "-0.1"),
+            (100.0, "100"),
+            (0.5, "0.5"),
+        ]
+        for (input, expected) in cases {
+            XCTAssertEqual(
+                try RFC8785JCS.canonicalString(.double(input)),
+                expected,
+                "Unexpected canonical form for \(input)"
+            )
+        }
+    }
+
     func testTupleTierASCIIFieldsHashUnchangedByNFCStep() throws {
         let value = RFC8785JCS.Value.object([
             "model_id": .string("mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"),

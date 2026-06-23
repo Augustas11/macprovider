@@ -31,7 +31,7 @@ enum PromptCanonicalizer {
     private static func canonicalMessage(_ value: JSONValue) throws -> RFC8785JCS.Value {
         let object = try objectValue(value, context: "message")
         return .object([
-            "role": try jcsOrNull(object["role"]),
+            "role": .string(try stringValue(object["role"], context: "message role")),
             "content": try canonicalContent(object["content"]),
             "name": try jcsOrNull(object["name"]),
             "tool_call_id": try jcsOrNull(object["tool_call_id"]),

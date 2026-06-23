@@ -88,8 +88,6 @@ enum RFC8785JCS {
                 escaped += "\\r"
             case 0x00...0x1f:
                 escaped += String(format: "\\u%04x", scalar.value)
-            case 0xfffd:
-                escaped += "\\ufffd"
             default:
                 escaped.unicodeScalars.append(scalar)
             }
