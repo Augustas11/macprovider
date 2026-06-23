@@ -17,7 +17,7 @@ func TestRunVersion(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) exit code = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	want := fmt.Sprintf("macprovider-verify %s (verifies up to SPEC-015 v%s)\n", version.BinaryVersion, version.MaxSPECVersion)
+	want := fmt.Sprintf("macprovider-verify %s\n", version.BinaryVersion)
 	if stdout.String() != want {
 		t.Fatalf("run(--version) stdout = %q, want %q", stdout.String(), want)
 	}
@@ -53,26 +53,31 @@ func TestRunHelp(t *testing.T) {
 	}
 }
 
-func TestRunUsageStub(t *testing.T) {
+func TestRunUsageErrors(t *testing.T) {
 	tests := []struct {
 		name string
 		args []string
+		want int
 	}{
 		{
 			name: "no args",
 			args: nil,
+			want: 64,
 		},
 		{
 			name: "bundle placeholder",
 			args: []string{"--bundle", "/dev/null"},
+			want: 65,
 		},
 		{
 			name: "malformed pubkey value",
 			args: []string{"--pubkey", "not-real-base64!!", "--bundle", "/dev/null"},
+			want: 64,
 		},
 		{
 			name: "explicit pubkey but no other input",
 			args: []string{"--pubkey", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="},
+			want: 64,
 		},
 	}
 
@@ -82,11 +87,11 @@ func TestRunUsageStub(t *testing.T) {
 
 			code := run(tt.args, &stdout, &stderr, func(string) string { return "" })
 
-			if code != exitUsage {
-				t.Fatalf("run(%v) exit code = %d, want %d", tt.args, code, exitUsage)
+			if code != tt.want {
+				t.Fatalf("run(%v) exit code = %d, want %d", tt.args, code, tt.want)
 			}
-			if !strings.Contains(stderr.String(), "TODO: Step 7") {
-				t.Fatalf("stderr missing Step 7 TODO, got %q", stderr.String())
+			if stderr.Len() == 0 {
+				t.Fatalf("stderr empty for usage error")
 			}
 		})
 	}
@@ -100,8 +105,8 @@ func TestRunUnknownFlag(t *testing.T) {
 
 	code := run([]string{"--bogus-flag"}, &stdout, &stderr, func(string) string { return "" })
 
-	if code != exitUsage {
-		t.Fatalf("run(--bogus-flag) exit code = %d, want %d", code, exitUsage)
+	if code != 64 {
+		t.Fatalf("run(--bogus-flag) exit code = %d, want %d", code, 64)
 	}
 	// flag package writes "flag provided but not defined" to stderr; the scaffold
 	// passes that through. Don't assert the exact phrase (it's a stdlib internal),

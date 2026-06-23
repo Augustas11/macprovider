@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -43,13 +44,15 @@ const (
 // Either Header OR (TupleRaw + Signature) is sufficient (Step 7 will wire
 // from CLI flags or bundle decoding).
 type VerifyInput struct {
-	Header         string         // X-MacProvider-Receipt header value (preferred input)
-	TupleRaw       []byte         // decoded base64(JCS(tuple)); used only when Header is empty
-	Signature      []byte         // decoded ed25519 signature; used only when Header is empty
-	Request        map[string]any // raw OpenAI request body (for hash recomputation)
-	Response       map[string]any // raw OpenAI completion response (for hash recomputation)
-	ExplicitPubkey []byte         // optional --pubkey override (32 bytes)
-	ProviderID     string         // resolved provider_id (from CLI, bundle, or single-match cache)
+	Header             string         // X-MacProvider-Receipt header value (preferred input)
+	TupleRaw           []byte         // decoded base64(JCS(tuple)); used only when Header is empty
+	Signature          []byte         // decoded ed25519 signature; used only when Header is empty
+	Request            map[string]any // raw OpenAI request body (for hash recomputation)
+	Response           map[string]any // raw OpenAI completion response (for hash recomputation)
+	ExplicitPromptHash []byte         // optional pre-computed --prompt-hash override (32 bytes)
+	ExplicitOutputHash []byte         // optional pre-computed --output-hash override (32 bytes)
+	ExplicitPubkey     []byte         // optional --pubkey override (32 bytes)
+	ProviderID         string         // resolved provider_id (from CLI, bundle, or single-match cache)
 }
 
 // VerifyOpts threads through resolver options + system clock.
@@ -87,6 +90,43 @@ type Details struct {
 type Warning struct {
 	Kind   string         `json:"kind"`
 	Fields map[string]any `json:"fields,omitempty"`
+}
+
+func (r Result) MarshalJSON() ([]byte, error) {
+	type resultJSON struct {
+		Result          string    `json:"result"`
+		Reason          string    `json:"reason"`
+		ProviderID      *string   `json:"provider_id"`
+		ModelID         string    `json:"model_id,omitempty"`
+		SignedAt        int64     `json:"signed_at,omitempty"`
+		TrustSource     string    `json:"trust_source"`
+		CoordinatorHost string    `json:"coordinator_host,omitempty"`
+		Details         *Details  `json:"details,omitempty"`
+		Warnings        []Warning `json:"warnings,omitempty"`
+	}
+	out := resultJSON{
+		Result:          r.Result,
+		Reason:          r.Reason,
+		ModelID:         r.ModelID,
+		SignedAt:        r.SignedAt,
+		TrustSource:     r.TrustSource,
+		CoordinatorHost: r.CoordinatorHost,
+		Details:         r.Details,
+		Warnings:        r.Warnings,
+	}
+	if r.ProviderID != "" {
+		out.ProviderID = &r.ProviderID
+	}
+	return json.Marshal(out)
+}
+
+func (w Warning) MarshalJSON() ([]byte, error) {
+	out := make(map[string]any, len(w.Fields)+1)
+	out["kind"] = w.Kind
+	for key, value := range w.Fields {
+		out[key] = value
+	}
+	return json.Marshal(out)
 }
 
 // InputFormatError marks receipt/bundle data that the verifier cannot parse.
@@ -179,11 +219,11 @@ func Verify(input VerifyInput, opts VerifyOpts) (Result, error) {
 		return Result{}, err
 	}
 
-	_, promptHash, err := canon.CanonicalPrompt(input.Request)
+	promptHash, err := computedPromptHash(input)
 	if err != nil {
-		return Result{}, &UsageError{Err: fmt.Errorf("canonicalize request: %w", err)}
+		return Result{}, err
 	}
-	computedPrompt := hex.EncodeToString(promptHash[:])
+	computedPrompt := hex.EncodeToString(promptHash)
 	if computedPrompt != parsed.Tuple.PromptHash {
 		return invalid(base, reasonPromptHashMismatch, Details{
 			Field:    "prompt_hash",
@@ -192,11 +232,11 @@ func Verify(input VerifyInput, opts VerifyOpts) (Result, error) {
 		}), nil
 	}
 
-	_, outputHash, err := canon.CanonicalOutput(input.Response)
+	outputHash, err := computedOutputHash(input)
 	if err != nil {
-		return Result{}, &UsageError{Err: fmt.Errorf("canonicalize response: %w", err)}
+		return Result{}, err
 	}
-	computedOutput := hex.EncodeToString(outputHash[:])
+	computedOutput := hex.EncodeToString(outputHash)
 	if computedOutput != parsed.Tuple.OutputHash {
 		return invalid(base, reasonOutputHashMismatch, Details{
 			Field:    "output_hash",
@@ -209,6 +249,34 @@ func Verify(input VerifyInput, opts VerifyOpts) (Result, error) {
 	base.Result = resultValid
 	base.Reason = reasonValid
 	return base, nil
+}
+
+func computedPromptHash(input VerifyInput) ([]byte, error) {
+	if len(input.ExplicitPromptHash) > 0 {
+		if len(input.ExplicitPromptHash) != 32 {
+			return nil, &UsageError{Err: fmt.Errorf("explicit prompt hash must be 32 bytes, got %d", len(input.ExplicitPromptHash))}
+		}
+		return cloneBytes(input.ExplicitPromptHash), nil
+	}
+	_, promptHash, err := canon.CanonicalPrompt(input.Request)
+	if err != nil {
+		return nil, &UsageError{Err: fmt.Errorf("canonicalize request: %w", err)}
+	}
+	return promptHash[:], nil
+}
+
+func computedOutputHash(input VerifyInput) ([]byte, error) {
+	if len(input.ExplicitOutputHash) > 0 {
+		if len(input.ExplicitOutputHash) != 32 {
+			return nil, &UsageError{Err: fmt.Errorf("explicit output hash must be 32 bytes, got %d", len(input.ExplicitOutputHash))}
+		}
+		return cloneBytes(input.ExplicitOutputHash), nil
+	}
+	_, outputHash, err := canon.CanonicalOutput(input.Response)
+	if err != nil {
+		return nil, &UsageError{Err: fmt.Errorf("canonicalize response: %w", err)}
+	}
+	return outputHash[:], nil
 }
 
 func parseInput(input VerifyInput) (receipt.Parsed, error) {
