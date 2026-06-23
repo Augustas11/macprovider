@@ -84,6 +84,17 @@ func canonicalTupleValue(v any) ([]byte, error) {
 // U+2028, U+2029 (Go's encoding/json escapes these by default for
 // browser-safe embedding). json.Encoder appends a trailing newline; we
 // trim it so the result matches json.Marshal's no-newline contract.
+//
+// Audit-trail note: this MUST match the Swift authority for SPEC-015,
+// which is phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift —
+// NOT phase3-binary/Sources/macprovider-cli/Tier2Attestation.swift's
+// `goJSONString`. The Tier2 attestation helper deliberately escapes
+// <, >, & to match Go's default json.Marshal because it's signing
+// over Go-equivalent bytes; the SPEC-015 receipt path uses
+// RFC8785JCS.escapeString instead, which passes those code points
+// through as raw UTF-8 per RFC 8785 §3.2.2.2. A round-3 review of
+// commit 62ac9ff mistook the two paths; this comment is the
+// rebuttal so a future reviewer does not repeat the misreading.
 func marshalJSONNoHTMLEscape(v any) ([]byte, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
