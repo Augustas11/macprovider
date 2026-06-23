@@ -40,8 +40,62 @@ func TestReceiptKeysReturnsCurrentKeyOnly(t *testing.T) {
 	if got["receipt_pubkey_prev"] != nil {
 		t.Fatalf("receipt_pubkey_prev = %#v, want null", got["receipt_pubkey_prev"])
 	}
-	if got["fetched_at"] == "" {
-		t.Fatalf("fetched_at missing")
+	fetchedAt, ok := got["fetched_at"].(string)
+	if !ok || fetchedAt == "" {
+		t.Fatalf("fetched_at missing or not string: %#v", got["fetched_at"])
+	}
+	parsed, err := time.Parse(time.RFC3339, fetchedAt)
+	if err != nil {
+		t.Fatalf("fetched_at %q is not RFC3339: %v", fetchedAt, err)
+	}
+	if parsed.Location() != time.UTC {
+		t.Fatalf("fetched_at %q must be UTC (Z suffix); got location %s", fetchedAt, parsed.Location())
+	}
+	wantKeys := map[string]bool{"provider_id": true, "receipt_pubkey": true, "receipt_pubkey_prev": true, "fetched_at": true}
+	for k := range got {
+		if !wantKeys[k] {
+			t.Fatalf("response body contains unexpected key %q (full body: %v)", k, got)
+		}
+	}
+	if len(got) != len(wantKeys) {
+		t.Fatalf("response body has %d keys, want %d (%v)", len(got), len(wantKeys), got)
+	}
+	if rr.Header().Get("Cache-Control") != "public, max-age=300" {
+		t.Fatalf("Cache-Control = %q", rr.Header().Get("Cache-Control"))
+	}
+}
+
+func TestReceiptKeysDropsExpiredPreviousKey(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	current := bytes.Repeat([]byte{0x44}, 32)
+	previous := bytes.Repeat([]byte{0x45}, 32)
+	// The handler uses s.now() which is wall-clock real-time (not the startedAt argument).
+	// Use clearly-past dates so the test stays stable regardless of when CI runs.
+	rotatedAt := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	expiresAt := time.Date(2020, 1, 8, 0, 0, 0, 0, time.UTC) // 7-day grace from rotated, but expired years ago
+	registerReceiptKeyProvider(registry, "p1", current, &pool.ReceiptPubkeyPrevious{
+		Pubkey:    previous,
+		RotatedAt: rotatedAt,
+		ExpiresAt: expiresAt,
+	})
+	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := serveReceiptKeys(server, "p1", "198.51.100.7:12345")
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	if got["receipt_pubkey_prev"] != nil {
+		t.Fatalf("expired receipt_pubkey_prev MUST serialize as null; got %#v", got["receipt_pubkey_prev"])
+	}
+	// The expired previous-key bytes MUST NOT appear anywhere in the response body.
+	prevB64 := base64.StdEncoding.EncodeToString(previous)
+	if bytes.Contains(rr.Body.Bytes(), []byte(prevB64)) {
+		t.Fatalf("expired previous pubkey leaked into response body: %s", rr.Body.String())
 	}
 	if rr.Header().Get("Cache-Control") != "public, max-age=300" {
 		t.Fatalf("Cache-Control = %q", rr.Header().Get("Cache-Control"))
@@ -84,6 +138,32 @@ func TestReceiptKeysReturnsPreviousKeyInGraceWindow(t *testing.T) {
 	}
 	if got.ReceiptPubkeyPrev.RotatedAt != rotatedAt.Format(time.RFC3339) || got.ReceiptPubkeyPrev.ExpiresAt != expiresAt.Format(time.RFC3339) {
 		t.Fatalf("prev times = %#v", got.ReceiptPubkeyPrev)
+	}
+	// MINOR-2: parse the timestamps back, assert UTC, and assert the nested object has exactly three keys.
+	for _, ts := range []string{got.ReceiptPubkeyPrev.RotatedAt, got.ReceiptPubkeyPrev.ExpiresAt} {
+		parsed, err := time.Parse(time.RFC3339, ts)
+		if err != nil {
+			t.Fatalf("nested timestamp %q is not RFC3339: %v", ts, err)
+		}
+		if parsed.Location() != time.UTC {
+			t.Fatalf("nested timestamp %q must be UTC; got location %s", ts, parsed.Location())
+		}
+	}
+	// Assert nested receipt_pubkey_prev object has exactly {pubkey, rotated_at, expires_at}.
+	var nested map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &struct {
+		Prev *map[string]any `json:"receipt_pubkey_prev"`
+	}{Prev: &nested}); err != nil {
+		t.Fatalf("nested json: %v", err)
+	}
+	wantNestedKeys := map[string]bool{"pubkey": true, "rotated_at": true, "expires_at": true}
+	for k := range nested {
+		if !wantNestedKeys[k] {
+			t.Fatalf("receipt_pubkey_prev contains unexpected key %q (full nested: %v)", k, nested)
+		}
+	}
+	if len(nested) != len(wantNestedKeys) {
+		t.Fatalf("receipt_pubkey_prev has %d keys, want %d (%v)", len(nested), len(wantNestedKeys), nested)
 	}
 }
 
