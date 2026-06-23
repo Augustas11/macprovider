@@ -19,7 +19,7 @@
 
 # MacProvider
 
-**Make any Apple Silicon Mac a remote-addressable MLX inference endpoint.** Built on `mlx-lm`. OpenAI-compatible API. Every response will carry a signed receipt binding (prompt, output, provider) — verifiable inference, without a datacenter (planned, not yet implemented; see [Roadmap](#roadmap)).
+**Make any Apple Silicon Mac a remote-addressable MLX inference endpoint.** Built on `mlx-lm`. OpenAI-compatible API. Every response carries a signed receipt binding (prompt, output, provider) verifiable with the open-source [macprovider-verify](phase7-verify/README.md) CLI — verifiable inference, without a datacenter.
 
 A lot of the most interesting LLM applications — long-running personal agents, privacy-sensitive tooling, dev workflows that hammer a model thousands of times a day — don't really belong in a cloud datacenter. But the moment you want your Mac's MLX endpoint to be reachable from somewhere that isn't localhost, you fall off a cliff: auth, tunneling, multi-tenant routing, observability, none of it exists out of the box. MacProvider is a thin layer over `mlx-lm` that fills that gap.
 
@@ -110,9 +110,9 @@ Latest release and signed binaries: [github.com/augustas11/macprovider/releases]
 
 ## Roadmap
 
-**Signed inference receipts — planned, not implemented.** The product surface described below is a design proposal preserved here so it isn't lost; no service in this repo currently issues, signs, or verifies receipts. Tracked as Open Question 1 in `audits/2026-06-10/REPO_AUDIT.md`.
+:white_check_mark: **Signed inference receipts — Shipped in v1.0.0.** The SPEC-015 v0.2 verifier is available as the open-source [macprovider-verify](phase7-verify/README.md) CLI.
 
-The intent is that every request through MacProvider eventually returns a signed receipt that lets the caller later prove which provider ran their inference. The receipt would be issued by the gateway and signed with the provider's key:
+Every request through MacProvider carries a signed receipt that lets the caller later prove which provider signed the canonical prompt/output binding. The receipt is issued on the response path and signed with the provider's receipt key:
 
 ```json
 {
@@ -128,10 +128,10 @@ The intent is that every request through MacProvider eventually returns a signed
 }
 ```
 
-What this would enable:
+What this enables:
 
-- **Audit trail.** A buyer could prove an inference happened, on which model, at which provider — without trusting the gateway to be honest after the fact.
+- **Audit trail.** A buyer can prove an inference happened, on which model, at which provider — without trusting the gateway to be honest after the fact.
 - **Provider accountability.** Disputes over output quality or downtime become resolvable from receipts rather than from memory.
-- **New compositions.** Receipts could be replayed into systems that don't trust the issuer but trust the signature (escrow, reputation, on-chain settlement).
+- **New compositions.** Receipts can be replayed into systems that don't trust the issuer but trust the signature (escrow, reputation, on-chain settlement).
 
-The schema above is the v1 proposal. Feedback welcome via Issues.
+The verifier contract is documented in [phase7-verify](phase7-verify/README.md). Feedback welcome via Issues.

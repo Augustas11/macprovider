@@ -1,0 +1,291 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://streamvc.live/schemas/macprovider-verify-output.schema.json",
+  "title": "macprovider-verify output",
+  "description": "SPEC-015 v0.2 macprovider-verify one-line JSON output.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "reason",
+        "provider_id",
+        "model_id",
+        "signed_at",
+        "trust_source",
+        "coordinator_host"
+      ],
+      "properties": {
+        "result": { "const": "valid" },
+        "reason": { "const": "signature_and_canonicalization_match" },
+        "provider_id": { "type": ["string", "null"] },
+        "model_id": { "type": ["string", "null"] },
+        "signed_at": { "type": ["integer", "null"] },
+        "trust_source": { "enum": ["explicit_pubkey", "cache", "live"] },
+        "coordinator_host": { "type": ["string", "null"] },
+        "warnings": {
+          "type": "array",
+          "items": { "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind", "live_pubkey", "coordinator_host"],
+              "properties": {
+                "kind": { "const": "explicit_vs_live_divergence" },
+                "live_pubkey": { "type": "string" },
+                "coordinator_host": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "reason"],
+              "properties": {
+                "kind": { "const": "live_check_skipped" },
+                "reason": { "enum": ["offline_flag", "network_unreachable", "provider_id_unresolvable"] }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "coordinator_host"],
+              "properties": {
+                "kind": { "const": "non_default_coordinator" },
+                "coordinator_host": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "unix_ts", "system_time", "delta_seconds"],
+              "properties": {
+                "kind": { "const": "clock_skew" },
+                "unix_ts": { "type": "integer" },
+                "system_time": { "type": "integer" },
+                "delta_seconds": { "type": "integer" }
+              },
+              "additionalProperties": false
+            }
+          ] }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "trust_source": { "const": "explicit_pubkey" } },
+            "required": ["trust_source"]
+          },
+          "then": {
+            "properties": { "coordinator_host": { "type": "null" } }
+          },
+          "else": {
+            "properties": { "coordinator_host": { "type": "string" } }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "reason",
+        "provider_id",
+        "model_id",
+        "signed_at",
+        "trust_source",
+        "coordinator_host",
+        "details"
+      ],
+      "properties": {
+        "result": { "const": "invalid" },
+        "reason": {
+          "description": "Reason values follow §10.4.2. bundle_pubkey_provider_mismatch is reserved for v0.3+ and is NOT emitted by v0.2 verifiers.",
+          "enum": [
+            "signature_verify_failed",
+            "prompt_hash_mismatch",
+            "output_hash_mismatch",
+            "pubkey_not_endorsed",
+            "previous_key_outside_grace_window",
+            "bundle_pubkey_provider_mismatch"
+          ]
+        },
+        "provider_id": { "type": ["string", "null"] },
+        "model_id": { "type": ["string", "null"] },
+        "signed_at": { "type": ["integer", "null"] },
+        "trust_source": { "enum": ["explicit_pubkey", "cache", "live"] },
+        "coordinator_host": { "type": ["string", "null"] },
+        "details": {
+          "type": "object",
+          "required": ["field", "receipt"],
+          "properties": {
+            "field": { "enum": ["signature", "prompt_hash", "output_hash", "pubkey", "grace_window"] },
+            "computed": { "type": "string" },
+            "receipt": { "type": "string" },
+            "extra": {
+              "type": "object",
+              "properties": {
+                "unix_ts": { "type": "integer" },
+                "rotated_at": { "type": "integer" },
+                "expires_at": { "type": "integer" }
+              },
+              "additionalProperties": false
+            }
+          },
+          "if": {
+            "properties": { "field": { "const": "signature" } },
+            "required": ["field"]
+          },
+          "then": {
+            "not": { "required": ["computed"] }
+          },
+          "else": {
+            "required": ["computed"]
+          },
+          "additionalProperties": false
+        },
+        "warnings": {
+          "type": "array",
+          "items": { "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind", "live_pubkey", "coordinator_host"],
+              "properties": {
+                "kind": { "const": "explicit_vs_live_divergence" },
+                "live_pubkey": { "type": "string" },
+                "coordinator_host": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "reason"],
+              "properties": {
+                "kind": { "const": "live_check_skipped" },
+                "reason": { "enum": ["offline_flag", "network_unreachable", "provider_id_unresolvable"] }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "coordinator_host"],
+              "properties": {
+                "kind": { "const": "non_default_coordinator" },
+                "coordinator_host": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "unix_ts", "system_time", "delta_seconds"],
+              "properties": {
+                "kind": { "const": "clock_skew" },
+                "unix_ts": { "type": "integer" },
+                "system_time": { "type": "integer" },
+                "delta_seconds": { "type": "integer" }
+              },
+              "additionalProperties": false
+            }
+          ] }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "trust_source": { "const": "explicit_pubkey" } },
+            "required": ["trust_source"]
+          },
+          "then": {
+            "properties": { "coordinator_host": { "type": "null" } }
+          },
+          "else": {
+            "properties": { "coordinator_host": { "type": "string" } }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "required": [
+        "result",
+        "reason",
+        "trust_source",
+        "coordinator_host"
+      ],
+      "properties": {
+        "result": { "const": "inconclusive" },
+        "reason": {
+          "enum": [
+            "pubkey_unresolvable",
+            "provider_id_not_in_pool",
+            "cache_stale_and_live_unreachable"
+          ]
+        },
+        "provider_id": { "type": ["string", "null"] },
+        "model_id": { "type": ["string", "null"] },
+        "signed_at": { "type": ["integer", "null"] },
+        "trust_source": { "enum": ["explicit_pubkey", "cache", "live", "none"] },
+        "coordinator_host": { "type": ["string", "null"] },
+        "warnings": {
+          "type": "array",
+          "items": { "oneOf": [
+            {
+              "type": "object",
+              "required": ["kind", "live_pubkey", "coordinator_host"],
+              "properties": {
+                "kind": { "const": "explicit_vs_live_divergence" },
+                "live_pubkey": { "type": "string" },
+                "coordinator_host": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "reason"],
+              "properties": {
+                "kind": { "const": "live_check_skipped" },
+                "reason": { "enum": ["offline_flag", "network_unreachable", "provider_id_unresolvable"] }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "coordinator_host"],
+              "properties": {
+                "kind": { "const": "non_default_coordinator" },
+                "coordinator_host": { "type": "string" }
+              },
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "required": ["kind", "unix_ts", "system_time", "delta_seconds"],
+              "properties": {
+                "kind": { "const": "clock_skew" },
+                "unix_ts": { "type": "integer" },
+                "system_time": { "type": "integer" },
+                "delta_seconds": { "type": "integer" }
+              },
+              "additionalProperties": false
+            }
+          ] }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "trust_source": { "enum": ["explicit_pubkey", "none"] } },
+            "required": ["trust_source"]
+          },
+          "then": {
+            "properties": { "coordinator_host": { "type": "null" } }
+          },
+          "else": {
+            "properties": { "coordinator_host": { "type": "string" } }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -58,6 +58,73 @@ jobs:
       - name: make test-gateway
         run: make test-gateway
 
+  phase7-verify:
+    name: phase7-verify (go vet + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Assert dependency allowlist (only golang.org/x/text permitted, per SPEC-015 v0.2 §10.3 NFC normalization exception)
+        run: |
+          # Whitelist: golang.org/x/text — required for NFC normalization in
+          # phase7-verify/internal/jcs/. No other external modules are permitted
+          # per the BUILD prompt's "Dependencies (HARD constraint)" section.
+          # The audit prompt cross-checks this allowlist.
+          DISALLOWED=$(grep -v '^golang\.org/x/text \|^golang\.org/x/text/' phase7-verify/go.sum | grep -v '^$' || true)
+          if [ -n "$DISALLOWED" ]; then
+            echo "phase7-verify/go.sum contains entries outside the allowlist:"
+            echo "$DISALLOWED"
+            echo ""
+            echo "Allowlist: golang.org/x/text only."
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: phase7-verify/go.mod
+          cache-dependency-path: phase7-verify/go.sum
+
+      - name: go vet phase7-verify
+        run: cd phase7-verify && go vet ./...
+
+      - name: go test phase7-verify
+        run: cd phase7-verify && go test ./... -race -count=1
+
+  phase7-verify-integration:
+    name: phase7-verify integration (fixtures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Assert dependency allowlist (only golang.org/x/text permitted, per SPEC-015 v0.2 §10.3 NFC normalization exception)
+        run: |
+          DISALLOWED=$(grep -v '^golang\.org/x/text \|^golang\.org/x/text/' phase7-verify/go.sum | grep -v '^$' || true)
+          if [ -n "$DISALLOWED" ]; then
+            echo "phase7-verify/go.sum contains entries outside the allowlist:"
+            echo "$DISALLOWED"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: phase7-verify/go.mod
+          cache-dependency-path: phase7-verify/go.sum
+
+      - name: Run fixture integration test
+        run: cd phase7-verify && go test -race -count=1 -tags=integration -timeout 60s .
+
   integration:
     name: integration (cross-service)
     runs-on: ubuntu-latest
@@ -208,6 +275,8 @@ jobs:
     needs:
       - coordinator
       - gateway
+      - phase7-verify
+      - phase7-verify-integration
       - integration
       - spec-014-v0-2-gate
       - dist-tooling
@@ -220,6 +289,8 @@ jobs:
         env:
           COORDINATOR_RESULT: ${{ needs.coordinator.result }}
           GATEWAY_RESULT: ${{ needs.gateway.result }}
+          PHASE7_VERIFY_RESULT: ${{ needs.phase7-verify.result }}
+          PHASE7_VERIFY_INTEGRATION_RESULT: ${{ needs.phase7-verify-integration.result }}
           INTEGRATION_RESULT: ${{ needs.integration.result }}
           SPEC_014_RESULT: ${{ needs.spec-014-v0-2-gate.result }}
           DIST_TOOLING_RESULT: ${{ needs.dist-tooling.result }}
@@ -232,6 +303,8 @@ jobs:
           for check in \
             "phase4-coordinator (go vet + test):${COORDINATOR_RESULT}" \
             "phase5-gateway (go vet + test):${GATEWAY_RESULT}" \
+            "phase7-verify (go vet + test):${PHASE7_VERIFY_RESULT}" \
+            "phase7-verify integration (fixtures):${PHASE7_VERIFY_INTEGRATION_RESULT}" \
             "integration (cross-service):${INTEGRATION_RESULT}" \
             "spec-014-v0-2-gate:${SPEC_014_RESULT}" \
             "deploy tooling (check-deploy-config gate):${DIST_TOOLING_RESULT}" \

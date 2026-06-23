@@ -1,0 +1,46 @@
+{
+  "bundle_version": 1,
+  "provider_id": "m1-anon",
+  "receipt": "eyJtb2RlbF9pZCI6ImZpeHR1cmUtbW9kZWwiLCJvdXRwdXRfaGFzaCI6ImRlNzVhODcwOWY3ZGRlZTEzOWVmMDAxYjMwNmVmZWUxMjYwZTIwYWYxYWMzNGM3ZmY5MWU5ZTMxYWI2YmUyNTQiLCJwcm9tcHRfaGFzaCI6ImJkZDY4NWUzNDk0NDk4NmFlNTVlOGQ4YmNhN2QyYjBjNTgzZjllMTdmZmVhOTg3MzhjNmRlZmUyYjE3NTBiMWQiLCJwcm92aWRlcl9wdWJrZXkiOiJFbGtqVDBNVWVJblgrK1BQQS9RWFByZytoeVZGcFUwbDVnSFhsTGdscTY4PSIsInRva2Vuc19vdXQiOjksInR0ZnRfbXMiOjEyMywidW5peF90cyI6MTc4MjIxNjAwMH0=.oWnBFtNPvEuNyK0nu7F4dFFYYES+godaZ5lpQhlghQQ+Zmgh+qMgDFtY1joWnHpM94oTncpDaRDhuvHp3aHtDA==",
+  "request": {
+    "frequency_penalty": 0,
+    "max_tokens": 64,
+    "messages": [
+      {
+        "content": "Answer concisely.",
+        "role": "system"
+      },
+      {
+        "content": "Explain receipt verification in one sentence.",
+        "role": "user"
+      }
+    ],
+    "model": "fixture-model",
+    "n": 1,
+    "presence_penalty": 0,
+    "temperature": 0.2,
+    "top_p": 0.95
+  },
+  "response": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "content": "Receipt verification proves signed prompt and output hashes.",
+          "role": "assistant"
+        }
+      }
+    ],
+    "created": 1782216000,
+    "id": "chatcmpl-fixture",
+    "model": "fixture-model",
+    "object": "chat.completion",
+    "usage": {
+      "completion_tokens": 9,
+      "prompt_tokens": 7,
+      "total_tokens": 16
+    }
+  },
+  "unexpected": true
+}

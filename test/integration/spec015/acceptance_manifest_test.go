@@ -225,6 +225,114 @@ var spec015ACs = []acceptanceCriterion{
 			{"phase4-coordinator/internal/ws/server_test.go", "TestProviderAuthV2ReceiptKeyOmissionClearsLiveReceiptTrustState"},
 		},
 	},
+	{
+		Number:   18,
+		Summary:  "valid path: fresh receipt + matching prompt/response + resolver-endorsed pubkey returns valid",
+		SpecStep: "SPEC-015 §14 AC-18",
+		Commands: []string{"cd phase7-verify && go test ./internal/verify/... -race -count=1 -run TestVerifyAcceptanceAC18ThroughAC23"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/verify/verify_test.go", "TestVerifyAcceptanceAC18ThroughAC23"},
+			{"phase7-verify/testdata/valid_fresh.bundle.json", "bundle_version"},
+		},
+	},
+	{
+		Number:   19,
+		Summary:  "response content byte flip surfaces invalid result with output_hash_mismatch reason",
+		SpecStep: "SPEC-015 §14 AC-19",
+		Commands: []string{"cd phase7-verify && go test -tags=integration -count=1 -timeout 120s -run TestReceiptBundleFixturesEndToEnd ."},
+		CIJobs:   []string{"phase7-verify integration (fixtures)", "phase7-verify (go vet + test)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/verify/verify_test.go", "AC-19 response content flip reports output hash mismatch"},
+			{"phase7-verify/testdata/invalid_tampered_output.bundle.json", "bundle_version"},
+		},
+	},
+	{
+		Number:   20,
+		Summary:  "request content byte flip surfaces invalid result with prompt_hash_mismatch reason",
+		SpecStep: "SPEC-015 §14 AC-20",
+		Commands: []string{"cd phase7-verify && go test -tags=integration -count=1 -timeout 120s -run TestReceiptBundleFixturesEndToEnd ."},
+		CIJobs:   []string{"phase7-verify integration (fixtures)", "phase7-verify (go vet + test)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/verify/verify_test.go", "AC-20 request content flip reports prompt hash mismatch"},
+			{"phase7-verify/testdata/invalid_tampered_prompt.bundle.json", "bundle_version"},
+		},
+	},
+	{
+		Number:   21,
+		Summary:  "receipt tuple byte mutation surfaces signature_verify_failed before any hash-level check",
+		SpecStep: "SPEC-015 §14 AC-21",
+		Commands: []string{"cd phase7-verify && go test ./internal/verify/... -race -count=1 -run TestVerifyAcceptanceAC18ThroughAC23"},
+		CIJobs:   []string{"phase7-verify (go vet + test)", "phase7-verify integration (fixtures)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/verify/verify_test.go", "AC-21 tuple byte mutation fails signature before hash checks"},
+			{"phase7-verify/testdata/invalid_tampered_unix_ts.bundle.json", "bundle_version"},
+		},
+	},
+	{
+		Number:   22,
+		Summary:  "live coordinator unreachable plus empty cache plus no explicit pubkey returns inconclusive with network warning",
+		SpecStep: "SPEC-015 §14 AC-22",
+		Commands: []string{"cd phase7-verify && go test ./internal/verify/... -race -count=1 -run TestVerifyAcceptanceAC18ThroughAC23"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/verify/verify_test.go", "AC-22 unreachable live with no cache is inconclusive"},
+		},
+	},
+	{
+		Number:   23,
+		Summary:  "offline explicit-pubkey bundle invocation returns valid with zero observed network traffic",
+		SpecStep: "SPEC-015 §14 AC-23",
+		Commands: []string{"cd phase7-verify && go test ./internal/verify/... -race -count=1 -run TestVerifyAcceptanceAC18ThroughAC23"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/verify/verify_test.go", "AC-23 offline explicit pubkey uses no network"},
+		},
+	},
+	{
+		Number:   24,
+		Summary:  "JSON mode output validates against schemas/output.schema.json for every result variant",
+		SpecStep: "SPEC-015 §14 AC-24",
+		Commands: []string{"cd phase7-verify && go test ./internal/cli/... -race -count=1 -run TestSchema", "cd phase7-verify && go test -tags=integration -count=1 -timeout 120s -run TestReceiptBundleFixturesEndToEnd ."},
+		CIJobs:   []string{"phase7-verify (go vet + test)", "phase7-verify integration (fixtures)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/cli/output_test.go", "TestSchemaValidationValid"},
+			{"phase7-verify/schemas/output.schema.json", "additionalProperties"},
+		},
+	},
+	{
+		Number:   25,
+		Summary:  "five normative exit codes (0 valid, 1 invalid, 2 inconclusive, 64 usage, 65 input-format) are each reachable",
+		SpecStep: "SPEC-015 §14 AC-25",
+		Commands: []string{"cd phase7-verify && go test ./internal/cli/... -race -count=1 -run TestCLIExitCodesAC25"},
+		CIJobs:   []string{"phase7-verify (go vet + test)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/cli/cli_test.go", "TestCLIExitCodesAC25"},
+		},
+	},
+	{
+		Number:   26,
+		Summary:  "stale cache entry with fetched_at older than 7 days triggers a live fetch on the next verification",
+		SpecStep: "SPEC-015 §14 AC-26",
+		Commands: []string{"cd phase7-verify && go test ./internal/verify/... -race -count=1 -run TestVerifyAC26"},
+		CIJobs:   []string{"phase7-verify (go vet + test)", "phase7-verify integration (fixtures)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/verify/verify_test.go", "TestVerifyAC26StaleCacheTriggersLiveFetch"},
+			{"phase7-verify/internal/verify/verify_test.go", "TestVerifyAC26StaleCacheLiveFailureIsInconclusive"},
+		},
+	},
+	{
+		Number:   27,
+		Summary:  "receipt signed by previous key inside the rotation grace window verifies valid; outside the window verifies invalid",
+		SpecStep: "SPEC-015 §14 AC-27",
+		Commands: []string{"cd phase7-verify && go test ./internal/verify/... -race -count=1 -run TestVerifyAC27"},
+		CIJobs:   []string{"phase7-verify (go vet + test)", "phase7-verify integration (fixtures)"},
+		Evidence: []evidenceAnchor{
+			{"phase7-verify/internal/verify/verify_test.go", "TestVerifyAC27PreviousKeyGraceWindow"},
+			{"phase7-verify/testdata/valid_prev_key_in_grace.bundle.json", "bundle_version"},
+			{"phase7-verify/testdata/invalid_prev_key_outside_grace.bundle.json", "bundle_version"},
+		},
+	},
 }
 
 func TestSpec015AcceptanceCriteria(t *testing.T) {
@@ -252,13 +360,13 @@ func TestSpec015AcceptanceCriteria(t *testing.T) {
 	}
 }
 
-func TestAcceptanceManifestCoversAC1ThroughAC17(t *testing.T) {
-	if len(spec015ACs) != 17 {
-		t.Fatalf("manifest has %d ACs, want 17", len(spec015ACs))
+func TestAcceptanceManifestCoversAC1ThroughAC27(t *testing.T) {
+	if len(spec015ACs) != 27 {
+		t.Fatalf("manifest has %d ACs, want 27", len(spec015ACs))
 	}
 	seen := make(map[int]bool, len(spec015ACs))
 	for _, ac := range spec015ACs {
-		if ac.Number < 1 || ac.Number > 17 {
+		if ac.Number < 1 || ac.Number > 27 {
 			t.Fatalf("AC-%d outside expected range", ac.Number)
 		}
 		if seen[ac.Number] {
@@ -278,7 +386,7 @@ func TestAcceptanceManifestCoversAC1ThroughAC17(t *testing.T) {
 			}
 		}
 	}
-	for i := 1; i <= 17; i++ {
+	for i := 1; i <= 27; i++ {
 		if !seen[i] {
 			t.Fatalf("manifest missing AC-%d", i)
 		}
@@ -301,16 +409,16 @@ func TestAcceptanceEvidenceAnchorsExist(t *testing.T) {
 	}
 }
 
-func TestSpec015Section14StillDefinesAC1ThroughAC17(t *testing.T) {
+func TestSpec015Section14DefinesAC1ThroughAC27(t *testing.T) {
 	content := readRepoFile(t, "specs/SPEC-015-receipts.md")
-	for i := 1; i <= 17; i++ {
+	for i := 1; i <= 27; i++ {
 		want := fmt.Sprintf("**AC-%d.**", i)
 		if !strings.Contains(content, want) {
 			t.Fatalf("SPEC-015 §14 missing %s", want)
 		}
 	}
-	if strings.Contains(content, "**AC-18.**") {
-		t.Fatalf("SPEC-015 §14 unexpectedly contains AC-18")
+	if strings.Contains(content, "**AC-28.**") {
+		t.Fatalf("SPEC-015 §14 unexpectedly contains AC-28 (v0.2.4 caps at AC-27)")
 	}
 }
 
@@ -356,12 +464,12 @@ func TestAcceptanceRunnerReportsEveryAC(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %q: %v", match[1], err)
 		}
-		if n < 1 || n > 17 {
+		if n < 1 || n > 27 {
 			t.Fatalf("runner reports out-of-range AC-%02d", n)
 		}
 		seen[n]++
 	}
-	for i := 1; i <= 17; i++ {
+	for i := 1; i <= 27; i++ {
 		if seen[i] == 0 {
 			t.Fatalf("runner does not visibly report AC-%02d", i)
 		}

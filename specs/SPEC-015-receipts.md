@@ -1,7 +1,235 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.1.3 (2026-06-22, round-3 audit fix pass — LOCK candidate)
-**Depends on:** SPEC-001 v1.5, SPEC-002 v1.3.5, SPEC-005 v0.3, SPEC-006 v0.8.3, SPEC-008 v0.3, SPEC-011 v0.5, SPEC-013 v0.3
+**Version:** 0.2.4 (2026-06-23, buyer-side verification — LOCKED)
+**Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver), SPEC-005 v0.3, SPEC-006 v0.9, SPEC-008 v0.3, SPEC-011 v0.5, SPEC-013 v0.3
+
+**Lock state:** Round-5 codex audit returned `READY TO LOCK` 0/0/0/0 across all three lenses (code, security, architect) on 2026-06-23 — see `specs/SPEC-015-v0-2-audit.md`. Five-round audit history captured 5 CRITICAL + 11 MAJOR + 6 MINOR findings, all resolved. CF6 confirmed round-1 CRITICALs (CF1 trust-root architecture, CF2 time-window validity, CF3 schema strictness) structurally closed, not papered over.
+
+**Change log v0.2.4:**
+- Round-4 codex audit fix pass (round 4 verdicts: security
+  **READY TO LOCK** maintained; code + architect READY WITH FIX
+  PASS, single convergent finding **CF8** flagging two
+  stale-wording spots that v0.2.3 missed when adopting the
+  strict-CLI contract):
+  - **CF8 / C13 / A10 (stale provider-id wording in §10.4.1
+    bundle field description and §10.1 HTTP 404 reason):**
+    - §10.4.1 `provider_id` field description rewritten to
+      align with the §10.4 "Provider-id requirements" strict
+      contract — absent bundle `provider_id` falls back to
+      `--provider-id` then single-match cache; if neither yields
+      a value AND no `--pubkey` is supplied, exit `64` (not
+      `inconclusive`). The "MAY produce `inconclusive` if no
+      other identification path applies" phrasing is REMOVED.
+    - §10.1 HTTP 404 paragraph updated to use `reason:
+      "provider_id_not_in_pool"` per the §10.4.2 enum, not the
+      now-warning-only `provider_id_unresolvable`.
+- All three codex lenses now project to READY TO LOCK on round 5.
+  v0.2.4 ships into the combined SPEC + IMPL PR per the
+  [[feedback-bundle-spec-impl-one-pr]] convention if round 5
+  confirms 0 CRITICAL / 0 MAJOR across all lenses.
+
+**Change log v0.2.3:**
+- Round-3 codex audit fix pass against
+  `specs/SPEC-015-v0-2-audit.md` round-3 sections (round 3:
+  security lens **READY TO LOCK** 0/0/0/0; code + architect
+  READY WITH FIX PASS with 3 MAJOR + 1 MINOR converging on a
+  single root cause CF7). Findings resolved:
+  - **CF7 / C10 / A9 (provider-id absence is BOTH a usage error
+    AND an inconclusive result — internal contradiction):** §10.4
+    normalized around the strict CLI contract (Option A from the
+    round-3 reading). Missing `--provider-id` in header+hashes
+    mode without `--pubkey` is now exit code `64` (usage error)
+    everywhere — at §10.4 input shapes, §10.4 "Provider-id
+    requirements", §10.4.4 flag matrix, and the §10.4.3 exit-code
+    table. The `inconclusive` matrix row for that combination is
+    replaced with USAGE ERROR. Rationale: the verifier was
+    misinvoked (missing essential argument), not failed at
+    runtime; this matches the convention for missing `--receipt`
+    / `--bundle`. `inconclusive` remains reserved for trust-root
+    failures the verifier discovered during execution.
+  - **C11 (`live_check_skipped.reason` enum incomplete):** the
+    enum in §10.4.2 is extended with `provider_id_unresolvable`
+    — emitted when explicit `--pubkey` was supplied AND no
+    provider id is recoverable (the verifier can produce `valid`
+    against the explicit key but the live divergence check is
+    skipped because the resolver cannot be addressed). The
+    enum is now `offline_flag` / `network_unreachable` /
+    `provider_id_unresolvable`.
+  - **C12 (§10.0 algorithm step 5 still pubkey-byte-oriented):**
+    §10.0 step 5 rewritten to read "Resolve the trusted pubkey
+    for the resolved `provider_id` per §10.2" instead of "for the
+    receipt's provider_pubkey bytes." Aligns the algorithm summary
+    with the §10.2 no-scan rule.
+
+v0.2.3 is the LOCK candidate. Round 4 pending — target READY TO
+LOCK across all three lenses (security is already there). On
+clean round 4, v0.2 locks and bundles into the combined SPEC +
+IMPL PR per [[feedback-bundle-spec-impl-one-pr]].
+
+**Change log v0.2.2:**
+- Round-2 codex audit fix pass against
+  `specs/SPEC-015-v0-2-audit.md` round-2 sections (round 2 = 0
+  CRITICAL, 4 MAJOR, 3 MINOR across code/security/architect
+  lenses; verdict READY WITH FIX PASS on every lens). Findings
+  resolved:
+  - **CF4 / C7 / S6 (stale `/poolz` wording in §10.1 + AC-18;
+    §10.1 ↔ §10.2.1 no-match semantics conflict):** §10.1
+    rewritten to (a) eliminate `/poolz` references, (b) reserve
+    `inconclusive` for fetch failure / provider_id unresolvable /
+    no authoritative resolver answer, and (c) require `invalid`
+    when the resolver returns an authoritative provider record
+    whose current/previous keys do not match the receipt's
+    `provider_pubkey`. AC-18 rewritten to reference
+    `/v1/receipt-keys/<provider_id>` and the §10.2.1 grace-window
+    semantics.
+  - **CF5 / C8 / A7 (`--provider-id` is load-bearing but not
+    first-class CLI input):** §10.4 expanded to make
+    `--provider-id <id>` a first-class CLI input across all three
+    input modes (header+hashes, bundle, stdin). §10.4.4 flag
+    matrix gains explicit `--provider-id` rows covering required-
+    vs-optional disposition per mode. §10.2 rule on no-provider-id
+    `inconclusive` reframed as a normative escape hatch rather
+    than an under-specified edge case.
+  - **C9 (timestamp format split between Unix seconds and
+    RFC3339):** §10.2 cache fields normalized — `fetched_at`,
+    `rotated_at`, `expires_at` are stored as RFC3339 UTC strings
+    in the cache to match the §10.7 wire shape. The receipt
+    `unix_ts` remains Unix seconds (v0.1 wire contract — locked).
+    Conversion happens once at the cache-write boundary.
+  - **S7 (positive trust-boundary sentence reads like timestamp
+    attestation):** §10.6 opening sentence reworded from "signed
+    this tuple at the claimed `unix_ts`" to "signed a tuple
+    containing the claimed `unix_ts`" to eliminate the
+    quotability-out-of-context risk.
+  - **A8 (`valid` does not disclaim receipt uniqueness):** §10.6
+    "DOES NOT prove" list extended with a sixth bullet — `valid`
+    does not prove that no other receipt was issued for the same
+    response, or that this was the only provider-side attestation.
+    Locks the surface against the same "narrow proof" misreading
+    the §10.6 audit surfaces in round 1.
+
+v0.2.2 is the LOCK candidate. If round 3 returns 0 CRITICAL / 0
+MAJOR across all three lenses, v0.2.2 ships into the combined
+SPEC + IMPL PR per the [[feedback-bundle-spec-impl-one-pr]]
+convention.
+
+**Change log v0.2.1:**
+- Round-1 codex audit fix pass against
+  `specs/SPEC-015-v0-2-audit.md` (round 1 = 6 CRITICAL, 8 MAJOR,
+  3 MINOR across code/security/architect lenses; verdict DESIGN
+  ROUND NEEDED). Findings resolved:
+  - **CF1 / S1 / A1 / C2 (live `/poolz` is operator-only — buyer
+    cannot use it as default trust root):** SPEC-015 v0.2.1
+    introduces a **SPEC-002 v1.5 candidate annotation** for
+    `GET /v1/receipt-keys/<provider_id>` — a public,
+    unauthenticated, rate-limited endpoint exposing ONLY the
+    receipt-key tuple `(provider_id, receipt_pubkey,
+    receipt_pubkey_prev, rotated_at, expires_at)`. §10.2 rewritten
+    to make this the default live source instead of operator-only
+    `/poolz`. The new endpoint is pinned in §10.7 as a candidate
+    annotation following the same parser-optional / additive /
+    non-breaking pattern v0.1's three candidates used.
+  - **CF2 / S2 (grace-window check missing on
+    `receipt_pubkey_prev`):** §10.2.1 rewritten to require the
+    receipt `unix_ts` to fall within `[rotated_at - 60s,
+    expires_at]` — matching v0.1 AC-11's pre-existing invariant.
+    A previous-key match outside the grace window is now `invalid`,
+    not `valid`.
+  - **CF2 / S3 (stale-cache fallback validates retired keys via
+    provider-reported `unix_ts`):** §10.2 stale-cache rule
+    rewritten. A stale entry (older than the 7-day TTL) MUST NOT
+    produce `valid` — the result is `inconclusive` regardless of
+    receipt `unix_ts`. The provider-reported timestamp is no longer
+    load-bearing for trust-root validity per §10.6's existing
+    posture that timestamp honesty is not proven.
+  - **CF3 / C1 / A2 (bundle mode rejects ordinary OpenAI
+    captures):** §10.4.1 rewritten to require `request` as the raw
+    OpenAI request body as captured by the buyer. Absent §4.2
+    optional fields canonicalize as JSON `null` per the locked
+    v0.1 §4.2 rule. The "16-field minimum" requirement is
+    REMOVED.
+  - **C4 (`bundle_version` exit-code contradiction):** §10.4.1 +
+    §10.4.3 + AC-25 now agree: unsupported `bundle_version` →
+    exit `65` (input format error). §10.4.1 wording corrected.
+  - **C3 (JSON output schema is examples, not contract):**
+    §10.4.2 now pins a normative field table covering `valid`,
+    `invalid`, and `inconclusive`, with required/optional
+    disposition, enum values for `result`, `reason`, `details.field`,
+    and `trust_source`, and a normative `warnings[]` array for
+    explicit-vs-live divergence and non-default-coordinator signals.
+  - **C5 (flag interaction matrix under-specified):** new §10.4.4
+    pins a flag-interaction matrix covering `--offline`,
+    `--quiet`, `--pubkey`, `--coordinator`, `--json`, `--explain`,
+    `MACPROVIDER_COORDINATOR`.
+  - **S4 (non-default coordinator trust hidden):** §10.4.2
+    `trust_source` enum now carries a `coordinator_host` companion
+    field whenever the source is live or cache-derived. JSON output
+    includes the host explicitly.
+  - **S5 (divergence warnings can disappear under `--quiet`):**
+    §10.2 + §10.4.2 now require the explicit-vs-live divergence
+    check to happen in ALL modes (including `--quiet`) and to be
+    recorded in the JSON `warnings[]` array; `--quiet` suppresses
+    only stderr emission, not the warning record itself.
+  - **C6 (bundle `receipt` placeholder mislabeled):** §10.4.1
+    example string corrected to reflect the
+    `<base64(JCS(T))>.<base64(SIG)>` wire shape.
+  - **A3 (per-provider `/poolz` variant undefined):** removed from
+    §10.2; the new `/v1/receipt-keys/<provider_id>` endpoint
+    replaces it.
+  - **A4 (cache keys lose provider identity):** §10.2 cache now
+    keyed by `(coordinator_host, provider_id, receipt_pubkey)`,
+    not bare pubkey bytes.
+  - **A5 (dep header candidate-only wording):** line 4 deps
+    updated to reflect SPEC-002 v1.4 and SPEC-006 v0.9 absorbed
+    locked status; new SPEC-002 v1.5 candidate annotation called
+    out explicitly.
+  - **A6 (AC-24 leaks "IMPL repo" boundary):** AC-24 rephrased to
+    name the verifier implementation test suite and release
+    artifacts, leaving repository layout to the BUILD prompt.
+
+**Change log v0.2.0:**
+- Promotes §10 from "informative; v0.2 normative" to NORMATIVE and
+  expands it into six subsections covering the buyer-side
+  `macprovider-verify` CLI contract.
+  - **§10.1 Result semantics:** pins a three-valued result
+    (`valid` / `invalid` / `inconclusive`). `inconclusive` is a
+    first-class result; a verifier that collapses it into either
+    of the others is non-conforming.
+  - **§10.2 Pubkey resolution:** priority-ordered sources
+    (explicit `--pubkey` → local cache → `/poolz`), 7-day cache TTL
+    matching §7.5.2 rotation grace, explicit-vs-live divergence
+    warning, and §10.2.1 rotation-grace behavior covering
+    `receipt_pubkey_prev`.
+  - **§10.3 Canonicalization parity:** bit-identical to the §3.2 /
+    §4 / §5 provider-side rules; explicitly forbids a "lenient"
+    verifier mode; mandates a Swift↔Go JCS parity CI gate.
+  - **§10.4 Inputs, outputs, exit codes:** header+hashes / bundle /
+    stdin input modes; bundle JSON shape pinned in §10.4.1
+    (strict-mode rejection of unknown keys, `bundle_version` for
+    future evolution); JSON-mode output schema in §10.4.2; exit
+    codes 0/1/2/64/65 in §10.4.3 (per `sysexits.h`).
+  - **§10.5 Network behavior:** verifier MUST NOT make any network
+    call beyond `/poolz`; no telemetry / no analytics / no
+    version-check beacon; single GET, 5-second timeout, no retries,
+    no redirects beyond operator-named coordinator host.
+  - **§10.6 Trust boundary:** uncompromising statement of what
+    `valid` does and does not prove. Specifically: NOT model
+    attestation (SPEC-011 / v0.3+), NOT timestamp honesty
+    (Q4 / v0.3+), NOT privacy properties (SPEC-008), NOT pubkey
+    trustworthiness (Q1 / v0.3+). Recommends `--explain` flag
+    that prints §10.6 verbatim after a `valid` result.
+- Extends §14 acceptance criteria with **AC-18 through AC-27**
+  covering: `valid` path on fresh receipts, three tamper-detection
+  `invalid` paths (output / prompt / timestamp), `inconclusive` on
+  `/poolz` unreachable, offline `--pubkey` path with zero network,
+  JSON-mode schema conformance, exit-code reachability, cache-TTL
+  refresh, and rotation-grace `receipt_pubkey_prev` acceptance.
+- Updates §15 Q4 (timestamp trust): partially addressed by §10.6
+  (out of scope for `valid` result); full normative skew-check
+  remains v0.3+ candidate.
+- v0.1.x §§1-9, §11-13, §14 AC-1..AC-17, §16 README compatibility
+  table are UNCHANGED. v0.1.3 issuance contract is preserved
+  bit-identically. v0.2 adds the verifier contract on top.
 
 **Change log v0.1.3:**
 - Round-3 codex audit fix pass against `specs/SPEC-015-audit.md`
@@ -1202,10 +1430,18 @@ streaming path.
 
 ---
 
-## 10. Verifier algorithm (informative; v0.2 normative)
+## 10. Verification (v0.2 NORMATIVE)
 
-A buyer with the receipt header value and the provider pubkey
-(fetched from `/poolz`) verifies as follows:
+v0.1 carried this section as a sketch (`informative; v0.2
+normative`). v0.2 promotes it to normative: buyers MUST be able to
+use the algorithm below — implemented by the v0.2 `macprovider-verify`
+CLI (binary contract per §10.4) — to obtain a deterministic
+verification result for any v0.1.3-shape receipt.
+
+### 10.0 Core algorithm (preserved from v0.1)
+
+A buyer with the receipt header value and a trusted provider pubkey
+verifies as follows:
 
 ```
 1. Split the header value on the first '.' → (b64_tuple, b64_sig).
@@ -1213,20 +1449,700 @@ A buyer with the receipt header value and the provider pubkey
 3. Decode SIG = base64_decode(b64_sig). Reject if len(SIG) != 64.
 4. Parse JCS_T as JSON to confirm well-formed and contains exactly
    the seven SPEC-015 §3.1 keys.
-5. Check provider_pubkey matches the pubkey the buyer trusts.
-6. ed25519_verify(provider_pubkey, JCS_T, SIG). Reject on failure.
+5. Resolve the trusted pubkey for the resolved `provider_id` per
+   §10.2 (sources: explicit `--pubkey` → cached entry → live
+   `GET /v1/receipt-keys/<provider_id>`). The verifier MUST NOT
+   resolve by scanning across providers for a matching
+   `provider_pubkey`; `provider_id` is the resolver address. If
+   the trust root cannot reach a verdict → `inconclusive`
+   (§10.1).
+6. ed25519_verify(trusted_pubkey, JCS_T, SIG). Reject on failure
+   → `invalid` (§10.1).
 7. Canonicalize the buyer's recorded request prompt per §4 →
-   prompt_hash_local. Reject if != receipt.prompt_hash.
+   prompt_hash_local. If != receipt.prompt_hash → `invalid`.
 8. Canonicalize the buyer's recorded response output per §5 →
-   output_hash_local. Reject if != receipt.output_hash.
-9. (Optional) Check unix_ts is within an operator-set skew window
-   from the buyer's record of when the response was received.
+   output_hash_local. If != receipt.output_hash → `invalid`.
+9. → `valid` (§10.1).
 ```
 
-v0.1 informatively specifies this algorithm; v0.2 will ship a
-normative `macprovider verify <receipt-json>` CLI that implements it
-in tested code and updates the SPEC to v0.2-locked verifier
-semantics.
+The optional `unix_ts` skew check that appeared in v0.1's sketch is
+removed from the v0.2 core algorithm. Per §10.6, the timestamp is
+NOT proven by a `valid` result; cross-checking against buyer-side
+received-at remains a v0.3+ candidate (§15 Q4). A v0.2 verifier MAY
+emit an informational warning if `unix_ts` is wildly off (e.g.
+> 24h skew vs. system clock), but MUST NOT downgrade the result to
+`invalid` on skew alone.
+
+### 10.1 Result semantics (the tri-state)
+
+A verifier MUST return exactly one of three results for any
+(receipt, request, response) input:
+
+| Result | Meaning | Exit code |
+|---|---|---|
+| `valid` | Signature verifies, canonical hashes match, pubkey resolved to a trusted source | 0 |
+| `invalid` | Signature fails OR a canonical hash mismatches OR pubkey is known-revoked | 1 |
+| `inconclusive` | Pubkey could not be resolved AND no explicit pubkey was supplied | 2 |
+
+A verifier MUST NOT collapse `inconclusive` into either of the other
+results. In particular, a verifier MUST NOT report `valid` when the
+pubkey is unresolved, even if a signature self-verifies against a
+pubkey embedded in the receipt: an unrooted pubkey is unrooted,
+regardless of the signature's internal consistency.
+
+`inconclusive` is the correct result when ANY of the following
+hold AND no explicit `--pubkey` was supplied AND the verifier
+passed §10.4 input validation (i.e. `provider_id` was obtainable
+at parse time per §10.4 "Provider-id requirements"):
+
+- The configured coordinator's `GET /v1/receipt-keys/<provider_id>`
+  endpoint (§10.7) is unreachable (network down, DNS failure, 5xx,
+  timeout, rate-limited via 429) AND no fresh cached entry exists
+  for `(coordinator_host, provider_id, receipt_pubkey)`, OR
+- The §10.7 endpoint returns HTTP 404 for the `provider_id` — an
+  authoritative "this provider is unknown to me" answer, treated
+  as `inconclusive` with `reason: "provider_id_not_in_pool"`
+  because the receipt itself may predate provider removal, OR
+- The cache holds only a stale entry (older than the §10.2 7-day
+  TTL) AND the live fetch fails.
+
+The "provider_id is not addressable at all" case (no CLI arg, no
+bundle field, no single-match cache) is NOT an `inconclusive`
+case in v0.2 — it is an exit-64 usage error per §10.4. The
+verifier rejects the invocation at parse time and never reaches
+the result-determination algorithm. See §10.4 "Provider-id
+requirements" for the exit-64 contract.
+
+`invalid` (not `inconclusive`) is the correct result when ANY of
+the following hold:
+
+- The resolver returns an authoritative provider record for the
+  resolved `provider_id` (HTTP 200, parseable response) whose
+  `receipt_pubkey` and `receipt_pubkey_prev.pubkey` are BOTH
+  different from the receipt's embedded `provider_pubkey` — the
+  coordinator has explicitly named the keys it endorses for this
+  provider and the receipt's key is not among them, OR
+- The resolver returns a `receipt_pubkey_prev` match BUT the
+  receipt's `unix_ts` falls outside the §10.2.1 grace window, OR
+- The signature check fails against a successfully-resolved
+  trusted pubkey, OR
+- Either canonical hash mismatches.
+
+The boundary between `inconclusive` and `invalid` is the
+authoritative-resolver-answer test: if the trust root reached a
+verdict ("no, I don't endorse this key for this provider"), the
+receipt is `invalid`; if the trust root could not reach a verdict
+(unreachable, identity unresolvable), the receipt is
+`inconclusive`. A receipt MUST NOT be `inconclusive` when the
+coordinator's authoritative response excludes its
+`provider_pubkey` — that case is a coordinator-rejected forgery
+(or retired key), not an environmental failure.
+
+The HTTP 404 response from the §10.7 endpoint (provider not in
+the current pool) is a degenerate case: it is authoritative
+("this `provider_id` is unknown to me") but the receipt itself may
+predate the provider's removal. v0.2 verifiers MUST treat 404 as
+`inconclusive` with `reason: "provider_id_not_in_pool"` per the
+§10.4.2 reason enum. v0.3+ MAY revisit this if the coordinator
+gains a "retired but historic" state.
+
+### 10.2 Pubkey resolution
+
+A verifier MUST resolve the pubkey it trusts against, in this
+priority order:
+
+1. **Explicit:** A pubkey supplied by the caller via
+   `--pubkey <44-char base64>`. Used for offline / air-gap
+   verification. When supplied alongside `--provider-id`, the
+   verifier MUST treat the pair as the trusted root regardless of
+   live coordinator state. The explicit pubkey wins the
+   verification result; live divergence is reported via
+   `warnings[]` per §10.4.2, not via result downgrade.
+2. **Cached:** A pubkey stored locally from a prior
+   `GET /v1/receipt-keys/<provider_id>` fetch (§10.7), keyed by
+   the tuple `(coordinator_host, provider_id, receipt_pubkey)`.
+   Cache entries MUST carry a `fetched_at` timestamp, the
+   `rotated_at` and `expires_at` timestamps as returned by the
+   coordinator, and the corresponding `receipt_pubkey_prev`
+   record (if any) for grace-window verification. All three
+   timestamps MUST be stored as RFC3339 UTC strings matching the
+   §10.7 wire shape; conversion from the receipt's Unix-seconds
+   `unix_ts` to RFC3339 (or vice versa) happens at the cache
+   boundary, not at every comparison. The receipt `unix_ts`
+   itself remains Unix seconds per the locked v0.1 wire contract.
+   - **Fresh entry** (cache `fetched_at` ≤ 7 days before `now()`):
+     used directly.
+   - **Stale entry** (cache `fetched_at` > 7 days before `now()`):
+     MUST trigger a
+     fresh live fetch. On fetch success, replace the entry. On
+     fetch failure, the verifier MUST NOT use the stale entry to
+     produce `valid` — the result is `inconclusive`. The
+     provider-reported `unix_ts` MUST NOT be used to revalidate
+     a stale cache entry (per §10.6, timestamp honesty is not
+     proven; staleness is a coordinator-attested property, not a
+     buyer-derivable one).
+   - The 7-day TTL matches §7.5.2 rotation grace; a key that has
+     not rotated within 7 days remains valid via fresh-fetch
+     refresh.
+3. **Live:** A fetch of `GET /v1/receipt-keys/<provider_id>`
+   (§10.7 — SPEC-002 v1.5 candidate annotation, public /
+   unauthenticated / rate-limited) on the coordinator named in
+   the verifier's config (default: `coordinator.streamvc.live`).
+   MUST be a single `GET` over HTTPS with a 5-second timeout and
+   no retries. On success, the verifier MUST update its cache
+   (write `fetched_at = now()`) before continuing. The verifier
+   MUST NOT fall back to `GET /poolz`: that endpoint is
+   operator-only per SPEC-002 v1.4 §FR-O2 and is not buyer-safe.
+
+`provider_id` resolution: when the bundle provides `provider_id`,
+the verifier uses it directly. When `provider_id` is absent, the
+verifier MUST NOT scan all known providers. The fallback order is:
+(1) explicit `--provider-id` CLI argument, (2) a single matching
+cached entry's `provider_id` under the configured coordinator. If
+neither yields a `provider_id` AND no `--pubkey` is supplied, the
+verifier exits `64` per §10.4 "Provider-id requirements" — the
+verifier MUST NOT emit `inconclusive` for missing-input cases.
+Pubkey-byte scanning across providers re-introduces the
+identity-loss problem audit A4 named.
+
+**Explicit-vs-live divergence handling (S5):** Whenever an
+explicit pubkey is supplied AND the verifier is not running with
+`--offline`, the verifier MUST attempt the live `/v1/receipt-keys`
+fetch in the background. If the live pubkey for the supplied
+`provider_id` differs from the explicit one, the verifier MUST
+record a `warnings[]` entry in JSON output with kind
+`explicit_vs_live_divergence` and the differing live pubkey. The
+explicit pubkey still wins for `result`; the warning is recorded
+regardless of `--quiet` (which suppresses only stderr emission,
+not the warning record itself). With `--offline`, the live check
+is skipped and a `warnings[]` entry of kind `live_check_skipped`
+is recorded for output transparency.
+
+If sources (1), (2), and (3) all fail to yield a trusted pubkey
+(no explicit, no fresh cached entry, `/v1/receipt-keys`
+unreachable or returns no matching entry), the result is
+`inconclusive`. A verifier MUST NOT fall back to "trust the
+receipt's embedded `provider_pubkey` on faith."
+
+#### 10.2.1 Rotation-grace behavior
+
+A receipt issued under the previous key during the §7.5.2 rotation
+grace window MUST verify `valid` ONLY when ALL of the following
+hold:
+
+1. The resolved `/v1/receipt-keys/<provider_id>` response (live or
+   cached) contains a non-null `receipt_pubkey_prev` block with a
+   `pubkey` field matching the receipt's `provider_pubkey`.
+2. The receipt's `unix_ts` satisfies
+   `rotated_at - 60s ≤ unix_ts ≤ expires_at`, where `rotated_at`
+   and `expires_at` are taken from the `receipt_pubkey_prev`
+   block.
+
+The `-60s` slack matches the v0.1 AC-11 invariant and absorbs
+provider-side clock skew within the rotation moment. A previous-
+key match OUTSIDE this interval MUST verify `invalid`, NOT
+`valid` or `inconclusive`: the coordinator has explicitly named the
+window during which the previous key was endorsed, and a receipt
+outside it is one of (a) a clock-cheating provider attempting to
+extend the grace, (b) a stale receipt the buyer is presenting late
+(out of contract), or (c) a forgery. None of these warrant
+`valid`.
+
+A receipt whose `provider_pubkey` matches neither `receipt_pubkey`
+nor `receipt_pubkey_prev.pubkey` for the resolved `provider_id`
+MUST be `invalid`, not `inconclusive`: the coordinator has
+explicitly stated which keys it endorses for this provider, and
+the receipt's key is not among them.
+
+### 10.3 Canonicalization parity
+
+The verifier MUST canonicalize the buyer-held prompt and response
+using **bit-identical** rules to those §3.2 and §§4-5 pin for the
+provider-side signing path. Specifically:
+
+- JCS per RFC 8785, with the SPEC-015 v0.1.1 §3.2 extensions
+  (RFC 8785 §3.2.2.3 float handling and explicit NFC normalization
+  of natural-language strings).
+- Prompt canonical object per §4.2 (16-key shape).
+- Output canonical object per §5.1 (`content` / `tool_calls` /
+  `finish_reason`).
+
+A v0.2-compliant verifier that diverges from these rules is
+non-conforming. A verifier MUST NOT add a "lenient" mode that
+accepts non-canonical inputs: doing so destroys the cryptographic
+property that makes verification meaningful.
+
+If a buyer's tool has re-serialized or pretty-printed the response
+JSON before passing it to `macprovider verify`, the canonicalization
+step (which re-parses the response to its abstract value and
+re-emits canonical bytes) MUST still reproduce the same
+`output_hash` the provider signed. If it does not, the receipt is
+`invalid`, not "verifier needs to be more lenient."
+
+The Go port of `RFC8785JCS.swift` shipped with the v0.2 verify CLI
+MUST include a parity test (`testdata/jcs_parity.json` — same
+inputs, same canonical outputs across Swift and Go) wired as a CI
+gate. Any drift between the two implementations MUST fail CI
+before the verify binary can be released.
+
+### 10.4 Inputs, outputs, exit codes
+
+The verifier MUST accept these input shapes:
+
+1. **Header + hashes mode:** `macprovider verify --receipt <base64>
+   --prompt-hash <hex> --output-hash <hex> [--provider-id <id>]` —
+   for callers who have already canonicalized and hashed the
+   request/response. `--provider-id` is REQUIRED in this mode
+   UNLESS `--pubkey` is also supplied (see §10.4 "Provider-id
+   requirements" below); without it the live resolver cannot be
+   addressed.
+2. **Bundle mode:** `macprovider verify --bundle <path>
+   [--provider-id <id>]` — bundle JSON shape pinned in §10.4.1.
+   The bundle's `provider_id` field MAY be omitted; if so,
+   `--provider-id` becomes REQUIRED for online verification.
+   `--provider-id` (when supplied) MUST match the bundle's
+   `provider_id` (when also present); a mismatch is a usage error
+   (exit 64).
+3. **Stdin mode:** `cat bundle.json | macprovider verify -
+   [--provider-id <id>]` — same shape as bundle mode, read from
+   stdin. Same `--provider-id` rules.
+
+A verifier MAY accept additional input shapes (e.g. raw HTTP
+response capture) as long as they reduce to one of the three above
+before the §10.0 algorithm runs.
+
+**Provider-id requirements (CF5 / CF7 normative):** The §10.7
+resolver endpoint is addressed by `provider_id`. The verifier MUST
+obtain `provider_id` from one of:
+
+1. The `--provider-id <id>` CLI argument (first-class input).
+2. The bundle's `provider_id` field (bundle/stdin modes only).
+3. A single matching cached entry for `receipt_pubkey` under the
+   configured coordinator (degenerate "I've seen exactly one of
+   these before" path; verifier MUST NOT scan multiple cached
+   entries).
+
+**Without `--pubkey` (online verification path):** `provider_id`
+MUST be obtained from (1)/(2)/(3) before the verifier runs. If
+none of those sources yield a `provider_id`, the verifier MUST
+reject the invocation with exit code `64` (usage error) and a
+clear error message naming `--provider-id` as the missing input.
+The verifier MUST NOT run to completion and emit `inconclusive` in
+this case: the receipt may be perfectly valid, but the buyer has
+not supplied enough information to reach the trust root. This is
+a CLI contract violation, not a trust-root failure. Other
+"missing required argument" cases (`--receipt`, `--bundle`) follow
+the same exit-64 convention.
+
+**With explicit `--pubkey`:** online verification does NOT require
+`provider_id` to produce `valid` — the explicit pubkey serves as
+the trust root. The verifier MUST still attempt to record
+`provider_id` (from sources 1/2/3) for output reporting and the
+live divergence-warning check (§10.2). If no `provider_id` is
+recoverable AND the verifier is online, JSON output emits
+`provider_id: null` and `warnings[]` gains a
+`live_check_skipped` entry with `reason:
+"provider_id_unresolvable"`. The verifier MUST NOT
+fingerprint-scan across providers under any circumstance.
+
+The verifier MUST NOT use `inconclusive` as a substitute for the
+missing-provider-id exit-64 case: `inconclusive` is reserved for
+trust-root failures the verifier discovered during execution, not
+for CLI contract violations the verifier knows at parse time.
+
+#### 10.4.1 Bundle JSON shape
+
+```json
+{
+  "bundle_version": 1,
+  "receipt": "<base64(JCS(T))>.<base64(SIG)>",
+  "request": { "model": "...", "messages": [ ... ], ... },
+  "response": { "id": "...", "choices": [ ... ], "usage": { ... } },
+  "provider_id": "m1-anon"
+}
+```
+
+- `bundle_version` (REQUIRED, integer): pinned to `1` in v0.2.x. A
+  verifier MUST reject any other value as an **input format error**
+  with exit code `65` per §10.4.3. (Unsupported `bundle_version` is
+  data that the verifier cannot parse, not a CLI usage mistake.)
+  v0.3+ MAY introduce `bundle_version: 2` for additive fields;
+  v0.3+ verifiers MUST continue to accept `bundle_version: 1`.
+- `receipt` (REQUIRED, string): the verbatim value of the
+  `X-MacProvider-Receipt` response header, which per §3.4 has the
+  shape `<base64(JCS(T))>.<base64(SIG)>` (two base64 segments
+  separated by a literal `.`).
+- `request` (REQUIRED, object): the OpenAI
+  `/v1/chat/completions` request body as captured by the buyer.
+  This is the raw request as the buyer's HTTP client saw it; the
+  verifier MUST NOT require pre-canonicalization or pre-population
+  of optional fields. Any §4.2 canonical-prompt field absent from
+  the captured request canonicalizes as JSON `null` per the locked
+  v0.1 §4.2 rule. Buyers who use the OpenAI SDK with only the
+  required `model` + `messages` parameters MUST be able to bundle
+  the SDK-sent request unchanged and have it verify.
+- `response` (REQUIRED, object): the OpenAI completion response
+  as captured by the buyer. Same rule: raw, no pre-canonicalization.
+- `provider_id` (OPTIONAL, string): the provider identifier as
+  surfaced by the coordinator. When present, this is used as the
+  primary key for §10.2 step 2/3 pubkey resolution and §10.2.1
+  rotation-grace lookup. When absent, the verifier follows the
+  §10.4 "Provider-id requirements" fallback order (explicit
+  `--provider-id`, then single-match cache); if neither yields a
+  `provider_id` AND no `--pubkey` is supplied, the verifier exits
+  `64` (usage error) before any verification runs. The verifier
+  MUST NOT emit `inconclusive` for missing-input cases.
+
+A v0.2 verifier MUST reject unknown top-level keys with exit code
+`65` (input format error per §10.4.3). This prevents future
+ambiguity about field semantics and forces forward-compatibility
+changes through the `bundle_version` bump.
+
+#### 10.4.2 Output modes
+
+`--json` MUST emit a single line of JSON conforming to the field
+table below.
+
+**Top-level fields:**
+
+| Field | Disposition | Type | Notes |
+|---|---|---|---|
+| `result` | REQUIRED | enum string | One of `valid`, `invalid`, `inconclusive`. |
+| `reason` | REQUIRED | enum string | See "reason values" table below. |
+| `provider_id` | REQUIRED-when-resolved, else `null` | string\|null | The coordinator-attested `provider_id` used for pubkey lookup. `null` when result is `inconclusive` and no provider could be identified. |
+| `model_id` | REQUIRED-when-resolved, else `null` | string\|null | Read from the receipt tuple. `null` only when the tuple itself could not be parsed (a `65` exit-code path that produces no JSON anyway). |
+| `signed_at` | REQUIRED-when-resolved, else `null` | integer\|null | The receipt's `unix_ts`. Same null rule as `model_id`. |
+| `trust_source` | REQUIRED | enum string | One of `explicit_pubkey`, `cache`, `live`, `none`. The last only when `result == "inconclusive"`. |
+| `coordinator_host` | REQUIRED-when-trust_source-is-network-derived, else `null` | string\|null | The coordinator host that supplied the trust root. Required when `trust_source` is `cache` (cache origin host) or `live`. `null` for `explicit_pubkey` (no coordinator involved) and `none`. |
+| `details` | REQUIRED-when-invalid, else absent | object | See "details schema" below. MUST be present when `result == "invalid"`. MUST be absent otherwise. |
+| `warnings` | OPTIONAL | array of objects | Each entry has a `kind` (enum) and `kind`-specific fields. See "warnings schema" below. Array MAY be empty or absent when no warnings apply. |
+
+**`reason` values (enum, exhaustive for v0.2.x):**
+
+- For `valid`: `signature_and_canonicalization_match`
+- For `invalid`: `signature_verify_failed`, `prompt_hash_mismatch`,
+  `output_hash_mismatch`, `pubkey_not_endorsed`,
+  `previous_key_outside_grace_window`, `bundle_pubkey_provider_mismatch`
+- For `inconclusive`: `pubkey_unresolvable`,
+  `provider_id_not_in_pool`, `cache_stale_and_live_unreachable`
+
+v0.3+ MAY extend the enum additively; v0.3+ verifiers MUST emit
+v0.2-known values for v0.2-mapped cases.
+
+**`details` schema (REQUIRED when `result == "invalid"`):**
+
+| Field | Type | Notes |
+|---|---|---|
+| `field` | enum string | One of `signature`, `prompt_hash`, `output_hash`, `pubkey`, `grace_window`. |
+| `computed` | string | The value the verifier computed (hex for hashes, base64 for pubkey, etc.). Absent only when `field == "signature"` (the signature check is opaque). |
+| `receipt` | string | The value carried by the receipt for comparison. |
+| `extra` | object | OPTIONAL, `field`-specific extra context (e.g. `rotated_at`/`expires_at`/`unix_ts` for `grace_window`). |
+
+**`warnings[]` schema:**
+
+| `kind` value | Additional fields | When emitted |
+|---|---|---|
+| `explicit_vs_live_divergence` | `live_pubkey` (string), `coordinator_host` (string) | Explicit `--pubkey` was used AND a live `/v1/receipt-keys` fetch succeeded AND returned a different pubkey for the same `provider_id`. |
+| `live_check_skipped` | `reason` (one of `offline_flag`, `network_unreachable`, `provider_id_unresolvable`) | The live divergence check did not run. `offline_flag`: `--offline` was passed. `network_unreachable`: live fetch failed (network down, 5xx, timeout, 429). `provider_id_unresolvable`: explicit `--pubkey` was supplied AND no `provider_id` was recoverable from CLI, bundle, or cache (the verifier had nothing to address the resolver with). |
+| `non_default_coordinator` | `coordinator_host` (string) | A non-default coordinator (i.e. not `coordinator.streamvc.live`) was used as the trust-root source. |
+| `clock_skew` | `unix_ts` (int), `system_time` (int), `delta_seconds` (int) | Receipt `unix_ts` differs from the verifier's system clock by more than 24 hours. Informational only — does NOT downgrade `result` per §10.6. |
+
+A verifier MUST emit `warnings[]` entries regardless of `--quiet`
+(which suppresses only stderr emission, not the JSON record).
+
+**Example outputs:**
+
+```json
+{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","warnings":[]}
+```
+
+```json
+{"result":"invalid","reason":"output_hash_mismatch","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","details":{"field":"output_hash","computed":"ab12...","receipt":"cd34..."}}
+```
+
+```json
+{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"none","coordinator_host":null,"warnings":[{"kind":"live_check_skipped","reason":"network_unreachable"}]}
+```
+
+**Default (non-JSON) human-readable output** is a single line:
+
+```
+valid (m1-anon · qwen2.5-7b-instruct-q4 · signed 2026-06-23T08:00Z · trust=live@coordinator.streamvc.live)
+invalid: output_hash mismatch (computed=ab12... receipt=cd34...)
+inconclusive: cache stale and /v1/receipt-keys unreachable on coordinator.streamvc.live
+```
+
+When the `trust_source` is `live` or `cache`, the human-mode line
+MUST include the coordinator host (rendered as
+`trust=<source>@<host>`). Warnings MUST be printed to stderr (one
+per line, prefixed `warning:`) unless `--quiet` suppresses stderr.
+
+The v0.2 CLI SHOULD include a `--explain` flag that prints §10.6
+verbatim to stderr after a `valid` result, so a buyer who reads
+`valid` is reminded of what `valid` does and does not mean.
+
+#### 10.4.3 Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | `valid` |
+| 1 | `invalid` (signature, canonicalization, coordinator-rejected pubkey, or previous-key-outside-grace-window) |
+| 2 | `inconclusive` (pubkey unresolvable, provider_id not in pool per §10.7 404, cache stale + live unreachable) |
+| 64 | usage error (per `sysexits.h`, `EX_USAGE`) — unknown CLI flag, missing required CLI argument, mutually-exclusive flags combined (e.g. `--bundle` + `--receipt`), invalid value format for a CLI flag (e.g. malformed `--pubkey` base64) |
+| 65 | input format error (per `sysexits.h`, `EX_DATAERR`) — malformed bundle JSON, missing required bundle field, unknown bundle top-level key, unsupported `bundle_version`, malformed receipt header value (cannot split on `.`), base64 decode failure on tuple or signature, tuple JSON not well-formed or wrong key set |
+
+These exit codes are normative. Scripts and CI pipelines WILL rely
+on them. A future v0.3+ verifier MUST preserve the 0/1/2/64/65
+mapping; adding new exit codes for new failure modes is allowed
+only in the >65 range (e.g. 66 for cache-corruption diagnostics).
+
+**`64` vs `65` boundary:** `64` is for problems with how the
+verifier was *invoked*; `65` is for problems with the *data* the
+verifier was asked to verify. An unsupported `bundle_version` is
+data the verifier cannot parse, so it is `65`. A typo'd flag is
+how the verifier was invoked, so it is `64`. A malformed
+`--pubkey` argument is `64` (the flag value is malformed,
+preventing invocation), but a malformed `receipt` field inside a
+syntactically-valid bundle is `65` (the bundle was accepted, but
+its receipt content is unparseable).
+
+#### 10.4.4 Flag interaction matrix
+
+The v0.2 CLI flags are listed in §10.4. This matrix pins their
+interaction semantics for combinations that are not obvious from
+individual flag descriptions.
+
+| Flag combination | Live `/v1/receipt-keys` fetch? | Divergence warning? | Stderr emission? | Result downgrade? |
+|---|---|---|---|---|
+| (no `--pubkey`, no `--offline`) | YES (default path) | n/a | per-mode | n/a |
+| `--pubkey P` (no `--offline`) | YES (background, for divergence check) | YES if live differs | per `--quiet` | NO — explicit wins |
+| `--pubkey P --offline` | NO | n/a — `live_check_skipped` warning emitted | per `--quiet` | NO |
+| `--offline` (no `--pubkey`) | NO | n/a | per `--quiet` | `inconclusive` if cache miss / stale |
+| `--quiet` (alone) | per other flags | per other flags | SUPPRESSED (stderr only) | NO |
+| `--quiet --json` | per other flags | per other flags | SUPPRESSED (stderr); warnings still in JSON `warnings[]` | NO |
+| `--coordinator H` (or env) | YES, against host `H` | per other flags | per `--quiet` | NO; `non_default_coordinator` warning if `H != coordinator.streamvc.live` |
+| `--explain` | per other flags | per other flags | §10.6 verbatim printed to stderr after valid result | NO |
+| `--bundle B --receipt R` | n/a | n/a | n/a | USAGE ERROR (exit 64) — mutually exclusive |
+| `--bundle -` (stdin mode) | per other flags | per other flags | per `--quiet` | NO |
+| `--provider-id I` + header+hashes mode (no `--pubkey`) | YES, addressed by `I` | n/a (no explicit) | per `--quiet` | NO if resolver responds; `inconclusive` if `I` returns 404 |
+| `--provider-id I` + header+hashes mode + `--pubkey P` | YES (background only) | YES if live differs | per `--quiet` | NO — explicit wins |
+| `--provider-id I` + bundle mode where bundle also has `provider_id: J` and `I != J` | n/a | n/a | n/a | USAGE ERROR (exit 64) — mismatched provider identity |
+| `--provider-id I` + bundle mode where bundle has `provider_id: I` (or none) | per other flags | per other flags | per `--quiet` | NO |
+| header+hashes mode (no `--provider-id`, no `--pubkey`) | n/a | n/a | n/a | USAGE ERROR (exit 64) — `--provider-id` required for online verification without explicit pubkey |
+| bundle/stdin mode (no bundle `provider_id`, no `--provider-id`, no `--pubkey`, no single-match cache entry) | n/a | n/a | n/a | USAGE ERROR (exit 64) — same as above; provider id unobtainable for online verification |
+| header+hashes mode + `--pubkey P` (no `--provider-id`) | NO (no `provider_id` to address) | n/a | per `--quiet`; `live_check_skipped` warning with `reason: provider_id_unresolvable` | NO — explicit pubkey wins; `provider_id: null` in JSON output |
+
+**`--provider-id` summary:** REQUIRED for online verification in
+header+hashes mode unless `--pubkey` is supplied. OPTIONAL in
+bundle/stdin modes when the bundle carries `provider_id` (the
+bundle field takes precedence on absence; mismatch is a usage
+error). When neither source provides `provider_id` AND no
+`--pubkey` is supplied, the verifier rejects the invocation with
+exit code `64` per §10.4 "Provider-id requirements" — the
+verifier MUST NOT scan and MUST NOT emit `inconclusive` in this
+case (it is a CLI contract violation, not a trust-root failure).
+
+The matrix is normative. A verifier MUST NOT introduce flag
+combinations whose semantics aren't covered here or aren't
+trivially derivable from §10.4 / §10.4.2 / §10.5. A v0.3+ verifier
+MAY add new flags; if a new flag interacts with any v0.2 flag, the
+v0.3+ spec MUST extend this matrix.
+
+`--quiet` semantics (final): suppresses all stderr emission
+(including `warning:` lines and `--explain` output). Does NOT
+suppress JSON `warnings[]` records. Does NOT change exit code.
+
+### 10.5 Network behavior
+
+The verifier MUST NOT make any network call beyond
+`GET /v1/receipt-keys/<provider_id>` (§10.7) on the configured
+coordinator host for pubkey resolution. No telemetry. No opt-in
+analytics. No version-check beacon. No crash reporting. No update
+check. No fallback to `/poolz` (which is operator-only per SPEC-002
+v1.4 §FR-O2). A buyer running
+`macprovider verify --offline --pubkey <p> ...` on an air-gapped
+Mac MUST observe zero network traffic (verifiable via packet
+capture or a network sandbox that denies all egress).
+
+The live fetch is a single `GET` over HTTPS with a 5-second
+connection-plus-read timeout. No retries. The verifier MUST NOT
+follow HTTP redirects beyond the configured coordinator host
+(default: `coordinator.streamvc.live`; configurable via
+`--coordinator` flag or `MACPROVIDER_COORDINATOR` environment
+variable). Redirects whose `Location` resolves to a different host
+MUST be treated as a fetch failure (contributing to `inconclusive`
+when no fresh cache exists), not silently followed. A redirect to
+the SAME host (e.g. http→https upgrade) MAY be followed.
+
+A buyer who wants different timeout / retry semantics MUST
+pre-populate the cache and run with `--offline`. The verifier MUST
+NOT expose `--timeout` or `--retries` flags in v0.2: variability
+in fetch semantics across deployments would make `inconclusive`
+mean different things to different buyers.
+
+When the configured coordinator host is NOT the default
+`coordinator.streamvc.live`, the verifier MUST record a
+`non_default_coordinator` warning per §10.4.2 in every output
+(JSON and human-mode stderr unless `--quiet`). The trust boundary
+is coordinator-specific; making non-default coordinators visible
+is a buyer-protection invariant.
+
+### 10.6 Trust boundary
+
+A `valid` result from `macprovider verify` proves **exactly this**:
+a holder of the provider's private key signed a canonical tuple
+containing the values (`model_id`, `prompt_hash`, `output_hash`,
+`provider_pubkey`, `ttft_ms`, `tokens_out`, `unix_ts`), AND the
+pubkey that signature checks against is the one the coordinator
+publishes for the resolved `provider_id` at verification time (or
+was within the §7.5.2 rotation grace window per §10.2.1).
+
+The phrasing "signed a tuple containing `unix_ts`" is deliberate:
+the signature commits the holder of the private key to the claimed
+timestamp value, but does NOT prove that value reflects the real
+wall-clock time at signing. The signed-at attestation is about
+content, not chronology.
+
+A `valid` result DOES NOT prove:
+
+- **That the response was generated by the model named in
+  `model_id`.** Model-hash binding is the SPEC-011 v0.5
+  catalog-signing surface; folding `model_hash` into the receipt
+  tuple is the v0.3+ candidate per §15 Q6. A v0.2 verifier MUST
+  NOT silently treat `valid` as "model attestation."
+- **That `unix_ts` is honest.** The timestamp is provider-reported.
+  The verifier MAY optionally cross-check against a buyer-recorded
+  received-at timestamp with an operator-set skew window, but v0.2
+  does NOT require this check (see §15 Q4), and a `valid` result
+  without skew-check does NOT attest to timestamp honesty.
+- **That no other party also saw the response.** Privacy
+  properties are SPEC-008 / Cluster E territory and are orthogonal
+  to receipt verification. A receipt with `valid` says nothing
+  about whether the operator, the coordinator, the gateway, or
+  another buyer also observed the response bytes.
+- **That the pubkey itself is trustworthy in some absolute sense.**
+  v0.1's §8 trust root (`/poolz`) is operator-mutable. The v0.1
+  SPEC is honest about this; v0.2 inherits that honesty without
+  weakening it. The §15 Q1 stronger-trust-root work (TUF-style
+  signing, on-chain anchor) is v0.3+ scope.
+- **That the response was delivered to the buyer who is now
+  verifying it.** A receipt commits to (prompt, output, provider);
+  it does not commit to `request_id` or a buyer-supplied nonce.
+  Replay-resistance is §15 Q2 (v0.2 verifier scope per the v0.1
+  text, now deferred to v0.3+ — see §15 Q2 update below).
+- **That this was the only receipt issued for this response.** A
+  receipt does not commit to uniqueness. A provider could in
+  principle issue multiple receipts for the same canonical
+  (prompt, output) tuple — to different buyers, on different
+  reconnects, or by re-running the same prompt. Each receipt
+  independently verifies on its own merits; `valid` says nothing
+  about whether another `valid` receipt also exists. This matters
+  for accounting (a buyer cannot use a receipt as proof of
+  sole-delivery for billing-dispute purposes) and is orthogonal
+  to the replay-resistance concern above.
+
+A `valid` result from `macprovider verify` is therefore a narrow,
+specific proof: cryptographic evidence that some holder of the
+provider's signing key — which the coordinator currently endorses
+— attests to having produced this (prompt → output) mapping. It
+is necessary for verifiable inference. It is not sufficient.
+SPEC-015 v0.3+ closes the remaining gaps (model attestation,
+timestamp honesty, replay resistance, stronger trust root) in
+priority order determined by audit-loop and operator demand.
+
+A verifier's human-mode output line for `valid` SHOULD frame this
+scope visibly — e.g. by including the phrase `signed by m1-anon`
+rather than `verified m1-anon`. The `--explain` flag of §10.4.2
+exists precisely to make this trust boundary unmissable to a
+buyer who is about to act on a `valid` result.
+
+### 10.7 SPEC-002 v1.5 candidate annotation: `GET /v1/receipt-keys/<provider_id>`
+
+v0.2's verifier contract depends on a public, buyer-callable
+pubkey-resolution endpoint that the locked SPEC-002 v1.4 surface
+does not provide (`GET /poolz` is operator-only per §FR-O2;
+`GET /v1/pool/check` does not return receipt-key material). v0.2
+pins the buyer endpoint as a SPEC-002 v1.5 **candidate annotation**
+following the same parser-optional / additive / non-breaking
+pattern v0.1 used for `receipt_pubkey` (SPEC-002 v1.4 candidate)
+and `provider_receipt_public_key` (SPEC-001 v1.6 candidate).
+
+A SPEC-002 v1.5 release MUST add the endpoint as specified below;
+SPEC-015 v0.2 implementations MAY use it before SPEC-002 v1.5 LOCK
+provided the coordinator returns the exact shape.
+
+**Endpoint:** `GET /v1/receipt-keys/<provider_id>`
+
+- **Host placement:** Same nginx route split as the existing
+  buyer-facing `GET /v1/pool/check` (SPEC-002 v1.4 §FR-O3) — i.e.
+  on the `buyer_port` route, NOT the operator `/poolz` route.
+- **Authentication:** NONE (public). A buyer with no operator
+  credentials MUST be able to call this endpoint. Pubkey
+  attestation is a public-trust-root surface — the same property
+  TUF / on-chain anchoring (§15 Q1) layers on top of.
+- **Rate limiting:** Operator-configurable; recommended floor
+  `10 req/sec` per source IP, with a `429` response on overage.
+  This protects the coordinator against amplification attacks
+  while leaving headroom for batch buyer-side verification.
+- **Caching headers:** Response MUST include `Cache-Control: public,
+  max-age=300` (5 minutes). Verifiers SHOULD NOT bypass this cache
+  via `Cache-Control: no-cache` request headers — staleness up to
+  5 minutes is acceptable for receipt verification, and bypass
+  attacks would defeat the rate-limit.
+
+**Response (success, HTTP 200):**
+
+```json
+{
+  "provider_id": "m1-anon",
+  "receipt_pubkey": "<44-char base64 ed25519 pubkey>",
+  "receipt_pubkey_prev": null | {
+    "pubkey": "<44-char base64 ed25519 pubkey>",
+    "rotated_at": "<RFC3339 UTC>",
+    "expires_at": "<RFC3339 UTC>"
+  },
+  "fetched_at": "<RFC3339 UTC; server-side now()>"
+}
+```
+
+The `receipt_pubkey` and `receipt_pubkey_prev` fields MUST be
+sourced from the same coordinator memory the SPEC-002 v1.4 §FR-O2
+`/poolz` response reads (i.e. the in-memory `Provider.ReceiptPubkey`
+state per §13). Response MUST NOT leak any operator-sensitive
+field (e.g. `endpoint_url`, `hostname`, `connected_at`,
+`slots_total`, `throughput_tps_estimate`) — only the receipt-key
+tuple.
+
+**Response (error):**
+
+- **404** — `provider_id` not in the current pool. Body is the
+  SPEC-002 §FR-X-N standard JSON error envelope with
+  `error.code = provider_not_found`. The verifier treats this as
+  `inconclusive` with `reason: "provider_id_not_in_pool"`, NOT
+  `invalid`: the provider may have been retired, but the receipt
+  is not necessarily a forgery.
+- **429** — rate limit exceeded. Verifier treats as a fetch
+  failure (contributing to `inconclusive` if no cache), MUST NOT
+  retry within the same verification invocation.
+- **5xx** — coordinator internal failure. Same fetch-failure
+  treatment as `429`.
+
+**Reference behavior on rotation:** Within the §7.5.2 7-day grace
+window, the response carries BOTH `receipt_pubkey` (the new key)
+AND `receipt_pubkey_prev` (the previous key block, with
+`rotated_at` and `expires_at`). After the grace window expires,
+the coordinator MUST drop `receipt_pubkey_prev` (set to `null`).
+This precisely mirrors the existing `/poolz` `receipt_pubkey_prev`
+shape so SPEC-002 v1.5 reuses the v1.4 data model.
+
+**Why this is a candidate annotation, not an operator demand:**
+the SPEC-002 v1.5 amendment is additive (new endpoint, no changes
+to existing endpoints), non-breaking (`/poolz` retains operator-
+only access), parser-optional (a SPEC-002 v1.4 coordinator without
+the new endpoint returns `404`; verifier treats as `inconclusive`
+and falls back to explicit/cache). This matches the SPEC-008 v0.3
+§5.3 / §5.7 candidate-annotation pattern used throughout the
+v0.1-line cross-cuts.
 
 ---
 
@@ -1432,6 +2348,96 @@ admit successfully, the coordinator MUST log
 flagged in its `/poolz` row as `receipt_pubkey: null` until a
 subsequent reconnect with the field present.
 
+### v0.2 additions: verifier acceptance criteria
+
+**AC-18.** `macprovider verify --bundle <fresh-receipt-bundle.json>`
+MUST exit `0` with `result: "valid"` for a bundle whose receipt
+was issued by a v1.6 binary against a matching prompt/response,
+where `GET /v1/receipt-keys/<bundle.provider_id>` (§10.7) on the
+configured coordinator returns the issuing pubkey as
+`receipt_pubkey` (current key) at the time of verification.
+
+**AC-19.** Flipping a single byte in
+`response.choices[0].message.content` of the bundle and re-running
+`macprovider verify --bundle ...` MUST exit `1` with
+`result: "invalid"`, `details.field: "output_hash"`, and the
+non-matching computed/receipt hash pair populated.
+
+**AC-20.** Flipping a single character in
+`request.messages[0].content` (e.g. a single Unicode codepoint
+change) MUST exit `1` with `result: "invalid"` and
+`details.field: "prompt_hash"`.
+
+**AC-21.** Mutating any byte of the base64-decoded signed tuple
+(e.g. flipping the last digit of `unix_ts`) without re-signing
+MUST exit `1` with `result: "invalid"` and `reason` referencing
+signature verification failure (the signature check fails before
+any field-level mismatch is reported).
+
+**AC-22.** With `GET /v1/receipt-keys/<provider_id>` unreachable
+(configured coordinator host returns connection refused, 5xx, or
+timeout within the §10.5 5-second budget) AND no fresh cached
+entry for `(coordinator_host, provider_id, receipt_pubkey)` AND no
+`--pubkey` argument, `macprovider verify --bundle <bundle.json>`
+MUST exit `2` with `result: "inconclusive"`,
+`trust_source: "none"`, and a `warnings[]` entry of kind
+`live_check_skipped` with `reason: "network_unreachable"`.
+
+**AC-23.** `macprovider verify --offline --pubkey
+<correct-44-char-base64> --provider-id <id> --bundle <bundle.json>`
+MUST exit `0` with `result: "valid"` AND emit ZERO network traffic
+to any host. (Test this by running in a sandbox that denies all
+egress; observe exit 0 and no DNS / TCP attempts.) JSON output
+MUST include a `warnings[]` entry of kind `live_check_skipped`
+with `reason: "offline_flag"`.
+
+**AC-24.** `macprovider verify --json` output MUST be exactly one
+line of JSON conforming to the §10.4.2 field table. The verifier
+implementation's release artifact MUST include a JSON-Schema
+document covering `valid`, `invalid`, and `inconclusive` outputs
+(including the `details` and `warnings[]` shapes), and the
+verifier's test suite MUST validate every output across its
+acceptance fixtures against that schema. The schema document MUST
+be addressable from the release (e.g. published alongside the
+binary) so independent buyer-side automation can validate verifier
+output without re-deriving the schema from this spec.
+
+**AC-25.** Each of the five normative exit codes (`0`, `1`, `2`,
+`64`, `65`) MUST be reachable by a concrete invocation pinned in
+the verifier's acceptance test suite. `64` is reachable e.g. via
+`macprovider verify --unknown-flag` or `macprovider verify
+--pubkey badbase64== --bundle good.json` (malformed flag value).
+`65` is reachable e.g. via `macprovider verify --bundle
+<malformed.json>`, a bundle with `bundle_version: 99`, a bundle
+with an unknown top-level key, or a receipt header value that
+fails to split on `.`. The `64` vs `65` boundary defined in
+§10.4.3 MUST hold across all paths.
+
+**AC-26.** A cache entry whose `fetched_at` is more than 7 days
+before the verifier's wall clock MUST trigger a fresh
+`GET /v1/receipt-keys/<provider_id>` fetch on the next
+verification attempt that would use it. The acceptance test suite
+MUST verify this by mocking the cache `fetched_at` and asserting
+an outgoing HTTP `GET /v1/receipt-keys/...` call is made against
+the configured coordinator host. If the live fetch fails AND no
+fresh source remains, the verifier MUST exit `2`
+(`inconclusive`); the stale entry MUST NOT be used to produce
+`valid` per §10.2.
+
+**AC-27.** A receipt issued during the §7.5.2 7-day rotation
+grace window verifies `valid` if and only if ALL of the following
+hold simultaneously: (a) the resolved `/v1/receipt-keys/<provider_id>`
+response contains a non-null `receipt_pubkey_prev` block whose
+`pubkey` field matches the receipt's `provider_pubkey`, AND (b)
+the receipt's `unix_ts` satisfies `rotated_at - 60s ≤ unix_ts ≤
+expires_at` per the previous-key block. A previous-key match
+OUTSIDE this interval MUST verify `invalid` with
+`reason: "previous_key_outside_grace_window"`. A receipt whose
+`provider_pubkey` appears in neither `receipt_pubkey` nor
+`receipt_pubkey_prev.pubkey` for the resolved `provider_id` MUST
+verify `invalid` with `reason: "pubkey_not_endorsed"` (not
+`inconclusive`).
+
 ---
 
 ## 15. Open questions
@@ -1440,18 +2446,27 @@ These are flagged for v0.x audit cycles and are NOT resolved in
 v0.1. Implementers MUST NOT pin behavior in v0.1 that pre-decides
 these.
 
-**Q1: Stronger trust root.** Should `/poolz` pubkey publication
-eventually be signed by an offline operator key (TUF-style) or
-anchored to an external registry (AntFeed provider listing, an
-on-chain Cluster D-token registry)? v0.1 is honest about
-operator-mutability. v0.3+ candidate.
+**Q1: Stronger trust root.** Should the buyer-facing
+`GET /v1/receipt-keys/<provider_id>` endpoint (SPEC-015 v0.2 §10.7
+candidate annotation) eventually be signed by an offline operator
+key (TUF-style) or anchored to an external registry (AntFeed
+provider listing, an on-chain Cluster D-token registry)? v0.2
+inherits v0.1's honest acknowledgement that the coordinator-
+returned pubkey set is operator-mutable; v0.2 narrows the
+buyer-exposed surface from the operator-only `/poolz` to the
+public `/v1/receipt-keys` endpoint, but does NOT add a signature
+or anchor on top. The §10.7 endpoint is the natural foundation
+for the v0.3+ work — TUF / on-chain anchoring would sign the
+response shape pinned in §10.7. v0.3+ candidate.
 
 **Q2: Replay-resistance and request-id binding.** The receipt does
 NOT bind `request_id`. A malicious replay of the response body to a
 different buyer would yield the same `output_hash` for the same
 prompt. Should the receipt commit to `request_id` or a buyer-supplied
 nonce? If so, where does the buyer obtain its expected `request_id`?
-v0.2 verifier scope or v0.3+ depending on operator decision.
+v0.2 §10.6 (trust boundary) names replay-resistance as explicitly
+NOT proven by a `valid` result; full normative replay-binding is
+deferred to v0.3+ pending operator decision and audit input.
 
 **Q3: Cross-provider routing.** Once Cluster F sharding lands, a
 single response may span multiple provider segments. Receipt-per-
@@ -1461,7 +2476,13 @@ v0.4+ candidate.
 
 **Q4: Timestamp trust.** `unix_ts` is provider-reported. Should the
 buyer cross-check against the coordinator's response timestamp, and
-what skew window is acceptable? v0.2 verifier scope.
+what skew window is acceptable? **Partially addressed in v0.2:**
+§10.6 names timestamp honesty as explicitly NOT proven by a `valid`
+result; §10.0 step 9 removes the v0.1-sketch optional skew check
+to avoid implying timestamp attestation. Full normative skew-check
+(buyer-recorded received-at vs `unix_ts` with operator-set window)
+remains v0.3+ candidate pending coordinator-side timestamp surface
+and operator skew-policy decision.
 
 **Q5: Streaming receipt delivery mechanism.** v0.1's terminal
 `event: receipt` SSE block was rejected in the round-1 audit (C1)
