@@ -1,107 +1,134 @@
 # macprovider-verify
 
-`macprovider-verify` is the buyer-side verifier module for SPEC-015
-receipts. This Step 1 module is intentionally only a scaffold: it exposes the
-future CLI surface, version reporting, package layout, CI gate, and build
-targets, but it does not verify receipts yet.
+Buyer-side verification for SPEC-015 signed inference receipts.
 
-The verifier is scoped to SPEC-015 v0.2.4 receipt verification. The locked
-CLI contract is described in
-[SPEC-015 section 10](../specs/SPEC-015-receipts.md#104-inputs-outputs-exit-codes).
+`macprovider-verify` checks an `X-MacProvider-Receipt` value against the buyer's recorded request and response, resolves the provider receipt key, and returns a deterministic `valid`, `invalid`, or `inconclusive` result.
 
-## Current Status
+## Install
 
-Step 1 includes:
+Release artifacts are published on tags named `verify-v<version>`, for example `verify-v1.0.0`.
 
-- `cmd/macprovider-verify` CLI entry point
-- placeholder internal packages for later implementation steps
-- version constants
-- tests for `--version`, `--help`, and scaffold exit-code behavior
-- zero external Go dependencies
-- CI wiring for `go vet`, `go test -race`, and empty `go.sum`
-
-Step 1 does not include:
-
-- receipt parsing
-- JCS canonicalization
-- ed25519 verification
-- cache or coordinator resolver behavior
-- JSON verification output
-
-## Build
-
-Build the local platform binary:
+### macOS Apple Silicon
 
 ```sh
-make build
+VERSION=1.0.0
+gh release download "verify-v${VERSION}" --repo Augustas11/macprovider \
+  --pattern "macprovider-verify-${VERSION}-darwin-arm64" \
+  --pattern "macprovider-verify-${VERSION}-darwin-arm64.sha256"
+shasum -a 256 -c "macprovider-verify-${VERSION}-darwin-arm64.sha256"
+chmod +x "macprovider-verify-${VERSION}-darwin-arm64"
+sudo install -m 0755 "macprovider-verify-${VERSION}-darwin-arm64" /usr/local/bin/macprovider-verify
 ```
 
-The binary is written to:
+### macOS Intel
 
 ```sh
-./macprovider-verify
+VERSION=1.0.0
+gh release download "verify-v${VERSION}" --repo Augustas11/macprovider \
+  --pattern "macprovider-verify-${VERSION}-darwin-amd64" \
+  --pattern "macprovider-verify-${VERSION}-darwin-amd64.sha256"
+shasum -a 256 -c "macprovider-verify-${VERSION}-darwin-amd64.sha256"
+chmod +x "macprovider-verify-${VERSION}-darwin-amd64"
+sudo install -m 0755 "macprovider-verify-${VERSION}-darwin-amd64" /usr/local/bin/macprovider-verify
 ```
 
-Build all planned release targets:
+### Linux amd64
 
 ```sh
-make build-all
+VERSION=1.0.0
+gh release download "verify-v${VERSION}" --repo Augustas11/macprovider \
+  --pattern "macprovider-verify-${VERSION}-linux-amd64" \
+  --pattern "macprovider-verify-${VERSION}-linux-amd64.sha256"
+sha256sum -c "macprovider-verify-${VERSION}-linux-amd64.sha256"
+chmod +x "macprovider-verify-${VERSION}-linux-amd64"
+sudo install -m 0755 "macprovider-verify-${VERSION}-linux-amd64" /usr/local/bin/macprovider-verify
 ```
 
-Artifacts are written to `dist/`:
+## Quickstart
 
-- `macprovider-verify-darwin-arm64`
-- `macprovider-verify-darwin-amd64`
-- `macprovider-verify-linux-amd64`
-
-Cross-compilation uses pure Go with `CGO_ENABLED=0`.
-
-## Test
-
-Run tests:
+Verify a captured receipt header when you already have the canonical prompt and output hashes:
 
 ```sh
-make test
+macprovider-verify \
+  --receipt "$X_MACPROVIDER_RECEIPT" \
+  --prompt-hash "$PROMPT_SHA256_HEX" \
+  --output-hash "$OUTPUT_SHA256_HEX" \
+  --provider-id m1-anon \
+  --json
 ```
 
-Run vet:
+To verify raw buyer captures instead, place the receipt, OpenAI request body, OpenAI response body, and `provider_id` in a bundle JSON file and run:
 
 ```sh
-make vet
+macprovider-verify --bundle receipt-bundle.json --json
 ```
 
-Clean generated binaries:
+## CLI Reference
 
-```sh
-make clean
-```
+| Flag | Semantics |
+|---|---|
+| `--version` | Print `macprovider-verify <binary-version> (verifies up to SPEC-015 v<max-spec-version>)` and exit 0. |
+| `--help` | Print usage and all supported flags, then exit 0. |
+| `--bundle <path|->` | Verify a bundle JSON file. Use `-` to read the bundle from stdin. Mutually exclusive with `--receipt`. |
+| `--receipt <value>` | Verify a raw `X-MacProvider-Receipt` header value in header+hashes mode. Requires `--prompt-hash` and `--output-hash`. Mutually exclusive with `--bundle`. |
+| `--prompt-hash <hex>` | Expected canonical prompt SHA-256 hex in header+hashes mode. Required with `--receipt`. Malformed hex is a usage error. |
+| `--output-hash <hex>` | Expected canonical output SHA-256 hex in header+hashes mode. Required with `--receipt`. Malformed hex is a usage error. |
+| `--pubkey <base64>` | Explicit base64 ed25519 public key. This is the trust root for offline or air-gapped verification. When supplied with `--provider-id` and not `--offline`, the verifier still attempts a live divergence check; an explicit key wins the result. |
+| `--provider-id <id>` | Provider identifier used to address `/v1/receipt-keys/<provider_id>`. Required for online header+hashes mode unless `--pubkey` is supplied. Optional in bundle/stdin mode when the bundle carries the same `provider_id`; a mismatch is a usage error. |
+| `--json` | Emit exactly one line of JSON conforming to `schemas/output.schema.json`. Warnings remain in the JSON `warnings` array even with `--quiet`. |
+| `--offline` | Disable live coordinator fetches. With `--pubkey`, verification can still be `valid`. Without `--pubkey`, cache misses or stale cache entries produce `inconclusive`. |
+| `--quiet` | Suppress stderr diagnostics, `warning:` lines, and `--explain` text. Does not suppress JSON `warnings` records and does not change the exit code. |
+| `--coordinator <host>` | Coordinator host for `/v1/receipt-keys`. Defaults to `coordinator.streamvc.live` or `MACPROVIDER_COORDINATOR` when that environment variable is set. Non-default hosts emit a `non_default_coordinator` warning. |
+| `--explain` | After a `valid` result, print the SPEC-015 trust-boundary text to stderr unless `--quiet` is also set. Does not change the result or exit code. |
 
-## CLI Surface
+Input modes:
 
-The scaffold parses the SPEC-015 v0.2 flags:
+| Mode | Required flags and data |
+|---|---|
+| Header+hashes | `--receipt`, `--prompt-hash`, `--output-hash`, and `--provider-id` unless `--pubkey` is supplied. |
+| Bundle file | `--bundle <path>` where the JSON contains `bundle_version`, `receipt`, `request`, `response`, and optionally `provider_id`. |
+| Stdin bundle | `--bundle -` or positional `-`, with the same JSON shape as bundle mode. |
 
-```sh
-macprovider-verify --bundle receipt-bundle.json
-macprovider-verify --receipt "$X_MACPROVIDER_RECEIPT" --prompt-hash <hex> --output-hash <hex> --provider-id <id>
-macprovider-verify --offline --pubkey <base64> --bundle receipt-bundle.json
-```
+Flag interactions follow the SPEC-015 section 10.4.4 matrix: `--bundle` and `--receipt` are mutually exclusive; `--offline` prevents live fetches; `--pubkey` prevents resolver failures from downgrading an otherwise valid explicit-key verification; `--provider-id` must match the bundle field when both are present.
 
-`--version` and `--help` are implemented. Any verification invocation currently
-prints `TODO: Step 7` to stderr and exits `64` (`EX_USAGE`) until the later
-implementation steps land.
+## Exit Codes
 
-`MACPROVIDER_COORDINATOR` is read as the default value for `--coordinator`.
-Step 5 will use it for `/v1/receipt-keys` resolution.
+| Code | Meaning |
+|---|---|
+| 0 | `valid` |
+| 1 | `invalid` (signature, canonicalization, coordinator-rejected pubkey, or previous-key-outside-grace-window) |
+| 2 | `inconclusive` (pubkey unresolvable, provider_id not in pool per `/v1/receipt-keys` 404, cache stale plus live unreachable) |
+| 64 | Usage error: unknown CLI flag, missing required CLI argument, mutually exclusive flags, or invalid value format for a CLI flag such as malformed `--pubkey` base64. |
+| 65 | Input format error: malformed bundle JSON, missing required bundle field, unknown bundle top-level key, unsupported `bundle_version`, malformed receipt header, tuple/signature base64 decode failure, or tuple JSON with the wrong key set. |
+
+## JSON Output Schema
+
+JSON mode emits one line conforming to the shipped Draft-07 schema:
+
+[schemas/output.schema.json](schemas/output.schema.json)
 
 ## Version Compatibility
 
-| macprovider-verify version | Max SPEC-015 version | Status |
-|---|---:|---|
-| `0.1.0-step1-scaffold` | `v0.2.4` | Scaffold only; no verification logic |
-| `1.0.0` | `v0.2.4` | Planned final Step 10 acceptance binary |
+| macprovider-verify | SPEC-015 receipt versions verified |
+|---|---|
+| 1.0.x | 0.2.0 through 0.2.4 |
 
-## Dependency Policy
+## Trust Boundary
 
-This module is stdlib-only in Step 1. `go.sum` must remain empty. External Go
-modules, including `golang.org/x/*`, are explicitly deferred unless a later
-audited step approves them.
+Read the locked trust-boundary contract in [SPEC-015 section 10.6](../specs/SPEC-015-receipts.md#106-trust-boundary).
+
+In short, a `valid` result proves that a holder of the provider signing key signed the canonical tuple and that the verifier resolved that key through the configured trust source. It does not prove model honesty, timestamp honesty, response uniqueness, privacy, replay resistance, or absolute trust in the coordinator.
+
+## Reporting Bugs and Security Issues
+
+Report verifier bugs through GitHub Issues with:
+
+- `macprovider-verify --version` output
+- the command mode used (`--bundle`, `--receipt`, or stdin)
+- exit code
+- stdout and stderr
+- whether `--offline`, `--pubkey`, or a non-default `--coordinator` was used
+
+Do not attach private prompts, responses, API keys, or receipt bundles to public issues. For security-sensitive reports, use GitHub's private vulnerability reporting for the repository.
+
+Gateway receipt-header forwarding compatibility with the OpenAI Python SDK was verified when PR #123 landed. This Step 10 release does not add a new SDK smoke script; regressions in forwarding should be reported against the gateway path with the SDK version and captured response headers.

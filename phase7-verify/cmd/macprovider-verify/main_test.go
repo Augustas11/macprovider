@@ -17,7 +17,7 @@ func TestRunVersion(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("run(--version) exit code = %d, want 0; stderr=%q", code, stderr.String())
 	}
-	want := fmt.Sprintf("macprovider-verify %s\n", version.BinaryVersion)
+	want := fmt.Sprintf("macprovider-verify %s (verifies up to SPEC-015 v%s)\n", version.BinaryVersion, version.MaxSPECVersion)
 	if stdout.String() != want {
 		t.Fatalf("run(--version) stdout = %q, want %q", stdout.String(), want)
 	}

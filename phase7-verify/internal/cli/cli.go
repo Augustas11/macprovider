@@ -97,7 +97,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, get
 		return exitValid
 	}
 	if opts.version {
-		fmt.Fprintf(stdout, "macprovider-verify %s\n", version.BinaryVersion)
+		fmt.Fprintf(stdout, "macprovider-verify %s (verifies up to SPEC-015 v%s)\n", version.BinaryVersion, version.MaxSPECVersion)
 		return exitValid
 	}
 

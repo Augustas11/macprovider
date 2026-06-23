@@ -598,7 +598,7 @@ func TestHelpVersionAndJSONOutput(t *testing.T) {
 	t.Run("version", func(t *testing.T) {
 		stdout, stderr, _ := buffersAndCache(t)
 		code := run([]string{"--version"}, nil, stdout, stderr, getenvNone, runConfig{})
-		want := fmt.Sprintf("macprovider-verify %s\n", version.BinaryVersion)
+		want := fmt.Sprintf("macprovider-verify %s (verifies up to SPEC-015 v%s)\n", version.BinaryVersion, version.MaxSPECVersion)
 		if code != exitValid || stdout.String() != want {
 			t.Fatalf("code=%d stdout=%q want=%q stderr=%q", code, stdout.String(), want, stderr.String())
 		}
