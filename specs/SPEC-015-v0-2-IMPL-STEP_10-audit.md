@@ -80,3 +80,46 @@ Residual risk: Decision-log ordering should be cleaned before merge for archival
 - `go build -trimpath -ldflags="-s -w" -o /tmp/v1 ./cmd/macprovider-verify` and `/tmp/v2` produced matching SHA-256 `33614398acf90067105b381f3aa96d4f5a67a4922bf87485ce3ee2e119740968`.
 
 Overall verdict: READY TO LOCK (0 CRITICAL, 0 HIGH, 0 MEDIUM; 2 LOW, 0 blocking).
+## Claude 3-Lens Audit (independent, on top of 22 codex rounds)
+
+**Date:** 2026-06-23
+**Tooling:** Claude code-reviewer + security-reviewer + architect subagents
+**Scope:** full `impl/spec-015-v0-2-step-10` branch vs `main`
+**Initial findings:** 0 CRITICAL, 3 HIGH (security), 6 MEDIUM (3 code, 4 sec, 3 arch), 12 LOW
+
+### Lens verdicts (initial pass)
+
+| Lens | Verdict | Crit | High | Med | Low |
+|---|---|---|---|---|---|
+| Code | READY TO MERGE | 0 | 0 | 3 | 7 |
+| Security | NEEDS WORK | 0 | **3** | 4 | 3 |
+| Architect | READY TO MERGE | 0 | 0 | 3 | 2 |
+
+**All three reviewers independently agreed: cryptographic spine is sound. No CRITICAL false-valid path against a forged receipt across any lens.**
+
+### Convergent finding (code + security)
+
+Rate-limit on `phase4-coordinator/internal/buyer/server.go:830` keyed on raw `RemoteAddr`. Behind nginx all requests share one global bucket. **Pre-existing issue** (also affects `/v1/pool/check`); flagged as v1.0.1 follow-up — NOT addressed in this PR.
+
+### Fixes applied (commit 39e3fa7)
+
+Six findings closed via codex fix pass, then verified by fresh Claude security + architect re-audit:
+
+| ID | Lens | Title | Status (re-audit) |
+|---|---|---|---|
+| H1 | sec | `io.LimitReader(64KiB)` on `/v1/receipt-keys` response | CLOSED |
+| H2 | sec | `bufio.Scanner.Buffer(1MiB)` + fatal-on-overflow in cache + CLI | CLOSED |
+| H3 | sec | `--coordinator` private/loopback deny by default (env-var escape) + `--explain` divergence semantics | CLOSED |
+| M1 | arch | `TestReasonEnumBijection` drift detector | CLOSED |
+| M2 | arch | `cache_format_version` field with back-compat | CLOSED |
+| M3 | arch | `bundle_pubkey_provider_mismatch` retention markers (Go comment + JSON Schema description) | CLOSED |
+
+### Non-blocking observations (filed as v1.0.1 follow-ups)
+
+1. **H3 exit-code nit**: `--coordinator https://127.0.0.1:...` (without env var) exits **70** (internal/software) not 64 (usage). Security intent satisfied (blocks silent accept, names env var); strictness is cosmetic.
+2. **M1 reflection gap**: drift test uses hand-maintained `expectedReasons` slice; a brand-new `reasonXXX` const in verify.go that's never used wouldn't trip the test. Architect classified as acceptable trade — explicit slice IS the single source of truth.
+3. **Convergent rate-limit** (pre-existing, also affects `/v1/pool/check`): coordinator-side fix, out of verifier scope.
+
+### Overall Claude verdict
+
+After H1+H2+H3+M1+M2+M3 closure: **READY TO MERGE** across all three lenses.
