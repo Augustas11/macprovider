@@ -45,6 +45,18 @@ model, and trust source. Step 8 owns final formatting polish.
 `--explain` prints the Step 7 inline trust-boundary text after a valid result
 unless `--quiet` suppresses stderr.
 
+`bundle_pubkey_provider_mismatch` is reserved per SPEC-015 §10.4.2; the v0.2
+detection path is a bundle-layer check landing with Step 9 end-to-end fixtures
+and integration, while Step 6 already reports `pubkey_not_endorsed` for
+receipt-embedded pubkey vs resolver-endorsed pubkey divergence and the reserved
+reason is the narrower case where the bundle's own `provider_id` claim conflicts
+with the receipt-embedded `provider_pubkey`'s cached/resolved provider identity.
+
+Step 8 ships the output schema, inline validator, and synthetic valid/invalid/
+inconclusive schema validation tests. Step 9 owns `testdata/*.bundle.json`
+end-to-end fixtures and the integration test that routes those fixture outputs
+through the schema gate.
+
 ## Provider-ID Resolution
 
 Provider identity is resolved before verification:

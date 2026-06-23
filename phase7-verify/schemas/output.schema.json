@@ -21,7 +21,7 @@
         "provider_id": { "type": ["string", "null"] },
         "model_id": { "type": ["string", "null"] },
         "signed_at": { "type": ["integer", "null"] },
-        "trust_source": { "enum": ["explicit_pubkey", "cache", "live", "none"] },
+        "trust_source": { "enum": ["explicit_pubkey", "cache", "live"] },
         "coordinator_host": { "type": ["string", "null"] },
         "warnings": {
           "type": "array",
@@ -68,6 +68,20 @@
           ] }
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "trust_source": { "const": "explicit_pubkey" } },
+            "required": ["trust_source"]
+          },
+          "then": {
+            "properties": { "coordinator_host": { "type": "null" } }
+          },
+          "else": {
+            "properties": { "coordinator_host": { "type": "string" } }
+          }
+        }
+      ],
       "additionalProperties": false
     },
     {
@@ -90,13 +104,14 @@
             "prompt_hash_mismatch",
             "output_hash_mismatch",
             "pubkey_not_endorsed",
-            "previous_key_outside_grace_window"
+            "previous_key_outside_grace_window",
+            "bundle_pubkey_provider_mismatch"
           ]
         },
         "provider_id": { "type": ["string", "null"] },
         "model_id": { "type": ["string", "null"] },
         "signed_at": { "type": ["integer", "null"] },
-        "trust_source": { "enum": ["explicit_pubkey", "cache", "live", "none"] },
+        "trust_source": { "enum": ["explicit_pubkey", "cache", "live"] },
         "coordinator_host": { "type": ["string", "null"] },
         "details": {
           "type": "object",
@@ -172,6 +187,20 @@
           ] }
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "trust_source": { "const": "explicit_pubkey" } },
+            "required": ["trust_source"]
+          },
+          "then": {
+            "properties": { "coordinator_host": { "type": "null" } }
+          },
+          "else": {
+            "properties": { "coordinator_host": { "type": "string" } }
+          }
+        }
+      ],
       "additionalProperties": false
     },
     {
@@ -195,7 +224,7 @@
         "provider_id": { "type": ["string", "null"] },
         "model_id": { "type": ["string", "null"] },
         "signed_at": { "type": ["integer", "null"] },
-        "trust_source": { "const": "none" },
+        "trust_source": { "enum": ["explicit_pubkey", "cache", "live", "none"] },
         "coordinator_host": { "type": ["string", "null"] },
         "warnings": {
           "type": "array",
@@ -242,6 +271,20 @@
           ] }
         }
       },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "trust_source": { "enum": ["explicit_pubkey", "none"] } },
+            "required": ["trust_source"]
+          },
+          "then": {
+            "properties": { "coordinator_host": { "type": "null" } }
+          },
+          "else": {
+            "properties": { "coordinator_host": { "type": "string" } }
+          }
+        }
+      ],
       "additionalProperties": false
     }
   ]

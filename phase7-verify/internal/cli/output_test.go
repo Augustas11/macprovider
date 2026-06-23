@@ -268,6 +268,23 @@ func TestSchemaValidationInvalid(t *testing.T) {
 	})
 }
 
+func TestSchemaValidationReservedBundlePubkeyProviderMismatch(t *testing.T) {
+	schema := loadOutputSchema(t)
+	if !invalidReasonEnumContains(schema, "bundle_pubkey_provider_mismatch") {
+		t.Fatal("invalid reason enum missing bundle_pubkey_provider_mismatch")
+	}
+	assertSchemaValidWithSchema(t, schema, verify.Result{
+		Result:          "invalid",
+		Reason:          "bundle_pubkey_provider_mismatch",
+		ProviderID:      outputProviderID,
+		ModelID:         outputModelID,
+		SignedAt:        outputSignedAt,
+		TrustSource:     "live",
+		CoordinatorHost: outputCoordinatorHost,
+		Details:         &verify.Details{Field: "pubkey", Computed: "provider-a", Receipt: "provider-b"},
+	})
+}
+
 func TestSchemaValidationInconclusive(t *testing.T) {
 	assertSchemaValid(t, verify.Result{
 		Result:          "inconclusive",
@@ -289,6 +306,42 @@ func TestSchemaRejectsExtraProperty(t *testing.T) {
 	raw := []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","foo":"bar"}`)
 	if err := validateRawJSON(schema, raw); err == nil {
 		t.Fatal("schema accepted extra top-level property")
+	}
+}
+
+func TestSchemaRejectsTrustSourceCoordinatorHostMismatches(t *testing.T) {
+	schema := loadOutputSchema(t)
+	tests := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "valid none trust source",
+			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"none","coordinator_host":null}`),
+		},
+		{
+			name: "valid live null coordinator",
+			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":null}`),
+		},
+		{
+			name: "valid explicit pubkey coordinator",
+			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"explicit_pubkey","coordinator_host":"coordinator.streamvc.live"}`),
+		},
+		{
+			name: "inconclusive live null coordinator",
+			raw:  []byte(`{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","trust_source":"live","coordinator_host":null}`),
+		},
+		{
+			name: "inconclusive none coordinator",
+			raw:  []byte(`{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","trust_source":"none","coordinator_host":"coordinator.streamvc.live"}`),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := validateRawJSON(schema, tt.raw); err == nil {
+				t.Fatalf("schema accepted malformed trust_source/coordinator_host combination: %s", tt.raw)
+			}
+		})
 	}
 }
 
@@ -323,6 +376,11 @@ func mustRenderJSONMap(t *testing.T, result verify.Result) map[string]any {
 func assertSchemaValid(t *testing.T, result verify.Result) {
 	t.Helper()
 	schema := loadOutputSchema(t)
+	assertSchemaValidWithSchema(t, schema, result)
+}
+
+func assertSchemaValidWithSchema(t *testing.T, schema any, result verify.Result) {
+	t.Helper()
 	data, err := renderJSON(result)
 	if err != nil {
 		t.Fatal(err)
@@ -343,6 +401,39 @@ func loadOutputSchema(t *testing.T) any {
 		t.Fatal(err)
 	}
 	return schema
+}
+
+func invalidReasonEnumContains(schema any, reason string) bool {
+	root, ok := schema.(map[string]any)
+	if !ok {
+		return false
+	}
+	variants, ok := root["oneOf"].([]any)
+	if !ok || len(variants) < 2 {
+		return false
+	}
+	invalidBranch, ok := variants[1].(map[string]any)
+	if !ok {
+		return false
+	}
+	properties, ok := invalidBranch["properties"].(map[string]any)
+	if !ok {
+		return false
+	}
+	reasonSchema, ok := properties["reason"].(map[string]any)
+	if !ok {
+		return false
+	}
+	enumValues, ok := reasonSchema["enum"].([]any)
+	if !ok {
+		return false
+	}
+	for _, enumValue := range enumValues {
+		if enumValue == reason {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRawJSON(schema any, raw []byte) error {
@@ -385,6 +476,13 @@ func validateSchemaObject(schema map[string]any, instance any, path string) erro
 				lastErr = errors.New("no branch detail")
 			}
 			return fmt.Errorf("%s matched %d oneOf branches: %w", path, matches, lastErr)
+		}
+	}
+	if allVariants, ok := schema["allOf"].([]any); ok {
+		for _, variant := range allVariants {
+			if err := validateSchema(variant, instance, path); err != nil {
+				return err
+			}
 		}
 	}
 	if notSchema, ok := schema["not"]; ok {

@@ -30,6 +30,7 @@ const (
 	reasonOutputHashMismatch            = "output_hash_mismatch"
 	reasonPubkeyNotEndorsed             = "pubkey_not_endorsed"
 	reasonPreviousKeyOutsideGraceWindow = "previous_key_outside_grace_window"
+	reasonBundlePubkeyProviderMismatch  = "bundle_pubkey_provider_mismatch"
 	reasonPubkeyUnresolvable            = "pubkey_unresolvable"
 	reasonProviderIDUnresolvable        = "provider_id_unresolvable"
 	reasonCacheStaleAndLiveUnreachable  = "cache_stale_and_live_unreachable"
