@@ -1,7 +1,54 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.2.1 (2026-06-23, round-1 codex audit fix pass)
+**Version:** 0.2.2 (2026-06-23, round-2 codex audit fix pass — LOCK candidate)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver), SPEC-005 v0.3, SPEC-006 v0.9, SPEC-008 v0.3, SPEC-011 v0.5, SPEC-013 v0.3
+
+**Change log v0.2.2:**
+- Round-2 codex audit fix pass against
+  `specs/SPEC-015-v0-2-audit.md` round-2 sections (round 2 = 0
+  CRITICAL, 4 MAJOR, 3 MINOR across code/security/architect
+  lenses; verdict READY WITH FIX PASS on every lens). Findings
+  resolved:
+  - **CF4 / C7 / S6 (stale `/poolz` wording in §10.1 + AC-18;
+    §10.1 ↔ §10.2.1 no-match semantics conflict):** §10.1
+    rewritten to (a) eliminate `/poolz` references, (b) reserve
+    `inconclusive` for fetch failure / provider_id unresolvable /
+    no authoritative resolver answer, and (c) require `invalid`
+    when the resolver returns an authoritative provider record
+    whose current/previous keys do not match the receipt's
+    `provider_pubkey`. AC-18 rewritten to reference
+    `/v1/receipt-keys/<provider_id>` and the §10.2.1 grace-window
+    semantics.
+  - **CF5 / C8 / A7 (`--provider-id` is load-bearing but not
+    first-class CLI input):** §10.4 expanded to make
+    `--provider-id <id>` a first-class CLI input across all three
+    input modes (header+hashes, bundle, stdin). §10.4.4 flag
+    matrix gains explicit `--provider-id` rows covering required-
+    vs-optional disposition per mode. §10.2 rule on no-provider-id
+    `inconclusive` reframed as a normative escape hatch rather
+    than an under-specified edge case.
+  - **C9 (timestamp format split between Unix seconds and
+    RFC3339):** §10.2 cache fields normalized — `fetched_at`,
+    `rotated_at`, `expires_at` are stored as RFC3339 UTC strings
+    in the cache to match the §10.7 wire shape. The receipt
+    `unix_ts` remains Unix seconds (v0.1 wire contract — locked).
+    Conversion happens once at the cache-write boundary.
+  - **S7 (positive trust-boundary sentence reads like timestamp
+    attestation):** §10.6 opening sentence reworded from "signed
+    this tuple at the claimed `unix_ts`" to "signed a tuple
+    containing the claimed `unix_ts`" to eliminate the
+    quotability-out-of-context risk.
+  - **A8 (`valid` does not disclaim receipt uniqueness):** §10.6
+    "DOES NOT prove" list extended with a sixth bullet — `valid`
+    does not prove that no other receipt was issued for the same
+    response, or that this was the only provider-side attestation.
+    Locks the surface against the same "narrow proof" misreading
+    the §10.6 audit surfaces in round 1.
+
+v0.2.2 is the LOCK candidate. If round 3 returns 0 CRITICAL / 0
+MAJOR across all three lenses, v0.2.2 ships into the combined
+SPEC + IMPL PR per the [[feedback-bundle-spec-impl-one-pr]]
+convention.
 
 **Change log v0.2.1:**
 - Round-1 codex audit fix pass against
@@ -1375,24 +1422,51 @@ pubkey is unresolved, even if a signature self-verifies against a
 pubkey embedded in the receipt: an unrooted pubkey is unrooted,
 regardless of the signature's internal consistency.
 
-`inconclusive` is the correct result when:
+`inconclusive` is the correct result when ANY of the following
+hold AND no explicit `--pubkey` was supplied:
 
-- `/poolz` is unreachable (network down, DNS failure, 5xx, timeout)
-  AND no `--pubkey` was supplied AND no fresh cached pubkey exists
-  for the receipt's `provider_pubkey` bytes, OR
-- `/poolz` returns a response that contains no `receipt_pubkey`
-  (nor `receipt_pubkey_prev`) entry matching the receipt's bytes,
-  AND no `--pubkey` was supplied.
+- The configured coordinator's `GET /v1/receipt-keys/<provider_id>`
+  endpoint (§10.7) is unreachable (network down, DNS failure, 5xx,
+  timeout, rate-limited via 429) AND no fresh cached entry exists
+  for `(coordinator_host, provider_id, receipt_pubkey)`, OR
+- `provider_id` cannot be resolved (the bundle did not supply it,
+  no `--provider-id` argument was given, and no single matching
+  cached entry exists), OR
+- The cache holds only a stale entry (older than the §10.2 7-day
+  TTL) AND the live fetch fails.
 
-`invalid` (not `inconclusive`) is the correct result when:
+`invalid` (not `inconclusive`) is the correct result when ANY of
+the following hold:
 
-- `/poolz` returns a `receipt_pubkey` for the receipt's
-  `provider_id` and that pubkey differs from the receipt's
-  embedded `provider_pubkey` (the receipt claims a key the
-  coordinator does not endorse), OR
+- The resolver returns an authoritative provider record for the
+  resolved `provider_id` (HTTP 200, parseable response) whose
+  `receipt_pubkey` and `receipt_pubkey_prev.pubkey` are BOTH
+  different from the receipt's embedded `provider_pubkey` — the
+  coordinator has explicitly named the keys it endorses for this
+  provider and the receipt's key is not among them, OR
+- The resolver returns a `receipt_pubkey_prev` match BUT the
+  receipt's `unix_ts` falls outside the §10.2.1 grace window, OR
 - The signature check fails against a successfully-resolved
   trusted pubkey, OR
 - Either canonical hash mismatches.
+
+The boundary between `inconclusive` and `invalid` is the
+authoritative-resolver-answer test: if the trust root reached a
+verdict ("no, I don't endorse this key for this provider"), the
+receipt is `invalid`; if the trust root could not reach a verdict
+(unreachable, identity unresolvable), the receipt is
+`inconclusive`. A receipt MUST NOT be `inconclusive` when the
+coordinator's authoritative response excludes its
+`provider_pubkey` — that case is a coordinator-rejected forgery
+(or retired key), not an environmental failure.
+
+The HTTP 404 response from the §10.7 endpoint (provider not in
+the current pool) is a degenerate case: it is authoritative
+("this `provider_id` is unknown to me") but the receipt itself may
+predate the provider's removal. v0.2 verifiers MUST treat 404 as
+`inconclusive` with `reason: "provider_id_unresolvable"`. v0.3+
+MAY revisit this if the coordinator gains a "retired but historic"
+state.
 
 ### 10.2 Pubkey resolution
 
@@ -1409,12 +1483,19 @@ priority order:
 2. **Cached:** A pubkey stored locally from a prior
    `GET /v1/receipt-keys/<provider_id>` fetch (§10.7), keyed by
    the tuple `(coordinator_host, provider_id, receipt_pubkey)`.
-   Cache entries MUST carry a `fetched_at` Unix-seconds timestamp,
-   the `rotated_at` and `expires_at` timestamps as returned by
-   the coordinator, and the corresponding `receipt_pubkey_prev`
-   record (if any) for grace-window verification.
-   - **Fresh entry** (`now() - fetched_at ≤ 7d`): used directly.
-   - **Stale entry** (`now() - fetched_at > 7d`): MUST trigger a
+   Cache entries MUST carry a `fetched_at` timestamp, the
+   `rotated_at` and `expires_at` timestamps as returned by the
+   coordinator, and the corresponding `receipt_pubkey_prev`
+   record (if any) for grace-window verification. All three
+   timestamps MUST be stored as RFC3339 UTC strings matching the
+   §10.7 wire shape; conversion from the receipt's Unix-seconds
+   `unix_ts` to RFC3339 (or vice versa) happens at the cache
+   boundary, not at every comparison. The receipt `unix_ts`
+   itself remains Unix seconds per the locked v0.1 wire contract.
+   - **Fresh entry** (cache `fetched_at` ≤ 7 days before `now()`):
+     used directly.
+   - **Stale entry** (cache `fetched_at` > 7 days before `now()`):
+     MUST trigger a
      fresh live fetch. On fetch success, replace the entry. On
      fetch failure, the verifier MUST NOT use the stale entry to
      produce `valid` — the result is `inconclusive`. The
@@ -1529,16 +1610,50 @@ before the verify binary can be released.
 The verifier MUST accept these input shapes:
 
 1. **Header + hashes mode:** `macprovider verify --receipt <base64>
-   --prompt-hash <hex> --output-hash <hex>` — for callers who have
-   already canonicalized and hashed the request/response.
-2. **Bundle mode:** `macprovider verify --bundle <path>` — bundle
-   JSON shape pinned in §10.4.1.
-3. **Stdin mode:** `cat bundle.json | macprovider verify -` — same
-   shape as bundle mode, read from stdin.
+   --prompt-hash <hex> --output-hash <hex> [--provider-id <id>]` —
+   for callers who have already canonicalized and hashed the
+   request/response. `--provider-id` is REQUIRED in this mode
+   UNLESS `--pubkey` is also supplied (see §10.4 "Provider-id
+   requirements" below); without it the live resolver cannot be
+   addressed.
+2. **Bundle mode:** `macprovider verify --bundle <path>
+   [--provider-id <id>]` — bundle JSON shape pinned in §10.4.1.
+   The bundle's `provider_id` field MAY be omitted; if so,
+   `--provider-id` becomes REQUIRED for online verification.
+   `--provider-id` (when supplied) MUST match the bundle's
+   `provider_id` (when also present); a mismatch is a usage error
+   (exit 64).
+3. **Stdin mode:** `cat bundle.json | macprovider verify -
+   [--provider-id <id>]` — same shape as bundle mode, read from
+   stdin. Same `--provider-id` rules.
 
 A verifier MAY accept additional input shapes (e.g. raw HTTP
 response capture) as long as they reduce to one of the three above
 before the §10.0 algorithm runs.
+
+**Provider-id requirements (CF5 normative):** The §10.7 resolver
+endpoint is addressed by `provider_id`. The verifier MUST obtain
+`provider_id` from one of:
+
+1. The `--provider-id <id>` CLI argument (first-class input).
+2. The bundle's `provider_id` field (bundle/stdin modes only).
+3. A single matching cached entry for `receipt_pubkey` under the
+   configured coordinator (degenerate "I've seen exactly one of
+   these before" path; verifier MUST NOT scan multiple cached
+   entries).
+
+When `--pubkey` is supplied, online verification does not require
+`provider_id` to produce `valid` — but the verifier MUST still
+attempt to record `provider_id` (from the bundle or `--provider-id`)
+for output reporting and the divergence-warning check (§10.2). If
+no `provider_id` is recoverable, JSON output emits `provider_id:
+null` and `warnings[]` gains a `live_check_skipped` entry with
+`reason: "provider_id_unresolvable"`.
+
+When `--pubkey` is NOT supplied and `provider_id` cannot be
+obtained from (1)/(2)/(3), the result is `inconclusive` with
+`reason: "provider_id_unresolvable"`. The verifier MUST NOT
+fingerprint-scan across providers.
 
 #### 10.4.1 Bundle JSON shape
 
@@ -1711,6 +1826,19 @@ individual flag descriptions.
 | `--explain` | per other flags | per other flags | §10.6 verbatim printed to stderr after valid result | NO |
 | `--bundle B --receipt R` | n/a | n/a | n/a | USAGE ERROR (exit 64) — mutually exclusive |
 | `--bundle -` (stdin mode) | per other flags | per other flags | per `--quiet` | NO |
+| `--provider-id I` + header+hashes mode (no `--pubkey`) | YES, addressed by `I` | n/a (no explicit) | per `--quiet` | NO if resolver responds; `inconclusive` if `I` returns 404 |
+| `--provider-id I` + header+hashes mode + `--pubkey P` | YES (background only) | YES if live differs | per `--quiet` | NO — explicit wins |
+| `--provider-id I` + bundle mode where bundle also has `provider_id: J` and `I != J` | n/a | n/a | n/a | USAGE ERROR (exit 64) — mismatched provider identity |
+| `--provider-id I` + bundle mode where bundle has `provider_id: I` (or none) | per other flags | per other flags | per `--quiet` | NO |
+| header+hashes mode (no `--provider-id`, no `--pubkey`) | NO (cannot address resolver) | n/a | per `--quiet` | `inconclusive` with `reason: provider_id_unresolvable` |
+
+**`--provider-id` summary:** REQUIRED for online verification in
+header+hashes mode unless `--pubkey` is supplied. OPTIONAL in
+bundle/stdin modes when the bundle carries `provider_id` (the
+bundle field takes precedence on absence; mismatch is a usage
+error). When neither source provides `provider_id` AND no
+`--pubkey` is supplied, the result is `inconclusive` per §10.4
+"Provider-id requirements" — the verifier MUST NOT scan.
 
 The matrix is normative. A verifier MUST NOT introduce flag
 combinations whose semantics aren't covered here or aren't
@@ -1760,12 +1888,18 @@ is a buyer-protection invariant.
 ### 10.6 Trust boundary
 
 A `valid` result from `macprovider verify` proves **exactly this**:
-a holder of the provider's private key signed this canonical
-(`model_id`, `prompt_hash`, `output_hash`, `provider_pubkey`,
-`ttft_ms`, `tokens_out`, `unix_ts`) tuple at the claimed `unix_ts`,
-AND the pubkey that signature checks against is the one the
-coordinator publishes for the resolved `provider_id` at verification
-time (or was within the §7.5.2 rotation grace window).
+a holder of the provider's private key signed a canonical tuple
+containing the values (`model_id`, `prompt_hash`, `output_hash`,
+`provider_pubkey`, `ttft_ms`, `tokens_out`, `unix_ts`), AND the
+pubkey that signature checks against is the one the coordinator
+publishes for the resolved `provider_id` at verification time (or
+was within the §7.5.2 rotation grace window per §10.2.1).
+
+The phrasing "signed a tuple containing `unix_ts`" is deliberate:
+the signature commits the holder of the private key to the claimed
+timestamp value, but does NOT prove that value reflects the real
+wall-clock time at signing. The signed-at attestation is about
+content, not chronology.
 
 A `valid` result DOES NOT prove:
 
@@ -1794,6 +1928,16 @@ A `valid` result DOES NOT prove:
   it does not commit to `request_id` or a buyer-supplied nonce.
   Replay-resistance is §15 Q2 (v0.2 verifier scope per the v0.1
   text, now deferred to v0.3+ — see §15 Q2 update below).
+- **That this was the only receipt issued for this response.** A
+  receipt does not commit to uniqueness. A provider could in
+  principle issue multiple receipts for the same canonical
+  (prompt, output) tuple — to different buyers, on different
+  reconnects, or by re-running the same prompt. Each receipt
+  independently verifies on its own merits; `valid` says nothing
+  about whether another `valid` receipt also exists. This matters
+  for accounting (a buyer cannot use a receipt as proof of
+  sole-delivery for billing-dispute purposes) and is orthogonal
+  to the replay-resistance concern above.
 
 A `valid` result from `macprovider verify` is therefore a narrow,
 specific proof: cryptographic evidence that some holder of the
@@ -2104,10 +2248,11 @@ subsequent reconnect with the field present.
 ### v0.2 additions: verifier acceptance criteria
 
 **AC-18.** `macprovider verify --bundle <fresh-receipt-bundle.json>`
-MUST exit `0` with `result: "valid"` for a bundle whose receipt was
-issued by a v1.6 binary against a matching prompt/response and
-whose `provider_id` is in `/poolz` with the issuing pubkey as
-`receipt_pubkey`.
+MUST exit `0` with `result: "valid"` for a bundle whose receipt
+was issued by a v1.6 binary against a matching prompt/response,
+where `GET /v1/receipt-keys/<bundle.provider_id>` (§10.7) on the
+configured coordinator returns the issuing pubkey as
+`receipt_pubkey` (current key) at the time of verification.
 
 **AC-19.** Flipping a single byte in
 `response.choices[0].message.content` of the bundle and re-running
