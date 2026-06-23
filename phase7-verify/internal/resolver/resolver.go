@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -22,7 +23,11 @@ import (
 	"github.com/augstar/macprovider/phase7-verify/internal/version"
 )
 
-const defaultCoordinatorHost = "coordinator.streamvc.live"
+const (
+	defaultCoordinatorHost      = "coordinator.streamvc.live"
+	maxReceiptKeysResponseBytes = 64 * 1024
+	allowPrivateCoordinatorEnv  = "MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR"
+)
 
 // Source describes which trust-root source Resolve selected.
 type Source string
@@ -263,20 +268,24 @@ func fetchLive(providerID string, target coordinatorTarget, client *http.Client)
 	case resp.StatusCode == http.StatusOK:
 		return decodeResponse(resp.Body)
 	case resp.StatusCode == http.StatusNotFound:
-		io.Copy(io.Discard, resp.Body)
+		discardResponseBody(resp.Body)
 		return ResolverResponse{}, ErrProviderNotInPool
 	case resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500:
-		io.Copy(io.Discard, resp.Body)
+		discardResponseBody(resp.Body)
 		return ResolverResponse{}, fmt.Errorf("%w: status %d", ErrFetchFailed, resp.StatusCode)
 	default:
-		io.Copy(io.Discard, resp.Body)
+		discardResponseBody(resp.Body)
 		return ResolverResponse{}, fmt.Errorf("%w: status %d", ErrFetchFailed, resp.StatusCode)
 	}
 }
 
+func discardResponseBody(body io.Reader) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, maxReceiptKeysResponseBytes))
+}
+
 func decodeResponse(body io.Reader) (ResolverResponse, error) {
 	var wire wireResponse
-	decoder := json.NewDecoder(body)
+	decoder := json.NewDecoder(io.LimitReader(body, maxReceiptKeysResponseBytes))
 	if err := decoder.Decode(&wire); err != nil {
 		return ResolverResponse{}, fmt.Errorf("%w: decode response: %v", ErrFetchFailed, err)
 	}
@@ -430,11 +439,23 @@ func normalizeCoordinator(raw string) (coordinatorTarget, error) {
 	if parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return coordinatorTarget{}, ErrInvalidCoordinator
 	}
+	host := parsed.Hostname()
+	if isPrivateOrLoopback(host) && os.Getenv(allowPrivateCoordinatorEnv) != "1" {
+		return coordinatorTarget{}, fmt.Errorf("--coordinator host %q is loopback/private; set %s=1 to allow", host, allowPrivateCoordinatorEnv)
+	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	if parsed.Path != "" {
 		return coordinatorTarget{}, ErrInvalidCoordinator
 	}
 	return coordinatorTarget{url: parsed, host: parsed.Host}, nil
+}
+
+func isPrivateOrLoopback(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()
 }
 
 func validateProviderID(providerID string) error {

@@ -331,7 +331,10 @@ func runVerify(t *testing.T, bundlePath, coordinator, cacheDir, certFile string)
 func runVerifyArgs(t *testing.T, args []string, cacheDir, certFile string) ([]byte, []byte, int) {
 	t.Helper()
 	cmd := exec.Command(verifyBin, args...)
-	cmd.Env = append(os.Environ(), "MACPROVIDER_CACHE_DIR="+cacheDir)
+	cmd.Env = append(os.Environ(),
+		"MACPROVIDER_CACHE_DIR="+cacheDir,
+		"MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR=1",
+	)
 	if certFile != "" {
 		cmd.Env = append(cmd.Env,
 			"SSL_CERT_FILE="+certFile,

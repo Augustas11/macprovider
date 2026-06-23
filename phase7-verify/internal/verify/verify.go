@@ -30,11 +30,17 @@ const (
 	reasonOutputHashMismatch            = "output_hash_mismatch"
 	reasonPubkeyNotEndorsed             = "pubkey_not_endorsed"
 	reasonPreviousKeyOutsideGraceWindow = "previous_key_outside_grace_window"
+	// FORWARD-COMPAT v0.3+: reserved enum value. The v0.2 verifier does NOT emit this reason;
+	// the Step 9 preflight that previously emitted it was removed because it falsely rejected
+	// valid previous-key-in-grace receipts (see internal/verify/implementation-notes.md).
+	// A future spec revision may define a narrower bundle-layer detection that distinguishes
+	// intra-bundle identity drift. Do NOT delete this constant without a coordinated removal
+	// from schemas/output.schema.json and a SPEC-015 enum deprecation note.
 	reasonBundlePubkeyProviderMismatch  = "bundle_pubkey_provider_mismatch"
 	reasonPubkeyUnresolvable            = "pubkey_unresolvable"
-	reasonProviderIDUnresolvable        = "provider_id_unresolvable"
 	reasonCacheStaleAndLiveUnreachable  = "cache_stale_and_live_unreachable"
 	reasonProviderIDNotInPool           = "provider_id_not_in_pool"
+	warningReasonProviderIDUnresolvable = "provider_id_unresolvable"
 
 	defaultCoordinatorHost = "coordinator.streamvc.live"
 	clockSkewThreshold     = 24 * time.Hour
@@ -396,7 +402,7 @@ func sourceNoneReason(providerID string, opts VerifyOpts, c *cache.Cache, warnin
 		}
 		reason, _ := warning.Fields["reason"].(string)
 		switch reason {
-		case "provider_id_unresolvable":
+		case warningReasonProviderIDUnresolvable:
 			return reasonPubkeyUnresolvable
 		case "network_unreachable":
 			if hasStaleCacheEntry(c, normalizedCoordinatorHost(opts.CoordinatorHost), providerID, now) {

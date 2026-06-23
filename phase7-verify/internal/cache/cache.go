@@ -17,8 +17,13 @@ import (
 	"github.com/augstar/macprovider/phase7-verify/internal/receipt"
 )
 
-// TTL is the maximum age of a cache entry before the resolver must refresh it.
-const TTL = 7 * 24 * time.Hour
+const (
+	// TTL is the maximum age of a cache entry before the resolver must refresh it.
+	TTL = 7 * 24 * time.Hour
+
+	maxCacheLineBytes = 1 * 1024 * 1024
+	cacheFormatV1     = 1
+)
 
 // Entry is one decoded cache entry.
 type Entry struct {
@@ -57,11 +62,12 @@ type Cache struct {
 }
 
 type diskEntry struct {
-	CoordinatorHost   string        `json:"coordinator_host"`
-	ProviderID        string        `json:"provider_id"`
-	ReceiptPubkey     string        `json:"receipt_pubkey"`
-	ReceiptPubkeyPrev *diskPrevious `json:"receipt_pubkey_prev"`
-	FetchedAt         string        `json:"fetched_at"`
+	CacheFormatVersion int           `json:"cache_format_version"`
+	CoordinatorHost    string        `json:"coordinator_host"`
+	ProviderID         string        `json:"provider_id"`
+	ReceiptPubkey      string        `json:"receipt_pubkey"`
+	ReceiptPubkeyPrev  *diskPrevious `json:"receipt_pubkey_prev"`
+	FetchedAt          string        `json:"fetched_at"`
 }
 
 type diskPrevious struct {
@@ -220,6 +226,7 @@ func (c *Cache) readEntries() ([]*Entry, error) {
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxCacheLineBytes)
 	var entries []*Entry
 	lineNo := 0
 	for scanner.Scan() {
@@ -228,9 +235,12 @@ func (c *Cache) readEntries() ([]*Entry, error) {
 		if len(line) == 0 {
 			continue
 		}
-		entry, err := decodeEntry(line)
+		entry, err := decodeEntry(line, lineNo)
 		if err != nil {
 			log.Printf("macprovider verify cache: skipping corrupted line %d in %s: %v", lineNo, c.path, err)
+			continue
+		}
+		if entry == nil {
 			continue
 		}
 		entries = append(entries, entry)
@@ -241,10 +251,18 @@ func (c *Cache) readEntries() ([]*Entry, error) {
 	return entries, nil
 }
 
-func decodeEntry(line []byte) (*Entry, error) {
+func decodeEntry(line []byte, lineNo int) (*Entry, error) {
 	var disk diskEntry
 	if err := json.Unmarshal(line, &disk); err != nil {
 		return nil, err
+	}
+	switch {
+	case disk.CacheFormatVersion == 0 || disk.CacheFormatVersion == cacheFormatV1:
+	case disk.CacheFormatVersion > cacheFormatV1:
+		log.Printf("macprovider verify cache: skipping unknown cache format version v%d at line %d", disk.CacheFormatVersion, lineNo)
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("invalid cache format version %d", disk.CacheFormatVersion)
 	}
 	if disk.CoordinatorHost == "" || disk.ProviderID == "" || disk.ReceiptPubkey == "" || disk.FetchedAt == "" {
 		return nil, errors.New("missing required field")
@@ -310,10 +328,11 @@ func encodeEntries(entries []*Entry) ([]byte, error) {
 
 func entryToDisk(entry *Entry) diskEntry {
 	disk := diskEntry{
-		CoordinatorHost: entry.CoordinatorHost,
-		ProviderID:      entry.ProviderID,
-		ReceiptPubkey:   base64.StdEncoding.EncodeToString(entry.ReceiptPubkey),
-		FetchedAt:       entry.FetchedAt.UTC().Format(time.RFC3339),
+		CacheFormatVersion: cacheFormatV1,
+		CoordinatorHost:    entry.CoordinatorHost,
+		ProviderID:         entry.ProviderID,
+		ReceiptPubkey:      base64.StdEncoding.EncodeToString(entry.ReceiptPubkey),
+		FetchedAt:          entry.FetchedAt.UTC().Format(time.RFC3339),
 	}
 	if entry.ReceiptPubkeyPrev != nil {
 		disk.ReceiptPubkeyPrev = &diskPrevious{

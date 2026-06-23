@@ -295,6 +295,85 @@ func TestCorruptedJSONLineIsSkipped(t *testing.T) {
 	}
 }
 
+func TestOversizedCacheLineReturnsReadError(t *testing.T) {
+	c := openTempCache(t)
+	if err := os.WriteFile(c.Path(), append(bytes.Repeat([]byte("x"), 2*1024*1024), '\n'), 0o600); err != nil {
+		t.Fatalf("write oversized cache line: %v", err)
+	}
+	if _, err := c.readEntries(); err == nil {
+		t.Fatal("readEntries returned nil error for oversized cache line")
+	}
+}
+
+func TestCacheWriteIncludesFormatVersion(t *testing.T) {
+	c := openTempCache(t)
+	pubkey := testKey(10)
+	if err := c.Put(testCoordinator, "m1-anon", ResolverResponse{ProviderID: "m1-anon", ReceiptPubkey: pubkey}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	data, err := os.ReadFile(c.Path())
+	if err != nil {
+		t.Fatalf("read cache: %v", err)
+	}
+	var disk diskEntry
+	if err := json.Unmarshal(bytes.TrimSpace(data), &disk); err != nil {
+		t.Fatalf("unmarshal cache line: %v", err)
+	}
+	if disk.CacheFormatVersion != cacheFormatV1 {
+		t.Fatalf("cache_format_version = %d, want %d in %s", disk.CacheFormatVersion, cacheFormatV1, data)
+	}
+	if !bytes.Contains(data, []byte(`"cache_format_version":1`)) {
+		t.Fatalf("raw cache line missing cache_format_version: %s", data)
+	}
+}
+
+func TestUnknownCacheFormatVersionIsSkipped(t *testing.T) {
+	c := openTempCache(t)
+	pubkey := testKey(11)
+	writeDiskEntries(t, c.Path(), diskEntry{
+		CacheFormatVersion: 99,
+		CoordinatorHost:    testCoordinator,
+		ProviderID:         "m1-anon",
+		ReceiptPubkey:      b64(pubkey),
+		FetchedAt:          time.Now().UTC().Format(time.RFC3339),
+	})
+
+	entries, err := c.LookupByProviderID(testCoordinator, "m1-anon")
+	if err != nil {
+		t.Fatalf("LookupByProviderID: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("got %d entries for unknown cache format version, want 0", len(entries))
+	}
+}
+
+func TestLegacyCacheLineWithoutFormatVersionStillDecodes(t *testing.T) {
+	c := openTempCache(t)
+	pubkey := testKey(12)
+	line := map[string]any{
+		"coordinator_host":    testCoordinator,
+		"provider_id":         "m1-anon",
+		"receipt_pubkey":      b64(pubkey),
+		"receipt_pubkey_prev": nil,
+		"fetched_at":          time.Now().UTC().Format(time.RFC3339),
+	}
+	data, err := json.Marshal(line)
+	if err != nil {
+		t.Fatalf("marshal legacy cache line: %v", err)
+	}
+	if err := os.WriteFile(c.Path(), append(data, '\n'), 0o600); err != nil {
+		t.Fatalf("write legacy cache line: %v", err)
+	}
+
+	got, fresh, err := c.Lookup(testCoordinator, "m1-anon", pubkey)
+	if err != nil {
+		t.Fatalf("Lookup legacy entry: %v", err)
+	}
+	if got == nil || !fresh {
+		t.Fatalf("legacy entry lookup got=%#v fresh=%v, want fresh entry", got, fresh)
+	}
+}
+
 func openTempCache(t *testing.T) *Cache {
 	t.Helper()
 	c, err := Open(filepath.Join(t.TempDir(), "verify-cache.jsonl"))

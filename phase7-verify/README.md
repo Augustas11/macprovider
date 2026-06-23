@@ -81,6 +81,12 @@ macprovider-verify --bundle receipt-bundle.json --json
 | `--coordinator <host>` | Coordinator host for `/v1/receipt-keys`. Defaults to `coordinator.streamvc.live` or `MACPROVIDER_COORDINATOR` when that environment variable is set. Non-default hosts emit a `non_default_coordinator` warning. |
 | `--explain` | After a `valid` result, print the SPEC-015 trust-boundary text to stderr unless `--quiet` is also set. Does not change the result or exit code. |
 
+### Running against a private coordinator
+
+By default, `--coordinator` rejects literal loopback, RFC1918, link-local, and unspecified IP hosts. This prevents accidental verification against a private or local endpoint when a buyer expected the public coordinator.
+
+For local development or an explicitly private deployment, set `MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR=1` before using a private coordinator URL. Hostnames are not blocked by this literal-IP guard; operators remain responsible for choosing trusted DNS names.
+
 Input modes:
 
 | Mode | Required flags and data |

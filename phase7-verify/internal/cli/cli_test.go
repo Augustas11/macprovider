@@ -24,6 +24,11 @@ const testProviderID = "m1-anon"
 
 var cliNow = time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 
+func TestMain(m *testing.M) {
+	os.Setenv("MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR", "1")
+	os.Exit(m.Run())
+}
+
 func TestCLIExitCodesAC25(t *testing.T) {
 	fixture := newCLIFixture(t, makeKey(1), cliNow.Unix())
 	tests := []struct {
@@ -324,6 +329,9 @@ func TestFlagInteractionMatrixRows(t *testing.T) {
 			if tt.name == "--explain after valid" && !strings.HasSuffix(stderr.String(), explainText+"\n") {
 				t.Fatalf("--explain text mismatch; stderr=%q want suffix=%q", stderr.String(), explainText+"\n")
 			}
+			if tt.name == "--explain after valid" && !strings.Contains(stderr.String(), "When you supply `--pubkey` AND a custom `--coordinator`") {
+				t.Fatalf("--explain text missing explicit pubkey divergence semantics: %q", stderr.String())
+			}
 		})
 	}
 }
@@ -450,6 +458,28 @@ func TestUsageBoundaries(t *testing.T) {
 				t.Fatalf("missing %q in stdout=%q stderr=%q", tt.wantMessage, stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+func TestSingleMatchCacheScannerOverflowRequiresProviderID(t *testing.T) {
+	fixture := newCLIFixture(t, makeKey(50), cliNow.Unix())
+	stdout, stderr, c := buffersAndCache(t)
+	if err := os.WriteFile(c.Path(), append(bytes.Repeat([]byte("x"), 2*1024*1024), '\n'), 0o600); err != nil {
+		t.Fatalf("write oversized cache line: %v", err)
+	}
+
+	code := run(headerArgs("https://example.test", fixture), nil, stdout, stderr, getenvNone, runConfig{
+		cache: c,
+		now:   func() time.Time { return cliNow },
+	})
+	if code != exitUsage {
+		t.Fatalf("exit=%d want=%d stdout=%q stderr=%q", code, exitUsage, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "--provider-id is required") {
+		t.Fatalf("stderr=%q missing --provider-id-required usage message", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "single-match resolution failed") {
+		t.Fatalf("stderr=%q missing single-match resolution failure", stderr.String())
 	}
 }
 

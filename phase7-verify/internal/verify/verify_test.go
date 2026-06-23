@@ -24,6 +24,11 @@ const testProviderID = "m1-anon"
 
 var verifyNow = time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 
+func TestMain(m *testing.M) {
+	os.Setenv("MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR", "1")
+	os.Exit(m.Run())
+}
+
 func TestVerifyAcceptanceAC18ThroughAC23(t *testing.T) {
 	tests := []struct {
 		name        string

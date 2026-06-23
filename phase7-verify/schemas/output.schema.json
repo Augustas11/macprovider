@@ -99,6 +99,7 @@
       "properties": {
         "result": { "const": "invalid" },
         "reason": {
+          "description": "Reason values follow §10.4.2. bundle_pubkey_provider_mismatch is reserved for v0.3+ and is NOT emitted by v0.2 verifiers.",
           "enum": [
             "signature_verify_failed",
             "prompt_hash_mismatch",

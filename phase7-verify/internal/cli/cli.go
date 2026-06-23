@@ -33,6 +33,7 @@ const (
 	exitSoftware     = 70
 
 	defaultCoordinator = "coordinator.streamvc.live"
+	maxCacheLineBytes  = 1 * 1024 * 1024
 )
 
 var providerIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -219,12 +220,12 @@ func optionsToVerifyArgs(opts options, stdin io.Reader, getenv func(string) stri
 		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: err}
 	}
 	coordinatorHost := opts.coordinator
-	resolvedProviderID, err := resolveProviderID(opts.providerID, bundleProviderID, input.Header, coordinatorHost, c)
+	resolvedProviderID, resolutionErr, err := resolveProviderID(opts.providerID, bundleProviderID, input.Header, coordinatorHost, c)
 	if err != nil {
 		return verify.VerifyInput{}, verify.VerifyOpts{}, err
 	}
 	if resolvedProviderID == "" && len(pubkey) == 0 {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: errors.New("--provider-id is required when no bundle provider_id or single-match cache entry is available")}
+		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: missingProviderIDError(resolutionErr)}
 	}
 	input.ProviderID = resolvedProviderID
 
@@ -305,36 +306,46 @@ func cacheForRun(cfg runConfig) (*cache.Cache, error) {
 	return cache.Open("")
 }
 
-func resolveProviderID(cliProviderID, bundleProviderID, header, coordinatorHost string, c *cache.Cache) (string, error) {
+func resolveProviderID(cliProviderID, bundleProviderID, header, coordinatorHost string, c *cache.Cache) (string, error, error) {
 	if cliProviderID != "" {
-		return cliProviderID, nil
+		return cliProviderID, nil, nil
 	}
 	if bundleProviderID != "" {
-		return bundleProviderID, nil
+		return bundleProviderID, nil, nil
 	}
 	parsed, err := receipt.Parse(header)
 	if err != nil {
-		return "", &verify.InputFormatError{Err: err}
+		return "", nil, &verify.InputFormatError{Err: err}
 	}
 	pubkey, err := receipt.ParsePubkey(parsed.Tuple.ProviderPubkey)
 	if err != nil {
-		return "", &verify.InputFormatError{Err: err}
+		return "", nil, &verify.InputFormatError{Err: err}
 	}
-	return singleMatchProviderIDFromCache(c, normalizedCoordinatorHost(coordinatorHost), pubkey), nil
+	providerID, err := singleMatchProviderIDFromCache(c, normalizedCoordinatorHost(coordinatorHost), pubkey)
+	return providerID, err, nil
 }
 
-func singleMatchProviderIDFromCache(c *cache.Cache, coordinatorHost string, pubkey []byte) string {
+func missingProviderIDError(resolutionErr error) error {
+	message := "--provider-id is required when no bundle provider_id or single-match cache entry is available"
+	if resolutionErr != nil {
+		return fmt.Errorf("%s (single-match resolution failed: %v)", message, resolutionErr)
+	}
+	return errors.New(message)
+}
+
+func singleMatchProviderIDFromCache(c *cache.Cache, coordinatorHost string, pubkey []byte) (string, error) {
 	if c == nil || c.Path() == "" {
-		return ""
+		return "", nil
 	}
 	file, err := os.Open(c.Path())
 	if errors.Is(err, os.ErrNotExist) || err != nil {
-		return ""
+		return "", nil
 	}
 	defer file.Close()
 
 	matches := map[string]bool{}
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxCacheLineBytes)
 	for scanner.Scan() {
 		var entry struct {
 			CoordinatorHost string `json:"coordinator_host"`
@@ -352,13 +363,16 @@ func singleMatchProviderIDFromCache(c *cache.Cache, coordinatorHost string, pubk
 			matches[entry.ProviderID] = true
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		return "", err
+	}
 	if len(matches) != 1 {
-		return ""
+		return "", nil
 	}
 	for providerID := range matches {
-		return providerID
+		return providerID, nil
 	}
-	return ""
+	return "", nil
 }
 
 func normalizedCoordinatorHost(raw string) string {
@@ -507,4 +521,13 @@ A verifier's human-mode output line for ` + "`valid`" + ` SHOULD frame this
 scope visibly — e.g. by including the phrase ` + "`signed by m1-anon`" + `
 rather than ` + "`verified m1-anon`" + `. The ` + "`--explain`" + ` flag of §10.4.2
 exists precisely to make this trust boundary unmissable to a
-buyer who is about to act on a ` + "`valid`" + ` result.`
+buyer who is about to act on a ` + "`valid`" + ` result.
+
+When you supply ` + "`--pubkey`" + ` AND a custom ` + "`--coordinator`" + `, the explicit
+pubkey is the trust root regardless of what the coordinator publishes. A
+divergence between your ` + "`--pubkey`" + ` and the coordinator's published pubkey
+for the same ` + "`provider_id`" + ` is recorded as the warning
+` + "`explicit_vs_live_divergence`" + ` but does NOT change the verification result
+— the explicit pubkey wins. If you need to act on disagreement, parse the JSON
+output's ` + "`warnings[]`" + ` array; checking the exit code alone is not enough in
+this configuration.`

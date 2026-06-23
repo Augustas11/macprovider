@@ -21,6 +21,11 @@ const providerID = "m1-anon"
 
 var fixedNow = time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
 
+func TestMain(m *testing.M) {
+	os.Setenv(allowPrivateCoordinatorEnv, "1")
+	os.Exit(m.Run())
+}
+
 func TestResolveExplicitOfflineNoNetwork(t *testing.T) {
 	var calls int32
 	server := receiptKeyServer(t, testKey(2), http.StatusOK, &calls)
@@ -256,6 +261,23 @@ func TestResolve429And5xxAreFetchFailuresNoRetry(t *testing.T) {
 	}
 }
 
+func TestFetchLiveOversizedResponseFailsFetch(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(strings.Repeat(" ", 1<<20)))
+	}))
+	defer server.Close()
+
+	target, err := normalizeCoordinator(server.URL)
+	if err != nil {
+		t.Fatalf("normalizeCoordinator: %v", err)
+	}
+	_, err = fetchLive(providerID, target, server.Client())
+	if !errors.Is(err, ErrFetchFailed) {
+		t.Fatalf("fetchLive err = %v, want ErrFetchFailed", err)
+	}
+}
+
 func TestResolveRedirectOffHostFails(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "https://example.invalid/v1/receipt-keys/"+providerID, http.StatusFound)
@@ -445,6 +467,40 @@ func TestResolveRejectsHTTPAndInvalidProviderID(t *testing.T) {
 				t.Fatalf("err = %v, want ErrInvalidProviderID", err)
 			}
 		})
+	}
+}
+
+func TestNormalizeCoordinatorRejectsPrivateLiteralHostsByDefault(t *testing.T) {
+	t.Setenv(allowPrivateCoordinatorEnv, "")
+	for _, raw := range []string{
+		"https://127.0.0.1:8443",
+		"https://[::1]:8443",
+		"https://10.0.0.5",
+		"https://172.16.0.5",
+		"https://192.168.1.5",
+		"https://169.254.1.5",
+		"https://[fe80::1]",
+		"https://0.0.0.0",
+	} {
+		t.Run(raw, func(t *testing.T) {
+			if _, err := normalizeCoordinator(raw); err == nil || !strings.Contains(err.Error(), "loopback/private") {
+				t.Fatalf("normalizeCoordinator(%q) err = %v, want loopback/private rejection", raw, err)
+			}
+		})
+	}
+}
+
+func TestNormalizeCoordinatorAllowsPrivateLiteralHostsWithEnv(t *testing.T) {
+	t.Setenv(allowPrivateCoordinatorEnv, "1")
+	if _, err := normalizeCoordinator("https://127.0.0.1:8443"); err != nil {
+		t.Fatalf("normalizeCoordinator with allow env: %v", err)
+	}
+}
+
+func TestNormalizeCoordinatorAllowsNamesWithoutResolution(t *testing.T) {
+	t.Setenv(allowPrivateCoordinatorEnv, "")
+	if _, err := normalizeCoordinator("https://localhost:8443"); err != nil {
+		t.Fatalf("normalizeCoordinator hostname: %v", err)
 	}
 }
 
