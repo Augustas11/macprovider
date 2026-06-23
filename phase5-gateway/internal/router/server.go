@@ -741,14 +741,29 @@ func writeError(w http.ResponseWriter, status int, typ, code, message string) {
 }
 
 func copyCleanHeaders(dst, src http.Header) {
+	copyCleanHeadersWithReceipt(dst, src, false)
+}
+
+func copyReceiptEligibleHeaders(dst, src http.Header) {
+	copyCleanHeadersWithReceipt(dst, src, true)
+}
+
+func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 	for key, values := range src {
-		if isMacProviderHeader(key) || strings.EqualFold(key, "Content-Length") {
+		if strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		if isMacProviderHeader(key) && !(allowReceipt && isReceiptResponseHeader(key)) {
 			continue
 		}
 		for _, value := range values {
 			dst.Add(key, value)
 		}
 	}
+}
+
+func isReceiptResponseHeader(key string) bool {
+	return strings.EqualFold(key, "X-MacProvider-Receipt")
 }
 
 func stripInternalMacProviderHeaders(header http.Header) []string {

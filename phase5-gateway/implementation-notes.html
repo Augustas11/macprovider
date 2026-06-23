@@ -14,6 +14,7 @@
     <li>Coordinator buyer listener must be rebound to <code>127.0.0.1:8443</code> for the gateway migration.</li>
     <li>SQLite is the concrete v1 storage target, behind interfaces that can later move to D1, PostgreSQL, or Workers KV.</li>
     <li>GitHub OAuth is primary identity; email magic link is secondary only if a practical free tier is available.</li>
+    <li><strong>SPEC-015 Step 8:</strong> Non-streaming chat completion and SPEC-001 null-usage provider-error responses may preserve only <code>X-MacProvider-Receipt</code> from the <code>X-MacProvider-*</code> namespace. Streaming responses, generic provider errors, and rejected sibling/internal headers such as <code>X-MacProvider-Receipt-Pending</code>, <code>X-MacProvider-Foo</code>, and <code>X-MacProvider-Completion-Tokens</code> remain stripped before buyer response delivery.</li>
   </ul>
   <h2>Known implementation constraints</h2>
   <ul>

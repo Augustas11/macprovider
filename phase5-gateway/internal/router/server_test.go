@@ -1117,6 +1117,124 @@ func TestCapacityTierDeescalation(t *testing.T) {
 	}
 }
 
+func TestReceiptHeaderForwardedAndSiblingMacProviderHeadersStripped(t *testing.T) {
+	const receipt = "receipt-tuple.signature"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{
+			"Content-Type":                    []string{"application/json"},
+			"X-MacProvider-Receipt":           []string{receipt},
+			"X-MacProvider-Foo":               []string{"strip-me"},
+			"X-MacProvider-Receipt-Pending":   []string{"strip-me-too"},
+			"X-MacProvider-Completion-Tokens": []string{"4"},
+		}, `{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_receipt_header")
+
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("X-MacProvider-Receipt"); got != receipt {
+		t.Fatalf("receipt header = %q, want %q", got, receipt)
+	}
+	for _, header := range []string{"X-MacProvider-Foo", "X-MacProvider-Receipt-Pending", "X-MacProvider-Completion-Tokens"} {
+		if got := resp.Header().Get(header); got != "" {
+			t.Fatalf("buyer response exposed %s=%q", header, got)
+		}
+	}
+}
+
+func TestNullUsageErrorReceiptHeaderForwarded(t *testing.T) {
+	const receipt = "null-usage-receipt.signature"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusBadGateway, http.Header{
+			"Content-Type":                    []string{"application/json"},
+			"X-MacProvider-Receipt":           []string{receipt},
+			"X-MacProvider-Foo":               []string{"strip-me"},
+			"X-MacProvider-Receipt-Pending":   []string{"strip-me-too"},
+			"X-MacProvider-Completion-Tokens": []string{"4"},
+		}, `{"error":{"message":"model not loaded","type":"api_error","param":null,"code":"error_model_not_loaded"}}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_receipt_null_usage")
+
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "error_model_not_loaded")
+	if got := resp.Header().Get("X-MacProvider-Receipt"); got != receipt {
+		t.Fatalf("receipt header = %q, want %q", got, receipt)
+	}
+	for _, header := range []string{"X-MacProvider-Foo", "X-MacProvider-Receipt-Pending", "X-MacProvider-Completion-Tokens"} {
+		if got := resp.Header().Get(header); got != "" {
+			t.Fatalf("null-usage response exposed %s=%q", header, got)
+		}
+	}
+}
+
+func TestGenericProviderErrorReceiptHeaderStripped(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusBadGateway, http.Header{
+			"Content-Type":          []string{"application/json"},
+			"X-MacProvider-Receipt": []string{"generic-error-receipt.signature"},
+		}, `{"error":{"message":"provider failed","type":"api_error","param":null,"code":"provider_failed"}}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_receipt_generic_error")
+
+	resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if resp.Code != http.StatusBadGateway {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	assertErrorCode(t, resp.Body.String(), "upstream_provider_error")
+	if got := resp.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("generic provider error exposed receipt header %q", got)
+	}
+}
+
+func TestStreamingReceiptHeaderStripped(t *testing.T) {
+	const receipt = "stream-receipt.signature"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := `data: {"id":"chatcmpl","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"delta":{"content":"ok"}}]}`
+		return responseWithBody(http.StatusOK, http.Header{
+			"Content-Type":                    []string{"text/event-stream; charset=utf-8"},
+			"X-MacProvider-Receipt":           []string{receipt},
+			"X-MacProvider-Foo":               []string{"strip-me"},
+			"X-MacProvider-Receipt-Pending":   []string{"strip-me-too"},
+			"X-MacProvider-Completion-Tokens": []string{"4"},
+		}, payload+"\n\ndata: [DONE]\n\n"), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_stream_receipt_header")
+
+	resp := postChat(t, h, fullKey, `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Header().Get("Content-Type"); got != "text/event-stream; charset=utf-8" {
+		t.Fatalf("content-type=%q", got)
+	}
+	for _, header := range []string{"X-MacProvider-Receipt", "X-MacProvider-Foo", "X-MacProvider-Receipt-Pending", "X-MacProvider-Completion-Tokens"} {
+		if got := resp.Header().Get(header); got != "" {
+			t.Fatalf("streaming buyer response exposed %s=%q", header, got)
+		}
+	}
+}
+
 func TestProviderPinningHeadersStripped(t *testing.T) {
 	var captured http.Header
 	failing := false
