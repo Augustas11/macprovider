@@ -1,4 +1,4 @@
-module github.com/Augustas11/macprovider/phase7-verify
+module github.com/augstar/macprovider/phase7-verify
 
 go 1.26
 
