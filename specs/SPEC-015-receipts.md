@@ -1,7 +1,30 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.2.3 (2026-06-23, round-3 codex audit fix pass — LOCK candidate)
+**Version:** 0.2.4 (2026-06-23, round-4 codex audit fix pass — LOCK candidate)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver), SPEC-005 v0.3, SPEC-006 v0.9, SPEC-008 v0.3, SPEC-011 v0.5, SPEC-013 v0.3
+
+**Change log v0.2.4:**
+- Round-4 codex audit fix pass (round 4 verdicts: security
+  **READY TO LOCK** maintained; code + architect READY WITH FIX
+  PASS, single convergent finding **CF8** flagging two
+  stale-wording spots that v0.2.3 missed when adopting the
+  strict-CLI contract):
+  - **CF8 / C13 / A10 (stale provider-id wording in §10.4.1
+    bundle field description and §10.1 HTTP 404 reason):**
+    - §10.4.1 `provider_id` field description rewritten to
+      align with the §10.4 "Provider-id requirements" strict
+      contract — absent bundle `provider_id` falls back to
+      `--provider-id` then single-match cache; if neither yields
+      a value AND no `--pubkey` is supplied, exit `64` (not
+      `inconclusive`). The "MAY produce `inconclusive` if no
+      other identification path applies" phrasing is REMOVED.
+    - §10.1 HTTP 404 paragraph updated to use `reason:
+      "provider_id_not_in_pool"` per the §10.4.2 enum, not the
+      now-warning-only `provider_id_unresolvable`.
+- All three codex lenses now project to READY TO LOCK on round 5.
+  v0.2.4 ships into the combined SPEC + IMPL PR per the
+  [[feedback-bundle-spec-impl-one-pr]] convention if round 5
+  confirms 0 CRITICAL / 0 MAJOR across all lenses.
 
 **Change log v0.2.3:**
 - Round-3 codex audit fix pass against
@@ -1517,9 +1540,9 @@ The HTTP 404 response from the §10.7 endpoint (provider not in
 the current pool) is a degenerate case: it is authoritative
 ("this `provider_id` is unknown to me") but the receipt itself may
 predate the provider's removal. v0.2 verifiers MUST treat 404 as
-`inconclusive` with `reason: "provider_id_unresolvable"`. v0.3+
-MAY revisit this if the coordinator gains a "retired but historic"
-state.
+`inconclusive` with `reason: "provider_id_not_in_pool"` per the
+§10.4.2 reason enum. v0.3+ MAY revisit this if the coordinator
+gains a "retired but historic" state.
 
 ### 10.2 Pubkey resolution
 
@@ -1762,8 +1785,11 @@ for CLI contract violations the verifier knows at parse time.
   surfaced by the coordinator. When present, this is used as the
   primary key for §10.2 step 2/3 pubkey resolution and §10.2.1
   rotation-grace lookup. When absent, the verifier follows the
-  §10.2 "provider_id resolution" fallback rules — which MAY
-  produce `inconclusive` if no other identification path applies.
+  §10.4 "Provider-id requirements" fallback order (explicit
+  `--provider-id`, then single-match cache); if neither yields a
+  `provider_id` AND no `--pubkey` is supplied, the verifier exits
+  `64` (usage error) before any verification runs. The verifier
+  MUST NOT emit `inconclusive` for missing-input cases.
 
 A v0.2 verifier MUST reject unknown top-level keys with exit code
 `65` (input format error per §10.4.3). This prevents future

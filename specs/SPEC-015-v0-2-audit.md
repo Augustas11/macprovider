@@ -473,3 +473,99 @@ None.
 The round-2 roots CF4 and CF5 are fixed in substance: `/v1/receipt-keys/<provider_id>` is now the operative resolver, authoritative no-match is `invalid`, cache timestamps match the wire shape, `--provider-id` is first-class, and §10.6's trust boundary is sharper. The remaining blocker is a regression introduced while promoting `--provider-id`: missing provider identity is specified both as a required-argument usage error and as a normal `inconclusive` result.
 
 **Effective severity:** MAJOR. One fix pass should be enough: pick either exit `64` or exit `2` semantics for missing provider id in header+hashes mode, then align §10.4, §10.4.3, §10.4.4, the warning schema, and AC-22/AC-24 around that choice.
+
+## Lens: code — round 4 by Codex
+
+**Verdict:** READY WITH FIX PASS
+
+**Counts:** 0 CRITICAL, 1 MAJOR, 0 MINOR, 0 QUESTIONS
+
+**Round-3 resolution check:** C10 is resolved in the controlling CLI contract: §10.4, §10.4.3, and §10.4.4 now consistently make missing `provider_id` without `--pubkey` an exit-64 usage error before the verifier runs. C11 is resolved by adding `provider_id_unresolvable` to the `live_check_skipped.reason` enum for the explicit-`--pubkey` / no-provider-id path. C12 is resolved by rewriting §10.0 step 5 around `provider_id` and by explicitly forbidding pubkey-byte scans. The remaining code finding is a narrow stale-wording regression inside the same provider-id surface.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+#### C13. Provider-id reason wording still conflicts with the strict CLI and JSON contracts
+**Location:** §10.1 lines 1516-1520; §10.4.1 lines 1761-1766; §10.4.2 lines 1798-1799 and 1817-1818; §10.7 lines 2073-2076
+
+**Finding:** v0.2.3 intends to separate missing provider identity from resolver failure: missing provider id is exit `64`, `provider_id_not_in_pool` is the top-level inconclusive reason for §10.7 HTTP 404, and `provider_id_unresolvable` is only a `live_check_skipped.reason` warning when explicit `--pubkey` lets verification proceed without a resolver address. Two normative clauses still blur those meanings. §10.4.1 says an absent bundle `provider_id` follows fallback rules "which MAY produce `inconclusive` if no other identification path applies," even though §10.4 and the flag matrix require exit `64` when no provider id can be obtained and no `--pubkey` is supplied. §10.1 also says HTTP 404 is `inconclusive` with `reason: "provider_id_unresolvable"`, while the §10.4.2 exhaustive top-level reason enum and §10.7 404 wording use `provider_id_not_in_pool`.
+
+**Why it matters:** Scripts and JSON Schema consumers can still disagree on two common paths: bundle/stdin without provider identity, and live resolver 404. One conforming implementation could follow the strict matrix and exit `64`, while another could follow the bundle-field note and emit `inconclusive`; one could emit a top-level reason outside the §10.4.2 enum for 404. This is not a security regression, but it is still the exit-code/schema ambiguity CF7 was supposed to close.
+
+**Suggested fix:** Make §10.4.1's `provider_id` bullet say absence follows §10.2/§10.4 fallback rules and produces exit `64` when no provider id is obtainable without `--pubkey`; reserve `inconclusive` there for resolver failures after a provider id exists. Change the §10.1 404 sentence to `reason: "provider_id_not_in_pool"` so `provider_id_unresolvable` remains warning-only.
+
+### MINOR findings
+
+None.
+
+### QUESTIONS
+
+None.
+
+## Lens: security — round 4 by Codex
+
+**Verdict:** READY TO LOCK
+
+**Counts:** 0 CRITICAL, 0 MAJOR, 0 MINOR, 0 QUESTIONS
+
+**Round-3 resolution check:** The v0.2.3 deltas do not re-open the round-3 security result. `inconclusive` remains first-class and cannot become `valid` for unrooted pubkeys; authoritative key mismatch and out-of-window previous-key matches remain `invalid`; stale cache still cannot produce `valid`; `--offline --pubkey` still has zero network; non-default coordinator use remains visible; and §10.6 continues to avoid model-attestation, timestamp-honesty, privacy, pubkey-root, replay, and uniqueness overclaim. The C13/A10 provider-id reason drift is machine-contract wording, not a false-valid or trust-boundary regression.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+None.
+
+### MINOR findings
+
+None.
+
+### QUESTIONS
+
+None.
+
+## Lens: architect — round 4 by Codex
+
+**Verdict:** READY WITH FIX PASS
+
+**Counts:** 0 CRITICAL, 1 MAJOR, 0 MINOR, 0 QUESTIONS
+
+**Round-3 resolution check:** A9 is resolved in the main architecture: v0.2.3 chooses the strict CLI contract, makes `provider_id` the resolver address, forbids provider scans, and reserves `inconclusive` for trust-root failures after parse-time input validation succeeds. BUILD-prompt deferrals remain intact: no bulk verification, no receipt explorer, no model-hash binding, no HSM/hardware trust root, no cross-provider chain verification, no TUF/on-chain root, and no buyer SDK integration landed in v0.2.3.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+#### A10. Strict provider-id contract is architecturally chosen but not fully reified
+**Location:** §10.1 lines 1516-1520; §10.4.1 lines 1761-1766; §10.4 lines 1700-1725; §10.4.4 lines 1903-1915
+
+**Finding:** The architecture now clearly chooses "missing provider id is a CLI contract violation" over "missing provider id is a runtime `inconclusive` result." However, §10.4.1 still describes absent bundle `provider_id` as a path that may become `inconclusive` when no identification path applies, and §10.1 still uses the old `provider_id_unresolvable` reason for the 404 retired-provider case. Those stale clauses preserve a sliver of the old dual interpretation even though the controlling §10.4 paragraphs and matrix are strict.
+
+**Why it matters:** The implementation BUILD prompt should not have to decide which provider-id interpretation wins when generating tests and JSON Schema. Leaving stale wording in a lock candidate risks a "spec patch disguised as implementation" exactly where round 3 asked v0.2.3 to make the architectural choice explicit.
+
+**Suggested fix:** Align the two stale clauses with the strict contract: no provider id before execution is `64`; HTTP 404 after a provider-id-addressed resolver call is `inconclusive` with `provider_id_not_in_pool`; `provider_id_unresolvable` is only a warning reason for explicit-pubkey verification with no addressable live check.
+
+### MINOR findings
+
+None.
+
+### QUESTIONS
+
+None.
+
+## Convergent findings — round 4 by Codex
+
+### CF8. v0.2.3 chose the strict provider-id contract but left stale reason/field wording
+
+**Converged from:** code C13, architect A10
+
+The round-3 roots are closed in substance: C10's exit-code contradiction is fixed in §10.4/§10.4.3/§10.4.4, C11's warning enum is fixed, C12's algorithm framing is fixed, and A9's architectural choice is made. The remaining issue is narrow but still lock-blocking for automation: §10.4.1 still hints that absent provider identity can become `inconclusive`, and §10.1 still assigns the old `provider_id_unresolvable` top-level reason to §10.7 404 despite the enum and endpoint wording using `provider_id_not_in_pool`.
+
+**Effective severity:** MAJOR. One text-only fix pass should be enough; no security redesign or resolver architecture change is needed.
