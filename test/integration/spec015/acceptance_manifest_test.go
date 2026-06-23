@@ -127,7 +127,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "pinned Python and JavaScript OpenAI SDK fixtures ignore the non-streaming receipt header and accept streaming responses",
 		SpecStep: "SPEC-015 §14 AC-9",
 		Commands: []string{"cd test/integration && SPEC015_SDK_COMPAT_GATEWAY=1 go test -race -count=1 -timeout 10m . -run TestSpec015SDKCompatAgainstGateway"},
-		CIJobs:   []string{"integration (cross-service + SPEC-015 AC manifest)", "spec-015-acceptance"},
+		CIJobs:   []string{"integration (cross-service)", "spec-015-acceptance"},
 		Evidence: []evidenceAnchor{
 			{"test/integration/spec015_sdk_fixture_test.go", "TestSpec015SDKCompatFixturePinsOpenAISDKs"},
 			{"test/integration/spec015/run_acceptance.sh", "SPEC-015 AC-09 Python/Node SDKs against real local gateway"},
@@ -153,7 +153,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "previous receipt keys verify during the seven-day grace window with -60s slack",
 		SpecStep: "SPEC-015 §14 AC-11",
 		Commands: []string{"cd test/integration && go test -race -count=1 -timeout 5m ./...", "cd phase4-coordinator && go test ./... -count=1"},
-		CIJobs:   []string{"integration (cross-service + SPEC-015 AC manifest)", "phase4-coordinator (go vet + test)"},
+		CIJobs:   []string{"integration (cross-service)", "phase4-coordinator (go vet + test)"},
 		Evidence: []evidenceAnchor{
 			{"test/integration/spec015/acceptance_manifest_test.go", "TestRotationGraceVerifierAcceptsPreviousKeyWithinSlack"},
 			{"phase4-coordinator/internal/ws/server_test.go", "TestPoolzReceiptPubkeyPrevShape"},
@@ -188,7 +188,7 @@ var spec015ACs = []acceptanceCriterion{
 		Summary:  "non-streaming responses from receipt_pubkey:null providers remain receipt-free",
 		SpecStep: "SPEC-015 §14 AC-14",
 		Commands: []string{"cd test/integration && go test -race -count=1 -timeout 5m ./...", "cd phase3-binary && swift test --parallel"},
-		CIJobs:   []string{"integration (cross-service + SPEC-015 AC manifest)", "phase3-binary (swift test)"},
+		CIJobs:   []string{"integration (cross-service)", "phase3-binary (swift test)"},
 		Evidence: []evidenceAnchor{
 			{"test/integration/scenarios_test.go", "pre-v1.6 fake provider response exposed receipt header"},
 			{"phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift", "testPreKeypairReceiptHeaderIsOmittedWithout500"},
@@ -317,7 +317,7 @@ func TestSpec015Section14StillDefinesAC1ThroughAC17(t *testing.T) {
 func TestCIWiresAcceptanceSuite(t *testing.T) {
 	ci := readRepoFile(t, ".github/workflows/ci.yml")
 	required := []string{
-		"name: integration (cross-service + SPEC-015 AC manifest)",
+		"name: integration (cross-service)",
 		"Run cross-service integration and SPEC-015 AC manifest tests",
 		"working-directory: test/integration",
 		"run: go test -race -count=1 -timeout 5m ./...",
