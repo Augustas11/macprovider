@@ -59,7 +59,7 @@ jobs:
         run: make test-gateway
 
   integration:
-    name: integration (cross-service + SPEC-015 AC manifest)
+    name: integration (cross-service)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     # Closes TEST-6 / M2-9 / M3-11 (audits/2026-06-10/REPO_AUDIT.md:117).
@@ -232,7 +232,7 @@ jobs:
           for check in \
             "phase4-coordinator (go vet + test):${COORDINATOR_RESULT}" \
             "phase5-gateway (go vet + test):${GATEWAY_RESULT}" \
-            "integration (cross-service + SPEC-015 AC manifest):${INTEGRATION_RESULT}" \
+            "integration (cross-service):${INTEGRATION_RESULT}" \
             "spec-014-v0-2-gate:${SPEC_014_RESULT}" \
             "deploy tooling (check-deploy-config gate):${DIST_TOOLING_RESULT}" \
             "phase3-binary (swift test):${SWIFT_TESTS_RESULT}" \
