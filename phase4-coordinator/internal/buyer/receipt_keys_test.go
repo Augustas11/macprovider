@@ -114,6 +114,8 @@ func TestReceiptKeysReturnsPreviousKeyInGraceWindow(t *testing.T) {
 		ExpiresAt: expiresAt,
 	})
 	server := NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	frozen := time.Date(2026, 6, 23, 12, 0, 0, 0, time.UTC)
+	server.now = func() time.Time { return frozen }
 
 	rr := serveReceiptKeys(server, "p1", "198.51.100.2:12345")
 
