@@ -28,7 +28,15 @@ final class ReceiptAuditTests: XCTestCase {
     }
 
     func testReceiptOmittedPayloadSupportsEverySpecReason() throws {
-        let expected = Set(["pre_v1_6_binary", "no_keypair", "model_swap_violation", "pre_token_cancel", "streaming_request"])
+        let expected = Set([
+            "pre_v1_6_binary",
+            "no_keypair",
+            "model_swap_violation",
+            "pre_token_cancel",
+            "streaming_request",
+            "construction_failed",
+            "write_failed",
+        ])
         let got = try Set(ReceiptOmissionReason.allCases.map { reason in
             let payload = try payloadObject(ReceiptAudit.omittedPayload(providerID: "provider-a", requestID: "req-1", reason: reason))
             XCTAssertEqual(payload["event"] as? String, "receipt_omitted")
