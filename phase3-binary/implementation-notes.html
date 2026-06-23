@@ -2198,5 +2198,28 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   candidate commit-after-accept, rejection leaves current unchanged, and the
   rotation auth initial frame overrides the old published receipt pubkey.</p>
 </div>
+<div class="entry">
+  <time>2026-06-23</time>
+  <p><strong>SPEC-015 Step 9 provider receipt audit events.</strong>
+  Added structured JSON audit events for receipt issuance and omission on the
+  provider HTTP path. Successful non-streaming responses and SPEC-001
+  null-usage error receipts emit <code>receipt_issued</code> with
+  <code>provider_id</code>, <code>request_id</code>, <code>model_id</code>,
+  <code>tokens_out</code>, <code>ttft_ms</code>, and <code>unix_ts</code> only.
+  The event shape intentionally excludes receipt bodies, public keys, prompt
+  hashes, output hashes, and signatures.</p>
+  <p>Receipt suppression now emits <code>receipt_omitted</code> for the five
+  SPEC-015 reasons: pre-v1.6 receipt runtime unavailable, no current keypair,
+  model-swap violation, pre-token cancellation, and streaming requests. The
+  provider continues to use its existing structured stderr operational event
+  sink; no new durable provider-side audit store was introduced.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --filter ReceiptAuditTests --filter HTTPServerReceiptTests</code>
+  passes 25 tests, covering issued-event field allowlisting, all omission
+  reasons, handler-level audit emission for success/streaming/no-keypair/model
+  swap/buyer-cancel paths, unrelated non-null-usage errors staying unaudited,
+  successful non-streaming receipts, null-usage receipts, pre-keypair omission,
+  and streaming suppression.</p>
+</div>
 </section>
 </body></html>

@@ -240,14 +240,15 @@ type Registry struct {
 	// over currently-connected providers' sets — so when a provider
 	// disconnects, models only it had reported correctly disappear from
 	// the global "seen" answer.
-	seenModelsByProvider  map[string]map[string]struct{}
-	breakerFaults         map[string][]time.Time
-	recoveryHolds         map[string]recoveryHold
-	canarySanctions       map[string]canarySanction
-	lastBreakerRecoveries map[string]time.Time
-	maxProvider           int
-	hashVerifier          HeartbeatHashVerifier
-	swapEmitter           SwapEventEmitter
+	seenModelsByProvider   map[string]map[string]struct{}
+	breakerFaults          map[string][]time.Time
+	recoveryHolds          map[string]recoveryHold
+	canarySanctions        map[string]canarySanction
+	lastBreakerRecoveries  map[string]time.Time
+	maxProvider            int
+	hashVerifier           HeartbeatHashVerifier
+	swapEmitter            SwapEventEmitter
+	receiptRotationEmitter ReceiptRotationEventEmitter
 }
 
 // maxSeenModelsPerProvider caps the seenModelsByProvider inner set so a
@@ -524,23 +525,33 @@ func activeReceiptPubkeyPrev(p *Provider, now time.Time) *ReceiptPubkeyPrevious 
 	return p.ReceiptPubkeyPrev
 }
 
-func (r *Registry) commitPendingReceiptPubkeyLocked(p *Provider, now time.Time) {
+func (r *Registry) commitPendingReceiptPubkeyLocked(p *Provider, now time.Time) *ReceiptRotationEvent {
 	now = now.UTC()
 	if p.ReceiptPubkeyPrev != nil && !now.Before(p.ReceiptPubkeyPrev.ExpiresAt) {
 		p.ReceiptPubkeyPrev = nil
 	}
 	if len(p.PendingReceiptPubkey) == 0 {
-		return
+		return nil
 	}
+	var event *ReceiptRotationEvent
 	if len(p.ReceiptPubkey) > 0 && !bytes.Equal(p.ReceiptPubkey, p.PendingReceiptPubkey) {
+		oldPubkey := cloneBytes(p.ReceiptPubkey)
+		newPubkey := cloneBytes(p.PendingReceiptPubkey)
 		p.ReceiptPubkeyPrev = &ReceiptPubkeyPrevious{
-			Pubkey:    cloneBytes(p.ReceiptPubkey),
+			Pubkey:    oldPubkey,
 			RotatedAt: now,
 			ExpiresAt: now.Add(ReceiptRotationGrace),
+		}
+		event = &ReceiptRotationEvent{
+			ProviderID: p.ProviderID,
+			OldPubkey:  cloneBytes(oldPubkey),
+			NewPubkey:  newPubkey,
+			RotatedAt:  now,
 		}
 	}
 	p.ReceiptPubkey = cloneBytes(p.PendingReceiptPubkey)
 	p.PendingReceiptPubkey = nil
+	return event
 }
 
 func cloneReceiptPubkeyPrevious(prev *ReceiptPubkeyPrevious) *ReceiptPubkeyPrevious {
@@ -963,6 +974,20 @@ type SwapEvent struct {
 // handler, matching the v1.3.4 default failure mode.
 type SwapEventEmitter func(event SwapEvent)
 
+// ReceiptRotationEvent carries the coordinator-side audit fields emitted when
+// a provider reconnect publishes a different receipt pubkey and that pending
+// key commits on state_update. Pubkeys are public trust roots and are included
+// per SPEC-015 §11; receipt bodies, hashes, and signatures are never present.
+type ReceiptRotationEvent struct {
+	ProviderID string
+	OldPubkey  []byte
+	NewPubkey  []byte
+	RotatedAt  time.Time
+}
+
+// ReceiptRotationEventEmitter is invoked after Registry.mu is released.
+type ReceiptRotationEventEmitter func(event ReceiptRotationEvent)
+
 type HeartbeatUpdate struct {
 	Status                State
 	ModelID               string
@@ -1133,9 +1158,9 @@ type StateUpdate struct {
 
 func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateUpdate) (*Provider, bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID {
+		r.mu.Unlock()
 		return nil, false
 	}
 	if r.canApplyProviderStateLocked(p, update.State) {
@@ -1151,8 +1176,13 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 	if at.IsZero() {
 		at = time.Now().UTC()
 	}
-	r.commitPendingReceiptPubkeyLocked(p, at)
+	rotationEvent := r.commitPendingReceiptPubkeyLocked(p, at)
 	cp := *p
+	emitter := r.receiptRotationEmitter
+	r.mu.Unlock()
+	if rotationEvent != nil && emitter != nil {
+		emitter(*rotationEvent)
+	}
 	return &cp, true
 }
 
@@ -1239,4 +1269,10 @@ func WithHeartbeatHashVerifier(fn HeartbeatHashVerifier) RegistryOption {
 // 2E ships the SQLite writer).
 func WithSwapEmitter(fn SwapEventEmitter) RegistryOption {
 	return func(r *Registry) { r.swapEmitter = fn }
+}
+
+// WithReceiptRotationEmitter injects the SPEC-015 receipt_rotation_detected
+// audit callback. Default nil = no-op.
+func WithReceiptRotationEmitter(fn ReceiptRotationEventEmitter) RegistryOption {
+	return func(r *Registry) { r.receiptRotationEmitter = fn }
 }

@@ -142,6 +142,8 @@ func main() {
 	// buffer until full, then drop with a WARN.
 	swapCh := make(chan pool.SwapEvent, 64)
 	swapDrained := make(chan struct{})
+	receiptRotationCh := make(chan pool.ReceiptRotationEvent, 64)
+	receiptRotationDrained := make(chan struct{})
 	logSwapAuditFailure := func(event pool.SwapEvent, err error) {
 		loadingWindowMS := int64(0)
 		if !event.LoadingStartedAt.IsZero() {
@@ -186,6 +188,35 @@ func main() {
 			}
 		}
 	}()
+	logReceiptRotationAuditFailure := func(event pool.ReceiptRotationEvent, err error) {
+		logger.Warn().
+			Err(err).
+			Str("provider_id", event.ProviderID).
+			Time("rotated_at", event.RotatedAt).
+			Msg("receipt_rotation_detected audit write failed")
+	}
+	go func() {
+		defer close(receiptRotationDrained)
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				for {
+					select {
+					case event := <-receiptRotationCh:
+						if err := auditStore.EmitReceiptRotation(context.Background(), event); err != nil {
+							logReceiptRotationAuditFailure(event, err)
+						}
+					default:
+						return
+					}
+				}
+			case event := <-receiptRotationCh:
+				if err := auditStore.EmitReceiptRotation(context.Background(), event); err != nil {
+					logReceiptRotationAuditFailure(event, err)
+				}
+			}
+		}
+	}()
 	logSwapDropped := func(event pool.SwapEvent, reason string) {
 		// Symmetry with logSwapAuditFailure: a dropped event must be
 		// reconstructable from the log line. Include the same identity
@@ -222,8 +253,20 @@ func main() {
 			logSwapDropped(event, "queue_full_cap_64")
 		}
 	}
+	receiptRotationEmitter := func(event pool.ReceiptRotationEvent) {
+		if shutdownCtx.Err() != nil {
+			logger.Warn().Str("provider_id", event.ProviderID).Str("reason", "shutdown").Msg("receipt_rotation_detected event dropped")
+			return
+		}
+		select {
+		case receiptRotationCh <- event:
+		default:
+			logger.Warn().Str("provider_id", event.ProviderID).Str("reason", "queue_full_cap_64").Msg("receipt_rotation_detected event dropped")
+		}
+	}
 	wsOpts = append(wsOpts, providerws.WithRegistryOptions(
 		pool.WithSwapEmitter(swapEmitter),
+		pool.WithReceiptRotationEmitter(receiptRotationEmitter),
 	))
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	buyerServer := buyer.NewServer(
@@ -329,6 +372,11 @@ func main() {
 			case <-swapDrained:
 			case <-ctx.Done():
 				logger.Warn().Msg("swap audit drain timed out at shutdown")
+			}
+			select {
+			case <-receiptRotationDrained:
+			case <-ctx.Done():
+				logger.Warn().Msg("receipt rotation audit drain timed out at shutdown")
 			}
 			logger.Info().Msg("coordinator shutdown complete")
 			return

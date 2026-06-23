@@ -116,6 +116,140 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertFalse(response.headers.containsMacProviderHeader)
     }
 
+
+    func testHTTPHandlerEmitsReceiptIssuedAuditOnSuccess() async throws {
+        let capture = ReceiptAuditCapture()
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let response = try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await roundTripChatCompletion(
+                body: [
+                    "model": "fixture-model",
+                    "messages": [["role": "user", "content": "hello"]],
+                ],
+                requestID: "req-issued",
+                receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+                completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 2, ttftMilliseconds: 7)
+            )
+        }
+        let event = try capture.singleEvent()
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertEqual(event["event"] as? String, "receipt_issued")
+        XCTAssertEqual(event["provider_id"] as? String, "provider-a")
+        XCTAssertEqual(event["request_id"] as? String, "req-issued")
+        XCTAssertEqual(event["model_id"] as? String, "fixture-model")
+        XCTAssertEqual(event["tokens_out"] as? Int, 2)
+        XCTAssertEqual(event["ttft_ms"] as? Int, 7)
+        XCTAssertNotNil(event["unix_ts"] as? Int)
+        XCTAssertEqual(Set(event.keys), Set(["event", "provider_id", "request_id", "model_id", "tokens_out", "ttft_ms", "unix_ts"]))
+        for forbidden in ["provider_pubkey", "prompt_hash", "output_hash", "signature", "receipt"] {
+            XCTAssertNil(event[forbidden], "receipt_issued leaked forbidden field \(forbidden)")
+        }
+    }
+
+    func testHTTPHandlerEmitsStreamingOmissionAudit() async throws {
+        let capture = ReceiptAuditCapture()
+        let response = try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await roundTripChatCompletion(
+                body: [
+                    "model": "fixture-model",
+                    "messages": [["role": "user", "content": "hello"]],
+                    "stream": true,
+                ],
+                requestID: "req-streaming",
+                receiptBuilder: nil,
+                completion: CompletionResult(content: "chunk", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            )
+        }
+        let event = try capture.singleEvent()
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertEqual(event["event"] as? String, "receipt_omitted")
+        XCTAssertEqual(event["request_id"] as? String, "req-streaming")
+        XCTAssertEqual(event["reason"] as? String, "streaming_request")
+    }
+
+    func testHTTPHandlerEmitsNoKeypairOmissionAudit() async throws {
+        let capture = ReceiptAuditCapture()
+        let response = try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await roundTripChatCompletion(
+                body: [
+                    "model": "fixture-model",
+                    "messages": [["role": "user", "content": "hello"]],
+                ],
+                requestID: "req-no-key",
+                receiptBuilder: ReceiptBuilder(keyStore: HTTPEmptyReceiptKeyStore()),
+                completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            )
+        }
+        let event = try capture.singleEvent()
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertEqual(event["event"] as? String, "receipt_omitted")
+        XCTAssertEqual(event["request_id"] as? String, "req-no-key")
+        XCTAssertEqual(event["reason"] as? String, "no_keypair")
+    }
+
+    func testHTTPHandlerEmitsModelSwapOmissionAudit() async throws {
+        let capture = ReceiptAuditCapture()
+        let response = try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await roundTripChatCompletion(
+                body: [
+                    "model": "fixture-model",
+                    "messages": [["role": "user", "content": "hello"]],
+                ],
+                requestID: "req-swap",
+                receiptBuilder: nil,
+                completionError: DrainCancelledError()
+            )
+        }
+        let event = try capture.singleEvent()
+
+        XCTAssertEqual(response.status, .serviceUnavailable, response.body)
+        XCTAssertEqual(event["event"] as? String, "receipt_omitted")
+        XCTAssertEqual(event["request_id"] as? String, "req-swap")
+        XCTAssertEqual(event["reason"] as? String, "model_swap_violation")
+    }
+
+    func testHTTPHandlerEmitsPreTokenCancelOmissionOnlyForBuyerCancel() async throws {
+        let capture = ReceiptAuditCapture()
+        let response = try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await roundTripChatCompletion(
+                body: [
+                    "model": "fixture-model",
+                    "messages": [["role": "user", "content": "hello"]],
+                ],
+                requestID: "req-cancel",
+                receiptBuilder: nil,
+                completionError: APIError(status: 499, message: "buyer disconnected", type: "server_error", code: "buyer_cancelled")
+            )
+        }
+        let event = try capture.singleEvent()
+
+        XCTAssertEqual(response.status.code, 499, response.body)
+        XCTAssertEqual(event["event"] as? String, "receipt_omitted")
+        XCTAssertEqual(event["request_id"] as? String, "req-cancel")
+        XCTAssertEqual(event["reason"] as? String, "pre_token_cancel")
+    }
+
+    func testHTTPHandlerDoesNotAuditUnrelatedNonNullUsageErrorAsOmission() async throws {
+        let capture = ReceiptAuditCapture()
+        let response = try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await roundTripChatCompletion(
+                body: [
+                    "model": "fixture-model",
+                    "messages": [["role": "user", "content": "hello"]],
+                ],
+                requestID: "req-loading",
+                receiptBuilder: nil,
+                completionError: APIError(status: 503, message: "loading", type: "server_error", code: "provider_loading")
+            )
+        }
+
+        XCTAssertEqual(response.status, .serviceUnavailable, response.body)
+        XCTAssertEqual(try capture.events().count, 0)
+    }
+
     func testNonStreamingReceiptHeaderParsesAndSelfVerifies() throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let request = try parseRequest([
@@ -316,6 +450,34 @@ private struct HTTPReceiptResponse {
     let body: String
 }
 
+private final class ReceiptAuditCapture: @unchecked Sendable {
+    private let lock = NSLock()
+    private var records: [Data] = []
+
+    func append(_ record: Data) {
+        lock.lock()
+        records.append(record)
+        lock.unlock()
+    }
+
+    func events() throws -> [[String: Any]] {
+        lock.lock()
+        let snapshot = records
+        lock.unlock()
+        return try snapshot.map { record in
+            let line = String(decoding: record, as: UTF8.self).trimmingCharacters(in: .newlines)
+            let data = Data(line.utf8)
+            return try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        }
+    }
+
+    func singleEvent() throws -> [String: Any] {
+        let events = try events()
+        XCTAssertEqual(events.count, 1)
+        return try XCTUnwrap(events.first)
+    }
+}
+
 private enum HTTPReceiptFixtureError: Error {
     case inferenceFailed
 }
@@ -324,6 +486,7 @@ private func roundTripChatCompletion(
     body: [String: Any],
     routerModelID: String? = "fixture-model",
     providerID: String? = "provider-a",
+    requestID: String = "req-http-receipt",
     receiptBuilder: ReceiptBuilder?,
     completion: CompletionResult? = nil,
     completionError: Error? = nil
@@ -356,7 +519,7 @@ private func roundTripChatCompletion(
         routerModelID: routerModelID,
         receiptBuilder: receiptBuilder
     ) { port in
-        try rawChatCompletionRoundTrip(port: port, body: body, headerOnly: body["stream"] as? Bool == true)
+        try rawChatCompletionRoundTrip(port: port, body: body, headerOnly: body["stream"] as? Bool == true, requestID: requestID)
     }
 }
 
@@ -404,13 +567,15 @@ private func withReceiptHTTPServer<T>(
 private func rawChatCompletionRoundTrip(
     port: Int,
     body: [String: Any],
-    headerOnly: Bool
+    headerOnly: Bool,
+    requestID: String
 ) throws -> HTTPReceiptResponse {
     let bodyData = try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
     let requestHead = "POST /v1/chat/completions HTTP/1.1\r\n"
         + "Host: 127.0.0.1:\(port)\r\n"
         + "Content-Type: application/json\r\n"
         + "Content-Length: \(bodyData.count)\r\n"
+        + "X-Request-ID: \(requestID)\r\n"
         + "Connection: close\r\n"
         + "\r\n"
     var requestData = Data(requestHead.utf8)

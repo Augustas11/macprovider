@@ -1679,6 +1679,57 @@ func TestProviderAuthV2ReceiptRotationMovesPriorPubkeyToPrevious(t *testing.T) {
 	}
 }
 
+func TestProviderAuthV2ReceiptRotationDetectedAuditEvent(t *testing.T) {
+	clock := newLockedTime(time.Now().UTC())
+	auditStore, err := audit.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open audit store: %v", err)
+	}
+	defer auditStore.Close()
+	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{
+		providerws.WithNow(clock.Now),
+		providerws.WithRegistryOptions(pool.WithReceiptRotationEmitter(func(event pool.ReceiptRotationEvent) {
+			if err := auditStore.EmitReceiptRotation(context.Background(), event); err != nil {
+				t.Errorf("emit receipt rotation: %v", err)
+			}
+		})),
+	}, func(cfg *config.Config) {
+		cfg.Providers[0].EndpointURL = ""
+	})
+	defer h.HTTP.Close()
+
+	oldPubkey := bytes.Repeat([]byte{0x71}, 32)
+	newPubkey := bytes.Repeat([]byte{0x72}, 32)
+	oldConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, oldPubkey)
+	defer oldConn.Close()
+
+	rotatedAt := clock.Now().Add(100 * time.Second)
+	clock.Set(rotatedAt)
+	newConn := authV2ProviderWithReceiptKey(t, h.HTTP.URL, newPubkey)
+	defer newConn.Close()
+
+	var payloadJSON string
+	eventually(t, func() bool {
+		return auditStore.DB().QueryRowContext(context.Background(), `
+SELECT payload_json
+FROM audit_log
+WHERE event_type = 'receipt_rotation_detected' AND provider_id = 'm4-anon'`).Scan(&payloadJSON) == nil
+	})
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("payload json: %v", err)
+	}
+	if payload["event"] != "receipt_rotation_detected" {
+		t.Fatalf("event = %#v", payload["event"])
+	}
+	if payload["old_pubkey"] != base64.StdEncoding.EncodeToString(oldPubkey) || payload["new_pubkey"] != base64.StdEncoding.EncodeToString(newPubkey) {
+		t.Fatalf("rotation payload pubkeys = %#v", payload)
+	}
+	if payload["rotated_at"] != float64(rotatedAt.Unix()) {
+		t.Fatalf("rotated_at = %#v, want %d", payload["rotated_at"], rotatedAt.Unix())
+	}
+}
+
 func TestProviderAuthV2ReceiptRotationRejectsSecondChangeDuringPreviousGrace(t *testing.T) {
 	clock := newLockedTime(time.Now().UTC())
 	h := newProviderHarnessWithServerOptions(t, nil, []providerws.Option{

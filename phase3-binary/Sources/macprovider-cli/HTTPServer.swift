@@ -206,6 +206,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let receiptBuilder = receiptBuilder
         let providerID = providerID
         let requestAcceptedAt = Date()
+        let auditRequestID = requestHead?.headers.first(name: "X-Request-ID") ?? UUID().uuidString
         var parsedRequest: ChatCompletionRequest?
 
         do {
@@ -216,6 +217,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
 
             if request.stream {
+                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
                 handleStreamingChatCompletions(
                     request: request,
                     writer: writer,
@@ -226,7 +228,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
 
             let providerStatus = providerStatus
-            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID] in
+            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID] in
                 let startedAt = await providerStatus.beginRequest()
                 do {
                     let snapshot = await modelRuntime.currentSnapshot()
@@ -239,32 +241,51 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     let completion = try await modelRuntime.complete(request)
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
                     let response = Self.chatCompletionResponse(request: request, completion: completion)
-                    let receiptHeader = try Self.receiptHeader(
+                    let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+                    let unixTsSeconds = Int64(Date().timeIntervalSince1970)
+                    let receipt = try Self.receiptHeaderResult(
                         providerID: providerID,
                         receiptBuilder: receiptBuilder,
                         request: request,
                         outputContent: completion.content,
                         outputToolCalls: nil,
                         finishReason: completion.finishReason,
-                        ttftMs: completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt),
+                        ttftMs: ttftMs,
                         tokensOut: Int64(completion.completionTokens),
-                        unixTsSeconds: Int64(Date().timeIntervalSince1970)
+                        unixTsSeconds: unixTsSeconds
                     )
-                    writer.writeJSON(status: .ok, body: response, extraHeaders: receiptHeader.httpHeaders)
+                    switch receipt {
+                    case .issued(let header):
+                        ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: Int64(completion.completionTokens), ttftMs: ttftMs, unixTs: unixTsSeconds)
+                        writer.writeJSON(status: .ok, body: response, extraHeaders: [(Self.receiptHeaderName, header)])
+                    case .omitted(let reason):
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                        writer.writeJSON(status: .ok, body: response)
+                    }
                 } catch is DrainCancelledError {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .modelSwapViolation)
                     writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
                 } catch let error as APIError {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
                     do {
-                        let receiptHeader = try Self.errorReceiptHeader(
+                        let receipt = try Self.errorReceiptHeaderResult(
                             providerID: providerID,
                             receiptBuilder: receiptBuilder,
                             request: request,
                             error: error,
                             startedAt: startedAt
                         )
-                        writer.writeAPIError(error, extraHeaders: receiptHeader.httpHeaders)
+                        switch receipt {
+                        case .issued(let header, let ttftMs, let unixTs):
+                            ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                            writer.writeAPIError(error, extraHeaders: [(Self.receiptHeaderName, header)])
+                        case .omitted(let reason):
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                            writer.writeAPIError(error)
+                        case .notReceiptEligible:
+                            writer.writeAPIError(error)
+                        }
                     } catch {
                         writer.writeAPIError(Self.receiptConstructionError())
                     }
@@ -273,14 +294,23 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     let apiError =
                         APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
                     do {
-                        let receiptHeader = try Self.errorReceiptHeader(
+                        let receipt = try Self.errorReceiptHeaderResult(
                             providerID: providerID,
                             receiptBuilder: receiptBuilder,
                             request: request,
                             error: apiError,
                             startedAt: startedAt
                         )
-                        writer.writeAPIError(apiError, extraHeaders: receiptHeader.httpHeaders)
+                        switch receipt {
+                        case .issued(let header, let ttftMs, let unixTs):
+                            ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                            writer.writeAPIError(apiError, extraHeaders: [(Self.receiptHeaderName, header)])
+                        case .omitted(let reason):
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                            writer.writeAPIError(apiError)
+                        case .notReceiptEligible:
+                            writer.writeAPIError(apiError)
+                        }
                     } catch {
                         writer.writeAPIError(Self.receiptConstructionError())
                     }
@@ -293,14 +323,23 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             if let request = parsedRequest, !request.stream {
                 let writer = ResponseWriter(context: context)
                 do {
-                    let receiptHeader = try Self.errorReceiptHeader(
+                    let receipt = try Self.errorReceiptHeaderResult(
                         providerID: providerID,
                         receiptBuilder: receiptBuilder,
                         request: request,
                         error: error,
                         startedAt: requestAcceptedAt
                     )
-                    writer.writeAPIError(error, extraHeaders: receiptHeader.httpHeaders)
+                    switch receipt {
+                    case .issued(let header, let ttftMs, let unixTs):
+                        ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                        writer.writeAPIError(error, extraHeaders: [(Self.receiptHeaderName, header)])
+                    case .omitted(let reason):
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                        writer.writeAPIError(error)
+                    case .notReceiptEligible:
+                        writer.writeAPIError(error)
+                    }
                 } catch {
                     writer.writeAPIError(Self.receiptConstructionError())
                 }
@@ -451,6 +490,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     static let receiptHeaderName = "X-MacProvider-Receipt"
     static let maxReceiptHeaderBytes = 4096
 
+    enum ReceiptHeaderResult: Equatable {
+        case issued(String)
+        case omitted(ReceiptOmissionReason)
+    }
+
+    enum ErrorReceiptHeaderResult: Equatable {
+        case issued(String, ttftMs: Int64, unixTs: Int64)
+        case omitted(ReceiptOmissionReason)
+        case notReceiptEligible
+    }
+
     static func receiptHeader(
         providerID: String?,
         receiptBuilder: ReceiptBuilder?,
@@ -462,10 +512,40 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         tokensOut: Int64,
         unixTsSeconds: Int64
     ) throws -> String? {
-        guard let receiptBuilder,
-              let providerID,
-              !providerID.isEmpty else {
+        switch try receiptHeaderResult(
+            providerID: providerID,
+            receiptBuilder: receiptBuilder,
+            request: request,
+            outputContent: outputContent,
+            outputToolCalls: outputToolCalls,
+            finishReason: finishReason,
+            ttftMs: ttftMs,
+            tokensOut: tokensOut,
+            unixTsSeconds: unixTsSeconds
+        ) {
+        case .issued(let header):
+            return header
+        case .omitted:
             return nil
+        }
+    }
+
+    static func receiptHeaderResult(
+        providerID: String?,
+        receiptBuilder: ReceiptBuilder?,
+        request: ChatCompletionRequest,
+        outputContent: String,
+        outputToolCalls: [ToolCall]?,
+        finishReason: String,
+        ttftMs: Int64,
+        tokensOut: Int64,
+        unixTsSeconds: Int64
+    ) throws -> ReceiptHeaderResult {
+        guard let providerID, !providerID.isEmpty else {
+            return .omitted(.noKeypair)
+        }
+        guard let receiptBuilder else {
+            return .omitted(.preV16Binary)
         }
         do {
             let header = try receiptBuilder.build(
@@ -484,9 +564,9 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             guard header.utf8.count <= maxReceiptHeaderBytes else {
                 throw ReceiptEmissionError.headerTooLarge(byteCount: header.utf8.count)
             }
-            return header
+            return .issued(header)
         } catch ReceiptBuilder.Error.missingCurrentReceiptKey {
-            return nil
+            return .omitted(.noKeypair)
         }
     }
 
@@ -497,20 +577,48 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         error: APIError,
         startedAt: Date
     ) throws -> String? {
-        guard error.code == "model_not_loaded" else {
+        switch try errorReceiptHeaderResult(providerID: providerID, receiptBuilder: receiptBuilder, request: request, error: error, startedAt: startedAt) {
+        case .issued(let header, _, _):
+            return header
+        case .omitted, .notReceiptEligible:
             return nil
         }
-        return try receiptHeader(
+    }
+
+    static func errorReceiptHeaderResult(
+        providerID: String?,
+        receiptBuilder: ReceiptBuilder?,
+        request: ChatCompletionRequest,
+        error: APIError,
+        startedAt: Date
+    ) throws -> ErrorReceiptHeaderResult {
+        guard error.code == "model_not_loaded" else {
+            if error.code == "swap_drain_timeout" {
+                return .omitted(.modelSwapViolation)
+            }
+            if error.code == "buyer_cancelled" {
+                return .omitted(.preTokenCancel)
+            }
+            return .notReceiptEligible
+        }
+        let ttftMs = elapsedMilliseconds(since: startedAt)
+        let unixTs = Int64(Date().timeIntervalSince1970)
+        switch try receiptHeaderResult(
             providerID: providerID,
             receiptBuilder: receiptBuilder,
             request: request,
             outputContent: "",
             outputToolCalls: nil,
             finishReason: "error",
-            ttftMs: elapsedMilliseconds(since: startedAt),
+            ttftMs: ttftMs,
             tokensOut: 0,
-            unixTsSeconds: Int64(Date().timeIntervalSince1970)
-        )
+            unixTsSeconds: unixTs
+        ) {
+        case .issued(let header):
+            return .issued(header, ttftMs: ttftMs, unixTs: unixTs)
+        case .omitted(let reason):
+            return .omitted(reason)
+        }
     }
 
     static func elapsedMilliseconds(since start: Date, now: Date = Date()) -> Int64 {

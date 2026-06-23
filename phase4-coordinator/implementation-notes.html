@@ -1353,5 +1353,25 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   clearing to <code>receipt_pubkey: null</code> plus omission logging, and
   read-time purge after the 7-day grace window.</p>
 </div>
+<div class="entry">
+  <time>2026-06-23</time>
+  <p><strong>SPEC-015 Step 9 coordinator receipt rotation audit event.</strong>
+  Added <code>receipt_rotation_detected</code> emission when a provider's
+  post-auth <code>state_update</code> publishes a changed receipt pubkey. The
+  registry builds the rotation event while holding its publication lock, then
+  emits after unlock through a bounded coordinator queue into the existing
+  <code>internal/audit</code> SQLite sink.</p>
+  <p>The audit payload stores <code>provider_id</code>, base64
+  <code>old_pubkey</code>, base64 <code>new_pubkey</code>, and
+  <code>rotated_at</code>. It does not include receipt bodies, prompt hashes,
+  output hashes, signatures, or buyer response headers. If the bounded queue
+  is full during production shutdown pressure, the coordinator drops the
+  observability event with an operator log rather than blocking provider state
+  publication.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>go test ./internal/audit ./internal/pool ./internal/ws -run 'TestEmitReceiptRotationWritesAuditRow|TestProviderAuthV2ReceiptRotationDetectedAuditEvent|TestProviderAuthV2ReceiptRotationMovesPriorPubkeyToPrevious' -count=1</code>
+  passes, covering durable audit rows, forbidden-field exclusion, and rotation
+  detection after receipt pubkey publication.</p>
+</div>
 </section>
 </body></html>
