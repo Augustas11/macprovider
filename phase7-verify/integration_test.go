@@ -91,7 +91,6 @@ func TestReceiptBundleFixturesEndToEnd(t *testing.T) {
 
 	current := pubkeyB64(keyFromSeed(fixtureSeed, "current"))
 	previous := pubkeyB64(keyFromSeed(fixtureSeed, "previous"))
-	mismatch := pubkeyB64(keyFromSeed(fixtureSeed, "mismatch-cache"))
 
 	rotatedAt := time.Unix(validFreshUnixTS, 0).UTC().Add(time.Hour)
 	expiresAt := rotatedAt.Add(7 * 24 * time.Hour)
@@ -118,7 +117,6 @@ func TestReceiptBundleFixturesEndToEnd(t *testing.T) {
 		fail404       bool
 		fail5xx       bool
 		seedStale     bool
-		seedMismatch  bool
 		expectJSON    bool
 		expectNetwork bool
 	}{
@@ -134,7 +132,6 @@ func TestReceiptBundleFixturesEndToEnd(t *testing.T) {
 		{name: "inconclusive_stale_cache_live_fail", file: "inconclusive_stale_cache_live_fail.bundle.json", exitCode: 2, result: "inconclusive", reason: "cache_stale_and_live_unreachable", warnings: []string{"live_check_skipped", "non_default_coordinator"}, fail5xx: true, seedStale: true, expectJSON: true, expectNetwork: true},
 		{name: "malformed_bundle", file: "malformed_bundle.bundle.json", exitCode: 65},
 		{name: "malformed_receipt", file: "malformed_receipt.bundle.json", exitCode: 65},
-		{name: "invalid_bundle_pubkey_provider_mismatch", file: "invalid_bundle_pubkey_provider_mismatch.bundle.json", exitCode: 1, result: "invalid", reason: "bundle_pubkey_provider_mismatch", warnings: []string{"non_default_coordinator"}, seedMismatch: true, expectJSON: true},
 	}
 
 	for _, tt := range tests {
@@ -157,9 +154,6 @@ func TestReceiptBundleFixturesEndToEnd(t *testing.T) {
 			coordinatorHost := serverHost(t, server.URL)
 			if tt.seedStale {
 				writeCacheLine(t, cacheDir, coordinatorHost, fixtureProvider, current, time.Now().UTC().Add(-8*24*time.Hour), nil)
-			}
-			if tt.seedMismatch {
-				writeCacheLine(t, cacheDir, coordinatorHost, fixtureProvider, mismatch, time.Now().UTC(), nil)
 			}
 
 			stdout, stderr, code := runVerify(t, filepath.Join("testdata", tt.file), server.URL, cacheDir, certFile)
@@ -200,6 +194,50 @@ func TestReceiptBundleFixturesEndToEnd(t *testing.T) {
 	}
 }
 
+func TestValidPreviousKeyInGraceAcceptsCurrentAndPreviousCacheOffline(t *testing.T) {
+	schema, err := os.ReadFile(filepath.Join("schemas", "output.schema.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	current := pubkeyB64(keyFromSeed(fixtureSeed, "current"))
+	previous := pubkeyB64(keyFromSeed(fixtureSeed, "previous"))
+	rotatedAt := time.Unix(validFreshUnixTS, 0).UTC().Add(time.Hour)
+	expiresAt := rotatedAt.Add(7 * 24 * time.Hour)
+	prev := &PreviousKeyResponse{
+		Pubkey:    previous,
+		RotatedAt: rotatedAt.Format(time.RFC3339),
+		ExpiresAt: expiresAt.Format(time.RFC3339),
+	}
+
+	cacheDir := t.TempDir()
+	coordinatorHost := "coordinator.example.test"
+	writeCacheLine(t, cacheDir, coordinatorHost, fixtureProvider, current, time.Now().UTC().Add(-time.Minute), nil)
+	writeCacheLine(t, cacheDir, coordinatorHost, fixtureProvider, current, time.Now().UTC(), prev)
+
+	stdout, stderr, code := runVerifyArgs(t, []string{
+		"--bundle", filepath.Join("testdata", "valid_prev_key_in_grace.bundle.json"),
+		"--coordinator", "https://" + coordinatorHost,
+		"--offline",
+		"--json",
+	}, cacheDir, "")
+	if code != 0 {
+		t.Fatalf("exit=%d want=0 stdout=%q stderr=%q", code, stdout, stderr)
+	}
+	if err := schemavalidator.Validate(schema, stdout); err != nil {
+		t.Fatalf("schema rejected stdout %s: %v", stdout, err)
+	}
+	var decoded map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(stdout))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
+		t.Fatalf("stdout did not decode as JSON: %v in %q", err, stdout)
+	}
+	if decoded["result"] != "valid" || decoded["reason"] != "signature_and_canonicalization_match" {
+		t.Fatalf("result/reason=(%v,%v), want valid/signature_and_canonicalization_match: %s", decoded["result"], decoded["reason"], stdout)
+	}
+}
+
 func TestFixtureGeneratorIdempotentAndCommitted(t *testing.T) {
 	first := t.TempDir()
 	second := t.TempDir()
@@ -210,8 +248,8 @@ func TestFixtureGeneratorIdempotentAndCommitted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(committed) != 12 {
-		t.Fatalf("committed bundle count=%d want 12", len(committed))
+	if len(committed) != 11 {
+		t.Fatalf("committed bundle count=%d want 11", len(committed))
 	}
 	for _, path := range committed {
 		name := filepath.Base(path)
@@ -287,13 +325,20 @@ func (h *mockReceiptKeysHandler) calls() int {
 
 func runVerify(t *testing.T, bundlePath, coordinator, cacheDir, certFile string) ([]byte, []byte, int) {
 	t.Helper()
-	cmd := exec.Command(verifyBin, "--bundle", bundlePath, "--coordinator", coordinator, "--json")
-	cmd.Env = append(os.Environ(),
-		"MACPROVIDER_CACHE_DIR="+cacheDir,
-		"SSL_CERT_FILE="+certFile,
-		"MACPROVIDER_VERIFY_TLS_CA_FILE="+certFile,
-		"GODEBUG=x509usefallbackroots=1",
-	)
+	return runVerifyArgs(t, []string{"--bundle", bundlePath, "--coordinator", coordinator, "--json"}, cacheDir, certFile)
+}
+
+func runVerifyArgs(t *testing.T, args []string, cacheDir, certFile string) ([]byte, []byte, int) {
+	t.Helper()
+	cmd := exec.Command(verifyBin, args...)
+	cmd.Env = append(os.Environ(), "MACPROVIDER_CACHE_DIR="+cacheDir)
+	if certFile != "" {
+		cmd.Env = append(cmd.Env,
+			"SSL_CERT_FILE="+certFile,
+			"MACPROVIDER_VERIFY_TLS_CA_FILE="+certFile,
+			"GODEBUG=x509usefallbackroots=1",
+		)
+	}
 	stdout, stderr := bytes.Buffer{}, bytes.Buffer{}
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -397,7 +442,12 @@ func writeCacheLine(t *testing.T, cacheDir, coordinatorHost, providerID, pubkey 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cacheDir, "verify-cache.jsonl"), append(data, '\n'), 0o600); err != nil {
+	file, err := os.OpenFile(filepath.Join(cacheDir, "verify-cache.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	if _, err := file.Write(append(data, '\n')); err != nil {
 		t.Fatal(err)
 	}
 }

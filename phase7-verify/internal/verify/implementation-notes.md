@@ -40,6 +40,12 @@ Once parsing succeeds, cryptographic, canonical-hash, pubkey-endorsement, and
 grace-window failures return a tri-state `Result` with `result: "invalid"` and
 one of the §10.4.2 reason enum values.
 
+`bundle_pubkey_provider_mismatch` is a reserved enum value; v0.2 verifier paths
+emit `pubkey_not_endorsed` for receipt-pubkey-vs-resolver-pubkey divergence. A
+future spec revision may define a narrower bundle-layer detection that
+distinguishes intra-bundle identity drift; the schema/enum is
+forward-compatible.
+
 ## Warning Merge Strategy
 
 The resolver owns trust-root warnings:
@@ -54,7 +60,7 @@ verify-owned warning kind: `clock_skew`.
 
 `SourceNone` reason mapping uses resolver warnings plus cache metadata:
 
-- `provider_id_unresolvable` warning -> `provider_id_unresolvable`
+- `provider_id_unresolvable` warning -> `pubkey_unresolvable`
 - `network_unreachable` with stale cache entries -> `cache_stale_and_live_unreachable`
 - `network_unreachable` without stale cache -> `pubkey_unresolvable`
 - resolver `ErrProviderNotInPool` -> `provider_id_not_in_pool`

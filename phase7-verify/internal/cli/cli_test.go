@@ -508,12 +508,9 @@ func TestCoordinatorEnvAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, verifyOpts, preflight, err := optionsToVerifyArgs(opts, nil, getenvNone, runConfig{cache: c})
+	_, verifyOpts, err := optionsToVerifyArgs(opts, nil, getenvNone, runConfig{cache: c})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if preflight != nil {
-		t.Fatalf("unexpected preflight result: %#v", preflight)
 	}
 	if got := normalizedCoordinatorHost(verifyOpts.CoordinatorHost); got != "other.example" {
 		t.Fatalf("coordinator host=%q want other.example", got)
@@ -528,23 +525,20 @@ func TestCoordinatorEnvAndOverride(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, verifyOpts, preflight, err = optionsToVerifyArgs(opts, nil, getenvNone, runConfig{cache: c})
+	_, verifyOpts, err = optionsToVerifyArgs(opts, nil, getenvNone, runConfig{cache: c})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if preflight != nil {
-		t.Fatalf("unexpected preflight result: %#v", preflight)
 	}
 	if got := normalizedCoordinatorHost(verifyOpts.CoordinatorHost); got != "override.example" {
 		t.Fatalf("coordinator host=%q want override.example", got)
 	}
 }
 
-func TestBundlePubkeyProviderMismatchPreflight(t *testing.T) {
+func TestBundlePubkeyProviderMismatchUsesVerifierPath(t *testing.T) {
 	fixture := newCLIFixture(t, makeKey(20), cliNow.Unix())
 	mismatchedPubkey := []byte(makeKey(21).Public().(ed25519.PublicKey))
 
-	t.Run("bundle mode returns reserved mismatch reason before verify", func(t *testing.T) {
+	t.Run("bundle mode reports orchestrator pubkey endorsement reason", func(t *testing.T) {
 		stdout, stderr, c := buffersAndCache(t)
 		if err := c.Put(defaultCoordinator, testProviderID, cache.ResolverResponse{ProviderID: testProviderID, ReceiptPubkey: mismatchedPubkey}); err != nil {
 			t.Fatal(err)
@@ -560,8 +554,11 @@ func TestBundlePubkeyProviderMismatchPreflight(t *testing.T) {
 		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &decoded); err != nil {
 			t.Fatalf("stdout not JSON: %v in %q", err, stdout.String())
 		}
-		if decoded["reason"] != "bundle_pubkey_provider_mismatch" {
-			t.Fatalf("reason=%v want bundle_pubkey_provider_mismatch in %s", decoded["reason"], stdout.String())
+		if decoded["reason"] == "bundle_pubkey_provider_mismatch" {
+			t.Fatalf("bundle mode triggered reserved preflight reason: %s", stdout.String())
+		}
+		if decoded["reason"] != "pubkey_not_endorsed" {
+			t.Fatalf("reason=%v want pubkey_not_endorsed in %s", decoded["reason"], stdout.String())
 		}
 	})
 

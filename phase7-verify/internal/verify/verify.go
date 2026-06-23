@@ -397,7 +397,7 @@ func sourceNoneReason(providerID string, opts VerifyOpts, c *cache.Cache, warnin
 		reason, _ := warning.Fields["reason"].(string)
 		switch reason {
 		case "provider_id_unresolvable":
-			return reasonProviderIDUnresolvable
+			return reasonPubkeyUnresolvable
 		case "network_unreachable":
 			if hasStaleCacheEntry(c, normalizedCoordinatorHost(opts.CoordinatorHost), providerID, now) {
 				return reasonCacheStaleAndLiveUnreachable

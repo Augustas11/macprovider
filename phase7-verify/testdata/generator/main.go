@@ -141,9 +141,6 @@ func generate(seed int64, out string) error {
 		return err
 	}
 
-	if err := writeBundle(out, "invalid_bundle_pubkey_provider_mismatch.bundle.json", validFresh); err != nil {
-		return err
-	}
 	return nil
 }
 

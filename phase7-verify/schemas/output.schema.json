@@ -216,7 +216,6 @@
         "reason": {
           "enum": [
             "pubkey_unresolvable",
-            "provider_id_unresolvable",
             "provider_id_not_in_pool",
             "cache_stale_and_live_unreachable"
           ]

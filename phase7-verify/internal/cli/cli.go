@@ -101,21 +101,16 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, get
 		return exitValid
 	}
 
-	input, verifyOpts, preflightResult, err := optionsToVerifyArgs(opts, stdin, getenv, cfg)
+	input, verifyOpts, err := optionsToVerifyArgs(opts, stdin, getenv, cfg)
 	if err != nil {
 		writeErr(stderr, opts.quiet, err)
 		return exitForError(err)
 	}
 
-	result := verify.Result{}
-	if preflightResult != nil {
-		result = *preflightResult
-	} else {
-		result, err = verify.Verify(input, verifyOpts)
-		if err != nil {
-			writeErr(stderr, opts.quiet, err)
-			return exitForError(err)
-		}
+	result, err := verify.Verify(input, verifyOpts)
+	if err != nil {
+		writeErr(stderr, opts.quiet, err)
+		return exitForError(err)
 	}
 
 	if err := emitResult(stdout, result, opts.json); err != nil {
@@ -166,27 +161,26 @@ func parseOptions(args []string, stdout, stderr io.Writer, getenv func(string) s
 	return opts, nil
 }
 
-func optionsToVerifyArgs(opts options, stdin io.Reader, getenv func(string) string, cfg runConfig) (verify.VerifyInput, verify.VerifyOpts, *verify.Result, error) {
+func optionsToVerifyArgs(opts options, stdin io.Reader, getenv func(string) string, cfg runConfig) (verify.VerifyInput, verify.VerifyOpts, error) {
 	if opts.bundle != "" && opts.receipt != "" {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, nil, &cliUsageError{err: errors.New("--bundle and --receipt are mutually exclusive")}
+		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: errors.New("--bundle and --receipt are mutually exclusive")}
 	}
 
 	pubkey, err := parseOptionalPubkey(opts.pubkey)
 	if err != nil {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, nil, err
+		return verify.VerifyInput{}, verify.VerifyOpts{}, err
 	}
 	if opts.providerID != "" && !providerIDPattern.MatchString(opts.providerID) {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, nil, &cliUsageError{err: fmt.Errorf("--provider-id must match ^[A-Za-z0-9_-]+$")}
+		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: fmt.Errorf("--provider-id must match ^[A-Za-z0-9_-]+$")}
 	}
 
 	var input verify.VerifyInput
 	var bundleProviderID string
-	bundleMode := opts.bundle != ""
 	switch {
 	case opts.bundle != "":
 		bundle, err := readBundle(opts.bundle, stdin)
 		if err != nil {
-			return verify.VerifyInput{}, verify.VerifyOpts{}, nil, err
+			return verify.VerifyInput{}, verify.VerifyOpts{}, err
 		}
 		input.Header = bundle.Receipt
 		input.Request = bundle.Request
@@ -195,42 +189,42 @@ func optionsToVerifyArgs(opts options, stdin io.Reader, getenv func(string) stri
 			bundleProviderID = *bundle.ProviderID
 		}
 		if bundleProviderID != "" && !providerIDPattern.MatchString(bundleProviderID) {
-			return verify.VerifyInput{}, verify.VerifyOpts{}, nil, &cliInputFormatError{err: errors.New("bundle provider_id has invalid format")}
+			return verify.VerifyInput{}, verify.VerifyOpts{}, &cliInputFormatError{err: errors.New("bundle provider_id has invalid format")}
 		}
 		if opts.providerID != "" && bundleProviderID != "" && opts.providerID != bundleProviderID {
-			return verify.VerifyInput{}, verify.VerifyOpts{}, nil, &cliUsageError{err: errors.New("--provider-id does not match bundle provider_id")}
+			return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: errors.New("--provider-id does not match bundle provider_id")}
 		}
 	case opts.receipt != "":
 		if opts.promptHash == "" || opts.outputHash == "" {
-			return verify.VerifyInput{}, verify.VerifyOpts{}, nil, &cliUsageError{err: errors.New("--prompt-hash and --output-hash are required with --receipt")}
+			return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: errors.New("--prompt-hash and --output-hash are required with --receipt")}
 		}
 		promptHash, err := parseHashFlag("--prompt-hash", opts.promptHash)
 		if err != nil {
-			return verify.VerifyInput{}, verify.VerifyOpts{}, nil, err
+			return verify.VerifyInput{}, verify.VerifyOpts{}, err
 		}
 		outputHash, err := parseHashFlag("--output-hash", opts.outputHash)
 		if err != nil {
-			return verify.VerifyInput{}, verify.VerifyOpts{}, nil, err
+			return verify.VerifyInput{}, verify.VerifyOpts{}, err
 		}
 		input.Header = opts.receipt
 		input.ExplicitPromptHash = promptHash
 		input.ExplicitOutputHash = outputHash
 	default:
-		return verify.VerifyInput{}, verify.VerifyOpts{}, nil, &cliUsageError{err: errors.New("one of --bundle or --receipt is required")}
+		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: errors.New("one of --bundle or --receipt is required")}
 	}
 	input.ExplicitPubkey = pubkey
 
 	c, err := cacheForRun(cfg)
 	if err != nil {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, nil, &cliUsageError{err: err}
+		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: err}
 	}
 	coordinatorHost := opts.coordinator
 	resolvedProviderID, err := resolveProviderID(opts.providerID, bundleProviderID, input.Header, coordinatorHost, c)
 	if err != nil {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, nil, err
+		return verify.VerifyInput{}, verify.VerifyOpts{}, err
 	}
 	if resolvedProviderID == "" && len(pubkey) == 0 {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, nil, &cliUsageError{err: errors.New("--provider-id is required when no bundle provider_id or single-match cache entry is available")}
+		return verify.VerifyInput{}, verify.VerifyOpts{}, &cliUsageError{err: errors.New("--provider-id is required when no bundle provider_id or single-match cache entry is available")}
 	}
 	input.ProviderID = resolvedProviderID
 
@@ -242,11 +236,7 @@ func optionsToVerifyArgs(opts options, stdin io.Reader, getenv func(string) stri
 		Now:             cfg.now,
 		HTTPClient:      cfg.httpClient,
 	}
-	preflight, err := bundlePubkeyProviderMismatchResult(bundleMode, input.Header, resolvedProviderID, coordinatorHost, c)
-	if err != nil {
-		return verify.VerifyInput{}, verify.VerifyOpts{}, nil, err
-	}
-	return input, verifyOpts, preflight, nil
+	return input, verifyOpts, nil
 }
 
 func readBundle(path string, stdin io.Reader) (*bundleInput, error) {
@@ -369,56 +359,6 @@ func singleMatchProviderIDFromCache(c *cache.Cache, coordinatorHost string, pubk
 		return providerID
 	}
 	return ""
-}
-
-func bundlePubkeyProviderMismatchResult(bundleMode bool, header, providerID, coordinatorHost string, c *cache.Cache) (*verify.Result, error) {
-	if !bundleMode || providerID == "" || c == nil {
-		return nil, nil
-	}
-	parsed, err := receipt.Parse(header)
-	if err != nil {
-		return nil, &verify.InputFormatError{Err: err}
-	}
-	receiptPubkey, err := receipt.ParsePubkey(parsed.Tuple.ProviderPubkey)
-	if err != nil {
-		return nil, &verify.InputFormatError{Err: err}
-	}
-	normalizedHost := normalizedCoordinatorHost(coordinatorHost)
-	entry, ok := singleCacheEntryForProvider(c, normalizedHost, providerID)
-	if !ok || bytes.Equal(entry.ReceiptPubkey, receiptPubkey) {
-		return nil, nil
-	}
-	result := &verify.Result{
-		Result:          "invalid",
-		Reason:          "bundle_pubkey_provider_mismatch",
-		ProviderID:      providerID,
-		ModelID:         parsed.Tuple.ModelID,
-		SignedAt:        parsed.Tuple.UnixTS,
-		TrustSource:     "cache",
-		CoordinatorHost: normalizedHost,
-		Details: &verify.Details{
-			Field:    "pubkey",
-			Computed: base64.StdEncoding.EncodeToString(entry.ReceiptPubkey),
-			Receipt:  parsed.Tuple.ProviderPubkey,
-		},
-	}
-	if normalizedHost != defaultCoordinator {
-		result.Warnings = []verify.Warning{{
-			Kind: "non_default_coordinator",
-			Fields: map[string]any{
-				"coordinator_host": normalizedHost,
-			},
-		}}
-	}
-	return result, nil
-}
-
-func singleCacheEntryForProvider(c *cache.Cache, coordinatorHost, providerID string) (*cache.Entry, bool) {
-	entries, err := c.LookupByProviderID(coordinatorHost, providerID)
-	if err != nil || len(entries) != 1 {
-		return nil, false
-	}
-	return entries[0], true
 }
 
 func normalizedCoordinatorHost(raw string) string {

@@ -228,8 +228,6 @@ func inconclusiveReason(result verify.Result) string {
 		return "cache stale and /v1/receipt-keys unreachable on " + host
 	case "provider_id_not_in_pool":
 		return "provider_id not in coordinator pool"
-	case "provider_id_unresolvable":
-		return "provider_id could not be resolved"
 	default:
 		return strings.ReplaceAll(result.Reason, "_", " ")
 	}

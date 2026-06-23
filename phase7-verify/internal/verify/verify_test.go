@@ -412,6 +412,23 @@ func TestVerifyProviderNotInPoolAndClockSkewWarning(t *testing.T) {
 		assertResult(t, result, resultInconclusive, reasonProviderIDNotInPool)
 	})
 
+	t.Run("unresolved provider id maps to spec-legal pubkey_unresolvable", func(t *testing.T) {
+		fixture := newVerifyFixture(t, makeKey(13), verifyNow.Unix())
+		result, err := Verify(VerifyInput{
+			Header:   fixture.header,
+			Request:  fixture.request,
+			Response: fixture.response,
+		}, VerifyOpts{
+			Cache: openTempCache(t),
+			Now:   func() time.Time { return verifyNow },
+		})
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		assertResult(t, result, resultInconclusive, reasonPubkeyUnresolvable)
+		assertWarningReason(t, result, "provider_id_unresolvable")
+	})
+
 	t.Run("clock skew is warning only", func(t *testing.T) {
 		fixture := newVerifyFixture(t, makeKey(12), verifyNow.Add(-25*time.Hour).Unix())
 		server := receiptKeyServer(t, resolverResponse{current: fixture.pub, status: http.StatusOK})

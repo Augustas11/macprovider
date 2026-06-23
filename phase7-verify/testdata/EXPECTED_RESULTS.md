@@ -18,7 +18,6 @@ The mock coordinator is non-default, so network-backed JSON outcomes include
 | `inconclusive_stale_cache_live_fail.bundle.json` | 2 | `inconclusive` | `cache_stale_and_live_unreachable` | `live_check_skipped`, `non_default_coordinator` |
 | `malformed_bundle.bundle.json` | 65 | n/a | unknown top-level bundle field | n/a |
 | `malformed_receipt.bundle.json` | 65 | n/a | receipt has no `.` separator | n/a |
-| `invalid_bundle_pubkey_provider_mismatch.bundle.json` | 1 | `invalid` | `bundle_pubkey_provider_mismatch` | `non_default_coordinator` |
 
 `inconclusive_stale_cache_live_fail.bundle.json` intentionally omits
 `provider_id`; the integration test resolves it through a single matching cache

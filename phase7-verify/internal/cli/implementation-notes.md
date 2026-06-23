@@ -45,12 +45,11 @@ model, and trust source. Step 8 owns final formatting polish.
 `--explain` prints the Step 7 inline trust-boundary text after a valid result
 unless `--quiet` suppresses stderr.
 
-`bundle_pubkey_provider_mismatch` is reserved per SPEC-015 §10.4.2; the v0.2
-detection path is a bundle-layer check landing with Step 9 end-to-end fixtures
-and integration, while Step 6 already reports `pubkey_not_endorsed` for
-receipt-embedded pubkey vs resolver-endorsed pubkey divergence and the reserved
-reason is the narrower case where the bundle's own `provider_id` claim conflicts
-with the receipt-embedded `provider_pubkey`'s cached/resolved provider identity.
+`bundle_pubkey_provider_mismatch` is a reserved enum value; v0.2 verifier paths
+emit `pubkey_not_endorsed` for receipt-pubkey-vs-resolver-pubkey divergence. A
+future spec revision may define a narrower bundle-layer detection that
+distinguishes intra-bundle identity drift; the schema/enum is
+forward-compatible.
 
 Step 8 ships the output schema, inline validator, and synthetic valid/invalid/
 inconclusive schema validation tests. Step 9 owns `testdata/*.bundle.json`
@@ -71,7 +70,8 @@ Provider identity is resolved before verification:
    an error naming `--provider-id`.
 5. If still missing and `--pubkey` was supplied, verification proceeds with
    `ProviderID == ""`. The resolver records `live_check_skipped` with
-   `reason: provider_id_unresolvable`; JSON output renders `provider_id: null`.
+   `reason: provider_id_unresolvable`; the top-level result reason is
+   `pubkey_unresolvable`, and JSON output renders `provider_id: null`.
 
 The cache fallback reads provider IDs only from exact pubkey matches and does
 not fingerprint-scan coordinator state or perform any live discovery.
