@@ -1,6 +1,7 @@
 package spec015
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -9,6 +10,12 @@ import (
 	"strings"
 	"time"
 )
+
+// maxReceiptHeaderBytes mirrors SPEC-015 AC-15. DecodeReceiptHeader rejects
+// values above this limit so a misbehaving provider cannot push arbitrarily
+// large bytes through the verifier (defense-in-depth atop the Swift-side and
+// coordinator-side caps).
+const maxReceiptHeaderBytes = 8192
 
 type PoolzReceiptTrust struct {
 	ReceiptPubkey     string
@@ -40,6 +47,9 @@ func VerifyReceiptAgainstPoolzTrust(header string, trust PoolzReceiptTrust) (Ver
 	if err := requireReceiptTupleShape(tuple); err != nil {
 		return VerifiedReceipt{}, err
 	}
+	if err := AssertTupleCanonicalizationMatches(tupleData); err != nil {
+		return VerifiedReceipt{}, fmt.Errorf("tuple canonicalization drift: %w", err)
+	}
 	unixTS, err := receiptUnixTS(tuple)
 	if err != nil {
 		return VerifiedReceipt{}, err
@@ -48,21 +58,46 @@ func VerifyReceiptAgainstPoolzTrust(header string, trust PoolzReceiptTrust) (Ver
 	if err != nil {
 		return VerifiedReceipt{}, err
 	}
-	if verifyWithPubkey(tupleData, signature, trust.ReceiptPubkey) && providerPubkey == trust.ReceiptPubkey {
+	if verifyWithPubkey(tupleData, signature, trust.ReceiptPubkey) && pubkeyBytesEqual(providerPubkey, trust.ReceiptPubkey) {
 		return VerifiedReceipt{Tuple: tuple, TupleData: tupleData, Signature: signature, KeySource: "current"}, nil
 	}
 	if prev := trust.ReceiptPubkeyPrev; prev != nil {
 		stamp := time.Unix(unixTS, 0)
 		rotatedAt := time.Unix(prev.RotatedAt, 0)
 		expiresAt := time.Unix(prev.ExpiresAt, 0)
-		if !stamp.Before(rotatedAt.Add(-60*time.Second)) && !stamp.After(expiresAt) && verifyWithPubkey(tupleData, signature, prev.Pubkey) && providerPubkey == prev.Pubkey {
+		if !stamp.Before(rotatedAt.Add(-60*time.Second)) && !stamp.After(expiresAt) && verifyWithPubkey(tupleData, signature, prev.Pubkey) && pubkeyBytesEqual(providerPubkey, prev.Pubkey) {
 			return VerifiedReceipt{Tuple: tuple, TupleData: tupleData, Signature: signature, KeySource: "previous"}, nil
 		}
 	}
 	return VerifiedReceipt{}, errors.New("receipt signature does not match active poolz receipt keys")
 }
 
+// pubkeyBytesEqual decodes both sides as base64 and compares the resulting
+// raw 32-byte Ed25519 public keys. M15 audit: pure string equality was
+// fragile under StdEncoding vs URL-safe (or padded vs unpadded) drift,
+// even though both sides typically agree today.
+func pubkeyBytesEqual(a, b string) bool {
+	if a == b {
+		return true
+	}
+	aBytes, err := base64.StdEncoding.DecodeString(a)
+	if err != nil {
+		return false
+	}
+	bBytes, err := base64.StdEncoding.DecodeString(b)
+	if err != nil {
+		return false
+	}
+	if len(aBytes) != ed25519.PublicKeySize || len(bBytes) != ed25519.PublicKeySize {
+		return false
+	}
+	return bytes.Equal(aBytes, bBytes)
+}
+
 func DecodeReceiptHeader(header string) ([]byte, []byte, error) {
+	if len(header) > maxReceiptHeaderBytes {
+		return nil, nil, fmt.Errorf("receipt header length %d exceeds %d-byte cap", len(header), maxReceiptHeaderBytes)
+	}
 	parts := strings.Split(header, ".")
 	if len(parts) != 2 {
 		return nil, nil, fmt.Errorf("receipt header has %d parts, want 2", len(parts))
@@ -74,6 +109,9 @@ func DecodeReceiptHeader(header string) ([]byte, []byte, error) {
 	signature, err := base64.StdEncoding.DecodeString(parts[1])
 	if err != nil {
 		return nil, nil, fmt.Errorf("decode signature: %w", err)
+	}
+	if len(signature) != ed25519.SignatureSize {
+		return nil, nil, fmt.Errorf("signature must be %d bytes, got %d", ed25519.SignatureSize, len(signature))
 	}
 	return tupleData, signature, nil
 }

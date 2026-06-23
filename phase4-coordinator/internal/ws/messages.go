@@ -217,6 +217,13 @@ type InferenceResponseEnd struct {
 	ChunksSent int             `json:"chunks_sent"`
 	Usage      json.RawMessage `json:"usage,omitempty"`
 	Error      string          `json:"error,omitempty"`
+	// SPEC-015 v0.1.x: WS-tunneled non-streaming inference carries the
+	// X-MacProvider-Receipt header value as a field on the
+	// inference_response_end frame. Coordinator stamps it as the
+	// response header when forwarding to the buyer, subject to the
+	// same provider receipt-eligibility gate used on the HTTP-direct
+	// path.
+	Receipt string `json:"receipt,omitempty"`
 }
 
 type CancelRequest struct {

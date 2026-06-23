@@ -198,7 +198,8 @@ struct ServeCommand: AsyncParsableCommand {
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
                 attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath),
-                providerReceiptPublicKey: receiptRuntime.publicKeyBase64
+                providerReceiptPublicKey: receiptRuntime.publicKeyBase64,
+                receiptBuilder: receiptRuntime.builder
             )
         }
         let controlSocket: ControlSocketServer?
@@ -274,9 +275,10 @@ struct ServeCommand: AsyncParsableCommand {
               !providerID.isEmpty else {
             return (nil, nil)
         }
-        let privateKey = try keyStore.loadOrGenerate(providerId: providerID)
+        let cachingStore = CachedReceiptKeyStore(keyStore)
+        let privateKey = try cachingStore.loadOrGenerate(providerId: providerID)
         return (
-            ReceiptBuilder(keyStore: keyStore),
+            ReceiptBuilder(keyStore: cachingStore),
             Data(privateKey.publicKey.rawRepresentation).base64EncodedString()
         )
     }

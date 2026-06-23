@@ -79,14 +79,13 @@ struct KeychainReceiptKeyStore: ReceiptKeyStoring {
             throw ReceiptKeyStoreError.missingCurrentKey(providerId: providerId)
         }
 
+        // Crash-safety order: commit the new key to .current FIRST so that, if
+        // the process dies between the two writes, the binary still signs with
+        // the key the coordinator already published. Then snapshot the old key
+        // into .prev for operator recovery (.prev is never read for signing).
+        try replaceKey(providerId: providerId, service: Self.currentService, privateKey: newKey)
         try deleteIfPresent(providerId: providerId, service: Self.previousService)
         try addKey(providerId: providerId, service: Self.previousService, privateKey: current)
-        do {
-            try replaceKey(providerId: providerId, service: Self.currentService, privateKey: newKey)
-        } catch {
-            try? deleteIfPresent(providerId: providerId, service: Self.previousService)
-            throw error
-        }
     }
 
     private func cleanupExpiredPrevious(providerId: String) throws {

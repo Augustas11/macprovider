@@ -170,6 +170,7 @@ actor CoordinatorClient {
     private let publishesSupportedModels: Bool
     private let warmSwapEnabled: Bool
     private var providerReceiptPublicKey: String?
+    private let receiptBuilder: ReceiptBuilder?
     private var receiptRotationInFlight = false
     private let reconnectGraceNanoseconds: UInt64
     private let receiptKeyRotationTimeoutNanoseconds: UInt64
@@ -214,7 +215,8 @@ actor CoordinatorClient {
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
         pairingController: PairingController? = nil,
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
-        providerReceiptPublicKey: String? = nil
+        providerReceiptPublicKey: String? = nil,
+        receiptBuilder: ReceiptBuilder? = nil
     ) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
             return nil
@@ -240,6 +242,7 @@ actor CoordinatorClient {
         self.publishesSupportedModels = config.publishesSupportedModels
         self.warmSwapEnabled = config.enableWarmSwap
         self.providerReceiptPublicKey = providerReceiptPublicKey
+        self.receiptBuilder = receiptBuilder
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
         self.receiptKeyRotationTimeoutNanoseconds = receiptKeyRotationTimeoutNanoseconds
         self.attestationGenerator = attestationGenerator
@@ -681,6 +684,8 @@ actor CoordinatorClient {
             maxActiveRequests: maxActiveRequests,
             maxBodyBytes: maxBodyBytes,
             tier2Session: session,
+            receiptBuilder: receiptBuilder,
+            receiptProviderID: providerID,
             sendFrame: { payload in
                 try await Self.send(payload, to: socket)
             }

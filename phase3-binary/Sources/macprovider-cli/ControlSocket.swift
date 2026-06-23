@@ -407,6 +407,10 @@ actor ControlSocketServer {
                 }
                 break
             }
+            if !Self.peerHasSameEUID(fd: clientFD) {
+                close(clientFD)
+                continue
+            }
             await server.appendClientFD(clientFD)
             let taskID = UUID()
             let task = Task.detached(priority: .userInitiated) { [server] in
@@ -582,6 +586,15 @@ actor ControlSocketServer {
     private nonisolated static func elapsedMs(since requestedAtMs: Int64) -> Int {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         return max(0, Int(now - requestedAtMs))
+    }
+
+    private nonisolated static func peerHasSameEUID(fd: Int32) -> Bool {
+        var euid = uid_t(0)
+        var egid = gid_t(0)
+        guard getpeereid(fd, &euid, &egid) == 0 else {
+            return false
+        }
+        return euid == geteuid()
     }
 }
 
