@@ -99,7 +99,7 @@ func TestRunUsageErrors(t *testing.T) {
 
 // TestRunUnknownFlag asserts that an unknown CLI flag exits 64 (usage error)
 // per SPEC-015 v0.2.4 §10.4.3. flag.ContinueOnError returns the parse error;
-// the scaffold maps that to exit 64.
+// the CLI maps that to exit 64.
 func TestRunUnknownFlag(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
@@ -108,7 +108,7 @@ func TestRunUnknownFlag(t *testing.T) {
 	if code != 64 {
 		t.Fatalf("run(--bogus-flag) exit code = %d, want %d", code, 64)
 	}
-	// flag package writes "flag provided but not defined" to stderr; the scaffold
+	// flag package writes "flag provided but not defined" to stderr; the CLI
 	// passes that through. Don't assert the exact phrase (it's a stdlib internal),
 	// just confirm SOMETHING was written to stderr to aid the user.
 	if stderr.Len() == 0 {
