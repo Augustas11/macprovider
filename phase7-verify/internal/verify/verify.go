@@ -198,7 +198,11 @@ func Verify(input VerifyInput, opts VerifyOpts) (Result, error) {
 		return Result{}, err
 	}
 	if root.TrustSource == resolver.SourceNone {
-		return inconclusive(base, sourceNoneReason(input.ProviderID, opts, cacheForResolve, root.Warnings, now())), nil
+		reason := sourceNoneReason(input.ProviderID, opts, cacheForResolve, root.Warnings, now())
+		if reason == reasonCacheStaleAndLiveUnreachable {
+			base.CoordinatorHost = normalizedCoordinatorHost(opts.CoordinatorHost)
+		}
+		return inconclusive(base, reason), nil
 	}
 
 	trustedPubkey, invalidResult := trustedVerificationKey(parsed, root)
@@ -374,7 +378,6 @@ func inconclusive(base Result, reason string) Result {
 	base.Result = resultInconclusive
 	base.Reason = reason
 	base.TrustSource = string(resolver.SourceNone)
-	base.CoordinatorHost = ""
 	return base
 }
 

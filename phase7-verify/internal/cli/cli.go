@@ -117,7 +117,9 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, get
 		writeErr(stderr, opts.quiet, err)
 		return exitSoftware
 	}
-	emitWarnings(stderr, opts.quiet, result.Warnings)
+	if !opts.quiet {
+		renderWarningsToStderr(stderr, result.Warnings)
+	}
 	if opts.explain && !opts.quiet && result.Result == "valid" {
 		fmt.Fprintln(stderr, explainText)
 	}
@@ -374,57 +376,15 @@ func normalizedCoordinatorHost(raw string) string {
 
 func emitResult(stdout io.Writer, result verify.Result, asJSON bool) error {
 	if asJSON {
-		data, err := json.Marshal(result)
+		data, err := renderJSON(result)
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintln(stdout, string(data))
+		_, err = stdout.Write(data)
 		return err
 	}
-	_, err := fmt.Fprintln(stdout, humanSummary(result))
+	_, err := fmt.Fprint(stdout, renderHuman(result))
 	return err
-}
-
-func humanSummary(result verify.Result) string {
-	trust := result.TrustSource
-	if result.CoordinatorHost != "" && (result.TrustSource == "live" || result.TrustSource == "cache") {
-		trust += "@" + result.CoordinatorHost
-	}
-	switch result.Result {
-	case "valid":
-		return fmt.Sprintf("valid (%s · %s · signed %d · trust=%s)", nullText(result.ProviderID), nullText(result.ModelID), result.SignedAt, trust)
-	case "invalid":
-		reason := strings.ReplaceAll(result.Reason, "_", " ")
-		if result.Details != nil {
-			return fmt.Sprintf("invalid: %s (computed=%s receipt=%s provider_id=%s model_id=%s trust=%s)", reason, result.Details.Computed, result.Details.Receipt, nullText(result.ProviderID), nullText(result.ModelID), trust)
-		}
-		return fmt.Sprintf("invalid: %s (provider_id=%s model_id=%s trust=%s)", reason, nullText(result.ProviderID), nullText(result.ModelID), trust)
-	case "inconclusive":
-		return fmt.Sprintf("inconclusive: %s (provider_id=%s model_id=%s trust=%s)", strings.ReplaceAll(result.Reason, "_", " "), nullText(result.ProviderID), nullText(result.ModelID), trust)
-	default:
-		return fmt.Sprintf("%s: %s (provider_id=%s model_id=%s trust=%s)", result.Result, result.Reason, nullText(result.ProviderID), nullText(result.ModelID), trust)
-	}
-}
-
-func nullText(value string) string {
-	if value == "" {
-		return "null"
-	}
-	return value
-}
-
-func emitWarnings(stderr io.Writer, quiet bool, warnings []verify.Warning) {
-	if quiet {
-		return
-	}
-	for _, warning := range warnings {
-		if len(warning.Fields) == 0 {
-			fmt.Fprintf(stderr, "warning: %s\n", warning.Kind)
-			continue
-		}
-		data, _ := json.Marshal(warning.Fields)
-		fmt.Fprintf(stderr, "warning: %s %s\n", warning.Kind, data)
-	}
 }
 
 func exitForResult(result verify.Result) int {

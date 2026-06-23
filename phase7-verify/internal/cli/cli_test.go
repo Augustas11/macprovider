@@ -377,7 +377,7 @@ func TestProviderIDHeaderMode404IsInconclusive(t *testing.T) {
 	if got := atomic.LoadInt32(&calls); got != 1 {
 		t.Fatalf("calls=%d want=1", got)
 	}
-	if !strings.Contains(stdout.String(), "provider id not in pool") {
+	if !strings.Contains(stdout.String(), "provider_id not in coordinator pool") {
 		t.Fatalf("stdout=%q missing provider-id-not-in-pool summary", stdout.String())
 	}
 }
