@@ -228,3 +228,248 @@ The previous-key and stale-cache paths both depend on time claims, but one path 
 The bundle input contract over-constrains raw OpenAI requests while the output contract under-specifies JSON result shapes and contradicts exit codes. Both issues will show up immediately in the implementation prompt and CI fixtures.
 
 **Effective severity:** CRITICAL via C1, with MAJOR follow-on schema work.
+
+## Lens: code — round 2 by Codex
+
+**Verdict:** READY WITH FIX PASS
+
+**Counts:** 0 CRITICAL, 2 MAJOR, 1 MINOR, 0 QUESTIONS
+
+**Round-1 resolution check:** C1, C3, C4, C5, and C6 are substantively resolved by the v0.2.1 rewrites to §10.4.1, §10.4.2, §10.4.3, §10.4.4, AC-24, and AC-25. C2 is resolved at the main resolver level by §10.7 plus §10.2's ban on `/poolz`, but stale `/poolz` wording remains in result semantics and AC-18 as C7 below.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+#### C7. Stale `/poolz` result semantics contradict the new live resolver
+**Location:** §10.1 lines 1380-1390; §10.2 lines 1428-1436; AC-18 lines 2106-2110
+
+**Finding:** v0.2.1 correctly moves live resolution to `GET /v1/receipt-keys/<provider_id>` in §10.2 and forbids fallback to operator-only `/poolz`, but §10.1 still defines `inconclusive` and `invalid` cases in terms of `/poolz`, and AC-18 still requires the provider to be "in `/poolz`" with the issuing pubkey. These are no longer just historical references; they sit inside the normative v0.2 verifier contract and acceptance criteria.
+
+**Why it matters:** Implementers can follow §10.2 and test against `/v1/receipt-keys`, or follow §10.1/AC-18 and retain `/poolz` assumptions. That reopens part of CF1 at the contract-consistency level even though the architectural endpoint fix is otherwise sound.
+
+**Suggested fix:** Replace the §10.1 and AC-18 `/poolz` references with `GET /v1/receipt-keys/<provider_id>` language, and make the no-match / mismatch cases line up with §10.2.1.
+
+#### C8. `--provider-id` became required for key resolution but is not fully specified as a CLI input
+**Location:** §10.2 lines 1402-1405 and 1438-1444; §10.4 lines 1529-1537; §10.4.4 lines 1696-1719; AC-23 lines 2138-2144
+
+**Finding:** v0.2.1 introduces `--provider-id` as the escape hatch when a bundle lacks `provider_id`, and AC-23 relies on it. But §10.4's accepted input shapes do not list `--provider-id`, §10.4.4's flag matrix does not include it, and header+hashes mode has no documented way to supply the provider id needed to call `/v1/receipt-keys/<provider_id>`.
+
+**Why it matters:** Header+hashes mode can become unexpectedly `inconclusive` for otherwise valid receipts unless the user knows about an under-documented flag. Two implementations can also disagree on whether `--provider-id` is legal only with `--pubkey`, legal with all modes, or required for online header+hash verification.
+
+**Suggested fix:** Promote `--provider-id <id>` into the §10.4 flag/input contract, add it to §10.4.4, and state exactly which input modes require or accept it.
+
+### MINOR findings
+
+#### C9. Cache timestamp formats are split between Unix seconds and RFC3339
+**Location:** §10.2 lines 1412-1414 and 1433-1434; §10.7 lines 1853-1858
+
+**Finding:** §10.2 says cache `fetched_at` is Unix seconds and that live success writes `fetched_at = now()`, while §10.7's endpoint response returns `fetched_at`, `rotated_at`, and `expires_at` as RFC3339 strings. This is parseable, but the cache format and wire format boundary should be explicit so fixtures do not drift.
+
+### QUESTIONS
+
+None.
+
+## Lens: security — round 2 by Codex
+
+**Verdict:** READY WITH FIX PASS
+
+**Counts:** 0 CRITICAL, 1 MAJOR, 1 MINOR, 0 QUESTIONS
+
+**Round-1 resolution check:** S1 is resolved by the buyer-callable §10.7 endpoint and §10.2's explicit `/poolz` ban, subject to C7's stale references. S2 is resolved by the explicit `[rotated_at - 60s, expires_at]` check in §10.2.1 and AC-27. S3 is resolved because stale cache can now produce only `inconclusive`, not `valid`. S4 is resolved by `coordinator_host`. S5 is resolved for JSON/default output; `--quiet` now has an explicit suppression rule.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+#### S6. Coordinator-rejected key can still be read as `inconclusive` in §10.1
+**Location:** §10.1 lines 1378-1395; §10.2.1 lines 1490-1494
+
+**Finding:** §10.2.1 says a receipt whose `provider_pubkey` matches neither the current nor previous key for the resolved provider MUST be `invalid`. §10.1 still says a resolver response containing no matching `receipt_pubkey` / `receipt_pubkey_prev` is `inconclusive` when no `--pubkey` was supplied.
+
+**Why it matters:** This is the security-sensitive boundary between "the trust root could not be reached" and "the trust root was reached and did not endorse this key." Returning `inconclusive` for the latter weakens script reliability and lets a forged or retired-key receipt look like an environmental failure.
+
+**Suggested fix:** In §10.1, reserve `inconclusive` for fetch failure, provider-id unresolvable, or no authoritative resolver answer. When `/v1/receipt-keys/<provider_id>` returns an authoritative provider record whose current/previous keys do not match, require `invalid`.
+
+### MINOR findings
+
+#### S7. The positive trust-boundary sentence still reads like timestamp attestation
+**Location:** §10.6 lines 1762-1781
+
+**Finding:** The opening `valid` proof says a holder signed the tuple "at the claimed `unix_ts`," while the following bullet correctly says timestamp honesty is not proven. The intended meaning is likely "signed a tuple containing the claimed `unix_ts`," but the current wording can be quoted out of context as a time attestation.
+
+### QUESTIONS
+
+None.
+
+## Lens: architect — round 2 by Codex
+
+**Verdict:** READY WITH FIX PASS
+
+**Counts:** 0 CRITICAL, 1 MAJOR, 1 MINOR, 0 QUESTIONS
+
+**Round-1 resolution check:** A1 and A3 are resolved by the explicit SPEC-002 v1.5 candidate endpoint and removal of the per-provider `/poolz` variant. A2, A5, and A6 are resolved. A4 is resolved for cache identity by keying cache entries on `(coordinator_host, provider_id, receipt_pubkey)`, with the remaining provider-id CLI integration gap captured as A7/C8.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+#### A7. Provider identity is now architecturally required but not first-class across verifier modes
+**Location:** §10.2 lines 1438-1444; §10.4 lines 1529-1537; §10.7 lines 1813-1828; AC-23 lines 2138-2144
+
+**Finding:** The v0.2.1 architecture correctly chooses a provider-id-addressed resolver, but the verifier contract still treats `provider_id` as optional bundle metadata plus an incidental `--provider-id` flag. That leaves header+hashes mode and non-bundle workflows without a first-class provider identity input, even though the live resolver cannot run without it.
+
+**Why it matters:** Round 1 A4 was about losing provider identity in cache design. v0.2.1 fixes the cache key but leaves identity under-specified at the CLI boundary, where buyers actually invoke verification. This can push implementations back toward pubkey-byte scans or offline-only behavior.
+
+**Suggested fix:** Make provider identity an explicit part of the verifier contract: either require `--provider-id` for online header+hashes mode, or define a separate resolver path when only `provider_pubkey` is known. Keep the no-scan rule.
+
+### MINOR findings
+
+#### A8. `valid` still does not explicitly disclaim receipt uniqueness
+**Location:** §10.6 lines 1770-1796
+
+**Finding:** §10.6 cleanly disclaims model attestation, timestamp honesty, privacy, absolute pubkey trustworthiness, and delivery to the verifying buyer. It still does not explicitly say that `valid` does not prove no other receipt was issued for the same prompt/response or that this was the only provider-side attestation. This is not blocking, but it is part of the same trust-boundary surface the audit prompt asked to scrutinize.
+
+### QUESTIONS
+
+None.
+
+## Convergent findings — round 2 by Codex
+
+### CF4. v0.2.1 fixed the trust-root architecture but left resolver terminology split
+
+**Converged from:** code C7, security S6
+
+The buyer-safe `/v1/receipt-keys/<provider_id>` endpoint resolves the original CF1 architecture problem, but §10.1 and AC-18 still speak in `/poolz` terms and §10.1 still conflicts with §10.2.1 on no-match semantics. This is no longer a "drop and redesign" issue; it is a fix-pass consistency issue.
+
+**Effective severity:** MAJOR. Replace stale `/poolz` result/AC wording and align authoritative no-match as `invalid`.
+
+### CF5. Provider identity must be promoted into the verifier CLI contract
+
+**Converged from:** code C8, architect A7
+
+The v0.2.1 cache and live endpoint both need `(coordinator_host, provider_id, receipt_pubkey)`, but §10.4 does not make `provider_id` a complete CLI input across modes. This is the main regression introduced by the otherwise-correct fix for CF1/A4.
+
+**Effective severity:** MAJOR. Add `--provider-id` to the normative input and flag matrix, especially for header+hashes mode.
+
+### CF6. Round-1 criticals are closed in substance
+
+**Converged from:** code/security/architect resolution checks above
+
+The original CF1/CF2/CF3 critical roots are not still open in their round-1 form: live lookup is no longer operator-only `/poolz`, previous-key grace has an executable time-window check, stale cache cannot produce `valid`, raw OpenAI request bundles are accepted, JSON/exit-code surfaces are materially pinned, and cache keying includes provider identity. The remaining findings are consistency and integration fixes suitable for one v0.2.2 pass.
+
+**Effective severity:** informational closure note.
+
+## Lens: code — round 3 by Codex
+
+**Verdict:** READY WITH FIX PASS
+
+**Counts:** 0 CRITICAL, 2 MAJOR, 1 MINOR, 0 QUESTIONS
+
+**Round-2 resolution check:** CF4 / C7 / S6 are resolved by the v0.2.2 rewrite of §10.1 and AC-18: stale `/poolz` wording is gone from the v0.2 verifier result semantics, authoritative resolver no-match is `invalid`, 404 remains a named `inconclusive` case, and AC-18 now uses `GET /v1/receipt-keys/<bundle.provider_id>`. C9 is resolved by the RFC3339 UTC cache-field normalization in §10.2. S7 and A8 are resolved in §10.6. CF5 / C8 / A7 are mostly resolved by making `--provider-id` first-class, but the fix introduced the new code-contract findings below.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+#### C10. Missing provider id is both a required-argument error and an `inconclusive` result
+**Location:** §10.4 lines 1612-1618, §10.4 lines 1634-1656, §10.4.3 lines 1790-1794, §10.4.4 lines 1833-1841
+
+**Finding:** Header+hashes mode says `--provider-id` is REQUIRED unless `--pubkey` is supplied. Under §10.4.3, a missing required CLI argument is a usage error with exit `64`. But the later provider-id requirements and flag matrix say that when `--pubkey` is not supplied and no provider id can be obtained, the verifier returns `inconclusive` with `reason: "provider_id_unresolvable"` and exit `2`; the explicit header+hashes/no-provider-id/no-pubkey row repeats that result.
+
+**Why it matters:** Scripts cannot rely on the exit-code mapping for a common v0.2.2 edge case. One conforming implementation can reject the invocation at parse time as `64`; another can run the verifier and emit `result: "inconclusive"` with exit `2`. This is exactly the kind of exit-code ambiguity the v0.2 audit prompt classifies as MAJOR.
+
+**Suggested fix:** Choose one branch. If header+hashes mode truly requires `--provider-id`, make the no-provider-id/no-pubkey invocation exit `64` everywhere and remove the `inconclusive` matrix row. If `provider_id_unresolvable` is intended to be a normal verifier result, replace "REQUIRED" with "needed for online lookup" and keep exit `2`.
+
+#### C11. `live_check_skipped` schema omits required v0.2.2 warning cases
+**Location:** §10.4 lines 1645-1651; §10.4.2 lines 1743-1749; AC-22 lines 2274-2281; AC-23 lines 2283-2289; AC-24 lines 2291-2300
+
+**Finding:** §10.4 now requires a `live_check_skipped` warning with `reason: "provider_id_unresolvable"` when explicit `--pubkey` can produce `valid` but no provider id is recoverable. AC-22 also requires `live_check_skipped` with `reason: "network_unreachable"` when no explicit pubkey exists and live resolution fails. But the `warnings[]` schema only allows `reason` values `offline_flag` and `network_unreachable`, and describes `live_check_skipped` as emitted only when explicit `--pubkey` was used.
+
+**Why it matters:** The release JSON Schema required by AC-24 cannot validate every normative output without inventing behavior outside the §10.4.2 table. JSON consumers also cannot know whether `provider_id_unresolvable` is a legal warning reason, a top-level `reason` only, or an implementation mistake.
+
+**Suggested fix:** Expand the `live_check_skipped.reason` enum to include `provider_id_unresolvable`, and rewrite the "When emitted" column so it covers both explicit-pubkey divergence-check skips and ordinary live-resolution failures required by AC-22.
+
+### MINOR findings
+
+#### C12. Core algorithm still describes resolution as pubkey-byte-oriented
+**Location:** §10.0 lines 1389-1390; §10.2 lines 1519-1526
+
+**Finding:** §10.0 step 5 says to resolve the trusted pubkey "for the receipt's provider_pubkey bytes," while §10.2 now makes `provider_id` the resolver address and forbids broad pubkey-byte scanning. §10.2 is clear enough to control, but the algorithm summary still points implementers toward the old identity-loss framing.
+
+### QUESTIONS
+
+None.
+
+## Lens: security — round 3 by Codex
+
+**Verdict:** READY TO LOCK
+
+**Counts:** 0 CRITICAL, 0 MAJOR, 0 MINOR, 0 QUESTIONS
+
+**Round-2 resolution check:** S6 is resolved. §10.1 now reserves `inconclusive` for fetch failure, provider-id unresolvable, stale-cache/live-failure, or the special 404 retired-provider case; authoritative HTTP 200 key no-match and out-of-window previous-key matches are `invalid`. S7 is resolved by §10.6's "signed a tuple containing `unix_ts`" wording and the explicit content-not-chronology paragraph. The v0.2.2 changes do not introduce a false-`valid`, unrooted-pubkey, telemetry, trust-boundary, or `inconclusive`-collapse issue.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+None.
+
+### MINOR findings
+
+None.
+
+### QUESTIONS
+
+None.
+
+## Lens: architect — round 3 by Codex
+
+**Verdict:** READY WITH FIX PASS
+
+**Counts:** 0 CRITICAL, 1 MAJOR, 0 MINOR, 0 QUESTIONS
+
+**Round-2 resolution check:** A7 is resolved in architectural direction: provider identity is now a first-class CLI input across header+hashes, bundle, and stdin modes, and §10.2 no longer leaves online resolution without a provider-id path. A8 is resolved by the new receipt-uniqueness disclaimer in §10.6. The BUILD-prompt deferrals remain intact: no bulk verification, no receipt explorer, no model-hash binding, no hardware trust-root, no chain verification, no TUF/on-chain root, and no buyer SDK integration landed in v0.2.2.
+
+### CRITICAL findings
+
+None.
+
+### MAJOR findings
+
+#### A9. Provider-id promotion still has two incompatible architectural interpretations
+**Location:** §10.4 lines 1612-1656; §10.4.4 lines 1833-1841
+
+**Finding:** v0.2.2 simultaneously models `provider_id` as a required address component for online header+hashes verification and as an optional identity that may fail to resolve into a normal tri-state verifier result. Both architectures are defensible, but the spec currently contains both. That leaves the verifier boundary unclear: is "missing provider id" a CLI contract violation, or is it a successful invocation whose trust root cannot reach a verdict?
+
+**Why it matters:** This is the only remaining architectural ambiguity from CF5. If left as-is, the implementation prompt will need to choose one meaning, and that choice will be a spec patch disguised as implementation.
+
+**Suggested fix:** Normalize §10.4 around one architectural rule. For a strict CLI contract, require `--provider-id` before execution in header+hashes mode. For a pure tri-state contract, allow the invocation and make provider-id absence an `inconclusive` resolver state.
+
+### MINOR findings
+
+None.
+
+### QUESTIONS
+
+None.
+
+## Convergent findings — round 3 by Codex
+
+### CF7. v0.2.2 closes the round-2 roots but leaves provider-id absence ambiguous
+
+**Converged from:** code C10, architect A9
+
+The round-2 roots CF4 and CF5 are fixed in substance: `/v1/receipt-keys/<provider_id>` is now the operative resolver, authoritative no-match is `invalid`, cache timestamps match the wire shape, `--provider-id` is first-class, and §10.6's trust boundary is sharper. The remaining blocker is a regression introduced while promoting `--provider-id`: missing provider identity is specified both as a required-argument usage error and as a normal `inconclusive` result.
+
+**Effective severity:** MAJOR. One fix pass should be enough: pick either exit `64` or exit `2` semantics for missing provider id in header+hashes mode, then align §10.4, §10.4.3, §10.4.4, the warning schema, and AC-22/AC-24 around that choice.

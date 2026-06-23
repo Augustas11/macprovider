@@ -1,7 +1,45 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.2.2 (2026-06-23, round-2 codex audit fix pass — LOCK candidate)
+**Version:** 0.2.3 (2026-06-23, round-3 codex audit fix pass — LOCK candidate)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver), SPEC-005 v0.3, SPEC-006 v0.9, SPEC-008 v0.3, SPEC-011 v0.5, SPEC-013 v0.3
+
+**Change log v0.2.3:**
+- Round-3 codex audit fix pass against
+  `specs/SPEC-015-v0-2-audit.md` round-3 sections (round 3:
+  security lens **READY TO LOCK** 0/0/0/0; code + architect
+  READY WITH FIX PASS with 3 MAJOR + 1 MINOR converging on a
+  single root cause CF7). Findings resolved:
+  - **CF7 / C10 / A9 (provider-id absence is BOTH a usage error
+    AND an inconclusive result — internal contradiction):** §10.4
+    normalized around the strict CLI contract (Option A from the
+    round-3 reading). Missing `--provider-id` in header+hashes
+    mode without `--pubkey` is now exit code `64` (usage error)
+    everywhere — at §10.4 input shapes, §10.4 "Provider-id
+    requirements", §10.4.4 flag matrix, and the §10.4.3 exit-code
+    table. The `inconclusive` matrix row for that combination is
+    replaced with USAGE ERROR. Rationale: the verifier was
+    misinvoked (missing essential argument), not failed at
+    runtime; this matches the convention for missing `--receipt`
+    / `--bundle`. `inconclusive` remains reserved for trust-root
+    failures the verifier discovered during execution.
+  - **C11 (`live_check_skipped.reason` enum incomplete):** the
+    enum in §10.4.2 is extended with `provider_id_unresolvable`
+    — emitted when explicit `--pubkey` was supplied AND no
+    provider id is recoverable (the verifier can produce `valid`
+    against the explicit key but the live divergence check is
+    skipped because the resolver cannot be addressed). The
+    enum is now `offline_flag` / `network_unreachable` /
+    `provider_id_unresolvable`.
+  - **C12 (§10.0 algorithm step 5 still pubkey-byte-oriented):**
+    §10.0 step 5 rewritten to read "Resolve the trusted pubkey
+    for the resolved `provider_id` per §10.2" instead of "for the
+    receipt's provider_pubkey bytes." Aligns the algorithm summary
+    with the §10.2 no-scan rule.
+
+v0.2.3 is the LOCK candidate. Round 4 pending — target READY TO
+LOCK across all three lenses (security is already there). On
+clean round 4, v0.2 locks and bundles into the combined SPEC +
+IMPL PR per [[feedback-bundle-spec-impl-one-pr]].
 
 **Change log v0.2.2:**
 - Round-2 codex audit fix pass against
@@ -1386,8 +1424,13 @@ verifies as follows:
 3. Decode SIG = base64_decode(b64_sig). Reject if len(SIG) != 64.
 4. Parse JCS_T as JSON to confirm well-formed and contains exactly
    the seven SPEC-015 §3.1 keys.
-5. Resolve the trusted pubkey for the receipt's provider_pubkey
-   bytes per §10.2. If unresolvable → `inconclusive` (§10.1).
+5. Resolve the trusted pubkey for the resolved `provider_id` per
+   §10.2 (sources: explicit `--pubkey` → cached entry → live
+   `GET /v1/receipt-keys/<provider_id>`). The verifier MUST NOT
+   resolve by scanning across providers for a matching
+   `provider_pubkey`; `provider_id` is the resolver address. If
+   the trust root cannot reach a verdict → `inconclusive`
+   (§10.1).
 6. ed25519_verify(trusted_pubkey, JCS_T, SIG). Reject on failure
    → `invalid` (§10.1).
 7. Canonicalize the buyer's recorded request prompt per §4 →
@@ -1423,17 +1466,27 @@ pubkey embedded in the receipt: an unrooted pubkey is unrooted,
 regardless of the signature's internal consistency.
 
 `inconclusive` is the correct result when ANY of the following
-hold AND no explicit `--pubkey` was supplied:
+hold AND no explicit `--pubkey` was supplied AND the verifier
+passed §10.4 input validation (i.e. `provider_id` was obtainable
+at parse time per §10.4 "Provider-id requirements"):
 
 - The configured coordinator's `GET /v1/receipt-keys/<provider_id>`
   endpoint (§10.7) is unreachable (network down, DNS failure, 5xx,
   timeout, rate-limited via 429) AND no fresh cached entry exists
   for `(coordinator_host, provider_id, receipt_pubkey)`, OR
-- `provider_id` cannot be resolved (the bundle did not supply it,
-  no `--provider-id` argument was given, and no single matching
-  cached entry exists), OR
+- The §10.7 endpoint returns HTTP 404 for the `provider_id` — an
+  authoritative "this provider is unknown to me" answer, treated
+  as `inconclusive` with `reason: "provider_id_not_in_pool"`
+  because the receipt itself may predate provider removal, OR
 - The cache holds only a stale entry (older than the §10.2 7-day
   TTL) AND the live fetch fails.
+
+The "provider_id is not addressable at all" case (no CLI arg, no
+bundle field, no single-match cache) is NOT an `inconclusive`
+case in v0.2 — it is an exit-64 usage error per §10.4. The
+verifier rejects the invocation at parse time and never reaches
+the result-determination algorithm. See §10.4 "Provider-id
+requirements" for the exit-64 contract.
 
 `invalid` (not `inconclusive`) is the correct result when ANY of
 the following hold:
@@ -1518,12 +1571,14 @@ priority order:
 
 `provider_id` resolution: when the bundle provides `provider_id`,
 the verifier uses it directly. When `provider_id` is absent, the
-verifier MUST NOT scan all known providers — it MUST treat the
-receipt as `inconclusive` UNLESS an explicit `--provider-id`
-argument is supplied or a single cached entry with a matching
-`receipt_pubkey` exists for the configured coordinator. Pubkey-byte
-scanning across providers re-introduces the identity-loss problem
-audit A4 named.
+verifier MUST NOT scan all known providers. The fallback order is:
+(1) explicit `--provider-id` CLI argument, (2) a single matching
+cached entry's `provider_id` under the configured coordinator. If
+neither yields a `provider_id` AND no `--pubkey` is supplied, the
+verifier exits `64` per §10.4 "Provider-id requirements" — the
+verifier MUST NOT emit `inconclusive` for missing-input cases.
+Pubkey-byte scanning across providers re-introduces the
+identity-loss problem audit A4 named.
 
 **Explicit-vs-live divergence handling (S5):** Whenever an
 explicit pubkey is supplied AND the verifier is not running with
@@ -1631,9 +1686,9 @@ A verifier MAY accept additional input shapes (e.g. raw HTTP
 response capture) as long as they reduce to one of the three above
 before the §10.0 algorithm runs.
 
-**Provider-id requirements (CF5 normative):** The §10.7 resolver
-endpoint is addressed by `provider_id`. The verifier MUST obtain
-`provider_id` from one of:
+**Provider-id requirements (CF5 / CF7 normative):** The §10.7
+resolver endpoint is addressed by `provider_id`. The verifier MUST
+obtain `provider_id` from one of:
 
 1. The `--provider-id <id>` CLI argument (first-class input).
 2. The bundle's `provider_id` field (bundle/stdin modes only).
@@ -1642,18 +1697,33 @@ endpoint is addressed by `provider_id`. The verifier MUST obtain
    these before" path; verifier MUST NOT scan multiple cached
    entries).
 
-When `--pubkey` is supplied, online verification does not require
-`provider_id` to produce `valid` — but the verifier MUST still
-attempt to record `provider_id` (from the bundle or `--provider-id`)
-for output reporting and the divergence-warning check (§10.2). If
-no `provider_id` is recoverable, JSON output emits `provider_id:
-null` and `warnings[]` gains a `live_check_skipped` entry with
-`reason: "provider_id_unresolvable"`.
+**Without `--pubkey` (online verification path):** `provider_id`
+MUST be obtained from (1)/(2)/(3) before the verifier runs. If
+none of those sources yield a `provider_id`, the verifier MUST
+reject the invocation with exit code `64` (usage error) and a
+clear error message naming `--provider-id` as the missing input.
+The verifier MUST NOT run to completion and emit `inconclusive` in
+this case: the receipt may be perfectly valid, but the buyer has
+not supplied enough information to reach the trust root. This is
+a CLI contract violation, not a trust-root failure. Other
+"missing required argument" cases (`--receipt`, `--bundle`) follow
+the same exit-64 convention.
 
-When `--pubkey` is NOT supplied and `provider_id` cannot be
-obtained from (1)/(2)/(3), the result is `inconclusive` with
-`reason: "provider_id_unresolvable"`. The verifier MUST NOT
-fingerprint-scan across providers.
+**With explicit `--pubkey`:** online verification does NOT require
+`provider_id` to produce `valid` — the explicit pubkey serves as
+the trust root. The verifier MUST still attempt to record
+`provider_id` (from sources 1/2/3) for output reporting and the
+live divergence-warning check (§10.2). If no `provider_id` is
+recoverable AND the verifier is online, JSON output emits
+`provider_id: null` and `warnings[]` gains a
+`live_check_skipped` entry with `reason:
+"provider_id_unresolvable"`. The verifier MUST NOT
+fingerprint-scan across providers under any circumstance.
+
+The verifier MUST NOT use `inconclusive` as a substitute for the
+missing-provider-id exit-64 case: `inconclusive` is reserved for
+trust-root failures the verifier discovered during execution, not
+for CLI contract violations the verifier knows at parse time.
 
 #### 10.4.1 Bundle JSON shape
 
@@ -1726,7 +1796,7 @@ table below.
   `output_hash_mismatch`, `pubkey_not_endorsed`,
   `previous_key_outside_grace_window`, `bundle_pubkey_provider_mismatch`
 - For `inconclusive`: `pubkey_unresolvable`,
-  `provider_id_unresolvable`, `cache_stale_and_live_unreachable`
+  `provider_id_not_in_pool`, `cache_stale_and_live_unreachable`
 
 v0.3+ MAY extend the enum additively; v0.3+ verifiers MUST emit
 v0.2-known values for v0.2-mapped cases.
@@ -1745,7 +1815,7 @@ v0.2-known values for v0.2-mapped cases.
 | `kind` value | Additional fields | When emitted |
 |---|---|---|
 | `explicit_vs_live_divergence` | `live_pubkey` (string), `coordinator_host` (string) | Explicit `--pubkey` was used AND a live `/v1/receipt-keys` fetch succeeded AND returned a different pubkey for the same `provider_id`. |
-| `live_check_skipped` | `reason` (one of `offline_flag`, `network_unreachable`) | Explicit `--pubkey` was used AND the live divergence check did not run. |
+| `live_check_skipped` | `reason` (one of `offline_flag`, `network_unreachable`, `provider_id_unresolvable`) | The live divergence check did not run. `offline_flag`: `--offline` was passed. `network_unreachable`: live fetch failed (network down, 5xx, timeout, 429). `provider_id_unresolvable`: explicit `--pubkey` was supplied AND no `provider_id` was recoverable from CLI, bundle, or cache (the verifier had nothing to address the resolver with). |
 | `non_default_coordinator` | `coordinator_host` (string) | A non-default coordinator (i.e. not `coordinator.streamvc.live`) was used as the trust-root source. |
 | `clock_skew` | `unix_ts` (int), `system_time` (int), `delta_seconds` (int) | Receipt `unix_ts` differs from the verifier's system clock by more than 24 hours. Informational only — does NOT downgrade `result` per §10.6. |
 
@@ -1789,7 +1859,7 @@ verbatim to stderr after a `valid` result, so a buyer who reads
 |---|---|
 | 0 | `valid` |
 | 1 | `invalid` (signature, canonicalization, coordinator-rejected pubkey, or previous-key-outside-grace-window) |
-| 2 | `inconclusive` (pubkey unresolvable, provider_id unresolvable, cache stale + live unreachable) |
+| 2 | `inconclusive` (pubkey unresolvable, provider_id not in pool per §10.7 404, cache stale + live unreachable) |
 | 64 | usage error (per `sysexits.h`, `EX_USAGE`) — unknown CLI flag, missing required CLI argument, mutually-exclusive flags combined (e.g. `--bundle` + `--receipt`), invalid value format for a CLI flag (e.g. malformed `--pubkey` base64) |
 | 65 | input format error (per `sysexits.h`, `EX_DATAERR`) — malformed bundle JSON, missing required bundle field, unknown bundle top-level key, unsupported `bundle_version`, malformed receipt header value (cannot split on `.`), base64 decode failure on tuple or signature, tuple JSON not well-formed or wrong key set |
 
@@ -1830,15 +1900,19 @@ individual flag descriptions.
 | `--provider-id I` + header+hashes mode + `--pubkey P` | YES (background only) | YES if live differs | per `--quiet` | NO — explicit wins |
 | `--provider-id I` + bundle mode where bundle also has `provider_id: J` and `I != J` | n/a | n/a | n/a | USAGE ERROR (exit 64) — mismatched provider identity |
 | `--provider-id I` + bundle mode where bundle has `provider_id: I` (or none) | per other flags | per other flags | per `--quiet` | NO |
-| header+hashes mode (no `--provider-id`, no `--pubkey`) | NO (cannot address resolver) | n/a | per `--quiet` | `inconclusive` with `reason: provider_id_unresolvable` |
+| header+hashes mode (no `--provider-id`, no `--pubkey`) | n/a | n/a | n/a | USAGE ERROR (exit 64) — `--provider-id` required for online verification without explicit pubkey |
+| bundle/stdin mode (no bundle `provider_id`, no `--provider-id`, no `--pubkey`, no single-match cache entry) | n/a | n/a | n/a | USAGE ERROR (exit 64) — same as above; provider id unobtainable for online verification |
+| header+hashes mode + `--pubkey P` (no `--provider-id`) | NO (no `provider_id` to address) | n/a | per `--quiet`; `live_check_skipped` warning with `reason: provider_id_unresolvable` | NO — explicit pubkey wins; `provider_id: null` in JSON output |
 
 **`--provider-id` summary:** REQUIRED for online verification in
 header+hashes mode unless `--pubkey` is supplied. OPTIONAL in
 bundle/stdin modes when the bundle carries `provider_id` (the
 bundle field takes precedence on absence; mismatch is a usage
 error). When neither source provides `provider_id` AND no
-`--pubkey` is supplied, the result is `inconclusive` per §10.4
-"Provider-id requirements" — the verifier MUST NOT scan.
+`--pubkey` is supplied, the verifier rejects the invocation with
+exit code `64` per §10.4 "Provider-id requirements" — the
+verifier MUST NOT scan and MUST NOT emit `inconclusive` in this
+case (it is a CLI contract violation, not a trust-root failure).
 
 The matrix is normative. A verifier MUST NOT introduce flag
 combinations whose semantics aren't covered here or aren't
@@ -2016,8 +2090,9 @@ tuple.
 - **404** — `provider_id` not in the current pool. Body is the
   SPEC-002 §FR-X-N standard JSON error envelope with
   `error.code = provider_not_found`. The verifier treats this as
-  `inconclusive`, not `invalid`: the provider may have been
-  retired, but the receipt is not necessarily a forgery.
+  `inconclusive` with `reason: "provider_id_not_in_pool"`, NOT
+  `invalid`: the provider may have been retired, but the receipt
+  is not necessarily a forgery.
 - **429** — rate limit exceeded. Verifier treats as a fetch
   failure (contributing to `inconclusive` if no cache), MUST NOT
   retry within the same verification invocation.
