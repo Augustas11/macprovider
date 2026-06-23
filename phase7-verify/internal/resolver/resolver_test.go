@@ -274,13 +274,17 @@ func TestResolveRedirectOffHostFails(t *testing.T) {
 	assertWarning(t, root, "live_check_skipped", "reason", "network_unreachable")
 }
 
-func TestResolveRedirectSameHostSucceeds(t *testing.T) {
+func TestResolveRedirectSameHostSamePathSucceeds(t *testing.T) {
+	// Round-1 audit MAJOR fix: same-host redirects MUST preserve the exact
+	// path. Legal case: redirect to the same URL the original GET targeted
+	// (modeling an http→https upgrade hop as a self-redirect for test
+	// purposes). Redirected URL is byte-identical so CheckRedirect passes.
 	key := testKey(17)
 	var calls int32
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		atomic.AddInt32(&calls, 1)
-		if r.URL.Query().Get("redirected") == "" {
-			http.Redirect(w, r, "/v1/receipt-keys/"+providerID+"?redirected=1", http.StatusFound)
+		n := atomic.AddInt32(&calls, 1)
+		if n == 1 {
+			http.Redirect(w, r, "/v1/receipt-keys/"+providerID, http.StatusFound)
 			return
 		}
 		writeResolverResponse(t, w, key)
@@ -298,6 +302,76 @@ func TestResolveRedirectSameHostSucceeds(t *testing.T) {
 	assertSource(t, root, SourceLive)
 	if atomic.LoadInt32(&calls) != 2 {
 		t.Fatalf("network calls = %d, want initial+redirect", calls)
+	}
+}
+
+// TestResolveRedirectSameHostDifferentPathFails — round-1 audit MAJOR fix:
+// SPEC-015 §10.5 bounds the verifier to GET /v1/receipt-keys/<provider_id>.
+// A coordinator that redirects same-host to /poolz, /telemetry, /analytics,
+// a different provider id, or the same path with smuggled ?query / #fragment
+// MUST NOT be silently followed — that would re-open the network surface
+// after the first response. Verifier treats as fetch failure.
+func TestResolveRedirectSameHostDifferentPathFails(t *testing.T) {
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"redirect to /poolz", "/poolz"},
+		{"redirect to /telemetry", "/telemetry"},
+		{"redirect to /analytics/v1/event", "/analytics/v1/event"},
+		{"redirect to receipt-keys with query string", "/v1/receipt-keys/" + providerID + "?op=admin"},
+		{"redirect to receipt-keys with fragment", "/v1/receipt-keys/" + providerID + "#admin"},
+		{"redirect to different provider id", "/v1/receipt-keys/other-provider"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, tc.path, http.StatusFound)
+			}))
+			defer server.Close()
+
+			root, err := Resolve(providerID, nil, ResolveOpts{
+				CoordinatorHost: server.URL,
+				HTTPClient:      server.Client(),
+				Now:             func() time.Time { return fixedNow },
+			})
+			if err != nil {
+				t.Fatalf("Resolve: %v", err)
+			}
+			assertSource(t, root, SourceNone)
+			assertWarning(t, root, "live_check_skipped", "reason", "network_unreachable")
+		})
+	}
+}
+
+// TestResolveClampsInjectedClientTimeout — round-1 audit MAJOR fix: the
+// SPEC-015 §10.5 5-second timeout is a HARD invariant. An injected
+// http.Client with a longer timeout MUST be clamped, not honored. Otherwise
+// Step 6 or the CLI could weaken network discipline by passing a more
+// permissive client.
+func TestResolveClampsInjectedClientTimeout(t *testing.T) {
+	// Server blocks until the client cancels. If the 30s timeout is honored,
+	// the test waits 30s; if the 5s clamp kicks in, it returns in ~5s.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	permissiveClient := *server.Client()
+	permissiveClient.Timeout = 30 * time.Second
+
+	start := time.Now()
+	_, err := Resolve(providerID, nil, ResolveOpts{
+		CoordinatorHost: server.URL,
+		HTTPClient:      &permissiveClient,
+		Now:             func() time.Time { return fixedNow },
+	})
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if elapsed > 10*time.Second {
+		t.Fatalf("Resolve took %v with permissive client; §10.5 5s timeout was NOT clamped — Step 6/CLI could now bypass network discipline", elapsed)
 	}
 }
 

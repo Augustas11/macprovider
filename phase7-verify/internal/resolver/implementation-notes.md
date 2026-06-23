@@ -47,6 +47,13 @@ Warnings map directly to SPEC-015 §10.4.2:
   `network_unreachable`, or `provider_id_unresolvable`.
 - `non_default_coordinator`: field `coordinator_host`.
 
+The `clock_skew` warning kind from SPEC-015 §10.4.2 is INTENTIONALLY NOT
+emitted by this resolver. `clock_skew` needs the receipt's `unix_ts` value,
+which `resolver.Resolve()` does not receive — only Step 6 (the verifier
+orchestrator) has both the resolved trust root AND the parsed receipt tuple
+in scope. Step 6 / Step 7 own `clock_skew` emission; resolver's job is the
+trust-root lookup itself.
+
 `ResolveOpts.Quiet` is intentionally not used to suppress warning records.
 Quiet-mode stderr suppression belongs at the CLI/reporting layer.
 

@@ -64,6 +64,12 @@ var (
 	ErrInvalidProviderID  = errors.New("invalid provider_id")
 	ErrInvalidCoordinator = errors.New("invalid coordinator host")
 	ErrRedirectOffHost    = errors.New("redirect target is outside configured coordinator host")
+	// ErrRedirectOffPath fires when a same-host redirect points to a different
+	// path, query, or fragment than the original GET /v1/receipt-keys/<provider_id>
+	// request. SPEC-015 §10.5 bounds the verifier to that exact URL; same-host
+	// redirects to /poolz, /telemetry, /analytics, etc. would otherwise be silently
+	// followed by net/http after the first response.
+	ErrRedirectOffPath    = errors.New("redirect target path differs from the original receipt-keys request")
 	ErrFetchFailed        = errors.New("receipt key fetch failed")
 )
 
@@ -232,7 +238,7 @@ func fetchLive(providerID string, target coordinatorTarget, client *http.Client)
 	endpoint.RawQuery = ""
 	endpoint.Fragment = ""
 
-	httpClient := configuredClient(client, target.host)
+	httpClient := configuredClient(client, target.host, endpoint.Path)
 	req, err := http.NewRequest(http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return ResolverResponse{}, err
@@ -241,7 +247,9 @@ func fetchLive(providerID string, target coordinatorTarget, client *http.Client)
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		if errors.Is(err, ErrRedirectOffHost) {
+		// Off-host and off-path redirects both surface as fetch failures —
+		// the URL net/http wrapping unwraps either sentinel via errors.Is.
+		if errors.Is(err, ErrRedirectOffHost) || errors.Is(err, ErrRedirectOffPath) || errors.Is(err, ErrInsecureScheme) {
 			return ResolverResponse{}, fmt.Errorf("%w: %v", ErrFetchFailed, err)
 		}
 		return ResolverResponse{}, fmt.Errorf("%w: %v", ErrFetchFailed, err)
@@ -312,13 +320,30 @@ func decodePrevious(wire *wirePrevious) (*PreviousKeyResponse, error) {
 	}, nil
 }
 
-func configuredClient(client *http.Client, coordinatorHost string) *http.Client {
+// maxFetchTimeout is the hard SPEC-015 §10.5 budget: 5 seconds connect+read.
+// configuredClient ALWAYS clamps the effective client.Timeout to this value
+// regardless of any injected client's defaults — Step 6/CLI/test callers cannot
+// weaken the network discipline by passing a more permissive client.
+const maxFetchTimeout = 5 * time.Second
+
+// configuredClient returns an http.Client with the SPEC-015 §10.5 network
+// discipline applied: 5s timeout (hard cap, never relaxed), and a custom
+// CheckRedirect that constrains redirects to the EXACT same-host + same-path
+// request (no escape to /poolz, /telemetry, etc.).
+//
+// requestPath MUST be the original request path (e.g. "/v1/receipt-keys/m1-anon").
+// Same-host redirects to ANY other path are rejected as ErrRedirectOffHost
+// (semantically off-the-allowed-surface, even if the host is unchanged).
+func configuredClient(client *http.Client, coordinatorHost, requestPath string) *http.Client {
 	var configured http.Client
 	if client != nil {
 		configured = *client
 	}
-	if configured.Timeout == 0 {
-		configured.Timeout = 5 * time.Second
+	// MAJOR fix round-1 audit: clamp to the §10.5 5-second budget unconditionally.
+	// An injected client with Timeout = 30s would otherwise let Step 6/CLI silently
+	// extend the network surface beyond spec.
+	if configured.Timeout == 0 || configured.Timeout > maxFetchTimeout {
+		configured.Timeout = maxFetchTimeout
 	}
 	configured.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		if req.URL.Scheme != "https" {
@@ -326,6 +351,19 @@ func configuredClient(client *http.Client, coordinatorHost string) *http.Client 
 		}
 		if !strings.EqualFold(req.URL.Host, coordinatorHost) {
 			return ErrRedirectOffHost
+		}
+		// MAJOR fix round-1 audit: same-host redirects MUST also preserve the
+		// request path. SPEC-015 §10.5 says "no network call beyond
+		// /v1/receipt-keys/<provider_id>" — a coordinator (malicious, or
+		// misconfigured) redirecting to /poolz, /telemetry, /analytics, etc.
+		// would otherwise be silently followed by net/http.
+		if req.URL.Path != requestPath {
+			return ErrRedirectOffPath
+		}
+		// Also reject redirects that smuggle a query string or fragment —
+		// neither was in the original GET and both are out-of-spec.
+		if req.URL.RawQuery != "" || req.URL.Fragment != "" {
+			return ErrRedirectOffPath
 		}
 		return nil
 	}
