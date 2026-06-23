@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 )
@@ -60,6 +61,8 @@ type AuthRequest struct {
 	BinaryVersion            string          `json:"binary_version,omitempty"`
 	EndpointURL              *string         `json:"endpoint_url,omitempty"`
 	ProviderECDHPublicKey    string          `json:"provider_ecdh_public_key,omitempty"`
+	ProviderReceiptPublicKey string          `json:"provider_receipt_public_key,omitempty"`
+	ProviderReceiptPubkey    []byte          `json:"-"`
 	Tier2Capabilities        Tier2Caps       `json:"tier2_capabilities,omitempty"`
 	AttestationToken         json.RawMessage `json:"attestation_token,omitempty"`
 	SupportedModels          []string        `json:"supported_models,omitempty"`
@@ -214,6 +217,13 @@ type InferenceResponseEnd struct {
 	ChunksSent int             `json:"chunks_sent"`
 	Usage      json.RawMessage `json:"usage,omitempty"`
 	Error      string          `json:"error,omitempty"`
+	// SPEC-015 v0.1.x: WS-tunneled non-streaming inference carries the
+	// X-MacProvider-Receipt header value as a field on the
+	// inference_response_end frame. Coordinator stamps it as the
+	// response header when forwarding to the buyer, subject to the
+	// same provider receipt-eligibility gate used on the HTTP-direct
+	// path.
+	Receipt string `json:"receipt,omitempty"`
 }
 
 type CancelRequest struct {
@@ -412,6 +422,19 @@ func parseAuthInitial(raw map[string]json.RawMessage, req AuthRequest) (AuthRequ
 	}
 	if err := requireString(raw, "provider_ecdh_public_key", &req.ProviderECDHPublicKey); err != nil {
 		return AuthRequest{}, Spec010Presence{}, err.Field, err
+	}
+	if v, ok := raw["provider_receipt_public_key"]; ok && string(v) != "null" {
+		if err := json.Unmarshal(v, &req.ProviderReceiptPublicKey); err != nil {
+			return AuthRequest{}, Spec010Presence{}, "provider_receipt_public_key", err
+		}
+		pubkey, err := base64.StdEncoding.DecodeString(req.ProviderReceiptPublicKey)
+		if err != nil {
+			return AuthRequest{}, Spec010Presence{}, "provider_receipt_public_key", err
+		}
+		if len(pubkey) != 32 {
+			return AuthRequest{}, Spec010Presence{}, "provider_receipt_public_key", fmt.Errorf("provider_receipt_public_key must decode to 32 bytes")
+		}
+		req.ProviderReceiptPubkey = append([]byte(nil), pubkey...)
 	}
 	capsRaw, ok := raw["tier2_capabilities"]
 	if !ok {

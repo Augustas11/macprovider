@@ -203,6 +203,16 @@ func WithVersion(v string) Option {
 	}
 }
 
+func WithNow(now func() time.Time) Option {
+	return func(s *Server) {
+		if now == nil {
+			return
+		}
+		s.now = now
+		s.admission = NewAdmissionManager(s.cfg.Admission, s.now)
+	}
+}
+
 func WithExplorerHandler(handler http.Handler) Option {
 	return func(s *Server) {
 		s.explorer = handler
@@ -698,7 +708,7 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		return "", ""
 	}
 	entry.AuthState = authState
-	session := s.registerProviderSession(conn, entry)
+	session, _ := s.registerProviderSession(conn, entry)
 	if session == nil {
 		// Eviction defense fired: bearer-less duplicate tried to
 		// displace a routable session for the same provider_id.
@@ -903,6 +913,15 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 
 	entry.EncryptedLeg = true
 	entry.AttestationStatus = attestationStatus
+	if len(initial.ProviderReceiptPubkey) > 0 {
+		entry.ReceiptPubkey = append([]byte(nil), initial.ProviderReceiptPubkey...)
+	} else {
+		s.log.Info().
+			Str("provider_id", initial.ProviderID).
+			Bool("receipt_omitted", true).
+			Str("reason", "no_keypair").
+			Msg("provider receipt public key omitted")
+	}
 	// SPEC-002 v1.3.5 §3.X.1 / §3.X.2 + SPEC-010 v1.5 R-3.3.1 /
 	// R-3.3.2 — populate the catalog onto Provider. The fallback
 	// synthesis [ModelID] applies when supported_models was
@@ -944,9 +963,14 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		return "", ""
 	}
 	entry.AuthState = authState
-	session := s.registerProviderSession(conn, entry)
+	session, refusal := s.registerProviderSession(conn, entry)
 	if session == nil {
-		s.close(conn, CloseInvalidToken, "invalid_token")
+		if refusal == pool.RegisterRefusalReceiptRotationGraceActive {
+			s.sendAuthRejection(conn, "receipt_rotation_grace_active", "receipt key rotation already has an active previous-key grace window")
+			s.close(conn, CloseInvalidHello, "receipt_key_rotation_grace_active")
+		} else {
+			s.close(conn, CloseInvalidToken, "invalid_token")
+		}
 		return "", ""
 	}
 	releaseUnauth()
@@ -1155,19 +1179,19 @@ func semverParts(value string) ([]int, bool) {
 
 // registerProviderSession installs the WS session in the registry +
 // starts heartbeat monitoring. Returns nil when the registry refused
-// to register (only possible for bearer-less duplicates colliding
-// with a routable session — see pool.Registry.Register doc-comment).
+// the registration, including bearer-less duplicate eviction defense
+// and receipt-key rotation grace conflicts.
 // On refusal, the caller MUST close the connection with
 // CloseInvalidToken / "invalid_token" and not advance to ack-write.
-func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *providerSession {
-	old, ok := s.pool.Register(entry, conn)
+func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
+	old, ok, refusal := s.pool.RegisterAtDetailed(entry, conn, s.now())
 	if !ok {
 		// SPEC-003 v0.8.3 FR-C9.4 eviction defense fired: a
 		// bearer-less duplicate tried to evict an existing routable
 		// session for the same provider_id. Log + signal the caller
 		// to close.
-		s.log.Info().Str("provider_id", entry.ProviderID).Msg("FR-C9.4 eviction defense: refusing to replace routable session with bearer-less duplicate")
-		return nil
+		s.log.Info().Str("provider_id", entry.ProviderID).Str("refusal", string(refusal)).Msg("provider session registration refused")
+		return nil, refusal
 	}
 	if old != nil {
 		_ = old.Close()
@@ -1177,7 +1201,7 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *p
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
 	go session.runWriter()
 	go s.monitorHeartbeat(entry.ProviderID, entry.AssignedID, conn)
-	return session
+	return session, pool.RegisterRefusalNone
 }
 
 func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) {
@@ -2370,6 +2394,7 @@ func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte
 		State:      state,
 		SlotsFree:  update.MetricsSnapshot.SlotsFree,
 		SlotsTotal: update.MetricsSnapshot.SlotsTotal,
+		At:         s.now(),
 	})
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Msg("state_update for unknown provider")
@@ -2597,7 +2622,9 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	for _, p := range providers {
 		switch p.State {
 		case pool.StateReady:
-			resp.PoolReady++
+			if providerPublishedReady(p) {
+				resp.PoolReady++
+			}
 			if s.providerTier2PolicyEligible(p, s.tier2Config()) {
 				resp.PoolPolicyReady++
 			}
@@ -2648,14 +2675,20 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}{TotalProviders: len(providers)}
 	cfg := s.tier2Config()
 	for _, p := range providers {
-		if p.State == pool.StateReady {
+		// SPEC-015 §7 / TestProviderAuthV2ReceiptRotationCandidateWithout
+		// StateUpdateDoesNotPublish: FreeSlots aggregates buyer-usable
+		// capacity only, gated by providerPublishedReady, so a pending
+		// rotation does NOT contribute. TotalSlots stays top-level because
+		// it represents absolute fleet capacity for capacity planning.
+		// The two summary fields have intentionally different semantics.
+		if providerPublishedReady(p) {
 			summary.Ready++
-			if s.providerTier2PolicyEligible(p, cfg) {
-				summary.PolicyReady++
-			}
+			summary.FreeSlots += p.SlotsFree
+		}
+		if s.providerTier2PolicyEligible(p, cfg) {
+			summary.PolicyReady++
 		}
 		summary.TotalSlots += p.SlotsTotal
-		summary.FreeSlots += p.SlotsFree
 		if _, ok := modelSet[p.ModelID]; !ok {
 			modelSet[p.ModelID] = struct{}{}
 			summary.Models = append(summary.Models, p.ModelID)
@@ -2663,15 +2696,38 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	type poolzReceiptPubkeyPrev struct {
+		Pubkey    string `json:"pubkey"`
+		RotatedAt int64  `json:"rotated_at"`
+		ExpiresAt int64  `json:"expires_at"`
+	}
 	type poolzProvider struct {
 		pool.Provider
-		CanaryFailCount int `json:"canary_fail_count"`
+		CanaryFailCount   int                     `json:"canary_fail_count"`
+		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
+		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
 	}
+	now := s.now()
 	poolz := make([]poolzProvider, 0, len(providers))
 	for _, provider := range providers {
+		var receiptPubkey *string
+		if len(provider.ReceiptPubkey) > 0 {
+			encoded := base64.StdEncoding.EncodeToString(provider.ReceiptPubkey)
+			receiptPubkey = &encoded
+		}
+		var receiptPubkeyPrev *poolzReceiptPubkeyPrev
+		if provider.ReceiptPubkeyPrev != nil && now.Before(provider.ReceiptPubkeyPrev.ExpiresAt) {
+			receiptPubkeyPrev = &poolzReceiptPubkeyPrev{
+				Pubkey:    base64.StdEncoding.EncodeToString(provider.ReceiptPubkeyPrev.Pubkey),
+				RotatedAt: provider.ReceiptPubkeyPrev.RotatedAt.Unix(),
+				ExpiresAt: provider.ReceiptPubkeyPrev.ExpiresAt.Unix(),
+			}
+		}
 		poolz = append(poolz, poolzProvider{
-			Provider:        provider,
-			CanaryFailCount: provider.CanaryFailCount,
+			Provider:          provider,
+			CanaryFailCount:   provider.CanaryFailCount,
+			ReceiptPubkey:     receiptPubkey,
+			ReceiptPubkeyPrev: receiptPubkeyPrev,
 		})
 	}
 	_ = json.NewEncoder(w).Encode(struct {
@@ -2683,8 +2739,12 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func providerPublishedReady(p pool.Provider) bool {
+	return p.State == pool.StateReady && p.AuthState != pool.AuthBearerlessDuplicate && len(p.PendingReceiptPubkey) == 0
+}
+
 func (s *Server) providerTier2PolicyEligible(p pool.Provider, cfg config.Tier2Config) bool {
-	if p.State != pool.StateReady {
+	if !providerPublishedReady(p) {
 		return false
 	}
 	if !tier2.ConfigActive(cfg) {

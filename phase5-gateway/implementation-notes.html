@@ -14,6 +14,9 @@
     <li>Coordinator buyer listener must be rebound to <code>127.0.0.1:8443</code> for the gateway migration.</li>
     <li>SQLite is the concrete v1 storage target, behind interfaces that can later move to D1, PostgreSQL, or Workers KV.</li>
     <li>GitHub OAuth is primary identity; email magic link is secondary only if a practical free tier is available.</li>
+    <li><strong>SPEC-015 Step 8:</strong> Non-streaming chat completion and SPEC-001 null-usage provider-error responses may preserve only <code>X-MacProvider-Receipt</code> from the <code>X-MacProvider-*</code> namespace. Streaming responses, generic provider errors, and rejected sibling/internal headers such as <code>X-MacProvider-Receipt-Pending</code>, <code>X-MacProvider-Foo</code>, and <code>X-MacProvider-Completion-Tokens</code> remain stripped before buyer response delivery.</li>
+    <li><strong>SPEC-015 Step 10:</strong> Added pinned OpenAI Python (<code>openai==1.30.1</code>) and JavaScript (<code>openai 4.52.7</code>) SDK compatibility smoke fixtures under <code>test/integration/spec015/sdk_compat/</code>. The live runner points each SDK at a local gateway and exercises both non-streaming and streaming <code>chat.completions.create</code> calls. The prompt's <code>deploy/nginx/api.streamvc.live.conf</code> path maps to this repo's deployable <code>phase5-gateway/dist/nginx-api.streamvc.live.conf</code>, which now sets 8k nginx header/proxy buffers for the 4096-byte receipt cap and is checked by <code>make test-dist</code>; an env-gated curl echo test can additionally verify a deployed nginx path via <code>SPEC015_NGINX_ECHO_URL</code>.</li>
+
   </ul>
   <h2>Known implementation constraints</h2>
   <ul>

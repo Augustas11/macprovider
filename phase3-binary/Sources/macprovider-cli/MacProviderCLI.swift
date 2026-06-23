@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Darwin
 import Dispatch
 import Foundation
@@ -10,7 +11,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, RotateKeyCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -50,6 +51,9 @@ struct ServeCommand: AsyncParsableCommand {
 
     @Flag(name: .customLong("enable-warm-swap"), inversion: .prefixedNo, help: "Opt into the operator-pushed warm model swap workflow (SPEC-011 v0.5). Default off. When off, the binary follows the SPEC-001 v1.2.4 synchronous-load path; no control socket is opened.")
     var enableWarmSwap: Bool?
+
+    @Flag(name: .customLong("enable-receipts"), inversion: .prefixedNo, help: "Opt into SPEC-015 non-streaming receipt emission. Default off for v0.1.x rollout.")
+    var enableReceipts: Bool?
 
     @Option(help: "Drain timeout in seconds for an in-flight warm swap (SPEC-011 v0.5 §3.4 / §3.9). Default 30. Only meaningful when --enable-warm-swap is set.")
     var swapDrainTimeoutSeconds: Int?
@@ -145,6 +149,7 @@ struct ServeCommand: AsyncParsableCommand {
                 supportedModels: SupportedModels.parseCSV(supportedModels),
                 publishesSupportedModels: publishSupportedModels,
                 enableWarmSwap: enableWarmSwap,
+                enableReceipts: enableReceipts,
                 swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
                 ctlSocketPath: ctlSocketPath,
                 switchStatePath: switchStatePath,
@@ -185,21 +190,42 @@ struct ServeCommand: AsyncParsableCommand {
             modelHash: await modelRuntime.loadedModelHash
         )
         await modelRuntime.setProviderStatus(providerStatus)
+        let receiptKeyStore = KeychainReceiptKeyStore()
+        let receiptRuntime = try Self.makeReceiptRuntime(config: resolved, keyStore: receiptKeyStore)
         let coordinatorClient = Self.makeCoordinatorClient(noJoin: noJoin) {
             CoordinatorClient(
                 config: resolved,
                 modelRuntime: modelRuntime,
                 providerStatus: providerStatus,
-                attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
+                attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath),
+                providerReceiptPublicKey: receiptRuntime.publicKeyBase64,
+                receiptBuilder: receiptRuntime.builder
             )
         }
         let controlSocket: ControlSocketServer?
-        if resolved.enableWarmSwap {
+        let receiptRotator: (@Sendable () async throws -> Void)?
+        if resolved.enableReceipts,
+           let providerID = resolved.providerID,
+           !providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let coordinatorClient {
+            receiptRotator = {
+                try await RotateKeyCommand.rotateActiveProvider(
+                    providerID: providerID,
+                    keyStore: receiptKeyStore,
+                    coordinatorClient: coordinatorClient
+                )
+            }
+        } else {
+            receiptRotator = nil
+        }
+        if resolved.enableWarmSwap || receiptRotator != nil {
             let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
             controlSocket = ControlSocketServer(
                 socketPath: socketURL,
                 modelRuntime: modelRuntime,
-                supportedModels: resolved.supportedModels
+                supportedModels: resolved.supportedModels,
+                receiptRotator: receiptRotator,
+                receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines)
             )
             do {
                 try await controlSocket?.start()
@@ -214,7 +240,12 @@ struct ServeCommand: AsyncParsableCommand {
             controlSocket = nil
         }
         await coordinatorClient?.start()
-        let server = HTTPServer(config: resolved, modelRuntime: modelRuntime, providerStatus: providerStatus)
+        let server = HTTPServer(
+            config: resolved,
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            receiptBuilder: receiptRuntime.builder
+        )
         let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket)
         defer {
             Task {
@@ -226,6 +257,30 @@ struct ServeCommand: AsyncParsableCommand {
         try withExtendedLifetime(terminationHandlers) {
             try server.run()
         }
+    }
+
+    static func makeReceiptBuilder(
+        config: AppConfig,
+        keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
+    ) throws -> ReceiptBuilder? {
+        try makeReceiptRuntime(config: config, keyStore: keyStore).builder
+    }
+
+    static func makeReceiptRuntime(
+        config: AppConfig,
+        keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
+    ) throws -> (builder: ReceiptBuilder?, publicKeyBase64: String?) {
+        guard config.enableReceipts,
+              let providerID = config.providerID,
+              !providerID.isEmpty else {
+            return (nil, nil)
+        }
+        let cachingStore = CachedReceiptKeyStore(keyStore)
+        let privateKey = try cachingStore.loadOrGenerate(providerId: providerID)
+        return (
+            ReceiptBuilder(keyStore: cachingStore),
+            Data(privateKey.publicKey.rawRepresentation).base64EncodedString()
+        )
     }
 }
 
@@ -346,4 +401,5 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  kv_bits: \(config.kvBitsOverride.map(String.init) ?? "<unset, mlx default>")")
     print("  max_context: \(config.maxContextOverride.map(String.init) ?? "<unset, per-tier default>")")
     print("  max_batch: \(config.maxConcurrencyOverride.map(String.init) ?? "1")")
+    print("  enable_receipts: \(config.enableReceipts)")
 }

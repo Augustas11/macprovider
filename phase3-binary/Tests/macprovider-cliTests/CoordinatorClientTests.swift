@@ -1,3 +1,4 @@
+import CryptoKit
 import MacProviderCore
 import XCTest
 @testable import macprovider_cli
@@ -731,6 +732,7 @@ final class CoordinatorClientTests: XCTestCase {
         )
 
         await client.start()
+        await client.start()
         try await Task.sleep(nanoseconds: 50_000_000)
         let swapTask = try await runtime.beginSwap(targetModelID: "model-b")
         try await swapTask.value
@@ -745,7 +747,382 @@ final class CoordinatorClientTests: XCTestCase {
         await client.stop()
 
         let frames = await recorder.frames
-        XCTAssertTrue(frames.contains { $0["type"] as? String == "heartbeat" && $0["model_hash"] as? String == newHash })
+        let matchingHeartbeats = frames.filter { $0["type"] as? String == "heartbeat" && $0["model_hash"] as? String == newHash }
+        XCTAssertEqual(matchingHeartbeats.count, 1)
+    }
+
+    func testReceiptRotationTimeoutCancelsCandidateSocketAndRestartsReconnect() async throws {
+        let committed = LockedBox(false)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = true
+        let newKey = Curve25519.Signing.PrivateKey()
+        let candidatePublicKey = Data(newKey.publicKey.rawRepresentation).base64EncodedString()
+        let candidateResponder = FakeTier2AuthResponder(outcome: .accepted)
+        let candidateSocket = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverrideIgnoresCancellation: true,
+            receiveOverride: { socket in
+                let sleeper = Task.detached {
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                }
+                await sleeper.value
+                return try await candidateResponder.receive(from: socket)
+            }
+        )
+        let restoreResponder = FakeTier2AuthResponder(outcome: .accepted)
+        let restoreSocket = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverride: { socket in
+                try await restoreResponder.receive(from: socket)
+            }
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [candidateSocket, restoreSocket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            reconnectGraceNanoseconds: 1_000_000,
+            receiptKeyRotationTimeoutNanoseconds: 20_000_000,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            connectAndRunOverride: { throw CancellationError() },
+            providerReceiptPublicKey: "old-receipt-public-key"
+        ))
+
+        let startedAt = Date()
+        do {
+            try await client.reconnectWithNewKey(newKey) {
+                committed.set(true)
+            }
+            XCTFail("rotation should time out")
+        } catch let error as CoordinatorReceiptRotationTimeout {
+            XCTAssertLessThanOrEqual(error.timeoutSeconds, 0.02)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
+        XCTAssertFalse(committed.get())
+        XCTAssertGreaterThan(candidateSocket.cancelCountSnapshot(), 0)
+        XCTAssertTrue(restoreSocket.sentFrames().contains { frame in
+            frame["type"] as? String == "state_update"
+        })
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let restoreFrames = restoreSocket.sentFrames()
+        XCTAssertTrue(restoreFrames.contains { frame in
+            frame["provider_receipt_public_key"] as? String == "old-receipt-public-key"
+        })
+        XCTAssertFalse(restoreFrames.contains { frame in
+            frame["provider_receipt_public_key"] as? String == candidatePublicKey
+        })
+        XCTAssertTrue(candidateSocket.sentFrames().contains { frame in
+            frame["provider_receipt_public_key"] as? String == candidatePublicKey
+        })
+        await client.stop()
+    }
+
+    func testReceiptRotationRestoreTimeoutDoesNotHangAfterCandidateRejection() async throws {
+        let committed = LockedBox(false)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = true
+        let candidateResponder = FakeTier2AuthResponder(
+            outcome: .rejected(code: "receipt_rotation_grace_active", message: "active previous-key grace")
+        )
+        let candidateSocket = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverride: { socket in
+                try await candidateResponder.receive(from: socket)
+            }
+        )
+        let restoreSocket = FakeProviderWebSocketTask(
+            receiveResults: [.success(.string("{}"))],
+            receiveDelayNanoseconds: 1_000_000_000
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [candidateSocket, restoreSocket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            reconnectGraceNanoseconds: 1_000_000,
+            receiptKeyRotationTimeoutNanoseconds: 200_000_000,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            connectAndRunOverride: { throw CancellationError() },
+            providerReceiptPublicKey: "old-receipt-public-key"
+        ))
+
+        let startedAt = Date()
+        do {
+            try await client.reconnectWithNewKey(Curve25519.Signing.PrivateKey()) {
+                committed.set(true)
+            }
+            XCTFail("rotation should surface coordinator rejection")
+        } catch let CoordinatorAuthError.rejected(code, _) {
+            XCTAssertEqual(code, "receipt_rotation_grace_active")
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 0.5)
+        XCTAssertFalse(committed.get())
+        XCTAssertGreaterThan(restoreSocket.cancelCountSnapshot(), 0)
+        await client.stop()
+    }
+
+    func testReceiptRotationPostCommitRestoreTimeoutReportsCommittedUnconfirmed() async throws {
+        let committed = LockedBox(false)
+        let candidateResponder = FakeTier2AuthResponder(outcome: .accepted)
+        let candidateSocket = FakeProviderWebSocketTask(
+            receiveResults: [],
+            sendErrorTypes: ["state_update"],
+            receiveOverride: { socket in
+                try await candidateResponder.receive(from: socket)
+            }
+        )
+        let restoreSocket = FakeProviderWebSocketTask(
+            receiveResults: [.success(.string("{}"))],
+            receiveDelayNanoseconds: 1_000_000_000
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [candidateSocket, restoreSocket])
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = true
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            reconnectGraceNanoseconds: 1_000_000,
+            receiptKeyRotationTimeoutNanoseconds: 20_000_000,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            connectAndRunOverride: { throw CancellationError() },
+            providerReceiptPublicKey: "old-receipt-public-key"
+        ))
+
+        let startedAt = Date()
+        do {
+            try await client.reconnectWithNewKey(Curve25519.Signing.PrivateKey()) {
+                committed.set(true)
+            }
+            XCTFail("rotation should report committed publication failure")
+        } catch let error as CoordinatorReceiptRotationCommittedRecoveryFailed {
+            XCTAssertTrue(error.description.contains("committed locally"), error.description)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 1.0)
+        XCTAssertTrue(committed.get())
+        XCTAssertGreaterThan(restoreSocket.cancelCountSnapshot(), 0)
+        await client.stop()
+    }
+
+    func testReceiptRotationRejectsConcurrentRequests() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = true
+        let firstSocket = FakeProviderWebSocketTask(
+            receiveResults: [.success(.string("{}"))],
+            receiveDelayNanoseconds: 1_000_000_000
+        )
+        let restoreSocket = FakeProviderWebSocketTask(
+            receiveResults: [.success(.string("{}"))],
+            receiveDelayNanoseconds: 1_000_000_000
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [firstSocket, restoreSocket])
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            reconnectGraceNanoseconds: 1_000_000,
+            receiptKeyRotationTimeoutNanoseconds: 1_000_000_000,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            connectAndRunOverride: { throw CancellationError() },
+            providerReceiptPublicKey: "old-receipt-public-key"
+        ))
+
+        let first = Task {
+            try await client.reconnectWithNewKey(Curve25519.Signing.PrivateKey()) {}
+        }
+        try await Self.waitUntil(timeoutNanoseconds: 500_000_000) {
+            firstSocket.resumeCountSnapshot() == 1
+        }
+
+        do {
+            try await client.reconnectWithNewKey(Curve25519.Signing.PrivateKey()) {}
+            XCTFail("second rotation should be rejected while first is in flight")
+        } catch is CoordinatorReceiptRotationInProgress {
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        first.cancel()
+        _ = try? await first.value
+        await client.stop()
+    }
+
+
+    func testReceiptRotationPostCommitStateUpdateFailureRestoresNewKeyBeforeSuccess() async throws {
+        let committed = LockedBox(false)
+        let candidateResponder = FakeTier2AuthResponder(outcome: .accepted)
+        let restoreResponder = FakeTier2AuthResponder(outcome: .accepted)
+        let candidateSocket = FakeProviderWebSocketTask(
+            receiveResults: [],
+            sendErrorTypes: ["state_update"],
+            receiveOverride: { socket in
+                try await candidateResponder.receive(from: socket)
+            }
+        )
+        let restoreSocket = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverride: { socket in
+                try await restoreResponder.receive(from: socket)
+            }
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [candidateSocket, restoreSocket])
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = true
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            reconnectGraceNanoseconds: 1_000_000,
+            receiptKeyRotationTimeoutNanoseconds: 1_000_000_000,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            connectAndRunOverride: { throw CancellationError() },
+            providerReceiptPublicKey: "old-receipt-public-key"
+        ))
+
+        let newKey = Curve25519.Signing.PrivateKey()
+        let expectedPubkey = Data(newKey.publicKey.rawRepresentation).base64EncodedString()
+        try await client.reconnectWithNewKey(newKey) {
+            committed.set(true)
+        }
+
+        XCTAssertTrue(committed.get())
+        XCTAssertGreaterThan(candidateSocket.cancelCountSnapshot(), 0)
+        let restoreFrames = restoreSocket.sentFrames()
+        XCTAssertTrue(restoreFrames.contains { frame in
+            frame["type"] as? String == "auth_request"
+                && frame["stage"] as? String == "initial"
+                && frame["provider_receipt_public_key"] as? String == expectedPubkey
+        })
+        XCTAssertTrue(restoreFrames.contains { frame in
+            frame["type"] as? String == "state_update"
+        })
+        await client.stop()
+    }
+
+    func testReceiptRotationRejectedCandidateAwaitsOldKeyRestore() async throws {
+        let committed = LockedBox(false)
+        let candidateResponder = FakeTier2AuthResponder(
+            outcome: .rejected(code: "receipt_rotation_grace_active", message: "active previous-key grace")
+        )
+        let restoreResponder = FakeTier2AuthResponder(outcome: .accepted)
+        let candidateSocket = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverride: { socket in
+                try await candidateResponder.receive(from: socket)
+            }
+        )
+        let restoreSocket = FakeProviderWebSocketTask(
+            receiveResults: [],
+            receiveOverride: { socket in
+                try await restoreResponder.receive(from: socket)
+            }
+        )
+        let factory = FakeProviderWebSocketFactory(sockets: [candidateSocket, restoreSocket])
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
+        config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
+        config.providerID = "provider-test"
+        config.model = "model-a"
+        config.wsTunneledMode = true
+        let runtime = try await ModelRuntime(modelID: nil)
+        let client = try XCTUnwrap(CoordinatorClient(
+            config: config,
+            modelRuntime: runtime,
+            providerStatus: status,
+            reconnectGraceNanoseconds: 1_000_000,
+            receiptKeyRotationTimeoutNanoseconds: 1_000_000_000,
+            attestationGenerator: StaticAttestationGenerator(token: nil),
+            webSocketFactory: { factory.makeSocket(for: $0) },
+            sleepAssertionFactory: { nil },
+            connectAndRunOverride: { throw CancellationError() },
+            providerReceiptPublicKey: "old-receipt-public-key"
+        ))
+
+        do {
+            try await client.reconnectWithNewKey(Curve25519.Signing.PrivateKey()) {
+                committed.set(true)
+            }
+            XCTFail("rotation should surface coordinator rejection")
+        } catch let CoordinatorAuthError.rejected(code, message) {
+            XCTAssertEqual(code, "receipt_rotation_grace_active")
+            XCTAssertTrue(message.contains("active previous-key grace"))
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+
+        XCTAssertFalse(committed.get())
+        XCTAssertEqual(restoreSocket.resumeCountSnapshot(), 1)
+        let restoreInitial = try XCTUnwrap(restoreSocket.sentFrames().first)
+        XCTAssertEqual(restoreInitial["provider_receipt_public_key"] as? String, "old-receipt-public-key")
+        await client.stop()
     }
 
     func testAuthInitialUsesV2EncryptedLegCapabilitiesAndModelHash() async throws {
@@ -777,7 +1154,49 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(caps["aead_suites"] as? [String], [Tier2ProviderSession.aeadSuite])
     }
 
-    func testBinaryVersion_AdvertisesSPEC001V15AcrossHandshakeFrames() async throws {
+    func testAuthInitialIncludesReceiptPublicKeyWhenConfigured() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let receiptPublicKey = Data(repeating: 0x42, count: 32).base64EncodedString()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerReceiptPublicKey: receiptPublicKey
+        )
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+
+        XCTAssertEqual(auth["stage"] as? String, "initial")
+        XCTAssertEqual(auth["provider_receipt_public_key"] as? String, receiptPublicKey)
+    }
+
+    func testAuthInitialOmitsReceiptPublicKeyWhenUnavailableAndProofNeverIncludesIt() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+        let attempt = Tier2AuthAttempt()
+
+        let auth = await client.authInitialMessage(attempt: attempt)
+        let proof = try await client.authProofMessage(challenge: [
+            "type": "auth_challenge",
+            "version": 2,
+            "auth_attempt_id": "auth-test",
+            "attestation_challenge": Data(repeating: 0x11, count: 32).base64URLUnpadded(),
+        ], attempt: attempt)
+
+        XCTAssertNil(auth["provider_receipt_public_key"])
+        XCTAssertNil(proof["provider_receipt_public_key"])
+    }
+
+    func testBinaryVersion_AdvertisesSPEC001V16AcrossHandshakeFrames() async throws {
         let recorder = CoordinatorFrameRecorder()
         let status = ProviderStatus(
             modelID: "model-a",
@@ -790,10 +1209,10 @@ final class CoordinatorClientTests: XCTestCase {
         let hello = await client.helloMessage()
         let auth = await client.authInitialMessage(attempt: attempt)
 
-        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.5.0")
-        XCTAssertEqual(MacProviderCLI.configuration.version, "1.5.0")
-        XCTAssertEqual(hello["binary_version"] as? String, "1.5.0")
-        XCTAssertEqual(auth["binary_version"] as? String, "1.5.0")
+        XCTAssertEqual(CoordinatorClient.binaryVersion, "1.6.0")
+        XCTAssertEqual(MacProviderCLI.configuration.version, "1.6.0")
+        XCTAssertEqual(hello["binary_version"] as? String, "1.6.0")
+        XCTAssertEqual(auth["binary_version"] as? String, "1.6.0")
     }
 
     func testAuthInitialDefaultsToSingleEntryCatalog() async throws {
@@ -942,6 +1361,27 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(firstFrames[0]["stage"] as? String, "initial")
 
         await client.stop()
+    }
+
+    func testAuthInitialReceiptKeyOverrideWinsDuringRotation() async throws {
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let recorder = CoordinatorFrameRecorder()
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            providerReceiptPublicKey: "old-receipt-public-key"
+        )
+
+        let message = await client.authInitialMessage(
+            attempt: Tier2AuthAttempt(),
+            providerReceiptPublicKeyOverride: "new-receipt-public-key"
+        )
+
+        XCTAssertEqual(message["provider_receipt_public_key"] as? String, "new-receipt-public-key")
     }
 
     func testAuthProofUsesNullAttestationWhenGeneratorIsUnsupported() async throws {
@@ -1205,11 +1645,13 @@ final class CoordinatorClientTests: XCTestCase {
         recorder: CoordinatorFrameRecorder,
         drainTimeoutSeconds: Int = 1,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
+        receiptKeyRotationTimeoutNanoseconds: UInt64 = 55 * 1_000_000_000,
         enableWarmSwap: Bool = false,
         modelRuntime: ModelRuntime? = nil,
         attestationGenerator: Tier2AttestationTokenGenerating = StaticAttestationGenerator(token: nil),
         pairingController: PairingController? = nil,
-        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
+        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
+        providerReceiptPublicKey: String? = nil
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
@@ -1231,10 +1673,12 @@ final class CoordinatorClientTests: XCTestCase {
                 await recorder.append(frame)
             },
             reconnectGraceNanoseconds: reconnectGraceNanoseconds,
+            receiptKeyRotationTimeoutNanoseconds: receiptKeyRotationTimeoutNanoseconds,
             attestationGenerator: attestationGenerator,
             sleepAssertionFactory: { nil },
             pairingController: pairingController,
-            connectAndRunOverride: connectAndRunOverride
+            connectAndRunOverride: connectAndRunOverride,
+            providerReceiptPublicKey: providerReceiptPublicKey
         ))
     }
 
@@ -1270,6 +1714,126 @@ final class CoordinatorClientTests: XCTestCase {
 
 private enum CoordinatorClientTestError: Error {
     case unexpectedContainerLoader
+    case sendStateUpdateFailed
+    case missingProviderECDHPublicKey
+}
+
+private enum FakeTier2AuthOutcome: Sendable {
+    case accepted
+    case rejected(code: String, message: String)
+}
+
+private actor FakeTier2AuthResponder {
+    private let outcome: FakeTier2AuthOutcome
+    private let assignedID: String
+    private let coordinatorPrivateKey = Curve25519.KeyAgreement.PrivateKey()
+    private var receiveCount = 0
+    private var keyID: String?
+
+    init(outcome: FakeTier2AuthOutcome, assignedID: String = "assigned-rotation") {
+        self.outcome = outcome
+        self.assignedID = assignedID
+    }
+
+    func receive(from socket: FakeProviderWebSocketTask) async throws -> URLSessionWebSocketTask.Message {
+        receiveCount += 1
+        switch receiveCount {
+        case 1:
+            guard let initial = socket.sentFrames().first else {
+                throw CoordinatorClientTestError.missingProviderECDHPublicKey
+            }
+            guard let providerPublic = initial["provider_ecdh_public_key"] as? String else {
+                throw CoordinatorClientTestError.missingProviderECDHPublicKey
+            }
+            let providerPublicRaw = try Data(base64URLUnpadded: providerPublic)
+            let coordinatorPublicRaw = coordinatorPrivateKey.publicKey.rawRepresentation
+            let derivedKeyID = fakeTier2KeyID(
+                providerID: "provider-test",
+                assignedID: assignedID,
+                providerPublicKey: providerPublicRaw,
+                coordinatorPublicKey: coordinatorPublicRaw,
+                selectedAEAD: Tier2ProviderSession.aeadSuite
+            )
+            keyID = derivedKeyID
+            return .string(Self.jsonString([
+                "type": "auth_challenge",
+                "version": 2,
+                "auth_attempt_id": "attempt-rotation",
+                "assigned_id": assignedID,
+                "attestation_challenge": Data(repeating: 0x77, count: 32).base64URLUnpadded(),
+                "attestation_formats": [],
+                "coordinator_ecdh_public_key": coordinatorPublicRaw.base64URLUnpadded(),
+                "selected_aead_suite": Tier2ProviderSession.aeadSuite,
+                "key_id": derivedKeyID,
+                "expires_at": "2026-06-22T00:00:00Z",
+            ]))
+        case 2:
+            switch outcome {
+            case .accepted:
+                return .string(Self.jsonString([
+                    "type": "auth_response",
+                    "version": 2,
+                    "status": "accepted",
+                    "assigned_id": assignedID,
+                    "heartbeat_interval_s": 30,
+                    "tier": "pinned",
+                    "tier2_session": [
+                        "encrypted_leg": [
+                            "enabled": true,
+                            "alg": Tier2ProviderSession.aeadSuite,
+                            "kid": keyID ?? "",
+                        ],
+                    ],
+                ]))
+            case .rejected(let code, let message):
+                return .string(Self.jsonString([
+                    "type": "auth_response",
+                    "version": 2,
+                    "status": "rejected",
+                    "error": [
+                        "code": code,
+                        "message": message,
+                    ],
+                ]))
+            }
+        default:
+            throw CancellationError()
+        }
+    }
+
+    private static func jsonString(_ object: [String: Any]) -> String {
+        let data = try! JSONSerialization.data(withJSONObject: object, options: [.withoutEscapingSlashes])
+        return String(decoding: data, as: UTF8.self)
+    }
+}
+
+private func fakeTier2KeyID(
+    providerID: String,
+    assignedID: String,
+    providerPublicKey: Data,
+    coordinatorPublicKey: Data,
+    selectedAEAD: String
+) -> String {
+    var data = Data("macprovider/spec008/pillar-b/transcript/v1".utf8)
+    fakeAppendTranscriptField(label: "provider_id", value: Data(providerID.utf8), to: &data)
+    fakeAppendTranscriptField(label: "assigned_id", value: Data(assignedID.utf8), to: &data)
+    fakeAppendTranscriptField(label: "provider_public", value: providerPublicKey, to: &data)
+    fakeAppendTranscriptField(label: "coordinator_public", value: coordinatorPublicKey, to: &data)
+    fakeAppendTranscriptField(label: "selected_aead", value: Data(selectedAEAD.utf8), to: &data)
+    let transcriptHash = Data(SHA256.hash(data: data))
+    return Data(SHA256.hash(data: transcriptHash).prefix(16)).base64URLUnpadded()
+}
+
+private func fakeAppendTranscriptField(label: String, value: Data, to data: inout Data) {
+    fakeAppendUInt32(UInt32(label.utf8.count), to: &data)
+    data.append(Data(label.utf8))
+    fakeAppendUInt32(UInt32(value.count), to: &data)
+    data.append(value)
+}
+
+private func fakeAppendUInt32(_ value: UInt32, to data: inout Data) {
+    var bigEndian = value.bigEndian
+    withUnsafeBytes(of: &bigEndian) { data.append(contentsOf: $0) }
 }
 
 final class LockedBox<Value>: @unchecked Sendable {
@@ -1373,13 +1937,26 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
     private var receiveResults: [Result<URLSessionWebSocketTask.Message, Error>]
     private let receiveDelayNanoseconds: UInt64
     private var sent: [[String: Any]] = []
+    private var cancelled = false
     private(set) var resumeCount = 0
     private(set) var cancelCount = 0
     private var pingCount = 0
+    private let sendErrorTypes: Set<String>
+    private let receiveOverrideIgnoresCancellation: Bool
+    private let receiveOverride: (@Sendable (FakeProviderWebSocketTask) async throws -> URLSessionWebSocketTask.Message)?
 
-    init(receiveResults: [Result<URLSessionWebSocketTask.Message, Error>], receiveDelayNanoseconds: UInt64 = 0) {
+    init(
+        receiveResults: [Result<URLSessionWebSocketTask.Message, Error>],
+        receiveDelayNanoseconds: UInt64 = 0,
+        sendErrorTypes: Set<String> = [],
+        receiveOverrideIgnoresCancellation: Bool = false,
+        receiveOverride: (@Sendable (FakeProviderWebSocketTask) async throws -> URLSessionWebSocketTask.Message)? = nil
+    ) {
         self.receiveResults = receiveResults
         self.receiveDelayNanoseconds = receiveDelayNanoseconds
+        self.sendErrorTypes = sendErrorTypes
+        self.receiveOverrideIgnoresCancellation = receiveOverrideIgnoresCancellation
+        self.receiveOverride = receiveOverride
     }
 
     func resume() {
@@ -1403,6 +1980,9 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
         queue.sync {
             sent.append(object)
         }
+        if let type = object["type"] as? String, sendErrorTypes.contains(type) {
+            throw CoordinatorClientTestError.sendStateUpdateFailed
+        }
     }
 
     func sendPing() async throws {
@@ -1413,10 +1993,20 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
 
     func receive() async throws -> URLSessionWebSocketTask.Message {
         if receiveDelayNanoseconds > 0 {
-            try? await Task.sleep(nanoseconds: receiveDelayNanoseconds)
+            try await Task.sleep(nanoseconds: receiveDelayNanoseconds)
+        }
+        if let receiveOverride {
+            let isCancelled = queue.sync { cancelled }
+            if isCancelled && !receiveOverrideIgnoresCancellation {
+                throw CancellationError()
+            }
+            return try await receiveOverride(self)
         }
         let result = queue.sync {
-            receiveResults.isEmpty ? Result<URLSessionWebSocketTask.Message, Error>.failure(CancellationError()) : receiveResults.removeFirst()
+            if cancelled {
+                return Result<URLSessionWebSocketTask.Message, Error>.failure(CancellationError())
+            }
+            return receiveResults.isEmpty ? Result<URLSessionWebSocketTask.Message, Error>.failure(CancellationError()) : receiveResults.removeFirst()
         }
         return try result.get()
     }
@@ -1424,6 +2014,7 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
     func cancel(with _: URLSessionWebSocketTask.CloseCode, reason _: Data?) {
         queue.sync {
             cancelCount += 1
+            cancelled = true
         }
     }
 
@@ -1436,6 +2027,18 @@ private final class FakeProviderWebSocketTask: ProviderWebSocketTask, @unchecked
     func pingCountSnapshot() -> Int {
         queue.sync {
             pingCount
+        }
+    }
+
+    func resumeCountSnapshot() -> Int {
+        queue.sync {
+            resumeCount
+        }
+    }
+
+    func cancelCountSnapshot() -> Int {
+        queue.sync {
+            cancelCount
         }
     }
 }

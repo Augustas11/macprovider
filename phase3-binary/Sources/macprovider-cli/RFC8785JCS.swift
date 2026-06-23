@@ -1,12 +1,15 @@
 import CryptoKit
 import Foundation
+import JavaScriptCore
 
 enum RFC8785JCS {
     enum Value: Equatable {
         case object([String: Value])
         case array([Value])
         case string(String)
+        case rawString(String)
         case int(Int)
+        case double(Double)
         case bool(Bool)
         case null
     }
@@ -19,15 +22,19 @@ enum RFC8785JCS {
                 guard let member = object[key] else {
                     throw Error.missingObjectMember(key)
                 }
-                return "\(escapeString(key)):\(try canonicalString(member))"
+                return "\(escapeString(key, normalizeNFC: false)):\(try canonicalString(member))"
             }
             return "{\(members.joined(separator: ","))}"
         case .array(let array):
             return try "[\(array.map { try canonicalString($0) }.joined(separator: ","))]"
         case .string(let string):
-            return escapeString(string)
+            return escapeString(string, normalizeNFC: true)
+        case .rawString(let string):
+            return escapeString(string, normalizeNFC: false)
         case .int(let int):
             return String(int)
+        case .double(let double):
+            return try canonicalDouble(double)
         case .bool(let bool):
             return bool ? "true" : "false"
         case .null:
@@ -45,9 +52,25 @@ enum RFC8785JCS {
         lhs.utf16.lexicographicallyPrecedes(rhs.utf16)
     }
 
-    private static func escapeString(_ string: String) -> String {
+    private static func canonicalDouble(_ double: Double) throws -> String {
+        guard double.isFinite else {
+            throw Error.nonFiniteDouble
+        }
+        guard let context = JSContext() else {
+            throw Error.numberFormatterUnavailable
+        }
+        context.setObject(double, forKeyedSubscript: "n" as NSString)
+        guard let formatted = context.evaluateScript("JSON.stringify(n)")?.toString(),
+              formatted != "null" else {
+            throw Error.numberFormatterUnavailable
+        }
+        return formatted
+    }
+
+    private static func escapeString(_ string: String, normalizeNFC: Bool) -> String {
+        let source = normalizeNFC ? string.precomposedStringWithCanonicalMapping : string
         var escaped = "\""
-        for scalar in string.unicodeScalars {
+        for scalar in source.unicodeScalars {
             switch scalar.value {
             case 0x22:
                 escaped += "\\\""
@@ -65,8 +88,6 @@ enum RFC8785JCS {
                 escaped += "\\r"
             case 0x00...0x1f:
                 escaped += String(format: "\\u%04x", scalar.value)
-            case 0xfffd:
-                escaped += "\\ufffd"
             default:
                 escaped.unicodeScalars.append(scalar)
             }
@@ -77,5 +98,7 @@ enum RFC8785JCS {
 
     enum Error: Swift.Error, Equatable {
         case missingObjectMember(String)
+        case nonFiniteDouble
+        case numberFormatterUnavailable
     }
 }

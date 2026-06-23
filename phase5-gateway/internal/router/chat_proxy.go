@@ -242,6 +242,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
+		if isNullUsageProviderError(body) {
+			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body)
+			return
+		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
@@ -271,6 +275,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
+		if isNullUsageProviderError(body) {
+			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body)
+			return
+		}
 		completion := completionFromHeader(resp.Header)
 		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "upstream_error") {
 			return
@@ -294,7 +302,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	if !s.settleBeforeResponse(w, r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, tokenSource, "ok") {
 		return
 	}
-	copyCleanHeaders(w.Header(), resp.Header)
+	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(body)
@@ -429,6 +437,23 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(body)
+}
+
+func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
+	_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+	copyReceiptEligibleHeaders(w.Header(), resp.Header)
+	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
+	w.WriteHeader(resp.StatusCode)
+	_, _ = w.Write(body)
+}
+
+func isNullUsageProviderError(body []byte) bool {
+	switch openAIErrorCode(body) {
+	case "error_model_not_loaded", "error_context_exceeded", "error_queue_full", "error_internal":
+		return true
+	default:
+		return false
+	}
 }
 
 func coordinatorTier2PolicyError(status int, body []byte) bool {

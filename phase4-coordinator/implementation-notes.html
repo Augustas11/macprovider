@@ -1271,5 +1271,129 @@ what was taken. d-inference is strictly prohibited per Section 8.2.</p>
   <code>catalog_path</code>, <code>catalog_public_key</code>,
   <code>require_hash_verified:true</code>, and all Pillar D controls.</p>
 </div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 5 receipt key auth parsing.</strong>
+  The v2 initial-stage <code>auth_request</code> parser accepts optional
+  <code>provider_receipt_public_key</code>, validates it as standard padded
+  base64 that decodes to exactly 32 bytes, and keeps the decoded ed25519 public
+  key bytes on the admitted <code>pool.Provider</code>. Absent field remains
+  accepted for pre-v1.6 providers; invalid base64 and wrong-length values are
+  rejected at auth parse time with <code>provider_receipt_public_key</code> as
+  the bad field.</p>
+  <p>No proof-stage receipt-key field was added and no new WebSocket control
+  frame was introduced. Rotation and <code>/poolz</code> exposure are left to
+  later SPEC-015 steps; this step only preserves the parsed current key on the
+  in-memory provider record.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>go test ./internal/ws ./internal/pool</code> passes. Coverage includes
+  absent-field compatibility, valid 32-byte pubkey storage, invalid base64
+  rejection, wrong-length rejection, and full v2 auth admission storage.</p>
+</div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 6 /poolz receipt key exposure.</strong>
+  The operator <code>/poolz</code> provider-row projection now emits explicit
+  nullable <code>receipt_pubkey</code> and <code>receipt_pubkey_prev</code>
+  fields. Current receipt pubkeys are encoded as standard padded base64 from
+  the raw 32-byte value captured during v2 auth; legacy/pre-v1.6 providers
+  serialize both receipt fields as JSON <code>null</code>.</p>
+  <p>The registry keeps previous receipt pubkeys as internal raw bytes plus
+  rotation timestamps. The public <code>/poolz</code> shape converts the grace
+  window object to <code>{pubkey, rotated_at, expires_at}</code> with Unix
+  seconds for the timestamps, matching SPEC-015 §7.5.1 and §8.1. Rotation
+  mechanics remain deferred to the next SPEC-015 step; this step adds the
+  storage seam and serializer contract needed to expose a simulated grace
+  window safely.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>go test ./internal/ws -run 'Test(PoolzReceiptPubkeyForV16Provider|PoolzReceiptPubkeyNullForPreV16Provider|PoolzReceiptPubkeyPrevShape|PoolzShapeUnchangedForL1Provider|PoolzDefaultOmitsTier2HashFieldsAfterWSAdmission|ProviderAuthV2InitialReceiptPublicKeyPublishesAfterStateUpdate)' -count=1 -v</code>
+  passes. <code>go test ./internal/ws ./internal/pool -count=1</code> passes.
+  Coverage includes v1.6 current key exposure, explicit nulls for pre-v1.6
+  rows, documented previous-key shape, and existing additive /poolz
+  compatibility.</p>
+</div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 7 receipt pubkey rotation detection.</strong>
+  The v2 auth path now stages incoming <code>provider_receipt_public_key</code>
+  values as pending receipt-key publication. The staged key is not visible in
+  <code>/poolz</code> at <code>auth_response</code> time, and pending-key sessions
+  are excluded from <code>Provider.RoutingEligible()</code> so buyer traffic cannot
+  receive new-key receipts before <code>/poolz</code> publishes that key. The
+  registry publishes it on the provider's first post-auth
+  <code>state_update</code>, which the provider sends after local Keychain commit.
+  On rotation publication it moves
+  the prior raw pubkey into <code>receipt_pubkey_prev</code>, stamps
+  <code>rotated_at</code> with coordinator time, and sets
+  <code>expires_at = rotated_at + 7 days</code>.</p>
+  <p>There is no rollback wire flag. An accepted candidate that never sends
+  the post-commit <code>state_update</code> remains unpublished, so reconnecting
+  with the old key preserves the old <code>/poolz</code> trust state. Because
+  <code>/poolz</code> exposes a single previous-key slot, the registry rejects a
+  second changed key while either a pending rotation or an unexpired
+  previous-key grace window exists. The rejection happens inside the registry
+  lock and the v2 auth path surfaces it as
+  <code>receipt_rotation_grace_active</code>.</p>
+  <p>Missing receipt keys on reconnect clear the live session's receipt-key
+  state, so parser-optional pre-v1.6/no-key reconnects remain admitted, emit
+  <code>receipt_omitted=true reason=no_keypair</code>, and expose
+  <code>receipt_pubkey: null</code> in <code>/poolz</code> until a later reconnect
+  sends a key and its post-auth <code>state_update</code> publishes it.
+  When the same current key reconnects after the grace window expires,
+  <code>receipt_pubkey_prev</code> is purged. The public <code>/poolz</code>
+  serializer also filters expired previous-key blocks against the server clock
+  at read time. No durable coordinator storage was introduced.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>go test ./internal/ws ./internal/pool -run 'TestProviderAuthV2ReceiptRotation|TestProviderAuthV2ReceiptKeyOmission|TestProviderAuthV2InitialReceipt|TestRoutingEligibleIgnoresHashStatus|TestPoolzReceiptPubkey|TestRegistry' -count=1</code>
+  passes. Full <code>go test ./... -count=1</code> passes. Coverage exercises
+  staged v2 auth admission, non-routable pending-key sessions, post-commit
+  publication, current/previous <code>/poolz</code> projection after rotation,
+  uncommitted candidate non-publication, second-rotation rejection during
+  active grace, missing-key
+  clearing to <code>receipt_pubkey: null</code> plus omission logging, and
+  read-time purge after the 7-day grace window.</p>
+</div>
+<div class="entry">
+  <time>2026-06-23</time>
+  <p><strong>SPEC-015 Step 9 coordinator receipt rotation audit event.</strong>
+  Added <code>receipt_rotation_detected</code> emission when a provider's
+  post-auth <code>state_update</code> publishes a changed receipt pubkey. The
+  registry builds the rotation event while holding its publication lock, then
+  emits after unlock through a bounded coordinator queue into the existing
+  <code>internal/audit</code> SQLite sink.</p>
+  <p>The audit payload stores <code>provider_id</code>, base64
+  <code>old_pubkey</code>, base64 <code>new_pubkey</code>, and
+  <code>rotated_at</code>. It does not include receipt bodies, prompt hashes,
+  output hashes, signatures, or buyer response headers. If the bounded queue
+  is full during production shutdown pressure, the coordinator drops the
+  observability event with an operator log rather than blocking provider state
+  publication.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>go test ./internal/audit ./internal/pool ./internal/ws -run 'TestEmitReceiptRotationWritesAuditRow|TestProviderAuthV2ReceiptRotationDetectedAuditEvent|TestProviderAuthV2ReceiptRotationMovesPriorPubkeyToPrevious' -count=1</code>
+  passes, covering durable audit rows, forbidden-field exclusion, and rotation
+  detection after receipt pubkey publication.</p>
+</div>
+</section>
+
+<section id="spec015-receipts-step10">
+  <h2>SPEC-015 design decisions — Step 10 coordinator nginx receipt buffers (2026-06-23)</h2>
+  <div class="entry">
+    <time>2026-06-23</time>
+    <p><strong>Scope:</strong> configured the coordinator deploy nginx template to
+    preserve SPEC-015 receipt-sized headers and added the deploy gate
+    <code>phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh</code> and the env-gated live curl echo check <code>phase4-coordinator/dist/test/check_nginx_receipt_header_live_test.sh</code>.</p>
+    <p><strong>Path decision:</strong> the build prompt names
+    <code>deploy/nginx/coordinator.streamvc.live.conf</code>, but this repository stores
+    deployable nginx templates under <code>phase4-coordinator/dist/</code>. The Step 10
+    change therefore lands in
+    <code>phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf</code> and is wired
+    through <code>make test-dist</code>.</p>
+    <p><strong>Buffer decision:</strong> the static deploy gate strips comments before matching active directives. <code>large_client_header_buffers 4 8k</code>,
+    <code>proxy_buffer_size 8k</code>, and <code>proxy_buffers 4 8k</code> exceed the 4096-byte
+    receipt cap while preserving existing timeout/body-size behavior.</p>
+    <p><strong>Open questions:</strong> Pearl deployment still requires the normal operator
+    rollout after PR merge; this step only updates and tests the repo-owned deploy
+    template.</p>
+  </div>
 </section>
 </body></html>

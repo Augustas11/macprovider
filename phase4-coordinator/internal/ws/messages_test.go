@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -116,6 +117,46 @@ func TestParseAuthInitialAcceptsLegacyAbsentSpec010(t *testing.T) {
 	}
 	if req.PublishesSupportedModels {
 		t.Fatal("publishes_supported_models = true, want false")
+	}
+	if req.ProviderReceiptPublicKey != "" || req.ProviderReceiptPubkey != nil {
+		t.Fatalf("receipt key = (%q, %#v), want absent", req.ProviderReceiptPublicKey, req.ProviderReceiptPubkey)
+	}
+}
+
+func TestParseAuthInitialAcceptsProviderReceiptPublicKey(t *testing.T) {
+	payload := validAuthRequestInitial()
+	pubkey := bytesOf(0x42, 32)
+	payload["provider_receipt_public_key"] = base64.StdEncoding.EncodeToString(pubkey)
+
+	req, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+	if err != nil {
+		t.Fatalf("ParseAuthRequest field=%q err=%v", field, err)
+	}
+	if req.ProviderReceiptPublicKey != base64.StdEncoding.EncodeToString(pubkey) {
+		t.Fatalf("ProviderReceiptPublicKey = %q", req.ProviderReceiptPublicKey)
+	}
+	if string(req.ProviderReceiptPubkey) != string(pubkey) {
+		t.Fatalf("ProviderReceiptPubkey = %#v, want %#v", req.ProviderReceiptPubkey, pubkey)
+	}
+}
+
+func TestParseAuthInitialRejectsInvalidProviderReceiptPublicKey(t *testing.T) {
+	for name, value := range map[string]string{
+		"invalid_base64": "not base64",
+		"wrong_length":   base64.StdEncoding.EncodeToString(bytesOf(0x42, 31)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := validAuthRequestInitial()
+			payload["provider_receipt_public_key"] = value
+
+			_, _, field, err := ParseAuthRequest(mustAuthJSON(t, payload))
+			if err == nil {
+				t.Fatal("ParseAuthRequest err = nil")
+			}
+			if field != "provider_receipt_public_key" {
+				t.Fatalf("badField = %q", field)
+			}
+		})
 	}
 }
 
@@ -293,4 +334,12 @@ func mustAuthJSON(t *testing.T, payload map[string]any) []byte {
 		t.Fatalf("json marshal: %v", err)
 	}
 	return b
+}
+
+func bytesOf(value byte, count int) []byte {
+	out := make([]byte, count)
+	for i := range out {
+		out[i] = value
+	}
+	return out
 }

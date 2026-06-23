@@ -607,7 +607,9 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	for _, p := range providers {
 		switch p.State {
 		case pool.StateReady:
-			resp.PoolReady++
+			if p.AuthState != pool.AuthBearerlessDuplicate && len(p.PendingReceiptPubkey) == 0 {
+				resp.PoolReady++
+			}
 		case pool.StateDegraded, pool.StateBusy:
 			resp.PoolDegraded++
 		case pool.StateDraining:
@@ -748,7 +750,7 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		if pillarAActive && !p.RoutingEligible() {
 			continue
 		}
-		if !pillarAActive && (p.State != pool.StateReady || p.AuthState == pool.AuthBearerlessDuplicate) {
+		if !pillarAActive && (p.State != pool.StateReady || p.AuthState == pool.AuthBearerlessDuplicate || len(p.PendingReceiptPubkey) > 0) {
 			continue
 		}
 		excluded := tier2Active && s.tier2ProviderExcludedForConfig(p, cfg)
@@ -1322,6 +1324,7 @@ func (s *Server) forwardHTTPSequence(
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
 			}
+			copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
 			w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 			if w.Header().Get("Content-Type") == "" {
 				w.Header().Set("Content-Type", "application/json")
@@ -1340,7 +1343,34 @@ func (s *Server) forwardHTTPSequence(
 			status = resp.StatusCode
 			respBody, _ := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 			_ = resp.Body.Close()
-			attempt.ErrorCode = spec001StatusFromBody(respBody)
+			attempt.ErrorCode = nullUsageProviderErrorCode(respBody)
+			if attempt.ErrorCode != "" && providerReceiptEligible(state.provider) {
+				// Round-1 audit H1: receipt-bearing null-usage errors used to
+				// return immediately to the buyer, bypassing the
+				// `X-MacProvider-Retries: N` budget. Only short-circuit when
+				// the retry budget is genuinely exhausted; otherwise fall
+				// through to the failover path so the buyer's explicit retry
+				// budget is honored. The receipt is preserved on the final
+				// attempt.
+				if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, status, nil) {
+					if err := rec.logProviderRow(state.provider, status, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries); err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return
+					}
+					copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
+					w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+					if w.Header().Get("Content-Type") == "" {
+						w.Header().Set("Content-Type", "application/json")
+					}
+					w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+					w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+					w.WriteHeader(status)
+					_, _ = w.Write(respBody)
+					cancelAttempt()
+					return
+				}
+			}
 		}
 		cancelAttempt()
 		// classifyHTTPResult is the canonical translation of the
@@ -1558,14 +1588,27 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
 				faultFlag = billing.FaultBreakerQualifying
 			}
-			checkedBody, err := guard.CheckNonStreamingBody(body.Bytes())
+			originalBody := body.Bytes()
+			checkedBody, err := guard.CheckNonStreamingBody(originalBody)
 			if err != nil {
 				writeError(w, http.StatusBadGateway, "tier2_output_encoding_invalid", "Provider returned invalid Tier2 output encoding")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding"}
 			}
+			// Round-2 audit HIGH: PillarD enforceOutputCap may truncate the
+			// completion. The provider signed end.Receipt over the original
+			// bytes; if we forward the truncated body alongside the receipt,
+			// the buyer-side verifier will recompute a different output_hash
+			// and reject. Drop the receipt header in that case — the buyer
+			// still gets the truncated 200 OK body, just without an
+			// integrity attestation that no longer applies.
+			receiptValue := end.Receipt
+			if !bytes.Equal(checkedBody, originalBody) {
+				receiptValue = ""
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+			setReceiptHeaderForProvider(w.Header(), receiptValue, provider)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(checkedBody)
 			promptTok, completionTok := tokenPointersFromUsageObject(end.Usage)
@@ -3237,6 +3280,66 @@ func estimateTokens(raw json.RawMessage) int {
 		return 1
 	}
 	return n
+}
+
+func copyReceiptHeaderForProvider(dst, src http.Header, provider pool.Provider) {
+	if !providerReceiptEligible(provider) {
+		return
+	}
+	if receipt := normalizeReceiptHeaderValue(src.Get("X-MacProvider-Receipt")); receipt != "" {
+		dst.Set("X-MacProvider-Receipt", receipt)
+	}
+}
+
+func setReceiptHeaderForProvider(dst http.Header, value string, provider pool.Provider) {
+	if !providerReceiptEligible(provider) {
+		return
+	}
+	if receipt := normalizeReceiptHeaderValue(value); receipt != "" {
+		dst.Set("X-MacProvider-Receipt", receipt)
+	}
+}
+
+// normalizeReceiptHeaderValue enforces SPEC-015 AC-15: the receipt header
+// is at most 4096 ASCII bytes and contains no CR/LF/NUL. Returns "" when
+// the candidate value fails either constraint so the caller drops the
+// header rather than poisoning the response (nginx upstream defaults are
+// 8 KiB and a malicious provider header would otherwise convert into a
+// 502 at the gateway hop).
+func normalizeReceiptHeaderValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	if len(value) > 4096 {
+		return ""
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c < 0x20 || c > 0x7E {
+			return ""
+		}
+	}
+	return value
+}
+
+func providerReceiptEligible(provider pool.Provider) bool {
+	return len(provider.ReceiptPubkey) > 0
+}
+
+func nullUsageProviderErrorCode(body []byte) string {
+	if code := spec001StatusFromBody(body); code != "" {
+		return code
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	return spec001EndStatus(envelope.Error.Code)
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

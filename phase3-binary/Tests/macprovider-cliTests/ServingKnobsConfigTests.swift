@@ -22,6 +22,37 @@ final class ServingKnobsConfigTests: XCTestCase {
         XCTAssertNil(config.kvBitsOverride)
         XCTAssertNil(config.maxContextOverride)
         XCTAssertNil(config.maxConcurrencyOverride)
+        XCTAssertFalse(config.enableReceipts)
+    }
+
+    func testEnableReceiptsCLIOverridesEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(enableReceipts: false),
+            environment: ["MACPROVIDER_ENABLE_RECEIPTS": "true"],
+            fileExists: { _ in true },
+            readFile: { _ in "enable_receipts: true\n" }
+        )
+        XCTAssertFalse(config.enableReceipts)
+    }
+
+    func testEnableReceiptsEnvironmentOverridesYAML() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: ["MACPROVIDER_ENABLE_RECEIPTS": "true"],
+            fileExists: { _ in true },
+            readFile: { _ in "enable_receipts: false\n" }
+        )
+        XCTAssertTrue(config.enableReceipts)
+    }
+
+    func testEnableReceiptsYAMLApplied() throws {
+        let config = try ConfigLoader.load(
+            cli: CLIOverrides(),
+            environment: [:],
+            fileExists: { _ in true },
+            readFile: { _ in "enable_receipts: true\n" }
+        )
+        XCTAssertTrue(config.enableReceipts)
     }
 
     // MARK: - --kv-bits

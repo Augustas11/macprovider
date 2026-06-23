@@ -766,6 +766,23 @@ func TestHealthzMountedOnBuyerHandler(t *testing.T) {
 	}
 }
 
+func TestHealthzExcludesPendingReceiptCandidateFromReadyCapacity(t *testing.T) {
+	registry := pool.NewRegistry(nil)
+	registerPendingReceiptCandidate(t, registry, "p1", "session-1", "model-a")
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	rr := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_size":1`)) || !bytes.Contains(rr.Body.Bytes(), []byte(`"pool_ready":0`)) {
+		t.Fatalf("pending receipt candidate must remain visible but not ready capacity; body=%s", rr.Body.String())
+	}
+}
+
 func TestHealthzReportsInjectedVersion(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithVersion("v1.3.0-7-gabcdef0"))
@@ -921,6 +938,86 @@ func TestChatCompletionsRoutesNonStreamingRequest(t *testing.T) {
 	}
 	if got["id"] != "chatcmpl-test" {
 		t.Fatalf("response not relayed: %#v", got)
+	}
+}
+
+func TestHTTPForwardingStripsReceiptFromProviderWithoutPublishedReceiptKey(t *testing.T) {
+	const spoofedReceipt = "spoofed.receipt"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", spoofedReceipt)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("receipt header = %q, want stripped for provider without receipt pubkey", got)
+	}
+}
+
+func TestHTTPForwardingPassesReceiptFromProviderWithPublishedReceiptKey(t *testing.T) {
+	const receipt = "trusted.receipt"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", receipt)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x61}, 32))
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != receipt {
+		t.Fatalf("receipt header = %q, want %q", got, receipt)
+	}
+}
+
+func TestHTTPForwardingPassesTrustedNullUsageReceipt(t *testing.T) {
+	const receipt = "trusted.null-usage.receipt"
+	body := []byte(`{"error":{"message":"model not loaded","type":"api_error","param":null,"code":"error_model_not_loaded"}}`)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", receipt)
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write(body)
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x62}, 32))
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want %d body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != receipt {
+		t.Fatalf("receipt header = %q, want %q", got, receipt)
+	}
+	if got := rr.Header().Get("X-MacProvider-Provider"); got != "p1" {
+		t.Fatalf("provider header = %q", got)
+	}
+	if got := rr.Header().Get("X-MacProvider-Route"); got != "session-1" {
+		t.Fatalf("route header = %q", got)
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("error_model_not_loaded")) {
+		t.Fatalf("body = %s, want provider error body", rr.Body.String())
 	}
 }
 
@@ -2382,6 +2479,111 @@ func TestChatCompletionsWSTunneledTier2StreamingSizeCapTruncatesAndStops(t *test
 	}
 }
 
+// Round-2 audit HIGH (M11 close-out): the WS-tunneled receipt forwarding
+// path landed in C1's fix without an end-to-end test. These three cases
+// pin the contract:
+//   - end.Receipt is forwarded as X-MacProvider-Receipt when the
+//     provider's pubkey is published on /poolz;
+//   - the receipt is stripped when no pubkey is published;
+//   - the receipt is stripped when PillarD mutates the buyer-visible body,
+//     because the provider's signature no longer applies to the bytes the
+//     buyer receives. The third case is the integrity gap the previous
+//     round-2 HIGH flagged.
+func TestChatCompletionsWSTunneledForwardsReceiptFromInferenceResponseEnd(t *testing.T) {
+	const receipt = "trusted.ws.receipt"
+	registry := pool.NewRegistry(nil)
+	registerWithPathConnReceiptPubkey(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled, nil, bytes.Repeat([]byte{0x65}, 32))
+	slotsFree := 1
+	registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: time.Now().UTC()})
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","choices":[{"message":{"content":"ok"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Receipt: receipt}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != receipt {
+		t.Fatalf("receipt header = %q, want %q", got, receipt)
+	}
+}
+
+func TestChatCompletionsWSTunneledStripsReceiptWhenProviderHasNoReceiptPubkey(t *testing.T) {
+	const receipt = "spoofed.ws.receipt"
+	registry := pool.NewRegistry(nil)
+	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","choices":[{"message":{"content":"ok"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Receipt: receipt}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("receipt header = %q, want stripped because provider has no published receipt pubkey", got)
+	}
+}
+
+func TestChatCompletionsWSTunneledStripsReceiptWhenPillarDTruncatesBody(t *testing.T) {
+	const receipt = "originalbytes.signed.receipt"
+	registry := pool.NewRegistry(nil)
+	registerWithPathConnReceiptPubkey(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled, nil, bytes.Repeat([]byte{0x66}, 32))
+	slotsFree := 1
+	registry.ApplyStateUpdate("p1", "s1", pool.StateUpdate{State: pool.StateReady, SlotsFree: &slotsFree, At: time.Now().UTC()})
+	tier2Cfg := config.Default().Tier2
+	tier2Cfg.BehavioralSafetyEnabled = true
+	tier2Cfg.OutputSizeCapBytes = 8
+	server := buyer.NewServer(
+		registry,
+		zerolog.Nop(),
+		time.Unix(1716768000, 0),
+		buyer.WithTier2Config(tier2Cfg),
+		buyer.WithRelay(func(ctx context.Context, provider pool.Provider, requestID string, body []byte, stream bool) (*providerws.RelayStream, error) {
+			chunks := make(chan providerws.InferenceResponseChunk, 1)
+			done := make(chan providerws.InferenceResponseEnd, 1)
+			errs := make(chan error, 1)
+			chunks <- providerws.InferenceResponseChunk{Type: "inference_response_chunk", RequestID: requestID, Seq: 0, Data: `{"id":"ws","choices":[{"message":{"content":"this content is longer than the cap and will get truncated"}}]}`}
+			done <- providerws.InferenceResponseEnd{Type: "inference_response_end", RequestID: requestID, Status: "complete", ChunksSent: 1, Receipt: receipt}
+			return &providerws.RelayStream{RequestID: requestID, Chunks: chunks, Done: done, Errors: errs}, nil
+		}, time.Second),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("truncated")) {
+		t.Fatalf("body was not truncated by PillarD: %s", rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("receipt header = %q, want stripped because PillarD mutated the body the provider signed", got)
+	}
+}
+
 func TestChatCompletionsWSTunneledTimeoutReturns504(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	registerWithPath(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, "", 20, pool.TierProvisional, pool.InferencePathWSTunneled)
@@ -3792,6 +3994,40 @@ func register(registry *pool.Registry, providerID, assignedID, modelID string, s
 	registerWithEndpoint(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, "https://"+providerID+".example", 20)
 }
 
+func registerPendingReceiptCandidate(t *testing.T, registry *pool.Registry, providerID, assignedID, modelID string) {
+	t.Helper()
+	_, registered, refusal := registry.RegisterAtDetailed(&pool.Provider{
+		ProviderID:            providerID,
+		AssignedID:            assignedID,
+		Hostname:              providerID + ".local",
+		ModelID:               modelID,
+		ModelParamsB:          7,
+		RAMGB:                 16,
+		MaxContextTokens:      20000,
+		MaxConcurrency:        1,
+		SlotsFree:             1,
+		SlotsTotal:            1,
+		ThroughputTPSEstimate: 20,
+		EndpointURL:           "https://" + providerID + ".example",
+		Tier:                  pool.TierPinned,
+		InferencePath:         pool.InferencePathHTTPForwarding,
+		State:                 pool.StateReady,
+		LastHeartbeatAt:       time.Now().UTC(),
+		LastActivityAt:        time.Now().UTC(),
+		ConnectedAt:           time.Now().UTC(),
+		BinaryVersion:         "0.1.0",
+		AuthState:             pool.AuthBearerValidated,
+		ReceiptPubkey:         bytes.Repeat([]byte{0x61}, 32),
+	}, nil, time.Now().UTC())
+	if !registered || refusal != pool.RegisterRefusalNone {
+		t.Fatalf("register pending receipt candidate: registered=%v refusal=%v", registered, refusal)
+	}
+	provider, ok := registry.Resolve(providerID, assignedID)
+	if !ok || provider.RoutingEligible() || len(provider.PendingReceiptPubkey) == 0 {
+		t.Fatalf("pending receipt candidate = %+v ok=%v; want visible but non-routable", provider, ok)
+	}
+}
+
 func registerWithHashStatus(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, hashStatus pool.HashStatus) {
 	registerWithHashStatusEndpoint(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, "https://"+providerID+".example", hashStatus)
 }
@@ -3855,6 +4091,12 @@ func registerWithEndpoint(registry *pool.Registry, providerID, assignedID, model
 	registerWithEndpointConn(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, nil)
 }
 
+func registerWithEndpointReceiptPubkey(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, receiptPubkey []byte) {
+	registerWithPathConnReceiptPubkey(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, pool.TierPinned, pool.InferencePathHTTPForwarding, nil, receiptPubkey)
+	slotsFree := slotsTotal
+	registry.ApplyStateUpdate(providerID, assignedID, pool.StateUpdate{State: state, SlotsFree: &slotsFree, At: time.Now().UTC()})
+}
+
 func registerWithEndpointConn(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, conn net.Conn) {
 	registerWithPathConn(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, pool.TierPinned, pool.InferencePathHTTPForwarding, conn)
 }
@@ -3864,6 +4106,10 @@ func registerWithPath(registry *pool.Registry, providerID, assignedID, modelID s
 }
 
 func registerWithPathConn(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, tier pool.Tier, path pool.InferencePath, conn net.Conn) {
+	registerWithPathConnReceiptPubkey(registry, providerID, assignedID, modelID, state, maxContextTokens, slotsTotal, endpointURL, throughput, tier, path, conn, nil)
+}
+
+func registerWithPathConnReceiptPubkey(registry *pool.Registry, providerID, assignedID, modelID string, state pool.State, maxContextTokens, slotsTotal int, endpointURL string, throughput float64, tier pool.Tier, path pool.InferencePath, conn net.Conn, receiptPubkey []byte) {
 	registry.Register(&pool.Provider{
 		ProviderID:            providerID,
 		AssignedID:            assignedID,
@@ -3883,6 +4129,7 @@ func registerWithPathConn(registry *pool.Registry, providerID, assignedID, model
 		LastHeartbeatAt:       time.Now().UTC(),
 		ConnectedAt:           time.Now().UTC(),
 		BinaryVersion:         "0.1.0",
+		ReceiptPubkey:         append([]byte(nil), receiptPubkey...),
 	}, conn)
 }
 
@@ -4667,5 +4914,98 @@ func TestModelsExcludesAuthBearerlessDuplicateFromCapacity(t *testing.T) {
 	}
 	if modelA.TotalSlots != 1 {
 		t.Fatalf("total_slots = %d, want 1 (good only)", modelA.TotalSlots)
+	}
+}
+
+func TestModelsExcludesPendingReceiptCandidateFromCapacity(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "pending", EndpointURL: "https://pending.example"}})
+	registerPendingReceiptCandidate(t, registry, "pending", "session-pending", "model-a")
+
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	var resp struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("json: %v", err)
+	}
+	for _, m := range resp.Data {
+		if m.ID == "model-a" {
+			t.Fatalf("pending receipt candidate must not be advertised as model capacity; body=%s", rr.Body.String())
+		}
+	}
+}
+
+// Round-1 audit H2: receipt header MUST be capped at 4096 ASCII bytes
+// and contain no CR/LF/NUL. A misbehaving provider that emits a 1 MB
+// header would otherwise punch through nginx's 8 KiB upstream limit and
+// turn into a 502 at the gateway. The coordinator now strips oversize
+// or non-ASCII values before forwarding.
+func TestHTTPForwardingStripsOversizedReceiptHeader(t *testing.T) {
+	oversized := strings.Repeat("A", 4097) + "." + strings.Repeat("B", 32)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-MacProvider-Receipt", oversized)
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+	}))
+	defer upstream.Close()
+
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x63}, 32))
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+		t.Fatalf("receipt header = %q, want stripped for oversized value", got)
+	}
+}
+
+func TestHTTPForwardingStripsReceiptHeaderWithNonPrintableBytes(t *testing.T) {
+	// Note: Go's net/http normalizes CR/LF to spaces on the upstream
+	// response before we see it, so smuggling-style CRLF injection is
+	// already defended at the transport layer. The cases below cover
+	// the bytes that DO reach the coordinator unchanged: NUL and
+	// non-ASCII bytes (multi-byte UTF-8). normalizeReceiptHeaderValue
+	// must strip both.
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"nul", "good\x00bad"},
+		{"non_ascii", "good\xc3\xa9bad"},
+		{"del", "good\x7fbad"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := tc.body
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-MacProvider-Receipt", body)
+				_, _ = w.Write([]byte(`{"id":"chatcmpl-test","object":"chat.completion","created":1716768000,"model":"model-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}`))
+			}))
+			defer upstream.Close()
+
+			registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+			registerWithEndpointReceiptPubkey(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20, bytes.Repeat([]byte{0x64}, 32))
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":false}`), nil)
+
+			if got := rr.Header().Get("X-MacProvider-Receipt"); got != "" {
+				t.Fatalf("receipt header = %q, want stripped for non-printable bytes (%s)", got, tc.name)
+			}
+		})
 	}
 }

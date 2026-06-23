@@ -17,6 +17,69 @@ code { background: #f4f4f4; padding: 0.1em 0.3em; border-radius: 3px; }
 <p class=meta>Status: <strong>3h local soak PASS · M4 parity validation pending</strong> · Spec:
 <a href="../specs/SPEC-001-phase3-binary.md">SPEC-001 v1.1.1</a></p>
 
+<section id="spec015-receipts-step1">
+  <h2>SPEC-015 design decisions — Step 1 JCS canonicalizer extensions (2026-06-22)</h2>
+  <div class="entry">
+    <time>2026-06-22</time>
+    <p><strong>Scope:</strong> extended <code>RFC8785JCS</code> for
+    SPEC-015 v0.1.3 receipt hashing prerequisites only: NFC normalization for
+    JSON string values and RFC 8785 / ECMAScript JSON-number rendering for
+    finite <code>Double</code> values.</p>
+    <p><strong>Number-format decision:</strong> Swift's native
+    <code>String(Double)</code> and <code>JSONSerialization</code> do not match
+    RFC 8785 for required cases such as <code>-0.0</code>,
+    <code>1.0</code>, <code>1e20</code>, and <code>1.1</code>. The
+    implementation delegates only the numeric string rendering to the
+    platform JavaScriptCore ECMAScript engine via <code>JSON.stringify(n)</code>
+    after rejecting NaN and infinities. This keeps the existing in-house JCS
+    object/array/string/int path intact while using the same ECMAScript number
+    semantics RFC 8785 normatively references.</p>
+    <p><strong>NFC decision:</strong> normalization is applied to JSON string
+    values immediately before escaping. Object keys are not normalized; the
+    receipt and prompt/output canonical object keys are fixed ASCII names, and
+    preserving key bytes avoids changing existing key-order semantics.</p>
+    <p><strong>Deviations:</strong> none for Step 1. No receipt signing,
+    Keychain, coordinator, or gateway behavior is implemented in this step.</p>
+    <p><strong>Open questions:</strong> if a future Linux provider binary is
+    introduced, the JavaScriptCore dependency will need a replacement
+    ECMAScript-compatible dtoa implementation or a platform abstraction.</p>
+  </div>
+</section>
+
+<section id="spec015-receipts-step2">
+  <h2>SPEC-015 design decisions — Step 2 receipt Keychain lifecycle (2026-06-22)</h2>
+  <div class="entry">
+    <time>2026-06-22</time>
+    <p><strong>Scope:</strong> added <code>ReceiptKeyStoring</code>,
+    <code>KeychainReceiptKeyStore</code>, and
+    <code>InMemoryReceiptKeyStore</code>. The production store uses the
+    SPEC-015 service/account/accessible/synchronizable attributes exactly and
+    stores only the 32-byte raw ed25519 private key. The public key remains
+    derived from the private key and is not persisted separately.</p>
+    <p><strong>Race decision:</strong> <code>loadOrGenerate</code> follows the
+    insert-or-load contract: read current, generate only on not-found, attempt
+    add, and on duplicate discard the generated candidate and reload the
+    winning Keychain item.</p>
+    <p><strong>Rotation-slot decision:</strong> <code>swapToCurrent</code>
+    serializes process-local mutations, copies the current key to the
+    <code>.prev</code> service, then replaces the current value. macOS Keychain
+    does not expose a multi-item transaction; the implementation orders writes
+    so the previous key is copied before the current slot changes and rolls
+    back the copied <code>.prev</code> item if replacing current fails.</p>
+    <p><strong>Testability:</strong> the in-memory store implements the same
+    protocol with an injectable clock so race convergence, byte-equivalent key
+    reloads, <code>.prev</code> movement, and 7-day stale previous-key cleanup
+    are mechanically testable without touching the real login Keychain.</p>
+    <p><strong>Deviations:</strong> no serve startup, receipt signing, auth
+    frame publication, coordinator parsing, or gateway forwarding is wired in
+    this step.</p>
+    <p><strong>Open questions:</strong> if future rotation requires crash-proof
+    cross-process atomicity between current and previous Keychain items, the
+    rotation flow will need a small state marker or single-item envelope rather
+    than two independent generic-password records.</p>
+  </div>
+</section>
+
 <section id="spec013-autotune-step1">
   <h2>SPEC-013 design decisions — Step 1 autotune scaffold (2026-06-18)</h2>
   <div class="entry">
@@ -1991,5 +2054,189 @@ what was taken. d-inference is strictly prohibited per Section 7.2.</p>
   baseline + 4 new from this fix-pass), with 2 skipped integration-gated
   tests, 0 failures.</p>
 </div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 3 receipt canonicalization and signing.</strong>
+  Added a receipt prompt-source capture beside the existing parsed serving
+  fields so inference defaults remain unchanged while receipts commit to the
+  protocol-visible request JSON. <code>PromptCanonicalizer</code> emits the
+  exact 16-key prompt object from SPEC-015 section 4.2, with absent fields as
+  JSON null, five-key message objects, normalized CRLF/bare-CR text content,
+  content-part handling, function-tool handling, and tool-call argument strings
+  kept as strings. <code>OutputCanonicalizer</code> emits the exact 3-key
+  output object from section 5.1 and rejects finish reasons outside the v0.1.x
+  allowlist.</p>
+  <p><code>ReceiptBuilder</code> constructs the seven-field tuple, rejects
+  non-ASCII model IDs and negative integer fields, signs the UTF-8
+  <code>JCS(T)</code> bytes with the current provider receipt key, and returns
+  the standard padded base64 header
+  <code>&lt;base64(JCS(T))&gt;.&lt;base64(SIG)&gt;</code>. The pinned prompt
+  fixture hash is
+  <code>a762aef8cf64fd65f05096e7f98010804a1c4e8fb07f0a1ea7616f1cde2663cd</code>;
+  the pinned output fixture hash is
+  <code>9693532507cf1a58e91969588a3d987d8715e8a25dc1037b1f8d6e6980ed43c3</code>;
+  the null-usage error output hash is
+  <code>1bc371f568ecc23722dd522a5d00854589c78fcc9a2bebdb3523c5d8b9010b76</code>.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter 'PromptCanonicalizerTests|OutputCanonicalizerTests|ReceiptBuilderTests'</code>
+  passes 11/11 new Step 3 tests, including signed-header self-verification
+  and byte-exact Unicode tool-call argument commitment.</p>
+</div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 4 non-streaming receipt emission.</strong>
+  Added an opt-in receipt runtime gate via <code>--enable-receipts</code>,
+  <code>enable_receipts</code>, and
+  <code>MACPROVIDER_ENABLE_RECEIPTS</code>. The serve command only constructs
+  a <code>ReceiptBuilder</code> when receipts are enabled and a provider ID is
+  configured; startup generation owns first key creation, while response-time
+  signing requires an existing current key and omits the header if the keypair
+  is absent.</p>
+  <p>Non-streaming successful chat completions now attach
+  <code>X-MacProvider-Receipt</code> before the JSON body is written. The
+  receipt commits the parsed request source, output content, finish reason,
+  completion-token count, measured first-token latency in milliseconds, and
+  current Unix timestamp.
+  The null-usage <code>model_not_loaded</code> path emits a receipt with
+  empty content, <code>finish_reason</code> <code>error</code>, and
+  <code>tokens_out</code> <code>0</code>. Other API errors and pre-keypair
+  states omit the header.</p>
+  <p>Streaming/SSE remains receipt-free. Header construction is split into
+  JSON and SSE helpers; tests assert JSON can carry the receipt header while
+  the SSE header set remains byte-stable and contains no
+  <code>X-MacProvider-*</code> headers. Receipt headers larger than 4096 bytes
+  fail closed with an internal receipt-construction error instead of writing a
+  body with an oversized or partial header.</p>
+  <p>The first Step 4 audit found three implementation gaps: generic
+  inference failures synthesized as <code>model_not_loaded</code> bypassed the
+  null-usage receipt path; <code>ttft_ms</code> used request-to-completion
+  latency instead of first-token latency; and tests covered helper seams
+  without exercising the real <code>/v1/chat/completions</code> handler. The
+  fix routes generic failures and early non-streaming
+  <code>model_not_loaded</code> validation failures through the same API-error
+  receipt branch, records first non-empty token emission in the model runtime,
+  and adds raw-socket NIO handler tests for success, missing-key omission,
+  null-usage error emission, early validation failure emission, and streaming
+  header omission.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter 'HTTPServerReceiptTests|ServeCommandTests|ReceiptBuilderTests|ReceiptKeyStoreTests'</code>
+  passes 55/55 focused tests. Full
+  <code>swift test --package-path phase3-binary</code> passes 470 tests with 7
+  skipped integration-gated tests and 0 failures.</p>
+</div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 5 auth-frame receipt key publication.</strong>
+  Bumped the provider binary version to <code>1.6.0</code> and added optional
+  initial-stage <code>auth_request.provider_receipt_public_key</code>
+  emission. The field is injected into <code>CoordinatorClient</code> as a
+  precomputed standard padded base64 value so the proof-stage frame remains
+  unchanged and tests can exercise degraded/no-keypair omission without live
+  Keychain access.</p>
+  <p>The serve command now prepares the receipt key runtime before joining the
+  coordinator when <code>--enable-receipts</code> is active. The same
+  <code>KeychainReceiptKeyStore</code> feeds both the auth-frame public key and
+  the HTTP <code>ReceiptBuilder</code>, avoiding a split-brain key identity
+  between coordinator publication and response signing.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --package-path phase3-binary --filter 'CoordinatorClientTests|ServeCommandTests'</code>
+  passes 51/51 focused tests, including initial-stage receipt-key emission,
+  proof-stage omission, and shared key-store public-key derivation. Full
+  <code>swift test --package-path phase3-binary</code> passes 473 tests with 7
+  skipped integration-gated tests and 0 failures.</p>
+</div>
+<div class="entry">
+  <time>2026-06-22</time>
+  <p><strong>SPEC-015 Step 7 manual receipt-key rotation.</strong>
+  Added <code>macprovider-cli rotate-key</code> for operator-triggered receipt
+  signing-key rotation. The command resolves config with receipts enabled,
+  requires a stable <code>provider_id</code>, and sends a provider-bound
+  <code>rotate_receipt_key_request</code> over the local serve control socket;
+  standalone rotation is intentionally rejected when no receipt-enabled
+  <code>serve</code> process owns the live coordinator session.</p>
+  <p>The serve process generates the fresh ed25519 candidate in memory only,
+  stops its current coordinator WebSocket, reconnects through the existing v2
+  auth path with the candidate public key in
+  <code>auth_request.provider_receipt_public_key</code>, and commits
+  <code>swapToCurrent</code> only after coordinator auth acceptance. The
+  coordinator stages changed receipt keys during auth and publishes them only
+  after the provider's post-commit <code>state_update</code>, so local commit
+  failure leaves <code>/poolz</code> on the old key without a rollback wire flag,
+  and coordinator sessions with a pending receipt key are non-routable until
+  that publication <code>state_update</code> lands. Candidate rejection,
+  candidate timeout, and pre-commit failures await bounded old-key session
+  restoration before returning failure. Once <code>swapToCurrent</code> succeeds,
+  the provider must still publish the committed key through a post-auth
+  <code>state_update</code> before <code>rotate-key</code> reports success; if
+  that first state update fails, the provider reconnects with the committed
+  new key and waits for that restored session to publish. If post-commit
+  recovery also times out, the error is explicit that the local key has already
+  changed and coordinator publication is unconfirmed.</p>
+  <p>Rotation requests reject concurrent in-process rotations and the control
+  server rejects mismatched <code>provider_id</code> frames before touching the
+  coordinator session. The control socket does not wrap the side-effecting
+  rotation in an opaque timeout; bounded failure lives in the coordinator
+  client's candidate-auth timeout before Keychain commit plus the same bounded
+  timeout for restore attempts, and the foreground command keeps a 180-second
+  client-side receive guard that covers the worst-case candidate plus restore
+  sequence. On candidate-auth expiry, the coordinator client
+  cancels the candidate socket, attempts old-key session restoration within the
+  rotation timeout, and binds all candidate and restore auth writes to their
+  specific sockets so stale rotation tasks cannot publish onto the restored
+  session. The control result includes a machine-readable
+  <code>committed_unconfirmed</code> status so the foreground command preserves
+  the difference between rollback-safe rejection and local commit with
+  unconfirmed coordinator publication.</p>
+  <p><strong>Anti-regression:</strong>
+  focused <code>CoordinatorClientTests</code> rotation coverage passes for
+  timeout cancellation, bounded restore timeout, concurrent rejection,
+  post-commit state-update failure, committed-but-unconfirmed recovery failure,
+  control-boundary status preservation, and rejected-candidate old-key restore. Full
+  <code>swift test</code> passes 489 tests with 7 skipped integration-gated
+  tests and 0 failures. Coverage also includes control-socket request/result
+  framing, provider-id mismatch rejection, disabled-process rejection,
+  candidate commit-after-accept, rejection leaves current unchanged, and the
+  rotation auth initial frame overrides the old published receipt pubkey.</p>
+</div>
+<div class="entry">
+  <time>2026-06-23</time>
+  <p><strong>SPEC-015 Step 9 provider receipt audit events.</strong>
+  Added structured JSON audit events for receipt issuance and omission on the
+  provider HTTP path. Successful non-streaming responses and SPEC-001
+  null-usage error receipts emit <code>receipt_issued</code> with
+  <code>provider_id</code>, <code>request_id</code>, <code>model_id</code>,
+  <code>tokens_out</code>, <code>ttft_ms</code>, and <code>unix_ts</code> only.
+  The event shape intentionally excludes receipt bodies, public keys, prompt
+  hashes, output hashes, and signatures.</p>
+  <p>Receipt suppression now emits <code>receipt_omitted</code> for the five
+  SPEC-015 reasons: pre-v1.6 receipt runtime unavailable, no current keypair,
+  model-swap violation, pre-token cancellation, and streaming requests. The
+  provider continues to use its existing structured stderr operational event
+  sink; no new durable provider-side audit store was introduced.</p>
+  <p><strong>Anti-regression:</strong>
+  <code>swift test --filter ReceiptAuditTests --filter HTTPServerReceiptTests</code>
+  passes 25 tests, covering issued-event field allowlisting, all omission
+  reasons, handler-level audit emission for success/streaming/no-keypair/model
+  swap/buyer-cancel paths, unrelated non-null-usage errors staying unaudited,
+  successful non-streaming receipts, null-usage receipts, pre-keypair omission,
+  and streaming suppression.</p>
+</div>
+</section>
+
+<section id="spec015-receipts-step10">
+  <h2>SPEC-015 design decisions — Step 10 SDK compatibility, nginx buffers, and receipt perf (2026-06-23)</h2>
+  <div class="entry">
+    <time>2026-06-23</time>
+    <p><strong>Scope:</strong> added <code>ReceiptPerfTests</code> as the provider-side
+    SPEC-015 AC-16 guard. The benchmark measures 1000 invocations of
+    <code>ReceiptBuilder.build</code> after warmup against a 1024-token output payload,
+    covering JCS tuple construction, SHA-256 hashing, and ed25519 signing.</p>
+    <p><strong>Performance decision:</strong> the test asserts p95 below 5 ms using the
+    same receipt builder path used by the HTTP server, with deterministic key material
+    supplied through the existing key-store protocol to avoid Keychain variance.</p>
+    <p><strong>Deviations:</strong> none for provider runtime behavior; Step 10 adds a
+    regression benchmark only.</p>
+    <p><strong>Open questions:</strong> none blocking AC-16. The assertion is scoped to Apple Silicon/arm64 as the locked AC specifies; other architectures still measure the path and skip with the measured p95.</p>
+  </div>
 </section>
 </body></html>

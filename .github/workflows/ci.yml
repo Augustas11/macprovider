@@ -86,7 +86,7 @@ jobs:
           go-version-file: test/integration/go.mod
           cache-dependency-path: test/integration/go.sum
 
-      - name: Run cross-service integration tests
+      - name: Run cross-service integration and SPEC-015 AC manifest tests
         working-directory: test/integration
         # -count=1 disables the test cache (the harness builds REAL
         # binaries from working-tree source; a cached pass would hide a
@@ -178,6 +178,29 @@ jobs:
         working-directory: phase3-binary
         run: swift test --parallel
 
+
+  spec-015-acceptance:
+    name: spec-015-acceptance
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version-file: test/integration/go.mod
+          cache-dependency-path: test/integration/go.sum
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Run SPEC-015 acceptance runner
+        run: bash test/integration/spec015/run_acceptance.sh
+
   ci-required:
     name: ci-required
     runs-on: ubuntu-latest
@@ -189,6 +212,7 @@ jobs:
       - spec-014-v0-2-gate
       - dist-tooling
       - swift-tests
+      - spec-015-acceptance
     if: always()
     steps:
       - name: Require all CI jobs
@@ -200,6 +224,7 @@ jobs:
           SPEC_014_RESULT: ${{ needs.spec-014-v0-2-gate.result }}
           DIST_TOOLING_RESULT: ${{ needs.dist-tooling.result }}
           SWIFT_TESTS_RESULT: ${{ needs.swift-tests.result }}
+          SPEC_015_RESULT: ${{ needs.spec-015-acceptance.result }}
         run: |
           set -euo pipefail
 
@@ -210,7 +235,8 @@ jobs:
             "integration (cross-service):${INTEGRATION_RESULT}" \
             "spec-014-v0-2-gate:${SPEC_014_RESULT}" \
             "deploy tooling (check-deploy-config gate):${DIST_TOOLING_RESULT}" \
-            "phase3-binary (swift test):${SWIFT_TESTS_RESULT}"
+            "phase3-binary (swift test):${SWIFT_TESTS_RESULT}" \
+            "spec-015-acceptance:${SPEC_015_RESULT}"
           do
             name="${check%%:*}"
             result="${check#*:}"
