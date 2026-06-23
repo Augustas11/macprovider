@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -76,6 +77,10 @@ type Server struct {
 	poolCheckLast          map[string]time.Time
 	poolCheckMaxEntries    int
 	poolCheckTTL           time.Duration
+	receiptKeysMu          sync.Mutex
+	receiptKeysLimiters    map[string]receiptKeysBucket
+	receiptKeysMaxEntries  int
+	receiptKeysTTL         time.Duration
 	billingMu              sync.RWMutex
 	billing                *billing.Store
 	billingCfg             config.RewardsConfig
@@ -91,6 +96,11 @@ type stickyEntry struct {
 	ModelScope      string
 	CreatedAt       time.Time
 	LastUsedAt      time.Time
+}
+
+type receiptKeysBucket struct {
+	tokens float64
+	last   time.Time
 }
 
 type PreflightResult struct {
@@ -367,6 +377,9 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		poolCheckLast:          map[string]time.Time{},
 		poolCheckMaxEntries:    4096,
 		poolCheckTTL:           time.Minute,
+		receiptKeysLimiters:    map[string]receiptKeysBucket{},
+		receiptKeysMaxEntries:  4096,
+		receiptKeysTTL:         5 * time.Minute,
 		now:                    func() time.Time { return time.Now().UTC() },
 		version:                "dev",
 	}
@@ -381,6 +394,7 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
+	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)
 	r.Post("/v1/chat/completions", s.handleChatCompletions)
 	return r
 }
@@ -630,6 +644,19 @@ type poolCheckResponse struct {
 	State      pool.State `json:"state"`
 }
 
+type receiptKeysResponse struct {
+	ProviderID        string                     `json:"provider_id"`
+	ReceiptPubkey     *string                    `json:"receipt_pubkey"`
+	ReceiptPubkeyPrev *receiptKeysPreviousPubkey `json:"receipt_pubkey_prev"`
+	FetchedAt         string                     `json:"fetched_at"`
+}
+
+type receiptKeysPreviousPubkey struct {
+	Pubkey    string `json:"pubkey"`
+	RotatedAt string `json:"rotated_at"`
+	ExpiresAt string `json:"expires_at"`
+}
+
 func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 	if !s.allowPoolCheck(r) {
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Pool check rate limit exceeded")
@@ -664,6 +691,47 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {
+	if !s.allowReceiptKeys(r) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Receipt keys rate limit exceeded")
+		return
+	}
+	providerID := strings.TrimSpace(chi.URLParam(r, "provider_id"))
+	if providerID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Missing provider_id")
+		return
+	}
+	provider, ok := s.pool.Resolve(providerID, "")
+	if !ok {
+		writeError(w, http.StatusNotFound, "provider_not_found", "Provider not found")
+		return
+	}
+
+	now := s.now().UTC()
+	resp := receiptKeysResponse{
+		ProviderID: provider.ProviderID,
+		FetchedAt:  now.Format(time.RFC3339),
+	}
+	if len(provider.ReceiptPubkey) > 0 {
+		pubkey := base64.StdEncoding.EncodeToString(provider.ReceiptPubkey)
+		resp.ReceiptPubkey = &pubkey
+	}
+	if provider.ReceiptPubkeyPrev != nil && now.Before(provider.ReceiptPubkeyPrev.ExpiresAt) {
+		resp.ReceiptPubkeyPrev = &receiptKeysPreviousPubkey{
+			Pubkey:    base64.StdEncoding.EncodeToString(provider.ReceiptPubkeyPrev.Pubkey),
+			RotatedAt: provider.ReceiptPubkeyPrev.RotatedAt.UTC().Format(time.RFC3339),
+			ExpiresAt: provider.ReceiptPubkeyPrev.ExpiresAt.UTC().Format(time.RFC3339),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("write receipt keys response failed")
+	}
+}
+
 func (s *Server) allowPoolCheck(r *http.Request) bool {
 	key := poolCheckClientKey(r)
 	now := s.now()
@@ -677,6 +745,39 @@ func (s *Server) allowPoolCheck(r *http.Request) bool {
 	}
 	s.poolCheckLast[key] = now
 	s.evictPoolCheckEntries(now)
+	return true
+}
+
+func (s *Server) allowReceiptKeys(r *http.Request) bool {
+	const (
+		receiptKeysRatePerSecond = 10.0
+		receiptKeysBurst         = 10.0
+	)
+	key := poolCheckClientKey(r)
+	now := s.now()
+	s.receiptKeysMu.Lock()
+	defer s.receiptKeysMu.Unlock()
+	s.evictReceiptKeyEntries(now)
+
+	bucket, ok := s.receiptKeysLimiters[key]
+	if !ok {
+		bucket = receiptKeysBucket{tokens: receiptKeysBurst, last: now}
+	}
+	if bucket.last.IsZero() {
+		bucket.last = now
+	}
+	if elapsed := now.Sub(bucket.last).Seconds(); elapsed > 0 {
+		bucket.tokens = math.Min(receiptKeysBurst, bucket.tokens+elapsed*receiptKeysRatePerSecond)
+		bucket.last = now
+	}
+	if bucket.tokens < 1 {
+		s.receiptKeysLimiters[key] = bucket
+		return false
+	}
+	bucket.tokens--
+	bucket.last = now
+	s.receiptKeysLimiters[key] = bucket
+	s.evictReceiptKeyEntries(now)
 	return true
 }
 
@@ -700,6 +801,29 @@ func (s *Server) evictPoolCheckEntries(now time.Time) {
 			return
 		}
 		delete(s.poolCheckLast, oldestKey)
+	}
+}
+
+func (s *Server) evictReceiptKeyEntries(now time.Time) {
+	cutoff := now.Add(-s.receiptKeysTTL)
+	for key, bucket := range s.receiptKeysLimiters {
+		if bucket.last.Before(cutoff) {
+			delete(s.receiptKeysLimiters, key)
+		}
+	}
+	for len(s.receiptKeysLimiters) > s.receiptKeysMaxEntries {
+		var oldestKey string
+		var oldest time.Time
+		for key, bucket := range s.receiptKeysLimiters {
+			if oldestKey == "" || bucket.last.Before(oldest) {
+				oldestKey = key
+				oldest = bucket.last
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.receiptKeysLimiters, oldestKey)
 	}
 }
 

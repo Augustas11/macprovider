@@ -27,6 +27,23 @@ import (
 	"github.com/rs/zerolog"
 )
 
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func TestProviderHelloReceivesAck(t *testing.T) {
 	ts := newProviderServer(t)
 	defer ts.Close()
@@ -1772,7 +1789,7 @@ func TestProviderAuthV2ReceiptRotationRejectsSecondChangeDuringPreviousGrace(t *
 
 func TestProviderAuthV2ReceiptKeyOmissionClearsLiveReceiptTrustState(t *testing.T) {
 	clock := newLockedTime(time.Now().UTC())
-	var logBuffer bytes.Buffer
+	var logBuffer lockedBuffer
 	h := newProviderHarnessWithServerOptionsAndLogger(t, nil, []providerws.Option{
 		providerws.WithNow(clock.Now),
 	}, zerolog.New(&logBuffer), func(cfg *config.Config) {
