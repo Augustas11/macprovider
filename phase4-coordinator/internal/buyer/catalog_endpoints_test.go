@@ -19,8 +19,8 @@ import (
 )
 
 // SPEC-015 §M.4 / §M.5 AC-39 — GET /catalog/<catalog_id> returns
-// the on-disk signed catalog bytes verbatim with the right
-// Content-Type and Cache-Control.
+// the verified signed catalog bytes verbatim with the right Content-Type
+// and Cache-Control.
 func TestCatalogFileServesActiveCatalogBytes(t *testing.T) {
 	defer tier2.ResetForTest()
 	raw, pubkey := buyerCatalogFixture(t, "test-catalog-2026-06-24", time.Now().UTC().Add(time.Hour))
@@ -37,6 +37,73 @@ func TestCatalogFileServesActiveCatalogBytes(t *testing.T) {
 	server.SetTier2Config(cfg)
 
 	rr := serveCatalogFile(server, "test-catalog-2026-06-24", "198.51.100.1:12345")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
+	}
+	if got := rr.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q", got)
+	}
+	if got := rr.Header().Get("Cache-Control"); got != "public, max-age=300" {
+		t.Fatalf("Cache-Control = %q", got)
+	}
+	if !bytes.Equal(rr.Body.Bytes(), raw) {
+		t.Fatalf("body bytes mismatch: got %d bytes, want %d", len(rr.Body.Bytes()), len(raw))
+	}
+}
+
+func TestCatalogEndpointServesVerifiedBytesAfterFileReplacement(t *testing.T) {
+	defer tier2.ResetForTest()
+	raw, pubkey := buyerCatalogFixture(t, "test-catalog-2026-06-24", time.Now().UTC().Add(time.Hour))
+	path := writeBuyerCatalog(t, raw)
+	cfg := config.Tier2Config{
+		CatalogPath:      path,
+		CatalogPublicKey: pubkey,
+		ObserveEnabled:   true,
+	}
+	if err := tier2.Configure(cfg, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+	tampered := bytes.Replace(raw, []byte(`"catalog_id":"test-catalog-2026-06-24"`), []byte(`"catalog_id":"tampered-catalog-2026-06"`), 1)
+	if bytes.Equal(tampered, raw) {
+		t.Fatal("tamper replacement did not change catalog bytes")
+	}
+	if err := os.WriteFile(path, tampered, 0o600); err != nil {
+		t.Fatalf("replace catalog file: %v", err)
+	}
+	server := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1716768000, 0))
+	server.SetTier2Config(cfg)
+
+	for name, rr := range map[string]*httptest.ResponseRecorder{
+		"current": serveCatalogCurrent(server, "198.51.100.1:12345"),
+		"id":      serveCatalogFile(server, "test-catalog-2026-06-24", "198.51.100.1:12346"),
+	} {
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status = %d body=%s", name, rr.Code, rr.Body.String())
+		}
+		if !bytes.Equal(rr.Body.Bytes(), raw) {
+			t.Fatalf("%s served bytes from replaced file; got %s want verified raw catalog", name, rr.Body.String())
+		}
+	}
+}
+
+// GET /catalog/current serves the same signed catalog bytes without requiring
+// installers to discover catalog_id from operator-only /poolz.
+func TestCatalogCurrentServesActiveCatalogBytes(t *testing.T) {
+	defer tier2.ResetForTest()
+	raw, pubkey := buyerCatalogFixture(t, "test-catalog-2026-06-24", time.Now().UTC().Add(time.Hour))
+	path := writeBuyerCatalog(t, raw)
+	cfg := config.Tier2Config{
+		CatalogPath:      path,
+		CatalogPublicKey: pubkey,
+		ObserveEnabled:   true,
+	}
+	if err := tier2.Configure(cfg, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+	server := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1716768000, 0))
+	server.SetTier2Config(cfg)
+
+	rr := serveCatalogCurrent(server, "198.51.100.1:12345")
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d body=%s", rr.Code, rr.Body.String())
 	}
@@ -86,7 +153,7 @@ func TestCatalogEndpoints404WhenNoCatalogConfigured(t *testing.T) {
 	server := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1716768000, 0))
 	server.SetTier2Config(config.Tier2Config{})
 
-	for _, target := range []string{"/catalog/test-catalog", "/catalog/pubkey"} {
+	for _, target := range []string{"/catalog/current", "/catalog/test-catalog", "/catalog/pubkey"} {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodGet, target, nil)
 		req.RemoteAddr = "198.51.100.1:12345"
@@ -234,6 +301,14 @@ func serveCatalogPubkeyWithRealIP(server *Server, remoteAddr, realIP string) *ht
 
 func serveCatalogFile(server *Server, catalogID, remoteAddr string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/catalog/"+catalogID, nil)
+	req.RemoteAddr = remoteAddr
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	return rr
+}
+
+func serveCatalogCurrent(server *Server, remoteAddr string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/catalog/current", nil)
 	req.RemoteAddr = remoteAddr
 	rr := httptest.NewRecorder()
 	server.Handler().ServeHTTP(rr, req)

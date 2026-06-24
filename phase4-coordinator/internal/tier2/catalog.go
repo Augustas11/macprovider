@@ -31,6 +31,7 @@ type ModelEntry struct {
 	ArtifactKind string `json:"artifact_kind"`
 	HashScope    string `json:"hash_scope"`
 	ModelID      string `json:"model_id"`
+	MinRAMGB     *int   `json:"min_ram_gb,omitempty"`
 	Notes        string `json:"notes,omitempty"`
 	SHA256       string `json:"sha256"`
 	Source       string `json:"source"`
@@ -45,6 +46,7 @@ type ParsedCatalog struct {
 	CatalogID string
 	ExpiresAt time.Time
 	Models    map[string]ModelEntry
+	Raw       []byte
 }
 
 type HashCounts struct {
@@ -341,6 +343,28 @@ func (c *Catalog) CatalogID() string {
 	return parsed.CatalogID
 }
 
+// CatalogSnapshot returns the active catalog ID and the exact signed catalog
+// bytes accepted by signature verification, read under one catalog lock.
+func (c *Catalog) CatalogSnapshot() (string, []byte, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	parsed := activeParsedLocked(c.st)
+	if parsed == nil || len(parsed.Raw) == 0 {
+		return "", nil, false
+	}
+	return parsed.CatalogID, append([]byte(nil), parsed.Raw...), true
+}
+
+// CatalogBytes returns the exact signed catalog bytes accepted by signature
+// verification, or nil if no active catalog exists.
+func (c *Catalog) CatalogBytes() []byte {
+	_, raw, ok := c.CatalogSnapshot()
+	if !ok {
+		return nil
+	}
+	return raw
+}
+
 // --- Package-level shims (legacy API; route to Default()) -------------------
 //
 // Pre-M3-8d code, including buyer.Server, cmd/coordinator/main.go, and tests
@@ -356,16 +380,18 @@ func ConfigureStrict(cfg config.Tier2Config, logger zerolog.Logger) error {
 	return Default().ConfigureStrict(cfg, logger)
 }
 
-func Active() bool                                                  { return Default().Active() }
-func Configured() bool                                              { return Default().Configured() }
-func LoadFailed() bool                                              { return Default().LoadFailed() }
-func CatalogUnavailable() bool                                      { return Default().CatalogUnavailable() }
-func Catalogued(modelID string) bool                                { return Default().Catalogued(modelID) }
+func Active() bool                   { return Default().Active() }
+func Configured() bool               { return Default().Configured() }
+func LoadFailed() bool               { return Default().LoadFailed() }
+func CatalogUnavailable() bool       { return Default().CatalogUnavailable() }
+func Catalogued(modelID string) bool { return Default().Catalogued(modelID) }
 func VerifyProviderHash(modelID, reportedHash string) pool.HashStatus {
 	return Default().VerifyProviderHash(modelID, reportedHash)
 }
 func ExpectedHashPrefix(modelID string) string { return Default().ExpectedHashPrefix(modelID) }
 func CatalogID() string                        { return Default().CatalogID() }
+func CatalogBytes() []byte                     { return Default().CatalogBytes() }
+func CatalogSnapshot() (string, []byte, bool)  { return Default().CatalogSnapshot() }
 
 // ResetForTest swaps in a fresh package-singleton Catalog and restores nowUTC.
 //
@@ -534,13 +560,21 @@ func ParseCatalog(raw []byte, publicKey string) (*ParsedCatalog, error) {
 		if strings.TrimSpace(model.Source) == "" {
 			return nil, fmt.Errorf("catalog source for %q must not be empty", model.ModelID)
 		}
+		if model.MinRAMGB != nil && *model.MinRAMGB < 1 {
+			return nil, fmt.Errorf("catalog min_ram_gb for %q must be positive", model.ModelID)
+		}
 		if !hashPattern.MatchString(model.SHA256) {
 			return nil, fmt.Errorf("catalog sha256 for %q must be 64 lowercase hex chars", model.ModelID)
 		}
 		model.SHA256 = strings.ToLower(model.SHA256)
 		models[modelID] = model
 	}
-	return &ParsedCatalog{CatalogID: file.CatalogID, ExpiresAt: expiresAt, Models: models}, nil
+	return &ParsedCatalog{
+		CatalogID: file.CatalogID,
+		ExpiresAt: expiresAt,
+		Models:    models,
+		Raw:       append([]byte(nil), raw...),
+	}, nil
 }
 
 func activeParsedLocked(st state) *ParsedCatalog {

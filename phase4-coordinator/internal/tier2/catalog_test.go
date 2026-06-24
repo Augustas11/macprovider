@@ -33,6 +33,9 @@ func TestLoadCatalogVerifiesKnownGoodFixture(t *testing.T) {
 	if got := catalog.Models["model-a"].SHA256; got != testHash {
 		t.Fatalf("sha=%q", got)
 	}
+	if got := catalog.Models["model-a"].MinRAMGB; got == nil || *got != 16 {
+		t.Fatalf("min_ram_gb=%v, want 16", got)
+	}
 }
 
 func TestLoadCatalogLogsSuccessfulActivation(t *testing.T) {
@@ -242,6 +245,16 @@ func TestParseCatalogRejectsUnknownFieldsDuplicateModelsAndBadSemantics(t *testi
 			t.Fatalf("ParseCatalog err=%v, want hash_scope rejection", err)
 		}
 	})
+
+	t.Run("non-positive min ram", func(t *testing.T) {
+		zero := 0
+		model := validModelEntry("model-a", testHash)
+		model.MinRAMGB = &zero
+		raw, publicKey := signedCatalogFixtureWithModels(t, time.Now().UTC().Add(time.Hour), []ModelEntry{model})
+		if _, err := ParseCatalog(raw, publicKey); err == nil || !strings.Contains(err.Error(), "min_ram_gb") {
+			t.Fatalf("ParseCatalog err=%v, want min_ram_gb rejection", err)
+		}
+	})
 }
 
 func TestTier2AuditEventsIncludeCommonFields(t *testing.T) {
@@ -296,10 +309,12 @@ func signedCatalogFixture(t *testing.T, expiresAt time.Time, sha string) ([]byte
 }
 
 func validModelEntry(modelID, sha string) ModelEntry {
+	minRAMGB := 16
 	return ModelEntry{
 		ArtifactKind: "mlx_weight_file",
 		HashScope:    "primary_weight_file",
 		ModelID:      modelID,
+		MinRAMGB:     &minRAMGB,
 		SHA256:       sha,
 		Source:       "operator-curated",
 	}
