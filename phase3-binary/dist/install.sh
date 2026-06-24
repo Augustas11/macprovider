@@ -615,10 +615,19 @@ validate_inputs() {
 }
 
 latest_release_tag() {
-  api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+  # Scan the recent release list and pick the newest tag that names a
+  # macprovider-cli release (tag matches ^v[0-9], e.g. v1.3.1). The
+  # /releases/latest endpoint can't be trusted on its own: it returns
+  # whichever release is flagged "Latest" repo-wide, so any unrelated
+  # release published under the same repo (e.g. macprovider-verify
+  # under tag verify-vX.Y.Z) silently hijacks the installer.
+  api_url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30"
   json="$(curl -fsSL "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
-  tag="$(printf "%s" "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-  [ -n "$tag" ] || die 3 "GitHub Releases API response did not include tag_name"
+  tag="$(printf "%s" "$json" \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | grep -E '^v[0-9]' \
+    | head -1)"
+  [ -n "$tag" ] || die 3 "no macprovider-cli release (tag ^v[0-9]) found in recent GitHub Releases"
   printf "%s" "$tag"
 }
 
