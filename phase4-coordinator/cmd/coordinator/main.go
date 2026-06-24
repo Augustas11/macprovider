@@ -634,6 +634,10 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 
 	"CatalogPath":                    tier2StartupOnly,
 	"CatalogPublicKey":               tier2StartupOnly,
+	// SPEC-015 §M.4 — public catalog base URL is operator-visible
+	// only; hot-reloadable so an operator can flip it without
+	// restarting the coordinator.
+	"PublicCatalogBaseURL":           tier2HotReloadable,
 	"EncryptedLegAEAD":               tier2StartupOnly,
 	"EncryptedLegRekeyAfterRequests": tier2StartupOnly,
 	"EncryptedLegRekeyAfterSeconds":  tier2StartupOnly,

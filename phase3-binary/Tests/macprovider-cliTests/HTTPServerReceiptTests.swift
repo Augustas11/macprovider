@@ -271,7 +271,8 @@ final class HTTPServerReceiptTests: XCTestCase {
             finishReason: "stop",
             ttftMs: 12,
             tokensOut: 2,
-            unixTsSeconds: 1_800_000_000
+            unixTsSeconds: 1_800_000_000,
+            modelHashSource: .warmSwapDisabled
         ))
         let parsed = try parseReceiptHeader(header)
 
@@ -312,7 +313,8 @@ final class HTTPServerReceiptTests: XCTestCase {
             finishReason: "stop",
             ttftMs: 1,
             tokensOut: 1,
-            unixTsSeconds: 1
+            unixTsSeconds: 1,
+            modelHashSource: .warmSwapDisabled
         )
 
         XCTAssertNil(header)
@@ -341,7 +343,8 @@ final class HTTPServerReceiptTests: XCTestCase {
             receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
             request: request,
             error: error,
-            startedAt: Date(timeIntervalSince1970: 1_800_000_000)
+            startedAt: Date(timeIntervalSince1970: 1_800_000_000),
+            modelHashSource: .warmSwapDisabled
         ))
         let parsed = try parseReceiptHeader(header)
 
@@ -377,7 +380,8 @@ final class HTTPServerReceiptTests: XCTestCase {
             )),
             request: request,
             error: error,
-            startedAt: Date()
+            startedAt: Date(),
+            modelHashSource: .warmSwapDisabled
         )
 
         XCTAssertNil(header)
@@ -405,7 +409,8 @@ final class HTTPServerReceiptTests: XCTestCase {
             finishReason: "stop",
             ttftMs: 1,
             tokensOut: 1,
-            unixTsSeconds: 1
+            unixTsSeconds: 1,
+            modelHashSource: .warmSwapDisabled
         ))
 
         XCTAssertLessThanOrEqual(header.utf8.count, RouterHandler.maxReceiptHeaderBytes)
@@ -438,6 +443,150 @@ final class HTTPServerReceiptTests: XCTestCase {
             "connection: close",
             "transfer-encoding: chunked",
         ])
+    }
+
+    // SPEC-015 §M.5 AC-29 — warm-swap-on success path binds the
+    // runtime hash captured at request-start.
+    func testHTTPSuccessReceiptCarriesWarmSwapHash() async throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+            ],
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            completion: CompletionResult(
+                content: "answer",
+                finishReason: "stop",
+                promptTokens: 1,
+                completionTokens: 2,
+                ttftMilliseconds: 5
+            ),
+            warmSwapEnabled: true,
+            modelHash: hash
+        )
+
+        let header = try XCTUnwrap(response.headers.first(name: RouterHandler.receiptHeaderName))
+        let parsed = try parseReceiptHeader(header)
+        XCTAssertEqual(parsed.tuple["model_hash"] as? String, hash)
+        XCTAssertEqual(parsed.tuple["receipt_version"] as? String, "3")
+        XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
+    }
+
+    // SPEC-015 §M.5 AC-31 — error receipt inherits request-start hash.
+    func testHTTPErrorReceiptInheritsWarmSwapHash() async throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+            ],
+            receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+            completionError: HTTPReceiptFixtureError.inferenceFailed,
+            warmSwapEnabled: true,
+            modelHash: hash
+        )
+
+        let header = try XCTUnwrap(response.headers.first(name: RouterHandler.receiptHeaderName))
+        let parsed = try parseReceiptHeader(header)
+        XCTAssertEqual(parsed.tuple["model_hash"] as? String, hash,
+                       "AC-31: warm-swap-on error receipts MUST carry the request-start hash")
+        XCTAssertEqual(parsed.tuple["tokens_out"] as? Int, 0)
+        XCTAssertEqual(parsed.tuple["receipt_version"] as? String, "3")
+        XCTAssertTrue(parsed.publicKey.isValidSignature(parsed.signature, for: parsed.tupleData))
+    }
+
+    // SPEC-015 §M.5 AC-42 — defence-in-depth refusal also emits the
+    // `receipt_omitted: model_swap_violation` audit row end-to-end
+    // through the HTTP success path (closing the CODE-R2-HIGH-1 +
+    // SECURITY-R2-HIGH-1 gap that the helper-only test left).
+    func testHTTPAmbiguousProvenanceEmitsReceiptOmittedAudit() async throws {
+        let capture = ReceiptAuditCapture()
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let response = try await ReceiptAudit.withSink({ record in capture.append(record) }) {
+            try await roundTripChatCompletion(
+                body: [
+                    "model": "fixture-model",
+                    "messages": [["role": "user", "content": "hello"]],
+                ],
+                requestID: "req-ambiguous",
+                receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
+                completion: CompletionResult(content: "answer", finishReason: "stop", promptTokens: 1, completionTokens: 1),
+                warmSwapEnabled: true,
+                modelHash: nil  // warm-swap on + no hash → .ambiguous
+            )
+        }
+        XCTAssertEqual(response.status, .ok)
+        XCTAssertNil(response.headers.first(name: RouterHandler.receiptHeaderName))
+        let event = try capture.singleEvent()
+        XCTAssertEqual(event["event"] as? String, "receipt_omitted",
+                       "AC-42 audit row missing")
+        XCTAssertEqual(event["reason"] as? String, "model_swap_violation",
+                       "AC-42: reason MUST be model_swap_violation")
+        XCTAssertEqual(event["provider_id"] as? String, "provider-a")
+        XCTAssertEqual(event["request_id"] as? String, "req-ambiguous")
+        for forbidden in ["model_hash", "prompt_hash", "output_hash", "signature", "provider_pubkey"] {
+            XCTAssertNil(event[forbidden], "receipt_omitted leaked \(forbidden)")
+        }
+    }
+
+    // SPEC-015 §M.5 AC-42 — defence-in-depth refusal: warm-swap on
+    // AND no hash on the request-start snapshot → no receipt header,
+    // model_swap_violation audit row.
+    func testHTTPReceiptRefusedOnAmbiguousProvenance() throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let builder = ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key))
+        let request = try PromptCanonicalizerTests.fixtureRequest()
+
+        // resolveModelHashSource maps warm-swap=on + snapshot.modelHash=nil
+        // → .ambiguous → §M.2.2 defence-in-depth refusal.
+        let ambiguousSnapshot = RuntimeSnapshot(state: .ready, container: nil, modelID: "fixture-model", modelHash: nil)
+        let source = RouterHandler.resolveModelHashSource(warmSwapEnabled: true, snapshot: ambiguousSnapshot)
+        XCTAssertEqual(source, .ambiguous, "warm-swap on + nil snapshot.modelHash MUST resolve to .ambiguous")
+
+        let header = try RouterHandler.receiptHeader(
+            providerID: "provider-a",
+            receiptBuilder: builder,
+            request: request,
+            outputContent: "answer",
+            outputToolCalls: nil,
+            finishReason: "stop",
+            ttftMs: 5,
+            tokensOut: 1,
+            unixTsSeconds: 1,
+            modelHashSource: source
+        )
+        XCTAssertNil(header, "§M.2.2: ambiguous provenance MUST refuse the receipt")
+    }
+
+    // SPEC-015 §M.5 AC-42 — §M.2.2 normal in-flight request through
+    // a swap MUST still emit a receipt (the construction proof case,
+    // distinct from the defence-in-depth refusal above).
+    func testHTTPReceiptEmittedForNormalInFlightSwap() throws {
+        let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let builder = ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key))
+        let request = try PromptCanonicalizerTests.fixtureRequest()
+        let hash = "00010203040506070809a0b0c0d0e0f00102030405060708090a0b0c0d0e0f01"
+        let snapshot = RuntimeSnapshot(state: .draining, container: nil, modelID: "fixture-model", modelHash: hash)
+        let source = RouterHandler.resolveModelHashSource(warmSwapEnabled: true, snapshot: snapshot)
+        XCTAssertEqual(source, .captured(hash))
+
+        let header = try XCTUnwrap(RouterHandler.receiptHeader(
+            providerID: "provider-a",
+            receiptBuilder: builder,
+            request: request,
+            outputContent: "answer",
+            outputToolCalls: nil,
+            finishReason: "stop",
+            ttftMs: 5,
+            tokensOut: 1,
+            unixTsSeconds: 1,
+            modelHashSource: source
+        ))
+        let parsed = try parseReceiptHeader(header)
+        XCTAssertEqual(parsed.tuple["model_hash"] as? String, hash)
     }
 }
 
@@ -493,11 +642,14 @@ private func roundTripChatCompletion(
     requestID: String = "req-http-receipt",
     receiptBuilder: ReceiptBuilder?,
     completion: CompletionResult? = nil,
-    completionError: Error? = nil
+    completionError: Error? = nil,
+    warmSwapEnabled: Bool = false,
+    modelHash: String? = nil
 ) async throws -> HTTPReceiptResponse {
     let runtime = ModelRuntime(
         modelID: "fixture-model",
-        warmSwapEnabled: false,
+        modelHash: modelHash,
+        warmSwapEnabled: warmSwapEnabled,
         loader: { _ in throw HTTPReceiptFixtureError.inferenceFailed },
         testCompletion: { _, _ in
             if let completionError {
@@ -521,7 +673,8 @@ private func roundTripChatCompletion(
         providerStatus: status,
         providerID: providerID,
         routerModelID: routerModelID,
-        receiptBuilder: receiptBuilder
+        receiptBuilder: receiptBuilder,
+        warmSwapEnabled: warmSwapEnabled
     ) { port in
         try rawChatCompletionRoundTrip(port: port, body: body, headerOnly: body["stream"] as? Bool == true, requestID: requestID)
     }
@@ -533,6 +686,7 @@ private func withReceiptHTTPServer<T>(
     providerID: String?,
     routerModelID: String? = "fixture-model",
     receiptBuilder: ReceiptBuilder?,
+    warmSwapEnabled: Bool = false,
     operation: (Int) throws -> T
 ) async throws -> T {
     let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
@@ -547,7 +701,7 @@ private func withReceiptHTTPServer<T>(
                     coordinatorURL: nil,
                     modelRuntime: runtime,
                     providerStatus: providerStatus,
-                    warmSwapEnabled: false,
+                    warmSwapEnabled: warmSwapEnabled,
                     maxBodyBytes: 1_000_000,
                     receiptBuilder: receiptBuilder
                 ))

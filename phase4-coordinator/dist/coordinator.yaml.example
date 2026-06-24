@@ -95,6 +95,19 @@ logging:
   level: "info"
   format: "json"
 
+tier2:
+  # SPEC-008 catalog-based hash verification. Operator-controlled,
+  # observation-only by default per beta/DECISION_CRITERIA Entry 80.
+  # Uncomment + populate to enable.
+  #   catalog_path: "/etc/macprovider/catalog.signed.json"
+  #   catalog_public_key: "<43-char base64url-unpadded ed25519 pubkey>"
+  #   require_hash_verified: false
+  #
+  # SPEC-015 v0.3 §M.4 — public absolute base URL the coordinator
+  # advertises as `catalog_url` / `catalog_pubkey_url` in /poolz.
+  # When empty, /poolz falls back to scheme + request Host. For Pearl:
+  public_catalog_base_url: "https://coordinator.streamvc.live"
+
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that
 # may connect MUST be listed here). Edit this list locally — DO NOT
 # add providers by SSHing to the VPS and appending to /opt/macprovider/

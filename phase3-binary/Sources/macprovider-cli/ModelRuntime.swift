@@ -6,6 +6,13 @@ import MacProviderCore
 
 protocol ModelRuntimeServing: Actor {
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult
+    /// SPEC-015 §M.2 — return the runtime-owned snapshot that
+    /// actually drove inference (validation, in-flight registration,
+    /// generation) so the receipt can bind `model_hash` to the
+    /// container that served. Atomically captured inside the actor
+    /// turn — distinct from a caller-side `currentSnapshot()` sample,
+    /// which can drift across an actor interleaving / warm-swap.
+    func completeWithServedSnapshot(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> (CompletionResult, RuntimeSnapshot)
     func stream(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (String) -> Void) async throws -> CompletionResult
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
@@ -22,6 +29,21 @@ extension ModelRuntimeServing {
         try await complete(request, shouldCancel: { false })
     }
 
+    /// Convenience default — conformers that don't override get the
+    /// served snapshot from `currentSnapshot()` AFTER generation. The
+    /// real `ModelRuntime` overrides this to capture the snapshot
+    /// inside the actor turn that started inference, which is the
+    /// SPEC-015 §M.2.2 atomic-read invariant. Mock/stub runtimes used
+    /// in tests can rely on this default safely because they don't
+    /// model swaps.
+    func completeWithServedSnapshot(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        let result = try await complete(request, shouldCancel: shouldCancel)
+        let snapshot = await currentSnapshot()
+        return (result, snapshot)
+    }
 }
 
 public struct RuntimeSnapshot: @unchecked Sendable {
@@ -359,6 +381,20 @@ actor ModelRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> CompletionResult {
+        let (result, _) = try await completeWithServedSnapshot(request, shouldCancel: shouldCancel)
+        return result
+    }
+
+    /// SPEC-015 §M.2.2 — atomic snapshot capture inside the actor
+    /// turn that started inference. The returned snapshot IS the
+    /// container that served the response (in-flight tracking pins
+    /// it for the request lifetime per SPEC-011 R-3.4.1). Callers
+    /// MUST bind the receipt's `model_hash` to this snapshot, NOT to
+    /// a separately-sampled `currentSnapshot()`.
+    func completeWithServedSnapshot(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
         let completionStartedAt = Date()
         let snapshot = await currentSnapshot()
         try Self.validateReady(snapshot.state)
@@ -367,9 +403,10 @@ actor ModelRuntime: ModelRuntimeServing {
         let registrationID = registerInFlight { drainCancelled.fire() }
         defer { unregisterInFlight(registrationID) }
         if let testCompletion {
-            return try await Self.withDrainCancellation(drainCancelled) {
+            let result = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
             }
+            return (result, snapshot)
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -379,7 +416,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let kvBitsOverride = kvBitsOverride
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
-        return try await Self.withDrainCancellation(drainCancelled) {
+        let completion = try await Self.withDrainCancellation(drainCancelled) {
             try await inferenceGate.withPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
@@ -432,6 +469,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 }
             }
         }
+        return (completion, snapshot)
     }
 
     func stream(

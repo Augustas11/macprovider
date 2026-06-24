@@ -21,6 +21,13 @@ type jsonResult struct {
 	SignedAt        *int64        `json:"signed_at"`
 	TrustSource     string        `json:"trust_source"`
 	CoordinatorHost *string       `json:"coordinator_host"`
+	// SPEC-015 v0.3 §M.3.2.1 — REQUIRED tri-state. true / false /
+	// null. Always present in v0.3 verifier output (even for
+	// legacy v0.1/v0.2 receipts, where the value is null).
+	ModelHashVerified *bool `json:"model_hash_verified"`
+	// SPEC-015 v0.3 §M.0 — receipt_version diagnostic; "1" for
+	// legacy receipts, "3" for v0.3 receipts.
+	ReceiptVersion  string        `json:"receipt_version,omitempty"`
 	Details         *jsonDetails  `json:"details,omitempty"`
 	Warnings        []jsonWarning `json:"warnings,omitempty"`
 }
@@ -28,8 +35,19 @@ type jsonResult struct {
 type jsonDetails struct {
 	Field    string         `json:"field"`
 	Computed *string        `json:"computed,omitempty"`
-	Receipt  string         `json:"receipt"`
+	Receipt  string         `json:"receipt,omitempty"`
 	Extra    map[string]any `json:"extra,omitempty"`
+	// SPEC-015 v0.3 §M.3.2.1 — named top-level details fields.
+	Expected       string `json:"expected,omitempty"`
+	Actual         string `json:"actual,omitempty"`
+	PolicyFlag     string `json:"policy_flag,omitempty"`
+	ModelID        string `json:"model_id,omitempty"`
+	CatalogID      string `json:"catalog_id,omitempty"`
+	ExpiresAt      string `json:"expires_at,omitempty"`
+	ReceiptVersion string `json:"receipt_version,omitempty"`
+	Cause          string `json:"cause,omitempty"`
+	URL            string `json:"url,omitempty"`
+	Alg            string `json:"alg,omitempty"`
 }
 
 type jsonWarning struct {
@@ -39,15 +57,20 @@ type jsonWarning struct {
 
 func renderJSON(result verify.Result) ([]byte, error) {
 	payload := jsonResult{
-		Result:          result.Result,
-		Reason:          result.Reason,
-		ProviderID:      stringOrNull(result.ProviderID),
-		ModelID:         stringOrNull(result.ModelID),
-		SignedAt:        int64OrNull(result.SignedAt),
-		TrustSource:     result.TrustSource,
-		CoordinatorHost: coordinatorHostOrNull(result),
+		Result:            result.Result,
+		Reason:            result.Reason,
+		ProviderID:        stringOrNull(result.ProviderID),
+		ModelID:           stringOrNull(result.ModelID),
+		SignedAt:          int64OrNull(result.SignedAt),
+		TrustSource:       result.TrustSource,
+		CoordinatorHost:   coordinatorHostOrNull(result),
+		ModelHashVerified: result.ModelHashVerified,
+		ReceiptVersion:    result.ReceiptVersion,
 	}
-	if result.Result == "invalid" && result.Details != nil {
+	// SPEC-015 v0.3 §M.3.2.1 — Details required for v0.3-named
+	// inconclusive cases (model_id_not_in_catalog, catalog_expired,
+	// unknown_receipt_version), in addition to v0.2's invalid path.
+	if result.Details != nil && (result.Result == "invalid" || result.Result == "inconclusive") {
 		payload.Details = renderJSONDetails(result.Details)
 	}
 	if len(result.Warnings) > 0 {
@@ -68,11 +91,23 @@ func renderJSON(result verify.Result) ([]byte, error) {
 
 func renderJSONDetails(details *verify.Details) *jsonDetails {
 	out := &jsonDetails{
-		Field:   details.Field,
-		Receipt: details.Receipt,
-		Extra:   details.Extra,
+		Field:          details.Field,
+		Receipt:        details.Receipt,
+		Extra:          details.Extra,
+		Expected:       details.Expected,
+		Actual:         details.Actual,
+		PolicyFlag:     details.PolicyFlag,
+		ModelID:        details.ModelID,
+		CatalogID:      details.CatalogID,
+		ExpiresAt:      details.ExpiresAt,
+		ReceiptVersion: details.ReceiptVersion,
+		Cause:          details.Cause,
+		URL:            details.URL,
+		Alg:            details.Alg,
 	}
-	if details.Field != "signature" {
+	// v0.2 invariant: emit "computed" for hash-field invalids only.
+	switch details.Field {
+	case "prompt_hash", "output_hash", "pubkey", "grace_window":
 		out.Computed = &details.Computed
 	}
 	return out
