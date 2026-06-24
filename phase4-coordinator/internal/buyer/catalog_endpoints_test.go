@@ -164,7 +164,73 @@ func TestCatalogEndpointRateLimited(t *testing.T) {
 	}
 }
 
+// SPEC-015 v0.3 bundle audit round 1 SECURITY HIGH-1 fix:
+// catalog endpoints sit behind nginx on loopback (see
+// phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf), so
+// every public buyer's r.RemoteAddr is 127.0.0.1. Keying the bucket
+// solely off RemoteAddr collapses every public buyer into one shared
+// pool and lets a single caller starve everyone else. The fix to
+// poolCheckClientKey honors X-Real-IP only when r.RemoteAddr is a
+// loopback address (so an open-internet attacker can't spoof). This
+// test asserts two different X-Real-IP values behind 127.0.0.1 get
+// independent buckets, while a direct caller cannot use X-Real-IP to
+// escape its own bucket.
+func TestCatalogEndpointRateLimitedPerXRealIPBehindLoopback(t *testing.T) {
+	defer tier2.ResetForTest()
+	raw, pubkey := buyerCatalogFixture(t, "test-catalog", time.Now().UTC().Add(time.Hour))
+	path := writeBuyerCatalog(t, raw)
+	cfg := config.Tier2Config{CatalogPath: path, CatalogPublicKey: pubkey}
+	if err := tier2.Configure(cfg, zerolog.Nop()); err != nil {
+		t.Fatalf("tier2.Configure: %v", err)
+	}
+	server := NewServer(pool.NewRegistry(nil), zerolog.Nop(), time.Unix(1716768000, 0))
+	server.SetTier2Config(cfg)
+	now := time.Date(2026, 6, 24, 12, 0, 0, 0, time.UTC)
+	server.now = func() time.Time { return now }
+
+	// Buyer A (X-Real-IP=198.51.100.1) burns the burst.
+	for i := 1; i <= 10; i++ {
+		rr := serveCatalogPubkeyWithRealIP(server, "127.0.0.1:65431", "198.51.100.1")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("A request %d status = %d want 200 body=%s", i, rr.Code, rr.Body.String())
+		}
+	}
+	// Buyer A's 11th request returns 429 — its own bucket is empty.
+	if rr := serveCatalogPubkeyWithRealIP(server, "127.0.0.1:65431", "198.51.100.1"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("A request 11 status = %d want 429", rr.Code)
+	}
+	// Buyer B (X-Real-IP=198.51.100.2) behind the SAME loopback gets a
+	// fresh bucket — this is what the fix protects.
+	if rr := serveCatalogPubkeyWithRealIP(server, "127.0.0.1:65432", "198.51.100.2"); rr.Code != http.StatusOK {
+		t.Fatalf("B request 1 status = %d want 200 — bucket leaked across X-Real-IP", rr.Code)
+	}
+	// Direct non-loopback caller MUST NOT escape its bucket by
+	// spoofing X-Real-IP — header is only honored when RemoteAddr is
+	// loopback. Different X-Real-IP values from the same direct
+	// remote share the same bucket.
+	for i := 1; i <= 10; i++ {
+		rr := serveCatalogPubkeyWithRealIP(server, "203.0.113.5:50000", "decoy-1")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("direct burst %d status = %d want 200", i, rr.Code)
+		}
+	}
+	if rr := serveCatalogPubkeyWithRealIP(server, "203.0.113.5:50001", "decoy-2"); rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("direct spoof status = %d want 429 — X-Real-IP was honored for non-loopback caller", rr.Code)
+	}
+}
+
 // helpers
+
+func serveCatalogPubkeyWithRealIP(server *Server, remoteAddr, realIP string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/catalog/pubkey", nil)
+	req.RemoteAddr = remoteAddr
+	if realIP != "" {
+		req.Header.Set("X-Real-IP", realIP)
+	}
+	rr := httptest.NewRecorder()
+	server.Handler().ServeHTTP(rr, req)
+	return rr
+}
 
 func serveCatalogFile(server *Server, catalogID, remoteAddr string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/catalog/"+catalogID, nil)

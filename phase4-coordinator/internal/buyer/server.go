@@ -899,12 +899,42 @@ func (s *Server) evictReceiptKeyEntries(now time.Time) {
 	}
 }
 
+// poolCheckClientKey returns the per-source key used for the
+// /poolz, /v1/receipt-keys/*, and /catalog/* rate-limit buckets.
+//
+// Production sits behind nginx on loopback (see
+// phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf) so
+// every public buyer's r.RemoteAddr is 127.0.0.1 — keying on that
+// alone collapses every public buyer into one shared bucket and lets
+// any single caller starve the rate-limit pool for everyone else.
+//
+// Mirrors ws.remoteIPForUnauthSemaphore: when r.RemoteAddr is a
+// loopback address, honor X-Real-IP (which the on-host nginx site
+// sets). Direct, non-loopback hits (no proxy in front) use
+// r.RemoteAddr unchanged so an attacker on the open internet cannot
+// spoof their bucket key.
 func poolCheckClientKey(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil || host == "" {
+		host = r.RemoteAddr
+	}
+	if isLoopbackHost(host) {
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+			return realIP
+		}
+	}
+	if host == "" {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+func isLoopbackHost(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 type modelsResponse struct {
