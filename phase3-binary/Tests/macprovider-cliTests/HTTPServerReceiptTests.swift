@@ -50,6 +50,110 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertTrue(response.body.contains(#""content":"answer""#), response.body)
     }
 
+    func testHTTPNonStreamingHandlerEmitsOpenAIToolCallsShape() async throws {
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "What is the weather in Vilnius?"]],
+                "tools": [[
+                    "type": "function",
+                    "function": [
+                        "name": "get_weather",
+                        "description": "Get the current weather for a city",
+                        "parameters": [
+                            "type": "object",
+                            "properties": ["city": ["type": "string"]],
+                            "required": ["city"],
+                        ],
+                    ],
+                ]],
+            ],
+            receiptBuilder: nil,
+            completion: CompletionResult(
+                content: "",
+                finishReason: "tool_calls",
+                promptTokens: 10,
+                completionTokens: 4,
+                toolCalls: [ToolCall(id: "call_test", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)]
+            )
+        )
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any])
+        let choices = try XCTUnwrap(json["choices"] as? [[String: Any]])
+        let first = try XCTUnwrap(choices.first)
+        XCTAssertEqual(first["finish_reason"] as? String, "tool_calls")
+        let message = try XCTUnwrap(first["message"] as? [String: Any])
+        XCTAssertTrue(message["content"] is NSNull)
+        let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
+        let call = try XCTUnwrap(toolCalls.first)
+        XCTAssertEqual(call["id"] as? String, "call_test")
+        XCTAssertEqual(call["type"] as? String, "function")
+        let function = try XCTUnwrap(call["function"] as? [String: Any])
+        XCTAssertEqual(function["name"] as? String, "get_weather")
+        let arguments = try XCTUnwrap(function["arguments"] as? String)
+        let argumentObject = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: Any])
+        XCTAssertEqual(argumentObject["city"] as? String, "Vilnius")
+    }
+
+    func testHTTPRejectsUnsupportedToolChoiceForV1Slice() async throws {
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "What is the weather in Vilnius?"]],
+                "tools": [[
+                    "type": "function",
+                    "function": [
+                        "name": "get_weather",
+                        "parameters": [
+                            "type": "object",
+                            "properties": ["city": ["type": "string"]],
+                        ],
+                    ],
+                ]],
+                "tool_choice": "none",
+            ],
+            receiptBuilder: nil,
+            completion: CompletionResult(content: "should-not-run", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+        )
+
+        XCTAssertEqual(response.status, .badRequest, response.body)
+        XCTAssertTrue(response.body.contains(#""code":"unsupported_tool_choice""#), response.body)
+    }
+
+    func testHTTPRejectsMultiTurnToolMessagesForV1Slice() async throws {
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [
+                    ["role": "user", "content": "What is the weather in Vilnius?"],
+                    [
+                        "role": "assistant",
+                        "content": NSNull(),
+                        "tool_calls": [[
+                            "id": "call_test",
+                            "type": "function",
+                            "function": [
+                                "name": "get_weather",
+                                "arguments": #"{"city":"Vilnius"}"#,
+                            ],
+                        ]],
+                    ],
+                    [
+                        "role": "tool",
+                        "tool_call_id": "call_test",
+                        "content": #"{"temperature_c":21}"#,
+                    ],
+                ],
+            ],
+            receiptBuilder: nil,
+            completion: CompletionResult(content: "should-not-run", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+        )
+
+        XCTAssertEqual(response.status, .badRequest, response.body)
+        XCTAssertTrue(response.body.contains(#""code":"unsupported_tool_messages""#), response.body)
+    }
+
     func testHTTPGenericInferenceFailureGetsNullUsageReceipt() async throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
         let response = try await roundTripChatCompletion(

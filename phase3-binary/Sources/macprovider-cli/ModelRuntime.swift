@@ -350,6 +350,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
+        try Self.validateToolCallingV1Scope(request)
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
         return RequestHandle(
@@ -370,7 +371,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         try await inferenceGate.withPermit {
             return try await container.perform { context in
-                let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+                let input = UserInput(chat: request.messages.map { $0.mlxMessage }, tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
@@ -399,6 +400,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let snapshot = await currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
+        try Self.validateToolCallingV1Scope(request)
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
         defer { unregisterInFlight(registrationID) }
@@ -423,7 +425,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+                    let input = UserInput(chat: request.messages.map { $0.mlxMessage }, tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
@@ -452,19 +454,23 @@ actor ModelRuntime: ModelRuntimeServing {
                         requestStops: request.stop
                     )
 
+                    let parsed = Self.parseToolCallsIfRequested(filtered.text, request: request)
                     let finishReason: String
-                    if let maxTokens = request.maxTokens, result.generationTokenCount >= maxTokens, !filtered.hitStop {
+                    if !parsed.toolCalls.isEmpty {
+                        finishReason = "tool_calls"
+                    } else if let maxTokens = request.maxTokens, result.generationTokenCount >= maxTokens, !filtered.hitStop {
                         finishReason = "length"
                     } else {
                         finishReason = "stop"
                     }
 
                     return CompletionResult(
-                        content: filtered.text,
+                        content: parsed.content,
                         finishReason: finishReason,
                         promptTokens: result.promptTokenCount,
                         completionTokens: result.generationTokenCount,
-                        ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt)
+                        ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
+                        toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls
                     )
                 }
             }
@@ -504,7 +510,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = UserInput(chat: request.messages.map { $0.mlxMessage })
+                    let input = UserInput(chat: request.messages.map { $0.mlxMessage }, tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
@@ -518,9 +524,23 @@ actor ModelRuntime: ModelRuntimeServing {
                     var emittedText = ""
                     var stoppedByRequestStop = false
 
+                    let bufferForToolParsing = Self.hasEnabledTools(request.promptSource.tools)
                     let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
                         if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
                             return .stop
+                        }
+                        if bufferForToolParsing {
+                            let decoded = context.tokenizer.decode(tokens: tokens)
+                            let candidate = Self.streamingSafePrefix(
+                                decoded,
+                                stopTokenFilter: stopTokenFilter,
+                                requestStops: request.stop
+                            )
+                            if candidate.hitStop {
+                                stoppedByRequestStop = true
+                                return .stop
+                            }
+                            return .more
                         }
                         let decoded = context.tokenizer.decode(tokens: tokens)
                         let candidate = Self.streamingSafePrefix(
@@ -550,12 +570,17 @@ actor ModelRuntime: ModelRuntimeServing {
                         requestStops: request.stop
                     )
                     let finalDelta = Self.delta(from: emittedText, to: final.text)
-                    if !finalDelta.isEmpty {
+                    let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
+                    if bufferForToolParsing, parsed.toolCalls.isEmpty, !parsed.content.isEmpty {
+                        onChunk(parsed.content)
+                    } else if !bufferForToolParsing, !finalDelta.isEmpty {
                         onChunk(finalDelta)
                     }
 
                     let finishReason: String
-                    if let maxTokens = request.maxTokens,
+                    if !parsed.toolCalls.isEmpty {
+                        finishReason = "tool_calls"
+                    } else if let maxTokens = request.maxTokens,
                        result.generationTokenCount >= maxTokens,
                        !stoppedByRequestStop,
                        !final.hitStop
@@ -566,10 +591,11 @@ actor ModelRuntime: ModelRuntimeServing {
                     }
 
                     return CompletionResult(
-                        content: final.text,
+                        content: parsed.content,
                         finishReason: finishReason,
                         promptTokens: result.promptTokenCount,
-                        completionTokens: result.generationTokenCount
+                        completionTokens: result.generationTokenCount,
+                        toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls
                     )
                 }
             }
@@ -796,6 +822,133 @@ actor ModelRuntime: ModelRuntimeServing {
         guard current.hasPrefix(emitted) else { return "" }
         return String(current.dropFirst(emitted.count))
     }
+
+    private static func parseToolCallsIfRequested(_ text: String, request: ChatCompletionRequest) -> (content: String, toolCalls: [ToolCall]) {
+        guard let allowedFunctionNames = toolFunctionNames(from: request.promptSource.tools) else {
+            return (text, [])
+        }
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: text,
+            modelID: request.model,
+            allowedFunctionNames: allowedFunctionNames
+        )
+        guard !parsed.toolCalls.isEmpty else {
+            return (text, [])
+        }
+        return ("", parsed.toolCalls)
+    }
+
+    static func mlxToolsForTemplate(from value: MacProviderCore.JSONValue?) -> [[String: Any]]? {
+        guard let value, case .array(let tools) = value, !tools.isEmpty else {
+            return nil
+        }
+        let converted = tools.compactMap { tool -> [String: Any]? in
+            guard case .object(let object) = tool,
+                  case .object(let functionObject)? = object["function"],
+                  case .string(let name)? = functionObject["name"],
+                  let parameters = functionObject["parameters"]
+            else {
+                return nil
+            }
+            return [
+                "type": "function",
+                "function": [
+                    "name": name,
+                    "description": functionObject["description"].map(jsonAny) ?? NSNull(),
+                    "parameters": jsonAny(parameters),
+                ],
+            ]
+        }
+        return converted.isEmpty ? nil : converted
+    }
+
+    private static func hasEnabledTools(_ value: MacProviderCore.JSONValue?) -> Bool {
+        toolFunctionNames(from: value) != nil
+    }
+
+    private static func toolFunctionNames(from value: MacProviderCore.JSONValue?) -> Set<String>? {
+        guard let value, case .array(let tools) = value, !tools.isEmpty else {
+            return nil
+        }
+        let names = tools.compactMap { tool -> String? in
+            guard case .object(let toolObject) = tool,
+                  case .object(let functionObject)? = toolObject["function"],
+                  case .string(let name)? = functionObject["name"],
+                  !name.isEmpty
+            else {
+                return nil
+            }
+            return name
+        }
+        return names.isEmpty ? nil : Set(names)
+    }
+
+    private static func jsonObject(_ object: [String: MacProviderCore.JSONValue]) -> [String: Any] {
+        object.mapValues(jsonAny)
+    }
+
+    private static func jsonAny(_ value: MacProviderCore.JSONValue) -> Any {
+        switch value {
+        case .object(let object):
+            return jsonObject(object)
+        case .array(let array):
+            return array.map(jsonAny)
+        case .string(let string):
+            return string
+        case .int(let int):
+            return int
+        case .double(let double):
+            return double
+        case .bool(let bool):
+            return bool
+        case .null:
+            return NSNull()
+        }
+    }
+
+    private static func validateToolCallingV1Scope(_ request: ChatCompletionRequest) throws {
+        if let toolChoice = request.promptSource.toolChoice,
+           !isSupportedToolChoice(toolChoice)
+        {
+            throw APIError(
+                status: 400,
+                message: "tool_choice values other than auto are not supported by this provider",
+                code: "unsupported_tool_choice"
+            )
+        }
+
+        for (index, message) in request.promptSource.messages.enumerated() {
+            guard case .object(let object) = message else {
+                continue
+            }
+            if case .string("tool")? = object["role"] {
+                throw APIError(
+                    status: 400,
+                    message: "tool role messages are not supported by this provider",
+                    code: "unsupported_tool_messages"
+                )
+            }
+            if let toolCalls = object["tool_calls"], toolCalls != .null {
+                throw APIError(
+                    status: 400,
+                    message: "assistant tool_calls in messages are not supported by this provider",
+                    code: "unsupported_tool_messages",
+                    param: "messages[\(index)].tool_calls"
+                )
+            }
+        }
+    }
+
+    private static func isSupportedToolChoice(_ value: MacProviderCore.JSONValue) -> Bool {
+        switch value {
+        case .string(let choice):
+            return choice == "auto"
+        case .null:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 final class DrainCancelToken: @unchecked Sendable {
@@ -870,19 +1023,22 @@ struct CompletionResult: Sendable {
     let promptTokens: Int
     let completionTokens: Int
     let ttftMilliseconds: Int64?
+    let toolCalls: [ToolCall]?
 
     init(
         content: String,
         finishReason: String,
         promptTokens: Int,
         completionTokens: Int,
-        ttftMilliseconds: Int64? = nil
+        ttftMilliseconds: Int64? = nil,
+        toolCalls: [ToolCall]? = nil
     ) {
         self.content = content
         self.finishReason = finishReason
         self.promptTokens = promptTokens
         self.completionTokens = completionTokens
         self.ttftMilliseconds = ttftMilliseconds
+        self.toolCalls = toolCalls
     }
 }
 

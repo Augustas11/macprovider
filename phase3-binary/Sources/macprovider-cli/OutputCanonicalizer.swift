@@ -13,6 +13,31 @@ struct ToolCall: Equatable, Sendable {
     }
 }
 
+extension ToolCall {
+    var openAIObject: [String: Any] {
+        [
+            "id": id,
+            "type": "function",
+            "function": [
+                "name": functionName,
+                "arguments": arguments,
+            ],
+        ]
+    }
+
+    func openAIDelta(index: Int) -> [String: Any] {
+        [
+            "index": index,
+            "id": id,
+            "type": "function",
+            "function": [
+                "name": functionName,
+                "arguments": arguments,
+            ],
+        ]
+    }
+}
+
 enum OutputCanonicalizer {
     static let allowedFinishReasons: Set<String> = [
         "stop",

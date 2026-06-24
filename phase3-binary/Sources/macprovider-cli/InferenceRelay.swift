@@ -366,7 +366,7 @@ actor InferenceRelay {
                     modelId: request.model,
                     request: request,
                     outputContent: completion.content,
-                    outputToolCalls: nil,
+                    outputToolCalls: completion.toolCalls,
                     finishReason: completion.finishReason,
                     ttftMs: ttftMs,
                     tokensOut: Int64(completion.completionTokens),
@@ -447,6 +447,16 @@ actor InferenceRelay {
                     ], requestID: requestID, stream: true, tier2Session: tier2Session, sendFrame: sendFrame)
                 }
                 return completion
+            }
+
+            if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
+                _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+                    id: id,
+                    created: created,
+                    model: request.model,
+                    delta: ["tool_calls": toolCallDeltas(toolCalls)],
+                    finishReason: NSNull()
+                )))
             }
 
             _ = buffer.enqueue(sseEvent(chatCompletionChunk(
@@ -563,10 +573,7 @@ actor InferenceRelay {
             "choices": [
                 [
                     "index": 0,
-                    "message": [
-                        "role": "assistant",
-                        "content": completion.content,
-                    ],
+                    "message": chatCompletionMessage(completion),
                     "finish_reason": completion.finishReason,
                 ]
             ],
@@ -594,6 +601,24 @@ actor InferenceRelay {
                 ]
             ],
         ]
+    }
+
+    private static func chatCompletionMessage(_ completion: CompletionResult) -> [String: Any] {
+        let toolCalls = completion.toolCalls?.isEmpty == false ? completion.toolCalls : nil
+        var message: [String: Any] = [
+            "role": "assistant",
+            "content": toolCalls == nil ? completion.content : NSNull(),
+        ]
+        if let toolCalls {
+            message["tool_calls"] = toolCalls.map(\.openAIObject)
+        }
+        return message
+    }
+
+    private static func toolCallDeltas(_ toolCalls: [ToolCall]) -> [[String: Any]] {
+        toolCalls.enumerated().map { index, call in
+            call.openAIDelta(index: index)
+        }
     }
 
     private static func usage(_ completion: CompletionResult) -> [String: Any] {
