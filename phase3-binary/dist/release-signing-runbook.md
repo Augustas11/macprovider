@@ -5,6 +5,14 @@ The release workflow (`.github/workflows/release.yml`) signs the
 notarizes via `xcrun notarytool` so freshly-installed binaries pass
 macOS 26.3.1+ launchd's tightened AMFI policy.
 
+The current release artifact is a `.tar.gz` containing a standalone
+Mach-O executable. Apple notarization accepts the executable when it is
+submitted inside a transient zip, but `xcrun stapler` cannot attach a
+notarization ticket directly to that raw executable format. For this
+artifact shape, the release gate is `notarytool submit --wait` returning
+`Accepted`. If releases move to a `.pkg`, `.dmg`, or `.app` bundle, add
+stapling for that container.
+
 The signing step is **conditional on operator-supplied secrets**. If
 `APPLE_DEVELOPER_ID_CERT_P12_BASE64` is empty, the step emits a
 GitHub Actions warning and ships an adhoc-signed binary (current
@@ -99,9 +107,8 @@ on top of the existing ~5-10 minute build. The step:
 1. Imports the `.p12` into a transient keychain
 2. Codesigns the binary with `--options runtime --timestamp`
 3. Notarizes via `xcrun notarytool submit --wait`
-4. Staples the notarization ticket to the binary
-5. Re-tars with the signed binary
-6. Deletes the transient keychain
+4. Re-tars with the signed, notarization-accepted binary
+5. Deletes the transient keychain
 
 Verify on a macOS 26.3.1+ Mac:
 
@@ -120,16 +127,17 @@ log show --last 1m | grep -iE "macprovider|AMFI"
 
 Common follow-up issues:
 
-- **"the certificate could not be validated"** — notarization succeeded
-  but staple failed. The binary is online-verifiable but launchd's
-  offline-only check rejects it. Re-run `xcrun stapler staple` locally
-  and republish the tarball.
+- **`xcrun stapler` exits with Error 73** — expected if someone tries
+  to staple `macprovider-cli` directly. Raw standalone executables are
+  not a supported stapler target. Use a signed `.pkg`, `.dmg`, or
+  executable bundle if offline stapling becomes required.
 - **"Notarization request was not found"** — `notarytool submit` was
-  invoked without `--wait` (or it timed out), so the ticket never
-  attached. Re-trigger the workflow.
+  invoked without `--wait` (or it timed out), so notarization was not
+  accepted before packaging. Re-trigger the workflow.
 - **"developer cannot be verified"** — Gatekeeper, not AMFI. Clears
   with `xattr -d com.apple.quarantine <binary>` or accepting the
-  Gatekeeper prompt once. Should not happen for stapled binaries.
+  Gatekeeper prompt once. Should not happen for signed and accepted
+  notarized binaries under normal online verification.
 
 ## Cost summary
 

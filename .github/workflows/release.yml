@@ -69,13 +69,16 @@ jobs:
       # macprovider-launchd-amfi-blocker-macos-26 for the full discovery
       # writeup (2026-06-12 session).
       #
-      # The fix: codesign the binary with a Developer ID Application cert,
-      # notarize via xcrun notarytool, and staple. Once the operator has an
-      # Apple Developer Program membership and populates the required secrets,
-      # this step activates automatically. Until then it is a documented
-      # no-op so the workflow still produces a release (operator can install
-      # under earlier macOS or run the binary outside launchd while the
-      # signing pipeline is being set up).
+      # The fix: codesign the binary with a Developer ID Application cert
+      # and notarize via xcrun notarytool. The current release artifact is a
+      # tarball containing a standalone Mach-O executable; Apple's stapler
+      # cannot attach a ticket to that raw file format. If the release format
+      # changes to a signed pkg, dmg, or app bundle, add stapling for that
+      # container. Once the operator has an Apple Developer Program membership
+      # and populates the required secrets, this step activates automatically.
+      # Until then it is a documented no-op so the workflow still produces a
+      # release (operator can install under earlier macOS or run the binary
+      # outside launchd while the signing pipeline is being set up).
       - name: Sign + notarize binary (conditional on operator secrets)
         shell: bash
         env:
@@ -160,10 +163,12 @@ jobs:
           codesign --verify --strict --verbose=2 "$WORK/macprovider-cli"
 
           # Step 3: notarize. notarytool needs a zip or dmg, not a raw
-          # binary — wrap the binary in a transient zip for submission
-          # only. The tarball is what we ship; we staple the binary
-          # itself before re-tarring (--wait blocks until notarization
-          # completes, typically 1-15 minutes).
+          # binary, so wrap the binary in a transient zip for submission
+          # only. The tarball is what we ship. Apple's stapler cannot
+          # attach a ticket to a standalone executable, so Accepted
+          # notarization is the release gate for this artifact format
+          # (--wait blocks until notarization completes, typically 1-15
+          # minutes).
           NOTARIZE_ZIP=$(mktemp -u).zip
           (cd "$WORK" && /usr/bin/ditto -c -k --keepParent macprovider-cli "$NOTARIZE_ZIP")
 
@@ -174,15 +179,7 @@ jobs:
             --wait
           rm -f "$NOTARIZE_ZIP"
 
-          # Step 4: staple. Without stapling, first launch needs a
-          # network round-trip to Apple's notary servers — bad UX for
-          # curl|bash install flows on machines that have just come
-          # online. With stapling, the notarization ticket is embedded
-          # in the binary and verified offline.
-          xcrun stapler staple "$WORK/macprovider-cli"
-          xcrun stapler validate "$WORK/macprovider-cli"
-
-          # Step 5: re-tar with the signed + notarized + stapled binary.
+          # Step 4: re-tar with the signed + notarized binary.
           # Preserve the same internal layout package.sh produced; the
           # only difference vs the input tarball is that
           # ./macprovider-cli now carries a real signature chain.
@@ -194,7 +191,8 @@ jobs:
           rm -rf "$WORK"
 
           echo "  binary signed by: $SIGNING_ID"
-          echo "  notarization: stapled"
+          echo "  notarization: accepted"
+          echo "  stapling: skipped for standalone executable tarball"
 
       - name: Tier-2 provider artifact preflight
         shell: bash
