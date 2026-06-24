@@ -74,7 +74,11 @@ func TestMain(m *testing.M) {
 	defer os.RemoveAll(tmp)
 
 	verifyBin = filepath.Join(tmp, "macprovider-verify")
-	cmd := exec.Command("go", "build", "-o", verifyBin, "./cmd/macprovider-verify")
+	// `-tags=testclock` enables the MACPROVIDER_VERIFY_NOW_UNIX hook in
+	// internal/cli (clock_testclock.go), letting tests pin "now" against
+	// the frozen receipt fixtures so clock_skew doesn't fire as fixtures
+	// age past 24h. Production builds (no tag) ignore the env var.
+	cmd := exec.Command("go", "build", "-tags=testclock", "-o", verifyBin, "./cmd/macprovider-verify")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		fmt.Fprintf(os.Stderr, "go build ./cmd/macprovider-verify: %v\n%s", err, out)
@@ -153,7 +157,13 @@ func TestReceiptBundleFixturesEndToEnd(t *testing.T) {
 			cacheDir := t.TempDir()
 			coordinatorHost := serverHost(t, server.URL)
 			if tt.seedStale {
-				writeCacheLine(t, cacheDir, coordinatorHost, fixtureProvider, current, time.Now().UTC().Add(-8*24*time.Hour), nil)
+				// FetchedAt must be stale RELATIVE to the verifier's
+				// pinned "now" (validFreshUnixTS+60), not real time.Now.
+				// hasStaleCacheEntry compares against opts.Now, so a
+				// real-clock offset that looks 8d old to wall time can
+				// look <7d old (within TTL) to the pinned verifier.
+				pinnedNow := time.Unix(validFreshUnixTS+60, 0).UTC()
+				writeCacheLine(t, cacheDir, coordinatorHost, fixtureProvider, current, pinnedNow.Add(-8*24*time.Hour), nil)
 			}
 
 			stdout, stderr, code := runVerify(t, filepath.Join("testdata", tt.file), server.URL, cacheDir, certFile)
@@ -334,6 +344,12 @@ func runVerifyArgs(t *testing.T, args []string, cacheDir, certFile string) ([]by
 	cmd.Env = append(os.Environ(),
 		"MACPROVIDER_CACHE_DIR="+cacheDir,
 		"MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR=1",
+		// Pin "now" to just after the fixture's unix_ts (see
+		// TestMain's `-tags=testclock` build) so receipts aging
+		// past clockSkewThreshold (24h) don't add a clock_skew
+		// warning the test wasn't expecting. Honored only because
+		// the binary was built with the testclock tag.
+		fmt.Sprintf("MACPROVIDER_VERIFY_NOW_UNIX=%d", validFreshUnixTS+60),
 	)
 	if certFile != "" {
 		cmd.Env = append(cmd.Env,
