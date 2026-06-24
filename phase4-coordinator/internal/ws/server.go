@@ -2730,13 +2730,48 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 			ReceiptPubkeyPrev: receiptPubkeyPrev,
 		})
 	}
-	_ = json.NewEncoder(w).Encode(struct {
-		Pool    []poolzProvider `json:"pool"`
-		Summary any             `json:"summary"`
-	}{
-		Pool:    poolz,
-		Summary: summary,
-	})
+	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotation. The three
+	// `catalog_*` fields are present iff the catalog is effectively
+	// active: (a) Tier2Config.CatalogPath is configured, (b) the
+	// catalog parsed cleanly, (c) its signature verified. The
+	// `s.catalogRef().Active()` predicate captures all three.
+	type poolzResponse struct {
+		Pool             []poolzProvider `json:"pool"`
+		Summary          any             `json:"summary"`
+		CatalogID        *string         `json:"catalog_id,omitempty"`
+		CatalogURL       *string         `json:"catalog_url,omitempty"`
+		CatalogPubkeyURL *string         `json:"catalog_pubkey_url,omitempty"`
+	}
+	resp := poolzResponse{Pool: poolz, Summary: summary}
+	if s.catalogRef().Active() {
+		catalogID := s.catalogRef().CatalogID()
+		if catalogID != "" {
+			resp.CatalogID = &catalogID
+			base := strings.TrimSpace(cfg.PublicCatalogBaseURL)
+			if base == "" {
+				// Fallback: derive from the inbound request host so a
+				// verifier reading `/poolz` from the same coordinator
+				// can resolve the URLs even when the operator hasn't
+				// pinned a public base.
+				if r.Host != "" {
+					scheme := "https"
+					if r.TLS == nil {
+						scheme = "http"
+					}
+					base = scheme + "://" + r.Host
+				}
+			} else {
+				base = strings.TrimRight(base, "/")
+			}
+			if base != "" {
+				catalogURL := base + "/catalog/" + catalogID
+				pubkeyURL := base + "/catalog/pubkey"
+				resp.CatalogURL = &catalogURL
+				resp.CatalogPubkeyURL = &pubkeyURL
+			}
+		}
+	}
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func providerPublishedReady(p pool.Provider) bool {
