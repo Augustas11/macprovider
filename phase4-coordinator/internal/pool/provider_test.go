@@ -130,6 +130,11 @@ func TestProviderJSONSerializesNewFieldsWhenSet(t *testing.T) {
 	p.PublishesSupportedModels = true
 	p.LastLoadingState = true
 	p.LoadingStartedAt = time.Date(2026, 6, 7, 12, 4, 30, 0, time.UTC)
+	p.CanaryFailCount = 2
+	checkedAt := time.Date(2026, 6, 7, 12, 6, 0, 0, time.UTC)
+	failedAt := time.Date(2026, 6, 7, 12, 6, 0, 0, time.UTC)
+	p.CanaryLastCheckedAt = &checkedAt
+	p.CanaryLastFailedAt = &failedAt
 
 	got, err := json.Marshal(p)
 	if err != nil {
@@ -146,6 +151,15 @@ func TestProviderJSONSerializesNewFieldsWhenSet(t *testing.T) {
 	}
 	if fields["publishes_supported_models"] != true {
 		t.Fatalf("publishes_supported_models = %#v, want true", fields["publishes_supported_models"])
+	}
+	if fields["canary_fail_count"] != float64(2) {
+		t.Fatalf("canary_fail_count = %#v, want 2", fields["canary_fail_count"])
+	}
+	if fields["canary_last_checked_at"] != "2026-06-07T12:06:00Z" {
+		t.Fatalf("canary_last_checked_at = %#v", fields["canary_last_checked_at"])
+	}
+	if fields["canary_last_failed_at"] != "2026-06-07T12:06:00Z" {
+		t.Fatalf("canary_last_failed_at = %#v", fields["canary_last_failed_at"])
 	}
 	for _, key := range []string{
 		"last_loading_state",
@@ -184,7 +198,14 @@ func providerJSONL1Baseline() Provider {
 	}
 }
 
-func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
+// fix-pass-4 (PR #69): RoutingEligible is now exclusively about credential
+// trust + slot availability. HashStatus filtering moved to Tier-2-aware
+// buyer code (tier2ProviderExcludedStatus) so the operator-configurable
+// "ignore stale mismatches when hash enforcement is disabled" semantics
+// can be honored. The predicate must NOT exclude hash-mismatched providers
+// unconditionally — that would make a config-disabled inactive state
+// reject providers the operator chose to admit.
+func TestRoutingEligibleIgnoresHashStatus(t *testing.T) {
 	base := Provider{State: StateReady, SlotsFree: 1}
 	if !base.RoutingEligible() {
 		t.Fatal("zero hash status should preserve default routing eligibility")
@@ -194,13 +215,322 @@ func TestRoutingEligibleExcludesHashMismatchAndInvalid(t *testing.T) {
 	}
 	mismatch := base
 	mismatch.HashStatus = HashStatusMismatch
-	if mismatch.RoutingEligible() {
-		t.Fatal("hash_mismatch provider should not be routing eligible")
+	if !mismatch.RoutingEligible() {
+		t.Fatal("hash_mismatch must NOT be excluded by RoutingEligible — Tier-2 hash filtering is config-aware and lives elsewhere")
 	}
 	invalid := base
 	invalid.HashStatus = HashStatusInvalid
-	if invalid.RoutingEligible() {
-		t.Fatal("hash_invalid provider should not be routing eligible")
+	if !invalid.RoutingEligible() {
+		t.Fatal("hash_invalid must NOT be excluded by RoutingEligible — Tier-2 hash filtering is config-aware and lives elsewhere")
+	}
+	bearerless := base
+	bearerless.AuthState = AuthBearerlessDuplicate
+	if bearerless.RoutingEligible() {
+		t.Fatal("AuthBearerlessDuplicate MUST be excluded — SPEC-003 v0.8.3 FR-C9.4 credential trust gate")
+	}
+	pendingReceiptKey := base
+	pendingReceiptKey.PendingReceiptPubkey = []byte("pending")
+	if pendingReceiptKey.RoutingEligible() {
+		t.Fatal("pending receipt pubkey sessions must be excluded from routing until state_update publishes the key")
+	}
+}
+
+func TestRecordCanaryResultTripsProvisionalUnavailable(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:     "provisional-a",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           TierProvisional,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, nil)
+	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+
+	first := registry.RecordCanaryResult("provisional-a", "session-a", false, at, 3)
+	if !first.Current || first.Count != 1 || first.Tripped != CanaryTripNone {
+		t.Fatalf("first canary result = %+v", first)
+	}
+	second := registry.RecordCanaryResult("provisional-a", "session-a", false, at.Add(time.Minute), 3)
+	if !second.Current || second.Count != 2 || second.Tripped != CanaryTripNone {
+		t.Fatalf("second canary result = %+v", second)
+	}
+	third := registry.RecordCanaryResult("provisional-a", "session-a", false, at.Add(2*time.Minute), 3)
+	if !third.Current || third.Count != 3 || third.Tripped != CanaryTripUnavailable || third.Tier != TierProvisional {
+		t.Fatalf("third canary result = %+v", third)
+	}
+	got, ok := registry.Resolve("provisional-a", "session-a")
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	if got.State != StateUnavailable {
+		t.Fatalf("state = %q, want unavailable", got.State)
+	}
+	if got.CanaryFailCount != 3 {
+		t.Fatalf("canary fail count = %d, want 3", got.CanaryFailCount)
+	}
+}
+
+func TestRecordCanaryResultHoldsPinnedDegraded(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:     "pinned-a",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, nil)
+	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+
+	first := registry.RecordCanaryResult("pinned-a", "session-a", false, at, 2)
+	if first.Count != 1 || first.Tripped != CanaryTripNone {
+		t.Fatalf("first canary result = %+v", first)
+	}
+	second := registry.RecordCanaryResult("pinned-a", "session-a", false, at.Add(time.Minute), 2)
+	if second.Count != 2 || second.Tripped != CanaryTripDegraded || second.Tier != TierPinned {
+		t.Fatalf("second canary result = %+v", second)
+	}
+	if ok := registry.MarkState("pinned-a", "session-a", StateReady); ok {
+		t.Fatal("pinned canary hold should block coordinator ready promotion")
+	}
+	if _, _, ok := registry.ApplyHeartbeat("pinned-a", "session-a", HeartbeatUpdate{
+		Status:     StateReady,
+		ModelID:    "model-a",
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		At:         at.Add(2 * time.Minute),
+	}); !ok {
+		t.Fatal("heartbeat should still update telemetry while canary hold blocks ready promotion")
+	}
+	got, ok := registry.Resolve("pinned-a", "session-a")
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	if got.State != StateDegraded {
+		t.Fatalf("state = %q, want degraded", got.State)
+	}
+
+	replacement := &Provider{
+		ProviderID:     "pinned-a",
+		AssignedID:     "session-b",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(replacement, nil)
+	reconnected, ok := registry.Resolve("pinned-a", "session-b")
+	if !ok {
+		t.Fatal("reconnected provider not found")
+	}
+	if reconnected.State != StateDegraded || reconnected.RoutingEligible() {
+		t.Fatalf("reconnected canary-sanctioned provider = %+v, want degraded and unroutable", reconnected)
+	}
+	if reconnected.CanaryFailCount != 2 {
+		t.Fatalf("reconnected canary fail count = %d, want 2", reconnected.CanaryFailCount)
+	}
+	if !registry.CanaryRecoveryEligible("pinned-a", "session-b") {
+		t.Fatal("reconnected canary-sanctioned provider should be eligible for canary recovery probe")
+	}
+	if registry.MarkRecovered("pinned-a", "session-b", at.Add(3*time.Minute)) {
+		t.Fatal("generic recovery must not clear canary hold")
+	}
+	if registry.MarkDegradedForRecovery("pinned-a", "session-b", RecoveryReasonBreaker) {
+		t.Fatal("generic degraded recovery must not overwrite canary hold")
+	}
+	stillHeld, ok := registry.Resolve("pinned-a", "session-b")
+	if !ok {
+		t.Fatal("held provider not found")
+	}
+	if stillHeld.State != StateDegraded || !registry.CanaryRecoveryEligible("pinned-a", "session-b") {
+		t.Fatalf("generic recovery changed canary hold: %+v", stillHeld)
+	}
+
+	pass := registry.RecordCanaryResult("pinned-a", "session-b", true, at.Add(3*time.Minute), 2)
+	if !pass.Current || !pass.Passed || pass.Count != 0 || !pass.SanctionCleared {
+		t.Fatalf("passing canary result = %+v", pass)
+	}
+	recovered, ok := registry.Resolve("pinned-a", "session-b")
+	if !ok {
+		t.Fatal("recovered provider not found")
+	}
+	if recovered.State != StateReady || !recovered.RoutingEligible() || recovered.CanaryFailCount != 0 {
+		t.Fatalf("recovered provider = %+v, want ready/routable with fail count reset", recovered)
+	}
+	if registry.CanaryRecoveryEligible("pinned-a", "session-b") {
+		t.Fatal("canary recovery hold should clear after passing canary")
+	}
+
+	next := &Provider{
+		ProviderID:     "pinned-a",
+		AssignedID:     "session-c",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(next, nil)
+	nextResolved, ok := registry.Resolve("pinned-a", "session-c")
+	if !ok {
+		t.Fatal("next provider not found")
+	}
+	if nextResolved.State != StateReady || nextResolved.CanaryFailCount != 0 {
+		t.Fatalf("post-recovery reconnect = %+v, want no persisted canary sanction", nextResolved)
+	}
+}
+
+func TestLoadedCanarySanctionHoldsPinnedProviderAfterRestart(t *testing.T) {
+	beforeRestart := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:     "pinned-restart",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	beforeRestart.Register(provider, nil)
+	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	beforeRestart.RecordCanaryResult("pinned-restart", "session-a", false, at, 2)
+	beforeRestart.RecordCanaryResult("pinned-restart", "session-a", false, at.Add(time.Minute), 2)
+	snapshots := beforeRestart.CanarySanctions()
+	if len(snapshots) != 1 {
+		t.Fatalf("canary sanctions = %+v, want one snapshot", snapshots)
+	}
+
+	afterRestart := NewRegistry(nil)
+	afterRestart.LoadCanarySanctions(snapshots)
+	reconnected := &Provider{
+		ProviderID:     "pinned-restart",
+		AssignedID:     "session-b",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	afterRestart.Register(reconnected, nil)
+	got, ok := afterRestart.Resolve("pinned-restart", "session-b")
+	if !ok {
+		t.Fatal("reconnected provider not found")
+	}
+	if got.State != StateDegraded || got.RoutingEligible() || got.CanaryFailCount != 2 {
+		t.Fatalf("reconnected persisted canary-sanctioned provider = %+v, want degraded, unroutable, count=2", got)
+	}
+	if !afterRestart.CanaryRecoveryEligible("pinned-restart", "session-b") {
+		t.Fatal("loaded sanction should create a canary recovery hold for the new session")
+	}
+}
+
+func TestStaleTerminalCanaryPassDoesNotClearSanction(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:     "pinned-terminal",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, nil)
+	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	registry.RecordCanaryResult("pinned-terminal", "session-a", false, at, 1)
+	if !registry.MarkState("pinned-terminal", "session-a", StateUnavailable) {
+		t.Fatal("mark unavailable failed")
+	}
+	pass := registry.RecordCanaryResult("pinned-terminal", "session-a", true, at.Add(time.Minute), 1)
+	if !pass.Current || !pass.Passed || pass.SanctionCleared {
+		t.Fatalf("stale terminal pass = %+v, want current/pass without sanction clear", pass)
+	}
+	sanctions := registry.CanarySanctions()
+	if len(sanctions) != 1 || sanctions[0].ProviderID != "pinned-terminal" {
+		t.Fatalf("canary sanctions after stale pass = %+v, want retained sanction", sanctions)
+	}
+}
+
+func TestCanaryPassDoesNotUndoDrain(t *testing.T) {
+	registry := NewRegistry(nil)
+	provider := &Provider{
+		ProviderID:     "pinned-drain",
+		AssignedID:     "session-a",
+		ModelID:        "model-a",
+		Tier:           TierPinned,
+		State:          StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}
+	registry.Register(provider, nil)
+	at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+
+	registry.RecordCanaryResult("pinned-drain", "session-a", false, at, 1)
+	if !registry.MarkState("pinned-drain", "session-a", StateDraining) {
+		t.Fatal("mark draining")
+	}
+	pass := registry.RecordCanaryResult("pinned-drain", "session-a", true, at.Add(time.Minute), 1)
+	if !pass.Current || !pass.Passed {
+		t.Fatalf("passing canary result = %+v", pass)
+	}
+	got, ok := registry.Resolve("pinned-drain", "session-a")
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	if got.State != StateDraining || got.RoutingEligible() {
+		t.Fatalf("passing canary during drain = %+v, want draining and unroutable", got)
+	}
+	if !registry.CanaryRecoveryEligible("pinned-drain", "session-a") {
+		t.Fatal("canary hold should remain while provider is draining")
+	}
+}
+
+func TestStaleCanaryFailureDoesNotOverrideDrainOrUnavailable(t *testing.T) {
+	for _, terminal := range []State{StateDraining, StateUnavailable} {
+		t.Run(string(terminal), func(t *testing.T) {
+			registry := NewRegistry(nil)
+			provider := &Provider{
+				ProviderID:     "pinned-stale-" + string(terminal),
+				AssignedID:     "session-a",
+				ModelID:        "model-a",
+				Tier:           TierPinned,
+				State:          StateReady,
+				SlotsFree:      1,
+				SlotsTotal:     1,
+				MaxConcurrency: 1,
+			}
+			registry.Register(provider, nil)
+			at := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+			if !registry.MarkState(provider.ProviderID, provider.AssignedID, terminal) {
+				t.Fatalf("mark %s", terminal)
+			}
+
+			result := registry.RecordCanaryResult(provider.ProviderID, provider.AssignedID, false, at, 1)
+			if !result.Current || result.Count != 0 || result.Tripped != CanaryTripNone {
+				t.Fatalf("stale canary result after %s = %+v", terminal, result)
+			}
+			got, ok := registry.Resolve(provider.ProviderID, provider.AssignedID)
+			if !ok {
+				t.Fatal("provider not found")
+			}
+			if got.State != terminal || got.CanaryFailCount != 0 || registry.CanaryRecoveryEligible(provider.ProviderID, provider.AssignedID) {
+				t.Fatalf("stale canary failure changed terminal state: %+v", got)
+			}
+		})
 	}
 }
 
@@ -855,4 +1185,109 @@ func legacyLoadingHeartbeatUpdate(modelID string, loading bool, at time.Time) He
 	update.Loading = loading
 	update.LoadingPresent = true
 	return update
+}
+
+// TestRegistryRefusesBearerlessDuplicateReplacement directly exercises the
+// pool.Registry eviction defense layer (SPEC-003 v0.8.3 fix-pass-3 codex
+// security MAJOR-1). Under v0.8.4 composition this layer is reached only
+// via the IssueToken race-loss path, but the layer must still refuse the
+// replacement deterministically. Doesn't depend on the WS handler so the
+// branch is unambiguously exercised regardless of the composed wire
+// contract.
+func TestRegistryRefusesBearerlessDuplicateReplacement(t *testing.T) {
+	registry := NewRegistry(nil)
+	existing := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-legitimate",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthBearerValidated,
+	}
+	if _, ok := registry.Register(existing, nil); !ok {
+		t.Fatal("legitimate Bearer-validated session: initial Register must succeed")
+	}
+	incoming := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-attacker",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthBearerlessDuplicate,
+	}
+	old, ok := registry.Register(incoming, nil)
+	if ok {
+		t.Fatalf("registry.Register(bearer-less duplicate) = (old=%v, ok=true), want (nil, false)", old)
+	}
+	if old != nil {
+		t.Fatalf("registry.Register(bearer-less duplicate) returned old=%v, want nil (no replacement should have happened)", old)
+	}
+	resolved, found := registry.Resolve("claimed-provider", "session-legitimate")
+	if !found {
+		t.Fatal("legitimate session resolution failed; eviction defense did not protect it")
+	}
+	if resolved.AssignedID != "session-legitimate" {
+		t.Fatalf("resolved.AssignedID = %q, want session-legitimate (AuthBearerlessDuplicate must not replace)", resolved.AssignedID)
+	}
+}
+
+// TestRegistryRefusesNonBearerReplacementOfRoutableBearerValidated directly
+// exercises the proven-session protection layer added in SPEC-003 v0.8.4
+// fix-pass-5 (codex security MAJOR-2). An incoming AuthSelfMinted session
+// MUST NOT be allowed to last-writer-wins evict an existing routable
+// AuthBearerValidated session, because that would let a concurrent
+// tokenless self-heal race displace a legitimate Bearer-validated provider.
+func TestRegistryRefusesNonBearerReplacementOfRoutableBearerValidated(t *testing.T) {
+	registry := NewRegistry(nil)
+	existing := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-legitimate",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthBearerValidated,
+	}
+	if _, ok := registry.Register(existing, nil); !ok {
+		t.Fatal("legitimate Bearer-validated session: initial Register must succeed")
+	}
+	incoming := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-self-mint",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthSelfMinted,
+	}
+	old, ok := registry.Register(incoming, nil)
+	if ok {
+		t.Fatalf("registry.Register(self-minted) over existing AuthBearerValidated = (old=%v, ok=true), want (nil, false)", old)
+	}
+	if old != nil {
+		t.Fatalf("registry.Register(self-minted) returned old=%v, want nil", old)
+	}
+	resolved, found := registry.Resolve("claimed-provider", "session-legitimate")
+	if !found || resolved.AssignedID != "session-legitimate" {
+		t.Fatal("legitimate Bearer-validated session was displaced by AuthSelfMinted; fix-pass-5 proven-session protection failed")
+	}
+
+	// Conversely: a NEW Bearer-validated incoming SHOULD be allowed to
+	// replace (legitimate provider reconnect with a valid Bearer is
+	// always trusted).
+	bearerReplacement := &Provider{
+		ProviderID: "claimed-provider",
+		AssignedID: "session-rebearer",
+		ModelID:    "model-a",
+		State:      StateReady,
+		SlotsFree:  1,
+		SlotsTotal: 1,
+		AuthState:  AuthBearerValidated,
+	}
+	_, ok = registry.Register(bearerReplacement, nil)
+	if !ok {
+		t.Fatal("legitimate AuthBearerValidated reconnect MUST be allowed to replace an existing AuthBearerValidated session")
+	}
 }

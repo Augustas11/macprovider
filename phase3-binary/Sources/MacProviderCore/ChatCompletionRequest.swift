@@ -12,6 +12,7 @@ public struct ChatCompletionRequest: Sendable {
     public let frequencyPenalty: Double
     public let seed: Int?
     public let responseFormat: ResponseFormat
+    public let promptSource: ChatCompletionPromptSource
 
     public static func parse(data: Data) throws -> ChatCompletionRequest {
         let json: Any
@@ -82,6 +83,11 @@ public struct ChatCompletionRequest: Sendable {
 
         try validateTools(dict["tools"])
         try validateToolChoice(dict["tool_choice"])
+        try validateOptionalJSONBool(dict["logprobs"], key: "logprobs")
+        _ = try optionalInt(dict["top_logprobs"], key: "top_logprobs")
+        _ = try optionalJSONValue(dict["logit_bias"])
+
+        let promptSource = try ChatCompletionPromptSource(dict: dict, rawMessages: rawMessages)
 
         return ChatCompletionRequest(
             model: model,
@@ -94,7 +100,8 @@ public struct ChatCompletionRequest: Sendable {
             presencePenalty: presencePenalty,
             frequencyPenalty: frequencyPenalty,
             seed: seed,
-            responseFormat: responseFormat
+            responseFormat: responseFormat,
+            promptSource: promptSource
         )
     }
 
@@ -120,6 +127,44 @@ public struct ChatCompletionRequest: Sendable {
     }
 }
 
+public struct ChatCompletionPromptSource: Equatable, Sendable {
+    public let model: JSONValue
+    public let messages: [JSONValue]
+    public let tools: JSONValue?
+    public let temperature: JSONValue?
+    public let topP: JSONValue?
+    public let maxTokens: JSONValue?
+    public let stop: JSONValue?
+    public let seed: JSONValue?
+    public let responseFormat: JSONValue?
+    public let toolChoice: JSONValue?
+    public let presencePenalty: JSONValue?
+    public let frequencyPenalty: JSONValue?
+    public let logitBias: JSONValue?
+    public let logprobs: JSONValue?
+    public let topLogprobs: JSONValue?
+    public let n: JSONValue?
+
+    init(dict: [String: Any], rawMessages: [Any]) throws {
+        self.model = try JSONValue.parse(dict["model"] as Any)
+        self.messages = try rawMessages.map { try JSONValue.parse($0) }
+        self.tools = try optionalJSONValue(dict["tools"])
+        self.temperature = try optionalJSONValue(dict["temperature"])
+        self.topP = try optionalJSONValue(dict["top_p"])
+        self.maxTokens = try optionalJSONValue(dict["max_tokens"])
+        self.stop = try optionalJSONValue(dict["stop"])
+        self.seed = try optionalJSONValue(dict["seed"])
+        self.responseFormat = try optionalJSONValue(dict["response_format"])
+        self.toolChoice = try optionalJSONValue(dict["tool_choice"])
+        self.presencePenalty = try optionalJSONValue(dict["presence_penalty"])
+        self.frequencyPenalty = try optionalJSONValue(dict["frequency_penalty"])
+        self.logitBias = try optionalJSONValue(dict["logit_bias"])
+        self.logprobs = try optionalJSONValue(dict["logprobs"])
+        self.topLogprobs = try optionalJSONValue(dict["top_logprobs"])
+        self.n = try optionalJSONValue(dict["n"])
+    }
+}
+
 public enum ChatRole: String, Sendable {
     case system
     case user
@@ -141,12 +186,13 @@ public struct ChatMessage: Sendable {
 
         switch role {
         case .system, .user:
-            guard let content = dict["content"] as? String, !content.isEmpty else {
-                throw APIError(status: 400, message: "messages[\(index)].content must be a non-empty string", code: "invalid_request")
+            let content = try textProjection(from: dict["content"], messageIndex: index, allowNull: false)
+            guard let content, !content.isEmpty else {
+                throw APIError(status: 400, message: "messages[\(index)].content must be non-empty", code: "invalid_request")
             }
             return ChatMessage(role: role, content: content)
         case .assistant:
-            let content = dict["content"] as? String
+            let content = try textProjection(from: dict["content"], messageIndex: index, allowNull: true)
             if let toolCalls = dict["tool_calls"], !(toolCalls is NSNull) {
                 try validateAssistantToolCalls(toolCalls, messageIndex: index)
             } else if content == nil {
@@ -157,7 +203,7 @@ public struct ChatMessage: Sendable {
             guard dict["tool_call_id"] is String else {
                 throw APIError(status: 400, message: "tool message requires tool_call_id", code: "invalid_request")
             }
-            guard let content = dict["content"] as? String else {
+            guard let content = try textProjection(from: dict["content"], messageIndex: index, allowNull: false) else {
                 throw APIError(status: 400, message: "tool message requires content", code: "invalid_request")
             }
             return ChatMessage(role: role, content: content)
@@ -200,6 +246,22 @@ public struct APIError: Error, Sendable {
 
 private func optionalInt(_ raw: Any?, key: String) throws -> Int? {
     guard let raw, !(raw is NSNull) else { return nil }
+    if let number = raw as? NSNumber {
+        if CFGetTypeID(number) == CFBooleanGetTypeID() {
+            throw APIError(status: 400, message: "\(key) must be an integer", code: "invalid_request")
+        }
+        let objCType = String(cString: number.objCType)
+        if objCType == "f" || objCType == "d" {
+            let double = number.doubleValue
+            guard double.rounded(.towardZero) == double,
+                  double >= Double(Int.min),
+                  double <= Double(Int.max) else {
+                throw APIError(status: 400, message: "\(key) must be an integer", code: "invalid_request")
+            }
+            return number.intValue
+        }
+        return number.intValue
+    }
     guard let int = raw as? Int else {
         throw APIError(status: 400, message: "\(key) must be an integer", code: "invalid_request")
     }
@@ -223,6 +285,18 @@ private func optionalBool(_ raw: Any?, key: String) throws -> Bool? {
         throw APIError(status: 400, message: "\(key) must be a boolean", code: "invalid_request")
     }
     return bool
+}
+
+private func optionalJSONValue(_ raw: Any?) throws -> JSONValue? {
+    guard let raw else { return nil }
+    return try JSONValue.parse(raw)
+}
+
+private func validateOptionalJSONBool(_ raw: Any?, key: String) throws {
+    guard let raw, !(raw is NSNull) else { return }
+    guard raw is Bool else {
+        throw APIError(status: 400, message: "\(key) must be a boolean", code: "invalid_request")
+    }
 }
 
 private func parseStop(_ raw: Any?) throws -> [String] {
@@ -308,4 +382,47 @@ private func validateAssistantToolCalls(_ raw: Any, messageIndex: Int) throws {
             throw APIError(status: 400, message: "Invalid tool_call arguments JSON", code: "invalid_tools")
         }
     }
+}
+
+private func textProjection(from raw: Any?, messageIndex: Int, allowNull: Bool) throws -> String? {
+    guard let raw, !(raw is NSNull) else {
+        if allowNull {
+            return nil
+        }
+        throw APIError(status: 400, message: "messages[\(messageIndex)].content is invalid", code: "invalid_request")
+    }
+    if let string = raw as? String {
+        return string
+    }
+    guard let parts = raw as? [Any] else {
+        throw APIError(status: 400, message: "messages[\(messageIndex)].content is invalid", code: "invalid_request")
+    }
+    var textParts: [String] = []
+    for (partIndex, rawPart) in parts.enumerated() {
+        guard let part = rawPart as? [String: Any], let type = part["type"] as? String else {
+            throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)] is invalid", code: "invalid_request")
+        }
+        switch type {
+        case "text":
+            guard let text = part["text"] as? String else {
+                throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].text is invalid", code: "invalid_request")
+            }
+            textParts.append(text)
+        case "image_url":
+            guard let imageURL = part["image_url"] as? [String: Any],
+                  imageURL["url"] is String,
+                  imageURL["detail"] == nil || imageURL["detail"] is NSNull || imageURL["detail"] is String else {
+                throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].image_url is invalid", code: "invalid_request")
+            }
+        case "input_audio":
+            guard let inputAudio = part["input_audio"] as? [String: Any],
+                  inputAudio["data"] is String,
+                  inputAudio["format"] is String else {
+                throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].input_audio is invalid", code: "invalid_request")
+            }
+        default:
+            throw APIError(status: 400, message: "messages[\(messageIndex)].content[\(partIndex)].type is invalid", code: "invalid_request")
+        }
+    }
+    return textParts.joined(separator: "\n")
 }

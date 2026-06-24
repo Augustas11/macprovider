@@ -33,6 +33,12 @@ func OpenStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// QW-5 / M2-3 / ARCH-3: cap the pool at a single connection (mirrors
+	// phase5-gateway/internal/storage/sqlite/store.go). Prevents implicit
+	// concurrent BEGIN IMMEDIATE on shared SQLite files and removes a
+	// latent SQLITE_BUSY source on the coordinator money path.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	s := &Store{db: db}
 	ctx := context.Background()
 	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {
@@ -115,15 +121,45 @@ INSERT INTO audit_log (
 	return err
 }
 
+// pruneBatchSize bounds a single retention DELETE to keep the write lock
+// short while billing's 6s hot path is sharing the same SQLite handle.
+// PERF-3 (M3-1): the comparison stays on julianday() because audit_log
+// writes use time.RFC3339Nano, which strips trailing zeros in the
+// fractional seconds — variable widths break lexicographic `<` ordering
+// (".000…Z" sorts before "Z"). Normalizing writes to a fixed-width
+// format is deferred to a follow-up.
+const pruneBatchSize = 500
+
+// pruneBatchYieldMs is the sleep between full batches so concurrent
+// audit writers can acquire the SQLite writer lock between iterations.
+const pruneBatchYieldMs = 10
+
 func (s *Store) PruneBefore(ctx context.Context, cutoff time.Time) (int64, error) {
 	if s == nil || s.db == nil {
 		return 0, errStoreClosed
 	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM audit_log WHERE julianday(ts_utc) < julianday(?)`, cutoff.UTC().Format(time.RFC3339Nano))
-	if err != nil {
-		return 0, err
+	cutoffText := cutoff.UTC().Format(time.RFC3339Nano)
+	var total int64
+	for {
+		res, err := s.db.ExecContext(ctx, `DELETE FROM audit_log WHERE rowid IN (SELECT rowid FROM audit_log WHERE julianday(ts_utc) < julianday(?) LIMIT ?)`, cutoffText, pruneBatchSize)
+		if err != nil {
+			return total, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return total, err
+		}
+		total += n
+		if n < int64(pruneBatchSize) {
+			return total, nil
+		}
+		// Yield so concurrent writers can acquire the writer lock between full batches.
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(pruneBatchYieldMs * time.Millisecond):
+		}
 	}
-	return result.RowsAffected()
 }
 
 // EmitSwap writes one operator_model_swap audit row for an upstream-gated

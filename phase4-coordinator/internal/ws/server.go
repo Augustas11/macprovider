@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"strconv"
@@ -43,29 +45,34 @@ const (
 )
 
 type Server struct {
-	cfg       config.Config
-	tier2Mu   sync.RWMutex
-	tier2     config.Tier2Config
-	pool      *pool.Registry
-	log       zerolog.Logger
-	now       func() time.Time
-	newUUID   func() string
-	timers    sync.Map
-	pending   sync.Map
-	warmups   sync.Map
-	tokens    TokenValidator
+	cfg             config.Config
+	tier2Mu         sync.RWMutex
+	tier2           config.Tier2Config
+	pool            *pool.Registry
+	log             zerolog.Logger
+	now             func() time.Time
+	newUUID         func() string
+	timers          sync.Map
+	pending         sync.Map
+	warmups         sync.Map
+	canaries        sync.Map
+	canaryDue       sync.Map
+	canarySanctions CanarySanctionStore
+	tokens          TokenValidator
 	// SPEC-003 v0.8 FR-C9.1 — separate issuer field so validator and
 	// issuer roles can be wired independently. Production wires the same
 	// concrete *auth.Store to both (see main.go), but tests can override
 	// mint behavior (e.g. mintFailingStore) without touching the
 	// validator. Codex architect review on PR #44 flagged the
 	// interface-segregation regression of mixing both on TokenValidator.
-	issuer    TokenIssuer
-	admission *AdmissionManager
-	sessions  sync.Map
-	started   time.Time
-	explorer  http.Handler
-	unauth    chan struct{}
+	issuer      TokenIssuer
+	authStore   *auth.Store
+	githubOAuth githubOAuthClient
+	admission   *AdmissionManager
+	sessions    sync.Map
+	started     time.Time
+	explorer    http.Handler
+	unauth      chan struct{}
 	// unauthPerIP counts concurrent unauthenticated WS handshakes by remote IP.
 	// Defense-in-depth against nginx limit_conn evasion: one host can still
 	// burn the global 64-slot semaphore without per-IP shaping (M1-4 / SECU-1).
@@ -74,14 +81,31 @@ type Server struct {
 	version       string
 	// SPEC-002 v1.3.5 §7.9 — auth-attempt retention store, 1024 bound
 	authAttempts *authAttemptStore
+	// catalog holds an explicitly-injected tier2.Catalog for tests that
+	// want isolation from the package-singleton; nil means "use
+	// tier2.Default()". M3-8d (audit TEST-4). See s.catalogRef().
+	catalog *tier2.Catalog
 }
 
 // TokenValidator handles inspection of a Bearer header on the WS connect.
 // Intentionally narrow — issuance is a separate concern (see TokenIssuer)
 // so test seams can mock validation independently.
+//
+// SPEC-003 v0.8.4 (fix-pass-5) added `ValidateAndMarkTokenUsed` to close
+// the TOCTOU window between `ValidateToken` and `MarkTokenUsed`: a
+// concurrent tokenless self-heal between the two could revoke the
+// legitimate provider's still-NULL row and mint a fresh bearer. The
+// atomic operation stamps `last_used_at` in the same DB statement that
+// validates the token, so `RevokeUnusedTokenForProvider` will never see
+// a NULL row for a bearer that has just validated.
+//
+// `ValidateToken` is retained as a separate method for read-only
+// validations that don't need to record use (operator tooling, status).
+// `MarkTokenUsed` is retained for backwards compatibility and tests.
 type TokenValidator interface {
 	ValidateToken(context.Context, string) (string, bool, error)
 	MarkTokenUsed(context.Context, string) error
+	ValidateAndMarkTokenUsed(context.Context, string) (string, bool, error)
 }
 
 // TokenIssuer handles SPEC-003 v0.8 FR-C9.1 self-serve provisional token
@@ -92,16 +116,36 @@ type TokenValidator interface {
 // concrete *auth.Store to both, but the two roles are decoupled at the
 // interface layer so the seam exists when needed.
 type TokenIssuer interface {
-	// IssueToken returns (record, cleartext_token, err); only the
-	// cleartext is used in the ack frame, the record is logged.
+	// IssueToken returns (record, cleartext_token, err). On success,
+	// only the cleartext is used in the ack frame; the record is
+	// logged. On `auth.ErrActiveTokenAlreadyExists` (the partial
+	// unique index trapped a duplicate), the caller maps the error
+	// to admit-tokenless with AuthBearerlessDuplicate marking — see
+	// resolveProvisionalToken in this package and SPEC-003 v0.8.4
+	// FR-C9.4 (composed self-heal + race-loss quarantine).
 	IssueToken(ctx context.Context, providerID, providerName string) (auth.TokenRecord, string, error)
-	// HasActiveTokenForProvider implements FR-C9.4 TOFU: when true, the
-	// server MUST refuse to mint a second token for the same provider_id
-	// and MUST close the tokenless connection. Closes the
-	// credential-capture attack flagged by the codex security audit on
-	// PR #44 — without TOFU, an attacker could spam tokenless connects
-	// declaring a victim's provider_id and harvest a valid bearer.
+	// HasActiveTokenForProvider implements the FR-C9.4 strict-reject
+	// path: when true AND the active row's `last_used_at IS NOT NULL`
+	// (verified separately via RevokeUnusedTokenForProvider returning
+	// false), the server MUST refuse to mint a second token for the
+	// same provider_id and MUST close the tokenless connection. Closes
+	// the credential-capture attack flagged by the codex security
+	// audit on PR #44 — an attacker who declares a victim's
+	// provider_id on a tokenless connect cannot harvest a parallel
+	// bearer once the victim has authenticated once.
 	HasActiveTokenForProvider(ctx context.Context, providerID string) (bool, error)
+	// RevokeUnusedTokenForProvider implements SPEC-003 v0.8.3 FR-C9.4
+	// unused-token self-heal: atomically revokes the active row for
+	// `providerID` if its `last_used_at IS NULL`, returning true when
+	// a row was revoked. Called BEFORE HasActiveTokenForProvider in
+	// resolveProvisionalToken so a deploy-gap reconnect with an
+	// unused (never-authenticated) row self-heals into a clean
+	// re-mint instead of triggering the strict-reject path. A used
+	// token (last_used_at NOT NULL) is NOT touched — that case still
+	// follows the v0.8.1 strict-reject contract because the codex
+	// MAJOR-1 credential-capture vector requires an attacker to have
+	// authenticated at least once.
+	RevokeUnusedTokenForProvider(ctx context.Context, providerID string) (bool, error)
 }
 
 type providerAuth struct {
@@ -111,6 +155,16 @@ type providerAuth struct {
 }
 
 type Option func(*Server)
+
+// WithCatalog injects a specific tier2.Catalog instance for this server.
+// Default (nil/unset) is tier2.Default(), the package singleton, so production
+// wiring needs no change. Tests can pass an isolated *tier2.Catalog so they
+// no longer race against tier2.ResetForTest. M3-8d (audit TEST-4).
+func WithCatalog(c *tier2.Catalog) Option {
+	return func(s *Server) {
+		s.catalog = c
+	}
+}
 
 func WithTokenValidator(tokens TokenValidator) Option {
 	return func(s *Server) {
@@ -129,11 +183,33 @@ func WithTokenIssuer(issuer TokenIssuer) Option {
 	}
 }
 
+func WithGitHubAuthStore(store *auth.Store) Option {
+	return func(s *Server) {
+		s.authStore = store
+	}
+}
+
+func WithGitHubOAuthClient(client githubOAuthClient) Option {
+	return func(s *Server) {
+		s.githubOAuth = client
+	}
+}
+
 func WithVersion(v string) Option {
 	return func(s *Server) {
 		if v != "" {
 			s.version = v
 		}
+	}
+}
+
+func WithNow(now func() time.Time) Option {
+	return func(s *Server) {
+		if now == nil {
+			return
+		}
+		s.now = now
+		s.admission = NewAdmissionManager(s.cfg.Admission, s.now)
 	}
 }
 
@@ -148,6 +224,12 @@ func WithAdmissionStore(store AdmissionStateStore) Option {
 		s.admission.SetPersistence(store, func(err error) {
 			s.log.Warn().Err(err).Msg("admission state persistence failed")
 		})
+	}
+}
+
+func WithCanarySanctionStore(store CanarySanctionStore) Option {
+	return func(s *Server) {
+		s.canarySanctions = store
 	}
 }
 
@@ -207,26 +289,46 @@ type pendingPreflight struct {
 
 func NewServer(cfg config.Config, registry *pool.Registry, logger zerolog.Logger, opts ...Option) *Server {
 	s := &Server{
-		cfg:     cfg,
-		tier2:   cfg.Tier2,
-		pool:    registry,
-		log:     logger,
-		now:     func() time.Time { return time.Now().UTC() },
-		newUUID: func() string { return uuid.NewString() },
-		started: time.Now().UTC(),
+		cfg:         cfg,
+		tier2:       cfg.Tier2,
+		pool:        registry,
+		log:         logger,
+		now:         func() time.Time { return time.Now().UTC() },
+		newUUID:     func() string { return uuid.NewString() },
+		started:     time.Now().UTC(),
 		unauth:      make(chan struct{}, cfg.ProviderWSMaxUnauthenticatedConn()),
 		unauthPerIP: map[string]int{},
 		version:     "dev",
 	}
 	s.authAttempts = newAuthAttemptStore(1024)
 	s.admission = NewAdmissionManager(cfg.Admission, s.now)
-	if registry != nil {
-		pool.WithHeartbeatHashVerifier(tier2.VerifyProviderHash)(registry)
-	}
 	for _, opt := range opts {
 		opt(s)
 	}
+	if registry != nil {
+		// M3-8d: route the heartbeat verifier through s.catalogRef() so a
+		// caller that overrides the catalog via WithCatalog (and the
+		// SIGHUP swap of tier2.Default()) is honored on every heartbeat
+		// rather than frozen at NewServer time.
+		pool.WithHeartbeatHashVerifier(func(modelID, reportedHash string) pool.HashStatus {
+			return s.catalogRef().VerifyProviderHash(modelID, reportedHash)
+		})(registry)
+	}
+	if cfg.Pool.CanaryEnabled && registry != nil {
+		go s.runCanaryLoop()
+	}
 	return s
+}
+
+// catalogRef returns the *tier2.Catalog this server reads through. Returns
+// the explicit override set by WithCatalog when present; otherwise the
+// package singleton via tier2.Default(). Safe under SIGHUP reload because
+// tier2.Default() is an atomic.Pointer load.
+func (s *Server) catalogRef() *tier2.Catalog {
+	if s.catalog != nil {
+		return s.catalog
+	}
+	return tier2.Default()
 }
 
 func (s *Server) Admission() *AdmissionManager {
@@ -247,7 +349,7 @@ func (s *Server) RefreshTier2HashStatuses() int {
 		})
 	}
 	return s.pool.UpdateHashStatuses(func(provider pool.Provider) pool.HashStatus {
-		next := tier2.VerifyProviderHash(provider.ModelID, provider.ModelHash)
+		next := s.catalogRef().VerifyProviderHash(provider.ModelID, provider.ModelHash)
 		if next != provider.HashStatus {
 			tier2.LogProviderHashStatus(s.log, provider.ProviderID, provider.AssignedID, provider.ModelID, provider.ModelHash, next)
 		}
@@ -278,6 +380,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/admin/provisional", s.handleAdminProvisional)
 	mux.HandleFunc("/admin/promote/", s.handleAdminPromote)
 	mux.HandleFunc("/admin/reject/", s.handleAdminReject)
+	if s.cfg.Auth.GitHubOAuth.Enabled {
+		mux.HandleFunc("/v1/auth/github/start", s.handleGitHubStart)
+		mux.HandleFunc("/v1/auth/github/callback", s.handleGitHubCallback)
+		mux.HandleFunc("/v1/auth/me/providers", s.handleAuthMeProviders)
+		mux.HandleFunc("/v1/auth/me/providers/bind", s.handleAuthMeProvidersBind)
+		mux.HandleFunc("/v1/auth/logout", s.handleAuthLogout)
+		mux.HandleFunc("/v1/install/pair/refresh", s.handleInstallPairRefresh)
+		return s.redactedRequestLogMiddleware(mux)
+	}
 	return mux
 }
 
@@ -353,7 +464,15 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 		return providerAuth{}, false
 	}
 	token := strings.TrimSpace(strings.TrimPrefix(authz, prefix))
-	providerID, ok, err := s.tokens.ValidateToken(r.Context(), token)
+	// SPEC-003 v0.8.4 (fix-pass-5) — validate-and-mark in one atomic
+	// DB operation. Pre-fix this was ValidateToken at upgrade + a
+	// separate MarkTokenUsed inside prepareProviderAdmission, leaving a
+	// TOCTOU window where a concurrent tokenless self-heal could revoke
+	// the still-NULL row and mint a fresh bearer for an attacker. The
+	// atomic UPDATE-RETURNING closes the window: once we have a non-
+	// empty providerID, the row's last_used_at IS NOT NULL, so any
+	// concurrent RevokeUnusedTokenForProvider skips it.
+	providerID, ok, err := s.tokens.ValidateAndMarkTokenUsed(r.Context(), token)
 	if err != nil {
 		s.log.Warn().Err(err).Msg("provider token validation failed")
 		return providerAuth{}, false
@@ -378,7 +497,7 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 		}
 	}()
 
-	payload, op, err := s.readClientData(conn)
+	payload, op, err := s.readClientData(conn, s.directControlReply(conn))
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_hello: read")
 		return
@@ -404,88 +523,154 @@ func (s *Server) handleConn(conn net.Conn, auth providerAuth, releaseUnauthentic
 }
 
 // provisionalTokenOutcome captures the three possible results of a
-// tokenless admission's pre-ack mint decision. Splitting from the prior
-// "return string-or-empty" shape closes the codex security audit's
-// MAJOR finding on PR #44: an empty string was ambiguous between "mint
-// not needed" and "mint refused", so callers had no way to distinguish
-// admit-without-token from must-close. The reject path is now explicit
-// and the caller closes the connection before the ack frame is written.
+// tokenless admission's pre-ack mint decision under the v0.8.4 composed
+// FR-C9.4 contract:
+//
+//   - Skip:        admit without minting, optionally with an AuthState
+//     marker (BearerValidated / BearerlessDuplicate / empty).
+//   - Minted:      admit with a freshly-minted token in the ack frame.
+//   - RejectTOFU:  close the connection with CloseInvalidToken. Fires
+//     when the existing row has last_used_at IS NOT NULL
+//     (credential-capture closure) or a DB error blocked
+//     the gate evaluation (fail closed).
+//
+// The auth state is carried separately via pool.AuthState so registry +
+// routing + billing can distinguish bearer-less-duplicate from other
+// admit-tokenless cases (PR #69 fix-pass-3 + fix-pass-4 + PR #78
+// composition).
 type provisionalTokenOutcome int
 
 const (
 	// provisionalTokenSkip — caller MUST NOT include assigned_provider_token
 	// in the ack and SHOULD proceed with admission. Triggers: no issuer
-	// configured, or the connect arrived with a validated Bearer.
+	// configured, connect arrived with a validated Bearer, IssueToken DB
+	// error (admitted bearer-less, binary retries next reconnect), or
+	// IssueToken race-loss (admitted with AuthBearerlessDuplicate marking;
+	// non-routable, eviction-defended).
 	provisionalTokenSkip provisionalTokenOutcome = iota
 	// provisionalTokenMinted — caller MUST include the returned token in
 	// the ack frame so the binary can persist it (FR-C9.3).
 	provisionalTokenMinted
 	// provisionalTokenRejectTOFU — caller MUST close the connection with
-	// CloseInvalidToken / "invalid_token" before admission. An active
-	// token already exists for this provider_id; minting a second one
-	// would let an attacker harvest a valid bearer for someone else's
-	// declared identity (codex security audit MAJOR-1, PR #44).
+	// CloseInvalidToken / "invalid_token". Triggers: last_used_at IS NOT NULL
+	// on the existing row (strict TOFU credential-capture closure), or the
+	// self-heal / HasActive DB lookups returned an error (fail closed).
 	provisionalTokenRejectTOFU
 )
 
-// resolveProvisionalToken implements SPEC-003 v0.8 FR-C9.1 (mint) and
-// FR-C9.4 TOFU (refuse second mint for a known provider_id). It is the
-// single decision point the v1 hello_ack and v2 auth_response paths both
-// call before constructing their ack frame.
+// resolveProvisionalToken implements SPEC-003 v0.8.4 FR-C9.1 (mint),
+// FR-C9.4 unused-token self-heal (PR #78), FR-C9.4 strict TOFU
+// (refuse second mint for a USED identity), and the v0.8.3 race-loss
+// admit-tokenless quarantine (PR #69, AuthBearerlessDuplicate). It is
+// the single decision point the v1 hello_ack and v2 auth_response
+// paths both call before constructing their ack frame.
 //
-// Algorithm:
-//  1. If the issuer is not wired OR the connect already validated a
-//     Bearer: return Skip — no mint needed, no token in ack.
-//  2. Query HasActiveTokenForProvider. If TRUE: return RejectTOFU —
-//     attacker (or a confused legitimate retry) is trying to mint a
-//     parallel credential for an already-claimed provider_id.
-//  3. Mint. On success: return Minted + cleartext.
-//  4. On mint failure (DB error): return Skip and log — the connection
-//     is admitted tokenless, the operator notices via the warning log,
-//     and the binary's next connect retries cleanly (because
-//     HasActiveTokenForProvider will still be false).
+// Returns (outcome, cleartextToken, authState):
+//   - outcome:        provisionalTokenSkip | provisionalTokenMinted | provisionalTokenRejectTOFU
+//   - cleartextToken: populated only when outcome == provisionalTokenMinted
+//   - authState:      pool.AuthState assigned to the provider entry —
+//     drives registry eviction defense, buyer routing
+//     exclusion, and billing exclusion.
 //
-// On HasActiveTokenForProvider DB error: FAIL CLOSED with RejectTOFU.
-// We MUST NOT mint in the dark when the gate could not be evaluated —
-// that's the same posture validateProviderToken adopts when
-// ValidateToken errors.
-// authState is the renamed parameter for the providerAuth argument. The
-// auth.ErrActiveTokenAlreadyExists reference below needs the imported
-// auth package, but the parameter previously named `auth` shadowed it.
-func (s *Server) resolveProvisionalToken(authState providerAuth, providerID, providerName string) (provisionalTokenOutcome, string) {
-	if s.issuer == nil || authState.validated {
-		return provisionalTokenSkip, ""
+// Algorithm (v0.8.4 composed):
+//  1. If the issuer is not wired: return Skip + empty authState (legacy
+//     pre-FR-C9 mode; provider is routable as before).
+//  2. If the connect arrived with a validated Bearer: return Skip +
+//     authState=BearerValidated (no mint needed).
+//  3. Call RevokeUnusedTokenForProvider:
+//     - (true, nil): self-heal fired — proceed to mint.
+//     - (false, nil): call HasActiveTokenForProvider; if true a USED
+//     row exists → return RejectTOFU (preserves v0.8.1 closure of
+//     codex MAJOR-1 credential-capture vector).
+//     - (_, err): fail closed, return RejectTOFU.
+//  4. Mint via IssueToken:
+//     - success: return Minted + cleartext + authState=SelfMinted.
+//     - ErrActiveTokenAlreadyExists: a concurrent connect won the race
+//     between our revoke and our INSERT. Return Skip + authState=
+//     BearerlessDuplicate. The connection is admitted bearer-less,
+//     but pool.Registry.Register refuses to evict an existing
+//     routable session, and buyer routing + billing exclude this
+//     entry (PR #69 fix-pass-3 + fix-pass-4).
+//     - other DB error: return Skip + empty authState (transient infra
+//     failure; binary retries next reconnect).
+//
+// Settling-window posture (FR-C9.4):
+// validateProviderToken rejects all tokenless connects at the WS
+// upgrade gate when RequireProviderTokens=true, so this function is
+// only reached for tokenless admissions during the settling window
+// (flag=false). The unique index prevents minting a parallel bearer
+// for someone else's provider_id. Whoever races first owns the
+// bearer; race-losers are quarantined as AuthBearerlessDuplicate.
+//
+// authParam is renamed to disambiguate from the auth package import.
+func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, providerName string) (provisionalTokenOutcome, string, string, string, pool.AuthState) {
+	if s.issuer == nil {
+		return provisionalTokenSkip, "", "", "", ""
+	}
+	if authParam.validated {
+		return provisionalTokenSkip, "", "", "", pool.AuthBearerValidated
 	}
 	ctx := context.Background()
-	hasActive, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
+	selfHealed, err := s.issuer.RevokeUnusedTokenForProvider(ctx, providerID)
 	if err != nil {
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 TOFU gate evaluation failed; closing tokenless connect (fail closed)")
-		return provisionalTokenRejectTOFU, ""
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 unused-token self-heal evaluation failed; closing tokenless connect (fail closed)")
+		return provisionalTokenRejectTOFU, "", "", "", ""
 	}
-	if hasActive {
-		s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 TOFU: tokenless connect refused; an active token already exists for this provider_id (operator can revoke + retry if this is the legitimate provider after a persist failure)")
-		return provisionalTokenRejectTOFU, ""
+	if selfHealed {
+		s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_self_heal").Msg("FR-C9.4 self-heal: revoked existing unused token for this provider_id; proceeding to mint a fresh one (SPEC-003 v0.8.4 deploy-gap recovery path)")
+	} else {
+		hasActive, err := s.issuer.HasActiveTokenForProvider(ctx, providerID)
+		if err != nil {
+			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.4 TOFU gate evaluation failed; closing tokenless connect (fail closed)")
+			return provisionalTokenRejectTOFU, "", "", "", ""
+		}
+		if hasActive {
+			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_tofu_reject").Msg("FR-C9.4 TOFU: tokenless connect refused; an active USED token already exists for this provider_id (operator can revoke + retry if this is the legitimate provider after a used-token persist failure)")
+			return provisionalTokenRejectTOFU, "", "", "", ""
+		}
+	}
+	if s.cfg.Auth.GitHubOAuth.Enabled && s.authStore != nil {
+		mint, err := s.authStore.MintAdmissionTokenAndPairOT(ctx, providerID, providerName, s.now())
+		if err == nil {
+			claimURL := ""
+			if mint.Paired {
+				claimURL = s.claimURL(mint.PairOT)
+			}
+			s.log.Info().Str("provider_id", providerID).Msg("FR-C9.1 self-serve provisional token minted on first tokenless admission")
+			return provisionalTokenMinted, mint.ProviderToken, mint.PairOT, claimURL, pool.AuthSelfMinted
+		}
+		if errors.Is(err, auth.ErrActiveTokenAlreadyExists) {
+			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_race_loss_admit_quarantined").Msg("FR-C9.4 race-loss: concurrent connect won IssueToken; admitting bearer-less-duplicate (non-routable; operator MUST revoke before legitimate provider can reconnect cleanly)")
+			return provisionalTokenSkip, "", "", "", pool.AuthBearerlessDuplicate
+		}
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C10 pair_ot compound mint failed; closing tokenless connect (fail closed)")
+		return provisionalTokenRejectTOFU, "", "", "", pool.AuthMintFailed
 	}
 	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
 	if err != nil {
-		// SPEC-003 v0.8.2 FR-C9.4 — defense in depth against the
-		// TOCTOU race. The pre-INSERT HasActiveTokenForProvider gate
-		// can race past a concurrent connect, but the partial unique
-		// index on provider_tokens(provider_id) WHERE revoked_at IS
-		// NULL traps the duplicate at INSERT time. When that happens
-		// we MUST close the loser with TOFU rejection — emitting a
-		// generic mint-failure would admit them tokenless on the
-		// next reconnect, defeating the closure of the codex security
-		// re-audit MAJOR-1 finding on PR #44.
 		if errors.Is(err, auth.ErrActiveTokenAlreadyExists) {
-			s.log.Info().Str("provider_id", providerID).Msg("FR-C9.4 TOFU: lost concurrent mint race; refusing tokenless admission")
-			return provisionalTokenRejectTOFU, ""
+			// SPEC-003 v0.8.4 race-loss path: a concurrent tokenless
+			// connect won the IssueToken race after our self-heal /
+			// strict-reject gates passed. Admit bearer-less-duplicate;
+			// the registry eviction defense + routing/billing
+			// exclusion neutralize impact.
+			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_race_loss_admit_quarantined").Msg("FR-C9.4 race-loss: concurrent connect won IssueToken; admitting bearer-less-duplicate (non-routable; operator MUST revoke before legitimate provider can reconnect cleanly)")
+			return provisionalTokenSkip, "", "", "", pool.AuthBearerlessDuplicate
 		}
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C9.1 self-serve mint failed; admitting tokenless. Next reconnect will retry mint since no row was written.")
-		return provisionalTokenSkip, ""
+		// SPEC-003 v0.8.4 (fix-pass-5) — fail-closed on transient DB
+		// error. Previously this path returned (Skip, "", "") and the
+		// empty AuthState was treated as routable, which would amplify
+		// a token-store outage into a routing-admission DoS where
+		// attackers could be admitted as fully-routable empty-state
+		// sessions (codex security MAJOR-1 on fix-pass-4). Now we
+		// surface the failure via AuthMintFailed for /poolz observability
+		// and close the connection so the binary retries cleanly on
+		// next reconnect.
+		s.log.Warn().Err(err).Str("provider_id", providerID).Str("event", "fr_c9_1_mint_failed").Msg("FR-C9.1 self-serve mint failed (transient DB error); closing tokenless connect (fail closed)")
+		return provisionalTokenRejectTOFU, "", "", "", pool.AuthMintFailed
 	}
 	s.log.Info().Str("provider_id", providerID).Msg("FR-C9.1 self-serve provisional token minted on first tokenless admission")
-	return provisionalTokenMinted, token
+	return provisionalTokenMinted, token, "", "", pool.AuthSelfMinted
 }
 
 func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, releaseUnauth func()) (string, string) {
@@ -510,18 +695,26 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	if !ok {
 		return "", ""
 	}
-	// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for an
-	// already-known provider_id. Must run BEFORE registerProviderSession
-	// so a rejected attacker never enters the pool. Same close code as
-	// pinned-tokenless rejection (CloseInvalidToken / "invalid_token");
-	// the operator runbook + log message tell legitimate providers that
-	// a persist-failure recovery requires `coordinator-cli revoke-token`.
-	outcome, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
+	// SPEC-003 v0.8.4 FR-C9.1/FR-C9.2/FR-C9.4 — composed flow:
+	// self-heal-on-NULL (PR #78) + strict-reject-on-USED (PR #78) +
+	// race-loss admit-quarantined (PR #69). On RejectTOFU close;
+	// on Minted embed the token in hello_ack; on Skip admit with
+	// the provided AuthState (BearerValidated / BearerlessDuplicate /
+	// empty) and let the registry eviction defense + RoutingEligible
+	// gates take over.
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(auth, entry.ProviderID, hello.Hostname)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		return "", ""
 	}
-	session := s.registerProviderSession(conn, entry)
+	entry.AuthState = authState
+	session, _ := s.registerProviderSession(conn, entry)
+	if session == nil {
+		// Eviction defense fired: bearer-less duplicate tried to
+		// displace a routable session for the same provider_id.
+		s.close(conn, CloseInvalidToken, "invalid_token")
+		return "", ""
+	}
 	releaseUnauth()
 
 	ack := HelloAck{
@@ -533,10 +726,15 @@ func (s *Server) handleV1Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 		AssignedProviderToken:    assignedProviderToken,
+		PairOT:                   pairOT,
+		ClaimURL:                 claimURL,
 	}
 	b, err := json.Marshal(ack)
 	if err != nil {
-		s.close(conn, CloseInvalidHello, "invalid_hello: ack")
+		// runWriter is already running for `session`; route the Close through
+		// it instead of writing directly to conn so we don't race an in-flight
+		// frame on the wire.
+		s.closeSession(session, CloseInvalidHello, "invalid_hello: ack")
 		return "", ""
 	}
 	if err := session.send(b); err != nil {
@@ -660,7 +858,7 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 
 	s.setReadDeadline(conn, s.cfg.ProviderWSHandshakeTimeout())
-	proofPayload, op, err := s.readClientData(conn)
+	proofPayload, op, err := s.readClientData(conn, s.directControlReply(conn))
 	if err != nil {
 		s.close(conn, CloseInvalidHello, "invalid_auth_request: read")
 		return "", ""
@@ -715,6 +913,15 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 
 	entry.EncryptedLeg = true
 	entry.AttestationStatus = attestationStatus
+	if len(initial.ProviderReceiptPubkey) > 0 {
+		entry.ReceiptPubkey = append([]byte(nil), initial.ProviderReceiptPubkey...)
+	} else {
+		s.log.Info().
+			Str("provider_id", initial.ProviderID).
+			Bool("receipt_omitted", true).
+			Str("reason", "no_keypair").
+			Msg("provider receipt public key omitted")
+	}
 	// SPEC-002 v1.3.5 §3.X.1 / §3.X.2 + SPEC-010 v1.5 R-3.3.1 /
 	// R-3.3.2 — populate the catalog onto Provider. The fallback
 	// synthesis [ModelID] applies when supported_models was
@@ -746,15 +953,26 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		// no-op delete.
 		s.authAttempts.release(authAttemptID)
 	}
-	// SPEC-003 v0.8 FR-C9.4 TOFU — refuse a SECOND token for an
-	// already-known provider_id. Must run BEFORE registerProviderSession
-	// so a rejected attacker never enters the pool. v2 path mirrors v1.
-	outcome, assignedProviderToken := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
+	// SPEC-003 v0.8.4 FR-C9.1/FR-C9.2/FR-C9.4 — v2 mirrors v1 composed
+	// flow: RejectTOFU closes; Minted embeds; Skip admits with the
+	// provided AuthState; eviction defense protects existing routable
+	// sessions from bearer-less duplicates.
+	outcome, assignedProviderToken, pairOT, claimURL, authState := s.resolveProvisionalToken(auth, entry.ProviderID, initial.Hostname)
 	if outcome == provisionalTokenRejectTOFU {
 		s.close(conn, CloseInvalidToken, "invalid_token")
 		return "", ""
 	}
-	session := s.registerProviderSession(conn, entry)
+	entry.AuthState = authState
+	session, refusal := s.registerProviderSession(conn, entry)
+	if session == nil {
+		if refusal == pool.RegisterRefusalReceiptRotationGraceActive {
+			s.sendAuthRejection(conn, "receipt_rotation_grace_active", "receipt key rotation already has an active previous-key grace window")
+			s.close(conn, CloseInvalidHello, "receipt_key_rotation_grace_active")
+		} else {
+			s.close(conn, CloseInvalidToken, "invalid_token")
+		}
+		return "", ""
+	}
 	releaseUnauth()
 	response := AuthResponse{
 		Type:                     "auth_response",
@@ -766,6 +984,8 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 		RecommendedBinaryVersion: s.cfg.CoordinatorAdvertisedVersion.LatestBinaryVersion,
 		RequiredBinaryVersion:    s.cfg.CoordinatorAdvertisedVersion.RequiredBinaryVersion,
 		AssignedProviderToken:    assignedProviderToken,
+		PairOT:                   pairOT,
+		ClaimURL:                 claimURL,
 		Tier2Session: &AuthTier2Session{
 			EncryptedLeg: AuthEncryptedLegSession{
 				Enabled:            true,
@@ -783,7 +1003,10 @@ func (s *Server) handleV2Conn(conn net.Conn, auth providerAuth, payload []byte, 
 	}
 	rawResponse, err := json.Marshal(response)
 	if err != nil {
-		s.close(conn, CloseInvalidHello, "invalid_auth_response")
+		// runWriter is already running for `session`; route the Close through
+		// it instead of writing directly to conn so we don't race an in-flight
+		// frame on the wire.
+		s.closeSession(session, CloseInvalidHello, "invalid_auth_response")
 		return "", ""
 	}
 	if err := session.send(rawResponse); err != nil {
@@ -815,13 +1038,12 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 			s.close(conn, CloseInvalidToken, "invalid_token")
 			return nil, false
 		}
-		if auth.validated {
-			if err := s.tokens.MarkTokenUsed(context.Background(), auth.token); err != nil {
-				s.log.Warn().Err(err).Str("provider_id", hello.ProviderID).Msg("provider token usage update failed")
-				s.close(conn, CloseInvalidToken, "invalid_token")
-				return nil, false
-			}
-		}
+		// SPEC-003 v0.8.4 (fix-pass-5) — `last_used_at` is now stamped
+		// atomically by validateProviderToken's ValidateAndMarkTokenUsed
+		// call at WS upgrade. The previously-here MarkTokenUsed
+		// invocation was removed because it ran AFTER admission, leaving
+		// a TOCTOU window where a concurrent tokenless self-heal could
+		// revoke the row before the mark.
 	}
 	tier, closeCode, closeReason := s.admission.Admit(hello, pinned, s.connectedProvisional())
 	if closeCode != 0 {
@@ -858,7 +1080,7 @@ func (s *Server) prepareProviderAdmission(conn net.Conn, auth providerAuth, hell
 	hashStatus := pool.HashStatus("")
 	tier2Cfg := s.tier2Config()
 	if tier2.ModelHashActive(tier2Cfg) {
-		hashStatus = tier2.VerifyProviderHash(hello.ModelID, hello.ModelHash)
+		hashStatus = s.catalogRef().VerifyProviderHash(hello.ModelID, hello.ModelHash)
 		tier2.LogProviderHashStatus(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
 		if tier2Cfg.RequireHashVerified && (hashStatus == pool.HashStatusUncatalogued || hashStatus == pool.HashStatusCatalogUnavailable) {
 			tier2.LogHashRequiredProviderExcluded(s.log, hello.ProviderID, assignedID, hello.ModelID, hello.ModelHash, hashStatus)
@@ -955,8 +1177,23 @@ func semverParts(value string) ([]int, bool) {
 	return out, true
 }
 
-func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *providerSession {
-	if old := s.pool.Register(entry, conn); old != nil {
+// registerProviderSession installs the WS session in the registry +
+// starts heartbeat monitoring. Returns nil when the registry refused
+// the registration, including bearer-less duplicate eviction defense
+// and receipt-key rotation grace conflicts.
+// On refusal, the caller MUST close the connection with
+// CloseInvalidToken / "invalid_token" and not advance to ack-write.
+func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) (*providerSession, pool.RegisterRefusal) {
+	old, ok, refusal := s.pool.RegisterAtDetailed(entry, conn, s.now())
+	if !ok {
+		// SPEC-003 v0.8.3 FR-C9.4 eviction defense fired: a
+		// bearer-less duplicate tried to evict an existing routable
+		// session for the same provider_id. Log + signal the caller
+		// to close.
+		s.log.Info().Str("provider_id", entry.ProviderID).Str("refusal", string(refusal)).Msg("provider session registration refused")
+		return nil, refusal
+	}
+	if old != nil {
 		_ = old.Close()
 	}
 	session := newProviderSession(entry.ProviderID, entry.AssignedID, conn, s.cfg.WS.WriteBufferSize, s.cfg.ProviderWSWriteTimeout())
@@ -964,13 +1201,30 @@ func (s *Server) registerProviderSession(conn net.Conn, entry *pool.Provider) *p
 	s.sessions.Store(sessionKey(entry.ProviderID, entry.AssignedID), session)
 	go session.runWriter()
 	go s.monitorHeartbeat(entry.ProviderID, entry.AssignedID, conn)
-	return session
+	return session, pool.RegisterRefusalNone
 }
 
 func (s *Server) readProviderLoop(conn net.Conn, providerID, assignedID string) {
+	// Resolve the session once so reactive PONG / Close-echo writes funnel
+	// through session.enqueueRaw — i.e. through the single runWriter goroutine.
+	// Without this, gobwas's ControlHandler would emit reply frames directly to
+	// conn from THIS read goroutine, racing runWriter mid-text-frame and
+	// corrupting WS framing on the wire. The race is invisible to -race because
+	// net.TCPConn.Write itself is internally locked; the corruption lives one
+	// layer up at the WS framing boundary.
+	//
+	// Fallback to directControlReply when no session is registered (only
+	// reachable from tests that drive readProviderLoop without a sessions-map
+	// entry) — keeps the historical behaviour for those callers.
+	var controlReply func([]byte) error
+	if session, ok := s.storedSessionFor(providerID, assignedID); ok {
+		controlReply = session.enqueueRaw
+	} else {
+		controlReply = s.directControlReply(conn)
+	}
 	for {
 		s.setReadDeadline(conn, s.cfg.HeartbeatMissThreshold())
-		payload, op, err := s.readClientData(conn)
+		payload, op, err := s.readClientData(conn, controlReply)
 		if err != nil {
 			s.log.Warn().Err(err).Str("provider_id", providerID).Msg("provider websocket read failed")
 			return
@@ -1025,6 +1279,29 @@ func (s *Server) close(conn net.Conn, code gobwas.StatusCode, reason string) {
 	// deploy's invalid_token rejection of M4/M1) are visible in the journal.
 	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
 	_ = s.writeServerMessage(conn, gobwas.OpClose, gobwas.NewCloseFrameBody(code, reason))
+}
+
+// closeSession is the post-handshake equivalent of close: it enqueues a Close
+// frame through the providerSession's writer (so it serializes with any
+// in-flight text frame from runWriter instead of racing it on the wire) and
+// schedules conn.Close after a short grace period so runWriter can actually
+// flush the frame before the TCP conn dies. Callers MUST use this instead of
+// close(session.conn, ...) once runWriter is running — i.e. after
+// registerProviderSession has returned.
+func (s *Server) closeSession(session *providerSession, code gobwas.StatusCode, reason string) {
+	s.log.Warn().Int("close_code", int(code)).Str("reason", reason).Msg("provider websocket closing")
+	body := gobwas.NewCloseFrameBody(code, reason)
+	var buf bytes.Buffer
+	if err := gobwas.WriteFrame(&buf, gobwas.NewCloseFrame(body)); err != nil {
+		// Writing to bytes.Buffer cannot realistically fail; fall back to a
+		// hard conn.Close so the session still tears down.
+		_ = session.conn.Close()
+		return
+	}
+	_ = session.enqueueRaw(buf.Bytes())
+	time.AfterFunc(100*time.Millisecond, func() {
+		_ = session.conn.Close()
+	})
 }
 
 func (s *Server) reserveUnauthenticatedConn() bool {
@@ -1137,8 +1414,56 @@ func (s *Server) writeServerMessage(conn net.Conn, op gobwas.OpCode, payload []b
 	return wsutil.WriteServerMessage(conn, op, payload)
 }
 
-func (s *Server) readClientData(conn net.Conn) ([]byte, gobwas.OpCode, error) {
-	controlHandler := wsutil.ControlFrameHandler(conn, gobwas.StateServerSide)
+// readClientData reads the next data frame from conn, handling any inbound
+// control frames inline. Control-frame replies (PONG, Close echo, protocol-
+// error Close) are assembled into a single contiguous frame and delivered via
+// controlReply.
+//
+// Two reply paths exist:
+//
+//   - Pre-handshake (handleConn / handleV2Conn before a providerSession has
+//     been registered): callers pass directControlReply, which writes the
+//     assembled frame straight to conn after re-arming the write deadline.
+//     No runWriter exists yet, so there is no goroutine to race against.
+//
+//   - Post-handshake (readProviderLoop): callers pass session.enqueueRaw, so
+//     the assembled frame is serialized through writeCh and emitted by the
+//     single runWriter goroutine. This closes the framing-corruption hazard
+//     where gobwas's ControlHandler would otherwise write header+payload in
+//     two separate conn.Write calls that could interleave with an in-flight
+//     coordinator→provider text frame (inference_request, cancel_request, …).
+//
+// We capture into a bytes.Buffer rather than writing through ControlHandler's
+// destination directly because HandlePing/HandleClose emit the frame as
+// TWO underlying Writes (one for the header, one for the body). Buffering
+// folds them into a single payload runWriter (or directControlReply) can ship
+// with one conn.Write — the unit of atomicity at the WS framing layer.
+func (s *Server) readClientData(conn net.Conn, controlReply func([]byte) error) ([]byte, gobwas.OpCode, error) {
+	controlHandler := func(hdr gobwas.Header, src io.Reader) error {
+		var buf bytes.Buffer
+		h := wsutil.ControlHandler{
+			Src: src,
+			Dst: &buf,
+			// src is the enclosing wsutil.Reader which already unmasks the
+			// frame payload as it Reads. ControlHandler's own cipher reader
+			// would XOR a second time and corrupt the bytes — match the
+			// invariant wsutil.ControlFrameHandler relies on.
+			DisableSrcCiphering: true,
+			State:               gobwas.StateServerSide,
+		}
+		handleErr := h.Handle(hdr)
+		// Always attempt delivery if any reply bytes were assembled. HandleClose
+		// returns a wsutil.ClosedError after the echo write succeeds, and the
+		// internal protocol-error path returns its error after writing a Close
+		// frame — in both cases the bytes still belong on the wire.
+		if buf.Len() > 0 {
+			reply := append([]byte(nil), buf.Bytes()...)
+			if err := controlReply(reply); err != nil && handleErr == nil {
+				handleErr = err
+			}
+		}
+		return handleErr
+	}
 	rd := wsutil.Reader{
 		Source:          conn,
 		State:           gobwas.StateServerSide,
@@ -1166,6 +1491,21 @@ func (s *Server) readClientData(conn net.Conn) ([]byte, gobwas.OpCode, error) {
 		}
 		payload, err := io.ReadAll(&rd)
 		return payload, hdr.OpCode, err
+	}
+}
+
+// directControlReply is the pre-handshake reply path. Writes the fully-assembled
+// control frame straight to conn after re-arming the write deadline. Socket
+// write deadlines are absolute and are never cleared after a successful write,
+// so an idle handshake conn's reactive PONG would otherwise inherit a stale,
+// expired deadline and fail instantly with i/o timeout. Used only before a
+// providerSession (and its runWriter) exists; once registerProviderSession has
+// started runWriter the post-handshake reply path is session.enqueueRaw.
+func (s *Server) directControlReply(conn net.Conn) func([]byte) error {
+	return func(frame []byte) error {
+		s.setWriteDeadline(conn)
+		_, err := conn.Write(frame)
+		return err
 	}
 }
 
@@ -1375,7 +1715,7 @@ func (s *Server) tier2WarmupExcluded(provider pool.Provider) bool {
 	if tier2.ModelHashActive(cfg) {
 		status := provider.HashStatus
 		if status == "" {
-			status = tier2.VerifyProviderHash(provider.ModelID, provider.ModelHash)
+			status = s.catalogRef().VerifyProviderHash(provider.ModelID, provider.ModelHash)
 		}
 		if tier2.IsHashPredicateFailure(status, cfg.RequireHashVerified) {
 			return true
@@ -1413,6 +1753,403 @@ func (s *Server) runHTTPWarmupGateAttempt(ctx context.Context, provider pool.Pro
 		return false
 	}
 	return warmupPayloadHasOutput(raw) && warmupCompletionUsagePassed(raw)
+}
+
+func (s *Server) runCanaryLoop() {
+	s.runCanarySweep()
+	ticker := time.NewTicker(s.canarySweepCadence())
+	defer ticker.Stop()
+	for range ticker.C {
+		s.runCanarySweep()
+	}
+}
+
+func (s *Server) runCanarySweep() {
+	now := s.now()
+	activeKeys := map[string]struct{}{}
+	for _, provider := range shuffledProviders(s.pool.Snapshot()) {
+		dueKey := provider.ProviderID
+		activeKeys[dueKey] = struct{}{}
+		if !s.canaryProbeEligible(provider) {
+			continue
+		}
+		nextDue, scheduled := s.canaryDue.Load(dueKey)
+		if !scheduled {
+			s.scheduleNextCanaryProbe(dueKey, now)
+			continue
+		}
+		if due, ok := nextDue.(time.Time); ok && now.Before(due) {
+			continue
+		}
+		key := sessionKey(provider.ProviderID, provider.AssignedID)
+		if _, loaded := s.canaries.LoadOrStore(key, struct{}{}); loaded {
+			continue
+		}
+		go func(provider pool.Provider, key, dueKey string) {
+			defer s.canaries.Delete(key)
+			if s.runCanaryProbe(provider) {
+				s.scheduleNextCanaryProbe(dueKey, s.now())
+			}
+		}(provider, key, dueKey)
+	}
+	s.canaryDue.Range(func(key, _ any) bool {
+		typedKey, ok := key.(string)
+		if !ok {
+			s.canaryDue.Delete(key)
+			return true
+		}
+		if _, active := activeKeys[typedKey]; !active {
+			s.canaryDue.Delete(key)
+		}
+		return true
+	})
+}
+
+func (s *Server) scheduleNextCanaryProbe(key string, from time.Time) {
+	s.canaryDue.Store(key, from.Add(jitteredCanaryInterval(s.canaryInterval())))
+}
+
+func (s *Server) canaryProbeEligible(provider pool.Provider) bool {
+	if s.pool.CanaryRecoveryEligible(provider.ProviderID, provider.AssignedID) {
+		if provider.State != pool.StateDegraded {
+			return false
+		}
+	} else if !provider.RoutingEligible() {
+		return false
+	}
+	if provider.SlotsFree <= 0 {
+		return false
+	}
+	if s.warmupGatePending(provider.ProviderID) {
+		return false
+	}
+	if provider.IsWSTunneled() {
+		_, ok := s.sessionFor(provider.ProviderID, provider.AssignedID)
+		return ok
+	}
+	return strings.TrimSpace(provider.EndpointURL) != ""
+}
+
+type canaryProbeOutcome string
+
+const (
+	canaryProbePass canaryProbeOutcome = "pass"
+	canaryProbeFail canaryProbeOutcome = "fail"
+	canaryProbeSkip canaryProbeOutcome = "skip"
+)
+
+func (s *Server) runCanaryProbe(provider pool.Provider) bool {
+	outcome := s.runCanaryProbeAttempt(provider)
+	if outcome == canaryProbeSkip {
+		s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary skipped")
+		return false
+	}
+	passed := outcome == canaryProbePass
+	checkedAt := s.now()
+	result := s.pool.RecordCanaryResult(provider.ProviderID, provider.AssignedID, passed, checkedAt, s.canaryFailureThreshold())
+	if !result.Current {
+		return false
+	}
+	if passed {
+		if result.SanctionCleared {
+			s.deleteCanarySanction(provider.ProviderID)
+		}
+		if result.Count == 0 {
+			s.log.Debug().Str("provider_id", provider.ProviderID).Msg("provider canary passed")
+		}
+		return true
+	}
+	event := s.log.Warn().
+		Str("provider_id", provider.ProviderID).
+		Int("canary_fail_count", result.Count).
+		Int("canary_failure_threshold", result.Threshold)
+	if result.Tripped != pool.CanaryTripNone {
+		event = event.Str("canary_trip", string(result.Tripped))
+	}
+	event.Msg("provider canary failed")
+	switch result.Tripped {
+	case pool.CanaryTripUnavailable:
+		if result.Tier == pool.TierProvisional && s.admission != nil {
+			s.admission.Reject(provider.ProviderID, "canary failures")
+		}
+		if session, ok := s.sessionFor(provider.ProviderID, provider.AssignedID); ok {
+			s.closeSession(session, CloseBanned, "canary_failed")
+		}
+	case pool.CanaryTripDegraded:
+		s.saveCanarySanction(pool.CanarySanctionSnapshot{
+			ProviderID:    provider.ProviderID,
+			FailCount:     result.Count,
+			LastCheckedAt: &checkedAt,
+			LastFailedAt:  &checkedAt,
+		})
+		s.log.Warn().Str("provider_id", provider.ProviderID).Msg("provider held degraded after canary threshold")
+	}
+	return true
+}
+
+func (s *Server) saveCanarySanction(snapshot pool.CanarySanctionSnapshot) {
+	if s.canarySanctions == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.canarySanctions.UpsertCanarySanction(ctx, snapshot); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", snapshot.ProviderID).Msg("canary sanction persistence failed")
+	}
+}
+
+func (s *Server) deleteCanarySanction(providerID string) {
+	if s.canarySanctions == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.canarySanctions.DeleteCanarySanction(ctx, providerID); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("canary sanction deletion failed")
+	}
+}
+
+func (s *Server) runCanaryProbeAttempt(provider pool.Provider) canaryProbeOutcome {
+	body, expected, err := s.buildCanaryBody(provider.ModelID, s.canaryMaxTokens())
+	if err != nil {
+		return canaryProbeSkip
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), s.canaryTimeout())
+	defer cancel()
+	if !provider.IsWSTunneled() {
+		return s.runHTTPCanaryProbeAttempt(ctx, provider, body, expected)
+	}
+	return s.runWSCanaryProbeAttempt(ctx, provider, body, expected)
+}
+
+func (s *Server) runWSCanaryProbeAttempt(ctx context.Context, provider pool.Provider, body []byte, expected string) canaryProbeOutcome {
+	if s.tier2WarmupExcluded(provider) {
+		return canaryProbeSkip
+	}
+	requestID := s.newUUID()
+	relay, err := s.DispatchInference(ctx, provider, requestID, body, false)
+	if err != nil {
+		return canaryProbeSkip
+	}
+	chunks := relay.Chunks
+	var output strings.Builder
+	for {
+		select {
+		case chunk, ok := <-chunks:
+			if !ok {
+				chunks = nil
+				continue
+			}
+			output.WriteString(canaryChunkContent(chunk.Data))
+		case end := <-relay.Done:
+			if end.Status != "complete" {
+				return canaryProbeFail
+			}
+			if canaryAnswerMatches(output.String(), expected) {
+				return canaryProbePass
+			}
+			return canaryProbeFail
+		case <-relay.Errors:
+			return canaryProbeFail
+		case <-ctx.Done():
+			return canaryProbeFail
+		}
+	}
+}
+
+func (s *Server) runHTTPCanaryProbeAttempt(ctx context.Context, provider pool.Provider, body []byte, expected string) canaryProbeOutcome {
+	endpoint := strings.TrimRight(strings.TrimSpace(provider.EndpointURL), "/")
+	if endpoint == "" {
+		return canaryProbeSkip
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint+"/v1/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return canaryProbeSkip
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := providerhttp.Client.Do(req)
+	if err != nil {
+		return canaryProbeFail
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return canaryProbeFail
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return canaryProbeFail
+	}
+	if canaryAnswerMatches(strings.Join(canaryPayloadContents(raw), ""), expected) {
+		return canaryProbePass
+	}
+	return canaryProbeFail
+}
+
+func (s *Server) buildCanaryBody(modelID string, maxTokens int) ([]byte, string, error) {
+	return buildCanaryBody(modelID, maxTokens, s.cfg.Pool.CanaryChallenges)
+}
+
+func buildCanaryBody(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig) ([]byte, string, error) {
+	random, err := randomBytes(5)
+	if err != nil {
+		return nil, "", err
+	}
+	return buildCanaryBodyFromRandom(modelID, maxTokens, challenges, random)
+}
+
+func buildCanaryBodyFromRandom(modelID string, maxTokens int, challenges []config.CanaryChallengeConfig, random []byte) ([]byte, string, error) {
+	if len(challenges) == 0 {
+		return nil, "", errors.New("canary challenge bank is empty")
+	}
+	if len(random) < 5 {
+		return nil, "", errors.New("canary random seed too short")
+	}
+	challenge := challenges[int(random[4])%len(challenges)]
+	promptTemplate := strings.TrimSpace(challenge.Prompt)
+	expectedTemplate := strings.TrimSpace(challenge.Expected)
+	if promptTemplate == "" || expectedTemplate == "" {
+		return nil, "", errors.New("canary challenge prompt and expected must not be empty")
+	}
+	if !strings.Contains(promptTemplate, "{nonce}") || !strings.Contains(expectedTemplate, "{nonce}") {
+		return nil, "", errors.New("canary challenge prompt and expected must contain {nonce}")
+	}
+	nonce := strings.ToUpper(hex.EncodeToString(random[:4]))
+	content := strings.ReplaceAll(promptTemplate, "{nonce}", nonce)
+	expected := strings.ReplaceAll(expectedTemplate, "{nonce}", nonce)
+	body, err := json.Marshal(map[string]any{
+		"model": modelID,
+		"messages": []map[string]string{{
+			"role":    "user",
+			"content": content,
+		}},
+		"max_tokens": maxTokens,
+		"stream":     false,
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return body, expected, nil
+}
+
+func canaryAnswerMatches(output, expected string) bool {
+	return strings.TrimSpace(output) == expected
+}
+
+func jitteredCanaryInterval(base time.Duration) time.Duration {
+	if base <= 0 {
+		return 0
+	}
+	spread := int64(base)
+	offset, err := randomInt64(spread)
+	if err != nil {
+		return base
+	}
+	return base/2 + time.Duration(offset)
+}
+
+func shuffledProviders(providers []pool.Provider) []pool.Provider {
+	shuffled := append([]pool.Provider(nil), providers...)
+	for i := len(shuffled) - 1; i > 0; i-- {
+		j, err := randomInt(i + 1)
+		if err != nil {
+			return shuffled
+		}
+		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
+	}
+	return shuffled
+}
+
+func randomInt(max int) (int, error) {
+	n, err := randomInt64(int64(max))
+	return int(n), err
+}
+
+func randomInt64(max int64) (int64, error) {
+	if max <= 0 {
+		return 0, errors.New("random bound must be positive")
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(max))
+	if err != nil {
+		return 0, err
+	}
+	return n.Int64(), nil
+}
+
+func canaryChunkContent(data string) string {
+	var out strings.Builder
+	hasDataLines := false
+	for _, line := range strings.Split(data, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		hasDataLines = true
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		out.WriteString(strings.Join(canaryPayloadContents([]byte(payload)), ""))
+	}
+	if hasDataLines {
+		return out.String()
+	}
+	return strings.Join(canaryPayloadContents([]byte(data)), "")
+}
+
+func canaryPayloadContents(raw []byte) []string {
+	var resp struct {
+		Choices []struct {
+			Message struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+			Delta struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"delta"`
+			Text json.RawMessage `json:"text"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(raw, &resp); err != nil {
+		return nil
+	}
+	var out []string
+	for _, choice := range resp.Choices {
+		out = append(out, rawJSONTextValues(choice.Message.Content)...)
+		out = append(out, rawJSONTextValues(choice.Delta.Content)...)
+		out = append(out, rawJSONTextValues(choice.Text)...)
+	}
+	return out
+}
+
+func rawJSONTextValues(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil
+	}
+	return textValues(value)
+}
+
+func textValues(value any) []string {
+	switch v := value.(type) {
+	case string:
+		return []string{v}
+	case []any:
+		var out []string
+		for _, item := range v {
+			out = append(out, textValues(item)...)
+		}
+		return out
+	case map[string]any:
+		var out []string
+		for _, key := range []string{"text", "content"} {
+			out = append(out, textValues(v[key])...)
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func warmupGatePassed(end InferenceResponseEnd, observedOutput bool) bool {
@@ -1657,6 +2394,7 @@ func (s *Server) handleStateUpdate(providerID, assignedID string, payload []byte
 		State:      state,
 		SlotsFree:  update.MetricsSnapshot.SlotsFree,
 		SlotsTotal: update.MetricsSnapshot.SlotsTotal,
+		At:         s.now(),
 	})
 	if !ok {
 		s.log.Warn().Str("provider_id", providerID).Msg("state_update for unknown provider")
@@ -1813,6 +2551,49 @@ func (s *Server) degradedBackoff() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
+func (s *Server) canaryInterval() time.Duration {
+	seconds := s.cfg.Pool.CanaryIntervalS
+	if seconds <= 0 {
+		seconds = config.Default().Pool.CanaryIntervalS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Server) canarySweepCadence() time.Duration {
+	cadence := s.canaryInterval() / 10
+	if cadence < time.Second {
+		return time.Second
+	}
+	if cadence > 30*time.Second {
+		return 30 * time.Second
+	}
+	return cadence
+}
+
+func (s *Server) canaryTimeout() time.Duration {
+	seconds := s.cfg.Pool.CanaryTimeoutS
+	if seconds <= 0 {
+		seconds = config.Default().Pool.CanaryTimeoutS
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+func (s *Server) canaryMaxTokens() int {
+	tokens := s.cfg.Pool.CanaryMaxTokens
+	if tokens <= 0 {
+		tokens = config.Default().Pool.CanaryMaxTokens
+	}
+	return tokens
+}
+
+func (s *Server) canaryFailureThreshold() int {
+	threshold := s.cfg.Pool.CanaryFailureThreshold
+	if threshold <= 0 {
+		threshold = config.Default().Pool.CanaryFailureThreshold
+	}
+	return threshold
+}
+
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
@@ -1841,7 +2622,9 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	for _, p := range providers {
 		switch p.State {
 		case pool.StateReady:
-			resp.PoolReady++
+			if providerPublishedReady(p) {
+				resp.PoolReady++
+			}
 			if s.providerTier2PolicyEligible(p, s.tier2Config()) {
 				resp.PoolPolicyReady++
 			}
@@ -1878,7 +2661,7 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		for i := range providers {
-			providers[i].HashStatus = tier2.VerifyProviderHash(providers[i].ModelID, providers[i].ModelHash)
+			providers[i].HashStatus = s.catalogRef().VerifyProviderHash(providers[i].ModelID, providers[i].ModelHash)
 		}
 	}
 	modelSet := map[string]struct{}{}
@@ -1892,14 +2675,20 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}{TotalProviders: len(providers)}
 	cfg := s.tier2Config()
 	for _, p := range providers {
-		if p.State == pool.StateReady {
+		// SPEC-015 §7 / TestProviderAuthV2ReceiptRotationCandidateWithout
+		// StateUpdateDoesNotPublish: FreeSlots aggregates buyer-usable
+		// capacity only, gated by providerPublishedReady, so a pending
+		// rotation does NOT contribute. TotalSlots stays top-level because
+		// it represents absolute fleet capacity for capacity planning.
+		// The two summary fields have intentionally different semantics.
+		if providerPublishedReady(p) {
 			summary.Ready++
-			if s.providerTier2PolicyEligible(p, cfg) {
-				summary.PolicyReady++
-			}
+			summary.FreeSlots += p.SlotsFree
+		}
+		if s.providerTier2PolicyEligible(p, cfg) {
+			summary.PolicyReady++
 		}
 		summary.TotalSlots += p.SlotsTotal
-		summary.FreeSlots += p.SlotsFree
 		if _, ok := modelSet[p.ModelID]; !ok {
 			modelSet[p.ModelID] = struct{}{}
 			summary.Models = append(summary.Models, p.ModelID)
@@ -1907,23 +2696,96 @@ func (s *Server) handlePoolz(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
-		Pool    []pool.Provider `json:"pool"`
-		Summary any             `json:"summary"`
-	}{
-		Pool:    providers,
-		Summary: summary,
-	})
+	type poolzReceiptPubkeyPrev struct {
+		Pubkey    string `json:"pubkey"`
+		RotatedAt int64  `json:"rotated_at"`
+		ExpiresAt int64  `json:"expires_at"`
+	}
+	type poolzProvider struct {
+		pool.Provider
+		CanaryFailCount   int                     `json:"canary_fail_count"`
+		ReceiptPubkey     *string                 `json:"receipt_pubkey"`
+		ReceiptPubkeyPrev *poolzReceiptPubkeyPrev `json:"receipt_pubkey_prev"`
+	}
+	now := s.now()
+	poolz := make([]poolzProvider, 0, len(providers))
+	for _, provider := range providers {
+		var receiptPubkey *string
+		if len(provider.ReceiptPubkey) > 0 {
+			encoded := base64.StdEncoding.EncodeToString(provider.ReceiptPubkey)
+			receiptPubkey = &encoded
+		}
+		var receiptPubkeyPrev *poolzReceiptPubkeyPrev
+		if provider.ReceiptPubkeyPrev != nil && now.Before(provider.ReceiptPubkeyPrev.ExpiresAt) {
+			receiptPubkeyPrev = &poolzReceiptPubkeyPrev{
+				Pubkey:    base64.StdEncoding.EncodeToString(provider.ReceiptPubkeyPrev.Pubkey),
+				RotatedAt: provider.ReceiptPubkeyPrev.RotatedAt.Unix(),
+				ExpiresAt: provider.ReceiptPubkeyPrev.ExpiresAt.Unix(),
+			}
+		}
+		poolz = append(poolz, poolzProvider{
+			Provider:          provider,
+			CanaryFailCount:   provider.CanaryFailCount,
+			ReceiptPubkey:     receiptPubkey,
+			ReceiptPubkeyPrev: receiptPubkeyPrev,
+		})
+	}
+	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotation. The three
+	// `catalog_*` fields are present iff the catalog is effectively
+	// active: (a) Tier2Config.CatalogPath is configured, (b) the
+	// catalog parsed cleanly, (c) its signature verified. The
+	// `s.catalogRef().Active()` predicate captures all three.
+	type poolzResponse struct {
+		Pool             []poolzProvider `json:"pool"`
+		Summary          any             `json:"summary"`
+		CatalogID        *string         `json:"catalog_id,omitempty"`
+		CatalogURL       *string         `json:"catalog_url,omitempty"`
+		CatalogPubkeyURL *string         `json:"catalog_pubkey_url,omitempty"`
+	}
+	resp := poolzResponse{Pool: poolz, Summary: summary}
+	if s.catalogRef().Active() {
+		catalogID := s.catalogRef().CatalogID()
+		if catalogID != "" {
+			resp.CatalogID = &catalogID
+			base := strings.TrimSpace(cfg.PublicCatalogBaseURL)
+			if base == "" {
+				// Fallback: derive from the inbound request host so a
+				// verifier reading `/poolz` from the same coordinator
+				// can resolve the URLs even when the operator hasn't
+				// pinned a public base.
+				if r.Host != "" {
+					scheme := "https"
+					if r.TLS == nil {
+						scheme = "http"
+					}
+					base = scheme + "://" + r.Host
+				}
+			} else {
+				base = strings.TrimRight(base, "/")
+			}
+			if base != "" {
+				catalogURL := base + "/catalog/" + catalogID
+				pubkeyURL := base + "/catalog/pubkey"
+				resp.CatalogURL = &catalogURL
+				resp.CatalogPubkeyURL = &pubkeyURL
+			}
+		}
+	}
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func providerPublishedReady(p pool.Provider) bool {
+	return p.State == pool.StateReady && p.AuthState != pool.AuthBearerlessDuplicate && len(p.PendingReceiptPubkey) == 0
 }
 
 func (s *Server) providerTier2PolicyEligible(p pool.Provider, cfg config.Tier2Config) bool {
-	if p.State != pool.StateReady {
+	if !providerPublishedReady(p) {
 		return false
 	}
 	if !tier2.ConfigActive(cfg) {
 		return true
 	}
-	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(tier2.VerifyProviderHash(p.ModelID, p.ModelHash), cfg.RequireHashVerified) {
+	if tier2.ModelHashActive(cfg) && tier2.IsHashPredicateFailure(s.catalogRef().VerifyProviderHash(p.ModelID, p.ModelHash), cfg.RequireHashVerified) {
 		return false
 	}
 	if cfg.RequireEncryptedLeg && !p.EncryptedLeg {
@@ -1986,14 +2848,40 @@ func (s *Server) handleBlacklist(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// authorizedOperator returns true only when the configured operator key is
-// non-empty and matches the request's Bearer token. Empty configured key →
-// DENY (M1-5 / SECU-5). Previously this short-circuited to allow on empty
-// expected key, relying on config.Validate() to refuse to start with an empty
-// key. That defense-in-depth coupling meant any future entry point bypassing
-// Validate (live SIGHUP, ad-hoc Server construction) would silently fail open.
+// authorizedOperator returns true when the request's Bearer token
+// matches the configured operator key. This guards HUMAN-ADMIN
+// endpoints (`/poolz`, `/admin/blacklist`, `/admin/promote`,
+// `/admin/reject`, `/admin/provisional`) and intentionally does NOT
+// accept gateway_service_token: the codex security audit on PR #73
+// (HIGH-1) flagged that admin endpoints accepting the service-token
+// silently grant human-admin power to the gateway once the operator
+// rotates the legacy operator_key. Operator-class endpoints are
+// reachable only from a human operator's machine, so the legacy single
+// credential is sufficient and the dual-credential bridge stays scoped
+// to the `/internal/*` paths the gateway actually calls.
+//
+// Empty operator_key still means DENY (M1-5 / SECU-5 preserved). The
+// service-to-service `/internal/*` paths under buyer.Server use the
+// auth.GatewayInternalBearerMatches helper instead, which accepts
+// either credential class and emits its own audit-log line.
+//
+// TODO(m3-2-cleanup): the buyer-side gateway-internal bridge still
+// accepts the OperatorKey fallback. Tracked for removal in
+// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md once live audit
+// logs show zero gateway-origin `key=operator_key` for 30 days post-
+// rotation. Until then, removing the fallback would break the cutover
+// for operators who still pin the legacy single credential.
 func (s *Server) authorizedOperator(r *http.Request) bool {
-	return s.cfg.Auth.OperatorKey != "" && auth.BearerTokenMatchesHeader(r.Header, s.cfg.Auth.OperatorKey)
+	if !auth.OperatorOnlyBearerMatches(r.Header, s.cfg.Auth.OperatorKey) {
+		return false
+	}
+	s.log.Info().
+		Str("event", "internal_bearer_accepted").
+		Str("key", "operator_key").
+		Str("path", r.URL.Path).
+		Str("remote_addr", r.RemoteAddr).
+		Msg("internal bearer accepted")
+	return true
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

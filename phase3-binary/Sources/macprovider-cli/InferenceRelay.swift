@@ -17,6 +17,8 @@ actor InferenceRelay {
     private let maxBodyBytes: Int
     private let sendFrame: SendFrame
     private let tier2Session: Tier2ProviderSession?
+    private let receiptBuilder: ReceiptBuilder?
+    private let receiptProviderID: String?
     private var active: [String: ActiveRequest] = [:]
 
     init(
@@ -27,6 +29,8 @@ actor InferenceRelay {
         maxActiveRequests: Int,
         maxBodyBytes: Int,
         tier2Session: Tier2ProviderSession? = nil,
+        receiptBuilder: ReceiptBuilder? = nil,
+        receiptProviderID: String? = nil,
         sendFrame: @escaping SendFrame
     ) {
         self.modelRuntime = modelRuntime
@@ -36,6 +40,8 @@ actor InferenceRelay {
         self.maxActiveRequests = max(1, maxActiveRequests)
         self.maxBodyBytes = max(1, maxBodyBytes)
         self.tier2Session = tier2Session
+        self.receiptBuilder = receiptBuilder
+        self.receiptProviderID = receiptProviderID
         self.sendFrame = sendFrame
     }
 
@@ -93,6 +99,8 @@ actor InferenceRelay {
         }
 
         let state = RelayRequestState()
+        let receiptBuilder = receiptBuilder
+        let receiptProviderID = receiptProviderID
         let task = Task { [weak self, modelRuntime, providerStatus, loadedModelID, warmSwapEnabled, sendFrame, tier2Session, state] in
             await Self.process(
                 requestID: requestID,
@@ -104,6 +112,8 @@ actor InferenceRelay {
                 loadedModelID: loadedModelID,
                 warmSwapEnabled: warmSwapEnabled,
                 tier2Session: tier2Session,
+                receiptBuilder: receiptBuilder,
+                receiptProviderID: receiptProviderID,
                 sendFrame: sendFrame
             )
             await self?.removeActive(requestID)
@@ -182,6 +192,8 @@ actor InferenceRelay {
         loadedModelID: String?,
         warmSwapEnabled: Bool,
         tier2Session: Tier2ProviderSession?,
+        receiptBuilder: ReceiptBuilder?,
+        receiptProviderID: String?,
         sendFrame: @escaping SendFrame
     ) async {
         let startedAt = await providerStatus.beginRequest(requestID: requestID)
@@ -211,6 +223,10 @@ actor InferenceRelay {
                     state: state,
                     modelRuntime: modelRuntime,
                     tier2Session: tier2Session,
+                    receiptBuilder: receiptBuilder,
+                    receiptProviderID: receiptProviderID,
+                    startedAt: startedAt,
+                    warmSwapEnabled: warmSwapEnabled,
                     sendFrame: sendFrame
                 )
             }
@@ -256,9 +272,22 @@ actor InferenceRelay {
         state: RelayRequestState,
         modelRuntime: any ModelRuntimeServing,
         tier2Session: Tier2ProviderSession?,
+        receiptBuilder: ReceiptBuilder?,
+        receiptProviderID: String?,
+        startedAt: Date,
+        warmSwapEnabled: Bool,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
-        let completion = try await modelRuntime.complete(request, shouldCancel: { state.isCancelled })
+        // SPEC-015 §M.2.2 atomic-read invariant — bind the receipt
+        // to the snapshot the runtime ACTUALLY used to drive
+        // generation, not to a separately-sampled `currentSnapshot()`
+        // which can drift across an actor interleaving / warm-swap.
+        let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, shouldCancel: { state.isCancelled })
+        let modelHashSource = RouterHandler.resolveModelHashSource(
+            warmSwapEnabled: warmSwapEnabled,
+            snapshot: servedSnapshot
+        )
+        let unixTsSeconds = Int64(Date().timeIntervalSince1970)
         state.setUsage(completion)
         if state.isCancelled {
             if state.markTerminalSent() {
@@ -278,16 +307,81 @@ actor InferenceRelay {
         let response = try jsonString(chatCompletionResponse(request: request, completion: completion))
         let seq = state.nextSeq()
         try await sendChunk(requestID: requestID, stream: false, seq: seq, data: response, tier2Session: tier2Session, sendFrame: sendFrame)
+        let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+        let receiptHeader = Self.buildReceiptHeader(
+            receiptBuilder: receiptBuilder,
+            providerID: receiptProviderID,
+            request: request,
+            completion: completion,
+            ttftMs: ttftMs,
+            unixTsSeconds: unixTsSeconds,
+            requestID: requestID,
+            modelHashSource: modelHashSource
+        )
         if state.markTerminalSent() {
-            try await sendEndFrame([
+            var endFrame: [String: Any] = [
                 "type": "inference_response_end",
                 "request_id": requestID,
                 "status": "complete",
                 "chunks_sent": state.chunksSent,
                 "usage": usage(completion),
-            ], requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
+            ]
+            if let receiptHeader {
+                endFrame["receipt"] = receiptHeader
+            }
+            try await sendEndFrame(endFrame, requestID: requestID, stream: false, tier2Session: tier2Session, sendFrame: sendFrame)
         }
         return completion
+    }
+
+    private static func buildReceiptHeader(
+        receiptBuilder: ReceiptBuilder?,
+        providerID: String?,
+        request: ChatCompletionRequest,
+        completion: CompletionResult,
+        ttftMs: Int64,
+        unixTsSeconds: Int64,
+        requestID: String,
+        modelHashSource: ReceiptModelHashSource
+    ) -> String? {
+        guard let receiptBuilder, let providerID, !providerID.isEmpty else {
+            return nil
+        }
+        // SPEC-015 §M.2.2 — refuse receipt construction when the
+        // request-start container cannot be identified.
+        let resolvedModelHash: String?
+        switch modelHashSource {
+        case .captured(let hash):
+            resolvedModelHash = hash
+        case .warmSwapDisabled:
+            resolvedModelHash = nil
+        case .ambiguous:
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .modelSwapViolation)
+            return nil
+        }
+        do {
+            return try receiptBuilder.build(
+                providerId: providerID,
+                input: ReceiptInput(
+                    modelId: request.model,
+                    request: request,
+                    outputContent: completion.content,
+                    outputToolCalls: nil,
+                    finishReason: completion.finishReason,
+                    ttftMs: ttftMs,
+                    tokensOut: Int64(completion.completionTokens),
+                    unixTsSeconds: unixTsSeconds,
+                    modelHash: resolvedModelHash
+                )
+            )
+        } catch {
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .constructionFailed)
+            return nil
+        }
+    }
+
+    private static func elapsedMilliseconds(since start: Date, now: Date = Date()) -> Int64 {
+        max(0, Int64(now.timeIntervalSince(start) * 1000))
     }
 
     private static func processStreaming(

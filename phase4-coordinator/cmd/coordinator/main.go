@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"flag"
 	"fmt"
 	"net/http"
@@ -27,7 +28,9 @@ import (
 )
 
 // version is overridden at build time via
-//   go build -ldflags "-X main.version=$(git describe --always --dirty --tags)"
+//
+//	go build -ldflags "-X main.version=$(git describe --always --dirty --tags)"
+//
 // (see scripts/build-linux.sh). Defaults to "dev" for local `go run`.
 var version = "dev"
 
@@ -66,6 +69,11 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	canaryStore, err := setupCanarySanctionStore(context.Background(), cfg, reqLogStore.DB(), registry)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "canary sanction storage: %v\n", err)
+		os.Exit(1)
+	}
 	auditStore, err := audit.OpenStore(cfg.Storage.DBPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "audit log storage: %v\n", err)
@@ -92,6 +100,9 @@ func main() {
 	wsOpts := []providerws.Option{}
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
+	if canaryStore != nil {
+		wsOpts = append(wsOpts, providerws.WithCanarySanctionStore(canaryStore))
+	}
 	// SPEC-003 v0.8 FR-C9.1 — the token validator is always wired now,
 	// even when require_provider_tokens=false, because the same store
 	// is the issuance backend for self-serve provisional tokens. Pre-
@@ -105,6 +116,7 @@ func main() {
 	// interface layer (codex architect review on PR #44, interface
 	// segregation MINOR).
 	wsOpts = append(wsOpts, providerws.WithTokenIssuer(tokenStore))
+	wsOpts = append(wsOpts, providerws.WithGitHubAuthStore(tokenStore))
 	if cfg.Auth.RequireProviderTokens {
 		logger.Info().Msg("provider WS token validation REQUIRED (auth.require_provider_tokens=true)")
 	} else {
@@ -130,6 +142,8 @@ func main() {
 	// buffer until full, then drop with a WARN.
 	swapCh := make(chan pool.SwapEvent, 64)
 	swapDrained := make(chan struct{})
+	receiptRotationCh := make(chan pool.ReceiptRotationEvent, 64)
+	receiptRotationDrained := make(chan struct{})
 	logSwapAuditFailure := func(event pool.SwapEvent, err error) {
 		loadingWindowMS := int64(0)
 		if !event.LoadingStartedAt.IsZero() {
@@ -174,6 +188,35 @@ func main() {
 			}
 		}
 	}()
+	logReceiptRotationAuditFailure := func(event pool.ReceiptRotationEvent, err error) {
+		logger.Warn().
+			Err(err).
+			Str("provider_id", event.ProviderID).
+			Time("rotated_at", event.RotatedAt).
+			Msg("receipt_rotation_detected audit write failed")
+	}
+	go func() {
+		defer close(receiptRotationDrained)
+		for {
+			select {
+			case <-shutdownCtx.Done():
+				for {
+					select {
+					case event := <-receiptRotationCh:
+						if err := auditStore.EmitReceiptRotation(context.Background(), event); err != nil {
+							logReceiptRotationAuditFailure(event, err)
+						}
+					default:
+						return
+					}
+				}
+			case event := <-receiptRotationCh:
+				if err := auditStore.EmitReceiptRotation(context.Background(), event); err != nil {
+					logReceiptRotationAuditFailure(event, err)
+				}
+			}
+		}
+	}()
 	logSwapDropped := func(event pool.SwapEvent, reason string) {
 		// Symmetry with logSwapAuditFailure: a dropped event must be
 		// reconstructable from the log line. Include the same identity
@@ -210,8 +253,20 @@ func main() {
 			logSwapDropped(event, "queue_full_cap_64")
 		}
 	}
+	receiptRotationEmitter := func(event pool.ReceiptRotationEvent) {
+		if shutdownCtx.Err() != nil {
+			logger.Warn().Str("provider_id", event.ProviderID).Str("reason", "shutdown").Msg("receipt_rotation_detected event dropped")
+			return
+		}
+		select {
+		case receiptRotationCh <- event:
+		default:
+			logger.Warn().Str("provider_id", event.ProviderID).Str("reason", "queue_full_cap_64").Msg("receipt_rotation_detected event dropped")
+		}
+	}
 	wsOpts = append(wsOpts, providerws.WithRegistryOptions(
 		pool.WithSwapEmitter(swapEmitter),
+		pool.WithReceiptRotationEmitter(receiptRotationEmitter),
 	))
 	wsServer := providerws.NewServer(cfg, registry, logger, wsOpts...)
 	buyerServer := buyer.NewServer(
@@ -227,6 +282,7 @@ func main() {
 		buyer.WithTier2Config(cfg.Tier2),
 		buyer.WithLimitsConfig(cfg.Limits),
 		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
+		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
 		buyer.WithAdmission(wsServer.Admission(), cfg.Admission.ProvisionalTierWeight),
 		buyer.WithRequestLog(reqLogStore),
@@ -242,8 +298,9 @@ func main() {
 	providerMux := http.NewServeMux()
 	providerMux.Handle("/", wsServer.Handler())
 	providerMux.Handle("/internal/", buyerServer.InternalHandler())
-	billingHandler := billingStore.Handlers(
+	billingHandler := billingStore.HandlersWithBridge(
 		cfg.Auth.OperatorKey,
+		cfg.Auth.GatewayServiceToken,
 		tokenStore,
 		cfg.Auth.RequireProviderTokens,
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
@@ -264,6 +321,7 @@ func main() {
 	startRequestLogRetentionPruner(shutdownCtx, reqLogStore, cfg.Storage.RequestLogRetentionDays, logger)
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
+	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
 
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
@@ -315,6 +373,11 @@ func main() {
 			case <-ctx.Done():
 				logger.Warn().Msg("swap audit drain timed out at shutdown")
 			}
+			select {
+			case <-receiptRotationDrained:
+			case <-ctx.Done():
+				logger.Warn().Msg("receipt rotation audit drain timed out at shutdown")
+			}
 			logger.Info().Msg("coordinator shutdown complete")
 			return
 		case err := <-errs:
@@ -328,6 +391,22 @@ func main() {
 
 type requestLogPruner interface {
 	PruneBefore(context.Context, time.Time) (int64, error)
+}
+
+func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB, registry *pool.Registry) (providerws.CanarySanctionStore, error) {
+	if !cfg.Pool.CanaryEnabled {
+		return nil, nil
+	}
+	store, err := providerws.NewSQLiteCanarySanctionStore(db)
+	if err != nil {
+		return nil, err
+	}
+	canarySanctions, err := store.LoadCanarySanctions(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load canary sanctions: %w", err)
+	}
+	registry.LoadCanarySanctions(canarySanctions)
+	return store, nil
 }
 
 func startRequestLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
@@ -403,6 +482,36 @@ func startAdmissionRetentionPruner(ctx context.Context, mgr admissionPruner, ret
 	}()
 }
 
+type githubAuthStatePruner interface {
+	PruneGitHubAuthState(context.Context, time.Time) error
+}
+
+func startGitHubAuthStatePruner(ctx context.Context, store githubAuthStatePruner, logger zerolog.Logger) {
+	if store == nil {
+		return
+	}
+	prune := func() {
+		now := time.Now().UTC()
+		if err := store.PruneGitHubAuthState(ctx, now); err != nil {
+			logger.Warn().Err(err).Msg("github auth state prune failed")
+		}
+	}
+	prune()
+	logger.Info().Time("next_prune_at", time.Now().UTC().Add(time.Hour)).Msg("github auth state pruner armed")
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
+}
+
 func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, retentionDays int, logger zerolog.Logger) {
 	if store == nil || retentionDays <= 0 {
 		return
@@ -453,16 +562,21 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		logger.Error().Msg("tier2 config reload rejected: startup-only tier2 fields require restart")
 		return
 	}
-	if err := tier2.ConfigureStrict(cfg.Tier2, logger); err != nil {
+	// M3-8d (audit TEST-4): build a fresh *Catalog and atomically swap the
+	// package singleton, rather than mutating the in-place global. A reader
+	// holding the old pointer mid-VerifyProviderHash completes against the
+	// old (still-valid) catalog; the next call lands on the new one. If
+	// ConfigureStrict on the new *Catalog fails, the SIGHUP is rejected
+	// and the in-flight singleton is left untouched — same semantics as
+	// the pre-M3-8d in-place mutation, but without the SIGHUP-reload race
+	// the audit flagged on catalog.go:81-84.
+	//
+	// M3-8d fixup (codex MED): build + validate + require_hash_verified
+	// post-condition + swap now happen atomically inside
+	// ConfigureDefaultStrict so this path cannot be bypassed by a future
+	// caller skipping a step.
+	if _, err := tier2.ConfigureDefaultStrict(cfg.Tier2, logger); err != nil {
 		logger.Error().Err(err).Msg("tier2 config reload rejected")
-		return
-	}
-	if cfg.Tier2.RequireHashVerified && !tier2.Active() {
-		if tier2.Configured() {
-			logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires an active (non-expired) catalog; the current catalog has expired or failed to load")
-		} else {
-			logger.Error().Msg("tier2 config reload rejected: require_hash_verified requires a configured catalog")
-		}
 		return
 	}
 	wsServer.SetTier2Config(cfg.Tier2)
@@ -520,6 +634,10 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 
 	"CatalogPath":                    tier2StartupOnly,
 	"CatalogPublicKey":               tier2StartupOnly,
+	// SPEC-015 §M.4 — public catalog base URL is operator-visible
+	// only; hot-reloadable so an operator can flip it without
+	// restarting the coordinator.
+	"PublicCatalogBaseURL":           tier2HotReloadable,
 	"EncryptedLegAEAD":               tier2StartupOnly,
 	"EncryptedLegRekeyAfterRequests": tier2StartupOnly,
 	"EncryptedLegRekeyAfterSeconds":  tier2StartupOnly,

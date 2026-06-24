@@ -435,7 +435,7 @@ func TestRelayIgnoresResponsesFromReplacedSession(t *testing.T) {
 
 	current := *stale
 	current.AssignedID = "current"
-	if old := registry.Register(&current, nil); old != nil {
+	if old, _ := registry.Register(&current, nil); old != nil {
 		_ = old.Close()
 	}
 	if _, err := s.DispatchInference(context.Background(), *stale, "req-after-replace", []byte(`{"model":"model-a"}`), false); err != ErrRelayClosed {
@@ -485,7 +485,7 @@ func TestPreflightIgnoresAckFromReplacedSession(t *testing.T) {
 
 	current := *stale
 	current.AssignedID = "current"
-	if old := registry.Register(&current, nil); old != nil {
+	if old, _ := registry.Register(&current, nil); old != nil {
 		_ = old.Close()
 	}
 	s.handlePreflightAck("p1", "stale", mustJSON(PreflightAck{Type: "preflight_ack", RequestID: "pf-stale", Accepted: true}))
@@ -525,7 +525,7 @@ func TestRelayIgnoresNAKFromReplacedSession(t *testing.T) {
 
 	current := *stale
 	current.AssignedID = "current"
-	if old := registry.Register(&current, nil); old != nil {
+	if old, _ := registry.Register(&current, nil); old != nil {
 		_ = old.Close()
 	}
 	s.handleNAK("p1", "stale", []byte(`{"type":"nak","in_reply_to":"req-stale-nak","error":{"code":"unknown_message_type","message":"stale reject-nak"}}`))

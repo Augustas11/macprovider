@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"bytes"
 	"fmt"
 	"net"
 	"strings"
@@ -16,6 +17,19 @@ type InferencePath string
 type RecoveryReason string
 type HashStatus string
 type AttestationStatus string
+
+// AuthState records HOW a provider session was admitted. Added in
+// SPEC-003 v0.8.3 fix-pass-3 (codex security audit on PR #69 MAJOR-1)
+// so the post-PR-#69 admit-tokenless-on-duplicate behavior can be
+// distinguished from a legitimate self-mint or Bearer-validated
+// session for routing, billing, and operator audit purposes. The zero
+// value (empty string) is intentionally "no special marking" so
+// pre-FR-C9 providers and pinned-tier admissions don't need to set it
+// explicitly; the registry, routing, and billing all treat empty +
+// AuthBearerValidated + AuthSelfMinted as routable. Only
+// AuthBearerlessDuplicate triggers the eviction-defense + non-routable
+// gates.
+type AuthState string
 
 const (
 	StateReady       State = "ready"
@@ -33,6 +47,7 @@ const (
 
 	RecoveryReasonBreaker         RecoveryReason = "breaker"
 	RecoveryReasonProviderFailure RecoveryReason = "provider_failure"
+	RecoveryReasonCanary          RecoveryReason = "canary"
 
 	HashStatusVerified           HashStatus = "hash_verified"
 	HashStatusMismatch           HashStatus = "hash_mismatch"
@@ -45,28 +60,67 @@ const (
 	AttestationStatusStale       AttestationStatus = "attestation_stale"
 	AttestationStatusUnsupported AttestationStatus = "unsupported"
 	AttestationStatusNotRequired AttestationStatus = "not_required"
+
+	// AuthBearerValidated — connect arrived with a Bearer header that
+	// auth.Store.ValidateToken matched. Post-flag-flip this is the
+	// only admitted state.
+	AuthBearerValidated AuthState = "bearer_validated"
+	// AuthSelfMinted — connect arrived tokenless and the coordinator
+	// minted a fresh provider_tokens row + returned the cleartext in
+	// the ack frame (FR-C9.1). Provider can persist it and reconnect
+	// authenticated next time.
+	AuthSelfMinted AuthState = "self_minted"
+	// AuthBearerlessDuplicate — connect arrived tokenless for a
+	// provider_id that already has an unrevoked token row in
+	// provider_tokens (FR-C9.4 v0.8.3). The connection is admitted
+	// (the v0.8.2 hard-reject was a deploy brick — see Entry 66) but
+	// excluded from routing + billing + cannot evict an existing
+	// session for the same provider_id. Operator MUST revoke the
+	// stale row before the legitimate provider can reconnect cleanly.
+	AuthBearerlessDuplicate AuthState = "bearerless_duplicate"
+	// AuthMintFailed — FR-C9.1 mint attempted but a non-constraint DB
+	// error occurred (transient infrastructure failure, not race-loss).
+	// SPEC-003 v0.8.4 (fix-pass-5) marks the session distinctly from
+	// the pre-FR-C9 / no-issuer empty state so /poolz observers can
+	// distinguish "FR-C9 wanted to mint but the DB failed" from
+	// "FR-C9 isn't enabled here." The wire treatment is fail-closed
+	// (RejectTOFU) because admitting an empty-AuthState session as
+	// fully routable would amplify a DB-error storm into a routing
+	// admission DoS. See codex security audit MAJOR-1 on PR #69
+	// fix-pass-4 + architect Recommended Followup 4.
+	AuthMintFailed AuthState = "mint_failed"
 )
 
 type Provider struct {
-	ProviderID            string        `json:"provider_id"`
-	AssignedID            string        `json:"assigned_id"`
-	Hostname              string        `json:"hostname"`
-	ModelID               string        `json:"model_id"`
-	ModelParamsB          float64       `json:"model_params_b"`
-	RAMGB                 int           `json:"ram_gb"`
-	MaxContextTokens      int           `json:"max_context_tokens"`
-	MaxConcurrency        int           `json:"max_concurrency"`
-	SlotsFree             int           `json:"slots_free"`
-	SlotsTotal            int           `json:"slots_total"`
-	ThroughputTPSEstimate float64       `json:"throughput_tps_estimate"`
-	ModelLoadTimeMs       int64         `json:"model_load_time_ms,omitempty"`
-	EndpointURL           string        `json:"endpoint_url"`
-	Tier                  Tier          `json:"tier"`
-	InferencePath         InferencePath `json:"inference_path"`
-	AdmittedAt            time.Time     `json:"admitted_at"`
-	HTTPForwardingOnly    bool          `json:"http_forwarding_only,omitempty"`
-	State                 State         `json:"state"`
-	LastHeartbeatAt       time.Time     `json:"last_heartbeat_at"`
+	ProviderID            string  `json:"provider_id"`
+	AssignedID            string  `json:"assigned_id"`
+	Hostname              string  `json:"hostname"`
+	ModelID               string  `json:"model_id"`
+	ModelParamsB          float64 `json:"model_params_b"`
+	RAMGB                 int     `json:"ram_gb"`
+	MaxContextTokens      int     `json:"max_context_tokens"`
+	MaxConcurrency        int     `json:"max_concurrency"`
+	SlotsFree             int     `json:"slots_free"`
+	SlotsTotal            int     `json:"slots_total"`
+	ThroughputTPSEstimate float64 `json:"throughput_tps_estimate"`
+	ModelLoadTimeMs       int64   `json:"model_load_time_ms,omitempty"`
+	EndpointURL           string  `json:"endpoint_url"`
+	Tier                  Tier    `json:"tier"`
+	// AuthState records how the connect was admitted. Empty string
+	// preserves pre-v0.8.3 behavior (routable, billable). Set to
+	// AuthBearerlessDuplicate by the duplicate-tokenless admit path
+	// in resolveProvisionalToken; set to AuthSelfMinted on a fresh
+	// FR-C9.1 mint; set to AuthBearerValidated when the connect
+	// carried a Bearer header that matched a stored token. The
+	// Registry uses this to refuse evicting a routable session in
+	// favor of a bearer-less duplicate; buyer routing + billing use
+	// it to exclude bearer-less duplicates from money paths.
+	AuthState          AuthState     `json:"auth_state,omitempty"`
+	InferencePath      InferencePath `json:"inference_path"`
+	AdmittedAt         time.Time     `json:"admitted_at"`
+	HTTPForwardingOnly bool          `json:"http_forwarding_only,omitempty"`
+	State              State         `json:"state"`
+	LastHeartbeatAt    time.Time     `json:"last_heartbeat_at"`
 	// LastActivityAt is the timestamp of the most recent inbound frame of any
 	// kind (heartbeat OR in-flight inference response). The liveness monitor
 	// uses this — not LastHeartbeatAt — so a provider actively streaming a
@@ -78,9 +132,27 @@ type Provider struct {
 	ModelHash      string     `json:"model_hash,omitempty"`
 	HashStatus     HashStatus `json:"hash_status,omitempty"`
 	EncryptedLeg   bool       `json:"encrypted_leg,omitempty"`
+	// SPEC-015 v0.1.3 / SPEC-001 v1.6 — raw ed25519 public key bytes
+	// populated from auth_request.provider_receipt_public_key when present.
+	ReceiptPubkey []byte `json:"-"`
+	// Previous receipt pubkey retained during the SPEC-015 rotation grace
+	// window. /poolz owns the public JSON projection.
+	ReceiptPubkeyPrev *ReceiptPubkeyPrevious `json:"-"`
+	// PendingReceiptPubkey is a changed receipt key accepted during v2 auth but
+	// not yet published to /poolz. The provider publishes it only after its
+	// post-auth state_update, which the provider sends after local Keychain
+	// commit.
+	PendingReceiptPubkey []byte `json:"-"`
 	// AttestationStatus is informational unless tier2.require_attestation is
 	// enabled. The zero value represents a legacy provider with no claim.
 	AttestationStatus AttestationStatus `json:"attestation_status,omitempty"`
+	// CanaryFailCount is the current consecutive nonce-echo canary failure
+	// count for this live session. Zero is omitted from generic Provider JSON
+	// to preserve L-1 default wire compatibility; /poolz adds the field
+	// explicitly for every provider.
+	CanaryFailCount     int        `json:"canary_fail_count,omitempty"`
+	CanaryLastCheckedAt *time.Time `json:"canary_last_checked_at,omitempty"`
+	CanaryLastFailedAt  *time.Time `json:"canary_last_failed_at,omitempty"`
 
 	// SPEC-002 v1.3.5 §3.X.1 — populated from v2 auth_request initial-stage
 	// supported_models[] per SPEC-010 v1.5 R-3.3.1; nil for the L-1 baseline.
@@ -114,8 +186,36 @@ type Tier2Session struct {
 	StartedAt          time.Time
 }
 
+type ReceiptPubkeyPrevious struct {
+	Pubkey    []byte
+	RotatedAt time.Time
+	ExpiresAt time.Time
+}
+
+// RoutingEligible is the single authority on whether a session may receive
+// buyer traffic and serve as a billing identity. It captures credential trust
+// (was this session admitted with a credential we trust?) and slot
+// availability — NOT Tier-2 hash enforcement, which is operator-configurable
+// and lives in Tier-2-aware buyer code.
+//
+// SPEC-003 v0.8.3 FR-C9.4 — bearer-less duplicate sessions are registered in
+// the pool (so they're operator-visible in /poolz) but excluded from routing.
+// The provider on the other end thinks they're admitted but receives no buyer
+// traffic and accrues no billing identity under the claimed provider_id. The
+// legitimate holder of the token row remains routable.
+//
+// HashStatus filtering used to live here as a defense-in-depth gate. Fix-pass-4
+// removed it: when Tier-2 hash enforcement is disabled, hash-mismatched
+// providers must still route, and a non-config-aware predicate cannot model
+// that. Buyer routing (chat completions, hard-pin) calls RoutingEligible()
+// alongside tier2ProviderExcludedStatus to enforce hash policy. Catalog and
+// health surfaces separately exclude pending receipt-key publication while
+// preserving ready providers that are temporarily out of free slots.
 func (p Provider) RoutingEligible() bool {
-	if p.HashStatus == HashStatusMismatch || p.HashStatus == HashStatusInvalid {
+	if p.AuthState == AuthBearerlessDuplicate {
+		return false
+	}
+	if len(p.PendingReceiptPubkey) > 0 {
 		return false
 	}
 	return p.State == StateReady && p.SlotsFree > 0
@@ -140,13 +240,15 @@ type Registry struct {
 	// over currently-connected providers' sets — so when a provider
 	// disconnects, models only it had reported correctly disappear from
 	// the global "seen" answer.
-	seenModelsByProvider  map[string]map[string]struct{}
-	breakerFaults         map[string][]time.Time
-	recoveryHolds         map[string]recoveryHold
-	lastBreakerRecoveries map[string]time.Time
-	maxProvider           int
-	hashVerifier          HeartbeatHashVerifier
-	swapEmitter           SwapEventEmitter
+	seenModelsByProvider   map[string]map[string]struct{}
+	breakerFaults          map[string][]time.Time
+	recoveryHolds          map[string]recoveryHold
+	canarySanctions        map[string]canarySanction
+	lastBreakerRecoveries  map[string]time.Time
+	maxProvider            int
+	hashVerifier           HeartbeatHashVerifier
+	swapEmitter            SwapEventEmitter
+	receiptRotationEmitter ReceiptRotationEventEmitter
 }
 
 // maxSeenModelsPerProvider caps the seenModelsByProvider inner set so a
@@ -156,9 +258,26 @@ type Registry struct {
 // M2-5 / PERF-5.
 const maxSeenModelsPerProvider = 32
 
+// ReceiptRotationGrace is the SPEC-015 overlap window during which buyers may
+// validate receipts signed by the previous provider receipt key.
+const ReceiptRotationGrace = 7 * 24 * time.Hour
+
 type recoveryHold struct {
 	assignedID string
 	reason     RecoveryReason
+}
+
+type canarySanction struct {
+	failCount     int
+	lastCheckedAt *time.Time
+	lastFailedAt  *time.Time
+}
+
+type CanarySanctionSnapshot struct {
+	ProviderID    string
+	FailCount     int
+	LastCheckedAt *time.Time
+	LastFailedAt  *time.Time
 }
 
 func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Registry {
@@ -173,12 +292,51 @@ func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Reg
 		seenModelsByProvider:  map[string]map[string]struct{}{},
 		breakerFaults:         map[string][]time.Time{},
 		recoveryHolds:         map[string]recoveryHold{},
+		canarySanctions:       map[string]canarySanction{},
 		lastBreakerRecoveries: map[string]time.Time{},
 	}
 	for _, opt := range opts {
 		opt(r)
 	}
 	return r
+}
+
+func (r *Registry) LoadCanarySanctions(snapshots []CanarySanctionSnapshot) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, snapshot := range snapshots {
+		if strings.TrimSpace(snapshot.ProviderID) == "" || snapshot.FailCount <= 0 {
+			continue
+		}
+		r.canarySanctions[snapshot.ProviderID] = canarySanction{
+			failCount:     snapshot.FailCount,
+			lastCheckedAt: cloneTimePtr(snapshot.LastCheckedAt),
+			lastFailedAt:  cloneTimePtr(snapshot.LastFailedAt),
+		}
+	}
+}
+
+func (r *Registry) CanarySanctions() []CanarySanctionSnapshot {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]CanarySanctionSnapshot, 0, len(r.canarySanctions))
+	for providerID, sanction := range r.canarySanctions {
+		out = append(out, CanarySanctionSnapshot{
+			ProviderID:    providerID,
+			FailCount:     sanction.failCount,
+			LastCheckedAt: cloneTimePtr(sanction.lastCheckedAt),
+			LastFailedAt:  cloneTimePtr(sanction.lastFailedAt),
+		})
+	}
+	return out
+}
+
+func cloneTimePtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	cloned := *t
+	return &cloned
 }
 
 func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
@@ -188,10 +346,88 @@ func (r *Registry) Endpoint(providerID string) (config.ProviderConfig, bool) {
 	return p, ok
 }
 
-func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
+// Register installs a provider session, replacing any prior session
+// for the same provider_id. Returns (oldConn, registered):
+//
+//   - registered==true: session installed; oldConn is the displaced
+//     connection (nil if no prior session existed) and the caller
+//     SHOULD close it after the new ack frame is written.
+//
+//   - registered==false: registration was REFUSED. Caller MUST NOT
+//     proceed and MUST close `conn` with CloseInvalidToken /
+//     "invalid_token". This branch fires on two SPEC-003 v0.8.4 FR-C9.4
+//     defense layers:
+//
+//     1. **Bearer-less duplicate rule (fix-pass-3):** an incoming
+//     AuthBearerlessDuplicate is refused whenever a session already
+//     exists for the same provider_id — no incoming bearer-less
+//     connection may displace any other session.
+//
+//     2. **Proven-session protection (fix-pass-5):** an incoming
+//     non-Bearer-validated session (AuthSelfMinted / AuthMintFailed /
+//     empty) is refused whenever the existing session is a routing-
+//     eligible AuthBearerValidated session. Without this rule, a
+//     concurrent tokenless self-heal during a victim's first-mint
+//     window could mint a fresh bearer and then register as
+//     AuthSelfMinted, last-writer-wins evicting the victim's
+//     validated session (security audit, PR #69 fix-pass-5 MAJOR-2).
+//     Bearer-validated incoming connects always succeed because
+//     their proof-of-bearer is independently strong.
+//
+// The DB partial unique index alone prevents the attacker from minting
+// a parallel bearer, but does NOT prevent these two pool-slot capture
+// shapes. These checks close them at the registry layer.
+func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn, registered bool) {
+	return r.RegisterAt(p, conn, time.Now().UTC())
+}
+
+// RegisterAt is Register with an injected coordinator clock for tests and
+// server-level time control.
+func (r *Registry) RegisterAt(p *Provider, conn net.Conn, now time.Time) (old net.Conn, registered bool) {
+	old, registered, _ = r.RegisterAtDetailed(p, conn, now)
+	return old, registered
+}
+
+type RegisterRefusal string
+
+const (
+	RegisterRefusalNone                       RegisterRefusal = ""
+	RegisterRefusalBearerlessDuplicate        RegisterRefusal = "bearerless_duplicate"
+	RegisterRefusalBearerDowngrade            RegisterRefusal = "bearer_downgrade"
+	RegisterRefusalReceiptRotationGraceActive RegisterRefusal = "receipt_rotation_grace_active"
+)
+
+func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time) (old net.Conn, registered bool, refusal RegisterRefusal) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if existing := r.providers[p.ProviderID]; existing != nil {
+	existing := r.providers[p.ProviderID]
+	if existing != nil {
+		// SPEC-003 v0.8.4 FR-C9.4 — refuse to evict ANY existing
+		// session in favor of a bearer-less duplicate. This closes the
+		// pool-slot capture vector from the PR #69 codex security audit
+		// MAJOR-1. A legitimate reconnect after a NAT blip will find
+		// the existing session already reaped (readProviderLoop
+		// cleanup); only an attacker racing while the legitimate
+		// provider is still in the pool would hit this branch.
+		if p.AuthState == AuthBearerlessDuplicate {
+			return nil, false, RegisterRefusalBearerlessDuplicate
+		}
+		// SPEC-003 v0.8.4 FR-C9.4 (fix-pass-5) — protect proven
+		// (Bearer-validated, routing-eligible) sessions from non-
+		// Bearer-validated replacement. Under composition, a tokenless
+		// connect that hits self-heal becomes AuthSelfMinted; without
+		// this check, the attacker could last-writer-wins evict the
+		// legitimate Bearer-validated session. A legitimate provider
+		// reconnect with a valid Bearer always wins because their
+		// AuthState is AuthBearerValidated.
+		if existing.AuthState == AuthBearerValidated &&
+			existing.RoutingEligible() &&
+			p.AuthState != AuthBearerValidated {
+			return nil, false, RegisterRefusalBearerDowngrade
+		}
+		if r.stageReceiptPublicationLocked(existing, p, now) == RegisterRefusalReceiptRotationGraceActive {
+			return nil, false, RegisterRefusalReceiptRotationGraceActive
+		}
 		old = existing.conn
 		delete(r.sessions, existing.AssignedID)
 		// M2-5: this is a session replacement (same provider_id, new
@@ -203,6 +439,10 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 		// the new one and ModelKnown would over-report. (Codex code-audit
 		// 2026-06-11 #47.)
 		delete(r.seenModelsByProvider, p.ProviderID)
+	} else {
+		if r.stageReceiptPublicationLocked(nil, p, now) == RegisterRefusalReceiptRotationGraceActive {
+			return nil, false, RegisterRefusalReceiptRotationGraceActive
+		}
 	}
 	p.conn = conn
 	if p.Tier == "" {
@@ -221,7 +461,117 @@ func (r *Registry) Register(p *Provider, conn net.Conn) (old net.Conn) {
 	delete(r.breakerFaults, p.ProviderID)
 	delete(r.recoveryHolds, p.ProviderID)
 	delete(r.lastBreakerRecoveries, p.ProviderID)
-	return old
+	r.applyCanarySanctionLocked(p)
+	return old, true, RegisterRefusalNone
+}
+
+func (r *Registry) stageReceiptPublicationLocked(existing, incoming *Provider, now time.Time) RegisterRefusal {
+	now = now.UTC()
+	incomingKey := cloneBytes(incoming.ReceiptPubkey)
+	incomingPrev := activeReceiptPubkeyPrev(incoming, now)
+	incoming.ReceiptPubkey = nil
+	incoming.PendingReceiptPubkey = nil
+	incoming.ReceiptPubkeyPrev = nil
+	if existing == nil {
+		if incomingPrev != nil {
+			incoming.ReceiptPubkey = cloneBytes(incomingKey)
+			incoming.ReceiptPubkeyPrev = cloneReceiptPubkeyPrevious(incomingPrev)
+			return RegisterRefusalNone
+		}
+		incoming.PendingReceiptPubkey = cloneBytes(incomingKey)
+		return RegisterRefusalNone
+	}
+	activePrev := activeReceiptPubkeyPrev(existing, now)
+	if len(incomingKey) == 0 {
+		return RegisterRefusalNone
+	}
+	if len(existing.ReceiptPubkey) == 0 {
+		if len(existing.PendingReceiptPubkey) > 0 {
+			if bytes.Equal(existing.PendingReceiptPubkey, incomingKey) {
+				incoming.PendingReceiptPubkey = cloneBytes(existing.PendingReceiptPubkey)
+				return RegisterRefusalNone
+			}
+			return RegisterRefusalReceiptRotationGraceActive
+		}
+		incoming.PendingReceiptPubkey = cloneBytes(incomingKey)
+		return RegisterRefusalNone
+	}
+	if bytes.Equal(existing.ReceiptPubkey, incomingKey) {
+		incoming.ReceiptPubkey = cloneBytes(existing.ReceiptPubkey)
+		incoming.ReceiptPubkeyPrev = cloneReceiptPubkeyPrevious(activePrev)
+		return RegisterRefusalNone
+	}
+	if len(existing.PendingReceiptPubkey) > 0 {
+		if bytes.Equal(existing.PendingReceiptPubkey, incomingKey) {
+			incoming.ReceiptPubkey = cloneBytes(existing.ReceiptPubkey)
+			incoming.ReceiptPubkeyPrev = cloneReceiptPubkeyPrevious(activePrev)
+			incoming.PendingReceiptPubkey = cloneBytes(existing.PendingReceiptPubkey)
+			return RegisterRefusalNone
+		}
+		return RegisterRefusalReceiptRotationGraceActive
+	}
+	if activePrev != nil {
+		return RegisterRefusalReceiptRotationGraceActive
+	}
+	incoming.PendingReceiptPubkey = cloneBytes(incomingKey)
+	incoming.ReceiptPubkey = cloneBytes(existing.ReceiptPubkey)
+	return RegisterRefusalNone
+}
+
+func activeReceiptPubkeyPrev(p *Provider, now time.Time) *ReceiptPubkeyPrevious {
+	if p == nil || p.ReceiptPubkeyPrev == nil || !now.Before(p.ReceiptPubkeyPrev.ExpiresAt) {
+		return nil
+	}
+	return p.ReceiptPubkeyPrev
+}
+
+func (r *Registry) commitPendingReceiptPubkeyLocked(p *Provider, now time.Time) *ReceiptRotationEvent {
+	now = now.UTC()
+	if p.ReceiptPubkeyPrev != nil && !now.Before(p.ReceiptPubkeyPrev.ExpiresAt) {
+		p.ReceiptPubkeyPrev = nil
+	}
+	if len(p.PendingReceiptPubkey) == 0 {
+		return nil
+	}
+	var event *ReceiptRotationEvent
+	if len(p.ReceiptPubkey) > 0 && !bytes.Equal(p.ReceiptPubkey, p.PendingReceiptPubkey) {
+		oldPubkey := cloneBytes(p.ReceiptPubkey)
+		newPubkey := cloneBytes(p.PendingReceiptPubkey)
+		p.ReceiptPubkeyPrev = &ReceiptPubkeyPrevious{
+			Pubkey:    oldPubkey,
+			RotatedAt: now,
+			ExpiresAt: now.Add(ReceiptRotationGrace),
+		}
+		event = &ReceiptRotationEvent{
+			ProviderID: p.ProviderID,
+			OldPubkey:  cloneBytes(oldPubkey),
+			NewPubkey:  newPubkey,
+			RotatedAt:  now,
+		}
+	}
+	p.ReceiptPubkey = cloneBytes(p.PendingReceiptPubkey)
+	p.PendingReceiptPubkey = nil
+	return event
+}
+
+func cloneReceiptPubkeyPrevious(prev *ReceiptPubkeyPrevious) *ReceiptPubkeyPrevious {
+	if prev == nil {
+		return nil
+	}
+	return &ReceiptPubkeyPrevious{
+		Pubkey:    cloneBytes(prev.Pubkey),
+		RotatedAt: prev.RotatedAt,
+		ExpiresAt: prev.ExpiresAt,
+	}
+}
+
+func cloneBytes(in []byte) []byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]byte, len(in))
+	copy(out, in)
+	return out
 }
 
 // recordSeenModelLocked records a model id under a provider's set,
@@ -309,6 +659,9 @@ func (r *Registry) MarkDegradedForRecovery(providerID, assignedID string, reason
 	if p == nil || p.AssignedID != assignedID {
 		return false
 	}
+	if hold, held := r.recoveryHolds[providerID]; held && hold.assignedID == assignedID && hold.reason == RecoveryReasonCanary {
+		return false
+	}
 	r.setStateLocked(p, StateDegraded)
 	r.recoveryHolds[providerID] = recoveryHold{assignedID: assignedID, reason: reason}
 	return true
@@ -328,6 +681,9 @@ func (r *Registry) MarkRecovered(providerID, assignedID string, at time.Time) bo
 	if !held || hold.assignedID != assignedID {
 		return false
 	}
+	if hold.reason == RecoveryReasonCanary {
+		return false
+	}
 	r.setStateLocked(p, StateReady)
 	delete(r.breakerFaults, providerID)
 	delete(r.recoveryHolds, providerID)
@@ -335,6 +691,13 @@ func (r *Registry) MarkRecovered(providerID, assignedID string, at time.Time) bo
 		r.lastBreakerRecoveries[providerID] = at
 	}
 	return true
+}
+
+func (r *Registry) CanaryRecoveryEligible(providerID, assignedID string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	hold, held := r.recoveryHolds[providerID]
+	return held && hold.assignedID == assignedID && hold.reason == RecoveryReasonCanary
 }
 
 type BreakerTripState string
@@ -349,6 +712,100 @@ type BreakerFaultResult struct {
 	Count     int
 	Threshold int
 	Tripped   BreakerTripState
+}
+
+type CanaryTripState string
+
+const (
+	CanaryTripNone        CanaryTripState = ""
+	CanaryTripDegraded    CanaryTripState = "degraded"
+	CanaryTripUnavailable CanaryTripState = "unavailable"
+)
+
+type CanaryResult struct {
+	Current         bool
+	Passed          bool
+	Count           int
+	Threshold       int
+	Tier            Tier
+	Tripped         CanaryTripState
+	SanctionCleared bool
+}
+
+func (r *Registry) RecordCanaryResult(providerID, assignedID string, passed bool, at time.Time, threshold int) CanaryResult {
+	if threshold <= 0 {
+		threshold = 3
+	}
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	p := r.providers[providerID]
+	if p == nil || p.AssignedID != assignedID {
+		return CanaryResult{Threshold: threshold}
+	}
+	if p.State == StateDraining || p.State == StateUnavailable {
+		return CanaryResult{Current: true, Passed: passed, Threshold: threshold, Tier: p.Tier}
+	}
+	if hold, held := r.recoveryHolds[providerID]; held && hold.assignedID == assignedID && hold.reason == RecoveryReasonCanary && p.State != StateDegraded {
+		return CanaryResult{Current: true, Passed: passed, Threshold: threshold, Tier: p.Tier}
+	}
+	checkedAt := at
+	p.CanaryLastCheckedAt = &checkedAt
+	result := CanaryResult{
+		Current:   true,
+		Passed:    passed,
+		Threshold: threshold,
+		Tier:      p.Tier,
+	}
+	if passed {
+		p.CanaryFailCount = 0
+		if _, held := r.canarySanctions[providerID]; held {
+			result.SanctionCleared = true
+		}
+		delete(r.canarySanctions, providerID)
+		if hold, held := r.recoveryHolds[providerID]; held && hold.assignedID == assignedID && hold.reason == RecoveryReasonCanary {
+			result.SanctionCleared = true
+			delete(r.recoveryHolds, providerID)
+			r.setStateLocked(p, StateReady)
+		}
+		result.Count = 0
+		return result
+	}
+	p.CanaryFailCount++
+	failedAt := at
+	p.CanaryLastFailedAt = &failedAt
+	result.Count = p.CanaryFailCount
+	if result.Count < threshold {
+		return result
+	}
+	if p.Tier == TierProvisional {
+		r.setStateLocked(p, StateUnavailable)
+		result.Tripped = CanaryTripUnavailable
+		return result
+	}
+	r.setStateLocked(p, StateDegraded)
+	r.recoveryHolds[providerID] = recoveryHold{assignedID: assignedID, reason: RecoveryReasonCanary}
+	r.canarySanctions[providerID] = canarySanction{
+		failCount:     p.CanaryFailCount,
+		lastCheckedAt: p.CanaryLastCheckedAt,
+		lastFailedAt:  p.CanaryLastFailedAt,
+	}
+	result.Tripped = CanaryTripDegraded
+	return result
+}
+
+func (r *Registry) applyCanarySanctionLocked(p *Provider) {
+	sanction, ok := r.canarySanctions[p.ProviderID]
+	if !ok || p.Tier != TierPinned {
+		return
+	}
+	p.CanaryFailCount = sanction.failCount
+	p.CanaryLastCheckedAt = sanction.lastCheckedAt
+	p.CanaryLastFailedAt = sanction.lastFailedAt
+	r.setStateLocked(p, StateDegraded)
+	r.recoveryHolds[p.ProviderID] = recoveryHold{assignedID: p.AssignedID, reason: RecoveryReasonCanary}
 }
 
 func (r *Registry) RecordBreakerFault(providerID, assignedID string, at time.Time, threshold int, window time.Duration) BreakerFaultResult {
@@ -467,9 +924,11 @@ func (r *Registry) Count() int {
 
 // HeartbeatHashVerifier verifies a (model_id, reported_hash) pair against
 // the SPEC-008 v0.3 §5.5 five-state enum. Injected into Registry via
-// WithHeartbeatHashVerifier so the pool package stays decoupled from the tier2
-// catalog package; the production wiring at internal/ws/server.go passes
-// tier2.VerifyProviderHash.
+// WithHeartbeatHashVerifier so the pool package stays decoupled from the
+// tier2 catalog package; post-M3-8d DI, the production wiring at
+// internal/ws/server.go binds the *tier2.Catalog instance passed via
+// ws.WithCatalog (default: tier2.Default()) so SIGHUP reload through
+// tier2.ConfigureDefaultStrict swaps the underlying state atomically.
 type HeartbeatHashVerifier func(modelID, reportedHash string) HashStatus
 
 // SwapEvent carries the per-swap data needed for the operator_model_swap audit
@@ -514,6 +973,20 @@ type SwapEvent struct {
 // provider; a panic still propagates and crashes the heartbeat
 // handler, matching the v1.3.4 default failure mode.
 type SwapEventEmitter func(event SwapEvent)
+
+// ReceiptRotationEvent carries the coordinator-side audit fields emitted when
+// a provider reconnect publishes a different receipt pubkey and that pending
+// key commits on state_update. Pubkeys are public trust roots and are included
+// per SPEC-015 §11; receipt bodies, hashes, and signatures are never present.
+type ReceiptRotationEvent struct {
+	ProviderID string
+	OldPubkey  []byte
+	NewPubkey  []byte
+	RotatedAt  time.Time
+}
+
+// ReceiptRotationEventEmitter is invoked after Registry.mu is released.
+type ReceiptRotationEventEmitter func(event ReceiptRotationEvent)
 
 type HeartbeatUpdate struct {
 	Status                State
@@ -680,13 +1153,14 @@ type StateUpdate struct {
 	State      State
 	SlotsFree  *int
 	SlotsTotal *int
+	At         time.Time
 }
 
 func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateUpdate) (*Provider, bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	p := r.providers[providerID]
 	if p == nil || p.AssignedID != assignedID {
+		r.mu.Unlock()
 		return nil, false
 	}
 	if r.canApplyProviderStateLocked(p, update.State) {
@@ -698,7 +1172,17 @@ func (r *Registry) ApplyStateUpdate(providerID, assignedID string, update StateU
 	if update.SlotsTotal != nil {
 		p.SlotsTotal = *update.SlotsTotal
 	}
+	at := update.At
+	if at.IsZero() {
+		at = time.Now().UTC()
+	}
+	rotationEvent := r.commitPendingReceiptPubkeyLocked(p, at)
 	cp := *p
+	emitter := r.receiptRotationEmitter
+	r.mu.Unlock()
+	if rotationEvent != nil && emitter != nil {
+		emitter(*rotationEvent)
+	}
 	return &cp, true
 }
 
@@ -785,4 +1269,10 @@ func WithHeartbeatHashVerifier(fn HeartbeatHashVerifier) RegistryOption {
 // 2E ships the SQLite writer).
 func WithSwapEmitter(fn SwapEventEmitter) RegistryOption {
 	return func(r *Registry) { r.swapEmitter = fn }
+}
+
+// WithReceiptRotationEmitter injects the SPEC-015 receipt_rotation_detected
+// audit callback. Default nil = no-op.
+func WithReceiptRotationEmitter(fn ReceiptRotationEventEmitter) RegistryOption {
+	return func(r *Registry) { r.receiptRotationEmitter = fn }
 }

@@ -1,0 +1,17 @@
+[Unit]
+Description=Daily gateway DB archive-rotate check (M2-4 Part C / PERF-1)
+Documentation=https://github.com/Augustas11/macprovider/blob/main/audits/2026-06-10/Q4_ARCHIVE_ROTATE_DESIGN.md
+
+[Timer]
+# Daily at 04:00 UTC — chosen to fall in the existing scripted-deploy quiet
+# window (operators in the Americas / Europe are asleep; buyer traffic on the
+# beta is near-zero per monitor traces). The script itself is a no-op if
+# size + age are below threshold, so daily checks are cheap.
+OnCalendar=*-*-* 04:00:00
+# Mirror the monitor timer's drift tolerance.
+RandomizedDelaySec=900
+Persistent=true
+Unit=macprovider-archive-rotate.service
+
+[Install]
+WantedBy=timers.target

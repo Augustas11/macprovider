@@ -1,6 +1,7 @@
 import Foundation
 import MacProviderCore
 import Darwin
+import CryptoKit
 
 protocol ProviderWebSocketTask: AnyObject, Sendable {
     func resume()
@@ -45,10 +46,62 @@ private let providerWebSocketSession: URLSession = {
 
 extension URLSessionWebSocketTask: ProviderWebSocketTask {}
 
+protocol ReceiptKeyRotatingCoordinatorClient: Sendable {
+    func reconnectWithNewKey(
+        _ newKey: Curve25519.Signing.PrivateKey,
+        commitKey: @escaping @Sendable () async throws -> Void
+    ) async throws
+}
+
+struct CoordinatorReceiptRotationTimeout: Error, CustomStringConvertible, Equatable {
+    let timeoutSeconds: Double
+
+    var description: String {
+        String(format: "receipt key rotation timed out after %.1fs", timeoutSeconds)
+    }
+}
+
+struct CoordinatorReceiptRotationInProgress: Error, CustomStringConvertible, Equatable {
+    var description: String {
+        "receipt key rotation already in progress"
+    }
+}
+
+struct CoordinatorReceiptRotationCommittedRecoveryFailed: Error, CustomStringConvertible, Equatable {
+    let underlying: String
+
+    var description: String {
+        "receipt key rotation committed locally, but coordinator publication recovery failed: \(underlying)"
+    }
+}
+
+// Guards a CheckedContinuation so it resumes exactly once. URLSession's
+// pongReceiveHandler can fire more than once on a connection abort (observed
+// in the field: NSPOSIXErrorDomain Code=53 "Software caused connection
+// abort"), which previously double-resumed the continuation and tripped a
+// SWIFT TASK CONTINUATION MISUSE fatalError — crashing the whole provider on
+// a single transient WS blip. NSLock-guarded flag matches the @unchecked
+// Sendable idiom used elsewhere in this file (CaffeinateSleepAssertion).
+private final class ResumeOnceGuard: @unchecked Sendable {
+    private let lock = NSLock()
+    private var resumed = false
+    /// Returns true exactly once — for the first caller. All later calls
+    /// return false so the continuation is never resumed twice.
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if resumed { return false }
+        resumed = true
+        return true
+    }
+}
+
 extension URLSessionWebSocketTask {
     func sendPing() async throws {
+        let once = ResumeOnceGuard()
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             sendPing { error in
+                guard once.claim() else { return }
                 if let error {
                     continuation.resume(throwing: error)
                 } else {
@@ -100,7 +153,7 @@ final class CaffeinateSleepAssertion: ProviderSleepAssertion, @unchecked Sendabl
 actor CoordinatorClient {
     typealias SendOverride = @Sendable (sending [String: Any]) async throws -> Void
 
-    static let binaryVersion = "1.3.1"
+    static let binaryVersion = "1.6.0"
     private static let keepaliveDebugEnabled = ProcessInfo.processInfo.environment["MACPROVIDER_KEEPALIVE_DEBUG"] == "1"
 
     private let coordinatorURL: URL
@@ -116,7 +169,11 @@ actor CoordinatorClient {
     private let supportedModels: [String]?
     private let publishesSupportedModels: Bool
     private let warmSwapEnabled: Bool
+    private var providerReceiptPublicKey: String?
+    private let receiptBuilder: ReceiptBuilder?
+    private var receiptRotationInFlight = false
     private let reconnectGraceNanoseconds: UInt64
+    private let receiptKeyRotationTimeoutNanoseconds: UInt64
     private let connectAndRunOverride: (@Sendable () async throws -> Void)?
     private let attestationGenerator: Tier2AttestationTokenGenerating
     // M1-1 / XSEC-1: the factory now takes a URLRequest so the binary can
@@ -136,6 +193,7 @@ actor CoordinatorClient {
     // without taking another dependency on the loader.
     private let configPath: String
     private let sleepAssertionFactory: @Sendable () -> ProviderSleepAssertion?
+    private let pairingController: PairingController
     private var inferenceRelay: InferenceRelay?
     private var tier2Session: Tier2ProviderSession?
     private var webSocket: ProviderWebSocketTask?
@@ -151,12 +209,19 @@ actor CoordinatorClient {
         providerStatus: ProviderStatus,
         sendOverride: SendOverride? = nil,
         reconnectGraceNanoseconds: UInt64 = 10 * 1_000_000_000,
+        receiptKeyRotationTimeoutNanoseconds: UInt64 = 55 * 1_000_000_000,
         attestationGenerator: Tier2AttestationTokenGenerating = ManagedDeviceAttestationGenerator(),
         webSocketFactory: @escaping @Sendable (URLRequest) -> ProviderWebSocketTask = { providerWebSocketSession.webSocketTask(with: $0) },
         sleepAssertionFactory: @escaping @Sendable () -> ProviderSleepAssertion? = { CaffeinateSleepAssertion.start() },
-        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil
+        pairingController: PairingController? = nil,
+        connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
+        providerReceiptPublicKey: String? = nil,
+        receiptBuilder: ReceiptBuilder? = nil
     ) {
         guard let rawURL = config.coordinatorURL, let url = URL(string: rawURL) else {
+            return nil
+        }
+        guard url.scheme == "wss" else {
             return nil
         }
         self.coordinatorURL = url
@@ -176,7 +241,10 @@ actor CoordinatorClient {
         self.supportedModels = config.supportedModels
         self.publishesSupportedModels = config.publishesSupportedModels
         self.warmSwapEnabled = config.enableWarmSwap
+        self.providerReceiptPublicKey = providerReceiptPublicKey
+        self.receiptBuilder = receiptBuilder
         self.reconnectGraceNanoseconds = reconnectGraceNanoseconds
+        self.receiptKeyRotationTimeoutNanoseconds = receiptKeyRotationTimeoutNanoseconds
         self.attestationGenerator = attestationGenerator
         self.webSocketFactory = webSocketFactory
         self.providerToken = config.providerToken.flatMap { value in
@@ -185,16 +253,14 @@ actor CoordinatorClient {
         }
         self.configPath = config.configPath
         self.sleepAssertionFactory = sleepAssertionFactory
+        self.pairingController = pairingController ?? PairingController(configPath: config.configPath)
         self.connectAndRunOverride = connectAndRunOverride
         self.sendOverride = sendOverride
     }
 
     func start() {
-        guard runTask == nil else { return }
-        runTask = Task { [weak self] in
-            await self?.runReconnectLoop()
-        }
-        if warmSwapEnabled {
+        startReconnectTask()
+        if warmSwapEnabled, swapHeartbeatTask == nil {
             swapHeartbeatTask = Task { [weak self] in
                 await self?.consumeSwapSignals()
             }
@@ -236,6 +302,13 @@ actor CoordinatorClient {
             case let .failed(reason):
                 Self.keepaliveDebug("coordinator.warmSwap.swapFailed reason=\(reason)")
             }
+        }
+    }
+
+    private func startReconnectTask() {
+        guard runTask == nil else { return }
+        runTask = Task { [weak self] in
+            await self?.runReconnectLoop()
         }
     }
 
@@ -285,6 +358,371 @@ actor CoordinatorClient {
         try await connectAndRunOnce()
     }
 
+    func reconnectWithNewKey(
+        _ newKey: Curve25519.Signing.PrivateKey,
+        commitKey: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        guard wsTunneledMode else {
+            throw CoordinatorAuthError.invalidMessage("receipt key rotation requires v2 WS-tunneled auth")
+        }
+        guard !receiptRotationInFlight else {
+            throw CoordinatorReceiptRotationInProgress()
+        }
+        receiptRotationInFlight = true
+        defer { receiptRotationInFlight = false }
+
+        // Round-2 audit M14: give any in-flight non-streaming inference a
+        // bounded window to finish so the receipt it carries (signed with
+        // the OLD key) lands on the buyer before we tear the socket down
+        // and swap keys. Without this drain, a buyer mid-request sees a
+        // dropped session with no receipt even though the provider
+        // produced one. The budget mirrors drainTimeoutSeconds so it
+        // composes with the existing shutdown path.
+        if let activeRunTask = runTask {
+            _ = await inferenceRelay?.waitUntilIdle(timeoutSeconds: max(1, drainTimeoutSeconds))
+            activeRunTask.cancel()
+            webSocket?.cancel(with: .goingAway, reason: nil)
+            await activeRunTask.value
+            runTask = nil
+        }
+        await cleanupConnection()
+
+        let socket = openWebSocket()
+        do {
+            try await authenticateRotatedSocket(socket, newKey: newKey, commitKey: commitKey)
+        } catch let error as CoordinatorReceiptRotationCommittedRecoveryFailed {
+            startReconnectTask()
+            throw error
+        } catch {
+            let rotationError = error
+            if webSocket === socket {
+                webSocket = nil
+            }
+            socket.cancel(with: .goingAway, reason: nil)
+            await cleanupConnection()
+            do {
+                try await restoreReceiptRotationSessionWithTimeout()
+            } catch {
+                startReconnectTask()
+                throw rotationError
+            }
+            throw rotationError
+        }
+    }
+    private struct ReceiptRotationHandshakeValue: @unchecked Sendable {
+        let publicKey: String
+        let session: Tier2ProviderSession
+        let response: [String: Any]
+    }
+
+    private enum ReceiptRotationHandshakeRace: @unchecked Sendable {
+        case completed(Result<ReceiptRotationHandshakeValue, Error>)
+        case timedOut
+    }
+
+    private final class ReceiptRotationHandshakeCompletion: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: ReceiptRotationHandshakeRace?
+        private var continuation: CheckedContinuation<ReceiptRotationHandshakeRace, Never>?
+
+        func complete(_ result: ReceiptRotationHandshakeRace) {
+            lock.lock()
+            if self.result != nil {
+                lock.unlock()
+                return
+            }
+            self.result = result
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(returning: result)
+        }
+
+        func wait() async -> ReceiptRotationHandshakeRace {
+            if let result = storedResult() {
+                return result
+            }
+            return await withCheckedContinuation { continuation in
+                install(continuation)
+            }
+        }
+
+        private func storedResult() -> ReceiptRotationHandshakeRace? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+
+        private func install(_ continuation: CheckedContinuation<ReceiptRotationHandshakeRace, Never>) {
+            lock.lock()
+            if let result {
+                lock.unlock()
+                continuation.resume(returning: result)
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    private enum ReceiptRotationVoidRace: @unchecked Sendable {
+        case completed(Result<Void, Error>)
+        case timedOut
+    }
+
+    private final class ReceiptRotationVoidCompletion: @unchecked Sendable {
+        private let lock = NSLock()
+        private var result: ReceiptRotationVoidRace?
+        private var continuation: CheckedContinuation<ReceiptRotationVoidRace, Never>?
+
+        func complete(_ result: ReceiptRotationVoidRace) {
+            lock.lock()
+            if self.result != nil {
+                lock.unlock()
+                return
+            }
+            self.result = result
+            let continuation = continuation
+            self.continuation = nil
+            lock.unlock()
+            continuation?.resume(returning: result)
+        }
+
+        func wait() async -> ReceiptRotationVoidRace {
+            if let result = storedResult() {
+                return result
+            }
+            return await withCheckedContinuation { continuation in
+                install(continuation)
+            }
+        }
+
+        private func storedResult() -> ReceiptRotationVoidRace? {
+            lock.lock()
+            defer { lock.unlock() }
+            return result
+        }
+
+        private func install(_ continuation: CheckedContinuation<ReceiptRotationVoidRace, Never>) {
+            lock.lock()
+            if let result {
+                lock.unlock()
+                continuation.resume(returning: result)
+                return
+            }
+            self.continuation = continuation
+            lock.unlock()
+        }
+    }
+
+    private func runReceiptRotationHandshakeWithTimeout(
+        socket: ProviderWebSocketTask,
+        newKey: Curve25519.Signing.PrivateKey
+    ) async throws -> (publicKey: String, session: Tier2ProviderSession, response: [String: Any]) {
+        let timeoutNanoseconds = receiptKeyRotationTimeoutNanoseconds
+        let completion = ReceiptRotationHandshakeCompletion()
+        let handshakeTask = Task {
+            do {
+                let result = try await performRotatedAuthHandshake(socket, newKey: newKey)
+                completion.complete(.completed(.success(ReceiptRotationHandshakeValue(
+                    publicKey: result.publicKey,
+                    session: result.session,
+                    response: result.response
+                ))))
+            } catch {
+                completion.complete(.completed(.failure(error)))
+            }
+        }
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                completion.complete(.timedOut)
+            } catch {
+                return
+            }
+        }
+        defer {
+            handshakeTask.cancel()
+            timeoutTask.cancel()
+        }
+
+        switch await completion.wait() {
+        case .completed(.success(let result)):
+            return (result.publicKey, result.session, result.response)
+        case .completed(.failure(let error)):
+            throw error
+        case .timedOut:
+            socket.cancel(with: .goingAway, reason: nil)
+            handshakeTask.cancel()
+            throw CoordinatorReceiptRotationTimeout(
+                timeoutSeconds: Double(timeoutNanoseconds) / 1_000_000_000
+            )
+        }
+    }
+
+    private func performRotatedAuthHandshake(
+        _ socket: ProviderWebSocketTask,
+        newKey: Curve25519.Signing.PrivateKey
+    ) async throws -> (publicKey: String, session: Tier2ProviderSession, response: [String: Any]) {
+        let authAttempt = Tier2AuthAttempt()
+        let publicKey = Data(newKey.publicKey.rawRepresentation).base64EncodedString()
+        let initialMessage = await authInitialMessage(
+            attempt: authAttempt,
+            providerReceiptPublicKeyOverride: publicKey
+        )
+        try await send(initialMessage, to: socket)
+        let challenge = try await receiveAuthChallenge(from: socket)
+        try Task.checkCancellation()
+        let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
+        let proofMessage = try await authProofMessage(challenge: challenge, attempt: authAttempt)
+        try Task.checkCancellation()
+        try await send(proofMessage, to: socket)
+        let response = try await receiveAuthResponse(from: socket)
+        try Task.checkCancellation()
+        return (publicKey, session, response)
+    }
+
+    private func authenticateRotatedSocket(
+        _ socket: ProviderWebSocketTask,
+        newKey: Curve25519.Signing.PrivateKey,
+        commitKey: @escaping @Sendable () async throws -> Void
+    ) async throws {
+        let handshake = try await runReceiptRotationHandshakeWithTimeout(socket: socket, newKey: newKey)
+        try validateAcceptedAuthResponse(handshake.response, session: handshake.session)
+        try await commitKey()
+        providerReceiptPublicKey = handshake.publicKey
+        do {
+            try await acceptCoordinatorSession(handshake.response, reason: "coordinator rotated receipt key accepted")
+        } catch {
+            print("WARN coordinator rotated receipt key committed but session activation failed; retrying committed receipt key publication last_error=\(error)")
+            socket.cancel(with: .goingAway, reason: nil)
+            await cleanupConnection()
+            do {
+                try await restoreReceiptRotationSessionWithTimeout()
+                return
+            } catch {
+                throw CoordinatorReceiptRotationCommittedRecoveryFailed(underlying: String(describing: error))
+            }
+        }
+        installTier2Session(handshake.session, socket: socket)
+        runTask = Task { [weak self] in
+            await self?.runAuthenticatedSocketThenReconnect(socket)
+        }
+    }
+
+    private func restoreReceiptRotationSessionWithTimeout() async throws {
+        let timeoutNanoseconds = receiptKeyRotationTimeoutNanoseconds
+        let socket = openWebSocket()
+        let completion = ReceiptRotationVoidCompletion()
+        let restoreTask = Task {
+            do {
+                try await restoreReceiptRotationSession(on: socket)
+                completion.complete(.completed(.success(())))
+            } catch {
+                completion.complete(.completed(.failure(error)))
+            }
+        }
+        let timeoutTask = Task {
+            do {
+                try await Task.sleep(nanoseconds: timeoutNanoseconds)
+                completion.complete(.timedOut)
+            } catch {
+                return
+            }
+        }
+        defer {
+            restoreTask.cancel()
+            timeoutTask.cancel()
+        }
+
+        switch await completion.wait() {
+        case .completed(.success):
+            return
+        case .completed(.failure(let error)):
+            throw error
+        case .timedOut:
+            socket.cancel(with: .goingAway, reason: nil)
+            restoreTask.cancel()
+            if webSocket === socket {
+                webSocket = nil
+            }
+            await cleanupConnection()
+            throw CoordinatorReceiptRotationTimeout(
+                timeoutSeconds: Double(timeoutNanoseconds) / 1_000_000_000
+            )
+        }
+    }
+
+    private func restoreReceiptRotationSession(on socket: ProviderWebSocketTask) async throws {
+        do {
+            let authAttempt = Tier2AuthAttempt()
+            let initialMessage = await authInitialMessage(attempt: authAttempt)
+            try await send(initialMessage, to: socket)
+            let challenge = try await receiveAuthChallenge(from: socket)
+            try Task.checkCancellation()
+            let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
+            let proofMessage = try await authProofMessage(challenge: challenge, attempt: authAttempt)
+            try Task.checkCancellation()
+            try await send(proofMessage, to: socket)
+            let response = try await receiveAuthResponse(from: socket)
+            try Task.checkCancellation()
+            try await acceptAuthResponse(response, session: session)
+            try Task.checkCancellation()
+            installTier2Session(session, socket: socket)
+            runTask = Task { [weak self] in
+                await self?.runAuthenticatedSocketThenReconnect(socket)
+            }
+        } catch {
+            if webSocket === socket {
+                webSocket = nil
+            }
+            socket.cancel(with: .goingAway, reason: nil)
+            await cleanupConnection()
+            throw error
+        }
+    }
+
+    private func installTier2Session(_ session: Tier2ProviderSession, socket: ProviderWebSocketTask) {
+        tier2Session = session
+        inferenceRelay = InferenceRelay(
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            loadedModelID: loadedModelID,
+            warmSwapEnabled: warmSwapEnabled,
+            maxActiveRequests: maxActiveRequests,
+            maxBodyBytes: maxBodyBytes,
+            tier2Session: session,
+            receiptBuilder: receiptBuilder,
+            receiptProviderID: providerID,
+            sendFrame: { payload in
+                try await Self.send(payload, to: socket)
+            }
+        )
+    }
+
+    private func runAuthenticatedSocketThenReconnect(_ socket: ProviderWebSocketTask) async {
+        do {
+            try await receiveLoop(socket)
+            await cleanupConnection()
+            runTask = nil
+            startReconnectTask()
+        } catch is CancellationError {
+            await cleanupConnection()
+            runTask = nil
+        } catch is CoordinatorDrainComplete {
+            await cleanupConnection()
+            runTask = nil
+            print("coordinator reconnect attempt 1 scheduled after drain")
+            try? await Task.sleep(nanoseconds: reconnectGraceNanoseconds)
+            startReconnectTask()
+        } catch {
+            await cleanupConnection()
+            runTask = nil
+            print("WARN coordinator rotated session ended last_error=\(error)")
+            startReconnectTask()
+        }
+    }
+
     private func connectAndRun() async throws {
         if wsTunneledMode {
             try await connectAndRunTier2(socket: openWebSocket())
@@ -314,61 +752,92 @@ actor CoordinatorClient {
     private func connectAndRunTier2(socket: ProviderWebSocketTask) async throws {
         let authAttempt = Tier2AuthAttempt()
         try await send(await authInitialMessage(attempt: authAttempt))
-        let challenge: [String: Any]
-        do {
-            challenge = try await receiveAuthChallenge(from: socket)
-        } catch { throw error }
+        let challenge: [String: Any] = try await receiveAuthChallenge(from: socket)
         let session = try makeTier2Session(attempt: authAttempt, challenge: challenge)
         try await send(try await authProofMessage(challenge: challenge, attempt: authAttempt))
         let response = try await receiveAuthResponse(from: socket)
         try await acceptAuthResponse(response, session: session)
-        tier2Session = session
-        inferenceRelay = InferenceRelay(
-            modelRuntime: modelRuntime,
-            providerStatus: providerStatus,
-            loadedModelID: loadedModelID,
-            warmSwapEnabled: warmSwapEnabled,
-            maxActiveRequests: maxActiveRequests,
-            maxBodyBytes: maxBodyBytes,
-            tier2Session: session,
-            sendFrame: { payload in
-                try await Self.send(payload, to: socket)
-            }
-        )
+        installTier2Session(session, socket: socket)
         try await receiveLoop(socket)
     }
 
     private func connectAndRunLegacy(socket: ProviderWebSocketTask) async throws {
         tier2Session = nil
-        if wsTunneledMode {
-            inferenceRelay = InferenceRelay(
-                modelRuntime: modelRuntime,
-                providerStatus: providerStatus,
-                loadedModelID: loadedModelID,
-                warmSwapEnabled: warmSwapEnabled,
-                maxActiveRequests: maxActiveRequests,
-                maxBodyBytes: maxBodyBytes,
-                sendFrame: { payload in
-                    try await Self.send(payload, to: socket)
-                }
-            )
-        } else {
-            inferenceRelay = nil
-        }
+        // endpoint_url legacy mode — no relay needed.
+        inferenceRelay = nil
         try await send(await helloMessage())
         try await receiveLoop(socket)
     }
 
+    // Receive/handle decoupling (provider WS drain fix). Previously this loop
+    // ran `await socket.receive()` then `await handle(message)` serially on the
+    // CoordinatorClient actor. While handle() suspended — drain's
+    // waitUntilDrained (up to drainTimeoutSeconds), warm_up's two state_update
+    // writes, acceptCoordinatorSession's token-persist + state_update, or an
+    // InferenceRelay actor hop — the actor could not re-enter the loop to call
+    // the next receive(). The OS WS read buffer backed up, TCP backpressure made
+    // the coordinator's heartbeat/control writes block and time out (~30-48s),
+    // and the coordinator dropped the session. A constrained provider thus never
+    // held a steady `ready` heartbeat.
+    //
+    // The fix splits receiving from handling across two structured child tasks:
+    //   - the receive task does only `socket.receive()` -> `continuation.yield`
+    //     and loops straight back, so the socket is always drained promptly;
+    //   - one drainer task consumes the stream and calls handle() serially,
+    //     preserving inbound frame ordering (control/heartbeat frames are no
+    //     longer blocked by inference handling, which spawns its own child Task
+    //     in InferenceRelay and returns quickly).
+    // The inbox is .unbounded: AsyncStream.yield never suspends, so it never
+    // re-introduces producer backpressure, and unbounded never drops a control
+    // frame (a bounded buffering policy would silently drop cancel/drain/
+    // inference frames). On any handle() throw (e.g. CoordinatorDrainComplete or
+    // a send failure) the drainer rethrows; the first child to finish ends the
+    // connection and the group cancels its sibling, so the error unwinds to
+    // runReconnectLoop exactly as before.
     private func receiveLoop(_ socket: ProviderWebSocketTask) async throws {
-        while !Task.isCancelled {
-            let message: URLSessionWebSocketTask.Message
+        let (inbox, continuation) = AsyncStream.makeStream(
+            of: URLSessionWebSocketTask.Message.self,
+            bufferingPolicy: .unbounded
+        )
+
+        try await withThrowingTaskGroup(of: Void.self) { group in
+            // Receive task: keep the socket drained. Captures `socket` and
+            // `continuation` (both Sendable), never `self`, so nothing here
+            // hops onto the actor and stalls the next receive().
+            group.addTask {
+                defer { continuation.finish() }
+                while !Task.isCancelled {
+                    let message: URLSessionWebSocketTask.Message
+                    do {
+                        message = try await socket.receive()
+                    } catch {
+                        Self.keepaliveDebug("ws_receive_error error=\(error)")
+                        throw error
+                    }
+                    continuation.yield(message)
+                }
+            }
+
+            // Drainer task: serial handle() preserves frame ordering. The actor
+            // hop on self.handle is the serialization point and is race-free.
+            group.addTask { [self] in
+                for await message in inbox {
+                    try Task.checkCancellation()
+                    try await handle(message)
+                }
+            }
+
+            // The first child to finish (normal end or throw) ends the
+            // connection; cancel the sibling and unwind. Rethrowing here
+            // carries CoordinatorDrainComplete / receive errors to
+            // runReconnectLoop unchanged.
             do {
-                message = try await socket.receive()
+                try await group.next()
             } catch {
-                Self.keepaliveDebug("ws_receive_error error=\(error)")
+                group.cancelAll()
                 throw error
             }
-            try await handle(message)
+            group.cancelAll()
         }
     }
 
@@ -410,6 +879,10 @@ actor CoordinatorClient {
         switch type {
         case "hello_ack":
             try await acceptCoordinatorSession(dict, reason: "coordinator hello_ack received")
+        case "ownership_event":
+            try await handleOwnershipEvent(dict)
+        case "ownership_status":
+            try await handleOwnershipStatus(dict)
         case "preflight":
             try await handlePreflight(dict)
         case "inference_request":
@@ -454,6 +927,33 @@ actor CoordinatorClient {
     func handleCoordinatorPayloadForTest(_ payload: [String: Any]) async throws {
         let data = try JSONSerialization.data(withJSONObject: payload)
         try await handle(.string(String(decoding: data, as: UTF8.self)))
+    }
+
+    func acceptAuthResponseForTest(_ response: [String: Any], session: Tier2ProviderSession) async throws {
+        try await acceptAuthResponse(response, session: session)
+    }
+
+    private func handleOwnershipEvent(_ payload: [String: Any]) async throws {
+        guard let providerID = payload["provider_id"] as? String,
+              providerID == self.providerID,
+              let login = payload["github_login"] as? String,
+              let rawEvent = payload["event"] as? String,
+              let event = OwnershipEventKind(rawValue: rawEvent)
+        else {
+            try await sendNAK(inReplyTo: "ownership_event", code: "invalid_message", message: "Invalid ownership_event frame")
+            return
+        }
+        try pairingController.handleOwnershipEvent(OwnershipEventFrame(providerID: providerID, githubLogin: login, event: event))
+    }
+
+    private func handleOwnershipStatus(_ payload: [String: Any]) async throws {
+        guard let providerID = payload["provider_id"] as? String, providerID == self.providerID else {
+            try await sendNAK(inReplyTo: "ownership_status", code: "invalid_message", message: "Invalid ownership_status frame")
+            return
+        }
+        if payload["needs_claim"] as? Bool == true {
+            try pairingController.handleNeedsClaim()
+        }
     }
 
     func sendHeartbeatForTest() async throws {
@@ -525,6 +1025,11 @@ actor CoordinatorClient {
     }
 
     private func acceptAuthResponse(_ response: [String: Any], session: Tier2ProviderSession) async throws {
+        try validateAcceptedAuthResponse(response, session: session)
+        try await acceptCoordinatorSession(response, reason: "coordinator auth_response accepted")
+    }
+
+    private func validateAcceptedAuthResponse(_ response: [String: Any], session: Tier2ProviderSession) throws {
         guard response["status"] as? String == "accepted" else {
             let error = response["error"] as? [String: Any]
             throw CoordinatorAuthError.rejected(
@@ -540,7 +1045,6 @@ actor CoordinatorClient {
         else {
             throw CoordinatorAuthError.invalidMessage("auth_response missing matching encrypted_leg session")
         }
-        try await acceptCoordinatorSession(response, reason: "coordinator auth_response accepted")
     }
 
     /// SPEC-003 v0.8.2 FR-C9.3 — extract `assigned_provider_token` from
@@ -629,6 +1133,15 @@ actor CoordinatorClient {
         // Awaited so that persist-before-adopt holds: see
         // adoptAssignedProviderTokenIfPresent doc-comment.
         await adoptAssignedProviderTokenIfPresent(payload)
+        do {
+            try pairingController.handlePairingMaterial(
+                pairOT: payload["pair_ot"] as? String,
+                claimURL: payload["claim_url"] as? String,
+                portalBaseURL: payload["portal_base_url"] as? String
+            )
+        } catch {
+            Self.emitClaimURLHandoffEvent(error: error)
+        }
         let interval = max(Self.intValue(payload["heartbeat_interval_s"]) ?? 30, 1)
         await providerStatus.setCoordinatorSession(
             connected: true,
@@ -650,18 +1163,72 @@ actor CoordinatorClient {
         try await sendStateUpdate(state: nil, reason: reason)
     }
 
+    private static func emitClaimURLHandoffEvent(error: Error) {
+        let payload = [
+            "event": "claim_url_handoff_failed",
+            "error": String(describing: error),
+        ]
+        do {
+            var data = try JSONSerialization.data(withJSONObject: payload, options: [])
+            data.append(0x0A)
+            FileHandle.standardError.write(data)
+        } catch {
+            FileHandle.standardError.write(Data("{\"event\":\"claim_url_handoff_failed\"}\n".utf8))
+        }
+    }
+
+    // Provider WS keepalive fix. The coordinator advertises heartbeat_interval_s
+    // (typically 30) and we previously slept the FULL interval before the first
+    // keepalive, then on each tick sent a WebSocket control PING followed by a
+    // heartbeat. That kept a constrained provider out of the `ready` pool via a
+    // connect -> i/o-timeout -> disconnect -> reconnect loop, for two reasons
+    // confirmed against the coordinator code:
+    //
+    //   1. A provider->coordinator WS control PING is actively harmful here. The
+    //      coordinator's gobwas reader auto-writes a PONG to the raw conn
+    //      (server.go readClientData / ControlFrameHandler), but the coordinator
+    //      only ever sets the connection write deadline inside its runWriter
+    //      text-frame path (relay.go:106, write_timeout_s=10) and never clears
+    //      it. Once the connection has been idle past that absolute 10s deadline,
+    //      the PONG write fails immediately with "write tcp ... i/o timeout" and
+    //      the coordinator drops the session. So the PING we sent to keep the
+    //      link alive was the very thing triggering the disconnect — which is
+    //      why the drop cadence tracked our ping period.
+    //   2. The coordinator does not count provider control frames as liveness:
+    //      readProviderLoop ignores any non-text frame (server.go:1127) and only
+    //      text frames refresh activity. A PING would not have kept us alive even
+    //      without bug (1).
+    //
+    // The fix: send a heartbeat TEXT frame on a short sub-interval tick and send
+    // no control pings. A text frame routes through the coordinator's runWriter,
+    // which sets a FRESH write deadline before writing, and reaches handleMessage
+    // which refreshes liveness. The tick is capped well under the coordinator's
+    // 10s write deadline (and any proxy idle timeout) so the connection never
+    // sits idle long enough for the stale-deadline write to fire. The since-last
+    // metrics window is still rolled only on the full coordinator interval
+    // (resetWindow), so heartbeat metrics are unchanged from before.
+    private static let keepaliveTickCeilingSeconds = 5
     private func startHeartbeat(intervalSeconds: Int) {
         heartbeatTask?.cancel()
-        Self.keepaliveDebug("heartbeat_start interval_s=\(intervalSeconds)")
+        let tickSeconds = max(1, min(intervalSeconds, Self.keepaliveTickCeilingSeconds))
+        Self.keepaliveDebug("heartbeat_start interval_s=\(intervalSeconds) tick_s=\(tickSeconds)")
         heartbeatTask = Task { [weak self] in
+            var secondsSinceWindowReset = 0
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(intervalSeconds) * 1_000_000_000)
+                try? await Task.sleep(nanoseconds: UInt64(tickSeconds) * 1_000_000_000)
                 if Task.isCancelled {
                     return
                 }
+                secondsSinceWindowReset += tickSeconds
+                // Roll the metrics window only on the full coordinator interval;
+                // intermediate ticks are keepalive heartbeats that report the
+                // same accumulating window without resetting it.
+                let rollWindow = secondsSinceWindowReset >= intervalSeconds
+                if rollWindow {
+                    secondsSinceWindowReset = 0
+                }
                 do {
-                    try await self?.sendWebSocketPing()
-                    try await self?.sendHeartbeat()
+                    try await self?.sendHeartbeat(resetWindow: rollWindow)
                 } catch {
                     Self.keepaliveDebug("keepalive_send_error error=\(error)")
                     await self?.closeWebSocketAfterKeepaliveFailure()
@@ -669,12 +1236,6 @@ actor CoordinatorClient {
                 }
             }
         }
-    }
-
-    private func sendWebSocketPing() async throws {
-        guard let webSocket else { throw CancellationError() }
-        try await webSocket.sendPing()
-        Self.keepaliveDebug("ws_ping")
     }
 
     private func closeWebSocketAfterKeepaliveFailure() {
@@ -772,8 +1333,13 @@ actor CoordinatorClient {
         await providerStatus.setState(.ready)
     }
 
-    private func sendHeartbeat() async throws {
-        let snapshot = await providerStatus.snapshot(resetWindow: true)
+    // resetWindow=true rolls the since-last metrics window (the coordinator-
+    // interval heartbeat). Intermediate keepalive heartbeats (sent on the short
+    // sub-interval tick to keep the connection alive) pass resetWindow=false so
+    // the since-last window stays aligned to the full coordinator interval and
+    // metrics are unchanged from the prior single-heartbeat-per-interval cadence.
+    private func sendHeartbeat(resetWindow: Bool = true) async throws {
+        let snapshot = await providerStatus.snapshot(resetWindow: resetWindow)
         var payload: [String: Any] = [
             "type": "heartbeat",
             "status": snapshot.status.rawValue,
@@ -841,7 +1407,10 @@ actor CoordinatorClient {
         ])
     }
 
-    func authInitialMessage(attempt: Tier2AuthAttempt) async -> [String: Any] {
+    func authInitialMessage(
+        attempt: Tier2AuthAttempt,
+        providerReceiptPublicKeyOverride: String? = nil
+    ) async -> [String: Any] {
         let snapshot = await providerStatus.snapshot()
         var message: [String: Any] = [
             "type": "auth_request",
@@ -875,6 +1444,10 @@ actor CoordinatorClient {
         message["supported_models"] = resolvedCatalog
         if publishesSupportedModels {
             message["publishes_supported_models"] = true
+        }
+        let receiptPublicKey = providerReceiptPublicKeyOverride ?? providerReceiptPublicKey
+        if let receiptPublicKey, !receiptPublicKey.isEmpty {
+            message["provider_receipt_public_key"] = receiptPublicKey
         }
         if let endpointURL {
             message["endpoint_url"] = endpointURL
@@ -929,6 +1502,15 @@ actor CoordinatorClient {
         }
         guard let webSocket else { throw CancellationError() }
         try await Self.send(payload, to: webSocket)
+    }
+
+    private func send(_ payload: [String: Any], to webSocket: ProviderWebSocketTask) async throws {
+        let data = try JSONSerialization.data(withJSONObject: payload, options: [.withoutEscapingSlashes])
+        let text = String(decoding: data, as: UTF8.self)
+        if let type = payload["type"] as? String {
+            Self.keepaliveDebug("ws_send type=\(type) bytes=\(text.utf8.count)")
+        }
+        try await webSocket.send(.string(text))
     }
 
     private static func send(_ payload: sending [String: Any], to webSocket: ProviderWebSocketTask) async throws {
@@ -1006,6 +1588,8 @@ actor CoordinatorClient {
         return .orderedSame
     }
 }
+
+extension CoordinatorClient: ReceiptKeyRotatingCoordinatorClient {}
 
 /// Signals "coordinator asked us to drain, handle complete, reconnect later
 /// after a grace period." Caught by runReconnectLoop.

@@ -13,6 +13,10 @@ import (
 
 var providerIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,64}$`)
 
+// minAuditLogRetentionDays is the compliance floor for audit_log retention.
+// Operators may not set audit_log_retention_days below this value.
+const minAuditLogRetentionDays = 90
+
 type Config struct {
 	Listen                       ListenConfig                 `yaml:"listen"`
 	Pool                         PoolConfig                   `yaml:"pool"`
@@ -50,20 +54,31 @@ type PoolConfig struct {
 	// chunks count as activity and keep the socket alive. Decoupled from
 	// routing.failover_timeout_s (which governs replacement selection, not
 	// liveness). Defaults to 90s (3x the 30s heartbeat interval).
-	HeartbeatMissThresholdS int  `yaml:"heartbeat_miss_threshold_s"`
-	WakeGapThresholdS       int  `yaml:"wake_gap_threshold_s"`
+	HeartbeatMissThresholdS int `yaml:"heartbeat_miss_threshold_s"`
+	WakeGapThresholdS       int `yaml:"wake_gap_threshold_s"`
 	// WakeGapThresholdMs, when > 0, overrides WakeGapThresholdS for
 	// millisecond-precision test scenarios. Not for production use.
-	WakeGapThresholdMs      int  `yaml:"wake_gap_threshold_ms"`
-	WarmupFallbackS         int  `yaml:"warmup_fallback_s"`
-	WarmupGateEnabled       bool `yaml:"warmup_gate_enabled"`
-	WarmupGateTimeoutS      int  `yaml:"warmup_gate_timeout_s"`
-	WarmupGateMaxTokens     int  `yaml:"warmup_gate_max_tokens"`
-	DegradedBackoffS        int  `yaml:"degraded_backoff_s"`
-	DegradedMaxRetries      int  `yaml:"degraded_max_retries"`
-	DegradedProbeAfter502   bool `yaml:"degraded_probe_after_502"`
-	BreakerFailureThreshold int  `yaml:"breaker_failure_threshold"`
-	BreakerWindowS          int  `yaml:"breaker_window_s"`
+	WakeGapThresholdMs      int                     `yaml:"wake_gap_threshold_ms"`
+	WarmupFallbackS         int                     `yaml:"warmup_fallback_s"`
+	WarmupGateEnabled       bool                    `yaml:"warmup_gate_enabled"`
+	WarmupGateTimeoutS      int                     `yaml:"warmup_gate_timeout_s"`
+	WarmupGateMaxTokens     int                     `yaml:"warmup_gate_max_tokens"`
+	DegradedBackoffS        int                     `yaml:"degraded_backoff_s"`
+	DegradedMaxRetries      int                     `yaml:"degraded_max_retries"`
+	DegradedProbeAfter502   bool                    `yaml:"degraded_probe_after_502"`
+	BreakerFailureThreshold int                     `yaml:"breaker_failure_threshold"`
+	BreakerWindowS          int                     `yaml:"breaker_window_s"`
+	CanaryEnabled           bool                    `yaml:"canary_enabled"`
+	CanaryIntervalS         int                     `yaml:"canary_interval_s"`
+	CanaryTimeoutS          int                     `yaml:"canary_timeout_s"`
+	CanaryMaxTokens         int                     `yaml:"canary_max_tokens"`
+	CanaryFailureThreshold  int                     `yaml:"canary_failure_threshold"`
+	CanaryChallenges        []CanaryChallengeConfig `yaml:"canary_challenges"`
+}
+
+type CanaryChallengeConfig struct {
+	Prompt   string `yaml:"prompt"`
+	Expected string `yaml:"expected"`
 }
 
 type RoutingConfig struct {
@@ -125,6 +140,19 @@ type Tier2Config struct {
 	CatalogPath         string `yaml:"catalog_path"`
 	CatalogPublicKey    string `yaml:"catalog_public_key"`
 	RequireHashVerified bool   `yaml:"require_hash_verified"`
+	// PublicCatalogBaseURL is the public base URL the coordinator
+	// advertises for SPEC-015 §M.4 catalog endpoints
+	// (`GET /catalog/<catalog_id>` and `GET /catalog/pubkey`). When
+	// non-empty, `/poolz` emits absolute catalog URLs derived from
+	// this base (trailing slashes trimmed). When empty, `/poolz`
+	// falls back to deriving an absolute URL from the inbound
+	// request's scheme + `Host` header. If neither source yields a
+	// usable base (catalog_id present but no host available),
+	// `catalog_url` and `catalog_pubkey_url` are OMITTED from the
+	// `/poolz` response — only `catalog_id` is emitted, so a
+	// verifier invoked with `--catalog <path>` + `--catalog-pubkey`
+	// (file-based, no URL resolution) still works.
+	PublicCatalogBaseURL string `yaml:"public_catalog_base_url"`
 
 	RequireEncryptedLeg            bool   `yaml:"require_encrypted_leg"`
 	EncryptedLegAEAD               string `yaml:"encrypted_leg_aead"`
@@ -154,10 +182,29 @@ type CoordinatorAdvertisedVersion struct {
 
 type AuthConfig struct {
 	OperatorKey string `yaml:"operator_key"`
+	// GatewayServiceToken is the optional service-to-service credential
+	// the gateway uses when calling internal/admin coordinator endpoints
+	// (M3-2 / SECU-4). When set, the coordinator accepts EITHER
+	// OperatorKey OR GatewayServiceToken on the internal-bearer auth
+	// path; this allows the operator key to be rotated independently of
+	// the live gateway upstream credential. Empty = legacy-only
+	// (OperatorKey is the sole accepted credential), preserving
+	// pre-bridge behavior.
+	GatewayServiceToken string `yaml:"gateway_service_token"`
 	// RequireProviderTokens fails closed for public provider WebSocket
 	// exposure. Disable only for isolated local development or one-off
 	// migrations where anonymous pinned-provider admission is acceptable.
-	RequireProviderTokens bool `yaml:"require_provider_tokens"`
+	RequireProviderTokens bool              `yaml:"require_provider_tokens"`
+	GitHubOAuth           GitHubOAuthConfig `yaml:"github_oauth"`
+}
+
+type GitHubOAuthConfig struct {
+	Enabled             bool   `yaml:"enabled"`
+	ClientID            string `yaml:"client_id"`
+	ClientSecret        string `yaml:"client_secret"`
+	RedirectURI         string `yaml:"redirect_uri"`
+	PortalBaseURL       string `yaml:"portal_base_url"`
+	SessionCookieDomain string `yaml:"session_cookie_domain"`
 }
 
 type StorageConfig struct {
@@ -250,6 +297,11 @@ func Default() Config {
 			DegradedProbeAfter502:   true,
 			BreakerFailureThreshold: 2,
 			BreakerWindowS:          120,
+			CanaryEnabled:           false,
+			CanaryIntervalS:         300,
+			CanaryTimeoutS:          30,
+			CanaryMaxTokens:         8,
+			CanaryFailureThreshold:  3,
 		},
 		Routing: RoutingConfig{
 			PreflightThresholdTokens:      4096,
@@ -274,10 +326,10 @@ func Default() Config {
 			MaxChatRequestBodyBytes: 1 << 20,
 		},
 		WS: WSConfig{
-			WriteBufferSize:        64,
-			HandshakeTimeoutS:      10,
-			WriteTimeoutS:          10,
-			MaxFrameBytes:          4 << 20,
+			WriteBufferSize:             64,
+			HandshakeTimeoutS:           10,
+			WriteTimeoutS:               10,
+			MaxFrameBytes:               4 << 20,
 			MaxUnauthenticatedConn:      64,
 			MaxUnauthenticatedConnPerIP: 4,
 		},
@@ -378,10 +430,77 @@ func Load(path string) (Config, error) {
 	if err := yaml.Unmarshal(b, &cfg); err != nil {
 		return Config{}, err
 	}
+	if err := cfg.resolveEnv(); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// resolveEnv expands "env:NAME" sentinels in secret-bearing fields by
+// reading the named environment variable. Mirrors the gateway-side
+// resolver (M3-2 / DEVE-7) but is intentionally duplicated to avoid a
+// cross-module import; the audit recorded "intentional duplication" as
+// the house pattern for config plumbing.
+//
+// FAIL-CLOSED contract: when the YAML uses an env: sentinel and the
+// referenced variable is unset OR empty, Load returns an error. Silent
+// fall-through to "" would let the coordinator boot with an empty
+// operator_key in places where Validate's "must be set" guard does not
+// catch the substitution (e.g. future fields added to this resolver).
+func (c *Config) resolveEnv() error {
+	if v, err := resolveEnvValue("auth.operator_key", c.Auth.OperatorKey); err != nil {
+		return err
+	} else {
+		c.Auth.OperatorKey = v
+	}
+	if v, err := resolveEnvValue("auth.gateway_service_token", c.Auth.GatewayServiceToken); err != nil {
+		return err
+	} else {
+		c.Auth.GatewayServiceToken = v
+	}
+	if raw, ok := os.LookupEnv("GITHUB_OAUTH_ENABLED"); ok {
+		switch raw {
+		case "true":
+			c.Auth.GitHubOAuth.Enabled = true
+		case "false":
+			c.Auth.GitHubOAuth.Enabled = false
+		default:
+			return fmt.Errorf("GITHUB_OAUTH_ENABLED must be \"true\" or \"false\"")
+		}
+	}
+	if c.Auth.GitHubOAuth.Enabled {
+		if v := strings.TrimSpace(os.Getenv("GITHUB_OAUTH_CLIENT_ID")); v != "" {
+			c.Auth.GitHubOAuth.ClientID = v
+		}
+		if v := strings.TrimSpace(os.Getenv("GITHUB_OAUTH_CLIENT_SECRET")); v != "" {
+			c.Auth.GitHubOAuth.ClientSecret = v
+		}
+		if v := strings.TrimSpace(os.Getenv("GITHUB_OAUTH_REDIRECT_URI")); v != "" {
+			c.Auth.GitHubOAuth.RedirectURI = v
+		}
+		if v := strings.TrimSpace(os.Getenv("PORTAL_BASE_URL")); v != "" {
+			c.Auth.GitHubOAuth.PortalBaseURL = strings.TrimRight(v, "/")
+		}
+		if v := strings.TrimSpace(os.Getenv("MP_SESSION_COOKIE_DOMAIN")); v != "" {
+			c.Auth.GitHubOAuth.SessionCookieDomain = v
+		}
+	}
+	return nil
+}
+
+func resolveEnvValue(field, v string) (string, error) {
+	if !strings.HasPrefix(v, "env:") {
+		return v, nil
+	}
+	name := strings.TrimPrefix(v, "env:")
+	resolved := os.Getenv(name)
+	if resolved == "" {
+		return "", fmt.Errorf("%s references env:%s but the environment variable is unset or empty", field, name)
+	}
+	return resolved, nil
 }
 
 func (c Config) HeartbeatInterval() time.Duration {
@@ -462,6 +581,9 @@ func (c Config) Validate() error {
 	if c.Auth.OperatorKey == "" {
 		return fmt.Errorf("auth.operator_key must be set")
 	}
+	if err := c.validateGitHubOAuth(); err != nil {
+		return err
+	}
 	if c.WS.WriteBufferSize <= 0 {
 		return fmt.Errorf("ws.write_buffer_size must be > 0")
 	}
@@ -528,6 +650,22 @@ func (c Config) Validate() error {
 	}
 	if c.Pool.BreakerFailureThreshold <= 0 || c.Pool.BreakerWindowS <= 0 {
 		return fmt.Errorf("pool breaker settings must be > 0")
+	}
+	if c.Pool.CanaryEnabled && (c.Pool.CanaryIntervalS <= 0 || c.Pool.CanaryTimeoutS <= 0 || c.Pool.CanaryMaxTokens <= 0 || c.Pool.CanaryFailureThreshold <= 0) {
+		return fmt.Errorf("pool canary settings must be > 0 when enabled")
+	}
+	if c.Pool.CanaryEnabled {
+		if len(c.Pool.CanaryChallenges) == 0 {
+			return fmt.Errorf("pool canary_challenges must not be empty when enabled")
+		}
+		for i, challenge := range c.Pool.CanaryChallenges {
+			if strings.TrimSpace(challenge.Prompt) == "" || strings.TrimSpace(challenge.Expected) == "" {
+				return fmt.Errorf("pool canary_challenges[%d] prompt and expected must not be empty", i)
+			}
+			if !strings.Contains(challenge.Prompt, "{nonce}") || !strings.Contains(challenge.Expected, "{nonce}") {
+				return fmt.Errorf("pool canary_challenges[%d] prompt and expected must contain {nonce}", i)
+			}
+		}
 	}
 	if c.Admission.ProvisionalAdmissionRatePerHour <= 0 {
 		return fmt.Errorf("admission.provisional_admission_rate_per_hour must be > 0")
@@ -609,8 +747,8 @@ func (c Config) Validate() error {
 	if c.Storage.RequestLogRetentionDays <= 0 {
 		return fmt.Errorf("storage.request_log_retention_days must be > 0")
 	}
-	if c.Storage.AuditLogRetentionDays <= 0 {
-		return fmt.Errorf("storage.audit_log_retention_days must be > 0")
+	if c.Storage.AuditLogRetentionDays < minAuditLogRetentionDays {
+		return fmt.Errorf("storage.audit_log_retention_days must be >= %d (compliance floor)", minAuditLogRetentionDays)
 	}
 	if c.Storage.RequestLogRetentionDays < c.Settlement.NightlyReconcileWindowDays {
 		return fmt.Errorf("storage.request_log_retention_days must be >= settlement.nightly_reconcile_window_days")
@@ -642,6 +780,35 @@ func (c Config) Validate() error {
 			if err := ValidateEndpointURL(p.EndpointURL); err != nil {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
+		}
+	}
+	return nil
+}
+
+func (c Config) validateGitHubOAuth() error {
+	oauth := c.Auth.GitHubOAuth
+	if !oauth.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(oauth.ClientID) == "" {
+		return fmt.Errorf("GITHUB_OAUTH_CLIENT_ID must be set when GITHUB_OAUTH_ENABLED=true")
+	}
+	if strings.TrimSpace(oauth.ClientSecret) == "" {
+		return fmt.Errorf("GITHUB_OAUTH_CLIENT_SECRET must be set when GITHUB_OAUTH_ENABLED=true")
+	}
+	redirect, err := url.Parse(strings.TrimSpace(oauth.RedirectURI))
+	if err != nil || redirect.Scheme != "https" || redirect.Host == "" || redirect.Path != "/v1/auth/github/callback" || redirect.RawQuery != "" || redirect.Fragment != "" {
+		return fmt.Errorf("GITHUB_OAUTH_REDIRECT_URI must be https://.../v1/auth/github/callback when GITHUB_OAUTH_ENABLED=true")
+	}
+	portal, err := url.Parse(strings.TrimSpace(oauth.PortalBaseURL))
+	if err != nil || portal.Scheme != "https" || portal.Host == "" || portal.Path != "" || portal.RawQuery != "" || portal.Fragment != "" || portal.User != nil {
+		return fmt.Errorf("PORTAL_BASE_URL must be https://<host>[:<port>] with no path or query when GITHUB_OAUTH_ENABLED=true")
+	}
+	if oauth.SessionCookieDomain != "" {
+		domain := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(oauth.SessionCookieDomain)), ".")
+		host := strings.ToLower(portal.Hostname())
+		if domain == "" || host != domain && !strings.HasSuffix(host, "."+domain) {
+			return fmt.Errorf("MP_SESSION_COOKIE_DOMAIN must match PORTAL_BASE_URL host scope")
 		}
 	}
 	return nil

@@ -67,6 +67,7 @@ Environment overrides:
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
   MACPROVIDER_NO_PROMPT=1        use defaults without interactive prompts
   MACPROVIDER_NO_LAUNCHD=1       skip launchd service install
+  MACPROVIDER_SKIP_HF_CHECK=1    skip HuggingFace lookup on custom model id
 USAGE
 }
 
@@ -268,16 +269,343 @@ model_default_for_ram() {
   ram_gb="$1"
   if [ "$ram_gb" -lt 12 ]; then
     printf "mlx-community/Llama-3.2-3B-Instruct-4bit"
+  elif [ "$ram_gb" -lt 16 ]; then
+    printf "mlx-community/Qwen3-4B-Instruct-2507-4bit"
   elif [ "$ram_gb" -lt 24 ]; then
     printf "mlx-community/Qwen2.5-7B-Instruct-4bit"
-  else
+  elif [ "$ram_gb" -lt 32 ]; then
     printf "mlx-community/Qwen2.5-14B-Instruct-4bit"
+  elif [ "$ram_gb" -lt 48 ]; then
+    printf "mlx-community/Qwen3-32B-4bit"
+  elif [ "$ram_gb" -lt 64 ]; then
+    printf "mlx-community/Llama-3.3-70B-Instruct-4bit"
+  else
+    printf "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit"
+  fi
+}
+
+known_min_ram_gb_for_model() {
+  case "$1" in
+    mlx-community/Llama-3.2-3B-Instruct-4bit) printf "8" ;;
+    mlx-community/Qwen3-4B-Instruct-2507-4bit) printf "12" ;;
+    mlx-community/Qwen2.5-7B-Instruct-4bit) printf "16" ;;
+    mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit) printf "16" ;;
+    mlx-community/Qwen2.5-14B-Instruct-4bit) printf "24" ;;
+    mlx-community/Qwen3-32B-4bit) printf "32" ;;
+    mlx-community/Qwen2.5-Coder-32B-Instruct-4bit) printf "32" ;;
+    mlx-community/Llama-3.3-70B-Instruct-4bit) printf "48" ;;
+    mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit) printf "64" ;;
+  esac
+}
+
+# SPEC-003 v0.9 FR-D2: enforce safe HuggingFace repo id format.
+# Path-component charset (A-Za-z0-9._-) plus a single "/" separator. Any
+# deviation from "org/name" is rejected — this id is interpolated into a URL
+# and a YAML field, so traversal/newlines/whitespace must not slip through.
+validate_hf_id() {
+  id="$1"
+  reject_newlines "model id" "$id"
+  case "$id" in
+    */*/*|*/) die 7 "model id must be in the form org/name (got: $id)" ;;
+    */*) ;;
+    *) die 7 "model id must be in the form org/name (got: $id)" ;;
+  esac
+  case "$id" in
+    *[!A-Za-z0-9._/-]*) die 7 "model id contains invalid characters; allowed: A-Z a-z 0-9 . _ - /" ;;
+  esac
+  case "$id" in
+    /*|*/) die 7 "model id must be in the form org/name (got: $id)" ;;
+  esac
+  # Round-2 hardening (codex code/security MAJOR): reject "." / ".." path
+  # components even though the charset filter allows them. Otherwise an id
+  # like "org/.." or "../name" passes the format check and could be
+  # path-normalized into the HF URL or later treated as a relative local
+  # model path by the binary.
+  hf_org="${id%/*}"
+  hf_name="${id##*/}"
+  case "$hf_org" in
+    .|..) die 7 "model id org segment cannot be \".\" or \"..\"" ;;
+  esac
+  case "$hf_name" in
+    .|..) die 7 "model id name segment cannot be \".\" or \"..\"" ;;
+  esac
+}
+
+# SPEC-003 v0.9 FR-D2: estimate weight size in GB from HF repo name.
+# Parses N params from "...3B...", "...7B...", "...1.7B..." patterns and a
+# quantization hint (4bit/8bit/bf16/fp16/q4/q8). Returns an integer GB to
+# stdout or empty if the name can't be parsed — callers treat empty as
+# "skip fit check, warn user".
+estimate_weights_gb_from_name() {
+  id="$1"
+  # Round-2 (codex code MAJOR): match "NxMB" Mixture-of-Experts shape FIRST
+  # (e.g. "Mixtral-8x7B" — 8 experts of 7B each, total ~56B params). The
+  # single-N pattern below would otherwise capture only the "7B" half and
+  # under-count memory by ~N×, letting the fit check pass a model that
+  # would OOM the host.
+  moe_match="$(printf "%s" "$id" | grep -oE '[0-9]+x[0-9]+(\.[0-9]+)?[Bb]' | head -n1)"
+  if [ -n "$moe_match" ]; then
+    experts="${moe_match%%x*}"
+    per_rest="${moe_match#*x}"
+    per_b="${per_rest%[Bb]}"
+    params_b="$(awk -v e="$experts" -v p="$per_b" 'BEGIN { printf "%g", e * p }')"
+  else
+    params_b="$(printf "%s" "$id" | grep -oE '[0-9]+(\.[0-9]+)?[Bb]' | head -n1 | tr -d 'Bb')"
+  fi
+  [ -n "$params_b" ] || return 0
+  quant_lc="$(printf "%s" "$id" | tr '[:upper:]' '[:lower:]')"
+  case "$quant_lc" in
+    *4bit*|*-q4*|*_q4*) bytes_per_param=0.5 ;;
+    *8bit*|*-q8*|*_q8*) bytes_per_param=1.0 ;;
+    *bf16*|*fp16*|*-f16*) bytes_per_param=2.0 ;;
+    *) bytes_per_param=2.0 ;;
+  esac
+  awk -v p="$params_b" -v b="$bytes_per_param" \
+    'BEGIN { gb = p * b; if (gb < 1) gb = 1; printf "%d", gb + 0.5 }'
+}
+
+hf_safetensors_gb_from_api_body() {
+  body="$1"
+  printf "%s" "$body" | tr '\n\r' '  ' | awk '
+    {
+      data = $0
+      while (match(data, /"rfilename"[[:space:]]*:[[:space:]]*"[^"]*\.safetensors"/)) {
+        data = substr(data, RSTART + RLENGTH)
+        window = substr(data, 1, 700)
+        if (match(window, /"size"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+          value = substr(window, RSTART, RLENGTH)
+          gsub(/[^0-9]/, "", value)
+          total += value + 0
+        }
+      }
+    }
+    END {
+      if (total > 0) {
+        printf "%d", int((total + 1073741824 - 1) / 1073741824)
+      }
+    }
+  '
+}
+
+ram_floor_for_weight_gb() {
+  weight_gb="$1"
+  awk -v w="$weight_gb" '
+    BEGIN {
+      if (w <= 2) print 8;
+      else if (w <= 3) print 12;
+      else if (w <= 5) print 16;
+      else if (w <= 9) print 24;
+      else if (w <= 20) print 32;
+      else if (w <= 38) print 48;
+      else print 64;
+    }
+  '
+}
+
+confirm_model_fit_override() {
+  reason="$1"
+  if [ "$NO_PROMPT" = "1" ]; then
+    die 7 "$reason; refusing non-interactive install"
+  fi
+  log "WARNING: $reason"
+  prompt_yes_no "Proceed anyway? [y/N]" "N" || die 7 "aborted by user"
+}
+
+enforce_model_min_ram_floor() {
+  id="$1"
+  ram_gb="$2"
+  min_ram_gb="$3"
+  source="$4"
+  if [ "$ram_gb" -lt "$min_ram_gb" ]; then
+    confirm_model_fit_override "$source requires ${min_ram_gb} GB RAM for $id, but this Mac has ${ram_gb} GB"
+  else
+    log "Model fits: $id requires ${min_ram_gb} GB RAM by $source; this Mac has ${ram_gb} GB."
+  fi
+}
+
+enforce_model_ram_fit_from_weight_gb() {
+  id="$1"
+  ram_gb="$2"
+  weight_gb="$3"
+  source="$4"
+  min_ram_gb="$(ram_floor_for_weight_gb "$weight_gb")"
+  if [ "$ram_gb" -lt "$min_ram_gb" ]; then
+    confirm_model_fit_override "$source reports ~${weight_gb} GB safetensors; recommended RAM floor is ${min_ram_gb} GB for $id, but this Mac has ${ram_gb} GB"
+  else
+    log "Model fits: $source reports ~${weight_gb} GB safetensors; recommended RAM floor is ${min_ram_gb} GB and this Mac has ${ram_gb} GB."
+  fi
+}
+
+enforce_model_ram_fit() {
+  id="$1"
+  ram_gb="$2"
+  min_ram_gb="$(known_min_ram_gb_for_model "$id")"
+  if [ -n "$min_ram_gb" ]; then
+    enforce_model_min_ram_floor "$id" "$ram_gb" "$min_ram_gb" "model table"
+    return 0
+  fi
+
+  est_gb="$(estimate_weights_gb_from_name "$id")"
+  if [ -z "$est_gb" ]; then
+    log "WARNING: could not estimate weight size from model name; skipping fit check."
+    return 0
+  fi
+  # Headroom: ~6 GB for macOS (3-4 GB) + Metal + mlx runtime + binary +
+  # KV cache. This matches the existing RAM-tier policy where the 7B (~4 GB)
+  # default targets 16 GB Macs, not 8 GB Macs.
+  comfortable_gb=$((est_gb + 6))
+  if [ "$ram_gb" -ge "$comfortable_gb" ]; then
+    log "Model fits: ~${est_gb} GB weights on ${ram_gb} GB Mac (working set ~${comfortable_gb} GB)."
+    return 0
+  fi
+  if [ "$ram_gb" -ge "$((est_gb + 2))" ]; then
+    confirm_model_fit_override "tight fit — ~${est_gb} GB weights on ${ram_gb} GB Mac; may swap or OOM under load"
+    return 0
+  fi
+  confirm_model_fit_override "~${est_gb} GB weights will not fit on ${ram_gb} GB Mac"
+}
+
+catalog_min_ram_from_body() {
+  catalog_body="$1"
+  model_id="$2"
+  printf "%s" "$catalog_body" | tr '\n\r' '  ' | awk -v id="$model_id" '
+    BEGIN { RS = "}"; }
+    index($0, "\"model_id\"") && index($0, "\"" id "\"") {
+      if (match($0, /"min_ram_gb"[[:space:]]*:[[:space:]]*[1-9][0-9]*/)) {
+        value = substr($0, RSTART, RLENGTH)
+        gsub(/[^0-9]/, "", value)
+        print value
+      }
+      exit
+    }
+  '
+}
+
+check_catalog_ram_metadata() {
+  coordinator_base="$1"
+  model_id="$2"
+  ram_gb="$3"
+  if [ "${MACPROVIDER_SKIP_CATALOG_CHECK:-0}" = "1" ]; then
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    log "WARNING: curl not found; using built-in model RAM estimates."
+    return 1
+  fi
+
+  catalog_url="$coordinator_base/catalog/current"
+  body_and_code="$(curl -sSL -m 5 -o - -w '\n__HTTP_STATUS__%{http_code}' "$catalog_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
+  http_code="${body_and_code##*__HTTP_STATUS__}"
+  catalog_body="${body_and_code%__HTTP_STATUS__*}"
+  if [ "$http_code" != "200" ]; then
+    log "WARNING: could not read signed catalog $catalog_url (status $http_code); using built-in model RAM estimates."
+    return 1
+  fi
+
+  catalog_id="$(printf "%s" "$catalog_body" | sed -n 's/.*"catalog_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  if [ -z "$catalog_id" ]; then
+    log "WARNING: signed catalog did not include catalog_id; using built-in model RAM estimates."
+    return 1
+  fi
+
+  min_ram_gb="$(catalog_min_ram_from_body "$catalog_body" "$model_id")"
+  if [ -n "$min_ram_gb" ]; then
+    if [ "$ram_gb" -lt "$min_ram_gb" ]; then
+      confirm_model_fit_override "catalog $catalog_id requires ${min_ram_gb} GB RAM for $model_id, but this Mac has ${ram_gb} GB"
+    else
+      log "Catalog fit: $model_id requires ${min_ram_gb} GB RAM; this Mac has ${ram_gb} GB."
+    fi
+    return 0
+  fi
+  log "WARNING: catalog $catalog_id has no min_ram_gb metadata; using built-in model RAM estimates."
+  return 1
+}
+
+# SPEC-003 v0.9 FR-D2: pre-install validation of a user-supplied HuggingFace
+# model id. Hard-blocks on inaccessible (401/403/404 — HF returns 401 for both
+# gated and nonexistent repos) and on non-MLX repos. Warns and prompts on
+# tight/over-RAM fit; user may override. Network errors downgrade to a
+# "skipped" warning so a flaky HF doesn't brick installs, but the local
+# name-based RAM-fit guard still runs. All output goes to stderr — caller's
+# stdout is reserved for the chosen id.
+hf_check_model() {
+  id="$1"
+  ram_gb="$2"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "Dry run: would check model $id on HuggingFace."
+    enforce_model_ram_fit "$id" "$ram_gb"
+    return 0
+  fi
+  if [ "${MACPROVIDER_SKIP_HF_CHECK:-0}" = "1" ]; then
+    log "Skipping HuggingFace check (MACPROVIDER_SKIP_HF_CHECK=1)."
+    enforce_model_ram_fit "$id" "$ram_gb"
+    return 0
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    log "curl not found; skipping HuggingFace check."
+    enforce_model_ram_fit "$id" "$ram_gb"
+    return 0
+  fi
+  log "Checking model $id on HuggingFace…"
+  api_url="https://huggingface.co/api/models/$id?blobs=true"
+  # -f omitted so 4xx bodies still reach us; status is routed explicitly below.
+  body_and_code="$(curl -sSL -m 10 -o - -w '\n__HTTP_STATUS__%{http_code}' "$api_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
+  http_code="${body_and_code##*__HTTP_STATUS__}"
+  body="${body_and_code%__HTTP_STATUS__*}"
+  case "$http_code" in
+    200) ;;
+    401|403|404)
+      die 7 "model $id is not accessible on HuggingFace (private, gated, or doesn't exist). For a gated repo, use 'macprovider-cli models switch' post-install with HF_TOKEN set."
+      ;;
+    network_error)
+      log "WARNING: could not reach HuggingFace API; using local RAM-fit estimate only."
+      enforce_model_ram_fit "$id" "$ram_gb"
+      return 0
+      ;;
+    *)
+      log "WARNING: unexpected HuggingFace API status $http_code; using local RAM-fit estimate only."
+      enforce_model_ram_fit "$id" "$ram_gb"
+      return 0
+      ;;
+  esac
+
+  # MLX detection: mlx-community/* repos are mlx by convention, plus any repo
+  # that declares mlx as library_name or carries an "mlx" tag.
+  is_mlx=0
+  case "$id" in
+    mlx-community/*) is_mlx=1 ;;
+  esac
+  if [ "$is_mlx" -eq 0 ]; then
+    # Round-2 (codex code MINOR): flatten the body to one line before the
+    # tags regex. HF currently returns minified JSON, but a future format
+    # change to pretty-printed bodies would defeat the bracketed-class
+    # match because grep -E reads line-by-line.
+    flat_body="$(printf "%s" "$body" | tr -d '\n\r')"
+    if printf "%s" "$flat_body" | grep -qE '"library_name"[[:space:]]*:[[:space:]]*"mlx"|"tags"[[:space:]]*:[[:space:]]*\[[^]]*"mlx"'; then
+      is_mlx=1
+    fi
+  fi
+  if [ "$is_mlx" -eq 0 ]; then
+    die 7 "model $id is not an MLX repo. macprovider runs MLX-format models only. Pick an mlx-community/* variant or convert with mlx_lm.convert."
+  fi
+
+  hf_weight_gb="$(hf_safetensors_gb_from_api_body "$body")"
+  if [ -n "$hf_weight_gb" ]; then
+    enforce_model_ram_fit_from_weight_gb "$id" "$ram_gb" "$hf_weight_gb" "HuggingFace"
+  else
+    enforce_model_ram_fit "$id" "$ram_gb"
   fi
 }
 
 choose_model() {
   ram_gb="$1"
   if [ -n "${MACPROVIDER_MODEL:-}" ]; then
+    # Env-var override is an explicit power-user path, but it must still pass
+    # the local RAM-fit guard. Keep the previous reachability behavior for
+    # private/gated repos; NO_PROMPT oversized models fail loud with exit 7
+    # instead of silently downloading multi-GB weights that cannot fit.
+    validate_hf_id "$MACPROVIDER_MODEL"
+    enforce_model_ram_fit "$MACPROVIDER_MODEL" "$ram_gb" >&2
     printf "%s" "$MACPROVIDER_MODEL"
     return
   fi
@@ -291,15 +619,37 @@ choose_model() {
   printf "[macprovider-install] Detected approximately %s GB RAM.\n" "$ram_gb" >&2
   printf "Choose a model:\n" >&2
   printf "  1) mlx-community/Llama-3.2-3B-Instruct-4bit      ~2 GB, 8 GB Macs\n" >&2
-  printf "  2) mlx-community/Qwen2.5-7B-Instruct-4bit        ~4 GB, 16 GB Macs\n" >&2
-  printf "  3) mlx-community/Qwen2.5-14B-Instruct-4bit       ~8 GB, 24 GB+ Macs\n" >&2
+  printf "  2) mlx-community/Qwen3-4B-Instruct-2507-4bit     ~2 GB, 12 GB+ Macs\n" >&2
+  printf "  3) mlx-community/Qwen2.5-7B-Instruct-4bit        ~4 GB, 16 GB Macs\n" >&2
+  printf "  4) mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit  ~4 GB, 16 GB+ Macs\n" >&2
+  printf "  5) mlx-community/Qwen2.5-14B-Instruct-4bit       ~8 GB, 24 GB+ Macs\n" >&2
+  printf "  6) mlx-community/Qwen3-32B-4bit                  ~18 GB, 32 GB+ Macs\n" >&2
+  printf "  7) mlx-community/Qwen2.5-Coder-32B-Instruct-4bit ~17 GB, 32 GB+ Macs\n" >&2
+  printf "  8) mlx-community/Llama-3.3-70B-Instruct-4bit     ~35 GB, 48 GB+ Macs\n" >&2
+  printf "  9) mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit ~40 GB, 64 GB+ Macs\n" >&2
+  printf "  c) custom HuggingFace MLX model id\n" >&2
   printf "Selection [default: %s]: " "$default_model" >&2
   read_line
   selection="$REPLY"
   case "$selection" in
     1) printf "mlx-community/Llama-3.2-3B-Instruct-4bit" ;;
-    2) printf "mlx-community/Qwen2.5-7B-Instruct-4bit" ;;
-    3) printf "mlx-community/Qwen2.5-14B-Instruct-4bit" ;;
+    2) printf "mlx-community/Qwen3-4B-Instruct-2507-4bit" ;;
+    3) printf "mlx-community/Qwen2.5-7B-Instruct-4bit" ;;
+    4) printf "mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit" ;;
+    5) printf "mlx-community/Qwen2.5-14B-Instruct-4bit" ;;
+    6) printf "mlx-community/Qwen3-32B-4bit" ;;
+    7) printf "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit" ;;
+    8) printf "mlx-community/Llama-3.3-70B-Instruct-4bit" ;;
+    9) printf "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit" ;;
+    c|C)
+      printf "HuggingFace model id (org/name): " >&2
+      read_line
+      custom_id="$REPLY"
+      [ -n "$custom_id" ] || die 7 "custom model id cannot be empty"
+      validate_hf_id "$custom_id"
+      hf_check_model "$custom_id" "$ram_gb" >&2
+      printf "%s" "$custom_id"
+      ;;
     "") printf "%s" "$default_model" ;;
     *) die 7 "invalid model selection" ;;
   esac
@@ -366,10 +716,19 @@ validate_inputs() {
 }
 
 latest_release_tag() {
-  api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+  # Scan the recent release list and pick the newest tag that names a
+  # macprovider-cli release (tag matches ^v[0-9], e.g. v1.3.1). The
+  # /releases/latest endpoint can't be trusted on its own: it returns
+  # whichever release is flagged "Latest" repo-wide, so any unrelated
+  # release published under the same repo (e.g. macprovider-verify
+  # under tag verify-vX.Y.Z) silently hijacks the installer.
+  api_url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30"
   json="$(curl -fsSL "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
-  tag="$(printf "%s" "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-  [ -n "$tag" ] || die 3 "GitHub Releases API response did not include tag_name"
+  tag="$(printf "%s" "$json" \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | grep -E '^v[0-9]' \
+    | head -1)"
+  [ -n "$tag" ] || die 3 "no macprovider-cli release (tag ^v[0-9]) found in recent GitHub Releases"
   printf "%s" "$tag"
 }
 
@@ -763,6 +1122,12 @@ print_pid() {
   launchctl list 2>/dev/null | awk '/live.streamvc.macprovider/ {print $1; exit}'
 }
 
+print_autotune_handoff() {
+  provider_id="$1"
+  printf "To tune throughput / latency parameters for your specific Mac, run:\n"
+  printf "  macprovider-cli autotune --provider-id %s\n" "$provider_id"
+}
+
 main() {
   detect_platform
   for tool in curl tar shasum grep sed awk date hostname mktemp openssl find; do
@@ -789,6 +1154,8 @@ main() {
     check_path_hint
     exit 0
   fi
+
+  check_catalog_ram_metadata "$coordinator_base" "$model" "$ram_gb" || true
 
   tag="$(latest_release_tag)"
   log "Latest release: $tag"
@@ -822,6 +1189,7 @@ main() {
   log "PID: ${pid:-unknown}"
   log "Logs: tail -f $LOG_DIR/macprovider.out.log $LOG_DIR/macprovider.err.log"
   log "Coordinator pool check: $coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")"
+  print_autotune_handoff "$provider_id"
   log "Uninstall: bash <(curl -fsSL https://get.streamvc.live/uninstall.sh)"
 }
 

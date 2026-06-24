@@ -24,6 +24,7 @@ Both Go services are co-hosted on one DigitalOcean-style VPS named **Pearl**
 | `api.streamvc.live` | `127.0.0.1:9443` | `phase5-gateway` | `macprovider-gateway.service` | nginx-api.streamvc.live.conf |
 | n/a (loopback) | `127.0.0.1:8443` (buyer port) | `phase4-coordinator` | (same unit) | reached only from gateway over loopback |
 | `console.streamvc.live` | static (Cloudflare Pages) | none | n/a | static `frontdoor/console/` build |
+| `portal.streamvc.live` | static (`/var/www/portal/`) + nginx reverse-proxy to coordinator | n/a (static + proxy) | n/a (nginx-only) | `frontdoor/provider-portal/dist/nginx-portal.streamvc.live.conf` (decision-log Entry 86) |
 
 Provider Macs connect outbound to `wss://coordinator.streamvc.live/ws/provider`.
 Buyers hit `https://api.streamvc.live/v1/*`. Operator endpoints (`/poolz`,
@@ -104,6 +105,135 @@ matches the script (the path was inferred from `deploy-pearl-vps.sh`
 comments; the first real deploy should leave a `gateway.prev` artifact that
 either confirms or amends this section).
 
+### 3.1 Gateway DB archive-rotate (M2-4 Part C / PERF-1)
+
+The gateway's 9 `RAISE(ABORT) BEFORE DELETE` triggers
+(`phase5-gateway/internal/storage/sqlite/migrate.go:184-251`) keep the 8
+event tables + `concurrency_reservations` append-only forever per the Q4
+ruling (`beta/DECISION_CRITERIA.md` Entry 77, design at
+`audits/2026-06-10/Q4_ARCHIVE_ROTATE_DESIGN.md`). Disk pressure on Pearl
+is handled out-of-band by a rotation job that ships a clean snapshot of
+`gateway.db` to cold storage on a size or age threshold, then prunes old
+rows (rows older than `GATEWAY_ARCHIVE_PRUNE_DAYS`, default 7) from the
+live DB while temporarily dropping + recreating the per-table
+`*_no_delete` triggers inside a single `BEGIN IMMEDIATE; ... COMMIT;`
+transaction.
+
+All 9 tables are in scope. `concurrency_reservations` keeps a narrower
+prune predicate (`status <> 'active'`): non-active rows older than the
+cutoff are dropped, active rows are NEVER touched regardless of age.
+M2-4 Part B's per-row `DeleteTerminalQuotaReservations` on
+`quota_reservations` runs independently and unchanged — it handles the
+quota table, which has no BEFORE-DELETE trigger.
+
+**Files (shipped):**
+
+- `phase5-gateway/dist/archive-rotate.sh` — the rotation script. Uses
+  SQLite's `VACUUM INTO` for the snapshot (single-file, no WAL
+  artifacts), compresses with `zstd` (or `gzip` if zstd is missing),
+  drops a `.sha256` sidecar, optionally uploads to S3 if
+  `GATEWAY_ARCHIVE_S3_BUCKET` is set and `aws-cli` is on PATH, then
+  prunes the live DB. Exit codes: `0` success, `2` below threshold (no
+  rotation needed — timer treats as success), `3` rotation attempted but
+  live DB did not shrink (loud alert), `4` pre-flight failure.
+- `phase5-gateway/dist/archive-restore.sh` — forensic-restore path.
+  Verifies the `.sha256` checksum, decompresses, runs `PRAGMA
+  integrity_check`, refuses if the archive's `schema_migrations` max
+  version exceeds the binary's expected version (currently 1), and
+  installs to a tempfile target (default `/tmp/gateway-restored-<ts>.db`).
+  `--to-live` does the destructive replace-the-live-DB path; requires
+  `ASSUME_YES=1`. Snapshots the existing live DB to a `.pre-restore.<ts>`
+  sibling before swapping.
+- `phase5-gateway/dist/macprovider-archive-rotate.service` +
+  `macprovider-archive-rotate.timer` — daily check at 04:00 UTC ±15 min
+  jitter. Runs as `User=root` (needs `systemctl stop/start` on the
+  gateway). `SuccessExitStatus=0 2` so below-threshold checks don't
+  alert.
+- `phase5-gateway/dist/test/archive_rotate_test.sh` — integration tests
+  (T1–T6: below-threshold no-op, FORCE_ROTATE shrinks + preserves recent
+  rows + leaves `concurrency_reservations` untouched, forensic-restore
+  integrity, idempotent re-run, schema-mismatch refusal, append-only
+  trigger restored post-prune).
+
+**Operator install on Pearl (one-time):**
+
+```bash
+ssh pearl
+# Install scripts to /usr/local/sbin (root-owned parent dir). The
+# /opt/macprovider parent is owned by macprovider:macprovider per the
+# coordinator deploy — installing the root-run archive scripts there would
+# let a compromised macprovider user substitute the script before the next
+# timer fires (audit-iter-2 security HIGH).
+sudo install -o root -g root -m 0755 archive-rotate.sh /usr/local/sbin/macprovider-archive-rotate.sh
+sudo install -o root -g root -m 0755 archive-restore.sh /usr/local/sbin/macprovider-archive-restore.sh
+sudo install -o root -g root -m 0644 macprovider-archive-rotate.service /etc/systemd/system/
+sudo install -o root -g root -m 0644 macprovider-archive-rotate.timer   /etc/systemd/system/
+# Archive dir is ROOT-owned 0700 — the gateway service (User=macprovider)
+# must NOT be able to substitute or unlink compliance archives. The rotation
+# job runs as root and writes here; the gateway never reads or writes it.
+sudo install -d -o root -g root -m 0700 /var/lib/macprovider-gateway-archive
+# /etc/macprovider/archive-rotate.env carries S3 credentials + bucket name +
+# thresholds. Required keys for the default REQUIRE_REMOTE=1 mode:
+#   GATEWAY_ARCHIVE_S3_BUCKET=macprovider-archives
+#   AWS_ACCESS_KEY_ID=<key>
+#   AWS_SECRET_ACCESS_KEY=<secret>
+#   AWS_DEFAULT_REGION=<region>
+# If the operator deliberately runs without cold storage (NOT recommended,
+# defeats the "tamper-evident archive lives off-host" Q4 contract):
+#   GATEWAY_ARCHIVE_REQUIRE_REMOTE=0
+sudo install -o root -g root -m 0600 /dev/stdin /etc/macprovider/archive-rotate.env <<EOF
+GATEWAY_ARCHIVE_S3_BUCKET=macprovider-archives
+AWS_DEFAULT_REGION=us-east-1
+# Set AWS creds here or via instance profile / IAM role.
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now macprovider-archive-rotate.timer
+# Smoke-test (DRY_RUN=1 prints actions only — no service stop, no prune):
+sudo DRY_RUN=1 GATEWAY_DB_PATH=/var/lib/macprovider/gateway.db \
+  /usr/local/sbin/macprovider-archive-rotate.sh || true
+# Verify the timer is scheduled:
+sudo systemctl list-timers macprovider-archive-rotate.timer
+# Tail the journal after the first natural fire (04:00 UTC + jitter):
+sudo journalctl -u macprovider-archive-rotate -n 50 --no-pager
+```
+
+**Exit-3 alert response.** If the rotation script logs `exit 3` (live DB did
+not shrink despite passing the size/age threshold), the archive WAS written
+to cold storage but the live DB is still oversize. Investigate before the
+next daily fire — typical causes are (a) no rows older than
+`GATEWAY_ARCHIVE_PRUNE_DAYS` (drop the threshold), (b) an unexpected table
+holding the bulk of bytes, or (c) WAL/SHM not checkpointed (force a sqlite3
+PRAGMA wal_checkpoint(TRUNCATE)).
+
+**Exit-4 cold-storage failure.** If the script logs `exit 4` with "REQUIRE_REMOTE=1
+but ..." the archive snapshot succeeded locally but cold-storage upload or
+readback failed; the live DB was NOT pruned and the gateway was not stopped.
+Restore S3 credentials / connectivity, then re-run with `FORCE_ROTATE=1`.
+
+**Restore (forensic):**
+
+```bash
+# Inspect an archive locally without touching the live DB.
+sudo /usr/local/sbin/macprovider-archive-restore.sh \
+  /var/lib/macprovider-gateway-archive/gateway-YYYYMMDDTHHMMSSZ.db.zst \
+  /tmp/forensic.db
+sqlite3 /tmp/forensic.db 'SELECT COUNT(*) FROM usage_events;'
+```
+
+**Restore (destructive — replaces live DB):**
+
+```bash
+sudo ASSUME_YES=1 /usr/local/sbin/macprovider-archive-restore.sh --to-live \
+  /var/lib/macprovider-gateway-archive/gateway-YYYYMMDDTHHMMSSZ.db.zst
+# All rows written to the live DB since the snapshot was taken are lost.
+# A copy of the pre-restore live DB is left at
+# /var/lib/macprovider/gateway.db.pre-restore.<ts>.
+```
+
+Document any `--to-live` use as an incident entry in
+`beta/DECISION_CRITERIA.md` per the Q4 design's restore-procedure
+section.
+
 ## 4. Settlement
 
 Billing settlement is handled by `phase4-coordinator/internal/billing`:
@@ -165,21 +295,91 @@ known M3 follow-up.
 
 ## 6. Key rotation
 
-The coordinator and gateway currently share an operator key:
-`auth.operator_key` in both `coordinator.yaml` and `gateway.yaml` (the
-gateway uses it as the bearer when calling coordinator `/internal/*`
-endpoints). M3-2 will split these; until then, a rotation is a coordinated
-edit:
+Post M3-2 (PR #73 + codex fixup), **three bearer-token classes** are in
+play:
+
+- `auth.operator_key` in `coordinator.yaml` — human-admin credential.
+  Accepted by `/admin/blacklist`, `/admin/promote`, `/admin/reject`,
+  `/admin/provisional`, `/poolz`, `/admin/ledger/*`,
+  `/admin/explorer/*`. The codex PR #73 HIGH-1 fix scoped these to
+  operator-key-only so a compromised gateway cannot pivot to
+  human-admin power.
+- `auth.gateway_service_token` in `coordinator.yaml` — service-to-service
+  credential the coordinator accepts on `/internal/routing` and
+  `/internal/sticky`. The operator key is ALSO accepted on those paths
+  as a backward-compat fallback until the cutover gate is met (see
+  `audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md`).
+- `coordinator.service_token` in `gateway.yaml` — outbound credential
+  the gateway sends on upstream `/internal/*` calls.
+
+Both coordinator-side fields support `env:NAME` indirection and now
+fail closed on missing/empty env var (codex PR #73 MED fix); the
+gateway side fails closed on the same pattern as of the same fix.
+
+### Post-M3-2 cutover procedure (one-time per fleet)
+
+1. Generate a fresh service token:
+   `head -c 32 /dev/urandom | base64`
+2. On Pearl, append it to `/etc/macprovider/coordinator.env` as
+   `GATEWAY_SERVICE_TOKEN=<value>` (root:macprovider 0640) — see step
+   6.1 below.
+3. Push the same value to each gateway's `gateway.yaml`
+   `coordinator.service_token` (also via env: indirection if the
+   gateway uses systemd-environment plumbing).
+4. `sudo systemctl reload macprovider-coordinator` so the coordinator
+   re-reads `gateway_service_token`.
+5. Restart each gateway so it sends the new service token upstream.
+6. Watch the audit log on the BRIDGE paths only — `/internal/*`:
+   ```
+   journalctl -u macprovider-coordinator -f | \
+     grep -E 'internal_bearer_accepted.*"path":"/internal/'
+   ```
+   Look for `"key":"service_token"` on every gateway-origin
+   `/internal/*` hit. (The bridge paths are `/internal/routing` and
+   `/internal/sticky`; they fire on buyer disclosure + sticky-route
+   maintenance.)
+7. After **24h of zero** `"key":"operator_key"` on gateway-origin
+   `/internal/*` hits, rotate the legacy `operator_key` (steps below).
+   Cutover-countdown one-liner:
+   ```
+   journalctl -u macprovider-coordinator --since "24h ago" | \
+     grep -E 'internal_bearer_accepted.*"key":"operator_key".*"path":"/internal/' | \
+     wc -l    # must be 0 before rotating
+   ```
+   Admin tooling needs the new operator key; gateways do not, since
+   they are now on service token.
+
+   **Note on `/poolz`:** the gateway polls `/poolz` every 10s for
+   pool-state caching. `/poolz` is an admin-scoped endpoint (per
+   codex PR #73 HIGH-1 fix) so its bearer is `operator_key` —
+   forever. That is by design: `/poolz` audit-log lines with
+   `"key":"operator_key","path":"/poolz"` are NOT cutover-blocking
+   and must be excluded from the countdown grep above.
+
+### Rotating `operator_key` (human admin)
 
 1. Generate a fresh key:
    `head -c 32 /dev/urandom | base64`
-2. Edit `/opt/macprovider/coordinator.yaml` and
-   `/opt/macprovider/gateway.yaml` on Pearl — set the new key in both.
+2. Edit `/opt/macprovider/coordinator.yaml` (or
+   `/etc/macprovider/coordinator.env` if env-resolved) — set the new
+   key.
 3. `sudo systemctl reload macprovider-coordinator` (SIGHUP re-reads).
-4. `sudo systemctl restart macprovider-gateway` (gateway re-reads on
-   start).
-5. Verify: `curl -s -H "Authorization: Bearer $NEW_KEY"
+4. Verify: `curl -s -H "Authorization: Bearer $NEW_KEY"
    http://127.0.0.1:8444/poolz` returns the pool snapshot.
+
+### 6.1 `coordinator.env` permissions
+
+`/etc/macprovider/coordinator.env` holds `OPERATOR_KEY` and (optionally)
+`GATEWAY_SERVICE_TOKEN`. It is read by the coordinator unit (running
+as root → drops to macprovider via `User=`) and by the de-rooted
+monitor unit (running as macprovider). The required mode is **0640
+root:macprovider**. The deploy script enforces this when the file is
+present (codex PR #73 LOW fix). If you create the file by hand:
+
+```bash
+sudo install -o root -g macprovider -m 0640 /dev/null /etc/macprovider/coordinator.env
+sudoedit /etc/macprovider/coordinator.env
+```
 
 For **provider tokens** (M1-1 pinned-tier path, audit XSEC-1): the
 operator-issued tokens are stored hashed in the coordinator's `auth.tokens`
@@ -205,6 +405,7 @@ file for the full forensic trail.
 | Coordinator OOM (Pearl is RAM-constrained) | A long admin query holding a SQLite handle | `sudo systemctl restart macprovider-coordinator` is the immediate mitigation; investigate the explorer/admin query that ran around the OOM time. M2-2 (swap-audit off the pool lock) and M2-5 (bounded seenModels) reduce the steady-state memory pressure. |
 | Gateway restart drops in-flight chat requests | Buyer requests holding the HTTP server were not given grace | The scripted deploy uses a 10s shutdown context (`cmd/gateway/main.go`). For a planned restart, schedule during a quiet window observed via `monitor.py` request graph. |
 | `/v1/usage` is slow during admin explorer load | Pre-M2-4 path: explorer + usage shared one capped DB handle | Confirm gateway is on M2-4-or-later (look for `read-only storage` log line at startup). If on older, restart during quiet window. |
+| A provider that mints a self-serve token cannot reconnect; coordinator log shows `event=fr_c9_4_tofu_reject` or `event=fr_c9_4_self_heal` | FR-C9.4 TOFU gate fired on tokenless reconnect | See **§9. FR-C9.4 lockout recovery** below — the self-heal path is automatic in v0.8.3; the strict-reject path needs `coordinator-cli revoke-token`. |
 
 ## 8. Provider provisioning
 
@@ -220,19 +421,162 @@ sudo -u macprovider /opt/macprovider/coordinator-cli issue-token \
 ```
 
 Send the token to the provider operator over a secure channel; they place
-it as `auth.provider_token: <token>` in their `macprovider.yaml` (and
-`chmod 0600 macprovider.yaml`), then restart the provider.
+it as top-level `provider_token: <token>` in their macprovider config
+(normally `~/.config/macprovider/config.yaml`, mode 0600), then restart
+the provider.
 
-Stranger-tier (curl|bash open-onboarding) — currently **gated on Open
-Question 2** from the audit. Two branches:
+Stranger-tier (curl|bash open-onboarding) — **self-serve provisional**
+is the production path per SPEC-003 v0.8.x. The coordinator mints a
+fresh `provider_token` on every tokenless provisional admission and
+returns it in the v1 `hello_ack` and v2 `auth_response` frames; the
+binary persists it atomically to top-level `provider_token:` in
+`~/.config/macprovider/config.yaml` (mode 0600). Next reconnect carries
+it as `Authorization: Bearer`.
+No operator action is required for the open-onboarding tier under
+`auth.require_provider_tokens=false`. After the flag flip (FR-C9.5
+compatibility cutoff), tokenless connects are rejected at the auth
+gate before admission — only tokens already issued at that point
+remain valid; new strangers must onboard before the flip.
 
-- **Operator-issued strangers:** `install.sh` prompts for a token or reads
-  `MACPROVIDER_PROVIDER_TOKEN` from env.
-- **Self-serve provisional:** the coordinator mints a provisional token on
-  first admission and returns it via `auth_response`; the installer writes
-  it back to config.
+Per SPEC-003 v0.8.1, two tokens MUST NOT exist for the same
+`provider_id` simultaneously. The v0.8.2 partial unique index
+`idx_provider_tokens_one_active_per_provider` enforces this at the
+DB layer. The v0.8.3 unused-token self-heal handles the deploy-gap
+case automatically; the strict-reject case is documented in §9 below.
 
-PR [#44](https://github.com/Augustas11/macprovider/pull/44)
-(`feat/m1-1-self-serve-provisional-tokens`) implements the self-serve
-path. Until it merges, only the pinned-tier path is documented as
-production-ready. Decision log entry pending.
+## 9. FR-C9.4 lockout recovery
+
+A provider that fails to authenticate after a deploy or a manual
+config change typically falls into one of two FR-C9.4 paths. The
+coordinator log line is the canonical signal — `journalctl -u
+macprovider-coordinator -n 200 \| grep fr_c9_4` shows which path
+fired.
+
+### 9.1 Self-heal path (v0.8.3+, in-band recovery)
+
+**Log fingerprint:** `event=fr_c9_4_self_heal provider_id=<id>`,
+message `FR-C9.4 self-heal: revoked existing unused token for this
+provider_id; proceeding to mint a fresh one`.
+
+**What happened:** the provider had a row in `provider_tokens` with
+`last_used_at IS NULL` (never authenticated since issuance — the
+deploy-gap shape). The coordinator atomically revoked it and minted
+a fresh token in the same admission path. The binary's next
+ack-frame carries the new token under `assigned_provider_token` and
+persists it. No operator action required.
+
+**When to investigate anyway:** if the same `provider_id` triggers
+`fr_c9_4_self_heal` repeatedly across several connects, the binary
+is NOT persisting the assigned token between connects. Check the
+provider's `~/.config/macprovider/macprovider.yaml` — the top-level
+`provider_token:` key must be present after a successful connect.
+File permissions must be 0600 owned by the user running the binary.
+
+### 9.2 Strict-reject path (v0.8.1+, operator action required)
+
+**Log fingerprint:** `event=fr_c9_4_tofu_reject provider_id=<id>`,
+message `FR-C9.4 TOFU: tokenless connect refused; an active USED
+token already exists for this provider_id`. WS close code
+`CloseInvalidToken` / reason `invalid_token`.
+
+**What happened:** the provider had a row in `provider_tokens` with
+`last_used_at IS NOT NULL` (the token has authenticated at least
+once) AND the binary is presenting no `Authorization: Bearer` on
+reconnect. This shape is INDISTINGUISHABLE from the codex MAJOR-1
+credential-capture attack the v0.8.1 TOFU rewrite closed; the
+coordinator MUST NOT mint a parallel token automatically. Operator
+intervention is the trust signal that distinguishes the legitimate
+provider from an attacker.
+
+**Recovery (the legitimate-provider case):**
+
+```bash
+ssh pearl
+
+# 1. Identify the active token. The output is a TSV row per
+#    token — id, prefix, provider_id, name, created_at, status,
+#    last_used. Find the prefix for the locked-out provider_id
+#    where status=active.
+sudo -u macprovider /opt/macprovider/coordinator-cli list-tokens \
+  --db /var/lib/macprovider/coordinator.db | grep -F <provider_id>
+
+# 2. Revoke the active row. The 12-hex prefix is enough; use the
+#    same prefix shown in step 1.
+sudo -u macprovider /opt/macprovider/coordinator-cli revoke-token \
+  --db /var/lib/macprovider/coordinator.db \
+  --token-prefix <12-hex-prefix>
+
+# 3. Tell the provider operator to restart their macprovider service.
+#    On their next connect, the FR-C9.4 gate sees no active row and
+#    proceeds to FR-C9.1 mint — the binary writes the fresh token to
+#    macprovider.yaml and uses it on the connect after that.
+
+# 4. Verify on the coordinator side. The first connect after revoke
+#    should log:
+#      event=fr_c9_1_self_serve_mint provider_id=<id> ...
+#    (self-heal does NOT fire because there is no active row at all,
+#     not because the existing row was unused.)
+journalctl -u macprovider-coordinator -n 50 -f | grep -F <provider_id>
+```
+
+**The attacker case:** the same shape can be an attacker declaring a
+victim's `provider_id` on a tokenless connect to harvest a fresh
+bearer. Do NOT run the recovery above if the operator cannot
+out-of-band confirm the request to restart came from the actual
+provider. Confirm via the contact channel established at admission
+time (Slack DM, email reply chain, etc.). If unconfirmable, leave
+the row in place and document the lockout — the legitimate provider
+will eventually escalate.
+
+**Fallback (CLI not yet on Pearl):** sqlite3 direct UPDATE is
+equivalent to `revoke-token` semantically. Use ONLY if
+`coordinator-cli` is not present on this Pearl host (which is the
+case for any host that hasn't been redeployed since this milestone):
+
+```bash
+# Identify
+ssh pearl "sudo -u macprovider sqlite3 /var/lib/macprovider/coordinator.db \
+  \"SELECT id, token_prefix, provider_id, datetime(created_at), datetime(last_used_at) \
+    FROM provider_tokens WHERE provider_id='<id>' AND revoked_at IS NULL;\""
+
+# Revoke
+ssh pearl "sudo -u macprovider sqlite3 /var/lib/macprovider/coordinator.db \
+  \"UPDATE provider_tokens \
+      SET revoked_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+    WHERE provider_id='<id>' AND revoked_at IS NULL;\""
+```
+
+The sqlite3 path bypasses the CLI's prefix-uniqueness assertion; if
+multiple active rows somehow exist for the same `provider_id` (which
+should be impossible since v0.8.2's partial unique index), the
+`UPDATE` will revoke them all in one statement, which is the
+operator's intent.
+
+### 9.3 Routine token hygiene
+
+Two `coordinator-cli` subcommands belong on a quarterly hygiene
+cycle (or any time the operator notices unused tokens accumulating):
+
+```bash
+# Dry-run: list candidate prunes (default cutoff 168h = 7 days)
+sudo -u macprovider /opt/macprovider/coordinator-cli prune-tokens \
+  --db /var/lib/macprovider/coordinator.db \
+  --older-than 168h
+
+# Apply (after reviewing the dry-run output)
+sudo -u macprovider /opt/macprovider/coordinator-cli prune-tokens \
+  --db /var/lib/macprovider/coordinator.db \
+  --older-than 168h \
+  --apply
+```
+
+Prune-tokens (per SPEC-003 v0.8.2 hardening) refuses cutoffs younger
+than 24h without `--force` — a self-minted token is
+`last_used_at IS NULL` until the binary completes its first
+authenticated reconnect, which can be seconds to minutes after
+issuance under bad-network conditions. A naive `--older-than 0s
+--apply` during a settling window would brick the active
+first-session provider.
+
+`list-tokens` is read-only and safe to run any time; the output is
+a TSV that pipes cleanly into `awk` / `grep` / `column`.

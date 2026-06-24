@@ -47,7 +47,7 @@ case "$GW" in
 esac
 
 python3 - "$COORD" "$GW" <<'PY'
-import re, sys
+import os, re, sys
 
 coord = open(sys.argv[1]).read()
 gw = open(sys.argv[2]).read() if len(sys.argv) > 2 and sys.argv[2] else ""
@@ -62,16 +62,75 @@ def hard(m):
 def warn(m): print(f"  WARN: {m}")
 def ok(m):   print(f"  ok:   {m}")
 
-# --- operator_key ---
-key = g(coord, "operator_key")
-if not key:
-    hard("coordinator operator_key missing")
-elif re.search(r"REPLACE|change-me|<required>|placeholder|xxx", key, re.I):
-    hard(f"coordinator operator_key is a PLACEHOLDER -> would break /poolz + /admin auth")
-elif not re.fullmatch(r"[0-9a-fA-F]{64}", key):
-    hard(f"operator_key is not 64-hex (len {len(key)}); expected `openssl rand -hex 32`")
-else:
-    ok("operator_key present (64-hex, non-placeholder)")
+# Secrets may be inlined as a literal value OR indirected to a runtime
+# environment variable as `env:NAME` (M3-2 / DEVE-7). The systemd units inject
+# NAME from /etc/macprovider/{coordinator,gateway}.env at start. This gate runs
+# LOCALLY before the config is shipped to Pearl, where those env files do not
+# exist and secrets are deliberately never pulled to local disk (see
+# normalize_yaml masking in deploy-pearl-vps.sh). So an `env:NAME` value is
+# "deferred to runtime": validate the reference is well-formed, and only if
+# NAME happens to be present in THIS process's environment (e.g. the gate is
+# run on Pearl with the env file sourced) do we also validate the resolved
+# secret. A bare unresolved `env:NAME` is NOT a failure — hex-validating the
+# literal string "env:NAME" was a false fail-closed gate that pressured
+# operators into SKIP_C2_CHECK=1, which also skipped the genuinely load-bearing
+# C2 timer check (observed 2026-06-17 on a gateway deploy to Pearl).
+ENV_REF = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
+PLACEHOLDER = re.compile(r"REPLACE|change-me|<required>|placeholder|xxx", re.I)
+
+def check_hex_secret(label, raw):
+    """Validate a 64-hex secret that may be inline or `env:NAME`-indirected.
+
+    Reusable across every secret-shaped field this gate hex/placeholder-checks
+    (currently operator_key; add a field by calling this). Behavior:
+      - missing                 -> HARD fail
+      - "env:NAME", NAME unset   -> ok (deferred to runtime; cannot resolve here)
+      - "env:NAME", NAME set     -> validate the resolved value (placeholder/hex)
+      - "env:" / "env:1bad"      -> HARD fail (malformed reference)
+      - inline literal           -> validate as before (placeholder/hex)
+    """
+    if not raw:
+        hard(f"{label} missing")
+        return
+    src = ""
+    if raw.startswith("env:"):
+        m = ENV_REF.match(raw)
+        if not m:
+            hard(f"{label} malformed env indirection {raw!r}; expected env:NAME")
+            return
+        name = m.group(1)
+        resolved = os.environ.get(name)
+        if not resolved:
+            ok(f"{label} deferred to runtime via env:{name} "
+               f"(injected from /etc/macprovider/*.env at start; not resolvable in this gate)")
+            return
+        raw = resolved
+        src = f" (resolved from env:{name})"
+    if PLACEHOLDER.search(raw):
+        hard(f"{label} is a PLACEHOLDER{src} -> would break /poolz + /admin auth")
+    elif not re.fullmatch(r"[0-9a-fA-F]{64}", raw):
+        hard(f"{label} is not 64-hex (len {len(raw)}){src}; expected `openssl rand -hex 32`")
+    else:
+        ok(f"{label} present (64-hex, non-placeholder){src}")
+
+# --- operator_key (inline literal or env:NAME deferred to runtime) ---
+check_hex_secret("coordinator operator_key", g(coord, "operator_key"))
+
+# --- gateway credentials (same hazard class as the coordinator key) ---
+# Only checkable when the gateway config is present (not coordinator-only
+# SKIP_C2_CHECK mode). operator_key is REQUIRED by the gateway (config.go
+# Validate); service_token is OPTIONAL — preferred over operator_key for
+# upstream calls when set — so it is validated only when present. The gateway
+# runtime already fails closed on an unset/empty env:NAME or an empty
+# operator_key (config.go resolveEnvValue + Validate); the residual gap is an
+# INLINE placeholder, which is non-empty and so boots with a junk credential
+# that silently fails gateway->coordinator auth. That is what this catches,
+# symmetric to the coordinator operator_key check above.
+if gw:
+    check_hex_secret("gateway operator_key", g(gw, "operator_key"))
+    gw_service_token = g(gw, "service_token")
+    if gw_service_token is not None:
+        check_hex_secret("gateway service_token", gw_service_token)
 
 # --- require_provider_tokens ---
 # Security-sensitive: the binary default is `true` (fail-closed), but a

@@ -16,9 +16,17 @@ public enum SwitchProgressState: String, Sendable, Equatable {
     case failed
 }
 
+public enum ReceiptKeyRotationResultStatus: String, Sendable, Equatable {
+    case accepted
+    case rejected
+    case committedUnconfirmed = "committed_unconfirmed"
+}
+
 public enum ControlSocketFrame: Equatable, Sendable {
     case switchRequest(targetModelID: String, requestedAtMs: Int64)
     case statusRequest
+    case rotateReceiptKeyRequest(providerID: String)
+    case rotateReceiptKeyResult(status: ReceiptKeyRotationResultStatus, error: String?)
     case switchAck(accepted: Bool, reason: SwitchAckReason?, currentTarget: String?, secondsRemaining: Int?)
     case switchProgress(state: SwitchProgressState, elapsedMs: Int, reason: String?)
     case statusResponse(currentModelID: String, runtimeState: SwapState)
@@ -36,6 +44,21 @@ public enum ControlSocketCodec {
             ]
         case .statusRequest:
             object = ["type": "status_request"]
+        case let .rotateReceiptKeyRequest(providerID):
+            object = [
+                "type": "rotate_receipt_key_request",
+                "provider_id": providerID,
+            ]
+        case let .rotateReceiptKeyResult(status, error):
+            var frame: [String: Any] = [
+                "type": "rotate_receipt_key_result",
+                "status": status.rawValue,
+                "accepted": status == .accepted,
+            ]
+            if status != .accepted, let error {
+                frame["error"] = error
+            }
+            object = frame
         case let .switchAck(accepted, reason, currentTarget, secondsRemaining):
             var frame: [String: Any] = [
                 "type": "switch_ack",
@@ -92,6 +115,20 @@ public enum ControlSocketCodec {
             )
         case "status_request":
             return .statusRequest
+        case "rotate_receipt_key_request":
+            return .rotateReceiptKeyRequest(providerID: try stringField("provider_id", in: object))
+        case "rotate_receipt_key_result":
+            let status: ReceiptKeyRotationResultStatus
+            if let statusRaw = object["status"] as? String {
+                guard let decoded = ReceiptKeyRotationResultStatus(rawValue: statusRaw) else {
+                    throw ControlSocketError.invalidEnumValue(field: "status", value: statusRaw)
+                }
+                status = decoded
+            } else {
+                status = try boolField("accepted", in: object) ? .accepted : .rejected
+            }
+            let error = status == .accepted ? nil : try stringField("error", in: object)
+            return .rotateReceiptKeyResult(status: status, error: error)
         case "switch_ack":
             let accepted = try boolField("accepted", in: object)
             if accepted {
@@ -231,6 +268,8 @@ actor ControlSocketServer {
     private let socketPath: URL
     private let modelRuntime: ModelRuntime
     private let supportedModels: [String]?
+    private let receiptRotator: (@Sendable () async throws -> Void)?
+    private let receiptRotationProviderID: String?
     private let idleTimeoutSeconds: TimeInterval
     private let tracker = ControlSocketSwitchTracker()
     private var listenerFD: Int32?
@@ -242,11 +281,15 @@ actor ControlSocketServer {
         socketPath: URL,
         modelRuntime: ModelRuntime,
         supportedModels: [String]? = nil,
+        receiptRotator: (@Sendable () async throws -> Void)? = nil,
+        receiptRotationProviderID: String? = nil,
         idleTimeoutSeconds: TimeInterval = 30.0
     ) {
         self.socketPath = socketPath
         self.modelRuntime = modelRuntime
         self.supportedModels = supportedModels
+        self.receiptRotator = receiptRotator
+        self.receiptRotationProviderID = receiptRotationProviderID
         self.idleTimeoutSeconds = idleTimeoutSeconds
     }
 
@@ -290,6 +333,8 @@ actor ControlSocketServer {
         let runtime = modelRuntime
         let tracker = tracker
         let supportedModels = supportedModels
+        let receiptRotator = receiptRotator
+        let receiptRotationProviderID = receiptRotationProviderID
         let idleTimeoutSeconds = idleTimeoutSeconds
         acceptTask = Task.detached(priority: .userInitiated) {
             await Self.acceptLoop(
@@ -297,6 +342,8 @@ actor ControlSocketServer {
                 modelRuntime: runtime,
                 tracker: tracker,
                 supportedModels: supportedModels,
+                receiptRotator: receiptRotator,
+                receiptRotationProviderID: receiptRotationProviderID,
                 idleTimeoutSeconds: idleTimeoutSeconds,
                 server: self
             )
@@ -347,6 +394,8 @@ actor ControlSocketServer {
         modelRuntime: ModelRuntime,
         tracker: ControlSocketSwitchTracker,
         supportedModels: [String]?,
+        receiptRotator: (@Sendable () async throws -> Void)?,
+        receiptRotationProviderID: String?,
         idleTimeoutSeconds: TimeInterval,
         server: ControlSocketServer
     ) async {
@@ -357,6 +406,10 @@ actor ControlSocketServer {
                     continue
                 }
                 break
+            }
+            if !Self.peerHasSameEUID(fd: clientFD) {
+                close(clientFD)
+                continue
             }
             await server.appendClientFD(clientFD)
             let taskID = UUID()
@@ -369,6 +422,8 @@ actor ControlSocketServer {
                     modelRuntime: modelRuntime,
                     tracker: tracker,
                     supportedModels: supportedModels,
+                    receiptRotator: receiptRotator,
+                    receiptRotationProviderID: receiptRotationProviderID,
                     idleTimeoutSeconds: idleTimeoutSeconds
                 )
                 await server.removeClientFD(clientFD)
@@ -382,6 +437,8 @@ actor ControlSocketServer {
         modelRuntime: ModelRuntime,
         tracker: ControlSocketSwitchTracker,
         supportedModels: [String]?,
+        receiptRotator: (@Sendable () async throws -> Void)?,
+        receiptRotationProviderID: String?,
         idleTimeoutSeconds: TimeInterval
     ) async {
         let connection = ControlSocketConnection(fd: fd)
@@ -393,6 +450,15 @@ actor ControlSocketServer {
                     let snapshot = await modelRuntime.currentSnapshot()
                     let state = snapshot.state == .failed ? SwapState.ready : snapshot.state
                     try await connection.send(.statusResponse(currentModelID: snapshot.modelID ?? "", runtimeState: state))
+                case let .rotateReceiptKeyRequest(providerID):
+                    await handleReceiptKeyRotationRequest(
+                        providerID: providerID,
+                        connection: connection,
+                        receiptRotator: receiptRotator,
+                        receiptRotationProviderID: receiptRotationProviderID
+                    )
+                    await connection.close()
+                    return
                 case let .switchRequest(targetModelID, requestedAtMs):
                     await handleSwitchRequest(
                         targetModelID: targetModelID,
@@ -426,6 +492,31 @@ actor ControlSocketServer {
             }
         }
         await connection.close()
+    }
+
+
+    private nonisolated static func handleReceiptKeyRotationRequest(
+        providerID: String,
+        connection: ControlSocketConnection,
+        receiptRotator: (@Sendable () async throws -> Void)?,
+        receiptRotationProviderID: String?
+    ) async {
+        guard let receiptRotator else {
+            try? await connection.send(.rotateReceiptKeyResult(status: .rejected, error: "receipt rotation is not enabled in this serve process"))
+            return
+        }
+        if let receiptRotationProviderID, receiptRotationProviderID != providerID {
+            try? await connection.send(.rotateReceiptKeyResult(status: .rejected, error: "receipt rotation provider_id mismatch"))
+            return
+        }
+        do {
+            try await receiptRotator()
+            try await connection.send(.rotateReceiptKeyResult(status: .accepted, error: nil))
+        } catch let error as CoordinatorReceiptRotationCommittedRecoveryFailed {
+            try? await connection.send(.rotateReceiptKeyResult(status: .committedUnconfirmed, error: String(describing: error)))
+        } catch {
+            try? await connection.send(.rotateReceiptKeyResult(status: .rejected, error: String(describing: error)))
+        }
     }
 
     private nonisolated static func handleSwitchRequest(
@@ -495,6 +586,15 @@ actor ControlSocketServer {
     private nonisolated static func elapsedMs(since requestedAtMs: Int64) -> Int {
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         return max(0, Int(now - requestedAtMs))
+    }
+
+    private nonisolated static func peerHasSameEUID(fd: Int32) -> Bool {
+        var euid = uid_t(0)
+        var egid = gid_t(0)
+        guard getpeereid(fd, &euid, &egid) == 0 else {
+            return false
+        }
+        return euid == geteuid()
     }
 }
 

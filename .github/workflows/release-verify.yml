@@ -1,0 +1,179 @@
+name: Release macprovider-verify
+
+on:
+  push:
+    tags:
+      - "verify-v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Verifier version, for example 1.0.0 or verify-v1.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-release:
+    name: Prepare verifier release
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+      spec_version: ${{ steps.version.outputs.spec_version }}
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v4.2.2. Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          VERSION_INPUT: ${{ github.event.inputs.version || '' }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            raw="$VERSION_INPUT"
+          else
+            raw="$REF_NAME"
+          fi
+          case "$raw" in
+            verify-v*) tag="$raw" ;;
+            v*) tag="verify-$raw" ;;
+            *) tag="verify-v$raw" ;;
+          esac
+          if [[ ! "$tag" =~ ^verify-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version must look like 1.0.0, v1.0.0, or verify-v1.0.0" >&2
+            exit 1
+          fi
+          version="${tag#verify-v}"
+          # Cross-check the tag version against the BinaryVersion constant
+          # pinned in phase7-verify/internal/version/version.go. Fails the
+          # release-prep step (before any binaries get built) if someone
+          # pushes a tag whose name disagrees with the constant the binary
+          # will report at runtime. Also reads MaxSPECVersion so the smoke
+          # step does not have to be edited on every release.
+          binary_version=$(awk -F'"' '/BinaryVersion[[:space:]]*=/{print $2; exit}' phase7-verify/internal/version/version.go)
+          spec_version=$(awk -F'"' '/MaxSPECVersion[[:space:]]*=/{print $2; exit}' phase7-verify/internal/version/version.go)
+          if [ "$binary_version" != "$version" ]; then
+            echo "tag version=$version disagrees with phase7-verify BinaryVersion=$binary_version" >&2
+            echo "either re-tag to match, or bump BinaryVersion + MaxSPECVersion in version.go first" >&2
+            exit 1
+          fi
+          if [ -z "$spec_version" ]; then
+            echo "could not read MaxSPECVersion from phase7-verify/internal/version/version.go" >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "spec_version=$spec_version" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.version.outputs.tag }}"
+          version="${{ steps.version.outputs.version }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; build jobs will clobber assets."
+            exit 0
+          fi
+          cat > release-notes.md <<EOF
+          # macprovider-verify $version
+
+          SPEC-015 receipt verifier for macOS Apple Silicon, macOS Intel, and Linux amd64.
+          EOF
+          gh release create "$tag" \
+            --target "$GITHUB_SHA" \
+            --title "macprovider-verify $version" \
+            --notes-file release-notes.md
+
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: prepare-release
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        include:
+          - goos: darwin
+            goarch: arm64
+            runner: macos-15
+          - goos: darwin
+            goarch: amd64
+            runner: macos-15-intel
+          - goos: linux
+            goarch: amd64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v4.2.2. Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        # Pinned to actions/setup-go v5.5.0. Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5
+        with:
+          go-version: "1.22.x"
+          cache-dependency-path: phase7-verify/go.sum
+
+      - name: Build verifier
+        id: build
+        shell: bash
+        env:
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          asset="macprovider-verify-${VERSION}-${GOOS}-${GOARCH}"
+          cd phase7-verify
+          CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags="-s -w" -o "../$asset" ./cmd/macprovider-verify
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke verifier
+        shell: bash
+        env:
+          ASSET: ${{ steps.build.outputs.asset }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          SPEC_VERSION: ${{ needs.prepare-release.outputs.spec_version }}
+        run: |
+          set -euo pipefail
+          "./$ASSET" --version | tee version.txt
+          grep -qx "macprovider-verify ${VERSION} (verifies up to SPEC-015 v${SPEC_VERSION})" version.txt
+
+      - name: Compute SHA-256 checksum
+        shell: bash
+        env:
+          ASSET: ${{ steps.build.outputs.asset }}
+        run: |
+          set -euo pipefail
+          shasum -a 256 "$ASSET" > "$ASSET.sha256"
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+          ASSET: ${{ steps.build.outputs.asset }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" \
+            "$ASSET" \
+            "$ASSET.sha256" \
+            phase7-verify/schemas/output.schema.json \
+            --clobber

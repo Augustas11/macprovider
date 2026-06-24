@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,6 +18,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
+	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	"github.com/rs/zerolog"
@@ -35,6 +38,87 @@ func TestNewHTTPServerAppliesTimeouts(t *testing.T) {
 	}
 	if server.IdleTimeout == 0 {
 		t.Fatal("IdleTimeout must be set")
+	}
+}
+
+func TestSetupCanarySanctionStoreHonorsCanaryEnabled(t *testing.T) {
+	reqStore, err := requestlog.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open request log store: %v", err)
+	}
+	defer reqStore.Close()
+	seedStore, err := providerws.NewSQLiteCanarySanctionStore(reqStore.DB())
+	if err != nil {
+		t.Fatalf("open canary store: %v", err)
+	}
+	checkedAt := time.Date(2026, 6, 22, 12, 0, 0, 0, time.UTC)
+	if err := seedStore.UpsertCanarySanction(context.Background(), pool.CanarySanctionSnapshot{
+		ProviderID:    "pinned-a",
+		FailCount:     2,
+		LastCheckedAt: &checkedAt,
+		LastFailedAt:  &checkedAt,
+	}); err != nil {
+		t.Fatalf("seed canary sanction: %v", err)
+	}
+
+	disabledCfg := config.Default()
+	disabledCfg.Pool.CanaryEnabled = false
+	disabledRegistry := pool.NewRegistry(nil)
+	store, err := setupCanarySanctionStore(context.Background(), disabledCfg, reqStore.DB(), disabledRegistry)
+	if err != nil {
+		t.Fatalf("setup disabled canary store: %v", err)
+	}
+	if store != nil {
+		t.Fatal("disabled canary setup returned a store")
+	}
+	disabledRegistry.Register(&pool.Provider{
+		ProviderID:     "pinned-a",
+		AssignedID:     "session-disabled",
+		ModelID:        "model-a",
+		Tier:           pool.TierPinned,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	disabledProvider, ok := disabledRegistry.Resolve("pinned-a", "session-disabled")
+	if !ok {
+		t.Fatal("disabled provider not found")
+	}
+	if disabledProvider.State != pool.StateReady || !disabledProvider.RoutingEligible() {
+		t.Fatalf("disabled canary applied persisted sanction: %+v", disabledProvider)
+	}
+
+	enabledCfg := config.Default()
+	enabledCfg.Pool.CanaryEnabled = true
+	enabledCfg.Pool.CanaryChallenges = []config.CanaryChallengeConfig{{
+		Prompt:   "Private challenge with {nonce}",
+		Expected: "private-{nonce}",
+	}}
+	enabledRegistry := pool.NewRegistry(nil)
+	store, err = setupCanarySanctionStore(context.Background(), enabledCfg, reqStore.DB(), enabledRegistry)
+	if err != nil {
+		t.Fatalf("setup enabled canary store: %v", err)
+	}
+	if store == nil {
+		t.Fatal("enabled canary setup returned nil store")
+	}
+	enabledRegistry.Register(&pool.Provider{
+		ProviderID:     "pinned-a",
+		AssignedID:     "session-enabled",
+		ModelID:        "model-a",
+		Tier:           pool.TierPinned,
+		State:          pool.StateReady,
+		SlotsFree:      1,
+		SlotsTotal:     1,
+		MaxConcurrency: 1,
+	}, nil)
+	enabledProvider, ok := enabledRegistry.Resolve("pinned-a", "session-enabled")
+	if !ok {
+		t.Fatal("enabled provider not found")
+	}
+	if enabledProvider.State != pool.StateDegraded || enabledProvider.RoutingEligible() {
+		t.Fatalf("enabled canary did not apply persisted sanction: %+v", enabledProvider)
 	}
 }
 

@@ -364,3 +364,51 @@ INSERT INTO ledger_operator_credits (
 		t.Fatal(err)
 	}
 }
+
+// TestWriteErrorEnvelopeShape verifies the billing writeError emits the
+// canonical 4-field OpenAI-compatible error envelope: message, type, param, code.
+func TestWriteErrorEnvelopeShape(t *testing.T) {
+	w := httptest.NewRecorder()
+	writeError(w, http.StatusBadRequest, "test_code", "test message")
+
+	var outer map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &outer); err != nil {
+		t.Fatalf("unmarshal: %v body=%s", err, w.Body.String())
+	}
+	errObj, ok := outer["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("missing 'error' key or wrong type; body=%s", w.Body.String())
+	}
+	for _, required := range []string{"message", "type", "code"} {
+		if _, present := errObj[required]; !present {
+			t.Errorf("missing required key %q in error envelope; body=%s", required, w.Body.String())
+		}
+	}
+	// param must be present (may be null)
+	if _, present := errObj["param"]; !present {
+		t.Errorf("missing 'param' key in error envelope; body=%s", w.Body.String())
+	}
+	// no extra keys beyond the 4-field set
+	allowed := map[string]bool{"message": true, "type": true, "param": true, "code": true}
+	for k := range errObj {
+		if !allowed[k] {
+			t.Errorf("unexpected extra key %q in error envelope", k)
+		}
+	}
+	// 4xx status → invalid_request_error
+	if got := errObj["type"]; got != "invalid_request_error" {
+		t.Errorf("type for 400 = %q, want %q", got, "invalid_request_error")
+	}
+
+	// 5xx status → server_error
+	w2 := httptest.NewRecorder()
+	writeError(w2, http.StatusInternalServerError, "internal_error", "boom")
+	var outer2 map[string]any
+	if err := json.Unmarshal(w2.Body.Bytes(), &outer2); err != nil {
+		t.Fatalf("unmarshal 5xx: %v", err)
+	}
+	errObj2 := outer2["error"].(map[string]any)
+	if got := errObj2["type"]; got != "server_error" {
+		t.Errorf("type for 500 = %q, want %q", got, "server_error")
+	}
+}

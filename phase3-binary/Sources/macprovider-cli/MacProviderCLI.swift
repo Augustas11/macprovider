@@ -1,4 +1,5 @@
 import ArgumentParser
+import CryptoKit
 import Darwin
 import Dispatch
 import Foundation
@@ -10,7 +11,7 @@ struct MacProviderCLI: AsyncParsableCommand {
         commandName: "macprovider-cli",
         abstract: "OpenAI-compatible Mac Provider inference CLI.",
         version: CoordinatorClient.binaryVersion,
-        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self],
+        subcommands: [ServeCommand.self, SelfTestCommand.self, StatusCommand.self, ClaimCommand.self, UpdateCommand.self, UninstallCommand.self, ModelsCommand.self, AutotuneCommand.self, RotateKeyCommand.self],
         defaultSubcommand: ServeCommand.self
     )
 }
@@ -51,6 +52,9 @@ struct ServeCommand: AsyncParsableCommand {
     @Flag(name: .customLong("enable-warm-swap"), inversion: .prefixedNo, help: "Opt into the operator-pushed warm model swap workflow (SPEC-011 v0.5). Default off. When off, the binary follows the SPEC-001 v1.2.4 synchronous-load path; no control socket is opened.")
     var enableWarmSwap: Bool?
 
+    @Flag(name: .customLong("enable-receipts"), inversion: .prefixedNo, help: "Opt into SPEC-015 non-streaming receipt emission. Default off for v0.1.x rollout.")
+    var enableReceipts: Bool?
+
     @Option(help: "Drain timeout in seconds for an in-flight warm swap (SPEC-011 v0.5 §3.4 / §3.9). Default 30. Only meaningful when --enable-warm-swap is set.")
     var swapDrainTimeoutSeconds: Int?
 
@@ -63,6 +67,18 @@ struct ServeCommand: AsyncParsableCommand {
 
     @Option(help: "Provider authentication token (SPEC-001 / XSEC-1). When set, the binary sends 'Authorization: Bearer <token>' on the coordinator WS connect. Required when the coordinator runs with auth.require_provider_tokens=true. Overrides MACPROVIDER_PROVIDER_TOKEN and config key provider_token. Treat as a secret — the binary never logs it; chmod 0600 the config file containing it.")
     var providerToken: String?
+
+    @Option(help: "KV-cache quantization precision in bits (4 or 8). When set, forwarded to mlx-swift GenerateParameters.kvBits — quantizes the KV cache to reduce per-token memory footprint at a small accuracy cost. Unset (default) keeps the mlx-swift default of no KV quantization. Overrides MACPROVIDER_KV_BITS and config key kv_bits.")
+    var kvBits: Int?
+
+    @Option(help: "Maximum prompt context length (tokens) this provider will accept. Prompts whose tokenized length exceeds this cap are rejected with HTTP 413 context_length_exceeded. Also wired to mlx-swift GenerateParameters.maxKVSize, capping KV-cache allocation. Unset defers to the per-tier default (8GB:20000, 16GB:50000, 32GB:120000, 64GB+:200000). Overrides MACPROVIDER_MAX_CONTEXT_OVERRIDE and config key max_context_override.")
+    var maxContext: Int?
+
+    @Option(help: "Maximum concurrent in-flight inferences. Defaults to 1 (single-slot, the only safe value while mlx-swift parallel generation remains unproven). Lifting this above 1 is an autotune knob — the binary itself does not enforce safety beyond the AsyncSemaphore. Overrides MACPROVIDER_MAX_CONCURRENCY_OVERRIDE and config key max_concurrency_override.")
+    var maxBatch: Int?
+
+    @Flag(help: "Run only the local HTTP server; do not establish a coordinator WebSocket session.")
+    var noJoin = false
 
     static func runSupportedModelsPreflight(_ resolved: inout AppConfig) throws {
         if resolved.supportedModels != nil {
@@ -88,6 +104,38 @@ struct ServeCommand: AsyncParsableCommand {
         }
     }
 
+    // SPEC-013 autoresearch serving knobs: fail loud at serve start
+    // instead of mid-inference when an operator passes a value mlx-swift
+    // does not accept.
+    static func runServingKnobsPreflight(_ resolved: AppConfig) throws {
+        if let kvBits = resolved.kvBitsOverride, kvBits != 4 && kvBits != 8 {
+            FileHandle.standardError.write(Data((
+                "--kv-bits \(kvBits) invalid; must be 4 or 8\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        if let maxContext = resolved.maxContextOverride, maxContext < 1 {
+            FileHandle.standardError.write(Data((
+                "--max-context \(maxContext) must be >= 1\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+        if let maxBatch = resolved.maxConcurrencyOverride, maxBatch < 1 {
+            FileHandle.standardError.write(Data((
+                "--max-batch \(maxBatch) must be >= 1\n"
+            ).utf8))
+            throw ExitCode(2)
+        }
+    }
+
+    static func makeCoordinatorClient(
+        noJoin: Bool,
+        factory: () -> CoordinatorClient?
+    ) -> CoordinatorClient? {
+        guard !noJoin else { return nil }
+        return factory()
+    }
+
     func run() async throws {
         var resolved = try ConfigLoader.load(
             cli: CLIOverrides(
@@ -101,30 +149,38 @@ struct ServeCommand: AsyncParsableCommand {
                 supportedModels: SupportedModels.parseCSV(supportedModels),
                 publishesSupportedModels: publishSupportedModels,
                 enableWarmSwap: enableWarmSwap,
+                enableReceipts: enableReceipts,
                 swapDrainTimeoutSeconds: swapDrainTimeoutSeconds,
                 ctlSocketPath: ctlSocketPath,
                 switchStatePath: switchStatePath,
-                providerToken: providerToken
+                providerToken: providerToken,
+                kvBits: kvBits,
+                maxContext: maxContext,
+                maxBatch: maxBatch
             )
         )
 
         try Self.runSupportedModelsPreflight(&resolved)
         try Self.runDrainTimeoutPreflight(resolved)
+        try Self.runServingKnobsPreflight(resolved)
 
         printResolvedConfiguration(resolved)
 
         let modelRuntime = try await ModelRuntime(
             modelID: resolved.model,
             maxContextTokensOverride: resolved.maxContextOverride,
+            kvBitsOverride: resolved.kvBitsOverride,
+            maxBatch: resolved.maxConcurrencyOverride ?? 1,
             warmSwapEnabled: resolved.enableWarmSwap,
             swapDrainTimeoutSeconds: resolved.swapDrainTimeoutSeconds
         )
-        // MLX generation is currently guarded by a process-local semaphore of 1.
-        // Advertise the real runtime concurrency until the runtime is proven safe
-        // for parallel generation.
+        // The serve runtime defaults `--max-batch` to 1 (the prior
+        // single-slot behavior). Operators opting in via --max-batch >1
+        // own the safety check; we surface the configured value in
+        // capacity so the coordinator's view stays consistent.
         let capacityDefaults = ProviderCapacity(
             maxContextOverride: resolved.maxContextOverride,
-            maxConcurrencyOverride: 1
+            maxConcurrencyOverride: resolved.maxConcurrencyOverride ?? 1
         )
         let throughputEstimate = await modelRuntime.measureStartupThroughput()
         let providerStatus = ProviderStatus(
@@ -134,19 +190,42 @@ struct ServeCommand: AsyncParsableCommand {
             modelHash: await modelRuntime.loadedModelHash
         )
         await modelRuntime.setProviderStatus(providerStatus)
-        let coordinatorClient = CoordinatorClient(
-            config: resolved,
-            modelRuntime: modelRuntime,
-            providerStatus: providerStatus,
-            attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath)
-        )
+        let receiptKeyStore = KeychainReceiptKeyStore()
+        let receiptRuntime = try Self.makeReceiptRuntime(config: resolved, keyStore: receiptKeyStore)
+        let coordinatorClient = Self.makeCoordinatorClient(noJoin: noJoin) {
+            CoordinatorClient(
+                config: resolved,
+                modelRuntime: modelRuntime,
+                providerStatus: providerStatus,
+                attestationGenerator: ManagedDeviceAttestationGenerator(artifactPath: resolved.tier2MDAArtifactPath),
+                providerReceiptPublicKey: receiptRuntime.publicKeyBase64,
+                receiptBuilder: receiptRuntime.builder
+            )
+        }
         let controlSocket: ControlSocketServer?
-        if resolved.enableWarmSwap {
+        let receiptRotator: (@Sendable () async throws -> Void)?
+        if resolved.enableReceipts,
+           let providerID = resolved.providerID,
+           !providerID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let coordinatorClient {
+            receiptRotator = {
+                try await RotateKeyCommand.rotateActiveProvider(
+                    providerID: providerID,
+                    keyStore: receiptKeyStore,
+                    coordinatorClient: coordinatorClient
+                )
+            }
+        } else {
+            receiptRotator = nil
+        }
+        if resolved.enableWarmSwap || receiptRotator != nil {
             let socketURL = ControlSocketPaths.resolve(ctlSocketPath: resolved.ctlSocketPath)
             controlSocket = ControlSocketServer(
                 socketPath: socketURL,
                 modelRuntime: modelRuntime,
-                supportedModels: resolved.supportedModels
+                supportedModels: resolved.supportedModels,
+                receiptRotator: receiptRotator,
+                receiptRotationProviderID: resolved.providerID?.trimmingCharacters(in: .whitespacesAndNewlines)
             )
             do {
                 try await controlSocket?.start()
@@ -161,7 +240,12 @@ struct ServeCommand: AsyncParsableCommand {
             controlSocket = nil
         }
         await coordinatorClient?.start()
-        let server = HTTPServer(config: resolved, modelRuntime: modelRuntime, providerStatus: providerStatus)
+        let server = HTTPServer(
+            config: resolved,
+            modelRuntime: modelRuntime,
+            providerStatus: providerStatus,
+            receiptBuilder: receiptRuntime.builder
+        )
         let terminationHandlers = installTerminationHandlers(coordinatorClient: coordinatorClient, controlSocket: controlSocket)
         defer {
             Task {
@@ -173,6 +257,30 @@ struct ServeCommand: AsyncParsableCommand {
         try withExtendedLifetime(terminationHandlers) {
             try server.run()
         }
+    }
+
+    static func makeReceiptBuilder(
+        config: AppConfig,
+        keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
+    ) throws -> ReceiptBuilder? {
+        try makeReceiptRuntime(config: config, keyStore: keyStore).builder
+    }
+
+    static func makeReceiptRuntime(
+        config: AppConfig,
+        keyStore: ReceiptKeyStoring = KeychainReceiptKeyStore()
+    ) throws -> (builder: ReceiptBuilder?, publicKeyBase64: String?) {
+        guard config.enableReceipts,
+              let providerID = config.providerID,
+              !providerID.isEmpty else {
+            return (nil, nil)
+        }
+        let cachingStore = CachedReceiptKeyStore(keyStore)
+        let privateKey = try cachingStore.loadOrGenerate(providerId: providerID)
+        return (
+            ReceiptBuilder(keyStore: cachingStore),
+            Data(privateKey.publicKey.rawRepresentation).base64EncodedString()
+        )
     }
 }
 
@@ -194,7 +302,7 @@ struct StatusCommand: AsyncParsableCommand {
         )
         let status = try await LocalStatusClient.fetch(port: resolved.port)
         let latest = try? await SelfUpdate(currentVersion: CoordinatorClient.binaryVersion, releasesAPIURL: nil).latestVersionCached()
-        print(LocalStatusFormatter.format(status, latestVersion: latest))
+        print(LocalStatusFormatter.format(status, latestVersion: latest, ownerLogin: OwnerFileReader.githubLogin(configPath: resolved.configPath)))
     }
 }
 
@@ -290,4 +398,8 @@ private func printResolvedConfiguration(_ config: AppConfig) {
     print("  log_level: \(config.logLevel.rawValue)")
     print("  log_format: \(config.logFormat.rawValue)")
     print("  tier2_mda_artifact_path: \(config.tier2MDAArtifactPath ?? "<unset>")")
+    print("  kv_bits: \(config.kvBitsOverride.map(String.init) ?? "<unset, mlx default>")")
+    print("  max_context: \(config.maxContextOverride.map(String.init) ?? "<unset, per-tier default>")")
+    print("  max_batch: \(config.maxConcurrencyOverride.map(String.init) ?? "1")")
+    print("  enable_receipts: \(config.enableReceipts)")
 }

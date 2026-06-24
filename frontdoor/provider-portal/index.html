@@ -1,0 +1,1765 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>MacProvider — Provider Portal</title>
+  <script>
+    const PAIR_OT_CAPTURED = (function() {
+      if (location.pathname !== "/claim") return null;
+      const u = new URL(location.href);
+      const ot = u.searchParams.get("ot");
+      history.replaceState({}, "", "/claim");
+      return ot;
+    })();
+  </script>
+  <style>
+    :root {
+      --bg:#0c0d10;
+      --sb:#111316;
+      --surface:#16181d;
+      --border:#252830;
+      --border2:#323743;
+      --text:#e1e3e8;
+      --muted:#878d99;
+      --hint:#4a5060;
+      --accent:#7c6af6;
+      --accent-dim:rgba(124,106,246,.14);
+      --ok:#22c55e;
+      --warn:#f59e0b;
+      --bad:#ef4444;
+      color-scheme:dark;
+    }
+    * { box-sizing:border-box; }
+    html, body { margin:0; padding:0; background:var(--bg); color:var(--text); height:100%; }
+    body {
+      font:14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Inter", sans-serif;
+      -webkit-font-smoothing:antialiased;
+    }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color:var(--accent); text-decoration:none; }
+    a:hover { text-decoration:underline; }
+    button { font:inherit; color:inherit; cursor:pointer; }
+
+    /* App shell */
+    .shell { display:flex; min-height:100vh; }
+    .sidebar {
+      width:220px; flex:0 0 220px;
+      background:var(--sb);
+      border-right:1px solid var(--border);
+      display:flex; flex-direction:column;
+      padding:18px 0;
+    }
+    .brand {
+      padding:0 18px 14px 18px;
+      font-weight:600; letter-spacing:.2px;
+      border-bottom:1px solid var(--border);
+      margin-bottom:10px;
+    }
+    .brand .brand-sub { display:block; color:var(--muted); font-weight:400; font-size:12px; margin-top:2px; }
+    .nav { display:flex; flex-direction:column; gap:2px; padding:6px 8px; }
+    .nav-item {
+      display:block; width:100%; text-align:left;
+      background:transparent; border:0;
+      color:var(--text); padding:8px 12px; border-radius:6px;
+      font-size:13px;
+    }
+    .nav-item:hover { background:var(--accent-dim); }
+    .nav-item.active { background:var(--accent-dim); color:var(--text); border-left:2px solid var(--accent); padding-left:10px; }
+    .nav-spacer { flex:1; }
+    .nav-footer {
+      padding:10px 12px; border-top:1px solid var(--border);
+      display:flex; flex-direction:column; gap:6px; font-size:13px;
+    }
+    .nav-footer a, .nav-footer button { color:var(--muted); }
+    .nav-footer button {
+      background:transparent; border:0; padding:6px 0; text-align:left;
+    }
+    .nav-footer button:hover { color:var(--text); }
+
+    .main {
+      flex:1; display:flex; flex-direction:column;
+      min-width:0;
+    }
+    .topbar {
+      padding:14px 24px; border-bottom:1px solid var(--border);
+      display:none;
+      align-items:center; gap:12px;
+      background:var(--sb);
+    }
+    .hamburger {
+      background:transparent; border:1px solid var(--border2);
+      color:var(--text); padding:6px 10px; border-radius:6px;
+    }
+    .surface-pane { padding:24px; flex:1; overflow:auto; }
+
+    .scrim {
+      display:none;
+      position:fixed; inset:0;
+      background:rgba(0,0,0,.45);
+      z-index:40;
+    }
+
+    /* Cards */
+    .card {
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:16px 18px;
+    }
+    .card h3 { margin:0 0 4px 0; font-size:13px; color:var(--muted); font-weight:500; }
+    .card .val { font-size:24px; font-weight:600; letter-spacing:-.2px; }
+    .card .sub { font-size:12px; color:var(--muted); margin-top:6px; }
+
+    /* Surface A */
+    .surface-title { font-size:18px; font-weight:600; margin:0 0 14px 0; }
+    .headstrip {
+      display:flex; flex-wrap:wrap; gap:10px 18px;
+      align-items:center;
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:14px 18px;
+      margin-bottom:18px;
+    }
+    .headstrip .field { display:flex; flex-direction:column; gap:2px; }
+    .headstrip .field .lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+    .headstrip .field .vl { font-size:14px; }
+    .headstrip .spacer { flex:1; }
+    .headstrip .refresh-btn {
+      background:var(--accent-dim); border:1px solid var(--border2);
+      color:var(--text); padding:6px 12px; border-radius:6px;
+      font-size:13px;
+    }
+    .headstrip .refresh-btn:disabled { opacity:.5; cursor:default; }
+    .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 10px; border-radius:999px; font-size:12px; }
+    .pill.online { background:rgba(34,197,94,.14); color:var(--ok); }
+    .pill.offline { background:rgba(239,68,68,.14); color:var(--bad); }
+    .pill.unknown { background:rgba(135,141,153,.14); color:var(--muted); }
+    .stamp { font-size:12px; color:var(--muted); }
+    .stamp.stale { color:var(--warn); }
+
+    .counters {
+      display:grid; gap:14px;
+      grid-template-columns:repeat(auto-fit, minmax(220px, 1fr));
+      margin-bottom:18px;
+    }
+    .counters .card .val.dim { color:var(--muted); font-size:18px; }
+
+    .panel {
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:10px;
+      padding:16px 18px;
+    }
+    .panel h2 { margin:0 0 10px 0; font-size:14px; color:var(--muted); font-weight:500; letter-spacing:.3px; text-transform:uppercase; }
+    .row {
+      display:flex; flex-direction:column; gap:8px;
+      padding:12px;
+      border:1px solid var(--border);
+      border-radius:8px;
+      background:var(--bg);
+    }
+    .row + .row { margin-top:10px; }
+    .row .row-title { font-size:14px; }
+    .row .row-hint { font-size:13px; color:var(--muted); }
+    .row .row-cta {
+      display:flex; align-items:center; gap:10px;
+      margin-top:4px;
+    }
+    .row .row-cta code {
+      background:#0a0b0e; border:1px solid var(--border2);
+      padding:5px 8px; border-radius:6px; font-size:12px;
+    }
+    .row .copy-btn {
+      background:transparent; border:1px solid var(--border2);
+      color:var(--text); padding:5px 10px; border-radius:6px;
+      font-size:12px;
+    }
+    .row .copy-btn:hover { background:var(--accent-dim); }
+    .row .copy-ok { color:var(--ok); font-size:12px; }
+    .row.muted {
+      color:var(--muted);
+      background:transparent;
+      border-style:dashed;
+    }
+
+    /* Banners */
+    .banner {
+      border-radius:10px;
+      padding:12px 16px;
+      margin-bottom:16px;
+      border:1px solid;
+      font-size:13px;
+      line-height:1.5;
+    }
+    .banner.bad {
+      background:rgba(239,68,68,.10);
+      border-color:rgba(239,68,68,.5);
+      color:#fecaca;
+    }
+    .banner.warn {
+      background:rgba(245,158,11,.10);
+      border-color:rgba(245,158,11,.5);
+      color:#fde68a;
+    }
+
+    /* Sign-in */
+    .signin-wrap {
+      min-height:100vh;
+      display:flex; align-items:center; justify-content:center;
+      padding:24px;
+    }
+    .signin-card {
+      width:100%; max-width:420px;
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:28px 26px;
+    }
+    .signin-card h1 { margin:0 0 4px 0; font-size:18px; }
+    .signin-card .h-sub { color:var(--muted); font-size:13px; margin-bottom:18px; }
+    .signin-field { display:flex; flex-direction:column; gap:6px; margin-bottom:14px; }
+    .signin-field label { font-size:12px; color:var(--muted); }
+    .signin-field input {
+      background:var(--bg);
+      border:1px solid var(--border2);
+      color:var(--text);
+      border-radius:8px; padding:9px 11px;
+      font:inherit;
+    }
+    .signin-field input:focus { outline:1px solid var(--accent); border-color:var(--accent); }
+    .signin-submit {
+      width:100%; background:var(--accent); border:0; color:#fff;
+      padding:10px; border-radius:8px; font-weight:600;
+      margin-top:6px;
+    }
+    .signin-submit:hover { filter:brightness(1.08); }
+    .signin-err { color:var(--bad); font-size:13px; margin-top:10px; }
+    .signin-misconfig {
+      margin-top:14px; padding:10px 12px;
+      border:1px solid rgba(245,158,11,.5);
+      background:rgba(245,158,11,.10);
+      color:#fde68a;
+      border-radius:8px; font-size:12px; line-height:1.5;
+    }
+    .signin-guide { margin-top:14px; color:var(--muted); font-size:13px; text-align:center; }
+    .github-btn {
+      display:block; width:100%;
+      background:var(--accent); border:0; color:#fff;
+      padding:10px; border-radius:8px; font-weight:600;
+      text-align:center;
+    }
+    .github-btn:hover { filter:brightness(1.08); text-decoration:none; }
+    .claim-card h1 { color:var(--text); }
+    .claim-card .claim-ok { color:var(--ok); font-size:13px; margin-top:10px; }
+    .provider-list { display:flex; flex-direction:column; gap:10px; }
+    .provider-row {
+      display:flex; justify-content:space-between; align-items:center; gap:12px;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:8px; padding:12px 14px; width:100%; text-align:left;
+    }
+    .provider-row:hover { background:var(--accent-dim); }
+    .provider-row .sub { color:var(--muted); font-size:12px; }
+
+    /* Unavailable mode */
+    .unavail-wrap {
+      min-height:100vh;
+      display:flex; align-items:center; justify-content:center;
+      padding:24px;
+    }
+    .unavail-card {
+      width:100%; max-width:560px;
+      background:var(--surface);
+      border:1px solid var(--border);
+      border-radius:12px;
+      padding:28px 26px;
+    }
+    .unavail-card h1 { margin:0 0 8px 0; font-size:18px; color:var(--warn); }
+    .unavail-card p { color:var(--muted); font-size:13px; line-height:1.6; }
+    .unavail-card code { background:#0a0b0e; border:1px solid var(--border2); padding:2px 6px; border-radius:4px; font-size:12px; color:var(--text); }
+
+    /* Surface B */
+    .section { margin-bottom:22px; }
+    .section-h { font-size:13px; color:var(--muted); margin:0 0 10px 0; text-transform:uppercase; letter-spacing:.5px; font-weight:500; }
+    .section-sub { font-size:12px; color:var(--muted); margin:0 0 12px 0; }
+    .grid-4 { display:grid; gap:12px; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr)); }
+    .req-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+    .req-card .req-lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
+    .req-card .req-val { font-size:14px; }
+    .sizing-card { background:var(--surface); border:1px solid var(--border2); border-radius:10px; padding:16px 18px; border-left:2px solid var(--accent); }
+    .sizing-card table { width:100%; border-collapse:collapse; font-size:13px; margin-top:8px; }
+    .sizing-card th, .sizing-card td { text-align:left; padding:8px 10px; border-bottom:1px solid var(--border); }
+    .sizing-card th { color:var(--muted); font-weight:500; font-size:12px; text-transform:uppercase; letter-spacing:.4px; }
+    .sizing-card .hint-foot { font-size:12px; color:var(--muted); margin-top:10px; }
+    .step-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:14px 16px; }
+    .step-card + .step-card { margin-top:10px; }
+    .step-card .step-h { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+    .step-card .step-num { background:var(--accent-dim); color:var(--text); border-radius:50%; width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; }
+    .step-card .step-title { font-size:14px; font-weight:600; }
+    .step-card .step-body { font-size:13px; color:var(--muted); margin:4px 0 8px 0; line-height:1.5; }
+    .step-card .step-cite { font-size:11px; color:var(--hint); margin-top:6px; }
+    .snippet { display:flex; align-items:center; gap:8px; }
+    .snippet code { flex:1; background:var(--bg); border:1px solid var(--border2); padding:7px 10px; border-radius:6px; font-size:12px; overflow-x:auto; white-space:nowrap; }
+    .release-list { display:flex; flex-direction:column; gap:10px; }
+    .release-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:12px 14px; }
+    .release-card .rel-head { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+    .release-card .rel-tag { font-size:13px; }
+    .release-card .rel-date { font-size:12px; color:var(--muted); }
+    .release-card .rel-spacer { flex:1; }
+    .release-card details { margin-top:8px; }
+    .release-card summary { font-size:12px; color:var(--muted); cursor:pointer; user-select:none; }
+    .release-card pre.rel-body { white-space:pre-wrap; word-break:break-word; max-height:200px; overflow:auto; background:var(--bg); border:1px solid var(--border2); border-radius:6px; padding:10px; font-size:12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin:8px 0; }
+    .release-card .rel-cta { margin-top:8px; }
+
+    /* Surface C / D / E */
+    .fiat-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px 18px; }
+    .fiat-card h3 { margin:0 0 6px 0; font-size:13px; color:var(--muted); font-weight:500; text-transform:uppercase; letter-spacing:.5px; }
+    .fiat-card .fiat-body { font-size:14px; }
+    .fiat-card .fiat-cite { font-size:11px; color:var(--hint); margin-top:8px; }
+    .monitor-card { background:var(--surface); border:1px dashed var(--border2); border-radius:10px; padding:16px 18px; }
+    .monitor-card h3 { margin:0 0 10px 0; font-size:14px; }
+    .monitor-card ul { margin:0; padding-left:18px; color:var(--muted); font-size:13px; line-height:1.6; }
+    .monitor-card .mon-cite { font-size:11px; color:var(--hint); margin-top:10px; }
+    .id-card { background:var(--surface); border:1px solid var(--border); border-radius:10px; padding:16px 18px; }
+    .id-card .id-grid { display:grid; grid-template-columns:140px 1fr; row-gap:10px; column-gap:14px; align-items:center; }
+    .id-card .id-lbl { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+    .id-card .id-val { font-size:14px; }
+    .id-card .id-foot { font-size:12px; color:var(--muted); margin-top:14px; padding-top:12px; border-top:1px solid var(--border); line-height:1.5; }
+
+    /* Mobile */
+    @media (max-width: 720px) {
+      .shell { flex-direction:column; }
+      .topbar { display:flex; }
+      .sidebar {
+        position:fixed; top:0; left:0; bottom:0;
+        width:240px;
+        z-index:50;
+        transform:translateX(-100%);
+        transition:transform .18s ease;
+      }
+      .sidebar.open { transform:translateX(0); }
+      .scrim.show { display:block; }
+      .surface-pane { padding:16px; }
+    }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script>
+    "use strict";
+
+    /* =====================================================================
+     * Constants / thresholds (SPEC-014 §5.4)
+     * ===================================================================== */
+    var POOL_POLL_MS = 30 * 1000;
+    var EARN_POLL_MS = 60 * 1000;
+    var EARN_CACHE_TTL_MS = 60 * 1000;
+    var STALE_FACTOR = 2; // stamp flips to "stale" past STALE_FACTOR x cadence
+    var STAMP_TICK_MS = 1000;
+
+    var ALLOWED_CONFIG_KEYS = [
+      "coordinator_base_url",
+      "releases_repo_owner_name",
+      "require_provider_tokens",
+      "github_oauth_enabled"
+    ];
+    var REPO_OWNER_NAME_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+    var POOL_PATH = "/v1/pool/check";
+    function earningsPath(providerId) {
+      return "/providers/" + encodeURIComponent(providerId) + "/earnings";
+    }
+
+    var RELEASES_HOST = "https://api.github.com";
+    var RELEASES_TTL_MS = 5 * 60 * 1000;
+    var RELEASES_MAX_ENTRIES = 12;
+
+    /* =====================================================================
+     * State container
+     * ===================================================================== */
+    var state = {
+      cfg: null,
+      session: null,
+      route: "machine",
+      pool: { data: null, ts: 0, err: null, inflight: false },
+      earn: { data: null, ts: 0, err: null, inflight: false },
+      authFailBySurface: {},
+      proxyMissing: false,
+      sidebarOpen: false,
+      signinErr: null,
+      signinMisconfigNotice: null,
+      copyEcho: null,
+      configError: null,
+      flagFalse: false,
+      releases: { list: null, ts: 0, err: null, inflight: false, rateLimited: false },
+      githubAuthState: "idle",
+      githubProviders: [],
+      cookieFetch: null,
+      claim: { phase: "idle", error: null, result: null },
+    };
+
+    var timers = {
+      pool: null,
+      earn: null,
+      stamp: null,
+    };
+
+    /* =====================================================================
+     * DOM helpers — text-only, never assigns markup from user data
+     * ===================================================================== */
+    function el(tag, attrs) {
+      var node = document.createElement(tag);
+      if (attrs) {
+        for (var k in attrs) {
+          if (!Object.prototype.hasOwnProperty.call(attrs, k)) continue;
+          var v = attrs[k];
+          if (v === null || v === undefined || v === false) continue;
+          if (k === "class") node.className = v;
+          else if (k === "style") node.setAttribute("style", v);
+          else if (k.indexOf("on") === 0 && typeof v === "function") {
+            node.addEventListener(k.slice(2), v);
+          } else if (k === "for") node.setAttribute("for", v);
+          else if (k === "value") node.value = v;
+          else if (typeof v === "boolean") {
+            if (v) node.setAttribute(k, "");
+          } else {
+            node.setAttribute(k, String(v));
+          }
+        }
+      }
+      for (var i = 2; i < arguments.length; i++) {
+        var child = arguments[i];
+        if (child === null || child === undefined || child === false) continue;
+        if (Array.isArray(child)) {
+          for (var j = 0; j < child.length; j++) appendChild(node, child[j]);
+        } else {
+          appendChild(node, child);
+        }
+      }
+      return node;
+    }
+    function appendChild(parent, child) {
+      if (child === null || child === undefined || child === false) return;
+      if (child instanceof Node) parent.appendChild(child);
+      else parent.appendChild(document.createTextNode(String(child)));
+    }
+    function clear(node) {
+      while (node.firstChild) node.removeChild(node.firstChild);
+    }
+
+    /* =====================================================================
+     * AUTH-3 — operator-declared deployment mode loader (fail-CLOSED)
+     * ===================================================================== */
+    function loadConfig() {
+      return fetch("/portal-config.json", { cache: "no-store" })
+        .then(function (resp) {
+          if (!resp.ok) {
+            throw new Error("non-200:" + resp.status);
+          }
+          return resp.json().catch(function () {
+            throw new Error("malformed-json");
+          });
+        })
+        .then(function (raw) {
+          var validated = validateConfig(raw);
+          state.cfg = validated;
+          return validated;
+        })
+        .catch(function (err) {
+          var info = describeConfigError(err);
+          if (info.kind !== "flag-false") {
+            state.configError = info;
+          }
+          throw err;
+        });
+    }
+
+    function validateConfig(raw) {
+      if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new Error("not-object");
+      }
+      var keys = Object.keys(raw);
+      for (var i = 0; i < keys.length; i++) {
+        if (ALLOWED_CONFIG_KEYS.indexOf(keys[i]) === -1) {
+          throw new Error("unknown-key:" + keys[i]);
+        }
+      }
+      var cbu = raw.coordinator_base_url;
+      if (typeof cbu !== "string" || cbu.length === 0) {
+        throw new Error("invalid-coordinator_base_url");
+      }
+      var rro = raw.releases_repo_owner_name;
+      if (typeof rro !== "string" || rro.length === 0 || !REPO_OWNER_NAME_RE.test(rro)) {
+        throw new Error("invalid-releases_repo_owner_name");
+      }
+      if (raw.require_provider_tokens !== true) {
+        state.flagFalse = true;
+        throw new Error("flag-false");
+      }
+      if (Object.prototype.hasOwnProperty.call(raw, "github_oauth_enabled") && typeof raw.github_oauth_enabled !== "boolean") {
+        throw new Error("invalid-github_oauth_enabled");
+      }
+      return {
+        coordinator_base_url: cbu,
+        releases_repo_owner_name: rro,
+        require_provider_tokens: true,
+        github_oauth_enabled: raw.github_oauth_enabled === true,
+      };
+    }
+
+    function describeConfigError(err) {
+      var msg = err && err.message ? err.message : String(err);
+      if (msg === "flag-false") return { kind: "flag-false" };
+      if (msg.indexOf("unknown-key:") === 0) {
+        return { kind: "unknown-key", key: msg.slice("unknown-key:".length) };
+      }
+      if (msg === "not-object") return { kind: "not-object" };
+      if (msg === "malformed-json") return { kind: "malformed-json" };
+      if (msg.indexOf("invalid-") === 0) return { kind: "invalid-field", field: msg.slice("invalid-".length) };
+      if (msg.indexOf("non-200:") === 0) return { kind: "non-200", status: msg.slice("non-200:".length) };
+      return { kind: "fetch-failed" };
+    }
+
+    /* =====================================================================
+     * Same-origin fetch with proxy fail-loud (§3 + Open Q9)
+     * ===================================================================== */
+    function coordFetch(pathAndQuery, opts) {
+      opts = opts || {};
+      var headers = {};
+      if (opts.auth && state.session && state.session.provider_token) {
+        headers["Authorization"] = "Bearer " + state.session.provider_token;
+      }
+      headers["Accept"] = "application/json";
+      return fetch(pathAndQuery, {
+        method: "GET",
+        headers: headers,
+        cache: "no-store",
+      })
+        .then(function (resp) {
+          var surface = opts.surface;
+          if (resp.ok) {
+            if (opts.auth && surface) state.authFailBySurface[surface] = 0;
+            return resp.json().then(function (j) { return { ok: true, status: resp.status, body: j }; });
+          }
+          if (opts.auth && surface && (resp.status === 401 || resp.status === 403 || resp.status === 404)) {
+            state.authFailBySurface[surface] = (state.authFailBySurface[surface] || 0) + 1;
+          }
+          return { ok: false, status: resp.status, body: null };
+        })
+        .catch(function (e) {
+          if (!state.proxyMissing) {
+            state.proxyMissing = true;
+            render();
+          }
+          throw e;
+        });
+    }
+
+    function makeCookieFetch() {
+      return function cookieFetch(pathAndQuery, opts) {
+        opts = opts || {};
+        var supplied = opts.headers || {};
+        var headers = { "Accept": "application/json", "Content-Type": "application/json" };
+        for (var k in supplied) {
+          if (!Object.prototype.hasOwnProperty.call(supplied, k)) continue;
+          if (String(k).toLowerCase() === "authorization") continue;
+          headers[k] = supplied[k];
+        }
+        return fetch(pathAndQuery, {
+          method: opts.method || "GET",
+          headers: headers,
+          body: opts.body,
+          cache: "no-store",
+          credentials: "include",
+        }).catch(function (e) {
+          if (!state.proxyMissing) {
+            state.proxyMissing = true;
+            render();
+          }
+          throw e;
+        });
+      };
+    }
+
+    function cookieJSON(pathAndQuery, opts) {
+      if (!state.cookieFetch) state.cookieFetch = makeCookieFetch();
+      return state.cookieFetch(pathAndQuery, opts).then(function (resp) {
+        return readJSONResponse(resp);
+      });
+    }
+
+    function readJSONResponse(resp) {
+      return resp.text().then(function (txt) {
+        var body = null;
+        if (txt) {
+          try { body = JSON.parse(txt); } catch (_) { body = null; }
+        }
+        return { ok: resp.ok, status: resp.status, body: body };
+      });
+    }
+
+    window.__macproviderPortalAuthProbe = function () {
+      return {
+        mode: state.cfg && state.cfg.github_oauth_enabled ? "cookie" : "paste",
+        pasteAuth: coordFetch,
+        cookieAuth: state.cookieFetch || undefined,
+      };
+    };
+
+    /* =====================================================================
+     * Pool poll (§5.4: 30 s + manual refresh)
+     * ===================================================================== */
+    function poolCheck() {
+      if (!state.session) return Promise.resolve();
+      if (state.pool.inflight) return Promise.resolve();
+      state.pool.inflight = true;
+      render();
+      var pid = state.session.provider_id;
+      var url = POOL_PATH + "?provider_id=" + encodeURIComponent(pid);
+      var fetchResult = state.cfg && state.cfg.github_oauth_enabled
+        ? cookieJSON(url, { method: "GET" })
+        : coordFetch(url, { auth: false });
+      return fetchResult
+        .then(function (r) {
+          state.pool.inflight = false;
+          if (r.ok) {
+            state.pool.data = r.body;
+            state.pool.ts = Date.now();
+            state.pool.err = null;
+          } else {
+            state.pool.err = { status: r.status };
+          }
+          render();
+        })
+        .catch(function () {
+          state.pool.inflight = false;
+          render();
+        });
+    }
+
+    /* =====================================================================
+     * Earnings fetch (§5.4: 60 s cadence + 60 s cache TTL)
+     * ===================================================================== */
+    function earnFetch(surface, opts) {
+      opts = opts || {};
+      if (!state.session) return Promise.resolve();
+      var now = Date.now();
+      if (!opts.force && state.earn.data && (now - state.earn.ts) < EARN_CACHE_TTL_MS) {
+        return Promise.resolve();
+      }
+      if (state.earn.inflight) return Promise.resolve();
+      state.earn.inflight = true;
+      render();
+      var pid = state.session.provider_id;
+      var fetchResult = state.cfg && state.cfg.github_oauth_enabled
+        ? cookieJSON(earningsPath(pid), { method: "GET" })
+        : coordFetch(earningsPath(pid), { auth: true, surface: surface || "machine" });
+      return fetchResult
+        .then(function (r) {
+          state.earn.inflight = false;
+          if (r.ok) {
+            state.earn.data = r.body;
+            state.earn.ts = Date.now();
+            state.earn.err = null;
+            render();
+            return;
+          }
+          if (r.status === 401 || r.status === 403 || r.status === 404) {
+            if (state.cfg && state.cfg.github_oauth_enabled && r.status === 401) {
+              githubSessionExpired("/" + "?p=" + encodeURIComponent(pid));
+            } else {
+              handleAuthRejection(r.status, surface || "machine");
+            }
+            return;
+          }
+          state.earn.err = { status: r.status };
+          render();
+        })
+        .catch(function () {
+          state.earn.inflight = false;
+          render();
+        });
+    }
+
+    /* =====================================================================
+     * GitHub Releases feed (§4.2 B.3, §5.1 table (a), §5.4 thresholds)
+     *
+     * Cross-origin to api.github.com. The bundle never reads the
+     * browser-suppressed CORS allow-origin response header as
+     * application data — a successful, readable fetch IS the CORS
+     * confirmation. Fail-loud on rate-limit
+     * (X-RateLimit-Remaining: 0) and on fetch() rejection.
+     * ===================================================================== */
+    function releasesFetch() {
+      if (!state.cfg) return Promise.resolve();
+      if (state.releases.inflight) return Promise.resolve();
+      if (state.releases.list && (Date.now() - state.releases.ts) < RELEASES_TTL_MS) {
+        return Promise.resolve();
+      }
+      state.releases.inflight = true;
+      render();
+      var url = RELEASES_HOST + "/repos/" + state.cfg.releases_repo_owner_name + "/releases";
+      return fetch(url, { cache: "no-store" })
+        .then(function (resp) {
+          var remaining = null;
+          try { remaining = resp.headers.get("X-RateLimit-Remaining"); } catch (_) {}
+          if (remaining === "0") {
+            state.releases.rateLimited = true;
+            state.releases.err = "GitHub API rate limit reached — release feed paused; refresh later.";
+            return null;
+          }
+          state.releases.rateLimited = false;
+          if (!resp.ok) {
+            state.releases.err = "HTTP " + resp.status + " from GitHub Releases.";
+            return null;
+          }
+          return resp.json().then(function (arr) {
+            if (!Array.isArray(arr)) {
+              state.releases.err = "Unexpected GitHub Releases response shape.";
+              return;
+            }
+            state.releases.list = arr;
+            state.releases.ts = Date.now();
+            state.releases.err = null;
+          }).catch(function () {
+            state.releases.err = "Malformed JSON from GitHub Releases.";
+          });
+        })
+        .catch(function () {
+          state.releases.err = "GitHub Releases unavailable — release feed disabled; see SPEC-014 Open Q2.";
+        })
+        .then(function () {
+          state.releases.inflight = false;
+          render();
+        });
+    }
+
+    /* =====================================================================
+     * Auth rejection handling (§2.2 + §2.3 stale-config guard)
+     * ===================================================================== */
+    function handleAuthRejection(status, surface) {
+      var failCount = state.authFailBySurface[surface] || 0;
+      var misconfig = failCount >= 2;
+      stopPollers();
+      state.session = null;
+      state.earn = { data: null, ts: 0, err: null, inflight: false };
+      state.pool = { data: null, ts: 0, err: null, inflight: false };
+      if (status === 401) {
+        state.signinErr = signInRejectedCopy();
+      } else {
+        state.signinErr = signInRejectedCopy();
+      }
+      state.signinMisconfigNotice = misconfig ? misconfigNoticeCopy() : null;
+      render();
+    }
+    function signInRejectedCopy() {
+      return "Sign-in rejected. Please verify your provider_id and provider_token and try again.";
+    }
+    function misconfigNoticeCopy() {
+      return "Your deployment may be misconfigured — ask your operator to verify portal-config.json against the coordinator's auth.require_provider_tokens setting.";
+    }
+
+    /* =====================================================================
+     * Pollers + stamp tick
+     * ===================================================================== */
+    function startPollers() {
+      stopPollers();
+      timers.pool = setInterval(function () { poolCheck(); }, POOL_POLL_MS);
+      timers.earn = setInterval(function () { earnFetch("machine"); }, EARN_POLL_MS);
+      timers.stamp = setInterval(function () { renderStampOnly(); }, STAMP_TICK_MS);
+      poolCheck();
+      earnFetch("machine", { force: true });
+    }
+    function stopPollers() {
+      if (timers.pool) { clearInterval(timers.pool); timers.pool = null; }
+      if (timers.earn) { clearInterval(timers.earn); timers.earn = null; }
+      if (timers.stamp) { clearInterval(timers.stamp); timers.stamp = null; }
+    }
+
+    /* =====================================================================
+     * Sign-out
+     * ===================================================================== */
+    function signOut() {
+      if (state.cfg && state.cfg.github_oauth_enabled) {
+        stopPollers();
+        cookieJSON("/v1/auth/logout", { method: "POST", body: "{}" })
+          .catch(function () { return null; })
+          .then(function () { location.reload(); });
+        return;
+      }
+      stopPollers();
+      state.session = null;
+      state.pool = { data: null, ts: 0, err: null, inflight: false };
+      state.earn = { data: null, ts: 0, err: null, inflight: false };
+      state.releases = { list: null, ts: 0, err: null, inflight: false, rateLimited: false };
+      state.authFailBySurface = {};
+      state.proxyMissing = false;
+      state.signinErr = null;
+      state.signinMisconfigNotice = null;
+      state.route = "machine";
+      state.sidebarOpen = false;
+      render();
+    }
+
+    /* =====================================================================
+     * Sign-in submit
+     * ===================================================================== */
+    function submitSignIn(providerId, providerToken) {
+      var pid = (providerId || "").trim();
+      var tok = (providerToken || "").trim();
+      if (!pid || !tok) {
+        state.signinErr = "Both provider_id and provider_token are required.";
+        render();
+        return;
+      }
+      state.session = { provider_id: pid, provider_token: tok };
+      state.signinErr = null;
+      state.signinMisconfigNotice = null;
+      state.route = "machine";
+      render();
+      startPollers();
+    }
+
+    /* =====================================================================
+     * GitHub auth mode
+     * ===================================================================== */
+    function githubStartURL(returnTo, pairOT) {
+      var url = "/v1/auth/github/start?return_to=" + encodeURIComponent(returnTo);
+      if (pairOT) url += "&pair_ot=" + encodeURIComponent(pairOT);
+      return url;
+    }
+
+    function startGitHubOAuth(returnTo, pairOT) {
+      location.assign(githubStartURL(returnTo, pairOT));
+    }
+
+    function initializeGitHubMode() {
+      state.cookieFetch = makeCookieFetch();
+      state.githubAuthState = "loading";
+      render();
+      if (location.pathname === "/claim") {
+        return handleClaimRoute();
+      }
+      return loadGitHubHome();
+    }
+
+    function loadGitHubHome() {
+      state.githubAuthState = "loading";
+      state.claim = { phase: "idle", error: null, result: null };
+      stopPollers();
+      state.session = null;
+      render();
+      return cookieJSON("/v1/auth/me/providers", { method: "GET" })
+        .then(function (r) {
+          if (r.status === 401) {
+            state.githubAuthState = "signin";
+            render();
+            return;
+          }
+          if (!r.ok) {
+            state.githubAuthState = "signin";
+            if (r.status === 404 || r.status >= 500) state.proxyMissing = true;
+            render();
+            return;
+          }
+          var providers = r.body && Array.isArray(r.body.providers) ? r.body.providers : [];
+          state.githubProviders = providers;
+          if (providers.length === 0) {
+            state.githubAuthState = "waiting";
+            state.route = "machine";
+            render();
+            return;
+          }
+          var wanted = new URL(location.href).searchParams.get("p");
+          var selected = null;
+          for (var i = 0; i < providers.length; i++) {
+            if (providers[i] && providers[i].provider_id === wanted) selected = providers[i];
+          }
+          if (!selected && providers.length === 1) selected = providers[0];
+          if (!selected) {
+            state.githubAuthState = "providers";
+            state.route = "machine";
+            render();
+            return;
+          }
+          selectGitHubProvider(selected.provider_id, false);
+        })
+        .catch(function () {
+          state.githubAuthState = "signin";
+          render();
+        });
+    }
+
+    function selectGitHubProvider(providerId, pushRoute) {
+      state.session = { provider_id: providerId, provider_token: null };
+      state.githubAuthState = "dashboard";
+      state.route = "machine";
+      state.pool = { data: null, ts: 0, err: null, inflight: false };
+      state.earn = { data: null, ts: 0, err: null, inflight: false };
+      if (pushRoute) {
+        history.pushState({}, "", "/?p=" + encodeURIComponent(providerId));
+      }
+      render();
+      startPollers();
+    }
+
+    function githubSessionExpired(returnTo) {
+      stopPollers();
+      state.session = null;
+      state.githubAuthState = "signin";
+      render();
+      startGitHubOAuth(returnTo || "/", null);
+    }
+
+    function handleClaimRoute() {
+      state.githubAuthState = "claim";
+      state.claim = { phase: "checking", error: null, result: null };
+      render();
+      return cookieJSON("/v1/auth/me/providers", { method: "GET" })
+        .then(function (r) {
+          if (r.status === 401) {
+            startGitHubOAuth("/claim", PAIR_OT_CAPTURED);
+            return;
+          }
+          if (!r.ok) {
+            if (isProxyMisconfigurationStatus(r.status)) {
+              state.proxyMissing = true;
+              state.claim = { phase: "error", error: "proxy_missing", result: null };
+            } else {
+              state.claim = { phase: "error", error: "bad_request", result: null };
+            }
+            render();
+            return;
+          }
+          return bindClaim();
+        })
+        .catch(function () {
+          state.claim = { phase: "error", error: "network", result: null };
+          render();
+        });
+    }
+
+    function bindClaim() {
+      state.claim = { phase: "binding", error: null, result: null };
+      render();
+      var body = PAIR_OT_CAPTURED ? { pair_ot: PAIR_OT_CAPTURED } : {};
+      return cookieJSON("/v1/auth/me/providers/bind", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }).then(function (r) {
+        if (r.ok) {
+          state.claim = { phase: "success", error: null, result: r.body || {} };
+          render();
+          setTimeout(function () { location.assign("/"); }, 2000);
+          return;
+        }
+        if (r.status === 401) {
+          startGitHubOAuth("/claim", PAIR_OT_CAPTURED);
+          return;
+        }
+        if (isProxyMisconfigurationStatus(r.status)) {
+          state.proxyMissing = true;
+          state.claim = { phase: "error", error: "proxy_missing", result: null };
+          render();
+          return;
+        }
+        var code = r.body && r.body.error ? r.body.error : "bad_request";
+        state.claim = { phase: "error", error: code, result: null };
+        render();
+      }).catch(function () {
+        state.claim = { phase: "error", error: "network", result: null };
+        render();
+      });
+    }
+
+    function isProxyMisconfigurationStatus(status) {
+      return status === 404 || status >= 500;
+    }
+
+    /* =====================================================================
+     * Copy-to-clipboard
+     * ===================================================================== */
+    function copyText(text, key) {
+      var done = function () {
+        state.copyEcho = key;
+        render();
+        setTimeout(function () {
+          if (state.copyEcho === key) {
+            state.copyEcho = null;
+            render();
+          }
+        }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallbackCopy(text); done(); });
+      } else {
+        fallbackCopy(text);
+        done();
+      }
+    }
+    function fallbackCopy(text) {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.style.position = "absolute";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.select();
+      try { document.execCommand("copy"); } catch (_) {}
+      document.body.removeChild(ta);
+    }
+
+    /* =====================================================================
+     * Renderers
+     * ===================================================================== */
+    function render() {
+      var root = document.getElementById("app");
+      if (!root) return;
+      clear(root);
+      if (state.configError) {
+        root.appendChild(renderUnavailable_Config(state.configError));
+        return;
+      }
+      if (state.flagFalse) {
+        root.appendChild(renderUnavailable_FlagFalse());
+        return;
+      }
+      if (!state.cfg) {
+        root.appendChild(renderLoading());
+        return;
+      }
+      if (state.cfg.github_oauth_enabled) {
+        if (state.githubAuthState === "signin") {
+          root.appendChild(renderGitHubSignIn());
+          return;
+        }
+        if (state.githubAuthState === "claim") {
+          root.appendChild(renderClaim());
+          return;
+        }
+        if (state.githubAuthState === "waiting" || state.githubAuthState === "providers" || state.githubAuthState === "dashboard") {
+          root.appendChild(renderShell());
+          return;
+        }
+        root.appendChild(renderLoading());
+        return;
+      }
+      if (!state.session) {
+        root.appendChild(renderSignIn());
+        return;
+      }
+      root.appendChild(renderShell());
+    }
+
+    function renderLoading() {
+      return el("div", { class: "signin-wrap" },
+        el("div", { class: "signin-card" },
+          el("p", { class: "h-sub" }, "Loading portal configuration…")));
+    }
+
+    function renderUnavailable_Config(errInfo) {
+      var heading = el("h1", null, "Portal unavailable");
+      var body;
+      switch (errInfo.kind) {
+        case "non-200":
+          body = el("p", null,
+            "The portal could not load ",
+            el("code", null, "/portal-config.json"),
+            " (HTTP status ", errInfo.status,
+            "). The operator must deploy this file at the portal host root before the portal can be used.");
+          break;
+        case "fetch-failed":
+          body = el("p", null,
+            "The portal could not fetch ",
+            el("code", null, "/portal-config.json"),
+            ". The operator must deploy this file at the portal host root before the portal can be used.");
+          break;
+        case "malformed-json":
+          body = el("p", null,
+            "The file ",
+            el("code", null, "/portal-config.json"),
+            " is not valid JSON. Fix the file and reload.");
+          break;
+        case "not-object":
+          body = el("p", null,
+            el("code", null, "/portal-config.json"),
+            " must be a JSON object with the keys ",
+            el("code", null, "coordinator_base_url"),
+            ", ",
+            el("code", null, "releases_repo_owner_name"),
+            ", and ",
+            el("code", null, "require_provider_tokens"),
+            ", and optionally ",
+            el("code", null, "github_oauth_enabled"),
+            ".");
+          break;
+        case "unknown-key":
+          body = el("p", null,
+            el("code", null, "/portal-config.json"),
+            " contains an unknown top-level key ",
+            el("code", null, errInfo.key),
+            ". Only ",
+            el("code", null, "coordinator_base_url"),
+            ", ",
+            el("code", null, "releases_repo_owner_name"),
+            ", and ",
+            el("code", null, "require_provider_tokens"),
+            ", plus optional ",
+            el("code", null, "github_oauth_enabled"),
+            " are permitted.");
+          break;
+        case "invalid-field":
+          body = el("p", null,
+            "The ",
+            el("code", null, errInfo.field),
+            " value in ",
+            el("code", null, "/portal-config.json"),
+            " is not valid. Refer to the example file and reload.");
+          break;
+        default:
+          body = el("p", null,
+            "The portal could not load ",
+            el("code", null, "/portal-config.json"),
+            ".");
+      }
+      return el("div", { class: "unavail-wrap" },
+        el("div", { class: "unavail-card" },
+          heading,
+          body,
+          el("p", null, "See SPEC-014 §2.3 (AUTH-3) for the deployment-mode loader contract.")));
+    }
+
+    function renderUnavailable_FlagFalse() {
+      return el("div", { class: "unavail-wrap" },
+        el("div", { class: "unavail-card" },
+          el("h1", null, "Portal unavailable"),
+          el("p", null,
+            "The portal needs the coordinator to run with ",
+            el("code", null, "auth.require_provider_tokens=true"),
+            ". SPEC-002 FR-P12 defines the flag and its enforcement semantics; SPEC-005 §11.5 is the binding route-disablement clause that disables ",
+            el("code", null, "GET /providers/{id}/earnings"),
+            " at the route layer in ",
+            el("code", null, "false"),
+            " mode."),
+          el("p", null,
+            "The current deployment runs with this flag set to ",
+            el("code", null, "false"),
+            ", which means the portal has no callable data path. Ask the operator to flip the coordinator config and re-deploy.")));
+    }
+
+    function renderSignIn() {
+      var pidInput = el("input", { type: "text", id: "pid", autocomplete: "off", spellcheck: "false" });
+      var tokInput = el("input", { type: "password", id: "tok", autocomplete: "off", spellcheck: "false" });
+      var form = el("form", {
+        onsubmit: function (e) { e.preventDefault(); submitSignIn(pidInput.value, tokInput.value); },
+      },
+        el("div", { class: "signin-field" },
+          el("label", { for: "pid" }, "provider_id"),
+          pidInput),
+        el("div", { class: "signin-field" },
+          el("label", { for: "tok" }, "provider_token"),
+          tokInput),
+        el("button", { type: "submit", class: "signin-submit" }, "Sign in"));
+      var card = el("div", { class: "signin-card" },
+        el("h1", null, "MacProvider — Provider Portal"),
+        el("p", { class: "h-sub" },
+          "Sign in with your provider_id and provider_token. Both values live on this Mac at ",
+          el("code", null, "~/.config/macprovider/")),
+        form,
+        state.signinErr ? el("div", { class: "signin-err" }, state.signinErr) : null,
+        state.signinMisconfigNotice
+          ? el("div", { class: "signin-misconfig" }, state.signinMisconfigNotice)
+          : null);
+      return el("div", { class: "signin-wrap" }, card);
+    }
+
+    function renderGitHubSignIn() {
+      var button = el("button", {
+        class: "github-btn",
+        onclick: function () { startGitHubOAuth("/", null); },
+      }, "Continue with GitHub");
+      var card = el("div", { class: "signin-card" },
+        el("h1", null, "MacProvider — Provider Portal"),
+        el("p", { class: "h-sub" }, "Sign in to view Macs linked to your GitHub account."),
+        button,
+        state.proxyMissing
+          ? el("div", { class: "signin-misconfig" }, "github_oauth_enabled is true but the coordinator has no GitHub OAuth endpoints. Set the flag to false or deploy the v0.2 coordinator.")
+          : null,
+        el("div", { class: "signin-guide" },
+          "New here? ",
+          el("a", { href: "#install-guide" }, "See the install guide")));
+      return el("div", { class: "signin-wrap" }, card);
+    }
+
+    function renderClaim() {
+      var phase = state.claim.phase;
+      var cardKids = [el("h1", null, "Link this Mac")];
+      if (state.proxyMissing) {
+        cardKids.push(renderProxyMissingBanner());
+      }
+      if (phase === "checking" || phase === "binding") {
+        cardKids.push(el("p", { class: "h-sub" }, phase === "checking" ? "Checking your GitHub session…" : "Linking this Mac to your account…"));
+      } else if (phase === "success") {
+        var result = state.claim.result || {};
+        cardKids.push(
+          el("p", { class: "h-sub" }, "This Mac is linked."),
+          el("div", { class: "claim-ok" }, "GitHub: ", result.github_login || "linked"),
+          el("div", { class: "claim-ok mono" }, "Provider: ", result.provider_id || "unknown"),
+          el("p", { class: "h-sub" }, "Redirecting to your dashboard…"));
+      } else {
+        var msg = "Something went wrong. Try running macprovider-cli claim again.";
+        var withCopy = false;
+        if (state.claim.error === "pair_ot_invalid") {
+          msg = "This link expired. Run `macprovider-cli claim` on your Mac for a fresh link.";
+          withCopy = true;
+        } else if (state.claim.error === "already_owned") {
+          msg = "This Mac is already linked to a different account. Contact the operator to unlink.";
+        } else if (state.claim.error === "proxy_missing") {
+          msg = "github_oauth_enabled is true but the coordinator has no GitHub OAuth endpoints. Set the flag to false or deploy the v0.2 coordinator.";
+        }
+        cardKids.push(el("p", { class: "h-sub" }, msg));
+        if (withCopy) {
+          cardKids.push(snippetNode("macprovider-cli claim", "claim-refresh"));
+        }
+      }
+      return el("div", { class: "signin-wrap" },
+        el("div", { class: "signin-card claim-card" }, cardKids));
+    }
+
+    function renderWaitingForMac() {
+      return el("div", null,
+        el("h1", { class: "surface-title" }, "Machine"),
+        el("div", { class: "panel" },
+          el("h2", null, "Waiting for a Mac to come online"),
+          el("p", null, "Install MacProvider on a Mac. After install, your Mac will auto-open a browser to link itself."),
+          snippetNode("curl -fsSL https://get.streamvc.live/install.sh | bash", "waiting-install")));
+    }
+
+    function renderProviderChooser() {
+      var rows = state.githubProviders.map(function (p) {
+        var pid = p && p.provider_id ? p.provider_id : "";
+        return el("button", {
+          class: "provider-row",
+          onclick: function () { selectGitHubProvider(pid, true); },
+        },
+          el("span", { class: "mono" }, pid),
+          el("span", { class: "sub" }, p && p.last_seen_at ? ("last seen " + p.last_seen_at) : "select"));
+      });
+      return el("div", null,
+        el("h1", { class: "surface-title" }, "Machine"),
+        el("div", { class: "panel" },
+          el("h2", null, "Choose a Mac"),
+          el("div", { class: "provider-list" }, rows)));
+    }
+
+    function renderShell() {
+      var sidebar = renderSidebar();
+      var topbar = el("div", { class: "topbar" },
+        el("button", { class: "hamburger", onclick: function () { state.sidebarOpen = !state.sidebarOpen; render(); } }, "☰ Menu"),
+        el("span", null, "MacProvider — Provider Portal"));
+      var pane = el("div", { class: "surface-pane" });
+      if (state.proxyMissing) {
+        pane.appendChild(renderProxyMissingBanner());
+      }
+      if (state.route === "machine") {
+        if (state.cfg && state.cfg.github_oauth_enabled && state.githubAuthState === "waiting") {
+          pane.appendChild(renderWaitingForMac());
+        } else if (state.cfg && state.cfg.github_oauth_enabled && state.githubAuthState === "providers" && !state.session) {
+          pane.appendChild(renderProviderChooser());
+        } else {
+          pane.appendChild(renderMachine());
+        }
+      } else if (state.route === "setup") {
+        pane.appendChild(renderSetup());
+      } else if (state.route === "earn") {
+        pane.appendChild(renderEarn());
+      } else if (state.route === "monitoring") {
+        pane.appendChild(renderMonitoring());
+      } else if (state.route === "identity") {
+        pane.appendChild(renderIdentity());
+      }
+      var scrim = el("div", {
+        class: "scrim" + (state.sidebarOpen ? " show" : ""),
+        onclick: function () { state.sidebarOpen = false; render(); },
+      });
+      return el("div", { class: "shell" },
+        sidebar,
+        el("div", { class: "main" }, topbar, pane),
+        scrim);
+    }
+
+    function renderSidebar() {
+      var items = [
+        { id: "machine",    label: "Machine" },
+      ];
+      if (!(state.cfg && state.cfg.github_oauth_enabled && !state.session)) {
+        items.push(
+          { id: "setup",      label: "Setup & Updates" },
+          { id: "earn",       label: "Earn" },
+          { id: "monitoring", label: "Monitoring" },
+          { id: "identity",   label: "Identity" }
+        );
+      }
+      var navNodes = items.map(function (it) {
+        return el("button", {
+          class: "nav-item" + (state.route === it.id ? " active" : ""),
+          onclick: function () {
+            state.route = it.id;
+            state.sidebarOpen = false;
+            render();
+            if (it.id === "machine") {
+              earnFetch("machine");
+            } else if (it.id === "setup") {
+              releasesFetch();
+            } else if (it.id === "earn") {
+              earnFetch("earn");
+            }
+          },
+        }, it.label);
+      });
+      return el("aside", { class: "sidebar" + (state.sidebarOpen ? " open" : "") },
+        el("div", { class: "brand" },
+          "MacProvider",
+          el("span", { class: "brand-sub" }, "Provider Portal")),
+        el("nav", { class: "nav" }, navNodes),
+        el("div", { class: "nav-spacer" }),
+        el("div", { class: "nav-footer" },
+          el("a", { href: "https://api.streamvc.live/docs", target: "_blank", rel: "noopener noreferrer" }, "↗ API Docs"),
+          el("button", { onclick: signOut }, "⏋ Sign out")));
+    }
+
+    function renderProxyMissingBanner() {
+      return el("div", { class: "banner bad" },
+        el("strong", null, "Same-origin proxy missing. "),
+        "The portal expects the operator's reverse proxy on this origin to forward ",
+        el("code", null, "/v1/pool/check"),
+        " and ",
+        el("code", null, "/providers/{id}/earnings"),
+        ", plus ",
+        el("code", null, "/v1/auth/github/*"),
+        ", ",
+        el("code", null, "/v1/auth/me/*"),
+        ", ",
+        el("code", null, "/v1/auth/logout"),
+        ", and ",
+        el("code", null, "/v1/install/pair/refresh"),
+        " to the coordinator. See SPEC-014 §3 and Open Q9.");
+    }
+
+    function renderStub(phaseLabel, title) {
+      return el("div", null,
+        el("h1", { class: "surface-title" }, title),
+        el("div", { class: "panel" },
+          el("p", null, "Coming in ", phaseLabel, ".")));
+    }
+
+    function snippetNode(text, key) {
+      var codeEl = el("code", { class: "mono" }, text);
+      var copied = state.copyEcho === key;
+      var btn = el("button", {
+        class: "copy-btn",
+        onclick: function () { copyText(text, key); },
+      }, copied ? "Copied" : "Copy");
+      return el("div", { class: "snippet" }, codeEl, btn);
+    }
+
+    /* ---- Surface B — Setup & Updates ---- */
+    function renderSetup() {
+      var wrap = el("div", null);
+      wrap.appendChild(el("h1", { class: "surface-title" }, "Setup & Updates"));
+      wrap.appendChild(renderRequirementsGrid());
+      wrap.appendChild(renderSizingCard());
+      wrap.appendChild(renderSetupSteps());
+      wrap.appendChild(renderReleasesFeed());
+      return wrap;
+    }
+
+    function renderRequirementsGrid() {
+      var rows = [
+        { lbl: "Hardware", val: "Apple Silicon Mac (M1, M2, M3, M4)" },
+        { lbl: "OS",       val: "macOS 14 (Sonoma) or later" },
+        { lbl: "Disk",     val: "~4-8 GB free disk space" },
+        { lbl: "Network",  val: "Internet connection" },
+      ];
+      var cards = rows.map(function (r) {
+        return el("div", { class: "req-card" },
+          el("div", { class: "req-lbl" }, r.lbl),
+          el("div", { class: "req-val" }, r.val));
+      });
+      return el("div", { class: "section" },
+        el("h2", { class: "section-h" }, "Requirements"),
+        el("p", { class: "section-sub" }, "SPEC-003 §5 / FR-D1."),
+        el("div", { class: "grid-4" }, cards));
+    }
+
+    function renderSizingCard() {
+      var rows = [
+        ["8 GB",   "Llama 3.2 3B",                  "Llama 3.2 3B"],
+        ["16 GB",  "Llama 3.2 3B / Qwen 2.5 7B",    "Qwen 2.5 7B"],
+        ["24 GB+", "+ Qwen 2.5 14B",                "Qwen 2.5 14B"],
+      ];
+      var thead = el("thead", null,
+        el("tr", null,
+          el("th", null, "RAM"),
+          el("th", null, "Recommended model"),
+          el("th", null, "Default")));
+      var tbody = el("tbody", null,
+        rows.map(function (r) {
+          return el("tr", null,
+            el("td", null, r[0]),
+            el("td", null, r[1]),
+            el("td", null, r[2]));
+        }));
+      return el("div", { class: "section" },
+        el("h2", { class: "section-h" }, "RAM-to-model sizing"),
+        el("p", { class: "section-sub" }, "SPEC-003 §5 / FR-D2 + FR-D2.1."),
+        el("div", { class: "sizing-card" },
+          el("table", null, thead, tbody),
+          el("div", { class: "hint-foot" }, "FR-D2 is a recommendation, not a hard requirement.")));
+    }
+
+    function renderSetupSteps() {
+      var steps = [
+        {
+          n: 1,
+          title: "Install",
+          body: "Run the install script once per Mac. The script writes the binary, the LaunchAgent, and the default config under ~/.config/macprovider/.",
+          snip: "curl -fsSL https://get.streamvc.live/install.sh | bash",
+          key: "step1-install",
+          cite: "SPEC-003 §4 / FR-C2.",
+        },
+        {
+          n: 2,
+          title: "Verify routable",
+          body: "Inspect local provider state — provider_id, tier, last admission. Run this after install and any time the Machine surface here shows offline.",
+          snip: "macprovider-cli status",
+          key: "step2-status",
+          cite: "SPEC-003 §4 / FR-C4 (per SPEC-003 §6.2).",
+        },
+        {
+          n: 3,
+          title: "(Optional) Autotune",
+          body: "Run before serving to pick conservative kv-bits / context / batch values. The portal does not render any autotune output — SPEC-013 §6 / NFR-4 forbids non-HF egress during autotune.",
+          snip: "macprovider-cli autotune",
+          key: "step3-autotune",
+          cite: "SPEC-013 §6 / NFR-4.",
+        },
+      ];
+      var cards = steps.map(function (s) {
+        return el("div", { class: "step-card" },
+          el("div", { class: "step-h" },
+            el("span", { class: "step-num" }, String(s.n)),
+            el("span", { class: "step-title" }, s.title)),
+          el("div", { class: "step-body" }, s.body),
+          snippetNode(s.snip, s.key),
+          el("div", { class: "step-cite" }, s.cite));
+      });
+      return el("div", { class: "section" },
+        el("h2", { class: "section-h" }, "Setup steps"),
+        cards);
+    }
+
+    function renderReleasesFeed() {
+      var owner = state.cfg.releases_repo_owner_name;
+      var section = el("div", { class: "section" },
+        el("h2", { class: "section-h" }, "Releases — " + owner),
+        el("p", { class: "section-sub" },
+          "GitHub Releases for ",
+          el("code", { class: "mono" }, owner),
+          ". Cached in memory for 5 minutes."));
+      if (state.releases.err) {
+        section.appendChild(el("div", { class: "banner bad" }, state.releases.err));
+      }
+      var hasList = state.releases.list && state.releases.list.length;
+      if (!hasList && state.releases.inflight) {
+        section.appendChild(el("div", { class: "panel" },
+          el("p", null, "Loading releases…")));
+      } else if (!hasList && !state.releases.err) {
+        section.appendChild(el("div", { class: "panel" },
+          el("p", null, "No releases yet.")));
+      } else if (hasList) {
+        var list = el("div", { class: "release-list" });
+        var entries = state.releases.list.slice(0, RELEASES_MAX_ENTRIES);
+        entries.forEach(function (r) { list.appendChild(renderReleaseCard(r)); });
+        section.appendChild(list);
+      }
+      return section;
+    }
+
+    function renderReleaseCard(r) {
+      var tag = (r && (r.tag_name || r.name)) ? (r.tag_name || r.name) : "(untagged)";
+      var date = "";
+      if (r && typeof r.published_at === "string" && r.published_at.length >= 10) {
+        date = r.published_at.slice(0, 10);
+      }
+      var body = (r && typeof r.body === "string") ? r.body : "";
+      var cardKids = [
+        el("div", { class: "rel-head" },
+          el("span", { class: "rel-tag mono" }, tag),
+          el("span", { class: "rel-spacer" }),
+          date ? el("span", { class: "rel-date" }, date) : null),
+      ];
+      if (body) {
+        cardKids.push(el("details", null,
+          el("summary", null, "Release notes"),
+          el("pre", { class: "rel-body mono" }, body)));
+      }
+      var updateCmd = "macprovider-cli update";
+      cardKids.push(el("div", { class: "rel-cta" },
+        snippetNode(updateCmd, "rel-update-" + tag)));
+      cardKids.push(el("div", { class: "step-cite" }, "SPEC-003 §4 / FR-C3 (per §6.2)."));
+      return el("div", { class: "release-card" }, cardKids);
+    }
+
+    /* ---- Surface C — Earn ---- */
+    function renderEarn() {
+      var d = state.earn.data;
+      var loading = state.earn.inflight && !d;
+      var totalTxt = d && typeof d.total_credits === "number" ? fmtInt(d.total_credits) : (loading ? "…" : "—");
+      var curTxt = d && typeof d.current_window_credits === "number" ? fmtInt(d.current_window_credits) : (loading ? "…" : "—");
+      var lp = d && d.last_payout_ready ? d.last_payout_ready : null;
+      var lpVal = lp && typeof lp.provider_credits === "number" ? fmtInt(lp.provider_credits) : (loading ? "…" : "—");
+      var lpSub = lp && lp.window_start_utc && lp.window_end_utc
+        ? (lp.window_start_utc + " → " + lp.window_end_utc)
+        : null;
+      var errSub = state.earn.err
+        ? "Earnings request returned HTTP " + state.earn.err.status + "."
+        : null;
+      var creditsRow = el("div", { class: "counters" },
+        el("div", { class: "card" },
+          el("h3", null, "Lifetime credits"),
+          el("div", { class: "val mono" }, totalTxt),
+          el("div", { class: "sub" }, "total_credits"),
+          errSub ? el("div", { class: "sub" }, errSub) : null),
+        el("div", { class: "card" },
+          el("h3", null, "Current window"),
+          el("div", { class: "val mono" }, curTxt),
+          el("div", { class: "sub" }, "current_window_credits")),
+        el("div", { class: "card" },
+          el("h3", null, "Last payout-ready window"),
+          el("div", { class: "val mono" }, lpVal),
+          el("div", { class: "sub" }, "last_payout_ready.provider_credits"),
+          lpSub ? el("div", { class: "sub mono" }, lpSub) : null));
+      var fiatCard = el("div", { class: "fiat-card" },
+        el("h3", null, "Fiat payout rail"),
+        el("div", { class: "fiat-body" }, "Fiat payout rail not yet specified — future spec."),
+        el("div", { class: "fiat-cite" }, "SPEC-005 §1.3 / §2.1 D1; SPEC-014 Open Q3."));
+      return el("div", null,
+        el("h1", { class: "surface-title" }, "Earn"),
+        el("h2", { class: "section-h" }, "Credit totals"),
+        creditsRow,
+        el("div", { style: "margin-top:18px;" },
+          el("h2", { class: "section-h" }, "Payout status"),
+          fiatCard));
+    }
+
+    /* ---- Surface D — Monitoring (placeholder) ---- */
+    function renderMonitoring() {
+      return el("div", null,
+        el("h1", { class: "surface-title" }, "Monitoring"),
+        el("div", { class: "monitor-card" },
+          el("h3", null, "Monitoring — coming after SPEC-002 amendment"),
+          el("ul", null,
+            el("li", null, "Uptime history (24 h / 7 d / 30 d) — needs Open Q5 (SPEC-002 amendment)."),
+            el("li", null, "Current routing weight — needs Open Q5 (SPEC-002 amendment)."),
+            el("li", null, "Live request tail — needs Open Q5 AND a privacy-redaction policy decision (which fields a provider may see; what redaction applies to buyer prompts, completions, identity, API keys, and IPs).")),
+          el("div", { class: "mon-cite" }, "SPEC-014 §4.4.")));
+    }
+
+    /* ---- Surface E — Identity (read-only) ---- */
+    function renderIdentity() {
+      var pool = state.pool.data;
+      var tier = pool && pool.tier ? pool.tier : "—";
+      var stt = pool && pool.state ? pool.state : "—";
+      var coordBase = state.cfg && state.cfg.coordinator_base_url ? state.cfg.coordinator_base_url : "—";
+      var pillCls;
+      if (tier === "pinned") pillCls = "pill online";
+      else if (tier === "provisional") pillCls = "pill unknown";
+      else pillCls = "pill unknown";
+      var grid = el("div", { class: "id-grid" },
+        el("span", { class: "id-lbl" }, "provider_id"),
+        el("span", { class: "id-val mono" }, state.session.provider_id),
+        el("span", { class: "id-lbl" }, "Tier"),
+        el("span", { class: "id-val" }, el("span", { class: pillCls }, tier)),
+        el("span", { class: "id-lbl" }, "State"),
+        el("span", { class: "id-val mono" }, stt),
+        el("span", { class: "id-lbl" }, "Coordinator"),
+        el("span", { class: "id-val mono" }, coordBase));
+      var foot = el("div", { class: "id-foot" },
+        "Hardware and runtime fields (model, RAM, capacity, binary_version, attestation, endpoint_url, …) are deferred behind SPEC-014 Open Q5. Token rotation and machine removal are deferred behind Open Q6.");
+      return el("div", null,
+        el("h1", { class: "surface-title" }, "Identity"),
+        el("div", { class: "id-card" }, grid, foot));
+    }
+
+    /* ---- Surface A — Machine ---- */
+    function renderMachine() {
+      var wrap = el("div", null);
+      wrap.appendChild(el("h1", { class: "surface-title" }, "Machine"));
+      wrap.appendChild(renderHeadstrip());
+      wrap.appendChild(renderCounters());
+      wrap.appendChild(renderNeedsAttention());
+      return wrap;
+    }
+
+    function renderHeadstrip() {
+      var pool = state.pool.data;
+      var tier = pool && pool.tier ? pool.tier : "—";
+      var stt = pool && pool.state ? pool.state : "—";
+      var pillCls, pillTxt;
+      if (!pool) {
+        pillCls = "pill unknown"; pillTxt = "Loading…";
+      } else if (pool.state === "ready" || pool.state === "draining") {
+        pillCls = "pill online"; pillTxt = "Online";
+      } else {
+        pillCls = "pill offline"; pillTxt = "Offline";
+      }
+      var stamp = renderStampNode();
+      var refreshBtn = el("button", {
+        class: "refresh-btn",
+        disabled: state.pool.inflight,
+        onclick: function () { poolCheck(); },
+      }, state.pool.inflight ? "Refreshing…" : "Refresh");
+      return el("div", { class: "headstrip", id: "headstrip" },
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "provider_id"),
+          el("span", { class: "vl mono" }, state.session.provider_id)),
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "tier"),
+          el("span", { class: "vl" }, tier)),
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "state"),
+          el("span", { class: "vl" }, stt)),
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "status"),
+          el("span", { class: pillCls }, pillTxt)),
+        el("div", { class: "spacer" }),
+        el("div", { class: "field" },
+          el("span", { class: "lbl" }, "pool poll"),
+          el("span", { class: "stamp", id: "pool-stamp" }, stamp)),
+        refreshBtn);
+    }
+
+    function renderStampNode() {
+      return computeStampText();
+    }
+    function computeStampText() {
+      if (!state.pool.ts) return "No successful poll yet";
+      var ageMs = Date.now() - state.pool.ts;
+      if (ageMs > STALE_FACTOR * POOL_POLL_MS) {
+        return "stale";
+      }
+      var secs = Math.max(0, Math.floor(ageMs / 1000));
+      return "Last refreshed " + secs + "s ago";
+    }
+    function renderStampOnly() {
+      var node = document.getElementById("pool-stamp");
+      if (!node) return;
+      clear(node);
+      var txt = computeStampText();
+      node.appendChild(document.createTextNode(txt));
+      if (txt === "stale") {
+        if (!node.classList.contains("stale")) node.classList.add("stale");
+      } else {
+        if (node.classList.contains("stale")) node.classList.remove("stale");
+      }
+    }
+
+    function renderCounters() {
+      var d = state.earn.data;
+      var loading = state.earn.inflight && !d;
+      var totalTxt = d && typeof d.total_credits === "number" ? fmtInt(d.total_credits) : (loading ? "…" : "—");
+      var curTxt = d && typeof d.current_window_credits === "number" ? fmtInt(d.current_window_credits) : (loading ? "…" : "—");
+      var lp = d && d.last_payout_ready ? d.last_payout_ready : null;
+      var lpVal = lp && typeof lp.provider_credits === "number" ? fmtInt(lp.provider_credits) : (loading ? "…" : "—");
+      var lpSub = lp && lp.window_start_utc && lp.window_end_utc
+        ? (lp.window_start_utc + " → " + lp.window_end_utc)
+        : null;
+      var errSub = state.earn.err
+        ? "Earnings request returned HTTP " + state.earn.err.status + "."
+        : null;
+      return el("div", { class: "counters" },
+        el("div", { class: "card" },
+          el("h3", null, "Lifetime credits"),
+          el("div", { class: "val mono" }, totalTxt),
+          el("div", { class: "sub" }, "total_credits"),
+          errSub ? el("div", { class: "sub" }, errSub) : null),
+        el("div", { class: "card" },
+          el("h3", null, "Current window"),
+          el("div", { class: "val mono" }, curTxt),
+          el("div", { class: "sub" }, "current_window_credits")),
+        el("div", { class: "card" },
+          el("h3", null, "Last payout-ready window"),
+          el("div", { class: "val mono" }, lpVal),
+          el("div", { class: "sub" }, "last_payout_ready.provider_credits"),
+          lpSub ? el("div", { class: "sub mono" }, lpSub) : null));
+    }
+
+    function renderNeedsAttention() {
+      var st = state.pool.data ? state.pool.data.state : null;
+      var panelBody;
+      if (st === "unavailable" || st === "unknown") {
+        var rowTitle = "This machine is currently " + st + ".";
+        var hint = "Run macprovider-cli status to inspect local state; if the binary is healthy, re-check in a few seconds.";
+        var cmd = "macprovider-cli status";
+        var copyKey = "cli-status";
+        var copyBtn = el("button", {
+          class: "copy-btn",
+          onclick: function () { copyText(cmd, copyKey); },
+        }, "Copy");
+        var echo = state.copyEcho === copyKey ? el("span", { class: "copy-ok" }, "Copied") : null;
+        panelBody = el("div", { class: "row" },
+          el("div", { class: "row-title" }, rowTitle),
+          el("div", { class: "row-hint" }, hint),
+          el("div", { class: "row-cta" },
+            el("code", { class: "mono" }, cmd),
+            copyBtn,
+            echo));
+      } else {
+        panelBody = el("div", { class: "row muted" },
+          el("div", null, "Nothing to do — this Mac looks healthy."));
+      }
+      return el("div", { class: "panel" },
+        el("h2", null, "Needs attention"),
+        panelBody);
+    }
+
+    /* =====================================================================
+     * Formatting
+     * ===================================================================== */
+    function fmtInt(n) {
+      if (typeof n !== "number" || !isFinite(n)) return "—";
+      try { return n.toLocaleString("en-US"); } catch (_) { return String(n); }
+    }
+
+    /* =====================================================================
+     * Bootstrap
+     * ===================================================================== */
+    function bootstrap() {
+      render();
+      loadConfig().then(function () {
+        if (state.cfg && state.cfg.github_oauth_enabled) {
+          initializeGitHubMode();
+          return;
+        }
+        render();
+      }, function () {
+        render();
+      });
+    }
+
+    window.addEventListener("popstate", function () {
+      if (state.cfg && state.cfg.github_oauth_enabled) {
+        loadGitHubHome();
+      }
+    });
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", bootstrap);
+    } else {
+      bootstrap();
+    }
+  </script>
+</body>
+</html>

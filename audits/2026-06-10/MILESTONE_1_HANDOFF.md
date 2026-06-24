@@ -63,6 +63,12 @@ entirely."** None of the five flags are asserted by the M1-6 deploy gate yet.
 When the team picks a target posture, Part C is a ~10-line addition to
 `check-deploy-config.sh` (one `g(coord, "<flag>")` check per asserted flag).
 
+**2026-06-22 update:** The deferral is now logged in `beta/DECISION_CRITERIA.md` as
+Entry 80, with revisit triggers (pool expansion beyond trusted Macs / ergonomic
+catalog signing / privacy-posture buyer asking for attestation-gated routing).
+DC Entry 80 is the canonical record; if this handoff doc and the DC entry ever
+disagree, the DC entry wins.
+
 ### Gate C — operator-driven, by design
 
 M1-1's `require_provider_tokens=true` flip and M1-7's canary day are operator

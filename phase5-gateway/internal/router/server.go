@@ -355,7 +355,9 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	upReq.Header.Set("X-Request-ID", newUUID())
-	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
+	// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
+	// OperatorKey so a not-yet-upgraded coordinator keeps accepting us.
+	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
 	resp, err := s.client.Do(upReq)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -538,6 +540,11 @@ func (s *Server) statusFromPoolz(ctx context.Context) (statusResponse, error) {
 	if err != nil {
 		return statusResponse{}, err
 	}
+	// /poolz is OPERATOR-ONLY on the coordinator (OperatorOnlyBearerMatches):
+	// it rejects the service_token. Unlike the /internal/* upstream calls,
+	// this poll must send OperatorKey directly, NOT UpstreamCoordinatorBearer()
+	// (which prefers ServiceToken once the M3-2 cutover sets it). Validate
+	// guarantees OperatorKey is non-empty.
 	req.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.OperatorKey)
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -730,18 +737,33 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 }
 
 func writeError(w http.ResponseWriter, status int, typ, code, message string) {
-	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "code": code}})
+	writeJSON(w, status, map[string]any{"error": map[string]any{"message": message, "type": typ, "param": nil, "code": code}})
 }
 
 func copyCleanHeaders(dst, src http.Header) {
+	copyCleanHeadersWithReceipt(dst, src, false)
+}
+
+func copyReceiptEligibleHeaders(dst, src http.Header) {
+	copyCleanHeadersWithReceipt(dst, src, true)
+}
+
+func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 	for key, values := range src {
-		if isMacProviderHeader(key) || strings.EqualFold(key, "Content-Length") {
+		if strings.EqualFold(key, "Content-Length") {
+			continue
+		}
+		if isMacProviderHeader(key) && !(allowReceipt && isReceiptResponseHeader(key)) {
 			continue
 		}
 		for _, value := range values {
 			dst.Add(key, value)
 		}
 	}
+}
+
+func isReceiptResponseHeader(key string) bool {
+	return strings.EqualFold(key, "X-MacProvider-Receipt")
 }
 
 func stripInternalMacProviderHeaders(header http.Header) []string {

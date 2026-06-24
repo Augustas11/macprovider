@@ -25,6 +25,31 @@ func TestProviderTokensRequiredByDefault(t *testing.T) {
 	}
 }
 
+func TestCanaryValidationRequiresPrivateChallengeBankWhenEnabled(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Pool.CanaryEnabled = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "canary_challenges") {
+		t.Fatalf("enabled canary without challenges validation err=%v", err)
+	}
+
+	cfg.Pool.CanaryChallenges = []CanaryChallengeConfig{{
+		Prompt:   "Which US state uses postal abbreviation VT?",
+		Expected: "Vermont-{nonce}",
+	}}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "{nonce}") {
+		t.Fatalf("challenge without prompt nonce validation err=%v", err)
+	}
+
+	cfg.Pool.CanaryChallenges = []CanaryChallengeConfig{{
+		Prompt:   "Which US state uses postal abbreviation VT? Append -{nonce}.",
+		Expected: "Vermont-{nonce}",
+	}}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("enabled canary with private challenge bank should validate: %v", err)
+	}
+}
+
 func TestProviderWebSocketBoundsDefaultAndValidate(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"
@@ -91,7 +116,21 @@ func TestSpec005BillingDefaultsAndValidation(t *testing.T) {
 	cfg.Auth.OperatorKey = "operator-key"
 	cfg.Storage.AuditLogRetentionDays = 0
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "audit_log_retention_days") {
-		t.Fatalf("audit log retention validation err=%v", err)
+		t.Fatalf("audit log retention=0 validation err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Storage.AuditLogRetentionDays = 89
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "compliance floor") {
+		t.Fatalf("audit log retention=89 (below 90-day floor) should fail; err=%v", err)
+	}
+
+	cfg = Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Storage.AuditLogRetentionDays = 90
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("audit log retention=90 should pass validation: %v", err)
 	}
 
 	cfg = Default()

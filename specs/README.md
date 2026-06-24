@@ -2,9 +2,9 @@
 
 | SPEC | Title | Current version | Link |
 |---|---|---|---|
-| SPEC-001 | Phase 3 binary (Swift provider CLI) | v1.3 | [SPEC-001-phase3-binary.md](SPEC-001-phase3-binary.md) |
+| SPEC-001 | Phase 3 binary (Swift provider CLI) | v1.4 | [SPEC-001-phase3-binary.md](SPEC-001-phase3-binary.md) |
 | SPEC-002 | Phase 4 coordinator (Go router) | v1.3.5 | [SPEC-002-coordinator.md](SPEC-002-coordinator.md) |
-| SPEC-003 | Open onboarding / distribution / lifecycle | v0.7 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
+| SPEC-003 | Open onboarding / distribution / lifecycle | v0.9.2 | [SPEC-003-open-onboarding.md](SPEC-003-open-onboarding.md) |
 | SPEC-004 | Smart router | v0.3.1 | [SPEC-004-smart-router.md](SPEC-004-smart-router.md) |
 | SPEC-005 | Billing, settlement, provider rewards | v0.3 | [SPEC-005-billing.md](SPEC-005-billing.md) |
 | SPEC-006 | Buyer API gateway | v0.8.3 | [SPEC-006-buyer-api.md](SPEC-006-buyer-api.md) |
@@ -14,6 +14,7 @@
 | SPEC-010 | Provider model catalog | v1.5 | [SPEC-010-model-catalog.md](SPEC-010-model-catalog.md) |
 | SPEC-011 | Operator-pushed warm swap | v0.5 | [SPEC-011-operator-pushed-warm-swap.md](SPEC-011-operator-pushed-warm-swap.md) |
 | SPEC-012 | Source spec history | v0.3 | [SPEC-012-source.md](SPEC-012-source.md) |
+| SPEC-013 | `macprovider-cli autotune` subcommand | v0.3 | [SPEC-013-cli-autotune.md](SPEC-013-cli-autotune.md) |
 
 **Version of record is line 3 of each spec; do not trust this index for compatibility decisions — read the spec header.** This index drifts; the spec headers do not. When in doubt, `grep -m1 '^\*\*Version' specs/SPEC-*.md`.
 

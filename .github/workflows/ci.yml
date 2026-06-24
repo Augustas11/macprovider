@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        # Pinned to actions/checkout v4.2.2. Re-resolve deliberately
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
         # when upgrading the action rather than trusting a mutable tag.
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
@@ -40,7 +40,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Checkout
-        # Pinned to actions/checkout v4.2.2. Re-resolve deliberately
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
         # when upgrading the action rather than trusting a mutable tag.
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
@@ -57,3 +57,266 @@ jobs:
 
       - name: make test-gateway
         run: make test-gateway
+
+  phase7-verify:
+    name: phase7-verify (go vet + test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Assert dependency allowlist (only golang.org/x/text permitted, per SPEC-015 v0.2 §10.3 NFC normalization exception)
+        run: |
+          # Whitelist: golang.org/x/text — required for NFC normalization in
+          # phase7-verify/internal/jcs/. No other external modules are permitted
+          # per the BUILD prompt's "Dependencies (HARD constraint)" section.
+          # The audit prompt cross-checks this allowlist.
+          DISALLOWED=$(grep -v '^golang\.org/x/text \|^golang\.org/x/text/' phase7-verify/go.sum | grep -v '^$' || true)
+          if [ -n "$DISALLOWED" ]; then
+            echo "phase7-verify/go.sum contains entries outside the allowlist:"
+            echo "$DISALLOWED"
+            echo ""
+            echo "Allowlist: golang.org/x/text only."
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: phase7-verify/go.mod
+          cache-dependency-path: phase7-verify/go.sum
+
+      - name: go vet phase7-verify
+        run: cd phase7-verify && go vet ./...
+
+      - name: go test phase7-verify
+        run: cd phase7-verify && go test ./... -race -count=1
+
+  phase7-verify-integration:
+    name: phase7-verify integration (fixtures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Assert dependency allowlist (only golang.org/x/text permitted, per SPEC-015 v0.2 §10.3 NFC normalization exception)
+        run: |
+          DISALLOWED=$(grep -v '^golang\.org/x/text \|^golang\.org/x/text/' phase7-verify/go.sum | grep -v '^$' || true)
+          if [ -n "$DISALLOWED" ]; then
+            echo "phase7-verify/go.sum contains entries outside the allowlist:"
+            echo "$DISALLOWED"
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: phase7-verify/go.mod
+          cache-dependency-path: phase7-verify/go.sum
+
+      - name: Run fixture integration test
+        run: cd phase7-verify && go test -race -count=1 -tags=integration -timeout 60s .
+
+  integration:
+    name: integration (cross-service)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Closes TEST-6 / M2-9 / M3-11 (audits/2026-06-10/REPO_AUDIT.md:117).
+    # Builds REAL coordinator + gateway binaries and exercises the
+    # gateway↔coordinator HTTP boundary that
+    # phase5-gateway/internal/router/integration_test.go currently
+    # mocks via httptest. Separate job from `coordinator` and `gateway`
+    # so a failure here can be diagnosed without scrolling past either
+    # service's own vet+test logs.
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
+        # when upgrading instead of trusting the mutable tag in this required
+        # pairing/security gate.
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version-file: test/integration/go.mod
+          cache-dependency-path: test/integration/go.sum
+
+      - name: Run cross-service integration and SPEC-015 AC manifest tests
+        working-directory: test/integration
+        # -count=1 disables the test cache (the harness builds REAL
+        # binaries from working-tree source; a cached pass would hide a
+        # bug in a freshly-touched coordinator/gateway file).
+        # -race catches data races in the harness goroutines (fake
+        # provider + log pumps).
+        run: go test -race -count=1 -timeout 5m ./...
+
+  spec-014-v0-2-gate:
+    name: spec-014-v0-2-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # SPEC-014 v0.2 Phase 2E gate: keep the GitHub-auth pairing surface
+    # deployable only when the portal bundle guard and live pairing
+    # integration scenarios both pass. The workflow already runs on every
+    # PR and main push; this job is intentionally present for all runs so
+    # branch protection can require a stable job name.
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        # Pinned to actions/setup-go v6 (4a360112). Re-resolve deliberately
+        # when upgrading instead of trusting the mutable tag in this required
+        # pairing/security gate.
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version-file: test/integration/go.mod
+          cache-dependency-path: test/integration/go.sum
+
+      - name: Verify Node runtime for portal probe
+        run: node --version
+
+      - name: Run provider portal bundle guard
+        run: bash frontdoor/provider-portal/check-bundle.sh
+
+      - name: Run SPEC-014 v0.2 pairing scenarios
+        working-directory: test/integration
+        run: go test -race -count=1 -timeout 5m ./spec_014_v0_2_pairing
+
+  dist-tooling:
+    name: deploy tooling (check-deploy-config gate)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # Guards the fail-closed C2 pre-deploy gate
+    # (phase4-coordinator/dist/check-deploy-config.sh), also invoked by
+    # phase5-gateway/dist/deploy-pearl-vps.sh. Bash + python3 only — no Go
+    # build — so it stays a fast, isolated job. Closes the 2026-06-17
+    # regression where an env:NAME-indirected operator_key false-failed the
+    # gate and pushed operators into SKIP_C2_CHECK=1.
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: make test-dist
+        run: make test-dist
+
+  swift-tests:
+    name: phase3-binary (swift test)
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        # Pinned to actions/checkout v6 (df4cb1c0). Re-resolve deliberately
+        # when upgrading the action rather than trusting a mutable tag.
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Cache SwiftPM
+        # Pinned to actions/cache v4.2.2.
+        uses: actions/cache@d4323d4df104b026a6aa633fdb11d772146be0bf
+        with:
+          path: phase3-binary/.build
+          key: spm-${{ runner.os }}-${{ hashFiles('phase3-binary/Package.resolved') }}
+
+      - name: Run Swift tests
+        working-directory: phase3-binary
+        run: swift test --parallel
+
+
+  spec-015-acceptance:
+    name: spec-015-acceptance
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c
+        with:
+          go-version-file: test/integration/go.mod
+          cache-dependency-path: test/integration/go.sum
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+      - name: Run SPEC-015 acceptance runner
+        run: bash test/integration/spec015/run_acceptance.sh
+
+  ci-required:
+    name: ci-required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    needs:
+      - coordinator
+      - gateway
+      - phase7-verify
+      - phase7-verify-integration
+      - integration
+      - spec-014-v0-2-gate
+      - dist-tooling
+      - swift-tests
+      - spec-015-acceptance
+    if: always()
+    steps:
+      - name: Require all CI jobs
+        shell: bash
+        env:
+          COORDINATOR_RESULT: ${{ needs.coordinator.result }}
+          GATEWAY_RESULT: ${{ needs.gateway.result }}
+          PHASE7_VERIFY_RESULT: ${{ needs.phase7-verify.result }}
+          PHASE7_VERIFY_INTEGRATION_RESULT: ${{ needs.phase7-verify-integration.result }}
+          INTEGRATION_RESULT: ${{ needs.integration.result }}
+          SPEC_014_RESULT: ${{ needs.spec-014-v0-2-gate.result }}
+          DIST_TOOLING_RESULT: ${{ needs.dist-tooling.result }}
+          SWIFT_TESTS_RESULT: ${{ needs.swift-tests.result }}
+          SPEC_015_RESULT: ${{ needs.spec-015-acceptance.result }}
+        run: |
+          set -euo pipefail
+
+          failed=0
+          for check in \
+            "phase4-coordinator (go vet + test):${COORDINATOR_RESULT}" \
+            "phase5-gateway (go vet + test):${GATEWAY_RESULT}" \
+            "phase7-verify (go vet + test):${PHASE7_VERIFY_RESULT}" \
+            "phase7-verify integration (fixtures):${PHASE7_VERIFY_INTEGRATION_RESULT}" \
+            "integration (cross-service):${INTEGRATION_RESULT}" \
+            "spec-014-v0-2-gate:${SPEC_014_RESULT}" \
+            "deploy tooling (check-deploy-config gate):${DIST_TOOLING_RESULT}" \
+            "phase3-binary (swift test):${SWIFT_TESTS_RESULT}" \
+            "spec-015-acceptance:${SPEC_015_RESULT}"
+          do
+            name="${check%%:*}"
+            result="${check#*:}"
+            if [ "$result" != "success" ]; then
+              printf '%s result=%s\n' "$name" "$result" >&2
+              failed=1
+            fi
+          done
+
+          exit "$failed"

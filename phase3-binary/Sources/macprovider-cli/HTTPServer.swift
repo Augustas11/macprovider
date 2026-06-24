@@ -3,10 +3,11 @@ import MacProviderCore
 @preconcurrency import NIO
 @preconcurrency import NIOHTTP1
 
-struct HTTPServer {
+struct HTTPServer: Sendable {
     let config: AppConfig
     let modelRuntime: ModelRuntime
     let providerStatus: ProviderStatus
+    let receiptBuilder: ReceiptBuilder?
 
     func run() throws {
         let group = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
@@ -22,11 +23,13 @@ struct HTTPServer {
                     channel.pipeline.addHandler(
                         RouterHandler(
                             modelID: config.model,
+                            providerID: config.providerID,
                             coordinatorURL: config.coordinatorURL,
                             modelRuntime: modelRuntime,
                             providerStatus: providerStatus,
                             warmSwapEnabled: config.enableWarmSwap,
-                            maxBodyBytes: config.maxRequestBodyBytes
+                            maxBodyBytes: config.maxRequestBodyBytes,
+                            receiptBuilder: receiptBuilder
                         )
                     )
                 }
@@ -44,29 +47,35 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias OutboundOut = HTTPServerResponsePart
 
     private let modelID: String?
+    private let providerID: String?
     private let coordinatorURL: String?
     private let modelRuntime: ModelRuntime
     private let providerStatus: ProviderStatus
     private let warmSwapEnabled: Bool
     private let maxBodyBytes: Int
+    private let receiptBuilder: ReceiptBuilder?
     private var requestHead: HTTPRequestHead?
     private var bodyBuffer: ByteBuffer?
     private var bodyTooLarge = false
 
     init(
         modelID: String?,
+        providerID: String?,
         coordinatorURL: String?,
         modelRuntime: ModelRuntime,
         providerStatus: ProviderStatus,
         warmSwapEnabled: Bool,
-        maxBodyBytes: Int
+        maxBodyBytes: Int,
+        receiptBuilder: ReceiptBuilder? = nil
     ) {
         self.modelID = modelID
+        self.providerID = providerID
         self.coordinatorURL = coordinatorURL
         self.modelRuntime = modelRuntime
         self.providerStatus = providerStatus
         self.warmSwapEnabled = warmSwapEnabled
         self.maxBodyBytes = maxBodyBytes
+        self.receiptBuilder = receiptBuilder
     }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
@@ -180,10 +189,11 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
     private func handleStatus(context: ChannelHandlerContext) {
         let writer = ResponseWriter(context: context)
         let providerStatus = providerStatus
+        let providerID = providerID
         let coordinatorURL = coordinatorURL
-        Task.detached { @Sendable [providerStatus, writer, coordinatorURL] in
+        Task.detached { @Sendable [providerStatus, writer, providerID, coordinatorURL] in
             let snapshot = await providerStatus.snapshot()
-            writer.writeJSON(status: .ok, body: Self.statusResponse(snapshot, coordinatorURL: coordinatorURL))
+            writer.writeJSON(status: .ok, body: Self.statusResponse(snapshot, providerID: providerID, coordinatorURL: coordinatorURL))
         }
     }
 
@@ -193,14 +203,21 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         let writer = ResponseWriter(context: context)
         let modelRuntime = modelRuntime
         let warmSwapEnabled = warmSwapEnabled
+        let receiptBuilder = receiptBuilder
+        let providerID = providerID
+        let requestAcceptedAt = Date()
+        let auditRequestID = requestHead?.headers.first(name: "X-Request-ID") ?? UUID().uuidString
+        var parsedRequest: ChatCompletionRequest?
 
         do {
             let request = try ChatCompletionRequest.parse(data: data)
+            parsedRequest = request
             if !warmSwapEnabled {
                 try request.validateModelMatches(modelID)
             }
 
             if request.stream {
+                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .streamingRequest)
                 handleStreamingChatCompletions(
                     request: request,
                     writer: writer,
@@ -211,38 +228,197 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             }
 
             let providerStatus = providerStatus
-            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled] in
+            Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID] in
                 let startedAt = await providerStatus.beginRequest()
+                // SPEC-015 §M.2.2 atomic-read invariant — capture
+                // the pre-snapshot for warm-swap validation, then
+                // call `completeWithServedSnapshot` which returns
+                // the actor-isolated snapshot the runtime used to
+                // drive generation. Binding `model_hash` to the
+                // SERVED snapshot (not the pre-snapshot) closes the
+                // interleaving gap a separately-sampled
+                // `currentSnapshot()` would leave open. Error /
+                // catch paths fall back to the pre-snapshot for the
+                // §7.6 / AC-31 error-receipt hash inheritance
+                // (no served snapshot exists when complete() throws).
+                let preSnapshot = await modelRuntime.currentSnapshot()
+                let fallbackHashSource = Self.resolveModelHashSource(
+                    warmSwapEnabled: warmSwapEnabled,
+                    snapshot: preSnapshot
+                )
                 do {
-                    let snapshot = await modelRuntime.currentSnapshot()
+                    let snapshot = preSnapshot
                     if let error = Self.warmSwapRejectionError(for: snapshot) {
                         throw error
                     }
                     if warmSwapEnabled {
                         try request.validateModelMatches(snapshot.modelID)
                     }
-                    let completion = try await modelRuntime.complete(request)
+                    let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, shouldCancel: { false })
+                    let modelHashSource = Self.resolveModelHashSource(
+                        warmSwapEnabled: warmSwapEnabled,
+                        snapshot: servedSnapshot
+                    )
+                    let unixTsSeconds = Int64(Date().timeIntervalSince1970)
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
                     let response = Self.chatCompletionResponse(request: request, completion: completion)
-                    writer.writeJSON(status: .ok, body: response)
+                    let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+                    // SPEC-015 §M.2.2 — bind the receipt's
+                    // `model_hash` to the runtime-served snapshot
+                    // returned above by
+                    // `completeWithServedSnapshot`. That snapshot
+                    // was captured atomically inside the actor turn
+                    // that drove generation (validation, in-flight
+                    // registration, container.perform), closing the
+                    // interleaving gap a separately-sampled
+                    // `currentSnapshot()` would leave open.
+                    let receipt = try Self.receiptHeaderResult(
+                        providerID: providerID,
+                        receiptBuilder: receiptBuilder,
+                        request: request,
+                        outputContent: completion.content,
+                        outputToolCalls: nil,
+                        finishReason: completion.finishReason,
+                        ttftMs: ttftMs,
+                        tokensOut: Int64(completion.completionTokens),
+                        unixTsSeconds: unixTsSeconds,
+                        modelHashSource: modelHashSource
+                    )
+                    switch receipt {
+                    case .issued(let header):
+                        let tokensOut = Int64(completion.completionTokens)
+                        writer.writeJSON(status: .ok, body: response, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
+                            if delivered {
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: tokensOut, ttftMs: ttftMs, unixTs: unixTsSeconds)
+                            } else {
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                            }
+                        }
+                    case .omitted(let reason):
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                        writer.writeJSON(status: .ok, body: response)
+                    }
                 } catch is DrainCancelledError {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .modelSwapViolation)
                     writer.writeJSON(status: .serviceUnavailable, body: Self.swapDrainTimeoutEnvelope())
-                } catch let error as APIError {
+                } catch let apiErr as APIError {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                    writer.writeAPIError(error)
+                    do {
+                        let receipt = try Self.errorReceiptHeaderResult(
+                            providerID: providerID,
+                            receiptBuilder: receiptBuilder,
+                            request: request,
+                            error: apiErr,
+                            startedAt: startedAt,
+                            modelHashSource: fallbackHashSource
+                        )
+                        switch receipt {
+                        case .issued(let header, let ttftMs, let unixTs):
+                            writer.writeAPIError(apiErr, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
+                                if delivered {
+                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                } else {
+                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                }
+                            }
+                        case .omitted(let reason):
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                            writer.writeAPIError(apiErr)
+                        case .notReceiptEligible:
+                            writer.writeAPIError(apiErr)
+                        }
+                    } catch {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                        writer.writeAPIError(apiErr)
+                    }
                 } catch {
                     await providerStatus.finishRequest(startedAt: startedAt, completion: nil, failed: true)
-                    writer.writeAPIError(
+                    let apiError =
                         APIError(status: 503, message: "Model inference failed", type: "server_error", code: "model_not_loaded")
-                    )
+                    do {
+                        let receipt = try Self.errorReceiptHeaderResult(
+                            providerID: providerID,
+                            receiptBuilder: receiptBuilder,
+                            request: request,
+                            error: apiError,
+                            startedAt: startedAt,
+                            modelHashSource: fallbackHashSource
+                        )
+                        switch receipt {
+                        case .issued(let header, let ttftMs, let unixTs):
+                            writer.writeAPIError(apiError, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
+                                if delivered {
+                                    ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                                } else {
+                                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                                }
+                            }
+                        case .omitted(let reason):
+                            ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                            writer.writeAPIError(apiError)
+                        case .notReceiptEligible:
+                            writer.writeAPIError(apiError)
+                        }
+                    } catch {
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                        writer.writeAPIError(apiError)
+                    }
                 }
             }
-        } catch let error as APIError {
+        } catch let parseError as APIError {
             Task { [providerStatus] in
                 await providerStatus.recordError()
             }
-            writeAPIError(context: context, error)
+            if let request = parsedRequest, !request.stream {
+                let writer = ResponseWriter(context: context)
+                do {
+                    // Parse-error path: the request failed to validate
+                    // before any runtime snapshot was taken, so no
+                    // request-start container was selected.
+                    // §M.2.2 construction proof: every receipt commits
+                    // to the hash that started generation — no
+                    // generation started here, so emit JSON null
+                    // (§M.2.3 semantics) for the receipt's
+                    // `model_hash` field.
+                    // Parse-error path: the request failed validation
+                    // before any model selection. The receipt commits
+                    // to `model_hash: null` semantically — no
+                    // generation ran, no container served. §M.2.3
+                    // null encoding is the right wire shape (NOT
+                    // .ambiguous, which is reserved for SPEC-011
+                    // R-3.4.1 regressions on requests that DID reach
+                    // inference).
+                    let receipt = try Self.errorReceiptHeaderResult(
+                        providerID: providerID,
+                        receiptBuilder: receiptBuilder,
+                        request: request,
+                        error: parseError,
+                        startedAt: requestAcceptedAt,
+                        modelHashSource: .warmSwapDisabled
+                    )
+                    switch receipt {
+                    case .issued(let header, let ttftMs, let unixTs):
+                        writer.writeAPIError(parseError, extraHeaders: [(Self.receiptHeaderName, header)]) { delivered in
+                            if delivered {
+                                ReceiptAudit.emitIssued(providerID: providerID, requestID: auditRequestID, modelID: request.model, tokensOut: 0, ttftMs: ttftMs, unixTs: unixTs)
+                            } else {
+                                ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .writeFailed)
+                            }
+                        }
+                    case .omitted(let reason):
+                        ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: reason)
+                        writer.writeAPIError(parseError)
+                    case .notReceiptEligible:
+                        writer.writeAPIError(parseError)
+                    }
+                } catch {
+                    ReceiptAudit.emitOmitted(providerID: providerID, requestID: auditRequestID, reason: .constructionFailed)
+                    writer.writeAPIError(parseError)
+                }
+            } else {
+                writeAPIError(context: context, parseError)
+            }
         } catch {
             Task { [providerStatus] in
                 await providerStatus.recordError()
@@ -384,6 +560,207 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         ]
     }
 
+    static let receiptHeaderName = "X-MacProvider-Receipt"
+    static let maxReceiptHeaderBytes = 4096
+
+    enum ReceiptHeaderResult: Equatable {
+        case issued(String)
+        case omitted(ReceiptOmissionReason)
+    }
+
+    enum ErrorReceiptHeaderResult: Equatable {
+        case issued(String, ttftMs: Int64, unixTs: Int64)
+        case omitted(ReceiptOmissionReason)
+        case notReceiptEligible
+    }
+
+    static func receiptHeader(
+        providerID: String?,
+        receiptBuilder: ReceiptBuilder?,
+        request: ChatCompletionRequest,
+        outputContent: String,
+        outputToolCalls: [ToolCall]?,
+        finishReason: String,
+        ttftMs: Int64,
+        tokensOut: Int64,
+        unixTsSeconds: Int64,
+        modelHashSource: ReceiptModelHashSource
+    ) throws -> String? {
+        switch try receiptHeaderResult(
+            providerID: providerID,
+            receiptBuilder: receiptBuilder,
+            request: request,
+            outputContent: outputContent,
+            outputToolCalls: outputToolCalls,
+            finishReason: finishReason,
+            ttftMs: ttftMs,
+            tokensOut: tokensOut,
+            unixTsSeconds: unixTsSeconds,
+            modelHashSource: modelHashSource
+        ) {
+        case .issued(let header):
+            return header
+        case .omitted:
+            return nil
+        }
+    }
+
+    /// SPEC-015 §M.2 — map (warmSwapEnabled, request-start snapshot)
+    /// to the receipt's `model_hash` provenance. §M.2.2 defence-in-
+    /// depth: if warm-swap is ON but the snapshot didn't carry a
+    /// hash (SPEC-011 R-3.4.1 in-flight tracking regression), the
+    /// runtime cannot disambiguate which container served and the
+    /// receipt-emission MUST refuse.
+    static func resolveModelHashSource(
+        warmSwapEnabled: Bool,
+        snapshot: RuntimeSnapshot
+    ) -> ReceiptModelHashSource {
+        if warmSwapEnabled {
+            if let hash = snapshot.modelHash {
+                return .captured(hash)
+            }
+            // Warm-swap is on; SPEC-011 R-3.4.1 should have produced
+            // a hash at request-start capture time. Absence is a
+            // regression — §M.2.2 defence-in-depth refusal.
+            return .ambiguous
+        }
+        // Warm-swap is off; SPEC-011 R-3.3.0 suppresses hash
+        // reporting. §M.2.3 null-hash semantics apply.
+        return .warmSwapDisabled
+    }
+
+    static func receiptHeaderResult(
+        providerID: String?,
+        receiptBuilder: ReceiptBuilder?,
+        request: ChatCompletionRequest,
+        outputContent: String,
+        outputToolCalls: [ToolCall]?,
+        finishReason: String,
+        ttftMs: Int64,
+        tokensOut: Int64,
+        unixTsSeconds: Int64,
+        modelHashSource: ReceiptModelHashSource
+    ) throws -> ReceiptHeaderResult {
+        guard let providerID, !providerID.isEmpty else {
+            return .omitted(.noKeypair)
+        }
+        guard let receiptBuilder else {
+            return .omitted(.preV16Binary)
+        }
+        // SPEC-015 §M.2.2 — fail-closed refusal BEFORE construction.
+        // The .ambiguous provenance can only arise from a SPEC-011
+        // R-3.4.1 in-flight-tracking regression; v0.3 normatively
+        // refuses to sign a receipt that cannot identify which
+        // container served. Audit row + no header. The HTTP 200
+        // response itself still goes out (the buyer got their
+        // tokens; the §M.2.2 normal construction proof allows the
+        // un-receipted 200 case).
+        let resolvedModelHash: String?
+        switch modelHashSource {
+        case .captured(let hash):
+            resolvedModelHash = hash
+        case .warmSwapDisabled:
+            resolvedModelHash = nil
+        case .ambiguous:
+            return .omitted(.modelSwapViolation)
+        }
+        do {
+            let header = try receiptBuilder.build(
+                providerId: providerID,
+                input: ReceiptInput(
+                    modelId: request.model,
+                    request: request,
+                    outputContent: outputContent,
+                    outputToolCalls: outputToolCalls,
+                    finishReason: finishReason,
+                    ttftMs: ttftMs,
+                    tokensOut: tokensOut,
+                    unixTsSeconds: unixTsSeconds,
+                    modelHash: resolvedModelHash
+                )
+            )
+            guard header.utf8.count <= maxReceiptHeaderBytes else {
+                throw ReceiptEmissionError.headerTooLarge(byteCount: header.utf8.count)
+            }
+            return .issued(header)
+        } catch ReceiptBuilder.Error.missingCurrentReceiptKey {
+            return .omitted(.noKeypair)
+        }
+    }
+
+    static func errorReceiptHeader(
+        providerID: String?,
+        receiptBuilder: ReceiptBuilder?,
+        request: ChatCompletionRequest,
+        error: APIError,
+        startedAt: Date,
+        modelHashSource: ReceiptModelHashSource
+    ) throws -> String? {
+        switch try errorReceiptHeaderResult(providerID: providerID, receiptBuilder: receiptBuilder, request: request, error: error, startedAt: startedAt, modelHashSource: modelHashSource) {
+        case .issued(let header, _, _):
+            return header
+        case .omitted, .notReceiptEligible:
+            return nil
+        }
+    }
+
+    static func errorReceiptHeaderResult(
+        providerID: String?,
+        receiptBuilder: ReceiptBuilder?,
+        request: ChatCompletionRequest,
+        error: APIError,
+        startedAt: Date,
+        modelHashSource: ReceiptModelHashSource
+    ) throws -> ErrorReceiptHeaderResult {
+        guard error.code == "model_not_loaded" else {
+            if error.code == "swap_drain_timeout" {
+                return .omitted(.modelSwapViolation)
+            }
+            if error.code == "buyer_cancelled" {
+                return .omitted(.preTokenCancel)
+            }
+            return .notReceiptEligible
+        }
+        let ttftMs = elapsedMilliseconds(since: startedAt)
+        let unixTs = Int64(Date().timeIntervalSince1970)
+        // SPEC-015 §M.2 / §7.6 — error receipts inherit the same
+        // request-start `modelHashSource` a successful receipt would
+        // carry. The error did not change the loaded weights; the
+        // buyer is still entitled to know which weights the provider
+        // had warm at the moment the error fired. An `.ambiguous`
+        // source still refuses here (§M.2.2 defence-in-depth).
+        switch try receiptHeaderResult(
+            providerID: providerID,
+            receiptBuilder: receiptBuilder,
+            request: request,
+            outputContent: "",
+            outputToolCalls: nil,
+            finishReason: "error",
+            ttftMs: ttftMs,
+            tokensOut: 0,
+            unixTsSeconds: unixTs,
+            modelHashSource: modelHashSource
+        ) {
+        case .issued(let header):
+            return .issued(header, ttftMs: ttftMs, unixTs: unixTs)
+        case .omitted(let reason):
+            return .omitted(reason)
+        }
+    }
+
+    static func elapsedMilliseconds(since start: Date, now: Date = Date()) -> Int64 {
+        max(0, Int64(now.timeIntervalSince(start) * 1000))
+    }
+
+    static func receiptConstructionError() -> APIError {
+        APIError(
+            status: 500,
+            message: "Receipt construction failed",
+            type: "server_error",
+            code: "internal_error"
+        )
+    }
+
     private static func chatCompletionResponse(request: ChatCompletionRequest, completion: CompletionResult) -> [String: Any] {
         let created = Int(Date().timeIntervalSince1970)
         return [
@@ -430,9 +807,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         ]
     }
 
-    private static func statusResponse(_ snapshot: ProviderSnapshot, coordinatorURL: String?) -> [String: Any] {
+    private static func statusResponse(_ snapshot: ProviderSnapshot, providerID: String?, coordinatorURL: String?) -> [String: Any] {
         [
             "binary_version": CoordinatorClient.binaryVersion,
+            "provider_id": jsonNullable(providerID),
             "status": snapshot.status.rawValue,
             "model": snapshot.modelID ?? NSNull(),
             "model_loaded": snapshot.modelLoaded,
@@ -529,21 +907,36 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
 private struct ResponseWriter: @unchecked Sendable {
     let context: ChannelHandlerContext
 
-    func writeJSON(status: HTTPResponseStatus, body: Any) {
+    func writeJSON(
+        status: HTTPResponseStatus,
+        body: Any,
+        extraHeaders: [(String, String)] = [],
+        completion: (@Sendable (Bool) -> Void)? = nil
+    ) {
         do {
             let data = try encodeJSONObject(body)
             context.eventLoop.execute {
-                writeRawJSON(context: context, status: status, data: data)
+                writeRawJSON(context: context, status: status, data: data, extraHeaders: extraHeaders, completion: completion)
             }
         } catch {
             context.eventLoop.execute {
                 context.close(promise: nil)
             }
+            completion?(false)
         }
     }
 
-    func writeAPIError(_ error: APIError) {
-        writeJSON(status: HTTPResponseStatus(statusCode: error.status), body: error.envelope)
+    func writeAPIError(
+        _ error: APIError,
+        extraHeaders: [(String, String)] = [],
+        completion: (@Sendable (Bool) -> Void)? = nil
+    ) {
+        writeJSON(
+            status: HTTPResponseStatus(statusCode: error.status),
+            body: error.envelope,
+            extraHeaders: extraHeaders,
+            completion: completion
+        )
     }
 
     func startSSE() {
@@ -578,29 +971,35 @@ private struct ResponseWriter: @unchecked Sendable {
     }
 }
 
-private func writeRawJSON(context: ChannelHandlerContext, status: HTTPResponseStatus, data: Data) {
-    var headers = HTTPHeaders()
-    headers.add(name: "content-type", value: "application/json")
-    headers.add(name: "content-length", value: "\(data.count)")
-    headers.add(name: "connection", value: "close")
-
+private func writeRawJSON(
+    context: ChannelHandlerContext,
+    status: HTTPResponseStatus,
+    data: Data,
+    extraHeaders: [(String, String)] = [],
+    completion: (@Sendable (Bool) -> Void)? = nil
+) {
+    let headers = makeJSONResponseHeaders(dataLength: data.count, extraHeaders: extraHeaders)
     let head = HTTPResponseHead(version: .http1_1, status: status, headers: headers)
     context.write(NIOAny(HTTPServerResponsePart.head(head)), promise: nil)
 
     var buffer = context.channel.allocator.buffer(capacity: data.count)
     buffer.writeBytes(data)
     context.write(NIOAny(HTTPServerResponsePart.body(.byteBuffer(buffer))), promise: nil)
-    context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil)), promise: nil)
-    context.close(promise: nil)
+    let endPromise = context.eventLoop.makePromise(of: Void.self)
+    context.writeAndFlush(NIOAny(HTTPServerResponsePart.end(nil)), promise: endPromise)
+    endPromise.futureResult.whenComplete { result in
+        switch result {
+        case .success:
+            completion?(true)
+        case .failure:
+            completion?(false)
+        }
+        context.close(promise: nil)
+    }
 }
 
 private func writeRawSSEHead(context: ChannelHandlerContext) {
-    var headers = HTTPHeaders()
-    headers.add(name: "content-type", value: "text/event-stream; charset=utf-8")
-    headers.add(name: "cache-control", value: "no-cache")
-    headers.add(name: "connection", value: "close")
-    headers.add(name: "transfer-encoding", value: "chunked")
-
+    let headers = makeSSEResponseHeaders()
     let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
     context.writeAndFlush(NIOAny(HTTPServerResponsePart.head(head)), promise: nil)
 }
@@ -614,4 +1013,38 @@ private func writeRawSSEData(context: ChannelHandlerContext, payload: String) {
 
 private func encodeJSONObject(_ body: Any) throws -> Data {
     try JSONSerialization.data(withJSONObject: body, options: [.withoutEscapingSlashes])
+}
+
+func makeJSONResponseHeaders(
+    dataLength: Int,
+    extraHeaders: [(String, String)] = []
+) -> HTTPHeaders {
+    var headers = HTTPHeaders()
+    headers.add(name: "content-type", value: "application/json")
+    headers.add(name: "content-length", value: "\(dataLength)")
+    headers.add(name: "connection", value: "close")
+    for (name, value) in extraHeaders {
+        headers.add(name: name, value: value)
+    }
+    return headers
+}
+
+func makeSSEResponseHeaders() -> HTTPHeaders {
+    var headers = HTTPHeaders()
+    headers.add(name: "content-type", value: "text/event-stream; charset=utf-8")
+    headers.add(name: "cache-control", value: "no-cache")
+    headers.add(name: "connection", value: "close")
+    headers.add(name: "transfer-encoding", value: "chunked")
+    return headers
+}
+
+private extension Optional where Wrapped == String {
+    var httpHeaders: [(String, String)] {
+        guard let self else { return [] }
+        return [(RouterHandler.receiptHeaderName, self)]
+    }
+}
+
+enum ReceiptEmissionError: Error, Equatable {
+    case headerTooLarge(byteCount: Int)
 }

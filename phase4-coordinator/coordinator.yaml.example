@@ -21,6 +21,15 @@ pool:
   degraded_probe_after_502: true
   breaker_failure_threshold: 2
   breaker_window_s: 120
+  canary_enabled: false
+  canary_interval_s: 300
+  canary_timeout_s: 30
+  canary_max_tokens: 8
+  canary_failure_threshold: 3
+  # Required when canary_enabled is true. Keep deployment-specific and rotate periodically.
+  # canary_challenges:
+  #   - prompt: "<private operator challenge prompt containing {nonce}>"
+  #     expected: "<private expected answer containing {nonce}>"
 
 routing:
   preflight_threshold_tokens: 4096
@@ -98,7 +107,26 @@ coordinator_advertised_version:
   required_binary_version: ""
 
 auth:
+  # operator_key accepts either a literal secret (local dev / one-off
+  # migrations) or an "env:NAME" sentinel that resolves at config-load
+  # time against the systemd EnvironmentFile (/etc/macprovider/coordinator.env
+  # in prod — M3-2 / DEVE-7). Prefer env:NAME on Pearl so the secret never
+  # lives in YAML on disk. If the env var is unset OR empty, the
+  # coordinator refuses to start (fail-closed, not silent-empty).
+  #
+  # Literal form (dev only):
+  #   operator_key: "change-me"
+  # Indirected form (production):
+  #   operator_key: env:OPERATOR_KEY
   operator_key: "change-me"
+  # gateway_service_token is the optional service-to-service credential
+  # the gateway uses when calling internal/admin coordinator endpoints
+  # (M3-2 / SECU-4). When set, the coordinator accepts EITHER
+  # operator_key OR gateway_service_token on the internal-bearer auth
+  # path, letting the operator key be rotated independently of the live
+  # upstream credential. Leave unset to preserve pre-bridge behavior
+  # (operator_key is the sole accepted credential).
+  #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
   require_provider_tokens: true # Disable only for isolated local development.
 
 storage:

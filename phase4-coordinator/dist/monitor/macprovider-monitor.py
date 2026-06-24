@@ -21,14 +21,12 @@ Config (/etc/macprovider/monitor.env, optional, KEY=VALUE lines):
 
 import json
 import os
-import re
 import smtplib
 import socket
 import sys
 import urllib.request
 from email.message import EmailMessage
 
-COORD_YAML = "/opt/macprovider/coordinator.yaml"
 ENV_FILE = "/etc/macprovider/monitor.env"
 STATE_FILE = "/var/lib/macprovider/monitor-state.json"
 HEALTHZ = "http://127.0.0.1:8444/healthz"
@@ -54,12 +52,13 @@ def load_env(path):
 
 
 def operator_key():
-    try:
-        with open(COORD_YAML) as f:
-            m = re.search(r'operator_key:\s*"?([^"\n]+)', f.read())
-            return m.group(1).strip() if m else ""
-    except FileNotFoundError:
-        return ""
+    # M3-2 / DEVE-7: pulled from systemd EnvironmentFile
+    # (/etc/macprovider/coordinator.env, same file the coordinator unit
+    # reads), not by regex-parsing /opt/macprovider/coordinator.yaml as
+    # root. Returns "" when unset so /poolz returns 401 cleanly instead
+    # of crashing the poll. See macprovider-monitor.service for the
+    # EnvironmentFile= directive.
+    return os.environ.get("OPERATOR_KEY", "")
 
 
 def get_json(url, bearer=None):

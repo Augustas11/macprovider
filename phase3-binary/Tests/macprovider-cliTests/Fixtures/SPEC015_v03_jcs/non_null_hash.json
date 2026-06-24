@@ -1,0 +1,15 @@
+{
+  "description": "v0.3 receipt with non-null 64-hex model_hash, deterministic ed25519 seed.",
+  "input": {
+    "model_id": "fixture-model",
+    "model_hash": "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f",
+    "output_content": "answer",
+    "finish_reason": "stop",
+    "ttft_ms": 7,
+    "tokens_out": 2,
+    "unix_ts": 1800000000
+  },
+  "provider_pubkey_seed_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "canonical_jcs_sha256_hex": "48c3f1ccc85a4de04f95aad465af55f0217f7a2c7086f4468c6f23f4a407f6c3",
+  "canonical_jcs_length": 405
+}

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -64,6 +65,7 @@ type Server struct {
 	sticky                 map[string]stickyEntry
 	stickyMu               sync.Mutex
 	internalAuthKey        string
+	gatewayServiceToken    string
 	tier2Mu                sync.RWMutex
 	tier2                  config.Tier2Config
 	reqLog                 requestLogInserter
@@ -75,6 +77,10 @@ type Server struct {
 	poolCheckLast          map[string]time.Time
 	poolCheckMaxEntries    int
 	poolCheckTTL           time.Duration
+	receiptKeysMu          sync.Mutex
+	receiptKeysLimiters    map[string]receiptKeysBucket
+	receiptKeysMaxEntries  int
+	receiptKeysTTL         time.Duration
 	billingMu              sync.RWMutex
 	billing                *billing.Store
 	billingCfg             config.RewardsConfig
@@ -90,6 +96,11 @@ type stickyEntry struct {
 	ModelScope      string
 	CreatedAt       time.Time
 	LastUsedAt      time.Time
+}
+
+type receiptKeysBucket struct {
+	tokens float64
+	last   time.Time
 }
 
 type PreflightResult struct {
@@ -247,6 +258,24 @@ func WithInternalAuthKey(key string) Option {
 	}
 }
 
+// WithGatewayServiceToken sets the secondary credential accepted on
+// `/internal/*` paths (M3-2 / SECU-4 / codex PR #73 HIGH-1). When
+// non-empty, the gateway can call `/internal/routing` and
+// `/internal/sticky` with either this token OR the operator key. The
+// audit-log line emits `key=service_token|operator_key` so the operator
+// can watch the cutover and rotate operator_key once gateway-origin
+// calls stop reporting key=operator_key.
+//
+// IMPORTANT: this credential is intentionally NOT accepted on any
+// `/admin/*` or `/poolz` endpoint. That class of route is human-admin
+// only (per the codex audit), to ensure rotating operator_key does NOT
+// silently leak admin power to a service token.
+func WithGatewayServiceToken(token string) Option {
+	return func(s *Server) {
+		s.gatewayServiceToken = strings.TrimSpace(token)
+	}
+}
+
 func WithRelay(fn RelayFunc, timeout time.Duration) Option {
 	return func(s *Server) {
 		s.relay = fn
@@ -348,6 +377,9 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		poolCheckLast:          map[string]time.Time{},
 		poolCheckMaxEntries:    4096,
 		poolCheckTTL:           time.Minute,
+		receiptKeysLimiters:    map[string]receiptKeysBucket{},
+		receiptKeysMaxEntries:  4096,
+		receiptKeysTTL:         5 * time.Minute,
 		now:                    func() time.Time { return time.Now().UTC() },
 		version:                "dev",
 	}
@@ -362,6 +394,15 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/healthz", s.handleHealthz)
 	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
+	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)
+	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotations.
+	// Public, unauthenticated, rate-limited; serve the literal
+	// signed catalog file and the catalog signing pubkey so a buyer-
+	// side verifier or public installer can run the §M.3.2 catalog-
+	// check path against this coordinator without reading /poolz.
+	r.Get("/catalog/current", s.handleCatalogCurrent)
+	r.Get("/catalog/pubkey", s.handleCatalogPubkey)
+	r.Get("/catalog/{catalog_id}", s.handleCatalogFile)
 	r.Post("/v1/chat/completions", s.handleChatCompletions)
 	return r
 }
@@ -374,7 +415,7 @@ func (s *Server) InternalHandler() http.Handler {
 }
 
 func (s *Server) handleInternalRouting(w http.ResponseWriter, r *http.Request) {
-	if !s.internalBearerAuthorized(r.Header) {
+	if !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal routing metadata requires coordinator authorization")
 		return
 	}
@@ -402,7 +443,7 @@ func (s *Server) internalTier2Metadata() map[string]any {
 		providers := s.pool.Snapshot()
 		var verified, mismatched, uncatalogued int
 		for _, p := range providers {
-			if !baseRoutingEligible(p) {
+			if !hasAvailableSlot(p) {
 				continue
 			}
 			switch s.effectiveHashStatus(p, cfg) {
@@ -539,7 +580,7 @@ func (s *Server) observedModelHashEvidence() bool {
 }
 
 func (s *Server) handleInternalStickyDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.internalBearerAuthorized(r.Header) {
+	if !s.internalBearerAuthorizedFull(r.Header, r.RemoteAddr, r.URL.Path) {
 		writeError(w, http.StatusUnauthorized, "unauthorized", "Internal sticky purge requires coordinator authorization")
 		return
 	}
@@ -588,7 +629,9 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	for _, p := range providers {
 		switch p.State {
 		case pool.StateReady:
-			resp.PoolReady++
+			if p.AuthState != pool.AuthBearerlessDuplicate && len(p.PendingReceiptPubkey) == 0 {
+				resp.PoolReady++
+			}
 		case pool.StateDegraded, pool.StateBusy:
 			resp.PoolDegraded++
 		case pool.StateDraining:
@@ -607,6 +650,19 @@ type poolCheckResponse struct {
 	ProviderID string     `json:"provider_id"`
 	Tier       pool.Tier  `json:"tier"`
 	State      pool.State `json:"state"`
+}
+
+type receiptKeysResponse struct {
+	ProviderID        string                     `json:"provider_id"`
+	ReceiptPubkey     *string                    `json:"receipt_pubkey"`
+	ReceiptPubkeyPrev *receiptKeysPreviousPubkey `json:"receipt_pubkey_prev"`
+	FetchedAt         string                     `json:"fetched_at"`
+}
+
+type receiptKeysPreviousPubkey struct {
+	Pubkey    string `json:"pubkey"`
+	RotatedAt string `json:"rotated_at"`
+	ExpiresAt string `json:"expires_at"`
 }
 
 func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
@@ -643,6 +699,113 @@ func (s *Server) handlePoolCheck(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {
+	if !s.allowReceiptKeys(r) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Receipt keys rate limit exceeded")
+		return
+	}
+	providerID := strings.TrimSpace(chi.URLParam(r, "provider_id"))
+	if providerID == "" {
+		writeError(w, http.StatusBadRequest, "invalid_request", "Missing provider_id")
+		return
+	}
+	provider, ok := s.pool.Resolve(providerID, "")
+	if !ok {
+		writeError(w, http.StatusNotFound, "provider_not_found", "Provider not found")
+		return
+	}
+
+	now := s.now().UTC()
+	resp := receiptKeysResponse{
+		ProviderID: provider.ProviderID,
+		FetchedAt:  now.Format(time.RFC3339),
+	}
+	if len(provider.ReceiptPubkey) > 0 {
+		pubkey := base64.StdEncoding.EncodeToString(provider.ReceiptPubkey)
+		resp.ReceiptPubkey = &pubkey
+	}
+	if provider.ReceiptPubkeyPrev != nil && now.Before(provider.ReceiptPubkeyPrev.ExpiresAt) {
+		resp.ReceiptPubkeyPrev = &receiptKeysPreviousPubkey{
+			Pubkey:    base64.StdEncoding.EncodeToString(provider.ReceiptPubkeyPrev.Pubkey),
+			RotatedAt: provider.ReceiptPubkeyPrev.RotatedAt.UTC().Format(time.RFC3339),
+			ExpiresAt: provider.ReceiptPubkeyPrev.ExpiresAt.UTC().Format(time.RFC3339),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("write receipt keys response failed")
+	}
+}
+
+// SPEC-015 §M.4 — serve the verified signed catalog bytes under the
+// effectively-active catalog's id. Public, unauthenticated, rate-
+// limited (shares the receipt-keys bucket so a single attacker
+// cannot starve the buyer surface). 404 when (a) no catalog
+// configured, (b) catalog failed to load/verify, OR (c) the path
+// segment does not match the active catalog_id.
+func (s *Server) handleCatalogFile(w http.ResponseWriter, r *http.Request) {
+	s.serveCatalogFile(w, r, strings.TrimSpace(chi.URLParam(r, "catalog_id")))
+}
+
+// handleCatalogCurrent serves the effectively-active catalog without requiring
+// clients to discover catalog_id through operator-only /poolz.
+func (s *Server) handleCatalogCurrent(w http.ResponseWriter, r *http.Request) {
+	s.serveCatalogFile(w, r, "")
+}
+
+func (s *Server) serveCatalogFile(w http.ResponseWriter, r *http.Request, requested string) {
+	if !s.allowReceiptKeys(r) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Catalog endpoint rate limit exceeded")
+		return
+	}
+	active, data, ok := tier2.CatalogSnapshot()
+	if !ok {
+		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
+		return
+	}
+	if requested != "" && requested != active {
+		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	if _, err := w.Write(data); err != nil {
+		s.log.Warn().Err(err).Str("catalog_id", active).Msg("write catalog file response failed")
+	}
+}
+
+// SPEC-015 §M.4 — serve the catalog signing pubkey.
+// `{"pubkey":"<43-char base64url-unpadded>","alg":"Ed25519"}`. The
+// pubkey comes from Tier2Config.CatalogPublicKey, which the
+// coordinator already uses to verify the loaded catalog — so the
+// trust root is the same operator-configured key (§M.3.3 operator-
+// mutable trust posture, inherited from §10.7).
+func (s *Server) handleCatalogPubkey(w http.ResponseWriter, r *http.Request) {
+	if !s.allowReceiptKeys(r) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Catalog endpoint rate limit exceeded")
+		return
+	}
+	cfg := s.tier2Config()
+	pubkey := strings.TrimSpace(cfg.CatalogPublicKey)
+	if !tier2.Active() || pubkey == "" {
+		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"pubkey": pubkey,
+		"alg":    "Ed25519",
+	}); err != nil {
+		s.log.Warn().Err(err).Msg("write catalog pubkey response failed")
+	}
+}
+
 func (s *Server) allowPoolCheck(r *http.Request) bool {
 	key := poolCheckClientKey(r)
 	now := s.now()
@@ -656,6 +819,39 @@ func (s *Server) allowPoolCheck(r *http.Request) bool {
 	}
 	s.poolCheckLast[key] = now
 	s.evictPoolCheckEntries(now)
+	return true
+}
+
+func (s *Server) allowReceiptKeys(r *http.Request) bool {
+	const (
+		receiptKeysRatePerSecond = 10.0
+		receiptKeysBurst         = 10.0
+	)
+	key := poolCheckClientKey(r)
+	now := s.now()
+	s.receiptKeysMu.Lock()
+	defer s.receiptKeysMu.Unlock()
+	s.evictReceiptKeyEntries(now)
+
+	bucket, ok := s.receiptKeysLimiters[key]
+	if !ok {
+		bucket = receiptKeysBucket{tokens: receiptKeysBurst, last: now}
+	}
+	if bucket.last.IsZero() {
+		bucket.last = now
+	}
+	if elapsed := now.Sub(bucket.last).Seconds(); elapsed > 0 {
+		bucket.tokens = math.Min(receiptKeysBurst, bucket.tokens+elapsed*receiptKeysRatePerSecond)
+		bucket.last = now
+	}
+	if bucket.tokens < 1 {
+		s.receiptKeysLimiters[key] = bucket
+		return false
+	}
+	bucket.tokens--
+	bucket.last = now
+	s.receiptKeysLimiters[key] = bucket
+	s.evictReceiptKeyEntries(now)
 	return true
 }
 
@@ -682,12 +878,65 @@ func (s *Server) evictPoolCheckEntries(now time.Time) {
 	}
 }
 
+func (s *Server) evictReceiptKeyEntries(now time.Time) {
+	cutoff := now.Add(-s.receiptKeysTTL)
+	for key, bucket := range s.receiptKeysLimiters {
+		if bucket.last.Before(cutoff) {
+			delete(s.receiptKeysLimiters, key)
+		}
+	}
+	for len(s.receiptKeysLimiters) > s.receiptKeysMaxEntries {
+		var oldestKey string
+		var oldest time.Time
+		for key, bucket := range s.receiptKeysLimiters {
+			if oldestKey == "" || bucket.last.Before(oldest) {
+				oldestKey = key
+				oldest = bucket.last
+			}
+		}
+		if oldestKey == "" {
+			return
+		}
+		delete(s.receiptKeysLimiters, oldestKey)
+	}
+}
+
+// poolCheckClientKey returns the per-source key used for the
+// /poolz, /v1/receipt-keys/*, and /catalog/* rate-limit buckets.
+//
+// Production sits behind nginx on loopback (see
+// phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf) so
+// every public buyer's r.RemoteAddr is 127.0.0.1 — keying on that
+// alone collapses every public buyer into one shared bucket and lets
+// any single caller starve the rate-limit pool for everyone else.
+//
+// Mirrors ws.remoteIPForUnauthSemaphore: when r.RemoteAddr is a
+// loopback address, honor X-Real-IP (which the on-host nginx site
+// sets). Direct, non-loopback hits (no proxy in front) use
+// r.RemoteAddr unchanged so an attacker on the open internet cannot
+// spoof their bucket key.
 func poolCheckClientKey(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil || host == "" {
+		host = r.RemoteAddr
+	}
+	if isLoopbackHost(host) {
+		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+			return realIP
+		}
+	}
+	if host == "" {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+func isLoopbackHost(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return ip.IsLoopback()
 }
 
 type modelsResponse struct {
@@ -726,10 +975,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	pillarAActive := tier2.ModelHashActive(cfg)
 	tier2Active := tier2.ConfigActive(cfg)
 	for _, p := range providers {
-		if pillarAActive && !baseRoutingEligible(p) {
+		if pillarAActive && !p.RoutingEligible() {
 			continue
 		}
-		if !pillarAActive && p.State != pool.StateReady {
+		if !pillarAActive && (p.State != pool.StateReady || p.AuthState == pool.AuthBearerlessDuplicate || len(p.PendingReceiptPubkey) > 0) {
 			continue
 		}
 		excluded := tier2Active && s.tier2ProviderExcludedForConfig(p, cfg)
@@ -792,7 +1041,7 @@ func (s *Server) applyHashVerification(entry *modelEntry, providers []pool.Provi
 	modelProviders := make([]pool.Provider, 0)
 	catalogUnavailable := false
 	for _, p := range providers {
-		if !baseRoutingEligible(p) || !modelIDEqual(p.ModelID, entry.ID) {
+		if !hasAvailableSlot(p) || !modelIDEqual(p.ModelID, entry.ID) {
 			continue
 		}
 		status := s.effectiveHashStatus(p, cfg)
@@ -853,161 +1102,46 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	routingRequestID := uuid.NewString()
 	originalRequestID := requestID
 	startedAt := s.now()
-	routingDone := startedAt
-	requestLogModel := ""
-	requestLogStream := false
-	explicitRetries := 0
-	billingAttemptN := 0
-	logRowWithBilling := func(
-		providerAssignedID string,
-		providerID string,
-		status int,
-		promptTok, completionTok *int64,
-		errMsg, errCode string,
-		retried int,
-		estimatedCompTokens *int64,
-		faultFlag string,
-	) error {
-		if s.reqLog == nil {
-			return nil
-		}
-		attemptN := billingAttemptN
-		if providerAssignedID != "" {
-			defer func() {
-				billingAttemptN++
-			}()
-		}
-		row := requestlog.Row{
-			TSUtc:               startedAt,
-			RequestID:           originalRequestID,
-			Model:               requestLogModel,
-			ProviderAssignedID:  providerAssignedID,
-			PromptTokens:        promptTok,
-			CompletionTokens:    completionTok,
-			EstimatedCompTokens: estimatedCompTokens,
-			LatencyMs:           float64(time.Since(startedAt).Milliseconds()),
-			RoutingMs:           float64(routingDone.Sub(startedAt).Milliseconds()),
-			Status:              status,
-			Stream:              requestLogStream,
-			BuyerIP:             buyerIP(r.RemoteAddr),
-			Error:               sanitizeRequestLogText(errMsg),
-			ErrorCode:           errCode,
-			PrefHeader:          sanitizeRequestLogText(r.Header.Get("X-MacProvider-Pref")),
-			ProviderHeader:      sanitizeRequestLogText(r.Header.Get("X-MacProvider-Provider")),
-			Retried:             retried,
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-		defer cancel()
-		billingStore, billingCfg, billingSnapshotID := s.billingState()
-		if billingStore != nil && s.reqLogStore != nil && providerAssignedID != "" && status != http.StatusServiceUnavailable {
-			stableProviderID := providerID
-			if stableProviderID == "" {
-				for _, p := range s.pool.Snapshot() {
-					if p.AssignedID == providerAssignedID {
-						stableProviderID = p.ProviderID
-						break
-					}
-				}
-			}
-			if stableProviderID == "" {
-				s.log.Warn().Str("request_id", originalRequestID).Str("provider_assigned_id", providerAssignedID).Msg("billing hot-path skipped without stable provider identity")
-				return fmt.Errorf("billing hot-path missing stable provider identity")
-			}
-			if faultFlag == "" {
-				faultFlag = billing.FaultNone
-			}
-			billingInput := billing.HotPathInput{
-				RequestID:           row.RequestID,
-				AttemptN:            attemptN,
-				ProviderAssignedID:  providerAssignedID,
-				ProviderID:          stableProviderID,
-				Model:               row.Model,
-				Status:              status,
-				Stream:              row.Stream,
-				TSUtc:               row.TSUtc,
-				PromptTokens:        promptTok,
-				CompletionTokens:    completionTok,
-				EstimatedCompTokens: estimatedCompTokens,
-				ErrorCode:           errCode,
-				FaultFlag:           faultFlag,
-				ConfigSnapshotID:    billingSnapshotID,
-				RateEntry:           billing.RateFor(billingCfg.RateCard, row.Model),
-				MultiplierPPM:       billing.ParseMultiplierPPM(billingCfg.GlobalMultiplier),
-				ProviderShareBps:    billing.ParseShareBps(billingCfg.ProviderShare),
-			}
-			err := billingStore.WriteHotPath(ctx, s.reqLogStore, row, billingInput)
-			if err != nil {
-				s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("billing hot-path insert failed")
-				fallbackCtx, fallbackCancel := context.WithTimeout(context.Background(), requestLogWriteTimeout)
-				defer fallbackCancel()
-				if fallbackErr := billingStore.WriteRequestLogWithIdentity(fallbackCtx, s.reqLogStore, row, billingInput); fallbackErr != nil {
-					s.log.Warn().Err(fallbackErr).Str("request_id", originalRequestID).Msg("request_log identity fallback insert failed")
-					return fmt.Errorf("billing hot-path insert failed: %w; fallback failed: %v", err, fallbackErr)
-				}
-			}
-			return nil
-		}
-		if err := s.reqLog.Insert(ctx, row); err != nil {
-			s.log.Warn().Err(err).Str("request_id", originalRequestID).Msg("request_log insert failed")
-			return err
-		}
-		return nil
+	// state is allocated up-front so the billingRecorder captures the
+	// pointer — pre-1c the inline logRowWithBilling closure read
+	// mutable locals (routingDone, explicitRetries); post-1c those
+	// locals migrated into forwardState; M3-10 hoists the closure
+	// itself into *billingRecorder. The recorder still needs the live
+	// state values at log-write time, so it holds *forwardState.
+	state := &forwardState{
+		routingDone:   startedAt,
+		faultedRoutes: map[string]struct{}{},
 	}
-	logRow := func(
-		providerAssignedID string,
-		status int,
-		promptTok, completionTok *int64,
-		errMsg, errCode string,
-		retried int,
-	) {
-		_ = logRowWithBilling(providerAssignedID, "", status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
-	}
-	logBuyerFailure := func(status int, msg string) {
-		logRow("", status, nil, nil, msg, "", 0)
-	}
-	logProviderRow := func(
-		provider pool.Provider,
-		status int,
-		promptTok, completionTok *int64,
-		errMsg, errCode string,
-		retried int,
-	) error {
-		return logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, nil, billing.FaultNone)
-	}
-	logProviderRowWithEstimate := func(
-		provider pool.Provider,
-		status int,
-		promptTok, completionTok *int64,
-		errMsg, errCode string,
-		retried int,
-		estimatedCompTokens *int64,
-	) error {
-		return logRowWithBilling(provider.AssignedID, provider.ProviderID, status, promptTok, completionTok, errMsg, errCode, retried, estimatedCompTokens, billing.FaultNone)
-	}
+	// M3-10 (ARCH-6 close-out): the previously-inline logRowWithBilling
+	// closure now lives as *billingRecorder. setModel / setStream /
+	// setRequestID land before the first provider-bound recordRow call,
+	// preserving the pre-refactor closure's "latest value at fire time"
+	// semantics for what used to be captured outer-scope variables.
+	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID)
 	maxBodyBytes := s.maxChatBodyBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
-		logBuyerFailure(http.StatusBadRequest, "Could not read request body")
+		rec.logBuyerFailure(http.StatusBadRequest, "Could not read request body")
 		writeError(w, http.StatusBadRequest, "invalid_request", "Could not read request body")
 		return
 	}
-	requestLogModel = modelForRequestLog(body)
+	rec.setModel(modelForRequestLog(body))
 	if int64(len(body)) > maxBodyBytes {
-		logBuyerFailure(http.StatusRequestEntityTooLarge, "Request body too large")
+		rec.logBuyerFailure(http.StatusRequestEntityTooLarge, "Request body too large")
 		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
 		return
 	}
 	req, status, code, msg := validateChatRequest(body)
 	if status != 0 {
-		logBuyerFailure(status, msg)
+		rec.logBuyerFailure(status, msg)
 		writeError(w, status, code, msg)
 		return
 	}
-	requestLogModel = req.Model
-	requestLogStream = req.Stream
+	rec.setModel(req.Model)
+	rec.setStream(req.Stream)
 	if idempotencyKey := normalizeIdempotencyKey(r.Header.Get("Idempotency-Key")); idempotencyKey != "" {
 		if s.reqLogStore == nil {
-			logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
+			rec.logBuyerFailure(http.StatusServiceUnavailable, "Idempotency-Key requires durable request logging")
 			writeError(w, http.StatusServiceUnavailable, "idempotency_unavailable", "Idempotency-Key requires durable request logging")
 			return
 		}
@@ -1015,31 +1149,50 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		reservedRequestID, replay, err := s.reqLogStore.ReserveIdempotencyKey(r.Context(), idempotencyKey, hex.EncodeToString(bodyHash[:]), originalRequestID, startedAt)
 		if err != nil {
 			if errors.Is(err, requestlog.ErrIdempotencyConflict) {
-				logBuyerFailure(http.StatusConflict, "Idempotency-Key was already used with a different request body")
+				rec.logBuyerFailure(http.StatusConflict, "Idempotency-Key was already used with a different request body")
 				writeError(w, http.StatusConflict, "idempotency_key_body_mismatch", "Idempotency-Key was already used with a different request body")
 				return
 			}
 			s.log.Warn().Err(err).Msg("idempotency reservation failed")
-			logBuyerFailure(http.StatusInternalServerError, "Could not reserve idempotency key")
+			rec.logBuyerFailure(http.StatusInternalServerError, "Could not reserve idempotency key")
 			writeError(w, http.StatusInternalServerError, "idempotency_reservation_failed", "Could not reserve idempotency key")
 			return
 		}
 		originalRequestID = reservedRequestID
 		requestID = reservedRequestID
 		routingRequestID = reservedRequestID
+		rec.setRequestID(reservedRequestID)
 		if replay {
 			w.Header().Set("X-Request-ID", reservedRequestID)
-			logBuyerFailure(http.StatusConflict, "Idempotency-Key request is already recorded")
+			rec.logBuyerFailure(http.StatusConflict, "Idempotency-Key request is already recorded")
 			writeError(w, http.StatusConflict, "idempotency_key_replayed", "Idempotency-Key request is already recorded")
 			return
 		}
 	}
 	if !s.pool.ModelKnown(req.Model) && s.resolveModelClass(req.Model) == nil {
-		logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
+		rec.logBuyerFailure(http.StatusNotFound, "No provider has advertised model "+req.Model)
 		writeError(w, http.StatusNotFound, "model_not_found", "No provider has advertised model "+req.Model)
 		return
 	}
-	logAttempt := func(provider pool.Provider, fallbackStatus int, attempt requestLogAttempt) {
+	// logAttempt's retried argument is supplied by the caller — M2-1c
+	// inlines state.explicitRetries at each call site instead of having
+	// the closure capture the outer-scope `explicitRetries`. Pre-1c the
+	// closure read from the captured variable; post-1c the three
+	// unified-loop helpers (forwardStreamSequence, forwardWSNonStream-
+	// Sequence, forwardHTTPSequence) bump state.explicitRetries and
+	// pass it in, which keeps every log row consistent with the
+	// transport's view of "what retry am I on" without relying on
+	// closure-by-reference semantics that wouldn't survive the helper
+	// boundary.
+	//
+	// M3-10: logAttempt stays as a local closure because the
+	// estimated-prompt-token computation reads req.raw (the chat
+	// request body), which is local to handleChatCompletions. The
+	// closure delegates the actual row write to rec.recordRow, so the
+	// billing/request-log orchestration that ARCH-6 flagged still
+	// lives in *billingRecorder — only the per-attempt token-estimate
+	// adapter remains here.
+	logAttempt := func(provider pool.Provider, fallbackStatus int, attempt requestLogAttempt, retried int) {
 		status := attempt.Status
 		if status == 0 {
 			status = fallbackStatus
@@ -1048,208 +1201,325 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			estimatedPrompt := int64(estimateTokens(req.raw))
 			attempt.PromptTokens = &estimatedPrompt
 		}
-		logRowWithBilling(provider.AssignedID, provider.ProviderID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, explicitRetries, attempt.EstimatedCompTokens, attempt.FaultFlag)
+		rec.recordRow(provider.AssignedID, provider.ProviderID, status, attempt.PromptTokens, attempt.CompletionTokens, attempt.Error, attempt.ErrorCode, retried, attempt.EstimatedCompTokens, attempt.FaultFlag)
 	}
 	shouldLogAttempt := func(attempt requestLogAttempt) bool {
 		return attempt.Status != 0 || attempt.PromptTokens != nil || attempt.CompletionTokens != nil || attempt.EstimatedCompTokens != nil || attempt.Error != "" || attempt.ErrorCode != ""
 	}
 	provider, routeErr := s.selectProvider(routingRequestID, req, r.Header)
 	if routeErr != nil {
-		routingDone = s.now()
-		logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
+		state.routingDone = s.now()
+		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", 0)
 		writeRouteError(w, routeErr)
 		return
 	}
-	routingDone = s.now()
-	faultedProviders := 0
-	faultedRoutes := map[string]struct{}{}
+	state.routingDone = s.now()
+	state.provider = provider
+	// M2-1c: the three transport loops (streaming, WS-non-streaming, HTTP)
+	// previously duplicated the retry/failover/busy-marking decision tree.
+	// They now share three thin helpers (forwardStreamSequence,
+	// forwardWSNonStreamSequence, forwardHTTPSequence) that drive all
+	// transition decisions off transportResult flags + *forwardState.
+	// Per-loop scratch (excluded, failoverAttempted) lives here in
+	// handleChatCompletions' local scope per audits/2026-06-10/
+	// M2-1B_DESIGN.md §forwardState — not on the state struct, because
+	// each call into the helpers is one transport sequence and scratch
+	// does not survive transport boundaries.
 	if req.Stream {
-		failoverAttempted := false
 		excluded := map[string]struct{}{}
-		for {
-			dispatchBody, err := dispatchBodyForProvider(req, provider)
-			if err != nil {
-				logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
-				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
-				return
-			}
-			if provider.IsWSTunneled() {
-				result, attempt := s.forwardWS(w, r, requestID, dispatchBody, provider, true, s.attemptTimeout(r))
-				if result == wsForwardProviderDisconnectedCommitted {
-					logAttempt(provider, http.StatusOK, attempt)
-					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "stream_terminal", "")
-					return
-				}
-				if result == wsForwardComplete {
-					logAttempt(provider, http.StatusOK, attempt)
-					s.stickyStore(r.Header, provider, req.Model)
-					return
-				}
-				excluded[routeKey(provider)] = struct{}{}
-				faultedRoutes[routeKey(provider)] = struct{}{}
-				if result == wsForwardQueueFull {
-					s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateBusy)
-				}
-				if result == wsForwardCancelled {
-					if shouldLogAttempt(attempt) {
-						logAttempt(provider, http.StatusOK, attempt)
-					}
-					return
-				}
-				if result == wsForwardProviderDisconnected {
-					if !failoverAttempted && !hasPinnedRoute(r.Header) {
-						next, ok := s.failoverCandidate(uuid.NewString(), req, r.Header, provider, excluded)
-						if ok {
-							s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "failover", next.ProviderID)
-							failoverAttempted = true
-							provider = next
-							continue
-						}
-					}
-					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
-				}
-				if !s.shouldRetry(r, startedAt, explicitRetries, faultedProviders, statusForForwardResult(result), nil) {
-					logAttempt(provider, statusForForwardResult(result), attempt)
-					writeStreamForwardError(w, result)
-					return
-				}
-				logAttempt(provider, statusForForwardResult(result), attempt)
-				next, nextRouteID, ok := s.advanceToNextProvider(w, r, req, excluded, &routingDone, &explicitRetries, &faultedProviders, logRow)
-				if !ok {
-					return
-				}
-				provider = next
-				excluded[routeKey(provider)] = struct{}{}
-				s.logRoutingDecision(nextRouteID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
-				continue
-			}
-			result, status, attempt := s.forwardStreaming(w, r, requestID, dispatchBody, provider, req.Model, s.attemptTimeout(r))
-			if result == wsForwardComplete {
-				logAttempt(provider, status, attempt)
-				return
-			}
-			if result == wsForwardProviderDisconnectedCommitted || result == wsForwardCancelled {
-				if shouldLogAttempt(attempt) {
-					logAttempt(provider, http.StatusOK, attempt)
-				}
-				return
-			}
-			excluded[routeKey(provider)] = struct{}{}
-			if !s.shouldRetry(r, startedAt, explicitRetries, faultedProviders, status, nil) {
-				logAttempt(provider, status, attempt)
-				writeStreamForwardError(w, result)
-				return
-			}
-			logAttempt(provider, status, attempt)
-			next, nextRouteID, ok := s.advanceToNextProvider(w, r, req, excluded, &routingDone, &explicitRetries, &faultedProviders, logRow)
-			if !ok {
-				return
-			}
-			provider = next
-			excluded[routeKey(provider)] = struct{}{}
-			s.logRoutingDecision(nextRouteID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
-		}
+		s.forwardStreamSequence(w, r, req, requestID, originalRequestID, externalRequestID, startedAt, state, excluded, rec, logAttempt, shouldLogAttempt)
+		return
 	}
-	if provider.IsWSTunneled() {
+	if state.provider.IsWSTunneled() {
 		excluded := map[string]struct{}{}
-		failoverAttempted := false
-		for {
-			dispatchBody, err := dispatchBodyForProvider(req, provider)
-			if err != nil {
-				logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
-				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
-				return
-			}
-			result, attempt := s.forwardWS(w, r, requestID, dispatchBody, provider, false, s.attemptTimeout(r))
-			if result == wsForwardComplete {
-				logAttempt(provider, http.StatusOK, attempt)
-				s.stickyStore(r.Header, provider, req.Model)
-				return
-			}
-			if result == wsForwardTimedOut {
-				excluded[routeKey(provider)] = struct{}{}
-				faultedRoutes[routeKey(provider)] = struct{}{}
-				if !s.shouldRetry(r, startedAt, explicitRetries, faultedProviders, http.StatusGatewayTimeout, nil) {
-					logAttempt(provider, http.StatusGatewayTimeout, attempt)
-					writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
-					return
-				}
-				logAttempt(provider, http.StatusGatewayTimeout, attempt)
-				next, _, ok := s.advanceToNextProvider(w, r, req, excluded, &routingDone, &explicitRetries, &faultedProviders, logRow)
-				if !ok {
-					return
-				}
-				provider = next
-				excluded[routeKey(provider)] = struct{}{}
-				if provider.IsWSTunneled() {
-					continue
-				}
-				break
-			}
-			if result == wsForwardFailed || result == wsForwardUnavailable || result == wsForwardCancelled {
-				if result != wsForwardCancelled || shouldLogAttempt(attempt) {
-					logAttempt(provider, statusForForwardResult(result), attempt)
-				}
-				return
-			}
-			if result == wsForwardProviderDisconnected {
-				excluded[routeKey(provider)] = struct{}{}
-				faultedRoutes[routeKey(provider)] = struct{}{}
-				if failoverAttempted || hasPinnedRoute(r.Header) {
-					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
-					logAttempt(provider, http.StatusBadGateway, attempt)
-					writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
-					return
-				}
-				next, ok := s.failoverCandidate(uuid.NewString(), req, r.Header, provider, excluded)
-				if !ok {
-					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "fast_fail", "")
-					logAttempt(provider, http.StatusBadGateway, attempt)
-					writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
-					return
-				}
-				s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, provider, "failover", next.ProviderID)
-				logAttempt(provider, http.StatusBadGateway, attempt)
-				failoverAttempted = true
-				provider = next
-				if provider.IsWSTunneled() {
-					continue
-				}
-				break
-			}
-			if result == wsForwardQueueFull {
-				s.pool.MarkState(provider.ProviderID, provider.AssignedID, pool.StateBusy)
-				excluded[routeKey(provider)] = struct{}{}
-				logAttempt(provider, http.StatusBadGateway, attempt)
-			}
-			provider, routeErr = s.selectProviderExcluding(uuid.NewString(), req, r.Header, excluded)
-			if routeErr != nil {
-				routingDone = s.now()
-				logRow("", routeErr.status, nil, nil, routeErr.message, "", explicitRetries)
-				writeRouteError(w, routeErr)
-				return
-			}
-			routingDone = s.now()
-			explicitRetries++
-			faultedProviders++
-			if !provider.IsWSTunneled() {
-				break
-			}
+		shouldFallThroughToHTTP := s.forwardWSNonStreamSequence(w, r, req, requestID, originalRequestID, externalRequestID, startedAt, state, excluded, rec, logAttempt, shouldLogAttempt)
+		if !shouldFallThroughToHTTP {
+			return
 		}
 	}
 	excluded := map[string]struct{}{}
-	for key := range faultedRoutes {
+	for key := range state.faultedRoutes {
 		excluded[key] = struct{}{}
 	}
-	excluded[routeKey(provider)] = struct{}{}
+	excluded[routeKey(state.provider)] = struct{}{}
+	s.forwardHTTPSequence(w, r, req, requestID, originalRequestID, startedAt, state, excluded, rec)
+}
+
+// forwardStreamSequence is the unified loop body for streaming requests
+// (req.Stream=true). It dispatches per-attempt to either forwardWS
+// (WS-tunneled streaming) or forwardStreaming (HTTP streaming), pipes
+// the native result through the appropriate classifier, and then drives
+// retry / failover / busy-marking / committed-early-exit decisions off
+// the resulting transportResult flags — the M2-1c unification of the
+// three previously-duplicated transport loops at server.go:1085-1170.
+//
+// Audit-flagged invariants preserved:
+//   - attempt_n numbering: identical across all transport types (logAttempt
+//     consults explicitRetries which is bumped exclusively by
+//     advanceToNextProvider, never by failoverCandidate).
+//   - logAttempt row sequence: emitted once per non-cancelled attempt
+//     before any branch decision, matching pre-refactor behaviour.
+//   - HTTP-only per-attempt context timeout: STAYS inside forwardStreaming,
+//     not in the unified loop (the loop never knows about it).
+//   - WS-streaming pre-first-chunk failoverEligible + retryable=true is
+//     branched on the classifier flags, not on transport kind — the
+//     classifier already encoded this divergence in M2-1b.
+func (s *Server) forwardStreamSequence(
+	w http.ResponseWriter,
+	r *http.Request,
+	req chatRequest,
+	requestID, originalRequestID, externalRequestID string,
+	startedAt time.Time,
+	state *forwardState,
+	excluded map[string]struct{},
+	rec *billingRecorder,
+	logAttempt func(pool.Provider, int, requestLogAttempt, int),
+	shouldLogAttempt func(requestLogAttempt) bool,
+) {
+	failoverAttempted := false
 	for {
-		dispatchBody, err := dispatchBodyForProvider(req, provider)
+		dispatchBody, err := dispatchBodyForProvider(req, state.provider)
 		if err != nil {
-			logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
+			rec.logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 			return
 		}
-		upstreamURL := provider.EndpointURL + "/v1/chat/completions"
+		wsTunneled := state.provider.IsWSTunneled()
+		var tr transportResult
+		var nativeResult wsForwardResult
+		if wsTunneled {
+			result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, true, s.attemptTimeout(r))
+			// Per pre-refactor server.go:1130/1131 — WS-streaming status
+			// for shouldRetry + logAttempt is statusForForwardResult(result).
+			tr = classifyStreamResult(result, statusForForwardResult(result), attempt)
+			nativeResult = result
+		} else {
+			result, status, attempt := s.forwardStreaming(w, r, requestID, dispatchBody, state.provider, req.Model, s.attemptTimeout(r))
+			tr = classifyStreamResult(result, status, attempt)
+			nativeResult = result
+		}
+		// Committed-early-exit: the streaming first-chunk-received path
+		// (wsForwardProviderDisconnectedCommitted, wsForwardCancelled).
+		// Encoded as committed=true by classifyStreamResult.
+		if tr.committed {
+			if tr.cancelled {
+				if shouldLogAttempt(tr.attempt) {
+					logAttempt(state.provider, http.StatusOK, tr.attempt, state.explicitRetries)
+				}
+			} else {
+				logAttempt(state.provider, http.StatusOK, tr.attempt, state.explicitRetries)
+				if wsTunneled && nativeResult == wsForwardProviderDisconnectedCommitted {
+					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, state.provider, "stream_terminal", "")
+				}
+			}
+			return
+		}
+		// Success: classifyStreamResult sets status=200, no behaviour flags.
+		if nativeResult == wsForwardComplete {
+			logAttempt(state.provider, http.StatusOK, tr.attempt, state.explicitRetries)
+			if wsTunneled {
+				s.stickyStore(r.Header, state.provider, req.Model)
+			}
+			return
+		}
+		excluded[routeKey(state.provider)] = struct{}{}
+		state.faultedRoutes[routeKey(state.provider)] = struct{}{}
+		if tr.markBusy {
+			s.pool.MarkState(state.provider.ProviderID, state.provider.AssignedID, pool.StateBusy)
+		}
+		// failoverEligible: WS-streaming pre-first-chunk disconnect path.
+		// Only set by classifyStreamResult on wsForwardProviderDisconnected
+		// in the WS-tunneled branch. Streaming-pre-chunk falls through to
+		// shouldRetry if failover misses (retryable=true).
+		if tr.failoverEligible && wsTunneled {
+			if !failoverAttempted && !hasPinnedRoute(r.Header) {
+				next, ok := s.failoverCandidate(uuid.NewString(), req, r.Header, state.provider, excluded)
+				if ok {
+					s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, state.provider, "failover", next.ProviderID)
+					failoverAttempted = true
+					state.provider = next
+					continue
+				}
+			}
+			s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, state.provider, "fast_fail", "")
+		}
+		// Curated attempt.Error: classify*Result already populated
+		// tr.attempt with the curated error string. logAttempt reads
+		// from tr.attempt — never from a raw tr.err mirror. Carry-forward
+		// from PR #61 security audit.
+		if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, tr.status, nil) {
+			logAttempt(state.provider, tr.status, tr.attempt, state.explicitRetries)
+			writeStreamForwardError(w, nativeResult)
+			return
+		}
+		logAttempt(state.provider, tr.status, tr.attempt, state.explicitRetries)
+		nextRouteID, ok := s.advanceToNextProvider(w, r, req, state, excluded, rec)
+		if !ok {
+			return
+		}
+		excluded[routeKey(state.provider)] = struct{}{}
+		s.logRoutingDecision(nextRouteID, []pool.Provider{state.provider}, "retry", 0, 0, "retry_"+itoa(state.explicitRetries), state.provider.ProviderID)
+	}
+}
+
+// forwardWSNonStreamSequence is the unified loop body for non-streaming
+// WS-tunneled requests — collapses server.go:1172-1257 pre-refactor.
+// Returns shouldFallThroughToHTTP=true when the loop's "advance picked
+// a non-WS provider" break-condition fires, signalling the caller to
+// run the HTTP non-streaming loop on state.provider.
+//
+// Audit-flagged invariants preserved:
+//   - WS-non-streaming failoverEligible carries retryable=false in the
+//     classifier; the loop branches on the flag pair to fast-fail with
+//     502 when failover misses, NOT falling through to shouldRetry.
+//     This is the audit-cited intentional divergence vs streaming.
+//   - Cancelled / Failed / Unavailable short-circuit return without
+//     advance, matching pre-refactor behaviour at server.go:1208-1213.
+func (s *Server) forwardWSNonStreamSequence(
+	w http.ResponseWriter,
+	r *http.Request,
+	req chatRequest,
+	requestID, originalRequestID, externalRequestID string,
+	startedAt time.Time,
+	state *forwardState,
+	excluded map[string]struct{},
+	rec *billingRecorder,
+	logAttempt func(pool.Provider, int, requestLogAttempt, int),
+	shouldLogAttempt func(requestLogAttempt) bool,
+) (shouldFallThroughToHTTP bool) {
+	failoverAttempted := false
+	for {
+		dispatchBody, err := dispatchBodyForProvider(req, state.provider)
+		if err != nil {
+			rec.logRow(state.provider.AssignedID, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
+			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
+			return false
+		}
+		result, attempt := s.forwardWS(w, r, requestID, dispatchBody, state.provider, false, s.attemptTimeout(r))
+		tr := classifyWSResult(result, attempt)
+		if result == wsForwardComplete {
+			logAttempt(state.provider, http.StatusOK, tr.attempt, state.explicitRetries)
+			s.stickyStore(r.Header, state.provider, req.Model)
+			return false
+		}
+		// Cancelled / Failed / Unavailable: short-circuit return.
+		if result == wsForwardFailed || result == wsForwardUnavailable || result == wsForwardCancelled {
+			if result != wsForwardCancelled || shouldLogAttempt(tr.attempt) {
+				logAttempt(state.provider, statusForForwardResult(result), tr.attempt, state.explicitRetries)
+			}
+			return false
+		}
+		// Timeout: classifier marks retryable=true, no failoverEligible.
+		// Runs through shouldRetry + advanceToNextProvider; on advance
+		// the loop continues if the next provider is WS, or breaks to
+		// HTTP fallback otherwise.
+		if result == wsForwardTimedOut {
+			excluded[routeKey(state.provider)] = struct{}{}
+			state.faultedRoutes[routeKey(state.provider)] = struct{}{}
+			if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, http.StatusGatewayTimeout, nil) {
+				logAttempt(state.provider, http.StatusGatewayTimeout, tr.attempt, state.explicitRetries)
+				writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
+				return false
+			}
+			logAttempt(state.provider, http.StatusGatewayTimeout, tr.attempt, state.explicitRetries)
+			_, ok := s.advanceToNextProvider(w, r, req, state, excluded, rec)
+			if !ok {
+				return false
+			}
+			excluded[routeKey(state.provider)] = struct{}{}
+			if state.provider.IsWSTunneled() {
+				continue
+			}
+			return true
+		}
+		// Provider disconnected (pre-commit): failoverEligible + retryable=false.
+		// The non-streaming WS loop fast-fails with 502 when failover misses
+		// (audit-flagged intentional divergence vs streaming).
+		if tr.failoverEligible {
+			excluded[routeKey(state.provider)] = struct{}{}
+			state.faultedRoutes[routeKey(state.provider)] = struct{}{}
+			if failoverAttempted || hasPinnedRoute(r.Header) {
+				s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, state.provider, "fast_fail", "")
+				logAttempt(state.provider, http.StatusBadGateway, tr.attempt, state.explicitRetries)
+				writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
+				return false
+			}
+			next, ok := s.failoverCandidate(uuid.NewString(), req, r.Header, state.provider, excluded)
+			if !ok {
+				s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, state.provider, "fast_fail", "")
+				logAttempt(state.provider, http.StatusBadGateway, tr.attempt, state.explicitRetries)
+				writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
+				return false
+			}
+			s.logWSDeadMidRequest(originalRequestID, requestID, externalRequestID, state.provider, "failover", next.ProviderID)
+			logAttempt(state.provider, http.StatusBadGateway, tr.attempt, state.explicitRetries)
+			failoverAttempted = true
+			state.provider = next
+			if state.provider.IsWSTunneled() {
+				continue
+			}
+			return true
+		}
+		// Queue full: markBusy + retryable=true. The audit (post-merge
+		// verification of PR #91 — Q3 BLOCKING) called out the prior
+		// inline state mutation here as the concrete shared-state
+		// bypass that kept ARCH-1 / CODE-1 at PARTIAL_RESOLVED_DIFFERENTLY.
+		// M2-1d routes this path through advanceToNextProvider so the
+		// "pick next provider + bump explicitRetries/faultedProviders"
+		// tail lives in exactly one place — same as the timeout branch
+		// above and the two siblings (forwardStreamSequence,
+		// forwardHTTPSequence).
+		//
+		// Byte-identical to PR #91 baseline: classifier sets markBusy=true
+		// only on wsForwardQueueFull (the only case that falls through to
+		// this point), so the unconditional MarkState + excluded-add +
+		// logAttempt block here matches the pre-1d guarded behaviour.
+		// advanceToNextProvider performs the identical mutation order
+		// (selectProviderExcluding → routingDone → explicitRetries++ →
+		// faultedProviders++ → state.provider = next) as the prior inline
+		// block, preserving the request_log row sequence the billing
+		// ledger keys off (verified by forward_loop_test.go scenario 5).
+		s.pool.MarkState(state.provider.ProviderID, state.provider.AssignedID, pool.StateBusy)
+		excluded[routeKey(state.provider)] = struct{}{}
+		logAttempt(state.provider, http.StatusBadGateway, tr.attempt, state.explicitRetries)
+		if _, ok := s.advanceToNextProvider(w, r, req, state, excluded, rec); !ok {
+			return false
+		}
+		if !state.provider.IsWSTunneled() {
+			return true
+		}
+	}
+}
+
+// forwardHTTPSequence is the unified loop body for HTTP non-streaming
+// requests — collapses server.go:1264-1356 pre-refactor.
+//
+// Audit-flagged invariants preserved:
+//   - HTTP per-attempt context timeout stays HTTP-only — set up
+//     inside this function via context.WithTimeout(r.Context(), ...)
+//     when retryRequested && retryPerAttemptTimeout > 0; the timeout
+//     is never visible at the unified-loop level for other transports.
+//   - handleProviderFailure called on non-200 status (HTTP-only fault
+//     tracking — WS path has its own MarkState semantics via classifier
+//     markBusy flag).
+func (s *Server) forwardHTTPSequence(
+	w http.ResponseWriter,
+	r *http.Request,
+	req chatRequest,
+	requestID, originalRequestID string,
+	startedAt time.Time,
+	state *forwardState,
+	excluded map[string]struct{},
+	rec *billingRecorder,
+) {
+	for {
+		dispatchBody, err := dispatchBodyForProvider(req, state.provider)
+		if err != nil {
+			rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
+			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
+			return
+		}
+		upstreamURL := state.provider.EndpointURL + "/v1/chat/completions"
 		attemptCtx := r.Context()
 		cancelAttempt := func() {}
 		retryRequested := s.maxRetries > 0 && retryHeaderLimit(r.Header.Get("X-MacProvider-Retry")) > 0
@@ -1259,37 +1529,38 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		upReq, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, upstreamURL, bytes.NewReader(dispatchBody))
 		if err != nil {
 			cancelAttempt()
-			logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
+			rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 			return
 		}
 		upReq.Header.Set("Content-Type", "application/json")
 		upReq.Header.Set("X-Request-ID", originalRequestID)
 		resp, err := providerhttp.Client.Do(upReq)
-		if err == nil && resp.StatusCode == http.StatusOK {
+		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			respBody, readErr := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 			_ = resp.Body.Close()
 			if readErr != nil {
 				cancelAttempt()
-				logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", explicitRetries)
+				rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", "", state.explicitRetries)
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
 				return
 			}
 			promptTok, completionTok := tokenPointersFromChatResponse(respBody)
 			estimatedCompletion := s.observedCompletionTokensFromBytes(len(respBody))
-			if err := logProviderRowWithEstimate(provider, http.StatusOK, promptTok, completionTok, "", "", explicitRetries, estimatedCompletion); err != nil {
+			if err := rec.logProviderRowWithEstimate(state.provider, http.StatusOK, promptTok, completionTok, "", "", state.explicitRetries, estimatedCompletion); err != nil {
 				cancelAttempt()
 				writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
 				return
 			}
+			copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
 			w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 			if w.Header().Get("Content-Type") == "" {
 				w.Header().Set("Content-Type", "application/json")
 			}
-			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
-			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+			w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+			w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
 			w.WriteHeader(http.StatusOK)
-			s.stickyStore(r.Header, provider, req.Model)
+			s.stickyStore(r.Header, state.provider, req.Model)
 			_, _ = w.Write(respBody)
 			cancelAttempt()
 			return
@@ -1300,47 +1571,80 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 			status = resp.StatusCode
 			respBody, _ := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 			_ = resp.Body.Close()
-			attempt.ErrorCode = spec001StatusFromBody(respBody)
+			attempt.ErrorCode = nullUsageProviderErrorCode(respBody)
+			if attempt.ErrorCode != "" && providerReceiptEligible(state.provider) {
+				// Round-1 audit H1: receipt-bearing null-usage errors used to
+				// return immediately to the buyer, bypassing the
+				// `X-MacProvider-Retries: N` budget. Only short-circuit when
+				// the retry budget is genuinely exhausted; otherwise fall
+				// through to the failover path so the buyer's explicit retry
+				// budget is honored. The receipt is preserved on the final
+				// attempt.
+				if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, status, nil) {
+					if err := rec.logProviderRow(state.provider, status, nil, nil, http.StatusText(status), attempt.ErrorCode, state.explicitRetries); err != nil {
+						cancelAttempt()
+						writeError(w, http.StatusInternalServerError, "request_log_failed", "Could not durably log request")
+						return
+					}
+					copyReceiptHeaderForProvider(w.Header(), resp.Header, state.provider)
+					w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
+					if w.Header().Get("Content-Type") == "" {
+						w.Header().Set("Content-Type", "application/json")
+					}
+					w.Header().Set("X-MacProvider-Provider", state.provider.ProviderID)
+					w.Header().Set("X-MacProvider-Route", state.provider.AssignedID)
+					w.WriteHeader(status)
+					_, _ = w.Write(respBody)
+					cancelAttempt()
+					return
+				}
+			}
 		}
 		cancelAttempt()
-		s.log.Warn().Err(err).Int("status", status).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider request failed")
+		// classifyHTTPResult is the canonical translation of the
+		// (resp, err) pair into transportResult.status (with the
+		// nil-response → 502 normalisation) and tr.retryable. The HTTP
+		// failure path keeps its inline shouldRetry + logProviderRow
+		// shape because logProviderRow vs logAttempt differ in
+		// caller-supplied message wording (the HTTP-specific
+		// "provider_timeout" / "provider_error" disambiguation lives
+		// here, not in the classifier). Using tr.status downstream
+		// pulls the status-derivation contract into one place across
+		// HTTP/streaming/WS.
+		tr := classifyHTTPResult(resp, err, attempt)
+		s.log.Warn().Err(err).Int("status", status).Str("request_id", requestID).Str("provider_id", state.provider.ProviderID).Msg("provider request failed")
 		if status != 0 {
-			s.handleProviderFailure(provider, status)
+			s.handleProviderFailure(state.provider, status)
 		}
-		if !s.shouldRetry(r, startedAt, explicitRetries, faultedProviders, status, err) {
+		if !s.shouldRetry(r, startedAt, state.explicitRetries, state.faultedProviders, status, err) {
 			if retryRequested && status == http.StatusGatewayTimeout {
-				logProviderRow(provider, http.StatusGatewayTimeout, nil, nil, "Selected provider timed out; buyer should retry", attempt.ErrorCode, explicitRetries)
+				rec.logProviderRow(state.provider, http.StatusGatewayTimeout, nil, nil, "Selected provider timed out; buyer should retry", attempt.ErrorCode, state.explicitRetries)
 				writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
 				return
 			}
-			logProviderRow(provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", attempt.ErrorCode, explicitRetries)
+			rec.logProviderRow(state.provider, http.StatusBadGateway, nil, nil, "Selected provider failed; buyer should retry", attempt.ErrorCode, state.explicitRetries)
 			writeError(w, http.StatusBadGateway, "provider_error", "Selected provider failed; buyer should retry")
 			return
 		}
-		failStatus := status
-		if failStatus == 0 {
-			failStatus = http.StatusBadGateway
-		}
+		// tr.status already encodes the nil-response → 502 normalisation
+		// the pre-refactor code did inline (failStatus := status; if
+		// failStatus == 0 { failStatus = http.StatusBadGateway }). Read
+		// it from the classifier so HTTP and streaming/WS paths share
+		// the same status-derivation contract.
+		failStatus := tr.status
 		errMsg := "Selected provider failed; buyer should retry"
 		if err != nil {
 			errMsg = err.Error()
 		}
-		logProviderRow(provider, failStatus, nil, nil, errMsg, attempt.ErrorCode, explicitRetries)
-		next, nextRouteID, ok := s.advanceToNextProvider(w, r, req, excluded, &routingDone, &explicitRetries, &faultedProviders, logRow)
+		rec.logProviderRow(state.provider, failStatus, nil, nil, errMsg, attempt.ErrorCode, state.explicitRetries)
+		nextRouteID, ok := s.advanceToNextProvider(w, r, req, state, excluded, rec)
 		if !ok {
 			return
 		}
-		provider = next
-		excluded[routeKey(provider)] = struct{}{}
-		s.logRoutingDecision(nextRouteID, []pool.Provider{provider}, "retry", 0, 0, "retry_"+itoa(explicitRetries), provider.ProviderID)
+		excluded[routeKey(state.provider)] = struct{}{}
+		s.logRoutingDecision(nextRouteID, []pool.Provider{state.provider}, "retry", 0, 0, "retry_"+itoa(state.explicitRetries), state.provider.ProviderID)
 	}
 }
-
-// forwardLogRowFunc is the signature of the `logRow` closure inside
-// handleChatCompletions. Hoisted into a named type so advanceToNextProvider
-// can accept the closure as a parameter without re-spelling the
-// 7-parameter signature.
-type forwardLogRowFunc func(providerAssignedID string, status int, promptTok, completionTok *int64, errMsg, errCode string, retried int)
 
 // advanceToNextProvider performs the per-retry "pick a fresh provider,
 // dispatch the route-error response on no-candidate, bump explicitRetries
@@ -1352,6 +1656,11 @@ type forwardLogRowFunc func(providerAssignedID string, status int, promptTok, co
 // continue/break) because those vary across callsites. Sub-PRs 1b and 1c
 // unify the three transport loops into a single failover skeleton.
 //
+// M3-10 (ARCH-6 close-out): the route-error logRow that this helper
+// emits on no-candidate now routes through *billingRecorder, matching
+// the rest of the request-log/billing orchestration that the audit
+// hoisted out of inline closures.
+//
 // Returns (next provider, nextRouteID used for routing-decision logging,
 // ok). ok=false means a route error has already been written to w and
 // the caller MUST return from handleChatCompletions immediately.
@@ -1359,24 +1668,23 @@ func (s *Server) advanceToNextProvider(
 	w http.ResponseWriter,
 	r *http.Request,
 	req chatRequest,
+	state *forwardState,
 	excluded map[string]struct{},
-	routingDone *time.Time,
-	explicitRetries *int,
-	faultedProviders *int,
-	logRow forwardLogRowFunc,
-) (next pool.Provider, nextRouteID string, ok bool) {
+	rec *billingRecorder,
+) (nextRouteID string, ok bool) {
 	nextRouteID = uuid.NewString()
 	picked, routeErr := s.selectProviderExcluding(nextRouteID, req, r.Header, excluded)
 	if routeErr != nil {
-		*routingDone = s.now()
-		logRow("", routeErr.status, nil, nil, routeErr.message, "", *explicitRetries)
+		state.routingDone = s.now()
+		rec.logRow("", routeErr.status, nil, nil, routeErr.message, "", state.explicitRetries)
 		writeRouteError(w, routeErr)
-		return pool.Provider{}, "", false
+		return "", false
 	}
-	*routingDone = s.now()
-	*explicitRetries++
-	*faultedProviders++
-	return picked, nextRouteID, true
+	state.routingDone = s.now()
+	state.explicitRetries++
+	state.faultedProviders++
+	state.provider = picked
+	return nextRouteID, true
 }
 
 func (s *Server) attemptTimeout(r *http.Request) time.Duration {
@@ -1508,14 +1816,27 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				s.recordBreakerFault(provider, breakerFaultZeroTokenCompletion, requestID)
 				faultFlag = billing.FaultBreakerQualifying
 			}
-			checkedBody, err := guard.CheckNonStreamingBody(body.Bytes())
+			originalBody := body.Bytes()
+			checkedBody, err := guard.CheckNonStreamingBody(originalBody)
 			if err != nil {
 				writeError(w, http.StatusBadGateway, "tier2_output_encoding_invalid", "Provider returned invalid Tier2 output encoding")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding"}
 			}
+			// Round-2 audit HIGH: PillarD enforceOutputCap may truncate the
+			// completion. The provider signed end.Receipt over the original
+			// bytes; if we forward the truncated body alongside the receipt,
+			// the buyer-side verifier will recompute a different output_hash
+			// and reject. Drop the receipt header in that case — the buyer
+			// still gets the truncated 200 OK body, just without an
+			// integrity attestation that no longer applies.
+			receiptValue := end.Receipt
+			if !bytes.Equal(checkedBody, originalBody) {
+				receiptValue = ""
+			}
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+			setReceiptHeaderForProvider(w.Header(), receiptValue, provider)
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(checkedBody)
 			promptTok, completionTok := tokenPointersFromUsageObject(end.Usage)
@@ -2241,7 +2562,7 @@ func (s *Server) selectProviderExcluding(requestID string, req chatRequest, head
 		if _, skip := excluded[routeKey(p)]; skip {
 			continue
 		}
-		if !s.providerMatchesRequest(p, req.Model, class) || !baseRoutingEligible(p) {
+		if !s.providerMatchesRequest(p, req.Model, class) || !p.RoutingEligible() {
 			continue
 		}
 		if p.MaxContextTokens < estimatedTokens {
@@ -2720,8 +3041,43 @@ func hasInternalRoutingHeader(headers http.Header) bool {
 	return false
 }
 
+// internalBearerAuthorized guards the `/internal/routing` and
+// `/internal/sticky` paths the gateway calls upstream. It accepts
+// EITHER the operator key OR the gateway service token (M3-2 / SECU-4
+// dual-credential bridge per the codex PR #73 fix). BOTH candidates are
+// evaluated before branching to close the short-circuit timing oracle
+// the audit flagged as MEDIUM. The audit-log line carries which class
+// matched so the operator can watch the cutover.
+//
+// TODO(m3-2-cleanup): remove the operator-key fallback in a dedicated
+// PR once live audit logs show zero gateway-origin
+// `key=operator_key` for 30 days post-OperatorKey-rotation. Tracked in
+// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md.
 func (s *Server) internalBearerAuthorized(headers http.Header) bool {
-	return auth.BearerTokenMatchesHeader(headers, s.internalAuthKey)
+	return s.internalBearerAuthorizedRemote(headers, "")
+}
+
+// internalBearerAuthorizedRemote is the variant called from request
+// handlers that have a *http.Request available, so the audit-log line
+// can carry the originating address. The non-remote variant calls this
+// with an empty string for legacy in-band call sites that only have
+// headers (e.g., the buyer routing-eligibility check).
+func (s *Server) internalBearerAuthorizedRemote(headers http.Header, remoteAddr string) bool {
+	return s.internalBearerAuthorizedFull(headers, remoteAddr, "")
+}
+
+func (s *Server) internalBearerAuthorizedFull(headers http.Header, remoteAddr, path string) bool {
+	kind := auth.GatewayInternalBearerMatches(headers, s.internalAuthKey, s.gatewayServiceToken)
+	if kind == auth.BearerKindNone {
+		return false
+	}
+	s.log.Info().
+		Str("event", "internal_bearer_accepted").
+		Str("key", kind.String()).
+		Str("path", path).
+		Str("remote_addr", remoteAddr).
+		Msg("internal bearer accepted")
+	return true
 }
 
 func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string, estimatedTokens int, unavailableMessage string, class *config.ModelClassConfig) (pool.Provider, *routeError) {
@@ -2731,7 +3087,7 @@ func (s *Server) validatePinnedProviderForRequest(p pool.Provider, model string,
 	if p.MaxContextTokens < estimatedTokens {
 		return pool.Provider{}, &routeError{status: http.StatusRequestEntityTooLarge, code: "context_exceeds_capacity", message: "Request exceeds pinned provider context capacity"}
 	}
-	if !baseRoutingEligible(p) {
+	if !p.RoutingEligible() {
 		return pool.Provider{}, &routeError{status: http.StatusServiceUnavailable, code: "no_provider_available", message: unavailableMessage}
 	}
 	if s.tier2ProviderExcluded(p) {
@@ -2780,7 +3136,18 @@ func validatePinnedProvider(p pool.Provider, model string, estimatedTokens int, 
 	return p, nil
 }
 
-func baseRoutingEligible(p pool.Provider) bool {
+// hasAvailableSlot reports providers occupying a routable slot. Used by
+// observability sites that branch on HashStatus and need to count
+// mismatched/uncatalogued providers (which RoutingEligible excludes from
+// routing entirely). Bearer-less duplicates are excluded here too —
+// they hold a slot but are never legitimate.
+//
+// For routing decisions, use pool.Provider.RoutingEligible() — that is the
+// single authority on whether a provider may receive traffic.
+func hasAvailableSlot(p pool.Provider) bool {
+	if p.AuthState == pool.AuthBearerlessDuplicate {
+		return false
+	}
 	return p.State == pool.StateReady && p.SlotsFree > 0
 }
 
@@ -2819,6 +3186,11 @@ func (s *Server) effectiveHashStatus(p pool.Provider, cfg config.Tier2Config) po
 	if p.HashStatus != "" {
 		return p.HashStatus
 	}
+	// TODO(m3-8d-followup): legacy fallback uses the package-singleton shim
+	// (tier2.VerifyProviderHash → tier2.Default()) because buyer.Server is
+	// not yet threaded with an explicit *tier2.Catalog via DI. Migration is
+	// tracked separately (see beta/DECISION_CRITERIA.md); switching it here
+	// also unblocks t.Parallel() in internal/buyer/server_test.go.
 	return tier2.VerifyProviderHash(p.ModelID, p.ModelHash)
 }
 
@@ -3136,6 +3508,66 @@ func estimateTokens(raw json.RawMessage) int {
 		return 1
 	}
 	return n
+}
+
+func copyReceiptHeaderForProvider(dst, src http.Header, provider pool.Provider) {
+	if !providerReceiptEligible(provider) {
+		return
+	}
+	if receipt := normalizeReceiptHeaderValue(src.Get("X-MacProvider-Receipt")); receipt != "" {
+		dst.Set("X-MacProvider-Receipt", receipt)
+	}
+}
+
+func setReceiptHeaderForProvider(dst http.Header, value string, provider pool.Provider) {
+	if !providerReceiptEligible(provider) {
+		return
+	}
+	if receipt := normalizeReceiptHeaderValue(value); receipt != "" {
+		dst.Set("X-MacProvider-Receipt", receipt)
+	}
+}
+
+// normalizeReceiptHeaderValue enforces SPEC-015 AC-15: the receipt header
+// is at most 4096 ASCII bytes and contains no CR/LF/NUL. Returns "" when
+// the candidate value fails either constraint so the caller drops the
+// header rather than poisoning the response (nginx upstream defaults are
+// 8 KiB and a malicious provider header would otherwise convert into a
+// 502 at the gateway hop).
+func normalizeReceiptHeaderValue(raw string) string {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return ""
+	}
+	if len(value) > 4096 {
+		return ""
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c < 0x20 || c > 0x7E {
+			return ""
+		}
+	}
+	return value
+}
+
+func providerReceiptEligible(provider pool.Provider) bool {
+	return len(provider.ReceiptPubkey) > 0
+}
+
+func nullUsageProviderErrorCode(body []byte) string {
+	if code := spec001StatusFromBody(body); code != "" {
+		return code
+	}
+	var envelope struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		return ""
+	}
+	return spec001EndStatus(envelope.Error.Code)
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {

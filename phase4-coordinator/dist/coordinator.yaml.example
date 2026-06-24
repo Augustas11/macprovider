@@ -27,6 +27,15 @@ pool:
   degraded_probe_after_502: true
   breaker_failure_threshold: 2
   breaker_window_s: 120
+  canary_enabled: false
+  canary_interval_s: 300
+  canary_timeout_s: 30
+  canary_max_tokens: 8
+  canary_failure_threshold: 3
+  # Required when canary_enabled is true. Keep deployment-specific and rotate periodically.
+  # canary_challenges:
+  #   - prompt: "<private operator challenge prompt containing {nonce}>"
+  #     expected: "<private expected answer containing {nonce}>"
 
 routing:
   preflight_threshold_tokens: 4096
@@ -64,7 +73,17 @@ limits:
 
 auth:
   # 64 hex chars (256 bits). Generated with: openssl rand -hex 32
+  # In production, prefer the env-indirected form so the secret lives in
+  # /etc/macprovider/coordinator.env (mode 0640 root:macprovider) instead
+  # of YAML on disk (M3-2 / DEVE-7):
+  #   operator_key: env:OPERATOR_KEY
   operator_key: "REPLACE_ME_WITH_RANDOM_HEX_64"
+  # Optional service-to-service credential the gateway uses for upstream
+  # admin calls (M3-2 / SECU-4). When set, the coordinator accepts EITHER
+  # operator_key OR gateway_service_token on internal-bearer endpoints,
+  # so operator_key can be rotated independently. Leave unset to preserve
+  # pre-bridge behavior.
+  #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
   require_provider_tokens: true # Production/provider WS public exposure must require provider tokens.
 
 storage:
@@ -75,6 +94,19 @@ storage:
 logging:
   level: "info"
   format: "json"
+
+tier2:
+  # SPEC-008 catalog-based hash verification. Operator-controlled,
+  # observation-only by default per beta/DECISION_CRITERIA Entry 80.
+  # Uncomment + populate to enable.
+  #   catalog_path: "/etc/macprovider/catalog.signed.json"
+  #   catalog_public_key: "<43-char base64url-unpadded ed25519 pubkey>"
+  #   require_hash_verified: false
+  #
+  # SPEC-015 v0.3 §M.4 — public absolute base URL the coordinator
+  # advertises as `catalog_url` / `catalog_pubkey_url` in /poolz.
+  # When empty, /poolz falls back to scheme + request Host. For Pearl:
+  public_catalog_base_url: "https://coordinator.streamvc.live"
 
 # Enumerated providers (SPEC-002 v1.0.4 Finding F-2: every provider_id that
 # may connect MUST be listed here). Edit this list locally — DO NOT

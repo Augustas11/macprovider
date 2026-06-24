@@ -8,6 +8,8 @@
 # re-copied). Mirrors phase4-coordinator/dist/deploy-pearl-vps.sh.
 #
 # What it does:
+#   0. freshness check — compare local repo / Pearl-deployed / origin/main
+#      sha256 for index.html; refuse to silently overwrite Pearl drift
 #   1. confirm SSH
 #   2. ensure DNS A record console.streamvc.live -> VPS (Cloudflare API,
 #      DNS-only) — created if missing, skipped if present
@@ -34,6 +36,9 @@
 #   CF_TOKEN_FILE default: ~/.config/macprovider/cloudflare-api-token
 #                  (Cloudflare API token scoped to Zone:DNS:Edit on streamvc.live;
 #                   only needed if the DNS record does not already exist)
+#   FORCE_OVERWRITE=1  bypass the step-0 freshness gate when local diverges
+#                      from origin/main (intentional hot-fix deploy)
+#   SKIP_FRESHNESS=1   skip step 0 entirely (offline / first-deploy / no git)
 
 set -euo pipefail
 
@@ -58,6 +63,63 @@ SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -p 22 $VPS_USER@$VPS_HOST"
 SCP="scp -i $SSH_KEY -P 22"
 
 log() { printf "\n[console-deploy] %s\n" "$*"; }
+
+# ─── step 0/8: freshness gate ──────────────────────────────────────────
+# Catches the "code-shipped-not-routed" pattern (decision-log Entry 86 +
+# Entry 138 silent drift): Pearl ran 5 commits behind origin/main on
+# index.html for 23 days because no one re-ran this script. This gate
+# makes the staleness loud at the start of every deploy.
+if [ "${SKIP_FRESHNESS:-0}" != "1" ]; then
+  log "step 0/8: freshness gate (local vs Pearl vs origin/main)"
+
+  LOCAL_SHA="$(sha256sum "$INDEX" | awk '{print $1}')"
+  PEARL_SHA="$(curl -fsS --max-time 10 --resolve "$DOMAIN:443:$VPS_HOST" \
+               "https://$DOMAIN/" 2>/dev/null | sha256sum | awk '{print $1}')"
+
+  REPO_ROOT="$(cd "$DIST_DIR/../../.." && pwd)"
+  ORIGIN_SHA=""
+  ORIGIN_AGE_LINE=""
+  if (cd "$REPO_ROOT" && git rev-parse --git-dir >/dev/null 2>&1); then
+    (cd "$REPO_ROOT" && git fetch -q origin main 2>/dev/null || true)
+    ORIGIN_SHA="$(cd "$REPO_ROOT" && git show origin/main:frontdoor/console/index.html 2>/dev/null | sha256sum | awk '{print $1}')"
+    # Find the most-recent commit on origin/main touching this file and
+    # the commit whose blob matches Pearl's served bytes (if any).
+    if [ -n "$PEARL_SHA" ]; then
+      ORIGIN_AGE_LINE="$(cd "$REPO_ROOT" && \
+        for sha in $(git log origin/main --pretty=format:'%h' -- frontdoor/console/index.html 2>/dev/null); do
+          blob=$(git show "$sha":frontdoor/console/index.html 2>/dev/null | sha256sum | awk '{print $1}')
+          if [ "$blob" = "$PEARL_SHA" ]; then
+            git log -1 --pretty=format:'  Pearl bytes match commit %h (%ar) — %s' "$sha"
+            break
+          fi
+        done)"
+    fi
+  fi
+
+  printf "  local sha256:        %s\n" "${LOCAL_SHA:-(unknown)}"
+  printf "  Pearl-served sha256: %s\n" "${PEARL_SHA:-(unreachable)}"
+  printf "  origin/main sha256:  %s\n" "${ORIGIN_SHA:-(no git or no fetch)}"
+  [ -n "$ORIGIN_AGE_LINE" ] && echo "$ORIGIN_AGE_LINE"
+
+  # Decide what state we're in.
+  if [ -n "$PEARL_SHA" ] && [ "$LOCAL_SHA" = "$PEARL_SHA" ]; then
+    log "step 0/8 result: Pearl is already serving these bytes — nothing to deploy"
+    log "DONE (no-op). Use SKIP_FRESHNESS=1 to force a redeploy anyway."
+    exit 0
+  fi
+
+  if [ -n "$ORIGIN_SHA" ] && [ "$LOCAL_SHA" != "$ORIGIN_SHA" ]; then
+    if [ "${FORCE_OVERWRITE:-0}" != "1" ]; then
+      echo "  WARNING: local index.html differs from origin/main." >&2
+      echo "  This deploy will ship un-pushed bytes to production." >&2
+      echo "  Re-run with FORCE_OVERWRITE=1 to confirm intent." >&2
+      exit 1
+    fi
+    log "step 0/8 result: FORCE_OVERWRITE=1 set — proceeding with local-diverged bytes"
+  else
+    log "step 0/8 result: deploying current origin/main"
+  fi
+fi
 
 log "step 1/8: confirm SSH"
 $SSH 'hostname >/dev/null && echo ok' >/dev/null

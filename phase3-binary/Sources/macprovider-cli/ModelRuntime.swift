@@ -6,6 +6,13 @@ import MacProviderCore
 
 protocol ModelRuntimeServing: Actor {
     func complete(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> CompletionResult
+    /// SPEC-015 §M.2 — return the runtime-owned snapshot that
+    /// actually drove inference (validation, in-flight registration,
+    /// generation) so the receipt can bind `model_hash` to the
+    /// container that served. Atomically captured inside the actor
+    /// turn — distinct from a caller-side `currentSnapshot()` sample,
+    /// which can drift across an actor interleaving / warm-swap.
+    func completeWithServedSnapshot(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> (CompletionResult, RuntimeSnapshot)
     func stream(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (String) -> Void) async throws -> CompletionResult
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
@@ -22,6 +29,21 @@ extension ModelRuntimeServing {
         try await complete(request, shouldCancel: { false })
     }
 
+    /// Convenience default — conformers that don't override get the
+    /// served snapshot from `currentSnapshot()` AFTER generation. The
+    /// real `ModelRuntime` overrides this to capture the snapshot
+    /// inside the actor turn that started inference, which is the
+    /// SPEC-015 §M.2.2 atomic-read invariant. Mock/stub runtimes used
+    /// in tests can rely on this default safely because they don't
+    /// model swaps.
+    func completeWithServedSnapshot(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        let result = try await complete(request, shouldCancel: shouldCancel)
+        let snapshot = await currentSnapshot()
+        return (result, snapshot)
+    }
 }
 
 public struct RuntimeSnapshot: @unchecked Sendable {
@@ -53,7 +75,12 @@ actor ModelRuntime: ModelRuntimeServing {
     private let stopTokenFilter: StopTokenFilter
     private var currentModelHash: String?
     private let maxContextTokens: Int
-    private let inferenceGate = AsyncSemaphore(value: 1)
+    // SPEC-013 autoresearch serving knobs. nil kvBits ⇒ no KV
+    // quantization (mlx-swift default). maxBatch defaults to 1, the
+    // pre-knob behavior; lifting above 1 widens the autotune search.
+    private let kvBitsOverride: Int?
+    private let inferenceGate: AsyncSemaphore
+    private let maxBatch: Int
     private let warmSwapEnabled: Bool
     private let swapDrainTimeoutSeconds: Int
     private var providerStatus: ProviderStatus?
@@ -79,11 +106,16 @@ actor ModelRuntime: ModelRuntimeServing {
     init(
         modelID: String?,
         maxContextTokensOverride: Int? = nil,
+        kvBitsOverride: Int? = nil,
+        maxBatch: Int = 1,
         warmSwapEnabled: Bool = false,
         swapDrainTimeoutSeconds: Int = 30
     ) async throws {
         self.currentModelID = modelID
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
+        self.kvBitsOverride = kvBitsOverride
+        self.maxBatch = max(1, maxBatch)
+        self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.loader = { targetModelID in
@@ -121,6 +153,8 @@ actor ModelRuntime: ModelRuntimeServing {
         modelID: String?,
         modelHash: String? = nil,
         maxContextTokensOverride: Int? = nil,
+        kvBitsOverride: Int? = nil,
+        maxBatch: Int = 1,
         warmSwapEnabled: Bool,
         swapDrainTimeoutSeconds: Int = 30,
         providerStatus: ProviderStatus? = nil,
@@ -133,6 +167,9 @@ actor ModelRuntime: ModelRuntimeServing {
         self.currentModelHash = modelHash
         self.stopTokenFilter = StopTokenFilter(tokens: [])
         self.maxContextTokens = maxContextTokensOverride ?? Self.defaultMaxContextTokens()
+        self.kvBitsOverride = kvBitsOverride
+        self.maxBatch = max(1, maxBatch)
+        self.inferenceGate = AsyncSemaphore(value: max(1, maxBatch))
         self.warmSwapEnabled = warmSwapEnabled
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.providerStatus = providerStatus
@@ -202,6 +239,20 @@ actor ModelRuntime: ModelRuntimeServing {
 
     nonisolated func swapDrainTimeoutForTest() -> Int {
         swapDrainTimeoutSeconds
+    }
+
+    // SPEC-013 autoresearch serving knobs: test-only accessors so test
+    // suites can confirm CLI flag values reached the runtime.
+    func kvBitsOverrideForTest() -> Int? {
+        kvBitsOverride
+    }
+
+    func maxBatchForTest() -> Int {
+        maxBatch
+    }
+
+    func maxContextTokensForTest() -> Int {
+        maxContextTokens
     }
 
     private func transitionToLoading(target: String) throws {
@@ -330,6 +381,21 @@ actor ModelRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         shouldCancel: @escaping @Sendable () -> Bool = { false }
     ) async throws -> CompletionResult {
+        let (result, _) = try await completeWithServedSnapshot(request, shouldCancel: shouldCancel)
+        return result
+    }
+
+    /// SPEC-015 §M.2.2 — atomic snapshot capture inside the actor
+    /// turn that started inference. The returned snapshot IS the
+    /// container that served the response (in-flight tracking pins
+    /// it for the request lifetime per SPEC-011 R-3.4.1). Callers
+    /// MUST bind the receipt's `model_hash` to this snapshot, NOT to
+    /// a separately-sampled `currentSnapshot()`.
+    func completeWithServedSnapshot(
+        _ request: ChatCompletionRequest,
+        shouldCancel: @escaping @Sendable () -> Bool = { false }
+    ) async throws -> (CompletionResult, RuntimeSnapshot) {
+        let completionStartedAt = Date()
         let snapshot = await currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
@@ -337,18 +403,20 @@ actor ModelRuntime: ModelRuntimeServing {
         let registrationID = registerInFlight { drainCancelled.fire() }
         defer { unregisterInFlight(registrationID) }
         if let testCompletion {
-            return try await Self.withDrainCancellation(drainCancelled) {
+            let result = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
             }
+            return (result, snapshot)
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
         }
 
         let maxContextTokens = maxContextTokens
+        let kvBitsOverride = kvBitsOverride
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
-        return try await Self.withDrainCancellation(drainCancelled) {
+        let completion = try await Self.withDrainCancellation(drainCancelled) {
             try await inferenceGate.withPermit {
                 try drainCancelled.check()
                 try Task.checkCancellation()
@@ -360,10 +428,16 @@ actor ModelRuntime: ModelRuntimeServing {
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
                         maxTokens: request.maxTokens,
+                        maxKVSize: maxContextTokens,
+                        kvBits: kvBitsOverride,
                         temperature: Float(request.temperature),
                         topP: Float(request.topP)
                     )
-                    let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { (_: [Int]) in
+                    let firstToken = FirstTokenRecorder()
+                    let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
+                        if !tokens.isEmpty {
+                            firstToken.recordIfMissing()
+                        }
                         if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
                             return GenerateDisposition.stop
                         }
@@ -389,11 +463,13 @@ actor ModelRuntime: ModelRuntimeServing {
                         content: filtered.text,
                         finishReason: finishReason,
                         promptTokens: result.promptTokenCount,
-                        completionTokens: result.generationTokenCount
+                        completionTokens: result.generationTokenCount,
+                        ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt)
                     )
                 }
             }
         }
+        return (completion, snapshot)
     }
 
     func stream(
@@ -418,6 +494,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
 
         let maxContextTokens = maxContextTokens
+        let kvBitsOverride = kvBitsOverride
         let inferenceGate = inferenceGate
         let stopTokenFilter = stopTokenFilter
         return try await Self.withDrainCancellation(drainCancelled) {
@@ -432,6 +509,8 @@ actor ModelRuntime: ModelRuntimeServing {
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
                         maxTokens: request.maxTokens,
+                        maxKVSize: maxContextTokens,
+                        kvBits: kvBitsOverride,
                         temperature: Float(request.temperature),
                         topP: Float(request.topP)
                     )
@@ -531,7 +610,7 @@ actor ModelRuntime: ModelRuntimeServing {
         return LLMModelFactory.shared.configuration(id: modelID)
     }
 
-    private static func validatePromptTokenCount(_ promptTokens: Int, maxContextTokens: Int) throws {
+    static func validatePromptTokenCount(_ promptTokens: Int, maxContextTokens: Int) throws {
         guard promptTokens <= maxContextTokens else {
             throw APIError(
                 status: 413,
@@ -790,6 +869,43 @@ struct CompletionResult: Sendable {
     let finishReason: String
     let promptTokens: Int
     let completionTokens: Int
+    let ttftMilliseconds: Int64?
+
+    init(
+        content: String,
+        finishReason: String,
+        promptTokens: Int,
+        completionTokens: Int,
+        ttftMilliseconds: Int64? = nil
+    ) {
+        self.content = content
+        self.finishReason = finishReason
+        self.promptTokens = promptTokens
+        self.completionTokens = completionTokens
+        self.ttftMilliseconds = ttftMilliseconds
+    }
+}
+
+private final class FirstTokenRecorder: @unchecked Sendable {
+    private let lock = NSLock()
+    private var timestamp: Date?
+
+    func recordIfMissing(now: Date = Date()) {
+        lock.lock()
+        if timestamp == nil {
+            timestamp = now
+        }
+        lock.unlock()
+    }
+
+    func elapsedMilliseconds(since start: Date) -> Int64? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let timestamp else {
+            return nil
+        }
+        return max(0, Int64(timestamp.timeIntervalSince(start) * 1000))
+    }
 }
 
 private extension ChatMessage {

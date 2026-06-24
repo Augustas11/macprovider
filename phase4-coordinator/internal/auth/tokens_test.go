@@ -32,6 +32,107 @@ func TestBearerTokenMatchesHeader(t *testing.T) {
 	}
 }
 
+// TestOperatorOnlyBearerMatches pins the codex PR #73 HIGH-1 fix at the
+// helper level: admin endpoints accept the operator key and ONLY the
+// operator key. Empty operator key denies (M1-5 / SECU-5).
+func TestOperatorOnlyBearerMatches(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer operator-secret")
+	if !auth.OperatorOnlyBearerMatches(headers, "operator-secret") {
+		t.Fatal("operator key not accepted")
+	}
+	if auth.OperatorOnlyBearerMatches(headers, "") {
+		t.Fatal("empty operator key accepted (M1-5 regression)")
+	}
+	// service token is structurally identical but must not be accepted
+	// by this helper; the gateway-internal class lives elsewhere.
+	headers.Set("Authorization", "Bearer service-secret")
+	if auth.OperatorOnlyBearerMatches(headers, "operator-secret") {
+		t.Fatal("service_token-shaped bearer matched operator-only helper")
+	}
+}
+
+// TestGatewayInternalBearerMatchesScoping pins the codex PR #73 HIGH-1
+// fix at the helper level for the gateway-internal class: BOTH the
+// operator key and the gateway service token are accepted. The kind
+// return identifies which one matched so the call-site can audit-log
+// correctly.
+func TestGatewayInternalBearerMatchesScoping(t *testing.T) {
+	cases := []struct {
+		name     string
+		bearer   string
+		want     auth.InternalBearerKind
+		wantName string
+	}{
+		{name: "service_token preferred", bearer: "service-secret", want: auth.BearerKindServiceToken, wantName: "service_token"},
+		{name: "operator_key fallback", bearer: "operator-secret", want: auth.BearerKindOperatorKey, wantName: "operator_key"},
+		{name: "no match", bearer: "wrong", want: auth.BearerKindNone, wantName: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			headers := http.Header{}
+			headers.Set("Authorization", "Bearer "+tc.bearer)
+			got := auth.GatewayInternalBearerMatches(headers, "operator-secret", "service-secret")
+			if got != tc.want {
+				t.Fatalf("kind=%v want=%v", got, tc.want)
+			}
+			if got.String() != tc.wantName {
+				t.Fatalf("name=%q want=%q", got.String(), tc.wantName)
+			}
+		})
+	}
+}
+
+// TestGatewayInternalBearerMatchesEmptyConfigs ensures that an empty
+// gateway_service_token cannot widen the auth surface (matches the
+// invariant in M3-2 / SECU-4), and that an empty operator_key denies
+// even when the request's bearer is also empty.
+func TestGatewayInternalBearerMatchesEmptyConfigs(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer operator-secret")
+
+	// Empty service_token, valid operator_key → accept under operator.
+	if got := auth.GatewayInternalBearerMatches(headers, "operator-secret", ""); got != auth.BearerKindOperatorKey {
+		t.Fatalf("empty service_token broke operator fallback: %v", got)
+	}
+	// Empty operator_key, valid service_token → accept under service.
+	headers.Set("Authorization", "Bearer service-secret")
+	if got := auth.GatewayInternalBearerMatches(headers, "", "service-secret"); got != auth.BearerKindServiceToken {
+		t.Fatalf("empty operator_key broke service accept: %v", got)
+	}
+	// Both empty → always deny, even when the request also has empty bearer.
+	empty := http.Header{}
+	if got := auth.GatewayInternalBearerMatches(empty, "", ""); got != auth.BearerKindNone {
+		t.Fatalf("both empty configs admitted: %v", got)
+	}
+}
+
+// TestGatewayInternalBearerMatchesEvaluatesBoth asserts the MEDIUM
+// timing-oracle fix from codex PR #73: the helper must evaluate BOTH
+// credentials before branching. We can't directly observe the branch
+// at this level, but we can pin the public contract that no short-
+// circuit is exposed by checking the helper succeeds when EITHER
+// credential is correct and only the OTHER is configured. (A naive
+// implementation that broke on empty would fail one of these.)
+func TestGatewayInternalBearerMatchesEvaluatesBoth(t *testing.T) {
+	headers := http.Header{}
+	// service_token matches; operator_key is non-empty but unmatched.
+	headers.Set("Authorization", "Bearer svc")
+	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindServiceToken {
+		t.Fatalf("svc match: %v", got)
+	}
+	// operator_key matches; service_token is non-empty but unmatched.
+	headers.Set("Authorization", "Bearer op")
+	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindOperatorKey {
+		t.Fatalf("op match: %v", got)
+	}
+	// Neither matches.
+	headers.Set("Authorization", "Bearer nope")
+	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindNone {
+		t.Fatalf("nope: %v", got)
+	}
+}
+
 func TestTokenIssueValidateRevokeAndList(t *testing.T) {
 	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
 	if err != nil {
@@ -156,11 +257,11 @@ func TestIssueTokenRefusesConcurrentDuplicateForSameProviderID(t *testing.T) {
 
 	const racers = 16
 	var (
-		wg              sync.WaitGroup
-		startGate       = make(chan struct{})
-		successes       int32
-		dupRejections   int32
-		otherErrors     atomic.Value
+		wg            sync.WaitGroup
+		startGate     = make(chan struct{})
+		successes     int32
+		dupRejections int32
+		otherErrors   atomic.Value
 	)
 	for i := 0; i < racers; i++ {
 		wg.Add(1)
@@ -270,4 +371,95 @@ CREATE TABLE provider_tokens (
 	if active != 1 || revoked != 1 {
 		t.Fatalf("after migration: legacy-dup active=%d revoked=%d, want 1/1: %#v", active, revoked, records)
 	}
+}
+
+// SPEC-003 v0.8.3 FR-C9.4 unused-token self-heal — Store layer
+// contract for the three input states the resolveProvisionalToken
+// caller will encounter. Direct unit coverage on top of the
+// end-to-end ws-level tests so a future refactor that changes the
+// SQL/semantics of this primitive fails here loudly.
+func TestRevokeUnusedTokenForProvider(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	t.Run("no row → false, no error", func(t *testing.T) {
+		revoked, err := store.RevokeUnusedTokenForProvider(ctx, "nonexistent")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if revoked {
+			t.Fatalf("revoked = true, want false (no row exists)")
+		}
+	})
+
+	t.Run("unused row → true, row revoked", func(t *testing.T) {
+		seed, _, err := store.IssueToken(ctx, "unused-provider", "unused hostname")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		revoked, err := store.RevokeUnusedTokenForProvider(ctx, "unused-provider")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if !revoked {
+			t.Fatalf("revoked = false, want true (unused row should be self-healed)")
+		}
+		row, err := lookupTokenRow(ctx, t, store, seed.ID)
+		if err != nil {
+			t.Fatalf("get row post-revoke: %v", err)
+		}
+		if !row.RevokedAt.Valid {
+			t.Fatalf("row.RevokedAt = %v, want non-NULL after self-heal", row.RevokedAt)
+		}
+	})
+
+	t.Run("used row → false, row preserved", func(t *testing.T) {
+		seed, cleartext, err := store.IssueToken(ctx, "used-provider", "used hostname")
+		if err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+		if err := store.MarkTokenUsed(ctx, cleartext); err != nil {
+			t.Fatalf("mark used: %v", err)
+		}
+		revoked, err := store.RevokeUnusedTokenForProvider(ctx, "used-provider")
+		if err != nil {
+			t.Fatalf("err = %v, want nil", err)
+		}
+		if revoked {
+			t.Fatalf("revoked = true, want false (used row MUST NOT be auto-revoked — codex MAJOR-1 surface)")
+		}
+		row, err := lookupTokenRow(ctx, t, store, seed.ID)
+		if err != nil {
+			t.Fatalf("get row post-no-op: %v", err)
+		}
+		if row.RevokedAt.Valid {
+			t.Fatalf("row.RevokedAt = %v, want NULL (used row must not be touched)", row.RevokedAt)
+		}
+	})
+
+	t.Run("empty provider_id rejected", func(t *testing.T) {
+		_, err := store.RevokeUnusedTokenForProvider(ctx, "   ")
+		if err == nil {
+			t.Fatalf("err = nil, want non-nil for empty provider_id")
+		}
+	})
+}
+
+func lookupTokenRow(ctx context.Context, t *testing.T, store *auth.Store, id int64) (auth.TokenRecord, error) {
+	t.Helper()
+	rows, err := store.ListTokens(ctx)
+	if err != nil {
+		return auth.TokenRecord{}, err
+	}
+	for _, r := range rows {
+		if r.ID == id {
+			return r, nil
+		}
+	}
+	t.Fatalf("token id=%d not found in ListTokens output", id)
+	return auth.TokenRecord{}, nil
 }

@@ -30,6 +30,12 @@ public struct AppConfig: Equatable, Sendable {
     public var logFile: String?
     public var maxContextOverride: Int?
     public var maxConcurrencyOverride: Int?
+    // SPEC-013 (autoresearch serving knobs): KV-cache quantization bits
+    // forwarded to mlx-swift `GenerateParameters.kvBits`. nil ⇒ no
+    // quantization (mlx-swift default). Triple-exposed: yaml key
+    // `kv_bits`, env `MACPROVIDER_KV_BITS`, CLI `--kv-bits`. Validated
+    // to be 4 or 8 (the values mlx-swift accepts) at serve preflight.
+    public var kvBitsOverride: Int?
     public var drainTimeoutSeconds: Int
     public var warmupEnabled: Bool
     public var maxRequestBodyBytes: Int
@@ -37,6 +43,7 @@ public struct AppConfig: Equatable, Sendable {
     public var supportedModels: [String]?
     public var publishesSupportedModels: Bool
     public var enableWarmSwap: Bool
+    public var enableReceipts: Bool
     public var swapDrainTimeoutSeconds: Int
     public var ctlSocketPath: String?
     public var switchStatePath: String?
@@ -68,6 +75,7 @@ public struct AppConfig: Equatable, Sendable {
             logFile: nil,
             maxContextOverride: nil,
             maxConcurrencyOverride: nil,
+            kvBitsOverride: nil,
             drainTimeoutSeconds: 30,
             warmupEnabled: true,
             maxRequestBodyBytes: 10 * 1024 * 1024,
@@ -75,6 +83,7 @@ public struct AppConfig: Equatable, Sendable {
             supportedModels: nil,
             publishesSupportedModels: false,
             enableWarmSwap: false,
+            enableReceipts: false,
             swapDrainTimeoutSeconds: 30,
             ctlSocketPath: nil,
             switchStatePath: nil,
@@ -94,10 +103,16 @@ public struct CLIOverrides: Equatable, Sendable {
     public var supportedModels: [String]?
     public var publishesSupportedModels: Bool?
     public var enableWarmSwap: Bool?
+    public var enableReceipts: Bool?
     public var swapDrainTimeoutSeconds: Int?
     public var ctlSocketPath: String?
     public var switchStatePath: String?
     public var providerToken: String?
+    // SPEC-013 autoresearch serving knobs. nil ⇒ defer to env / YAML /
+    // built-in default (the latter mirrors prior single-slot behavior).
+    public var kvBits: Int?
+    public var maxContext: Int?
+    public var maxBatch: Int?
 
     public init(
         port: Int? = nil,
@@ -110,10 +125,14 @@ public struct CLIOverrides: Equatable, Sendable {
         supportedModels: [String]? = nil,
         publishesSupportedModels: Bool? = nil,
         enableWarmSwap: Bool? = nil,
+        enableReceipts: Bool? = nil,
         swapDrainTimeoutSeconds: Int? = nil,
         ctlSocketPath: String? = nil,
         switchStatePath: String? = nil,
-        providerToken: String? = nil
+        providerToken: String? = nil,
+        kvBits: Int? = nil,
+        maxContext: Int? = nil,
+        maxBatch: Int? = nil
     ) {
         self.port = port
         self.model = model
@@ -125,10 +144,14 @@ public struct CLIOverrides: Equatable, Sendable {
         self.supportedModels = supportedModels
         self.publishesSupportedModels = publishesSupportedModels
         self.enableWarmSwap = enableWarmSwap
+        self.enableReceipts = enableReceipts
         self.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         self.ctlSocketPath = ctlSocketPath
         self.switchStatePath = switchStatePath
         self.providerToken = providerToken
+        self.kvBits = kvBits
+        self.maxContext = maxContext
+        self.maxBatch = maxBatch
     }
 }
 
@@ -220,6 +243,7 @@ public enum ConfigLoader {
         try assign(&config.logFile, from: dict, key: "log_file", expected: "string")
         try assign(&config.maxContextOverride, from: dict, key: "max_context_override", expected: "integer")
         try assign(&config.maxConcurrencyOverride, from: dict, key: "max_concurrency_override", expected: "integer")
+        try assign(&config.kvBitsOverride, from: dict, key: "kv_bits", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: dict, key: "drain_timeout_s", expected: "integer")
         try assign(&config.warmupEnabled, from: dict, key: "warmup_enabled", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: dict, key: "max_request_body_bytes", expected: "integer")
@@ -227,6 +251,7 @@ public enum ConfigLoader {
         try assign(&config.supportedModels, from: dict, key: "supported_models", expected: "array of strings or comma-separated string")
         try assign(&config.publishesSupportedModels, from: dict, key: "publishes_supported_models", expected: "boolean")
         try assign(&config.enableWarmSwap, from: dict, key: "enable_warm_swap", expected: "boolean")
+        try assign(&config.enableReceipts, from: dict, key: "enable_receipts", expected: "boolean")
         try assign(&config.swapDrainTimeoutSeconds, from: dict, key: "swap_drain_timeout_s", expected: "integer")
         try assign(&config.ctlSocketPath, from: dict, key: "ctl_socket_path", expected: "string")
         try assign(&config.switchStatePath, from: dict, key: "switch_state_path", expected: "string")
@@ -251,6 +276,7 @@ public enum ConfigLoader {
         try assign(&config.logFile, from: environment, env: "MACPROVIDER_LOG_FILE", expected: "string")
         try assign(&config.maxContextOverride, from: environment, env: "MACPROVIDER_MAX_CONTEXT_OVERRIDE", expected: "integer")
         try assign(&config.maxConcurrencyOverride, from: environment, env: "MACPROVIDER_MAX_CONCURRENCY_OVERRIDE", expected: "integer")
+        try assign(&config.kvBitsOverride, from: environment, env: "MACPROVIDER_KV_BITS", expected: "integer (4 or 8)")
         try assign(&config.drainTimeoutSeconds, from: environment, env: "MACPROVIDER_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.warmupEnabled, from: environment, env: "MACPROVIDER_WARMUP_ENABLED", expected: "boolean")
         try assign(&config.maxRequestBodyBytes, from: environment, env: "MACPROVIDER_MAX_REQUEST_BODY_BYTES", expected: "integer")
@@ -258,6 +284,7 @@ public enum ConfigLoader {
         config.supportedModels = SupportedModels.parseCSV(environment["MACPROVIDER_SUPPORTED_MODELS"]) ?? config.supportedModels
         try assign(&config.publishesSupportedModels, from: environment, env: "MACPROVIDER_PUBLISHES_SUPPORTED_MODELS", expected: "boolean")
         try assign(&config.enableWarmSwap, from: environment, env: "MACPROVIDER_ENABLE_WARM_SWAP", expected: "boolean")
+        try assign(&config.enableReceipts, from: environment, env: "MACPROVIDER_ENABLE_RECEIPTS", expected: "boolean")
         try assign(&config.swapDrainTimeoutSeconds, from: environment, env: "MACPROVIDER_SWAP_DRAIN_TIMEOUT_S", expected: "integer")
         try assign(&config.ctlSocketPath, from: environment, env: "MACPROVIDER_CTL_SOCKET_PATH", expected: "string")
         try assign(&config.switchStatePath, from: environment, env: "MACPROVIDER_SWITCH_STATE_PATH", expected: "string")
@@ -297,6 +324,9 @@ public enum ConfigLoader {
         if let enableWarmSwap = cli.enableWarmSwap {
             config.enableWarmSwap = enableWarmSwap
         }
+        if let enableReceipts = cli.enableReceipts {
+            config.enableReceipts = enableReceipts
+        }
         if let swapDrainTimeoutSeconds = cli.swapDrainTimeoutSeconds {
             config.swapDrainTimeoutSeconds = swapDrainTimeoutSeconds
         }
@@ -308,6 +338,15 @@ public enum ConfigLoader {
         }
         if let providerToken = cli.providerToken {
             config.providerToken = providerToken
+        }
+        if let kvBits = cli.kvBits {
+            config.kvBitsOverride = kvBits
+        }
+        if let maxContext = cli.maxContext {
+            config.maxContextOverride = maxContext
+        }
+        if let maxBatch = cli.maxBatch {
+            config.maxConcurrencyOverride = maxBatch
         }
         return config
     }
