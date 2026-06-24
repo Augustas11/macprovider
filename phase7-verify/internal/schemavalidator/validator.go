@@ -196,6 +196,9 @@ func singleSchemaTypeMatches(name string, value any) bool {
 	case "array":
 		_, ok := value.([]any)
 		return ok
+	case "boolean":
+		_, ok := value.(bool)
+		return ok
 	default:
 		return false
 	}

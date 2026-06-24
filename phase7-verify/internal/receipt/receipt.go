@@ -22,6 +22,31 @@ type Tuple struct {
 	TTFTms         int64  `json:"ttft_ms"`
 	TokensOut      int64  `json:"tokens_out"`
 	UnixTS         int64  `json:"unix_ts"`
+
+	// SPEC-015 v0.3 §M.0 — new fields. ReceiptVersion is "" for
+	// v0.1/v0.2 receipts (no field present); v0.3 receipts carry
+	// "3". The version is what drives the §M.1.1 / §M.1.3 / §M.1.4
+	// path: presence of `receipt_version` ≠ "" identifies v0.3,
+	// absence identifies v0.1/v0.2 legacy, presence of unknown
+	// value identifies forward-compat unknown version.
+	ReceiptVersion string `json:"receipt_version,omitempty"`
+
+	// ModelHash is the §M.0 raw 64-char lowercase hex string when
+	// the v0.3 provider opted in to warm-swap hash reporting, OR
+	// the empty string when the receipt carries `model_hash: null`
+	// (§M.2.3 warm-swap-disabled provider). Field PRESENT in the
+	// signed tuple bytes either way; we distinguish via
+	// ModelHashPresent.
+	ModelHash string `json:"-"`
+
+	// ModelHashPresent is true iff the parsed v0.3 tuple included
+	// the `model_hash` key. False for v0.1/v0.2 legacy tuples.
+	ModelHashPresent bool `json:"-"`
+
+	// ModelHashNull is true iff the v0.3 tuple's `model_hash` was
+	// the JSON literal null (§M.2.3). Mutually exclusive with
+	// ModelHash != "".
+	ModelHashNull bool `json:"-"`
 }
 
 // Parsed contains the decoded receipt header and the raw signed bytes.
@@ -63,6 +88,22 @@ var (
 		"tokens_out",
 		"unix_ts",
 	}
+	// SPEC-015 §M.0 — v0.3 9-field tuple. Order matches JCS
+	// canonical (UTF-16 code-unit lex / alphabetical ASCII).
+	v03TupleKeys = []string{
+		"model_hash",
+		"model_id",
+		"output_hash",
+		"prompt_hash",
+		"provider_pubkey",
+		"receipt_version",
+		"tokens_out",
+		"ttft_ms",
+		"unix_ts",
+	}
+	// SPEC-015 §M.0 / SPEC-011 R-3.3.1 — model_hash raw 64-char
+	// lowercase hex.
+	modelHashPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 )
 
 // Parse decodes a SPEC-015 X-MacProvider-Receipt header.
@@ -163,24 +204,46 @@ func parseTuple(raw []byte) (Tuple, error) {
 	if err != nil {
 		return Tuple{}, err
 	}
-	if len(fields) != len(requiredTupleKeys) {
-		for key := range fields {
-			if !isRequiredTupleKey(key) {
-				return Tuple{}, fmt.Errorf("%w: %s", ErrTupleExtraKey, key)
-			}
-		}
-		for _, key := range requiredTupleKeys {
-			if _, ok := fields[key]; !ok {
-				return Tuple{}, fmt.Errorf("%w: %s", ErrTupleMissingKey, key)
-			}
+	// SPEC-015 §M.0 / §M.1.4 — version detection via the value of
+	// `receipt_version`. Presence + value drives the dispatch:
+	//   - absent           → legacy v0.1/v0.2 7-field strict shape
+	//   - "3"              → v0.3 9-field strict shape
+	//   - other present    → unknown forward-compat version; we
+	//     extract the version string and return a Tuple stub so the
+	//     verifier can short-circuit to inconclusive:
+	//     unknown_receipt_version per §M.1.4 BEFORE strict shape
+	//     validation kicks in (a v0.4 receipt with a different
+	//     key set would otherwise be rejected as
+	//     `extra_field`/`missing_field`).
+	versionRaw, hasReceiptVersion := fields["receipt_version"]
+	var unknownReceiptVersion string
+	if hasReceiptVersion {
+		var rv string
+		if err := json.Unmarshal(versionRaw, &rv); err == nil && rv != "" && rv != "3" {
+			unknownReceiptVersion = rv
 		}
 	}
+	if unknownReceiptVersion != "" {
+		return Tuple{ReceiptVersion: unknownReceiptVersion}, nil
+	}
+	var requiredKeys []string
+	if hasReceiptVersion {
+		requiredKeys = v03TupleKeys
+	} else {
+		requiredKeys = requiredTupleKeys
+	}
+	requiredSet := make(map[string]struct{}, len(requiredKeys))
+	for _, k := range requiredKeys {
+		requiredSet[k] = struct{}{}
+	}
+	// Strict 9-key (v0.3) OR 7-key (legacy) shape: extra fields
+	// rejected; missing required fields rejected.
 	for key := range fields {
-		if !isRequiredTupleKey(key) {
+		if _, ok := requiredSet[key]; !ok {
 			return Tuple{}, fmt.Errorf("%w: %s", ErrTupleExtraKey, key)
 		}
 	}
-	for _, key := range requiredTupleKeys {
+	for _, key := range requiredKeys {
 		if _, ok := fields[key]; !ok {
 			return Tuple{}, fmt.Errorf("%w: %s", ErrTupleMissingKey, key)
 		}
@@ -196,6 +259,27 @@ func parseTuple(raw []byte) (Tuple, error) {
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		return Tuple{}, ErrTupleJSON
+	}
+	if hasReceiptVersion {
+		// SPEC-015 §M.0 — model_hash MUST be string (64 hex) OR
+		// JSON null literal. Detect at raw-field level so we
+		// distinguish `null` from `""`.
+		modelHashRaw := fields["model_hash"]
+		switch {
+		case bytes.Equal(bytes.TrimSpace(modelHashRaw), []byte("null")):
+			tuple.ModelHashPresent = true
+			tuple.ModelHashNull = true
+		default:
+			var s string
+			if err := json.Unmarshal(modelHashRaw, &s); err != nil {
+				return Tuple{}, fmt.Errorf("%w: model_hash: %v", ErrTupleWrongType, err)
+			}
+			if !modelHashPattern.MatchString(s) {
+				return Tuple{}, fmt.Errorf("%w: model_hash=%q is not 64 lowercase hex", ErrTupleWrongType, s)
+			}
+			tuple.ModelHash = s
+			tuple.ModelHashPresent = true
+		}
 	}
 	if err := validateTuple(tuple); err != nil {
 		return Tuple{}, err

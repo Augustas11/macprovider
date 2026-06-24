@@ -30,7 +30,7 @@ func TestRenderJSONExamples(t *testing.T) {
 		{
 			name:   "valid",
 			result: validOutputFixture(nil),
-			want:   `{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live"}` + "\n",
+			want:   `{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null}` + "\n",
 		},
 		{
 			name: "invalid",
@@ -48,7 +48,7 @@ func TestRenderJSONExamples(t *testing.T) {
 					Receipt:  "cd34...",
 				},
 			},
-			want: `{"result":"invalid","reason":"output_hash_mismatch","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","details":{"field":"output_hash","computed":"ab12...","receipt":"cd34..."}}` + "\n",
+			want: `{"result":"invalid","reason":"output_hash_mismatch","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null,"details":{"field":"output_hash","computed":"ab12...","receipt":"cd34..."}}` + "\n",
 		},
 		{
 			name: "inconclusive",
@@ -65,7 +65,7 @@ func TestRenderJSONExamples(t *testing.T) {
 					Fields: map[string]any{"reason": "network_unreachable"},
 				}},
 			},
-			want: `{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"none","coordinator_host":null,"warnings":[{"kind":"live_check_skipped","reason":"network_unreachable"}]}` + "\n",
+			want: `{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"none","coordinator_host":null,"model_hash_verified":null,"warnings":[{"kind":"live_check_skipped","reason":"network_unreachable"}]}` + "\n",
 		},
 	}
 	for _, tt := range tests {
@@ -302,7 +302,7 @@ func TestSchemaValidationInconclusive(t *testing.T) {
 
 func TestSchemaRejectsTopLevelProviderIDUnresolvable(t *testing.T) {
 	schema := loadOutputSchema(t)
-	raw := []byte(`{"result":"inconclusive","reason":"provider_id_unresolvable","provider_id":null,"model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"none","coordinator_host":null,"warnings":[{"kind":"live_check_skipped","reason":"provider_id_unresolvable"}]}`)
+	raw := []byte(`{"result":"inconclusive","reason":"provider_id_unresolvable","provider_id":null,"model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"none","coordinator_host":null,"model_hash_verified":null,"warnings":[{"kind":"live_check_skipped","reason":"provider_id_unresolvable"}]}`)
 	if err := validateRawJSON(schema, raw); err == nil {
 		t.Fatal("schema accepted provider_id_unresolvable as a top-level inconclusive reason")
 	}
@@ -310,7 +310,7 @@ func TestSchemaRejectsTopLevelProviderIDUnresolvable(t *testing.T) {
 
 func TestSchemaRejectsExtraProperty(t *testing.T) {
 	schema := loadOutputSchema(t)
-	raw := []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","foo":"bar"}`)
+	raw := []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null,"foo":"bar"}`)
 	if err := validateRawJSON(schema, raw); err == nil {
 		t.Fatal("schema accepted extra top-level property")
 	}
@@ -324,23 +324,23 @@ func TestSchemaRejectsTrustSourceCoordinatorHostMismatches(t *testing.T) {
 	}{
 		{
 			name: "valid none trust source",
-			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"none","coordinator_host":null}`),
+			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"none","coordinator_host":null,"model_hash_verified":null}`),
 		},
 		{
 			name: "valid live null coordinator",
-			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":null}`),
+			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"live","coordinator_host":null,"model_hash_verified":null}`),
 		},
 		{
 			name: "valid explicit pubkey coordinator",
-			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"explicit_pubkey","coordinator_host":"coordinator.streamvc.live"}`),
+			raw:  []byte(`{"result":"valid","reason":"signature_and_canonicalization_match","provider_id":"m1-anon","model_id":"qwen2.5-7b-instruct-q4","signed_at":1719144000,"trust_source":"explicit_pubkey","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null}`),
 		},
 		{
 			name: "inconclusive live null coordinator",
-			raw:  []byte(`{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","trust_source":"live","coordinator_host":null}`),
+			raw:  []byte(`{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","trust_source":"live","coordinator_host":null,"model_hash_verified":null}`),
 		},
 		{
 			name: "inconclusive none coordinator",
-			raw:  []byte(`{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","trust_source":"none","coordinator_host":"coordinator.streamvc.live"}`),
+			raw:  []byte(`{"result":"inconclusive","reason":"cache_stale_and_live_unreachable","trust_source":"none","coordinator_host":"coordinator.streamvc.live","model_hash_verified":null}`),
 		},
 	}
 	for _, tt := range tests {
