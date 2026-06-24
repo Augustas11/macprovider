@@ -24,6 +24,7 @@ Both Go services are co-hosted on one DigitalOcean-style VPS named **Pearl**
 | `api.streamvc.live` | `127.0.0.1:9443` | `phase5-gateway` | `macprovider-gateway.service` | nginx-api.streamvc.live.conf |
 | n/a (loopback) | `127.0.0.1:8443` (buyer port) | `phase4-coordinator` | (same unit) | reached only from gateway over loopback |
 | `console.streamvc.live` | static (Cloudflare Pages) | none | n/a | static `frontdoor/console/` build |
+| `portal.streamvc.live` | static (`/var/www/portal/`) + nginx reverse-proxy to coordinator | n/a (static + proxy) | n/a (nginx-only) | `frontdoor/provider-portal/dist/nginx-portal.streamvc.live.conf` (decision-log Entry 86) |
 
 Provider Macs connect outbound to `wss://coordinator.streamvc.live/ws/provider`.
 Buyers hit `https://api.streamvc.live/v1/*`. Operator endpoints (`/poolz`,
