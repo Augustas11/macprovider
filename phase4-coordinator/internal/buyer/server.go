@@ -16,6 +16,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -395,6 +396,13 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/v1/models", s.handleModels)
 	r.Get("/v1/pool/check", s.handlePoolCheck)
 	r.Get("/v1/receipt-keys/{provider_id}", s.handleReceiptKeys)
+	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotations.
+	// Public, unauthenticated, rate-limited; serve the literal
+	// signed catalog file and the catalog signing pubkey so a buyer-
+	// side verifier can run the §M.3.2 catalog-check path against
+	// this coordinator.
+	r.Get("/catalog/pubkey", s.handleCatalogPubkey)
+	r.Get("/catalog/{catalog_id}", s.handleCatalogFile)
 	r.Post("/v1/chat/completions", s.handleChatCompletions)
 	return r
 }
@@ -729,6 +737,70 @@ func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("write receipt keys response failed")
+	}
+}
+
+// SPEC-015 §M.4 — serve the literal signed catalog file under the
+// effectively-active catalog's id. Public, unauthenticated, rate-
+// limited (shares the receipt-keys bucket so a single attacker
+// cannot starve the buyer surface). 404 when (a) no catalog
+// configured, (b) catalog failed to load/verify, OR (c) the path
+// segment does not match the active catalog_id.
+func (s *Server) handleCatalogFile(w http.ResponseWriter, r *http.Request) {
+	if !s.allowReceiptKeys(r) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Catalog endpoint rate limit exceeded")
+		return
+	}
+	cfg := s.tier2Config()
+	if !tier2.Active() || strings.TrimSpace(cfg.CatalogPath) == "" {
+		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
+		return
+	}
+	requested := strings.TrimSpace(chi.URLParam(r, "catalog_id"))
+	active := tier2.CatalogID()
+	if requested == "" || requested != active {
+		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
+		return
+	}
+	data, err := os.ReadFile(cfg.CatalogPath)
+	if err != nil {
+		s.log.Warn().Err(err).Str("catalog_path", cfg.CatalogPath).Msg("read catalog file failed")
+		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	if _, err := w.Write(data); err != nil {
+		s.log.Warn().Err(err).Str("catalog_id", active).Msg("write catalog file response failed")
+	}
+}
+
+// SPEC-015 §M.4 — serve the catalog signing pubkey.
+// `{"pubkey":"<43-char base64url-unpadded>","alg":"Ed25519"}`. The
+// pubkey comes from Tier2Config.CatalogPublicKey, which the
+// coordinator already uses to verify the loaded catalog — so the
+// trust root is the same operator-configured key (§M.3.3 operator-
+// mutable trust posture, inherited from §10.7).
+func (s *Server) handleCatalogPubkey(w http.ResponseWriter, r *http.Request) {
+	if !s.allowReceiptKeys(r) {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "rate_limited", "Catalog endpoint rate limit exceeded")
+		return
+	}
+	cfg := s.tier2Config()
+	pubkey := strings.TrimSpace(cfg.CatalogPublicKey)
+	if !tier2.Active() || pubkey == "" {
+		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	if err := json.NewEncoder(w).Encode(map[string]any{
+		"pubkey": pubkey,
+		"alg":    "Ed25519",
+	}); err != nil {
+		s.log.Warn().Err(err).Msg("write catalog pubkey response failed")
 	}
 }
 

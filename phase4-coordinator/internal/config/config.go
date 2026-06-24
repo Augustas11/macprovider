@@ -140,6 +140,19 @@ type Tier2Config struct {
 	CatalogPath         string `yaml:"catalog_path"`
 	CatalogPublicKey    string `yaml:"catalog_public_key"`
 	RequireHashVerified bool   `yaml:"require_hash_verified"`
+	// PublicCatalogBaseURL is the public base URL the coordinator
+	// advertises for SPEC-015 §M.4 catalog endpoints
+	// (`GET /catalog/<catalog_id>` and `GET /catalog/pubkey`). When
+	// non-empty, `/poolz` emits absolute catalog URLs derived from
+	// this base (trailing slashes trimmed). When empty, `/poolz`
+	// falls back to deriving an absolute URL from the inbound
+	// request's scheme + `Host` header. If neither source yields a
+	// usable base (catalog_id present but no host available),
+	// `catalog_url` and `catalog_pubkey_url` are OMITTED from the
+	// `/poolz` response — only `catalog_id` is emitted, so a
+	// verifier invoked with `--catalog <path>` + `--catalog-pubkey`
+	// (file-based, no URL resolution) still works.
+	PublicCatalogBaseURL string `yaml:"public_catalog_base_url"`
 
 	RequireEncryptedLeg            bool   `yaml:"require_encrypted_leg"`
 	EncryptedLegAEAD               string `yaml:"encrypted_leg_aead"`
