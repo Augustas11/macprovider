@@ -28,14 +28,16 @@ A lot of the most interesting LLM applications — long-running personal agents,
 | Run MLX models locally on any M1+ Mac | OpenAI-compatible `/v1/chat/completions` endpoint |
 | Outbound WebSocket only — no port-forwarding needed | Route to the full pool or pin to a specific provider |
 | Choose which models to serve from your Mac | Pay only for compute, no subscription required |
-| Manage your node at [console.streamvc.live](https://console.streamvc.live) | Chat and monitor at [console.streamvc.live](https://console.streamvc.live) |
+| Manage your node at [portal.streamvc.live](https://portal.streamvc.live) | Chat and monitor at [console.streamvc.live](https://console.streamvc.live) |
 
 ## Console
 
-**[console.streamvc.live](https://console.streamvc.live)** is the front end for MacProvider. Today it ships two views:
+**[console.streamvc.live](https://console.streamvc.live)** is the buyer-facing front end. Today it ships two views:
 
 - **Browser chat.** Send requests to the network directly from the browser, with session history.
 - **Pool dashboard.** Monitor live provider pool status and which models are warm.
+
+**[portal.streamvc.live](https://portal.streamvc.live)** is the provider-facing front end. Sign in with your `provider_id` + `provider_token` to see your Mac's setup, earnings, identity, and the latest installer release. See [SPEC-014](specs/SPEC-014-provider-portal.md) for the surface contract.
 
 ## Architecture
 
