@@ -21,6 +21,7 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
+      spec_version: ${{ steps.version.outputs.spec_version }}
     steps:
       - name: Checkout
         # Pinned to actions/checkout v4.2.2. Re-resolve deliberately
@@ -53,8 +54,26 @@ jobs:
             exit 1
           fi
           version="${tag#verify-v}"
+          # Cross-check the tag version against the BinaryVersion constant
+          # pinned in phase7-verify/internal/version/version.go. Fails the
+          # release-prep step (before any binaries get built) if someone
+          # pushes a tag whose name disagrees with the constant the binary
+          # will report at runtime. Also reads MaxSPECVersion so the smoke
+          # step does not have to be edited on every release.
+          binary_version=$(awk -F'"' '/BinaryVersion[[:space:]]*=/{print $2; exit}' phase7-verify/internal/version/version.go)
+          spec_version=$(awk -F'"' '/MaxSPECVersion[[:space:]]*=/{print $2; exit}' phase7-verify/internal/version/version.go)
+          if [ "$binary_version" != "$version" ]; then
+            echo "tag version=$version disagrees with phase7-verify BinaryVersion=$binary_version" >&2
+            echo "either re-tag to match, or bump BinaryVersion + MaxSPECVersion in version.go first" >&2
+            exit 1
+          fi
+          if [ -z "$spec_version" ]; then
+            echo "could not read MaxSPECVersion from phase7-verify/internal/version/version.go" >&2
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "spec_version=$spec_version" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         env:
@@ -130,10 +149,12 @@ jobs:
         shell: bash
         env:
           ASSET: ${{ steps.build.outputs.asset }}
+          VERSION: ${{ needs.prepare-release.outputs.version }}
+          SPEC_VERSION: ${{ needs.prepare-release.outputs.spec_version }}
         run: |
           set -euo pipefail
           "./$ASSET" --version | tee version.txt
-          grep -qx "macprovider-verify 1.0.0 (verifies up to SPEC-015 v0.2.4)" version.txt
+          grep -qx "macprovider-verify ${VERSION} (verifies up to SPEC-015 v${SPEC_VERSION})" version.txt
 
       - name: Compute SHA-256 checksum
         shell: bash
