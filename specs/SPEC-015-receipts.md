@@ -1,9 +1,367 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.2.4 (2026-06-23, buyer-side verification — LOCKED)
-**Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver), SPEC-005 v0.3, SPEC-006 v0.9, SPEC-008 v0.3, SPEC-011 v0.5, SPEC-013 v0.3
+**Version:** 0.3.3 (2026-06-24, model-hash binding — LOCKED)
+**Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3, SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3
 
-**Lock state:** Round-5 codex audit returned `READY TO LOCK` 0/0/0/0 across all three lenses (code, security, architect) on 2026-06-23 — see `specs/SPEC-015-v0-2-audit.md`. Five-round audit history captured 5 CRITICAL + 11 MAJOR + 6 MINOR findings, all resolved. CF6 confirmed round-1 CRITICALs (CF1 trust-root architecture, CF2 time-window validity, CF3 schema strictness) structurally closed, not papered over.
+**Lock state v0.3:** Round-3 codex audit returned `READY TO LOCK` across all three lenses (code, security, architect) on 2026-06-24 — see `specs/SPEC-015-v0-3-audit.md`. Three-round audit history captured 3 CRITICAL + 11 MAJOR + 4 MINOR + 1 QUESTION findings; all CRITICAL / MAJOR resolved across v0.3.1 (round-1 fix pass) and v0.3.2 (round-2 fix pass). One round-3 MINOR (stale "four new flags" wording in staged IMPL prompt) fixed in v0.3.3. v0.3 changes the wire shape (7-field tuple → 9-field tuple, adding `model_hash` and `receipt_version`) and per [[feedback-bundle-spec-impl-one-pr]] EXCEPTION rule ships SPEC-only (no bundled IMPL) because it is a major version bump with a downstream implementer; the BUILD prompt for IMPL is staged at `specs/BUILD_SPEC_015_v0_3_MODELHASH_IMPL_PROMPT.md` for the next session.
+
+**Lock state v0.2 (preserved for history):** Round-5 codex audit returned `READY TO LOCK` 0/0/0/0 across all three lenses (code, security, architect) on 2026-06-23 — see `specs/SPEC-015-v0-2-audit.md`. Five-round audit history captured 5 CRITICAL + 11 MAJOR + 6 MINOR findings, all resolved. CF6 confirmed round-1 CRITICALs (CF1 trust-root architecture, CF2 time-window validity, CF3 schema strictness) structurally closed, not papered over.
+
+**Change log v0.3.3:**
+- Round-3 codex audit returned `READY TO LOCK` across all three
+  lenses on 2026-06-24 (CODE 0/0/0/0; SECURITY 0/0/0/0;
+  ARCHITECT 0/0/1/0). One round-3 MINOR (A6-R3 — staged IMPL
+  prompt had two stale "four new flags" mentions on top-level
+  summary lines after round-2 promoted the verifier flag set
+  to five) fixed in `specs/BUILD_SPEC_015_v0_3_MODELHASH_IMPL_PROMPT.md`
+  lines 29 and 286. SPEC text itself unchanged; v0.3.3 is the
+  lock entry.
+- Three-round audit history rollup:
+  - Round 1: 3 CRITICAL + 9 MAJOR + 4 MINOR + 1 QUESTION
+    (v0.3.0 → v0.3.1 fix pass)
+  - Round 2: 0 CRITICAL + 2 MAJOR + 0 MINOR + 0 QUESTION
+    (v0.3.1 → v0.3.2 fix pass)
+  - Round 3: 0 CRITICAL + 0 MAJOR + 1 MINOR + 0 QUESTION
+    (v0.3.2 → v0.3.3 lock)
+- v0.3.3 LOCKED. Ships as the SPEC-only PR per the
+  [[feedback-bundle-spec-impl-one-pr]] EXCEPTION rule for major
+  version bumps with downstream implementers.
+
+**Change log v0.3.2:**
+- Round-2 codex audit fix pass against
+  `specs/SPEC-015-v0-3-audit.md` round-2 sections. Round 2
+  returned 0 CRITICAL + 2 MAJOR + 0 MINOR across the three
+  lenses (SECURITY: READY TO LOCK 0/0/0/0; CODE: READY WITH
+  FIX PASS, single MAJOR C9; ARCHITECT: READY WITH FIX PASS,
+  single MAJOR A6). Both fixes applied:
+  - **C9 (MAJOR — §M.4 `catalog_pubkey_url` field paragraph
+    carried stale 44-char / lowercase wording):** the §M.4
+    `catalog_pubkey_url` bullet was rewritten to match the
+    detailed endpoint block — `{"pubkey": "<43-char
+    base64url-unpadded ed25519 pubkey>", "alg": "Ed25519"}` —
+    closing the interop split a coordinator implementer
+    reading §M.4 top-down could have introduced.
+  - **A6 (MAJOR — staged IMPL prompt still instructed pre-fix
+    behaviour):**
+    `specs/BUILD_SPEC_015_v0_3_MODELHASH_IMPL_PROMPT.md`
+    refreshed in three locations to match v0.3.1 controlling
+    clauses: Step 2 `GET /catalog/pubkey` response shape now
+    pins 43-char base64url-unpadded + `"Ed25519"` (closing C2);
+    Step 4 catalog `Lookup` now applies `catalogModelKey`
+    case-fold + trim transform (closing A1); Step 4 catalog
+    `signature.alg` test now expects `"Ed25519"` capital E
+    (closing C1); Step 5 CLI surface promoted to FIVE flags
+    including `--require-model-hash` per §M.3.1.2 (closing
+    S2); Step 5 result-schema fields point at §M.3.2.1
+    (closing C4). The IMPL prompt now reflects the round-1 +
+    round-2 controlling clauses end-to-end.
+
+v0.3.2 is the round-3 LOCK candidate. If round 3 returns
+0 CRITICAL / 0 MAJOR across all three lenses, v0.3.x ships into
+the SPEC-only PR per [[feedback-bundle-spec-impl-one-pr]] major-
+version-bump exception.
+
+**Change log v0.3.1:**
+- Round-1 codex audit fix pass against
+  `specs/SPEC-015-v0-3-audit.md` round-1 sections. Round 1
+  returned 3 CRITICAL + 9 MAJOR + 4 MINOR + 1 QUESTION; all
+  three lenses verdict READY WITH FIX PASS. Findings resolved
+  below.
+  - **C1 (CRITICAL — `signature.alg` casing):** §M.3.2 step 4
+    and §M.5 AC-35 now require `signature.alg = "Ed25519"`
+    (capital E, matching the existing
+    `scripts/sign-catalog.go:142-145` emitter and
+    `phase4-coordinator/internal/tier2/catalog.go:470`
+    validator). The v0.3.0 lowercase `"ed25519"` would have
+    rejected every catalog the existing signer produces.
+  - **C2 (CRITICAL — catalog pubkey encoding):** §M.3.1 flag
+    table, §M.3.2 step 4, §M.4 `GET /catalog/pubkey` response,
+    and §M.5 AC-32/AC-33/AC-37 all now require
+    `base64.RawURLEncoding` (base64url-unpadded), exactly 43
+    ASCII characters, NOT standard padded base64. This matches
+    `scripts/sign-catalog.go:90,316-328` and SPEC-008 §5.2.1's
+    locked Ed25519-pubkey encoding. v0.3.0's 44-char standard-
+    padded encoding would have rejected every catalog pubkey
+    produced by the existing tool.
+  - **S1 (CRITICAL — AC-40 routing semantics):** AC-40
+    rewritten so that with `RequireHashVerified: false`, the
+    coordinator continues routing to providers whose hash status
+    is `uncatalogued` OR `catalog_unavailable` only — NOT
+    `hash_mismatch` or `hash_invalid`. SPEC-008 §5.6 (lines
+    746-760) and `phase4-coordinator/internal/tier2/catalog.go:599-604`
+    (`IsHashPredicateFailure`) make mismatch / invalid
+    fail-closed at both flag settings; v0.3.0 AC-40's broader
+    claim would have silently demanded a SPEC-008 amendment and
+    contradicted Entry 80. v0.3 receipts still BIND whatever
+    the provider reports; the AC-40 normative change is only
+    about routing.
+  - **C3 (MAJOR — §10.4.4 flag matrix not extended):** New
+    §M.3.1.1 "v0.3 catalog flag matrix" sub-table covers every
+    combination of `{--catalog, --catalog-url, --catalog-pubkey,
+    --catalog-pubkey-url}` against
+    `{--offline, --coordinator, --pubkey, --json, header+hashes
+    mode, bundle mode, stdin mode}`. The matrix names the
+    expected exit code or behavior for each combination.
+    Pattern follows the v0.2.4 §10.4.4 `--provider-id` matrix.
+  - **C4 (MAJOR — JSON schema amendment for v0.3):** New
+    §M.3.2.1 "v0.3 result schema amendment" pins:
+    `model_hash_verified` is a tri-state JSON field —
+    `true` (catalog check ran AND hash matched), `false`
+    (catalog check ran AND hash mismatched — this path also
+    sets `result: "invalid"`), or `null` (catalog check did
+    not run for any reason: no catalog flags, null hash,
+    legacy receipt, unknown version, catalog fetch failed).
+    The field is REQUIRED in all v0.3 JSON output (always
+    present, never absent). `details` becomes legal on
+    `inconclusive` results when the named §M reasons fire
+    (`unknown_receipt_version` carries `details.receipt_version`;
+    `model_id_not_in_catalog` carries `details.model_id`;
+    `catalog_expired` carries `details.catalog_id` and
+    `details.expires_at`). The v0.2.4 §10.4.2 "details only on
+    invalid" rule is SUPERSEDED for these v0.3-named inconclusive
+    cases ONLY; otherwise §10.4.2 remains authoritative.
+  - **C5 (MAJOR — wrong `/poolz` top-level key):** §M.4
+    example response key changed from the v0.3.0 fictitious
+    `"providers": [...]` to the SPEC-002 v1.4 §FR-O2 actual
+    `"pool": [...]` (and `"summary": {...}` preserved). The
+    SPEC-002 v1.6 candidate annotation now adds ONLY the three
+    catalog fields at top level, leaving every existing key
+    byte-identical.
+  - **C6 (MAJOR — AC-29 introspection command):** AC-29
+    rewritten to use the heartbeat-reported hash route (the
+    existing observability surface visible at Pearl journald
+    `model_hash_verified` events; SPEC-011 §3.3.1 wire) rather
+    than a non-existent `macprovider-cli models inspect`
+    subcommand. v0.3 does NOT demand a new introspection
+    CLI; if implementations want one for ergonomics, that's
+    a future SPEC-001 extension, not a v0.3 prereq.
+  - **S2 (MAJOR — null-hash buyer policy knob):** New
+    §M.3.1.2 "Null-hash policy flag" introduces a v0.3 OPTIONAL
+    CLI flag `--require-model-hash` (boolean) that lets a
+    buyer fail-closed when the receipt's `model_hash` is JSON
+    null AND catalog arguments were supplied. With the flag
+    SET and a null-hash receipt: result becomes `invalid` with
+    `reason: "model_hash_required"`; without the flag (default):
+    result is `valid` per §M.2.3 + AC-32 with the
+    `catalog_skipped_null_hash` warning. This preserves the
+    "default warm-swap-disabled providers still verify clean"
+    posture for backward compatibility but gives buyers a
+    first-class fail-closed knob, eliminating the
+    deployment-specific wrapper anti-pattern. AC-32a NEW
+    captures the flag-set path.
+  - **S3 (MAJOR — AC-42 mid-swap clause vs. §M.2.2 construction):**
+    AC-42 rewritten to align with §M.2.2's construction proof.
+    A normal in-flight request that began on the old container
+    and finishes during `loading` / `draining` MUST still emit
+    a receipt with the request-start hash per §M.2.2 (not a
+    `receipt_omitted`). The `receipt_omitted:
+    model_swap_violation` row fires ONLY in the defence-in-
+    depth case where the runtime CANNOT identify the
+    request-start container/hash — which under SPEC-011
+    R-3.4.1 + R-3.2.2 is unreachable by construction in
+    correct implementations. The AC test becomes "synthesized
+    state where the request-start container is genuinely
+    unknown" (a defensive harness, not a normal swap).
+  - **A1 (MAJOR — catalog model_id case-folding divergence):**
+    §M.3.2 step 6 rewritten. Catalog model_id lookup is
+    case-folded (lowercase + trim whitespace) to match
+    `phase4-coordinator/internal/tier2/catalog.go:559-560`
+    `catalogModelKey` semantics. The buyer-side verifier MUST
+    mirror the coordinator-side check, NOT diverge from it.
+    v0.3.0's "case-sensitive" rule would have let a coordinator
+    accept a model the verifier rejected, and vice versa.
+  - **A2 + S4 (MAJOR + MINOR — `/poolz` catalog-field presence
+    consistency):** §M.4 prose now matches AC-39: catalog
+    fields appear iff (a) `Tier2Config.CatalogPath` is set
+    AND (b) the catalog loaded cleanly AND (c) its signature
+    verified. The "configured" wording is removed; all three
+    presence conditions are pinned. `GET /catalog/<id>` and
+    `GET /catalog/pubkey` return 404 when ANY of the three
+    conditions fails. This is the single source of truth for
+    the SPEC-002 v1.6 candidate absorption.
+  - **A3 (MAJOR — staged IMPL prompt now exists):**
+    `specs/BUILD_SPEC_015_v0_3_MODELHASH_IMPL_PROMPT.md` was
+    written in the same audit-loop session (v0.3.0 had it as a
+    forward reference, v0.3.1 confirms it is staged). Lock-
+    state language updated to reflect this.
+  - **A4 (QUESTION — SPEC-011 header drift):** Acknowledged but
+    out of scope for v0.3. SPEC-011 v0.5 status header polish
+    is tracked separately; v0.3 cites SPEC-011 v0.5 per
+    DECISION_CRITERIA Entry 55 which is authoritative.
+  - **A5 (MINOR — stale §16.2 SPEC-011 reference):** Updated
+    the inherited §16 SPEC-011 v0.5 §3.3.1 + §3.8 bullet to
+    cite §3.2 (state machine), §3.3 (heartbeat), §3.4 (drain)
+    — the sections v0.3 §M.2 actually rests on.
+  - **C7 (MINOR — §3.4 v0.3 size projection):** v0.3 envelope
+    recomputed including the signature segment:
+    `<base64(JCS(T))>.<base64(SIG)>` = ~936 bytes (700-byte
+    JCS, 4/3 base64) + 1 (`.`) + 88 (base64 of 64-byte sig) =
+    ≤ ~1025 bytes. The 4096-byte nginx headroom requirement is
+    unchanged.
+  - **C8 (MINOR — cache TTL boundary language):** §M.3.4 now
+    uses explicit interval notation for the three TTL bands:
+    `[6h+1s, ∞)` → 6h cache; `[60s+1s, 6h]` → `expires_at -
+    now() - 60s` cache; `(-∞, 60s]` (including catalogs
+    accepted only via the §M.3.2 step 5 60s skew grace) →
+    no cache.
+
+v0.3.1 is the round-2 LOCK candidate. If round 2 returns
+0 CRITICAL / 0 MAJOR across all three lenses, v0.3.x ships into
+the SPEC-only PR per [[feedback-bundle-spec-impl-one-pr]] major-
+version-bump exception.
+
+**Change log v0.3.0:**
+- **Receipt tuple wire shape changes: 7 fields → 9 fields.** v0.3
+  extends the receipt tuple per the new §M.0 by adding two NEW
+  fields. JCS canonical order (UTF-16 code-unit lexicographic per
+  RFC 8785 §3.2.3) places them as:
+  `model_hash`, `model_id`, `output_hash`, `prompt_hash`,
+  `provider_pubkey`, `receipt_version`, `tokens_out`, `ttft_ms`,
+  `unix_ts` — so the new fields land at index 0 and index 5 in
+  the emitted byte order, not at "the end."
+  - **`model_hash`** (string of 64 lowercase hex chars OR JSON
+    null) — the provider's SHA-256 of the loaded MLX container
+    at receipt-generation time, sourced from the SPEC-011 v0.5
+    R-3.3.1 heartbeat state. Per §M.2 provenance, this is the
+    post-swap in-memory container — what the buyer actually
+    consumed. `null` is permitted for providers running default
+    `--enable-warm-swap=false` (SPEC-011 R-3.3.0) and required
+    in that mode per §M.2.3.
+  - **`receipt_version`** (string, value `"3"` in this revision)
+    — explicit wire-shape discriminant. v0.1/v0.2 receipts had no
+    `receipt_version` field; v0.3 verifiers detect those as
+    `receipt_version="1"` by absence per §M.1.1. String-typed
+    (not int-typed) to avoid JSON-number canonicalization edge
+    cases.
+- **Forward/backward compatibility (NORMATIVE per §M.1).** v0.3
+  verifiers MUST accept v0.1/v0.2 receipts (back-compat: report
+  `valid` per the legacy §3.1 7-key path, skip catalog check).
+  v0.1/v0.2 verifiers reading a v0.3 receipt MUST report
+  `invalid` per their existing "EXACTLY these seven keys" rule —
+  the locked v0.1.3 / v0.2.4 releases are not amended. v0.4+
+  verifiers SHOULD report unknown `receipt_version` values as
+  `inconclusive: unknown_receipt_version` per §M.1.4 so a future
+  v0.4 receipt against a v0.3 verifier degrades to `inconclusive`
+  rather than `invalid`.
+- **New §M (top-level) "Model-hash binding (v0.3 NORMATIVE)"**
+  inserted between §10 and §11, with six subsections:
+  - §M.0 — v0.3 receipt tuple (the normative 9-key shape and
+    JCS byte order)
+  - §M.1 — Wire and version compatibility (back-compat,
+    forward-incompat, unknown-version semantics, no `RFC8785JCS.swift`
+    amendments)
+  - §M.2 — `model_hash` provenance (heartbeat lag, mid-response
+    swap REFUSED, absent-hash semantics for warm-swap-disabled
+    providers)
+  - §M.3 — Catalog-based verification (verify CLI extension: four
+    new flags, the algorithm, trust-boundary update, cache TTL)
+  - §M.4 — Coordinator `/poolz` extension (SPEC-002 v1.6
+    candidate annotation — `catalog_id`, `catalog_url`,
+    `catalog_pubkey_url`, `GET /catalog/<catalog_id>`,
+    `GET /catalog/pubkey`)
+  - §M.5 — Acceptance criteria (AC-28 through AC-42, extending
+    the v0.1/v0.2 AC-1 through AC-27 set)
+  - §M.6 — What v0.3 explicitly DOES NOT change (records
+    `RequireHashVerified` Entry-80 orthogonality, streaming
+    deferral, multi-hash receipts deferred to v0.4+, federation,
+    on-chain anchoring, quantization, soft model identity, JCS
+    amendments)
+- **§3.1 update — wire shape pointer.** The v0.1.3 sentence "A
+  receipt object MUST contain EXACTLY these seven keys" is
+  RETAINED for v0.1/v0.2 receipts (in-the-wild back-compat) and
+  is SUPERSEDED for v0.3 receipts by §M.0's normative nine-key
+  shape. §3.1's field-table heading carries a pointer to §M.0.
+- **§3.4 update — wire size envelope.** The v0.1.3 ≤ ~830-byte
+  projection for the `X-MacProvider-Receipt` header is updated to
+  account for the two new fields. v0.3 budget: `model_hash` adds
+  ≤ 80 bytes (`"model_hash":"<64 hex>"`), `receipt_version` adds
+  ≤ 22 bytes (`"receipt_version":"3"`). New `JCS(T)` ceiling is
+  ≤ ~700 bytes; the header value after base64 expansion is
+  ≤ ~960 ASCII bytes. The 4096-byte nginx headroom requirement
+  is unchanged — v0.3 still fits comfortably.
+- **§7.6 update — null-usage / error receipts.** Error receipts
+  (e.g. `error_model_not_loaded`) MUST set `model_hash` per §M.2
+  — i.e. the heartbeat-reported hash for the loaded container at
+  the time the error fired. The error did not invalidate the
+  in-memory container; the buyer is still entitled to know which
+  weights the provider had warm. v0.1.3 AC-12 is preserved
+  unchanged for the v0.1/v0.2 wire shape; new AC-31 pins the
+  v0.3 wire shape.
+- **§10 update — verify CLI extension.** §10.4 gains four CLI
+  flags (`--catalog <path>`, `--catalog-pubkey <base64>`,
+  `--catalog-pubkey-url <url>`, `--catalog-url <url>`); §10.4.2
+  result schema gains `model_hash_verified` (bool, present iff
+  catalog was provided AND receipt `model_hash` was non-null)
+  and the `reason` enum gains `model_hash_mismatch`,
+  `model_id_not_in_catalog`, `catalog_signature_invalid`,
+  `catalog_unreachable`, `catalog_expired`, `catalog_format_invalid`,
+  `unknown_receipt_version`, `extra_field` (for v0.1/v0.2 verifiers
+  rejecting v0.3 receipts and for v0.3 verifiers rejecting receipts
+  whose `receipt_version: "3"` tuple has missing/extra keys);
+  §10.4.3 exit-code table is UNCHANGED (0/1/2/64/65). §10.4.4
+  flag-interaction matrix gains rows for the four new flags and
+  their mutual-exclusivity rules per §M.3.1.
+- **§10.6 trust boundary update — supersession.** The v0.2 §10.6
+  "DOES NOT prove that the response was generated by the model
+  named in `model_id`" bullet is SUPERSEDED for v0.3 `valid`
+  results that carry non-null `model_hash` AND were verified with
+  a fresh, signature-valid, non-expired catalog. The remaining
+  v0.2 §10.6 disclaimers (timestamp honesty, no-other-observer,
+  pubkey-trust-root operator-mutability, no-buyer-correlator,
+  no-uniqueness) are PRESERVED. §M.3.3 is the v0.3 trust-boundary
+  authority for valid-with-catalog; §10.6 remains authoritative
+  for valid-without-catalog (v0.1/v0.2 receipts; v0.3 receipts
+  with null hash or no-catalog invocation).
+- **§11 update — audit categories.** The `receipt_omitted`
+  `reason` enum gains `model_swap_violation` as a v0.3-specific
+  defined case (a swap was in progress at receipt-time per
+  §M.2.2; the receipt was refused). v0.1/v0.2 §11 already
+  listed this string as a placeholder; v0.3 promotes it from
+  placeholder to defined semantics.
+- **§15 Q6 update — RESOLVED.** v0.1.3 / v0.2 §15 Q6 (model-hash
+  binding as a SPEC-011 cross-cut, gated on catalog-signing
+  readiness) is closed by §M. The Q6 paragraph is REWRITTEN to
+  point at §M and to note explicitly that `RequireHashVerified`
+  enforcement at the coordinator is ORTHOGONAL to v0.3 and
+  unchanged per `beta/DECISION_CRITERIA.md` Entry 80
+  (2026-06-22). New **§15 Q7** captures the deferred question of
+  multi-hash receipts (i.e. a single receipt binding two model
+  hashes for a swap-spanning streaming response); v0.3 §M.2.2
+  forbids the shape, v0.4+ may design it.
+- **§16 update — references.** New cites for
+  `scripts/sign-catalog.go`,
+  `phase4-coordinator/internal/tier2/catalog.go`,
+  `phase4-coordinator/internal/config/config.go:142,335`
+  (`RequireHashVerified` default flag),
+  `beta/DECISION_CRITERIA.md` Entry 80, SPEC-008 v0.3 §5.3-5.6
+  Pillar A semantics, SPEC-010 v1.5
+  `supported_models[]` / `publishes_supported_models`, SPEC-011
+  v0.5 §3.3 heartbeat extension + §3.2 warm-swap state machine.
+- **Depends-on line 4 update — SPEC-011 v0.5 promotion to HARD
+  dependency.** v0.1/v0.2 referenced SPEC-011 v0.5 only for §7.4
+  (drain semantics during reconnect-based rotation). v0.3
+  promotes SPEC-011 v0.5 to a HARD dependency for receipt
+  issuance because the receipt now reads `model_hash` from the
+  provider's local SPEC-011 R-3.3.1 hash-tracking state.
+  SPEC-008 v0.3 §5.3-5.6 is similarly promoted to HARD because
+  the verifier's catalog-check path consumes a SPEC-008-compatible
+  signed catalog. SPEC-010 v1.5 (`supported_models[]`) is added
+  as a SOFT dependency (informs which providers participate in
+  hash attestation; orthogonal to receipt issuance per §M.2.3).
+- **Live infrastructure citation.** As of 2026-06-24 the
+  coordinator at `coordinator.streamvc.live` runs SPEC-011 v0.5
+  observation mode against catalog
+  `macprovider-tier2-model-catalog-2026-05-31`; Pearl journald
+  shows 342+ `model_hash_verified` events over the last 7 days
+  for air5, all `decision:"allow", reason:"hash_match"`. v0.3
+  composes on that production infrastructure rather than
+  introducing it. Reproduction command in `specs/BUILD_SPEC_015_RECEIPTS_v0_3_MODELHASH_PROMPT.md` §"Files you should read".
+
+v0.3.0 is the LOCK CANDIDATE. Codex audit rounds pending. On a
+clean 0-CRITICAL / 0-MAJOR round across all three lenses, v0.3.x
+ships as the SPEC-only PR; IMPL follows in a separate PR per the
+[[feedback-bundle-spec-impl-one-pr]] EXCEPTION rule for major
+version bumps with downstream implementers.
 
 **Change log v0.2.4:**
 - Round-4 codex audit fix pass (round 4 verdicts: security
@@ -641,7 +999,20 @@ v0.1's design choices and their justifications:
 
 ### 3.1 The receipt tuple
 
-Every receipt is a JCS-canonicalized JSON object with EXACTLY the
+**v0.3 wire shape supersedes this section for v0.3 receipts.**
+The §3.1 seven-field shape below describes the v0.1 / v0.2 wire
+contract and remains authoritative for receipts emitted by v1.6
+binaries pre-v0.3, and for verifiers consuming such receipts.
+For v0.3 receipts (those carrying `receipt_version: "3"`), the
+normative tuple shape is §M.0's nine-field table. v0.3-emitting
+providers MUST construct the §M.0 nine-field tuple; v0.3
+verifiers MUST detect tuple version per the §M.1.1 / §M.1.4
+rules (presence of `receipt_version` field) and apply either the
+§3.1 7-key path (legacy back-compat) or the §M.0 9-key path
+accordingly. The §3.2 JCS canonicalization rules and the §3.3
+signature rules are UNCHANGED across both shapes.
+
+Every v0.1 / v0.2 receipt is a JCS-canonicalized JSON object with EXACTLY the
 following seven fields and no others:
 
 | Field | Type | Definition |
@@ -767,11 +1138,26 @@ NOT part of v0.1.
 `model_id` ≤ 256 bytes (SPEC-001 v1.5 model-id constraint),
 `prompt_hash`/`output_hash` = 64 hex chars each, `provider_pubkey` =
 44 chars, three int64 numerals ≤ 20 chars each. With JSON
-overhead, `JCS(T)` ≤ 600 bytes; base64 expands by 4/3, so the header
-value is ≤ ~830 ASCII bytes. Implementations MUST permit a
-generous `X-MacProvider-Receipt` header up to 4096 bytes to leave
-headroom for v0.2+ field additions and to avoid edge-case nginx
-truncation.
+overhead, the v0.1/v0.2 `JCS(T)` ≤ 600 bytes; base64 expands by
+4/3, so the v0.1/v0.2 header value is ≤ ~830 ASCII bytes.
+
+**v0.3 wire size (NEW).** A v0.3 receipt adds `model_hash`
+(≤ 80 bytes including key + quotes + colon: `"model_hash":"<64
+hex>"`) and `receipt_version` (≤ 22 bytes: `"receipt_version":
+"3"`). The v0.3 `JCS(T)` ceiling is ≤ ~700 bytes. The
+`X-MacProvider-Receipt` header value is
+`<base64(JCS(T))>.<base64(SIG)>`:
+- `base64(JCS(T))` = ⌈700 × 4/3⌉ ≈ 936 bytes (standard padded
+  base64).
+- The literal period separator = 1 byte.
+- `base64(SIG)` for a 64-byte ed25519 signature = 88 bytes
+  (standard padded base64).
+- Total v0.3 header value ≤ ~1025 ASCII bytes. v0.3 still
+  fits comfortably within the 4096-byte budget below.
+
+Implementations MUST permit a generous `X-MacProvider-Receipt`
+header up to 4096 bytes to leave headroom for v0.3+ field
+additions and to avoid edge-case nginx truncation.
 
 ---
 
@@ -2010,6 +2396,13 @@ A `valid` result DOES NOT prove:
   catalog-signing surface; folding `model_hash` into the receipt
   tuple is the v0.3+ candidate per §15 Q6. A v0.2 verifier MUST
   NOT silently treat `valid` as "model attestation."
+  **v0.3 supersession (NORMATIVE).** This bullet is SUPERSEDED
+  by §M.3.3 for v0.3 `valid` results that carry non-null
+  `model_hash` AND were resolved against a fresh, signature-valid,
+  non-expired catalog. For v0.3 `valid` results with null
+  `model_hash` OR without catalog arguments, this bullet
+  REMAINS in force unchanged. v0.1 / v0.2 verifiers (locked
+  releases) continue to read this bullet at full strength.
 - **That `unix_ts` is honest.** The timestamp is provider-reported.
   The verifier MAY optionally cross-check against a buyer-recorded
   received-at timestamp with an operator-set skew window, but v0.2
@@ -2146,6 +2539,1166 @@ v0.1-line cross-cuts.
 
 ---
 
+## §M. Model-hash binding (v0.3 NORMATIVE)
+
+v0.3 extends the receipt tuple to bind which model weights actually
+served the buyer, closing the v0.1 / v0.2 gap the §10.6 trust
+boundary names explicitly ("DOES NOT prove that the response was
+generated by the model named in `model_id`"). The infrastructure
+to do this already exists in production; v0.3 binds it into the
+receipt:
+
+- **SPEC-011 v0.5 R-3.3.1** defines provider-reported `model_hash`
+  on the heartbeat — raw 64-char lowercase hex of the loaded MLX
+  container.
+- **`scripts/sign-catalog.go`** produces ed25519-signed model
+  catalogs mapping `model_id → expected_hash` (the per-entry
+  field is named `sha256` per `scripts/sign-catalog.go:31`).
+- **`phase4-coordinator/internal/tier2/catalog.go`** parses + verifies
+  signed catalogs (in-memory shape `ParsedCatalog` per `catalog.go:45`).
+- **Production observation mode is LIVE.** As of 2026-06-24 Pearl
+  journald shows 342+ `model_hash_verified` events over the last
+  7 days for air5 against catalog
+  `macprovider-tier2-model-catalog-2026-05-31`, all
+  `decision:"allow", reason:"hash_match"`.
+
+The missing piece v0.3 closes: the receipt tuple does not include
+`model_hash`, so a buyer-side verifier cannot use any of the
+above. v0.3 extends the tuple, the verify CLI, and the `/poolz`
+surface to make catalog-based hash verification a buyer-driven
+choice.
+
+**Relationship to `RequireHashVerified` (Entry 80).** v0.3 is
+ORTHOGONAL to coordinator-side hash enforcement. The
+`Tier2Config.RequireHashVerified` flag
+(`phase4-coordinator/internal/config/config.go:142,335`) remains
+at its `false` default per the
+`beta/DECISION_CRITERIA.md` 2026-06-22 Entry 80 ruling. v0.3
+receipts BIND the hash from any provider that opts into SPEC-011
+hash reporting (whether or not the coordinator enforces); the
+buyer decides whether to demand catalog-match. AC-40 pins this
+orthogonality.
+
+### §M.0 v0.3 receipt tuple (NORMATIVE)
+
+A v0.3 receipt is a JCS-canonicalized JSON object with EXACTLY the
+following NINE fields and no others. The table rows are presented
+in JCS canonical order — UTF-16 code-unit lexicographic per RFC
+8785 §3.2.3 — so this is the literal byte order
+`RFC8785JCS.swift` will emit:
+
+| Field | Type | Definition |
+|---|---|---|
+| `model_hash` | string (64 lowercase hex) OR JSON null | The SHA-256 of the MLX container the provider had loaded at receipt-generation time, sourced from the SPEC-011 v0.5 R-3.3.1 heartbeat state. MUST be a raw 64-char lowercase hex string with no `sha256:` prefix (matching SPEC-008 §5.3-5.6 wire form and SPEC-011 R-3.3.1). MUST be the JSON literal `null` if and only if the provider is running with `--enable-warm-swap=false` per SPEC-011 R-3.3.0 (and therefore has no heartbeat-reported hash to bind). See §M.2 for provenance rules. MUST NOT be the empty string; MUST NOT be absent. |
+| `model_id` | string | Unchanged from v0.1.3 §3.1 — ASCII-only, case-insensitive matching for routing, verbatim-stored in the tuple. |
+| `output_hash` | string (64 lowercase hex) | Unchanged from v0.1.3 §3.1. |
+| `prompt_hash` | string (64 lowercase hex) | Unchanged from v0.1.3 §3.1. |
+| `provider_pubkey` | string (44 char base64) | Unchanged from v0.1.3 §3.1. |
+| `receipt_version` | string | Wire-shape discriminant. MUST be exactly the ASCII string `"3"` in v0.3 receipts (NOT the integer `3`, NOT `"v3"`, NOT `"0.3"`). The string-typed choice avoids the JSON-number-vs-int canonicalization edge cases the v0.1.3 §3.1 typing notes already raised. v0.4+ MAY bump this to `"4"`; v0.3 verifiers MUST treat unknown `receipt_version` values as `inconclusive: unknown_receipt_version` per §M.1.4. |
+| `tokens_out` | int64 | Unchanged from v0.1.3 §3.1. |
+| `ttft_ms` | int64 | Unchanged from v0.1.3 §3.1. |
+| `unix_ts` | int64 | Unchanged from v0.1.3 §3.1. |
+
+**Field omissions and extras.** A v0.3 receipt MUST contain EXACTLY
+these nine keys. Verifiers MUST reject v0.3 receipts (i.e. those
+with `receipt_version: "3"`) with missing or extra keys as `invalid`
+with `reason: "extra_field"` or `reason: "missing_field"` and
+`details.field` populated. There are no optional fields in v0.3.
+The `null`-valued `model_hash` is NOT a "missing" field — it is
+present with the JSON null literal per the §M.2.3 normative rule.
+
+**Types.** `model_hash` is `string | null`. `receipt_version`,
+`model_id`, `prompt_hash`, `output_hash`, and `provider_pubkey`
+are JSON strings. `ttft_ms`, `tokens_out`, and `unix_ts` are JSON
+integers per the v0.1.3 §3.1 numeric rules (no decimal point, no
+exponent).
+
+**JCS extension status.** No `RFC8785JCS.swift` amendments are
+required for v0.3 beyond emitting two additional keys through the
+existing sorted-emit path. See §M.1.5 for the proof: the new
+fields are ASCII-only (so NFC is a no-op) and the `null` literal
+encoding is RFC 8785 §3.2.2.2-trivial.
+
+### §M.1 Wire and version compatibility (NORMATIVE)
+
+#### §M.1.1 v0.3 verifier reading a v0.1 / v0.2 receipt — BACKWARD COMPAT
+
+A v0.3 verifier given a receipt with NO `receipt_version` field
+MUST:
+
+1. Treat the receipt as `receipt_version: "1"` (the implicit v0.1
+   tuple shape — the same shape v0.2 inherited unchanged).
+2. Run the v0.1.3 §3.1 7-field validation: exactly the seven
+   keys `model_id`, `prompt_hash`, `output_hash`, `provider_pubkey`,
+   `ttft_ms`, `tokens_out`, `unix_ts` — no missing, no extra.
+3. Canonicalize per v0.1.3 §3.2 (7-field JCS) and check the
+   signature against the resolved pubkey per §10.2.
+4. Report `valid` / `invalid` / `inconclusive` per the §10.1
+   tri-state, exactly as a v0.1 / v0.2 verifier would.
+5. Skip the catalog check entirely. The v0.1 / v0.2 receipt
+   carries no `model_hash` to compare against. If `--catalog`-
+   family arguments WERE supplied, the JSON output's
+   `warnings[]` MUST include a single entry of kind
+   `catalog_skipped_legacy_receipt` naming the receipt's
+   `provider_pubkey` and stating that the receipt predates v0.3
+   wire shape.
+
+The `valid` result for a v0.1 / v0.2 receipt under a v0.3
+verifier carries the v0.1 / v0.2 §10.6 trust boundary, NOT the
+v0.3 §M.3.3 trust boundary. The verifier's `--explain` output
+MUST disclose that the legacy receipt cannot attest model-hash
+binding even when a catalog was supplied to the verifier.
+
+#### §M.1.2 v0.1 / v0.2 verifier reading a v0.3 receipt — FORWARD INCOMPAT
+
+A v0.1 or v0.2 verifier (the locked v0.1.3 / v0.2.4 releases)
+given a v0.3 receipt MUST report `invalid`. The failure path:
+
+1. The receipt has 9 keys, two of which (`model_hash` and
+   `receipt_version`) are unrecognized.
+2. The v0.1 / v0.2 §3.1 "MUST contain EXACTLY these seven keys"
+   rule rejects the receipt as `invalid` with
+   `reason: "extra_field"` (or implementation-equivalent)
+   BEFORE the signature check. The signature would have failed
+   anyway — the signed canonical bytes differ — but the field-
+   shape check fires first.
+
+v0.3 does NOT amend v0.1 / v0.2 verifier behavior retroactively;
+those releases are locked. The operational consequence: buyers
+holding v0.1 / v0.2 verifier releases will see v0.3 receipts as
+`invalid`. This is unavoidable for the v0.1 / v0.2 lock state.
+v0.4+ SHOULD adopt the §M.1.4 unknown-version path so a future
+v0.4 receipt against a v0.3 verifier reports `inconclusive:
+unknown_receipt_version` rather than `invalid`. Buyers MUST
+coordinate verifier upgrades with provider upgrades during the
+v0.2 → v0.3 transition; release notes accompanying the v0.3
+implementation MUST call this out.
+
+#### §M.1.3 v0.3 verifier reading a v0.3 receipt — NORMAL PATH
+
+Per §M.0 (nine fields exactly, signature checked per §10 against
+the resolved pubkey), catalog checked per §M.3 if both
+`--catalog`-family arguments AND a non-null `model_hash` are
+present.
+
+#### §M.1.4 v0.3 verifier reading an unknown `receipt_version` — FORWARD COMPAT
+
+If a v0.3 verifier reads a receipt whose `receipt_version` field
+is PRESENT and NOT equal to `"3"` (and not equal to any other
+v0.x value the verifier was specifically built to handle), the
+verifier MUST:
+
+1. Report `inconclusive` with `reason: "unknown_receipt_version"`
+   and exit code `2`.
+2. NOT attempt to canonicalize or signature-check the unknown
+   version.
+3. Include the unknown version string under
+   `details.receipt_version` in the JSON output.
+4. NOT use field count as a fallback heuristic for version
+   detection — field count is a `valid`/`invalid` discriminant
+   for a known version, not a version detector.
+
+This locks v0.4+ as a forward-compat path: a v0.4 receipt
+against a v0.3 verifier reports `inconclusive` (NOT `invalid`),
+matching the §10.1 `inconclusive` tri-state intent.
+
+#### §M.1.5 Why no `RFC8785JCS.swift` amendments are required
+
+The v0.1.3 §3.2 JCS profile (UTF-16 key order, RFC 8785 string
+escape, NFC normalization on natural-language strings, RFC 8785
+number handling) handles the v0.3 9-field tuple WITHOUT
+amendment. Per §M.0:
+
+- `model_hash` is either ASCII (64 hex chars) or the JSON null
+  literal. ASCII → NFC is a no-op. JSON null → RFC 8785
+  §3.2.2.2 fixes the encoding as the literal four bytes `null`.
+- `receipt_version` is the ASCII string `"3"` (or future ASCII
+  strings). NFC no-op.
+- The two new keys (`model_hash`, `receipt_version`) sort
+  cleanly into the existing UTF-16 key order — see §M.0 for the
+  emitted order. The implementation's sorted-emit path picks
+  up the new keys with no code change beyond constructing the
+  tuple to include them.
+
+The §3.2 float-handling extension (step 4) was added in v0.1.3
+for the §4 prompt canonical object (`temperature`, `top_p`,
+`presence_penalty`, `frequency_penalty`). Neither v0.1/v0.2 nor
+v0.3 tuple-level encoding exercises floats; that extension is
+still triggered only by the prompt canonical hash path.
+
+The §3.3 signature step (`ed25519_sign(provider_receipt_private_key,
+UTF-8(JCS(T)))`) and the §3.4 wire envelope (`<base64(JCS(T))>.
+<base64(SIG)>`) are UNCHANGED for v0.3 — only `T`'s shape grows.
+
+### §M.2 `model_hash` provenance (NORMATIVE)
+
+The provider's `model_hash` value at receipt-generation time MUST
+be sourced from the provider's local SPEC-011 R-3.3.1
+hash-tracking state — the same value the provider reports on
+heartbeats per SPEC-011 §3.3. "Most recent heartbeat" is
+ambiguous in three edge cases; this section pins each.
+
+#### §M.2.1 Heartbeat lag — post-swap, pre-heartbeat
+
+If a SPEC-011 §3.2 warm-swap completed at T−100 ms but no
+heartbeat has yet been emitted (next heartbeat scheduled at
+T+200 ms), the receipt MUST commit to the POST-SWAP hash — the
+SHA-256 of the in-memory container at the moment inference ran,
+NOT the pre-swap hash the coordinator last received on
+heartbeats.
+
+**Rationale:** the buyer consumed the post-swap weights; the
+receipt binds to what served the buyer, not to what the
+coordinator most-recently knew. The implementation reads
+`model_hash` from the provider-local SPEC-011 R-3.3.1
+state-tracking variable, which transitions to the new hash at
+SPEC-011 §3.2 `ready` re-entry — i.e. at the moment of atomic
+swap, not at next-heartbeat emission.
+
+**Coordinator/provider transient disagreement is OK.** Across
+the heartbeat window the coordinator-side hash and the
+provider's receipt-bound hash MAY transiently disagree. That
+disagreement appears as a hash_status churn on the next
+heartbeat (the coordinator's R-3.3.5 SPEC-011 path re-verifies
+and `Provider.HashStatus` reflects the post-swap value). That
+churn is a SPEC-011 coordinator-side audit condition, NOT a
+SPEC-015 verifier-side failure. The verifier's trust root for
+catalog-check is the catalog itself, NOT the coordinator's
+heartbeat-derived state.
+
+#### §M.2.2 Mid-response model swap — REFUSED (NORMATIVE)
+
+A SPEC-011 §3.2 warm-swap MUST NOT span a single receipt-bound
+response. v0.3 expresses this rule via the SPEC-011 §3.4 drain
+semantics, which already make it enforceable by construction:
+
+- A request that BEGAN on the old container and FINISHED before
+  the SPEC-011 R-3.4.2 drain timeout: the runtime knows the
+  inference ran entirely on the old container (R-3.4.1
+  in-flight-set tracking + R-3.2.2 snapshot semantics). The
+  receipt-emission code path MUST emit a receipt with the
+  hash at request START — the hash that served the response,
+  even if the global provider state has moved to a new hash
+  mid-response. This is the §M.2.2 normative shape.
+- A request that BEGAN on the old container and was R-3.4.2
+  drain-timed-out: the response is HTTP 503 per SPEC-011
+  R-3.4.2; v0.1.3 §12 / §6.4 already specifies no receipt for
+  non-200 responses. The drain timeout itself is the audit
+  trail.
+- A request that ARRIVED during `loading` or `draining`:
+  rejected with HTTP 503 per SPEC-011 R-3.4.4; no receipt.
+- A request that BEGAN on the NEW container after the swap
+  completed: receipt-emission emits the NEW hash. Normal §M.2.1
+  path.
+
+The construction is therefore: *every receipt commits to the
+hash of the model that started generation for this request*, and
+v0.3 forbids any other shape.
+
+**Defence-in-depth refusal.** If the runtime detects a
+swap-in-progress state at receipt-emission time AND cannot
+disambiguate which container served the response (this is
+not reachable under SPEC-011 R-3.4.1 / R-3.2.2 by construction;
+this clause exists for future implementation regressions), the
+provider MUST refuse to emit a receipt and MUST log a
+`receipt_omitted` audit event with `reason:
+"model_swap_violation"`. The response itself MAY still complete
+normally (the buyer gets their tokens; HTTP 200) but carries
+no `X-MacProvider-Receipt` header. The §6.4 receipt-omission
+rules already accept this outcome.
+
+**Deferred to v0.4+:** representing a multi-hash response in a
+single receipt — i.e. a receipt that binds two `model_hash`
+values for one response, one pre-swap and one post-swap. v0.3
+§M.2.2 NORMATIVELY REFUSES the shape; v0.4 may design it,
+particularly in the streaming-receipts context where a swap
+genuinely spans a long-running response. See §15 Q5 (streaming
+delivery) and the new §15 Q7 (multi-hash receipt shape).
+
+#### §M.2.3 Absent hash — warm-swap disabled
+
+If the provider is running with `--enable-warm-swap=false` (the
+SPEC-011 R-3.1.0 default, and the production default per Entry
+80), the heartbeat omits `model_hash` per SPEC-011 R-3.3.0.
+The provider has no SPEC-011-sourced hash to bind into the
+receipt. In this mode the provider MUST emit `model_hash: null`
+in the v0.3 receipt tuple. Not the empty string. Not absence.
+The JSON literal `null`, which JCS encodes as the four bytes
+`null`.
+
+A v0.3 verifier reading `model_hash: null` MUST:
+
+1. Run the standard v0.3 verification path: §3.2 canonicalization
+   over the 9-field tuple (including the literal `null`),
+   signature check, prompt/output hash recomputation, exit code
+   per §10.1 tri-state.
+2. Skip the catalog check entirely — there is no hash to
+   compare. The verifier MUST NOT report `invalid` solely
+   because `model_hash` is null.
+3. If `--catalog`-family arguments WERE supplied, include in
+   `warnings[]` an entry of kind `catalog_skipped_null_hash`
+   (NOT `catalog_skipped_legacy_receipt` — the receipt IS v0.3,
+   the hash is opted-out via the warm-swap-disabled config).
+4. Report `valid` if signature + canonicalization + prompt/
+   output hash checks pass.
+
+**Trust statement (NORMATIVE).** A v0.3 `valid` result for a
+null-hash receipt carries the v0.1 / v0.2 §10.6 trust boundary
+PLUS the explicit attestation: "the holder of the provider's
+private key signed a tuple in which `model_hash` was the JSON
+literal `null`." The provider is committed to the null — a
+provider cannot later claim "the receipt is null because I
+couldn't get a hash"; the receipt SIGNED the null. v0.3
+exposes provider hash-attestation participation as a per-receipt
+attestable property.
+
+**Design rationale (the most contentious §M choice).** The
+choice of "inconclusive-for-hash + valid-for-signature" rather
+than "invalid because the provider didn't participate" is
+deliberate. v0.3 ships against a production pool that runs
+default `--enable-warm-swap=false` per Entry 80. Reporting every
+receipt from that pool as `invalid` would break existing buyer
+tooling on the day v0.3 ships; the softer rule preserves
+"signature attestation works" while letting the catalog-check
+side remain an opt-in trust upgrade. Operators who want to
+demand hash attestation MAY ship a deployment-specific verifier
+wrapper that filters `model_hash: null` results to "reject" —
+this is policy, not protocol. AC-32 pins the protocol behavior;
+the policy layer is out of scope.
+
+### §M.3 Catalog-based verification (verify CLI extension)
+
+When the v0.3 receipt has a non-null `model_hash` AND the
+verifier is invoked with catalog arguments, the verifier MUST
+compare `receipt.model_hash` against a signed catalog's expected
+hash for `receipt.model_id`. The catalog format is the output
+of `scripts/sign-catalog.go`, parsed and verified consistent
+with `phase4-coordinator/internal/tier2/catalog.go`. The
+verifier MUST re-implement parse + verify in pure Go in
+`phase7-verify/` rather than import the coordinator package,
+maintaining the v0.2 pure-Go discipline.
+
+#### §M.3.1 New verify CLI flags
+
+| Flag | Type | Required? | Purpose |
+|---|---|---|---|
+| `--catalog <path>` | string | optional | Path to a local signed catalog file (the output of `scripts/sign-catalog.go`). Mutually exclusive with `--catalog-url`. |
+| `--catalog-url <url>` | string | optional | URL to fetch the signed catalog. Suggested target: the SPEC-002 v1.6 candidate `GET /catalog/<catalog_id>` endpoint per §M.4. Mutually exclusive with `--catalog`. |
+| `--catalog-pubkey <base64url>` | string | optional | `base64.RawURLEncoding` (base64url-unpadded, NOT standard padded base64) of the ed25519 catalog-signing pubkey. Exactly 43 ASCII characters. Matches `scripts/sign-catalog.go:90,316-328` and SPEC-008 §5.2.1 wire form for ed25519 pubkeys. Mutually exclusive with `--catalog-pubkey-url`. |
+| `--catalog-pubkey-url <url>` | string | optional | URL to fetch the catalog signing pubkey. Suggested target: the SPEC-002 v1.6 candidate `GET /catalog/pubkey` endpoint per §M.4. Mutually exclusive with `--catalog-pubkey`. |
+
+**Flag-combination rules (NORMATIVE; extends §10.4.4).**
+
+- If NONE of the four catalog flags is supplied: catalog check
+  is skipped entirely. A v0.3 `valid` result carries the v0.1 /
+  v0.2 §10.6 trust boundary, NOT the §M.3.3 boundary. The JSON
+  output MUST set `model_hash_verified: null` (NOT absent) to
+  explicitly signal the catalog check did not run.
+- If `--catalog`-family flag is supplied without
+  `--catalog-pubkey`-family flag (or vice versa): exit `64`
+  (usage error) per §10.4.3. The catalog and the catalog pubkey
+  are mutually required — a catalog without a pubkey cannot be
+  verified, and a pubkey without a catalog has nothing to
+  verify.
+- If both `--catalog` and `--catalog-url` are supplied (or both
+  `--catalog-pubkey` and `--catalog-pubkey-url`): exit `64`.
+- If `--catalog-url` or `--catalog-pubkey-url` is used with
+  `--offline` (§10.5): exit `64` (incompatible flags). The
+  buyer is asserting offline AND requesting a network fetch.
+- `--catalog-url` with no network egress (a transient network
+  failure under §10.5's 5-second total network budget): report
+  `inconclusive` with `reason: "catalog_unreachable"`. The
+  verifier MUST NOT silently fall back to "skip catalog check
+  and report valid" when the buyer explicitly asked for a
+  catalog check. This is the same posture §10.2 takes for
+  `/v1/receipt-keys/<provider_id>` unreachability.
+
+#### §M.3.1.1 v0.3 catalog flag interaction matrix (extends §10.4.4)
+
+This sub-matrix extends the v0.2.4 §10.4.4 flag matrix with the
+v0.3 catalog flags. Rows = v0.3 catalog flags; columns = v0.2 +
+v0.3 flags they interact with. Cells name the exit code or
+behaviour. "OK" means the combination is legal and the verifier
+proceeds per §M.3.2. "64" means exit `64` (usage error per
+§10.4.3).
+
+|   | `--offline` | `--coordinator H` | `--pubkey` (receipt) | `--json` | `--quiet` | `--explain` | `--provider-id` |
+|---|---|---|---|---|---|---|---|
+| `--catalog <path>` | OK (no network) | OK (independent) | OK | OK | OK | OK (catalog shown) | OK |
+| `--catalog-url <url>` | **64** (incompatible: offline-vs-fetch) | OK (independent host from `H`) | OK | OK | OK | OK (catalog shown) | OK |
+| `--catalog-pubkey <b64url>` | OK | OK | OK | OK | OK | OK (key id shown) | OK |
+| `--catalog-pubkey-url <url>` | **64** (incompatible: offline-vs-fetch) | OK (independent host from `H`) | OK | OK | OK | OK (key id shown) | OK |
+| `--catalog` + `--catalog-url` | n/a | n/a | n/a | n/a | n/a | n/a | n/a |  (mutually exclusive — **64**)
+| `--catalog-pubkey` + `--catalog-pubkey-url` | n/a | n/a | n/a | n/a | n/a | n/a | n/a |  (mutually exclusive — **64**)
+| catalog flag without matching pubkey flag (or vice versa) | n/a | n/a | n/a | n/a | n/a | n/a | n/a |  (must both be supplied — **64**)
+| `--require-model-hash` (§M.3.1.2) | OK | OK | OK | OK | OK | OK (policy disclosed) | OK |
+
+**Cross-row rules.**
+
+1. Catalog flags compose freely with v0.2 input-mode flags
+   (`--bundle`, `--receipt`+`--prompt-hash`+`--output-hash`,
+   stdin) — the catalog check runs orthogonal to receipt
+   resolution.
+2. `--coordinator H` and `--catalog-url U` are INDEPENDENT
+   hosts. `H` resolves `/v1/receipt-keys/<provider_id>` for
+   the pubkey; `U` resolves the catalog. They MAY be the same
+   host (Pearl-style single-coordinator deployment) or
+   different (e.g. `H = test-coord` + `U = production-catalog`).
+3. Explicit `--pubkey <b64>` (the v0.2 receipt-signing-pubkey
+   pin) and `--catalog-pubkey <b64url>` (the v0.3 catalog-
+   signing pubkey pin) are independent and can be combined.
+   They sign different things (receipt vs. catalog).
+4. `--json` output ALWAYS includes the v0.3 fields
+   `model_hash_verified` and any §M-named `details` /
+   `warnings[]` entries per §M.3.2.1, regardless of whether
+   catalog flags were supplied (the field is `null` when
+   catalog check did not run).
+5. `--quiet` suppresses stderr emission but does NOT suppress
+   any `warnings[]` entries from the JSON output (same
+   posture v0.2 §10.4.4 takes for divergence warnings).
+6. `--explain` MUST disclose which catalog (`catalog_id`,
+   `catalog_url`-or-`--catalog` source path, `expires_at`)
+   contributed to a v0.3 `valid` verdict per §M.3.3.
+
+#### §M.3.1.2 Null-hash buyer policy flag (NEW)
+
+To give buyers a first-class fail-closed knob on the §M.2.3
+null-hash path without changing default §10.1 tri-state
+semantics, v0.3 introduces ONE optional CLI flag:
+
+| Flag | Type | Default | Purpose |
+|---|---|---|---|
+| `--require-model-hash` | boolean (presence) | off | When SET, a v0.3 receipt with `model_hash: null` causes `invalid` with `reason: "model_hash_required"` regardless of signature outcome. When NOT SET (default), null-hash receipts verify per §M.2.3 + AC-32 (valid + `catalog_skipped_null_hash` warning when catalog flags supplied). |
+
+**Flag-interaction rules:**
+
+- `--require-model-hash` composes with the v0.3 catalog flags
+  per §M.3.1.1 (last matrix row). It is OPTIONAL — a v0.3
+  verifier MAY omit the flag's implementation entirely if the
+  release target is "buyer-default tooling"; the §M.5 AC-32a
+  test is the gate.
+- `--require-model-hash` applied to a v0.1/v0.2 LEGACY receipt
+  (no `receipt_version` field) MUST report `invalid` with
+  `reason: "model_hash_required"` — the legacy receipt has no
+  hash to attest, and the buyer asked to fail closed.
+- `--require-model-hash` applied to a v0.3 receipt with a
+  NON-NULL `model_hash` is a no-op on result (the catalog
+  check proceeds normally per §M.3.2; result is determined by
+  that check).
+- `--require-model-hash` without `--catalog`-family flags is
+  LEGAL — the buyer is asserting "I demand the provider
+  participates in hash attestation, but I'll trust the
+  provider's self-reported hash without catalog cross-check."
+  Result is `valid` (if signature checks) or `invalid` (if
+  signature fails OR null hash); `model_hash_verified` is
+  `null` (no catalog ran). This is the minimal fail-closed
+  posture.
+
+**Trust statement.** A v0.3 `valid` result with
+`--require-model-hash` set carries the §M.2.3 trust statement
+("the holder of the provider's private key signed a tuple in
+which `model_hash` was non-null") PLUS the buyer's policy
+attestation that they demanded participation. A v0.3 `invalid`
+result with `reason: "model_hash_required"` is the buyer's
+explicit reject of a provider that opted out of hash
+attestation — this is policy, not protocol.
+
+#### §M.3.2 Catalog verification algorithm
+
+For a v0.3 receipt with non-null `model_hash` AND catalog
+arguments supplied, the verifier MUST execute these steps in
+order. Any failed step short-circuits with the named result:
+
+1. **Resolve catalog bytes** per `--catalog` or `--catalog-url`
+   (5-second total network budget per §10.5; fetch failure →
+   `inconclusive` with `reason: "catalog_unreachable"`).
+2. **Resolve catalog pubkey** per `--catalog-pubkey` or
+   `--catalog-pubkey-url` (same 5-second budget shared with
+   step 1).
+3. **Parse the catalog** as the `phase4-coordinator/internal/tier2`
+   `catalogFile` schema: top-level fields `catalog_id` (string),
+   `expires_at` (RFC3339 UTC string), `issued_at` (RFC3339 UTC
+   string), `models[]` (array of `{artifact_kind, hash_scope,
+   model_id, notes?, sha256, source}`), `signature{alg, key_id,
+   sig}`, `version` (int). Reject as `invalid` with `reason:
+   "catalog_format_invalid"` on any schema mismatch (missing
+   required field, wrong type, malformed RFC3339, `sha256`
+   field not matching `[0-9a-f]{64}` per
+   `phase4-coordinator/internal/tier2/catalog.go:22`).
+4. **Verify catalog signature.** Reconstruct the canonical body
+   (the `catalogFile` minus the `signature` field, in the exact
+   key order `scripts/sign-catalog.go:42-49` produces:
+   `catalog_id`, `expires_at`, `issued_at`, `models`, `version`)
+   and verify `ed25519_verify(catalog_pubkey,
+   canonical_body_bytes, base64_decode(signature.sig))`. The
+   verifier MUST decode `signature.sig` as
+   `base64.RawURLEncoding` (base64url-unpadded) to match
+   `scripts/sign-catalog.go:145`. The `signature.alg` field
+   MUST be the ASCII string `"Ed25519"` (capital E, matching
+   the existing emitter at `scripts/sign-catalog.go:142-145`
+   and the existing coordinator validator at
+   `phase4-coordinator/internal/tier2/catalog.go:470`) OR the
+   verifier reports `invalid` with
+   `reason: "catalog_signature_invalid"`. The catalog pubkey
+   itself MUST be decoded via `base64.RawURLEncoding` from the
+   `--catalog-pubkey` / `--catalog-pubkey-url` source — exactly
+   43 ASCII characters decoded to 32 bytes per RFC 8032. The
+   `signature.key_id` field is informational (the verifier
+   uses the resolved `--catalog-pubkey` /
+   `--catalog-pubkey-url` bytes, NOT the embedded `key_id`,
+   for verification — `key_id` is a fingerprint for
+   operator-side rotation tracking). If `ed25519_verify`
+   returns false: `invalid` with `reason:
+   "catalog_signature_invalid"`.
+5. **Check `expires_at`** against the verifier's wall clock. If
+   `now() > expires_at + 60s` (60s grace for clock skew,
+   matching §10.2.1 grace-window precedent): report
+   `inconclusive` with `reason: "catalog_expired"` and emit a
+   `warnings[]` entry with the catalog's `catalog_id` and
+   `expires_at` populated. v0.3 does NOT allow `valid` against
+   an expired catalog — catalog expiry is the operator's signal
+   to rotate; a verifier that ignored it would defeat the
+   rotation mechanism.
+6. **Find the catalog entry** whose `model_id` equals
+   `receipt.model_id` AFTER applying the canonical
+   `catalogModelKey` transform: `strings.ToLower(strings.TrimSpace(modelID))`
+   per `phase4-coordinator/internal/tier2/catalog.go:559-560`.
+   The buyer-side verifier MUST mirror the coordinator-side
+   match function exactly. v0.3 catalog lookup is case-FOLDED
+   (lowercase) and whitespace-trimmed; this matches both
+   SPEC-001 v1.5 §6.4's ASCII case-insensitivity rule for
+   model IDs and the existing SPEC-008 §5.6 routing predicate.
+   Diverging from the coordinator's match function would let
+   the coordinator accept a model the verifier rejects (or
+   vice versa) on case differences alone, which is the audit-
+   round-1 A1 finding the v0.3.1 fix pass closed. If no entry
+   matches after the canonical transform: report
+   `inconclusive` with `reason: "model_id_not_in_catalog"`,
+   `details.model_id: <receipt.model_id verbatim, no
+   transform>` (the buyer needs to see what was in the
+   receipt, not the lookup key). The verifier MUST NOT report
+   `valid` for a model the operator has not published a hash
+   for.
+7. **Compare hashes.** Compare `receipt.model_hash` to the
+   entry's `sha256` field (the catalog schema names this
+   `sha256` per `scripts/sign-catalog.go:31`, NOT `model_hash`
+   — do NOT invent a different field name). Comparison is
+   case-sensitive (both sides are required to be lowercase hex
+   by their respective specs; case mismatch is a schema bug,
+   not an attack vector). If equal: continue to step 8. If
+   mismatched: report `invalid` with `reason:
+   "model_hash_mismatch"`, `details.field: "model_hash"`,
+   `details.expected: <catalog sha256>`, `details.actual:
+   <receipt model_hash>`. This is `invalid` regardless of
+   signature outcome — a signature-valid receipt that names a
+   wrong-hash model is a model attestation failure, and v0.3
+   §M.3.3 makes this `invalid` rather than `inconclusive`
+   because the buyer's explicit catalog choice asserts "this is
+   the hash I expect."
+8. **Emit `model_hash_verified: true`** in the JSON output and
+   continue to the normal §10 result determination. The receipt
+   reports `valid` iff signature, prompt/output hashes, AND
+   catalog check all pass.
+
+If the receipt has `model_hash: null` AND catalog arguments are
+supplied, the verifier MUST skip steps 1-8 and apply §M.2.3
+instead (catalog_skipped_null_hash warning, normal §10 result
+determination, no hash check, `model_hash_verified: null` in
+output).
+
+#### §M.3.2.1 v0.3 result schema amendment (extends §10.4.2)
+
+v0.3 extends the v0.2.4 §10.4.2 JSON output schema. The v0.2.4
+"`details` only on `invalid`" rule is SUPERSEDED for the
+v0.3-named `inconclusive` cases below; otherwise §10.4.2
+remains authoritative.
+
+**New REQUIRED top-level field (every v0.3 verifier output):**
+
+| Field | Type | Required? | Disposition |
+|---|---|---|---|
+| `model_hash_verified` | bool OR JSON null | REQUIRED (always present) | Tri-state: `true` ⇔ catalog check ran AND hash equality held (§M.3.2 step 8); `false` ⇔ catalog check ran AND mismatched (§M.3.2 step 7 mismatch path; result is `invalid` with `reason: "model_hash_mismatch"`) OR `--require-model-hash` set with null hash (`reason: "model_hash_required"`); `null` ⇔ catalog check did NOT run for any reason (no catalog flags supplied; null `model_hash` without `--require-model-hash`; legacy v0.1/v0.2 receipt; unknown `receipt_version`; catalog fetch / signature / expiry failure that short-circuits before step 7). |
+
+The field MUST be present in every JSON output, including
+`valid`, `invalid`, `inconclusive` results. Absence = schema
+violation. Distinguishes `false` (catalog ran, mismatched —
+the cryptographic case) from `null` (catalog did not run — the
+operational case).
+
+**Extended `reason` enum (v0.3 ADDS these values):**
+
+| `reason` | Result | Source |
+|---|---|---|
+| `model_hash_mismatch` | invalid | §M.3.2 step 7 |
+| `model_hash_required` | invalid | §M.3.1.2 + AC-32a |
+| `model_id_not_in_catalog` | inconclusive | §M.3.2 step 6 |
+| `catalog_signature_invalid` | invalid | §M.3.2 step 4 |
+| `catalog_unreachable` | inconclusive | §M.3.2 step 1/2 + §M.4 404/429/5xx |
+| `catalog_expired` | inconclusive | §M.3.2 step 5 |
+| `catalog_format_invalid` | invalid | §M.3.2 step 3 |
+| `unknown_receipt_version` | inconclusive | §M.1.4 |
+| `extra_field` / `missing_field` | invalid | §M.0 strict 9-key rule for `receipt_version: "3"` receipts |
+
+The v0.2.4 `reason` enum values (signature, prompt_hash,
+output_hash, provider_pubkey, pubkey_not_endorsed,
+previous_key_outside_grace_window, fetch, offline_flag,
+network_unreachable, provider_id_unresolvable,
+provider_id_not_in_pool, etc.) remain valid and unchanged.
+
+**Extended `details` disposition for v0.3-named inconclusive
+cases.** §10.4.2's "details optional for valid / required for
+invalid" rule is extended:
+
+| `reason` | `details` requirement | Required keys |
+|---|---|---|
+| `unknown_receipt_version` (inconclusive) | REQUIRED | `details.receipt_version` (the unrecognized string value, verbatim) |
+| `model_id_not_in_catalog` (inconclusive) | REQUIRED | `details.model_id` (the receipt's `model_id` verbatim, no case transform) |
+| `catalog_expired` (inconclusive) | REQUIRED | `details.catalog_id`, `details.expires_at` (RFC3339 UTC) |
+| `catalog_unreachable` (inconclusive) | OPTIONAL | `details.url` if `--catalog-url` was set; absent otherwise |
+| `model_hash_mismatch` (invalid) | REQUIRED | `details.field: "model_hash"`, `details.expected: <catalog sha256, 64 hex>`, `details.actual: <receipt model_hash, 64 hex>` |
+| `model_hash_required` (invalid) | REQUIRED | `details.field: "model_hash"`, `details.policy_flag: "require-model-hash"` |
+| `catalog_signature_invalid` (invalid) | REQUIRED | `details.field: "signature"`, `details.alg: <observed alg string>` (e.g. `"ed25519"` lowercase to differentiate from the required `"Ed25519"`) |
+| `catalog_format_invalid` (invalid) | REQUIRED | `details.field: <name of failing field>`, `details.cause: <human-readable description>` |
+| `extra_field` / `missing_field` for v0.3 receipts (invalid) | REQUIRED | `details.field: <name of the offending key>` |
+
+**Extended `warnings[]` kinds:**
+
+- `catalog_skipped_null_hash` — v0.3 receipt with
+  `model_hash: null` AND catalog flags supplied (§M.2.3,
+  AC-32).
+- `catalog_skipped_legacy_receipt` — v0.1/v0.2 receipt (no
+  `receipt_version`) AND catalog flags supplied (§M.1.1,
+  AC-37).
+
+The v0.2.4 `warnings[]` kinds (`live_check_skipped`,
+divergence, non-default coordinator) remain valid and
+unchanged.
+
+**Schema versioning.** v0.3 verifier output JSON schema is a
+strict superset of the v0.2.4 schema for the unchanged fields.
+The release artifact MUST include an updated JSON-Schema
+document (per v0.2.4 AC-24) reflecting the v0.3 additions
+above; the schema document MUST be addressable from the release
+so independent buyer-side automation can validate v0.3 output
+without re-deriving the schema from this spec.
+
+#### §M.3.3 Trust boundary update (SUPERSEDES §10.6 for v0.3 catalog-valid)
+
+A v0.3 `valid` result with non-null `model_hash` AND catalog
+arguments supplied means: a holder of the provider's private key
+signed a canonical tuple containing the values (`model_hash`,
+`model_id`, `prompt_hash`, `output_hash`, `provider_pubkey`,
+`receipt_version: "3"`, `ttft_ms`, `tokens_out`, `unix_ts`); the
+pubkey that signature checks against is the one the coordinator
+publishes for the resolved `provider_id` at verification time
+(or in the §7.5.2 rotation grace window per §10.2.1); AND the
+catalog the buyer trusted (signature-valid against the supplied
+catalog pubkey, non-expired within the 60s skew grace) endorses
+that `receipt.model_hash` is the expected SHA-256 of the loaded
+weights for `receipt.model_id`.
+
+In other words, v0.3 `valid` (with catalog) closes the §10.6
+v0.2 "DOES NOT prove that the response was generated by the
+model named in `model_id`" bullet, subject to the buyer trusting
+the catalog signing pubkey — which is the new trust root the
+v0.3 verifier requires, and which §15 Q1 (TUF-style root) and
+the §M.4 `/poolz` `catalog_pubkey_url` surface inherit.
+
+The remaining §10.6 DOES-NOT-PROVE list is PRESERVED unchanged:
+v0.3 `valid` still does not prove timestamp honesty, no-other-
+observer, pubkey-trust-root incorruptibility, replay-resistance,
+or uniqueness.
+
+**Disclaimers that v0.3 specifically inherits.** The §M.4
+catalog-pubkey trust root is operator-mutable in the same way
+§8 / §10.6 `/poolz` is operator-mutable: a malicious operator
+can swap both the catalog AND the catalog pubkey AND a v0.3
+verifier with `--catalog-pubkey-url` (rather than a pinned
+`--catalog-pubkey`) will report `valid`. v0.3 §M.3.3 strengthens
+the receipt against PROVIDER substitution attacks (a provider
+loading a different SHA-256 than the operator published) — it
+does NOT strengthen the receipt against OPERATOR-level attacks
+on the catalog trust root. §15 Q1 (TUF / on-chain anchor) is
+where that strengthening lands; v0.3 is honest that it is not
+that work.
+
+A v0.3 `valid` result with NULL `model_hash`, OR with no
+catalog arguments, retains the v0.1 / v0.2 §10.6 trust boundary
+unchanged — model-hash attestation is not made.
+
+#### §M.3.4 Cache and TTL
+
+A `--catalog-url` resolution MUST cache the fetched catalog
+bytes AND the resolved catalog pubkey keyed by
+`(catalog_url, catalog_pubkey_url_or_explicit_marker)`. Cache
+TTL:
+
+Let `R = expires_at - now()` at cache-write time, expressed in
+seconds. The three TTL bands use explicit interval notation
+(half-open intervals; integer-second resolution; boundary at
+6h falls into the upper band):
+
+- `R ∈ (6h, +∞)` (i.e. `R > 21600s`): cache for exactly
+  `21600s` (6 hours).
+- `R ∈ [60s, 6h]` (i.e. `60 ≤ R ≤ 21600`): cache for
+  `R - 60s` seconds (so the cache expires 60 seconds before
+  the catalog itself, matching the §M.3.2 step 5 skew grace).
+- `R ∈ (-∞, 60s)` (i.e. `R < 60s`, including R ≤ 0 — a catalog
+  accepted only by the §M.3.2 step 5 60s skew grace, OR a
+  catalog with expires_at already in the past at fetch time):
+  do NOT cache. The next verification SHOULD re-fetch. A
+  catalog accepted only by skew grace is NEVER cached so that
+  the next verification re-checks expiry against a fresh
+  wall-clock reading.
+
+Cache location: the same `~/.macprovider/verify/` directory as
+the §10.2 pubkey cache, in a sibling subdirectory
+`catalogs/<sha256-of-catalog-url>.json`. Cache entries MUST
+include `{catalog_bytes, catalog_pubkey_b64, fetched_at,
+expires_at, catalog_url}` so a later verification can detect
+either a `--catalog-pubkey-url` rotation (cached pubkey
+differs from freshly-resolved pubkey → cache miss) or a manual
+pubkey override on the CLI (cached pubkey differs from
+`--catalog-pubkey` → cache miss).
+
+A stale cache entry (older than its computed TTL) MUST NOT
+produce `valid`. The verifier MUST attempt a fresh fetch; on
+fetch failure with a stale cache, report `inconclusive` with
+`reason: "catalog_unreachable"` — mirroring §10.2's stale-cache
+rule for the pubkey cache.
+
+### §M.4 Coordinator `/poolz` extension (SPEC-002 v1.6 candidate annotation)
+
+The coordinator's `/poolz` response gains three OPTIONAL
+top-level fields (NOT per-provider-row fields — these are
+catalog-level). The three fields are present iff ALL of the
+following hold (the "effectively active catalog" condition):
+
+1. `Tier2Config.CatalogPath` is set (non-empty per
+   `phase4-coordinator/internal/config/config.go:142`),
+2. The configured catalog file loaded cleanly (file present,
+   well-formed JSON, schema-valid per `catalogFile` in
+   `phase4-coordinator/internal/tier2/catalog.go:64`),
+3. The catalog's signature verified against
+   `Tier2Config.CatalogPublicKey` (equivalent to
+   `tier2.Default().Active() == true`).
+
+If ANY of (1)/(2)/(3) fails, the three fields MUST be ABSENT
+from the `/poolz` response (NOT present-with-null, NOT
+present-with-empty-string). This single rule governs §M.4
+field presence AND the §M.5 AC-39 acceptance test AND the
+two `/catalog/...` endpoint 404 cases below.
+
+**Response shape (additive — extends the SPEC-002 v1.4 §FR-O2
+locked shape, which uses top-level keys `pool` and `summary`).**
+
+```json
+{
+  "pool": [...],               // unchanged — SPEC-002 v1.4 §FR-O2
+  "summary": {...},            // unchanged — SPEC-002 v1.4 §FR-O2
+  "catalog_id": "macprovider-tier2-model-catalog-2026-05-31",
+  "catalog_url": "https://coordinator.streamvc.live/catalog/macprovider-tier2-model-catalog-2026-05-31",
+  "catalog_pubkey_url": "https://coordinator.streamvc.live/catalog/pubkey"
+}
+```
+
+- **`catalog_id`** (string): the `catalog_id` from the loaded
+  signed catalog (matches `ParsedCatalog.CatalogID` per
+  `phase4-coordinator/internal/tier2/catalog.go:45`).
+- **`catalog_url`** (string): URL where the same catalog file
+  can be fetched. SPEC-002 v1.6 candidate adds `GET /catalog/
+  <catalog_id>` returning the signed catalog bytes verbatim
+  with `Content-Type: application/json`. No authentication
+  (public) — same trust posture as `GET /v1/receipt-keys/
+  <provider_id>` in §10.7.
+- **`catalog_pubkey_url`** (string): URL where the catalog
+  signing pubkey can be fetched. SPEC-002 v1.6 candidate adds
+  `GET /catalog/pubkey` returning a JSON object
+  `{"pubkey": "<43-char base64url-unpadded ed25519 pubkey>",
+  "alg": "Ed25519"}` per the detailed endpoint block below —
+  matching `scripts/sign-catalog.go:90,142-145` emitters,
+  `phase4-coordinator/internal/tier2/catalog.go:470,479-485`
+  validators, and SPEC-008 §5.2.1's locked ed25519 wire form.
+  No authentication (public).
+
+Parsers that don't recognize the fields ignore them per the
+SPEC-002 v1.4 candidate-annotation pattern. Field absence is
+covered by the "effectively active catalog" condition above.
+
+**`GET /catalog/<catalog_id>` endpoint (SPEC-002 v1.6 candidate).**
+
+- **Authentication:** None (public).
+- **Rate limiting:** Operator-configurable; recommended floor
+  10 req/sec per source IP, mirroring §10.7's
+  `/v1/receipt-keys` posture.
+- **Cache-Control:** `public, max-age=300` (5 minutes; same as
+  §10.7).
+- **Response:** the literal signed catalog file bytes, as
+  produced by `scripts/sign-catalog.go`. `Content-Type:
+  application/json`.
+- **404:** the `<catalog_id>` path segment does NOT match the
+  effectively-active catalog's `catalog_id`, OR the
+  coordinator has no effectively-active catalog per the §M.4
+  three-condition rule above. Body is the SPEC-002 §FR-X-N
+  standard JSON error envelope with
+  `error.code = "catalog_not_found"`. Verifier treats as
+  `inconclusive: catalog_unreachable`.
+- **5xx / 429:** verifier treats as fetch-failure → `inconclusive:
+  catalog_unreachable`; no retry within the same verification
+  invocation.
+
+**`GET /catalog/pubkey` endpoint (SPEC-002 v1.6 candidate).**
+
+- Same authentication / rate-limit / cache posture as
+  `GET /catalog/<catalog_id>`.
+- **Response:** `{"pubkey": "<43-char base64url-unpadded>",
+  "alg": "Ed25519"}`. The `pubkey` value MUST be
+  `base64.RawURLEncoding` (base64url-unpadded), exactly 43
+  ASCII chars decoding to 32 bytes — matching the
+  `scripts/sign-catalog.go:90` keygen emitter, the SPEC-008
+  §5.2.1 wire form, and the v0.3 `--catalog-pubkey` CLI flag
+  per §M.3.1. The `alg` value MUST be the capital-E ASCII
+  string `"Ed25519"` matching the existing
+  `scripts/sign-catalog.go:142-145` catalog-signature `alg`
+  field.
+- Optional: `key_id` (informational fingerprint, identical to
+  the `signature.key_id` embedded in catalog files).
+- **404:** no effectively-active catalog per the §M.4 three-
+  condition rule. Verifier treats as
+  `inconclusive: catalog_unreachable`.
+
+**Composes with §M.3.1.** A verifier can do:
+
+```
+macprovider-verify --bundle X \
+  --catalog-url https://coordinator.streamvc.live/catalog/macprovider-tier2-model-catalog-2026-05-31 \
+  --catalog-pubkey-url https://coordinator.streamvc.live/catalog/pubkey
+```
+
+with the verifier resolving both URLs in two fetches (plus the
+§10.7 `/v1/receipt-keys/<provider_id>` resolution for the
+provider pubkey — three total fetches per verify when no caches
+are warm).
+
+**Trust posture (NORMATIVE).** §M.4 inherits §8.3's operator-
+mutability limit. The operator controls `/poolz`, the catalog
+file, AND the catalog signing key. v0.3 does NOT add TUF /
+on-chain anchoring; that's the §15 Q1 work and remains v0.4+.
+A buyer who needs stronger trust SHOULD pin
+`--catalog-pubkey` to a value out-of-band (key fingerprint
+shared by the operator via a separate channel) rather than
+relying on `--catalog-pubkey-url`, which delegates the pubkey
+trust to the same coordinator that serves `/poolz`.
+
+**SPEC-002 v1.6 candidate-annotation status.** §M.4 is named
+as a SPEC-002 v1.6 candidate annotation following the SPEC-015
+v0.1.3 `receipt_pubkey` (SPEC-002 v1.4 candidate) and SPEC-015
+v0.2 `/v1/receipt-keys` (SPEC-002 v1.5 candidate) precedent.
+Implementations MAY add the fields and endpoints before
+SPEC-002 v1.6 LOCK provided the shape matches §M.4 / §M.5 ACs.
+SPEC-002 v1.6 LOCK is OUT-OF-SCOPE for v0.3 of this SPEC;
+SPEC-015 v0.3 is the source of truth for the catalog-surface
+shape until that LOCK.
+
+### §M.5 Acceptance criteria (v0.3 extensions)
+
+Each AC is independently verifiable from outside this SPEC.
+Each AC cites a concrete test command an implementer can run.
+
+**AC-28 (v0.3 receipt wire shape).** A v0.3 provider binary
+serving a non-streaming `POST /v1/chat/completions` with a
+fixed model, prompt, and `temperature: 0` MUST emit an
+`X-MacProvider-Receipt` header whose tuple decodes to exactly
+nine fields in JCS canonical (UTF-16 code-unit lexicographic)
+order: `model_hash`, `model_id`, `output_hash`, `prompt_hash`,
+`provider_pubkey`, `receipt_version`, `tokens_out`, `ttft_ms`,
+`unix_ts`. `receipt_version` MUST be exactly the ASCII string
+`"3"`. **Test command:**
+```bash
+curl -sD - -X POST http://provider/v1/chat/completions -d '<fixed body>' \
+  | grep -i '^X-MacProvider-Receipt:' \
+  | cut -d' ' -f2 | tr -d '\r' | cut -d. -f1 | base64 -d \
+  | jq -r 'keys | join(",")'
+```
+Returns exactly `model_hash,model_id,output_hash,prompt_hash,provider_pubkey,receipt_version,tokens_out,ttft_ms,unix_ts`.
+
+**AC-29 (`model_hash` matches loaded weights — warm-swap-on).**
+A v0.3 provider running with `--enable-warm-swap=true` emits a
+v0.3 receipt whose `model_hash` equals the SHA-256 of the loaded
+MLX container at the moment of receipt generation.
+**Test commands** (any of the two equivalent observation routes
+— v0.3 does NOT require a new introspection CLI):
+- **Heartbeat route (preferred — uses existing wire surface):**
+  capture the provider's heartbeat-reported `model_hash` per
+  SPEC-011 R-3.3.1 from a coordinator-side log/journald scrape
+  (`journalctl -u macprovider-coordinator | grep model_hash_verified`
+  on Pearl, or the equivalent locally); assert
+  `receipt.model_hash == heartbeat.model_hash` over a fresh
+  heartbeat window (no swap in flight). This route is
+  observation-only and matches the Pearl-production
+  `model_hash_verified` events documented in the §M opening
+  paragraph.
+- **MLX container route (alternative — direct binary
+  introspection):** compute SHA-256 over the MLX container the
+  provider has loaded (same algorithm
+  `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:294-325`
+  uses for the heartbeat report); assert byte-equality with
+  `receipt.model_hash`. v0.3 does NOT require a new
+  `models inspect` CLI subcommand to expose this; an
+  implementer MAY add one as an ergonomics extension under a
+  future SPEC-001 revision, but it is NOT a v0.3 prereq.
+
+Implementations choose either route for the AC test. v0.3 §M.5
+treats both as equally normative; the divergence in form
+(coordinator-side vs. binary-side) does NOT change the
+expected outcome.
+
+**AC-30 (`model_hash: null` when warm-swap disabled).** A
+v0.3 provider running with default `--enable-warm-swap=false`
+emits a v0.3 receipt whose `model_hash` is the JSON literal
+`null`, NOT the empty string, NOT absent. **Test command:**
+```bash
+curl -sD - -X POST http://provider/v1/chat/completions -d '<fixed body>' \
+  | grep -i '^X-MacProvider-Receipt:' | cut -d' ' -f2 | tr -d '\r' \
+  | cut -d. -f1 | base64 -d \
+  | jq '.model_hash == null and (.model_hash | type) == "null" and has("model_hash")'
+```
+Returns `true` (three conjuncts: value is null, type is "null",
+key is present).
+
+**AC-31 (null-usage receipts inherit §M.2 hash).** A v0.3
+provider emitting a null-usage / error receipt (SPEC-001 §6.0
+error path; v0.1.3 AC-12) sets `model_hash` per §M.2 — i.e. the
+same value a successful receipt from the same provider would
+carry. The error did not change the loaded weights. **Test
+command:** trigger `error_model_not_loaded` on a v0.3 provider
+running with `--enable-warm-swap=true`; verify the resulting
+receipt's `model_hash` equals the post-error SPEC-011
+heartbeat-reported hash from the same provider over a fresh
+heartbeat window.
+
+**AC-32 (verifier valid on null-hash v0.3 receipt — default
+posture).** A v0.3 verifier without `--require-model-hash`
+MUST report `valid` for a v0.3 receipt with
+`model_hash: null` when signature + canonicalization checks
+pass, regardless of whether `--catalog`-family flags were
+supplied. If catalog flags WERE supplied, JSON output MUST
+include `warnings[]` of kind `catalog_skipped_null_hash`.
+**Test command:** golden fixture in
+`phase7-verify/testdata/spec015_v03_null_hash/`; assert
+`macprovider-verify --bundle bundle.json --catalog catalog.json
+--catalog-pubkey <pk>` exits 0, `result: "valid"`,
+`warnings | map(.kind) | contains(["catalog_skipped_null_hash"])`.
+
+**AC-32a (verifier `--require-model-hash` fail-closed on null
+hash — opt-in buyer policy per §M.3.1.2).** A v0.3 verifier
+invoked with `--require-model-hash` reading a v0.3 receipt with
+`model_hash: null` MUST report `invalid` with `reason:
+"model_hash_required"`, exit code `1`, and JSON output MUST
+include `model_hash_verified: false` AND `warnings[]` MAY
+include `catalog_skipped_null_hash` (the warning still records
+the underlying skip; the policy flag is what flipped the result
+to invalid). The signature MAY be valid; the policy flag
+demands hash attestation regardless. **Test command:** same
+golden fixture as AC-32; assert
+`macprovider-verify --bundle bundle.json --catalog catalog.json
+--catalog-pubkey <pk> --require-model-hash` exits 1,
+`result: "invalid"`, `reason: "model_hash_required"`.
+
+**AC-33 (verifier invalid on hash mismatch).** A v0.3 verifier
+MUST report `invalid` with `reason: "model_hash_mismatch"`
+for a v0.3 receipt whose `model_hash` does not equal the
+catalog's `sha256` for the receipt's `model_id`. The signature
+MAY be valid; the verifier MUST still report `invalid`.
+`details.expected` and `details.actual` MUST both be populated
+with the 64-hex strings. **Test command:** fixture
+`phase7-verify/testdata/spec015_v03_hash_mismatch/`.
+
+**AC-34 (verifier inconclusive on unknown model_id).** A v0.3
+verifier MUST report `inconclusive` with `reason:
+"model_id_not_in_catalog"` for a v0.3 receipt whose `model_id`
+is not present in the supplied catalog's `models[]`. **Test
+command:** fixture
+`phase7-verify/testdata/spec015_v03_unknown_model_id/`.
+
+**AC-35 (verifier invalid on bad catalog signature).** A v0.3
+verifier MUST report `invalid` with `reason:
+"catalog_signature_invalid"` when the catalog's `signature.sig`
+does not verify against the supplied catalog pubkey, OR when
+`signature.alg != "Ed25519"` (capital E; the v0.3 wire form
+matches the existing `scripts/sign-catalog.go:142-145`
+emitter). **Test command:** fixture
+`phase7-verify/testdata/spec015_v03_catalog_bad_sig/` covering
+both failure modes (tampered sig bytes; alg field set to
+`"ed25519"` lowercase, `""`, `"ECDSA"`, etc.).
+
+**AC-36 (verifier inconclusive on expired catalog).** A v0.3
+verifier MUST report `inconclusive` with `reason:
+"catalog_expired"` when the catalog's `expires_at` is more than
+60 seconds in the past relative to the verifier's wall clock.
+**Test command:** fixture
+`phase7-verify/testdata/spec015_v03_catalog_expired/` using
+`SOURCE_DATE_EPOCH` or `libfaketime` for deterministic clock.
+
+**AC-37 (backward-compat: v0.3 verifier on v0.1/v0.2 receipt).**
+A v0.3 verifier reading a v0.1 / v0.2 receipt (no
+`receipt_version` field, 7 keys total) MUST report `valid`
+without catalog check, and JSON output MUST include
+`warnings[]` of kind `catalog_skipped_legacy_receipt` when
+catalog flags were supplied. **Test command:**
+`macprovider-verify --bundle <v0.2-bundle.json>
+ --catalog <good-catalog.json>
+ --catalog-pubkey <good-key.b64>`
+exits 0, `result: "valid"`,
+`warnings | map(.kind) | contains(["catalog_skipped_legacy_receipt"])`.
+
+**AC-38 (forward-incompat: v0.2 verifier on v0.3 receipt).**
+A v0.1.3 / v0.2.4 verifier (i.e. unmodified, locked releases)
+reading a v0.3 receipt (9 keys including `receipt_version`)
+MUST report `invalid` per its §3.1 seven-keys-only rule. **Test
+command:** `./phase7-verify-v0.2.4 --bundle <v0.3-bundle.json>`
+exits 1, `result: "invalid"`. The exact reason string is
+implementation-defined for the locked release (likely
+`extra_field` or signature failure depending on which check
+fires first), but `result: "invalid"` MUST hold.
+
+**AC-39 (`/poolz` catalog fields).** A coordinator with
+`Tier2Config.CatalogPath` configured AND a successfully
+loaded+verified catalog MUST emit `catalog_id`, `catalog_url`,
+and `catalog_pubkey_url` as top-level fields in the `/poolz`
+response. A coordinator with `Tier2Config.CatalogPath == ""`
+MUST omit those three fields entirely (NOT
+present-with-null-value). A coordinator with
+`Tier2Config.CatalogPath` set but the catalog failed to load /
+parse / verify-signature MUST omit those three fields (the
+catalog is not effectively configured). **Test commands:**
+- `curl -s -H "Authorization: Bearer $OP" http://coordinator/poolz | jq 'has("catalog_id") and has("catalog_url") and has("catalog_pubkey_url")'` returns `true` on a catalog-configured coordinator.
+- Same command returns `false` on an unconfigured coordinator.
+- Same command returns `false` on a coordinator whose
+  configured catalog fails to load (e.g. file missing).
+
+**AC-40 (`RequireHashVerified` orthogonality preserved).**
+A coordinator with `RequireHashVerified: false` (the Entry 80
+deferred default) MUST continue to route to providers whose
+hash status is `uncatalogued` OR `catalog_unavailable` —
+matching the SPEC-008 §5.6 routing predicate
+(`phase4-coordinator/internal/tier2/catalog.go:599-604`
+`IsHashPredicateFailure`) which fails-CLOSED on
+`hash_mismatch` and `hash_invalid` REGARDLESS of the
+`RequireHashVerified` setting. v0.3 does NOT change SPEC-008
+§5.6 routing semantics. v0.3 receipt issuance on
+routing-eligible providers (i.e. providers in `uncatalogued`,
+`catalog_unavailable`, or `hash_verified` states) MUST still
+emit the actual loaded hash per §M.2 (even when the hash is
+uncatalogued, the receipt commits to it — the buyer is the one
+who decides via verifier `--catalog` whether to accept).
+**Test command:** with `RequireHashVerified: false`, a provider
+serving a model NOT in the catalog (hash status
+`uncatalogued`) routes normally; the receipt carries
+non-null `model_hash`; the buyer running `macprovider-verify
+--bundle X --catalog <catalog.json> --catalog-pubkey ...`
+reports `inconclusive: model_id_not_in_catalog`. The
+coordinator's routing decision (`uncatalogued` allowed at flag
+default) and the verifier's catalog decision (`model_id` not
+in catalog → inconclusive) are independent and v0.3 does NOT
+change either. A separate test with a provider in
+`hash_mismatch` state (configured catalog + provider reporting
+the wrong hash) confirms the coordinator REJECTS routing at
+both `RequireHashVerified` settings per SPEC-008 §5.6.
+
+**AC-41 (catalog cache TTL).** The `--catalog-url`-fetched
+catalog cache MUST follow §M.3.4: a catalog whose
+`expires_at - now() > 6h` caches for 6h; a catalog with
+`expires_at - now() < 60s` does NOT cache; a catalog with
+`expires_at - now()` in [60s, 6h] caches for
+`expires_at - now() - 60s`. **Test command:** mock catalog
+with controlled `expires_at` + verifier wall clock; assert
+cache file mtime + content + cache-miss-on-rotated-pubkey.
+
+**AC-42 (mid-swap defence-in-depth refusal — NOT normal swap
+in-flight requests).** §M.2.2's construction proof says a
+normal in-flight request that began on the OLD container and
+finishes while the runtime is in `loading` or `draining`
+state MUST still emit a v0.3 receipt with the hash captured
+at request START (per SPEC-011 R-3.4.1 in-flight tracking +
+R-3.2.2 snapshot semantics). AC-42 tests ONLY the
+defence-in-depth case: a synthetic state in which the
+runtime CANNOT identify which container served a specific
+request (i.e. the request-start-hash capture path failed or
+was bypassed — unreachable in correct SPEC-011 R-3.4.1
+implementations, but the §M.2.2 defence-in-depth clause
+demands the check). **Test command:** synthetic harness in
+`phase3-binary` that drives the runtime into a
+swap-in-progress state AND simulates a request whose
+request-start-hash slot is unset / nil / corrupted (e.g. via
+unit-level injection that bypasses the normal R-3.4.1 path);
+verify the response has no `X-MacProvider-Receipt` header AND
+the audit sink contains a matching `receipt_omitted: reason
+= model_swap_violation` row. A separate positive test ensures
+a NORMAL in-flight request through `loading` / `draining`
+DOES emit a receipt with the request-start hash (this is the
+§M.2.2 construction-proof path, not a violation).
+
+### §M.6 What v0.3 explicitly DOES NOT change
+
+Recorded here so future audit cycles do not re-litigate. Each
+item names the future SPEC that may revisit it.
+
+1. **`RequireHashVerified` enforcement at the coordinator.**
+   Per `beta/DECISION_CRITERIA.md` Entry 80 (2026-06-22), the
+   flag stays at its `false` default until any of three
+   triggers fire (pool size growth, catalog pipeline
+   ergonomics, buyer demand). v0.3 receipts BIND the hash; the
+   coordinator's route/reject policy is independent. AC-40
+   pins this. Successor: an Entry-80 revisit, not a SPEC-015
+   revision.
+
+2. **Streaming receipts.** v0.1.3 §15 Q5 (streaming receipt
+   delivery mechanism) remains v0.4+ scope. v0.3's §M.2.2
+   one-model-per-response rule preserves the streaming-design
+   space: v0.4+ may model multi-hash receipts when SDK
+   compatibility permits.
+
+3. **Mid-response model swaps producing a multi-hash receipt.**
+   v0.3 §M.2.2 NORMATIVELY REFUSES the shape. v0.4+ may
+   introduce a multi-hash receipt shape, particularly for
+   streaming responses where a swap genuinely spans a long
+   response. The new §15 Q7 captures this question for future
+   audit cycles.
+
+4. **Cross-catalog federation.** A coordinator serves ONE signed
+   catalog. v0.3 is single-catalog-per-coordinator; federation
+   across operators (or multiple catalogs per coordinator) is
+   v0.4+ scope.
+
+5. **On-chain anchoring of catalog Merkle roots.** Gated on the
+   Cluster D-tokens go/no-go decision; orthogonal to v0.3.
+
+6. **Quantization-aware verification.** v0.3 is
+   one-`model_id`-one-`sha256`. Quantization variants of the
+   same logical model (e.g. 4-bit vs 8-bit qwen2.5-7b) MUST be
+   published with distinct `model_id` values per SPEC-008 v0.3
+   + SPEC-010 v1.5 convention. A future SPEC may allow
+   per-`model_id` accept-list of multiple hashes; v0.3 does
+   not.
+
+7. **HuggingFace-style "soft" model identity** (model card
+   metadata, training-run provenance, dataset provenance).
+   v0.3 receipts bind weights (SHA-256 of the loaded MLX
+   container), not lineage. Deferred indefinitely.
+
+8. **`RFC8785JCS.swift` amendments.** None required for v0.3
+   beyond extending the keyset emitted by the existing
+   sorted-emit path. See §M.1.5.
+
+9. **TUF / signed-root upgrade of the catalog-pubkey trust
+   root.** §M.3.3 inherits the §8.3 operator-mutability limit;
+   §15 Q1 names TUF / on-chain anchoring as the v0.x+
+   successor. v0.3 is explicit about the limit and does not
+   close it.
+
+---
+
 ## 11. Audit categories
 
 The following audit categories are added (SPEC-006 v0.9 candidate
@@ -2164,6 +3717,16 @@ absorption; tracked locally for now):
   a receipt is suppressed per §6.4. Fields: `provider_id`,
   `request_id`, `reason` (`pre_v1_6_binary` | `no_keypair` |
   `model_swap_violation` | `pre_token_cancel` | `streaming_request`).
+  **v0.3 update:** the `model_swap_violation` reason is PROMOTED from
+  v0.1/v0.2 placeholder to defined semantics per §M.2.2: the
+  provider's runtime was in `loading` or `draining` state at
+  receipt-emission time AND could not disambiguate which container
+  served the response. Emission is constrained to the
+  defence-in-depth path of §M.2.2; the normal §M.2.2 construction
+  (every receipt commits to the hash at request START) does NOT
+  fire this reason. Operator monitoring SHOULD treat any
+  `receipt_omitted: model_swap_violation` event as an
+  implementation regression to investigate.
 - `receipt_rotation_detected`: emitted by the coordinator when a
   reconnecting provider's `auth_request.provider_receipt_public_key`
   differs from the previously-known pubkey for that `provider_id`.
@@ -2513,11 +4076,33 @@ itself MUST remain unchanged across (a)/(b)/(c)/(d). The §6 wire
 contract for non-streaming responses is locked in v0.1.2 and v0.2+
 MUST NOT change it.
 
-**Q6: Model-hash binding (SPEC-011 cross-cut).** Folding
-`heartbeat.model_hash` (SPEC-011 v0.5 §3.3.1) into the receipt
-tuple makes the receipt commit to which weights served the buyer.
-Gated on SPEC-011 catalog-signing readiness (`beta/DECISION_CRITERIA.md`
-Entry 80, Q3 tier-2 posture). v0.3+ candidate.
+**Q6: Model-hash binding (SPEC-011 cross-cut). RESOLVED in v0.3.**
+Folding `heartbeat.model_hash` (SPEC-011 v0.5 §3.3.1) into the
+receipt tuple is the v0.3 §M work. v0.3 extends the tuple from 7
+fields to 9 (adding `model_hash` and `receipt_version`), pins the
+provenance semantics (§M.2), defines a catalog-verifier
+extension (§M.3), and adds a `/poolz` catalog surface (§M.4).
+**This Q6 closure is ORTHOGONAL to coordinator-side enforcement.**
+`Tier2Config.RequireHashVerified` remains at its `false` default
+per `beta/DECISION_CRITERIA.md` 2026-06-22 Entry 80; v0.3 makes
+the receipt BIND the hash, but the operator-side decision to
+REJECT providers on hash mismatch is independent and unchanged.
+The Entry 80 deferral triggers (pool size growth, catalog
+pipeline ergonomics, buyer demand) still gate that flip;
+v0.3 receipts are usable by buyers who want catalog-match
+attestation REGARDLESS of how the operator routes.
+
+**Q7: Multi-hash receipts for swap-spanning streaming responses.**
+v0.3 §M.2.2 NORMATIVELY REFUSES the shape of a single receipt
+binding two `model_hash` values for one response. v0.4+ may
+introduce a multi-hash receipt to represent legitimately
+swap-spanning streaming responses (Q5 streaming + a swap mid-
+stream). Design questions for v0.4: should the receipt commit
+to (`first_hash`, `last_hash`) or to (`hash_per_chunk_range`)?
+How does the verifier compose multiple catalog lookups under
+a single tuple? Is the wire-shape extension a new
+`receipt_version: "4"` per §M.0 or a new optional field on the
+existing v0.3 tuple? v0.3 leaves these open. v0.4+ candidate.
 
 ---
 
@@ -2566,11 +4151,64 @@ M8 finding required explicit per-field justification.
   a SPEC-006 v0.9 candidate.
 - SPEC-008 v0.3 §5.3, §6 — Pillar A model-hash and Pillar B
   encrypted-leg semantics; v0.1 is orthogonal to both.
-- SPEC-011 v0.5 §3.3.1, §3.8 — `model_hash` heartbeat and warm-swap
-  drain; v0.1's §7.4 invariant relies on §3.8.
+- SPEC-011 v0.5 §3.2 (warm-swap state machine), §3.3
+  (heartbeat extension, R-3.3.0 opt-in gating, R-3.3.1 raw
+  64-hex format), §3.4 (drain semantics, R-3.4.1 in-flight
+  tracking, R-3.4.2 drain timeout) — `model_hash` heartbeat
+  and warm-swap drain; v0.1's §7.4 invariant relies on §3.4
+  drain semantics. (v0.1.3 originally cited "§3.3.1 and §3.8";
+  v0.3 audit-round-1 A5 normalized this to §3.2/§3.3/§3.4
+  which are the sections v0.3 §M.2 actually rests on.)
 - SPEC-013 v0.3 — `autotune` subcommand; this SPEC reuses
   `RFC8785JCS.swift` from SPEC-013's implementation.
 - RFC 8785 — JSON Canonicalization Scheme.
 - RFC 8032 — EdDSA / ed25519.
 - `phase3-binary/Sources/macprovider-cli/RFC8785JCS.swift` —
   in-house JCS implementation.
+
+**v0.3 additional references:**
+
+- `scripts/sign-catalog.go` (line 31 — `sha256` field name; line
+  42-49 — canonical-body key order; line 145 — RawURLEncoding
+  signature) — the catalog signing tool; v0.3 verifier's catalog
+  parse + verify path consumes the output of this tool.
+- `phase4-coordinator/internal/tier2/catalog.go` (line 22 —
+  64-hex regex; line 45 — `ParsedCatalog.CatalogID`; line 64 —
+  `catalogFile` schema; line 164-237 — catalog reload/swap
+  semantics) — the existing catalog parser/verifier; v0.3
+  re-implements the parse + verify path in pure Go in
+  `phase7-verify/` rather than importing this package.
+- `phase4-coordinator/internal/config/config.go` lines 142, 335
+  — current state of `Tier2Config.RequireHashVerified` (default
+  false, observation mode); v0.3 §M.6 #1 preserves this default
+  unchanged.
+- `beta/DECISION_CRITERIA.md` Entry 80 (2026-06-22) — operator
+  ruling on `RequireHashVerified` deferral; v0.3 §M.6 #1
+  inherits this deferral verbatim.
+- SPEC-008 v0.3 §5.3-5.6 — Pillar A model-hash semantics + the
+  five-state HashStatus enum the coordinator uses; v0.3
+  verifier's catalog-check path is a buyer-side mirror of the
+  coordinator-side check, NOT a replacement for it.
+- SPEC-010 v1.5 — `supported_models[]` /
+  `publishes_supported_models` semantics; informs which providers
+  participate in hash attestation orthogonal to v0.3 receipt
+  issuance (a provider may serve a model it has not declared
+  in `supported_models`; the receipt's `model_hash` still binds
+  whatever container is loaded).
+- SPEC-011 v0.5 §3.2 — warm-swap state machine
+  (`ready`/`loading`/`draining`/`ready` per §3.2 transitions);
+  v0.3 §M.2.2 enforces the mid-swap refusal via this state.
+- SPEC-011 v0.5 §3.3 (heartbeat extension) and R-3.3.0
+  (opt-in gating: `--enable-warm-swap=true` is the precondition
+  for `model_hash` reporting); v0.3 §M.2.3 inherits the
+  opt-in nature.
+- SPEC-011 v0.5 §3.4 drain semantics (R-3.4.1 in-flight tracking,
+  R-3.4.2 drain timeout); v0.3 §M.2.2 enforceability rests on
+  these rules.
+- Live infrastructure — `coordinator.streamvc.live/healthz` +
+  Pearl journald `model_hash_verified` events; v0.3 composes on
+  this production observation surface.
+- `specs/BUILD_SPEC_015_RECEIPTS_v0_3_MODELHASH_PROMPT.md` — the
+  spec-writing brief that authored v0.3.
+- `specs/BUILD_SPEC_015_v0_3_MODELHASH_IMPL_PROMPT.md` — the
+  staged implementation brief for the next session.
