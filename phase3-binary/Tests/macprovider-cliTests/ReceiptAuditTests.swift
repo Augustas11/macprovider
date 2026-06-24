@@ -60,7 +60,8 @@ final class ReceiptAuditTests: XCTestCase {
             finishReason: "stop",
             ttftMs: 1,
             tokensOut: 1,
-            unixTsSeconds: 1
+            unixTsSeconds: 1,
+            modelHashSource: .warmSwapDisabled
         )
         XCTAssertEqual(result, RouterHandler.ReceiptHeaderResult.omitted(.preV16Binary))
     }
@@ -75,7 +76,8 @@ final class ReceiptAuditTests: XCTestCase {
             finishReason: "stop",
             ttftMs: 1,
             tokensOut: 1,
-            unixTsSeconds: 1
+            unixTsSeconds: 1,
+            modelHashSource: .warmSwapDisabled
         )
         XCTAssertEqual(result, RouterHandler.ReceiptHeaderResult.omitted(.noKeypair))
     }
@@ -86,7 +88,8 @@ final class ReceiptAuditTests: XCTestCase {
             receiptBuilder: ReceiptBuilder(keyStore: AuditFixedReceiptKeyStore(key: Curve25519.Signing.PrivateKey())),
             request: fixtureRequest(),
             error: APIError(status: 499, message: "cancelled", type: "server_error", code: "buyer_cancelled"),
-            startedAt: Date()
+            startedAt: Date(),
+            modelHashSource: .warmSwapDisabled
         )
         XCTAssertEqual(result, RouterHandler.ErrorReceiptHeaderResult.omitted(.preTokenCancel))
     }
@@ -98,7 +101,8 @@ final class ReceiptAuditTests: XCTestCase {
             receiptBuilder: ReceiptBuilder(keyStore: AuditFixedReceiptKeyStore(key: Curve25519.Signing.PrivateKey())),
             request: fixtureRequest(),
             error: APIError(status: 503, message: "loading", type: "server_error", code: "provider_loading"),
-            startedAt: Date()
+            startedAt: Date(),
+            modelHashSource: .warmSwapDisabled
         )
         XCTAssertEqual(result, RouterHandler.ErrorReceiptHeaderResult.notReceiptEligible)
     }
@@ -109,7 +113,8 @@ final class ReceiptAuditTests: XCTestCase {
             receiptBuilder: ReceiptBuilder(keyStore: AuditFixedReceiptKeyStore(key: Curve25519.Signing.PrivateKey())),
             request: fixtureRequest(),
             error: APIError(status: 503, message: "drain", type: "server_error", code: "swap_drain_timeout"),
-            startedAt: Date()
+            startedAt: Date(),
+            modelHashSource: .warmSwapDisabled
         )
         XCTAssertEqual(result, RouterHandler.ErrorReceiptHeaderResult.omitted(.modelSwapViolation))
     }

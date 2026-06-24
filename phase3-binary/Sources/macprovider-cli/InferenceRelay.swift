@@ -226,6 +226,7 @@ actor InferenceRelay {
                     receiptBuilder: receiptBuilder,
                     receiptProviderID: receiptProviderID,
                     startedAt: startedAt,
+                    warmSwapEnabled: warmSwapEnabled,
                     sendFrame: sendFrame
                 )
             }
@@ -274,9 +275,18 @@ actor InferenceRelay {
         receiptBuilder: ReceiptBuilder?,
         receiptProviderID: String?,
         startedAt: Date,
+        warmSwapEnabled: Bool,
         sendFrame: @escaping SendFrame
     ) async throws -> CompletionResult {
-        let completion = try await modelRuntime.complete(request, shouldCancel: { state.isCancelled })
+        // SPEC-015 §M.2.2 atomic-read invariant — bind the receipt
+        // to the snapshot the runtime ACTUALLY used to drive
+        // generation, not to a separately-sampled `currentSnapshot()`
+        // which can drift across an actor interleaving / warm-swap.
+        let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, shouldCancel: { state.isCancelled })
+        let modelHashSource = RouterHandler.resolveModelHashSource(
+            warmSwapEnabled: warmSwapEnabled,
+            snapshot: servedSnapshot
+        )
         let unixTsSeconds = Int64(Date().timeIntervalSince1970)
         state.setUsage(completion)
         if state.isCancelled {
@@ -305,7 +315,8 @@ actor InferenceRelay {
             completion: completion,
             ttftMs: ttftMs,
             unixTsSeconds: unixTsSeconds,
-            requestID: requestID
+            requestID: requestID,
+            modelHashSource: modelHashSource
         )
         if state.markTerminalSent() {
             var endFrame: [String: Any] = [
@@ -330,9 +341,22 @@ actor InferenceRelay {
         completion: CompletionResult,
         ttftMs: Int64,
         unixTsSeconds: Int64,
-        requestID: String
+        requestID: String,
+        modelHashSource: ReceiptModelHashSource
     ) -> String? {
         guard let receiptBuilder, let providerID, !providerID.isEmpty else {
+            return nil
+        }
+        // SPEC-015 §M.2.2 — refuse receipt construction when the
+        // request-start container cannot be identified.
+        let resolvedModelHash: String?
+        switch modelHashSource {
+        case .captured(let hash):
+            resolvedModelHash = hash
+        case .warmSwapDisabled:
+            resolvedModelHash = nil
+        case .ambiguous:
+            ReceiptAudit.emitOmitted(providerID: providerID, requestID: requestID, reason: .modelSwapViolation)
             return nil
         }
         do {
@@ -346,7 +370,8 @@ actor InferenceRelay {
                     finishReason: completion.finishReason,
                     ttftMs: ttftMs,
                     tokensOut: Int64(completion.completionTokens),
-                    unixTsSeconds: unixTsSeconds
+                    unixTsSeconds: unixTsSeconds,
+                    modelHash: resolvedModelHash
                 )
             )
         } catch {
