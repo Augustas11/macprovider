@@ -84,6 +84,16 @@ else
   }
 fi
 
+# SPEC-015 v0.3 §M.4 — fail closed before any remote mutation if the
+# local nginx conf lacks the catalog routes. The static check is
+# under-engineered for the operator-runbook live smoke surface
+# (check_nginx_receipt_header_live_test.sh is the live counterpart);
+# this is the pre-upload acceptance gate that catches a stale local
+# nginx-coordinator.streamvc.live.conf before the deploy ships it.
+bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
+  echo "aborting deploy: nginx /catalog/ routes missing or misconfigured" >&2; exit 5;
+}
+
 log "step 1/9: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
 dig +short "$DOMAIN" | grep -q "$VPS_HOST" || { echo "DNS for $DOMAIN does not resolve to $VPS_HOST yet" >&2; exit 1; }
