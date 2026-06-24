@@ -1,10 +1,10 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.4 (2026-06-24, draft — round-5 audit fix pass:
-1 CRIT + 2 MAJOR + 6 MEDIUM + 1 LOW absorbed across CODE +
+**Version:** 0.1.5 (2026-06-24, draft — round-6 audit fix pass:
+0 CRIT + 5 MAJOR + 9 MEDIUM + 2 LOW absorbed across CODE +
 SECURITY + ARCHITECT lenses. Audit history: round-1 1/5,
-round-2 5/12/10, round-3 3/9/8, round-4 2/6/13, round-5 1/2/6.
-See git log for full per-round detail per
+round-2 5/12/10, round-3 3/9/8, round-4 2/6/13, round-5 1/2/6,
+round-6 0/5/9. See git log for full per-round detail per
 [[feedback-spec-audit-loop-before-pr]].)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
@@ -21,6 +21,136 @@ filed as a separate follow-up).
 
 ## Change log
 
+**v0.1.5 (2026-06-24, draft — round-6 audit fix pass):**
+
+Round-6 returned 0 CRIT + 5 MAJOR + 9 MEDIUM + 2 LOW.
+v0.1.5 closes all of them. Substantive changes (the
+v0.1.4 fixes themselves introduced most of these regressions
+— v0.1.5 corrects the half-refactor + adds missing equality
+checks):
+
+MAJOR:
+
+- **§6.5 namespace split was documentation-only** in v0.1.4
+  (config keys renamed at §6.5 but referenced as
+  bare `payout.X` everywhere else — same defect class as the
+  v0.1.2 `usd_cents` regression). v0.1.5 sweeps every
+  `payout.X` reference in §3–§9 to the
+  `payout.security.*` / `payout.tuning.*` form per the §6.5
+  buckets.
+- **§9.5b.1 response field `payout_id` collided with SPEC-005's
+  column `id`.** v0.1.5 changes the contract to return
+  `{"id": <int>}` matching the SPEC-005 source column and
+  updates §4.7 step 2 wording.
+- **§3.3 endpoint never normatively said the handler writes
+  `registered_against_hot_wallet`** — three IMPLs could read
+  three different behaviors. v0.1.5 §3.3 explicitly: handler
+  reads `payout.security.hot_wallet_address` at write time
+  and stamps it; client MUST NOT supply this field.
+- **§7.1 `payout_config_reloaded` event was INFO-only**, but
+  the v0.1.4 hot-reloadable `payout.tuning.*` namespace
+  created an operator-key-compromise attack class:
+  hot-reload `address_cooling_off_period: 3600` +
+  `confirmation_blocks: 2` + `low_balance_threshold: MAX`
+  on Friday → drain over weekend → operator first sees the
+  log Monday. v0.1.5 §7.1 marks
+  `payout_config_reloaded` as severity=PAGE; §6.5 adds
+  reload-time bound re-enforcement + hard floors
+  (`address_cooling_off_period >= 1h`,
+  `confirmation_blocks ∈ [2,50]`,
+  `low_balance_threshold <= 10× per_day_cap`); a reload
+  violating any bound is REJECTED + emits
+  `payout_config_reload_rejected` (severity=PAGE).
+- **§3.2 step 5 EIP-712 field-equality checks were
+  incomplete** — v0.1.4 LOW closure added `providerId` /
+  `address` / `chain` but FORGOT `nonce` / `tsUtc`, leaving
+  a captured-signature-replay class: attacker keeps the
+  captured signature past the 10-min nonce-prune window by
+  sending `body.ts_utc = now()`; the ±5min skew check uses
+  body.ts_utc, not typed-data.tsUtc, so the signature stays
+  valid forever. v0.1.5 §3.2 step 5 adds `nonce_mismatch`
+  + `tsutc_mismatch` to the equality-check enumeration.
+
+MEDIUM:
+
+- **§4.8 `payout_runner_state` row was never normatively
+  INSERTed** at coordinator startup. The single-row table
+  defaults to empty; the `trg_pa_bootstrap_flip` trigger
+  `UPDATE … WHERE id=1` silently matches zero rows and the
+  bootstrap flag never flips — re-opening the v0.1.3 C2
+  fake-funding attack closure. v0.1.5 §4.8 mandates
+  `INSERT OR IGNORE INTO payout_runner_state(id,
+  payout_bootstrap_complete, updated_at_utc) VALUES (1, 0,
+  <startup_utc>)` at coordinator startup before the runner
+  accepts the first attempt; IMPL test required.
+- **§3.5 documentation diverged from §4.3 step 1 SELECT**:
+  the gate disjuncts list omitted the
+  `registered_against_hot_wallet` filter added in v0.1.4.
+  v0.1.5 adds the 4th disjunct to §3.5 for parity.
+- **§4.8 `trg_pa_bootstrap_flip` only fired on UPDATE**,
+  missing the INSERT-confirmed-at-utc-non-NULL case (test
+  harness or SPEC-005 fork). v0.1.5 adds
+  `trg_pa_bootstrap_flip_insert` AFTER INSERT sibling
+  trigger; updates §4.8 trigger-presence assertion list.
+- **§4.8 trigger-presence assertion at "top of cycle" left
+  an intra-cycle DROP TRIGGER + UPDATE + CREATE TRIGGER
+  window.** v0.1.5 strengthens: the §4.9 `source='manual'`
+  acceptance check AND the §4.3 step 7 `ClaimPayoutReady`
+  invocation MUST each include a same-transaction
+  `SELECT count(*) FROM sqlite_master WHERE name='trg_pa_bootstrap_flip'`
+  predicate. A drop-and-recreate across the txn boundary
+  is now detectable per-money-path-call.
+- **§6.4 rotation procedure had a handler-live race window**:
+  step 1 halted only the runner, not the `:8444`
+  registration handler. A provider registering during
+  steps 2–3 stamped `registered_against_hot_wallet =
+  <old_wallet>`; post-rotation the row was stranded.
+  v0.1.5 §6.4 step 1 also flips
+  `payout.registration_paused: true` (a new internal
+  in-process flag — NOT a config key); the handler returns
+  `503 Service Unavailable {error:"rotation_in_progress"}`
+  for the rotation duration. Step 4 clears the flag after
+  restart.
+- **§9.5b.1 SPEC-005 admin endpoint had no per-call cap**
+  + no orphan-prerequisite check, leaving an
+  operator-key-compromise high-leverage drain vector that
+  bypassed the §5 caps end-to-end. v0.1.5 §9.5b.1: the
+  SPEC-005 IMPL MUST verify a matching unresolved
+  `payout_reorg_orphans` row exists (same SQLite txn) and
+  MUST cap `provider_credits` at
+  `payout.security.per_payout_cap_usdc_base_units`.
+- **§4.8 trigger-presence assertion referenced SPEC-005's
+  `trg_lpr_terminal_status_guard` by exact name** but
+  SPEC-005 didn't normatively pin that name. v0.1.5
+  §9.5b.1 normative contract surface adds: "SPEC-005
+  vX.Y+1 MUST create `trg_lpr_terminal_status_guard` on
+  `ledger_payout_ready` with the exact name; SPEC-016
+  §4.8 asserts presence by that exact name."
+- **Appendix A IMPL prompt name didn't acknowledge the
+  §6.5 two-loader complexity.** v0.1.5 appends a one-line
+  note: IMPL must ship two config-loader code paths
+  (immutable-at-startup for security; SIGHUP-reloaded for
+  tuning).
+- **Change-log entropy approaching 600 lines** flagged in
+  rounds 4+5+6. v0.1.5 compacts v0.1 / v0.1.1 / v0.1.2 /
+  v0.1.3 entries to one-line summaries with git
+  breadcrumbs; v0.1.4 + v0.1.5 entries remain full bodies
+  per audit-loop discipline.
+
+LOW:
+
+- §6.2 `/admin/payout/balance` JSON drops
+  `last_run_cancel_gas_native_wei` — the field is
+  explicitly observability-only per §4.8, surfacing it
+  invited operator dashboards keying on a value the SPEC
+  warns against using for decisions.
+- §6.5 documents that reductions to
+  `address_cooling_off_period` apply only to registrations
+  submitted after the reload; in-flight `pending_until_utc`
+  rows are NOT recomputed (with the v0.1.5 hard floor at
+  1h, the asymmetry is non-exploitable, but the prose
+  prevents incident-response confusion).
+
 **v0.1.4 (2026-06-24, draft — round-5 audit fix pass):**
 
 Round-5 returned 1 CRIT + 2 MAJOR + 6 MEDIUM + 1 LOW.
@@ -33,7 +163,7 @@ CRITICAL:
   queried — runtime SQL error in the negative-drift alarm.
   v0.1.4 adds `to_address TEXT NOT NULL` to the schema;
   request body persists `to_address` after the
-  `== payout.hot_wallet_address` check; §4.9 funding-sum
+  `== payout.security.hot_wallet_address` check; §4.9 funding-sum
   and §6.2 `/admin/payout/balance` queries switched to
   `WHERE to_address = :hot_wallet` (semantically correct:
   funding inflows go TO the hot wallet).
@@ -75,7 +205,7 @@ MEDIUM:
   `provider_payout_addresses` gains a
   `registered_against_hot_wallet TEXT NOT NULL` column; §4.3
   step 1 SELECT filters `ppa.registered_against_hot_wallet =
-  payout.hot_wallet_address` so stale-against-prior-rotation
+  payout.security.hot_wallet_address` so stale-against-prior-rotation
   rows are not paid. Closes the EIP-712 verifyingContract
   rotation invalidation ambiguity.
 - §6.5 split into `payout.security.*` (immutable: caps,
@@ -97,459 +227,66 @@ LOW:
   URL_provider_id`; REJECT 400 `providerid_mismatch` on
   inequality.
 
-**v0.1.3 (2026-06-24, draft — round-4 audit fix pass):**
+**v0.1.3 (2026-06-24, draft — round-4 audit fix pass; full
+detail at commit `be9dcb0`):**
 
-Round-4 lens-parallel audit returned 2 CRIT + 6 MAJOR + 13
-MEDIUM. All addressed. Substantive changes:
+Round-4 closed 2 CRIT + 6 MAJOR + 13 MEDIUM. Highlights:
+EIP-191 → EIP-712 migration with pinned domain
+(`verifyingContract = hot_wallet_address`, ±5min skew, 10min
+nonce prune, provider_id charset `^[A-Za-z0-9_-]{1,128}$`,
+anti-replay PK `(canonical_address, nonce)`);
+`payout_runner_state.payout_bootstrap_complete` one-way
+flag gates `source='manual'` funding to bootstrap window
+only; §4.7 raw SQL compensation removed, SPEC-005 vX.Y+1
+`POST /admin/ledger/payout-ready` promoted to HARD §9.5b
+prereq; §6.5 ALL `payout.*` keys runtime-immutable;
+systemd-coredump option (b) dropped; `SignMessage` removed
+from Signer interface; §2 documents Linux-only transitivity.
+[Body of this entry condensed in v0.1.5 per ARCH-MED-3 —
+see git log for full per-finding rationale.]
 
-CRITICAL:
 
-- **C1 (SEC) — EIP-191 → EIP-712 migration.** v0.1.2 §3.2
-  step 5 used plaintext-prefixed EIP-191 personal_sign,
-  vulnerable to (a) `provider_id` newline injection (no charset
-  constraint), (b) cross-message replay if any other
-  macprovider EIP-191 surface ever signs a colliding prefix,
-  (c) cross-provider replay (anti-replay PK was
-  `(provider_id, nonce)`). v0.1.3 §3.2 step 5 specifies
-  EIP-712 typed-data signing with a pinned domain (`name=
-  "macprovider-payout"`, `version="1"`, `chainId=8453`,
-  `verifyingContract=payout.hot_wallet_address`). The
-  `PayoutAddressRegistration` struct carries
-  `(providerId, address, chain, nonce, tsUtc)`.
-  `provider_id` MUST match `^[A-Za-z0-9_-]{1,128}$` (REJECT
-  400 `bad_provider_id`). Anti-replay table PK changed to
-  `(canonical_address, nonce)` (global per-address), AND
-  retention shortened to 10 minutes (== 2× ts_utc skew
-  bound) — the v0.1.2 1-hour retention left a ~1h replay
-  window past the ±5 min skew window.
-- **C2 (SEC) — `source='manual'` enabled fake-funding
-  drain.** A compromised operator key could record a
-  non-existent funding tx via `POST /admin/payout/record-funding
-  source=manual` to inflate `expected_balance`, masking
-  drains in the §7.4 drift alert. v0.1.3 §4.9 + §9.1:
-  `source='manual'` is now BOOTSTRAP-ONLY — gated by a
-  one-way `payout_bootstrap_complete` flag in
-  `payout_runner_state` that flips to `true` the moment any
-  payout confirms. After that, `source='manual'` is REJECTED
-  with 422 `bootstrap_complete`; ongoing funding records
-  MUST use `source='rpc-confirmed'` which now REQUIRES the
-  body's `from_address` (sender), `to_address == hot_wallet`,
-  `amount_base_units`, and `block_number` to all match the
-  on-chain receipt fetched from BOTH RPCs (mismatch → 422).
-  §7.1 splits `payout_chain_balance_drift_negative` as a
-  separate event with severity=PAGE and runbook text "POSSIBLE
-  FAKE FUNDING RECORD; cross-check basescan".
+**v0.1.2 (2026-06-24, draft — round-3 audit fix pass; full
+detail at commit `09f600a`):**
 
-MAJOR:
+Round-3 closed 3 CRITICAL + 9 MAJOR + 8 MEDIUM. Highlights:
+§4.7 trigger-bypass rewrite (no runtime trigger manipulation;
+orphan-record table + manual SPEC-005 compensation path);
+§3.3 24h cooling-off `pending_until_utc` with `rotated_from`
+fallback during cooling; §4.5 PK changed to
+`(payout_id, attempt_seq)` so abandon-and-retry-with-fresh-nonce
+representable; §4.5 partial-UNIQUE-INDEX
+`idx_pa_one_active_per_payout` is the in-DB double-spend
+guard; §4.6 /admin/payout/abandon-attempt with capped tip +
+24h aggregate gas cap; §4.4 + §9.2 require TWO RPCs; §7.4
+two reconciliation queries (delta + NULL payout_currency);
+§3.2 EIP-55 case-skipped accepted; §3.3 :8444 mux requires
+chi/gorilla router (http.ServeMux rejected); §4.1 PayoutAddressReader
+interface; §3.3 clock authority pinned. [Body condensed
+in v0.1.5 per ARCH-MED-3 — see commit `09f600a` body.]
 
-- **§4.7 manual SQL compensation recipe was non-executable.**
-  v0.1.2's recipe omitted `created_at_utc` (NOT NULL) and
-  the explicit `operator_credits` column, and synthetic-1s-
-  window collided on the `UNIQUE(provider_id, window_start_utc,
-  window_end_utc)` constraint when two orphans observed in
-  the same second. v0.1.3 REMOVES the manual SQL recipe
-  entirely. §9.5b (SPEC-005 vX.Y+1 `POST /admin/ledger/
-  payout-ready` admin endpoint) is PROMOTED FROM SOFT TO
-  HARD: IMPL is blocked until SPEC-005 vX.Y+1 lands the
-  admin endpoint. §4.7 compensation flow is now: operator
-  calls SPEC-005 admin endpoint, records the returned
-  `payout_id` in `payout_reorg_orphans.compensation_settlement_id`
-  via `/admin/payout/record-orphan`.
-- **§4.6 + §6 runtime-immutable cap set extended.**
-  v0.1.2 only pinned `payout.cancel_max_*` as runtime-
-  immutable, leaving `payout.chain_recon_interval` /
-  `chain_recon_tolerance_usdc_base_units` /
-  `confirmation_blocks` / `per_*_cap_*` / `hot_wallet_address`
-  / `rpc_url_*` / `address_cooling_off_period` mutable —
-  a compromised operator key could hot-edit `coordinator.toml`
-  + restart to silence the drift alarm. v0.1.3 §6.5: ALL
-  `payout.*` config keys are RUNTIME-IMMUTABLE process-wide;
-  SIGHUP / fsnotify / debug-endpoint reload of any
-  `payout.*` key is FORBIDDEN. IMPL test required.
-- **§4.7 `compensation_settlement_id` FK missing ON DELETE
-  RESTRICT** added.
-- **§6.3 systemd-coredump check option (b) was trivially
-  satisfied** at process startup (zero `coredumpctl` entries
-  is trivially true at startup). v0.1.3 drops option (b)
-  entirely; requires option (a) — `kernel.core_pattern` MUST
-  NOT begin with `|` AND MUST NOT contain `systemd-coredump`,
-  else fail-loud. Operators using systemd-coredump must
-  override `core_pattern` via sysctl on the runner host.
-- **§6.3.1 Signer interface `SignMessage` removed.** YAGNI
-  + footgun (exposes the hot-wallet signer for arbitrary
-  off-chain message signing); test-only methods belong on
-  the concrete struct, not the interface. The `unsignedTxBytes`
-  format ambiguity (RLP envelope vs sighash) is pinned to
-  EIP-2718-prefixed RLP-encoded unsigned EIP-1559 transaction
-  with empty signature fields.
-- **§2 Linux-only transitivity** documented: enabling
-  `payout.enabled: true` constrains the whole coordinator
-  process to Linux (since the registration handler + runner
-  are co-resident per §3.3). SPEC-005 + SPEC-014 endpoints
-  in the same process inherit the constraint.
 
-MEDIUM:
+**v0.1.1 (2026-06-24, draft — round-2 audit fix pass; full
+detail at commit `693fc3b`):**
 
-- §4.6 abandon transaction MUST use `BEGIN IMMEDIATE` (not
-  default `BEGIN DEFERRED`) so the partial-UNIQUE-INDEX
-  check is serialised against concurrent abandons.
-- §4.6 abandon broadcast-fail recovery clarified: the DB
-  transaction commits BEFORE the cancel-tx broadcast; if
-  the broadcast fails after commit, the cancel row remains
-  in `payout_attempts` with its `raw_signed_tx` and the
-  next cadence cycle picks it up for re-broadcast via §4.5
-  retry path (NOT a new sign — the persisted bytes are
-  re-broadcast bit-for-bit).
-- §7.4 chain-balance outflow query now includes `AND
-  is_cancel_self_transfer = 0` — cancel self-transfers move
-  1 base unit hot→hot (net-zero on-chain) but the v0.1.2
-  query subtracted them from expected, producing slow
-  positive drift accumulation.
-- §4.7 orphan compensation forgery detection added to
-  §7.4: two new reconciliation queries surface (a)
-  compensation_settlement_id pointing to a non-existent
-  ledger_payout_ready row, (b) idempotency_key matching
-  `reorg_compensation:*` pattern with no corresponding
-  orphan row.
-- §4.6 cold-start nonce ±1 disagreement now ALWAYS emits
-  `payout_nonce_cold_start_within_tolerance` with both RPC
-  values, even when within tolerance — the silent-within-
-  tolerance v0.1.2 behavior would have lost the
-  lying-RPC-by-1 signal.
-- §9 curl path explicitly REQUIRES the provider (not the
-  operator) to produce the EIP-712 signature out-of-band;
-  operator MUST NEVER touch the provider's private key.
-  Closes the operator-signs-for-provider attack class on
-  the §9.5 SOFT path.
-- §4.9 `payout_hot_wallet_funding` placement narrowed:
-  endpoint mounted under `/admin/payout/record-funding` but
-  the SPEC notes a v0.2 `treasury/` package extraction is a
-  candidate; v0.1.3 keeps it in `payout/funding.go` to avoid
-  premature abstraction.
+Round-2 closed 5 CRIT + 12 MAJOR + 10 MEDIUM. Highlights:
+trigger-bypass rewrite (record-only `payout_reorg_orphans`
+table; consumed row not reverted); §3.3 24h cooling-off
+defense against stolen-token + rotate + drain; §4.6
+abandon-attempt tip + 24h-aggregate gas caps; §4.4 + §9.2
+require TWO RPCs for receipt cross-confirmation; §4.5
+`payout_attempts` PK changed to `(payout_id, attempt_seq)`;
+§3.2 `expected_checksummed` echo removed (phishing vector);
+§4.1 `Signer` interface seam named; §7.4 `payout_currency`
+NULL safety; §3.3 :8444 mux per-handler authRealm table;
+all "round-1 audit X" parentheticals stripped from
+normative §-bodies. [Body condensed in v0.1.5 per ARCH-MED-3
+— see commit `693fc3b` body.]
 
-Scope: v0.1.3 spec is ~2200 lines. The originating prompt's
-~600 line "kill scope" budget is an audit-aware overshoot —
-each round closed real money-path defects. Future v0.2 SHOULD
-consider extracting §6.3 hardening checklist + §9 prereqs
-into a separate non-normative `OPERATOR_RUNBOOK.md`; v0.1.3
-keeps single-file for atomic merge.
 
-**v0.1.2 (2026-06-24, draft — round-3 audit fix pass):**
-
-Round-3 lens-parallel audit (CODE + SECURITY + ARCHITECT, three
-independent subagents) returned 3 CRITICAL + 9 MAJOR + 8 MEDIUM.
-All addressed. Substantive contract changes below; cosmetic
-fixes not enumerated.
-
-CRITICAL closures:
-
-- **C1 (CODE) — §4.5 `UNIQUE(from_address, nonce)` blocked the
-  §4.6 cancel-self-transfer write.** The round-2 abandon flow
-  inserted a new `payout_attempts` row at the original nonce,
-  which SQLite would reject. v0.1.2 replaces the unconditional
-  UNIQUE with a partial UNIQUE INDEX `idx_pa_from_nonce_active
-  ON payout_attempts(from_address, nonce) WHERE abandoned_at_utc
-  IS NULL`. §4.6 also pins the abandon flow as a single
-  transaction: set `abandoned_at_utc` on the original row, then
-  INSERT the cancel-self-transfer row, atomically. The on-chain
-  nonce uniqueness remains the ground-truth double-spend
-  guard.
-- **C2 (SEC) — 24h cooling-off didn't defeat first-ever-
-  registration backlog drain.** A stolen `provider_token` for
-  a provider who had never registered could register the
-  attacker's address (no `rotated_from` fallback exists),
-  wait 24h, then drain the backlog. The portal banner is a UX
-  defense; the provider may never log in. v0.1.2 §3.2 adds a
-  mandatory EIP-191 proof-of-possession signature: the
-  registration body MUST include a signature over `(provider_id
-  || canonical_address || nonce || ts)` produced by the
-  registered address's private key; the coordinator verifies
-  `ecrecover == submitted_address`. This defeats registration
-  of an address the registrant cannot sign for, regardless of
-  token theft, in both rotation AND first-ever cases.
-- **C3 (SEC) — abandon-attempt gas budget was operator-
-  mutable.** A compromised operator key could edit
-  `coordinator.toml`, restart the runner, and burn the entire
-  hot-wallet native ETH balance via abandons at any tip / any
-  per-cancel ceiling — the §5 caps only protected USDC, not
-  native. v0.1.2 §4.6 + §9.3: `payout.cancel_max_*` keys are
-  RUNTIME-IMMUTABLE (loaded only at process start; hot-reload
-  is FORBIDDEN — IMPL test required); a new aggregate ceiling
-  `payout.cancel_max_gas_native_wei_per_24h` (default `5e16` =
-  0.05 ETH/day) enforces a sliding-window cap from
-  `payout_attempts WHERE is_cancel_self_transfer = 1`; every
-  `payout_attempt_abandoned` event is severity=page (every
-  invocation deserves human eyes — abandon should be a
-  once-a-month operation).
-
-MAJOR closures:
-
-- **MAJOR (SEC) — RPC consensus needs separation hardening.**
-  v0.1.2 §4.4 + §9.2 add three sub-requirements: (a) the two
-  RPC keys MUST live under separate secrets paths (different
-  systemd `LoadCredential=` files or different env-vars under
-  different prefixes); (b) optional TLS certificate-pinning of
-  the RPC hostnames via `payout.rpc_url_primary_pin_spki` /
-  `payout.rpc_url_secondary_pin_spki` config keys; (c)
-  `payout.chain_recon_interval` default lowered from 24h to
-  1h; (d) drift tolerance default lowered from 1 USDC to the
-  smallest plausible per-payout amount
-  (`payout.chain_recon_tolerance_usdc_base_units` default
-  `100_000` == $0.10).
-- **MAJOR (SEC) — `last_run_cancel_gas_native_wei` was per-run
-  only.** A malicious operator spreading burns across runs was
-  invisible at `/admin/payout/balance`. v0.1.2 §4.8 + §6.2:
-  surface is now `cancel_gas_native_wei_24h` computed from
-  `SUM(payout_attempts.gas_used_native_wei WHERE
-  is_cancel_self_transfer = 1 AND broadcast_at_utc >=
-  now-24h)` directly, plus `cancel_gas_native_wei_total` over
-  the lifetime. The per-run column is retained for the runner-
-  state observability but not used for any cap-check.
-- **MAJOR (ARCH) — `Signer` interface contract was never
-  defined.** v0.1.2 adds §6.3.1 "Signer interface contract"
-  with method signatures, error semantics, and
-  determinism-on-retry guarantees the v0.2 KMS implementation
-  must satisfy without amending SPEC-016.
-- **MAJOR (ARCH) — §4.7 hand-waved compensation through a
-  SPEC-005 path that does not exist.** SPEC-005 v0.3's
-  `/admin/ledger/*` endpoints are GET-only; no
-  fresh-`ledger_payout_ready`-row admin endpoint exists. v0.1.2
-  §4.7 honest-ifies the compensation flow: it now describes
-  the available manual path (operator-controlled SQL INSERT
-  audited via a new structured log event
-  `payout_reorg_compensation_recorded`) AND files SPEC-005
-  vX.Y+1 candidate as a NEW HARD prerequisite in §9.5b for
-  shipping the compensation as an admin endpoint rather than
-  raw SQL. The orphan-recording surface itself (read-only) is
-  unchanged.
-- **MAJOR (ARCH) — audit-chain wording elided
-  multi-attempt PK.** §1 now reads `request_id → settlement_id
-  → payout_id → (attempt_seq, tx_hash)` and notes that
-  "the canonical confirmed attempt" is the unique row matching
-  `idx_pa_one_active_per_payout` (§4.5).
-
-MAJOR closures (CODE):
-
-- **MAJOR (CODE) — `payout_reorg_orphans` missing `ON DELETE
-  RESTRICT`.** v0.1.2 §4.7 adds it to both FK declarations.
-- **MAJOR (CODE) — `initial-funding-record` was undefined.**
-  v0.1.2 adds a new §4.9 `payout_hot_wallet_funding` table
-  + `POST /admin/payout/record-funding` endpoint
-  (operator-key, Idempotency-Key, structured-log event
-  `payout_funding_recorded`); §7.4 chain-balance reconciliation
-  references this table directly instead of a magic constant.
-
-MEDIUM closures:
-
-- §3.4 `submitted` field tightened from raw bytes to a
-  fingerprint (`submitted_fingerprint`: first 6 + last 4 chars
-  + length); defeats log-injection + reduces info disclosure
-  if log destination is breached.
-- §6.3 hot-wallet runtime support narrowed to Linux only;
-  macOS dev environments are FORBIDDEN for the runner
-  (Crashreporter bypasses RLIMIT_CORE; per
-  [[macprovider-launchd-amfi-blocker-macos-26]] the dev
-  surface is macOS-only, so this is an explicit op-mode
-  cut). The §6.3 hardening checklist adds a startup
-  self-test that asserts `cat /proc/sys/kernel/core_pattern`
-  does NOT pipe to `systemd-coredump`, OR that the
-  coordinator's systemd unit has `Coredump=no`.
-- §3.3 `:8444` handler routing restricted to EXACT-MATCH
-  patterns only; trailing-slash prefix routes are FORBIDDEN;
-  IMPL MUST use `chi` or `gorilla/mux` or an equivalent
-  router that does not collapse prefixes (Go stdlib
-  `http.ServeMux` is REJECTED for this listener at IMPL
-  audit). Test required: POST a set of
-  escaped/dot-segmented URLs and assert the realm hit.
-- §4.1 `billing/` package boundary specified: `billing/` MUST
-  NOT import `payout/`; cross-package reads go through a
-  `PayoutAddressReader` interface DECLARED in `billing/`
-  (not `payout/`) and SATISFIED by a thin adapter in
-  `payout/`, wired in `main.go`. Method:
-  `LookupPayoutAddress(ctx, providerID, chain) (address
-  string, payoutAllowed bool, err error)`.
-- §3.3 clock authority pinned: both `pending_until_utc`
-  (write) and `:now` (read at §4.3 step 1) MUST come from
-  the coordinator process clock; co-residency of registration
-  handler and runner asserted at startup; clock-skew
-  tolerance FORBIDDEN.
-- §9 item 5 promoted from SOFT back to HARD on the
-  notification-channel sub-requirement: IMPL MAY ship before
-  SPEC-014 v0.9 ONLY if the operator runs a manual
-  notification process (email/webhook) to providers on every
-  `provider_payout_address_changed` event. The
-  "curl-for-initial-set" escape valve is preserved for the
-  registration surface itself but the legitimate-provider
-  notification path becomes a hard prerequisite (item 5a).
-- §4.6 cold-start nonce sync hardened: requires BOTH RPCs to
-  agree within ±1 on `getTransactionCount`; disagreement
-  halts the runner and pages.
-- §4.3 step 1 SELECT outer `COALESCE(..., ppa.address)`
-  dropped — the inner CASE alone is correct and the WHERE
-  clause is the authoritative exclusion; the outer fallback
-  was defense-in-depth in the wrong direction.
-- §4.6 cancel self-transfer row spec: `to_address =
-  from_address = payout.hot_wallet_address`,
-  `amount_base_units = 1` (the §4.5 CHECK forbids 0; 1 base
-  unit == $0.000001, the cheapest concrete reconciliation).
-
-QUESTION closures:
-
-- §4.2 `/admin/payout/run-now` gets a `payout.run_now_min_interval`
-  (default 60s) rate-limit at the endpoint to prevent CPU/RPC
-  DoS.
-- §5.3 cancel-rows-count-against-day-cap is INTENTIONAL and
-  now documented inline (a malicious operator-key holder
-  burning the cap via cancels is bounded by the C3
-  runtime-immutable abandon caps; if those caps land, the
-  starvation risk is bounded).
-- §7.1.1 added: `payout_chain_balance_drift` and
-  `payout_rpc_disagreement` events are JOURNALCTL-ONLY at
-  v0.1; SQL-side promotion to `phase4-coordinator/internal/audit/store.go`
-  is a SPEC-016 v0.2 candidate.
-
-**v0.1.1 (2026-06-24, draft — round-2 audit fix pass):**
-
-Round-2 lens-parallel audit (CODE + SECURITY + ARCHITECT,
-three subagents run independently) returned a combined
-5 CRITICAL + 12 MAJOR + 10 MEDIUM. All addressed. Substantive
-contract changes below are normative; cosmetic/wording fixes
-are not enumerated.
-
-CRITICAL closures:
-
-- **C1 (CODE) — trigger-bypass concurrency model was broken.**
-  v0.1 §4.7 had IMPL `DROP TRIGGER trg_lpr_terminal_status_guard;
-  UPDATE ...; CREATE TRIGGER ...` for reorg revert. In WAL mode,
-  other connections see the schema mid-flight; a concurrent
-  `ClaimPayoutReady` writer can transition rows without the
-  guard. v0.1.1 §4.7 REWRITTEN: no runtime trigger manipulation.
-  Reorg-revert is now record-only — orphan tx hashes land in a
-  new `payout_reorg_orphans` table; the `consumed` row is NOT
-  reverted (the trigger is intentional). Operator chooses
-  whether to compensate the provider by issuing a fresh
-  `ledger_payout_ready` row via the SPEC-005 settlement-admin
-  path; SPEC-016 does NOT touch the SPEC-005 row's terminal
-  state.
-- **C2 (CODE) — trigger CREATE body not spelled out.** Moot
-  under the §4.7 rewrite: SPEC-016 never re-creates the
-  trigger.
-- **C3 (SEC) — stolen `provider_token` rotates payout address
-  and collects backlog.** v0.1.1 §3.3 adds a 24h cooling-off
-  window: a freshly-registered address is `pending_until_utc`,
-  during which queued `ledger_payout_ready` rows for that
-  provider continue to use the previous address (or remain
-  `ready` if no previous). The portal MUST surface the pending
-  state so a legitimate provider notices an unexpected
-  rotation within 24h.
-- **C4 (SEC) — `/admin/payout/abandon-attempt` cancel
-  self-transfer bypassed §5 day cap + had no tip ceiling.**
-  v0.1.1 §4.6: tip multiplier capped at
-  `payout.cancel_max_tip_multiplier` (default 5×); endpoint
-  rate-limited to `payout.abandon_rate_per_hour` (default 3);
-  cancel self-transfer gas spend MUST be accounted against
-  `payout_runner_state` and surfaced in
-  `/admin/payout/balance`; per-request `confirm: true` +
-  `Idempotency-Key` required.
-- **C5 (SEC) — single-RPC lying produces fake `consumed`
-  rows.** v0.1.1 §4.4 + §9.2: TWO independent RPCs are now
-  REQUIRED at v0.1; receipt confirmation MUST be cross-checked
-  across both before §4.3 step 7 fires. Disagreement halts the
-  runner and pages the operator. §7.4 reconciliation extended
-  with a periodic on-chain `balanceOf(hot_wallet)` cross-check
-  against in-DB cumulative outflow.
-
-MAJOR closures (consolidated, by area):
-
-- **§4.5 `payout_attempts` PRIMARY KEY** changed from
-  `(payout_id)` to `(payout_id, attempt_seq)` to make the
-  abandon-and-retry-with-fresh-nonce flow representable. A
-  payout_id can now have multiple attempts, only one of which
-  may be confirmed-and-non-abandoned (enforced by partial
-  UNIQUE index).
-- **§4.5 partial indexes** corrected: a second partial index
-  on `(confirmed_at_utc) WHERE confirmed_at_utc IS NOT NULL
-  AND abandoned_at_utc IS NULL` was missing — without it the
-  §5.3 day-cap query falls back to a full scan of
-  `payout_attempts`.
-- **§7.1 log-event field names** scrubbed of residual
-  `usd_cents` (the round-1 fix only renamed config keys, not
-  the log-emission field names — same 10,000× unit-error
-  regression class).
-- **§4.5 FK + PRAGMA foreign_keys** spelled out: `ON DELETE
-  RESTRICT`; `PRAGMA foreign_keys=ON` MUST be asserted on
-  every connection touching the payout tables.
-- **§4.7 `/admin/payout/void`** removed entirely as a status-
-  mutating endpoint; replaced with `/admin/payout/record-orphan`
-  (record-only). Eliminates the double-pay class flagged by
-  SEC-M2 because there is no re-attempt path post-consume.
-- **§3.3 `:8444` operator+provider mux risk** addressed: IMPL
-  MUST declare every registered handler in a
-  `map[path]authRealm` enforced at startup; routes without a
-  declared realm fail-closed-reject.
-- **§3.2 `expected_checksummed` echo removed** from the 400
-  body — was a phishing vector. Response now returns only
-  `{"error":"checksum_mismatch"}`.
-- **§4.1 package layout**: `wallet.go` renamed to `signer.go`
-  to make explicit the seam a v0.2 KMS swap will satisfy.
-  `addresses.go` added (was implicit) so the
-  `provider_payout_addresses` CRUD has a named home in
-  `payout/`; `billing/` reads only via a thin accessor exposed
-  by `payout/`.
-- **§7.4 reconciliation** extended to surface
-  `WHERE status='consumed' AND payout_currency IS NULL` as a
-  separate failure class; unit test required.
-- **All "round-1 audit X" parentheticals stripped from
-  normative §-bodies** per ARCH-A4; provenance lives in this
-  change log only.
-
-MEDIUM closures (consolidated):
-
-- §3.4 audit log MUST record the canonicalised checksummed
-  form, not the submitted form.
-- §3.5 + §3.3 provider_id existence validation against
-  `provider_tokens` at registration time, emitting
-  `provider_payout_address_rejected_unknown_provider` on
-  miss.
-- §4.3 step 5 explicitly persists `raw_signed_tx` AND
-  `tx_hash` together pre-broadcast.
-- §5.3 day-cap SQL gets an upper bound on `broadcast_at_utc`
-  (`<= :now`) to defeat clock-skew under-counting and starts
-  counting at `broadcast_at_utc` (not just `confirmed_at_utc`)
-  so a broadcast burst cannot bypass the cap during
-  confirmation lag.
-- §6.3 hot-wallet process hardening:
-  `setrlimit(RLIMIT_CORE, 0)`, `prctl(PR_SET_DUMPABLE, 0)` on
-  Linux, mlock return-code check + fail-loud, dedicated
-  no-shell uid; KEK env-var path includes process-listing
-  exposure note.
-- §7.1 missing log events added: `payout_run_now_invoked`,
-  `payout_balance_queried`,
-  `provider_payout_address_change_rejected`,
-  `payout_chain_balance_drift`.
-- §7.3 rate-limit posture pinned: identical to
-  `/providers/{id}/earnings` per existing
-  `phase4-coordinator/internal/billing/endpoints.go:453-465`
-  machinery (MUST be reused, not reimplemented). Sibling-vs-
-  fold rationale noted in §7.3 (different lifecycle: payouts
-  append-only → cacheable hours; earnings current-window-
-  mutable).
-- §9 prerequisites grew from 5 to 8: added BetterStack
-  alert-filter extension, nginx routing for `:8444` provider
-  endpoints, encrypted-wallet-file + KEK backup policy.
-
-QUESTION closures:
-
-- §1 now explicitly preserves the SPEC-015 → SPEC-005 →
-  SPEC-016 audit chain (`request_id → settlement_id →
-  payout_id → tx_hash`).
-- §8 `/admin/payout/allow` request body now includes
-  `reason` (was missing; §7.1 log schema required it).
-- §9 explicitly addresses SPEC-002 provisional-token
-  sufficiency for §3.3 payout-address registration.
-
-**v0.1 (2026-06-24, draft — round-1 internal-critic fix pass
-absorbed, never pushed standalone):**
+**v0.1 (2026-06-24, draft — round-1 internal-critic fix
+pass absorbed, never pushed standalone; full detail at
+commit `e0d838f`):**
 
 Initial draft. Defined the contract by which the existing
 `ledger_payout_ready` rows produced by
@@ -735,10 +472,10 @@ CREATE INDEX IF NOT EXISTS idx_ppa_provider ON provider_payout_addresses(provide
 ```
 
 `registered_against_hot_wallet` is the operator's
-`payout.hot_wallet_address` value AT registration time
+`payout.security.hot_wallet_address` value AT registration time
 (used as EIP-712 `verifyingContract`, §3.2 step 5). After a
 §6.4 key rotation, rows whose
-`registered_against_hot_wallet != payout.hot_wallet_address`
+`registered_against_hot_wallet != payout.security.hot_wallet_address`
 are SKIPPED by the runner (§4.3 step 1) until the provider
 re-registers against the new hot wallet. This makes the
 "EIP-712 signature is valid only for the current hot wallet"
@@ -758,7 +495,7 @@ SPEC-005 §10.1).
 registered or rotated address is NOT eligible for payout
 selection (§4.3 step 1) until `now() >= pending_until_utc`.
 Default cooling-off period is 24 hours; configurable via
-`payout.address_cooling_off_period` (minimum 1 hour at
+`payout.tuning.address_cooling_off_period` (minimum 1 hour at
 config-parse).
 
 `chain` is locked to `'base-mainnet'` at v0.1. The CHECK
@@ -805,7 +542,7 @@ The IMPL MUST validate, before INSERT or UPDATE:
      name:              "macprovider-payout",
      version:           "1",
      chainId:           8453,
-     verifyingContract: <payout.hot_wallet_address>
+     verifyingContract: <payout.security.hot_wallet_address>
    }
 
    PayoutAddressRegistration:
@@ -830,7 +567,7 @@ The IMPL MUST validate, before INSERT or UPDATE:
    what they're signing.
 
    The `verifyingContract` field is the operator's pinned
-   `payout.hot_wallet_address` (a sentinel — there is no
+   `payout.security.hot_wallet_address` (a sentinel — there is no
    smart contract at this step; the address is canonical
    for the domain separator). Pinning to the hot wallet
    means a signature is valid only for the current hot
@@ -854,14 +591,23 @@ The IMPL MUST validate, before INSERT or UPDATE:
    AND verify the typed-data `address` field equals the
    canonical-checksummed address from step 2, AND verify
    the typed-data `chain` field equals the request body's
-   `chain` field. REJECT 400 `signature_mismatch` on
-   ecrecover inequality, `providerid_mismatch` on the
-   providerId check, `address_mismatch` on the address
-   check, `chain_mismatch` on the chain check. These
-   field-by-field equality checks make every typed-data
-   field operationally load-bearing — a typed-data field
-   that isn't verified is decorative and creates a
-   future-attack-surface seam.
+   `chain` field, AND verify the typed-data `nonce` field
+   equals the request body's `nonce` field, AND verify the
+   typed-data `tsUtc` field equals the request body's
+   `ts_utc` field (unix seconds). REJECT 400
+   `signature_mismatch` on ecrecover inequality,
+   `providerid_mismatch` on the providerId check,
+   `address_mismatch` on the address check,
+   `chain_mismatch` on the chain check, `nonce_mismatch`
+   on the nonce check, `tsutc_mismatch` on the tsUtc
+   check. These field-by-field equality checks make every
+   typed-data field operationally load-bearing — a
+   typed-data field that isn't verified is decorative and
+   lets a captured signature be replayed with a fresh
+   body.nonce / body.ts_utc indefinitely (the anti-replay
+   table keys on body.nonce and the skew check uses
+   body.ts_utc; without typed-data parity, a captured
+   signature stays valid forever).
 
    This defeats registration of an address the registrant
    cannot sign for — closes the stolen-token attack class
@@ -1023,6 +769,24 @@ input vs log normalisation lives at the handler boundary
 (unix seconds in → RFC3339Nano out). All §7.1 event-table
 fields named `ts_utc` are RFC3339Nano.
 
+**Handler writes `registered_against_hot_wallet`.** On
+every successful INSERT or UPDATE the handler MUST stamp
+`registered_against_hot_wallet =
+payout.security.hot_wallet_address` (read from runtime
+config — the value loaded at process start and held
+immutable per §6.5). The client MUST NOT supply this
+field; if present in the request body it MUST be ignored
+(do NOT REJECT — silent ignore prevents an attacker from
+probing whether the column exists). This value is what
+§4.3 step 1 SELECT joins against; mismatch (after a §6.4
+rotation) silently routes the row to the "unpayable until
+re-registration" bucket. The signing-time `verifyingContract`
+field in the EIP-712 typed-data (§3.2 step 5) is the SAME
+hot-wallet address, so a signature signed against
+verifyingContract=X stays bound to a registration row
+stamped `registered_against_hot_wallet=X` — operational
+coupling.
+
 Failed registrations emit
 `provider_payout_address_change_rejected` with `reason`,
 `provider_id`, `src_ip`, `submitted_fingerprint` fields.
@@ -1045,9 +809,12 @@ A provider with no row in `provider_payout_addresses`, OR
 with `payout_allowed=0`, OR with `pending_until_utc >
 now()` AND no `rotated_from` predecessor that the runner
 could fall back to (first-ever registration during
-cooling-off), MUST NOT have any payout attempt initiated on
-their behalf. Their `ledger_payout_ready` rows remain in
-`status='ready'`.
+cooling-off), OR with `registered_against_hot_wallet !=
+payout.security.hot_wallet_address` (row registered against
+a prior hot wallet pre-§6.4 rotation, awaiting
+re-registration per §6.4 step 5), MUST NOT have any payout
+attempt initiated on their behalf. Their
+`ledger_payout_ready` rows remain in `status='ready'`.
 
 If a rotation is `pending_until_utc > now()` AND
 `rotated_from` is set, the runner pays to `rotated_from`
@@ -1106,13 +873,13 @@ Default config ships `payout.enabled: false`.
 ### 4.2 Cadence
 
 - Default cadence: every 6 hours.
-- Configurable via `payout.run_interval` (Go duration, min 5
+- Configurable via `payout.tuning.run_interval` (Go duration, min 5
   minutes at config-parse).
 - Operator MAY trigger a single immediate run via
   `POST /admin/payout/run-now` on the `:8444` listener
   (operator-key authenticated). Endpoint MUST be idempotent
   within an in-flight run (return 409 if one is active) AND
-  rate-limited via `payout.run_now_min_interval` (default
+  rate-limited via `payout.tuning.run_now_min_interval` (default
   60s — defends against a tight-loop CPU/RPC DoS by an
   operator-key holder; return 429 if invoked sooner than the
   interval). Every invocation emits `payout_run_now_invoked`
@@ -1198,7 +965,7 @@ any step on error and logging structurally:
    the row eligible for retry (§4.5) without nonce loss.
 6. **Confirm via TWO independent RPCs.** Poll both configured
    RPCs (§9.2) until both return a receipt at depth ≥
-   `payout.confirmation_blocks` (default 5; minimum 2;
+   `payout.tuning.confirmation_blocks` (default 5; minimum 2;
    maximum 50). The TWO receipts MUST agree on `tx_hash`,
    `block_number`, `status` (success), and `to`. Any
    disagreement HALTS the runner, emits
@@ -1257,17 +1024,17 @@ compromise, single secrets-store breach):
 2. The two RPC hostnames SHOULD resolve via different DNS
    chains where the operator's infrastructure allows.
 3. Optional TLS certificate-pinning via
-   `payout.rpc_url_primary_pin_spki` /
-   `payout.rpc_url_secondary_pin_spki` config keys (SHA-256
+   `payout.tuning.rpc_url_primary_pin_spki` /
+   `payout.tuning.rpc_url_secondary_pin_spki` config keys (SHA-256
    of the SubjectPublicKeyInfo); when set, the runner MUST
    verify the served cert chain anchors to the pinned SPKI
    and reject otherwise. v0.1.2 makes the keys OPTIONAL but
    the configurability hooks are normative.
-4. `payout.chain_recon_interval` default is 1 HOUR (NOT
+4. `payout.security.chain_recon_interval` default is 1 HOUR (NOT
    24h — earlier default would give an attacker who fakes
    both RPC receipts a 24-hour drain window before the
    on-chain `balanceOf` discrepancy is detected).
-5. `payout.chain_recon_tolerance_usdc_base_units` default
+5. `payout.security.chain_recon_tolerance_usdc_base_units` default
    is `100_000` (== $0.10) — the smallest plausible
    per-payout amount; any drift above this is paged.
 
@@ -1397,7 +1164,7 @@ the exact bytes. Re-signing is FORBIDDEN.
                payout_attempts row with attempt_seq+1 is
                INSERTed (same transaction) with
                is_cancel_self_transfer=1,
-               to_address = from_address = payout.hot_wallet_address,
+               to_address = from_address = payout.security.hot_wallet_address,
                amount_base_units = 1 (cheapest
                §4.5-CHECK-compatible value; 1 base unit ==
                $0.000001), original nonce, capped tip; the
@@ -1430,10 +1197,10 @@ the exact bytes. Re-signing is FORBIDDEN.
     409 Conflict — attempt already confirmed; nothing to
                    abandon.
     422      — per-cancel gas spend would exceed
-               payout.cancel_max_gas_native_wei ceiling
+               payout.security.cancel_max_gas_native_wei ceiling
                OR per-24h aggregate gas spend would exceed
-               payout.cancel_max_gas_native_wei_per_24h.
-    429      — exceeded payout.abandon_rate_per_hour
+               payout.security.cancel_max_gas_native_wei_per_24h.
+    429      — exceeded payout.security.abandon_rate_per_hour
                (default 3).
   ```
 
@@ -1444,15 +1211,15 @@ the exact bytes. Re-signing is FORBIDDEN.
   with `coordinator.toml` write access can otherwise edit
   the caps and burn the hot wallet via abandons.
 
-  - `payout.cancel_max_tip_multiplier` — default 5×; HARD
+  - `payout.security.cancel_max_tip_multiplier` — default 5×; HARD
     cap on `tip_multiplier` field; requests above the cap
     are silently floored AND logged with `cap_applied`.
-  - `payout.abandon_rate_per_hour` — default 3; per-
+  - `payout.security.abandon_rate_per_hour` — default 3; per-
     operator-token rate limit on the endpoint.
-  - `payout.cancel_max_gas_native_wei` — default `1e16`
+  - `payout.security.cancel_max_gas_native_wei` — default `1e16`
     (0.01 ETH); per-cancel gas spend ceiling. If exceeded,
     the request is REJECTED with 422.
-  - `payout.cancel_max_gas_native_wei_per_24h` — default
+  - `payout.security.cancel_max_gas_native_wei_per_24h` — default
     `5e16` (0.05 ETH/day); aggregate sliding-window
     ceiling computed as `SUM(payout_attempts.gas_used_native_wei
     WHERE is_cancel_self_transfer = 1 AND broadcast_at_utc
@@ -1472,7 +1239,7 @@ the exact bytes. Re-signing is FORBIDDEN.
 
 ### 4.7 Reorg handling (record-only, NO consumed-row revert)
 
-Base reorgs past `payout.confirmation_blocks` are vanishingly
+Base reorgs past `payout.tuning.confirmation_blocks` are vanishingly
 rare in practice but possible. The
 `trg_lpr_terminal_status_guard` trigger
 (`phase4-coordinator/internal/billing/store.go:121-126`) is
@@ -1634,14 +1401,50 @@ BEGIN
            updated_at_utc = NEW.confirmed_at_utc
      WHERE id = 1 AND payout_bootstrap_complete = 0;
 END;
+
+-- Sibling trigger for INSERTs that land confirmed_at_utc
+-- non-NULL directly (test harness or future helper that
+-- bypasses the broadcast+poll path). Without this, the
+-- UPDATE-only trigger leaves the bootstrap flag at 0,
+-- silently re-opening the §4.9 source='manual' window.
+CREATE TRIGGER IF NOT EXISTS trg_pa_bootstrap_flip_insert
+AFTER INSERT ON payout_attempts
+WHEN NEW.confirmed_at_utc IS NOT NULL
+BEGIN
+    UPDATE payout_runner_state
+       SET payout_bootstrap_complete = 1,
+           bootstrap_completed_at_utc = NEW.confirmed_at_utc,
+           updated_at_utc = NEW.confirmed_at_utc
+     WHERE id = 1 AND payout_bootstrap_complete = 0;
+END;
 ```
 
 The `payout_bootstrap_complete` flag flips the first time
 any `payout_attempts` row reaches `confirmed_at_utc IS NOT
-NULL`. The `trg_pa_bootstrap_flip` trigger guarantees
-atomicity with the confirmation regardless of which Go code
-path UPDATEs the row. The flag gates §4.9 `source='manual'`
-funding records (rejected post-flip).
+NULL`. The dual trigger pair (`trg_pa_bootstrap_flip` AFTER
+UPDATE + `trg_pa_bootstrap_flip_insert` AFTER INSERT)
+guarantees atomicity with the confirmation regardless of
+which Go code path writes the row. The flag gates §4.9
+`source='manual'` funding records (rejected post-flip).
+
+**Startup row initialization (REQUIRED).** The
+`payout_runner_state` row is single-row (PK CHECK id=1).
+The bootstrap-flip trigger's `UPDATE ... WHERE id=1 AND
+payout_bootstrap_complete=0` no-ops if the row does not
+exist. IMPL MUST execute the following at coordinator
+startup, BEFORE the runner accepts the first payout
+attempt:
+
+```sql
+INSERT OR IGNORE INTO payout_runner_state
+  (id, payout_bootstrap_complete, updated_at_utc)
+VALUES (1, 0, '<RFC3339Nano startup time>');
+```
+
+IMPL test required: assert the row exists at startup;
+absence is a hard fail. A missing row would silently
+defeat the v0.1.3 C2 fake-funding closure by leaving
+`source='manual'` accepted indefinitely.
 
 **Trigger-presence assertion (defense against DROP TRIGGER
 + UPDATE bypass).** Both bootstrap triggers (and the
@@ -1657,16 +1460,47 @@ SELECT name FROM sqlite_master
  WHERE type = 'trigger'
    AND name IN ('trg_prs_bootstrap_one_way',
                 'trg_pa_bootstrap_flip',
+                'trg_pa_bootstrap_flip_insert',
                 'trg_lpr_terminal_status_guard');
 ```
 
-If the result set does NOT include all three trigger
-names, IMPL MUST emit
+If the result set does NOT include all four trigger names,
+IMPL MUST emit
 `payout_invariant_violation where='trigger missing' detail='<name>'`
 per §7.1 and HALT the runner. Operator response is
 forensic — investigate why the trigger is missing
 (legitimate schema migration vs. compromise) before
 re-creating and resuming.
+
+**Intra-transaction trigger-presence assertion (defense
+against DROP+UPDATE+CREATE inside one cadence cycle).**
+The startup + top-of-cycle check leaves an intra-cycle
+window — an attacker with DB write can DROP a trigger,
+INSERT/UPDATE the row bypassing it, and CREATE the trigger
+back, all between two top-of-cycle assertions. v0.1.5
+closes this for the TWO money-path-mutating call sites:
+
+- §4.9 `source='manual'` acceptance check (the
+  `payout_bootstrap_complete` SELECT that gates the INSERT)
+  MUST be performed in the SAME SQLite transaction as a
+  predicate `SELECT count(*) FROM sqlite_master WHERE
+  name='trg_pa_bootstrap_flip'` (and `_insert`); count != 2
+  → REJECT 422 `bootstrap_trigger_missing` AND emit
+  `payout_invariant_violation`.
+- §4.3 step 7 `ClaimPayoutReady` invocation MUST be
+  performed in the SAME SQLite transaction as a predicate
+  `SELECT count(*) FROM sqlite_master WHERE
+  name='trg_lpr_terminal_status_guard'`; count != 1 →
+  abort the claim, leave the row in `ready`, emit
+  `payout_invariant_violation`.
+
+A drop-and-recreate that fully completes between two
+top-of-cycle checks is now detectable AT the money-path
+call boundary, because the SQLite transaction's snapshot
+view of `sqlite_master` is consistent with its other
+statements — the attacker cannot DROP, mutate, and
+CREATE all within the same SQLite txn (DDL serialises
+writes against the same connection).
 
 The `last_run_cancel_gas_native_wei` field is observability
 only — the cap-check at §4.6 reads from
@@ -1700,7 +1534,7 @@ CREATE INDEX IF NOT EXISTS idx_phwf_to ON payout_hot_wallet_funding(to_address);
 ```
 
 `to_address` is the recipient of the inbound USDC transfer
-— always equal to `payout.hot_wallet_address` per the
+— always equal to `payout.security.hot_wallet_address` per the
 request body validation. The column was added in v0.1.4 to
 fix a §7.4 query-vs-schema mismatch where the
 chain-balance reconciliation referenced `to_address` but
@@ -1716,7 +1550,7 @@ Content-Type: application/json
 Idempotency-Key: <opaque>
 
 { "from_address": "0x...sender of funds...",
-  "to_address":   "0x...hot wallet — MUST equal payout.hot_wallet_address...",
+  "to_address":   "0x...hot wallet — MUST equal payout.security.hot_wallet_address...",
   "amount_base_units": 100000000,
   "tx_hash": "0x...funding tx hash...",
   "block_number": 1234567,
@@ -1727,7 +1561,7 @@ Response:
   201 Created — record inserted; payout_funding_recorded
                 event emitted per §7.1.
   400         — missing field / amount_base_units <= 0 /
-                to_address != payout.hot_wallet_address.
+                to_address != payout.security.hot_wallet_address.
   409 Conflict — UNIQUE(tx_hash) violation (already recorded).
   422         — receipt verification mismatch (see below).
 ```
@@ -1743,7 +1577,7 @@ BOTH receipts:
   the operator's config.
 - The USDC `Transfer` event log within the receipt has
   `from = <request body's from_address>`,
-  `to = payout.hot_wallet_address`, `value =
+  `to = payout.security.hot_wallet_address`, `value =
   amount_base_units`.
 - `block_number` matches.
 - `status` = success.
@@ -1800,7 +1634,7 @@ negligible; v0.2 MAY revisit if Base base-fees rise structurally.
 
 ### 5.2 Per-payout cap
 
-`payout.per_payout_cap_usdc_base_units` — default
+`payout.security.per_payout_cap_usdc_base_units` — default
 `500_000_000` (i.e. $500 = 500 USDC × 10⁶ base units). All
 caps in SPEC-016 are USDC base units (== USD micro-dollars
 == credits, by SPEC-005 §5.1 unit identity).
@@ -1815,7 +1649,7 @@ config + restart. v0.1 does NOT auto-split.
 
 ### 5.3 Per-day cap
 
-`payout.per_day_cap_usdc_base_units` — default
+`payout.security.per_day_cap_usdc_base_units` — default
 `5_000_000_000` (i.e. $5,000). Computed against a rolling
 24h window using `broadcast_at_utc` (NOT `confirmed_at_utc`)
 so a broadcast burst cannot bypass the cap during the
@@ -1873,7 +1707,6 @@ authenticated):
   "from_address": "0x...",
   "usdc_base_units": 12345600,
   "native_wei": 1234567890000000,
-  "last_run_cancel_gas_native_wei": 0,
   "cancel_gas_native_wei_24h": 0,
   "cancel_gas_native_wei_total": 0,
   "cumulative_funding_usdc_base_units": 100000000,
@@ -1881,6 +1714,13 @@ authenticated):
   "as_of_utc": "2026-..."
 }
 ```
+
+The v0.1.4 draft surfaced `last_run_cancel_gas_native_wei`
+on this endpoint; v0.1.5 removed it because §4.8 declares
+the per-run column observability-only (NOT used for any
+cap-check). Surfacing it on a public admin endpoint invited
+operator dashboards keying on a value the SPEC warns
+against using for decisions.
 
 The `cancel_gas_native_wei_24h` field is computed at request
 time from `SUM(payout_attempts.gas_used_native_wei WHERE
@@ -1900,12 +1740,12 @@ Every invocation emits `payout_balance_queried` per §7.1
 is auditable).
 
 The runner MUST emit a structured log line every cadence
-cycle. When `usdc_base_units < payout.low_balance_threshold`
-(default `2 * payout.per_day_cap_usdc_base_units` — a fixed
+cycle. When `usdc_base_units < payout.tuning.low_balance_threshold`
+(default `2 * payout.security.per_day_cap_usdc_base_units` — a fixed
 multiple, NOT a function of `sum(ready rows)` which can grow
 unboundedly during a halt), emit `payout_low_balance` at
 warning level. Native ETH balance has a separate threshold
-`payout.low_native_threshold` (default `1e16` wei == 0.01
+`payout.tuning.low_native_threshold` (default `1e16` wei == 0.01
 ETH) — when tripped, emit `payout_low_native_balance` (gas
 exhaustion would silently halt the runner).
 
@@ -2061,7 +1901,17 @@ return contract is preserved.
 
 Procedure (manual, operator-driven):
 
-1. Halt the runner (`payout.enabled: false` + restart).
+1. **Halt the runner AND pause the registration handler.**
+   Flip `payout.enabled: false` + flip the in-process flag
+   `payout.registration_paused: true` (this is an
+   internal-state flag, NOT a config key — set via
+   `POST /admin/payout/pause-registration` on `:8444`,
+   operator-key authed). The §3.3 handler returns
+   `503 Service Unavailable {"error":"rotation_in_progress"}`
+   for the rotation duration. Without this, a provider who
+   registers during steps 2–3 stamps
+   `registered_against_hot_wallet = <old wallet>` and the
+   row is stranded post-rotation.
 2. For each `payout_attempts` row with `confirmed_at_utc IS
    NULL AND abandoned_at_utc IS NULL`, the operator MUST
    either wait for confirmation or call
@@ -2074,17 +1924,19 @@ Procedure (manual, operator-driven):
    transfer signed by the OLD wallet); rewrite the
    encrypted wallet file + config; rotate the KEK if also
    compromising the on-disk envelope.
-4. Restart with `payout.enabled: true`. The runner re-syncs
-   the nonce cursor from BOTH RPCs' `getTransactionCount`
-   for the new address.
+4. Restart with `payout.enabled: true`. Flip
+   `payout.registration_paused: false` via
+   `POST /admin/payout/resume-registration` to re-open the
+   §3.3 handler. The runner re-syncs the nonce cursor from
+   BOTH RPCs' `getTransactionCount` for the new address.
 5. **All registered providers MUST re-register their payout
    address against the new hot wallet.** The EIP-712
    `verifyingContract` field in §3.2 step 5 pins to
-   `payout.hot_wallet_address` — rotating the hot wallet
+   `payout.security.hot_wallet_address` — rotating the hot wallet
    invalidates every prior signature's typed-data hash.
    The runner's §4.3 step 1 SELECT filters
    `ppa.registered_against_hot_wallet =
-   payout.hot_wallet_address`, so post-rotation rows
+   payout.security.hot_wallet_address`, so post-rotation rows
    registered against the old wallet are SKIPPED until
    re-registration. Operator MUST notify every provider via
    the §9.5a channel (manual email/webhook process) within
@@ -2127,7 +1979,43 @@ IMPL test required.
 mutate + SIGHUP without restart; the runner re-reads on
 the next cadence cycle. Each successful reload emits
 `payout_config_reloaded` per §7.1 with the key + old + new
-values for operator audit trail. Keys:
+values for operator audit trail. **`payout_config_reloaded`
+is severity=PAGE** — a hot-reload of any tuning key is a
+high-signal operational event (operator-key compromise can
+weaponize this surface, see hard floors + reload-time
+re-enforcement below). The BetterStack filter §9.6 MUST
+match this event name.
+
+**Reload-time bound re-enforcement (REQUIRED).** Every
+config-parse-time bound on a `payout.tuning.*` key MUST
+also be re-enforced on hot-reload. A reload request that
+violates a bound is REJECTED, the live value is RETAINED,
+and `payout_config_reload_rejected` (severity=PAGE per
+§7.1) is emitted with the key + violating value + bound.
+Without this, an attacker SIGHUP-reload can bypass the
+parse-time floor.
+
+**Hard floors / ceilings on hot-reloadable keys (REQUIRED
+at parse time AND at every reload):**
+
+- `payout.tuning.address_cooling_off_period` >= 1h.
+  Setting below 1h defeats the §3.3 stolen-token defense.
+- `payout.tuning.confirmation_blocks` ∈ [2, 50]. Below 2
+  widens the reorg-revert window beyond v0.1.x assumptions.
+- `payout.tuning.low_balance_threshold` <= 10 ×
+  `payout.security.per_day_cap_usdc_base_units`. A higher
+  ceiling silences the low-balance alarm.
+- `payout.tuning.low_native_threshold` <= 1e18 (1 ETH —
+  prevents disabling the gas-exhaustion alarm).
+- `payout.tuning.run_interval` ∈ [5m, 24h].
+- `payout.tuning.run_now_min_interval` ∈ [10s, 1h].
+- `payout.tuning.max_rows_per_run` ∈ [1, 500].
+
+Bounds on `payout.tuning.rpc_url_*_pin_spki` are syntactic
+(64-hex-char SHA-256 or empty); content-correctness is
+operational.
+
+Keys:
 
 - `payout.tuning.run_interval`
 - `payout.tuning.confirmation_blocks`
@@ -2147,6 +2035,14 @@ Splitting the namespace gives operators tuning headroom
 drift patterns without dropping the live money path)
 while preserving the security-namespace's threat-model
 guarantees against operator-key compromise.
+
+**In-flight `pending_until_utc` rows are NOT recomputed on
+`address_cooling_off_period` reload.** A reduction (within
+the 1h floor) shortens NEW registrations' cooling-off;
+in-flight rows keep their original `pending_until_utc`.
+An increase similarly does not extend in-flight rows. This
+prevents the attack class where an attacker shortens the
+period mid-flight to retroactively drain a queued backlog.
 
 The non-`payout.*` namespace (SPEC-005 / SPEC-014 / SPEC-006
 keys) is unaffected by this rule and follows its own
@@ -2188,7 +2084,8 @@ operator-key endpoints log actor=operator_key):
 | `payout_chain_balance_drift_positive` | `from_address, in_db_expected_usdc_base_units, on_chain_usdc_base_units, drift_usdc_base_units, ts_utc` |
 | `payout_chain_balance_drift_negative` (severity=PAGE) | `from_address, in_db_expected_usdc_base_units, on_chain_usdc_base_units, drift_usdc_base_units, ts_utc` |
 | `payout_nonce_cold_start_within_tolerance` | `from_address, rpc_a_nonce, rpc_b_nonce, chosen_nonce, ts_utc` |
-| `payout_config_reloaded` | `key (payout.tuning.* only), old_value, new_value, actor, ts_utc` |
+| `payout_config_reloaded` (severity=PAGE) | `key (payout.tuning.* only), old_value, new_value, actor, ts_utc` |
+| `payout_config_reload_rejected` (severity=PAGE) | `key, attempted_value, bound, actor, ts_utc` |
 | `payout_nonce_gap` | `from_address, expected_nonce, observed_pending_nonce, ts_utc` |
 | `payout_attempt_abandoned` (severity=PAGE) | `payout_id, attempt_seq, nonce, cancel_self_transfer_tx_hash, cap_applied, reason, actor=operator_key, ts_utc` |
 | `payout_reorg_orphan_recorded` | `payout_id, attempt_seq, orphan_tx_hash, operator_resolution, compensation_settlement_id, reason, actor=operator_key, ts_utc` |
@@ -2334,7 +2231,7 @@ Any row returned by either query is a reconciliation
 failure.
 
 Additionally the runner MUST periodically (every
-`payout.chain_recon_interval`, default **1h**) query the
+`payout.security.chain_recon_interval`, default **1h**) query the
 USDC contract's
 on-chain `balanceOf(hot_wallet)` from BOTH RPCs and
 compare against the in-DB expected balance:
@@ -2359,7 +2256,7 @@ SELECT
 ```
 
 When `|on_chain_balance − expected_balance| >
-payout.chain_recon_tolerance_usdc_base_units` (default
+payout.security.chain_recon_tolerance_usdc_base_units` (default
 `100_000` == $0.10), emit a SIGNED drift event per §7.1
 and HALT the runner. The sign matters:
 
@@ -2468,24 +2365,24 @@ discharged:
    initial smoke (suggested 100 USDC) and ~$5 native ETH for
    gas headroom. Encrypted wallet file generated; KEK loaded
    via systemd `LoadCredential=` (preferred) or env var.
-   Address pinned in `payout.hot_wallet_address`.
+   Address pinned in `payout.security.hot_wallet_address`.
 2. **TWO RPC providers chosen + API keys provisioned.**
    v0.1.1 REQUIRES two independent RPCs for receipt
    cross-confirmation (§4.4). Different operators (e.g.
    Alchemy + QuickNode), ideally different ASNs. Both URLs +
-   keys pinned in `payout.rpc_url_primary` and
-   `payout.rpc_url_secondary`. v0.1's single-RPC framing is
+   keys pinned in `payout.security.rpc_url_primary` and
+   `payout.security.rpc_url_secondary`. v0.1's single-RPC framing is
    superseded.
 3. **Cap decisions.** Operator sets
-   `payout.per_payout_cap_usdc_base_units`,
-   `payout.per_day_cap_usdc_base_units`,
-   `payout.run_interval`,
-   `payout.confirmation_blocks`,
-   `payout.address_cooling_off_period`,
-   `payout.cancel_max_tip_multiplier`,
-   `payout.abandon_rate_per_hour`,
-   `payout.chain_recon_interval`,
-   `payout.chain_recon_tolerance_usdc_base_units`.
+   `payout.security.per_payout_cap_usdc_base_units`,
+   `payout.security.per_day_cap_usdc_base_units`,
+   `payout.tuning.run_interval`,
+   `payout.tuning.confirmation_blocks`,
+   `payout.tuning.address_cooling_off_period`,
+   `payout.security.cancel_max_tip_multiplier`,
+   `payout.security.abandon_rate_per_hour`,
+   `payout.security.chain_recon_interval`,
+   `payout.security.chain_recon_tolerance_usdc_base_units`.
 4. **Compliance posture decision.** Initial bulk
    `payout_allowed` set; policy that gates future
    provider eligibility documented.
@@ -2553,17 +2450,23 @@ discharged:
      "reason":           "<free-text required>" }
 
    Response:
-     201 Created — { "payout_id": <int> } — fresh
+     201 Created — { "id": <int> } — fresh
                    ledger_payout_ready row inserted with
                    status='ready', payout_currency=NULL,
-                   payout_external_id=NULL.
+                   payout_external_id=NULL. Field name is
+                   `id` (matches SPEC-005's column name on
+                   `ledger_payout_ready`).
      400         — missing required field, or
                    idempotency_key does not match
                    `^reorg_compensation:\d+:\d+$`.
      409 Conflict — Idempotency-Key replay (return the
                    original 201 response body).
      422         — provider_id not found in provider_tokens,
-                   OR provider_credits > gross_credits.
+                   OR provider_credits > gross_credits,
+                   OR provider_credits exceeds
+                   payout.security.per_payout_cap_usdc_base_units,
+                   OR no matching unresolved orphan record
+                   (see normative requirements below).
    ```
 
    Normative requirements on the SPEC-005 IMPL:
@@ -2595,10 +2498,44 @@ discharged:
    - Every successful invocation MUST emit a SPEC-005
      structured log event
      `ledger_payout_ready_admin_inserted` with
-     `provider_id, payout_id, idempotency_key, reason,
+     `provider_id, id, idempotency_key, reason,
      actor=operator_key, ts_utc` so the operator audit
      trail covers admin-inserted rows separately from
      settlement-emitted rows.
+   - **The SPEC-005 IMPL MUST verify a matching unresolved
+     `payout_reorg_orphans` row exists in the SAME SQLite
+     transaction as the INSERT.** The idempotency_key
+     `reorg_compensation:<orig_payout_id>:<orig_attempt_seq>`
+     identifies the orphan; the IMPL MUST `SELECT 1 FROM
+     payout_reorg_orphans WHERE payout_id =
+     <orig_payout_id> AND attempt_seq = <orig_attempt_seq>
+     AND compensation_settlement_id IS NULL` and REJECT
+     422 `no_matching_orphan` on miss. This defeats the
+     operator-key-compromise high-leverage drain: an
+     attacker who can call this endpoint MUST also first
+     manufacture a `payout_reorg_orphans` row via
+     `/admin/payout/record-orphan` — which is detectable by
+     the §7.4 stale-orphan reconciliation query (no real
+     `payout_attempts` row corresponds to a fake orphan;
+     query (B) catches the inverse case where the
+     compensation references a non-existent ledger row).
+   - **Per-call cap.** The SPEC-005 IMPL MUST cap
+     `provider_credits` at
+     `payout.security.per_payout_cap_usdc_base_units` (the
+     same per-payout cap §5.2 enforces on the runner).
+     This makes compensation rows subject to the same
+     blast-radius bound as settlement rows; an
+     over-cap compensation requires operator splitting
+     across multiple calls.
+   - **Trigger name binding (cross-spec contract).**
+     SPEC-005 vX.Y+1 MUST create the trigger
+     `trg_lpr_terminal_status_guard` on `ledger_payout_ready`
+     with that EXACT NAME (case-sensitive). SPEC-016 §4.8
+     asserts presence by exact name at every cadence
+     cycle; a rename in a future SPEC-005 schema migration
+     halts the SPEC-016 runner cycle 1. If SPEC-005 needs
+     to evolve the trigger, the rename MUST be coordinated
+     with a SPEC-016 minor-version bump.
 6. **BetterStack alert filter extended** to match each
    SPEC-016 event name (`payout_low_balance`,
    `payout_low_native_balance`, `payout_insufficient_funds`,
@@ -2649,6 +2586,18 @@ fresh session after this v0.1.x merges. That prompt will:
 - Carry the §9 prerequisites as a pre-flight checklist.
 - Run the SPEC-audit-loop discipline applied to IMPL work per
   [[feedback-build-audit-loop]].
+- Acknowledge the §6.5 namespace split: IMPL must ship TWO
+  config-loader code paths — immutable-at-startup for
+  `payout.security.*` (load once, fail-loud on any later
+  reload attempt) and SIGHUP-reloadable for
+  `payout.tuning.*` (with bound re-enforcement per §6.5 +
+  `payout_config_reloaded` / `payout_config_reload_rejected`
+  PAGE events per §7.1). This is non-trivial structurally
+  and may justify splitting the IMPL into stepped prompts
+  (STEP_1 schema + addresses, STEP_2 runner + RPC + signer,
+  STEP_3 admin + funding + orphan, STEP_4 reconciliation +
+  config-loader-split + ops) per the SPEC-015 stepped-IMPL
+  pattern.
 
 ## Appendix B — Deferred follow-ups (filed as Issue stubs, not inlined)
 
