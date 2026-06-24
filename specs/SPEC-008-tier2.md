@@ -630,6 +630,7 @@ The catalog MUST include:
       "artifact_kind": "mlx_weight_file",
       "sha256": "64 lowercase hex chars",
       "hash_scope": "primary_weight_file",
+      "min_ram_gb": 16,
       "source": "operator-curated",
       "notes": "optional operator note"
     }
@@ -655,6 +656,12 @@ The coordinator MUST verify the signature using `tier2.catalog_public_key`
 before accepting any entry. If verification fails, the coordinator MUST reject
 the catalog at startup or reload time and MUST leave the previous accepted
 catalog active, if one exists.
+
+Catalog model entries MAY include `min_ram_gb`, a positive integer RAM floor
+for provider-install UX and model-fit guidance. Because it is inside
+`models[]`, `min_ram_gb` is covered by the catalog signature when present. It
+MUST NOT affect hash equality; `sha256` remains the only model artifact hash
+field used for Pillar A verification.
 
 If no previous accepted catalog exists and `tier2.require_hash_verified: true`,
 the coordinator MUST fail startup. If `tier2.require_hash_verified: false`, the

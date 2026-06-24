@@ -39,6 +39,7 @@ type ModelEntry struct {
 	ArtifactKind string `json:"artifact_kind"`
 	HashScope    string `json:"hash_scope"`
 	ModelID      string `json:"model_id"`
+	MinRAMGB     *int   `json:"min_ram_gb,omitempty"`
 	Notes        string `json:"notes,omitempty"`
 	SHA256       string `json:"sha256"`
 	Source       string `json:"source"`
@@ -137,6 +138,9 @@ func Parse(data []byte) (*Catalog, error) {
 		}
 		if strings.TrimSpace(m.Source) == "" {
 			return nil, fmt.Errorf("catalog: model %q source is empty", m.ModelID)
+		}
+		if m.MinRAMGB != nil && *m.MinRAMGB < 1 {
+			return nil, fmt.Errorf("catalog: model %q min_ram_gb must be positive", m.ModelID)
 		}
 		if !hashPattern.MatchString(m.SHA256) {
 			return nil, fmt.Errorf("catalog: model %q sha256=%q is not 64 lowercase hex", m.ModelID, m.SHA256)

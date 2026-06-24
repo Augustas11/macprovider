@@ -269,11 +269,33 @@ model_default_for_ram() {
   ram_gb="$1"
   if [ "$ram_gb" -lt 12 ]; then
     printf "mlx-community/Llama-3.2-3B-Instruct-4bit"
+  elif [ "$ram_gb" -lt 16 ]; then
+    printf "mlx-community/Qwen3-4B-Instruct-2507-4bit"
   elif [ "$ram_gb" -lt 24 ]; then
     printf "mlx-community/Qwen2.5-7B-Instruct-4bit"
-  else
+  elif [ "$ram_gb" -lt 32 ]; then
     printf "mlx-community/Qwen2.5-14B-Instruct-4bit"
+  elif [ "$ram_gb" -lt 48 ]; then
+    printf "mlx-community/Qwen3-32B-4bit"
+  elif [ "$ram_gb" -lt 64 ]; then
+    printf "mlx-community/Llama-3.3-70B-Instruct-4bit"
+  else
+    printf "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit"
   fi
+}
+
+known_min_ram_gb_for_model() {
+  case "$1" in
+    mlx-community/Llama-3.2-3B-Instruct-4bit) printf "8" ;;
+    mlx-community/Qwen3-4B-Instruct-2507-4bit) printf "12" ;;
+    mlx-community/Qwen2.5-7B-Instruct-4bit) printf "16" ;;
+    mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit) printf "16" ;;
+    mlx-community/Qwen2.5-14B-Instruct-4bit) printf "24" ;;
+    mlx-community/Qwen3-32B-4bit) printf "32" ;;
+    mlx-community/Qwen2.5-Coder-32B-Instruct-4bit) printf "32" ;;
+    mlx-community/Llama-3.3-70B-Instruct-4bit) printf "48" ;;
+    mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit) printf "64" ;;
+  esac
 }
 
 # SPEC-003 v0.9 FR-D2: enforce safe HuggingFace repo id format.
@@ -342,6 +364,44 @@ estimate_weights_gb_from_name() {
     'BEGIN { gb = p * b; if (gb < 1) gb = 1; printf "%d", gb + 0.5 }'
 }
 
+hf_safetensors_gb_from_api_body() {
+  body="$1"
+  printf "%s" "$body" | tr '\n\r' '  ' | awk '
+    {
+      data = $0
+      while (match(data, /"rfilename"[[:space:]]*:[[:space:]]*"[^"]*\.safetensors"/)) {
+        data = substr(data, RSTART + RLENGTH)
+        window = substr(data, 1, 700)
+        if (match(window, /"size"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+          value = substr(window, RSTART, RLENGTH)
+          gsub(/[^0-9]/, "", value)
+          total += value + 0
+        }
+      }
+    }
+    END {
+      if (total > 0) {
+        printf "%d", int((total + 1073741824 - 1) / 1073741824)
+      }
+    }
+  '
+}
+
+ram_floor_for_weight_gb() {
+  weight_gb="$1"
+  awk -v w="$weight_gb" '
+    BEGIN {
+      if (w <= 2) print 8;
+      else if (w <= 3) print 12;
+      else if (w <= 5) print 16;
+      else if (w <= 9) print 24;
+      else if (w <= 20) print 32;
+      else if (w <= 38) print 48;
+      else print 64;
+    }
+  '
+}
+
 confirm_model_fit_override() {
   reason="$1"
   if [ "$NO_PROMPT" = "1" ]; then
@@ -351,9 +411,40 @@ confirm_model_fit_override() {
   prompt_yes_no "Proceed anyway? [y/N]" "N" || die 7 "aborted by user"
 }
 
+enforce_model_min_ram_floor() {
+  id="$1"
+  ram_gb="$2"
+  min_ram_gb="$3"
+  source="$4"
+  if [ "$ram_gb" -lt "$min_ram_gb" ]; then
+    confirm_model_fit_override "$source requires ${min_ram_gb} GB RAM for $id, but this Mac has ${ram_gb} GB"
+  else
+    log "Model fits: $id requires ${min_ram_gb} GB RAM by $source; this Mac has ${ram_gb} GB."
+  fi
+}
+
+enforce_model_ram_fit_from_weight_gb() {
+  id="$1"
+  ram_gb="$2"
+  weight_gb="$3"
+  source="$4"
+  min_ram_gb="$(ram_floor_for_weight_gb "$weight_gb")"
+  if [ "$ram_gb" -lt "$min_ram_gb" ]; then
+    confirm_model_fit_override "$source reports ~${weight_gb} GB safetensors; recommended RAM floor is ${min_ram_gb} GB for $id, but this Mac has ${ram_gb} GB"
+  else
+    log "Model fits: $source reports ~${weight_gb} GB safetensors; recommended RAM floor is ${min_ram_gb} GB and this Mac has ${ram_gb} GB."
+  fi
+}
+
 enforce_model_ram_fit() {
   id="$1"
   ram_gb="$2"
+  min_ram_gb="$(known_min_ram_gb_for_model "$id")"
+  if [ -n "$min_ram_gb" ]; then
+    enforce_model_min_ram_floor "$id" "$ram_gb" "$min_ram_gb" "model table"
+    return 0
+  fi
+
   est_gb="$(estimate_weights_gb_from_name "$id")"
   if [ -z "$est_gb" ]; then
     log "WARNING: could not estimate weight size from model name; skipping fit check."
@@ -380,7 +471,7 @@ catalog_min_ram_from_body() {
   printf "%s" "$catalog_body" | tr '\n\r' '  ' | awk -v id="$model_id" '
     BEGIN { RS = "}"; }
     index($0, "\"model_id\"") && index($0, "\"" id "\"") {
-      if (match($0, /"min_ram_gb"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+      if (match($0, /"min_ram_gb"[[:space:]]*:[[:space:]]*[1-9][0-9]*/)) {
         value = substr($0, RSTART, RLENGTH)
         gsub(/[^0-9]/, "", value)
         print value
@@ -402,25 +493,18 @@ check_catalog_ram_metadata() {
     return 1
   fi
 
-  poolz_url="$coordinator_base/poolz"
-  body_and_code="$(curl -sSL -m 5 -o - -w '\n__HTTP_STATUS__%{http_code}' "$poolz_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
+  catalog_url="$coordinator_base/catalog/current"
+  body_and_code="$(curl -sSL -m 5 -o - -w '\n__HTTP_STATUS__%{http_code}' "$catalog_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
   http_code="${body_and_code##*__HTTP_STATUS__}"
-  poolz_body="${body_and_code%__HTTP_STATUS__*}"
+  catalog_body="${body_and_code%__HTTP_STATUS__*}"
   if [ "$http_code" != "200" ]; then
-    log "WARNING: could not read catalog metadata from $poolz_url (status $http_code); using built-in model RAM estimates."
+    log "WARNING: could not read signed catalog $catalog_url (status $http_code); using built-in model RAM estimates."
     return 1
   fi
 
-  catalog_id="$(printf "%s" "$poolz_body" | sed -n 's/.*"catalog_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  catalog_id="$(printf "%s" "$catalog_body" | sed -n 's/.*"catalog_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
   if [ -z "$catalog_id" ]; then
-    log "WARNING: /poolz did not include catalog_id; using built-in model RAM estimates."
-    return 1
-  fi
-
-  catalog_url="$coordinator_base/catalog/$catalog_id"
-  catalog_body="$(curl -fsSL -m 5 "$catalog_url" 2>/dev/null || true)"
-  if [ -z "$catalog_body" ]; then
-    log "WARNING: could not read signed catalog $catalog_url; using built-in model RAM estimates."
+    log "WARNING: signed catalog did not include catalog_id; using built-in model RAM estimates."
     return 1
   fi
 
@@ -463,7 +547,7 @@ hf_check_model() {
     return 0
   fi
   log "Checking model $id on HuggingFace…"
-  api_url="https://huggingface.co/api/models/$id"
+  api_url="https://huggingface.co/api/models/$id?blobs=true"
   # -f omitted so 4xx bodies still reach us; status is routed explicitly below.
   body_and_code="$(curl -sSL -m 10 -o - -w '\n__HTTP_STATUS__%{http_code}' "$api_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
   http_code="${body_and_code##*__HTTP_STATUS__}"
@@ -505,7 +589,12 @@ hf_check_model() {
     die 7 "model $id is not an MLX repo. macprovider runs MLX-format models only. Pick an mlx-community/* variant or convert with mlx_lm.convert."
   fi
 
-  enforce_model_ram_fit "$id" "$ram_gb"
+  hf_weight_gb="$(hf_safetensors_gb_from_api_body "$body")"
+  if [ -n "$hf_weight_gb" ]; then
+    enforce_model_ram_fit_from_weight_gb "$id" "$ram_gb" "$hf_weight_gb" "HuggingFace"
+  else
+    enforce_model_ram_fit "$id" "$ram_gb"
+  fi
 }
 
 choose_model() {
@@ -530,16 +619,28 @@ choose_model() {
   printf "[macprovider-install] Detected approximately %s GB RAM.\n" "$ram_gb" >&2
   printf "Choose a model:\n" >&2
   printf "  1) mlx-community/Llama-3.2-3B-Instruct-4bit      ~2 GB, 8 GB Macs\n" >&2
-  printf "  2) mlx-community/Qwen2.5-7B-Instruct-4bit        ~4 GB, 16 GB Macs\n" >&2
-  printf "  3) mlx-community/Qwen2.5-14B-Instruct-4bit       ~8 GB, 24 GB+ Macs\n" >&2
+  printf "  2) mlx-community/Qwen3-4B-Instruct-2507-4bit     ~2 GB, 12 GB+ Macs\n" >&2
+  printf "  3) mlx-community/Qwen2.5-7B-Instruct-4bit        ~4 GB, 16 GB Macs\n" >&2
+  printf "  4) mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit  ~4 GB, 16 GB+ Macs\n" >&2
+  printf "  5) mlx-community/Qwen2.5-14B-Instruct-4bit       ~8 GB, 24 GB+ Macs\n" >&2
+  printf "  6) mlx-community/Qwen3-32B-4bit                  ~18 GB, 32 GB+ Macs\n" >&2
+  printf "  7) mlx-community/Qwen2.5-Coder-32B-Instruct-4bit ~17 GB, 32 GB+ Macs\n" >&2
+  printf "  8) mlx-community/Llama-3.3-70B-Instruct-4bit     ~35 GB, 48 GB+ Macs\n" >&2
+  printf "  9) mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit ~40 GB, 64 GB+ Macs\n" >&2
   printf "  c) custom HuggingFace MLX model id\n" >&2
   printf "Selection [default: %s]: " "$default_model" >&2
   read_line
   selection="$REPLY"
   case "$selection" in
     1) printf "mlx-community/Llama-3.2-3B-Instruct-4bit" ;;
-    2) printf "mlx-community/Qwen2.5-7B-Instruct-4bit" ;;
-    3) printf "mlx-community/Qwen2.5-14B-Instruct-4bit" ;;
+    2) printf "mlx-community/Qwen3-4B-Instruct-2507-4bit" ;;
+    3) printf "mlx-community/Qwen2.5-7B-Instruct-4bit" ;;
+    4) printf "mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit" ;;
+    5) printf "mlx-community/Qwen2.5-14B-Instruct-4bit" ;;
+    6) printf "mlx-community/Qwen3-32B-4bit" ;;
+    7) printf "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit" ;;
+    8) printf "mlx-community/Llama-3.3-70B-Instruct-4bit" ;;
+    9) printf "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit" ;;
     c|C)
       printf "HuggingFace model id (org/name): " >&2
       read_line

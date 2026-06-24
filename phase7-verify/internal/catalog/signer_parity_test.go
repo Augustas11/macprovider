@@ -58,6 +58,7 @@ func TestParityWithSignCatalogToolReal(t *testing.T) {
       "artifact_kind": "mlx_weight_file",
       "hash_scope": "primary_weight_file",
       "model_id": "mlx-community/Qwen2.5-7B-Instruct-4bit",
+      "min_ram_gb": 16,
       "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "source": "operator-curated"
     }
@@ -102,6 +103,13 @@ func TestParityWithSignCatalogToolReal(t *testing.T) {
 	}
 	if c.CatalogID != "parity-test-catalog" {
 		t.Fatalf("CatalogID=%q", c.CatalogID)
+	}
+	entry, ok := Lookup(c, "mlx-community/Qwen2.5-7B-Instruct-4bit")
+	if !ok {
+		t.Fatal("Lookup signer output = miss")
+	}
+	if entry.MinRAMGB == nil || *entry.MinRAMGB != 16 {
+		t.Fatalf("MinRAMGB=%v, want 16", entry.MinRAMGB)
 	}
 	if err := Verify(c, ed25519.PublicKey(pubKeyBytes), time.Now()); err != nil {
 		t.Fatalf("Verify signer output: %v", err)

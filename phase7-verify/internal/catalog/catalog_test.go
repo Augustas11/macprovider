@@ -19,6 +19,7 @@ func TestParseAndVerifyHappyPath(t *testing.T) {
 		ArtifactKind: "mlx_weight_file",
 		HashScope:    "primary_weight_file",
 		ModelID:      "model-a",
+		MinRAMGB:     intPtr(16),
 		SHA256:       validHash,
 		Source:       "operator-curated",
 	}})
@@ -31,6 +32,9 @@ func TestParseAndVerifyHappyPath(t *testing.T) {
 	}
 	if got := c.Models[modelKey("model-a")].SHA256; got != validHash {
 		t.Fatalf("sha = %q", got)
+	}
+	if got := c.Models[modelKey("model-a")].MinRAMGB; got == nil || *got != 16 {
+		t.Fatalf("min_ram_gb = %v, want 16", got)
 	}
 	if err := Verify(c, pub, time.Now()); err != nil {
 		t.Fatalf("Verify: %v", err)
@@ -331,6 +335,14 @@ func TestParseRejectsUnsupportedModelEntryFields(t *testing.T) {
 			SHA256:       validHash,
 			Source:       "operator-curated",
 		},
+		"non-positive-min_ram_gb": {
+			ArtifactKind: "mlx_weight_file",
+			HashScope:    "primary_weight_file",
+			ModelID:      "model-a",
+			MinRAMGB:     intPtr(0),
+			SHA256:       validHash,
+			Source:       "operator-curated",
+		},
 	}
 	for name, model := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -430,6 +442,7 @@ func TestParityWithSignCatalogProduces(t *testing.T) {
 			ArtifactKind: "mlx_weight_file",
 			HashScope:    "primary_weight_file",
 			ModelID:      "mlx-community/Qwen2.5-7B-Instruct-4bit",
+			MinRAMGB:     intPtr(16),
 			SHA256:       validHash,
 			Source:       "operator-curated",
 		}},
@@ -467,9 +480,16 @@ func TestParityWithSignCatalogProduces(t *testing.T) {
 	if entry.SHA256 != validHash {
 		t.Fatalf("entry.SHA256 = %q", entry.SHA256)
 	}
+	if entry.MinRAMGB == nil || *entry.MinRAMGB != 16 {
+		t.Fatalf("entry.MinRAMGB = %v, want 16", entry.MinRAMGB)
+	}
 }
 
 // helpers
+
+func intPtr(v int) *int {
+	return &v
+}
 
 func signFixture(t *testing.T, catalogID string, expires time.Time, models []ModelEntry) ([]byte, ed25519.PublicKey) {
 	t.Helper()
