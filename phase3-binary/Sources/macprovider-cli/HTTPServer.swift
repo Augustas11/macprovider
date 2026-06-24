@@ -230,19 +230,48 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             let providerStatus = providerStatus
             Task.detached { @Sendable [modelRuntime, providerStatus, request, writer, warmSwapEnabled, receiptBuilder, providerID, auditRequestID] in
                 let startedAt = await providerStatus.beginRequest()
+                // SPEC-015 §M.2.2 atomic-read invariant — capture
+                // the pre-snapshot for warm-swap validation, then
+                // call `completeWithServedSnapshot` which returns
+                // the actor-isolated snapshot the runtime used to
+                // drive generation. Binding `model_hash` to the
+                // SERVED snapshot (not the pre-snapshot) closes the
+                // interleaving gap a separately-sampled
+                // `currentSnapshot()` would leave open. Error /
+                // catch paths fall back to the pre-snapshot for the
+                // §7.6 / AC-31 error-receipt hash inheritance
+                // (no served snapshot exists when complete() throws).
+                let preSnapshot = await modelRuntime.currentSnapshot()
+                let fallbackHashSource = Self.resolveModelHashSource(
+                    warmSwapEnabled: warmSwapEnabled,
+                    snapshot: preSnapshot
+                )
                 do {
-                    let snapshot = await modelRuntime.currentSnapshot()
+                    let snapshot = preSnapshot
                     if let error = Self.warmSwapRejectionError(for: snapshot) {
                         throw error
                     }
                     if warmSwapEnabled {
                         try request.validateModelMatches(snapshot.modelID)
                     }
-                    let completion = try await modelRuntime.complete(request)
+                    let (completion, servedSnapshot) = try await modelRuntime.completeWithServedSnapshot(request, shouldCancel: { false })
+                    let modelHashSource = Self.resolveModelHashSource(
+                        warmSwapEnabled: warmSwapEnabled,
+                        snapshot: servedSnapshot
+                    )
                     let unixTsSeconds = Int64(Date().timeIntervalSince1970)
                     await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
                     let response = Self.chatCompletionResponse(request: request, completion: completion)
                     let ttftMs = completion.ttftMilliseconds ?? Self.elapsedMilliseconds(since: startedAt)
+                    // SPEC-015 §M.2.2 — bind the receipt's
+                    // `model_hash` to the runtime-served snapshot
+                    // returned above by
+                    // `completeWithServedSnapshot`. That snapshot
+                    // was captured atomically inside the actor turn
+                    // that drove generation (validation, in-flight
+                    // registration, container.perform), closing the
+                    // interleaving gap a separately-sampled
+                    // `currentSnapshot()` would leave open.
                     let receipt = try Self.receiptHeaderResult(
                         providerID: providerID,
                         receiptBuilder: receiptBuilder,
@@ -252,7 +281,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         finishReason: completion.finishReason,
                         ttftMs: ttftMs,
                         tokensOut: Int64(completion.completionTokens),
-                        unixTsSeconds: unixTsSeconds
+                        unixTsSeconds: unixTsSeconds,
+                        modelHashSource: modelHashSource
                     )
                     switch receipt {
                     case .issued(let header):
@@ -280,7 +310,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             receiptBuilder: receiptBuilder,
                             request: request,
                             error: apiErr,
-                            startedAt: startedAt
+                            startedAt: startedAt,
+                            modelHashSource: fallbackHashSource
                         )
                         switch receipt {
                         case .issued(let header, let ttftMs, let unixTs):
@@ -311,7 +342,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             receiptBuilder: receiptBuilder,
                             request: request,
                             error: apiError,
-                            startedAt: startedAt
+                            startedAt: startedAt,
+                            modelHashSource: fallbackHashSource
                         )
                         switch receipt {
                         case .issued(let header, let ttftMs, let unixTs):
@@ -341,12 +373,29 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             if let request = parsedRequest, !request.stream {
                 let writer = ResponseWriter(context: context)
                 do {
+                    // Parse-error path: the request failed to validate
+                    // before any runtime snapshot was taken, so no
+                    // request-start container was selected.
+                    // §M.2.2 construction proof: every receipt commits
+                    // to the hash that started generation — no
+                    // generation started here, so emit JSON null
+                    // (§M.2.3 semantics) for the receipt's
+                    // `model_hash` field.
+                    // Parse-error path: the request failed validation
+                    // before any model selection. The receipt commits
+                    // to `model_hash: null` semantically — no
+                    // generation ran, no container served. §M.2.3
+                    // null encoding is the right wire shape (NOT
+                    // .ambiguous, which is reserved for SPEC-011
+                    // R-3.4.1 regressions on requests that DID reach
+                    // inference).
                     let receipt = try Self.errorReceiptHeaderResult(
                         providerID: providerID,
                         receiptBuilder: receiptBuilder,
                         request: request,
                         error: parseError,
-                        startedAt: requestAcceptedAt
+                        startedAt: requestAcceptedAt,
+                        modelHashSource: .warmSwapDisabled
                     )
                     switch receipt {
                     case .issued(let header, let ttftMs, let unixTs):
@@ -534,7 +583,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         finishReason: String,
         ttftMs: Int64,
         tokensOut: Int64,
-        unixTsSeconds: Int64
+        unixTsSeconds: Int64,
+        modelHashSource: ReceiptModelHashSource
     ) throws -> String? {
         switch try receiptHeaderResult(
             providerID: providerID,
@@ -545,13 +595,38 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             finishReason: finishReason,
             ttftMs: ttftMs,
             tokensOut: tokensOut,
-            unixTsSeconds: unixTsSeconds
+            unixTsSeconds: unixTsSeconds,
+            modelHashSource: modelHashSource
         ) {
         case .issued(let header):
             return header
         case .omitted:
             return nil
         }
+    }
+
+    /// SPEC-015 §M.2 — map (warmSwapEnabled, request-start snapshot)
+    /// to the receipt's `model_hash` provenance. §M.2.2 defence-in-
+    /// depth: if warm-swap is ON but the snapshot didn't carry a
+    /// hash (SPEC-011 R-3.4.1 in-flight tracking regression), the
+    /// runtime cannot disambiguate which container served and the
+    /// receipt-emission MUST refuse.
+    static func resolveModelHashSource(
+        warmSwapEnabled: Bool,
+        snapshot: RuntimeSnapshot
+    ) -> ReceiptModelHashSource {
+        if warmSwapEnabled {
+            if let hash = snapshot.modelHash {
+                return .captured(hash)
+            }
+            // Warm-swap is on; SPEC-011 R-3.4.1 should have produced
+            // a hash at request-start capture time. Absence is a
+            // regression — §M.2.2 defence-in-depth refusal.
+            return .ambiguous
+        }
+        // Warm-swap is off; SPEC-011 R-3.3.0 suppresses hash
+        // reporting. §M.2.3 null-hash semantics apply.
+        return .warmSwapDisabled
     }
 
     static func receiptHeaderResult(
@@ -563,13 +638,31 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         finishReason: String,
         ttftMs: Int64,
         tokensOut: Int64,
-        unixTsSeconds: Int64
+        unixTsSeconds: Int64,
+        modelHashSource: ReceiptModelHashSource
     ) throws -> ReceiptHeaderResult {
         guard let providerID, !providerID.isEmpty else {
             return .omitted(.noKeypair)
         }
         guard let receiptBuilder else {
             return .omitted(.preV16Binary)
+        }
+        // SPEC-015 §M.2.2 — fail-closed refusal BEFORE construction.
+        // The .ambiguous provenance can only arise from a SPEC-011
+        // R-3.4.1 in-flight-tracking regression; v0.3 normatively
+        // refuses to sign a receipt that cannot identify which
+        // container served. Audit row + no header. The HTTP 200
+        // response itself still goes out (the buyer got their
+        // tokens; the §M.2.2 normal construction proof allows the
+        // un-receipted 200 case).
+        let resolvedModelHash: String?
+        switch modelHashSource {
+        case .captured(let hash):
+            resolvedModelHash = hash
+        case .warmSwapDisabled:
+            resolvedModelHash = nil
+        case .ambiguous:
+            return .omitted(.modelSwapViolation)
         }
         do {
             let header = try receiptBuilder.build(
@@ -582,7 +675,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     finishReason: finishReason,
                     ttftMs: ttftMs,
                     tokensOut: tokensOut,
-                    unixTsSeconds: unixTsSeconds
+                    unixTsSeconds: unixTsSeconds,
+                    modelHash: resolvedModelHash
                 )
             )
             guard header.utf8.count <= maxReceiptHeaderBytes else {
@@ -599,9 +693,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         receiptBuilder: ReceiptBuilder?,
         request: ChatCompletionRequest,
         error: APIError,
-        startedAt: Date
+        startedAt: Date,
+        modelHashSource: ReceiptModelHashSource
     ) throws -> String? {
-        switch try errorReceiptHeaderResult(providerID: providerID, receiptBuilder: receiptBuilder, request: request, error: error, startedAt: startedAt) {
+        switch try errorReceiptHeaderResult(providerID: providerID, receiptBuilder: receiptBuilder, request: request, error: error, startedAt: startedAt, modelHashSource: modelHashSource) {
         case .issued(let header, _, _):
             return header
         case .omitted, .notReceiptEligible:
@@ -614,7 +709,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         receiptBuilder: ReceiptBuilder?,
         request: ChatCompletionRequest,
         error: APIError,
-        startedAt: Date
+        startedAt: Date,
+        modelHashSource: ReceiptModelHashSource
     ) throws -> ErrorReceiptHeaderResult {
         guard error.code == "model_not_loaded" else {
             if error.code == "swap_drain_timeout" {
@@ -627,6 +723,12 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         }
         let ttftMs = elapsedMilliseconds(since: startedAt)
         let unixTs = Int64(Date().timeIntervalSince1970)
+        // SPEC-015 §M.2 / §7.6 — error receipts inherit the same
+        // request-start `modelHashSource` a successful receipt would
+        // carry. The error did not change the loaded weights; the
+        // buyer is still entitled to know which weights the provider
+        // had warm at the moment the error fired. An `.ambiguous`
+        // source still refuses here (§M.2.2 defence-in-depth).
         switch try receiptHeaderResult(
             providerID: providerID,
             receiptBuilder: receiptBuilder,
@@ -636,7 +738,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             finishReason: "error",
             ttftMs: ttftMs,
             tokensOut: 0,
-            unixTsSeconds: unixTs
+            unixTsSeconds: unixTs,
+            modelHashSource: modelHashSource
         ) {
         case .issued(let header):
             return .issued(header, ttftMs: ttftMs, unixTs: unixTs)

@@ -1,0 +1,15 @@
+{
+  "description": "v0.3 receipt with model_hash = JSON null (warm-swap-disabled provider, §M.2.3).",
+  "input": {
+    "model_id": "fixture-model",
+    "model_hash": null,
+    "output_content": "answer",
+    "finish_reason": "stop",
+    "ttft_ms": 7,
+    "tokens_out": 2,
+    "unix_ts": 1800000000
+  },
+  "provider_pubkey_seed_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+  "canonical_jcs_sha256_hex": "1db46007812f631a5f430b4166f6cf20482c7bd5997beaa3307d055401523a21",
+  "canonical_jcs_length": 343
+}

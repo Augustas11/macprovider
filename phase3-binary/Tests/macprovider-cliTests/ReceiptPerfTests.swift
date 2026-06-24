@@ -21,7 +21,8 @@ final class ReceiptPerfTests: XCTestCase {
             finishReason: "stop",
             ttftMs: 12,
             tokensOut: 1_024,
-            unixTsSeconds: 1_800_000_000
+            unixTsSeconds: 1_800_000_000,
+            modelHash: nil
         )
 
         for _ in 0..<25 {
@@ -34,7 +35,8 @@ final class ReceiptPerfTests: XCTestCase {
                 finishReason: "stop",
                 ttftMs: 12,
                 tokensOut: 1_024,
-                unixTsSeconds: 1_800_000_000
+                unixTsSeconds: 1_800_000_000,
+                modelHashSource: .warmSwapDisabled
             )
             _ = try builder.build(providerId: "provider-a", input: input)
         }
@@ -49,7 +51,8 @@ final class ReceiptPerfTests: XCTestCase {
                 finishReason: "stop",
                 ttftMs: 12,
                 tokensOut: 1_024,
-                unixTsSeconds: 1_800_000_000
+                unixTsSeconds: 1_800_000_000,
+                modelHashSource: .warmSwapDisabled
             )
         }
         let enabledP95 = try measureP95(iterations: 1_000) {
@@ -62,7 +65,8 @@ final class ReceiptPerfTests: XCTestCase {
                 finishReason: "stop",
                 ttftMs: 12,
                 tokensOut: 1_024,
-                unixTsSeconds: 1_800_000_000
+                unixTsSeconds: 1_800_000_000,
+                modelHashSource: .warmSwapDisabled
             )
         }
         let deltaP95 = max(0, enabledP95 - disabledP95)
