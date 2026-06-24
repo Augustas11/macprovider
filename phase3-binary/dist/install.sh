@@ -342,21 +342,124 @@ estimate_weights_gb_from_name() {
     'BEGIN { gb = p * b; if (gb < 1) gb = 1; printf "%d", gb + 0.5 }'
 }
 
+confirm_model_fit_override() {
+  reason="$1"
+  if [ "$NO_PROMPT" = "1" ]; then
+    die 7 "$reason; refusing non-interactive install"
+  fi
+  log "WARNING: $reason"
+  prompt_yes_no "Proceed anyway? [y/N]" "N" || die 7 "aborted by user"
+}
+
+enforce_model_ram_fit() {
+  id="$1"
+  ram_gb="$2"
+  est_gb="$(estimate_weights_gb_from_name "$id")"
+  if [ -z "$est_gb" ]; then
+    log "WARNING: could not estimate weight size from model name; skipping fit check."
+    return 0
+  fi
+  # Headroom: ~6 GB for macOS (3-4 GB) + Metal + mlx runtime + binary +
+  # KV cache. This matches the existing RAM-tier policy where the 7B (~4 GB)
+  # default targets 16 GB Macs, not 8 GB Macs.
+  comfortable_gb=$((est_gb + 6))
+  if [ "$ram_gb" -ge "$comfortable_gb" ]; then
+    log "Model fits: ~${est_gb} GB weights on ${ram_gb} GB Mac (working set ~${comfortable_gb} GB)."
+    return 0
+  fi
+  if [ "$ram_gb" -ge "$((est_gb + 2))" ]; then
+    confirm_model_fit_override "tight fit — ~${est_gb} GB weights on ${ram_gb} GB Mac; may swap or OOM under load"
+    return 0
+  fi
+  confirm_model_fit_override "~${est_gb} GB weights will not fit on ${ram_gb} GB Mac"
+}
+
+catalog_min_ram_from_body() {
+  catalog_body="$1"
+  model_id="$2"
+  printf "%s" "$catalog_body" | tr '\n\r' '  ' | awk -v id="$model_id" '
+    BEGIN { RS = "}"; }
+    index($0, "\"model_id\"") && index($0, "\"" id "\"") {
+      if (match($0, /"min_ram_gb"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+        value = substr($0, RSTART, RLENGTH)
+        gsub(/[^0-9]/, "", value)
+        print value
+      }
+      exit
+    }
+  '
+}
+
+check_catalog_ram_metadata() {
+  coordinator_base="$1"
+  model_id="$2"
+  ram_gb="$3"
+  if [ "${MACPROVIDER_SKIP_CATALOG_CHECK:-0}" = "1" ]; then
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
+    log "WARNING: curl not found; using built-in model RAM estimates."
+    return 1
+  fi
+
+  poolz_url="$coordinator_base/poolz"
+  body_and_code="$(curl -sSL -m 5 -o - -w '\n__HTTP_STATUS__%{http_code}' "$poolz_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
+  http_code="${body_and_code##*__HTTP_STATUS__}"
+  poolz_body="${body_and_code%__HTTP_STATUS__*}"
+  if [ "$http_code" != "200" ]; then
+    log "WARNING: could not read catalog metadata from $poolz_url (status $http_code); using built-in model RAM estimates."
+    return 1
+  fi
+
+  catalog_id="$(printf "%s" "$poolz_body" | sed -n 's/.*"catalog_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  if [ -z "$catalog_id" ]; then
+    log "WARNING: /poolz did not include catalog_id; using built-in model RAM estimates."
+    return 1
+  fi
+
+  catalog_url="$coordinator_base/catalog/$catalog_id"
+  catalog_body="$(curl -fsSL -m 5 "$catalog_url" 2>/dev/null || true)"
+  if [ -z "$catalog_body" ]; then
+    log "WARNING: could not read signed catalog $catalog_url; using built-in model RAM estimates."
+    return 1
+  fi
+
+  min_ram_gb="$(catalog_min_ram_from_body "$catalog_body" "$model_id")"
+  if [ -n "$min_ram_gb" ]; then
+    if [ "$ram_gb" -lt "$min_ram_gb" ]; then
+      confirm_model_fit_override "catalog $catalog_id requires ${min_ram_gb} GB RAM for $model_id, but this Mac has ${ram_gb} GB"
+    else
+      log "Catalog fit: $model_id requires ${min_ram_gb} GB RAM; this Mac has ${ram_gb} GB."
+    fi
+    return 0
+  fi
+  log "WARNING: catalog $catalog_id has no min_ram_gb metadata; using built-in model RAM estimates."
+  return 1
+}
+
 # SPEC-003 v0.9 FR-D2: pre-install validation of a user-supplied HuggingFace
 # model id. Hard-blocks on inaccessible (401/403/404 — HF returns 401 for both
 # gated and nonexistent repos) and on non-MLX repos. Warns and prompts on
 # tight/over-RAM fit; user may override. Network errors downgrade to a
-# "skipped" warning so a flaky HF doesn't brick installs. All output goes to
-# stderr — caller's stdout is reserved for the chosen id.
+# "skipped" warning so a flaky HF doesn't brick installs, but the local
+# name-based RAM-fit guard still runs. All output goes to stderr — caller's
+# stdout is reserved for the chosen id.
 hf_check_model() {
   id="$1"
   ram_gb="$2"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "Dry run: would check model $id on HuggingFace."
+    enforce_model_ram_fit "$id" "$ram_gb"
+    return 0
+  fi
   if [ "${MACPROVIDER_SKIP_HF_CHECK:-0}" = "1" ]; then
     log "Skipping HuggingFace check (MACPROVIDER_SKIP_HF_CHECK=1)."
+    enforce_model_ram_fit "$id" "$ram_gb"
     return 0
   fi
   if ! command -v curl >/dev/null 2>&1; then
     log "curl not found; skipping HuggingFace check."
+    enforce_model_ram_fit "$id" "$ram_gb"
     return 0
   fi
   log "Checking model $id on HuggingFace…"
@@ -371,11 +474,13 @@ hf_check_model() {
       die 7 "model $id is not accessible on HuggingFace (private, gated, or doesn't exist). For a gated repo, use 'macprovider-cli models switch' post-install with HF_TOKEN set."
       ;;
     network_error)
-      log "WARNING: could not reach HuggingFace API; skipping fit check."
+      log "WARNING: could not reach HuggingFace API; using local RAM-fit estimate only."
+      enforce_model_ram_fit "$id" "$ram_gb"
       return 0
       ;;
     *)
-      log "WARNING: unexpected HuggingFace API status $http_code; skipping fit check."
+      log "WARNING: unexpected HuggingFace API status $http_code; using local RAM-fit estimate only."
+      enforce_model_ram_fit "$id" "$ram_gb"
       return 0
       ;;
   esac
@@ -400,34 +505,18 @@ hf_check_model() {
     die 7 "model $id is not an MLX repo. macprovider runs MLX-format models only. Pick an mlx-community/* variant or convert with mlx_lm.convert."
   fi
 
-  est_gb="$(estimate_weights_gb_from_name "$id")"
-  if [ -z "$est_gb" ]; then
-    log "WARNING: could not estimate weight size from model name; skipping fit check."
-    return 0
-  fi
-  # Headroom: ~6 GB for macOS (3-4 GB) + Metal + mlx runtime + binary +
-  # KV cache. This matches the existing RAM-tier policy where the 7B (~4 GB)
-  # default targets 16 GB Macs, not 8 GB Macs.
-  comfortable_gb=$((est_gb + 6))
-  if [ "$ram_gb" -ge "$comfortable_gb" ]; then
-    log "Model fits: ~${est_gb} GB weights on ${ram_gb} GB Mac (working set ~${comfortable_gb} GB)."
-    return 0
-  fi
-  if [ "$ram_gb" -ge "$((est_gb + 2))" ]; then
-    log "WARNING: tight fit — ~${est_gb} GB weights on ${ram_gb} GB Mac; may swap or OOM under load."
-    prompt_yes_no "Proceed anyway? [y/N]" "N" || die 7 "aborted by user"
-    return 0
-  fi
-  log "WARNING: ~${est_gb} GB weights will not fit on ${ram_gb} GB Mac."
-  prompt_yes_no "Proceed anyway? [y/N]" "N" || die 7 "aborted by user"
+  enforce_model_ram_fit "$id" "$ram_gb"
 }
 
 choose_model() {
   ram_gb="$1"
   if [ -n "${MACPROVIDER_MODEL:-}" ]; then
-    # Env-var override is an explicit power-user path; validate format only,
-    # skip interactive HF prompts so CI / NO_PROMPT flows don't deadlock.
+    # Env-var override is an explicit power-user path, but it must still pass
+    # the local RAM-fit guard. Keep the previous reachability behavior for
+    # private/gated repos; NO_PROMPT oversized models fail loud with exit 7
+    # instead of silently downloading multi-GB weights that cannot fit.
     validate_hf_id "$MACPROVIDER_MODEL"
+    enforce_model_ram_fit "$MACPROVIDER_MODEL" "$ram_gb" >&2
     printf "%s" "$MACPROVIDER_MODEL"
     return
   fi
@@ -923,6 +1012,12 @@ print_pid() {
   launchctl list 2>/dev/null | awk '/live.streamvc.macprovider/ {print $1; exit}'
 }
 
+print_autotune_handoff() {
+  provider_id="$1"
+  printf "To tune throughput / latency parameters for your specific Mac, run:\n"
+  printf "  macprovider-cli autotune --provider-id %s\n" "$provider_id"
+}
+
 main() {
   detect_platform
   for tool in curl tar shasum grep sed awk date hostname mktemp openssl find; do
@@ -949,6 +1044,8 @@ main() {
     check_path_hint
     exit 0
   fi
+
+  check_catalog_ram_metadata "$coordinator_base" "$model" "$ram_gb" || true
 
   tag="$(latest_release_tag)"
   log "Latest release: $tag"
@@ -982,6 +1079,7 @@ main() {
   log "PID: ${pid:-unknown}"
   log "Logs: tail -f $LOG_DIR/macprovider.out.log $LOG_DIR/macprovider.err.log"
   log "Coordinator pool check: $coordinator_base/v1/pool/check?provider_id=$(urlencode "$provider_id")"
+  print_autotune_handoff "$provider_id"
   log "Uninstall: bash <(curl -fsSL https://get.streamvc.live/uninstall.sh)"
 }
 
