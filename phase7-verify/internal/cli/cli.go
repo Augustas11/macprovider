@@ -95,6 +95,12 @@ func run(args []string, stdin io.Reader, stdout io.Writer, stderr io.Writer, get
 		}
 	}()
 
+	if cfg.now == nil {
+		if override := envClockOverride(getenv); override != nil {
+			cfg.now = override
+		}
+	}
+
 	opts, err := parseOptions(args, stdout, stderr, getenv)
 	if err != nil {
 		writeErr(stderr, false, err)
