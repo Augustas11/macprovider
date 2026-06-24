@@ -5,13 +5,21 @@ The release workflow (`.github/workflows/release.yml`) signs the
 notarizes via `xcrun notarytool` so freshly-installed binaries pass
 macOS 26.3.1+ launchd's tightened AMFI policy.
 
-The current release artifact is a `.tar.gz` containing a standalone
+The compatibility release artifact is a `.tar.gz` containing a standalone
 Mach-O executable. Apple notarization accepts the executable when it is
 submitted inside a transient zip, but `xcrun stapler` cannot attach a
-notarization ticket directly to that raw executable format. For this
+notarization ticket directly to that raw executable format. For that
 artifact shape, the release gate is `notarytool submit --wait` returning
-`Accepted`. If releases move to a `.pkg`, `.dmg`, or `.app` bundle, add
-stapling for that container.
+`Accepted`.
+
+New releases can also publish a signed flat `.pkg` delivery container.
+The package carries the same `macprovider-cli` payload as the tarball,
+is signed with a Developer ID Installer certificate, is submitted to
+notarytool directly, and is stapled after Apple accepts it. `install.sh`
+prefers this package when present and falls back to the tarball for older
+releases. The package is not a standalone GUI installer; its preinstall
+script fails direct Installer.app installs so operators do not bypass
+`install.sh`'s user-level config, launchd, and support-file setup.
 
 The signing step is **conditional on operator-supplied secrets**. If
 `APPLE_DEVELOPER_ID_CERT_P12_BASE64` is empty, the step emits a
@@ -71,34 +79,45 @@ Keychain Access → Certificates → [find "Developer ID Application: <name>"]
 → set a password you will paste into APPLE_DEVELOPER_ID_CERT_PASSWORD
 ```
 
-### 3. Generate an app-specific password for notarytool
+### 3. Generate a Developer ID Installer certificate for `.pkg` releases
+
+Repeat the CSR upload flow from step 2, but choose
+**Developer ID Installer**. Download the resulting `.cer`, install it in
+Keychain Access, then export it as `.p12`.
+
+Use a separate export password; it becomes
+`APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD`.
+
+### 4. Generate an app-specific password for notarytool
 
 At <https://appleid.apple.com/account/manage> → App-Specific Passwords →
 Generate. This is **separate** from your Apple ID password — `notarytool`
 will not accept the main password. Label it "macprovider notarytool".
 
-### 4. Find your Team ID
+### 5. Find your Team ID
 
 <https://developer.apple.com/account> → Membership → Team ID. Looks
 like a 10-character alphanumeric string.
 
-### 5. Populate GitHub Secrets
+### 6. Populate GitHub Secrets
 
 At <https://github.com/Augustas11/macprovider/settings/secrets/actions>,
 add these repository secrets:
 
 | Secret name | Value |
 |---|---|
-| `APPLE_DEVELOPER_ID_CERT_P12_BASE64` | `base64 -i path/to/cert.p12 \| pbcopy` |
-| `APPLE_DEVELOPER_ID_CERT_PASSWORD` | The .p12 export password from step 2 |
+| `APPLE_DEVELOPER_ID_CERT_P12_BASE64` | `base64 -i path/to/application-cert.p12 \| pbcopy` |
+| `APPLE_DEVELOPER_ID_CERT_PASSWORD` | The Application .p12 export password from step 2 |
+| `APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64` | `base64 -i path/to/installer-cert.p12 \| pbcopy` |
+| `APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD` | The Installer .p12 export password from step 3 |
 | `APPLE_NOTARY_APPLE_ID` | The enrolled Apple ID email |
-| `APPLE_NOTARY_PASSWORD` | The app-specific password from step 3 |
-| `APPLE_NOTARY_TEAM_ID` | The Team ID from step 4 |
+| `APPLE_NOTARY_PASSWORD` | The app-specific password from step 4 |
+| `APPLE_NOTARY_TEAM_ID` | The Team ID from step 5 |
 
 The existing `MACPROVIDER_RELEASE_SIGNING_KEY_PEM` secret
 (checksums.txt signing) is unrelated and stays as-is.
 
-### 6. Cut a release and verify
+### 7. Cut a release and verify
 
 Push a new tag (e.g. `v1.3.2`). The workflow's "Sign + notarize binary"
 step now activates. Expected duration: 1-15 minutes for notarization,
@@ -108,7 +127,20 @@ on top of the existing ~5-10 minute build. The step:
 2. Codesigns the binary with `--options runtime --timestamp`
 3. Notarizes via `xcrun notarytool submit --wait`
 4. Re-tars with the signed, notarization-accepted binary
-5. Deletes the transient keychain
+5. Builds a signed flat `.pkg` when the Installer certificate secrets exist
+6. Notarizes and staples the `.pkg`
+7. Deletes the transient keychain
+
+Expected release assets:
+
+- `macprovider-cli-vX.Y.Z-darwin-arm64.tar.gz` — compatibility artifact
+- `macprovider-cli-vX.Y.Z-darwin-arm64.pkg` — preferred stapled delivery
+  container for `install.sh`
+- `checksums.txt`
+- `checksums.txt.sig`
+
+The tarball remains the canonical `macprovider-cli update` artifact until
+the self-update implementation explicitly learns the package path.
 
 Verify on a macOS 26.3.1+ Mac:
 
@@ -129,8 +161,11 @@ Common follow-up issues:
 
 - **`xcrun stapler` exits with Error 73** — expected if someone tries
   to staple `macprovider-cli` directly. Raw standalone executables are
-  not a supported stapler target. Use a signed `.pkg`, `.dmg`, or
-  executable bundle if offline stapling becomes required.
+  not a supported stapler target. Use the signed `.pkg` artifact for a
+  stapled release container.
+- **`.pkg` asset is missing** — the release workflow did not find
+  `APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64` and skipped package
+  creation. The tarball remains published for compatibility.
 - **"Notarization request was not found"** — `notarytool submit` was
   invoked without `--wait` (or it timed out), so notarization was not
   accepted before packaging. Re-trigger the workflow.

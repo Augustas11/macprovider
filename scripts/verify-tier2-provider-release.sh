@@ -112,6 +112,50 @@ checksum_for_asset() {
   awk -v asset="$asset" '$2 == asset { print $1 }' "$checksums" | head -1
 }
 
+validate_payload_entries() {
+  local payload_dir="$1"
+  local label="$2"
+  local entries
+  local entry normalized_entry has_binary=0
+
+  entries="$(cd "$payload_dir" && find . -mindepth 1 -print)" || die "failed to list $label"
+  [ -n "$entries" ] || die "$label is empty"
+  while IFS= read -r entry; do
+    normalized_entry="$entry"
+    while :; do
+      case "$normalized_entry" in
+        ./*) normalized_entry="${normalized_entry#./}" ;;
+        *) break ;;
+      esac
+    done
+    case "$normalized_entry" in
+      ""|.) continue ;;
+    esac
+    case "$normalized_entry" in
+      /*|*"/../"*|../*|*/..|..)
+        die "unsafe $label path: $entry"
+        ;;
+      macprovider-cli)
+        has_binary=1
+        ;;
+      THIRD-PARTY-NOTICES.txt)
+        ;;
+      *.bundle|*.bundle/*)
+        ;;
+      *)
+        die "unexpected $label member: $entry"
+        ;;
+    esac
+  done <<EOF
+$entries
+EOF
+
+  [ "$has_binary" -eq 1 ] || die "$label does not contain macprovider-cli"
+  if find "$payload_dir" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
+    die "$label contains unsafe link or device members"
+  fi
+}
+
 tmpdir=""
 temp_parent=""
 cleanup() {
@@ -127,6 +171,8 @@ trap cleanup EXIT
 require_command "$CURL_BIN"
 require_command "$OPENSSL_BIN"
 require_command awk
+require_command find
+require_command tar
 require_file "$INSTALL_SH"
 require_file "$CHECKER"
 
@@ -157,6 +203,7 @@ download_file() {
 }
 
 asset="macprovider-cli-${RELEASE_TAG}-darwin-arm64.tar.gz"
+pkg_asset="macprovider-cli-${RELEASE_TAG}-darwin-arm64.pkg"
 base="https://github.com/${GITHUB_REPO}/releases/download/${RELEASE_TAG}"
 
 temp_parent="${TMPDIR:-/tmp}"
@@ -165,6 +212,7 @@ temp_parent="$(cd "$temp_parent" && pwd -P)"
 tmpdir="$(mktemp -d "$temp_parent/tier2-provider-release.XXXXXX")"
 
 tarball_path="$tmpdir/$asset"
+pkg_path="$tmpdir/$pkg_asset"
 checksums_path="$tmpdir/checksums.txt"
 checksums_sig_path="$tmpdir/checksums.txt.sig"
 public_key_path="$tmpdir/release-signing-public.pem"
@@ -193,6 +241,49 @@ expected_sha="$(checksum_for_asset "$checksums_path" "$asset")"
 actual_sha="$(sha256_file "$tarball_path")"
 [ "$actual_sha" = "$expected_sha" ] || die "provider artifact sha256 mismatch: got $actual_sha want $expected_sha"
 log "provider artifact sha256 verified: $actual_sha"
+
+pkg_expected_sha="$(checksum_for_asset "$checksums_path" "$pkg_asset")"
+if [ -n "$pkg_expected_sha" ]; then
+  download_file "$base/$pkg_asset" "$pkg_path" "$pkg_asset"
+  pkg_actual_sha="$(sha256_file "$pkg_path")"
+  [ "$pkg_actual_sha" = "$pkg_expected_sha" ] || die "provider package sha256 mismatch: got $pkg_actual_sha want $pkg_expected_sha"
+  log "provider package sha256 verified: $pkg_actual_sha"
+  if command -v spctl >/dev/null 2>&1; then
+    spctl -a -vv -t install "$pkg_path" || die "provider package failed Gatekeeper assessment"
+    log "provider package Gatekeeper assessment passed"
+  fi
+  if command -v xcrun >/dev/null 2>&1; then
+    xcrun stapler validate "$pkg_path" || die "provider package stapler validation failed"
+    log "provider package stapler validation passed"
+  fi
+
+  require_command pkgutil
+  tar_payload_dir="$tmpdir/tar-payload"
+  pkg_expand_dir="$tmpdir/pkg-expanded"
+  pkg_payload_tar="$tmpdir/pkg-payload.tar.gz"
+  mkdir -p "$tar_payload_dir"
+  tar -xzf "$tarball_path" -C "$tar_payload_dir" macprovider-cli
+  pkgutil --expand-full "$pkg_path" "$pkg_expand_dir" || die "failed to expand provider package"
+  [ -x "$pkg_expand_dir/Payload/macprovider-cli" ] || die "provider package payload lacks executable macprovider-cli"
+  validate_payload_entries "$pkg_expand_dir/Payload" "provider package payload"
+
+  tar_binary_sha="$(sha256_file "$tar_payload_dir/macprovider-cli")"
+  pkg_binary_sha="$(sha256_file "$pkg_expand_dir/Payload/macprovider-cli")"
+  [ "$pkg_binary_sha" = "$tar_binary_sha" ] || die "package binary sha256 differs from tarball binary"
+  log "provider package binary matches tarball binary: $pkg_binary_sha"
+
+  pkg_version="$("$pkg_expand_dir/Payload/macprovider-cli" --version)"
+  [ "$pkg_version" = "$PROVIDER_VERSION" ] || die "provider package version mismatch: got $pkg_version want $PROVIDER_VERSION"
+  log "provider package version ok: $pkg_version"
+
+  tar czf "$pkg_payload_tar" -C "$pkg_expand_dir/Payload" .
+  PROVIDER_ARTIFACT="$pkg_payload_tar" \
+    PROVIDER_VERSION="$PROVIDER_VERSION" \
+    PROVIDER_SHA256="" \
+    "$CHECKER"
+else
+  log "no package entry in checksums.txt; tarball-only compatibility release"
+fi
 
 PROVIDER_ARTIFACT="$tarball_path" \
   PROVIDER_VERSION="$PROVIDER_VERSION" \
