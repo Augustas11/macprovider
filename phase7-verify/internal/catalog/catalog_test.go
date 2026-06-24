@@ -97,6 +97,32 @@ func TestVerifyRejectsLowercaseAlg(t *testing.T) {
 	}
 }
 
+// SPEC-015 §M.3.2.1 — even on the ed25519.Verify-returned-false path,
+// the typed ErrSignatureInvalid MUST carry ObservedAlg so callers can
+// populate details.alg per the v0.3 schema contract.
+func TestVerifyTamperedSignatureCarriesObservedAlg(t *testing.T) {
+	raw, pub := signFixture(t, "tc", time.Now().Add(time.Hour), []ModelEntry{{
+		ArtifactKind: "mlx_weight_file",
+		HashScope:    "primary_weight_file",
+		ModelID:      "model-a",
+		SHA256:       validHash,
+		Source:       "operator-curated",
+	}})
+	tampered := mutateSignatureSig(t, raw)
+	c, err := Parse(tampered)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	err = Verify(c, pub, time.Now())
+	var sigErr *ErrSignatureInvalid
+	if !errors.As(err, &sigErr) {
+		t.Fatalf("Verify err = %v, want ErrSignatureInvalid", err)
+	}
+	if sigErr.ObservedAlg != "Ed25519" {
+		t.Fatalf("ObservedAlg = %q, want %q", sigErr.ObservedAlg, "Ed25519")
+	}
+}
+
 func TestVerifyRejectsTamperedSignature(t *testing.T) {
 	raw, pub := signFixture(t, "tc", time.Now().Add(time.Hour), []ModelEntry{{
 		ArtifactKind: "mlx_weight_file",

@@ -4,6 +4,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -52,6 +53,12 @@ type options struct {
 	quiet       bool
 	coordinator string
 	explain     bool
+	// SPEC-015 v0.3 §M.3.1 catalog flags.
+	catalog           string // path to local signed catalog
+	catalogURL        string // remote catalog URL
+	catalogPubkey     string // base64.RawURLEncoding catalog pubkey
+	catalogPubkeyURL  string // remote pubkey URL
+	requireModelHash  bool   // §M.3.1.2 fail-closed on null model_hash
 }
 
 type runConfig struct {
@@ -148,6 +155,12 @@ func parseOptions(args []string, stdout, stderr io.Writer, getenv func(string) s
 	fs.BoolVar(&opts.quiet, "quiet", false, "suppress stderr diagnostics and warnings")
 	fs.StringVar(&opts.coordinator, "coordinator", opts.coordinator, "coordinator host for /v1/receipt-keys")
 	fs.BoolVar(&opts.explain, "explain", false, "print SPEC-015 trust-boundary explanation after valid results")
+	// SPEC-015 v0.3 §M.3.1 catalog flags.
+	fs.StringVar(&opts.catalog, "catalog", "", "path to local signed catalog file (mutually exclusive with --catalog-url)")
+	fs.StringVar(&opts.catalogURL, "catalog-url", "", "URL to fetch signed catalog (mutually exclusive with --catalog; incompatible with --offline)")
+	fs.StringVar(&opts.catalogPubkey, "catalog-pubkey", "", "base64.RawURLEncoding (43 ASCII chars) ed25519 catalog signing pubkey")
+	fs.StringVar(&opts.catalogPubkeyURL, "catalog-pubkey-url", "", "URL to fetch the catalog signing pubkey (incompatible with --offline)")
+	fs.BoolVar(&opts.requireModelHash, "require-model-hash", false, "§M.3.1.2: fail-closed (exit 1) when receipt model_hash is null")
 	fs.Usage = func() { printUsage(stdout) }
 
 	if err := fs.Parse(args); err != nil {
@@ -229,15 +242,73 @@ func optionsToVerifyArgs(opts options, stdin io.Reader, getenv func(string) stri
 	}
 	input.ProviderID = resolvedProviderID
 
+	catalogOpts, err := buildCatalogOpts(opts)
+	if err != nil {
+		return verify.VerifyInput{}, verify.VerifyOpts{}, err
+	}
+
 	verifyOpts := verify.VerifyOpts{
-		Offline:         opts.offline,
-		Quiet:           opts.quiet,
-		CoordinatorHost: coordinatorHost,
-		Cache:           c,
-		Now:             cfg.now,
-		HTTPClient:      cfg.httpClient,
+		Offline:          opts.offline,
+		Quiet:            opts.quiet,
+		CoordinatorHost:  coordinatorHost,
+		Cache:            c,
+		Now:              cfg.now,
+		HTTPClient:       cfg.httpClient,
+		Catalog:          catalogOpts,
+		RequireModelHash: opts.requireModelHash,
 	}
 	return input, verifyOpts, nil
+}
+
+// SPEC-015 §M.3.1 flag-combination validation. Returns the
+// catalog options bundle plus any usage error.
+func buildCatalogOpts(opts options) (verify.CatalogOpts, error) {
+	var co verify.CatalogOpts
+	hasCatalog := opts.catalog != "" || opts.catalogURL != ""
+	hasPubkey := opts.catalogPubkey != "" || opts.catalogPubkeyURL != ""
+
+	// Mutually-exclusive sources.
+	if opts.catalog != "" && opts.catalogURL != "" {
+		return co, &cliUsageError{err: errors.New("--catalog and --catalog-url are mutually exclusive")}
+	}
+	if opts.catalogPubkey != "" && opts.catalogPubkeyURL != "" {
+		return co, &cliUsageError{err: errors.New("--catalog-pubkey and --catalog-pubkey-url are mutually exclusive")}
+	}
+
+	// SPEC-015 §M.3.1 — catalog without pubkey (or vice versa) is exit 64.
+	if hasCatalog && !hasPubkey {
+		return co, &cliUsageError{err: errors.New("--catalog/--catalog-url requires --catalog-pubkey or --catalog-pubkey-url")}
+	}
+	if hasPubkey && !hasCatalog {
+		return co, &cliUsageError{err: errors.New("--catalog-pubkey/--catalog-pubkey-url requires --catalog or --catalog-url")}
+	}
+
+	// SPEC-015 §M.3.1.1 — --offline incompatible with URL-fetch flags.
+	if opts.offline && (opts.catalogURL != "" || opts.catalogPubkeyURL != "") {
+		return co, &cliUsageError{err: errors.New("--catalog-url and --catalog-pubkey-url are incompatible with --offline")}
+	}
+
+	if opts.catalog != "" {
+		co.Path = opts.catalog
+	}
+	if opts.catalogURL != "" {
+		co.URL = opts.catalogURL
+	}
+	if opts.catalogPubkey != "" {
+		decoded, err := base64.RawURLEncoding.DecodeString(opts.catalogPubkey)
+		if err != nil {
+			return co, &cliUsageError{err: fmt.Errorf("--catalog-pubkey not base64.RawURLEncoding: %v", err)}
+		}
+		if len(decoded) != ed25519.PublicKeySize {
+			return co, &cliUsageError{err: fmt.Errorf("--catalog-pubkey decoded length %d, want %d", len(decoded), ed25519.PublicKeySize)}
+		}
+		co.Pubkey = decoded
+	}
+	if opts.catalogPubkeyURL != "" {
+		co.PubkeyURL = opts.catalogPubkeyURL
+	}
+	co.Enabled = hasCatalog && hasPubkey
+	return co, nil
 }
 
 func readBundle(path string, stdin io.Reader) (*bundleInput, error) {
@@ -454,6 +525,13 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  --quiet                suppress stderr diagnostics and warnings")
 	fmt.Fprintln(w, "  --coordinator <host>   coordinator host for /v1/receipt-keys")
 	fmt.Fprintln(w, "  --explain              print SPEC-015 trust-boundary explanation after valid results")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "SPEC-015 v0.3 catalog flags (§M.3.1 / §M.3.1.2):")
+	fmt.Fprintln(w, "  --catalog <path>             local signed catalog file (mutually exclusive with --catalog-url)")
+	fmt.Fprintln(w, "  --catalog-url <url>          URL to fetch signed catalog (incompatible with --offline)")
+	fmt.Fprintln(w, "  --catalog-pubkey <b64url>    base64url-unpadded ed25519 catalog signing pubkey (43 ASCII chars)")
+	fmt.Fprintln(w, "  --catalog-pubkey-url <url>   URL to fetch the catalog signing pubkey (incompatible with --offline)")
+	fmt.Fprintln(w, "  --require-model-hash         fail-closed (exit 1) when receipt model_hash is null (§M.3.1.2)")
 }
 
 const explainText = `A ` + "`valid`" + ` result from ` + "`macprovider verify`" + ` proves **exactly this**:
@@ -522,6 +600,25 @@ scope visibly — e.g. by including the phrase ` + "`signed by m1-anon`" + `
 rather than ` + "`verified m1-anon`" + `. The ` + "`--explain`" + ` flag of §10.4.2
 exists precisely to make this trust boundary unmissable to a
 buyer who is about to act on a ` + "`valid`" + ` result.
+
+**SPEC-015 v0.3 catalog-attested ` + "`valid`" + ` results.** When ` + "`macprovider verify`" + `
+runs with ` + "`--catalog`" + ` (or ` + "`--catalog-url`" + `) and the receipt carries a
+non-null ` + "`model_hash`" + `, a ` + "`valid`" + ` result with ` + "`model_hash_verified: true`" + ` ALSO
+attests that the loaded weights matched the catalog's expected SHA-256 for the
+requested ` + "`model_id`" + `. This closes the §10.6 "DOES NOT prove that the
+response was generated by the model named in ` + "`model_id`" + `" disclaimer for v0.3
+catalog-valid results. Subject to: the buyer trusting the catalog signing
+pubkey (which is the new trust root v0.3 verifier requires); the catalog being
+non-expired (60-second skew grace per §M.3.2 step 5); and the operator not
+substituting both catalog AND catalog pubkey simultaneously (§M.3.3 inherits
+§8.3 operator-mutability). The other §10.6 disclaimers (timestamp honesty,
+no-other-observer, no-uniqueness, replay-resistance) are PRESERVED.
+
+When ` + "`model_hash_verified`" + ` is ` + "`null`" + `, the catalog check did NOT run
+(no catalog flags supplied, receipt is legacy v0.1/v0.2, or receipt
+` + "`model_hash`" + ` is null per §M.2.3 warm-swap-disabled providers). In that case
+the v0.2 trust boundary above applies in full and the v0.3 model-hash claim
+is not made.
 
 When you supply ` + "`--pubkey`" + ` AND a custom ` + "`--coordinator`" + `, the explicit
 pubkey is the trust root regardless of what the coordinator publishes. A

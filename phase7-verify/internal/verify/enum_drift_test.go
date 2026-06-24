@@ -19,6 +19,17 @@ func TestReasonEnumBijection(t *testing.T) {
 		"pubkey_unresolvable",
 		"provider_id_not_in_pool",
 		"cache_stale_and_live_unreachable",
+		// SPEC-015 v0.3 §M.3.2.1 — new reason enum.
+		"model_hash_mismatch",
+		"model_hash_required",
+		"model_id_not_in_catalog",
+		"catalog_signature_invalid",
+		"catalog_unreachable",
+		"catalog_expired",
+		"catalog_format_invalid",
+		"unknown_receipt_version",
+		"extra_field",
+		"missing_field",
 	}
 	expected := make(map[string]bool, len(expectedReasons))
 	for _, reason := range expectedReasons {
@@ -83,6 +94,16 @@ func TestReasonEnumBijection(t *testing.T) {
 		reasonPubkeyUnresolvable,
 		reasonProviderIDNotInPool,
 		reasonCacheStaleAndLiveUnreachable,
+		reasonModelHashMismatch,
+		reasonModelHashRequired,
+		reasonModelIDNotInCatalog,
+		reasonCatalogSignatureInvalid,
+		reasonCatalogUnreachable,
+		reasonCatalogExpired,
+		reasonCatalogFormatInvalid,
+		reasonUnknownReceiptVersion,
+		reasonExtraField,
+		reasonMissingField,
 	}
 	for _, reason := range verifyReasonConstants {
 		if !expected[reason] {

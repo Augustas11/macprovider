@@ -194,15 +194,22 @@ func Verify(c *Catalog, pubkey ed25519.PublicKey, now time.Time) error {
 
 	if f.Signature.Alg != signatureAlg {
 		return &ErrSignatureInvalid{
-			Reason: fmt.Sprintf("signature.alg=%q, want %q", f.Signature.Alg, signatureAlg),
+			Reason:      fmt.Sprintf("signature.alg=%q, want %q", f.Signature.Alg, signatureAlg),
+			ObservedAlg: f.Signature.Alg,
 		}
 	}
 	sig, err := base64.RawURLEncoding.DecodeString(strings.TrimSpace(f.Signature.Sig))
 	if err != nil {
-		return &ErrSignatureInvalid{Reason: fmt.Sprintf("signature.sig base64url decode: %v", err)}
+		return &ErrSignatureInvalid{
+			Reason:      fmt.Sprintf("signature.sig base64url decode: %v", err),
+			ObservedAlg: f.Signature.Alg,
+		}
 	}
 	if len(sig) != ed25519.SignatureSize {
-		return &ErrSignatureInvalid{Reason: fmt.Sprintf("signature.sig length=%d, want %d", len(sig), ed25519.SignatureSize)}
+		return &ErrSignatureInvalid{
+			Reason:      fmt.Sprintf("signature.sig length=%d, want %d", len(sig), ed25519.SignatureSize),
+			ObservedAlg: f.Signature.Alg,
+		}
 	}
 
 	body := canonicalBody{
@@ -217,7 +224,10 @@ func Verify(c *Catalog, pubkey ed25519.PublicKey, now time.Time) error {
 		return fmt.Errorf("catalog: canonical body marshal: %w", err)
 	}
 	if !ed25519.Verify(pubkey, canonical, sig) {
-		return &ErrSignatureInvalid{Reason: "ed25519.Verify returned false"}
+		return &ErrSignatureInvalid{
+			Reason:      "ed25519.Verify returned false",
+			ObservedAlg: f.Signature.Alg,
+		}
 	}
 
 	if now.After(c.ExpiresAt.Add(expiryGrace)) {
@@ -262,8 +272,14 @@ func decodeFile(data []byte) (File, error) {
 
 // ErrSignatureInvalid is returned by Verify when the catalog's
 // signature does not validate or the algorithm string is wrong.
+//
+// ObservedAlg carries the catalog's `signature.alg` value verbatim so
+// SPEC-015 §M.3.2.1 `details.alg` can be populated by callers without
+// re-parsing the catalog. Empty when not applicable (e.g. signature
+// length / decode failures unrelated to the alg field).
 type ErrSignatureInvalid struct {
-	Reason string
+	Reason      string
+	ObservedAlg string
 }
 
 func (e *ErrSignatureInvalid) Error() string {
