@@ -35,14 +35,17 @@ func TestConstants(t *testing.T) {
 	}
 }
 
-// TestStep10FinalConstants pins the exact Step 10 final-acceptance values per
-// the IMPL prompt. BinaryVersion is the verifier release version; MaxSPECVersion
-// stays pinned to the locked SPEC-015 v0.2.4 compatibility ceiling.
-func TestStep10FinalConstants(t *testing.T) {
-	if BinaryVersion != "1.0.0" {
-		t.Fatalf("BinaryVersion = %q, want %q (Step 10 final acceptance pin per BUILD prompt)", BinaryVersion, "1.0.0")
+// TestReleaseConstants pins the verifier release values. Bump this
+// AND the constants in version.go together when cutting a new release;
+// the pin guards against accidental version drift during a release PR.
+//
+// Current pin: v1.1.0 / SPEC-015 v0.3.3 (Entry 85 ship). v1.0.0 was
+// the previous floor (Step 10 final acceptance, SPEC v0.2.4).
+func TestReleaseConstants(t *testing.T) {
+	if BinaryVersion != "1.1.0" {
+		t.Fatalf("BinaryVersion = %q, want %q (v0.3 IMPL ship pin)", BinaryVersion, "1.1.0")
 	}
-	if MaxSPECVersion != "0.2.4" {
-		t.Fatalf("MaxSPECVersion = %q, want %q (matches LOCKED SPEC-015 v0.2.4)", MaxSPECVersion, "0.2.4")
+	if MaxSPECVersion != "0.3.3" {
+		t.Fatalf("MaxSPECVersion = %q, want %q (matches LOCKED SPEC-015 v0.3.3)", MaxSPECVersion, "0.3.3")
 	}
 }
