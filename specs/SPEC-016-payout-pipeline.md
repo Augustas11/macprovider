@@ -1,16 +1,17 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.9 (2026-06-25, draft — round-10 codex audit
-fix pass: 0 CRIT + 3 MAJOR + 5 MED + 7 LOW absorbed. Codex
-round-10 verified all 9 round-9 fixes landed clean and
-surfaced 15 new findings (defense-in-depth + schema
-specificity + edge cases). v0.1.9 absorbs all 15. Audit
-history: round-1 1/5, round-2 5/12/10, round-3 3/9/8,
-round-4 2/6/13, round-5 1/2/6, round-6 0/5/9, round-7 0/3/7
-(Claude lenses); round-8 2/2/7 (Claude lenses) deferred
-most findings, applied 3 convergent; round-9 2/5/2 (codex)
-all absorbed in v0.1.8; round-10 0/3/5/7 (codex) all
-absorbed in v0.1.9. See git log for full per-round detail.)
+**Version:** 0.1.10 (2026-06-25, draft — round-11 codex
+audit fix pass: 0 CRIT + 2 MAJOR + 2 MED absorbed; 4 LOW
+deferred to v0.1.11/v0.2 per user-driven scope decision.
+Codex round-11 verified all 15 round-10 fixes landed
+clean. Audit history: round-1 1/5, round-2 5/12/10,
+round-3 3/9/8, round-4 2/6/13, round-5 1/2/6, round-6
+0/5/9, round-7 0/3/7 (Claude lenses); round-8 2/2/7
+(Claude lenses) deferred most, applied 3 convergent;
+round-9 2/5/2 (codex) all absorbed in v0.1.8; round-10
+0/3/5/7 (codex) all absorbed in v0.1.9; round-11 0/2/2/4
+(codex) MAJORs+MEDs absorbed in v0.1.10, LOWs deferred.
+See git log for full per-round detail.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -25,6 +26,133 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.10 (2026-06-25, draft — round-11 codex audit fix
+pass, MAJORs+MEDs absorbed, 4 LOWs deferred):**
+
+Codex round-11 verified all 15 round-10 fixes landed clean
+and surfaced 8 new findings: 0 CRIT + 2 MAJOR + 2 MED + 4
+LOW. User scoped v0.1.10 to MAJORs+MEDs only (4 of 8); the
+4 LOWs (event-name correction in §4.3 self-fence, reaper
+CAS missing RETURNING id, §4.8 vs §4.8a/b section ordering,
+one stale step-5 → step-6 reference) are filed for v0.1.11
+or v0.2 cleanup. Codex explicitly verified two round-11
+prompt hunches as non-issues: no SQLite deadlock between
+the §4.8b lease and §4.8a runtime_flags BEGIN IMMEDIATE
+txns (SQLite's single writer-lock serializes rather than
+deadlocks), and no §4.7 observed-snapshot atomicity gap
+(population at INSERT time + immutable use is normative).
+
+MAJOR (closed):
+
+- **codex MAJOR-1 §5.3: stale-reservation age-out.** v0.1.9
+  bounded the cap-query (B) disjunct at
+  `updated_at_utc >= :now_minus_24h` to prevent a
+  long-stranded reservation from pinning the cap forever.
+  But the row stays non-abandoned + recoverable; after 24h
+  it silently stopped counting, then new reservations PLUS
+  the stale one (when eventually broadcast via §4.5 retry)
+  could exceed the rolling cap. v0.1.10 closes via two
+  edits: (a) REMOVED the age bound from the (B) disjunct
+  — the cap query now counts ALL non-abandoned unbroadcast
+  attempts regardless of age; (b) added a normative
+  pre-cap-sum halt check inside the §4.3 step 3(b) BEGIN
+  IMMEDIATE: if any non-abandoned unbroadcast row's
+  `updated_at_utc < :now_minus_24h` exists, ROLLBACK +
+  emit `payout_invariant_violation
+  where='stale_unbroadcast_attempt'` (PAGE) + HALT until
+  operator abandons-or-recovers. Stale reservations are
+  either crash-loop loss-of-state or evidence of
+  compromise; continuing with them present is unsafe.
+
+- **codex MAJOR-2 §4.3 step 6: step-6 self-fencing was a
+  standalone pre-step read.** v0.1.9 mandated self-fencing
+  on every §4.3 step but the implementation was a
+  pre-step read of `holder_token` — between that read and
+  the actual sign+persist+broadcast, a runner could stall
+  past the stale window, get taken over, and resume. With
+  nondeterministic ECDSA both old + new holders produce
+  different valid envelopes at the same nonce; chain
+  prevents double-confirm but DB receipt tracking can
+  chase the wrong `tx_hash` after funds moved. v0.1.10
+  rewrites step 6 persist as a `BEGIN IMMEDIATE`
+  compare-and-set: re-read `holder_token` in the txn,
+  UPDATE `payout_attempts SET raw_signed_tx = :bytes
+  WHERE raw_signed_tx IS NULL` (CAS — bytes already
+  exist → discard the just-signed envelope, never
+  re-sign), COMMIT. AFTER COMMIT, re-read holder_token
+  ONE MORE TIME (standalone read) before broadcast; if
+  lost between COMMIT and final check, do NOT broadcast
+  — the newly-elected holder will pick up the persisted
+  bytes via §4.3 step 5's pending-attempt path AND the
+  §4.5 retry path, rebroadcasting bit-for-bit.
+
+MEDIUM (closed):
+
+- **codex MED-1 §7.1: `payout_chain_value_mismatch`
+  enum missed `prebroadcast_signed_tx`.** §4.3 step 6
+  pre-broadcast Signer verification mandates
+  `mismatch_class='prebroadcast_signed_tx'` but the §7.1
+  field-list enum did not include it; alert parsers
+  built from §7.1 would silently drop the new
+  signer-compromise alert. v0.1.10 prepends the value
+  to the enum list.
+
+- **codex MED-2 §9 prereq item 6: BetterStack
+  synthetic-alert verification too weak.** v0.1.9 said
+  "one per severity tier minimum" — but a typo in any
+  specific event-name matcher (e.g.
+  `payout_runner_lease_lst` instead of `_lost`) would
+  pass the per-severity-tier check while silently
+  dropping the alert. v0.1.10 mandates ONE synthetic
+  alert per ENUMERATED PAGE/WARN event NAME (not per
+  tier); future SPEC-016 vX.Y MUST verify synthetic
+  alerts for any new event name as part of the
+  version's go-live gate.
+
+DEFERRED (4 LOWs — user scope decision; v0.1.11 / v0.2):
+
+- LOW-1: §4.3 self-fencing prose emits
+  `payout_runner_lease_conflict` (acquire-failure
+  event) for token-mismatch-after-acquire — should be
+  `payout_runner_lease_lost`. (Wording-only; the
+  §4.8b lease section uses the correct event name.)
+- LOW-2: §4.8a reaper CAS SQL shorthand omits
+  `RETURNING id` while the sync emitter includes it.
+  (Cosmetic alignment.)
+- LOW-3: Section order is §4.8 → §4.8b → §4.8a in
+  the body but §4.8a → §4.8b in the TOC. (Numbering
+  oddity from the v0.1.7 → v0.1.9 incremental section
+  additions.)
+- LOW-4: One stale "§4.3 step 5" reference that should
+  be "step 6" (line 3079 area — Signer-behavior
+  cross-reference).
+
+These 4 LOWs do not change normative requirements; they
+are filed in this change-log entry for v0.1.11 cleanup
+or rolling into the v0.2 hygiene sweep alongside the
+existing Appendix B items.
+
+POSITIVE codex round-11 findings (no fix needed):
+- All 15 codex round-10 fixes verified clean.
+- §4.8a/b BEGIN IMMEDIATE txns do NOT deadlock against
+  each other (SQLite single-writer-lock serializes).
+- §4.7 observed_* snapshot atomicity is well-defined.
+
+Net spec change: modest (~150 lines — single MAJOR-2
+rewrite of step 6 dominates; MAJOR-1 + MED-1 + MED-2
+are localized).
+
+Per [[feedback-codex-only-audits]] discipline, this is
+the final v0.1.10 fix pass at MAJOR/MED level. If the
+user wants the 4 LOWs swept before merge, run a v0.1.11
+pass; otherwise the audit-loop is effectively at 0
+MAJOR + 0 MED bar.
+
+Audited at /Users/augstar/macprovider-poc/.omc/artifacts/ask/
+codex-audit-spec-016-v0-1-9-...-2026-06-25T04-33-06-446Z.md
+
+Authored in /Users/augstar/macprovider-poc-spec016 worktree.
 
 **v0.1.9 (2026-06-25, draft — round-10 codex audit fix pass,
 all 15 findings absorbed):**
@@ -1618,10 +1746,72 @@ any step on error and logging structurally:
    stops the attack pre-flight.
 
    THEN persist `raw_signed_tx` AND its computed `tx_hash`
-   AND `broadcast_at_utc` on the `payout_attempts` row
-   BEFORE invoking `eth_sendRawTransaction` on either RPC.
-   A process crash between persistence and broadcast leaves
-   the row eligible for retry (§4.5) without nonce loss.
+   on the `payout_attempts` row via a `BEGIN IMMEDIATE`
+   compare-and-set (CAS) — **NORMATIVE per codex round-11
+   MAJOR-2 closure**:
+
+   ```sql
+   BEGIN IMMEDIATE;
+     -- 1. Re-read the lease holder_token in this txn.
+     SELECT holder_token FROM payout_runner_lease WHERE id = 1;
+     -- If returned value != <this process's acquired token>:
+     -- ROLLBACK, discard the just-signed envelope (do NOT
+     -- broadcast, do NOT persist), emit
+     -- payout_runner_lease_lost per §7.1 (severity=PAGE),
+     -- and self-halt. The newly-elected lease holder will
+     -- restart the §4.3 cycle from step 1 against fresh
+     -- ledger state.
+     --
+     -- 2. CAS-persist the signed envelope ONLY if
+     --    raw_signed_tx is still NULL (no other process or
+     --    prior iteration has already persisted bytes for
+     --    this attempt row).
+     UPDATE payout_attempts
+        SET raw_signed_tx = :raw_signed_tx,
+            tx_hash       = :computed_tx_hash,
+            updated_at_utc = :now
+      WHERE payout_id = :payout_id
+        AND attempt_seq = :attempt_seq
+        AND raw_signed_tx IS NULL;
+     -- If row count = 0: bytes already exist. Discard the
+     -- just-signed envelope (do NOT use it). Re-read the
+     -- existing raw_signed_tx from the row and use ONLY
+     -- those bytes for the rebroadcast below; re-signing is
+     -- FORBIDDEN per §4.6 nonce discipline.
+   COMMIT;
+   ```
+
+   The CAS pattern closes the codex round-11 MAJOR-2 gap:
+   without it, a runner that passes the pre-step-6 token
+   read, stalls past the stale window, gets taken over, then
+   resumes could sign + persist + broadcast a *different*
+   envelope at the same nonce than the newly-elected holder.
+   With nondeterministic ECDSA, both envelopes have valid
+   signatures and matching ecrecover'd senders, so the §4.3
+   step 7 chain-side verification would pass either one —
+   but DB receipt tracking can then chase the wrong
+   `tx_hash` after funds moved.
+
+   AFTER COMMIT (and before broadcast), the IMPL MUST
+   re-read the lease holder_token ONE MORE TIME (standalone
+   read; no txn required) and assert it still equals the
+   acquired token. If lost between COMMIT and this final
+   read: do NOT broadcast the persisted bytes — emit
+   `payout_runner_lease_lost` and self-halt. The newly-
+   elected holder will pick up the row via §4.3 step 5's
+   "pending (broadcast but not confirmed) → jump to step 7
+   to poll" path AND the §4.5 retry path: bytes are
+   persisted with `broadcast_at_utc IS NULL`, the new
+   holder re-broadcasts the EXISTING bytes via
+   `eth_sendRawTransaction` (re-signing FORBIDDEN), then
+   stamps `broadcast_at_utc = now()` in a follow-up update.
+
+   ONLY if the post-COMMIT lease check passes, the current
+   holder invokes `eth_sendRawTransaction` on BOTH RPCs and
+   stamps `broadcast_at_utc = now()` on the row. A process
+   crash between persistence and broadcast leaves the row
+   eligible for retry (§4.5) without nonce loss; the next
+   holder picks up the persisted bytes and rebroadcasts.
 7. **Confirm via TWO independent RPCs (with chain-side
    value verification).** Poll both configured RPCs (§9.2)
    until both return a receipt at depth ≥
@@ -2814,8 +3004,45 @@ the cap query skips because `broadcast_at_utc IS NULL`;
 both processes then proceed to broadcast and the day cap
 is exceeded.
 
+**Stale-reservation halt (NORMATIVE — codex round-11
+MAJOR-1 closure).** v0.1.9's reservation-aware cap used
+`updated_at_utc >= :now_minus_24h` to bound the (B)
+disjunct so a long-stranded reservation wouldn't pin the
+cap indefinitely. Codex round-11 correctly flagged this
+as a silent age-out: the row stays non-abandoned + recoverable,
+and after 24h it stops counting against the cap — so the
+next §4.3 cycle's new reservations PLUS the stale reservation
+(when eventually broadcast) can exceed the intended rolling
+cap. v0.1.10 fixes this by REMOVING the age bound from the
+(B) disjunct and adding a normative halt-check: BEFORE
+running the cap sum (inside the SAME §4.3 step 3(b) BEGIN
+IMMEDIATE transaction), the IMPL MUST execute:
+
 ```sql
--- Reservation-aware query (NORMATIVE — codex round-10 MAJOR-3).
+SELECT COUNT(*) FROM payout_attempts
+ WHERE broadcast_at_utc IS NULL
+   AND confirmed_at_utc IS NULL
+   AND abandoned_at_utc IS NULL
+   AND updated_at_utc < :now_minus_24h;
+```
+
+If the count > 0, IMPL MUST ROLLBACK the §4.3 step 3(b)
+transaction, emit `payout_invariant_violation
+where='stale_unbroadcast_attempt'` per §7.1 (severity=PAGE)
+with a list of the offending `(payout_id, attempt_seq,
+updated_at_utc)` tuples, and HALT the runner until the
+operator either abandons the stale rows via
+`/admin/payout/abandon-attempt` (§4.6) or deterministically
+recovers and broadcasts them. The halt is fail-closed: a
+stale reservation is either a crash-loop loss-of-state (the
+attempt got persisted but the broadcast retry path crashed
+too) or evidence of compromise; in either case continuing
+the runner with stale rows present is unsafe.
+
+```sql
+-- Reservation-aware query (NORMATIVE — codex round-10 MAJOR-3,
+-- amended by codex round-11 MAJOR-1: no age bound on (B);
+-- staleness is enforced by the halt-check above).
 SELECT COALESCE(SUM(amount_base_units), 0)
   FROM payout_attempts
  WHERE abandoned_at_utc IS NULL
@@ -2825,16 +3052,17 @@ SELECT COALESCE(SUM(amount_base_units), 0)
       AND broadcast_at_utc >= :now_minus_24h
       AND broadcast_at_utc <= :now)
      OR
-     -- (B) live reserved attempts (INSERTed but not yet
-     --     broadcast). updated_at_utc bounds the freshness
-     --     so a long-stranded reservation doesn't pin the
-     --     cap forever; if a reservation older than 24h
-     --     hasn't broadcast, it should have been abandoned
-     --     or retried by the §4.5 retry path.
+     -- (B) ALL live reserved attempts (INSERTed but not yet
+     --     broadcast), regardless of age. The §4.3 step 3(b)
+     --     stale-reservation halt above guarantees no row
+     --     here is older than 24h; if one slips through
+     --     (e.g. clock skew across processes), it STILL
+     --     counts and any cap breach correctly fires
+     --     payout_capped — which is the conservative
+     --     behavior (better to refuse a legitimate payout
+     --     than to silently over-spend).
      (broadcast_at_utc IS NULL
-      AND confirmed_at_utc IS NULL
-      AND updated_at_utc >= :now_minus_24h
-      AND updated_at_utc <= :now)
+      AND confirmed_at_utc IS NULL)
    );
 ```
 
@@ -3394,7 +3622,7 @@ operator-key endpoints log actor=operator_key):
 | `provider_payout_address_changed` | per §3.4 |
 | `provider_payout_address_change_rejected` | `reason, provider_id, src_ip, submitted_fingerprint, ts_utc` |
 | `provider_payout_address_rejected_unknown_provider` | `provider_id, submitted_fingerprint, src_ip, ts_utc` |
-| `payout_chain_value_mismatch` (severity=PAGE; NEW v0.1.8) | `payout_id, attempt_seq, tx_hash, mismatch_class (input_calldata, sender_recovery, transfer_log_count, transfer_log_to, transfer_log_amount, rpc_disagreement_on_logs), expected, observed, ts_utc` |
+| `payout_chain_value_mismatch` (severity=PAGE; NEW v0.1.8; v0.1.10 adds `prebroadcast_signed_tx`) | `payout_id, attempt_seq, tx_hash, mismatch_class (prebroadcast_signed_tx, input_calldata, sender_recovery, transfer_log_count, transfer_log_to, transfer_log_amount, rpc_disagreement_on_logs), expected, observed, ts_utc` |
 | `payout_runner_lease_conflict` (severity=PAGE; NEW v0.1.8) | `local_pid, local_started_at_utc, holder_host, holder_pid, holder_started_at_utc, holder_heartbeat_at_utc, ts_utc` |
 | `payout_flag_audit_reaped` (severity=WARN; NEW v0.1.8; v0.1.9 adds `event_id`) | `event_id (=runtime_flag_audit.id), flag_audit_id, flag_name, old_value, new_value, occurred_at_utc, reap_lag_seconds, ts_utc` |
 | `payout_runner_lease_taken_over` (severity=PAGE; NEW v0.1.9) | `prior_holder_host, prior_holder_pid, prior_holder_started_at_utc, prior_heartbeat_at_utc, new_holder_host, new_holder_pid, takeover_count, ts_utc` |
@@ -3956,12 +4184,21 @@ discharged:
    - `provider_payout_address_change_rejected` (WARN)
    - `provider_payout_address_rejected_unknown_provider` (WARN)
 
-   Operator MUST verify with a synthetic alert per event
-   class (one per severity tier minimum) before flipping
-   `payout.enabled: true`. (Per [[deve2-betterstack-live]],
-   BetterStack monitor config lives in the BetterStack UI,
-   not the repo.) Future SPEC-016 vX.Y MUST extend this
-   list when adding any new PAGE/WARN event.
+   Operator MUST verify with ONE synthetic alert per
+   ENUMERATED PAGE/WARN event NAME (NOT one per severity
+   tier — codex round-11 MED-2 closure) before flipping
+   `payout.enabled: true`. The per-event verification
+   catches typos and missing matchers in the BetterStack
+   filter config that a per-severity-tier check would
+   silently miss (e.g. `payout_runner_lease_lost` typo'd
+   as `payout_runner_lease_lst` still passes the
+   "at least one PAGE alert fires" test). (Per
+   [[deve2-betterstack-live]], BetterStack monitor config
+   lives in the BetterStack UI, not the repo.) Future
+   SPEC-016 vX.Y MUST extend this list when adding any
+   new PAGE/WARN event AND verify with a synthetic alert
+   for the new event name as part of the version's
+   go-live gate.
 7. **Nginx routing on Pearl VPS** updated to proxy
    `/providers/{id}/payout-address`,
    `/providers/{id}/payouts`, and the new `/admin/payout/*`
