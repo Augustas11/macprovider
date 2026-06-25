@@ -66,14 +66,20 @@ func TestProduceStaleOutboxRows_BothRPCsMissAfterThreshold_Produces(t *testing.T
 	if runID != "run-A" {
 		t.Errorf("outbox.run_id = %q, want %q (run_id not persisted)", runID, "run-A")
 	}
-	// Verify the marker CAS flipped NULL→now.
+	// Verify the marker CAS flipped NULL→now AND updated_at_utc
+	// advanced (codex Step 3 r3 [code:r3-3.1] MEDIUM closure).
 	var staleMarker sql.NullString
+	var updatedAt string
 	_ = db.QueryRowContext(context.Background(),
-		`SELECT cancel_reconfirm_stale_paged_at_utc FROM payout_attempts WHERE payout_id=? AND attempt_seq=1`,
+		`SELECT cancel_reconfirm_stale_paged_at_utc, updated_at_utc FROM payout_attempts WHERE payout_id=? AND attempt_seq=1`,
 		payoutID,
-	).Scan(&staleMarker)
+	).Scan(&staleMarker, &updatedAt)
 	if !staleMarker.Valid {
 		t.Errorf("cancel_reconfirm_stale_paged_at_utc not set after producer")
+	}
+	if staleMarker.Valid && updatedAt != staleMarker.String {
+		t.Errorf("updated_at_utc=%q != stale_marker=%q — SPEC §4.7 requires both advance",
+			updatedAt, staleMarker.String)
 	}
 }
 

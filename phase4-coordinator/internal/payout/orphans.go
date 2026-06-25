@@ -473,13 +473,20 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
 		committed := false
 		// CAS: only flip NULL→now. If another runner beat us, the
 		// row count = 0 and we skip this row.
+		// Codex Step 3 r3 [code:r3-3.1] MEDIUM closure: SPEC §4.7
+		// stale transition SQL sets BOTH the stale marker AND
+		// updated_at_utc. Advancing updated_at_utc preserves the
+		// "row was just touched by the runner" semantics that
+		// stale-reservation halts (§5.3) and the reorg-poll
+		// cadence both rely on.
 		res, err := conn.ExecContext(ctx, `
 UPDATE payout_attempts
-   SET cancel_reconfirm_stale_paged_at_utc = ?
+   SET cancel_reconfirm_stale_paged_at_utc = ?,
+       updated_at_utc = ?
  WHERE payout_id = ? AND attempt_seq = ?
    AND cancel_reconfirm_stale_paged_at_utc IS NULL
    AND confirmed_at_utc IS NULL`,
-			staleStarted, c.PayoutID, c.AttemptSeq,
+			staleStarted, staleStarted, c.PayoutID, c.AttemptSeq,
 		)
 		if err != nil {
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
