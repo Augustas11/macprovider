@@ -370,9 +370,18 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	var emitted int64
 	var reported *tokenUsage
 	invalidReportedUsage := false
+	settleReported := func(outcome string) {
+		usage := *reported
+		observedCompletion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
+		if observedCompletion > usage.CompletionTokens {
+			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome)
+			return
+		}
+		s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome)
+	}
 	settleTruncated := func() {
 		if reported != nil {
-			s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "stream_truncated")
+			settleReported("stream_truncated")
 			return
 		}
 		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated")
@@ -381,7 +390,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		select {
 		case <-r.Context().Done():
 			if reported != nil {
-				s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
+				settleReported("client_disconnect")
 				return false
 			}
 			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
@@ -391,7 +400,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		text := strings.TrimRight(string(line), "\r\n")
 		if data, ok := sseDataValue(text); ok {
 			if data != "[DONE]" {
-				deltaBytes, parseOK := streamingCompletionDeltaBytes(data)
+				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
 				if !parseOK {
 					slog.Warn("streaming gateway estimate saw malformed chunk; truncating stream", "request_id", requestID(r))
 					writeSSEError(w, "Upstream stream returned malformed data", "stream_malformed")
@@ -426,13 +435,23 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					} else if !invalidReportedUsage {
 						reported = &usage
 					}
+				} else if !hasChoices {
+					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
+					writeSSEError(w, "Upstream stream returned malformed data", "stream_malformed")
+					if flusher != nil {
+						flusher.Flush()
+					}
+					cancelCoordinator()
+					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
+					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed")
+					return false
 				}
 			}
 		}
 		if _, err := w.Write(line); err != nil {
 			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
 			if reported != nil {
-				s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
+				settleReported("client_disconnect")
 				return false
 			}
 			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
@@ -467,7 +486,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		}
 		if errors.Is(r.Context().Err(), context.Canceled) {
 			if reported != nil {
-				s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
+				settleReported("client_disconnect")
 				return
 			}
 			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
@@ -483,14 +502,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	if errors.Is(r.Context().Err(), context.Canceled) {
 		if reported != nil {
-			s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
+			settleReported("client_disconnect")
 			return
 		}
 		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
 		return
 	}
 	if reported != nil && !invalidReportedUsage {
-		s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "ok")
+		settleReported("ok")
 		return
 	}
 	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "ok")
@@ -630,14 +649,14 @@ func estimateTokensFromBytes(n int64) int64 {
 	return int64(math.Ceil(float64(n) / 4.0))
 }
 
-func streamingCompletionDeltaBytes(data string) (int64, bool) {
+func streamingCompletionDeltaBytes(data string) (int64, bool, bool) {
 	var envelope struct {
 		Choices []struct {
 			Delta json.RawMessage `json:"delta"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
-		return 0, false
+		return 0, false, false
 	}
 	var n int64
 	for _, choice := range envelope.Choices {
@@ -646,11 +665,11 @@ func streamingCompletionDeltaBytes(data string) (int64, bool) {
 		}
 		deltaBytes, ok := generatedDeltaStringBytes(choice.Delta)
 		if !ok {
-			return 0, false
+			return 0, false, false
 		}
 		n += deltaBytes
 	}
-	return n, true
+	return n, len(envelope.Choices) > 0, true
 }
 
 func generatedDeltaStringBytes(raw json.RawMessage) (int64, bool) {
