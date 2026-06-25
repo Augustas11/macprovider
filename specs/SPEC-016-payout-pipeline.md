@@ -1,20 +1,21 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.11 (2026-06-25, draft — round-12 codex
-audit fix pass: 0 CRIT + 1 MAJOR + 0 MED absorbed; 4 LOW
-still deferred. Codex round-12 verified all 4 round-11
-MAJOR+MED closures landed clean and surfaced a single
-concurrent-abandon race against the v0.1.10 step 6 CAS;
-v0.1.11 closes it from both sides. Audit history:
-round-1 1/5, round-2 5/12/10, round-3 3/9/8, round-4
-2/6/13, round-5 1/2/6, round-6 0/5/9, round-7 0/3/7
-(Claude lenses); round-8 2/2/7 (Claude lenses) deferred
-most, applied 3 convergent; round-9 2/5/2 (codex) all
-absorbed in v0.1.8; round-10 0/3/5/7 (codex) all
-absorbed in v0.1.9; round-11 0/2/2/4 (codex)
-MAJORs+MEDs absorbed in v0.1.10; round-12 0/1/0/4
-(codex) sole MAJOR absorbed in v0.1.11. See git log
-for full per-round detail.)
+**Version:** 0.1.12 (2026-06-25, draft — round-13 codex
+audit fix pass: 0 CRIT + 0 MAJOR + 1 MED absorbed; 4 LOW
+still deferred. Codex round-13 verified v0.1.11 closed
+the round-12 MAJOR (both sides) and surfaced one
+follow-on MEDIUM: the v0.1.11 §4.6 runner-active SQL
+block omitted state-check predicates on the abandon
+UPDATE itself. v0.1.12 closes by gating the UPDATE on
+`confirmed_at_utc IS NULL AND abandoned_at_utc IS NULL`
++ row-count disambiguation (404 / 409 already_confirmed /
+409 already_abandoned). Audit history: rounds 1-7
+Claude lenses; round-8 Claude convergent partial;
+round-9 codex 2/5/2 → v0.1.8; round-10 codex 0/3/5/7 →
+v0.1.9; round-11 codex 0/2/2/4 → v0.1.10 (LOWs
+deferred); round-12 codex 0/1/0/4 → v0.1.11; round-13
+codex 0/0/1/4 → v0.1.12. See git log for full
+per-round detail.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -29,6 +30,87 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.12 (2026-06-25, draft — round-13 codex audit fix
+pass, sole MEDIUM absorbed):**
+
+Codex round-13 verified v0.1.11 closed the round-12 MAJOR
+cleanly on both sides (runner-side CAS extension at §4.3
+step 6 + operator-side runner-active gate at §4.6). One
+follow-on MEDIUM: the v0.1.11 §4.6 runner-active SQL
+block enumerated the new lease-presence check but the
+abandon UPDATE itself only filtered on `(payout_id,
+attempt_seq)`. A cold implementer copying the SQL
+literally could mark a confirmed payout attempt
+abandoned, removing it from §7.4 "confirmed
+non-abandoned" reconciliation queries and breaking the
+receipt/audit model. Not an immediate double-payment
+(the matching `ledger_payout_ready` is already consumed),
+but a money-out state-machine contract gap.
+
+MEDIUM (closed):
+
+- **codex round-13 MEDIUM-1: §4.6 abandon UPDATE missing
+  state-check predicates.** v0.1.12 extends the UPDATE
+  WHERE to include `AND confirmed_at_utc IS NULL AND
+  abandoned_at_utc IS NULL`. If 0 rows affected, IMPL
+  re-reads the row in the same `BEGIN IMMEDIATE` and
+  returns:
+  - no row exists → 404 `not_found`
+  - `confirmed_at_utc IS NOT NULL` → 409 `already_confirmed`
+  - `abandoned_at_utc IS NOT NULL` → 409 `already_abandoned`
+  Cancel-row INSERT permitted ONLY after the UPDATE
+  affects exactly ONE live, unconfirmed, non-abandoned
+  row. Response table at §4.6 updated to enumerate the
+  three error bodies; v0.1.11 and earlier returned a
+  generic 409 here.
+
+KNOWN-OPEN LOWs (4 — still deferred per user scope
+decision):
+
+- LOW-1: §4.3 self-fence emits `payout_runner_lease_conflict`
+  for token-mismatch-after-acquire; should be
+  `payout_runner_lease_lost`.
+- LOW-2: §4.8a reaper CAS SQL shorthand omits
+  `RETURNING id` while sync emitter has it.
+- LOW-3: Section order §4.8 → §4.8b → §4.8a; should be
+  §4.8a → §4.8b.
+- LOW-4: One stale "§4.3 step 5" Signer-behavior cross-ref;
+  should be step 6.
+
+POSITIVE codex round-13 (no fix needed):
+- Round-12 MAJOR-1 runner side fully closed; CAS
+  predicate, same-txn disambiguation, side-channel
+  discipline all verified.
+- Round-12 operator side mostly closed (runner-active
+  response/runbook, BEGIN IMMEDIATE lease check); only
+  the MEDIUM-1 contract gap above was missing.
+- v0.1.11 diff, markdown fences, §9.6 dangling refs,
+  lease-staleness alignment with §4.8b, and replay /
+  MEV / signer / reorg / race / operator-key surfaces
+  all clean — no new CRITICAL or MAJOR.
+
+Net spec change: small (~35 lines — the §4.6 UPDATE
+predicate extension + row-count disambiguation prose +
+response table enumeration).
+
+Audit-loop trajectory (codex rounds only):
+- round-9  (v0.1.7): 2 CRIT + 5 MAJOR + 2 MED
+- round-10 (v0.1.8): 0 CRIT + 3 MAJOR + 5 MED + 7 LOW
+- round-11 (v0.1.9): 0 CRIT + 2 MAJOR + 2 MED + 4 LOW
+- round-12 (v0.1.10): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-13 (v0.1.11): 0 CRIT + 0 MAJOR + 1 MED + 4 LOW
+- v0.1.12 targets 0 CRIT + 0 MAJOR + 0 MED + 4 deferred LOW
+  pending round-14 codex re-verification.
+
+Per [[feedback-codex-only-audits]], round 14 codex audit
+will follow. Convergence target: 0 CRIT + 0 MAJOR + 0 MED
+at the user's bar (LOWs allowed to remain).
+
+Audited at /Users/augstar/macprovider-poc/.omc/artifacts/ask/
+codex-audit-spec-016-v0-1-11-...-2026-06-25T04-59-09-375Z.md
+
+Authored in /Users/augstar/macprovider-poc-spec016 worktree.
 
 **v0.1.11 (2026-06-25, draft — round-12 codex audit fix
 pass, sole MAJOR absorbed):**
@@ -2286,9 +2368,21 @@ the exact bytes. Re-signing is FORBIDDEN.
                abandoned_at_utc is now non-NULL in the same
                transaction.
     400      — missing confirm/Idempotency-Key/reason.
-    409 Conflict — attempt already confirmed; nothing to
-                   abandon. OR (v0.1.11 codex round-12
-                   MAJOR-1 closure):
+    404 Not Found — (NEW v0.1.12) no
+                    payout_attempts row matches
+                    (payout_id, attempt_seq).
+                    Body: `{"error":"not_found"}`.
+    409 Conflict — one of:
+                   `{"error":"already_confirmed"}` — the
+                   attempt is confirmed; nothing to abandon.
+                   (Disambiguated in v0.1.12; v0.1.11 and
+                   earlier returned a generic 409 here.)
+                   OR
+                   `{"error":"already_abandoned"}` — the
+                   attempt is already abandoned (idempotent
+                   re-abandon). (NEW v0.1.12.)
+                   OR (v0.1.11 codex round-12 MAJOR-1
+                   closure):
                    `{"error":"runner_active"}` — the
                    payout runner is actively holding the
                    §4.8b lease (heartbeat fresh within
@@ -2353,9 +2447,36 @@ the exact bytes. Re-signing is FORBIDDEN.
            abandoned_reason = :reason,
            updated_at_utc   = :now
      WHERE payout_id = :payout_id
-       AND attempt_seq = :attempt_seq;
-    -- ... (cancel-row INSERT as before if
-    -- broadcast_cancel_self_transfer=true) ...
+       AND attempt_seq = :attempt_seq
+       AND confirmed_at_utc IS NULL
+       AND abandoned_at_utc IS NULL;
+    -- v0.1.12 (codex round-13 MEDIUM-1 closure): the UPDATE
+    -- MUST also gate on confirmed_at_utc IS NULL AND
+    -- abandoned_at_utc IS NULL. Without these predicates,
+    -- a cold implementer could mark a confirmed attempt
+    -- abandoned, which removes it from §7.4 "confirmed
+    -- non-abandoned" reconciliation queries and breaks the
+    -- receipt/audit model. Not an immediate double-payment
+    -- (the matching ledger_payout_ready row is already
+    -- consumed), but a contract gap in the money-out state
+    -- machine.
+    --
+    -- If the UPDATE affects 0 rows, IMPL MUST re-read the
+    -- row IN THE SAME BEGIN IMMEDIATE transaction to
+    -- disambiguate the response (do NOT proceed to the
+    -- cancel-row INSERT):
+    --   - no row exists                          → 404 not_found
+    --   - confirmed_at_utc IS NOT NULL           → 409 already_confirmed
+    --   - abandoned_at_utc IS NOT NULL           → 409 already_abandoned
+    -- ROLLBACK in all three not-found/conflict cases (the
+    -- lease-presence check above already committed a read
+    -- lock, but no writes occurred — ROLLBACK is a no-op
+    -- semantically and releases the lock cleanly).
+    --
+    -- Cancel-row INSERT (if broadcast_cancel_self_transfer=
+    -- true) is permitted ONLY after the UPDATE affects
+    -- EXACTLY ONE live, unconfirmed, non-abandoned row.
+    -- ... (cancel-row INSERT as before) ...
   COMMIT;
   ```
 
