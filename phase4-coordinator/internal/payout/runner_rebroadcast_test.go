@@ -56,7 +56,7 @@ VALUES (?, 1, 'base-mainnet', ?, ?, 900000, 1, ?, ?, NULL, NULL, 0, ?)`,
 	// verify the broadcast happened with the persisted bytes.
 	s.runner.opts.ReceiptPollTimeout = 5 * time.Millisecond
 
-	_ = s.runner.RunOnce(context.Background())
+	_, _ = s.runner.RunOnce(context.Background())
 
 	if len(capturedRaw) == 0 {
 		t.Fatal("rebroadcast did not happen — runner fell through to fresh allocation despite persisted bytes")
@@ -163,7 +163,7 @@ VALUES (?, 1, 'base-mainnet', ?, ?, 1, 1, ?, ?, NULL, NULL, 1, ?)`,
 		[]byte{0x02, 0xca, 0xfe}, "0xcancelhash", NowUTC(),
 	)
 
-	if err := s.runner.RunOnce(context.Background()); err != nil {
+	if _, err := s.runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	// Fresh allocation MUST NOT have happened — no seq=2 row.

@@ -247,9 +247,11 @@ type ChainBalanceConfig struct {
 //     AND the worker HALTs the runner via the supplied haltFn callback
 //     (the operator-key-compromise fake-funding signature; SPEC §7.4).
 //
-// Two-RPC disagreement on balanceOf emits payout_rpc_disagreement
-// and SKIPs that tick (no drift comparison, no halt) — the next
-// tick re-evaluates after the transient stabilises.
+// Two-RPC disagreement on balanceOf emits
+// payout_chain_balance_rpc_disagreement and SKIPs that tick (no
+// drift comparison, no halt) — the next tick re-evaluates after the
+// transient stabilises. Named distinctly from payout_rpc_disagreement
+// (§7.1 payout-row receipts schema) to avoid consumer misparse.
 type ChainBalanceWorker struct {
 	db         *sql.DB
 	rpcs       TwoRPCs
@@ -386,13 +388,21 @@ func (w *ChainBalanceWorker) runOnce(ctx context.Context) {
 	}
 
 	// SPEC §7.4: BOTH RPCs MUST agree within the SAME tolerance;
-	// disagreement triggers payout_rpc_disagreement and SKIPs
-	// the drift comparison.
+	// disagreement triggers payout_chain_balance_rpc_disagreement
+	// and SKIPs the drift comparison.
+	//
+	// Step 4 r3 [code:r3-3] MEDIUM closure: renamed from
+	// payout_rpc_disagreement to payout_chain_balance_rpc_disagreement
+	// to avoid schema collision with §7.1 payout_rpc_disagreement
+	// (payout-row receipts disagreement schema: payout_id, attempt_seq,
+	// rpc_a_state, rpc_b_state). This event emits chain-balance-specific
+	// fields (primary_balance, secondary_balance, tolerance); the distinct
+	// name prevents consumer misparse.
 	tol := big.NewInt(w.cfg.ToleranceUSDC)
 	diff := new(big.Int).Sub(balA, balB)
 	if absBig(diff).Cmp(tol) > 0 {
 		w.log.Error().
-			Str("event", "payout_rpc_disagreement").
+			Str("event", "payout_chain_balance_rpc_disagreement").
 			Str("severity", "PAGE").
 			Str("primary_balance", balA.String()).
 			Str("secondary_balance", balB.String()).

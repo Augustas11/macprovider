@@ -269,7 +269,7 @@ func TestRunNowController_LiveIntervalFromTuning(t *testing.T) {
 	// now says 10m, so it should still rate-limit.
 	newSnap := validBaseSnapshot()
 	newSnap.RunNowMinInterval = 10 * time.Minute
-	if err := tp.Reload(context.Background(), newSnap); err != nil {
+	if _, err := tp.Reload(context.Background(), newSnap); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 
@@ -308,3 +308,61 @@ func TestRunNowController_RunIdInResponse(t *testing.T) {
 
 // noopErr is a sentinel non-ErrRunnerHalted error for testing.
 var noopErr = errors.New("generic_cycle_error")
+
+// fakeRunner is a minimal runnerExecutor that lets tests force specific
+// IsHalted / HaltReason / RunOnce return values without a real runner.
+//
+// Step 4 r3 [code:r3-4] MEDIUM closure: enables deterministic coverage
+// of the post-RunOnce ErrRunnerHalted halt-race path, which the prior
+// tests could not reach because *Runner's IsHalted is atomic.
+type fakeRunner struct {
+	halted     bool
+	haltReason string
+	runOnceFn  func(ctx context.Context) (string, error)
+}
+
+func (f *fakeRunner) IsHalted() bool      { return f.halted }
+func (f *fakeRunner) HaltReason() string  { return f.haltReason }
+func (f *fakeRunner) RunOnce(ctx context.Context) (string, error) {
+	return f.runOnceFn(ctx)
+}
+
+// TestRunNowController_PostRunOnceHaltRaceReturnsHaltedBody locks the
+// §4.2 concurrent-halt race path deterministically: IsHalted()=false at
+// admission, RunOnce returns ErrRunnerHalted (halt raced after the gate),
+// response body must be runner_halted (not cycle_in_flight_or_failed).
+//
+// Step 4 r3 [code:r3-4] MEDIUM closure: previously untestable without
+// runnerExecutor injection.
+func TestRunNowController_PostRunOnceHaltRaceReturnsHaltedBody(t *testing.T) {
+	fake := &fakeRunner{
+		halted:     false, // passes IsHalted() gate
+		haltReason: "chain_balance_drift_negative",
+		runOnceFn: func(ctx context.Context) (string, error) {
+			// Simulates: halt races between IsHalted check and RunOnce.
+			return "", ErrRunnerHalted
+		},
+	}
+
+	runner := newRunNowTestRunner(t)
+	ctrl, _ := NewRunNowController(runner, nil, 60*time.Second, zerolog.Nop())
+	// Inject the fake so ServeRunNow uses fake.IsHalted() and fake.RunOnce().
+	ctrl.runnerExec = fake
+
+	rec := httptest.NewRecorder()
+	ctrl.ServeRunNow(rec, httptest.NewRequest("POST", "/", nil), "operator_key")
+
+	if rec.Code != http.StatusConflict {
+		t.Errorf("code=%d, want 409 for halt race", rec.Code)
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, "cycle_in_flight_or_failed") {
+		t.Errorf("halt race: body incorrectly says cycle_in_flight_or_failed; got %s", body)
+	}
+	if !strings.Contains(body, "runner_halted") {
+		t.Errorf("halt race: body missing runner_halted; got %s", body)
+	}
+	if !strings.Contains(body, "chain_balance_drift_negative") {
+		t.Errorf("halt race: body missing halt reason; got %s", body)
+	}
+}

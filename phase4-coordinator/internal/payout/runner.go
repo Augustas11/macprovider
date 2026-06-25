@@ -248,7 +248,7 @@ func (r *Runner) loop(ctx context.Context) {
 	cycleTicker := time.NewTicker(r.opts.RunInterval)
 	defer cycleTicker.Stop()
 	// Run once immediately to drain any backlog at startup.
-	if err := r.RunOnce(ctx); err != nil {
+	if _, err := r.RunOnce(ctx); err != nil {
 		r.opts.Logger.Warn().Err(err).Msg("payout runner first cycle errored")
 	}
 	for {
@@ -263,7 +263,7 @@ func (r *Runner) loop(ctx context.Context) {
 				return
 			}
 		case <-cycleTicker.C:
-			if err := r.RunOnce(ctx); err != nil {
+			if _, err := r.RunOnce(ctx); err != nil {
 				r.opts.Logger.Warn().Err(err).Msg("payout runner cycle errored")
 			}
 		}
@@ -309,11 +309,22 @@ func (r *Runner) snap() TuningSnapshot {
 // RunOnce executes one §4.3 cycle synchronously. Used by Start
 // (cadence) and by the admin /admin/payout/run-now endpoint.
 //
+// Returns (runID, nil) on success or (runID, err) on error; the
+// runID is the same UUID emitted in payout_run_started /
+// payout_run_finished so callers (e.g. run-now handler) can
+// surface the same ID to operators for correlation.
+//
+// Step 4 r3 [code:r3-1] HIGH closure: previous signature was
+// (ctx) error — the run-now handler and the runner both generated
+// independent UUIDs so payout_run_now_invoked.run_id never matched
+// payout_run_started.run_id. Returning the run_id here lets
+// runnow.go emit payout_run_now_invoked with the actual cycle ID.
+//
 // The cycle is best-effort: per-row errors are logged but the
 // cycle continues with the next row. Fatal errors (lease lost,
 // invariant violation) abort the cycle and trip the runner-halt
 // signal via the returned error.
-func (r *Runner) RunOnce(ctx context.Context) error {
+func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 	// Step 4 r1 [arch:4.1]/[sec:r1-1] convergent closure: refuse
 	// the cycle if RequestHalt has been called. The PAGE event
 	// was already emitted at halt time; the per-cycle skip event
@@ -325,12 +336,12 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			Str("reason", r.HaltReason()).
 			Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
 			Send()
-		return ErrRunnerHalted
+		return "", ErrRunnerHalted
 	}
 	r.mu.Lock()
 	if r.inFlight {
 		r.mu.Unlock()
-		return errors.New("RunOnce: cycle already in flight")
+		return "", errors.New("RunOnce: cycle already in flight")
 	}
 	r.inFlight = true
 	r.mu.Unlock()
@@ -380,8 +391,15 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	// run_id). Runs BEFORE the §4.3 step 1 SELECT so the PAGE
 	// event for a stale cancel fires inside the same cycle that
 	// would otherwise blindly hold the stranded row indefinitely.
+	//
+	// Step 4 r3 [arch:r3-4.1] MAJOR closure: use snap.RunInterval
+	// (the per-cycle TuningProvider snapshot) instead of
+	// r.opts.RunInterval (the startup-time value). The reaper
+	// already does this (reaper.go:58); the stale-cancel threshold
+	// 3 × run_interval must be live-read on both paths so a SIGHUP
+	// run_interval change takes effect without a restart.
 	if produced, err := ProduceStaleOutboxRows(ctx, r.opts.DB, r.opts.Logger,
-		r.opts.RPCs, runID, now, r.opts.RunInterval,
+		r.opts.RPCs, runID, now, snap.RunInterval,
 	); err != nil {
 		r.opts.Logger.Warn().Err(err).
 			Str("event", "payout_stale_outbox_producer_failed").Send()
@@ -403,7 +421,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	hotWallet := r.opts.Security.HotWalletAddress
 	rows, err := SelectReadyPayouts(ctx, r.opts.DB, hotWallet, now.Format(time.RFC3339Nano), snap.MaxRowsPerRun)
 	if err != nil {
-		return fmt.Errorf("SelectReadyPayouts: %w", err)
+		return runID, fmt.Errorf("SelectReadyPayouts: %w", err)
 	}
 
 	for _, row := range rows {
@@ -424,7 +442,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			// Lease-lost / invariant-violation surfaces here halt the
 			// runner cycle.
 			if errors.Is(perr, ErrLeaseLost) {
-				return perr
+				return runID, perr
 			}
 			continue
 		}
@@ -439,7 +457,7 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			failed++
 		}
 	}
-	return nil
+	return runID, nil
 }
 
 type rowOutcome int

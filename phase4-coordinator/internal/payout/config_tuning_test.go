@@ -70,7 +70,7 @@ func TestTuningProvider_ReloadHappyPath(t *testing.T) {
 	}
 	new := validBaseSnapshot()
 	new.ConfirmationBlocks = 7 // within bounds; new value
-	if err := p.Reload(context.Background(), new); err != nil {
+	if _, err := p.Reload(context.Background(), new); err != nil {
 		t.Fatalf("Reload: %v", err)
 	}
 	if got := p.Snapshot().ConfirmationBlocks; got != 7 {
@@ -90,7 +90,7 @@ func TestTuningProvider_ReloadBoundViolationRetainsLiveValue(t *testing.T) {
 	}
 	bad := validBaseSnapshot()
 	bad.AddressCoolingOffPeriod = 30 * time.Minute // < 1h floor
-	err = p.Reload(context.Background(), bad)
+	_, err = p.Reload(context.Background(), bad)
 	if err == nil {
 		t.Fatal("Reload should reject address_cooling_off_period=30m")
 	}

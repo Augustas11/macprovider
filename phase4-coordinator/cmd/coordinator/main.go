@@ -359,7 +359,7 @@ func main() {
 		// TuningProvider.Reload helper applies bound re-enforcement
 		// AND emits payout_config_reloaded / payout_config_reload_rejected
 		// per SPEC §6.5.
-		go startPayoutSIGHUPListener(shutdownCtx, *configPath, payoutS2.tuning, logger)
+		go startPayoutSIGHUPListener(shutdownCtx, *configPath, payoutS2.tuning, payoutS2.rpcs, logger)
 	}
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerServer.Handler())
@@ -627,6 +627,7 @@ type payoutStep2 struct {
 	reaper      *payout.Reaper              // Step 3 §4.8a + §4.8c outbox reaper
 	chainWorker *payout.ChainBalanceWorker  // Step 4 §7.4
 	tuning      *payout.TuningProvider      // Step 4 §6.5 SIGHUP-reloadable
+	rpcs        payout.TwoRPCs              // Step 4 r3 [sec:r3-1] SPKI pin rotation: CloseIdleConnections on SIGHUP
 	stop        func(context.Context)       // calls Stop on every component then Release
 }
 
@@ -988,6 +989,7 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		reaper:      reaper,
 		chainWorker: chainWorker,
 		tuning:      tuningProvider,
+		rpcs:        rpcs,
 		stop: func(stopCtx context.Context) {
 			// Codex Step 3 r1 [arch:3.1] MAJOR closure: shutdown
 			// ordering is runner → poller → reaper → Release.
@@ -1321,10 +1323,16 @@ func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
 //     reads `payout.tuning.*` keys; it does NOT resolve env: sentinels
 //     for payout.security.*, does NOT call Validate on security fields,
 //     and will NOT reject a SIGHUP because a security key changed.
+//   - Step 4 r3 [sec:r3-1]/[arch:r3-4.2] closure: when an SPKI pin
+//     key is in the changed set, CloseIdleConnections is called on
+//     both RPC clients so the next RPC forces a fresh TLS handshake
+//     under the new pin instead of reusing a pooled connection that
+//     was verified under the old pin.
 func startPayoutSIGHUPListener(
 	ctx context.Context,
 	configPath string,
 	tuning *payout.TuningProvider,
+	rpcs payout.TwoRPCs,
 	log zerolog.Logger,
 ) {
 	if tuning == nil {
@@ -1366,14 +1374,34 @@ func startPayoutSIGHUPListener(
 			// payout_config_reload_rejected per §7.1; we just
 			// surface the wrapper error for the runner log so
 			// operators see SIGHUP arrived.
-			if err := tuning.Reload(ctx, candidate); err != nil {
-				log.Info().Err(err).
+			changedKeys, reloadErr := tuning.Reload(ctx, candidate)
+			if reloadErr != nil {
+				log.Info().Err(reloadErr).
 					Str("event", "payout_tuning_sighup_received").
 					Msg("payout tuning SIGHUP processed (rejected; see payout_config_reload_rejected)")
 			} else {
 				log.Info().
 					Str("event", "payout_tuning_sighup_received").
 					Msg("payout tuning SIGHUP processed (accepted; see payout_config_reloaded)")
+				// Step 4 r3 [sec:r3-1]/[arch:r3-4.2] CONVERGENT HIGH/MEDIUM
+				// closure: drain idle TLS connections so the next RPC call
+				// forces a fresh handshake under the new SPKI pin. Without
+				// this, the 90s IdleConnTimeout can keep the old verified
+				// connection alive after operators believe the new pin is
+				// active. Called only on accepted reloads where the pin key
+				// actually changed; no-op for non-SPKI reload cycles.
+				for _, k := range changedKeys {
+					if k == "payout.tuning.rpc_url_primary_pin_spki" ||
+						k == "payout.tuning.rpc_url_secondary_pin_spki" {
+						if rpc, ok := rpcs.Primary.(*payout.HTTPRPCClient); ok {
+							rpc.CloseIdleConnections()
+						}
+						if rpc, ok := rpcs.Secondary.(*payout.HTTPRPCClient); ok {
+							rpc.CloseIdleConnections()
+						}
+						break
+					}
+				}
 			}
 		}
 	}

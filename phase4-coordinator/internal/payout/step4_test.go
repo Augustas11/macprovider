@@ -154,8 +154,9 @@ VALUES (?, ?, 10000000, '0xdeadbeef', 1, '2026-01-01T00:00:00Z', 'manual')`,
 }
 
 // TestChainBalanceWorker_RPCDisagreementSkipsHalt locks the §7.4
-// behavior on RPC disagreement: emit payout_rpc_disagreement AND
-// skip the drift comparison — MUST NOT halt.
+// behavior on RPC disagreement: emit payout_chain_balance_rpc_disagreement
+// AND skip the drift comparison — MUST NOT halt.
+// Step 4 r3 [code:r3-3]: event renamed from payout_rpc_disagreement.
 func TestChainBalanceWorker_RPCDisagreementSkipsHalt(t *testing.T) {
 	db := openTestDB(t)
 	seedBootstrapForTest(t, db)
@@ -519,7 +520,7 @@ func TestEmitBalanceAlerts_NonZeroThresholdInvokesProbes(t *testing.T) {
 		t.Fatalf("NewRunner: %v", err)
 	}
 	// RunOnce with no rows to process — just runs the top-of-cycle probes.
-	_ = runner.RunOnce(context.Background())
+	_, _ = runner.RunOnce(context.Background())
 
 	if callContractCount == 0 {
 		t.Error("CallContract not invoked; LowBalanceThreshold > 0 must trigger USDC probe")
@@ -579,7 +580,7 @@ func TestRunnerHalted_Skips_Cycle(t *testing.T) {
 	if !runner.IsHalted() {
 		t.Fatal("IsHalted() = false after RequestHalt")
 	}
-	err = runner.RunOnce(context.Background())
+	_, err = runner.RunOnce(context.Background())
 	if !errors.Is(err, ErrRunnerHalted) {
 		t.Errorf("RunOnce after halt: err=%v, want ErrRunnerHalted", err)
 	}

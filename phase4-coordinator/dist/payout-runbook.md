@@ -13,7 +13,8 @@ narrative**, the SPEC body is the source of truth on contract.
 >    prereq item 6 — required BEFORE cutover)
 > 4. §4 Cutover sequence (this doc, mirrors SPEC §9 cutover)
 > 5. Day-2: §5 key-rotation runbook (SPEC §6.4 steps 1–5)
-> 6. Day-2: §6 weekly reconciliation (SPEC §7.4 queries A–F)
+> 6. Day-2: §6 SPKI pin rotation (when rotating RPC endpoint certificates)
+> 7. Day-2: §7 weekly reconciliation (SPEC §7.4 queries A–F)
 
 ---
 
@@ -133,7 +134,7 @@ Required PAGE-class events (test each by hand on a staging
 coordinator):
 
 - `payout_chain_balance_drift_negative`
-- `payout_rpc_disagreement`
+- `payout_chain_balance_rpc_disagreement` (chain-balance worker; r3 rename from `payout_rpc_disagreement`)
 - `payout_runner_lease_lost`
 - `payout_runner_lease_taken_over`
 - `payout_runner_lease_left_to_stale_out`
@@ -244,7 +245,64 @@ curl https://coordinator.streamvc.live/providers/<id>/payouts \
 
 ---
 
-## 6. Weekly reconciliation (SPEC §7.4 queries A–F)
+## 6. SPKI pin rotation (SPEC §6.5 / [arch:r3-4.2])
+
+The two RPC clients (primary + secondary) use TLS SPKI pinning.
+The pinned SHA-256 fingerprint is reloadable at runtime via SIGHUP;
+no process restart is required.
+
+### When to rotate
+
+- Planned certificate rotation on the RPC endpoint.
+- Vendor notice of upcoming certificate change.
+- Any incident where the RPC endpoint certificate is replaced.
+
+### Steps
+
+1. Obtain the new certificate's SPKI SHA-256 fingerprint:
+   ```bash
+   # From the DER-encoded cert on disk:
+   openssl x509 -in new_rpc_cert.pem -pubkey -noout \
+     | openssl pkey -pubin -outform DER \
+     | openssl dgst -sha256 -binary \
+     | base64
+   ```
+2. Update `dist/coordinator.yaml`:
+   ```yaml
+   payout:
+     tuning:
+       rpc_url_primary_pin_spki:   "<new base64 SHA-256>"
+       rpc_url_secondary_pin_spki: "<new base64 SHA-256>"
+   ```
+3. Send SIGHUP to the coordinator process:
+   ```bash
+   kill -HUP "$(systemctl show -p MainPID --value macprovider-coordinator)"
+   ```
+4. Watch journalctl for `payout_config_reloaded` events with
+   `key=payout.tuning.rpc_url_primary_pin_spki` and
+   `key=payout.tuning.rpc_url_secondary_pin_spki` to confirm
+   the reload was accepted.
+5. The SIGHUP handler drains the HTTP connection pool
+   (`CloseIdleConnections`) when SPKI keys change, so all
+   subsequent RPC calls perform fresh TLS handshakes against the
+   new pin. Pool drain is automatic — no additional action needed.
+
+   **Step 4 r3 [sec:r3-1]/[arch:r3-4.2] CONVERGENT HIGH/MEDIUM closure.**
+   Previously, pooled TLS connections (90s idle TTL) would bypass
+   the live-read pin for up to 90 seconds after SIGHUP. The
+   `CloseIdleConnections` call on SPKI-key SIGHUP closes this window.
+
+### Rollback
+
+If the new pin is wrong (no `payout_config_reloaded` event, or
+RPC calls start failing with TLS errors), update the YAML back to
+the old fingerprint and SIGHUP again. The SIGHUP handler validates
+the new config before applying; an invalid pin is rejected with
+`payout_config_reload_rejected`.
+
+---
+
+## 7. Weekly reconciliation (SPEC §7.4 queries A–F)
 
 The §7.4 queries are checked in at
 `phase4-coordinator/internal/payout/reconcile.sql`. Run

@@ -84,44 +84,92 @@ var (
 // the immutable security namespace (loaded at startup); it does
 // NOT flow through this loader.
 //
-// Returns a wrapped error naming the first failing field — the
-// §7.1 emitter surfaces the field name to operators.
+// Returns *BoundViolationError naming the first failing field —
+// the §7.1 emitter surfaces key/attempted_value/bound to operators.
+//
+// Step 4 r3 [code:r3-2]/[sec:r3-2] MEDIUM closure: switched from
+// plain fmt.Errorf to *BoundViolationError so emitRejected can log
+// the structured §7.1 field set (key, attempted_value, bound).
 func validateBounds(t TuningSnapshot, perDayCap int64) error {
 	if t.AddressCoolingOffPeriod < addressCoolingOffMin {
-		return fmt.Errorf("address_cooling_off_period %s < min %s", t.AddressCoolingOffPeriod, addressCoolingOffMin)
+		return &BoundViolationError{
+			Key:            "payout.tuning.address_cooling_off_period",
+			AttemptedValue: t.AddressCoolingOffPeriod.String(),
+			Bound:          fmt.Sprintf(">= %s", addressCoolingOffMin),
+		}
 	}
 	if t.RunInterval < runIntervalMin || t.RunInterval > runIntervalMax {
-		return fmt.Errorf("run_interval %s outside [%s, %s]", t.RunInterval, runIntervalMin, runIntervalMax)
+		return &BoundViolationError{
+			Key:            "payout.tuning.run_interval",
+			AttemptedValue: t.RunInterval.String(),
+			Bound:          fmt.Sprintf("[%s, %s]", runIntervalMin, runIntervalMax),
+		}
 	}
 	if t.RunNowMinInterval < runNowMinIntervalMin || t.RunNowMinInterval > runNowMinIntervalMax {
-		return fmt.Errorf("run_now_min_interval %s outside [%s, %s]", t.RunNowMinInterval, runNowMinIntervalMin, runNowMinIntervalMax)
+		return &BoundViolationError{
+			Key:            "payout.tuning.run_now_min_interval",
+			AttemptedValue: t.RunNowMinInterval.String(),
+			Bound:          fmt.Sprintf("[%s, %s]", runNowMinIntervalMin, runNowMinIntervalMax),
+		}
 	}
 	if t.ConfirmationBlocks < confirmationBlocksMin || t.ConfirmationBlocks > confirmationBlocksMax {
-		return fmt.Errorf("confirmation_blocks %d outside [%d, %d]", t.ConfirmationBlocks, confirmationBlocksMin, confirmationBlocksMax)
+		return &BoundViolationError{
+			Key:            "payout.tuning.confirmation_blocks",
+			AttemptedValue: fmt.Sprintf("%d", t.ConfirmationBlocks),
+			Bound:          fmt.Sprintf("[%d, %d]", confirmationBlocksMin, confirmationBlocksMax),
+		}
 	}
 	if t.MaxRowsPerRun < maxRowsPerRunMin || t.MaxRowsPerRun > maxRowsPerRunMax {
-		return fmt.Errorf("max_rows_per_run %d outside [%d, %d]", t.MaxRowsPerRun, maxRowsPerRunMin, maxRowsPerRunMax)
+		return &BoundViolationError{
+			Key:            "payout.tuning.max_rows_per_run",
+			AttemptedValue: fmt.Sprintf("%d", t.MaxRowsPerRun),
+			Bound:          fmt.Sprintf("[%d, %d]", maxRowsPerRunMin, maxRowsPerRunMax),
+		}
 	}
 	if t.ReorgPollWindow < reorgPollWindowMin || t.ReorgPollWindow > reorgPollWindowMax {
-		return fmt.Errorf("reorg_poll_window %s outside [%s, %s]", t.ReorgPollWindow, reorgPollWindowMin, reorgPollWindowMax)
+		return &BoundViolationError{
+			Key:            "payout.tuning.reorg_poll_window",
+			AttemptedValue: t.ReorgPollWindow.String(),
+			Bound:          fmt.Sprintf("[%s, %s]", reorgPollWindowMin, reorgPollWindowMax),
+		}
 	}
 	if t.LowNativeThreshold < 0 || t.LowNativeThreshold > lowNativeThresholdMax {
-		return fmt.Errorf("low_native_threshold %d outside [0, %d]", t.LowNativeThreshold, lowNativeThresholdMax)
+		return &BoundViolationError{
+			Key:            "payout.tuning.low_native_threshold",
+			AttemptedValue: fmt.Sprintf("%d", t.LowNativeThreshold),
+			Bound:          fmt.Sprintf("[0, %d]", lowNativeThresholdMax),
+		}
 	}
 	if t.LowBalanceThreshold < 0 {
-		return fmt.Errorf("low_balance_threshold %d must be >= 0", t.LowBalanceThreshold)
+		return &BoundViolationError{
+			Key:            "payout.tuning.low_balance_threshold",
+			AttemptedValue: fmt.Sprintf("%d", t.LowBalanceThreshold),
+			Bound:          ">= 0",
+		}
 	}
 	// Cross-field: low_balance_threshold MUST be <= 2 × per_day_cap.
 	// perDayCap = 0 means the security loader hasn't been wired yet
 	// (test path); skip the cross-field check in that case.
 	if perDayCap > 0 && t.LowBalanceThreshold > 2*perDayCap {
-		return fmt.Errorf("low_balance_threshold %d > 2 × per_day_cap %d (= %d)", t.LowBalanceThreshold, perDayCap, 2*perDayCap)
+		return &BoundViolationError{
+			Key:            "payout.tuning.low_balance_threshold",
+			AttemptedValue: fmt.Sprintf("%d", t.LowBalanceThreshold),
+			Bound:          fmt.Sprintf("<= 2 × per_day_cap (%d)", 2*perDayCap),
+		}
 	}
 	if t.RPCURLPrimaryPinSPKI != "" && !spkiPinRegex.MatchString(t.RPCURLPrimaryPinSPKI) {
-		return fmt.Errorf("rpc_url_primary_pin_spki must be 64-hex-char SHA-256 or empty")
+		return &BoundViolationError{
+			Key:            "payout.tuning.rpc_url_primary_pin_spki",
+			AttemptedValue: redactSPKI(t.RPCURLPrimaryPinSPKI),
+			Bound:          "64-hex-char SHA-256 or empty",
+		}
 	}
 	if t.RPCURLSecondaryPinSPKI != "" && !spkiPinRegex.MatchString(t.RPCURLSecondaryPinSPKI) {
-		return fmt.Errorf("rpc_url_secondary_pin_spki must be 64-hex-char SHA-256 or empty")
+		return &BoundViolationError{
+			Key:            "payout.tuning.rpc_url_secondary_pin_spki",
+			AttemptedValue: redactSPKI(t.RPCURLSecondaryPinSPKI),
+			Bound:          "64-hex-char SHA-256 or empty",
+		}
 	}
 	return nil
 }
@@ -186,6 +234,24 @@ func (p *TuningProvider) Snapshot() TuningSnapshot {
 // the live value.
 var ErrTuningBoundViolation = errors.New("payout: tuning reload rejected — bound violation")
 
+// BoundViolationError carries the structured §7.1 fields for a
+// payout_config_reload_rejected event: key, attempted_value, bound.
+// Returned by validateBoundsStructured so emitRejected can log the
+// full §7.1 field set.
+//
+// Step 4 r3 [code:r3-2]/[sec:r3-2] CONVERGENT MEDIUM closure:
+// structured error instead of plain string so the SIGHUP handler
+// emits key/attempted_value/bound per §7.1 line 3731.
+type BoundViolationError struct {
+	Key            string // e.g. "payout.tuning.run_interval"
+	AttemptedValue string // human-readable of the attempted value
+	Bound          string // human-readable of the violated bound
+}
+
+func (e *BoundViolationError) Error() string {
+	return fmt.Sprintf("%s: attempted=%s violated bound=%s", e.Key, e.AttemptedValue, e.Bound)
+}
+
 // Reload validates the candidate snapshot and, on success, atomic-
 // stores it as the new live value. Per SPEC §6.5 normative:
 //
@@ -194,81 +260,123 @@ var ErrTuningBoundViolation = errors.New("payout: tuning reload rejected — bou
 //   - Bound violation: emit `payout_config_reload_rejected` PAGE
 //     with the failing field; LIVE VALUE IS RETAINED.
 //
-// Returns ErrTuningBoundViolation wrapped with the violated
+// Returns (changedKeys, nil) on success, where changedKeys lists the
+// tuning field names that actually changed. The SIGHUP handler uses
+// this to detect SPKI pin changes and drain RPC idle connections.
+// Returns (nil, ErrTuningBoundViolation) wrapped with the violated
 // field on rejection. The runner cycle observes the new value at
 // the NEXT cycle's top (snapshot read at top of RunOnce).
-func (p *TuningProvider) Reload(ctx context.Context, candidate TuningSnapshot) error {
+//
+// Step 4 r3 [sec:r3-1]/[arch:r3-4.2] closure: changedKeys return
+// lets the SIGHUP handler call CloseIdleConnections on the RPC
+// clients when an SPKI pin key is in the changed set.
+func (p *TuningProvider) Reload(ctx context.Context, candidate TuningSnapshot) ([]string, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	old := p.Snapshot()
-	if err := validateBounds(candidate, p.perDayCap); err != nil {
-		p.emitRejected(err)
-		return fmt.Errorf("%w: %v", ErrTuningBoundViolation, err)
+	if bve := validateBounds(candidate, p.perDayCap); bve != nil {
+		p.emitRejected(bve)
+		return nil, fmt.Errorf("%w: %v", ErrTuningBoundViolation, bve)
 	}
 	// Atomic store — the next Snapshot() call sees the new value.
 	p.v.Store(candidate)
-	p.emitReloaded(old, candidate)
-	return nil
+	changed := p.emitReloaded(old, candidate)
+	return changed, nil
 }
 
 // emitReloaded fires one payout_config_reloaded PAGE event per
-// changed key. Per §7.1 the field set is {key, old, new, ts_utc,
+// changed key and returns the list of changed key names. Per §7.1
+// the field set is {key, old_value, new_value, actor, ts_utc,
 // severity=PAGE}. Operators get one log line per actual change so
 // the audit trail names exactly what flipped.
-func (p *TuningProvider) emitReloaded(old, new TuningSnapshot) {
+//
+// Step 4 r3 [code:r3-2]/[sec:r3-2] CONVERGENT MEDIUM closure:
+// renamed old→old_value, new→new_value per §7.1 line 3730; added
+// actor field ("operator_key:coordinator" = coordinator process
+// acting on behalf of the operator via SIGHUP). Returns changed
+// key names so the SIGHUP handler can detect SPKI pin changes.
+func (p *TuningProvider) emitReloaded(old, newSnap TuningSnapshot) []string {
 	tsUTC := time.Now().UTC().Format(time.RFC3339Nano)
+	var changed []string
 	emit := func(key, oldS, newS string) {
+		changed = append(changed, key)
 		p.log.Warn().
 			Str("event", "payout_config_reloaded").
 			Str("key", key).
-			Str("old", oldS).
-			Str("new", newS).
+			Str("old_value", oldS).
+			Str("new_value", newS).
+			Str("actor", "operator_key:coordinator").
 			Str("ts_utc", tsUTC).
 			Str("severity", "PAGE").
 			Send()
 	}
-	if old.AddressCoolingOffPeriod != new.AddressCoolingOffPeriod {
-		emit("payout.tuning.address_cooling_off_period", old.AddressCoolingOffPeriod.String(), new.AddressCoolingOffPeriod.String())
+	if old.AddressCoolingOffPeriod != newSnap.AddressCoolingOffPeriod {
+		emit("payout.tuning.address_cooling_off_period", old.AddressCoolingOffPeriod.String(), newSnap.AddressCoolingOffPeriod.String())
 	}
-	if old.RunInterval != new.RunInterval {
-		emit("payout.tuning.run_interval", old.RunInterval.String(), new.RunInterval.String())
+	if old.RunInterval != newSnap.RunInterval {
+		emit("payout.tuning.run_interval", old.RunInterval.String(), newSnap.RunInterval.String())
 	}
-	if old.RunNowMinInterval != new.RunNowMinInterval {
-		emit("payout.tuning.run_now_min_interval", old.RunNowMinInterval.String(), new.RunNowMinInterval.String())
+	if old.RunNowMinInterval != newSnap.RunNowMinInterval {
+		emit("payout.tuning.run_now_min_interval", old.RunNowMinInterval.String(), newSnap.RunNowMinInterval.String())
 	}
-	if old.ConfirmationBlocks != new.ConfirmationBlocks {
-		emit("payout.tuning.confirmation_blocks", fmt.Sprintf("%d", old.ConfirmationBlocks), fmt.Sprintf("%d", new.ConfirmationBlocks))
+	if old.ConfirmationBlocks != newSnap.ConfirmationBlocks {
+		emit("payout.tuning.confirmation_blocks", fmt.Sprintf("%d", old.ConfirmationBlocks), fmt.Sprintf("%d", newSnap.ConfirmationBlocks))
 	}
-	if old.MaxRowsPerRun != new.MaxRowsPerRun {
-		emit("payout.tuning.max_rows_per_run", fmt.Sprintf("%d", old.MaxRowsPerRun), fmt.Sprintf("%d", new.MaxRowsPerRun))
+	if old.MaxRowsPerRun != newSnap.MaxRowsPerRun {
+		emit("payout.tuning.max_rows_per_run", fmt.Sprintf("%d", old.MaxRowsPerRun), fmt.Sprintf("%d", newSnap.MaxRowsPerRun))
 	}
-	if old.ReorgPollWindow != new.ReorgPollWindow {
-		emit("payout.tuning.reorg_poll_window", old.ReorgPollWindow.String(), new.ReorgPollWindow.String())
+	if old.ReorgPollWindow != newSnap.ReorgPollWindow {
+		emit("payout.tuning.reorg_poll_window", old.ReorgPollWindow.String(), newSnap.ReorgPollWindow.String())
 	}
-	if old.LowBalanceThreshold != new.LowBalanceThreshold {
-		emit("payout.tuning.low_balance_threshold", fmt.Sprintf("%d", old.LowBalanceThreshold), fmt.Sprintf("%d", new.LowBalanceThreshold))
+	if old.LowBalanceThreshold != newSnap.LowBalanceThreshold {
+		emit("payout.tuning.low_balance_threshold", fmt.Sprintf("%d", old.LowBalanceThreshold), fmt.Sprintf("%d", newSnap.LowBalanceThreshold))
 	}
-	if old.LowNativeThreshold != new.LowNativeThreshold {
-		emit("payout.tuning.low_native_threshold", fmt.Sprintf("%d", old.LowNativeThreshold), fmt.Sprintf("%d", new.LowNativeThreshold))
+	if old.LowNativeThreshold != newSnap.LowNativeThreshold {
+		emit("payout.tuning.low_native_threshold", fmt.Sprintf("%d", old.LowNativeThreshold), fmt.Sprintf("%d", newSnap.LowNativeThreshold))
 	}
-	if old.RPCURLPrimaryPinSPKI != new.RPCURLPrimaryPinSPKI {
-		emit("payout.tuning.rpc_url_primary_pin_spki", redactSPKI(old.RPCURLPrimaryPinSPKI), redactSPKI(new.RPCURLPrimaryPinSPKI))
+	if old.RPCURLPrimaryPinSPKI != newSnap.RPCURLPrimaryPinSPKI {
+		emit("payout.tuning.rpc_url_primary_pin_spki", redactSPKI(old.RPCURLPrimaryPinSPKI), redactSPKI(newSnap.RPCURLPrimaryPinSPKI))
 	}
-	if old.RPCURLSecondaryPinSPKI != new.RPCURLSecondaryPinSPKI {
-		emit("payout.tuning.rpc_url_secondary_pin_spki", redactSPKI(old.RPCURLSecondaryPinSPKI), redactSPKI(new.RPCURLSecondaryPinSPKI))
+	if old.RPCURLSecondaryPinSPKI != newSnap.RPCURLSecondaryPinSPKI {
+		emit("payout.tuning.rpc_url_secondary_pin_spki", redactSPKI(old.RPCURLSecondaryPinSPKI), redactSPKI(newSnap.RPCURLSecondaryPinSPKI))
 	}
+	return changed
 }
 
 // emitRejected fires one payout_config_reload_rejected PAGE event
-// naming the failing field. The live value is retained.
+// with the full §7.1 field set. The live value is retained.
+//
+// Step 4 r3 [code:r3-2]/[sec:r3-2] CONVERGENT MEDIUM closure:
+// structured §7.1 fields key/attempted_value/bound/actor/ts_utc per
+// line 3731. When err is *BoundViolationError the fields are
+// individually extracted; otherwise key="yaml_parse" covers parse
+// failures and the raw error lands in attempted_value.
 func (p *TuningProvider) emitRejected(err error) {
-	p.log.Error().
-		Err(err).
-		Str("event", "payout_config_reload_rejected").
-		Str("ts_utc", time.Now().UTC().Format(time.RFC3339Nano)).
-		Str("severity", "PAGE").
-		Msg("payout tuning reload rejected — live value retained")
+	tsUTC := time.Now().UTC().Format(time.RFC3339Nano)
+	var bve *BoundViolationError
+	if errors.As(err, &bve) {
+		p.log.Error().
+			Str("event", "payout_config_reload_rejected").
+			Str("key", bve.Key).
+			Str("attempted_value", bve.AttemptedValue).
+			Str("bound", bve.Bound).
+			Str("actor", "operator_key:coordinator").
+			Str("ts_utc", tsUTC).
+			Str("severity", "PAGE").
+			Send()
+	} else {
+		// YAML-parse failure or other pre-bound error.
+		p.log.Error().
+			Str("event", "payout_config_reload_rejected").
+			Str("key", "yaml_parse").
+			Str("attempted_value", err.Error()).
+			Str("bound", "valid_yaml").
+			Str("actor", "operator_key:coordinator").
+			Str("ts_utc", tsUTC).
+			Str("severity", "PAGE").
+			Send()
+	}
 }
 
 // redactSPKI returns an 8-char prefix of an SPKI pin for log

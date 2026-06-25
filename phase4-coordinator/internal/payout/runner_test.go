@@ -178,7 +178,7 @@ VALUES ('p1', 'base-mainnet', ?, 1, ?, NULL, ?, ?)`,
 	}
 	s.secondary.txByHashFn = s.primary.txByHashFn
 
-	if err := s.runner.RunOnce(context.Background()); err != nil {
+	if _, err := s.runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("RunOnce: %v", err)
 	}
 	if len(s.claimer.calls) != 1 {
@@ -248,7 +248,7 @@ VALUES ('p1', 'base-mainnet', ?, 1, ?, NULL, ?, ?)`,
 	}()
 	// The runner's first SELECT will return the original 900_000,
 	// but the in-txn re-read will see the mutated value.
-	_ = s.runner.RunOnce(context.Background())
+	_, _ = s.runner.RunOnce(context.Background())
 	// Verify the runner did NOT call ClaimPayoutReady (the amount
 	// mismatch halts the row).
 	if len(s.claimer.calls) != 0 {
@@ -310,7 +310,7 @@ VALUES ('p1', 'base-mainnet', '0x000000000000000000000000000000000000dEaD', 1, ?
 	// Clobber the lease token.
 	_, _ = db.ExecContext(context.Background(),
 		`UPDATE payout_runner_lease SET holder_token = 'someone-else' WHERE id = 1`)
-	err := s.runner.RunOnce(context.Background())
+	_, err := s.runner.RunOnce(context.Background())
 	if !errors.Is(err, ErrLeaseLost) {
 		t.Errorf("RunOnce err = %v, want ErrLeaseLost", err)
 	}

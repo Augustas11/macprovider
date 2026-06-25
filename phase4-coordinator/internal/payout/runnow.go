@@ -1,6 +1,7 @@
 package payout
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"sync"
@@ -9,6 +10,22 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 )
+
+// runnerExecutor is the narrow surface RunNowController needs from
+// *Runner. Declared as an interface so tests can inject a fakeRunner
+// that forces RunOnce to return ErrRunnerHalted without needing a
+// real runner lifecycle.
+//
+// Step 4 r3 [code:r3-4] MEDIUM closure: the prior tests could not
+// exercise the post-RunOnce ErrRunnerHalted race path because
+// *Runner exposes IsHalted atomically; a fake lets tests force the
+// "IsHalted=false at admission, but RunOnce returns ErrRunnerHalted"
+// scenario deterministically.
+type runnerExecutor interface {
+	IsHalted() bool
+	HaltReason() string
+	RunOnce(ctx context.Context) (string, error)
+}
 
 // RunNowController centralises the §4.2 admin run-now contract:
 // rate-limit by payout.tuning.run_now_min_interval, emit
@@ -27,6 +44,10 @@ type RunNowController struct {
 	log              zerolog.Logger
 	nowFn            func() time.Time
 	fallbackInterval time.Duration // used when tuning is nil (test path)
+
+	// runnerExec holds the injectable runner for test paths.
+	// nil = use c.runner directly (production). Set by tests.
+	runnerExec runnerExecutor
 
 	mu           sync.Mutex
 	lastAccepted time.Time
@@ -54,6 +75,15 @@ func NewRunNowController(
 		fallbackInterval: fallbackInterval,
 	}
 	return c, nil
+}
+
+// execOrRunner returns the injectable executor when set (test path),
+// otherwise falls back to the concrete *Runner (production path).
+func (c *RunNowController) execOrRunner() runnerExecutor {
+	if c.runnerExec != nil {
+		return c.runnerExec
+	}
+	return c.runner
 }
 
 // currentInterval returns the live RunNowMinInterval from the tuning
@@ -119,19 +149,29 @@ func (c *RunNowController) ServeRunNow(w http.ResponseWriter, r *http.Request, a
 	c.lastAccepted = now
 	c.mu.Unlock()
 
+	exec := c.execOrRunner()
+
 	// Step 4 r2 [code:r2-3] MEDIUM closure: pre-check IsHalted as a
 	// fast path, but RunOnce's own halt check may also fire if
 	// RequestHalt races after this line. Both paths emit runner_halted.
-	if c.runner.IsHalted() {
+	if exec.IsHalted() {
 		c.emitRunNowInvoked(runID, actor, "runner_halted", now)
 		writeJSON(w, http.StatusConflict, map[string]any{
 			"error":  "runner_halted",
-			"reason": c.runner.HaltReason(),
+			"reason": exec.HaltReason(),
 		})
 		return
 	}
 
-	if err := c.runner.RunOnce(r.Context()); err != nil {
+	// Step 4 r3 [code:r3-1] HIGH closure: RunOnce now returns the
+	// run_id it used for payout_run_started / payout_run_finished.
+	// We replace our pre-generated runID with the cycle's actual
+	// run_id so payout_run_now_invoked.run_id == payout_run_started.run_id.
+	cycleRunID, err := exec.RunOnce(r.Context())
+	if cycleRunID != "" {
+		runID = cycleRunID
+	}
+	if err != nil {
 		// Step 4 r2 [code:r2-3] MEDIUM closure: if RequestHalt fired
 		// after IsHalted() check above but before/during RunOnce, the
 		// runner returns ErrRunnerHalted. Return runner_halted body
@@ -140,7 +180,7 @@ func (c *RunNowController) ServeRunNow(w http.ResponseWriter, r *http.Request, a
 			c.emitRunNowInvoked(runID, actor, "runner_halted", now)
 			writeJSON(w, http.StatusConflict, map[string]any{
 				"error":  "runner_halted",
-				"reason": c.runner.HaltReason(),
+				"reason": exec.HaltReason(),
 			})
 			return
 		}

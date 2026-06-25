@@ -369,4 +369,3 @@ func TestMakeSPKIPinVerifier_LiveRead(t *testing.T) {
 		t.Errorf("verifier with empty pin (no pinning) returned error: %v", err)
 	}
 }
-

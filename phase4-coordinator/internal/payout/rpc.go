@@ -121,6 +121,7 @@ type Transaction struct {
 type HTTPRPCClient struct {
 	URL        string
 	HTTPClient *http.Client
+	transport  *http.Transport // retained so CloseIdleConnections is callable
 	label      string
 }
 
@@ -156,7 +157,24 @@ func NewHTTPRPCClient(url, label string, pinFn func() string, timeout time.Durat
 			Timeout:   timeout,
 			Transport: transport,
 		},
-		label: label,
+		transport: transport, // retained for CloseIdleConnections
+		label:     label,
+	}
+}
+
+// CloseIdleConnections drains the transport's idle connection pool so
+// the next RPC forces a fresh TLS handshake. Called by the SIGHUP
+// handler when an SPKI pin change is accepted — ensures the new pin
+// is enforced immediately rather than waiting for the 90s idle-conn
+// TTL to expire.
+//
+// Step 4 r3 [sec:r3-1]/[arch:r3-4.2] CONVERGENT HIGH/MEDIUM closure:
+// SPKI live-read at handshake time is correct, but pooled TLS
+// connections bypass future handshakes. CloseIdleConnections + SIGHUP
+// wiring closes that window.
+func (c *HTTPRPCClient) CloseIdleConnections() {
+	if c != nil && c.transport != nil {
+		c.transport.CloseIdleConnections()
 	}
 }
 
