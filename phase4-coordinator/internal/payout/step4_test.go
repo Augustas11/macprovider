@@ -646,9 +646,16 @@ func TestRunNow_Returns409WhenHalted(t *testing.T) {
 	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTeapot)
 	})
+	// Step 4 r2 [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] closure:
+	// mux now requires a RunNowController.
+	runNowCtrl, err := NewRunNowController(runner, nil, 60*time.Second, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewRunNowController: %v", err)
+	}
 	mux, err := NewMuxStep2(Step2MuxOptions{
 		Addresses: addresses,
 		Runner:    runner,
+		RunNow:    runNowCtrl,
 		Abandon:   abandon,
 		Caps: AbandonCaps{
 			CancelMaxTipMultiplier:      5.0,

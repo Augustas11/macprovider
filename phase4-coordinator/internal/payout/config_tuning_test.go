@@ -176,22 +176,31 @@ func TestValidateBounds_CrossField_LowBalanceVsPerDayCap(t *testing.T) {
 func TestTuningStaticCheck_NoSecurityNamespaceReference(t *testing.T) {
 	// forbiddenIdents is the centralized set of security-namespace
 	// identifiers that must never appear in config_tuning.go.
+	// Step 4 r2 [code:r2-2]/[sec:r2-2] MEDIUM closure: replaced
+	// non-exact substrings (e.g. "PerDayCap") with the EXACT exported
+	// field and type names that the Go AST sees. Derived verbatim from
+	// config.PayoutSecurityConfig and payout.SecurityConfig declarations.
 	// Add entries here when new PayoutSecurityConfig fields are added.
 	forbiddenIdents := map[string]bool{
-		"SecurityConfig":                    true,
-		"HotWalletAddress":                  true,
-		"PerDayCap":                         true,
-		"PerPayoutCap":                      true,
-		"ChainReconInterval":                true,
-		"ChainReconToleranceUSDCBaseUnits":  true,
-		"DevMode":                           true,
-		"EncryptedWalletPath":               true,
-		"EncryptedWalletOnDiskHex":          true,
-		"PauseResumeMinInterval":            true,
-		"CancelMaxTipMultiplier":            true,
-		"CancelMaxGasNativeWei":             true,
-		"CancelMaxGasNativeWeiPer24h":       true,
-		"AbandonRatePerHour":                true,
+		// Type names.
+		"PayoutSecurityConfig":                true,
+		"SecurityConfig":                      true,
+		// Field names — exact identifiers as declared in config.go.
+		"HotWalletAddress":                    true,
+		"RPCURLPrimary":                       true,
+		"RPCURLSecondary":                     true,
+		"PerPayoutCapUSDCBaseUnits":           true,
+		"PerDayCapUSDCBaseUnits":              true,
+		"CancelMaxTipMultiplier":              true,
+		"CancelMaxGasNativeWei":               true,
+		"CancelMaxGasNativeWeiPer24h":         true,
+		"AbandonRatePerHour":                  true,
+		"ChainReconInterval":                  true,
+		"ChainReconToleranceUSDCBaseUnits":    true,
+		"PauseResumeMinInterval":              true,
+		"EncryptedWalletPath":                 true,
+		"EncryptedWalletOnDiskHex":            true,
+		"DevMode":                             true,
 	}
 
 	cwd, err := os.Getwd()

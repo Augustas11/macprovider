@@ -1375,12 +1375,16 @@ func (r *Runner) emitBalanceAlerts(ctx context.Context, runID string, now time.T
 		} else if bal, ok := parseBalanceResult(res); ok {
 			threshold := new(big.Int).SetInt64(snap.LowBalanceThreshold)
 			if bal.Cmp(threshold) < 0 {
+				// Step 4 r2 [code:r2-4] MEDIUM closure: §7.1 field
+				// names — from_address, usdc_base_units,
+				// threshold_usdc_base_units (was hot_wallet /
+				// balance_usdc_base_units / threshold).
 				r.opts.Logger.Warn().
 					Str("event", "payout_low_balance").
 					Str("severity", "WARN").
-					Str("hot_wallet", hotLower).
-					Str("balance_usdc_base_units", bal.String()).
-					Int64("threshold", snap.LowBalanceThreshold).
+					Str("from_address", hotLower).
+					Str("usdc_base_units", bal.String()).
+					Int64("threshold_usdc_base_units", snap.LowBalanceThreshold).
 					Str("run_id", runID).
 					Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).Send()
 			}
@@ -1395,11 +1399,14 @@ func (r *Runner) emitBalanceAlerts(ctx context.Context, runID string, now time.T
 				Str("probe", "native").
 				Str("run_id", runID).Send()
 		} else if bal < uint64(snap.LowNativeThreshold) {
+			// Step 4 r2 [code:r2-4] MEDIUM closure: §7.1 field names
+			// — from_address, native_wei, threshold_wei (was
+			// hot_wallet / balance_wei / threshold_wei).
 			r.opts.Logger.Warn().
 				Str("event", "payout_low_native_balance").
 				Str("severity", "WARN").
-				Str("hot_wallet", hotLower).
-				Uint64("balance_wei", bal).
+				Str("from_address", hotLower).
+				Uint64("native_wei", bal).
 				Int64("threshold_wei", snap.LowNativeThreshold).
 				Str("run_id", runID).
 				Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).Send()

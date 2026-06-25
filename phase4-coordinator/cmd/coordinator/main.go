@@ -689,11 +689,50 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 			signer.FromAddress(), sec.HotWalletAddress)
 	}
 
+	if claimer == nil {
+		return nil, nil, nil, fmt.Errorf("payout: PayoutClaimer is required when payout.enabled=true (SPEC §4.3 step 8)")
+	}
+
+	// Step 4 §6.5 — SIGHUP-reloadable tuning provider. Built
+	// BEFORE the RPC clients so the live pin func() string closures
+	// can reference it. Step 4 r1 [code:r1-1]/[sec:r1-2]/[arch:4.2]
+	// convergent closure — accepting a SIGHUP reload without consumer
+	// plumbing was the original defect. Step 4 r2 [arch:r2-4.2] MAJOR
+	// closure: moved BEFORE NewHTTPRPCClient so the pin func reads the
+	// live snapshot at every TLS handshake rather than the startup value.
+	initialTuning := payout.TuningSnapshot{
+		AddressCoolingOffPeriod: cfg.Payout.Tuning.AddressCoolingOffPeriod,
+		RunInterval:             cfg.Payout.Tuning.RunInterval,
+		RunNowMinInterval:       cfg.Payout.Tuning.RunNowMinInterval,
+		ConfirmationBlocks:      cfg.Payout.Tuning.ConfirmationBlocks,
+		MaxRowsPerRun:           cfg.Payout.Tuning.MaxRowsPerRun,
+		ReorgPollWindow:         cfg.Payout.Tuning.ReorgPollWindow,
+		LowBalanceThreshold:     cfg.Payout.Tuning.LowBalanceThreshold,
+		LowNativeThreshold:      cfg.Payout.Tuning.LowNativeThreshold,
+		RPCURLPrimaryPinSPKI:    cfg.Payout.Tuning.RPCURLPrimaryPinSPKI,
+		RPCURLSecondaryPinSPKI:  cfg.Payout.Tuning.RPCURLSecondaryPinSPKI,
+	}
+	tuningProvider, err := payout.NewTuningProvider(initialTuning, cfg.Payout.Security.PerDayCapUSDCBaseUnits, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("NewTuningProvider: %w", err)
+	}
+
 	// Two-RPC client + chain id assertion + cold-start nonce sync.
 	// SPKI pinning per SPEC §4.4 (Step 2 [arch:3.3] closure).
+	// Step 4 r2 [arch:r2-4.2] MAJOR closure: pin is now func() string
+	// reading the live TuningProvider snapshot so SIGHUP SPKI rotations
+	// take effect at the next TLS handshake (not just accepted and logged).
 	rpcs := payout.TwoRPCs{
-		Primary:   payout.NewHTTPRPCClient(cfg.Payout.Security.RPCURLPrimary, "primary", cfg.Payout.Tuning.RPCURLPrimaryPinSPKI, 20*time.Second),
-		Secondary: payout.NewHTTPRPCClient(cfg.Payout.Security.RPCURLSecondary, "secondary", cfg.Payout.Tuning.RPCURLSecondaryPinSPKI, 20*time.Second),
+		Primary: payout.NewHTTPRPCClient(
+			cfg.Payout.Security.RPCURLPrimary, "primary",
+			func() string { return tuningProvider.Snapshot().RPCURLPrimaryPinSPKI },
+			20*time.Second,
+		),
+		Secondary: payout.NewHTTPRPCClient(
+			cfg.Payout.Security.RPCURLSecondary, "secondary",
+			func() string { return tuningProvider.Snapshot().RPCURLSecondaryPinSPKI },
+			20*time.Second,
+		),
 	}
 	rpcCtx, rpcCancel := context.WithTimeout(ctx, 15*time.Second)
 	defer rpcCancel()
@@ -715,32 +754,6 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 	}
 	if err := payout.UpsertNonceCursor(ctx, db, sec.HotWalletAddress, chosen, rpcA, rpcB, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
 		return nil, nil, nil, fmt.Errorf("UpsertNonceCursor: %w", err)
-	}
-
-	if claimer == nil {
-		return nil, nil, nil, fmt.Errorf("payout: PayoutClaimer is required when payout.enabled=true (SPEC §4.3 step 8)")
-	}
-
-	// Step 4 §6.5 — SIGHUP-reloadable tuning provider. Built
-	// BEFORE the consumers so it can be wired into each as the
-	// live source of truth. Step 4 r1 [code:r1-1]/[sec:r1-2]/
-	// [arch:4.2] convergent closure — accepting a SIGHUP reload
-	// without consumer plumbing was the original defect.
-	initialTuning := payout.TuningSnapshot{
-		AddressCoolingOffPeriod: cfg.Payout.Tuning.AddressCoolingOffPeriod,
-		RunInterval:             cfg.Payout.Tuning.RunInterval,
-		RunNowMinInterval:       cfg.Payout.Tuning.RunNowMinInterval,
-		ConfirmationBlocks:      cfg.Payout.Tuning.ConfirmationBlocks,
-		MaxRowsPerRun:           cfg.Payout.Tuning.MaxRowsPerRun,
-		ReorgPollWindow:         cfg.Payout.Tuning.ReorgPollWindow,
-		LowBalanceThreshold:     cfg.Payout.Tuning.LowBalanceThreshold,
-		LowNativeThreshold:      cfg.Payout.Tuning.LowNativeThreshold,
-		RPCURLPrimaryPinSPKI:    cfg.Payout.Tuning.RPCURLPrimaryPinSPKI,
-		RPCURLSecondaryPinSPKI:  cfg.Payout.Tuning.RPCURLSecondaryPinSPKI,
-	}
-	tuningProvider, err := payout.NewTuningProvider(initialTuning, cfg.Payout.Security.PerDayCapUSDCBaseUnits, logger)
-	if err != nil {
-		return nil, nil, nil, fmt.Errorf("NewTuningProvider: %w", err)
 	}
 
 	// Build address service first — needed before NewMuxStep2.
@@ -914,12 +927,29 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		return nil, nil, nil, fmt.Errorf("NewPayoutsHandler: %w", err)
 	}
 
+	// Step 4 r2 [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR
+	// closure: shared RunNowController enforces run_now_min_interval
+	// rate-limit and emits payout_run_now_invoked on EVERY outcome.
+	// Uses the live tuningProvider so SIGHUP interval changes land at
+	// the next invocation without restart.
+	runNowCtrl, err := payout.NewRunNowController(
+		runner,
+		tuningProvider,
+		cfg.Payout.Tuning.RunNowMinInterval, // fallback when tuning nil
+		logger,
+	)
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewRunNowController: %w", err)
+	}
+
 	mux, err := payout.NewMuxStep4(payout.Step4MuxOptions{
 		Step3MuxOptions: payout.Step3MuxOptions{
 			Step2MuxOptions: payout.Step2MuxOptions{
 				Addresses:   svc,
 				Abandon:     abandonSvc,
 				Runner:      runner,
+				RunNow:      runNowCtrl,
 				OperatorKey: cfg.Auth.OperatorKey,
 				Caps: payout.AbandonCaps{
 					CancelMaxTipMultiplier:      cfg.Payout.Security.CancelMaxTipMultiplier,

@@ -417,6 +417,10 @@ func TestNewMuxStep3_PathTableConsistency(t *testing.T) {
 		t.Fatalf("NewAbandonService: %v", err)
 	}
 	runner := &Runner{}
+	runNowCtrl, err := NewRunNowController(runner, nil, 60*time.Second, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewRunNowController: %v", err)
+	}
 	w, _ := NewRuntimeFlagWriter(db, zerolog.Nop())
 	pauseSvc, _ := NewPauseResumeService(PauseResumeOptions{Writer: w, Logger: zerolog.Nop()})
 	fundingSvc, _ := NewFundingService(FundingOptions{
@@ -429,6 +433,7 @@ func TestNewMuxStep3_PathTableConsistency(t *testing.T) {
 			Addresses:   svc,
 			Abandon:     abandonSvc,
 			Runner:      runner,
+			RunNow:      runNowCtrl,
 			OperatorKey: "test-op-key",
 			Caps:        AbandonCaps{},
 			Fallback:    nilHandler{},

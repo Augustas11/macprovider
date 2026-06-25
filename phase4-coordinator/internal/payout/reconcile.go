@@ -423,27 +423,32 @@ func (w *ChainBalanceWorker) runOnce(ctx context.Context) {
 	if drift.Sign() > 0 {
 		// Positive drift: on_chain > expected. Operator likely
 		// forgot to record a funding deposit. WARN.
+		// Step 4 r2 [code:r2-4] MEDIUM closure: §7.1 field names —
+		// from_address, in_db_expected_usdc_base_units,
+		// on_chain_usdc_base_units, drift_usdc_base_units (was
+		// hot_wallet / expected / on_chain / drift).
 		w.log.Warn().
 			Str("event", "payout_chain_balance_drift_positive").
 			Str("severity", "WARN").
-			Str("on_chain", onChain.String()).
-			Str("expected", expected.String()).
-			Str("drift", drift.String()).
+			Str("from_address", w.cfg.HotWalletAddr).
+			Str("in_db_expected_usdc_base_units", expected.String()).
+			Str("on_chain_usdc_base_units", onChain.String()).
+			Str("drift_usdc_base_units", drift.String()).
 			Int64("tolerance", w.cfg.ToleranceUSDC).
-			Str("hot_wallet", w.cfg.HotWalletAddr).
 			Str("ts_utc", w.nowFn().UTC().Format(time.RFC3339Nano)).Send()
 		return
 	}
 	// Negative drift: on_chain < expected. SPEC §7.4: fake-funding
 	// signature; PAGE + HALT the runner.
+	// Step 4 r2 [code:r2-4] MEDIUM closure: §7.1 field names same as above.
 	w.log.Error().
 		Str("event", "payout_chain_balance_drift_negative").
 		Str("severity", "PAGE").
-		Str("on_chain", onChain.String()).
-		Str("expected", expected.String()).
-		Str("drift", drift.String()).
+		Str("from_address", w.cfg.HotWalletAddr).
+		Str("in_db_expected_usdc_base_units", expected.String()).
+		Str("on_chain_usdc_base_units", onChain.String()).
+		Str("drift_usdc_base_units", drift.String()).
 		Int64("tolerance", w.cfg.ToleranceUSDC).
-		Str("hot_wallet", w.cfg.HotWalletAddr).
 		Str("ts_utc", w.nowFn().UTC().Format(time.RFC3339Nano)).Send()
 	if w.haltRunner != nil {
 		w.haltRunner("payout_chain_balance_drift_negative")

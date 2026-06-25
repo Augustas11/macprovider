@@ -2,6 +2,8 @@ package payout
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -241,7 +243,7 @@ func TestHTTPRPCClient_TransactionReceipt_OK(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
-	client := NewHTTPRPCClient(server.URL, "test", "", time.Second)
+	client := NewHTTPRPCClient(server.URL, "test", nil, time.Second)
 	r, err := client.TransactionReceipt(context.Background(), "0xabcdef")
 	if err != nil {
 		t.Fatalf("TransactionReceipt: %v", err)
@@ -280,7 +282,7 @@ func TestHTTPRPCClient_TransactionReceipt_NotFound(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client := NewHTTPRPCClient(server.URL, "test", "", time.Second)
+	client := NewHTTPRPCClient(server.URL, "test", nil, time.Second)
 	r, err := client.TransactionReceipt(context.Background(), "0xabcdef")
 	if err != nil {
 		t.Fatalf("TransactionReceipt: %v", err)
@@ -302,7 +304,7 @@ func TestHTTPRPCClient_RPCError(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client := NewHTTPRPCClient(server.URL, "test", "", time.Second)
+	client := NewHTTPRPCClient(server.URL, "test", nil, time.Second)
 	_, err := client.SendRawTransaction(context.Background(), []byte{0x02})
 	if err == nil {
 		t.Fatal("expected RPC error")
@@ -311,3 +313,60 @@ func TestHTTPRPCClient_RPCError(t *testing.T) {
 		t.Errorf("IsNonceTooLow should be true for %v", err)
 	}
 }
+
+// TestMakeSPKIPinVerifier_LiveRead locks the [arch:r2-4.2] MAJOR
+// closure: makeSPKIPinVerifier now accepts a func() string so that
+// pin changes are read at handshake time rather than captured at
+// construction time. The test verifies the live read behaviour directly
+// against the verifier function without a real TLS connection:
+//  1. pinFn returns the WRONG pin → verifier returns an error.
+//  2. pinFn is updated to return the CORRECT pin → verifier returns nil.
+func TestMakeSPKIPinVerifier_LiveRead(t *testing.T) {
+	// Use a real self-signed DER cert so we have a real SPKI to hash.
+	// httptest.NewTLSServer generates one; grab its leaf.
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	defer ts.Close()
+
+	if len(ts.TLS.Certificates) == 0 {
+		t.Fatal("TLS test server has no certificates")
+	}
+	leafDER := ts.TLS.Certificates[0].Certificate[0]
+	cert, err := x509.ParseCertificate(leafDER)
+	if err != nil {
+		t.Fatalf("parse cert: %v", err)
+	}
+	spkiHash := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	correctPin := hex.EncodeToString(spkiHash[:])
+	wrongPin := strings.Repeat("00", 32) // 64 hex zeros — valid format, wrong hash
+
+	// Mutable pin source simulating the live TuningProvider.
+	currentPin := wrongPin
+	verifier := makeSPKIPinVerifier(func() string { return currentPin })
+
+	// With wrong pin: verifier must return SPKI mismatch error.
+	rawCerts := [][]byte{leafDER}
+	err = verifier(rawCerts, nil)
+	if err == nil {
+		t.Fatal("verifier with wrong pin should have returned an error")
+	}
+	if !strings.Contains(err.Error(), "SPKI pin") {
+		t.Errorf("error should mention SPKI pin; got: %v", err)
+	}
+
+	// Update the pin source — simulates a SIGHUP SPKI rotation landing.
+	currentPin = correctPin
+
+	// With correct pin: verifier must return nil (live read succeeds).
+	err = verifier(rawCerts, nil)
+	if err != nil {
+		t.Errorf("verifier with correct pin returned error: %v", err)
+	}
+
+	// Empty pin: verifier must return nil (pinning disabled).
+	currentPin = ""
+	err = verifier(rawCerts, nil)
+	if err != nil {
+		t.Errorf("verifier with empty pin (no pinning) returned error: %v", err)
+	}
+}
+

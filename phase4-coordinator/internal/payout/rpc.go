@@ -125,10 +125,18 @@ type HTTPRPCClient struct {
 }
 
 // NewHTTPRPCClient constructs a client against the given URL.
-// label is a non-secret operator-readable name. Optional SPKI
-// pin is the 64-hex-char SHA-256 of the SubjectPublicKeyInfo
-// expected from the served cert chain. SPEC §4.4 / §6.5.
-func NewHTTPRPCClient(url, label, spkiPin string, timeout time.Duration) *HTTPRPCClient {
+// label is a non-secret operator-readable name. pinFn returns the
+// current 64-hex-char SHA-256 SPKI pin to enforce; it is called on
+// EVERY TLS handshake so SIGHUP cert-rotation changes land on the
+// next connection without client rebuild. Return "" to disable
+// pinning (test/no-pin paths). SPEC §4.4 / §6.5.
+//
+// Step 4 r2 [arch:r2-4.2] MAJOR closure: the previous version took
+// a plain string and closed over the startup pin inside the TLS
+// verifier, making SIGHUP cert-rotation a no-op. Using func() string
+// lets TuningProvider.Snapshot() be called at handshake time so the
+// live value is always enforced.
+func NewHTTPRPCClient(url, label string, pinFn func() string, timeout time.Duration) *HTTPRPCClient {
 	if timeout == 0 {
 		timeout = 20 * time.Second
 	}
@@ -137,9 +145,9 @@ func NewHTTPRPCClient(url, label, spkiPin string, timeout time.Duration) *HTTPRP
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
 	}
-	if spkiPin != "" {
+	if pinFn != nil {
 		transport.TLSClientConfig = &tls.Config{
-			VerifyPeerCertificate: makeSPKIPinVerifier(spkiPin),
+			VerifyPeerCertificate: makeSPKIPinVerifier(pinFn),
 		}
 	}
 	return &HTTPRPCClient{
@@ -154,12 +162,22 @@ func NewHTTPRPCClient(url, label, spkiPin string, timeout time.Duration) *HTTPRP
 
 // makeSPKIPinVerifier returns a TLS VerifyPeerCertificate callback
 // that asserts the leaf cert's SubjectPublicKeyInfo SHA-256
-// hash matches the configured pin. The pin must be 64 hex chars
-// (case-insensitive); config parse-time bounds enforce this.
-// Closes codex round-1 [arch:3.3] MEDIUM.
-func makeSPKIPinVerifier(spkiPin string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-	wantLower := strings.ToLower(spkiPin)
+// hash matches the pin returned by pinFn at handshake time.
+// pinFn returning "" disables pinning for that handshake (empty
+// pin = no verification). The pin must be 64 hex chars when non-empty;
+// config parse-time bounds enforce this for non-empty values.
+//
+// Closes codex round-1 [arch:3.3] MEDIUM (original SPKI wiring).
+// Step 4 r2 [arch:r2-4.2] MAJOR closure: live read via pinFn so
+// SIGHUP SPKI rotations take effect on the next TLS handshake.
+func makeSPKIPinVerifier(pinFn func() string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		pin := pinFn()
+		if pin == "" {
+			// Empty pin = no pinning enforced for this handshake.
+			return nil
+		}
+		wantLower := strings.ToLower(pin)
 		if len(rawCerts) == 0 {
 			return errors.New("SPKI pin: peer sent no certs")
 		}

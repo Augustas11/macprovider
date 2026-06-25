@@ -121,6 +121,11 @@ type Step2MuxOptions struct {
 	Addresses   *AddressesService
 	Abandon     *AbandonService
 	Runner      *Runner
+	// RunNow is the shared §4.2 run-now controller. Step 4 r2
+	// [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR closure:
+	// rate-limit + payout_run_now_invoked event wired through the
+	// controller so all Step2/3/4 mux levels share the same gate.
+	RunNow      *RunNowController
 	OperatorKey string
 	Caps        AbandonCaps
 	Fallback    http.Handler
@@ -147,6 +152,9 @@ func NewMuxStep2(opts Step2MuxOptions) (http.Handler, error) {
 	if opts.Fallback == nil {
 		return nil, fmt.Errorf("payout.NewMuxStep2: Fallback required")
 	}
+	if opts.RunNow == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep2: RunNow controller required")
+	}
 	r := chi.NewRouter()
 
 	r.Post("/providers/{provider_id}/payout-address", opts.Addresses.ServePayoutAddress)
@@ -157,23 +165,11 @@ func NewMuxStep2(opts Step2MuxOptions) (http.Handler, error) {
 	r.With(auth).Post("/admin/payout/abandon-attempt", func(w http.ResponseWriter, req *http.Request) {
 		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
 	})
+	// Step 4 r2 [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR
+	// closure: delegate to shared RunNowController which enforces
+	// run_now_min_interval rate-limit and emits payout_run_now_invoked.
 	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
-		// §4.2 admin run-now: synchronous one-shot cycle. If a
-		// cycle is already in flight, the runner's mutex returns
-		// 409 inflight via the underlying RunOnce error.
-		// Step 4 r1 halt-primitive closure: refuse while halted.
-		if opts.Runner.IsHalted() {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":  "runner_halted",
-				"reason": opts.Runner.HaltReason(),
-			})
-			return
-		}
-		if err := opts.Runner.RunOnce(req.Context()); err != nil {
-			writeError(w, http.StatusConflict, "cycle_in_flight_or_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		opts.RunNow.ServeRunNow(w, req, "operator_key")
 	})
 
 	if err := verifyPathTable(r, step2PathTable); err != nil {
@@ -223,6 +219,9 @@ func NewMuxStep3(opts Step3MuxOptions) (http.Handler, error) {
 	if opts.Actor == "" {
 		return nil, fmt.Errorf("payout.NewMuxStep3: Actor required")
 	}
+	if opts.RunNow == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep3: RunNow controller required")
+	}
 	r := chi.NewRouter()
 
 	r.Post("/providers/{provider_id}/payout-address", opts.Addresses.ServePayoutAddress)
@@ -232,20 +231,10 @@ func NewMuxStep3(opts Step3MuxOptions) (http.Handler, error) {
 	r.With(auth).Post("/admin/payout/abandon-attempt", func(w http.ResponseWriter, req *http.Request) {
 		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
 	})
+	// Step 4 r2 [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR
+	// closure: shared RunNowController enforces rate-limit + event.
 	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
-		// Step 4 r1 halt-primitive closure: refuse while halted.
-		if opts.Runner.IsHalted() {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":  "runner_halted",
-				"reason": opts.Runner.HaltReason(),
-			})
-			return
-		}
-		if err := opts.Runner.RunOnce(req.Context()); err != nil {
-			writeError(w, http.StatusConflict, "cycle_in_flight_or_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		opts.RunNow.ServeRunNow(w, req, "operator_key")
 	})
 	// §6.4.1 pause/resume.
 	r.With(auth).Post("/admin/payout/pause-registration", func(w http.ResponseWriter, req *http.Request) {
@@ -307,6 +296,9 @@ func NewMuxStep4(opts Step4MuxOptions) (http.Handler, error) {
 	if opts.Payouts == nil {
 		return nil, fmt.Errorf("payout.NewMuxStep4: Payouts handler required")
 	}
+	if opts.RunNow == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep4: RunNow controller required")
+	}
 	r := chi.NewRouter()
 
 	// Step 1: §3.3 provider-token registration handler.
@@ -321,20 +313,10 @@ func NewMuxStep4(opts Step4MuxOptions) (http.Handler, error) {
 	r.With(auth).Post("/admin/payout/abandon-attempt", func(w http.ResponseWriter, req *http.Request) {
 		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
 	})
+	// Step 4 r2 [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR
+	// closure: shared RunNowController enforces rate-limit + event.
 	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
-		// Step 4 r1 halt-primitive closure: refuse while halted.
-		if opts.Runner.IsHalted() {
-			writeJSON(w, http.StatusConflict, map[string]any{
-				"error":  "runner_halted",
-				"reason": opts.Runner.HaltReason(),
-			})
-			return
-		}
-		if err := opts.Runner.RunOnce(req.Context()); err != nil {
-			writeError(w, http.StatusConflict, "cycle_in_flight_or_failed")
-			return
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+		opts.RunNow.ServeRunNow(w, req, "operator_key")
 	})
 	// Step 3: §6.4.1 pause/resume + §4.9 record-funding + §4.7 record-orphan.
 	r.With(auth).Post("/admin/payout/pause-registration", func(w http.ResponseWriter, req *http.Request) {
