@@ -1,8 +1,26 @@
 # IMPL audit prompt — SPEC-016 Step 1 (schema + §3 address registration + §3.2 EIP-712)
 
-Operator-paste prompt for **codex GPT-5** (via `omc ask codex` or
-`/ccg`) to perform an adversarial code / security / architecture review
-of the SPEC-016 Step 1 IMPL commit on branch `impl/spec-016`.
+> **THIS FILE IS THE SHARED-CONTEXT INDEX, NOT A FIREABLE PROMPT.**
+> Three parallel codex lanes consume the context preamble below.
+> Do NOT fire this file solo — fire the three lane files in
+> parallel instead:
+>
+> - `specs/AUDIT_SPEC_016_IMPL_STEP_1_CODE_PROMPT.md`     → `omc ask codex --agent-prompt code-reviewer`
+> - `specs/AUDIT_SPEC_016_IMPL_STEP_1_SECURITY_PROMPT.md` → `omc ask codex --agent-prompt security-reviewer`
+> - `specs/AUDIT_SPEC_016_IMPL_STEP_1_ARCH_PROMPT.md`     → `omc ask codex --agent-prompt architect`
+>
+> Each lane references this file for the shared context preamble
+> (lines 1–247: PR consolidation note, version history, deltas
+> intersection, threat model, required reading, file/LOC catalog).
+> Each lane scopes to ONE dimension and writes to a lane-specific
+> findings file. House practice is parallel fan-out so the three
+> lenses stay diverse and independent. Loop the fan-out as a unit
+> until ALL THREE lanes combined return 0 CRITICAL / 0 MAJOR /
+> 0 MEDIUM before push/PR.
+
+Master shared-context for the SPEC-016 Step 1 IMPL three-lane
+codex audit. Reviews target the SPEC-016 Step 1 IMPL commit on
+branch `impl/spec-016`.
 
 **PR consolidation note (operator decision, 2026-06-25):** the BUILD
 prompt at `specs/BUILD_SPEC_016_PAYOUT_IMPL_PROMPT.md` §2 / §7 / §8
@@ -247,8 +265,17 @@ Tests (under `phase4-coordinator/internal/payout/`):
 
 ## Audit dimensions
 
+> **Lane-split note (2026-06-25):** the dimension focus-area lists
+> below are the canonical source of truth for what each lane
+> audits. The lane prompt files
+> (`AUDIT_SPEC_016_IMPL_STEP_1_{CODE,SECURITY,ARCH}_PROMPT.md`)
+> reference these focus-area sections directly. Do not fire this
+> file as a single prompt — the three lanes run in parallel
+> against the three dimensions.
+
 You will perform **three dimensions** of review and emit findings
-in the format below each.
+in the format below each. Under the parallel-lane fan-out, each
+lane attends to ONE dimension only.
 
 ### Dimension 1: CODE REVIEW
 
