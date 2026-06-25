@@ -1,18 +1,23 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.15 (2026-06-25, draft — round-16 codex
-audit fix pass: 0 CRIT + 0 MAJOR + 3 MED absorbed; 4 LOW
-still deferred. Codex round-16 verified the v0.1.14
-cancel-handling closures landed clean and surfaced 3 MED
-hygiene/contract gaps in the new cancel paths: event
-transition-scoping, §7.1 schema discriminator field, and
-reconfirm-stale operator signal. v0.1.15 absorbs all 3.
-Audit history: round-9 codex 2/5/2 → v0.1.8; round-10
-codex 0/3/5/7 → v0.1.9; round-11 codex 0/2/2/4 →
-v0.1.10; round-12 codex 0/1/0/4 → v0.1.11; round-13
+**Version:** 0.1.16 (2026-06-25, draft — round-17 codex
+audit fix pass: 0 CRIT + 0 MAJOR + 1 MED absorbed; 4 LOW
+still deferred. Codex round-17 verified all 3 v0.1.15
+closures clean (transition-scope, discriminator field,
+reconfirm-stale event/threshold/re-arm) and surfaced one
+final follow-on: the reconfirm-stale suppression tracker
+was specified as "in memory or via flag column" — the
+in-memory option would re-page after every coordinator
+restart for an unresolved stale cancel. v0.1.16 mandates
+a durable SQLite column (`cancel_reconfirm_stale_paged_at_utc`
+on `payout_attempts`) + CAS-based once-per-transition
+emission. Audit history: round-9 codex 2/5/2 → v0.1.8;
+round-10 codex 0/3/5/7 → v0.1.9; round-11 codex 0/2/2/4
+→ v0.1.10; round-12 codex 0/1/0/4 → v0.1.11; round-13
 codex 0/0/1/4 → v0.1.12; round-14 codex 0/1/0/4 →
 v0.1.13; round-15 codex 0/2/1/0 → v0.1.14; round-16
-codex 0/0/3/0 → v0.1.15.)
+codex 0/0/3/0 → v0.1.15; round-17 codex 0/0/1/0 →
+v0.1.16.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -27,6 +32,107 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.16 (2026-06-25, draft — round-17 codex audit fix
+pass, 1 MED absorbed):**
+
+Codex round-17 verified all 3 v0.1.15 closures clean
+(transition-scope, §7.1 discriminator field, reconfirm-
+stale event/threshold/re-arm wording) and surfaced one
+final follow-on: the reconfirm-stale suppression tracker
+was specified as "in memory or via flag column" — the
+in-memory option would re-page after every coordinator
+restart for an unresolved stale cancel, breaking the
+once-per-transition alert contract during restart loops.
+v0.1.16 mandates durable SQLite suppression.
+
+MEDIUM (closed):
+
+- **codex round-17 MED-1: stale-paged tracker must be
+  durable, not in-memory.** v0.1.15 §4.7 cancel-reorg
+  step 5 said IMPL could track per-row stale-paged state
+  "in memory or via flag column". In-memory loses state
+  on restart → an unresolved stale cancel re-pages every
+  coordinator boot → BetterStack alert spam while fresh
+  non-cancel allocation remains halted. v0.1.16 closure:
+
+  - New column `cancel_reconfirm_stale_paged_at_utc TEXT
+    NULL` on `payout_attempts` (§4.5 schema). NULL =
+    not-stale OR newly-reactivated; non-NULL = stale-
+    paged at the recorded timestamp.
+
+  - §4.7 reorg-reactivation UPDATE (step 4) now also
+    SETs `cancel_reconfirm_stale_paged_at_utc = NULL` to
+    re-arm the marker for the newly-reactivated cancel.
+
+  - §4.7 reconfirm-stale escalation (step 5) replaces
+    the "in memory or via flag column" wording with a
+    CAS pattern: `UPDATE payout_attempts SET
+    cancel_reconfirm_stale_paged_at_utc = :now WHERE
+    ... AND cancel_reconfirm_stale_paged_at_utc IS NULL`.
+    PAGE event emitted ONLY if the CAS UPDATE affected
+    1 row (transition NULL → :now). If 0 rows, another
+    emitter has already paged this stale period; skip.
+
+  - §4.3 cancel-handling pre-check confirmed-branch's
+    transition UPDATE also clears
+    `cancel_reconfirm_stale_paged_at_utc = NULL` so any
+    future §4.7 reorg-reactivation correctly re-arms.
+
+  - Operator-driven §4.6 abandon drops the cancel row
+    out of the §4.3 cancel-handling pre-check entirely
+    (filter is `abandoned_at_utc IS NULL`); the marker
+    becomes moot.
+
+  Behavior across coordinator restart: a stale cancel
+  with `cancel_reconfirm_stale_paged_at_utc IS NOT NULL`
+  survives restart with the marker intact; the next
+  §4.3 cycle's stale-check CAS UPDATE affects 0 rows →
+  no re-page. The PAGE-once-per-stale-transition contract
+  holds across arbitrary process lifecycle events.
+
+KNOWN-OPEN LOWs (4 — still deferred per user scope decision):
+unchanged.
+
+POSITIVE codex round-17 (no fix needed):
+- Round-16 MED-1 (cancel-confirmed transition-only)
+  verified clean.
+- Round-16 MED-2 (§7.1 is_cancel_self_transfer
+  discriminator) verified clean.
+- Round-16 MED-3 partially closed in v0.1.15; fully
+  closed in v0.1.16 with durable SQLite suppression.
+- No new replay / MEV / Signer / reorg / race / operator-
+  key drain defects this pass.
+- Markdown / git diff --check clean; 4 deferred LOWs
+  intact.
+
+Net spec change: small (~70 lines — schema column +
+§4.7 step-4 UPDATE clear + §4.7 step-5 CAS rewrite +
+§4.3 cancel-confirmed-branch UPDATE clear).
+
+Audit-loop trajectory (codex rounds only):
+- round-9  (v0.1.7): 2 CRIT + 5 MAJOR + 2 MED
+- round-10 (v0.1.8): 0 CRIT + 3 MAJOR + 5 MED + 7 LOW
+- round-11 (v0.1.9): 0 CRIT + 2 MAJOR + 2 MED + 4 LOW
+- round-12 (v0.1.10): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-13 (v0.1.11): 0 CRIT + 0 MAJOR + 1 MED + 4 LOW
+- round-14 (v0.1.12): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-15 (v0.1.13): 0 CRIT + 2 MAJOR + 1 MED + 0 LOW
+- round-16 (v0.1.14): 0 CRIT + 0 MAJOR + 3 MED + 0 LOW
+- round-17 (v0.1.15): 0 CRIT + 0 MAJOR + 1 MED + 0 LOW
+- v0.1.16 targets 0/0/0 + 4 deferred LOW pending round-18
+  codex re-verification (cancel-handling-discipline wave
+  expected to converge at this point — round-17 surfaced
+  a SINGLE MED that's purely about persistence-vs-memory,
+  not a new defect class).
+
+Per [[feedback-codex-only-audits]], round 18 codex audit
+follows.
+
+Audited at /Users/augstar/macprovider-poc/.omc/artifacts/ask/
+codex-audit-spec-016-v0-1-15-...-2026-06-25T05-29-25-770Z.md
+
+Authored in /Users/augstar/macprovider-poc-spec016 worktree.
 
 **v0.1.15 (2026-06-25, draft — round-16 codex audit fix
 pass, 3 MED absorbed):**
@@ -2343,7 +2449,12 @@ any step on error and logging structurally:
        event MUST be emitted by the SAME §4.3 cycle that
        runs the UPDATE setting `confirmed_at_utc =
        <observed_at>` after passing cancel-specific §4.3
-       step 7 verification. A later pre-check that loads
+       step 7 verification. The transition UPDATE MUST
+       also clear `cancel_reconfirm_stale_paged_at_utc =
+       NULL` (v0.1.16 codex round-17 MED-1 closure) so
+       any future §4.7 reorg-reactivation can correctly
+       re-arm the once-per-stale-transition PAGE
+       suppression marker. A later pre-check that loads
        an already-confirmed cancel row MUST NOT re-emit
        this event (otherwise an INFO log would fire every
        cycle until fresh non-cancel allocation makes
@@ -2713,6 +2824,16 @@ CREATE TABLE IF NOT EXISTS payout_attempts (
     last_error       TEXT NULL,
     abandoned_at_utc TEXT NULL,
     abandoned_reason TEXT NULL,
+    -- v0.1.16 (codex round-17 MED-1 closure): durable
+    -- suppression marker for the §4.7 cancel-reorg
+    -- reconfirm-stale PAGE event. Persistent across
+    -- coordinator restart so an unresolved stale cancel
+    -- does NOT re-page after every restart. NULL =
+    -- not-stale OR newly-reactivated by §4.7 reorg;
+    -- non-NULL = stale-paged at the recorded timestamp
+    -- (suppress further pages until §4.3 confirmation
+    -- clears it back to NULL).
+    cancel_reconfirm_stale_paged_at_utc TEXT NULL,
     updated_at_utc   TEXT NOT NULL,
     PRIMARY KEY(payout_id, attempt_seq)
 );
@@ -3188,7 +3309,8 @@ longer canonical on either RPC, the IMPL MUST:
    block, the nonce gap is re-filled.
 
    **Reconfirm-stale escalation (NEW v0.1.15 — codex
-   round-16 MED-3 closure).** If a cancel row reactivated
+   round-16 MED-3 closure; v0.1.16 codex round-17 MED-1
+   adds durable suppression).** If a cancel row reactivated
    by this §4.7 path remains
    `broadcast_at_utc IS NOT NULL AND confirmed_at_utc IS
    NULL` AND BOTH RPCs return "not found" for the tx
@@ -3201,10 +3323,66 @@ longer canonical on either RPC, the IMPL MUST:
    last_seen_block, updated_at_utc, ts_utc)` AND MUST
    continue to HALT fresh non-cancel allocation for this
    `payout_id` until the operator resolves via §4.6
-   abandon-and-replace. The event fires once per
-   cancel-row-transition-into-stale (NOT every cycle) —
-   IMPL MUST track per-row "stale-paged" state in memory
-   or via a flag column to suppress repeats.
+   abandon-and-replace.
+
+   **Once-per-transition emission via durable SQLite
+   suppression marker (v0.1.16 codex round-17 MED-1
+   closure).** The event fires once per
+   cancel-row-transition-into-stale (NOT every cycle AND
+   NOT every coordinator restart — an in-memory tracker
+   would re-page after each restart for an unresolved
+   stale cancel, breaking the once-per-transition contract).
+   IMPL MUST track suppression via the
+   `payout_attempts.cancel_reconfirm_stale_paged_at_utc`
+   column (added in §4.5 schema v0.1.16):
+
+   - Step 4 reorg UPDATE (above) MUST set
+     `cancel_reconfirm_stale_paged_at_utc = NULL`
+     alongside clearing `confirmed_at_utc`/`block_number`/
+     `gas_used_native_wei`. This re-arms the suppression
+     marker for the newly-reactivated cancel — if it
+     later goes stale, the first stale-crossing emits a
+     fresh PAGE.
+   - On crossing the `3 × run_interval` threshold with
+     both RPCs still returning "not found", the runner
+     MUST atomically mark the row stale-paged ONLY if
+     the marker is currently NULL (CAS pattern):
+
+     ```sql
+     BEGIN IMMEDIATE;
+       UPDATE payout_attempts
+          SET cancel_reconfirm_stale_paged_at_utc = :now,
+              updated_at_utc                       = :now
+        WHERE payout_id   = :payout_id
+          AND attempt_seq = :attempt_seq
+          AND is_cancel_self_transfer = 1
+          AND abandoned_at_utc IS NULL
+          AND confirmed_at_utc IS NULL
+          AND cancel_reconfirm_stale_paged_at_utc IS NULL;
+     COMMIT;
+     ```
+
+     The PAGE event MUST be emitted ONLY if the CAS
+     UPDATE affected 1 row (transition NULL → :now). If
+     the UPDATE affected 0 rows, another emitter has
+     already paged this cancel-row's current stale
+     period; do NOT re-emit.
+
+   - The §4.3 cancel-handling pre-check
+     confirmed-branch (above) MUST clear
+     `cancel_reconfirm_stale_paged_at_utc = NULL` in the
+     SAME UPDATE that sets `confirmed_at_utc` from NULL
+     to non-NULL. This re-arms the suppression marker for
+     ANY future reorg-reactivation: a cancel that
+     stales, gets re-confirmed by chain recovery, then
+     reorgs again into a new stale period correctly
+     emits a fresh PAGE on the next 3 × run_interval
+     crossing.
+
+   - Operator-driven §4.6 abandon (cancel row gets
+     `abandoned_at_utc` set) drops the row out of the
+     §4.3 cancel-handling pre-check entirely; the
+     marker becomes moot.
 
    This event is an OPERATOR-RECOVERY SIGNAL ONLY;
    automatic re-signing remains FORBIDDEN per §4.6 nonce
