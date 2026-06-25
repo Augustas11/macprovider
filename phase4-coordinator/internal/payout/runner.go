@@ -499,6 +499,28 @@ func (r *Runner) pollCancelOnce(ctx context.Context, runID string, cancel Attemp
 			"secondary: unexpected USDC Transfer log on cancel tx")
 		return rowOutcomeFailed
 	}
+	// Cancel-specific tx-body verification per SPEC §4.3 step 7
+	// (cancel branch): tx.value MUST be 1 wei, tx.input MUST be
+	// empty, tx.to AND tx.from MUST equal hot_wallet, on BOTH
+	// RPC views. Closes codex round-3 [code:r3-3.1] MEDIUM.
+	txA, err := r.opts.RPCs.Primary.TransactionByHash(ctx, txHash)
+	if err != nil || txA == nil {
+		return rowOutcomeFailed
+	}
+	txB, err := r.opts.RPCs.Secondary.TransactionByHash(ctx, txHash)
+	if err != nil || txB == nil {
+		return rowOutcomeFailed
+	}
+	if err := verifyCancelTxView(txA, r.opts.Security.HotWalletAddress); err != nil {
+		r.emitChainValueMismatch(cancel.PayoutID, cancel.AttemptSeq, txHash, "cancel_self_transfer_mismatch",
+			"primary: "+err.Error())
+		return rowOutcomeFailed
+	}
+	if err := verifyCancelTxView(txB, r.opts.Security.HotWalletAddress); err != nil {
+		r.emitChainValueMismatch(cancel.PayoutID, cancel.AttemptSeq, txHash, "cancel_self_transfer_mismatch",
+			"secondary: "+err.Error())
+		return rowOutcomeFailed
+	}
 	now := r.opts.NowFn().UTC().Format(time.RFC3339Nano)
 	rowsAffected, err := r.markConfirmedStandalone(ctx, cancel.PayoutID, cancel.AttemptSeq,
 		int64(recA.BlockNumber), int64(recA.GasUsed), now)
@@ -990,6 +1012,38 @@ func (r *Runner) verifyChainSideTransfer(ctx context.Context, attempt *AttemptRo
 	}
 	if cnt := countMatchingTransferLog(recB, usdcAddrLower, transferTopic, hotTopic, toTopic, attempt.AmountBaseUnits); cnt != 1 {
 		return fmt.Errorf("secondary matching Transfer log count = %d, want 1", cnt)
+	}
+	return nil
+}
+
+// verifyCancelTxView enforces the SPEC §4.3 cancel-branch tx-body
+// invariants against ONE RPC's eth_getTransactionByHash response.
+// Called for both primary + secondary in pollCancelOnce so the
+// runner does not mark a cancel confirmed against a lying RPC
+// that fabricated receipt-level fields. Closes codex round-3
+// [code:r3-3.1] MEDIUM.
+//
+// Per SPEC §4.3 step 7 (cancel branch):
+//   - tx.to MUST equal hot_wallet (NOT USDC contract)
+//   - tx.value MUST equal 1 (one wei native self-transfer)
+//   - tx.input MUST be empty
+//   - tx.from MUST equal hot_wallet (sender = hot wallet)
+func verifyCancelTxView(tx *Transaction, hotWalletAddress string) error {
+	if !addressEqualFold(tx.To, hotWalletAddress) {
+		return fmt.Errorf("tx.to %s != hot_wallet", tx.To)
+	}
+	if !addressEqualFold(tx.From, hotWalletAddress) {
+		return fmt.Errorf("tx.from %s != hot_wallet", tx.From)
+	}
+	if len(tx.Input) != 0 {
+		return fmt.Errorf("tx.input must be empty (got %d bytes)", len(tx.Input))
+	}
+	// tx.Value is the raw hex string from JSON-RPC ("0x1" expected).
+	// Tolerate "0x01" / "0X1" via case-fold + leading-zero strip.
+	v := strings.TrimPrefix(strings.ToLower(tx.Value), "0x")
+	v = strings.TrimLeft(v, "0")
+	if v != "1" {
+		return fmt.Errorf("tx.value must be 0x1 wei (got %q)", tx.Value)
 	}
 	return nil
 }

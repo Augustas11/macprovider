@@ -77,6 +77,62 @@ VALUES (?, 1, 'base-mainnet', ?, ?, 900000, 1, ?, ?, NULL, NULL, 0, ?)`,
 	}
 }
 
+// TestVerifyCancelTxView locks codex round-3 [code:r3-3.1]
+// MEDIUM closure: the cancel-branch tx-body invariants enforced
+// against both primary and secondary eth_getTransactionByHash
+// returns before MarkConfirmedAtTx fires.
+func TestVerifyCancelTxView(t *testing.T) {
+	hot := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	hotLower := strings.ToLower(hot)
+	// Happy path.
+	good := &Transaction{
+		From:    hotLower,
+		To:      hotLower,
+		Value:   "0x1",
+		Input:   nil,
+		ChainID: BaseMainnetChainID,
+	}
+	if err := verifyCancelTxView(good, hot); err != nil {
+		t.Fatalf("happy path: %v", err)
+	}
+	// Tolerate 0x01 / 0X1.
+	for _, v := range []string{"0x01", "0X1", "0x0001"} {
+		c := *good
+		c.Value = v
+		if err := verifyCancelTxView(&c, hot); err != nil {
+			t.Errorf("value=%s should pass: %v", v, err)
+		}
+	}
+	// Reject wrong from.
+	c := *good
+	c.From = "0x000000000000000000000000000000000000dead"
+	if err := verifyCancelTxView(&c, hot); err == nil {
+		t.Error("wrong from should reject")
+	}
+	// Reject wrong to.
+	c = *good
+	c.To = "0x000000000000000000000000000000000000dead"
+	if err := verifyCancelTxView(&c, hot); err == nil {
+		t.Error("wrong to should reject")
+	}
+	// Reject non-empty input.
+	c = *good
+	c.Input = []byte{0xa9, 0x05, 0x9c, 0xbb}
+	if err := verifyCancelTxView(&c, hot); err == nil {
+		t.Error("non-empty input should reject")
+	}
+	// Reject wrong value.
+	c = *good
+	c.Value = "0x2"
+	if err := verifyCancelTxView(&c, hot); err == nil {
+		t.Error("value != 1 wei should reject")
+	}
+	c.Value = "0x0"
+	if err := verifyCancelTxView(&c, hot); err == nil {
+		t.Error("value=0 should reject")
+	}
+}
+
 // TestRunner_CancelPreCheck_LiveUnbroadcastBlocksFreshAllocation
 // locks codex round-1 [code:1.2] MAJOR closure: a live unbroadcast
 // cancel HALTS fresh non-cancel allocation for the same payout_id.
