@@ -1,11 +1,11 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.5 (2026-06-24, draft — round-6 audit fix pass:
-0 CRIT + 5 MAJOR + 9 MEDIUM + 2 LOW absorbed across CODE +
+**Version:** 0.1.6 (2026-06-24, draft — round-7 audit fix pass:
+0 CRIT + 3 MAJOR + 7 MEDIUM + 2 LOW absorbed across CODE +
 SECURITY + ARCHITECT lenses. Audit history: round-1 1/5,
 round-2 5/12/10, round-3 3/9/8, round-4 2/6/13, round-5 1/2/6,
-round-6 0/5/9. See git log for full per-round detail per
-[[feedback-spec-audit-loop-before-pr]].)
+round-6 0/5/9, round-7 0/3/7. See git log for full per-round
+detail per [[feedback-spec-audit-loop-before-pr]].)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -20,6 +20,104 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.6 (2026-06-24, draft — round-7 audit fix pass):**
+
+Round-7 returned 0 CRIT + 3 MAJOR + 7 MEDIUM + 2 LOW with
+significant convergence across CODE/SEC/ARCH lenses. All
+addressed. Substantive changes:
+
+MAJOR:
+
+- **§6.4 pause/resume admin endpoints were under-specified
+  and missing from §7.1 audit table.** v0.1.5 introduced
+  `POST /admin/payout/pause-registration` and
+  `/admin/payout/resume-registration` as side-statements
+  without endpoint blocks, rate-limit, or §7.1 events —
+  audit-trail regression vs the round-2 SEC-Md-2 closure
+  that required every write endpoint to have a §7.1 entry.
+  v0.1.6 §6.4.1 (new subsection) spells out both endpoints
+  with full request/response shape, operator-key auth, 409
+  if already in target state, and a new
+  `payout.security.pause_resume_min_interval` (default 60s)
+  rate-limit. §7.1 gains `payout_registration_paused` and
+  `payout_registration_resumed` events (severity=PAGE —
+  pausing the registration handler is high-signal,
+  indistinguishable from operator-key probing).
+- **§9.5b.1 cross-spec same-SQLite-DB assumption was not
+  pinned.** The SPEC-005 admin endpoint MUST query
+  `payout_reorg_orphans` in the same SQLite txn as the
+  `ledger_payout_ready` INSERT; this implicitly requires
+  the two SPEC-016 tables and SPEC-005's billing table to
+  share one SQLite database file. A future operator who
+  separates the DBs would silently break the cross-spec
+  contract. v0.1.6 §4.7 pins `payout_reorg_orphans` to the
+  same SQLite DB as `ledger_payout_ready` (mirrors §3.1's
+  `provider_payout_addresses` pin); §9.5b.1 mirrors the
+  requirement so the SPEC-005 author sees it cold.
+- **§9.5b.1 trigger-name binding wording was inverted.**
+  v0.1.5 said "SPEC-005 vX.Y+1 MUST **create** the trigger
+  `trg_lpr_terminal_status_guard`" — but that trigger
+  already exists at
+  `phase4-coordinator/internal/billing/store.go:121-126`.
+  The SPEC-005 author reading this could attempt a duplicate
+  CREATE TRIGGER (idempotent today via `IF NOT EXISTS` but
+  semantically wrong) or get confused about which migration
+  owns it. v0.1.6 changes to "MUST **preserve** (the
+  trigger already exists at the cited file path)"; renames
+  + drops require coordinated SPEC-016 minor-version bump.
+
+MEDIUM:
+
+- **§4.8 intra-tx trigger-presence SQL snippet had a count
+  mismatch.** Literal SQL queried ONE name but prose said
+  "count != 2". v0.1.6 rewrites the snippet to use
+  `name IN ('trg_pa_bootstrap_flip', 'trg_pa_bootstrap_flip_insert')`
+  for the count=2 check.
+- **§6.5 SIGHUP-as-only-reload-mechanism not normatively
+  pinned.** Earlier wording let an IMPL ship fsnotify or
+  a reload endpoint for the tuning namespace. v0.1.6
+  §6.5: SIGHUP is the ONLY supported tuning-reload trigger;
+  fsnotify and reload endpoints are FORBIDDEN for the
+  tuning namespace too (operator-key compromise via reload
+  endpoint would defeat the security/tuning split).
+- **§6.5 `low_balance_threshold` 10× ceiling was too lax**
+  ($5k cap × 10 = $50k threshold silences the alarm for
+  the entire realistic operating range). v0.1.6 tightens
+  to ≤ 2× per_day_cap.
+- **`payout.registration_paused` namespace collision** with
+  §6.5 bucketing rule. v0.1.6 renames to
+  `runtime.registration_paused` and adds a §6.5
+  carve-out paragraph defining the `runtime.*` namespace
+  for in-process flags (NOT config keys).
+- **§6.5 namespace-bucketing discipline was undocumented**
+  for future SPEC-016 v0.X authors. v0.1.6 §6.5 adds a
+  normative paragraph: every new `payout.*` config key MUST
+  be bucketed into `payout.security.*` or `payout.tuning.*`
+  at SPEC write time; bare `payout.X` is FORBIDDEN; new
+  in-process flags go under `runtime.*`.
+- **§4.8 INSERT-OR-IGNORE startup ordering was soft** —
+  prose said "BEFORE the runner accepts the first payout
+  attempt" without pinning a happens-before edge. v0.1.6:
+  the INSERT MUST execute in `cmd/coordinator/main.go`
+  BEFORE `runner.Start()` is invoked; IMPL test MUST
+  assert `SELECT count(*) FROM payout_runner_state`
+  returns 1 before any `payout_attempts` write is
+  attempted.
+- **Appendix B issue stubs missing** for v0.2 cleanups
+  named in round-6/7 ARCH. v0.1.6 adds two stubs:
+  (a) move §9.5b.1 normative contract into SPEC-005
+  vX.Y+2; (b) SPEC-014 v0.9 extend §7.3 with
+  `registered_against_current_hot_wallet: bool` so the
+  portal can render "pending re-registration after key
+  rotation" without joining against config.
+
+LOW:
+
+- §3.3 silent-ignore wording tightened: JSON decoder for
+  the endpoint MUST allow unknown fields by explicit
+  decode-then-overwrite (not by strict-mode rejection);
+  documented inline.
 
 **v0.1.5 (2026-06-24, draft — round-6 audit fix pass):**
 
@@ -777,7 +875,14 @@ config — the value loaded at process start and held
 immutable per §6.5). The client MUST NOT supply this
 field; if present in the request body it MUST be ignored
 (do NOT REJECT — silent ignore prevents an attacker from
-probing whether the column exists). This value is what
+probing whether the column exists). JSON decoder posture:
+the endpoint MUST allow unknown fields by explicit
+decode-then-overwrite (the handler decodes into a typed
+struct that does NOT include the `registered_against_hot_wallet`
+field, then writes the server-side value); IMPL MUST NOT
+use `DisallowUnknownFields()` strict mode for this
+endpoint specifically — the silent-ignore property is
+load-bearing for the probing defense. This value is what
 §4.3 step 1 SELECT joins against; mismatch (after a §6.4
 rotation) silently routes the row to the "unpayable until
 re-registration" bucket. The signing-time `verifyingContract`
@@ -1284,6 +1389,17 @@ reconciliation surface MUST surface any orphan unresolved
 > N days as a separate failure class to defeat
 favoritism / fraud via selective compensation.
 
+**Same-SQLite-DB requirement (cross-spec contract).**
+`payout_reorg_orphans` MUST live in the SAME SQLite
+database file as `ledger_payout_ready` so the §9.5b.1
+`POST /admin/ledger/payout-ready` SPEC-005 IMPL can perform
+its orphan-row prerequisite check in the SAME SQLite
+transaction as the INSERT. Splitting the SPEC-005 billing
+database from the SPEC-016 payout database silently breaks
+the §9.5b.1 per-call cap defense and the orphan-row
+prerequisite. Mirrors §3.1's `provider_payout_addresses`
+same-DB pin. IMPL test required.
+
 Operator-driven resolution is record-only via:
 
 ```
@@ -1431,9 +1547,12 @@ which Go code path writes the row. The flag gates §4.9
 `payout_runner_state` row is single-row (PK CHECK id=1).
 The bootstrap-flip trigger's `UPDATE ... WHERE id=1 AND
 payout_bootstrap_complete=0` no-ops if the row does not
-exist. IMPL MUST execute the following at coordinator
-startup, BEFORE the runner accepts the first payout
-attempt:
+exist. IMPL MUST execute the following INSERT in
+`cmd/coordinator/main.go` BEFORE `runner.Start()` is
+invoked (same goroutine, same `*sql.DB` handle; the
+happens-before edge is the synchronous return of the
+INSERT before the function call that constructs the
+runner returns):
 
 ```sql
 INSERT OR IGNORE INTO payout_runner_state
@@ -1441,10 +1560,13 @@ INSERT OR IGNORE INTO payout_runner_state
 VALUES (1, 0, '<RFC3339Nano startup time>');
 ```
 
-IMPL test required: assert the row exists at startup;
-absence is a hard fail. A missing row would silently
-defeat the v0.1.3 C2 fake-funding closure by leaving
-`source='manual'` accepted indefinitely.
+IMPL test required: assert
+`SELECT count(*) FROM payout_runner_state` returns 1
+BEFORE any `payout_attempts` write is attempted. A
+soft "execute at startup" wording would otherwise allow
+an IMPL to place the INSERT inside `runner.Start()` AFTER
+the loop begins, re-opening the v0.1.3 C2 fake-funding
+closure for one cycle.
 
 **Trigger-presence assertion (defense against DROP TRIGGER
 + UPDATE bypass).** Both bootstrap triggers (and the
@@ -1482,17 +1604,27 @@ closes this for the TWO money-path-mutating call sites:
 
 - §4.9 `source='manual'` acceptance check (the
   `payout_bootstrap_complete` SELECT that gates the INSERT)
-  MUST be performed in the SAME SQLite transaction as a
-  predicate `SELECT count(*) FROM sqlite_master WHERE
-  name='trg_pa_bootstrap_flip'` (and `_insert`); count != 2
-  → REJECT 422 `bootstrap_trigger_missing` AND emit
-  `payout_invariant_violation`.
+  MUST be performed in the SAME SQLite transaction as:
+
+  ```sql
+  SELECT count(*) FROM sqlite_master
+   WHERE type='trigger'
+     AND name IN ('trg_pa_bootstrap_flip',
+                  'trg_pa_bootstrap_flip_insert');
+  -- REJECT 422 bootstrap_trigger_missing if count != 2
+  -- AND emit payout_invariant_violation per §7.1.
+  ```
+
 - §4.3 step 7 `ClaimPayoutReady` invocation MUST be
-  performed in the SAME SQLite transaction as a predicate
-  `SELECT count(*) FROM sqlite_master WHERE
-  name='trg_lpr_terminal_status_guard'`; count != 1 →
-  abort the claim, leave the row in `ready`, emit
-  `payout_invariant_violation`.
+  performed in the SAME SQLite transaction as:
+
+  ```sql
+  SELECT count(*) FROM sqlite_master
+   WHERE type='trigger'
+     AND name = 'trg_lpr_terminal_status_guard';
+  -- abort the claim, leave the row in 'ready', emit
+  -- payout_invariant_violation if count != 1.
+  ```
 
 A drop-and-recreate that fully completes between two
 top-of-cycle checks is now detectable AT the money-path
@@ -1903,10 +2035,10 @@ Procedure (manual, operator-driven):
 
 1. **Halt the runner AND pause the registration handler.**
    Flip `payout.enabled: false` + flip the in-process flag
-   `payout.registration_paused: true` (this is an
-   internal-state flag, NOT a config key — set via
-   `POST /admin/payout/pause-registration` on `:8444`,
-   operator-key authed). The §3.3 handler returns
+   `runtime.registration_paused: true` (per §6.5 the
+   `runtime.*` namespace carves out in-process flags that
+   are neither security nor tuning config keys — set via
+   the §6.4.1 endpoint below). The §3.3 handler returns
    `503 Service Unavailable {"error":"rotation_in_progress"}`
    for the rotation duration. Without this, a provider who
    registers during steps 2–3 stamps
@@ -1925,10 +2057,10 @@ Procedure (manual, operator-driven):
    encrypted wallet file + config; rotate the KEK if also
    compromising the on-disk envelope.
 4. Restart with `payout.enabled: true`. Flip
-   `payout.registration_paused: false` via
-   `POST /admin/payout/resume-registration` to re-open the
-   §3.3 handler. The runner re-syncs the nonce cursor from
-   BOTH RPCs' `getTransactionCount` for the new address.
+   `runtime.registration_paused: false` via the §6.4.1
+   resume endpoint. The runner re-syncs the nonce cursor
+   from BOTH RPCs' `getTransactionCount` for the new
+   address.
 5. **All registered providers MUST re-register their payout
    address against the new hot wallet.** The EIP-712
    `verifyingContract` field in §3.2 step 5 pins to
@@ -1947,7 +2079,77 @@ Procedure (manual, operator-driven):
 A future v0.2 MAY add in-process rotation + automatic
 provider notification.
 
-### 6.5 Config namespaces: security (immutable) vs tuning (hot-reloadable)
+### 6.4.1 Pause/resume registration endpoints
+
+```
+POST /admin/payout/pause-registration
+Authorization: Bearer <operator_key>
+Content-Type: application/json
+
+{ "reason": "free-text required (logged)" }
+
+Response:
+  200 OK   — runtime.registration_paused flipped 0→1;
+             payout_registration_paused (severity=PAGE)
+             event emitted per §7.1.
+  400      — missing reason.
+  409      — already paused (runtime.registration_paused
+             is already 1).
+  429      — exceeded payout.security.pause_resume_min_interval
+             (default 60s).
+
+POST /admin/payout/resume-registration
+Authorization: Bearer <operator_key>
+Content-Type: application/json
+
+{ "reason": "free-text required (logged)" }
+
+Response:
+  200 OK   — runtime.registration_paused flipped 1→0;
+             payout_registration_resumed (severity=PAGE)
+             event emitted per §7.1.
+  400      — missing reason.
+  409      — already running (runtime.registration_paused
+             is already 0).
+  429      — exceeded payout.security.pause_resume_min_interval.
+```
+
+Both endpoints MUST be rate-limited by
+`payout.security.pause_resume_min_interval` (default 60s)
+to prevent an operator-key holder from spamming
+pause/resume to defeat rate-limit logging or to mask
+malicious activity behind a flood of events.
+
+Both events are severity=PAGE because pausing the
+registration handler mid-flight is high-signal
+operational state (legitimate use is bounded to §6.4
+rotation windows; any other invocation deserves human
+eyes).
+
+### 6.5 Config namespaces: security (immutable) vs tuning (hot-reloadable) vs runtime (in-process flags)
+
+**Namespace-bucketing discipline (REQUIRED for every future
+SPEC-016 vX.Y).** Every new payout-related identifier MUST
+be placed into exactly one of three namespaces at SPEC
+write time. Bare `payout.X` keys (without `security.` /
+`tuning.` infix) are FORBIDDEN; the v0.1.4 half-refactor
+defect was caused by exactly that. The buckets:
+
+- `payout.security.*` — config keys loaded at process
+  start, runtime-immutable. Mutating in `coordinator.toml`
+  post-start has NO effect until restart.
+- `payout.tuning.*` — config keys hot-reloadable via SIGHUP
+  with bound re-enforcement (below).
+- `runtime.*` — in-process flags NOT backed by
+  `coordinator.toml`. Mutated via authenticated admin
+  endpoints (e.g. `runtime.registration_paused` toggled by
+  §6.4.1 pause/resume endpoints; v0.1.x also keeps
+  `payout.enabled` as a singleton master switch separate
+  from this bucket because it gates whether the namespace
+  loaders run at all). The `runtime.*` bucket is the
+  carve-out for state that lives only in process memory
+  and the in-process flag table — there is no on-disk
+  config representation.
 
 `payout.*` config splits into TWO namespaces with distinct
 hot-reload semantics:
@@ -1975,11 +2177,22 @@ redirect outflows. Mutating ANY of these in
 `coordinator.toml` post-start has NO effect until restart;
 IMPL test required.
 
-**`payout.tuning.*` — HOT-RELOADABLE.** Operator MAY
-mutate + SIGHUP without restart; the runner re-reads on
-the next cadence cycle. Each successful reload emits
-`payout_config_reloaded` per §7.1 with the key + old + new
-values for operator audit trail. **`payout_config_reloaded`
+**`payout.tuning.*` — HOT-RELOADABLE via SIGHUP ONLY.**
+Operator MAY mutate `coordinator.toml` + send SIGHUP without
+restart; the runner re-reads on the next cadence cycle.
+SIGHUP is the ONLY supported trigger — fsnotify
+(filesystem watch on the config file) and any reload
+endpoint (`POST /admin/payout/reload-config` or similar)
+are FORBIDDEN for the tuning namespace. The fsnotify path
+would couple the live config to filesystem-watch races; a
+reload endpoint would give an operator-key-compromise
+attacker an in-process surface that defeats the
+security/tuning split (they'd hot-reload tuning keys via
+the endpoint without filesystem write). IMPL test MUST
+assert tuning values do NOT change when only the config
+file mtime advances (no SIGHUP). Each successful reload
+emits `payout_config_reloaded` per §7.1 with the key +
+old + new values for operator audit trail. **`payout_config_reloaded`
 is severity=PAGE** — a hot-reload of any tuning key is a
 high-signal operational event (operator-key compromise can
 weaponize this surface, see hard floors + reload-time
@@ -2002,9 +2215,14 @@ at parse time AND at every reload):**
   Setting below 1h defeats the §3.3 stolen-token defense.
 - `payout.tuning.confirmation_blocks` ∈ [2, 50]. Below 2
   widens the reorg-revert window beyond v0.1.x assumptions.
-- `payout.tuning.low_balance_threshold` <= 10 ×
-  `payout.security.per_day_cap_usdc_base_units`. A higher
-  ceiling silences the low-balance alarm.
+- `payout.tuning.low_balance_threshold` <= 2 ×
+  `payout.security.per_day_cap_usdc_base_units`. The
+  v0.1.5 draft used 10× but that allowed silencing the
+  alarm for the entire realistic operating range
+  ($5k cap × 10 = $50k threshold — well above any actual
+  hot-wallet balance). 2× is tight enough to alert
+  before the operator funds the next top-up while still
+  giving headroom for legitimate transient dips.
 - `payout.tuning.low_native_threshold` <= 1e18 (1 ETH —
   prevents disabling the gas-exhaustion alarm).
 - `payout.tuning.run_interval` ∈ [5m, 24h].
@@ -2086,6 +2304,8 @@ operator-key endpoints log actor=operator_key):
 | `payout_nonce_cold_start_within_tolerance` | `from_address, rpc_a_nonce, rpc_b_nonce, chosen_nonce, ts_utc` |
 | `payout_config_reloaded` (severity=PAGE) | `key (payout.tuning.* only), old_value, new_value, actor, ts_utc` |
 | `payout_config_reload_rejected` (severity=PAGE) | `key, attempted_value, bound, actor, ts_utc` |
+| `payout_registration_paused` (severity=PAGE) | `actor=operator_key, reason, ts_utc` |
+| `payout_registration_resumed` (severity=PAGE) | `actor=operator_key, reason, ts_utc` |
 | `payout_nonce_gap` | `from_address, expected_nonce, observed_pending_nonce, ts_utc` |
 | `payout_attempt_abandoned` (severity=PAGE) | `payout_id, attempt_seq, nonce, cancel_self_transfer_tx_hash, cap_applied, reason, actor=operator_key, ts_utc` |
 | `payout_reorg_orphan_recorded` | `payout_id, attempt_seq, orphan_tx_hash, operator_resolution, compensation_settlement_id, reason, actor=operator_key, ts_utc` |
@@ -2528,14 +2748,30 @@ discharged:
      over-cap compensation requires operator splitting
      across multiple calls.
    - **Trigger name binding (cross-spec contract).**
-     SPEC-005 vX.Y+1 MUST create the trigger
+     SPEC-005 vX.Y+1 MUST **preserve** the existing trigger
      `trg_lpr_terminal_status_guard` on `ledger_payout_ready`
-     with that EXACT NAME (case-sensitive). SPEC-016 §4.8
-     asserts presence by exact name at every cadence
-     cycle; a rename in a future SPEC-005 schema migration
-     halts the SPEC-016 runner cycle 1. If SPEC-005 needs
-     to evolve the trigger, the rename MUST be coordinated
+     with that EXACT NAME (case-sensitive). The trigger
+     already exists today at
+     `phase4-coordinator/internal/billing/store.go:121-126`;
+     the cross-spec contract is that SPEC-005 MUST NOT rename
+     or drop it across schema migrations (it would
+     be valid for SPEC-005 to re-issue the same
+     `CREATE TRIGGER IF NOT EXISTS` for idempotency, but not
+     to `DROP TRIGGER` it). SPEC-016 §4.8 asserts presence
+     by exact name at every cadence cycle; a rename in a
+     future SPEC-005 schema migration halts the SPEC-016
+     runner cycle 1. Any future rename MUST be coordinated
      with a SPEC-016 minor-version bump.
+   - **Same-SQLite-DB requirement.** The SPEC-005 admin
+     endpoint MUST query `payout_reorg_orphans` (SPEC-016-
+     owned, created in `payout/orphans.go`) in the SAME
+     SQLite transaction as the `ledger_payout_ready`
+     INSERT. For this to be possible, `payout_reorg_orphans`
+     MUST live in the same SQLite database file as
+     `ledger_payout_ready` (cf. §4.7 normative pin). SPEC-005
+     vX.Y+1 IMPL MUST use the same `*sql.DB` handle — a
+     separate DB connection cannot satisfy "same SQLite
+     transaction".
 6. **BetterStack alert filter extended** to match each
    SPEC-016 event name (`payout_low_balance`,
    `payout_low_native_balance`, `payout_insufficient_funds`,
@@ -2641,3 +2877,19 @@ fresh session after this v0.1.x merges. That prompt will:
   the Linux-only requirement from SPEC-016 §6.3." This
   surfaces the Linux-only transitivity to readers of those
   specs who never read SPEC-016.
+- SPEC-016 v0.2: move §9.5b.1 normative contract surface
+  into SPEC-005 vX.Y+2 (AFTER SPEC-005 vX.Y+1 IMPL lands
+  and the contract has stabilised). The cross-spec
+  ownership inversion (SPEC-016 owning the SPEC-005
+  endpoint contract) was an acceptable v0.1.x trade-off
+  but is anti-pattern long-term. SPEC-016 v0.2 retains a
+  one-line pointer ("see SPEC-005 §X.Y for the admin
+  endpoint contract"); SPEC-005 owns the canonical text.
+- SPEC-014 v0.9: extend §7.3 `/providers/{id}/payouts`
+  response with `registered_against_current_hot_wallet:
+  bool` so the portal can render "pending re-registration
+  after key rotation" state without joining against
+  `payout.security.hot_wallet_address` (which the portal
+  shouldn't see directly). The boolean is computed
+  server-side as `registered_against_hot_wallet ==
+  payout.security.hot_wallet_address`.
