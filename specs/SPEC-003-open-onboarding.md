@@ -607,7 +607,7 @@ The settling-window posture replaces v0.8.1's blanket strict reject (which brick
 
 This closes the pool-slot capture vector flagged by the PR #69 codex security review: pre-fix, a bearer-less duplicate connect would last-writer-win on `provider_id` in the registry, evicting the legitimate provider and receiving buyer traffic + accruing billing identity under the claimed `provider_id`.
 
-**(c) Post-flip wire contract** (when `RequireProviderTokens=true`). Tokenless connects are rejected at the WS upgrade layer by `validateProviderToken` BEFORE reaching admission. The DB constraint at this layer is defense in depth — if a future code path admitted a tokenless connect under flag=true, the INSERT would fail with `ErrActiveTokenAlreadyExists` and the connection would proceed bearer-less (non-routable) rather than minting a credential-capture window.
+**(c) Post-flip wire contract** (when `RequireProviderTokens=true`). Tokenless connects are rejected at the WS upgrade layer by `validateProviderToken` BEFORE reaching admission unless `auth.allow_tokenless_provisional_bootstrap=true` is also explicitly enabled. With that bootstrap flag enabled, a tokenless provisional connect reaches the same FR-C9 mint / TOFU path documented above: first-claim provisional installs can receive and persist a fresh `assigned_provider_token`, while pinned providers and provider IDs whose active token has already been used still close with `CloseInvalidToken / "invalid_token"`. The bootstrap exception MUST fail closed if the coordinator has no `TokenIssuer` wired. The DB constraint at this layer is defense in depth — if a future code path admitted a tokenless connect under flag=true, the INSERT would fail with `ErrActiveTokenAlreadyExists` and the connection would proceed bearer-less (non-routable) rather than minting a credential-capture window.
 
 **Operator flag-flip runbook (normative).** Before flipping `RequireProviderTokens=true`, the operator MUST verify EVERY active token row carries operational provenance evidence — specifically, the `last_used_at` column populated by the `MarkTokenUsed` call on a successful Bearer connect MUST be within an acceptable freshness window (recommended: 24 hours). A row whose `last_used_at IS NULL` proves no binary has ever successfully authenticated with that token; the row was either minted but never persisted by the legitimate provider OR minted by an attacker who never had a binary capable of using it. In either case the operator MUST treat such rows as "unproven" and either:
 
@@ -621,7 +621,17 @@ Pure "row existence" is NOT operational evidence under the v0.8.4 contract. The 
 Operator-side bounded-cleanup is unchanged: `coordinator-cli prune-tokens [--older-than 168h] [--apply]` removes rows where `last_used_at IS NULL AND revoked_at IS NULL AND created_at < cutoff`.
 
 **FR-C9.5. Compatibility cutoff at flag flip.**
-When the operator flips `auth.require_provider_tokens=true` (Decision log Entry 59 forecast; Entry 60 confirmed), tokenless connects are rejected at `validateProviderToken` BEFORE reaching admission. After the flip, FR-C9.1's mint path is unreachable for new connects — only providers holding a valid token (operator-issued OR previously self-minted) connect.
+When the operator flips `auth.require_provider_tokens=true` (Decision log Entry 59 forecast; Entry 60 confirmed), tokenless connects are rejected at `validateProviderToken` BEFORE reaching admission unless `auth.allow_tokenless_provisional_bootstrap=true` is explicitly enabled. After the flip with bootstrap disabled, FR-C9.1's mint path is unreachable for new connects — only providers holding a valid token (operator-issued OR previously self-minted) connect. After the flip with bootstrap enabled, FR-C9.1 remains reachable only for first-claim provisional bootstrap; pinned providers and provider IDs whose active token has already been used continue to reject tokenless reconnects.
+
+Production deployments intending public `curl|bash` provider onboarding MUST run:
+
+```yaml
+auth:
+  require_provider_tokens: true
+  allow_tokenless_provisional_bootstrap: true
+```
+
+Invite-only deployments MAY keep `allow_tokenless_provisional_bootstrap=false`, but then each new provider needs an operator-preprovisioned `provider_token` before first connect.
 
 **Supersedes SPEC-002 v1.3.5 FR-P12 / PG-1 for tokenless provisional admission.** Those locked clauses say provisional providers may continue without tokens under `require_provider_tokens=true`; SPEC-003 v0.8.1 explicitly narrows that to "providers with at least one unrevoked token row." The locked SPEC-002 text is intentionally preserved as-is; this supersede is normative for the open-onboarding tier (per codex architect MAJOR-1, PR #44). A future SPEC-002 revision SHOULD amend FR-P12 / PG-1 to reflect this.
 

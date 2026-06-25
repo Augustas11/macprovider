@@ -118,7 +118,9 @@ func main() {
 	wsOpts = append(wsOpts, providerws.WithTokenIssuer(tokenStore))
 	wsOpts = append(wsOpts, providerws.WithGitHubAuthStore(tokenStore))
 	if cfg.Auth.RequireProviderTokens {
-		logger.Info().Msg("provider WS token validation REQUIRED (auth.require_provider_tokens=true)")
+		logger.Info().
+			Bool("allow_tokenless_provisional_bootstrap", cfg.Auth.AllowTokenlessProvisionalBootstrap).
+			Msg("provider WS token validation REQUIRED (auth.require_provider_tokens=true)")
 	} else {
 		logger.Info().Msg("provider WS token validation NOT required (auth.require_provider_tokens=false); tokenless provisional admissions will self-mint per SPEC-003 FR-C9")
 	}
@@ -632,8 +634,8 @@ var tier2ReloadFieldClasses = map[string]tier2ReloadFieldClass{
 	"ObserveEnabled":      tier2HotReloadable,
 	"RequireHashVerified": tier2HotReloadable,
 
-	"CatalogPath":                    tier2StartupOnly,
-	"CatalogPublicKey":               tier2StartupOnly,
+	"CatalogPath":      tier2StartupOnly,
+	"CatalogPublicKey": tier2StartupOnly,
 	// SPEC-015 §M.4 — public catalog base URL is operator-visible
 	// only; hot-reloadable so an operator can flip it without
 	// restarting the coordinator.

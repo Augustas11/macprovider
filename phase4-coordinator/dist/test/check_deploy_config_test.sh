@@ -25,6 +25,13 @@
 #   T12 — gateway operator_key absent                  -> FAIL (gateway requires it)
 #   T13 — gateway service_token present + placeholder  -> FAIL
 #   T14 — gateway service_token absent                 -> silent (optional field)
+#   T15 — bootstrap flag absent                        -> FAIL (explicit onboarding choice required)
+#   T16 — bootstrap flag false                         -> pass with clean-install warning
+#   T17 — bootstrap flag invalid                       -> FAIL
+#   T18 — bootstrap flag outside auth                  -> FAIL (must match runtime config path)
+#   T19 — bootstrap flag nested under auth child       -> FAIL (direct child only)
+#   T20 — gateway C2 timeout absent                    -> FAIL (runtime default may violate C2)
+#   T21 — coordinator C2 timeout absent                -> FAIL (runtime default may violate C2)
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -60,8 +67,21 @@ write_coord() {
 auth:
   operator_key: $opkey
   require_provider_tokens: true
+  allow_tokenless_provisional_bootstrap: true
 routing:
   request_timeout_s: $rt
+EOF
+}
+
+write_coord_bootstrap() {
+  local wd="$1" bootstrap_line="$2"
+  cat > "$wd/coordinator.yaml" <<EOF
+auth:
+  operator_key: "$HEX64"
+  require_provider_tokens: true
+  $bootstrap_line
+routing:
+  request_timeout_s: 280
 EOF
 }
 
@@ -212,6 +232,7 @@ test_env_ref_does_not_mask_c2_inversion() {
   write_gw "$wd" 200                       # gateway 200s
   write_coord "$wd" "env:OPERATOR_KEY" 280  # coordinator 280s >= gateway -> inversion
   run_check "$wd" OPERATOR_KEY=
+  assert_exit 1 "T9 C2 inversion -> FAIL"
   assert_contains "C2: coordinator request_timeout_s" "T9 C2 inversion still surfaced"
   rm -rf "$wd"
 }
@@ -277,6 +298,110 @@ test_gateway_service_token_absent_is_silent() {
   rm -rf "$wd"
 }
 
+test_bootstrap_flag_absent_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd"
+  cat > "$wd/coordinator.yaml" <<EOF
+auth:
+  operator_key: "$HEX64"
+  require_provider_tokens: true
+routing:
+  request_timeout_s: 280
+EOF
+  run_check "$wd"
+  assert_exit 1 "T15 bootstrap flag absent -> FAIL"
+  assert_contains "allow_tokenless_provisional_bootstrap is ABSENT" "T15 missing bootstrap message"
+  rm -rf "$wd"
+}
+
+test_bootstrap_flag_false_warns_but_passes() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd"
+  write_coord_bootstrap "$wd" "allow_tokenless_provisional_bootstrap: false"
+  run_check "$wd"
+  assert_exit 0 "T16 bootstrap flag false -> pass"
+  assert_contains "clean public installs need a pre-provisioned provider_token" "T16 bootstrap false warning"
+  rm -rf "$wd"
+}
+
+test_bootstrap_flag_invalid_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd"
+  write_coord_bootstrap "$wd" "allow_tokenless_provisional_bootstrap: maybe"
+  run_check "$wd"
+  assert_exit 1 "T17 bootstrap flag invalid -> FAIL"
+  assert_contains "allow_tokenless_provisional_bootstrap must be true or false" "T17 invalid bootstrap message"
+  rm -rf "$wd"
+}
+
+test_bootstrap_flag_misplaced_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd"
+  cat > "$wd/coordinator.yaml" <<EOF
+auth:
+  operator_key: "$HEX64"
+  require_provider_tokens: true
+logging:
+  allow_tokenless_provisional_bootstrap: true
+routing:
+  request_timeout_s: 280
+EOF
+  run_check "$wd"
+  assert_exit 1 "T18 bootstrap flag outside auth -> FAIL"
+  assert_contains "allow_tokenless_provisional_bootstrap is ABSENT" "T18 misplaced bootstrap message"
+  rm -rf "$wd"
+}
+
+test_bootstrap_flag_nested_under_auth_child_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd"
+  cat > "$wd/coordinator.yaml" <<EOF
+auth:
+  operator_key: "$HEX64"
+  require_provider_tokens: true
+  github_oauth:
+    allow_tokenless_provisional_bootstrap: true
+routing:
+  request_timeout_s: 280
+EOF
+  run_check "$wd"
+  assert_exit 1 "T19 bootstrap flag nested under auth child -> FAIL"
+  assert_contains "allow_tokenless_provisional_bootstrap is ABSENT" "T19 nested bootstrap message"
+  rm -rf "$wd"
+}
+
+test_gateway_c2_timeout_absent_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 400
+  cat > "$wd/gateway.yaml" <<EOF
+coordinator:
+  operator_key: "$HEX64"
+timeouts:
+  coordinator_header_timeout_seconds: 10
+EOF
+  run_check "$wd"
+  assert_exit 1 "T20 gateway C2 timeout absent -> FAIL"
+  assert_contains "timeouts.coordinator_request_seconds is ABSENT" "T20 missing gateway C2 message"
+  rm -rf "$wd"
+}
+
+test_coordinator_c2_timeout_absent_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd" 200
+  cat > "$wd/coordinator.yaml" <<EOF
+auth:
+  operator_key: "$HEX64"
+  require_provider_tokens: true
+  allow_tokenless_provisional_bootstrap: true
+routing:
+  preflight_timeout_s: 5
+EOF
+  run_check "$wd"
+  assert_exit 1 "T21 coordinator C2 timeout absent -> FAIL"
+  assert_contains "routing.request_timeout_s is ABSENT" "T21 missing coordinator C2 message"
+  rm -rf "$wd"
+}
+
 # ---- run -------------------------------------------------------------------
 
 echo "== check-deploy-config.sh tests =="
@@ -297,6 +422,13 @@ test_gateway_operator_key_env_unset_deferred
 test_gateway_operator_key_absent_fails
 test_gateway_service_token_placeholder_fails
 test_gateway_service_token_absent_is_silent
+test_bootstrap_flag_absent_fails
+test_bootstrap_flag_false_warns_but_passes
+test_bootstrap_flag_invalid_fails
+test_bootstrap_flag_misplaced_fails
+test_bootstrap_flag_nested_under_auth_child_fails
+test_gateway_c2_timeout_absent_fails
+test_coordinator_c2_timeout_absent_fails
 
 echo
 echo "== summary =="

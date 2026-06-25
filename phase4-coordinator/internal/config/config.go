@@ -194,8 +194,14 @@ type AuthConfig struct {
 	// RequireProviderTokens fails closed for public provider WebSocket
 	// exposure. Disable only for isolated local development or one-off
 	// migrations where anonymous pinned-provider admission is acceptable.
-	RequireProviderTokens bool              `yaml:"require_provider_tokens"`
-	GitHubOAuth           GitHubOAuthConfig `yaml:"github_oauth"`
+	RequireProviderTokens bool `yaml:"require_provider_tokens"`
+	// AllowTokenlessProvisionalBootstrap keeps RequireProviderTokens
+	// fail-closed for normal reconnects while allowing a first tokenless
+	// provisional provider to reach the self-serve mint/TOFU path. Existing
+	// used-token identities still reject tokenless reconnects; enable only
+	// for public onboarding.
+	AllowTokenlessProvisionalBootstrap bool              `yaml:"allow_tokenless_provisional_bootstrap"`
+	GitHubOAuth                        GitHubOAuthConfig `yaml:"github_oauth"`
 }
 
 type GitHubOAuthConfig struct {
