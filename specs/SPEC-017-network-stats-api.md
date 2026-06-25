@@ -1,6 +1,6 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.4 (2026-06-25, draft — codex round-4 fix pass on v0.1.3. Round 4 returned 0 CRITICAL + 4 MAJOR + 2 MINOR. v0.1.4 absorbs: M1 §1.5 C3 final stale "stats_* only" wording rewritten to point at §7.2.1 request-path grant set (matches partner_keys + provider_visibility reads); M2 §7.2.2 rollup grant list switched to marked-non-normative footnote pointing at BUILD_SPEC_017 for the actual table enumeration against locked SPEC-002/005 (avoids citing tables that don't exist in locked deps), AC-9 updated to assert denial on a real locked ledger table; M3 §5.3 / §9.6 health-status thresholds aligned (degraded = beyond §9.5 target, down = beyond §5.8 503 budget — single source of truth); M4 §6.2 split bucket-boundary rule: appending new reserved bucket values stays additive (§8.2), changing existing thresholds is a breaking change requiring SPEC bump + changelog; m1 §7.2 role count corrected to "three required + one optional" + §5.4.3 cross-ref §7.2.5 -> §7.2.4; m2 RFC 9745 added to §12 references. Pending codex round-5 confirmation. Full r4 findings: `specs/SPEC-017-r4-audit.md`.)
+**Version:** 0.1.5 (2026-06-25, draft — codex round-5 fix pass on v0.1.4. Round 5 returned 0 CRITICAL + 2 MAJOR + 2 MINOR. v0.1.5 absorbs: M1 added `method_not_allowed` error code (HTTP 405) to §5.9 closed vocabulary and new AC-21 verifying the 405 envelope on a `POST /v1/stats/*`; M2 added SELECT grants to `stats_rollup` on its own `stats_*` tables to enable §9.3 incremental merge and §9.4 drift-detection without violating §7.2.5 role isolation; m1 §7.2.1 cross-ref §7.2.4 -> §7.2.5; m2 §12 advisor-artifact entry duplicate parenthetical removed. Pending codex round-6 confirmation; if r6 returns 0 CRITICAL + 0 MAJOR, v0.1.5 LOCKS. Full r5 findings: `specs/SPEC-017-r5-audit.md`.)
 **Status:** Draft (design-only — no IMPL until v0.1 LOCKED and a separate `BUILD_SPEC_017_IMPL_PROMPT.md` written).
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
@@ -13,6 +13,15 @@ Audit-narrative-by-round detail lives in the per-round audit files under
 entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
+
+**v0.1.5 (2026-06-25, draft — codex round-5 fix pass on v0.1.4):**
+Round 5 returned 0 CRITICAL + 2 MAJOR + 2 MINOR. Fixes: M1 added
+`method_not_allowed` (HTTP 405) to §5.9 closed code vocabulary and
+AC-21; M2 added SELECT grants to `stats_rollup` on its own
+`stats_*` tables to enable §9.3 incremental merge / §9.4 drift
+detection without violating role isolation; m1 §7.2.1 cross-ref
+§7.2.4 -> §7.2.5; m2 §12 advisor entry de-duplicated.
+Lock target: r6 returns 0 CRITICAL + 0 MAJOR.
 
 **v0.1.4 (2026-06-25, draft — codex round-4 fix pass on v0.1.3):**
 Round 4 returned 0 CRITICAL + 4 MAJOR + 2 MINOR. Fixes: M1 §1.5 C3
@@ -945,6 +954,7 @@ Code vocabulary (closed set for v0.1):
 |---|---|---|
 | `bad_request` | 400 | malformed `window`/`sort`/`limit` |
 | `unauthorized` | 401 | invalid or revoked `Authorization` |
+| `method_not_allowed` | 405 | request verb not in `Allow: GET, HEAD, OPTIONS` (§4.3); response MUST also carry `Allow: GET, HEAD, OPTIONS` |
 | `rate_limited` | 429 | per-IP or per-key bucket exhausted |
 | `stats_stale` | 503 | rollup older than §5.8 budget |
 | `internal` | 500 | unhandled; MUST NOT leak stack/SQL |
@@ -1214,7 +1224,7 @@ Explicit denies (request-path role MUST NOT have these grants):
 - `stats_late_events` (§9.1, §9.3) — rollup-internal only.
 - `provider_rewards_ledger` (§9.1a) — rollup-internal only.
 - Any OLTP billing/session/pool table — enforced by the connection
-  isolation in §7.2.4.
+  isolation in §7.2.5.
 
 #### 7.2.2 `stats_rollup` — rollup job role
 
@@ -1235,7 +1245,7 @@ Normatively pinned grants:
 CREATE ROLE stats_rollup LOGIN PASSWORD '<from-env>';
 REVOKE ALL ON SCHEMA public FROM stats_rollup;
 GRANT USAGE ON SCHEMA public TO stats_rollup;
-GRANT INSERT, UPDATE, DELETE ON
+GRANT SELECT, INSERT, UPDATE, DELETE ON
   stats_overview_current,
   stats_timeseries_rpm_30m,
   stats_timeseries_tpm_30m,
@@ -1246,6 +1256,10 @@ GRANT INSERT, UPDATE, DELETE ON
   stats_components_health,
   stats_late_events
 TO stats_rollup;
+-- SELECT on the rollup-owned stats_* tables is required for the
+-- §9.3 incremental merge (30d/all windows merge late events into
+-- the existing snapshot) and the §9.4 drift detection (nightly
+-- rebuild compares against the incremental snapshot).
 GRANT SELECT ON
   provider_visibility,
   provider_rewards_ledger
@@ -1792,6 +1806,10 @@ runbook step.
 - **AC-20.** No `provider_visibility_audit` row exists with
   `new_mode = 'exact' AND actor_kind = 'operator'` (§6.6.3 mechanical
   check). Verified by a SQL fixture and a CI assertion.
+- **AC-21.** `POST /v1/stats/overview` (or any verb other than GET,
+  HEAD, OPTIONS against any `/v1/stats/*` path) returns 405 with
+  `Allow: GET, HEAD, OPTIONS` and the §5.9 envelope
+  `{"error":{"code":"method_not_allowed", ...}}`.
 
 ---
 
@@ -1903,4 +1921,3 @@ challenge each and propose pins for v0.2.
   round establishing the four locked decisions Q1-Q4 of §2;
   canonical in-repo copy — the source `omc ask` artifact lives
   outside the worktree and is not citable from inside this SPEC)
-  (codex advisor round establishing the four locked decisions)
