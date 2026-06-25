@@ -34,18 +34,35 @@ func (m *mockRPCClient) ChainID(_ context.Context) (uint64, error) {
 	return m.chain, nil
 }
 func (m *mockRPCClient) TransactionCount(ctx context.Context, address string) (uint64, error) {
+	if m.txCountFn == nil {
+		return 0, nil
+	}
 	return m.txCountFn(ctx, address)
 }
 func (m *mockRPCClient) SendRawTransaction(ctx context.Context, raw []byte) (string, error) {
+	if m.sendFn == nil {
+		return "0xdeadbeef", nil
+	}
 	return m.sendFn(ctx, raw)
 }
 func (m *mockRPCClient) TransactionReceipt(ctx context.Context, h string) (*Receipt, error) {
+	if m.receiptFn == nil {
+		return nil, nil
+	}
 	return m.receiptFn(ctx, h)
 }
 func (m *mockRPCClient) TransactionByHash(ctx context.Context, h string) (*Transaction, error) {
+	if m.txByHashFn == nil {
+		return nil, nil
+	}
 	return m.txByHashFn(ctx, h)
 }
-func (m *mockRPCClient) BlockNumber(ctx context.Context) (uint64, error) { return m.blockNumFn(ctx) }
+func (m *mockRPCClient) BlockNumber(ctx context.Context) (uint64, error) {
+	if m.blockNumFn == nil {
+		return 0, nil
+	}
+	return m.blockNumFn(ctx)
+}
 
 func TestTwoRPCs_AssertChainID_OK(t *testing.T) {
 	rpcs := TwoRPCs{
