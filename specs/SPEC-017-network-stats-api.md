@@ -1,6 +1,6 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.3 (2026-06-25, draft — codex round-3 fix pass on v0.1.2. Round 3 returned 0 CRITICAL + 4 MAJOR + 3 MINOR. v0.1.3 absorbs: M1 DB-role-isolation wording sweep across §1.5 C4, §4.2, §5.4.3, §7.2.1 (removed "stats_* only" stale phrasing; replaced §7.2.2 SQL placeholder with enumerated grants; clarified `last_used_at` write path as separate role); M2 CORS preflight decoupled from keyed-GET auth in §5.7 (preflight echoes Origin if it matches any configured partner allowlist; GET enforces the per-key allowlist); M3 §12 reference to SPEC-016 §5.1 rewords to "payout-pipeline context only" with rewards-semantics pointing at §9.1a + Q13; M4 §11 Q2 rewritten as a v0.2+ design question (no longer contradicting §5.4.2 v0.1 operator-only rule); m1 noted (mirror is canonical, source `.omc` path no longer cited in body); m2 §8.3 Deprecation citation also updated to RFC 9745; example Unix timestamp corrected; m3 §6.6.2 cross-ref fixed to Q11 and Q12/Q13 ordered numerically. Pending codex round-4 confirmation. Full r3 findings: `specs/SPEC-017-r3-audit.md`.)
+**Version:** 0.1.4 (2026-06-25, draft — codex round-4 fix pass on v0.1.3. Round 4 returned 0 CRITICAL + 4 MAJOR + 2 MINOR. v0.1.4 absorbs: M1 §1.5 C3 final stale "stats_* only" wording rewritten to point at §7.2.1 request-path grant set (matches partner_keys + provider_visibility reads); M2 §7.2.2 rollup grant list switched to marked-non-normative footnote pointing at BUILD_SPEC_017 for the actual table enumeration against locked SPEC-002/005 (avoids citing tables that don't exist in locked deps), AC-9 updated to assert denial on a real locked ledger table; M3 §5.3 / §9.6 health-status thresholds aligned (degraded = beyond §9.5 target, down = beyond §5.8 503 budget — single source of truth); M4 §6.2 split bucket-boundary rule: appending new reserved bucket values stays additive (§8.2), changing existing thresholds is a breaking change requiring SPEC bump + changelog; m1 §7.2 role count corrected to "three required + one optional" + §5.4.3 cross-ref §7.2.5 -> §7.2.4; m2 RFC 9745 added to §12 references. Pending codex round-5 confirmation. Full r4 findings: `specs/SPEC-017-r4-audit.md`.)
 **Status:** Draft (design-only — no IMPL until v0.1 LOCKED and a separate `BUILD_SPEC_017_IMPL_PROMPT.md` written).
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
@@ -13,6 +13,20 @@ Audit-narrative-by-round detail lives in the per-round audit files under
 entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
+
+**v0.1.4 (2026-06-25, draft — codex round-4 fix pass on v0.1.3):**
+Round 4 returned 0 CRITICAL + 4 MAJOR + 2 MINOR. Fixes: M1 §1.5 C3
+final stale "stats_* only" wording rewritten to point at §7.2.1
+request-path grant set; M2 §7.2.2 rollup grant list switched to
+implementation-authored non-normative (the placeholder names that
+didn't exist in locked deps removed), AC-9 updated to test against
+a locked SPEC-005 ledger table; M3 §5.3 health-status thresholds
+aligned with §9.6 single source of truth (degraded = beyond §9.5
+target, down = beyond §5.8 503 budget); M4 §6.2 split rule for
+bucket-boundary changes: reserved-slot additions stay additive,
+threshold changes are breaking. m1 §7.2 role count corrected;
+§5.4.3 cross-ref §7.2.5 -> §7.2.4. m2 RFC 9745 added to §12.
+Full narrative: `specs/SPEC-017-r4-audit.md`.
 
 **v0.1.3 (2026-06-25, draft — codex round-3 fix pass on v0.1.2):**
 Round 3 returned 0 CRITICAL + 4 MAJOR + 3 MINOR. Fixes: M1 swept
@@ -150,8 +164,12 @@ C2. **Public dollar values are bucketed by default.** Pseudonymization
 alone is not a privacy model; once network revenue scales, exact `$` per
 provider becomes correlatable to real-world operators.
 
-C3. **No request-path queries against billing/session OLTP.** A stats
-handler MUST hit `stats_*` tables only. Hot OLTP tables stay protected.
+C3. **No request-path queries against billing/session OLTP.** A
+stats handler MUST query only the §7.2.1 request-path-readable
+grant set (the `stats_*` projections plus the SPEC-017-owned side
+tables `partner_keys` and `provider_visibility`) and MUST NOT
+issue queries against billing/session/pool OLTP source tables. Hot
+OLTP tables stay protected.
 
 C4. **No handler-level access to billing internals.** The stats DB role
 has the request-path readable grant set defined in §7.2.1 (a strict
@@ -760,7 +778,7 @@ Operational rules:
    not transactional with the response). Because `stats_reader` has
    only SELECT on `partner_keys` (§7.2.1), this UPDATE MUST be
    dispatched to a separate, narrowly-grant-scoped role
-   `partner_keys_writer` (§7.2.5) — typically via a background
+   `partner_keys_writer` (§7.2.4) — typically via a background
    channel/queue, NOT inline on the response path. v0.1
    implementations MAY also simply skip the `last_used_at` update
    if the operator decides the audit value is not worth the extra
@@ -998,10 +1016,30 @@ snapshot). At those magnitudes, `$$$` at `≥ $250 / 7d` correctly
 marks a clear top tier without exposing meaningful operator-level
 information. As the network grows, the absolute boundaries will
 under-fit (everyone tops out at `$$$`); Q1 in §11 flags whether
-v0.2 shifts to percentile-of-network-revenue. Until then, the
-operator MAY tighten the boundaries (e.g. raise `$$$` floor) as an
-additive change without a SPEC bump, provided the future-reserved
-slots `$$$$` and `$$$$$` are introduced per §8.2.1.
+v0.2 shifts to percentile-of-network-revenue.
+
+**Bucket-rule additivity boundary (v0.1).** Two operator changes
+have different versioning implications and the SPEC is explicit
+about both:
+
+- **Additive (no SPEC bump):** introducing a new bucket VALUE
+  (e.g. `$$$$` to extend the high end). Existing thresholds for
+  `$`, `$$`, `$$$` are unchanged; clients that already tolerate
+  the future-reserved set (§8.2.1) absorb the new label
+  transparently.
+- **Breaking (SPEC bump required):** changing the THRESHOLDS
+  behind existing labels (e.g. raising `$$$` floor from `$250/7d`
+  to `$500/7d`). Even though the wire shape is unchanged, the
+  meaning of an existing field changes; partner dashboards that
+  compare bucket labels over time would silently break. This is a
+  field-meaning change per §8.3 and requires `/v2/*` overlap or a
+  documented changelog entry with a coordinated partner-notification
+  cadence (operator-defined; not pinned by v0.1).
+
+The threshold values for v0.1 are pinned in the table above.
+Until v0.2 ships percentile-based buckets (§11 Q1), operators
+SHOULD prefer adding new reserved values over re-anchoring
+existing ones.
 
 ### 6.3 Provider opt-in flow (cross-SPEC handoff)
 
@@ -1128,7 +1166,12 @@ for v0.1).
 
 ### 7.2 DB role isolation
 
-SPEC-017 splits its DB grants across three roles. Each role's
+SPEC-017 splits its DB grants across three required roles —
+`stats_reader` (§7.2.1), `stats_rollup` (§7.2.2), `provider_portal`
+(§7.2.3) — plus one optional role `partner_keys_writer` (§7.2.4)
+that is only required when the operator chooses to populate
+`partner_keys.last_used_at`. §7.2.5 documents the connection-pool
+isolation contract that ties these together. Each role's
 read/write surface is enumerated below; the union of these grant
 sets covers all tables defined in §9.1 and §9.1a plus the
 SPEC-017-owned `provider_visibility` and `provider_visibility_audit`
@@ -1175,24 +1218,23 @@ Explicit denies (request-path role MUST NOT have these grants):
 
 #### 7.2.2 `stats_rollup` — rollup job role
 
+SPEC-017 v0.1 normatively pins ONLY the **write** grants for the
+rollup role (the `stats_*` tables it owns) plus the SPEC-017-owned
+read grants (`provider_visibility`, `provider_rewards_ledger`).
+The OLTP **source** read grants are deliberately left
+implementation-authored against the locked SPEC-002 v1.4 / SPEC-005
+v0.3 source-table inventory at IMPL time — that inventory has
+evolved enough across recent dependency versions that hardcoding a
+list here would silently drift. The IMPL prompt
+(`BUILD_SPEC_017_IMPL_PROMPT.md`) will enumerate the exact source
+tables against the locked dependency line-3 at the moment of IMPL.
+
+Normatively pinned grants:
+
 ```sql
 CREATE ROLE stats_rollup LOGIN PASSWORD '<from-env>';
 REVOKE ALL ON SCHEMA public FROM stats_rollup;
 GRANT USAGE ON SCHEMA public TO stats_rollup;
--- OLTP source tables for the rollup. The exact table names are
--- pinned by SPEC-002 §7 (provider/session) and SPEC-005 §10
--- (billing). The migration is operator-authored against the
--- current locked SPEC-002 / SPEC-005 versions, NOT a SPEC-017
--- normative SQL. SPEC-017 normatively requires SELECT on the
--- enumerated billing/session/pool tables and forbids any other
--- grant to stats_rollup.
-GRANT SELECT ON
-  provider_tokens,
-  sessions,
-  session_events,
-  billing_ledger,
-  request_log
-TO stats_rollup;
 GRANT INSERT, UPDATE, DELETE ON
   stats_overview_current,
   stats_timeseries_rpm_30m,
@@ -1204,11 +1246,22 @@ GRANT INSERT, UPDATE, DELETE ON
   stats_components_health,
   stats_late_events
 TO stats_rollup;
-GRANT SELECT ON provider_visibility, provider_rewards_ledger TO stats_rollup;
+GRANT SELECT ON
+  provider_visibility,
+  provider_rewards_ledger
+TO stats_rollup;
+-- + IMPL-authored SELECT grants on the locked OLTP source tables
+-- per SPEC-002 v1.4 §7 (provider/session) and SPEC-005 v0.3 §10
+-- (billing/ledger). See BUILD_SPEC_017_IMPL_PROMPT.md for the
+-- exact list at IMPL time.
 ```
 
 The rollup role MUST NOT have any grant on `partner_keys` or
-`provider_visibility_audit`.
+`provider_visibility_audit`. The IMPL-authored OLTP source grant
+list MUST be additive only to the normative grants above; any
+write grant or non-OLTP additional grant added to `stats_rollup`
+is a contract violation surfaced by an operator-side schema-audit
+script (out of scope for v0.1).
 
 #### 7.2.3 `provider_portal` — portal toggle role (SPEC-014 v0.9 candidate)
 
@@ -1323,8 +1376,10 @@ changes:
 - New optional query params with safe defaults.
 - New error codes appended to the §5.9 vocabulary, subject to §8.2.1
   forward-compat rules below.
-- New bucket values appended to the §6.2 `$/$$/$$$/-` set, subject
-  to §8.2.1 forward-compat rules below.
+- New bucket VALUES appended to the §6.2 `$/$$/$$$/-` set, subject
+  to §8.2.1 forward-compat rules below. Changing the THRESHOLD
+  behind an existing bucket value is NOT additive; see §6.2 and
+  §8.3.
 - Additive `partner_keys` row fields.
 
 ### 8.2.1 Forward-compat rules for closed enums
@@ -1614,8 +1669,12 @@ false-positive on legitimate arithmetic noise; a looser one (e.g.
 ### 9.6 Failure modes
 
 - Rollup job missed its tick: continue serving the previous snapshot
-  with its existing `generated_at`; health endpoint reports `degraded`
-  if past target staleness, `down` if past 2× target.
+  with its existing `generated_at`. The health endpoint thresholds
+  are pinned by §5.3 against the §9.5 target staleness (for
+  `degraded`) and the §5.8 503 budget (for `down`). The two
+  thresholds are NOT a 1×/2× ratio — they are two distinct
+  operator-meaningful budgets and §5.3 is the single source of
+  truth.
 - Rollup job hit a SQL error: log to the audit logger, increment a
   metric counter (`stats_rollup_errors_total`), retry on next tick.
 - Rollup job hit a panic: recover middleware logs and restarts the job
@@ -1683,9 +1742,13 @@ runbook step.
 - **AC-8.** A 61st request from the same IP in a 60s window to
   `/v1/stats/overview` returns 429 with `Retry-After` and
   `code: "rate_limited"`.
-- **AC-9.** `stats_reader` Postgres role CANNOT execute
-  `SELECT 1 FROM billing_ledger LIMIT 1`; the query MUST return a
-  permission-denied error.
+- **AC-9.** `stats_reader` Postgres role MUST return a
+  permission-denied error on any SELECT against a locked SPEC-005
+  v0.3 ledger table — the test MUST pick at least one of
+  `ledger_request_credits`, `ledger_operator_credits`,
+  `ledger_payout_ready`, or `ledger_reconciliation_runs` (per
+  SPEC-005 v0.3 §10) and assert denial. Permission denied, NOT
+  "relation does not exist", is the assertion target.
 - **AC-10.** Toggling `provider_visibility.mode` via the portal
   (SPEC-014 v0.9 candidate handler) inserts exactly one row into
   `provider_visibility_audit` with `actor_kind = 'provider'`,
@@ -1832,8 +1895,10 @@ challenge each and propose pins for v0.2.
   context only; SPEC-017 does NOT derive `rewards-$` semantics
   from SPEC-016 v0.1.19 — see §9.1a and §11 Q13 for the deferred
   source-spec decision)
-- RFC 7234 (HTTP caching), RFC 8594 (Sunset header), RFC 2119 (MUST /
-  SHOULD / MAY)
+- RFC 7234 (HTTP caching), RFC 8594 (Sunset header), RFC 9745
+  (Deprecation header + `rel="deprecation"` link relation), RFC 4648
+  (base64url encoding for partner-key format §3.7), RFC 7232 (304 Not
+  Modified semantics §5.9), RFC 2119 (MUST / SHOULD / MAY)
 - `specs/SPEC-017-advisor-round-2026-06-25.md` (codex advisor
   round establishing the four locked decisions Q1-Q4 of §2;
   canonical in-repo copy — the source `omc ask` artifact lives
