@@ -1174,3 +1174,168 @@ VALUES (?, 1, 'base-mainnet', ?, ?, 80, 1, X'02', ?, ?, ?, 100, 0, ?)`,
 		t.Errorf("payout_run_finished skipped_funds=1 but no row hit insufficient funds; logs:\n%s", logs)
 	}
 }
+
+// TestRunner_RunOnce_ExistingConfirmedThenFreshExactlyFits locks Step 4
+// r7 [code:r7-1] HIGH closure. The audit's concrete failure shape:
+// row 1 has an existing confirmed attempt for 80 (broadcast in a PRIOR
+// cycle, so the top-of-cycle on-chain balance already reflects that
+// transfer). Row 2 is fresh for 100. Top-of-cycle balance read = 100.
+// Row 2 must succeed — the chain has 100 USDC available for fresh
+// transfers. The pre-r7 code spuriously deducted row 1's 80 from
+// runningBalance even though no money left this cycle, making the
+// in-broadcast check see only 20 and emit payout_insufficient_funds.
+//
+// Expected: claimer called twice (row 1 claim + row 2 fresh pay);
+// NO payout_insufficient_funds emitted; skipped_funds stays 0.
+func TestRunner_RunOnce_ExistingConfirmedThenFreshExactlyFits(t *testing.T) {
+	db := openTestDB(t)
+	rawHex := "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	raw, _ := hex.DecodeString(rawHex)
+	signer, err := NewLocalFileSignerFromKey(raw)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	hotAddr := signer.FromAddress()
+	canonicalHot, _ := CanonicalizeEIP55(hotAddr)
+	logBuf := &bytes.Buffer{}
+	logger := zerolog.New(logBuf)
+	state, _, err := Acquire(context.Background(), db, testRunInterval, logger)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	// Nonce cursor at 2 because the seeded confirmed payout_attempt
+	// below already consumed nonce 1; the runner's fresh allocation
+	// for row 2 must use nonce 2.
+	if err := UpsertNonceCursor(context.Background(), db, hotAddr, 2, 2, 2, NowUTC()); err != nil {
+		t.Fatalf("UpsertNonceCursor: %v", err)
+	}
+
+	addr1 := "0x000000000000000000000000000000000000eee1"
+	addr2 := "0x000000000000000000000000000000000000eee2"
+	seedProviderForBalanceTest(t, db, "p1", addr1, canonicalHot)
+	seedProviderForBalanceTest(t, db, "p2", addr2, canonicalHot)
+
+	// Row 1: 80 base units, with an existing confirmed payout_attempts row
+	// (simulating prior cycle's broadcast that confirmed before this cycle
+	// started). Row 1 goes through claimAndLog → rowOutcomePaid WITHOUT
+	// spending hot-wallet USDC THIS cycle.
+	id1 := insertReadyRow(t, db, "p1", "settle:p1:r7test1")
+	_, _ = db.ExecContext(context.Background(),
+		`UPDATE ledger_payout_ready SET provider_credits=80, gross_credits=80 WHERE id=?`, id1)
+	confirmedHash := "0xconfirmedhashr7"
+	now := NowUTC()
+	_, err = db.ExecContext(context.Background(), `
+INSERT INTO payout_attempts
+  (payout_id, attempt_seq, chain, from_address, to_address,
+   amount_base_units, nonce, raw_signed_tx, tx_hash,
+   broadcast_at_utc, confirmed_at_utc, block_number,
+   is_cancel_self_transfer, updated_at_utc)
+VALUES (?, 1, 'base-mainnet', ?, ?, 80, 1, X'02', ?, ?, ?, 100, 0, ?)`,
+		id1, strings.ToLower(canonicalHot), strings.ToLower(addr1),
+		confirmedHash, now, now, now)
+	if err != nil {
+		t.Fatalf("seed confirmed payout_attempts: %v", err)
+	}
+
+	// Row 2: 100 base units, fresh row. Will go through allocateBuildSignBroadcast.
+	id2 := insertReadyRow(t, db, "p2", "settle:p2:r7test2")
+	_, _ = db.ExecContext(context.Background(),
+		`UPDATE ledger_payout_ready SET provider_credits=100, gross_credits=100 WHERE id=?`, id2)
+
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+
+	// Top-of-cycle hot-wallet USDC balance = 100. This already accounts
+	// for row 1's prior-cycle 80 transfer (the chain reflects it).
+	// Row 2 must see 100 available — NOT 100-80=20.
+	primary.callFn = func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+		return usdcBal32(100), nil
+	}
+
+	// Row 2 send/receipt mocks.
+	var capturedRaw []byte
+	primary.sendFn = func(_ context.Context, r []byte) (string, error) {
+		capturedRaw = append([]byte(nil), r...)
+		return TxHash(r), nil
+	}
+	secondary.sendFn = func(_ context.Context, r []byte) (string, error) {
+		return TxHash(r), nil
+	}
+	primary.receiptFn = func(_ context.Context, h string) (*Receipt, error) {
+		if capturedRaw == nil {
+			return nil, nil
+		}
+		hotTopic, _ := PadAddressTopic(canonicalHot)
+		toTopic, _ := PadAddressTopic(addr2)
+		return &Receipt{
+			TxHash: strings.ToLower(h), BlockNumber: 100, Status: 1,
+			From: strings.ToLower(canonicalHot),
+			To:   strings.ToLower(USDCContractAddressBase),
+			Logs: []ReceiptLog{{
+				Address: strings.ToLower(USDCContractAddressBase),
+				Topics: []string{
+					"0x" + hex.EncodeToString(transferEventTopic),
+					"0x" + hex.EncodeToString(hotTopic),
+					"0x" + hex.EncodeToString(toTopic),
+				},
+				Data: bigEndian32(100),
+			}},
+		}, nil
+	}
+	secondary.receiptFn = primary.receiptFn
+	primary.blockNumFn = func(_ context.Context) (uint64, error) { return 200, nil }
+	secondary.blockNumFn = primary.blockNumFn
+	primary.txByHashFn = func(_ context.Context, _ string) (*Transaction, error) {
+		want, _ := USDCTransferCalldata(addr2, 100)
+		return &Transaction{
+			Hash: "0xhash", From: strings.ToLower(canonicalHot),
+			To: strings.ToLower(USDCContractAddressBase), Input: want,
+			ChainID: BaseMainnetChainID,
+		}, nil
+	}
+	secondary.txByHashFn = primary.txByHashFn
+
+	claimer := &mockClaimer{claimed: true}
+	opts := RunnerOptions{
+		DB:                    db,
+		Security:              SecurityConfig{HotWalletAddress: hotAddr},
+		RPCs:                  TwoRPCs{Primary: primary, Secondary: secondary},
+		Signer:                signer,
+		Claimer:               claimer,
+		Logger:                logger,
+		RunInterval:           testRunInterval,
+		MaxRowsPerRun:         50,
+		ConfirmationBlocks:    5,
+		PerPayoutCapBaseUnits: 1_000_000_000_000,
+		PerDayCapBaseUnits:    10_000_000_000_000,
+		ReceiptPollInterval:   1 * time.Millisecond,
+		ReceiptPollTimeout:    100 * time.Millisecond,
+		NowFn:                 func() time.Time { return time.Now().UTC() },
+	}
+	runner, err := NewRunner(opts, state)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	if _, err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	logs := logBuf.String()
+	// Both rows should have been claimed — row 1 via the existing
+	// confirmed-attempt path, row 2 via fresh broadcast.
+	if len(claimer.calls) != 2 {
+		t.Errorf("claimer calls = %d, want 2 (row 1 claim + row 2 fresh pay); logs:\n%s",
+			len(claimer.calls), logs)
+	}
+	// payout_insufficient_funds MUST NOT be emitted — row 2 should fit
+	// the 100 USDC top-of-cycle balance without double-counting row 1's
+	// prior-cycle 80 spend.
+	if strings.Contains(logs, "payout_insufficient_funds") {
+		t.Errorf("payout_insufficient_funds emitted but row 2 (100) fits top-of-cycle balance (100); row 1 (80) was a prior-cycle claim and must not deduct from runningBalance. Logs:\n%s",
+			logs)
+	}
+	if strings.Contains(logs, `"skipped_funds":1`) {
+		t.Errorf("payout_run_finished skipped_funds=1 but no row should hit insufficient funds; logs:\n%s", logs)
+	}
+}

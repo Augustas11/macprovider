@@ -514,11 +514,18 @@ rowLoop:
 		switch outcome {
 		case rowOutcomePaid:
 			paid++
-			// Step 4 r5 [code:r5-1] HIGH closure: deduct paid amount
-			// from the running balance so the next fresh row's
-			// in-broadcast check sees the post-payout balance without
-			// an RPC call.
-			r.deductPaidAmount(row.ProviderCredits)
+			// NOTE: deduction of the paid amount from runningBalance
+			// happens INSIDE the broadcast paths (allocateBuildSignBroadcast
+			// + rebroadcastAndPoll) the moment the chain accepts the
+			// tx, NOT here at the outcome level. Step 4 r7 [code:r7-1]
+			// HIGH closure: rowOutcomePaid is overloaded — it is also
+			// returned by claimAndLog (existing confirmed in prior
+			// cycle) and pollAndConfirm (prior-cycle broadcast confirms
+			// now). Both of those reflect spend that ALREADY HAPPENED
+			// in a prior cycle; the top-of-cycle on-chain balance
+			// already accounts for them. Deducting again would
+			// double-count and cause spurious payout_insufficient_funds
+			// emissions on subsequent fresh rows.
 		case rowOutcomeCapped:
 			capped++
 		case rowOutcomeDailyCapTripped:
@@ -752,6 +759,12 @@ func (r *Runner) rebroadcastAndPoll(ctx context.Context, conn *sql.Conn, runID s
 	if err := StampBroadcastAt(ctx, r.opts.DB, row.PayoutID, attempt.AttemptSeq, now); err != nil {
 		r.opts.Logger.Warn().Err(err).Msg("StampBroadcastAt failed after rebroadcast")
 	}
+	// Step 4 r7 [code:r7-1] HIGH closure: persisted bytes were
+	// broadcast THIS cycle (the prior cycle stored them but never
+	// stamped broadcast_at_utc). Money has now left the hot wallet
+	// in this cycle, so deduct from runningBalance — subsequent
+	// fresh rows in the same cycle must see the post-spend tally.
+	r.deductPaidAmount(attempt.AmountBaseUnits)
 	return r.pollAndConfirm(ctx, conn, runID, row, attempt)
 }
 
@@ -1068,6 +1081,16 @@ func (r *Runner) allocateBuildSignBroadcast(ctx context.Context, runID string, r
 	if err := StampBroadcastAt(ctx, r.opts.DB, row.PayoutID, attemptSeq, now); err != nil {
 		r.opts.Logger.Warn().Err(err).Msg("StampBroadcastAt failed (will retry next cycle)")
 	}
+
+	// Step 4 r7 [code:r7-1] HIGH closure: chain has accepted the
+	// fresh broadcast; the USDC transfer is now in flight. Deduct
+	// from runningBalance so any subsequent fresh row in the same
+	// cycle sees the post-spend tally without another RPC call.
+	// Co-located with the spend EVENT, not with rowOutcomePaid
+	// (which is overloaded — also returned by claim/poll paths
+	// that reflect prior-cycle spends already in the top-of-cycle
+	// balance read).
+	r.deductPaidAmount(amount)
 
 	// §4.3 step 7 — confirm via two-RPC.
 	freshExisting := &AttemptRow{
