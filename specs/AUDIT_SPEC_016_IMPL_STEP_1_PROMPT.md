@@ -62,10 +62,45 @@ accepts WS connections from provider Macs, routes inference, splits
 revenue, and (via the SPEC-016 pipeline you're auditing) will pay
 providers in USDC on Base.
 
-SPEC-016 v0.1.19 is the controlling contract for this work. It is
-LOCKED at commit `5c034a0` on `main`. Re-read every MUST / MUST NOT /
-SHOULD in the SPEC against the IMPL code; SPEC §-references in this
-prompt point at that v0.1.19 text.
+SPEC-016 v0.1.21 is the controlling contract for this work. It is
+LOCKED at commit `f0152c0` on branch `impl/spec-016`. Re-read every
+MUST / MUST NOT / SHOULD in the SPEC against the IMPL code; SPEC
+§-references in this prompt point at that v0.1.21 text.
+
+**Version history between Step 1 IMPL and this audit fire.** The
+Step 1 IMPL commit `1df0235` was authored against SPEC v0.1.19.
+Between then and now, a Claude-side adversarial cross-check
+(`specs/SPEC-016-r20-audit.md`, 2 parallel subagents — critic +
+analyst lenses) surfaced 3 criticals + 5 majors that 19 codex
+rounds with one lens missed. v0.1.20 absorbed 7 of 8 (M3 EIP-712
+verifyingContract UX deferred to SPEC-014 v0.9). Codex round 21
+(`specs/SPEC-016-r21-audit.md`) fix-pass produced v0.1.21; codex
+round 22 declared CONVERGED 0/0/0/0 and GO for Step 2 IMPL.
+**None of the v0.1.20 / v0.1.21 deltas invalidated Step 1 IMPL**
+— codex re-ran `go test ./internal/payout` in r22 and all tests
+passed.
+
+**Step 1 IMPL ∩ v0.1.21 deltas — the in-scope intersection.** Most
+v0.1.21 deltas land in §4.3 / §4.7 / §4.9 territory (Step 2 / 3 /
+4 work). The deltas that COULD touch Step 1's surface:
+
+- §3.2 deny-list (line ~438 at v0.1.21) — extended framing: hot
+  wallet denied as funding SOURCE AND payout DESTINATION. Step 1's
+  `internal/payout/deny.go` denies the hot wallet from the
+  `SecurityConfig.HotWalletAddress` (correct for the §3.3 payout-
+  destination surface). The funding-SOURCE denial lands at §4.9
+  (Step 3). Verify Step 1's deny-list is complete for §3.3's scope
+  and the v0.1.21 destination framing is honored.
+- §4.5 / §4.7 / §4.8 / §4.8a / §4.8b / §4.8c / §4.9 schema — no
+  schema-level changes in v0.1.20 / v0.1.21. Verify Step 1's
+  migration SQL still matches v0.1.21 §-text byte-for-byte.
+- `payout.tuning.confirmation_blocks` bounds widened
+  `[2, 50]` → `[5, 200]` (M2). Step 1's `PayoutTuningConfig` only
+  declares `address_cooling_off_period`, not `confirmation_blocks`
+  — verify no stale bounds linger anywhere in Step 1.
+
+Any other delta surfacing in code review SHOULD be called out
+explicitly with the SPEC version that introduced it.
 
 The branch under review implements **Step 1** of the IMPL prompt at
 `specs/BUILD_SPEC_016_PAYOUT_IMPL_PROMPT.md` §2. Step 1 covers
@@ -111,7 +146,7 @@ holds operator USDC. **Be paranoid.**
      primitives), §10 (what you must NOT do).
 
 3. The SPEC (READ-ONLY, do not edit):
-   - `specs/SPEC-016-payout-pipeline.md` v0.1.19 — focus on:
+   - `specs/SPEC-016-payout-pipeline.md` v0.1.21 — focus on:
      - §3.1 storage (the `provider_payout_addresses` schema, same-DB
        pin, PRAGMA assertions)
      - §3.2 address validation (EIP-55, EIP-712 typed-data + field-
@@ -141,9 +176,12 @@ holds operator USDC. **Be paranoid.**
        the full dual-loader split is Step 4 and out of scope here)
    - The audit-round narrative files
      `specs/SPEC-016-r9-audit.md` through
-     `specs/SPEC-016-r19-audit.md` contain the *why* for many
+     `specs/SPEC-016-r21-audit.md` contain the *why* for many
      normative requirements; skim them when a SPEC paragraph looks
      defensive in a way you don't immediately understand.
+     `specs/SPEC-016-r20-audit.md` is the Claude-side cross-check
+     and `specs/SPEC-016-r21-audit.md` is the codex fix-pass; both
+     produced the v0.1.20 → v0.1.21 deltas summarised above.
 
 4. The existing primitives Step 1 builds on:
    - `phase4-coordinator/internal/billing/store.go:100-127` —
@@ -815,4 +853,4 @@ with a clean report, that's fine; do not pad.
   (Steps 1 / 2 / 3 / 4) have each converged to 0/0/0/0.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code) (Opus
-4.7) for the SPEC-016 v0.1.19 IMPL Step 1.
+4.7) for the SPEC-016 v0.1.21 IMPL Step 1.
