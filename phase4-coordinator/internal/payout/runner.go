@@ -120,6 +120,54 @@ type Runner struct {
 	// by processRow and all downstream helpers via r.snap().
 	// Cleared in RunOnce's defer.
 	activeSnap TuningSnapshot
+
+	// runningBalance tracks the hot wallet USDC balance across one
+	// RunOnce cycle. Set at top of RunOnce from a primary-RPC
+	// balanceOf read; nil when the read failed (callers treat as
+	// "unknown" and skip the check). On each rowOutcomePaid in the
+	// row loop, RunOnce deducts the paid amount in-memory so the
+	// next row sees the post-payout balance without an RPC call.
+	//
+	// allocateBuildSignBroadcast reads runningBalance via the
+	// r.hotWalletBalance() helper just before the attempt INSERT
+	// — AFTER per-payout-cap, daily-cap, and existing-attempt
+	// checks have decided this row needs a fresh transfer.
+	//
+	// Step 4 r6 [code:r6-1] HIGH closure: the r5 fix-pass placed
+	// the balance guard at the top of the row loop, which
+	// regressed per-payout-cap and daily-cap-trip rows on low
+	// balance. The correct authority layer is here, inside the
+	// broadcast path, after the cap/state decisions.
+	//
+	// Single-threaded under mu+inFlight; cleared in RunOnce defer.
+	runningBalance *big.Int
+}
+
+// hotWalletBalance returns the cycle-scoped running USDC balance
+// captured at the top of RunOnce, or nil if the initial RPC read
+// failed (treated as "unknown"; balance-gated paths fall through
+// and let downstream sign/broadcast surface the failure).
+//
+// Step 4 r6 [code:r6-1] HIGH closure: consumed by
+// allocateBuildSignBroadcast for the per-row insufficient-funds
+// check.
+func (r *Runner) hotWalletBalance() *big.Int {
+	if r.runningBalance == nil {
+		return nil
+	}
+	// Return a defensive copy so the caller can't mutate the
+	// running tally accidentally.
+	return new(big.Int).Set(r.runningBalance)
+}
+
+// deductPaidAmount subtracts a paid amount from the cycle-scoped
+// running balance after a successful row. No-op when the running
+// balance is unknown (initial RPC read failed).
+func (r *Runner) deductPaidAmount(amount int64) {
+	if r.runningBalance == nil || amount <= 0 {
+		return
+	}
+	r.runningBalance.Sub(r.runningBalance, new(big.Int).SetInt64(amount))
 }
 
 // RequestHalt is the chain-balance worker's halt entry point.
@@ -427,13 +475,17 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 		return runID, fmt.Errorf("SelectReadyPayouts: %w", err)
 	}
 
-	// Step 4 r5 [code:r5-1] HIGH closure: §4.3 step 6-7 + §7.1 line
-	// 3722 require a per-row hot-wallet USDC balance check before
-	// sign/broadcast. We read the balance once before the loop and
-	// deduct each successful payout's amount in-memory to avoid
-	// repeated RPC calls. On RPC error we fall through and let the
-	// sign path fail naturally (balance monitoring already alerted).
-	runningBalance, _ := r.currentHotWalletUSDCBalance(ctx)
+	// Step 4 r5 [code:r5-1] HIGH closure (r6 [code:r6-1] HIGH refit):
+	// §4.3 step 6-7 + §7.1 line 3722 require a per-row hot-wallet USDC
+	// balance check before sign/broadcast. The CHECK lives inside
+	// allocateBuildSignBroadcast (after per-payout-cap + daily-cap +
+	// existing-attempt decisions); RunOnce just captures the cycle's
+	// initial balance and deducts paid amounts after each successful
+	// row so the next fresh-broadcast row sees the post-payout
+	// balance without another RPC call. On RPC failure the running
+	// balance stays nil and the in-broadcast check falls through.
+	r.runningBalance, _ = r.currentHotWalletUSDCBalance(ctx)
+	defer func() { r.runningBalance = nil }()
 
 rowLoop:
 	for _, row := range rows {
@@ -443,27 +495,6 @@ rowLoop:
 			r.emitInvariantViolation(row.PayoutID, "null_effective_address", "")
 			failed++
 			continue
-		}
-
-		// Step 4 r5 [code:r5-1] HIGH closure: if we have a valid
-		// running balance and it is insufficient for this row, emit
-		// payout_insufficient_funds and halt the cycle.
-		if runningBalance != nil && row.ProviderCredits > 0 {
-			required := new(big.Int).SetInt64(row.ProviderCredits)
-			if runningBalance.Cmp(required) < 0 {
-				r.opts.Logger.Error().
-					Str("event", "payout_insufficient_funds").
-					Str("severity", "PAGE").
-					Str("run_id", runID).
-					Int64("payout_id", row.PayoutID).
-					Str("provider_id", row.ProviderID).
-					Str("required_usdc_base_units", required.String()).
-					Str("available_usdc_base_units", runningBalance.String()).
-					Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
-					Send()
-				skippedFunds++
-				break rowLoop
-			}
 		}
 
 		outcome, perr := r.processRow(ctx, runID, row)
@@ -483,11 +514,11 @@ rowLoop:
 		switch outcome {
 		case rowOutcomePaid:
 			paid++
-			// Deduct the paid amount from the running balance so the
-			// next row sees the post-payout balance without an RPC call.
-			if runningBalance != nil {
-				runningBalance.Sub(runningBalance, new(big.Int).SetInt64(row.ProviderCredits))
-			}
+			// Step 4 r5 [code:r5-1] HIGH closure: deduct paid amount
+			// from the running balance so the next fresh row's
+			// in-broadcast check sees the post-payout balance without
+			// an RPC call.
+			r.deductPaidAmount(row.ProviderCredits)
 		case rowOutcomeCapped:
 			capped++
 		case rowOutcomeDailyCapTripped:
@@ -495,6 +526,15 @@ rowLoop:
 			// all subsequent rows in this cycle per SPEC §4.3 step 4.
 			// Use a labeled break to exit the outer for loop.
 			capped++
+			break rowLoop
+		case rowOutcomeInsufficientFunds:
+			// Step 4 r6 [code:r6-1] HIGH closure: insufficient hot-wallet
+			// USDC for the row's required transfer. payout_insufficient_funds
+			// was already emitted by allocateBuildSignBroadcast. Per
+			// SPEC §4.3 step 6-7 we halt the cycle so subsequent rows
+			// are NOT processed; the next cadence cycle re-checks
+			// against a fresh balance.
+			skippedFunds++
 			break rowLoop
 		case rowOutcomeSkipped:
 			skipped++
@@ -537,6 +577,20 @@ const (
 	// (per-payout cap) so RunOnce can BREAK the row loop.
 	// Step 4 r5 [code:r5-2] HIGH closure.
 	rowOutcomeDailyCapTripped
+	// rowOutcomeInsufficientFunds is returned by
+	// allocateBuildSignBroadcast when, AFTER per-payout-cap +
+	// per-day-cap + existing-attempt decisions have all passed and
+	// a fresh transfer is about to be initiated, the running
+	// hot-wallet USDC balance is below the required amount. RunOnce
+	// breaks the row loop on this outcome per SPEC §4.3 step 6-7.
+	// Distinct from rowOutcomeCapped + rowOutcomeDailyCapTripped:
+	// those are cap-policy decisions; this is a chain-state
+	// observation.
+	// Step 4 r6 [code:r6-1] HIGH closure: the r5 fix-pass placed
+	// this check at the top of the row loop, regressing per-payout-cap
+	// + daily-cap rows on low balance. The correct authority layer
+	// is inside the broadcast path, after the cap/state decisions.
+	rowOutcomeInsufficientFunds
 	rowOutcomeFailed
 	rowOutcomeSkipped
 )
@@ -863,6 +917,35 @@ func (r *Runner) allocateBuildSignBroadcast(ctx context.Context, runID string, r
 			Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
 			Send()
 		return rowOutcomeDailyCapTripped, nil
+	}
+
+	// Step 4 r6 [code:r6-1] HIGH closure: per-row hot-wallet USDC
+	// balance check, performed AFTER per-payout-cap (caller in
+	// processRow) + per-day-cap (above) + existing-attempt state
+	// machine (caller) have all decided this row needs a fresh
+	// transfer. SPEC §4.3 step 6-7 + §7.1 line 3722.
+	//
+	// The running balance is captured at the top of RunOnce and
+	// deducted by RunOnce after each rowOutcomePaid. nil balance
+	// means the initial RPC read failed; we fall through and let
+	// downstream sign/broadcast surface the failure naturally.
+	if running := r.hotWalletBalance(); running != nil {
+		required := new(big.Int).SetInt64(amount)
+		if running.Cmp(required) < 0 {
+			r.opts.Logger.Error().
+				Str("event", "payout_insufficient_funds").
+				Str("severity", "PAGE").
+				Str("run_id", runID).
+				Int64("payout_id", row.PayoutID).
+				Str("provider_id", row.ProviderID).
+				Str("required_usdc_base_units", required.String()).
+				Str("available_usdc_base_units", running.String()).
+				Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
+				Send()
+			// No attempt row was inserted; the BEGIN IMMEDIATE txn
+			// rolls back via the deferred ROLLBACK on `committed == false`.
+			return rowOutcomeInsufficientFunds, nil
+		}
 	}
 
 	// §4.3 step 5 — C3 NORMATIVE invariant: re-read provider_credits
