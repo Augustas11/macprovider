@@ -1023,6 +1023,7 @@ install_plist() {
   run mkdir -p "$(dirname "$PLIST_PATH")" "$LOG_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Would render launchd plist to $PLIST_PATH"
+    log "Would enable launchd service: launchctl enable gui/$UID/live.streamvc.macprovider"
     log "Would bootstrap with: launchctl bootstrap gui/$UID $PLIST_PATH"
     return
   fi
@@ -1031,6 +1032,7 @@ install_plist() {
 
   plutil -lint "$PLIST_PATH" >/dev/null || die 5 "rendered launchd plist is invalid"
   launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
+  launchctl enable "gui/$UID/live.streamvc.macprovider" || die 5 "failed to enable launchd service"
   launchctl bootstrap "gui/$UID" "$PLIST_PATH" || die 5 "failed to load launchd service"
   LAUNCHD_INSTALLED=1
 }
