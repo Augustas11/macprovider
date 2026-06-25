@@ -54,7 +54,13 @@ final class InferenceRelayTests: XCTestCase {
         let end = try XCTUnwrap(frames.last { $0["type"] as? String == "inference_response_end" })
         XCTAssertEqual(end["request_id"] as? String, "req-cancel-usage")
         XCTAssertEqual(end["status"] as? String, "cancelled")
-        XCTAssertEqual(end["chunks_sent"] as? Int, 2)
+        let chunksSent = try XCTUnwrap(end["chunks_sent"] as? Int)
+        let responseChunks = frames.filter { $0["type"] as? String == "inference_response_chunk" }
+        XCTAssertEqual(chunksSent, responseChunks.count)
+        XCTAssertTrue(
+            [2, 3].contains(chunksSent),
+            "cancel may race with the fake runtime's already-queued second content chunk"
+        )
         let usage = try XCTUnwrap(end["usage"] as? [String: Any])
         XCTAssertEqual(usage["prompt_tokens"] as? Int, 7)
         XCTAssertEqual(usage["completion_tokens"] as? Int, 2)
