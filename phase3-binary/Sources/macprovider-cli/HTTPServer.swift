@@ -277,7 +277,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         receiptBuilder: receiptBuilder,
                         request: request,
                         outputContent: completion.content,
-                        outputToolCalls: nil,
+                        outputToolCalls: completion.toolCalls,
                         finishReason: completion.finishReason,
                         ttftMs: ttftMs,
                         tokensOut: Int64(completion.completionTokens),
@@ -481,6 +481,18 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                 }
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
+
+                if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
+                    writer.writeSSEJSON(
+                        Self.chatCompletionChunk(
+                            id: id,
+                            created: created,
+                            model: request.model,
+                            delta: ["tool_calls": Self.toolCallDeltas(toolCalls)],
+                            finishReason: NSNull()
+                        )
+                    )
+                }
 
                 writer.writeSSEJSON(
                     Self.chatCompletionChunk(
@@ -771,10 +783,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
             "choices": [
                 [
                     "index": 0,
-                    "message": [
-                        "role": "assistant",
-                        "content": completion.content,
-                    ],
+                    "message": Self.chatCompletionMessage(completion),
                     "finish_reason": completion.finishReason,
                 ]
             ],
@@ -805,6 +814,24 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 "throughput_tps_estimate": snapshot.capacity.throughputTPSEstimate,
             ],
         ]
+    }
+
+    private static func chatCompletionMessage(_ completion: CompletionResult) -> [String: Any] {
+        let toolCalls = completion.toolCalls?.isEmpty == false ? completion.toolCalls : nil
+        var message: [String: Any] = [
+            "role": "assistant",
+            "content": toolCalls == nil ? completion.content : NSNull(),
+        ]
+        if let toolCalls {
+            message["tool_calls"] = toolCalls.map(\.openAIObject)
+        }
+        return message
+    }
+
+    private static func toolCallDeltas(_ toolCalls: [ToolCall]) -> [[String: Any]] {
+        toolCalls.enumerated().map { index, call in
+            call.openAIDelta(index: index)
+        }
     }
 
     private static func statusResponse(_ snapshot: ProviderSnapshot, providerID: String?, coordinatorURL: String?) -> [String: Any] {
