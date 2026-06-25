@@ -353,8 +353,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	reader := bufio.NewReaderSize(resp.Body, maxStreamingLineBytes)
 	var cancelOnce sync.Once
 	cancelCoordinator := func() {
 		cancelOnce.Do(cancelUpstream)
@@ -371,20 +370,26 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	var emitted int64
 	var reported *tokenUsage
 	invalidReportedUsage := false
-	for scanner.Scan() {
+	settleTruncated := func() {
+		if reported != nil {
+			s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "stream_truncated")
+			return
+		}
+		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated")
+	}
+	forwardLine := func(line []byte) bool {
 		select {
 		case <-r.Context().Done():
 			if reported != nil {
 				s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
-				return
+				return false
 			}
 			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
-			return
+			return false
 		default:
 		}
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
+		text := strings.TrimRight(string(line), "\r\n")
+		if data, ok := sseDataValue(text); ok {
 			if data != "[DONE]" {
 				deltaBytes, parseOK := streamingCompletionDeltaBytes(data)
 				if !parseOK {
@@ -396,7 +401,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					cancelCoordinator()
 					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
 					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed")
-					return
+					return false
 				}
 				if deltaBytes > 0 {
 					projectedCompletion := estimateTokensFromBytes(emitted + deltaBytes)
@@ -409,7 +414,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						}
 						cancelCoordinator()
 						s.settleAfterCommit(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded")
-						return
+						return false
 					}
 					emitted += deltaBytes
 				}
@@ -424,10 +429,57 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				}
 			}
 		}
-		_, _ = w.Write([]byte(line + "\n"))
+		if _, err := w.Write(line); err != nil {
+			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+			if reported != nil {
+				s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
+				return false
+			}
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			return false
+		}
 		if flusher != nil {
 			flusher.Flush()
 		}
+		return true
+	}
+	for {
+		line, err := reader.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			slog.Error("streaming coordinator line exceeded limit", "request_id", requestID(r), "max_line_bytes", maxStreamingLineBytes)
+			writeSSEError(w, "Upstream stream failed", "stream_truncated")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			settleTruncated()
+			return
+		}
+		if len(line) > 0 {
+			if !forwardLine(line) {
+				return
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if err == io.EOF {
+			break
+		}
+		if errors.Is(r.Context().Err(), context.Canceled) {
+			if reported != nil {
+				s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
+				return
+			}
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			return
+		}
+		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
+		writeSSEError(w, "Upstream stream failed", "stream_truncated")
+		if flusher != nil {
+			flusher.Flush()
+		}
+		settleTruncated()
+		return
 	}
 	if errors.Is(r.Context().Err(), context.Canceled) {
 		if reported != nil {
@@ -435,19 +487,6 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
-		return
-	}
-	if err := scanner.Err(); err != nil {
-		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
-		writeSSEError(w, "Upstream stream failed", "stream_truncated")
-		if flusher != nil {
-			flusher.Flush()
-		}
-		if reported != nil {
-			s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "stream_truncated")
-			return
-		}
-		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated")
 		return
 	}
 	if reported != nil && !invalidReportedUsage {
@@ -594,14 +633,7 @@ func estimateTokensFromBytes(n int64) int64 {
 func streamingCompletionDeltaBytes(data string) (int64, bool) {
 	var envelope struct {
 		Choices []struct {
-			Delta struct {
-				Content   string `json:"content"`
-				ToolCalls []struct {
-					Function struct {
-						Arguments string `json:"arguments"`
-					} `json:"function"`
-				} `json:"tool_calls"`
-			} `json:"delta"`
+			Delta json.RawMessage `json:"delta"`
 		} `json:"choices"`
 	}
 	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
@@ -609,12 +641,71 @@ func streamingCompletionDeltaBytes(data string) (int64, bool) {
 	}
 	var n int64
 	for _, choice := range envelope.Choices {
-		n += int64(len(choice.Delta.Content))
-		for _, toolCall := range choice.Delta.ToolCalls {
-			n += int64(len(toolCall.Function.Arguments))
+		if len(choice.Delta) == 0 || bytes.Equal(choice.Delta, []byte("null")) {
+			continue
 		}
+		deltaBytes, ok := generatedDeltaStringBytes(choice.Delta)
+		if !ok {
+			return 0, false
+		}
+		n += deltaBytes
 	}
 	return n, true
+}
+
+func generatedDeltaStringBytes(raw json.RawMessage) (int64, bool) {
+	var delta any
+	if err := json.Unmarshal(raw, &delta); err != nil {
+		return 0, false
+	}
+	if _, ok := delta.(map[string]any); !ok {
+		return 0, false
+	}
+	return countGeneratedDeltaStrings("", delta), true
+}
+
+func countGeneratedDeltaStrings(key string, value any) int64 {
+	switch v := value.(type) {
+	case map[string]any:
+		var n int64
+		for childKey, childValue := range v {
+			n += countGeneratedDeltaStrings(childKey, childValue)
+		}
+		return n
+	case []any:
+		var n int64
+		for _, childValue := range v {
+			n += countGeneratedDeltaStrings(key, childValue)
+		}
+		return n
+	case string:
+		if !countDeltaStringKey(key) {
+			return 0
+		}
+		return int64(len(v))
+	default:
+		return 0
+	}
+}
+
+func countDeltaStringKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "", "role", "id", "type", "name":
+		return false
+	default:
+		return true
+	}
+}
+
+func sseDataValue(line string) (string, bool) {
+	if !strings.HasPrefix(line, "data:") {
+		return "", false
+	}
+	value := strings.TrimPrefix(line, "data:")
+	if strings.HasPrefix(value, " ") {
+		value = strings.TrimPrefix(value, " ")
+	}
+	return value, true
 }
 
 func demoTokenHash(token string) string {
@@ -627,6 +718,7 @@ func demoTokenHash(token string) string {
 // ============================================================
 
 const maxUpstreamResponseBodyBytes = int64(16 << 20)
+const maxStreamingLineBytes = 1024 * 1024
 
 func readLimitedBody(r io.Reader, maxBytes int64) ([]byte, error) {
 	if maxBytes < 0 {

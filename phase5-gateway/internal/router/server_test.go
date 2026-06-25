@@ -2037,6 +2037,38 @@ func TestStreamingScannerErrorSettlesStreamTruncated(t *testing.T) {
 	}
 }
 
+func TestStreamingReadErrorAfterBuyerCancelSettlesClientDisconnect(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"cancel"}]}`
+	accountID := "acct_stream_read_cancel"
+	ctx, cancel := context.WithCancel(context.Background())
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     header,
+			Body:       cancelingReadCloser{cancel: cancel, err: context.Canceled},
+		}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "client_disconnect" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want client_disconnect/gateway_estimated", outcome, source)
+	}
+}
+
 func TestStreamingCleanEOFSettlesOK(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"ok"}]}`
 	accountID := "acct_stream_ok"
@@ -2061,6 +2093,32 @@ func TestStreamingCleanEOFSettlesOK(t *testing.T) {
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
 	if outcome != "ok" || source != "provider_reported" {
 		t.Fatalf("usage outcome/source = %s/%s, want ok/provider_reported", outcome, source)
+	}
+}
+
+func TestStreamingPreservesSSELineBytes(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"ok"}]}`
+	accountID := "acct_stream_bytes"
+	streamBody := "data: {\"id\":\"chatcmpl\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\r\n\r\ndata: [DONE]\r\n\r\n"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, streamBody), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if got := resp.Body.String(); got != streamBody {
+		t.Fatalf("stream body bytes changed:\ngot  %q\nwant %q", got, streamBody)
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "ok" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want ok/gateway_estimated", outcome, source)
 	}
 }
 
@@ -2104,6 +2162,114 @@ func TestStreamingGatewayEstimateStopsOverMaxOutput(t *testing.T) {
 	}
 	if quota["daily_tokens_reserved"].(float64) != 0 {
 		t.Fatalf("daily_tokens_reserved=%v want 0", quota["daily_tokens_reserved"])
+	}
+}
+
+func TestStreamingGatewayEstimateCountsDataWithoutSpace(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":1,"messages":[{"role":"user","content":"ok"}]}`
+	accountID := "acct_stream_no_space"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := strings.Join([]string{
+			`data:{"id":"chatcmpl","choices":[{"delta":{"content":"` + strings.Repeat("x", 400) + `"}}]}`,
+			`data:[DONE]`,
+			``,
+		}, "\n\n")
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "stream_output_exceeded") {
+		t.Fatalf("stream body missing stream_output_exceeded: %s", resp.Body.String())
+	}
+	if !strings.HasSuffix(resp.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("stream body missing DONE terminator: %s", resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want stream_output_exceeded/gateway_estimated", outcome, source)
+	}
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	quota := readQuota(t, usageResp)
+	wantUsed := float64(estimatePromptTokens([]byte(body)) + 1)
+	if quota["daily_tokens_used"].(float64) != wantUsed {
+		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
+	}
+	if quota["daily_tokens_reserved"].(float64) != 0 {
+		t.Fatalf("daily_tokens_reserved=%v want 0", quota["daily_tokens_reserved"])
+	}
+}
+
+func TestStreamingGatewayEstimateCountsGeneratedDeltaStrings(t *testing.T) {
+	cases := []struct {
+		name    string
+		account string
+		delta   string
+	}{
+		{
+			name:    "reasoning_content",
+			account: "acct_stream_reasoning",
+			delta:   `"reasoning_content":"` + strings.Repeat("r", 400) + `"`,
+		},
+		{
+			name:    "refusal",
+			account: "acct_stream_refusal",
+			delta:   `"refusal":"` + strings.Repeat("f", 400) + `"`,
+		},
+		{
+			name:    "legacy_function_call_arguments",
+			account: "acct_stream_function_call",
+			delta:   `"function_call":{"name":"lookup","arguments":"` + strings.Repeat("a", 400) + `"}`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"model":"llama","stream":true,"max_tokens":1,"messages":[{"role":"user","content":"ok"}]}`
+			client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				payload := strings.Join([]string{
+					`data:{"id":"chatcmpl","choices":[{"delta":{` + tc.delta + `},"finish_reason":null}]}`,
+					`data:[DONE]`,
+					``,
+				}, "\n\n")
+				return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
+			})}
+			h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+				cfg.Coordinator.BuyerURL = "http://coordinator.test"
+			}, WithHTTPClient(client))
+			fullKey := createAccountAndKey(t, store, cfg, tc.account)
+
+			resp := postChat(t, h, fullKey, body, nil)
+
+			if resp.Code != http.StatusOK {
+				t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+			}
+			if !strings.Contains(resp.Body.String(), "stream_output_exceeded") {
+				t.Fatalf("stream body missing stream_output_exceeded: %s", resp.Body.String())
+			}
+			if !strings.HasSuffix(resp.Body.String(), "data: [DONE]\n\n") {
+				t.Fatalf("stream body missing DONE terminator: %s", resp.Body.String())
+			}
+			outcome, source := usageEventOutcome(t, dbPath, tc.account)
+			if outcome != "stream_output_exceeded" || source != "gateway_estimated" {
+				t.Fatalf("usage outcome/source = %s/%s, want stream_output_exceeded/gateway_estimated", outcome, source)
+			}
+			usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+			quota := readQuota(t, usageResp)
+			wantUsed := float64(estimatePromptTokens([]byte(body)) + 1)
+			if quota["daily_tokens_used"].(float64) != wantUsed {
+				t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
+			}
+			if quota["daily_tokens_reserved"].(float64) != 0 {
+				t.Fatalf("daily_tokens_reserved=%v want 0", quota["daily_tokens_reserved"])
+			}
+		})
 	}
 }
 
@@ -2268,6 +2434,98 @@ func TestStreamingGatewayEstimateStopsMalformedChunkWithoutRawCounting(t *testin
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
 	wantUsed := float64(estimatePromptTokens([]byte(body)) + 1)
+	if quota["daily_tokens_used"].(float64) != wantUsed {
+		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
+	}
+	if quota["daily_tokens_reserved"].(float64) != 0 {
+		t.Fatalf("daily_tokens_reserved=%v want 0", quota["daily_tokens_reserved"])
+	}
+}
+
+func TestStreamingGatewayEstimateStopsMalformedDataWithoutSpace(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"malformed"}]}`
+	accountID := "acct_stream_malformed_no_space"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := strings.Join([]string{
+			`data:{"id":"chatcmpl","choices":[{"delta":{"content":"ok"},"finish_reason":null}]}`,
+			`data:not-json-` + strings.Repeat("m", 400),
+			`data:[DONE]`,
+			``,
+		}, "\n\n")
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "stream_malformed") {
+		t.Fatalf("stream body missing stream_malformed: %s", resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), strings.Repeat("m", 200)) {
+		t.Fatalf("malformed raw payload was forwarded: %s", resp.Body.String())
+	}
+	if !strings.HasSuffix(resp.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("stream body missing DONE terminator: %s", resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "stream_malformed" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want stream_malformed/gateway_estimated", outcome, source)
+	}
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	quota := readQuota(t, usageResp)
+	wantUsed := float64(estimatePromptTokens([]byte(body)) + 1)
+	if quota["daily_tokens_used"].(float64) != wantUsed {
+		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
+	}
+	if quota["daily_tokens_reserved"].(float64) != 0 {
+		t.Fatalf("daily_tokens_reserved=%v want 0", quota["daily_tokens_reserved"])
+	}
+}
+
+func TestStreamingGatewayEstimateStopsNonObjectDelta(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":100,"messages":[{"role":"user","content":"malformed"}]}`
+	accountID := "acct_stream_non_object_delta"
+	rawDelta := strings.Repeat("m", 400)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		payload := strings.Join([]string{
+			`data:{"id":"chatcmpl","choices":[{"delta":"` + rawDelta + `","finish_reason":null}]}`,
+			`data:[DONE]`,
+			``,
+		}, "\n\n")
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}, payload), nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), "stream_malformed") {
+		t.Fatalf("stream body missing stream_malformed: %s", resp.Body.String())
+	}
+	if strings.Contains(resp.Body.String(), strings.Repeat("m", 200)) {
+		t.Fatalf("non-object delta raw payload was forwarded: %s", resp.Body.String())
+	}
+	if !strings.HasSuffix(resp.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("stream body missing DONE terminator: %s", resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "stream_malformed" || source != "gateway_estimated" {
+		t.Fatalf("usage outcome/source = %s/%s, want stream_malformed/gateway_estimated", outcome, source)
+	}
+	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+	quota := readQuota(t, usageResp)
+	wantUsed := float64(estimatePromptTokens([]byte(body)))
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
 	}
@@ -2785,6 +3043,20 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
 	return f(r)
+}
+
+type cancelingReadCloser struct {
+	cancel func()
+	err    error
+}
+
+func (r cancelingReadCloser) Read(_ []byte) (int, error) {
+	r.cancel()
+	return 0, r.err
+}
+
+func (r cancelingReadCloser) Close() error {
+	return nil
 }
 
 func responseWithBody(status int, header http.Header, body string) *http.Response {
