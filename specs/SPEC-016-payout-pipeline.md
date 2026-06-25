@@ -1,11 +1,14 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.6 (2026-06-24, draft — round-7 audit fix pass:
-0 CRIT + 3 MAJOR + 7 MEDIUM + 2 LOW absorbed across CODE +
-SECURITY + ARCHITECT lenses. Audit history: round-1 1/5,
-round-2 5/12/10, round-3 3/9/8, round-4 2/6/13, round-5 1/2/6,
-round-6 0/5/9, round-7 0/3/7. See git log for full per-round
-detail per [[feedback-spec-audit-loop-before-pr]].)
+**Version:** 0.1.7 (2026-06-25, draft — round-8 convergent
+fix pass: 2 CRIT + 2 MAJOR + 1 MED absorbed. v0.1.7 is the
+LAST Claude-internal-audit version per the new
+[[feedback-codex-only-audits]] rule — round 9 onward will
+be codex via /ask codex per [[feedback-spec-audit-loop-before-pr]].
+Audit history: round-1 1/5, round-2 5/12/10, round-3 3/9/8,
+round-4 2/6/13, round-5 1/2/6, round-6 0/5/9, round-7 0/3/7,
+round-8 2/2/7 (Claude lenses). See git log for full per-round
+detail.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -20,6 +23,87 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.7 (2026-06-25, draft — round-8 convergent fix pass,
+scoped to 3 cross-lens-convergent findings):**
+
+Round 8 (Claude lenses: code-reviewer + security-reviewer +
+architect) returned 2 CRIT + 2 MAJOR + 7 MED. v0.1.7 applies
+ONLY the convergent findings (those flagged by ≥2 lenses) +
+the SEC-MAJOR §3.3 contract gap. Single-lens findings are
+deferred to v0.2 / next codex round per the new
+[[feedback-codex-only-audits]] rule.
+
+**This is the last Claude-audit-driven version of SPEC-016.**
+Round 9 onward uses codex via `/ask codex` per
+[[feedback-spec-audit-loop-before-pr]] + the codex-only
+audit rule that supersedes it.
+
+CRITICAL / MAJOR (convergent across ≥2 lenses):
+
+- **CODE-CRIT-1 + ARCH-MAJOR-A1: `payout.security.pause_resume_
+  min_interval` referenced in §6.4.1 but missing from the
+  §6.5 enumerated `payout.security.*` keys list.** Same
+  half-refactor defect class that caused v0.1.4's
+  unprefixed-key regression that v0.1.5 had to sweep. v0.1.7
+  appends the key to the §6.5 enumeration with rationale +
+  cross-reference. Closure verified: §6.5 now lists 12 keys.
+
+- **CODE-CRIT-2 + SEC-MED: `runtime.registration_paused`
+  persistence across coordinator restarts unspecified.**
+  v0.1.6 §6.5 ran the runtime.* carve-out with mixed-signal
+  wording ("only in process memory and the in-process flag
+  table" — two storage models in one sentence). A coordinator
+  restart between §6.4 step 1 (pause) and step 4 (resume)
+  would silently auto-unpause the §3.3 handler, re-opening
+  the rotation-window stranded-row defect §6.4 step 5 exists
+  to prevent. v0.1.7 adds §4.8a `runtime_flags` SQLite table
+  (PK on name, INTEGER value, `updated_by_actor`,
+  `updated_reason`, bootstrap seed via INSERT OR IGNORE,
+  audit-trail discipline cross-checked against §7.1 events).
+  §6.4 step 4 wording updated to make restart-preserves-state
+  explicit. IMPL test required: pre-seed `registration_paused=1`,
+  restart, assert §3.3 still returns 503 before runner finishes
+  startup. Also tightens §6.5 to declare `runtime.*` a CLOSED
+  namespace (only `registration_paused` permitted in v0.1.x)
+  with explicit gating discipline for any future runtime.* flag
+  (admin endpoint + operator-key auth + rate-limit + PAGE event
+  + change-log analysis + no cap/gate/reconciliation bypass).
+
+- **SEC-MAJOR: §3.3 endpoint response table omits 503
+  `rotation_in_progress`.** v0.1.6 §6.4 step 1 prose said the
+  §3.3 handler returns 503 during rotation, but the §3.3
+  endpoint block at lines 808-825 only enumerated 201/200/400/
+  401/403/409/429. Three IMPLs reading §3.3 cold could ship
+  three different behaviors (silent no-op, custom body, or
+  409 collision). v0.1.7 appends 503 to §3.3 with the
+  normative body shape, explicit pre-auth check ordering
+  (so unauthenticated probes cannot use response-code timing
+  to detect pause state), and §7.1 event cross-reference.
+
+DEFERRED (single-lens, queued for v0.2 / codex round 9):
+
+- CODE-MAJOR (60s pause/resume rate-limit is a DoS amplifier
+  on the resume side) — design call, not a structural fix;
+  let codex weigh in before committing to an asymmetric
+  rate-limit.
+- CODE-MED (§4.8 pins `cmd/coordinator/main.go` in normative
+  text) — wording-only nit; bundle with v0.2 normative-vs-
+  implementation-guidance sweep.
+- CODE-MED (`payout.enabled` carve-out too loose) — see above.
+- SEC-MED (comprehensive same-DB pin for all SPEC-016 tables)
+  — structural but new Appendix B v0.2 stub captures it
+  (bundle with §9.5b.1 ownership-inversion cleanup).
+- ARCH-MED (`runtime.*` enumeration ceiling) — partially
+  closed by the v0.1.7 §6.5 CLOSED-namespace declaration
+  above; remaining items rolled into v0.2.
+- ARCH-MED (rename `runtime.*` → `payout.runtime.*` for
+  prefix discipline) — defer; rename now would be the FOURTH
+  namespace churn in 3 versions; codex view first.
+
+Net spec change: ~85 lines insertion (new §4.8a table block
++ §6.5 expanded runtime.* paragraph + §3.3 503 response +
+Appendix B v0.2 stub + change-log entry).
 
 **v0.1.6 (2026-06-24, draft — round-7 audit fix pass):**
 
@@ -822,6 +906,18 @@ Response:
   403 Forbidden    — provider_token does not own provider_id.
   409 Conflict     — payout_allowed=0 (operator gate).
   429 Too Many     — provider-scoped rate-limit (default 6/hr).
+  503 Service      — runtime.registration_paused == 1 (per §6.4.1
+       Unavailable   pause endpoint). Body:
+                     { "error": "rotation_in_progress" }.
+                     Logged as
+                     provider_payout_address_change_rejected with
+                     reason="registration_paused" per §7.1. The
+                     pause-state check MUST run BEFORE
+                     authentication so unauthenticated probes
+                     cannot use response-code timing to detect
+                     pause state; both unauthenticated and
+                     authenticated requests get identical 503
+                     bodies during a pause.
 ```
 
 Authentication is via the per-Mac `provider_token` (same
@@ -1568,6 +1664,78 @@ an IMPL to place the INSERT inside `runner.Start()` AFTER
 the loop begins, re-opening the v0.1.3 C2 fake-funding
 closure for one cycle.
 
+### 4.8a Runtime flags table (v0.1.7 — `runtime.*` persistence)
+
+```sql
+CREATE TABLE IF NOT EXISTS runtime_flags (
+    name              TEXT PRIMARY KEY,
+    value             INTEGER NOT NULL CHECK(value IN (0,1)),
+    updated_at_utc    TEXT NOT NULL,
+    updated_by_actor  TEXT NOT NULL,   -- "operator_key:<key_id>"
+                                       -- for §6.4.1 toggles;
+                                       -- "system:startup_seed"
+                                       -- for the bootstrap
+                                       -- INSERT OR IGNORE.
+    updated_reason    TEXT NOT NULL    -- §6.4.1 endpoint body
+                                       -- "reason" field; "" for
+                                       -- bootstrap seed.
+);
+
+-- Bootstrap seed (one row per closed-set flag). MUST run
+-- in the same coordinator startup sequence as the
+-- payout_runner_state seed above, BEFORE runner.Start()
+-- AND BEFORE the §3.3 handler accepts traffic.
+INSERT OR IGNORE INTO runtime_flags
+  (name, value, updated_at_utc, updated_by_actor, updated_reason)
+VALUES
+  ('registration_paused', 0,
+   '<RFC3339Nano startup time>',
+   'system:startup_seed', '');
+```
+
+**Persistence + restart semantics (NORMATIVE).** The
+`runtime_flags` table is the durable backing store for
+the `runtime.*` namespace defined in §6.5. Every §6.4.1
+admin endpoint MUST update the row atomically in the
+same SQLite transaction that emits the §7.1 PAGE event.
+On coordinator startup, the §3.3 handler MUST read the
+`registration_paused` value BEFORE accepting traffic;
+a process restart between §6.4 step 1 (pause) and step
+4 (resume) MUST NOT auto-unpause. The `INSERT OR
+IGNORE` bootstrap seed only fires on first-ever startup
+(empty table); subsequent restarts read the existing
+row and honor whatever state the operator last set.
+
+**Same-DB pin.** The `runtime_flags` table MUST live in
+the same SQLite database file as `payout_runner_state`
+and `payout_attempts` (consistent with §3.1's
+`provider_payout_addresses` pin and §4.7's
+`payout_reorg_orphans` pin to SPEC-005's
+`ledger_payout_ready` DB). The §6.4.1 endpoint's
+event-emission and flag-update happen in ONE SQLite
+transaction; a separate-DB topology would split them
+into two transactions and re-open an event-emitted-
+but-flag-not-flipped (or vice versa) gap window. The
+comprehensive "all SPEC-016 tables in one DB" pin is
+deferred to v0.2 (filed in Appendix B).
+
+**Audit-trail discipline.** Every §6.4.1 toggle MUST
+also emit a §7.1 structured-log event
+(`payout_registration_paused` or
+`payout_registration_resumed`) carrying the same
+`updated_by_actor` + `updated_reason` values written
+to the row. The two records (DB row + log event) are
+the cross-check defense against an attacker with raw
+DB write access flipping the flag outside the
+authenticated endpoint path; operators MUST scan for
+DB updates whose `updated_at_utc` has no matching
+§7.1 event line.
+
+IMPL test required: spawn coordinator with
+`registration_paused = 1` pre-seeded; assert that a
+clean restart preserves the value and that §3.3
+returns 503 BEFORE the runner finishes startup.
+
 **Trigger-presence assertion (defense against DROP TRIGGER
 + UPDATE bypass).** Both bootstrap triggers (and the
 `trg_lpr_terminal_status_guard` trigger from SPEC-005) are
@@ -2056,11 +2224,15 @@ Procedure (manual, operator-driven):
    transfer signed by the OLD wallet); rewrite the
    encrypted wallet file + config; rotate the KEK if also
    compromising the on-disk envelope.
-4. Restart with `payout.enabled: true`. Flip
-   `runtime.registration_paused: false` via the §6.4.1
-   resume endpoint. The runner re-syncs the nonce cursor
-   from BOTH RPCs' `getTransactionCount` for the new
-   address.
+4. Restart with `payout.enabled: true`. The restart
+   does NOT auto-unpause registration — the
+   `runtime.registration_paused` value persists across
+   restarts via §4.8a `runtime_flags` table. The operator
+   MUST call the §6.4.1 resume endpoint to flip the row
+   back to 0 once rotation is complete; the §3.3 handler
+   continues to return 503 until that call lands. The
+   runner re-syncs the nonce cursor from BOTH RPCs'
+   `getTransactionCount` for the new address.
 5. **All registered providers MUST re-register their payout
    address against the new hot wallet.** The EIP-712
    `verifyingContract` field in §3.2 step 5 pins to
@@ -2140,16 +2312,32 @@ defect was caused by exactly that. The buckets:
   post-start has NO effect until restart.
 - `payout.tuning.*` — config keys hot-reloadable via SIGHUP
   with bound re-enforcement (below).
-- `runtime.*` — in-process flags NOT backed by
-  `coordinator.toml`. Mutated via authenticated admin
-  endpoints (e.g. `runtime.registration_paused` toggled by
-  §6.4.1 pause/resume endpoints; v0.1.x also keeps
-  `payout.enabled` as a singleton master switch separate
-  from this bucket because it gates whether the namespace
-  loaders run at all). The `runtime.*` bucket is the
-  carve-out for state that lives only in process memory
-  and the in-process flag table — there is no on-disk
-  config representation.
+- `runtime.*` — operator-toggleable operational state NOT
+  backed by `coordinator.toml`. Mutated via authenticated
+  admin endpoints (e.g. `runtime.registration_paused`
+  toggled by §6.4.1 pause/resume endpoints; v0.1.x also
+  keeps `payout.enabled` as a singleton master switch
+  separate from this bucket because it gates whether the
+  namespace loaders run at all). Persistence: every
+  `runtime.*` flag MUST persist across coordinator
+  restarts via the `runtime_flags` SQLite table defined in
+  §4.8a (same database file as `payout_runner_state` per
+  the same-DB pin discipline). Volatile-only (process-
+  memory) `runtime.*` flags are FORBIDDEN — a coordinator
+  crash mid-§6.4 rotation between step 1 (pause) and step 4
+  (resume) would otherwise silently auto-unpause and re-open
+  the rotation-window stranded-row defect that §6.4 step 5
+  exists to prevent. **`runtime.*` is a CLOSED namespace
+  in v0.1.x.** The ONLY permitted flag is
+  `runtime.registration_paused`. Any new `runtime.*` flag
+  introduced in a future SPEC-016 minor version MUST: (a)
+  have a corresponding admin endpoint with operator-key
+  auth + rate-limit, (b) emit a severity=PAGE event on
+  every toggle per §7.1, (c) be analyzed in the SPEC
+  change-log for operator-key-compromise blast radius, (d)
+  NOT bypass any §5 cap, §6.4 rotation gate, or §7.4
+  reconciliation surface. Flags that would weaken signer
+  binding, RPC pinning, or money-path caps are FORBIDDEN.
 
 `payout.*` config splits into TWO namespaces with distinct
 hot-reload semantics:
@@ -2169,6 +2357,12 @@ reload is FORBIDDEN. Keys:
 - `payout.security.abandon_rate_per_hour`
 - `payout.security.chain_recon_interval`
 - `payout.security.chain_recon_tolerance_usdc_base_units`
+- `payout.security.pause_resume_min_interval` (default 60s;
+  rate-limit floor for the §6.4.1 pause/resume endpoint pair —
+  immutable so an operator-key-compromise attacker cannot
+  hot-edit to 0s and use rate-limit bypass to mask probing.
+  See MAJOR-A1 in v0.1.7 change-log for the half-refactor
+  defect this enumeration closes.)
 
 These defend against an operator-key-compromised attacker
 who could otherwise hot-edit `coordinator.toml` to silence
@@ -2893,3 +3087,14 @@ fresh session after this v0.1.x merges. That prompt will:
   shouldn't see directly). The boolean is computed
   server-side as `registered_against_hot_wallet ==
   payout.security.hot_wallet_address`.
+- SPEC-016 v0.2 (filed by v0.1.7 round-8 SEC-MED): replace
+  the one-table-at-a-time same-DB pins (`provider_payout_
+  addresses` in §3.1; `payout_reorg_orphans` in §4.7;
+  `runtime_flags` in §4.8a) with a single top-level §4.0a
+  "ALL SPEC-016 tables in the same SQLite DB as SPEC-005's
+  `ledger_payout_ready`" normative paragraph + an IMPL
+  test that asserts via `PRAGMA database_list` from both
+  module entry points. Closes a class of "next-table-
+  forgot-the-pin" regression. Bundled with the §9.5b.1
+  ownership-inversion cleanup above so SPEC-005 v0.4 lands
+  the shared-DB contract on the canonical side.
