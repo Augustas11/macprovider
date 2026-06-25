@@ -319,15 +319,15 @@ gateway side fails closed on the same pattern as of the same fix.
 ### Post-M3-2 cutover procedure (one-time per fleet)
 
 1. Generate a fresh service token:
-   `head -c 32 /dev/urandom | base64`
+   `openssl rand -hex 32`
 2. On Pearl, append it to `/etc/macprovider/coordinator.env` as
    `GATEWAY_SERVICE_TOKEN=<value>` (root:macprovider 0640) — see step
    6.1 below.
 3. Push the same value to each gateway's `gateway.yaml`
    `coordinator.service_token` (also via env: indirection if the
    gateway uses systemd-environment plumbing).
-4. `sudo systemctl reload macprovider-coordinator` so the coordinator
-   re-reads `gateway_service_token`.
+4. `sudo systemctl restart macprovider-coordinator` so the coordinator
+   reads `gateway_service_token` from startup auth config.
 5. Restart each gateway so it sends the new service token upstream.
 6. Watch the audit log on the BRIDGE paths only — `/internal/*`:
    ```
@@ -359,11 +359,13 @@ gateway side fails closed on the same pattern as of the same fix.
 ### Rotating `operator_key` (human admin)
 
 1. Generate a fresh key:
-   `head -c 32 /dev/urandom | base64`
+   `openssl rand -hex 32`
 2. Edit `/opt/macprovider/coordinator.yaml` (or
    `/etc/macprovider/coordinator.env` if env-resolved) — set the new
    key.
-3. `sudo systemctl reload macprovider-coordinator` (SIGHUP re-reads).
+3. `sudo systemctl restart macprovider-coordinator`. SIGHUP reloads only
+   selected Tier-2/billing config; auth material and provider-token bootstrap
+   flags are read at process start.
 4. Verify: `curl -s -H "Authorization: Bearer $NEW_KEY"
    http://127.0.0.1:8444/poolz` returns the pool snapshot.
 
@@ -427,16 +429,29 @@ the provider.
 
 Stranger-tier (curl|bash open-onboarding) — **self-serve provisional**
 is the production path per SPEC-003 v0.8.x. The coordinator mints a
-fresh `provider_token` on every tokenless provisional admission and
+fresh `provider_token` on the first tokenless provisional admission and
 returns it in the v1 `hello_ack` and v2 `auth_response` frames; the
 binary persists it atomically to top-level `provider_token:` in
 `~/.config/macprovider/config.yaml` (mode 0600). Next reconnect carries
 it as `Authorization: Bearer`.
-No operator action is required for the open-onboarding tier under
-`auth.require_provider_tokens=false`. After the flag flip (FR-C9.5
-compatibility cutoff), tokenless connects are rejected at the auth
-gate before admission — only tokens already issued at that point
-remain valid; new strangers must onboard before the flip.
+
+Production public onboarding MUST run both:
+
+```yaml
+auth:
+  require_provider_tokens: true
+  allow_tokenless_provisional_bootstrap: true
+```
+
+`auth.require_provider_tokens=true` remains the closed baseline for
+normal provider reconnects. `auth.allow_tokenless_provisional_bootstrap=true`
+is the narrow public-onboarding exception that lets only the first
+tokenless provisional connect reach the self-serve mint / TOFU path.
+Pinned providers and provider IDs whose active token has already been
+used still fail closed on tokenless reconnect. Invite-only or
+operator-preprovisioned deployments may set the bootstrap flag to
+`false`, but then clean public `curl|bash` installs will not join
+without a manually issued token.
 
 Per SPEC-003 v0.8.1, two tokens MUST NOT exist for the same
 `provider_id` simultaneously. The v0.8.2 partial unique index

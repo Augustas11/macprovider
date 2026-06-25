@@ -52,9 +52,56 @@ import os, re, sys
 coord = open(sys.argv[1]).read()
 gw = open(sys.argv[2]).read() if len(sys.argv) > 2 and sys.argv[2] else ""
 
-def g(src, key):
-    m = re.search(rf'(?m)^\s*{key}:\s*"?([^"\n#]+)', src)
-    return m.group(1).strip() if m else None
+KEY_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):(?:\s+.*)?$")
+
+def parse_scalar(raw):
+    raw = raw.strip()
+    if not raw:
+        return ""
+    if raw[0] in ("'", '"'):
+        quote = raw[0]
+        end = raw.find(quote, 1)
+        return raw[1:end] if end >= 0 else raw[1:]
+    return raw.split("#", 1)[0].strip()
+
+def section_body(src, section):
+    lines = src.splitlines()
+    for i, line in enumerate(lines):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith(" ") or line.startswith("\t"):
+            continue
+        m = KEY_RE.match(line.strip())
+        if not m or m.group(1) != section:
+            continue
+        body = []
+        for child in lines[i+1:]:
+            if child.strip() and not child.lstrip().startswith("#") and not child.startswith((" ", "\t")):
+                break
+            body.append(child)
+        return body
+    return None
+
+def g_section(src, section, key):
+    body = section_body(src, section)
+    if body is None:
+        return None
+    child_indent = None
+    for line in body:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        child_indent = re.match(r"^[ \t]*", line).group(0)
+        break
+    if child_indent is None:
+        return None
+    pattern = re.compile(rf"^{re.escape(child_indent)}{re.escape(key)}:\s*(.*)$")
+    for line in body:
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        m = pattern.match(line)
+        if m:
+            return parse_scalar(m.group(1))
+    return None
 
 fail = 0
 def hard(m):
@@ -114,7 +161,7 @@ def check_hex_secret(label, raw):
         ok(f"{label} present (64-hex, non-placeholder){src}")
 
 # --- operator_key (inline literal or env:NAME deferred to runtime) ---
-check_hex_secret("coordinator operator_key", g(coord, "operator_key"))
+check_hex_secret("coordinator operator_key", g_section(coord, "auth", "operator_key"))
 
 # --- gateway credentials (same hazard class as the coordinator key) ---
 # Only checkable when the gateway config is present (not coordinator-only
@@ -127,8 +174,8 @@ check_hex_secret("coordinator operator_key", g(coord, "operator_key"))
 # that silently fails gateway->coordinator auth. That is what this catches,
 # symmetric to the coordinator operator_key check above.
 if gw:
-    check_hex_secret("gateway operator_key", g(gw, "operator_key"))
-    gw_service_token = g(gw, "service_token")
+    check_hex_secret("gateway operator_key", g_section(gw, "coordinator", "operator_key"))
+    gw_service_token = g_section(gw, "coordinator", "service_token")
     if gw_service_token is not None:
         check_hex_secret("gateway service_token", gw_service_token)
 
@@ -138,7 +185,7 @@ if gw:
 # connecting. Silent-defaulting on this field caused the 2026-06-11 outage
 # (deployed a config without the field; new binary defaulted true; air5/air8gb
 # rejected with close_code:4005 reason:invalid_token). Force an explicit choice.
-rpt = g(coord, "require_provider_tokens")
+rpt = g_section(coord, "auth", "require_provider_tokens")
 if rpt is None:
     hard("auth.require_provider_tokens is ABSENT — binary default (true) "
          "will reject any provider not presenting a token. "
@@ -151,10 +198,29 @@ elif rpt.lower() == "true":
 else:
     hard(f"auth.require_provider_tokens must be true or false, got: {rpt!r}")
 
+# --- allow_tokenless_provisional_bootstrap ---
+# Public provider onboarding needs one narrowly-scoped tokenless path: the
+# first provisional connect can mint and persist its own provider_token, while
+# used-token provider IDs still fail closed via the coordinator TOFU gate. Force
+# an explicit deploy choice so public onboarding is not accidentally bricked by
+# the closed default, and invite-only deployments do not unknowingly open
+# first-claim bootstrap.
+aptb = g_section(coord, "auth", "allow_tokenless_provisional_bootstrap")
+if aptb is None:
+    hard("auth.allow_tokenless_provisional_bootstrap is ABSENT — set explicitly to "
+         "true for public curl-install onboarding or false for invite-only / "
+         "operator-preprovisioned providers.")
+elif aptb.lower() == "true":
+    ok("auth.allow_tokenless_provisional_bootstrap=true (first-install provider token self-bootstrap enabled)")
+elif aptb.lower() == "false":
+    warn("auth.allow_tokenless_provisional_bootstrap=false — clean public installs need a pre-provisioned provider_token.")
+else:
+    hard(f"auth.allow_tokenless_provisional_bootstrap must be true or false, got: {aptb!r}")
+
 # --- threshold sanity ---
-hi = g(coord, "heartbeat_interval_s")
-hm = g(coord, "heartbeat_miss_threshold_s")
-rt = g(coord, "request_timeout_s")
+hi = g_section(coord, "pool", "heartbeat_interval_s")
+hm = g_section(coord, "pool", "heartbeat_miss_threshold_s")
+rt = g_section(coord, "routing", "request_timeout_s")
 if hm is None:
     warn("heartbeat_miss_threshold_s absent -> coordinator default (90s) applies")
 elif hi and int(hm) <= int(hi):
@@ -162,18 +228,24 @@ elif hi and int(hm) <= int(hi):
 elif hi:
     ok(f"heartbeat_miss_threshold_s={hm} > heartbeat_interval_s={hi}")
 for k in ("warmup_gate_enabled", "breaker_failure_threshold", "breaker_window_s"):
-    if g(coord, k) is None:
+    if g_section(coord, "pool", k) is None:
         warn(f"{k} absent -> coordinator default applies (operator did not choose it)")
 
 # --- C2 cross-component timer relation (needs gateway config) ---
 if gw:
-    gwt = g(gw, "coordinator_request_seconds")
-    if rt and gwt:
+    gwt = g_section(gw, "timeouts", "coordinator_request_seconds")
+    if gwt is None:
+        hard("C2: gateway timeouts.coordinator_request_seconds is ABSENT — "
+             "cannot verify coordinator routing.request_timeout_s is below the gateway timeout.")
+    elif rt is None:
+        hard("C2: coordinator routing.request_timeout_s is ABSENT — "
+             "cannot verify it is below the gateway timeout.")
+    else:
         if int(rt) >= int(gwt):
-            warn(f"C2: coordinator request_timeout_s ({rt}) is NOT strictly below gateway "
+            hard(f"C2: coordinator request_timeout_s ({rt}) is NOT strictly below gateway "
                  f"coordinator_request_seconds ({gwt}). A gateway-timeout cancel can race the "
                  f"coordinator relay-timeout; a slow non-streaming provider may escape breaker "
-                 f"attribution (SPEC-002 FR-P11a C2). Recommend coordinator < gateway.")
+                 f"attribution (SPEC-002 FR-P11a C2). Set coordinator < gateway.")
         else:
             ok(f"C2 timer ordering: coordinator {rt}s < gateway {gwt}s")
 else:

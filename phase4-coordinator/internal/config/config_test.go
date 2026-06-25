@@ -23,6 +23,9 @@ func TestProviderTokensRequiredByDefault(t *testing.T) {
 	if !cfg.Auth.RequireProviderTokens {
 		t.Fatal("auth.require_provider_tokens should default to true")
 	}
+	if cfg.Auth.AllowTokenlessProvisionalBootstrap {
+		t.Fatal("auth.allow_tokenless_provisional_bootstrap should default to false")
+	}
 }
 
 func TestCanaryValidationRequiresPrivateChallengeBankWhenEnabled(t *testing.T) {

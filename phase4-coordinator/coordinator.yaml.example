@@ -128,6 +128,9 @@ auth:
   # (operator_key is the sole accepted credential).
   #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
   require_provider_tokens: true # Disable only for isolated local development.
+  # Public onboarding escape hatch. Keep false for local/invite-only configs;
+  # set true only when clean tokenless provisional installs should self-mint.
+  allow_tokenless_provisional_bootstrap: false
 
 storage:
   db_path: "coordinator.db"
