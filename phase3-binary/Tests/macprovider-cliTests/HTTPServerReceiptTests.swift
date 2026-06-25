@@ -220,6 +220,47 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertFalse(response.headers.containsMacProviderHeader)
     }
 
+    func testHTTPStreamingToolCallE2EEmitsDeltaWithoutRawDelimiters() async throws {
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "Use get_weather for Vilnius."]],
+                "stream": true,
+                "tools": [[
+                    "type": "function",
+                    "function": [
+                        "name": "get_weather",
+                        "description": "Get the current weather for a city",
+                        "parameters": [
+                            "type": "object",
+                            "properties": ["city": ["type": "string"]],
+                            "required": ["city"],
+                        ],
+                    ],
+                ]],
+            ],
+            receiptBuilder: nil,
+            completion: CompletionResult(
+                content: "",
+                finishReason: "tool_calls",
+                promptTokens: 10,
+                completionTokens: 4,
+                toolCalls: [ToolCall(id: "call_test", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)]
+            ),
+            readStreamingBody: true
+        )
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertEqual(response.headers.first(name: "content-type"), "text/event-stream; charset=utf-8")
+        XCTAssertFalse(response.body.contains("<tool_call>"), response.body)
+        XCTAssertFalse(response.body.contains("</tool_call>"), response.body)
+        XCTAssertTrue(response.body.contains(#""tool_calls""#), response.body)
+        XCTAssertTrue(response.body.contains(#""name":"get_weather""#), response.body)
+        XCTAssertTrue(response.body.contains(#""arguments":"{\"city\":\"Vilnius\"}""#), response.body)
+        XCTAssertTrue(response.body.contains(#""finish_reason":"tool_calls""#), response.body)
+        XCTAssertTrue(response.body.contains("data: [DONE]"), response.body)
+    }
+
 
     func testHTTPHandlerEmitsReceiptIssuedAuditOnSuccess() async throws {
         let capture = ReceiptAuditCapture()
@@ -748,7 +789,8 @@ private func roundTripChatCompletion(
     completion: CompletionResult? = nil,
     completionError: Error? = nil,
     warmSwapEnabled: Bool = false,
-    modelHash: String? = nil
+    modelHash: String? = nil,
+    readStreamingBody: Bool = false
 ) async throws -> HTTPReceiptResponse {
     let runtime = ModelRuntime(
         modelID: "fixture-model",
@@ -780,7 +822,13 @@ private func roundTripChatCompletion(
         receiptBuilder: receiptBuilder,
         warmSwapEnabled: warmSwapEnabled
     ) { port in
-        try rawChatCompletionRoundTrip(port: port, body: body, headerOnly: body["stream"] as? Bool == true, requestID: requestID)
+        let isStreaming = body["stream"] as? Bool == true
+        return try rawChatCompletionRoundTrip(
+            port: port,
+            body: body,
+            headerOnly: isStreaming && !readStreamingBody,
+            requestID: requestID
+        )
     }
 }
 
