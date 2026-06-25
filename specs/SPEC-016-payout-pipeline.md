@@ -1,14 +1,18 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.7 (2026-06-25, draft — round-8 convergent
-fix pass: 2 CRIT + 2 MAJOR + 1 MED absorbed. v0.1.7 is the
-LAST Claude-internal-audit version per the new
-[[feedback-codex-only-audits]] rule — round 9 onward will
-be codex via /ask codex per [[feedback-spec-audit-loop-before-pr]].
-Audit history: round-1 1/5, round-2 5/12/10, round-3 3/9/8,
-round-4 2/6/13, round-5 1/2/6, round-6 0/5/9, round-7 0/3/7,
-round-8 2/2/7 (Claude lenses). See git log for full per-round
-detail.)
+**Version:** 0.1.8 (2026-06-25, draft — round-9 codex audit
+fix pass: 2 CRIT + 5 MAJOR + 2 MED absorbed. FIRST codex-
+lens fix-pass; rounds 1-8 were Claude-internal subagents
+and the user shifted the audit lens to codex mid-loop per
+[[feedback-codex-only-audits]]. Codex caught two money-OUT
+critical defect classes the Claude rounds all missed:
+orphan-binding bypass on §9.5b.1 compensation and
+pre-confirmation double-attempt on §4.3. Audit history:
+round-1 1/5, round-2 5/12/10, round-3 3/9/8, round-4 2/6/13,
+round-5 1/2/6, round-6 0/5/9, round-7 0/3/7 (Claude lenses);
+round-8 2/2/7 (Claude lenses) deferred most findings, applied
+3 convergent; round-9 2/5/2 (codex) all absorbed in v0.1.8.
+See git log for full per-round detail.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -23,6 +27,170 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.8 (2026-06-25, draft — round-9 codex audit fix pass,
+all 9 findings absorbed):**
+
+First codex-lens audit on SPEC-016 (rounds 1-8 were
+Claude-internal subagents). Codex returned 2 CRIT + 5 MAJOR
++ 2 MED — including two money-OUT critical defect classes
+that Claude rounds all missed. v0.1.8 closes every finding.
+
+CRITICAL (closed):
+
+- **codex CRIT-1: §9.5b.1 compensation insert was not
+  bound to the original orphan's provider_id / credit
+  values.** v0.1.7 only required existence of an
+  unresolved orphan row matching `(payout_id, attempt_seq)`
+  parsed from `idempotency_key`. A compromised operator
+  key could use one real orphan ($10 owed to provider A)
+  to authorize a compensation row of any size to any
+  provider B, bounded only by per-call cap. v0.1.8
+  §9.5b.1 binds the SPEC-005 admin insert to
+  `orig.provider_id` AND `orig.provider_credits` via JOIN
+  in the SAME SQLite txn; mismatch returns 422
+  `orphan_mismatch`. Plus tightened: request
+  `gross_credits = orig.provider_credits` (since
+  compensation is provider-only, `operator_credits = 0`
+  pinned).
+- **codex CRIT-2: §4.3 fresh-attempt creation lacked a
+  live per-payout guard.** The existing
+  `idx_pa_one_active_per_payout` partial UNIQUE only
+  applies POST-confirmation. A multi-process deploy bug
+  or run-now + cadence overlap could produce two pending
+  attempts at DIFFERENT nonces, both broadcast and both
+  confirmed before either `ClaimPayoutReady` consumes the
+  ledger row → double-payment that no §7.4 recon would
+  catch (both broadcast amounts equal the legitimate
+  amount). v0.1.8 adds three compound defenses to §4.3:
+  (a) singleton-runner lease (DB-backed advisory row in
+  `payout_runner_state`, heartbeat-checked at runner
+  start, emits `payout_runner_lease_conflict` PAGE on
+  conflict); (b) `BEGIN IMMEDIATE` SQLite txn spanning
+  steps 4-5 (cap re-check → nonce alloc → INSERT); (c)
+  new partial UNIQUE INDEX `idx_pa_one_live_non_cancel_
+  per_payout` in §4.5 — at-most-one live non-cancel row
+  per payout_id at the DB layer. Belt-and-suspenders;
+  any of the three independently prevents the double-spend.
+
+MAJOR (closed):
+
+- **codex MAJOR-3: §4.3 step 6 (now step 7) receipt
+  confirmation did not verify the ERC-20 Transfer log.**
+  v0.1.7 only required RPC agreement on `tx_hash`,
+  `block_number`, `status`, `to` — but for USDC, `to` is
+  the token contract address. A calldata bug,
+  ABI-encoding mismatch, or compromised Signer could
+  produce a successful tx that does NOT transfer
+  `amount_base_units` to `effective_address`; §7.4 sums
+  DB values rather than chain logs and would NEVER
+  catch this. v0.1.8 §4.3 step 7 adds three chain-side
+  value verifications (BOTH RPCs MUST agree):
+  (a) tx input matches `0xa9059cbb || abi.encode(
+  effective_address, amount_base_units)`;
+  (b) recovered sender equals `payout.security.hot_wallet_address`;
+  (c) exactly ONE matching USDC Transfer log from hot
+  wallet to `effective_address` for `amount_base_units`.
+  Any mismatch emits new `payout_chain_value_mismatch`
+  PAGE event and HALTs the runner.
+
+- **codex MAJOR-4: §3.3 registration pause had TOCTOU
+  window.** v0.1.7's pre-auth pause check could pass
+  before the operator pauses, then the in-flight request
+  committed a row stamped against the OLD hot wallet
+  during the rotation window — re-opening the stranded-
+  row defect §6.4 step 5 closed. v0.1.8 mandates a
+  SECOND pause check inside the SAME `BEGIN IMMEDIATE`
+  SQLite txn that writes `provider_payout_addresses`.
+
+- **codex MAJOR-5: §4.8a runtime_flags atomicity was
+  impossible as written.** v0.1.7 said the flag UPDATE
+  and §7.1 PAGE event emission happen in the SAME SQLite
+  txn — but a journalctl/zerolog write is not transactional
+  with SQLite. v0.1.8 resolves via outbox pattern: new
+  `runtime_flag_audit` table written in the txn; §7.1
+  zerolog event emitted AFTER commit from the committed
+  audit row; background reaper re-emits any
+  `emitted_to_log=0` rows older than 5 minutes (counter:
+  `payout_flag_audit_reaped` WARN). The DB row IS the
+  canonical audit record.
+
+- **codex MAJOR-6: §4.8a `INSERT OR IGNORE` could fail
+  open after row deletion.** If `registration_paused`
+  was deleted by a bad migration or raw DB write during
+  rotation, v0.1.7's INSERT OR IGNORE silently recreated
+  it as `0` on restart — contradicting the restart-
+  persistence guarantee §4.8a was meant to establish.
+  v0.1.8 adds `runtime_flags_bootstrapped` sentinel
+  table; bootstrap-seed runs ONLY on first-ever DB init
+  (sentinel absent); subsequent missing flag rows on
+  startup emit `payout_invariant_violation
+  where='runtime_flag missing'` and HALT before the
+  §3.3 handler accepts traffic. Three new IMPL tests
+  pin the fail-closed behavior.
+
+- **codex MAJOR-7: §4.9 manual-funding trigger
+  assertion omitted `trg_prs_bootstrap_one_way`.** v0.1.7
+  only required `trg_pa_bootstrap_flip` +
+  `trg_pa_bootstrap_flip_insert` in the IN-list (count=2).
+  Without the one-way trigger, an attacker with raw DB
+  write could DROP `trg_prs_bootstrap_one_way`, reset
+  `payout_bootstrap_complete` from 1 back to 0, CREATE
+  the trigger back, then submit a `source='manual'`
+  funding record. v0.1.8 adds the one-way trigger to the
+  IN-list and changes count check to `!= 3`.
+
+MEDIUM (closed):
+
+- **codex MED-8: `Idempotency-Key` HTTP header and JSON
+  body `idempotency_key` were unrelated.** Replay-detection
+  referenced the header while reconciliation depended on
+  the body/DB key — divergence permitted. v0.1.8
+  requires the SPEC-005 IMPL to enforce byte-equality;
+  mismatch returns 400.
+
+- **codex MED-9: §9.5b.1 split invariant under-specified.**
+  v0.1.7 422-rejected only `provider_credits > gross_credits`
+  but SPEC-005's full invariant is
+  `provider_credits + operator_credits == gross_credits`.
+  Since `operator_credits = 0` is pinned by the §9.5b.1
+  contract, the invariant collapses to strict
+  `gross_credits == provider_credits`. The v0.1.7
+  asymmetric wording would have admitted
+  `provider_credits < gross_credits`, leaking USDC into
+  unaccountable §7.4 drift. v0.1.8 makes the check
+  strict.
+
+POSITIVE FINDINGS confirmed by codex (no fix needed):
+
+- §6.5 namespace bucketing is clean in §3-§9 (only
+  `payout.security.*`, `payout.tuning.*`, and the
+  grandfathered `payout.enabled` singleton).
+- §3.3's 503 body/event/pre-auth ordering is normatively
+  pinned and matches §7.1.
+
+§4.3 step renumbering: codex CRIT-2's new step 3
+(singleton-runner lease) bumped all subsequent steps by 1
+(old 3→4, 4→5, 5→6, 6→7, 7→8, 8→9). All cross-references
+in §3-§9 updated.
+
+New §7.1 events (3): `payout_chain_value_mismatch` (PAGE),
+`payout_runner_lease_conflict` (PAGE), `payout_flag_audit_reaped`
+(WARN).
+
+New schema (2 tables + 1 partial UNIQUE INDEX):
+`runtime_flag_audit`, `runtime_flags_bootstrapped`,
+`idx_pa_one_live_non_cancel_per_payout`.
+
+Net spec change: substantial (~400+ lines added across
+§3.3 TOCTOU, §4.3 steps 3+7, §4.5 index, §4.8a outbox
++ bootstrap fail-closed, §4.9 trigger list, §9.5b.1
+contract surface, §7.1 events table).
+
+This commit was authored in /Users/augstar/macprovider-poc-spec016
+(dedicated worktree for SPEC-016 audit loop) so the main
+checkout at /Users/augstar/macprovider-poc remains
+untouched. Round 10 codex audit will follow.
 
 **v0.1.7 (2026-06-25, draft — round-8 convergent fix pass,
 scoped to 3 cross-lens-convergent findings):**
@@ -927,6 +1095,35 @@ are provider-initiated only). Every response, including
 4xx/5xx, MUST emit a structured log line per §7.1 — a
 failed-registration burst is a stolen-token signal.
 
+**TOCTOU pause re-check (NORMATIVE — closes the v0.1.7
+single-check gap).** The §6.4.1 pause endpoint can fire
+AFTER a §3.3 request passes the pre-auth pause check but
+BEFORE the request commits its INSERT/UPDATE on
+`provider_payout_addresses`. Without a second check, the
+in-flight request would commit a row stamped against the
+OLD hot wallet during the rotation window — the exact
+stranded-row defect §6.4 step 5 exists to prevent. The
+§3.3 IMPL MUST perform TWO pause checks against
+`runtime_flags.value WHERE name='registration_paused'`:
+
+1. The existing pre-auth check (returns 503
+   `rotation_in_progress` before evaluating
+   `provider_token`).
+2. A SECOND check inside the SAME `BEGIN IMMEDIATE` SQLite
+   transaction that writes the `provider_payout_addresses`
+   row. If `value = 1` at this point, the IMPL MUST
+   ROLLBACK and return the SAME 503 body. The transaction
+   MUST use `BEGIN IMMEDIATE` (not deferred) so the
+   pause-flag read takes a write-intent lock against the
+   `runtime_flags` row, serialising with any concurrent
+   §6.4.1 pause endpoint call against the same SQLite
+   connection pool.
+
+The 503 body and `provider_payout_address_change_rejected
+reason="registration_paused"` event from BOTH check sites
+are identical; the response-code-timing carve-out applies
+to both sites symmetrically.
+
 The 24h `pending_until_utc` cooling-off is the v0.1.1
 defense against stolen-token + immediate-rotation + backlog-
 drain. During the cooling-off, queued `ledger_payout_ready`
@@ -1062,7 +1259,7 @@ type PayoutAddressReader interface {
 ```
 
 `payout/` is permitted to import `billing/` for the
-`ClaimPayoutReady` call (§4.3 step 7). The direction is
+`ClaimPayoutReady` call (§4.3 step 8). The direction is
 strictly one-way: `payout/ → billing/`, never the reverse.
 IMPL audit MUST include an import-graph test asserting
 this.
@@ -1132,7 +1329,7 @@ any step on error and logging structurally:
    `payout_invariant_violation`) — it can never legally
    appear given the WHERE clause.
 
-   `gross_credits` MUST be in the projection because step 7
+   `gross_credits` MUST be in the projection because step 8
    passes it to `ClaimPayoutReady`. `max_rows_per_run`
    default 50. The cooling-off + rotated_from fallback (§3.5)
    is encoded directly in the JOIN + WHERE.
@@ -1144,18 +1341,48 @@ any step on error and logging structurally:
    rate lookup. IMPL MUST hardcode this identity and MUST
    reject (log + skip) any configuration that introduces a
    multiplier.
-3. **Cap check.** Apply §5 caps. If the row's amount exceeds
+3. **Singleton-runner lease (NORMATIVE — closes the multi-
+   process double-attempt class).** Steps 4–5 (cap re-check,
+   attempt lookup, nonce allocation, attempt persistence)
+   MUST run under TWO compound guards:
+   (a) a DB-backed singleton runner lease — IMPL takes an
+   advisory lease row in `payout_runner_state` (or an
+   equivalent SQLite-backed mutex) at process start; only
+   the lease-holder process executes the runner. If the
+   lease is held by another `(host, pid, started_at_utc)`
+   and the holder is still alive (heartbeat updated within
+   the last `payout.tuning.run_interval × 3`), THIS process
+   MUST refuse to start the runner and emit
+   `payout_runner_lease_conflict` per §7.1 (severity=PAGE).
+   (b) a per-attempt `BEGIN IMMEDIATE` transaction that
+   spans the §5 cap re-read, nonce allocation, and
+   `payout_attempts` INSERT (steps 4–5). On COMMIT, the
+   row is observable by every other reader.
+   The new partial UNIQUE INDEX
+   `idx_pa_one_live_non_cancel_per_payout` (defined in
+   §4.5) is the DB-side belt-and-suspenders defense: even
+   if both the lease AND the BEGIN IMMEDIATE guards are
+   bypassed, the index forces the second INSERT to fail
+   with `UNIQUE constraint violation`, which IMPL MUST
+   catch and abort the run with
+   `payout_invariant_violation where='duplicate live attempt'`.
+4. **Cap check.** Apply §5 caps. If the row's amount exceeds
    per-payout cap, OR cumulative paid + broadcast amount this
    24h window would exceed per-day cap, skip the row and
    emit `payout_capped`. The row remains `ready` for a
    future run.
-4. **Attempt record.** Load any non-abandoned
+5. **Attempt record.** Load any non-abandoned
    `payout_attempts` row for the payout_id. If
-   confirmed-and-non-abandoned, jump to step 7. If pending
-   (broadcast but not confirmed), jump to step 6 to poll. If
+   confirmed-and-non-abandoned, jump to step 8. If pending
+   (broadcast but not confirmed), jump to step 7 to poll. If
    none exists, generate a fresh nonce per §4.6 and a new
-   `attempt_seq` (next integer for this payout_id).
-5. **Build + sign + broadcast.** Build USDC `transfer(to,
+   `attempt_seq` (next integer for this payout_id), INSERT
+   the row into `payout_attempts` (the new
+   `idx_pa_one_live_non_cancel_per_payout` partial UNIQUE
+   INDEX from §4.5 enforces at-most-one live non-cancel
+   row per payout_id at the DB layer), then COMMIT the
+   `BEGIN IMMEDIATE` transaction from step 3.
+6. **Build + sign + broadcast.** Build USDC `transfer(to,
    amount)` calldata; build EIP-1559 tx with hot-wallet
    sender, the computed nonce, chain id 8453, USDC contract
    as `to`; sign via the `Signer` interface (§6.3). Persist
@@ -1164,17 +1391,73 @@ any step on error and logging structurally:
    invoking `eth_sendRawTransaction` on either RPC. A
    process crash between persistence and broadcast leaves
    the row eligible for retry (§4.5) without nonce loss.
-6. **Confirm via TWO independent RPCs.** Poll both configured
-   RPCs (§9.2) until both return a receipt at depth ≥
+7. **Confirm via TWO independent RPCs (with chain-side
+   value verification).** Poll both configured RPCs (§9.2)
+   until both return a receipt at depth ≥
    `payout.tuning.confirmation_blocks` (default 5; minimum 2;
-   maximum 50). The TWO receipts MUST agree on `tx_hash`,
-   `block_number`, `status` (success), and `to`. Any
-   disagreement HALTS the runner, emits
-   `payout_rpc_disagreement` per §7.1, and pages the
-   operator. Single-RPC trust is REJECTED at v0.1 — the
-   originating prompt's "MAY assume single RPC" is
-   superseded.
-7. **Claim.** Call
+   maximum 50). The TWO receipts MUST agree on:
+   - `tx_hash`
+   - `block_hash` (NEW in v0.1.8 — closes the
+     same-block-hash-different-block-content reorg gap)
+   - `block_number`
+   - `status` (success — `0x1`)
+   - `to` (must equal the configured USDC contract address
+     for chain id 8453, i.e. `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`)
+
+   **Chain-side value verification (NORMATIVE — closes the
+   "tx succeeds but no USDC transferred" defect).** The
+   receipt `to == USDC contract` is necessary but NOT
+   sufficient — a calldata bug, ABI-encoding mismatch, or
+   compromised Signer can produce a successful tx that
+   does NOT transfer `amount_base_units` to
+   `effective_address`. The runner MUST additionally
+   verify on BOTH RPC receipts:
+
+   (a) **Transaction input matches the expected ABI
+   calldata.** Fetch the full transaction (not just the
+   receipt) via `eth_getTransactionByHash` on each RPC and
+   assert `tx.input == "0xa9059cbb" || abi.encode(address,
+   uint256)` where `address = effective_address`
+   (left-padded to 32 bytes) and `uint256 =
+   amount_base_units`. The 4-byte selector
+   `0xa9059cbb` is the keccak256 prefix of
+   `transfer(address,uint256)` and is fixed across all
+   ERC-20 tokens; the IMPL MUST reject any other selector.
+
+   (b) **Recovered sender equals the hot wallet.** Recover
+   the `from` address from the tx signature (or trust the
+   RPC's `tx.from` field IF both RPCs agree on it) and
+   assert it equals `payout.security.hot_wallet_address`.
+
+   (c) **Exactly one matching Transfer log.** Iterate the
+   receipt's `logs` array and assert exactly ONE log
+   matches:
+   - `log.address == USDC contract address`
+   - `log.topics[0] == keccak256("Transfer(address,address,uint256)")`
+     (the fixed value
+     `0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef`)
+   - `log.topics[1] == hot_wallet_address` (left-padded
+     to 32 bytes)
+   - `log.topics[2] == effective_address` (left-padded
+     to 32 bytes)
+   - `abi.decode(log.data, uint256) == amount_base_units`
+
+   The "exactly one" requirement defeats a malicious USDC-
+   contract-upgrade or sandwich-attack pattern where the
+   receipt contains multiple Transfer logs and the intended
+   amount lands elsewhere. Any disagreement between RPCs on
+   any of the above fields, or any mismatch on the
+   expected values, HALTS the runner, emits
+   `payout_chain_value_mismatch` per §7.1 (NEW event,
+   severity=PAGE), and pages the operator. A mismatch is
+   stronger evidence of compromise than a §7.4 drift alarm —
+   it means the signed tx body or the broadcast path is
+   wrong, not that the wallet is being skimmed externally.
+
+   Single-RPC trust is REJECTED at v0.1 — the originating
+   prompt's "MAY assume single RPC" is superseded.
+
+8. **Claim.** Call
    `ClaimPayoutReady(ctx, payoutID, expectedGrossCredits,
    payoutExternalID, "USDC-BASE")` at
    `phase4-coordinator/internal/billing/payout.go:10`.
@@ -1182,34 +1465,35 @@ any step on error and logging structurally:
    `(ctx context.Context, payoutID int64, expectedGrossCredits int64, payoutExternalID, payoutCurrency string) (bool, error)`.
    `expectedGrossCredits` MUST be `lpr.gross_credits` from
    step 1 (NOT `provider_credits`). `payoutExternalID` MUST
-   be the agreed tx hash from step 6. `payoutCurrency` MUST
+   be the agreed tx hash from step 7. `payoutCurrency` MUST
    be the literal string `"USDC-BASE"` (never empty, never
    NULL). IMPL MUST add a unit test asserting the literal is
    passed; the §7.4 reconciliation surfaces a NULL
    `payout_currency` on a `consumed` row as a separate
    failure class to catch any regression.
-8. **Log.** Emit `payout_paid` per §7.1. On failure in
-   steps 5-7, emit `payout_failed` with `stage` and
+9. **Log.** Emit `payout_paid` per §7.1. On failure in
+   steps 6-8, emit `payout_failed` with `stage` and
    `error_class`.
 
 ### 4.4 RPC failure tolerance + key/trust separation
 
-The runner MUST tolerate transient RPC errors at steps 5/6:
+The runner MUST tolerate transient RPC errors at steps 6/7:
 
-- Step 5 broadcast failure on either RPC → retry up to N
+- Step 6 broadcast failure on either RPC → retry up to N
   times (default 3) with exponential backoff. If at least
   ONE RPC confirms acceptance into its mempool, the
   broadcast is treated as successful for the purposes of
-  step 6 polling. If both RPCs reject (e.g. nonce too low,
+  step 7 polling. If both RPCs reject (e.g. nonce too low,
   insufficient funds, malformed envelope), leave the row
-  pending; the next run cycle retries via step 4.
-- Step 6 receipt-poll: if ONE RPC returns confirmed and the
+  pending; the next run cycle retries via step 5.
+- Step 7 receipt-poll: if ONE RPC returns confirmed and the
   OTHER returns "not found" past a tolerance window
   (default 2 minutes), emit `payout_rpc_disagreement` and
   HALT — silent disagreement is the lying-RPC threat model.
 
-The runner MUST NOT advance to step 7 without TWO-RPC
-agreement on a confirmed receipt.
+The runner MUST NOT advance to step 8 without TWO-RPC
+agreement on a confirmed receipt AND chain-side value
+verification per step 7 (a/b/c).
 
 **RPC trust separation requirements** (defense against the
 case where both RPC endpoints are subverted in tandem —
@@ -1281,6 +1565,15 @@ CREATE INDEX IF NOT EXISTS idx_pa_cancel_recent
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_one_active_per_payout
     ON payout_attempts(payout_id)
  WHERE confirmed_at_utc IS NOT NULL AND abandoned_at_utc IS NULL AND is_cancel_self_transfer = 0;
+-- v0.1.8: at-most-one LIVE (not necessarily confirmed) non-cancel
+-- attempt per payout_id — defense against the §4.3-step-3
+-- singleton-lease bypass class (multi-process race, run-now +
+-- cadence overlap). Without this, two pending attempts at
+-- different nonces can both pay the chain before either claim
+-- consumes the ledger row.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_pa_one_live_non_cancel_per_payout
+    ON payout_attempts(payout_id)
+ WHERE abandoned_at_utc IS NULL AND is_cancel_self_transfer = 0;
 ```
 
 `gas_used_native_wei` is populated post-confirmation from
@@ -1290,10 +1583,30 @@ visibility (`cancel_gas_native_wei_24h`).
 The `(payout_id, attempt_seq)` PK lets a payout_id have
 multiple attempt rows (the original payout attempt, plus any
 cancel self-transfers, plus any post-abandon fresh attempts).
-The `idx_pa_one_active_per_payout` partial UNIQUE index
-guarantees at most ONE confirmed non-cancel non-abandoned row
-per payout_id (the double-spend guarantee at the application
-layer; the chain nonce is the on-chain guarantee).
+
+Two partial UNIQUE indexes provide complementary defenses:
+
+- `idx_pa_one_active_per_payout` (existing): at-most-one
+  CONFIRMED non-cancel non-abandoned row per payout_id —
+  the post-confirmation double-spend guarantee at the
+  application layer; the chain nonce is the on-chain
+  guarantee.
+- `idx_pa_one_live_non_cancel_per_payout` (NEW in v0.1.8,
+  closes codex round-9 CRIT-2): at-most-one LIVE
+  (not yet abandoned) non-cancel row per payout_id —
+  the pre-confirmation double-spend guarantee. Without
+  this, two §4.3 cadence cycles racing (multi-process
+  deploy bug, run-now + cadence overlap) could both
+  INSERT pending attempts at DIFFERENT nonces, broadcast
+  both, and have BOTH chain transfers confirm before
+  either `ClaimPayoutReady` lands. The new index forces
+  the second INSERT to fail with `UNIQUE constraint
+  violation`; IMPL MUST catch and halt the runner with
+  `payout_invariant_violation where='duplicate live attempt'`.
+  Abandon-then-retry is unaffected: the abandon-marker
+  trigger sets `abandoned_at_utc` IS NOT NULL, lifting
+  the original row out of the index's WHERE clause, and a
+  fresh attempt INSERT succeeds with a new `attempt_seq`.
 
 The `idx_pa_from_nonce_active` partial UNIQUE index requires
 `abandoned_at_utc IS NULL`, so an abandon-then-cancel flow
@@ -1313,7 +1626,7 @@ The `chain` CHECK matches the §3.1 canary; a multi-rail
 expansion must amend BOTH constraints.
 
 The signed tx envelope itself is persisted in `raw_signed_tx`
-BEFORE broadcast in step 5; on retry IMPL MUST rebroadcast
+BEFORE broadcast in step 6; on retry IMPL MUST rebroadcast
 the exact bytes. Re-signing is FORBIDDEN.
 
 ### 4.6 Nonce strategy + abandon
@@ -1383,7 +1696,7 @@ the exact bytes. Re-signing is FORBIDDEN.
                gas-spike rejection), the cancel row remains
                in `payout_attempts` with its raw_signed_tx;
                the next cadence cycle picks it up for
-               re-broadcast via the §4.3 step 4 pending-
+               re-broadcast via the §4.3 step 5 pending-
                attempt path. The persisted bytes are
                re-broadcast bit-for-bit (re-signing is
                FORBIDDEN, same as §4.5 retry discipline).
@@ -1673,38 +1986,131 @@ CREATE TABLE IF NOT EXISTS runtime_flags (
     updated_at_utc    TEXT NOT NULL,
     updated_by_actor  TEXT NOT NULL,   -- "operator_key:<key_id>"
                                        -- for §6.4.1 toggles;
-                                       -- "system:startup_seed"
-                                       -- for the bootstrap
-                                       -- INSERT OR IGNORE.
+                                       -- "system:bootstrap_seed"
+                                       -- ONLY on first-ever DB
+                                       -- initialization.
     updated_reason    TEXT NOT NULL    -- §6.4.1 endpoint body
                                        -- "reason" field; "" for
                                        -- bootstrap seed.
 );
 
--- Bootstrap seed (one row per closed-set flag). MUST run
--- in the same coordinator startup sequence as the
--- payout_runner_state seed above, BEFORE runner.Start()
--- AND BEFORE the §3.3 handler accepts traffic.
-INSERT OR IGNORE INTO runtime_flags
-  (name, value, updated_at_utc, updated_by_actor, updated_reason)
-VALUES
-  ('registration_paused', 0,
-   '<RFC3339Nano startup time>',
-   'system:startup_seed', '');
+-- Outbox table for §6.4.1 audit-trail atomicity (closes
+-- codex round-9 MAJOR-5: a journalctl/zerolog write cannot
+-- be transactionally atomic with SQLite; the audit row IS
+-- the transactional record, and the §7.1 event is emitted
+-- AFTER commit from the committed row).
+CREATE TABLE IF NOT EXISTS runtime_flag_audit (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    flag_name         TEXT NOT NULL,
+    old_value         INTEGER NOT NULL CHECK(old_value IN (0,1)),
+    new_value         INTEGER NOT NULL CHECK(new_value IN (0,1)),
+    actor             TEXT NOT NULL,   -- "operator_key:<key_id>"
+    reason            TEXT NOT NULL,
+    occurred_at_utc   TEXT NOT NULL,
+    emitted_to_log    INTEGER NOT NULL DEFAULT 0 CHECK(emitted_to_log IN (0,1))
+);
+CREATE INDEX IF NOT EXISTS idx_rfa_unemitted
+    ON runtime_flag_audit(id) WHERE emitted_to_log = 0;
+```
+
+**Bootstrap seed (FIRST-EVER INIT ONLY — closes codex
+round-9 MAJOR-6 fail-open class).** The seed MUST run
+exactly once, gated by a separate sentinel that proves
+this is the first-ever DB initialization:
+
+```sql
+-- Sentinel: one-row table that proves first-ever bootstrap
+-- has occurred. After this row exists, the runtime_flags
+-- seed is FORBIDDEN.
+CREATE TABLE IF NOT EXISTS runtime_flags_bootstrapped (
+    id INTEGER PRIMARY KEY CHECK(id = 1),
+    bootstrapped_at_utc TEXT NOT NULL
+);
+
+-- First-ever-init seed (runs ONLY when the sentinel row
+-- does NOT exist). Wrapped in a single SQLite transaction:
+BEGIN IMMEDIATE;
+  -- Abort if sentinel exists (NOT first-ever boot).
+  -- IMPL MUST check this in Go BEFORE issuing the INSERTs
+  -- below; if SELECT count(*) FROM runtime_flags_bootstrapped > 0
+  -- AND SELECT count(*) FROM runtime_flags WHERE
+  -- name='registration_paused' = 0, EMIT
+  -- `payout_invariant_violation where='runtime_flag missing'
+  -- name='registration_paused'` and HALT before
+  -- accepting traffic. DO NOT recreate the row as value=0.
+  INSERT INTO runtime_flags
+    (name, value, updated_at_utc, updated_by_actor, updated_reason)
+  VALUES
+    ('registration_paused', 0,
+     '<RFC3339Nano startup time>',
+     'system:bootstrap_seed', '');
+  INSERT INTO runtime_flags_bootstrapped
+    (id, bootstrapped_at_utc)
+  VALUES (1, '<RFC3339Nano startup time>');
+COMMIT;
 ```
 
 **Persistence + restart semantics (NORMATIVE).** The
 `runtime_flags` table is the durable backing store for
-the `runtime.*` namespace defined in §6.5. Every §6.4.1
-admin endpoint MUST update the row atomically in the
-same SQLite transaction that emits the §7.1 PAGE event.
-On coordinator startup, the §3.3 handler MUST read the
-`registration_paused` value BEFORE accepting traffic;
-a process restart between §6.4 step 1 (pause) and step
-4 (resume) MUST NOT auto-unpause. The `INSERT OR
-IGNORE` bootstrap seed only fires on first-ever startup
-(empty table); subsequent restarts read the existing
-row and honor whatever state the operator last set.
+the `runtime.*` namespace defined in §6.5. On coordinator
+startup, the §3.3 handler MUST read the
+`registration_paused` value BEFORE accepting traffic; a
+process restart between §6.4 step 1 (pause) and step 4
+(resume) MUST NOT auto-unpause. The first-ever
+bootstrap-seed sequence above runs ONLY on initial DB
+init (gated by the `runtime_flags_bootstrapped`
+sentinel); subsequent restarts MUST read the existing
+row and honor whatever state the operator last set. If
+the `runtime_flags` row for any closed-set flag is
+missing on a NON-first-ever startup (the sentinel row
+exists but the flag row does not), IMPL MUST emit
+`payout_invariant_violation where='runtime_flag missing'
+name='<flag_name>'` per §7.1 (severity=PAGE) and HALT
+before the §3.3 handler accepts traffic — startup MUST
+NOT silently recreate the missing flag as value=0.
+
+**Atomicity discipline (closes codex round-9 MAJOR-5).** A
+log write (journalctl/zerolog per §7.1.1) cannot be
+transactionally atomic with a SQLite write. v0.1.8
+resolves this via a durable outbox pattern: every §6.4.1
+admin endpoint MUST perform the following in ONE
+`BEGIN IMMEDIATE` SQLite transaction:
+
+1. UPDATE `runtime_flags` SET value = <new>, updated_at_utc,
+   updated_by_actor, updated_reason WHERE name = '<flag>'.
+2. INSERT INTO `runtime_flag_audit` (flag_name, old_value,
+   new_value, actor, reason, occurred_at_utc,
+   emitted_to_log) VALUES (..., 0).
+3. COMMIT.
+
+If COMMIT fails, the §6.4.1 endpoint returns 500 and the
+§7.1 event is NOT emitted (because nothing committed —
+this is the consistent failure mode). AFTER COMMIT
+succeeds, the endpoint handler synchronously emits the
+§7.1 zerolog event from the just-committed audit row, then
+issues a follow-up UPDATE setting `emitted_to_log = 1`. A
+background reaper (cadence: every `payout.tuning.run_interval`)
+MUST scan `runtime_flag_audit WHERE emitted_to_log = 0
+AND occurred_at_utc < now - 5 minutes` and re-emit those
+events, on the theory that they committed but the
+emitter crashed before the synchronous log write. The
+reaper increments a `payout_flag_audit_reaped` counter
+per §7.1 (severity=WARN) so operators can detect a
+chronic emitter crash. The DB row IS the canonical audit
+record; the log line is a notification view of it.
+
+**Audit-trail discipline (renamed from "cross-check
+against raw DB write" in v0.1.7).** Operators MUST scan
+`runtime_flag_audit` for any row whose `actor` does not
+start with `operator_key:` or `system:bootstrap_seed` —
+that is the raw-DB-write tampering signal. The dual
+records (audit row + zerolog event) are intentionally
+redundant; a write that bypasses the §6.4.1 endpoint
+WILL miss BOTH the audit row AND the zerolog event,
+which is detectable by comparing the `runtime_flags`
+row's `updated_at_utc` against the most recent
+`runtime_flag_audit` row for the same flag — any
+diff = tampering.
 
 **Same-DB pin.** The `runtime_flags` table MUST live in
 the same SQLite database file as `payout_runner_state`
@@ -1719,22 +2125,24 @@ but-flag-not-flipped (or vice versa) gap window. The
 comprehensive "all SPEC-016 tables in one DB" pin is
 deferred to v0.2 (filed in Appendix B).
 
-**Audit-trail discipline.** Every §6.4.1 toggle MUST
-also emit a §7.1 structured-log event
-(`payout_registration_paused` or
-`payout_registration_resumed`) carrying the same
-`updated_by_actor` + `updated_reason` values written
-to the row. The two records (DB row + log event) are
-the cross-check defense against an attacker with raw
-DB write access flipping the flag outside the
-authenticated endpoint path; operators MUST scan for
-DB updates whose `updated_at_utc` has no matching
-§7.1 event line.
-
-IMPL test required: spawn coordinator with
-`registration_paused = 1` pre-seeded; assert that a
-clean restart preserves the value and that §3.3
+IMPL test required (1): spawn coordinator with
+`registration_paused = 1` pre-seeded AND the
+`runtime_flags_bootstrapped` sentinel pre-seeded; assert
+that a clean restart preserves the value and that §3.3
 returns 503 BEFORE the runner finishes startup.
+
+IMPL test required (2): delete the `registration_paused`
+row while leaving the `runtime_flags_bootstrapped`
+sentinel in place; assert that startup emits
+`payout_invariant_violation` and HALTS before the §3.3
+handler accepts traffic; assert NO new
+`registration_paused` row is created at startup.
+
+IMPL test required (3): call §6.4.1 pause endpoint;
+assert `runtime_flag_audit` row is INSERTed in the SAME
+SQLite transaction as the `runtime_flags` UPDATE; assert
+the §7.1 zerolog line is emitted AFTER commit; assert
+`emitted_to_log` flips to 1 after the log write.
 
 **Trigger-presence assertion (defense against DROP TRIGGER
 + UPDATE bypass).** Both bootstrap triggers (and the
@@ -1777,13 +2185,26 @@ closes this for the TWO money-path-mutating call sites:
   ```sql
   SELECT count(*) FROM sqlite_master
    WHERE type='trigger'
-     AND name IN ('trg_pa_bootstrap_flip',
+     AND name IN ('trg_prs_bootstrap_one_way',
+                  'trg_pa_bootstrap_flip',
                   'trg_pa_bootstrap_flip_insert');
-  -- REJECT 422 bootstrap_trigger_missing if count != 2
+  -- REJECT 422 bootstrap_trigger_missing if count != 3
   -- AND emit payout_invariant_violation per §7.1.
   ```
 
-- §4.3 step 7 `ClaimPayoutReady` invocation MUST be
+  v0.1.8 adds `trg_prs_bootstrap_one_way` to the IN list
+  (closes codex round-9 MAJOR-7): without it, an attacker
+  with raw DB write could DROP `trg_prs_bootstrap_one_way`
+  in one txn, reset `payout_bootstrap_complete` from 1
+  back to 0 in another txn, CREATE the trigger back, and
+  then submit a `source='manual'` funding record — the
+  two AFTER-trigger checks alone (UPDATE + INSERT bootstrap-
+  flip) cannot detect this because they fire AFTER the
+  flag was already manipulated. All three bootstrap-related
+  triggers MUST be present at the manual-funding txn for
+  the §4.9 fail-closed gate to hold.
+
+- §4.3 step 8 `ClaimPayoutReady` invocation MUST be
   performed in the SAME SQLite transaction as:
 
   ```sql
@@ -2118,13 +2539,13 @@ Signing happens via the package-internal `Signer` interface
 defined in `payout/signer.go`. v0.1.2 ships ONE
 implementation: the local-file signer described above. The
 `Signer` interface is the seam for the v0.2 KMS swap (§6.6);
-the §4.3 step 5 sequence is unchanged under v0.2 because the
+the §4.3 step 6 sequence is unchanged under v0.2 because the
 signed envelope is still received synchronously from the
 signer before persistence + broadcast.
 
 The chain-level `nonce` is the idempotency token; the
 signed envelope is persisted to `payout_attempts.raw_signed_tx`
-BEFORE broadcast (§4.3 step 5) and re-broadcast bit-for-bit
+BEFORE broadcast (§4.3 step 6) and re-broadcast bit-for-bit
 on retry. RFC 6979 deterministic ECDSA is RECOMMENDED for
 general ECDSA-nonce-reuse hygiene but is NOT load-bearing
 for SPEC-016's idempotency guarantee.
@@ -2158,7 +2579,7 @@ type Signer interface {
     // (deterministic ECDSA via RFC 6979) but SPEC-016
     // does NOT depend on determinism for idempotency —
     // the chain-level nonce + raw_signed_tx persistence
-    // (§4.3 step 5) is the actual guarantee. ctx supports
+    // (§4.3 step 6) is the actual guarantee. ctx supports
     // cancellation; KMS implementations MAY block on a
     // network call; local-file implementations MUST NOT
     // block longer than 100ms.
@@ -2512,6 +2933,9 @@ operator-key endpoints log actor=operator_key):
 | `provider_payout_address_changed` | per §3.4 |
 | `provider_payout_address_change_rejected` | `reason, provider_id, src_ip, submitted_fingerprint, ts_utc` |
 | `provider_payout_address_rejected_unknown_provider` | `provider_id, submitted_fingerprint, src_ip, ts_utc` |
+| `payout_chain_value_mismatch` (severity=PAGE; NEW v0.1.8) | `payout_id, attempt_seq, tx_hash, mismatch_class (input_calldata, sender_recovery, transfer_log_count, transfer_log_to, transfer_log_amount, rpc_disagreement_on_logs), expected, observed, ts_utc` |
+| `payout_runner_lease_conflict` (severity=PAGE; NEW v0.1.8) | `local_pid, local_started_at_utc, holder_host, holder_pid, holder_started_at_utc, holder_heartbeat_at_utc, ts_utc` |
+| `payout_flag_audit_reaped` (severity=WARN; NEW v0.1.8) | `flag_audit_id, flag_name, old_value, new_value, occurred_at_utc, reap_lag_seconds, ts_utc` |
 
 ### 7.1.1 Where these events live
 
@@ -2872,15 +3296,39 @@ discharged:
                    `ledger_payout_ready`).
      400         — missing required field, or
                    idempotency_key does not match
-                   `^reorg_compensation:\d+:\d+$`.
+                   `^reorg_compensation:\d+:\d+$`, or the
+                   `Idempotency-Key` HTTP header is not
+                   byte-equal to the JSON body
+                   `idempotency_key` field (closes codex
+                   round-9 MED-8: replay-detection
+                   referenced the header while
+                   reconciliation depends on the body/DB
+                   key — equality MUST be enforced).
      409 Conflict — Idempotency-Key replay (return the
                    original 201 response body).
      422         — provider_id not found in provider_tokens,
-                   OR provider_credits > gross_credits,
+                   OR `gross_credits != provider_credits`
+                   (v0.1.8 STRICT EQUALITY — closes codex
+                   round-9 MED-9: since `operator_credits`
+                   is pinned to 0 by §9.5b.1 contract,
+                   SPEC-005's invariant
+                   `provider_credits + operator_credits ==
+                   gross_credits` collapses to strict
+                   equality; the v0.1.7 wording
+                   `provider_credits > gross_credits` was
+                   asymmetric and admitted
+                   `provider_credits < gross_credits` —
+                   that case would skim USDC into the
+                   reconciliation drift unaccountably),
                    OR provider_credits exceeds
                    payout.security.per_payout_cap_usdc_base_units,
-                   OR no matching unresolved orphan record
-                   (see normative requirements below).
+                   OR no matching unresolved orphan record,
+                   OR orphan-binding mismatch (provider_id,
+                   provider_credits, gross_credits, or
+                   operator_credits does not match the
+                   original orphaned row — closes codex
+                   round-9 CRIT-1; see normative
+                   requirements below).
    ```
 
    Normative requirements on the SPEC-005 IMPL:
@@ -2916,23 +3364,47 @@ discharged:
      actor=operator_key, ts_utc` so the operator audit
      trail covers admin-inserted rows separately from
      settlement-emitted rows.
-   - **The SPEC-005 IMPL MUST verify a matching unresolved
-     `payout_reorg_orphans` row exists in the SAME SQLite
-     transaction as the INSERT.** The idempotency_key
-     `reorg_compensation:<orig_payout_id>:<orig_attempt_seq>`
-     identifies the orphan; the IMPL MUST `SELECT 1 FROM
-     payout_reorg_orphans WHERE payout_id =
-     <orig_payout_id> AND attempt_seq = <orig_attempt_seq>
-     AND compensation_settlement_id IS NULL` and REJECT
-     422 `no_matching_orphan` on miss. This defeats the
-     operator-key-compromise high-leverage drain: an
-     attacker who can call this endpoint MUST also first
+   - **The SPEC-005 IMPL MUST bind the compensation row to
+     the original orphaned `ledger_payout_ready` row's
+     provider_id AND credit values in the SAME SQLite
+     transaction as the INSERT.** Closes codex round-9
+     CRIT-1: the v0.1.7 wording only required existence of
+     an unresolved orphan row, not field-equality with the
+     compensation request body. A compromised operator key
+     could use one real orphan (say, $10 owed to provider A)
+     to authorize a compensation row of any size to any
+     provider B, bounded only by the per-call cap (e.g.
+     $1000 to attacker-controlled provider B). v0.1.8
+     requires the IMPL to parse `orig_payout_id` and
+     `orig_attempt_seq` from the `idempotency_key` regex
+     match, then JOIN `payout_reorg_orphans pro` against
+     `ledger_payout_ready orig ON orig.id = pro.payout_id`
+     in the SAME SQLite transaction as the INSERT, and
+     assert ALL of:
+     - `pro.payout_id = <orig_payout_id>` (parsed from key)
+     - `pro.attempt_seq = <orig_attempt_seq>` (parsed from key)
+     - `pro.compensation_settlement_id IS NULL` (orphan not
+       yet compensated)
+     - request `provider_id = orig.provider_id`
+     - request `provider_credits = orig.provider_credits`
+     - request `gross_credits = orig.provider_credits`
+       (NOTE: equals provider_credits, NOT
+       `orig.gross_credits` — the compensation is
+       provider-only, no operator share, per the
+       `operator_credits = 0` pin below)
+     - request `operator_credits = 0`
+
+     Any miss returns 422 `orphan_mismatch` with a body
+     field naming which assertion failed. This defeats the
+     operator-key-compromise high-leverage drain (an
+     attacker who can call this endpoint MUST first
      manufacture a `payout_reorg_orphans` row via
-     `/admin/payout/record-orphan` — which is detectable by
-     the §7.4 stale-orphan reconciliation query (no real
-     `payout_attempts` row corresponds to a fake orphan;
-     query (B) catches the inverse case where the
-     compensation references a non-existent ledger row).
+     `/admin/payout/record-orphan` for the EXACT amount AND
+     provider — which is detectable by the §7.4 stale-orphan
+     reconciliation query: no real `payout_attempts` row
+     corresponds to a fake orphan; query (B) catches the
+     inverse case where the compensation references a
+     non-existent ledger row).
    - **Per-call cap.** The SPEC-005 IMPL MUST cap
      `provider_credits` at
      `payout.security.per_payout_cap_usdc_base_units` (the
