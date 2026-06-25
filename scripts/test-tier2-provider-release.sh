@@ -75,12 +75,33 @@ make_release_fixture() {
   local fixture_dir="$1"
   local version="$2"
   local include_surfaces="$3"
+  local package_mode="${4:-none}"
   mkdir -p "$fixture_dir"
   local binary_dir="$fixture_dir/bin"
   local asset="$fixture_dir/macprovider-cli-v$version-darwin-arm64.tar.gz"
+  local pkg_asset="$fixture_dir/macprovider-cli-v$version-darwin-arm64.pkg"
   make_fake_binary "$binary_dir" "$version" "$include_surfaces"
   tar -czf "$asset" -C "$binary_dir" macprovider-cli
   sha256_file "$asset" | awk -v asset="$(basename "$asset")" '{ print $1 "  " asset }' >"$fixture_dir/checksums.txt"
+  case "$package_mode" in
+    none)
+      ;;
+    good|bad-extra)
+      local pkg_root="$fixture_dir/pkg-root"
+      mkdir -p "$pkg_root/Payload/example.bundle"
+      cp "$binary_dir/macprovider-cli" "$pkg_root/Payload/macprovider-cli"
+      printf '%s\n' 'fixture notice' >"$pkg_root/Payload/THIRD-PARTY-NOTICES.txt"
+      printf '%s\n' 'fixture bundle' >"$pkg_root/Payload/example.bundle/info.txt"
+      if [ "$package_mode" = "bad-extra" ]; then
+        printf '%s\n' 'unexpected' >"$pkg_root/Payload/unexpected.txt"
+      fi
+      tar -czf "$pkg_asset" -C "$pkg_root" Payload
+      sha256_file "$pkg_asset" | awk -v asset="$(basename "$pkg_asset")" '{ print $1 "  " asset }' >>"$fixture_dir/checksums.txt"
+      ;;
+    *)
+      die "unknown package fixture mode: $package_mode"
+      ;;
+  esac
   openssl dgst -sha256 -sign "$WORKDIR/private.pem" -out "$fixture_dir/checksums.txt.sig" "$fixture_dir/checksums.txt"
 }
 
@@ -108,7 +129,7 @@ done
 [ -n "$url" ] || exit 2
 name="${url##*/}"
 case "$name" in
-  macprovider-cli-*-darwin-arm64.tar.gz|checksums.txt|checksums.txt.sig)
+  macprovider-cli-*-darwin-arm64.tar.gz|macprovider-cli-*-darwin-arm64.pkg|checksums.txt|checksums.txt.sig)
     cp "$RELEASE_FIXTURE_DIR/$name" "$out"
     ;;
   *)
@@ -117,6 +138,33 @@ case "$name" in
 esac
 SH
 chmod +x "$WORKDIR/curl"
+
+cat >"$WORKDIR/pkgutil" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${1:-}" = "--expand-full" ] || exit 2
+pkg_path="$2"
+expanded_dir="$3"
+mkdir -p "$expanded_dir"
+tar -xzf "$pkg_path" -C "$expanded_dir"
+SH
+chmod +x "$WORKDIR/pkgutil"
+
+cat >"$WORKDIR/spctl" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$WORKDIR/spctl"
+
+cat >"$WORKDIR/xcrun" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = "stapler" ] && [ "${2:-}" = "validate" ]; then
+  exit 0
+fi
+exit 2
+SH
+chmod +x "$WORKDIR/xcrun"
 
 openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$WORKDIR/private.pem" >/dev/null 2>&1
 openssl pkey -in "$WORKDIR/private.pem" -pubout -out "$WORKDIR/public.pem" >/dev/null 2>&1
@@ -171,6 +219,30 @@ if PATH="$WORKDIR:$PATH" \
   die "missing Tier-2 surface unexpectedly passed"
 fi
 assert_contains "$WORKDIR/missing-surface.err" "provider binary lacks Tier-2 surface string"
+
+package_fixture="$WORKDIR/package-release"
+make_release_fixture "$package_fixture" "1.2.6" "1" "good"
+PATH="$WORKDIR:$PATH" \
+  CURL_BIN="$WORKDIR/curl" \
+  RELEASE_FIXTURE_DIR="$package_fixture" \
+  MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="$PUBLIC_KEY_PEM" \
+  RELEASE_TAG=v1.2.6 \
+  "$VERIFIER" >"$WORKDIR/package.out" 2>"$WORKDIR/package.err"
+assert_contains "$WORKDIR/package.err" "provider package sha256 verified"
+assert_contains "$WORKDIR/package.err" "provider package binary matches tarball binary"
+assert_contains "$WORKDIR/package.err" "provider package version ok"
+
+bad_package_fixture="$WORKDIR/bad-package-release"
+make_release_fixture "$bad_package_fixture" "1.2.6" "1" "bad-extra"
+if PATH="$WORKDIR:$PATH" \
+  CURL_BIN="$WORKDIR/curl" \
+  RELEASE_FIXTURE_DIR="$bad_package_fixture" \
+  MACPROVIDER_CHECKSUM_PUBLIC_KEY_PEM="$PUBLIC_KEY_PEM" \
+  RELEASE_TAG=v1.2.6 \
+  "$VERIFIER" >"$WORKDIR/bad-package.out" 2>"$WORKDIR/bad-package.err"; then
+  die "unexpected package payload member unexpectedly passed"
+fi
+assert_contains "$WORKDIR/bad-package.err" "unexpected provider package payload member"
 
 if PATH="$WORKDIR:$PATH" \
   CURL_BIN="$WORKDIR/curl" \

@@ -65,6 +65,7 @@ Environment overrides:
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
   MACPROVIDER_PORT               local HTTP port
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
+  MACPROVIDER_RELEASE_FORMAT     auto, pkg, or tar (default: auto)
   MACPROVIDER_NO_PROMPT=1        use defaults without interactive prompts
   MACPROVIDER_NO_LAUNCHD=1       skip launchd service install
   MACPROVIDER_SKIP_HF_CHECK=1    skip HuggingFace lookup on custom model id
@@ -734,17 +735,45 @@ latest_release_tag() {
 
 download_release() {
   tag="$1"
-  asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
+  tarball_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
+  pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
   base="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
   TMPDIR_PATH="$(mktemp -d)"
-  tarball_path="$TMPDIR_PATH/$asset"
+  tarball_path="$TMPDIR_PATH/$tarball_asset"
+  pkg_path="$TMPDIR_PATH/$pkg_asset"
   checksums_path="$TMPDIR_PATH/checksums.txt"
   checksums_sig_path="$TMPDIR_PATH/checksums.txt.sig"
+  asset_path=""
+  asset_kind=""
 
-  log "Downloading $asset from GitHub Releases."
-  curl -fL "$base/$asset" -o "$tarball_path" || die 3 "failed to download release tarball"
   curl -fL "$base/checksums.txt" -o "$checksums_path" || die 3 "failed to download checksums.txt"
   curl -fL "$base/checksums.txt.sig" -o "$checksums_sig_path" || die 3 "failed to download checksums.txt.sig"
+  verify_checksum_signature
+
+  release_format="${MACPROVIDER_RELEASE_FORMAT:-auto}"
+  case "$release_format" in
+    auto|pkg|tar) ;;
+    *) die 7 "MACPROVIDER_RELEASE_FORMAT must be auto, pkg, or tar" ;;
+  esac
+
+  if [ "$release_format" != "tar" ]; then
+    pkg_expected="$(checksum_for_asset "$pkg_asset")"
+    if [ -n "$pkg_expected" ]; then
+      log "Downloading signed package $pkg_asset from GitHub Releases."
+      curl -fL "$base/$pkg_asset" -o "$pkg_path" || die 3 "failed to download release package"
+      asset_path="$pkg_path"
+      asset_kind="pkg"
+      log "Using signed package release asset: $pkg_asset"
+      return
+    fi
+    [ "$release_format" = "auto" ] || die 3 "checksums.txt has no entry for $pkg_asset"
+    log "Signed release manifest has no package for $tag; falling back to tarball."
+  fi
+
+  log "Downloading $tarball_asset from GitHub Releases."
+  curl -fL "$base/$tarball_asset" -o "$tarball_path" || die 3 "failed to download release tarball"
+  asset_path="$tarball_path"
+  asset_kind="tar"
 }
 
 write_checksum_public_key() {
@@ -773,41 +802,117 @@ verify_checksum_signature() {
   log "checksums.txt signature verified."
 }
 
+checksum_for_asset() {
+  asset_name="$1"
+  awk -v asset="$asset_name" '$2 == asset { print $1; exit }' "$checksums_path"
+}
+
 verify_sha256() {
-  expected="$(grep "  $(basename "$tarball_path")$" "$checksums_path" | awk '{print $1}' | head -1)"
-  [ -n "$expected" ] || die 4 "checksums.txt has no entry for $(basename "$tarball_path")"
-  actual="$(shasum -a 256 "$tarball_path" | awk '{print $1}')"
-  [ "$actual" = "$expected" ] || die 4 "checksum mismatch for $(basename "$tarball_path")"
+  asset_name="$(basename "$asset_path")"
+  expected="$(checksum_for_asset "$asset_name")"
+  [ -n "$expected" ] || die 4 "checksums.txt has no entry for $asset_name"
+  actual="$(shasum -a 256 "$asset_path" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] || die 4 "checksum mismatch for $asset_name"
   log "SHA256 verified."
 }
 
 validate_tarball() {
-  entries="$(tar tzf "$tarball_path")" || die 5 "failed to list release tarball"
+  entries="$(tar tzf "$asset_path")" || die 5 "failed to list release tarball"
   [ -n "$entries" ] || die 5 "release tarball is empty"
 
+  validate_staged_entries "$entries" "tarball"
+  if tar tvzf "$asset_path" | awk '{print substr($1,1,1), $0}' | grep -E '^[lhbcp]' >/dev/null; then
+    die 5 "release tarball contains unsafe link or device members"
+  fi
+}
+
+validate_staged_entries() {
+  entries="$1"
+  label="$2"
   has_binary=0
   while IFS= read -r entry; do
-    case "$entry" in
-      ""|/*|*"/../"*|../*|*/..|..)
+    normalized_entry="$entry"
+    while :; do
+      case "$normalized_entry" in
+        ./*) normalized_entry="${normalized_entry#./}" ;;
+        *) break ;;
+      esac
+    done
+    case "$normalized_entry" in
+      ""|.) continue ;;
+    esac
+    case "$normalized_entry" in
+      /*|*"/../"*|../*|*/..|..)
         die 5 "unsafe tarball path: $entry"
         ;;
       macprovider-cli)
         has_binary=1
         ;;
+      THIRD-PARTY-NOTICES.txt)
+        ;;
       *.bundle|*.bundle/*)
         ;;
       *)
-        die 5 "unexpected tarball member: $entry"
+        die 5 "unexpected $label member: $entry"
         ;;
     esac
   done <<EOF
 $entries
 EOF
 
-  [ "$has_binary" -eq 1 ] || die 5 "release tarball does not contain macprovider-cli"
-  if tar tvzf "$tarball_path" | awk '{print substr($1,1,1), $0}' | grep -E '^[lhbcp]' >/dev/null; then
-    die 5 "release tarball contains unsafe link or device members"
+  [ "$has_binary" -eq 1 ] || die 5 "$label does not contain macprovider-cli"
+}
+
+validate_package() {
+  require_tool pkgutil
+  if command -v spctl >/dev/null 2>&1; then
+    spctl -a -vv -t install "$asset_path" || die 4 "package failed Gatekeeper assessment"
+    log "Package Gatekeeper assessment passed."
+  else
+    log "spctl not found; package checksum was verified but Gatekeeper assessment was skipped."
   fi
+  if command -v xcrun >/dev/null 2>&1 && xcrun --find stapler >/dev/null 2>&1; then
+    xcrun stapler validate "$asset_path" || die 4 "package stapler validation failed"
+    log "Package stapler validation passed."
+  else
+    log "stapler not found; local package stapler validation skipped."
+  fi
+}
+
+validate_release_payload() {
+  case "$asset_kind" in
+    tar) validate_tarball ;;
+    pkg) validate_package ;;
+    *) die 5 "release asset was not selected" ;;
+  esac
+}
+
+stage_release_payload() {
+  staging_dir="$TMPDIR_PATH/staging"
+  rm -rf "$staging_dir"
+  mkdir -p "$staging_dir"
+
+  case "$asset_kind" in
+    tar)
+      tar xzf "$asset_path" -C "$staging_dir" || die 5 "failed to extract release tarball"
+      ;;
+    pkg)
+      expanded_dir="$TMPDIR_PATH/pkg-expanded"
+      rm -rf "$expanded_dir"
+      pkgutil --expand-full "$asset_path" "$expanded_dir" || die 5 "failed to expand release package"
+      [ -d "$expanded_dir/Payload" ] || die 5 "expanded package does not contain Payload"
+      payload_entries="$(cd "$expanded_dir/Payload" && find . -mindepth 1 -print)" \
+        || die 5 "failed to list expanded package payload"
+      validate_staged_entries "$payload_entries" "package payload"
+      if find "$expanded_dir/Payload" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
+        die 5 "package payload contains unsafe link or device members"
+      fi
+      cp -R "$expanded_dir/Payload/." "$staging_dir"/
+      ;;
+    *)
+      die 5 "release asset was not selected"
+      ;;
+  esac
 }
 
 write_config() {
@@ -835,10 +940,7 @@ install_binary() {
     log "Would keep release support files in $INSTALL_DIR"
     return
   fi
-  staging_dir="$TMPDIR_PATH/staging"
-  rm -rf "$staging_dir"
-  mkdir -p "$staging_dir"
-  tar xzf "$tarball_path" -C "$staging_dir" || die 5 "failed to extract release tarball"
+  stage_release_payload
 
   # CRITICAL: mlx-swift loads Metal kernels from .bundle directories
   # adjacent to the binary. We install the REAL binary into $INSTALL_DIR
@@ -895,7 +997,11 @@ clear_quarantine() {
     log "xattr not found; skipping quarantine cleanup."
     return
   fi
-  log "The current release is unsigned. Clearing com.apple.quarantine lets macOS run it."
+  if [ "${asset_kind:-}" = "pkg" ]; then
+    log "Package release passed Gatekeeper assessment; quarantine cleanup is not required."
+    return
+  fi
+  log "Tarball release may carry a quarantine attribute. Clearing it lets macOS run the CLI."
   if prompt_yes_no "Clear quarantine attribute on $BINARY_PATH and $INSTALL_DIR? [Y/n]" "Y"; then
     run xattr -dr com.apple.quarantine "$BINARY_PATH"
     run xattr -dr com.apple.quarantine "$INSTALL_DIR"
@@ -1160,9 +1266,8 @@ main() {
   tag="$(latest_release_tag)"
   log "Latest release: $tag"
   download_release "$tag"
-  verify_checksum_signature
   verify_sha256
-  validate_tarball
+  validate_release_payload
   check_install_dir_clean
   install_binary
   check_path_hint
