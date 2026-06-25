@@ -27,10 +27,27 @@ the SPEC-015 SDK compatibility smoke. It asserts:
 
 - OpenAI Python SDK parses non-streaming `message.tool_calls[]`.
 - `finish_reason` is `tool_calls`.
-- `get_weather` arguments parse as JSON and contain `city: Vilnius`.
+- `find_definition` arguments parse as JSON and contain `symbol: ToolCallParser`.
 - Streaming emits `delta.tool_calls[]` and does not leak raw delimiters.
 - Unsupported v1 inputs return expected 400 codes for non-`auto`
   `tool_choice`, assistant `tool_calls`, and `tool` role messages.
 
 By default the JSON artifact is written to
 `artifacts/tool-calling-e2e-<timestamp>.json`. Secrets are not printed.
+
+## Model Compatibility
+
+Tool schemas are passed into the MLX chat template for any served model, but
+MacProvider only emits OpenAI `tool_calls[]` when the model output uses a
+recognized tool-call delimiter format:
+
+- Qwen-style `<tool_call>...</tool_call>` output, with either JSON tool-call
+  bodies or scalar Python-style keyword calls such as
+  `find_definition(symbol="ToolCallParser")`.
+- Llama 3.3-style `<|python_tag|>...<|eom_id|>` output, with either JSON
+  bodies or the same scalar Python-style keyword calls.
+
+Other HuggingFace MLX models may work if their chat template produces one of
+those raw formats. Models that answer in prose, or use a different tool-call
+syntax, safely fall back to normal assistant text instead of structured
+`tool_calls[]`.

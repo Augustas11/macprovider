@@ -22,12 +22,12 @@ RAW_DELIMITERS = ("<tool_call>", "</tool_call>", "<|python_tag|>", "<|eom_id|>")
 TOOL = {
     "type": "function",
     "function": {
-        "name": "get_weather",
-        "description": "Get the current weather for a city",
+        "name": "find_definition",
+        "description": "Find where a code symbol is defined",
         "parameters": {
             "type": "object",
-            "properties": {"city": {"type": "string"}},
-            "required": ["city"],
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
         },
     },
 }
@@ -36,8 +36,8 @@ MESSAGES = [
     {
         "role": "user",
         "content": (
-            "Use the get_weather tool to answer. Call get_weather with city "
-            "Vilnius and do not answer directly."
+            "Use the find_definition tool to answer. Call find_definition with "
+            "symbol ToolCallParser and do not answer directly."
         ),
     }
 ]
@@ -76,12 +76,12 @@ def model_dump(value: Any) -> dict[str, Any]:
 
 
 def assert_tool_call(call: Any) -> dict[str, Any]:
-    if call.function.name != "get_weather":
+    if call.function.name != "find_definition":
         raise AssertionError(f"unexpected function name: {call.function.name!r}")
     arguments = json.loads(call.function.arguments)
-    city = str(arguments.get("city", "")).lower()
-    if city != "vilnius":
-        raise AssertionError(f"expected city Vilnius, got arguments {arguments!r}")
+    symbol = str(arguments.get("symbol", ""))
+    if symbol != "ToolCallParser":
+        raise AssertionError(f"expected symbol ToolCallParser, got arguments {arguments!r}")
     return arguments
 
 
@@ -217,8 +217,8 @@ def run() -> dict[str, Any]:
                                 "id": "call_test",
                                 "type": "function",
                                 "function": {
-                                    "name": "get_weather",
-                                    "arguments": "{\"city\":\"Vilnius\"}",
+                                    "name": "find_definition",
+                                    "arguments": "{\"symbol\":\"ToolCallParser\"}",
                                 },
                             }
                         ],

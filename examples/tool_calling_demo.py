@@ -21,17 +21,25 @@ client = OpenAI(
 
 resp = client.chat.completions.create(
     model=MODEL,
-    messages=[{"role": "user", "content": "What is the weather in Vilnius?"}],
+    messages=[
+        {
+            "role": "user",
+            "content": (
+                "Use the find_definition tool to answer. Call find_definition "
+                "with symbol ToolCallParser and do not answer directly."
+            ),
+        }
+    ],
     tools=[
         {
             "type": "function",
             "function": {
-                "name": "get_weather",
-                "description": "Get the current weather for a city",
+                "name": "find_definition",
+                "description": "Find where a code symbol is defined",
                 "parameters": {
                     "type": "object",
-                    "properties": {"city": {"type": "string"}},
-                    "required": ["city"],
+                    "properties": {"symbol": {"type": "string"}},
+                    "required": ["symbol"],
                 },
             },
         }
@@ -43,9 +51,9 @@ tool_calls = message.tool_calls or []
 assert tool_calls, "expected at least one tool call"
 
 call = tool_calls[0]
-assert call.function.name == "get_weather", call.function.name
+assert call.function.name == "find_definition", call.function.name
 
 arguments = json.loads(call.function.arguments)
-assert arguments.get("city", "").lower() == "vilnius", arguments
+assert arguments.get("symbol") == "ToolCallParser", arguments
 
 print(json.dumps([call.model_dump() for call in tool_calls], indent=2))
