@@ -180,7 +180,7 @@ func Default() Config {
 		Capacity: CapacityConfig{
 			MonthlyBudgetUSD: 500, ReadyProviderDegradedThreshold: 1, ProjectedCostTier1Percent: 80, TierCooldownSeconds: 3600,
 		},
-		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, CoordinatorHeaderTimeoutSeconds: 10, StreamingCancelMS: 500},
+		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, CoordinatorHeaderTimeoutSeconds: 60, StreamingCancelMS: 500},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
 		Explorer: ExplorerConfig{Enabled: false},
@@ -449,10 +449,11 @@ func (c Config) CoordinatorTimeout() time.Duration {
 }
 
 // CoordinatorHeaderTimeout is the max time to wait for the coordinator to
-// start sending response headers after the request is fully written. This
-// bounds buyer-visible hangs during coordinator restarts or empty-pool windows
-// without capping long-running inference streams (ResponseHeaderTimeout only
-// covers the header phase; body streaming continues unaffected).
+// start sending response headers after the request is fully written. It must
+// cover non-streaming first-response latency for large local models, because
+// the coordinator cannot send headers until the provider returns a complete
+// non-streaming response. Body streaming continues unaffected after headers
+// are committed.
 func (c Config) CoordinatorHeaderTimeout() time.Duration {
 	return time.Duration(c.Timeouts.CoordinatorHeaderTimeoutSeconds) * time.Second
 }

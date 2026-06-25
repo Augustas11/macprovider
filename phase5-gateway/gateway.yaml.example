@@ -79,6 +79,10 @@ capacity:
 
 timeouts:
   coordinator_request_seconds: 300
+  # Non-streaming inference does not commit coordinator response headers until
+  # the provider returns a full response. Keep this above expected first
+  # response latency for large local models.
+  coordinator_header_timeout_seconds: 60
   streaming_cancel_ms: 500
 
 routing:

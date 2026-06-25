@@ -175,6 +175,118 @@ func TestEncryptedRelayDecryptsResponseEnd(t *testing.T) {
 	}
 }
 
+func TestEncryptedRelayDropsLateEndForRetiredRequest(t *testing.T) {
+	var logs bytes.Buffer
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, config.Default(), zerolog.New(&logs), time.Now())
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-late-end", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+	relay.Cancel("buyer_disconnected")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request: %v", err)
+	}
+
+	s.handleInferenceEnd("p1", "s1", encryptedResponseEnd(t, provider, "req-late-end", false, 0, InferenceResponseEnd{
+		Type:       "inference_response_end",
+		RequestID:  "req-late-end",
+		Status:     "complete",
+		ChunksSent: 0,
+	}))
+
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("session closed after valid late encrypted end for retired request")
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing from pool")
+	}
+	if got.State != pool.StateReady {
+		t.Fatalf("provider state = %s, want ready", got.State)
+	}
+	if provider.Tier2Session.P2CCounter != 1 {
+		t.Fatalf("p2c counter = %d, want 1", provider.Tier2Session.P2CCounter)
+	}
+	if bytes.Contains(logs.Bytes(), []byte(`"event":"aead_decrypt_failed"`)) {
+		t.Fatalf("late retired end logged AEAD failure: %s", logs.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("late encrypted inference_response_end for retired request dropped")) {
+		t.Fatalf("missing late-drop log: %s", logs.String())
+	}
+}
+
+func TestEncryptedRelayDropsLateChunkForRetiredRequest(t *testing.T) {
+	var logs bytes.Buffer
+	s, provider, providerConn := newEncryptedRelayHarnessWithConfig(t, config.Default(), zerolog.New(&logs), time.Now())
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-late-chunk", []byte(`{"model":"model-a"}`), true)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+	relay.Cancel("buyer_disconnected")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request: %v", err)
+	}
+
+	s.handleInferenceChunk("p1", "s1", encryptedResponseChunk(t, provider, "req-late-chunk", true, 0, []byte(`{"ok":true}`)))
+
+	if _, ok := s.storedSessionFor("p1", "s1"); !ok {
+		t.Fatal("session closed after valid late encrypted chunk for retired request")
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing from pool")
+	}
+	if got.State != pool.StateReady {
+		t.Fatalf("provider state = %s, want ready", got.State)
+	}
+	if provider.Tier2Session.P2CCounter != 1 {
+		t.Fatalf("p2c counter = %d, want 1", provider.Tier2Session.P2CCounter)
+	}
+	if bytes.Contains(logs.Bytes(), []byte(`"event":"aead_decrypt_failed"`)) {
+		t.Fatalf("late retired chunk logged AEAD failure: %s", logs.String())
+	}
+	if !bytes.Contains(logs.Bytes(), []byte("late encrypted inference_response_chunk for retired request dropped")) {
+		t.Fatalf("missing late-drop log: %s", logs.String())
+	}
+}
+
+func TestEncryptedRelayRejectsLateRetiredFrameTypeMismatch(t *testing.T) {
+	s, provider, providerConn := newEncryptedRelayHarness(t)
+	relay, err := s.DispatchInference(context.Background(), *provider, "req-late-mismatch", []byte(`{"model":"model-a"}`), false)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read encrypted inference_request: %v", err)
+	}
+	relay.Cancel("buyer_disconnected")
+	if _, _, err := wsutil.ReadServerData(providerConn); err != nil {
+		t.Fatalf("read cancel_request: %v", err)
+	}
+
+	s.handleInferenceEnd("p1", "s1", encryptedResponseChunk(t, provider, "req-late-mismatch", false, 0, []byte(`{"ok":true}`)))
+
+	if _, ok := s.storedSessionFor("p1", "s1"); ok {
+		t.Fatal("session still stored after late retired frame type mismatch")
+	}
+	got, ok := s.pool.Resolve("p1", "s1")
+	if !ok {
+		t.Fatal("provider missing from pool")
+	}
+	if got.State != pool.StateUnavailable {
+		t.Fatalf("provider state = %s, want unavailable", got.State)
+	}
+	if provider.Tier2Session.P2CCounter != 0 {
+		t.Fatalf("p2c counter = %d, want 0", provider.Tier2Session.P2CCounter)
+	}
+}
+
 func TestEncryptedRelayRekeysAfterRequestThreshold(t *testing.T) {
 	var logs bytes.Buffer
 	cfg := config.Default()

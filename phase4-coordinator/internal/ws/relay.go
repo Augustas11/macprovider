@@ -23,6 +23,8 @@ var (
 	ErrRelayAEADFailed   = errors.New("tier2 aead decrypt failed")
 )
 
+const retiredRelayRequestTTL = 5 * time.Minute
+
 type RelayStream struct {
 	RequestID string
 	Chunks    <-chan InferenceResponseChunk
@@ -45,6 +47,11 @@ type relayActive struct {
 	errs      chan error
 }
 
+type retiredRelayRequest struct {
+	stream    bool
+	retiredAt time.Time
+}
+
 type providerSession struct {
 	providerID string
 	assignedID string
@@ -56,6 +63,7 @@ type providerSession struct {
 	closed     bool
 	activeMu   sync.Mutex
 	active     map[string]*relayActive
+	retired    map[string]retiredRelayRequest
 	httpOnly   bool
 	tier2Mu    sync.Mutex
 	tier2      *pool.Tier2Session
@@ -116,6 +124,7 @@ func newProviderSession(providerID, assignedID string, conn net.Conn, bufferSize
 		writeCh:    make(chan providerFrame, bufferSize),
 		writeLimit: writeLimit,
 		active:     map[string]*relayActive{},
+		retired:    map[string]retiredRelayRequest{},
 	}
 }
 
@@ -205,8 +214,39 @@ func (ps *providerSession) removeActive(requestID string) (*relayActive, bool) {
 	active, ok := ps.active[requestID]
 	if ok {
 		delete(ps.active, requestID)
+		ps.markRetiredLocked(active, time.Now())
 	}
 	return active, ok
+}
+
+func (ps *providerSession) markRetiredLocked(active *relayActive, now time.Time) {
+	if active == nil || strings.TrimSpace(active.requestID) == "" {
+		return
+	}
+	cutoff := now.Add(-retiredRelayRequestTTL)
+	for id, retired := range ps.retired {
+		if retired.retiredAt.Before(cutoff) {
+			delete(ps.retired, id)
+		}
+	}
+	ps.retired[active.requestID] = retiredRelayRequest{
+		stream:    active.stream,
+		retiredAt: now,
+	}
+}
+
+func (ps *providerSession) recentlyRetired(requestID string) (retiredRelayRequest, bool) {
+	ps.activeMu.Lock()
+	defer ps.activeMu.Unlock()
+	retired, ok := ps.retired[requestID]
+	if !ok {
+		return retiredRelayRequest{}, false
+	}
+	if time.Since(retired.retiredAt) > retiredRelayRequestTTL {
+		delete(ps.retired, requestID)
+		return retiredRelayRequest{}, false
+	}
+	return retired, true
 }
 
 func (ps *providerSession) failActive(requestID string, err error) {
@@ -400,6 +440,44 @@ func (ps *providerSession) openInferenceEnd(providerID, assignedID string, activ
 	return end, nil
 }
 
+func (ps *providerSession) consumeRetiredEncryptedFrame(providerID, assignedID string, retired retiredRelayRequest, expectedType, expectedRequestID string, aad tier2.AEADFrameAAD, envelope tier2.AEADEnvelope) error {
+	ps.tier2Mu.Lock()
+	defer ps.tier2Mu.Unlock()
+	if ps.tier2 == nil {
+		return errors.New("encrypted frame for provider without tier2 session")
+	}
+	if ps.tier2.P2CCounter == ^uint64(0) {
+		return errors.New("tier2 p2c frame counter exhausted")
+	}
+	if aad.Type != expectedType {
+		return errors.New("tier2 retired frame type mismatch")
+	}
+	if aad.Direction != "p2c" {
+		return errors.New("tier2 retired frame direction mismatch")
+	}
+	if aad.RequestID != expectedRequestID {
+		return errors.New("tier2 retired frame request_id mismatch")
+	}
+	if aad.Stream != retired.stream {
+		return errors.New("tier2 retired frame stream mismatch")
+	}
+	seq := ps.tier2.P2CCounter
+	expectedAAD := tier2.AEADFrameAAD{
+		Type:       expectedType,
+		Direction:  "p2c",
+		RequestID:  expectedRequestID,
+		Stream:     retired.stream,
+		ProviderID: providerID,
+		AssignedID: assignedID,
+		Seq:        seq,
+	}
+	if _, err := tier2.OpenPillarBFrame(ps.tier2.P2CKey, ps.tier2.P2CNonceBase, ps.tier2.KeyID, seq, expectedAAD, envelope); err != nil {
+		return err
+	}
+	ps.tier2.P2CCounter++
+	return nil
+}
+
 func (ps *providerSession) markTier2RequestDispatched() {
 	ps.tier2Mu.Lock()
 	defer ps.tier2Mu.Unlock()
@@ -526,6 +604,14 @@ func (s *Server) handleInferenceChunk(providerID, assignedID string, payload []b
 		}
 		active, ok := session.activeFor(requestID)
 		if !ok {
+			if retired, ok := session.recentlyRetired(requestID); ok {
+				if err := session.consumeRetiredEncryptedFrame(providerID, assignedID, retired, "inference_response_chunk", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc}); err != nil {
+					s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
+					return
+				}
+				s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("late encrypted inference_response_chunk for retired request dropped")
+				return
+			}
 			s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("unknown encrypted inference_response_chunk request_id")
 			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown encrypted inference_response_chunk request_id")
 			return
@@ -594,6 +680,14 @@ func (s *Server) handleInferenceEnd(providerID, assignedID string, payload []byt
 		}
 		active, ok := session.activeFor(requestID)
 		if !ok {
+			if retired, ok := session.recentlyRetired(requestID); ok {
+				if err := session.consumeRetiredEncryptedFrame(providerID, assignedID, retired, "inference_response_end", requestID, aad, tier2.AEADEnvelope{Encrypted: true, Enc: envelope.Enc}); err != nil {
+					s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, err.Error())
+					return
+				}
+				s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("late encrypted inference_response_end for retired request dropped")
+				return
+			}
 			s.log.Warn().Str("provider_id", providerID).Str("request_id", requestID).Msg("unknown encrypted inference_response_end request_id")
 			s.closeProviderForTier2AEADFailure(session, providerID, assignedID, requestID, "unknown encrypted inference_response_end request_id")
 			return

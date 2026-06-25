@@ -18,7 +18,9 @@ import (
 )
 
 // version is overridden at build time via
-//   go build -ldflags "-X main.version=$(git describe --always --dirty --tags)"
+//
+//	go build -ldflags "-X main.version=$(git describe --always --dirty --tags)"
+//
 // (see scripts/build-linux.sh). Defaults to "dev" for local `go run`.
 var version = "dev"
 
@@ -77,10 +79,11 @@ func main() {
 	go runReservationReaper(ctx, store, time.Duration(cfg.Quotas.ReaperIntervalHours)*time.Hour)
 
 	// coordinatorTransport clones the default transport and adds
-	// ResponseHeaderTimeout so buyers get a fast 503 if the coordinator
-	// holds the connection without sending headers (e.g. during a restart
-	// while the provider pool is empty). This does not affect inference
-	// streams — ResponseHeaderTimeout only covers the header phase.
+	// ResponseHeaderTimeout so buyers get a bounded failure if the coordinator
+	// holds the connection without sending headers. This timeout must still be
+	// long enough for non-streaming large-model inference, because the
+	// coordinator cannot send headers until a complete non-streaming response
+	// is available. Streaming response bodies continue unaffected after headers.
 	coordinatorTransport := http.DefaultTransport.(*http.Transport).Clone()
 	coordinatorTransport.ResponseHeaderTimeout = cfg.CoordinatorHeaderTimeout()
 	coordinatorClient := &http.Client{
