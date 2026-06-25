@@ -1,6 +1,6 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.2 (2026-06-25, draft — codex round-2 fix pass on v0.1.1. Round 2 returned NEEDS-FIX-PASS at 2 CRITICAL + 5 MAJOR + 2 MINOR. v0.1.2 absorbs: C1 pinned partner-key token format unambiguously at `mpk_` + 43-char unpadded base64url of 32 random bytes (total 47 chars) and updated §3.7, §5.4.2, AC-17 in lock-step; C2 deferred `rewards` source semantics to operator-configured ledger with new §9.1a `provider_rewards_ledger` placeholder + Q13 open question (per codex's "absent/deferred" path); MAJORs M1-M5 absorbed (§5.4.3 CORS decision table, §1.1 portal-additional-fields wording removed, §7.2 grant inventory split into request-path readable / rollup-internal / SPEC-017-owned, §5.9 error envelope made internally consistent without claiming SPEC-006 envelope compat, §5.2 `stale_after` formula pinned); MINOR m1 noted, m2 RFC 9745 citation for Deprecation header added. Pending codex round-3 confirmation. Full r2 findings: `specs/SPEC-017-r2-audit.md`.)
+**Version:** 0.1.3 (2026-06-25, draft — codex round-3 fix pass on v0.1.2. Round 3 returned 0 CRITICAL + 4 MAJOR + 3 MINOR. v0.1.3 absorbs: M1 DB-role-isolation wording sweep across §1.5 C4, §4.2, §5.4.3, §7.2.1 (removed "stats_* only" stale phrasing; replaced §7.2.2 SQL placeholder with enumerated grants; clarified `last_used_at` write path as separate role); M2 CORS preflight decoupled from keyed-GET auth in §5.7 (preflight echoes Origin if it matches any configured partner allowlist; GET enforces the per-key allowlist); M3 §12 reference to SPEC-016 §5.1 rewords to "payout-pipeline context only" with rewards-semantics pointing at §9.1a + Q13; M4 §11 Q2 rewritten as a v0.2+ design question (no longer contradicting §5.4.2 v0.1 operator-only rule); m1 noted (mirror is canonical, source `.omc` path no longer cited in body); m2 §8.3 Deprecation citation also updated to RFC 9745; example Unix timestamp corrected; m3 §6.6.2 cross-ref fixed to Q11 and Q12/Q13 ordered numerically. Pending codex round-4 confirmation. Full r3 findings: `specs/SPEC-017-r3-audit.md`.)
 **Status:** Draft (design-only — no IMPL until v0.1 LOCKED and a separate `BUILD_SPEC_017_IMPL_PROMPT.md` written).
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
@@ -13,6 +13,23 @@ Audit-narrative-by-round detail lives in the per-round audit files under
 entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
+
+**v0.1.3 (2026-06-25, draft — codex round-3 fix pass on v0.1.2):**
+Round 3 returned 0 CRITICAL + 4 MAJOR + 3 MINOR. Fixes: M1 swept
+stale "stats_* only" / "exactly match" / "SELECT-only" wording across
+§1.5 C4, §4.2, §5.4.3, §7.2.1, §9.1; replaced §7.2.2 SQL placeholder
+with enumerated grants; routed `partner_keys.last_used_at` updates
+through a separate role. M2 decoupled CORS preflight from
+keyed-GET auth: preflight echoes Origin if it matches any
+configured partner allowlist OR returns `*`; per-key allowlist
+enforcement remains on GET. M3 §12 reference reworded so SPEC-016
+is cited for payout-pipeline context only, rewards semantics points
+at §9.1a + Q13. M4 §11 Q2 rewritten as a v0.2+ question ("when and
+how to add self-serve") instead of contradicting §5.4.2 v0.1
+operator-only rule. m1 noted; m2 §8.3 Deprecation citation also
+updated to RFC 9745, and example Unix timestamp corrected to match
+the prose date; m3 §6.6.2 cross-ref fixed to Q11 and §11 reordered
+numerically. Full narrative: `specs/SPEC-017-r3-audit.md`.
 
 **v0.1.2 (2026-06-25, draft — codex round-2 fix pass on v0.1.1):**
 Round 2 returned 2 CRITICAL + 5 MAJOR + 2 MINOR. Fixes: C1 pinned
@@ -137,7 +154,8 @@ C3. **No request-path queries against billing/session OLTP.** A stats
 handler MUST hit `stats_*` tables only. Hot OLTP tables stay protected.
 
 C4. **No handler-level access to billing internals.** The stats DB role
-has `SELECT` on `stats_*` only.
+has the request-path readable grant set defined in §7.2.1 (a strict
+subset that excludes billing/session OLTP).
 
 C5. **Edge-cacheable.** Every `GET` MUST return `Cache-Control` that lets
 nginx/Cloudflare serve a non-trivial cached body without contacting the
@@ -162,7 +180,9 @@ heading; it MUST NOT challenge the pick itself.
 A scheduled rollup job inside the coordinator binary reads OLTP
 billing/session/pool tables and writes narrow `stats_overview_current`,
 `stats_timeseries_*`, and `stats_leaderboard_<window>` tables. The API
-queries `stats_*` only.
+queries the §7.2.1 request-path readable set only (the `stats_*`
+projections plus the SPEC-017-owned side tables required at request
+time; never the OLTP billing/session tables).
 
 **Why this and not (a) materialized views or (c) on-demand:**
 
@@ -344,9 +364,11 @@ explorer. Both reach Postgres but via distinct DB roles; see §7.2.
   it runs out-of-band, not on the request path.
 - `phase4-coordinator/internal/stats/store/` — narrow read-only DAO over
   `stats_*` tables, used exclusively by handlers.
-- Postgres role `stats_reader` — `SELECT` on `stats_*` only; explicitly
-  denied on billing/session/pool tables. Created by a new migration in
-  §7.2.
+- Postgres role `stats_reader` — `SELECT` on the request-path
+  readable set defined in §7.2.1 (`stats_*` projections + the
+  SPEC-017-owned side tables needed at request time); explicitly
+  denied on billing/session/pool tables. Created by a new migration
+  in §7.2.
 - nginx server-block for `stats.streamvc.live` reverse-proxying to the
   same coordinator backend on `/v1/stats/*`, with a dedicated rate-limit
   zone (§5.6).
@@ -735,7 +757,14 @@ Operational rules:
    `token_hash` for every keyed request; there is no in-memory key
    cache in v0.1.
 2. The handler MAY update `last_used_at` on success (best effort,
-   not transactional with the response).
+   not transactional with the response). Because `stats_reader` has
+   only SELECT on `partner_keys` (§7.2.1), this UPDATE MUST be
+   dispatched to a separate, narrowly-grant-scoped role
+   `partner_keys_writer` (§7.2.5) — typically via a background
+   channel/queue, NOT inline on the response path. v0.1
+   implementations MAY also simply skip the `last_used_at` update
+   if the operator decides the audit value is not worth the extra
+   role.
 3. On success, all rate-limit accounting (§5.6) MUST key on
    `partner_keys.id`, NOT on the raw token or on the client IP.
 4. The 401 latency for "no row" and the 401 latency for "revoked"
@@ -830,12 +859,27 @@ response headers that each branch emits.
 | `/leaderboard` partner-key, `allowed_origins` non-empty, Origin not in allowlist | rejected at auth (§5.4.3) | omit (401 response carries no CORS allow header) | n/a |
 | `/leaderboard` partner-key, `allowed_origins` non-empty, Origin absent | rejected at auth (§5.4.3) | omit | n/a |
 
-Preflight: `OPTIONS` responds with status 204, no body, and
-`Access-Control-Allow-Methods: GET, HEAD, OPTIONS`,
-`Access-Control-Allow-Headers: Authorization, Content-Type`,
-`Access-Control-Max-Age: 3600`. The `Allow-Origin` value on preflight
-mirrors the table above based on the request's Origin and
-Authorization headers.
+**Preflight (`OPTIONS`).** Browser CORS preflight does NOT carry
+the actual `Authorization` token (only `Access-Control-Request-Headers:
+Authorization` advertises that the GET will). The handler therefore
+CANNOT evaluate per-key allowlists at preflight time, and MUST NOT
+try. Preflight uses a permissive, key-agnostic rule:
+
+- `OPTIONS /v1/stats/*` returns 204 with empty body.
+- `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`.
+- `Access-Control-Allow-Headers: Authorization, Content-Type`.
+- `Access-Control-Max-Age: 3600`.
+- `Access-Control-Allow-Origin`: if `Origin` matches **any** entry
+  in the operator-configured global partner-origin allowlist
+  (collected as the union of every active `partner_keys.allowed_origins`
+  array, plus the well-known origins `console.streamvc.live` and
+  `portal.streamvc.live`), echo `Origin` and also emit
+  `Access-Control-Allow-Credentials: true`. Otherwise emit `*`.
+
+Per-key allowlist enforcement is the responsibility of the actual
+GET (§5.4.3); preflight permissiveness MUST NOT be interpreted by
+clients or implementations as a guarantee that the GET will
+succeed.
 
 ### 5.8 Staleness and 503 budget
 
@@ -1049,7 +1093,7 @@ of this disclosure is part of the SPEC-014 v0.9 portal flow; v0.1 of
 this SPEC defines only the disclosure obligation, not the UI.
 
 Providers who object to partner-key exposure of their bucketed
-earnings have no v0.1 mechanism to suppress it. Q1' in §11
+earnings have no v0.1 mechanism to suppress it. Q11 in §11
 explicitly flags whether v0.2 should add a per-provider "block from
 partner projection" toggle.
 
@@ -1135,7 +1179,20 @@ Explicit denies (request-path role MUST NOT have these grants):
 CREATE ROLE stats_rollup LOGIN PASSWORD '<from-env>';
 REVOKE ALL ON SCHEMA public FROM stats_rollup;
 GRANT USAGE ON SCHEMA public TO stats_rollup;
-GRANT SELECT ON <OLTP billing/session/pool tables, enumerated per SPEC-002 §7 + SPEC-005 §10> TO stats_rollup;
+-- OLTP source tables for the rollup. The exact table names are
+-- pinned by SPEC-002 §7 (provider/session) and SPEC-005 §10
+-- (billing). The migration is operator-authored against the
+-- current locked SPEC-002 / SPEC-005 versions, NOT a SPEC-017
+-- normative SQL. SPEC-017 normatively requires SELECT on the
+-- enumerated billing/session/pool tables and forbids any other
+-- grant to stats_rollup.
+GRANT SELECT ON
+  provider_tokens,
+  sessions,
+  session_events,
+  billing_ledger,
+  request_log
+TO stats_rollup;
 GRANT INSERT, UPDATE, DELETE ON
   stats_overview_current,
   stats_timeseries_rpm_30m,
@@ -1167,13 +1224,33 @@ This role is referenced by SPEC-014 v0.9 candidate; SPEC-017 v0.1
 pins the grant set for that role here so the portal IMPL has a
 locked target. No `stats_*` grants. No OLTP grants.
 
-#### 7.2.4 Connection-pool isolation
+#### 7.2.4 `partner_keys_writer` — last_used_at writer
+
+```sql
+CREATE ROLE partner_keys_writer LOGIN PASSWORD '<from-env>';
+REVOKE ALL ON SCHEMA public FROM partner_keys_writer;
+GRANT USAGE ON SCHEMA public TO partner_keys_writer;
+GRANT UPDATE (last_used_at) ON partner_keys TO partner_keys_writer;
+```
+
+Used by a background channel/queue worker that consumes
+`(partner_keys.id, observed_at)` pairs from the request path and
+issues the UPDATE out-of-band (§5.4.3 step 2). This role has
+column-scoped UPDATE on `partner_keys.last_used_at` only — it
+cannot mutate hash, allowed_origins, rate_limit_*, or revoked_at.
+SPEC-017 v0.1 does NOT pin the channel transport (in-process
+buffered channel, NATS subject, etc.); the operator MAY pick. If
+the operator chooses to skip `last_used_at` updates entirely, this
+role MAY be omitted.
+
+#### 7.2.5 Connection-pool isolation
 
 The stats handlers MUST connect with `stats_reader` and MUST NOT
 share a `*sql.DB` instance with the explorer or billing handlers.
 A separate `*sql.DB` enforces this at compile/runtime; AC-9 verifies
 the role denies billing-table SELECT. The rollup job's `*sql.DB`
-uses `stats_rollup`; the portal's uses `provider_portal`. No two
+uses `stats_rollup`; the portal's uses `provider_portal`; the
+last-used writer (if present) uses `partner_keys_writer`. No two
 roles MAY be the same.
 
 ### 7.3 Process isolation
@@ -1275,7 +1352,7 @@ following forward-compat rules apply to any v0.x addition:
 Field removals, field-meaning changes, error-code repurposing, or
 window-vocabulary changes MUST ship behind `/v2/*` with a minimum
 **6-month** overlap window during which `/v1/*` continues to serve the
-prior shape, and a `Deprecation` header per RFC 8594 on every `/v1/*`
+prior shape, and a `Deprecation` header per RFC 9745 on every `/v1/*`
 response during overlap.
 
 ### 8.4 Sunset header
@@ -1284,7 +1361,7 @@ Once a `/v1/*` endpoint enters deprecation, every response MUST carry:
 
 - `Deprecation: @<unix_ts>` — RFC 9745 structured-field date format
   giving the deprecation effective timestamp (e.g.
-  `Deprecation: @1782518400` for 2026-06-22T00:00:00Z).
+  `Deprecation: @1782086400` for 2026-06-22T00:00:00Z).
 - `Sunset: Fri, 25 Dec 2026 00:00:00 GMT` — RFC 8594 / RFC 7231
   IMF-fixdate format with correct day-of-week giving the planned
   removal date.
@@ -1310,8 +1387,13 @@ number and the SPEC version that introduced the change.
 ### 9.1 Table schemas (normative)
 
 Every `stats_*` and `stats_components_health` table is owned by
-SPEC-017 and defined here. The handler's grant list in §7.2 MUST
-match this inventory exactly.
+SPEC-017 and defined here. The grant inventory across §7.2.1 /
+§7.2.2 / §7.2.3 partitions these tables by role; the union covers
+every table in this §9.1, plus the SPEC-017-owned `provider_visibility`
+/ `provider_visibility_audit` / `partner_keys` (defined in their
+respective sections) and the §9.1a `provider_rewards_ledger`. There
+is no single role with SELECT on the full union — that is the
+design.
 
 ```sql
 CREATE TABLE stats_overview_current (
@@ -1660,9 +1742,15 @@ challenge each and propose pins for v0.2.
   (e.g. `$$$` = top 10% earner by window) so that the disclosure
   surface stays uniform as the network scales? Absolute is simpler;
   percentile re-anchors automatically.
-- **Q2 — Partner key issuance UX.** Self-serve via portal,
-  operator-issued via Slack DM, or both? v0.1 pins "operator-issued
-  only" by default in §3.7 but does not normatively forbid self-serve.
+- **Q2 — Partner key issuance UX (v0.2+).** v0.1 §5.4.2 pins
+  operator-only issuance via the `coordinator partner-keys issue` CLI;
+  self-serve is NOT permitted in v0.1. Q2 is a forward-looking design
+  question for v0.2: WHEN and HOW should self-serve issuance be
+  introduced — portal-flow only, on-chain attestation, both? Should
+  self-serve keys carry a lower default rate-limit tier? Should
+  self-serve keys be locked to a single `allowed_origins` entry by
+  default? Resolution gated on partner volume / abuse signals after
+  v0.1 ships.
 - **Q3 — Leaderboard pagination.** Single-shot `limit ≤ 100` is the
   v0.1 contract. Should v0.2 introduce cursor-based pagination
   (`cursor=<opaque>`) for partner deep-rank queries? The
@@ -1704,15 +1792,6 @@ challenge each and propose pins for v0.2.
   posture works either way; the question is whether the partner-trust
   bargain is good enough as the operator-issued, operator-revocable
   surface it is in v0.1. Surfaced by codex round 1, q1.
-- **Q13 — Rewards source semantics.** §9.1a defers `earnings_rewards_*`
-  source semantics to an operator-defined `provider_rewards_ledger`
-  table whose population logic v0.1 does NOT pin. SPEC-016 v0.1.19
-  (the locked payout-pipeline SPEC) intentionally does not split
-  work vs rewards. Should v0.2: (a) wait for SPEC-016 v0.2 to define
-  the split normatively, (b) introduce a dedicated network-incentives
-  SPEC, or (c) leave `provider_rewards_ledger` operator-config
-  permanently and treat it as a hostable plug-in surface? Surfaced
-  by codex round 2 C2.
 - **Q12 — Network Stats UI canonical consumer.** The current
   in-repo `frontdoor/console/index.html` is a buyer-side dashboard,
   not the screenshot-style Network Statistics widget that motivated
@@ -1724,6 +1803,15 @@ challenge each and propose pins for v0.2.
   the vercel preview into the in-repo console. v0.1 of the API is
   agnostic; this is a follow-up SPEC-? UI spec. Surfaced by codex
   round 1, q2.
+- **Q13 — Rewards source semantics.** §9.1a defers `earnings_rewards_*`
+  source semantics to an operator-defined `provider_rewards_ledger`
+  table whose population logic v0.1 does NOT pin. SPEC-016 v0.1.19
+  (the locked payout-pipeline SPEC) intentionally does not split
+  work vs rewards. Should v0.2: (a) wait for SPEC-016 v0.2 to define
+  the split normatively, (b) introduce a dedicated network-incentives
+  SPEC, or (c) leave `provider_rewards_ledger` operator-config
+  permanently and treat it as a hostable plug-in surface? Surfaced
+  by codex round 2 C2.
 
 ---
 
@@ -1740,8 +1828,14 @@ challenge each and propose pins for v0.2.
 - `specs/SPEC-006-buyer-api.md` §2.2, §3 (public-surface conventions)
 - `specs/SPEC-014-provider-portal.md` (portal UI surfaces; v0.9
   candidate will add the earnings-visibility toggle)
-- `specs/SPEC-016-payout-pipeline.md` §5.1 (rewards-$ semantics)
+- `specs/SPEC-016-payout-pipeline.md` (payout-pipeline operator
+  context only; SPEC-017 does NOT derive `rewards-$` semantics
+  from SPEC-016 v0.1.19 — see §9.1a and §11 Q13 for the deferred
+  source-spec decision)
 - RFC 7234 (HTTP caching), RFC 8594 (Sunset header), RFC 2119 (MUST /
   SHOULD / MAY)
-- `specs/SPEC-017-advisor-round-2026-06-25.md` (mirror of the source artifact at `.omc/artifacts/ask/codex-i-m-designing-a-public-network-stats-api-for-macprovider-a-d-2026-06-25T18-18-42-442Z.md` in the main checkout)
+- `specs/SPEC-017-advisor-round-2026-06-25.md` (codex advisor
+  round establishing the four locked decisions Q1-Q4 of §2;
+  canonical in-repo copy — the source `omc ask` artifact lives
+  outside the worktree and is not citable from inside this SPEC)
   (codex advisor round establishing the four locked decisions)
