@@ -49,8 +49,14 @@ type ReorgPoller struct {
 	DB          *sql.DB
 	RPCs        TwoRPCs
 	HotWallet   string
-	PollWindow  time.Duration
+	PollWindow  time.Duration // fallback when Tuning == nil (test path)
 	RunInterval time.Duration
+	// Tuning is the §6.5 SIGHUP-reloadable snapshot provider.
+	// When non-nil, ReorgPoller reads PollWindow from
+	// Tuning.Snapshot() at the top of each poll cycle. Cadence
+	// (RunInterval) is NOT live-reloadable — change requires
+	// restart (documented limitation, Step 4 r1 [arch:4.2]).
+	Tuning      *TuningProvider
 	Logger      zerolog.Logger
 	NowFn       func() time.Time
 
@@ -59,6 +65,17 @@ type ReorgPoller struct {
 	done     chan struct{}
 	started  bool
 	stopOnce sync.Once
+}
+
+// currentPollWindow returns the live §4.7 re-poll window. When
+// TuningProvider is wired, reads the §6.5 SIGHUP-reloadable atomic
+// snapshot. When nil, returns the static PollWindow field. Step 4
+// r1 [arch:4.2] closure.
+func (p *ReorgPoller) currentPollWindow() time.Duration {
+	if p.Tuning != nil {
+		return p.Tuning.Snapshot().ReorgPollWindow
+	}
+	return p.PollWindow
 }
 
 // Run executes one re-poll cycle: for every confirmed, non-
@@ -72,7 +89,7 @@ func (p *ReorgPoller) Run(ctx context.Context) (int, error) {
 	if p.NowFn == nil {
 		p.NowFn = func() time.Time { return time.Now().UTC() }
 	}
-	cutoff := p.NowFn().Add(-p.PollWindow).UTC().Format(time.RFC3339Nano)
+	cutoff := p.NowFn().Add(-p.currentPollWindow()).UTC().Format(time.RFC3339Nano)
 
 	type pollRow struct {
 		PayoutID             int64

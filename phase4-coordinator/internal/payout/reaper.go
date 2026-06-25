@@ -36,7 +36,8 @@ type Reaper struct {
 	db          *sql.DB
 	pauseSvc    *PauseResumeService
 	tickEvery   time.Duration
-	staleAge    time.Duration
+	staleAge    time.Duration   // fallback when tuning == nil
+	tuning      *TuningProvider // §6.5 SIGHUP-reloadable; staleAge = 3×RunInterval at each ReapOnce
 	log         zerolog.Logger
 	nowFn       func() time.Time
 	mu          sync.Mutex
@@ -47,19 +48,40 @@ type Reaper struct {
 	stopWasFast bool
 }
 
+// currentStaleAge returns the live cancel-reconfirm stale cutoff.
+// When TuningProvider is wired, returns 3 × RunInterval from the
+// §6.5 atomic snapshot. When nil, returns the static staleAge field.
+// Step 4 r1 [arch:4.2] closure: SIGHUP-changed RunInterval lands in
+// the next ReapOnce without a process restart for the stale-age
+// CHECK; the ticker cadence (tickEvery) is captured at Start and
+// requires restart to change (documented limitation).
+func (r *Reaper) currentStaleAge() time.Duration {
+	if r.tuning != nil {
+		return 3 * r.tuning.Snapshot().RunInterval
+	}
+	return r.staleAge
+}
+
 // ReaperOptions bundles dependencies.
 type ReaperOptions struct {
 	DB       *sql.DB
 	PauseSvc *PauseResumeService
 	// TickEvery is the loop cadence — payout.tuning.run_interval.
 	// Tested with smaller values; production is in the [5m, 24h]
-	// range per SPEC §6.5.
+	// range per SPEC §6.5. Captured at Start; SIGHUP changes to
+	// run_interval do NOT change the ticker cadence until restart
+	// (Step 4 r1 [arch:4.2] documented limitation).
 	TickEvery time.Duration
 	// StaleAge is the cancel-reconfirm stale cutoff —
-	// 3 × payout.tuning.run_interval per §4.7.
+	// 3 × payout.tuning.run_interval per §4.7. Used as fallback
+	// when Tuning is nil; otherwise the per-cycle ReapOnce reads
+	// 3 × Tuning.Snapshot().RunInterval.
 	StaleAge time.Duration
-	Logger   zerolog.Logger
-	NowFn    func() time.Time
+	// Tuning is the §6.5 SIGHUP-reloadable snapshot provider.
+	// Step 4 r1 [arch:4.2] closure.
+	Tuning *TuningProvider
+	Logger zerolog.Logger
+	NowFn  func() time.Time
 }
 
 // NewReaper constructs a stopped Reaper. Call Start(ctx) to launch
@@ -86,6 +108,7 @@ func NewReaper(opts ReaperOptions) (*Reaper, error) {
 		pauseSvc:  opts.PauseSvc,
 		tickEvery: opts.TickEvery,
 		staleAge:  opts.StaleAge,
+		tuning:    opts.Tuning,
 		log:       opts.Logger,
 		nowFn:     nowFn,
 		done:      make(chan struct{}),
@@ -172,7 +195,7 @@ func (r *Reaper) runOnce(ctx context.Context) {
 // CAS-claims+emits each one. Returns the count of successfully
 // reaped rows.
 func (r *Reaper) reapStaleOutbox(ctx context.Context) (int, error) {
-	cutoff := r.nowFn().Add(-r.staleAge)
+	cutoff := r.nowFn().Add(-r.currentStaleAge())
 	rows, err := ListUnemittedStaleOutboxOlderThan(ctx, r.db, cutoff)
 	if err != nil {
 		return 0, err

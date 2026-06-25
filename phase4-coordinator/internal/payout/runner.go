@@ -10,6 +10,7 @@ import (
 	"math/big"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -68,8 +69,24 @@ type RunnerOptions struct {
 	// balance-monitoring emits at the top of each cycle (Step 4).
 	// 0 disables. Read once per cycle so SIGHUP reloads land
 	// without a runner restart.
+	//
+	// Step 4 r1 [code:r1-2]/[arch:4.3] closure: these defaults
+	// apply only when Tuning is nil. When Tuning is set, the live
+	// snapshot's LowBalanceThreshold/LowNativeThreshold override.
 	LowBalanceThreshold int64
 	LowNativeThreshold  int64
+
+	// Tuning is the §6.5 SIGHUP-reloadable snapshot provider.
+	// When non-nil, Runner reads ConfirmationBlocks, MaxRowsPerRun,
+	// LowBalanceThreshold, and LowNativeThreshold from Tuning.Snapshot()
+	// once per cycle at the top of RunOnce. When nil, the static
+	// fields above are used (test path).
+	//
+	// Step 4 r1 [code:r1-1]/[sec:r1-2]/[arch:4.2] convergent closure.
+	// The runner's cadence (RunInterval) is captured at construction
+	// and CANNOT be live-reloaded — a SIGHUP change to RunInterval
+	// is documented as a known limitation requiring restart.
+	Tuning *TuningProvider
 
 	// Test/instrumentation hooks. Production wiring leaves these nil.
 	SleepAfterPostCommitLeaseReread time.Duration
@@ -86,6 +103,73 @@ type Runner struct {
 	stop       chan struct{}
 	done       chan struct{}
 	tickerStop chan struct{}
+
+	// Step 4 r1 [arch:4.1]/[sec:r1-1] convergent closure: halted
+	// is set by RequestHalt (called by the chain-balance worker on
+	// negative drift). RunOnce checks at top and aborts the cycle
+	// with payout_runner_halted_skipping_cycle emitted; admin
+	// run-now refuses with 409. Operator runbook drives recovery
+	// (flip payout.enabled=false + investigate + restart).
+	halted       atomic.Bool
+	haltReason   atomic.Value // string
+	haltedAtUTC  atomic.Value // string (RFC3339Nano)
+
+	// activeSnap is the §6.5 tuning snapshot captured at the top
+	// of RunOnce. Single-threaded under mu+inFlight (only one
+	// cycle in flight at a time), so a plain field suffices. Used
+	// by processRow and all downstream helpers via r.snap().
+	// Cleared in RunOnce's defer.
+	activeSnap TuningSnapshot
+}
+
+// RequestHalt is the chain-balance worker's halt entry point.
+// Sets the persistent halt flag and persists the reason; the next
+// cycle observes the flag and skips. Safe to call concurrently and
+// idempotently — the first reason wins.
+//
+// SPEC §7.4: drift beyond tolerance MUST halt the runner.
+// Step 4 r1 [arch:4.1]/[sec:r1-1] convergent closure.
+func (r *Runner) RequestHalt(reason string) {
+	if r == nil {
+		return
+	}
+	if r.halted.CompareAndSwap(false, true) {
+		r.haltReason.Store(reason)
+		r.haltedAtUTC.Store(r.opts.NowFn().UTC().Format(time.RFC3339Nano))
+		r.opts.Logger.Error().
+			Str("event", "payout_runner_halted").
+			Str("severity", "PAGE").
+			Str("reason", reason).
+			Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
+			Send()
+	}
+}
+
+// IsHalted reports whether RequestHalt has been called. Admin
+// run-now uses this to refuse 409. The halt flag is process-local
+// and survives only until restart — operator runbook expects a
+// human-driven restart after investigation.
+func (r *Runner) IsHalted() bool {
+	if r == nil {
+		return false
+	}
+	return r.halted.Load()
+}
+
+// HaltReason returns the reason recorded by RequestHalt, or "" if
+// the runner is not halted.
+func (r *Runner) HaltReason() string {
+	if r == nil {
+		return ""
+	}
+	v := r.haltReason.Load()
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
 }
 
 // NewRunner builds a Runner. The caller MUST have already
@@ -186,6 +270,42 @@ func (r *Runner) loop(ctx context.Context) {
 	}
 }
 
+// currentTuning returns the live §6.5 tuning snapshot. When a
+// TuningProvider is wired (production path), reads come from the
+// SIGHUP-reloadable atomic snapshot. When nil (test path), the
+// static RunnerOptions fields are used.
+//
+// Step 4 r1 [code:r1-1]/[sec:r1-2]/[arch:4.2] convergent closure:
+// snapshot is read ONCE per RunOnce at the top, so all reads
+// within a cycle see a consistent view even if SIGHUP arrives
+// mid-cycle.
+func (r *Runner) currentTuning() TuningSnapshot {
+	if r.opts.Tuning != nil {
+		return r.opts.Tuning.Snapshot()
+	}
+	return TuningSnapshot{
+		AddressCoolingOffPeriod: 0,
+		RunInterval:             r.opts.RunInterval,
+		ConfirmationBlocks:      r.opts.ConfirmationBlocks,
+		MaxRowsPerRun:           r.opts.MaxRowsPerRun,
+		LowBalanceThreshold:     r.opts.LowBalanceThreshold,
+		LowNativeThreshold:      r.opts.LowNativeThreshold,
+	}
+}
+
+// snap returns r.activeSnap. When called outside a RunOnce cycle
+// (zero-value), falls back to currentTuning(). All processRow
+// downstream helpers must call this rather than reading
+// r.opts.ConfirmationBlocks / MaxRowsPerRun / LowBalance / LowNative
+// directly, so SIGHUP reloads land at the next cycle boundary
+// (Step 4 r1 [code:r1-1]/[arch:4.2] closure).
+func (r *Runner) snap() TuningSnapshot {
+	if r.activeSnap.ConfirmationBlocks == 0 {
+		return r.currentTuning()
+	}
+	return r.activeSnap
+}
+
 // RunOnce executes one §4.3 cycle synchronously. Used by Start
 // (cadence) and by the admin /admin/payout/run-now endpoint.
 //
@@ -194,6 +314,19 @@ func (r *Runner) loop(ctx context.Context) {
 // invariant violation) abort the cycle and trip the runner-halt
 // signal via the returned error.
 func (r *Runner) RunOnce(ctx context.Context) error {
+	// Step 4 r1 [arch:4.1]/[sec:r1-1] convergent closure: refuse
+	// the cycle if RequestHalt has been called. The PAGE event
+	// was already emitted at halt time; the per-cycle skip event
+	// here is observability for the operator runbook.
+	if r.halted.Load() {
+		r.opts.Logger.Warn().
+			Str("event", "payout_runner_halted_skipping_cycle").
+			Str("severity", "PAGE").
+			Str("reason", r.HaltReason()).
+			Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
+			Send()
+		return ErrRunnerHalted
+	}
 	r.mu.Lock()
 	if r.inFlight {
 		r.mu.Unlock()
@@ -206,6 +339,15 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 		r.inFlight = false
 		r.mu.Unlock()
 	}()
+
+	// Snapshot the §6.5 tuning ONCE at the top of the cycle so all
+	// downstream reads see a consistent view. SIGHUP between calls
+	// to processRow within a single cycle does NOT take effect
+	// until the next cycle. Cleared on cycle exit (mu+inFlight
+	// guarantees no concurrent reader).
+	snap := r.currentTuning()
+	r.activeSnap = snap
+	defer func() { r.activeSnap = TuningSnapshot{} }()
 
 	runID := uuid.NewString()
 	now := r.opts.NowFn()
@@ -255,11 +397,11 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	// SIGHUP-tuned thresholds land without a runner restart.
 	// Failure here is observability-only — degraded telemetry is
 	// preferred over a money-path stall on transient RPC error.
-	r.emitBalanceAlerts(ctx, runID, now)
+	r.emitBalanceAlerts(ctx, runID, now, snap)
 
 	// §4.3 step 1: SELECT ready rows.
 	hotWallet := r.opts.Security.HotWalletAddress
-	rows, err := SelectReadyPayouts(ctx, r.opts.DB, hotWallet, now.Format(time.RFC3339Nano), r.opts.MaxRowsPerRun)
+	rows, err := SelectReadyPayouts(ctx, r.opts.DB, hotWallet, now.Format(time.RFC3339Nano), snap.MaxRowsPerRun)
 	if err != nil {
 		return fmt.Errorf("SelectReadyPayouts: %w", err)
 	}
@@ -309,7 +451,10 @@ const (
 	rowOutcomeSkipped
 )
 
-// processRow runs §4.3 steps 2-9 for a single ready row.
+// processRow runs §4.3 steps 2-9 for a single ready row. The
+// §6.5 tuning snapshot is read off r.activeSnap via r.snap();
+// the snapshot was captured by RunOnce at cycle start so all
+// confirmation_blocks reads within one cycle see the same view.
 func (r *Runner) processRow(ctx context.Context, runID string, row ReadyRow) (rowOutcome, error) {
 	// Standalone lease self-fence (steps 6-8 are guarded inline).
 	if err := SelfFence(ctx, r.opts.DB, r.state); err != nil {
@@ -498,7 +643,7 @@ func (r *Runner) pollCancelOnce(ctx context.Context, runID string, cancel Attemp
 	if err != nil {
 		return rowOutcomeFailed
 	}
-	if int64(head)-int64(recA.BlockNumber) < int64(r.opts.ConfirmationBlocks) {
+	if int64(head)-int64(recA.BlockNumber) < int64(r.snap().ConfirmationBlocks) {
 		return rowOutcomeFailed
 	}
 	if recA.Status != 1 {
@@ -786,7 +931,7 @@ func (r *Runner) pollAndConfirm(ctx context.Context, conn *sql.Conn, runID strin
 				continue
 			}
 			depth := int64(head) - int64(recPri.BlockNumber)
-			if depth >= int64(r.opts.ConfirmationBlocks) {
+			if depth >= int64(r.snap().ConfirmationBlocks) {
 				break
 			}
 		}
@@ -1213,13 +1358,13 @@ func receiptSummary(r *Receipt) map[string]interface{} {
 // orthogonal: one is "we're running low on funds for upcoming
 // payouts" (operational alert); the other is "the books don't
 // match the chain" (incident-class drift detector).
-func (r *Runner) emitBalanceAlerts(ctx context.Context, runID string, now time.Time) {
-	if r.opts.LowBalanceThreshold <= 0 && r.opts.LowNativeThreshold <= 0 {
+func (r *Runner) emitBalanceAlerts(ctx context.Context, runID string, now time.Time, snap TuningSnapshot) {
+	if snap.LowBalanceThreshold <= 0 && snap.LowNativeThreshold <= 0 {
 		return
 	}
 	hotLower := strings.ToLower(r.opts.Security.HotWalletAddress)
 
-	if r.opts.LowBalanceThreshold > 0 {
+	if snap.LowBalanceThreshold > 0 {
 		data := usdcBalanceCalldata(hotLower)
 		res, err := r.opts.RPCs.Primary.CallContract(ctx, USDCContractAddressBase, data)
 		if err != nil {
@@ -1228,34 +1373,34 @@ func (r *Runner) emitBalanceAlerts(ctx context.Context, runID string, now time.T
 				Str("probe", "usdc").
 				Str("run_id", runID).Send()
 		} else if bal, ok := parseBalanceResult(res); ok {
-			threshold := new(big.Int).SetInt64(r.opts.LowBalanceThreshold)
+			threshold := new(big.Int).SetInt64(snap.LowBalanceThreshold)
 			if bal.Cmp(threshold) < 0 {
 				r.opts.Logger.Warn().
 					Str("event", "payout_low_balance").
 					Str("severity", "WARN").
 					Str("hot_wallet", hotLower).
 					Str("balance_usdc_base_units", bal.String()).
-					Int64("threshold", r.opts.LowBalanceThreshold).
+					Int64("threshold", snap.LowBalanceThreshold).
 					Str("run_id", runID).
 					Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).Send()
 			}
 		}
 	}
 
-	if r.opts.LowNativeThreshold > 0 {
+	if snap.LowNativeThreshold > 0 {
 		bal, err := r.opts.RPCs.Primary.NativeBalance(ctx, hotLower)
 		if err != nil {
 			r.opts.Logger.Warn().Err(err).
 				Str("event", "payout_balance_probe_rpc_error").
 				Str("probe", "native").
 				Str("run_id", runID).Send()
-		} else if bal < uint64(r.opts.LowNativeThreshold) {
+		} else if bal < uint64(snap.LowNativeThreshold) {
 			r.opts.Logger.Warn().
 				Str("event", "payout_low_native_balance").
 				Str("severity", "WARN").
 				Str("hot_wallet", hotLower).
 				Uint64("balance_wei", bal).
-				Int64("threshold_wei", r.opts.LowNativeThreshold).
+				Int64("threshold_wei", snap.LowNativeThreshold).
 				Str("run_id", runID).
 				Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).Send()
 		}

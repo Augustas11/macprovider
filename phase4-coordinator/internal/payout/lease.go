@@ -43,6 +43,13 @@ var ErrLeaseConflict = errors.New("payout: runner lease conflict (fresh holder)"
 // payout_runner_lease_lost + self-halts.
 var ErrLeaseLost = errors.New("payout: runner lease lost")
 
+// ErrRunnerHalted is returned by RunOnce when RequestHalt has been
+// called (typically by the §7.4 chain-balance worker on negative
+// drift). Caller observes via errors.Is; admin /admin/payout/run-now
+// returns 409 in this case. SPEC §7.4 + Step 4 r1 [arch:4.1]/
+// [sec:r1-1] convergent closure.
+var ErrRunnerHalted = errors.New("payout: runner halted (operator action required)")
+
 // Acquire implements the §4.8b Acquire semantics:
 //
 //   - No row → INSERT (fresh acquire).

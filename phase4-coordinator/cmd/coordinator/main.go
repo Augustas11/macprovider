@@ -721,6 +721,28 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		return nil, nil, nil, fmt.Errorf("payout: PayoutClaimer is required when payout.enabled=true (SPEC §4.3 step 8)")
 	}
 
+	// Step 4 §6.5 — SIGHUP-reloadable tuning provider. Built
+	// BEFORE the consumers so it can be wired into each as the
+	// live source of truth. Step 4 r1 [code:r1-1]/[sec:r1-2]/
+	// [arch:4.2] convergent closure — accepting a SIGHUP reload
+	// without consumer plumbing was the original defect.
+	initialTuning := payout.TuningSnapshot{
+		AddressCoolingOffPeriod: cfg.Payout.Tuning.AddressCoolingOffPeriod,
+		RunInterval:             cfg.Payout.Tuning.RunInterval,
+		RunNowMinInterval:       cfg.Payout.Tuning.RunNowMinInterval,
+		ConfirmationBlocks:      cfg.Payout.Tuning.ConfirmationBlocks,
+		MaxRowsPerRun:           cfg.Payout.Tuning.MaxRowsPerRun,
+		ReorgPollWindow:         cfg.Payout.Tuning.ReorgPollWindow,
+		LowBalanceThreshold:     cfg.Payout.Tuning.LowBalanceThreshold,
+		LowNativeThreshold:      cfg.Payout.Tuning.LowNativeThreshold,
+		RPCURLPrimaryPinSPKI:    cfg.Payout.Tuning.RPCURLPrimaryPinSPKI,
+		RPCURLSecondaryPinSPKI:  cfg.Payout.Tuning.RPCURLSecondaryPinSPKI,
+	}
+	tuningProvider, err := payout.NewTuningProvider(initialTuning, cfg.Payout.Security.PerDayCapUSDCBaseUnits, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("NewTuningProvider: %w", err)
+	}
+
 	// Build address service first — needed before NewMuxStep2.
 	denyList, err := payout.NewDenyList(sec.HotWalletAddress)
 	if err != nil {
@@ -734,6 +756,8 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("addresses service: %w", err)
 	}
+	// Wire live tuning so address cooling-off reads at write time.
+	svc.Tuning = tuningProvider
 
 	// Acquire the lease IMMEDIATELY before runner construction.
 	state, _, err := payout.Acquire(ctx, db, cfg.Payout.Tuning.RunInterval, logger)
@@ -741,7 +765,17 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		return nil, nil, nil, fmt.Errorf("Acquire lease: %w", err)
 	}
 
-	// Construct runner.
+	// Construct runner. Step 4 r1 closures:
+	//   - Tuning is wired so MaxRowsPerRun/ConfirmationBlocks/
+	//     LowBalance/LowNative reads come from the SIGHUP-reloadable
+	//     snapshot at the top of every cycle ([code:r1-1]/
+	//     [code:r1-2]/[arch:4.2]/[arch:4.3]/[sec:r1-2]/[sec:r1-3]).
+	//   - LowBalanceThreshold/LowNativeThreshold also passed as
+	//     static fields so a missing Tuning (test path) still has
+	//     a sane fallback.
+	//   - RunInterval is still captured here for the cadence ticker;
+	//     SIGHUP changes to run_interval require restart (documented
+	//     limitation per [arch:4.2]).
 	runner, err := payout.NewRunner(payout.RunnerOptions{
 		DB:                    db,
 		Security:              sec,
@@ -754,6 +788,9 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		ConfirmationBlocks:    cfg.Payout.Tuning.ConfirmationBlocks,
 		PerPayoutCapBaseUnits: cfg.Payout.Security.PerPayoutCapUSDCBaseUnits,
 		PerDayCapBaseUnits:    cfg.Payout.Security.PerDayCapUSDCBaseUnits,
+		LowBalanceThreshold:   cfg.Payout.Tuning.LowBalanceThreshold,
+		LowNativeThreshold:    cfg.Payout.Tuning.LowNativeThreshold,
+		Tuning:                tuningProvider,
 	}, state)
 	if err != nil {
 		// Release the lease on construction failure so the next
@@ -772,6 +809,7 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		HotWallet:   sec.HotWalletAddress,
 		PollWindow:  cfg.Payout.Tuning.ReorgPollWindow,
 		RunInterval: cfg.Payout.Tuning.RunInterval,
+		Tuning:      tuningProvider,
 		Logger:      logger,
 	}
 
@@ -824,8 +862,12 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		DB:        db,
 		PauseSvc:  pauseSvc,
 		TickEvery: cfg.Payout.Tuning.RunInterval,
-		// §4.7 stale cutoff = 3 × run_interval.
+		// §4.7 stale cutoff = 3 × run_interval. With Tuning wired,
+		// ReapOnce reads 3 × Tuning.Snapshot().RunInterval per
+		// cycle so SIGHUP changes land at the next tick (the ticker
+		// cadence itself remains captured until restart).
 		StaleAge: 3 * cfg.Payout.Tuning.RunInterval,
+		Tuning:   tuningProvider,
 		Logger:   logger,
 	})
 	if err != nil {
@@ -833,32 +875,16 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		return nil, nil, nil, fmt.Errorf("NewReaper: %w", err)
 	}
 
-	// Step 4 §6.5 — SIGHUP-reloadable tuning provider. Seeded from
-	// the startup config; main.go installs the SIGHUP handler that
-	// re-reads the config file and calls tuning.Reload.
-	initialTuning := payout.TuningSnapshot{
-		AddressCoolingOffPeriod: cfg.Payout.Tuning.AddressCoolingOffPeriod,
-		RunInterval:             cfg.Payout.Tuning.RunInterval,
-		RunNowMinInterval:       cfg.Payout.Tuning.RunNowMinInterval,
-		ConfirmationBlocks:      cfg.Payout.Tuning.ConfirmationBlocks,
-		MaxRowsPerRun:           cfg.Payout.Tuning.MaxRowsPerRun,
-		ReorgPollWindow:         cfg.Payout.Tuning.ReorgPollWindow,
-		LowBalanceThreshold:     cfg.Payout.Tuning.LowBalanceThreshold,
-		LowNativeThreshold:      cfg.Payout.Tuning.LowNativeThreshold,
-		RPCURLPrimaryPinSPKI:    cfg.Payout.Tuning.RPCURLPrimaryPinSPKI,
-		RPCURLSecondaryPinSPKI:  cfg.Payout.Tuning.RPCURLSecondaryPinSPKI,
-	}
-	tuningProvider, err := payout.NewTuningProvider(initialTuning, cfg.Payout.Security.PerDayCapUSDCBaseUnits, logger)
-	if err != nil {
-		_ = payout.Release(context.Background(), db, state, logger)
-		return nil, nil, nil, fmt.Errorf("NewTuningProvider: %w", err)
-	}
-
 	// Step 4 §7.4 — chain-balance worker. The haltRunner callback
-	// stops the runner cleanly on a negative-drift PAGE; the next
-	// process picks up the lease via stale takeover. Runs on the
-	// security namespace's chain_recon_interval (NOT the SIGHUP
-	// tuning interval).
+	// calls runner.RequestHalt to stop the next cycle from running;
+	// the in-flight broadcast (if any) still gets to complete since
+	// the halt flag is read at the TOP of the next RunOnce, not
+	// mid-cycle.
+	//
+	// Step 4 r1 [arch:4.1]/[sec:r1-1] convergent closure: the
+	// previous wiring emitted the PAGE but DID NOT actually halt
+	// the runner, so subsequent cycles continued after fake-funding
+	// detection. SPEC §7.4 says drift beyond tolerance MUST halt.
 	chainCfg := payout.ChainBalanceConfig{
 		Interval:      cfg.Payout.Security.ChainReconInterval,
 		ToleranceUSDC: cfg.Payout.Security.ChainReconToleranceUSDCBaseUnits,
@@ -866,16 +892,10 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		USDCContract:  payout.USDCContractAddressBase,
 	}
 	chainWorker, err := payout.NewChainBalanceWorker(db, rpcs, chainCfg, func(reason string) {
-		logger.Error().
-			Str("event", "payout_runner_halt_requested").
-			Str("reason", reason).
-			Str("severity", "PAGE").Send()
-		// The chain-balance worker requests a halt by emitting the
-		// PAGE event; the operator runbook + ops bundle wire the
-		// human response (flip payout.enabled=false + restart).
-		// Programmatic auto-halt is intentionally NOT done here so
-		// the runner's in-flight broadcast can complete before a
-		// human-driven restart.
+		// RequestHalt is idempotent and emits payout_runner_halted
+		// PAGE on the first invocation. Subsequent calls are no-ops
+		// preserving the first reason.
+		runner.RequestHalt(reason)
 	}, logger)
 	if err != nil {
 		_ = payout.Release(context.Background(), db, state, logger)

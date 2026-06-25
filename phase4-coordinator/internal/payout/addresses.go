@@ -83,6 +83,15 @@ type addressEvent struct {
 // AddressesService bundles the dependencies required by the
 // §3.3 / §3.2 handler. The struct is constructed once at
 // startup; it holds zero per-request state of its own.
+//
+// Step 4 r1 [code:r1-1]/[arch:4.2] closure: when Tuning is non-nil
+// (production path), the §3.3 write reads the live cooling-off
+// from Tuning.Snapshot() at the moment of registration. New
+// registrations cool off against the NEW value after SIGHUP;
+// in-flight `pending_until_utc` values on existing rows are NOT
+// recomputed (SPEC §6.5 normative — addresses.go reads at
+// write-time, not at runner-cycle time). CoolingOffPeriod remains
+// for the test path that doesn't wire a TuningProvider.
 type AddressesService struct {
 	DB                *sql.DB
 	Security          SecurityConfig
@@ -90,9 +99,21 @@ type AddressesService struct {
 	Tokens            providerTokenValidator
 	Identity          providerIdentityChecker
 	Pause             pauseFlagReader
-	CoolingOffPeriod  time.Duration // §3.3: default 24h, configurable via payout.tuning.address_cooling_off_period (Step 4)
+	CoolingOffPeriod  time.Duration // fallback when Tuning == nil (test path)
+	Tuning            *TuningProvider
 	Log               zerolog.Logger
 	Now               func() time.Time // injectable for tests
+}
+
+// currentCoolingOff returns the live address-registration
+// cooling-off period. When TuningProvider is wired (production),
+// reads the §6.5 SIGHUP-reloadable atomic snapshot. When nil
+// (test), returns the static CoolingOffPeriod field.
+func (s *AddressesService) currentCoolingOff() time.Duration {
+	if s.Tuning != nil {
+		return s.Tuning.Snapshot().AddressCoolingOffPeriod
+	}
+	return s.CoolingOffPeriod
 }
 
 // NewAddressesService validates the wiring and returns a usable
@@ -417,7 +438,7 @@ func (s *AddressesService) ServePayoutAddress(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	pendingUntil := now.Add(s.CoolingOffPeriod)
+	pendingUntil := now.Add(s.currentCoolingOff())
 	registeredAtUtcStr := now.Format(time.RFC3339Nano)
 	pendingUntilStr := pendingUntil.Format(time.RFC3339Nano)
 
