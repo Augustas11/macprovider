@@ -34,6 +34,7 @@ CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
 NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"
+CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}"
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
 # FR-C9.4 strict-reject path still requires `coordinator-cli
@@ -49,6 +50,26 @@ SSH="ssh -i $SSH_KEY -o ConnectTimeout=10 -p 22 $VPS_USER@$VPS_HOST"
 SCP="scp -i $SSH_KEY -P 22"
 
 log() { printf "\n[deploy] %s\n" "$*"; }
+
+yaml_tier2_value() {
+  local key="$1"
+  awk -v key="$key" '
+    /^[[:space:]]*tier2:[[:space:]]*$/ { in_tier2=1; next }
+    in_tier2 && /^[^[:space:]#][^:]*:/ { exit }
+    in_tier2 {
+      line=$0
+      sub(/[[:space:]]+#.*$/, "", line)
+      if (line ~ "^[[:space:]]*" key ":[[:space:]]*") {
+        sub("^[[:space:]]*" key ":[[:space:]]*", "", line)
+        gsub(/^"|"$/, "", line)
+        gsub(/^'\''|'\''$/, "", line)
+        gsub(/^[[:space:]]+|[[:space:]]+$/, "", line)
+        print line
+        exit
+      }
+    }
+  ' "$CONFIG"
+}
 
 log "step 0/9: pre-deploy config-drift + C2 cross-check"
 # Fail closed before touching the VPS if the config to be deployed has a
@@ -93,6 +114,34 @@ fi
 bash "$DIST_DIR/test/check_nginx_catalog_routes_test.sh" || {
   echo "aborting deploy: nginx /catalog/ routes missing or misconfigured" >&2; exit 5;
 }
+
+CATALOG_REMOTE_PATH="$(yaml_tier2_value catalog_path)"
+CATALOG_PUBLIC_KEY="$(yaml_tier2_value catalog_public_key)"
+if [ -n "$CATALOG_REMOTE_PATH" ]; then
+  if [ -z "$CATALOG_PUBLIC_KEY" ]; then
+    echo "aborting deploy: tier2.catalog_path is set but tier2.catalog_public_key is empty" >&2
+    exit 5
+  fi
+  if [ ! -f "$CATALOG_SOURCE" ]; then
+    echo "aborting deploy: configured tier2.catalog_path requires local catalog artifact, missing: $CATALOG_SOURCE" >&2
+    echo "  Override with CATALOG_SOURCE=<signed-catalog-json>" >&2
+    exit 5
+  fi
+  if ! command -v go >/dev/null 2>&1; then
+    echo "aborting deploy: go is required to verify the signed catalog before upload" >&2
+    exit 5
+  fi
+  TMP_CATALOG_PUBKEY="$(mktemp)"
+  trap 'rm -f "${TMP_CATALOG_PUBKEY:-}"' EXIT
+  printf '%s\n' "$CATALOG_PUBLIC_KEY" > "$TMP_CATALOG_PUBKEY"
+  go run "$DIST_DIR/../../scripts/sign-catalog.go" verify -public-key "$TMP_CATALOG_PUBKEY" "$CATALOG_SOURCE" >/dev/null || {
+    echo "aborting deploy: signed catalog does not verify against tier2.catalog_public_key" >&2
+    exit 5
+  }
+  echo "  ok: signed catalog verifies and will install to $CATALOG_REMOTE_PATH"
+else
+  echo "  tier2.catalog_path unset — public /catalog/current will return 404 by design"
+fi
 
 log "step 1/9: confirm SSH + DNS"
 $SSH 'hostname && uptime' >/dev/null
@@ -237,6 +286,9 @@ $SCP "$CLI_BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-cli-linux-amd64"
 $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:/tmp/coordinator.yaml"
 $SCP "$SERVICE" "$VPS_USER@$VPS_HOST:/tmp/macprovider-coordinator.service"
 $SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-coordinator-full.conf"
+if [ -n "$CATALOG_REMOTE_PATH" ]; then
+  $SCP "$CATALOG_SOURCE" "$VPS_USER@$VPS_HOST:/tmp/tier2-catalog.json"
+fi
 
 # M1-6 / DEVE-5 Part D: dated backup of the remote coordinator.yaml on Pearl
 # BEFORE we overwrite it. Step 1b already aborted on drift unless the
@@ -265,6 +317,14 @@ $SSH "set -e
   install -o root -g root -m 0644 /tmp/macprovider-coordinator.service /etc/systemd/system/macprovider-coordinator.service
   rm -f /tmp/coordinator-linux-amd64 /tmp/coordinator-cli-linux-amd64 /tmp/coordinator.yaml /tmp/macprovider-coordinator.service
 "
+if [ -n "$CATALOG_REMOTE_PATH" ]; then
+  CATALOG_REMOTE_DIR="$(dirname "$CATALOG_REMOTE_PATH")"
+  $SSH "set -e
+    install -d -o macprovider -g macprovider -m 0755 '$CATALOG_REMOTE_DIR'
+    install -o macprovider -g macprovider -m 0644 /tmp/tier2-catalog.json '$CATALOG_REMOTE_PATH'
+    rm -f /tmp/tier2-catalog.json
+  "
+fi
 
 # nginx + Let's Encrypt strategy:
 #   step 5  -> install a port-80-only STUB nginx site (ACME challenge + redirect).
@@ -428,6 +488,16 @@ STATUS=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "https://$DOMAIN/
 if [ "$STATUS" != "404" ]; then
   echo "coordinator /v1/models exposure check failed: status=$STATUS" >&2
   exit 1
+fi
+
+if [ -n "$CATALOG_REMOTE_PATH" ]; then
+  echo "  GET https://$DOMAIN/catalog/current -> expect 200"
+  STATUS=$(curl -sS -o /tmp/macprovider-catalog-current.json -w '%{http_code}' --max-time 10 --max-filesize 1048576 "https://$DOMAIN/catalog/current")
+  if [ "$STATUS" != "200" ]; then
+    echo "coordinator /catalog/current check failed: status=$STATUS body=$(head -c 300 /tmp/macprovider-catalog-current.json)" >&2
+    exit 1
+  fi
+  echo "  catalog OK: $(python3 -c 'import json,sys; c=json.load(open(sys.argv[1])); print("catalog_id=%s models=%d" % (c.get("catalog_id"), len(c.get("models", []))))' /tmp/macprovider-catalog-current.json)"
 fi
 
 log "step 9/9: tail the coordinator journal for sanity"
