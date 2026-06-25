@@ -103,6 +103,117 @@ func setupRunnerForTest(t *testing.T) *runnerTestSetup {
 // db returns the *sql.DB embedded in the setup.
 func (s *runnerTestSetup) DB() *sql.DB { return s.db }
 
+// TestRunner_RunOnce_StaleProducerUsesLiveSnapRunInterval proves that
+// Runner.RunOnce reads snap.RunInterval from the live TuningProvider for
+// stale-cancel production, NOT r.opts.RunInterval (the startup-time value).
+//
+// Setup:
+//   - opts.RunInterval = 60m → 3×60m = 180m stale threshold
+//   - TuningProvider live RunInterval = 10m → 3×10m = 30m stale threshold
+//   - Stale cancel row age = 31m (between 30m and 180m)
+//
+// Expected: stale row IS produced (threshold=30m < 31m).
+// If RunOnce used opts.RunInterval: threshold=180m > 31m → NOT produced (test fails).
+//
+// Step 4 r4 [code:r4-4] MEDIUM closure: regression test for
+// [arch:r3-4.1] MAJOR closure (snap.RunInterval replaces opts.RunInterval).
+func TestRunner_RunOnce_StaleProducerUsesLiveSnapRunInterval(t *testing.T) {
+	db := openTestDB(t)
+	rawHex := "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	raw, _ := hex.DecodeString(rawHex)
+	signer, err := NewLocalFileSignerFromKey(raw)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	hotAddr := signer.FromAddress()
+	logger, _ := quietLogger()
+
+	// Lease.
+	const startupRunInterval = 60 * time.Minute
+	state, _, err := Acquire(context.Background(), db, startupRunInterval, logger)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if err := UpsertNonceCursor(context.Background(), db, hotAddr, 0, 0, 0, NowUTC()); err != nil {
+		t.Fatalf("UpsertNonceCursor: %v", err)
+	}
+
+	// TuningProvider with short RunInterval (10m). After wiring, the
+	// live snap has RunInterval=10m → threshold = 3×10m = 30m.
+	const liveRunInterval = 10 * time.Minute
+	snap := validBaseSnapshot()
+	snap.RunInterval = liveRunInterval
+	tuning, err := NewTuningProvider(snap, 5_000_000_000, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewTuningProvider: %v", err)
+	}
+
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+	// Both RPCs return nil receipt (not found) so stale-cancel detection fires.
+	primary.receiptFn = func(_ context.Context, _ string) (*Receipt, error) { return nil, nil }
+	secondary.receiptFn = primary.receiptFn
+
+	opts := RunnerOptions{
+		DB:                    db,
+		Security:              SecurityConfig{HotWalletAddress: hotAddr},
+		RPCs:                  TwoRPCs{Primary: primary, Secondary: secondary},
+		Signer:                signer,
+		Claimer:               &mockClaimer{claimed: true},
+		Logger:                logger,
+		RunInterval:           startupRunInterval, // 60m — stale threshold would be 180m if used
+		MaxRowsPerRun:         50,
+		ConfirmationBlocks:    5,
+		PerPayoutCapBaseUnits: 1_000_000_000_000,
+		PerDayCapBaseUnits:    10_000_000_000_000,
+		ReceiptPollInterval:   1 * time.Millisecond,
+		ReceiptPollTimeout:    100 * time.Millisecond,
+		NowFn:                 func() time.Time { return time.Now().UTC() },
+		Tuning:                tuning, // live snap has RunInterval=10m → threshold=30m
+	}
+	runner, err := NewRunner(opts, state)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	// Seed a stale cancel row aged 31 minutes. This is between the live
+	// threshold (30m) and the startup threshold (180m).
+	const rowAge = 31 * time.Minute
+	staleTime := time.Now().Add(-rowAge).UTC().Format(time.RFC3339Nano)
+	payoutID := insertReadyRow(t, db, "p1", "settle:p1:staletest")
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO payout_attempts
+  (payout_id, attempt_seq, chain, from_address, to_address,
+   amount_base_units, nonce, raw_signed_tx, tx_hash,
+   broadcast_at_utc, is_cancel_self_transfer, updated_at_utc)
+VALUES (?, 1, 'base-mainnet', '0x', '0x', 1, 5, X'02', '0xstaletest',
+        ?, 1, ?)`,
+		payoutID, staleTime, staleTime,
+	); err != nil {
+		t.Fatalf("insert stale cancel row: %v", err)
+	}
+
+	_, runErr := runner.RunOnce(context.Background())
+	if runErr != nil && !errors.Is(runErr, ErrLeaseLost) {
+		t.Fatalf("RunOnce: %v", runErr)
+	}
+
+	// The stale-cancel outbox row should have been produced because the
+	// live snap.RunInterval (10m → threshold 30m) is shorter than the
+	// row age (31m). If RunOnce used opts.RunInterval (60m → threshold
+	// 180m), no row would be produced and this assertion would fail.
+	var count int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM cancel_reconfirm_stale_outbox WHERE payout_id=? AND attempt_seq=1`,
+		payoutID,
+	).Scan(&count); err != nil {
+		t.Fatalf("query stale outbox: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("stale outbox count = %d, want 1; Runner.RunOnce is likely using opts.RunInterval instead of snap.RunInterval", count)
+	}
+}
+
 func TestRunner_HappyPath_SinglePayout(t *testing.T) {
 	s := setupRunnerForTest(t)
 	db := s.db

@@ -1,10 +1,13 @@
 package payout
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -679,5 +682,59 @@ func TestRunNow_Returns409WhenHalted(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "runner_halted") {
 		t.Errorf("body missing runner_halted; got: %s", rec.Body.String())
+	}
+}
+
+// TestChainBalanceWorker_RPCDisagreementEmitsHotWallet locks the
+// Step 4 r4 [code:r4-2] MEDIUM closure: payout_chain_balance_rpc_disagreement
+// MUST include hot_wallet so multi-wallet logs are attributable.
+func TestChainBalanceWorker_RPCDisagreementEmitsHotWallet(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	hot := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+	primary.callFn = usdcMockBalance(100_000_000)
+	secondary.callFn = usdcMockBalance(1) // diverges beyond tolerance
+
+	buf := &bytes.Buffer{}
+	logger := zerolog.New(io.Writer(buf))
+	worker, err := NewChainBalanceWorker(db, TwoRPCs{Primary: primary, Secondary: secondary},
+		ChainBalanceConfig{
+			Interval:      1 * time.Hour,
+			ToleranceUSDC: 100_000,
+			HotWalletAddr: hot,
+			USDCContract:  USDCContractAddressBase,
+		}, func(_ string) {}, logger)
+	if err != nil {
+		t.Fatalf("NewChainBalanceWorker: %v", err)
+	}
+	worker.runOnce(context.Background())
+
+	// Find and parse the disagreement event line.
+	var found bool
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		var evt map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &evt); err != nil {
+			continue
+		}
+		if evt["event"] != "payout_chain_balance_rpc_disagreement" {
+			continue
+		}
+		found = true
+		if got := evt["hot_wallet"]; got != hot {
+			t.Errorf("hot_wallet = %q, want %q", got, hot)
+		}
+		for _, field := range []string{"primary_balance", "secondary_balance", "tolerance", "ts_utc", "severity"} {
+			if _, ok := evt[field]; !ok {
+				t.Errorf("payout_chain_balance_rpc_disagreement missing field %q", field)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("payout_chain_balance_rpc_disagreement event not emitted; got: %s", buf.String())
 	}
 }

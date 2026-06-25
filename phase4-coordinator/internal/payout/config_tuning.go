@@ -93,57 +93,57 @@ var (
 func validateBounds(t TuningSnapshot, perDayCap int64) error {
 	if t.AddressCoolingOffPeriod < addressCoolingOffMin {
 		return &BoundViolationError{
-			Key:            "payout.tuning.address_cooling_off_period",
-			AttemptedValue: t.AddressCoolingOffPeriod.String(),
+			Field:     "payout.tuning.address_cooling_off_period",
+			Attempted: t.AddressCoolingOffPeriod.String(),
 			Bound:          fmt.Sprintf(">= %s", addressCoolingOffMin),
 		}
 	}
 	if t.RunInterval < runIntervalMin || t.RunInterval > runIntervalMax {
 		return &BoundViolationError{
-			Key:            "payout.tuning.run_interval",
-			AttemptedValue: t.RunInterval.String(),
+			Field:"payout.tuning.run_interval",
+			Attempted:t.RunInterval.String(),
 			Bound:          fmt.Sprintf("[%s, %s]", runIntervalMin, runIntervalMax),
 		}
 	}
 	if t.RunNowMinInterval < runNowMinIntervalMin || t.RunNowMinInterval > runNowMinIntervalMax {
 		return &BoundViolationError{
-			Key:            "payout.tuning.run_now_min_interval",
-			AttemptedValue: t.RunNowMinInterval.String(),
+			Field:"payout.tuning.run_now_min_interval",
+			Attempted:t.RunNowMinInterval.String(),
 			Bound:          fmt.Sprintf("[%s, %s]", runNowMinIntervalMin, runNowMinIntervalMax),
 		}
 	}
 	if t.ConfirmationBlocks < confirmationBlocksMin || t.ConfirmationBlocks > confirmationBlocksMax {
 		return &BoundViolationError{
-			Key:            "payout.tuning.confirmation_blocks",
-			AttemptedValue: fmt.Sprintf("%d", t.ConfirmationBlocks),
+			Field:"payout.tuning.confirmation_blocks",
+			Attempted:fmt.Sprintf("%d", t.ConfirmationBlocks),
 			Bound:          fmt.Sprintf("[%d, %d]", confirmationBlocksMin, confirmationBlocksMax),
 		}
 	}
 	if t.MaxRowsPerRun < maxRowsPerRunMin || t.MaxRowsPerRun > maxRowsPerRunMax {
 		return &BoundViolationError{
-			Key:            "payout.tuning.max_rows_per_run",
-			AttemptedValue: fmt.Sprintf("%d", t.MaxRowsPerRun),
+			Field:"payout.tuning.max_rows_per_run",
+			Attempted:fmt.Sprintf("%d", t.MaxRowsPerRun),
 			Bound:          fmt.Sprintf("[%d, %d]", maxRowsPerRunMin, maxRowsPerRunMax),
 		}
 	}
 	if t.ReorgPollWindow < reorgPollWindowMin || t.ReorgPollWindow > reorgPollWindowMax {
 		return &BoundViolationError{
-			Key:            "payout.tuning.reorg_poll_window",
-			AttemptedValue: t.ReorgPollWindow.String(),
+			Field:"payout.tuning.reorg_poll_window",
+			Attempted:t.ReorgPollWindow.String(),
 			Bound:          fmt.Sprintf("[%s, %s]", reorgPollWindowMin, reorgPollWindowMax),
 		}
 	}
 	if t.LowNativeThreshold < 0 || t.LowNativeThreshold > lowNativeThresholdMax {
 		return &BoundViolationError{
-			Key:            "payout.tuning.low_native_threshold",
-			AttemptedValue: fmt.Sprintf("%d", t.LowNativeThreshold),
+			Field:"payout.tuning.low_native_threshold",
+			Attempted:fmt.Sprintf("%d", t.LowNativeThreshold),
 			Bound:          fmt.Sprintf("[0, %d]", lowNativeThresholdMax),
 		}
 	}
 	if t.LowBalanceThreshold < 0 {
 		return &BoundViolationError{
-			Key:            "payout.tuning.low_balance_threshold",
-			AttemptedValue: fmt.Sprintf("%d", t.LowBalanceThreshold),
+			Field:"payout.tuning.low_balance_threshold",
+			Attempted:fmt.Sprintf("%d", t.LowBalanceThreshold),
 			Bound:          ">= 0",
 		}
 	}
@@ -152,22 +152,22 @@ func validateBounds(t TuningSnapshot, perDayCap int64) error {
 	// (test path); skip the cross-field check in that case.
 	if perDayCap > 0 && t.LowBalanceThreshold > 2*perDayCap {
 		return &BoundViolationError{
-			Key:            "payout.tuning.low_balance_threshold",
-			AttemptedValue: fmt.Sprintf("%d", t.LowBalanceThreshold),
+			Field:"payout.tuning.low_balance_threshold",
+			Attempted:fmt.Sprintf("%d", t.LowBalanceThreshold),
 			Bound:          fmt.Sprintf("<= 2 × per_day_cap (%d)", 2*perDayCap),
 		}
 	}
 	if t.RPCURLPrimaryPinSPKI != "" && !spkiPinRegex.MatchString(t.RPCURLPrimaryPinSPKI) {
 		return &BoundViolationError{
-			Key:            "payout.tuning.rpc_url_primary_pin_spki",
-			AttemptedValue: redactSPKI(t.RPCURLPrimaryPinSPKI),
+			Field:"payout.tuning.rpc_url_primary_pin_spki",
+			Attempted:redactSPKI(t.RPCURLPrimaryPinSPKI),
 			Bound:          "64-hex-char SHA-256 or empty",
 		}
 	}
 	if t.RPCURLSecondaryPinSPKI != "" && !spkiPinRegex.MatchString(t.RPCURLSecondaryPinSPKI) {
 		return &BoundViolationError{
-			Key:            "payout.tuning.rpc_url_secondary_pin_spki",
-			AttemptedValue: redactSPKI(t.RPCURLSecondaryPinSPKI),
+			Field:"payout.tuning.rpc_url_secondary_pin_spki",
+			Attempted:redactSPKI(t.RPCURLSecondaryPinSPKI),
 			Bound:          "64-hex-char SHA-256 or empty",
 		}
 	}
@@ -242,14 +242,20 @@ var ErrTuningBoundViolation = errors.New("payout: tuning reload rejected — bou
 // Step 4 r3 [code:r3-2]/[sec:r3-2] CONVERGENT MEDIUM closure:
 // structured error instead of plain string so the SIGHUP handler
 // emits key/attempted_value/bound per §7.1 line 3731.
+//
+// Step 4 r4 [code:r4-5] LOW closure: fields renamed to Field/Attempted
+// to match the r4 review contract; Actor added as a structured field.
+// The §7.1 wire log field names (key, attempted_value, bound, actor)
+// are unchanged — only the Go struct field names are renamed here.
 type BoundViolationError struct {
-	Key            string // e.g. "payout.tuning.run_interval"
-	AttemptedValue string // human-readable of the attempted value
-	Bound          string // human-readable of the violated bound
+	Field     string // e.g. "payout.tuning.run_interval"
+	Attempted string // human-readable of the attempted value
+	Bound     string // human-readable of the violated bound
+	Actor     string // e.g. "operator_key:coordinator"
 }
 
 func (e *BoundViolationError) Error() string {
-	return fmt.Sprintf("%s: attempted=%s violated bound=%s", e.Key, e.AttemptedValue, e.Bound)
+	return fmt.Sprintf("%s: attempted=%s violated bound=%s", e.Field, e.Attempted, e.Bound)
 }
 
 // Reload validates the candidate snapshot and, on success, atomic-
@@ -356,12 +362,16 @@ func (p *TuningProvider) emitRejected(err error) {
 	tsUTC := time.Now().UTC().Format(time.RFC3339Nano)
 	var bve *BoundViolationError
 	if errors.As(err, &bve) {
+		actor := bve.Actor
+		if actor == "" {
+			actor = "operator_key:coordinator"
+		}
 		p.log.Error().
 			Str("event", "payout_config_reload_rejected").
-			Str("key", bve.Key).
-			Str("attempted_value", bve.AttemptedValue).
+			Str("key", bve.Field).
+			Str("attempted_value", bve.Attempted).
 			Str("bound", bve.Bound).
-			Str("actor", "operator_key:coordinator").
+			Str("actor", actor).
 			Str("ts_utc", tsUTC).
 			Str("severity", "PAGE").
 			Send()

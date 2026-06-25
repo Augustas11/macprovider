@@ -259,20 +259,25 @@ no process restart is required.
 
 ### Steps
 
-1. Obtain the new certificate's SPKI SHA-256 fingerprint:
+1. Obtain the new certificate's SPKI SHA-256 fingerprint as a
+   **64-hex-character string** (the implementation validates exactly
+   64 hex chars; base64 will be rejected):
    ```bash
-   # From the DER-encoded cert on disk:
+   # From the DER-encoded cert on disk — outputs 64 hex chars:
    openssl x509 -in new_rpc_cert.pem -pubkey -noout \
      | openssl pkey -pubin -outform DER \
-     | openssl dgst -sha256 -binary \
-     | base64
+     | openssl dgst -sha256
+   # Example output: SHA2-256(stdin)= a1b2c3...64hexchars
+   # Copy the hex string (64 characters after the '= ').
    ```
+   Cross-reference: `specs/SPEC-016-payout-pipeline.md` §6.5 (line 3654)
+   specifies 64-hex-char SHA-256; base64 encoding is NOT accepted.
 2. Update `dist/coordinator.yaml`:
    ```yaml
    payout:
      tuning:
-       rpc_url_primary_pin_spki:   "<new base64 SHA-256>"
-       rpc_url_secondary_pin_spki: "<new base64 SHA-256>"
+       rpc_url_primary_pin_spki:   "<new 64-hex-char SHA-256 SPKI>"
+       rpc_url_secondary_pin_spki: "<new 64-hex-char SHA-256 SPKI>"
    ```
 3. Send SIGHUP to the coordinator process:
    ```bash
@@ -282,15 +287,22 @@ no process restart is required.
    `key=payout.tuning.rpc_url_primary_pin_spki` and
    `key=payout.tuning.rpc_url_secondary_pin_spki` to confirm
    the reload was accepted.
-5. The SIGHUP handler drains the HTTP connection pool
-   (`CloseIdleConnections`) when SPKI keys change, so all
-   subsequent RPC calls perform fresh TLS handshakes against the
-   new pin. Pool drain is automatic — no additional action needed.
+5. The SIGHUP handler drains the HTTP idle connection pool
+   (`CloseIdleConnections`) when SPKI keys change. Note:
+   `CloseIdleConnections` drains idle pooled TLS connections only.
+   RPCs already in flight when SIGHUP lands may complete on the old
+   TLS session; the next connection after pool drain handshakes
+   against the live pin. No additional action is needed for in-flight
+   requests — they complete normally under the prior handshake.
 
    **Step 4 r3 [sec:r3-1]/[arch:r3-4.2] CONVERGENT HIGH/MEDIUM closure.**
    Previously, pooled TLS connections (90s idle TTL) would bypass
    the live-read pin for up to 90 seconds after SIGHUP. The
    `CloseIdleConnections` call on SPKI-key SIGHUP closes this window.
+
+   **Step 4 r4 [sec:r4-2] LOW closure:** corrected SPKI encoding to
+   64-hex-char (was incorrectly documented as base64); clarified
+   in-flight RPC semantics.
 
 ### Rollback
 

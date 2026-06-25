@@ -401,12 +401,15 @@ func (w *ChainBalanceWorker) runOnce(ctx context.Context) {
 	tol := big.NewInt(w.cfg.ToleranceUSDC)
 	diff := new(big.Int).Sub(balA, balB)
 	if absBig(diff).Cmp(tol) > 0 {
+		// Step 4 r4 [code:r4-2] MEDIUM closure: add hot_wallet field so
+		// multi-wallet or rotated-wallet logs are attributable.
 		w.log.Error().
 			Str("event", "payout_chain_balance_rpc_disagreement").
 			Str("severity", "PAGE").
 			Str("primary_balance", balA.String()).
 			Str("secondary_balance", balB.String()).
 			Int64("tolerance", w.cfg.ToleranceUSDC).
+			Str("hot_wallet", w.cfg.HotWalletAddr).
 			Str("ts_utc", w.nowFn().UTC().Format(time.RFC3339Nano)).Send()
 		return
 	}

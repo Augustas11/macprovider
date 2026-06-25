@@ -1352,8 +1352,19 @@ func startPayoutSIGHUPListener(
 			// validated on the SIGHUP path.
 			t, err := config.LoadPayoutTuningOnly(configPath)
 			if err != nil {
+				// Step 4 r4 [code:r4-1]/[sec:r4-1] CONVERGENT MEDIUM closure:
+				// structured §7.1 fields on YAML-load failure path. Use sanitized
+				// literal "config_load_failed" for attempted_value — do NOT log raw
+				// YAML contents because the full coordinator file can contain
+				// secrets outside payout.tuning.
+				tsUTC := time.Now().UTC().Format(time.RFC3339Nano)
 				log.Error().Err(err).
 					Str("event", "payout_config_reload_rejected").
+					Str("key", "yaml_parse").
+					Str("attempted_value", "config_load_failed").
+					Str("bound", "valid payout.tuning YAML").
+					Str("actor", "operator_key:coordinator").
+					Str("ts_utc", tsUTC).
 					Str("severity", "PAGE").
 					Msg("payout tuning SIGHUP reload: LoadPayoutTuningOnly failed; live value retained")
 				continue
