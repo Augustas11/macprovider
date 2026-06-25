@@ -108,6 +108,7 @@ var payoutTables = []string{
 	"payout_hot_wallet_funding",
 	"payout_reorg_orphans",
 	"cancel_reconfirm_stale_outbox",
+	"wallet_nonce_cursor",
 }
 
 // AssertSameDB verifies that every payout table resolves through
