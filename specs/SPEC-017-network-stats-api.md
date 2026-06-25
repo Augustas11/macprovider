@@ -1,8 +1,8 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.1 (2026-06-25, draft — codex round-1 fix pass. Round 1 returned 3 CRITICAL + 10 MAJOR + 5 MINOR against v0.1: C1 added §9.1 normative `stats_*` table shapes; C2 added §5.4 partner-key contract; C3 replaced `providers.public_earnings_mode` with the SPEC-017-owned `provider_visibility` side table. MAJORs M1-M10 absorbed (14-field schema sync, §2.3 same-origin rewording, §5.7→§9.5 budget alignment, §7.2 grant list, §5.8 304 exemption, §9.6 backfill softening, §8.2 enum forward-compat, X-Stats-Generated-At everywhere, threshold rationales, `TBD` removed). MINORs m1-m5 also absorbed. Pending codex round-2 confirmation. Full r1 findings: `specs/SPEC-017-r1-audit.md`.)
+**Version:** 0.1.2 (2026-06-25, draft — codex round-2 fix pass on v0.1.1. Round 2 returned NEEDS-FIX-PASS at 2 CRITICAL + 5 MAJOR + 2 MINOR. v0.1.2 absorbs: C1 pinned partner-key token format unambiguously at `mpk_` + 43-char unpadded base64url of 32 random bytes (total 47 chars) and updated §3.7, §5.4.2, AC-17 in lock-step; C2 deferred `rewards` source semantics to operator-configured ledger with new §9.1a `provider_rewards_ledger` placeholder + Q13 open question (per codex's "absent/deferred" path); MAJORs M1-M5 absorbed (§5.4.3 CORS decision table, §1.1 portal-additional-fields wording removed, §7.2 grant inventory split into request-path readable / rollup-internal / SPEC-017-owned, §5.9 error envelope made internally consistent without claiming SPEC-006 envelope compat, §5.2 `stale_after` formula pinned); MINOR m1 noted, m2 RFC 9745 citation for Deprecation header added. Pending codex round-3 confirmation. Full r2 findings: `specs/SPEC-017-r2-audit.md`.)
 **Status:** Draft (design-only — no IMPL until v0.1 LOCKED and a separate `BUILD_SPEC_017_IMPL_PROMPT.md` written).
-**Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (public-surface header conventions, error envelope shape, version-prefix path style), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline defines `rewards` $ semantics).
+**Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
 ---
 
@@ -13,6 +13,20 @@ Audit-narrative-by-round detail lives in the per-round audit files under
 entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
+
+**v0.1.2 (2026-06-25, draft — codex round-2 fix pass on v0.1.1):**
+Round 2 returned 2 CRITICAL + 5 MAJOR + 2 MINOR. Fixes: C1 pinned
+unambiguous partner-key token format (47 chars total); C2 deferred
+rewards-source semantics to operator-defined ledger (Q13 new in §11);
+M1 added a CORS decision table covering all six (key, origin)
+combinations; M2 removed "additional fields" from §1.1 mission; M3
+split §7.2 grant inventories into request-path-readable vs
+rollup-internal vs SPEC-017-owned (no more "exactly match" claim);
+M4 made §5.9 error envelope self-contained without claiming
+SPEC-006 envelope compat; M5 pinned `stale_after = generated_at +
+s-maxage` formula on leaderboard; m1 noted (advisor mirror is
+sufficient); m2 updated §8.4 to cite RFC 9745 for `Deprecation`.
+Full narrative: `specs/SPEC-017-r2-audit.md`.
 
 **v0.1.1 (2026-06-25, draft — codex round-1 fix pass on v0.1):**
 Round 1 returned READY-WITH-FIX-PASS at 3/10/5. Fixes: C1 added
@@ -38,7 +52,9 @@ statistics, consumed by three classes of clients:
 
 1. `console.streamvc.live` — buyer-facing public web surface.
 2. `portal.streamvc.live` — seller-facing provider portal
-   (SPEC-014); same-origin authenticated views see additional fields.
+   (SPEC-014). The portal consumes the same public contract for
+   network stats; own-provider exact earnings come from SPEC-014-owned
+   surfaces, NOT from a special projection here.
 3. **External partners** — third-party websites embedding network
    stats on their own pages, via a documented, versioned, edge-cacheable
    JSON contract.
@@ -262,13 +278,29 @@ provider absent from `provider_visibility`, or present with
 
 ### 3.7 Partner key
 
-An opaque bearer token issued by the operator. Format: `mpk_`
-prefix + 32 url-safe base64 chars (33 chars total once the prefix is
-counted; the prefix is a literal namespace marker, not part of the
-random entropy). Full contract — issuance, hashed storage, rotation,
-revocation, allowed-origin validation, rate-limit keying — is pinned
-in §5.4. The token MUST NOT appear in any log line, response body, or
-metric label; only its `partner_keys.id` (opaque, non-secret) and
+An opaque bearer token issued by the operator. Format:
+
+```
+mpk_<43 chars of unpadded base64url(32 random bytes)>
+```
+
+Exactly:
+
+- 4-character literal namespace prefix `mpk_`.
+- 43 characters of unpadded base64url (RFC 4648 §5) encoding of 32
+  cryptographically random bytes (32 bytes = 256 bits of entropy).
+  Unpadded base64url of 32 bytes is `ceil(32 × 4 / 3) − 0` = 43
+  characters (the standard padded length is 44; v0.1 strips the
+  trailing `=`).
+- Total token length: 47 characters. Validation MUST reject any
+  token whose length is not 47, whose first 4 characters are not
+  `mpk_`, or whose remaining 43 characters contain any character
+  outside `[A-Za-z0-9_-]`.
+
+Full contract — issuance, hashed storage, rotation, revocation,
+allowed-origin validation, rate-limit keying — is pinned in §5.4.
+The token MUST NOT appear in any log line, response body, or metric
+label; only its `partner_keys.id` (opaque, non-secret) and
 `partner_keys.label` MAY appear.
 
 ### 3.8 Edge cache
@@ -461,7 +493,7 @@ MUST be logged.
 ```json
 {
   "generated_at": "2026-06-25T18:14:00Z",
-  "stale_after":   "2026-06-25T18:18:00Z",
+  "stale_after":   "2026-06-25T18:15:00Z",
   "window":        "7d",
   "sort":          "earnings",
   "limit":         50,
@@ -492,6 +524,17 @@ MUST be logged.
 
 **Field-level normative rules.**
 
+- `generated_at` — RFC 3339 UTC timestamp of the rollup snapshot used
+  to produce this body. MUST match
+  `stats_leaderboard_<window>.generated_at` for the requested window.
+- `stale_after` — formula: `generated_at + Cache-Control: s-maxage`
+  (i.e. for the public projection's `s-maxage=60`, `stale_after =
+  generated_at + 60s`). Mechanically derivable; partners SHOULD use
+  it as a "display freshness indicator" rather than a hard
+  invalidation deadline. NOTE: this is NOT the §9.5 target staleness
+  (which is the rollup-side budget) and NOT the §5.8 503 budget
+  (which is the hard staleness ceiling); the three are intentionally
+  distinct timescales.
 - `pseudonym` — stable per provider across snapshots and across windows
   (§3.3). Length ≤ 32 chars, `[a-z0-9-]` only.
 - `earnings_bucket`, `earnings_work_bucket`, `earnings_rewards_bucket`
@@ -655,30 +698,57 @@ Q2). Concretely:
 1. Operator runs a coordinator CLI subcommand
    `coordinator partner-keys issue --label "Acme Corp dashboard"
    [--allowed-origin https://acme.example.com] [--rpm 600] [--burst 1200]`.
-2. The subcommand generates 32 random bytes, prefixes with `mpk_`,
-   url-safe base64-encodes the random bytes, hashes the resulting
-   token, INSERTs into `partner_keys`, and prints the raw token to
-   stdout exactly once.
+2. The subcommand:
+   a. Generates 32 cryptographically random bytes via the system
+      CSPRNG.
+   b. Encodes those bytes as 43-character unpadded base64url (RFC
+      4648 §5 alphabet, no `=` padding).
+   c. Prefixes with `mpk_` to form the 47-character raw token.
+   d. Computes `sha256(raw_token_utf8_bytes)`.
+   e. INSERTs into `partner_keys` with `token_hash = <that sha256>`,
+      `prefix = <first 8 characters of raw_token>` (always begins
+      with `mpk_`), and the operator-provided label/origin/limits.
+   f. Prints the raw token to stdout exactly once.
 3. The operator delivers the token to the partner via a side channel
    (email, signed message). The repository never persists the raw
    token.
 
-#### 5.4.3 Authentication on request
+#### 5.4.3 Authentication on request — decision table
 
-For each request carrying `Authorization: Bearer <token>`:
+The branch on `(Authorization header, Origin header)` is fully
+enumerated below. Implementations MUST match this table exactly;
+prose ambiguity in earlier drafts is superseded here.
 
-1. The handler MUST extract `<token>`, compute `sha256(<token>)`, and
-   SELECT the matching `partner_keys` row by `token_hash`.
-2. If no row matches OR `revoked_at IS NOT NULL`, return 401 with
-   `code: "unauthorized"`. The handler MUST NOT distinguish the two
-   cases in the response (timing attack resistance).
-3. If the row matches, the handler MAY update `last_used_at` (best
-   effort, not transactional with the response).
-4. If `allowed_origins` is non-empty AND the request's `Origin` header
-   is not in that array, return 401 (NOT 403, to avoid leaking the
-   existence of the key to non-allowlisted callers).
-5. On success, all rate-limit accounting (§5.6) MUST key on
+| Authorization | partner_keys row | Origin | Result |
+|---|---|---|---|
+| absent | n/a | n/a | **200 public projection** (no key path). |
+| present, hash matches a row, `revoked_at IS NULL`, `allowed_origins = '{}'` (empty array) | matched, active | absent or any value | **200 partner projection**. CORS per §5.7. |
+| present, hash matches a row, `revoked_at IS NULL`, `allowed_origins` non-empty | matched, active | absent | **401 `unauthorized`**. Non-empty allowlist requires an Origin header. |
+| present, hash matches a row, `revoked_at IS NULL`, `allowed_origins` non-empty | matched, active | exact-match in `allowed_origins` | **200 partner projection**. CORS echoes `Origin`. |
+| present, hash matches a row, `revoked_at IS NULL`, `allowed_origins` non-empty | matched, active | not in `allowed_origins` | **401 `unauthorized`** (NOT 403; avoids leaking key existence to non-allowlisted Origins). |
+| present, hash does NOT match a row | none | any | **401 `unauthorized`**. |
+| present, hash matches a row, `revoked_at IS NOT NULL` | matched, revoked | any | **401 `unauthorized`** (handler MUST NOT distinguish from "no match" in response shape or latency). |
+
+Operational rules:
+
+1. The handler MUST compute `sha256(<token>)` and SELECT by
+   `token_hash` for every keyed request; there is no in-memory key
+   cache in v0.1.
+2. The handler MAY update `last_used_at` on success (best effort,
+   not transactional with the response).
+3. On success, all rate-limit accounting (§5.6) MUST key on
    `partner_keys.id`, NOT on the raw token or on the client IP.
+4. The 401 latency for "no row" and the 401 latency for "revoked"
+   MUST be indistinguishable within ±20% (AC-18). This forces the
+   implementation to perform the same hash + SELECT pattern in both
+   paths.
+
+Note on the "absent Origin + non-empty allowlist" rule: this is the
+deliberate choice that a non-empty `allowed_origins` array means
+"this key is intended for browser-side embedding only; reject any
+non-browser context." A partner who wants both browser and
+server-side usage MUST be issued either two keys or one key with
+`allowed_origins = '{}'`.
 
 #### 5.4.4 Rotation
 
@@ -747,22 +817,25 @@ nginx; the SPEC does not mandate them but does not preclude them.
 
 ### 5.7 CORS
 
-- `/v1/stats/overview` and `/v1/stats/health` — `Access-Control-Allow-Origin:
-  *`. Partner-friendly.
-- `/v1/stats/leaderboard` public projection — `Access-Control-Allow-Origin:
-  *`.
-- `/v1/stats/leaderboard` partner-key projection — `Access-Control-Allow-Origin:
-  <Origin>` echoed when `Origin` is on the allowlist
-  (`console.streamvc.live`, `portal.streamvc.live`, and any origin
-  whitelisted in a partner key's `partner_keys.allowed_origins`
-  array). All other origins receive `*` plus the public projection
-  (auth header rejected with 401 if it was sent from a non-allowlisted
-  Origin, to discourage embedding the key in browser-side code).
+§5.4.3 owns the (Authorization, Origin) branch decision for
+authenticated requests. This section pins the `Access-Control-*`
+response headers that each branch emits.
 
-Preflight: respond to `OPTIONS` with
+| Branch | Request kind | `Access-Control-Allow-Origin` | Other CORS headers |
+|---|---|---|---|
+| `/overview`, `/health`, anonymous | any Origin or none | `*` | `Access-Control-Allow-Methods: GET, HEAD, OPTIONS` |
+| `/leaderboard` public (no key) | any Origin or none | `*` | same as above |
+| `/leaderboard` partner-key, `allowed_origins = '{}'` | any Origin or none | `*` | same as above |
+| `/leaderboard` partner-key, `allowed_origins` non-empty, Origin in allowlist | matched Origin | echo `Origin` (NOT `*`) | same as above, plus `Access-Control-Allow-Credentials: true` |
+| `/leaderboard` partner-key, `allowed_origins` non-empty, Origin not in allowlist | rejected at auth (§5.4.3) | omit (401 response carries no CORS allow header) | n/a |
+| `/leaderboard` partner-key, `allowed_origins` non-empty, Origin absent | rejected at auth (§5.4.3) | omit | n/a |
+
+Preflight: `OPTIONS` responds with status 204, no body, and
 `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`,
 `Access-Control-Allow-Headers: Authorization, Content-Type`,
-`Access-Control-Max-Age: 3600`.
+`Access-Control-Max-Age: 3600`. The `Allow-Origin` value on preflight
+mirrors the table above based on the request's Origin and
+Authorization headers.
 
 ### 5.8 Staleness and 503 budget
 
@@ -784,10 +857,15 @@ from `/health` reflects the coordinator process itself.
 
 ### 5.9 Error envelope
 
-`304 Not Modified` is exempt from this envelope: it MUST be returned
-with an empty body and only the headers required by RFC 7232 (`ETag`,
-`Cache-Control`, `Vary`). All other non-2xx responses MUST use the
-exact shape below.
+This envelope is SPEC-017-local. SPEC-017 does NOT claim
+error-envelope compatibility with SPEC-006 v0.9 (the buyer API uses
+its own envelope shape with additional fields). Partners reusing a
+SPEC-006-aware client SHOULD NOT assume schema parity; this is a
+narrower envelope by design.
+
+`304 Not Modified` is exempt: it MUST be returned with an empty body
+and only the headers required by RFC 7232 (`ETag`, `Cache-Control`,
+`Vary`). All other non-2xx responses MUST use the exact shape below.
 
 ```json
 {
@@ -1006,7 +1084,13 @@ for v0.1).
 
 ### 7.2 DB role isolation
 
-A new Postgres role `stats_reader`:
+SPEC-017 splits its DB grants across three roles. Each role's
+read/write surface is enumerated below; the union of these grant
+sets covers all tables defined in §9.1 and §9.1a plus the
+SPEC-017-owned `provider_visibility` and `provider_visibility_audit`
+tables.
+
+#### 7.2.1 `stats_reader` — request-path handler role
 
 ```sql
 CREATE ROLE stats_reader LOGIN PASSWORD '<from-env>';
@@ -1021,30 +1105,76 @@ GRANT SELECT ON
   stats_leaderboard_30d,
   stats_leaderboard_all,
   stats_components_health,
-  provider_visibility
+  provider_visibility,
+  partner_keys
 TO stats_reader;
 ```
 
-The grant list MUST match the `stats_*` and SPEC-017-owned table
-inventory in §9.1 exactly. The `stats_components_health` table feeds
-`/v1/stats/health` (§5.3); the `provider_visibility` table is
-read-only at request time (writes come via the SPEC-014 portal
-surface using a different role). `provider_visibility_audit` is
-write-only at request time and is NOT in the handler's grant list.
-`stats_late_events` (§9.3) is rollup-internal and is NOT in the
-handler's grant list either.
+These are the **request-path readable** tables. Notes:
 
-The stats handlers MUST connect with this role and MUST NOT share a
-connection pool with the explorer or billing handlers. A separate
-`*sql.DB` instance enforces this; tests MUST verify the connection
-attempt to billing tables fails.
+- `stats_components_health` feeds `/v1/stats/health` (§5.3).
+- `provider_visibility` is SELECT-only at request time (the rollup
+  joins it; the handler does not query it directly). The handler
+  role still needs the grant because the rollup runs as a separate
+  role but the handler's leaderboard projection MAY left-join
+  `provider_visibility` defensively in case of stale rollup data.
+- `partner_keys` is required for the authn flow (§5.4.3).
 
-The rollup job runs with a separate role `stats_rollup` that has
-SELECT on OLTP tables and INSERT/UPDATE on `stats_*` plus
-`stats_late_events`. The two roles MUST NOT be the same. The portal
-toggle (SPEC-014 v0.9) runs with a third role `provider_portal`
-which has INSERT/UPDATE on `provider_visibility` and INSERT on
-`provider_visibility_audit`; it does NOT have any grant on `stats_*`.
+Explicit denies (request-path role MUST NOT have these grants):
+
+- `provider_visibility_audit` — write-only at request time; not
+  read by handlers.
+- `stats_late_events` (§9.1, §9.3) — rollup-internal only.
+- `provider_rewards_ledger` (§9.1a) — rollup-internal only.
+- Any OLTP billing/session/pool table — enforced by the connection
+  isolation in §7.2.4.
+
+#### 7.2.2 `stats_rollup` — rollup job role
+
+```sql
+CREATE ROLE stats_rollup LOGIN PASSWORD '<from-env>';
+REVOKE ALL ON SCHEMA public FROM stats_rollup;
+GRANT USAGE ON SCHEMA public TO stats_rollup;
+GRANT SELECT ON <OLTP billing/session/pool tables, enumerated per SPEC-002 §7 + SPEC-005 §10> TO stats_rollup;
+GRANT INSERT, UPDATE, DELETE ON
+  stats_overview_current,
+  stats_timeseries_rpm_30m,
+  stats_timeseries_tpm_30m,
+  stats_leaderboard_24h,
+  stats_leaderboard_7d,
+  stats_leaderboard_30d,
+  stats_leaderboard_all,
+  stats_components_health,
+  stats_late_events
+TO stats_rollup;
+GRANT SELECT ON provider_visibility, provider_rewards_ledger TO stats_rollup;
+```
+
+The rollup role MUST NOT have any grant on `partner_keys` or
+`provider_visibility_audit`.
+
+#### 7.2.3 `provider_portal` — portal toggle role (SPEC-014 v0.9 candidate)
+
+```sql
+CREATE ROLE provider_portal LOGIN PASSWORD '<from-env>';
+REVOKE ALL ON SCHEMA public FROM provider_portal;
+GRANT USAGE ON SCHEMA public TO provider_portal;
+GRANT INSERT, UPDATE ON provider_visibility TO provider_portal;
+GRANT INSERT ON provider_visibility_audit TO provider_portal;
+```
+
+This role is referenced by SPEC-014 v0.9 candidate; SPEC-017 v0.1
+pins the grant set for that role here so the portal IMPL has a
+locked target. No `stats_*` grants. No OLTP grants.
+
+#### 7.2.4 Connection-pool isolation
+
+The stats handlers MUST connect with `stats_reader` and MUST NOT
+share a `*sql.DB` instance with the explorer or billing handlers.
+A separate `*sql.DB` enforces this at compile/runtime; AC-9 verifies
+the role denies billing-table SELECT. The rollup job's `*sql.DB`
+uses `stats_rollup`; the portal's uses `provider_portal`. No two
+roles MAY be the same.
 
 ### 7.3 Process isolation
 
@@ -1152,12 +1282,19 @@ response during overlap.
 
 Once a `/v1/*` endpoint enters deprecation, every response MUST carry:
 
-- `Deprecation: true`
-- `Sunset: Fri, 25 Dec 2026 00:00:00 GMT` (whatever the operator-decided
-  sunset date is, RFC 8594 / RFC 7231 IMF-fixdate format with
-  correct day-of-week)
+- `Deprecation: @<unix_ts>` — RFC 9745 structured-field date format
+  giving the deprecation effective timestamp (e.g.
+  `Deprecation: @1782518400` for 2026-06-22T00:00:00Z).
+- `Sunset: Fri, 25 Dec 2026 00:00:00 GMT` — RFC 8594 / RFC 7231
+  IMF-fixdate format with correct day-of-week giving the planned
+  removal date.
 - `Link: <https://docs.streamvc.live/network-stats-api/v2-migration>;
-  rel="deprecation"`
+  rel="deprecation"` — RFC 9745 `rel="deprecation"` link relation
+  pointing at the partner-facing migration guide.
+
+Citations: `Sunset` is defined by RFC 8594; the `Deprecation` header
+and `rel="deprecation"` link relation are defined by RFC 9745
+(supersedes the obsolete `Deprecation: true` form).
 
 ### 8.5 Public changelog location
 
@@ -1277,6 +1414,46 @@ The `provider_id → pseudonym` mapping is deterministic per provider
 and persisted in `stats_leaderboard_*.pseudonym`. The mapping
 function is operator-owned; v0.1 does NOT pin the function (§11 Q4
 flags pseudonym-rotation policy).
+
+### 9.1a Rewards source — deferred to operator-defined ledger
+
+SPEC-016 v0.1.19 (the locked dependency) defines the payout pipeline
+but does NOT normatively define a work-vs-rewards split. SPEC-017
+v0.1 therefore does NOT claim a locked source for
+`earnings_rewards_usd`. Instead:
+
+1. The leaderboard schema retains the `earnings_rewards_*` columns
+   so partners can build against a stable shape today.
+2. The rollup MUST source these columns from an operator-defined
+   ledger table `provider_rewards_ledger` whose shape is pinned
+   here in skeleton:
+
+   ```sql
+   CREATE TABLE provider_rewards_ledger (
+     id            BIGSERIAL PRIMARY KEY,
+     provider_id   TEXT NOT NULL,
+     unix_ts       BIGINT NOT NULL,
+     amount_usd    NUMERIC(18,2) NOT NULL,
+     reason        TEXT,
+     external_ref  TEXT
+   );
+   CREATE INDEX ON provider_rewards_ledger (provider_id, unix_ts);
+   ```
+
+3. The economic semantics of WHEN and HOW a row lands in
+   `provider_rewards_ledger` (e.g. ramp incentives, hardware-tier
+   bonuses, on-chain rewards mirror) are **out of scope for v0.1**
+   and are deferred to either (a) a future SPEC-016 v0.2+ revision
+   that splits work/rewards normatively, or (b) a new SPEC dedicated
+   to network incentives. See §11 Q13.
+4. Until that source spec lands, the operator MAY ship with zero
+   rows in `provider_rewards_ledger`. In that case `earnings_rewards_usd`
+   is `0.00` and `earnings_rewards_bucket` is `"-"` for every row;
+   the public surface remains a stable contract.
+
+This is the cleanest honest path: the partner-facing schema is
+locked at v0.1; the economic source is decoupled. A future SPEC bump
+of the rewards source does NOT require a `/v2/*` URL bump.
 
 ### 9.2 Cadence
 
@@ -1452,10 +1629,12 @@ runbook step.
   (the explicit boundary set from §7.6), enforced by a CI lint that
   fails on any new import added to the forbidden set.
 - **AC-17.** `coordinator partner-keys issue --label X` (§5.4.2)
-  prints the raw token exactly once to stdout, INSERTs a row into
-  `partner_keys` with `token_hash = sha256(raw_token)`, and the raw
-  token does NOT appear in any log line, journald entry, or DB row
-  after subprocess exit.
+  prints exactly one 47-character token starting with `mpk_` to
+  stdout, INSERTs a row into `partner_keys` with `token_hash =
+  sha256(raw_token_utf8_bytes)` and `length(prefix) = 8`, and the
+  raw token does NOT appear in any log line, journald entry, or DB
+  row after subprocess exit. The 43 characters after `mpk_` MUST
+  match `/^[A-Za-z0-9_-]{43}$/` (no padding).
 - **AC-18.** A request to `/v1/stats/leaderboard` with
   `Authorization: Bearer <revoked_token>` returns 401 with
   `code: "unauthorized"`. The 401 latency MUST be within ±20% of the
@@ -1525,6 +1704,15 @@ challenge each and propose pins for v0.2.
   posture works either way; the question is whether the partner-trust
   bargain is good enough as the operator-issued, operator-revocable
   surface it is in v0.1. Surfaced by codex round 1, q1.
+- **Q13 — Rewards source semantics.** §9.1a defers `earnings_rewards_*`
+  source semantics to an operator-defined `provider_rewards_ledger`
+  table whose population logic v0.1 does NOT pin. SPEC-016 v0.1.19
+  (the locked payout-pipeline SPEC) intentionally does not split
+  work vs rewards. Should v0.2: (a) wait for SPEC-016 v0.2 to define
+  the split normatively, (b) introduce a dedicated network-incentives
+  SPEC, or (c) leave `provider_rewards_ledger` operator-config
+  permanently and treat it as a hostable plug-in surface? Surfaced
+  by codex round 2 C2.
 - **Q12 — Network Stats UI canonical consumer.** The current
   in-repo `frontdoor/console/index.html` is a buyer-side dashboard,
   not the screenshot-style Network Statistics widget that motivated
