@@ -138,18 +138,39 @@ func stripLineComment(line string) string {
 	return line
 }
 
-// extractLabel scans the leading comment lines of a statement
+// extractLabel scans the LEADING comment/blank prefix of a statement
 // looking for `-- @label: X` and returns (label, statement_without_label_comment).
 // Returns ("", original) if no label found.
+//
+// Step 4 r1 [code:r1-6] LOW closure: the scan stops as soon as a
+// non-comment, non-blank line is encountered. A `-- @label:` directive
+// that appears inside the SQL body (e.g. a body comment) is preserved
+// verbatim in the output rather than stripped.
 func extractLabel(stmt string) (string, string) {
 	lines := strings.Split(stmt, "\n")
 	var sqlLines []string
 	label := ""
+	leadingBlock := true // true while we are still in the leading comment prefix
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "-- @label:") {
-			label = strings.TrimSpace(strings.TrimPrefix(trimmed, "-- @label:"))
-			continue
+		if leadingBlock {
+			if trimmed == "" {
+				// blank line — still in leading prefix; keep it
+				sqlLines = append(sqlLines, line)
+				continue
+			}
+			if strings.HasPrefix(trimmed, "-- @label:") {
+				// directive line in the leading block — extract and drop it
+				label = strings.TrimSpace(strings.TrimPrefix(trimmed, "-- @label:"))
+				continue
+			}
+			if strings.HasPrefix(trimmed, "--") {
+				// other comment line in the leading block — keep it, still leading
+				sqlLines = append(sqlLines, line)
+				continue
+			}
+			// First non-comment, non-blank line: SQL body begins here
+			leadingBlock = false
 		}
 		sqlLines = append(sqlLines, line)
 	}

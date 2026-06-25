@@ -3,6 +3,8 @@ package payout
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -339,3 +341,335 @@ func newPayoutsTestRouter(h *PayoutsHandler) http.Handler {
 // future refactors that might inline the method.
 var _ = (*PayoutsHandler)(nil).queryPayouts
 var _ = sql.ErrNoRows
+
+// ==========================================================================
+// Step 4 r1 [code:r1-5] MEDIUM closure — missing test coverage
+// ==========================================================================
+
+// TestPayoutsHandler_MissingBearer_401 asserts that a request with
+// no Authorization header returns 401 (§7.3 auth gate).
+func TestPayoutsHandler_MissingBearer_401(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	tokens := &fakeProviderTokens{tokenToProvider: map[string]string{"tok-a": "providerA"}}
+	h, err := NewPayoutsHandler(PayoutsHandlerOptions{
+		DB: db, Tokens: tokens, Logger: zerolog.Nop(),
+	})
+	if err != nil {
+		t.Fatalf("NewPayoutsHandler: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/providers/providerA/payouts", nil)
+	// No Authorization header.
+	rec := httptest.NewRecorder()
+	newPayoutsTestRouter(h).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("code=%d, want 401 for missing bearer", rec.Code)
+	}
+}
+
+// TestPayoutsHandler_EmptyBearer_401 asserts that "Authorization: Bearer "
+// (space after Bearer, no token) returns 401.
+func TestPayoutsHandler_EmptyBearer_401(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	tokens := &fakeProviderTokens{tokenToProvider: map[string]string{"tok-a": "providerA"}}
+	h, _ := NewPayoutsHandler(PayoutsHandlerOptions{
+		DB: db, Tokens: tokens, Logger: zerolog.Nop(),
+	})
+	req := httptest.NewRequest("GET", "/providers/providerA/payouts", nil)
+	req.Header.Set("Authorization", "Bearer ") // empty bearer value
+	rec := httptest.NewRecorder()
+	newPayoutsTestRouter(h).ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("code=%d, want 401 for empty bearer", rec.Code)
+	}
+}
+
+// TestPayoutsHandler_RateLimit_429 asserts the §7.3 per-provider
+// sliding-window rate-limiter: the 61st request in <60s for the same
+// provider MUST return 429.
+func TestPayoutsHandler_RateLimit_429(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	tokens := &fakeProviderTokens{tokenToProvider: map[string]string{"tok-a": "providerA"}}
+	fixedNow := time.Now()
+	h, _ := NewPayoutsHandler(PayoutsHandlerOptions{
+		DB:           db,
+		Tokens:       tokens,
+		Logger:       zerolog.Nop(),
+		RateLimitMin: 60, // 60 req/min cap
+		// Pin time so all requests land in the same window.
+		NowFn: func() time.Time { return fixedNow },
+	})
+	router := newPayoutsTestRouter(h)
+	// Send 60 requests — all should be allowed.
+	for i := 0; i < 60; i++ {
+		req := httptest.NewRequest("GET", "/providers/providerA/payouts", nil)
+		req.Header.Set("Authorization", "Bearer tok-a")
+		rec := httptest.NewRecorder()
+		router.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("request %d: code=%d, want 200", i+1, rec.Code)
+		}
+	}
+	// 61st request must be rate-limited.
+	req := httptest.NewRequest("GET", "/providers/providerA/payouts", nil)
+	req.Header.Set("Authorization", "Bearer tok-a")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("request 61: code=%d, want 429", rec.Code)
+	}
+}
+
+// TestParseLabeledQueries_ExactlyThreeUnlabeled locks the SPEC §7.4
+// invariant that reconcile.sql carries exactly 3 unlabeled regression
+// queries (not "at least 3" — divergence from 3 is a maintenance signal).
+func TestParseLabeledQueries_ExactlyThreeUnlabeled(t *testing.T) {
+	_, unlabeled := ParseLabeledQueries()
+	if len(unlabeled) != 3 {
+		t.Errorf("expected exactly 3 unlabeled regression queries, got %d; reconcile.sql changed?", len(unlabeled))
+	}
+}
+
+// TestExtractLabel_PreservesBodyComment asserts that a `-- @label: X`
+// appearing inside the SQL body (not in the leading prefix) is preserved
+// verbatim in the output and NOT stripped. Step 4 r1 [code:r1-6] closure.
+func TestExtractLabel_PreservesBodyComment(t *testing.T) {
+	stmt := `-- @label: header_label
+SELECT *
+FROM foo
+-- @label: body_label_should_not_be_stripped
+WHERE id = 1`
+
+	label, body := extractLabel(stmt)
+	if label != "header_label" {
+		t.Errorf("label=%q, want %q", label, "header_label")
+	}
+	if !strings.Contains(body, "-- @label: body_label_should_not_be_stripped") {
+		t.Errorf("body label was stripped; body:\n%s", body)
+	}
+	if !strings.Contains(body, "SELECT *") {
+		t.Errorf("SELECT missing from body:\n%s", body)
+	}
+}
+
+// TestEmitBalanceAlerts_NonZeroThresholdInvokesProbes asserts that
+// configuring a non-zero LowBalanceThreshold drives a USDC CallContract
+// probe and non-zero LowNativeThreshold drives a NativeBalance probe.
+// Step 4 r1 [code:r1-5]/[arch:4.3] convergent closure.
+func TestEmitBalanceAlerts_NonZeroThresholdInvokesProbes(t *testing.T) {
+	callContractCount := 0
+	nativeBalanceCount := 0
+
+	primary := &mockRPCClient{
+		label: "primary",
+		callFn: func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+			callContractCount++
+			// Return 32 zero bytes (balance = 0, will trigger alert).
+			return make([]byte, 32), nil
+		},
+		nativeBalanceFn: func(_ context.Context, _ string) (uint64, error) {
+			nativeBalanceCount++
+			return 0, nil // balance = 0, will trigger alert
+		},
+	}
+	secondary := &mockRPCClient{label: "secondary"}
+	secondary.callFn = primary.callFn
+	secondary.nativeBalanceFn = primary.nativeBalanceFn
+
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	rawHex := "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	raw, _ := hex.DecodeString(rawHex)
+	signer, err := NewLocalFileSignerFromKey(raw)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	hotAddr := signer.FromAddress()
+	logger, _ := quietLogger()
+	state, _, err := Acquire(context.Background(), db, testRunInterval, logger)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if err := UpsertNonceCursor(context.Background(), db, hotAddr, 0, 0, 0, NowUTC()); err != nil {
+		t.Fatalf("UpsertNonceCursor: %v", err)
+	}
+	opts := RunnerOptions{
+		DB:                  db,
+		Security:            SecurityConfig{HotWalletAddress: hotAddr},
+		RPCs:                TwoRPCs{Primary: primary, Secondary: secondary},
+		Signer:              signer,
+		Claimer:             &mockClaimer{claimed: false},
+		Logger:              logger,
+		RunInterval:         testRunInterval,
+		MaxRowsPerRun:       50,
+		ConfirmationBlocks:  5,
+		PerPayoutCapBaseUnits: 1_000_000_000_000,
+		PerDayCapBaseUnits:    10_000_000_000_000,
+		ReceiptPollInterval:   1 * time.Millisecond,
+		ReceiptPollTimeout:    100 * time.Millisecond,
+		NowFn:                 func() time.Time { return time.Now().UTC() },
+		// Non-zero thresholds must activate the probes.
+		LowBalanceThreshold: 1_000_000, // $1 USDC base units
+		LowNativeThreshold:  1_000_000_000_000_000, // 0.001 ETH
+	}
+	runner, err := NewRunner(opts, state)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	// RunOnce with no rows to process — just runs the top-of-cycle probes.
+	_ = runner.RunOnce(context.Background())
+
+	if callContractCount == 0 {
+		t.Error("CallContract not invoked; LowBalanceThreshold > 0 must trigger USDC probe")
+	}
+	if nativeBalanceCount == 0 {
+		t.Error("NativeBalance not invoked; LowNativeThreshold > 0 must trigger native probe")
+	}
+}
+
+// TestRunnerHalted_Skips_Cycle asserts that after RequestHalt is called,
+// RunOnce returns ErrRunnerHalted without selecting any rows.
+// Step 4 r1 halt-primitive closure.
+func TestRunnerHalted_Skips_Cycle(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	rawHex := "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	raw, _ := hex.DecodeString(rawHex)
+	signer, err := NewLocalFileSignerFromKey(raw)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	hotAddr := signer.FromAddress()
+	logger, _ := quietLogger()
+	state, _, err := Acquire(context.Background(), db, testRunInterval, logger)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if err := UpsertNonceCursor(context.Background(), db, hotAddr, 0, 0, 0, NowUTC()); err != nil {
+		t.Fatalf("UpsertNonceCursor: %v", err)
+	}
+	// Track whether any SELECT was issued via the claimer.
+	claimer := &mockClaimer{claimed: false}
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+	opts := RunnerOptions{
+		DB:                    db,
+		Security:              SecurityConfig{HotWalletAddress: hotAddr},
+		RPCs:                  TwoRPCs{Primary: primary, Secondary: secondary},
+		Signer:                signer,
+		Claimer:               claimer,
+		Logger:                logger,
+		RunInterval:           testRunInterval,
+		MaxRowsPerRun:         50,
+		ConfirmationBlocks:    5,
+		PerPayoutCapBaseUnits: 1_000_000_000_000,
+		PerDayCapBaseUnits:    10_000_000_000_000,
+		ReceiptPollInterval:   1 * time.Millisecond,
+		ReceiptPollTimeout:    100 * time.Millisecond,
+		NowFn:                 func() time.Time { return time.Now().UTC() },
+	}
+	runner, err := NewRunner(opts, state)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	runner.RequestHalt("test_reason")
+	if !runner.IsHalted() {
+		t.Fatal("IsHalted() = false after RequestHalt")
+	}
+	err = runner.RunOnce(context.Background())
+	if !errors.Is(err, ErrRunnerHalted) {
+		t.Errorf("RunOnce after halt: err=%v, want ErrRunnerHalted", err)
+	}
+	// Claimer should not have been called (no rows selected).
+	if len(claimer.calls) > 0 {
+		t.Errorf("ClaimPayoutReady called %d times; halted runner must not select rows", len(claimer.calls))
+	}
+}
+
+// TestRunNow_Returns409WhenHalted locks the mux halt-gate: the admin
+// run-now endpoint MUST return 409 with error=runner_halted when the
+// runner is halted.
+func TestRunNow_Returns409WhenHalted(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	rawHex := "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	raw, _ := hex.DecodeString(rawHex)
+	signer, err := NewLocalFileSignerFromKey(raw)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	hotAddr := signer.FromAddress()
+	logger, _ := quietLogger()
+	state, _, err := Acquire(context.Background(), db, testRunInterval, logger)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if err := UpsertNonceCursor(context.Background(), db, hotAddr, 0, 0, 0, NowUTC()); err != nil {
+		t.Fatalf("UpsertNonceCursor: %v", err)
+	}
+	opts := RunnerOptions{
+		DB:                    db,
+		Security:              SecurityConfig{HotWalletAddress: hotAddr},
+		RPCs:                  TwoRPCs{Primary: &mockRPCClient{}, Secondary: &mockRPCClient{}},
+		Signer:                signer,
+		Claimer:               &mockClaimer{claimed: false},
+		Logger:                logger,
+		RunInterval:           testRunInterval,
+		MaxRowsPerRun:         50,
+		ConfirmationBlocks:    5,
+		PerPayoutCapBaseUnits: 1_000_000_000_000,
+		PerDayCapBaseUnits:    10_000_000_000_000,
+		ReceiptPollInterval:   1 * time.Millisecond,
+		ReceiptPollTimeout:    100 * time.Millisecond,
+		NowFn:                 func() time.Time { return time.Now().UTC() },
+	}
+	runner, err := NewRunner(opts, state)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+	runner.RequestHalt("chain_balance_drift")
+
+	// Build a Step2 mux with the halted runner.
+	// Use newServiceForTest for AddressesService (it seeds bootstrap internally).
+	addresses := newServiceForTest(t, db, hotAddr, "mux-test-provider", "mux-test-tok", &fakePause{})
+	signer2, _ := NewLocalFileSignerFromKey(raw) // second instance for abandon
+	abandon, err2 := NewAbandonService(db,
+		SecurityConfig{HotWalletAddress: hotAddr},
+		TwoRPCs{Primary: &mockRPCClient{}, Secondary: &mockRPCClient{}},
+		signer2, testRunInterval, zerolog.Nop())
+	if err2 != nil {
+		t.Fatalf("NewAbandonService: %v", err2)
+	}
+	fallback := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTeapot)
+	})
+	mux, err := NewMuxStep2(Step2MuxOptions{
+		Addresses: addresses,
+		Runner:    runner,
+		Abandon:   abandon,
+		Caps: AbandonCaps{
+			CancelMaxTipMultiplier:      5.0,
+			CancelMaxGasNativeWei:       1e16,
+			CancelMaxGasNativeWeiPer24h: 5e16,
+			AbandonRatePerHour:          3,
+		},
+		OperatorKey: "test-op-key",
+		Fallback:    fallback,
+	})
+	if err != nil {
+		t.Fatalf("NewMuxStep2: %v", err)
+	}
+	req := httptest.NewRequest("POST", "/admin/payout/run-now", nil)
+	req.Header.Set("Authorization", "Bearer test-op-key")
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("code=%d, want 409 when runner halted", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "runner_halted") {
+		t.Errorf("body missing runner_halted; got: %s", rec.Body.String())
+	}
+}

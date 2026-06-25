@@ -371,6 +371,8 @@ else:
             ok(f"payout.security.{key} present")
 
     # tuning namespace
+    # Step 4 r1 [sec:r1-3]/[arch:4.6] MEDIUM closure: low_balance_threshold
+    # and low_native_threshold must be present (0 is valid; disables the probe).
     for key in (
         "address_cooling_off_period",
         "run_interval",
@@ -378,6 +380,8 @@ else:
         "confirmation_blocks",
         "max_rows_per_run",
         "reorg_poll_window",
+        "low_balance_threshold",
+        "low_native_threshold",
     ):
         val = get_tun(key)
         if val is None or val == "":

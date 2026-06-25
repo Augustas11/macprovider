@@ -169,11 +169,31 @@ func TestValidateBounds_CrossField_LowBalanceVsPerDayCap(t *testing.T) {
 // that the file `config_tuning.go` contains zero references to any
 // `payout.security.*` identifier.
 //
-// We parse the file directly with go/parser and walk identifier
-// usages. Any reference to a SecurityConfig field, SecurityConfig
-// struct literal, or the string "payout.security." (as a key) is a
-// fail.
+// Step 4 r1 [code:r1-4]/[arch:4.4] MEDIUM closure: the test now uses
+// a real ast.Inspect walk instead of strings.Contains so it detects
+// any *ast.Ident, *ast.SelectorExpr, or *ast.BasicLit (string literal)
+// that reference the forbidden security-namespace identifier set.
 func TestTuningStaticCheck_NoSecurityNamespaceReference(t *testing.T) {
+	// forbiddenIdents is the centralized set of security-namespace
+	// identifiers that must never appear in config_tuning.go.
+	// Add entries here when new PayoutSecurityConfig fields are added.
+	forbiddenIdents := map[string]bool{
+		"SecurityConfig":                    true,
+		"HotWalletAddress":                  true,
+		"PerDayCap":                         true,
+		"PerPayoutCap":                      true,
+		"ChainReconInterval":                true,
+		"ChainReconToleranceUSDCBaseUnits":  true,
+		"DevMode":                           true,
+		"EncryptedWalletPath":               true,
+		"EncryptedWalletOnDiskHex":          true,
+		"PauseResumeMinInterval":            true,
+		"CancelMaxTipMultiplier":            true,
+		"CancelMaxGasNativeWei":             true,
+		"CancelMaxGasNativeWeiPer24h":       true,
+		"AbandonRatePerHour":                true,
+	}
+
 	cwd, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("getwd: %v", err)
@@ -186,37 +206,30 @@ func TestTuningStaticCheck_NoSecurityNamespaceReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	// Quick string check first — strict, no false positives on
-	// imports/comments because the SPEC namespace literal has
-	// dots and the YAML keys would use those dots verbatim.
-	forbiddenSubstrings := []string{
-		"payout.security.",
-		"SecurityConfig",
-		"HotWalletAddress",
-		"PerPayoutCap",
-		"PerDayCap",
-		"CancelMaxTipMultiplier",
-		"CancelMaxGasNativeWei",
-		"AbandonRatePerHour",
-		"EncryptedWalletPath",
-		"PauseResumeMinInterval",
-		"ChainReconInterval",
-		"ChainReconTolerance",
-	}
-	for _, needle := range forbiddenSubstrings {
-		if strings.Contains(string(src), needle) {
-			t.Errorf("SPEC §6.5 violation: config_tuning.go references security-namespace identifier %q", needle)
-		}
-	}
-	// Parse it to confirm it's still valid Go (defensive — a
-	// rename refactor that breaks the static check must also
-	// keep the file compilable).
+
+	// Parse into a real AST so the walk is structure-aware, not text-based.
 	fset := token.NewFileSet()
-	if _, err := parser.ParseFile(fset, path, src, parser.ParseComments); err != nil {
+	file, err := parser.ParseFile(fset, path, src, parser.ParseComments)
+	if err != nil {
 		t.Fatalf("config_tuning.go is no longer valid Go: %v", err)
 	}
-	// Walk the AST for any identifier named TuningConfig + Security
-	// concatenated (defensive — the string check above already
-	// catches everything we currently care about).
-	_ = ast.NewPackage // keep import alive
+
+	// ast.Inspect walks every node in the file. We check:
+	//   *ast.Ident        — any identifier name in the forbidden set
+	//   *ast.BasicLit     — string literals containing "payout.security."
+	ast.Inspect(file, func(n ast.Node) bool {
+		switch v := n.(type) {
+		case *ast.Ident:
+			if forbiddenIdents[v.Name] {
+				pos := fset.Position(v.Pos())
+				t.Errorf("SPEC §6.5 violation: config_tuning.go references forbidden security-namespace identifier %q at %s", v.Name, pos)
+			}
+		case *ast.BasicLit:
+			if v.Kind == token.STRING && strings.Contains(v.Value, "payout.security.") {
+				pos := fset.Position(v.Pos())
+				t.Errorf("SPEC §6.5 violation: config_tuning.go contains string literal referencing payout.security.* at %s: %s", pos, v.Value)
+			}
+		}
+		return true
+	})
 }

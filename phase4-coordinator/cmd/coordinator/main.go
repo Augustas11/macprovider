@@ -1282,13 +1282,15 @@ func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
 //
 //   - SIGHUP MUST be the ONLY trigger. fsnotify / runtime-debug
 //     endpoint / config-file-mtime-watch are FORBIDDEN.
-//   - Reload re-reads the YAML, captures the candidate snapshot,
-//     and calls TuningProvider.Reload — which re-runs the §6.5
-//     bound matrix and either commits + PAGE-emits OR retains the
-//     live value + PAGE-emits-rejected.
-//   - The security namespace is NOT touched on this path; even if
-//     the YAML's `payout.security.*` changed, this handler ignores
-//     those keys (the security loader is process-start only).
+//   - Reload re-reads the YAML via config.LoadPayoutTuningOnly,
+//     captures the candidate snapshot, and calls TuningProvider.Reload
+//     — which re-runs the §6.5 bound matrix and either commits +
+//     PAGE-emits OR retains the live value + PAGE-emits-rejected.
+//   - Step 4 r1 [code:r1-3] MEDIUM closure: the security namespace is
+//     genuinely NOT parsed on this path. LoadPayoutTuningOnly only
+//     reads `payout.tuning.*` keys; it does NOT resolve env: sentinels
+//     for payout.security.*, does NOT call Validate on security fields,
+//     and will NOT reject a SIGHUP because a security key changed.
 func startPayoutSIGHUPListener(
 	ctx context.Context,
 	configPath string,
@@ -1307,25 +1309,28 @@ func startPayoutSIGHUPListener(
 		case <-ctx.Done():
 			return
 		case <-sigCh:
-			cfg, err := config.Load(configPath)
+			// Step 4 r1 [code:r1-3] MEDIUM closure: use tuning-only
+			// loader so payout.security.* is never parsed, resolved, or
+			// validated on the SIGHUP path.
+			t, err := config.LoadPayoutTuningOnly(configPath)
 			if err != nil {
 				log.Error().Err(err).
 					Str("event", "payout_config_reload_rejected").
 					Str("severity", "PAGE").
-					Msg("payout tuning SIGHUP reload: config.Load failed; live value retained")
+					Msg("payout tuning SIGHUP reload: LoadPayoutTuningOnly failed; live value retained")
 				continue
 			}
 			candidate := payout.TuningSnapshot{
-				AddressCoolingOffPeriod: cfg.Payout.Tuning.AddressCoolingOffPeriod,
-				RunInterval:             cfg.Payout.Tuning.RunInterval,
-				RunNowMinInterval:       cfg.Payout.Tuning.RunNowMinInterval,
-				ConfirmationBlocks:      cfg.Payout.Tuning.ConfirmationBlocks,
-				MaxRowsPerRun:           cfg.Payout.Tuning.MaxRowsPerRun,
-				ReorgPollWindow:         cfg.Payout.Tuning.ReorgPollWindow,
-				LowBalanceThreshold:     cfg.Payout.Tuning.LowBalanceThreshold,
-				LowNativeThreshold:      cfg.Payout.Tuning.LowNativeThreshold,
-				RPCURLPrimaryPinSPKI:    cfg.Payout.Tuning.RPCURLPrimaryPinSPKI,
-				RPCURLSecondaryPinSPKI:  cfg.Payout.Tuning.RPCURLSecondaryPinSPKI,
+				AddressCoolingOffPeriod: t.AddressCoolingOffPeriod,
+				RunInterval:             t.RunInterval,
+				RunNowMinInterval:       t.RunNowMinInterval,
+				ConfirmationBlocks:      t.ConfirmationBlocks,
+				MaxRowsPerRun:           t.MaxRowsPerRun,
+				ReorgPollWindow:         t.ReorgPollWindow,
+				LowBalanceThreshold:     t.LowBalanceThreshold,
+				LowNativeThreshold:      t.LowNativeThreshold,
+				RPCURLPrimaryPinSPKI:    t.RPCURLPrimaryPinSPKI,
+				RPCURLSecondaryPinSPKI:  t.RPCURLSecondaryPinSPKI,
 			}
 			// Reload itself emits payout_config_reloaded /
 			// payout_config_reload_rejected per §7.1; we just

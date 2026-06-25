@@ -608,6 +608,77 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// payoutTuningOnlyWrapper is a minimal YAML envelope that surfaces
+// only the payout.tuning.* namespace. Used by LoadPayoutTuningOnly
+// so SIGHUP parsing cannot accidentally read or validate payout.security.*.
+type payoutTuningOnlyWrapper struct {
+	Payout struct {
+		Tuning PayoutTuningConfig `yaml:"tuning"`
+	} `yaml:"payout"`
+}
+
+// LoadPayoutTuningOnly parses ONLY the `payout.tuning.*` keys from
+// the YAML at path and returns the validated snapshot. It intentionally
+// does NOT read `payout.security.*`, does NOT call resolveEnv on any
+// other field, and does NOT run full Config.Validate.
+//
+// Step 4 r1 [code:r1-3] MEDIUM closure: the SIGHUP loader MUST NOT
+// couple tuning-reload success to immutable security fields. Callers
+// that need the full config should use Load instead.
+//
+// Bound enforcement mirrors the §6.5 sub-set that applies to the
+// tuning namespace only. The per_day_cap cross-check on
+// low_balance_threshold is skipped because the security config is
+// deliberately not loaded here; the bound is enforced by Validate at
+// startup. On SIGHUP, TuningProvider.Reload applies its own in-memory
+// cap check using the startup PerDayCapUSDCBaseUnits.
+func LoadPayoutTuningOnly(path string) (PayoutTuningConfig, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return PayoutTuningConfig{}, err
+	}
+	// Start from defaults so missing keys inherit the startup values.
+	defaults := Default()
+	wrapper := payoutTuningOnlyWrapper{}
+	wrapper.Payout.Tuning = defaults.Payout.Tuning
+	if err := yaml.Unmarshal(b, &wrapper); err != nil {
+		return PayoutTuningConfig{}, err
+	}
+	t := wrapper.Payout.Tuning
+	// §6.5 tuning-namespace bound matrix — same as Validate's payout.tuning.* block.
+	if t.AddressCoolingOffPeriod < time.Hour {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.address_cooling_off_period must be >= 1h (SPEC-016 §3.1)")
+	}
+	if t.RunInterval < 5*time.Minute || t.RunInterval > 24*time.Hour {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.run_interval must be in [5m, 24h] (SPEC-016 §6.5)")
+	}
+	if t.RunNowMinInterval < 10*time.Second || t.RunNowMinInterval > time.Hour {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.run_now_min_interval must be in [10s, 1h] (SPEC-016 §6.5)")
+	}
+	if t.ConfirmationBlocks < 5 || t.ConfirmationBlocks > 200 {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.confirmation_blocks must be in [5, 200] (SPEC-016 §6.5)")
+	}
+	if t.MaxRowsPerRun < 1 || t.MaxRowsPerRun > 500 {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.max_rows_per_run must be in [1, 500] (SPEC-016 §6.5)")
+	}
+	if t.ReorgPollWindow < time.Hour || t.ReorgPollWindow > 168*time.Hour {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.reorg_poll_window must be in [1h, 168h] (SPEC-016 §6.5)")
+	}
+	if t.LowBalanceThreshold < 0 {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.low_balance_threshold must be >= 0")
+	}
+	if t.LowNativeThreshold < 0 || t.LowNativeThreshold > 1_000_000_000_000_000_000 {
+		return PayoutTuningConfig{}, fmt.Errorf("payout.tuning.low_native_threshold must be in [0, 1e18] (SPEC-016 §6.5)")
+	}
+	if err := validateSPKIPin(t.RPCURLPrimaryPinSPKI, "payout.tuning.rpc_url_primary_pin_spki"); err != nil {
+		return PayoutTuningConfig{}, err
+	}
+	if err := validateSPKIPin(t.RPCURLSecondaryPinSPKI, "payout.tuning.rpc_url_secondary_pin_spki"); err != nil {
+		return PayoutTuningConfig{}, err
+	}
+	return t, nil
+}
+
 // resolveEnv expands "env:NAME" sentinels in secret-bearing fields by
 // reading the named environment variable. Mirrors the gateway-side
 // resolver (M3-2 / DEVE-7) but is intentionally duplicated to avoid a
@@ -655,6 +726,32 @@ func (c *Config) resolveEnv() error {
 		}
 		if v := strings.TrimSpace(os.Getenv("MP_SESSION_COOKIE_DOMAIN")); v != "" {
 			c.Auth.GitHubOAuth.SessionCookieDomain = v
+		}
+	}
+	// Step 4 r1 [sec:r1-4] MEDIUM closure: payout.security.* string
+	// fields must honor the env:NAME indirection rule. The deploy gate
+	// already validates env: presence; without this resolver the
+	// coordinator boots with literal "env:..." RPC/wallet strings.
+	if c.Payout.Enabled {
+		if v, err := resolveEnvValue("payout.security.rpc_url_primary", c.Payout.Security.RPCURLPrimary); err != nil {
+			return err
+		} else {
+			c.Payout.Security.RPCURLPrimary = v
+		}
+		if v, err := resolveEnvValue("payout.security.rpc_url_secondary", c.Payout.Security.RPCURLSecondary); err != nil {
+			return err
+		} else {
+			c.Payout.Security.RPCURLSecondary = v
+		}
+		if v, err := resolveEnvValue("payout.security.hot_wallet_address", c.Payout.Security.HotWalletAddress); err != nil {
+			return err
+		} else {
+			c.Payout.Security.HotWalletAddress = v
+		}
+		if v, err := resolveEnvValue("payout.security.encrypted_wallet_path", c.Payout.Security.EncryptedWalletPath); err != nil {
+			return err
+		} else {
+			c.Payout.Security.EncryptedWalletPath = v
 		}
 	}
 	return nil

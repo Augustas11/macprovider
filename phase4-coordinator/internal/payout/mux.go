@@ -161,6 +161,14 @@ func NewMuxStep2(opts Step2MuxOptions) (http.Handler, error) {
 		// §4.2 admin run-now: synchronous one-shot cycle. If a
 		// cycle is already in flight, the runner's mutex returns
 		// 409 inflight via the underlying RunOnce error.
+		// Step 4 r1 halt-primitive closure: refuse while halted.
+		if opts.Runner.IsHalted() {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":  "runner_halted",
+				"reason": opts.Runner.HaltReason(),
+			})
+			return
+		}
 		if err := opts.Runner.RunOnce(req.Context()); err != nil {
 			writeError(w, http.StatusConflict, "cycle_in_flight_or_failed")
 			return
@@ -225,6 +233,14 @@ func NewMuxStep3(opts Step3MuxOptions) (http.Handler, error) {
 		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
 	})
 	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
+		// Step 4 r1 halt-primitive closure: refuse while halted.
+		if opts.Runner.IsHalted() {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":  "runner_halted",
+				"reason": opts.Runner.HaltReason(),
+			})
+			return
+		}
 		if err := opts.Runner.RunOnce(req.Context()); err != nil {
 			writeError(w, http.StatusConflict, "cycle_in_flight_or_failed")
 			return
@@ -306,6 +322,14 @@ func NewMuxStep4(opts Step4MuxOptions) (http.Handler, error) {
 		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
 	})
 	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
+		// Step 4 r1 halt-primitive closure: refuse while halted.
+		if opts.Runner.IsHalted() {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error":  "runner_halted",
+				"reason": opts.Runner.HaltReason(),
+			})
+			return
+		}
 		if err := opts.Runner.RunOnce(req.Context()); err != nil {
 			writeError(w, http.StatusConflict, "cycle_in_flight_or_failed")
 			return
