@@ -341,6 +341,10 @@ func main() {
 	if payoutS2 != nil {
 		payoutS2.runner.Start(shutdownCtx)
 		startPayoutReorgPoller(shutdownCtx, payoutS2.reorg, cfg.Payout.Tuning.RunInterval, logger)
+		// Step 3 §4.8a + §4.8c reaper.
+		if payoutS2.reaper != nil {
+			payoutS2.reaper.Start(shutdownCtx)
+		}
 	}
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerServer.Handler())
@@ -599,11 +603,13 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 // §0 "design-only" disposition at v0.1.x.
 // payoutStep2 bundles the Step 2 components so main.go can run
 // the runner lifecycle alongside the existing shutdown ordering.
+// Step 3 extends it with the §4.8a + §4.7 reaper.
 type payoutStep2 struct {
 	runner *payout.Runner
 	reorg  *payout.ReorgPoller
 	state  payout.LeaseState
-	stop   func(context.Context) // calls runner.Stop then Release
+	reaper *payout.Reaper       // Step 3 §4.8a + §4.8c outbox reaper
+	stop   func(context.Context) // calls runner.Stop, reaper.Stop, then Release
 }
 
 func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore *auth.Store, claimer payout.PayoutClaimer, billingFallback http.Handler, logger zerolog.Logger) (*payout.AddressesService, http.Handler, *payoutStep2, error) {
@@ -759,18 +765,77 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		_ = payout.Release(context.Background(), db, state, logger)
 		return nil, nil, nil, fmt.Errorf("NewAbandonService: %w", err)
 	}
-	mux, err := payout.NewMuxStep2(payout.Step2MuxOptions{
-		Addresses:   svc,
-		Abandon:     abandonSvc,
-		Runner:      runner,
-		OperatorKey: cfg.Auth.OperatorKey,
-		Caps: payout.AbandonCaps{
-			CancelMaxTipMultiplier:      cfg.Payout.Security.CancelMaxTipMultiplier,
-			CancelMaxGasNativeWei:       cfg.Payout.Security.CancelMaxGasNativeWei,
-			CancelMaxGasNativeWeiPer24h: cfg.Payout.Security.CancelMaxGasNativeWeiPer24h,
-			AbandonRatePerHour:          cfg.Payout.Security.AbandonRatePerHour,
+	// Step 3 services: §4.8a flag-write primitive, §6.4.1 pause/
+	// resume, §4.9 record-funding, §4.7 record-orphan, and the
+	// background reaper for the §4.8a + §4.8c outboxes.
+	flagWriter, err := payout.NewRuntimeFlagWriter(db, logger)
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewRuntimeFlagWriter: %w", err)
+	}
+	pauseSvc, err := payout.NewPauseResumeService(payout.PauseResumeOptions{
+		Writer:      flagWriter,
+		MinInterval: cfg.Payout.Security.PauseResumeMinInterval,
+		Logger:      logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewPauseResumeService: %w", err)
+	}
+	fundingSvc, err := payout.NewFundingService(payout.FundingOptions{
+		DB:               db,
+		RPCs:             &rpcs,
+		HotWalletAddress: sec.HotWalletAddress,
+		USDCAddress:      payout.USDCContractAddressBase,
+		Logger:           logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewFundingService: %w", err)
+	}
+	orphansSvc, err := payout.NewOrphansService(payout.OrphansOptions{
+		DB:     db,
+		Logger: logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewOrphansService: %w", err)
+	}
+	reaper, err := payout.NewReaper(payout.ReaperOptions{
+		DB:        db,
+		PauseSvc:  pauseSvc,
+		TickEvery: cfg.Payout.Tuning.RunInterval,
+		// §4.7 stale cutoff = 3 × run_interval.
+		StaleAge: 3 * cfg.Payout.Tuning.RunInterval,
+		Logger:   logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewReaper: %w", err)
+	}
+
+	mux, err := payout.NewMuxStep3(payout.Step3MuxOptions{
+		Step2MuxOptions: payout.Step2MuxOptions{
+			Addresses:   svc,
+			Abandon:     abandonSvc,
+			Runner:      runner,
+			OperatorKey: cfg.Auth.OperatorKey,
+			Caps: payout.AbandonCaps{
+				CancelMaxTipMultiplier:      cfg.Payout.Security.CancelMaxTipMultiplier,
+				CancelMaxGasNativeWei:       cfg.Payout.Security.CancelMaxGasNativeWei,
+				CancelMaxGasNativeWeiPer24h: cfg.Payout.Security.CancelMaxGasNativeWeiPer24h,
+				AbandonRatePerHour:          cfg.Payout.Security.AbandonRatePerHour,
+			},
+			Fallback: billingFallback,
 		},
-		Fallback: billingFallback,
+		Pause:   pauseSvc,
+		Funding: fundingSvc,
+		Orphans: orphansSvc,
+		// SPEC §4.8a actor format: "operator_key:<key_id>". The
+		// raw key is not the id (it's a secret); use the prefix
+		// of its sha-derived label. For Step 3 we use a stable
+		// non-secret label tied to the deployment.
+		Actor: "operator_key:coordinator",
 	})
 	if err != nil {
 		_ = payout.Release(context.Background(), db, state, logger)
@@ -781,12 +846,13 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		Str("hot_wallet_address", sec.HotWalletAddress).
 		Dur("address_cooling_off_period", cfg.Payout.Tuning.AddressCoolingOffPeriod).
 		Uint64("nonce_cursor", chosen).
-		Msg("payout pipeline enabled (Step 2: §3.3 handler + §4.3 runner + §4.6 abandon + §4.7 reorg poll)")
+		Msg("payout pipeline enabled (Step 3: §3.3 handler + §4.3 runner + §4.6 abandon + §4.7 reorg/record-orphan + §4.9 record-funding + §6.4.1 pause/resume + §4.8a reaper)")
 
 	step2 := &payoutStep2{
 		runner: runner,
 		reorg:  reorgPoller,
 		state:  state,
+		reaper: reaper,
 		stop: func(stopCtx context.Context) {
 			// Runner.Stop waits for any in-flight cycle to finish.
 			// Codex round-2 [arch:3.1-r2] MEDIUM closure: only
@@ -796,6 +862,10 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 			// lease would let the next process acquire and race
 			// the original holder's in-flight tx.
 			cleanExit := runner.Stop(stopCtx)
+			// Reaper has no lease to release; stop it after the
+			// runner so any final §4.8a write that COMMITs during
+			// runner shutdown still has the reaper's safety net.
+			_ = reaper.Stop(stopCtx)
 			if cleanExit {
 				_ = payout.Release(stopCtx, db, state, logger)
 			} else {
