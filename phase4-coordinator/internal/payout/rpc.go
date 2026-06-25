@@ -67,6 +67,18 @@ type RPCClient interface {
 	// by §4.3 step 7 to compute receipt depth.
 	BlockNumber(ctx context.Context) (uint64, error)
 
+	// CallContract issues an eth_call to the named contract
+	// address with the supplied ABI-encoded calldata. Returns
+	// the raw response bytes (caller decodes per ABI). Used by
+	// §7.4 chain-balance worker for USDC balanceOf(hot_wallet).
+	// Step 4 wiring.
+	CallContract(ctx context.Context, to string, data []byte) ([]byte, error)
+
+	// NativeBalance returns the native ETH balance of the
+	// address in wei. Used by §6.2 low-native-balance alert.
+	// Step 4 wiring.
+	NativeBalance(ctx context.Context, address string) (uint64, error)
+
 	// Label is an operator-readable name for log emissions
 	// (e.g. "primary" / "secondary"). Required because both RPC
 	// URLs are secret-bearing and MUST NOT be logged.
@@ -368,6 +380,43 @@ func (c *HTTPRPCClient) TransactionByHash(ctx context.Context, txHash string) (*
 func (c *HTTPRPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 	var hexStr string
 	if err := c.call(ctx, "eth_blockNumber", []interface{}{}, &hexStr); err != nil {
+		return 0, err
+	}
+	return parseHexUint(hexStr)
+}
+
+// CallContract issues eth_call against the given contract
+// address with the provided ABI-encoded calldata. Used by §7.4
+// chain-balance worker for USDC balanceOf(hot_wallet). Step 4
+// wiring.
+func (c *HTTPRPCClient) CallContract(ctx context.Context, to string, data []byte) ([]byte, error) {
+	params := []interface{}{
+		map[string]string{
+			"to":   to,
+			"data": "0x" + hex.EncodeToString(data),
+		},
+		"latest",
+	}
+	var hexStr string
+	if err := c.call(ctx, "eth_call", params, &hexStr); err != nil {
+		return nil, err
+	}
+	hexStr = strings.TrimPrefix(strings.ToLower(hexStr), "0x")
+	if hexStr == "" {
+		return nil, nil
+	}
+	out, err := hex.DecodeString(hexStr)
+	if err != nil {
+		return nil, fmt.Errorf("CallContract: decode result: %w", err)
+	}
+	return out, nil
+}
+
+// NativeBalance returns eth_getBalance(address, "latest") in wei.
+// Used by §6.2 low-native-balance alert. Step 4 wiring.
+func (c *HTTPRPCClient) NativeBalance(ctx context.Context, address string) (uint64, error) {
+	var hexStr string
+	if err := c.call(ctx, "eth_getBalance", []interface{}{address, "latest"}, &hexStr); err != nil {
 		return 0, err
 	}
 	return parseHexUint(hexStr)

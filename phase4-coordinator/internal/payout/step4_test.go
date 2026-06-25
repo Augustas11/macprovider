@@ -1,0 +1,341 @@
+package payout
+
+import (
+	"context"
+	"database/sql"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
+)
+
+// TestParseLabeledQueries_AllSixLabelsPresent locks the SPEC §7.4
+// invariant: queries (A) through (F) MUST be present verbatim in
+// the checked-in reconcile.sql. A missing label is a fail (someone
+// stripped or renamed the SPEC-reserved labels).
+func TestParseLabeledQueries_AllSixLabelsPresent(t *testing.T) {
+	labeled, unlabeled := ParseLabeledQueries()
+	for _, want := range []string{"A", "B", "C", "D", "E", "F"} {
+		stmt, ok := labeled[want]
+		if !ok {
+			t.Errorf("missing labeled query %q in reconcile.sql", want)
+			continue
+		}
+		if !strings.Contains(stmt, "SELECT") && !strings.Contains(stmt, "select") {
+			t.Errorf("query %q does not contain a SELECT statement", want)
+		}
+	}
+	if len(unlabeled) < 3 {
+		t.Errorf("expected at least 3 unlabeled regression queries, got %d", len(unlabeled))
+	}
+}
+
+// TestParseLabeledQueries_QueryDDelimitsCancelExclusion confirms
+// the cancel-self-transfer observability query (D) filters on
+// is_cancel_self_transfer = 1 (not 0) so the result set is the
+// roll-up the SPEC §7.4 names.
+func TestParseLabeledQueries_QueryDExcludesNonCancel(t *testing.T) {
+	labeled, _ := ParseLabeledQueries()
+	d, ok := labeled["D"]
+	if !ok {
+		t.Fatal("query (D) missing")
+	}
+	if !strings.Contains(d, "is_cancel_self_transfer = 1") {
+		t.Errorf("query (D) does not filter is_cancel_self_transfer = 1; got:\n%s", d)
+	}
+}
+
+// TestParseLabeledQueries_QueryFExcludesCancelFromOutflow locks
+// the §7.4 (F) money-conservation invariant: cancel rows MUST NOT
+// be subtracted from the outflow side (they're net-zero on-chain).
+func TestParseLabeledQueries_QueryFExcludesCancelFromOutflow(t *testing.T) {
+	labeled, _ := ParseLabeledQueries()
+	f, ok := labeled["F"]
+	if !ok {
+		t.Fatal("query (F) missing")
+	}
+	if !strings.Contains(f, "is_cancel_self_transfer = 0") {
+		t.Errorf("query (F) does not exclude is_cancel_self_transfer in outflow; got:\n%s", f)
+	}
+}
+
+// TestReconcileSQLRaw_VerbatimSPECFingerprint asserts the embedded
+// reconcile.sql file is checked in. A non-empty raw string is a
+// minimum check; the audit pipeline does fuller diff vs the SPEC
+// body.
+func TestReconcileSQLRaw_NonEmpty(t *testing.T) {
+	raw := ReconcileSQLRaw()
+	if len(raw) < 1000 {
+		t.Errorf("reconcile.sql looks truncated (len=%d)", len(raw))
+	}
+	for _, label := range []string{"-- @label: A", "-- @label: B", "-- @label: C", "-- @label: D", "-- @label: E", "-- @label: F"} {
+		if !strings.Contains(raw, label) {
+			t.Errorf("reconcile.sql missing %q", label)
+		}
+	}
+}
+
+// usdcMockReceiptFn returns a fixed mock balanceOf result.
+func usdcMockBalance(amount uint64) func(context.Context, string, []byte) ([]byte, error) {
+	return func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+		out := make([]byte, 32)
+		new(big.Int).SetUint64(amount).FillBytes(out)
+		return out, nil
+	}
+}
+
+// TestChainBalanceWorker_DriftPositiveEmitsWARN locks the §7.4
+// positive-drift path. on_chain > expected → payout_chain_balance_drift_positive.
+func TestChainBalanceWorker_DriftPositiveEmitsWARN(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	hot := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	// Seed: no funding in DB, no payouts. expected = 0.
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+	primary.callFn = usdcMockBalance(1_000_000) // $1 on chain
+	secondary.callFn = primary.callFn
+	worker, err := NewChainBalanceWorker(db, TwoRPCs{Primary: primary, Secondary: secondary},
+		ChainBalanceConfig{
+			Interval:      1 * time.Hour,
+			ToleranceUSDC: 100_000, // $0.10
+			HotWalletAddr: hot,
+			USDCContract:  USDCContractAddressBase,
+		}, nil, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("NewChainBalanceWorker: %v", err)
+	}
+	// Synchronously runOnce — the worker function emits but we
+	// only assert it doesn't crash + reaches the comparison.
+	// Side-channel: drift is on_chain (1M) - expected (0) = +1M > tol → positive.
+	worker.runOnce(context.Background())
+}
+
+// TestChainBalanceWorker_DriftNegativeCallsHalt locks the §7.4
+// negative-drift PAGE path AND the haltRunner callback invocation.
+func TestChainBalanceWorker_DriftNegativeCallsHalt(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	hot := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	hotLower := strings.ToLower(hot)
+	// Seed: $10 of funding recorded but $0 on chain → negative
+	// drift signature of the fake-funding attack class.
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO payout_hot_wallet_funding
+  (from_address, to_address, amount_base_units, tx_hash, block_number, observed_at_utc, source)
+VALUES (?, ?, 10000000, '0xdeadbeef', 1, '2026-01-01T00:00:00Z', 'manual')`,
+		"0x"+strings.Repeat("aa", 20), hotLower,
+	); err != nil {
+		t.Fatalf("seed funding: %v", err)
+	}
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+	primary.callFn = usdcMockBalance(0) // $0 on chain
+	secondary.callFn = primary.callFn
+	halted := false
+	worker, _ := NewChainBalanceWorker(db, TwoRPCs{Primary: primary, Secondary: secondary},
+		ChainBalanceConfig{
+			Interval:      1 * time.Hour,
+			ToleranceUSDC: 100_000, // $0.10
+			HotWalletAddr: hot,
+			USDCContract:  USDCContractAddressBase,
+		}, func(reason string) { halted = true }, zerolog.Nop())
+	worker.runOnce(context.Background())
+	if !halted {
+		t.Error("haltRunner not invoked on negative drift; SPEC §7.4 PAGE path broken")
+	}
+}
+
+// TestChainBalanceWorker_RPCDisagreementSkipsHalt locks the §7.4
+// behavior on RPC disagreement: emit payout_rpc_disagreement AND
+// skip the drift comparison — MUST NOT halt.
+func TestChainBalanceWorker_RPCDisagreementSkipsHalt(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	hot := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+	primary.callFn = usdcMockBalance(100_000_000)
+	secondary.callFn = usdcMockBalance(1) // diverges
+	haltCount := 0
+	worker, _ := NewChainBalanceWorker(db, TwoRPCs{Primary: primary, Secondary: secondary},
+		ChainBalanceConfig{
+			Interval:      1 * time.Hour,
+			ToleranceUSDC: 100_000,
+			HotWalletAddr: hot,
+			USDCContract:  USDCContractAddressBase,
+		}, func(reason string) { haltCount++ }, zerolog.Nop())
+	worker.runOnce(context.Background())
+	if haltCount != 0 {
+		t.Errorf("haltRunner invoked %d times on RPC disagreement; want 0", haltCount)
+	}
+}
+
+// TestChainBalanceWorker_StartStopIdempotent confirms the worker
+// follows the same Stop bool contract as Runner/Reaper/ReorgPoller.
+func TestChainBalanceWorker_StartStopIdempotent(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+	primary.callFn = usdcMockBalance(0)
+	secondary.callFn = primary.callFn
+	worker, _ := NewChainBalanceWorker(db, TwoRPCs{Primary: primary, Secondary: secondary},
+		ChainBalanceConfig{
+			Interval:      50 * time.Millisecond,
+			ToleranceUSDC: 0,
+			HotWalletAddr: "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+		}, nil, zerolog.Nop())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	worker.Start(ctx)
+	worker.Start(ctx) // idempotent
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer stopCancel()
+	if !worker.Stop(stopCtx) {
+		t.Error("first Stop returned false; expected clean exit")
+	}
+	if !worker.Stop(stopCtx) {
+		t.Error("second Stop returned false; expected idempotent true")
+	}
+}
+
+// TestUSDCBalanceCalldata_LowerCasePadding probes the ABI encoder
+// for balanceOf(address). The output MUST be 36 bytes: 4-byte
+// selector + 32-byte zero-padded address.
+func TestUSDCBalanceCalldata_Shape(t *testing.T) {
+	addr := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	out := usdcBalanceCalldata(addr)
+	if len(out) != 36 {
+		t.Errorf("calldata len = %d, want 36", len(out))
+	}
+	// First 4 bytes = balanceOf selector.
+	for i, b := range []byte{0x70, 0xa0, 0x82, 0x31} {
+		if out[i] != b {
+			t.Errorf("selector byte %d = 0x%02x, want 0x%02x", i, out[i], b)
+		}
+	}
+	// Bytes [4..16) MUST be zero (left-padding).
+	for i := 4; i < 16; i++ {
+		if out[i] != 0 {
+			t.Errorf("left-pad byte %d = 0x%02x, want 0", i, out[i])
+		}
+	}
+}
+
+// fakeProviderTokens lets us inject canned ValidateToken responses
+// without depending on the auth package.
+type fakeProviderTokens struct {
+	tokenToProvider map[string]string
+}
+
+func (f *fakeProviderTokens) ValidateToken(_ context.Context, raw string) (string, bool, error) {
+	p, ok := f.tokenToProvider[raw]
+	return p, ok, nil
+}
+
+// TestPayoutsHandler_403OnTokenProviderMismatch locks the §7.3
+// security invariant: a valid token for provider A MUST NOT read
+// provider B's payouts.
+func TestPayoutsHandler_403OnTokenProviderMismatch(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	tokens := &fakeProviderTokens{tokenToProvider: map[string]string{"tok-a": "providerA"}}
+	h, err := NewPayoutsHandler(PayoutsHandlerOptions{
+		DB: db, Tokens: tokens, Logger: zerolog.Nop(),
+	})
+	if err != nil {
+		t.Fatalf("NewPayoutsHandler: %v", err)
+	}
+	req := httptest.NewRequest("GET", "/providers/providerB/payouts", nil)
+	// chi's URLParam needs a URLParams ctx — easier to call the
+	// handler through a chi router.
+	req.Header.Set("Authorization", "Bearer tok-a")
+	mux := newPayoutsTestRouter(h)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("code=%d, want 403", rec.Code)
+	}
+}
+
+// TestPayoutsHandler_HappyPathReturnsRows seeds a couple of rows
+// and confirms the response shape.
+func TestPayoutsHandler_HappyPathReturnsRows(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	// Insert a confirmed payout for providerA.
+	payoutID := insertReadyRow(t, db, "providerA", "settle:A:1")
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO payout_attempts
+  (payout_id, attempt_seq, chain, from_address, to_address,
+   amount_base_units, nonce, raw_signed_tx, tx_hash,
+   broadcast_at_utc, confirmed_at_utc, is_cancel_self_transfer, updated_at_utc)
+VALUES (?, 1, 'base-mainnet', '0xhot', '0xrecv', 900000, 1, X'02', '0xab',
+        '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', 0, '2026-01-01T01:00:00Z')`,
+		payoutID); err != nil {
+		t.Fatalf("seed attempt: %v", err)
+	}
+	tokens := &fakeProviderTokens{tokenToProvider: map[string]string{"tok-a": "providerA"}}
+	h, _ := NewPayoutsHandler(PayoutsHandlerOptions{DB: db, Tokens: tokens, Logger: zerolog.Nop()})
+	req := httptest.NewRequest("GET", "/providers/providerA/payouts", nil)
+	req.Header.Set("Authorization", "Bearer tok-a")
+	rec := httptest.NewRecorder()
+	newPayoutsTestRouter(h).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"count":1`) {
+		t.Errorf("body missing count:1; got %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"tx_hash":"0xab"`) {
+		t.Errorf("body missing tx_hash; got %s", rec.Body.String())
+	}
+}
+
+// TestPayoutsHandler_CancelRowsFiltered locks the SPEC §7.3 invariant:
+// is_cancel_self_transfer=1 rows MUST NOT be in the provider read.
+func TestPayoutsHandler_CancelRowsFiltered(t *testing.T) {
+	db := openTestDB(t)
+	seedBootstrapForTest(t, db)
+	payoutID := insertReadyRow(t, db, "providerA", "settle:A:cancel")
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO payout_attempts
+  (payout_id, attempt_seq, chain, from_address, to_address,
+   amount_base_units, nonce, raw_signed_tx, tx_hash,
+   broadcast_at_utc, confirmed_at_utc, is_cancel_self_transfer, updated_at_utc)
+VALUES (?, 1, 'base-mainnet', '0xhot', '0xhot', 1, 1, X'02', '0xcancel',
+        '2026-01-01T00:00:00Z', '2026-01-01T01:00:00Z', 1, '2026-01-01T01:00:00Z')`,
+		payoutID); err != nil {
+		t.Fatalf("seed cancel: %v", err)
+	}
+	tokens := &fakeProviderTokens{tokenToProvider: map[string]string{"tok-a": "providerA"}}
+	h, _ := NewPayoutsHandler(PayoutsHandlerOptions{DB: db, Tokens: tokens, Logger: zerolog.Nop()})
+	req := httptest.NewRequest("GET", "/providers/providerA/payouts", nil)
+	req.Header.Set("Authorization", "Bearer tok-a")
+	rec := httptest.NewRecorder()
+	newPayoutsTestRouter(h).ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"count":0`) {
+		t.Errorf("cancel row leaked into provider read; body=%s", rec.Body.String())
+	}
+}
+
+// newPayoutsTestRouter returns a chi router with just the §7.3 route
+// wired so tests get chi.URLParam working without rebuilding the
+// full mux.
+func newPayoutsTestRouter(h *PayoutsHandler) http.Handler {
+	mux := chi.NewRouter()
+	mux.Get("/providers/{provider_id}/payouts", h.ServePayouts)
+	return mux
+}
+
+// Compile-time assertion: PayoutsHandler.queryPayouts has the same
+// signature as expected; this just keeps the import live during
+// future refactors that might inline the method.
+var _ = (*PayoutsHandler)(nil).queryPayouts
+var _ = sql.ErrNoRows

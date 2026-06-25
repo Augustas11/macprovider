@@ -63,6 +63,12 @@ var step3PathTable = append([]PathTableEntry{
 	{Method: http.MethodPost, Path: "/admin/payout/record-orphan", Realm: RealmOperatorKey},
 }, step2PathTable...)
 
+// step4PathTable extends step3PathTable with the §7.3 provider-
+// scoped read endpoint. Provider-token (NOT operator) auth.
+var step4PathTable = append([]PathTableEntry{
+	{Method: http.MethodGet, Path: "/providers/{provider_id}/payouts", Realm: RealmProviderToken},
+}, step3PathTable...)
+
 // NewMux constructs the chi-based payout HTTP router. The
 // returned http.Handler is mounted by main.go on the existing
 // provider listener (the SPEC's `:8444` ws-mux listener) at the
@@ -238,6 +244,85 @@ func NewMuxStep3(opts Step3MuxOptions) (http.Handler, error) {
 	r.With(auth).Post("/admin/payout/record-orphan", opts.Orphans.ServeRecordOrphan)
 
 	if err := verifyPathTable(r, step3PathTable); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// Step4MuxOptions extends Step3MuxOptions with the §7.3
+// provider-token-authed payouts read endpoint dependency.
+type Step4MuxOptions struct {
+	Step3MuxOptions
+	Payouts *PayoutsHandler
+}
+
+// NewMuxStep4 returns the Step 4 chi router with all Step 1+2+3
+// surfaces PLUS the §7.3 GET /providers/{provider_id}/payouts
+// provider-token read endpoint. Path-table verifier asserts
+// parity with step4PathTable.
+func NewMuxStep4(opts Step4MuxOptions) (http.Handler, error) {
+	if opts.Addresses == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep4: AddressesService required")
+	}
+	if opts.Abandon == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep4: AbandonService required")
+	}
+	if opts.Runner == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep4: Runner required")
+	}
+	if opts.OperatorKey == "" {
+		return nil, fmt.Errorf("payout.NewMuxStep4: OperatorKey required")
+	}
+	if opts.Fallback == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep4: Fallback required")
+	}
+	if opts.Pause == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep4: Pause required")
+	}
+	if opts.Funding == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep4: Funding required")
+	}
+	if opts.Orphans == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep4: Orphans required")
+	}
+	if opts.Actor == "" {
+		return nil, fmt.Errorf("payout.NewMuxStep4: Actor required")
+	}
+	if opts.Payouts == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep4: Payouts handler required")
+	}
+	r := chi.NewRouter()
+
+	// Step 1: §3.3 provider-token registration handler.
+	r.Post("/providers/{provider_id}/payout-address", opts.Addresses.ServePayoutAddress)
+	// Step 4: §7.3 provider-token payouts read endpoint.
+	r.Get("/providers/{provider_id}/payouts", opts.Payouts.ServePayouts)
+	// Fallback wildcard for non-payout /providers/* paths.
+	r.HandleFunc("/providers/*", opts.Fallback.ServeHTTP)
+
+	auth := operatorKeyMiddleware(opts.OperatorKey)
+	// Step 2: §4.6 abandon + §4.2 run-now.
+	r.With(auth).Post("/admin/payout/abandon-attempt", func(w http.ResponseWriter, req *http.Request) {
+		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
+	})
+	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
+		if err := opts.Runner.RunOnce(req.Context()); err != nil {
+			writeError(w, http.StatusConflict, "cycle_in_flight_or_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+	// Step 3: §6.4.1 pause/resume + §4.9 record-funding + §4.7 record-orphan.
+	r.With(auth).Post("/admin/payout/pause-registration", func(w http.ResponseWriter, req *http.Request) {
+		opts.Pause.ServePause(w, req, opts.Actor)
+	})
+	r.With(auth).Post("/admin/payout/resume-registration", func(w http.ResponseWriter, req *http.Request) {
+		opts.Pause.ServeResume(w, req, opts.Actor)
+	})
+	r.With(auth).Post("/admin/payout/record-funding", opts.Funding.ServeRecordFunding)
+	r.With(auth).Post("/admin/payout/record-orphan", opts.Orphans.ServeRecordOrphan)
+
+	if err := verifyPathTable(r, step4PathTable); err != nil {
 		return nil, err
 	}
 	return r, nil

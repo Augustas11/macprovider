@@ -64,6 +64,13 @@ type RunnerOptions struct {
 	ReceiptPollInterval time.Duration
 	ReceiptPollTimeout  time.Duration
 
+	// LowBalanceThreshold / LowNativeThreshold drive the §6.2
+	// balance-monitoring emits at the top of each cycle (Step 4).
+	// 0 disables. Read once per cycle so SIGHUP reloads land
+	// without a runner restart.
+	LowBalanceThreshold int64
+	LowNativeThreshold  int64
+
 	// Test/instrumentation hooks. Production wiring leaves these nil.
 	SleepAfterPostCommitLeaseReread time.Duration
 	NowFn                           func() time.Time
@@ -243,6 +250,12 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			Str("run_id", runID).
 			Str("ts_utc", now.Format(time.RFC3339Nano)).Send()
 	}
+
+	// §6.2 balance monitoring (Step 4). Runs ONCE per cycle so
+	// SIGHUP-tuned thresholds land without a runner restart.
+	// Failure here is observability-only — degraded telemetry is
+	// preferred over a money-path stall on transient RPC error.
+	r.emitBalanceAlerts(ctx, runID, now)
 
 	// §4.3 step 1: SELECT ready rows.
 	hotWallet := r.opts.Security.HotWalletAddress
@@ -1186,5 +1199,65 @@ func receiptSummary(r *Receipt) map[string]interface{} {
 		"block_number": r.BlockNumber,
 		"status":       r.Status,
 		"to":           r.To,
+	}
+}
+
+// emitBalanceAlerts reads the hot wallet's USDC + native balances
+// from BOTH RPCs (primary only suffices for the threshold check —
+// the chain-balance worker does the cross-RPC reconciliation). It
+// emits §7.1 events when balances fall below the configured
+// thresholds. Threshold == 0 disables that probe.
+//
+// This is the SPEC §6.2 monitoring surface; it is independent of
+// the chain-balance worker (§7.4). The two are intentionally
+// orthogonal: one is "we're running low on funds for upcoming
+// payouts" (operational alert); the other is "the books don't
+// match the chain" (incident-class drift detector).
+func (r *Runner) emitBalanceAlerts(ctx context.Context, runID string, now time.Time) {
+	if r.opts.LowBalanceThreshold <= 0 && r.opts.LowNativeThreshold <= 0 {
+		return
+	}
+	hotLower := strings.ToLower(r.opts.Security.HotWalletAddress)
+
+	if r.opts.LowBalanceThreshold > 0 {
+		data := usdcBalanceCalldata(hotLower)
+		res, err := r.opts.RPCs.Primary.CallContract(ctx, USDCContractAddressBase, data)
+		if err != nil {
+			r.opts.Logger.Warn().Err(err).
+				Str("event", "payout_balance_probe_rpc_error").
+				Str("probe", "usdc").
+				Str("run_id", runID).Send()
+		} else if bal, ok := parseBalanceResult(res); ok {
+			threshold := new(big.Int).SetInt64(r.opts.LowBalanceThreshold)
+			if bal.Cmp(threshold) < 0 {
+				r.opts.Logger.Warn().
+					Str("event", "payout_low_balance").
+					Str("severity", "WARN").
+					Str("hot_wallet", hotLower).
+					Str("balance_usdc_base_units", bal.String()).
+					Int64("threshold", r.opts.LowBalanceThreshold).
+					Str("run_id", runID).
+					Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).Send()
+			}
+		}
+	}
+
+	if r.opts.LowNativeThreshold > 0 {
+		bal, err := r.opts.RPCs.Primary.NativeBalance(ctx, hotLower)
+		if err != nil {
+			r.opts.Logger.Warn().Err(err).
+				Str("event", "payout_balance_probe_rpc_error").
+				Str("probe", "native").
+				Str("run_id", runID).Send()
+		} else if bal < uint64(r.opts.LowNativeThreshold) {
+			r.opts.Logger.Warn().
+				Str("event", "payout_low_native_balance").
+				Str("severity", "WARN").
+				Str("hot_wallet", hotLower).
+				Uint64("balance_wei", bal).
+				Int64("threshold_wei", r.opts.LowNativeThreshold).
+				Str("run_id", runID).
+				Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).Send()
+		}
 	}
 }

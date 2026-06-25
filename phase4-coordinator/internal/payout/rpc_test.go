@@ -19,11 +19,13 @@ type mockRPCClient struct {
 	label string
 	chain uint64
 
-	txCountFn  func(ctx context.Context, address string) (uint64, error)
-	sendFn     func(ctx context.Context, raw []byte) (string, error)
-	receiptFn  func(ctx context.Context, h string) (*Receipt, error)
-	txByHashFn func(ctx context.Context, h string) (*Transaction, error)
-	blockNumFn func(ctx context.Context) (uint64, error)
+	txCountFn       func(ctx context.Context, address string) (uint64, error)
+	sendFn          func(ctx context.Context, raw []byte) (string, error)
+	receiptFn       func(ctx context.Context, h string) (*Receipt, error)
+	txByHashFn      func(ctx context.Context, h string) (*Transaction, error)
+	blockNumFn      func(ctx context.Context) (uint64, error)
+	callFn          func(ctx context.Context, to string, data []byte) ([]byte, error)
+	nativeBalanceFn func(ctx context.Context, address string) (uint64, error)
 }
 
 func (m *mockRPCClient) Label() string { return m.label }
@@ -62,6 +64,18 @@ func (m *mockRPCClient) BlockNumber(ctx context.Context) (uint64, error) {
 		return 0, nil
 	}
 	return m.blockNumFn(ctx)
+}
+func (m *mockRPCClient) CallContract(ctx context.Context, to string, data []byte) ([]byte, error) {
+	if m.callFn == nil {
+		return nil, nil
+	}
+	return m.callFn(ctx, to, data)
+}
+func (m *mockRPCClient) NativeBalance(ctx context.Context, address string) (uint64, error) {
+	if m.nativeBalanceFn == nil {
+		return 0, nil
+	}
+	return m.nativeBalanceFn(ctx, address)
 }
 
 func TestTwoRPCs_AssertChainID_OK(t *testing.T) {

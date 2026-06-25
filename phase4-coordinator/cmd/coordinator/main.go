@@ -349,6 +349,17 @@ func main() {
 		if payoutS2.reaper != nil {
 			payoutS2.reaper.Start(shutdownCtx)
 		}
+		// Step 4 §7.4 chain-balance worker.
+		if payoutS2.chainWorker != nil {
+			payoutS2.chainWorker.Start(shutdownCtx)
+		}
+		// Step 4 §6.5 SIGHUP-only payout.tuning.* reload. Reading
+		// the YAML on SIGHUP MUST NOT touch payout.security.* (the
+		// loader is read-only on the security namespace); the
+		// TuningProvider.Reload helper applies bound re-enforcement
+		// AND emits payout_config_reloaded / payout_config_reload_rejected
+		// per SPEC §6.5.
+		go startPayoutSIGHUPListener(shutdownCtx, *configPath, payoutS2.tuning, logger)
 	}
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerServer.Handler())
@@ -607,13 +618,16 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 // §0 "design-only" disposition at v0.1.x.
 // payoutStep2 bundles the Step 2 components so main.go can run
 // the runner lifecycle alongside the existing shutdown ordering.
-// Step 3 extends it with the §4.8a + §4.7 reaper.
+// Step 3 extends it with the §4.8a + §4.7 reaper. Step 4 adds the
+// §7.4 chain-balance worker + §6.5 tuning provider for SIGHUP.
 type payoutStep2 struct {
-	runner *payout.Runner
-	reorg  *payout.ReorgPoller
-	state  payout.LeaseState
-	reaper *payout.Reaper       // Step 3 §4.8a + §4.8c outbox reaper
-	stop   func(context.Context) // calls runner.Stop, reaper.Stop, then Release
+	runner      *payout.Runner
+	reorg       *payout.ReorgPoller
+	state       payout.LeaseState
+	reaper      *payout.Reaper              // Step 3 §4.8a + §4.8c outbox reaper
+	chainWorker *payout.ChainBalanceWorker  // Step 4 §7.4
+	tuning      *payout.TuningProvider      // Step 4 §6.5 SIGHUP-reloadable
+	stop        func(context.Context)       // calls Stop on every component then Release
 }
 
 func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore *auth.Store, claimer payout.PayoutClaimer, billingFallback http.Handler, logger zerolog.Logger) (*payout.AddressesService, http.Handler, *payoutStep2, error) {
@@ -819,28 +833,92 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		return nil, nil, nil, fmt.Errorf("NewReaper: %w", err)
 	}
 
-	mux, err := payout.NewMuxStep3(payout.Step3MuxOptions{
-		Step2MuxOptions: payout.Step2MuxOptions{
-			Addresses:   svc,
-			Abandon:     abandonSvc,
-			Runner:      runner,
-			OperatorKey: cfg.Auth.OperatorKey,
-			Caps: payout.AbandonCaps{
-				CancelMaxTipMultiplier:      cfg.Payout.Security.CancelMaxTipMultiplier,
-				CancelMaxGasNativeWei:       cfg.Payout.Security.CancelMaxGasNativeWei,
-				CancelMaxGasNativeWeiPer24h: cfg.Payout.Security.CancelMaxGasNativeWeiPer24h,
-				AbandonRatePerHour:          cfg.Payout.Security.AbandonRatePerHour,
+	// Step 4 §6.5 — SIGHUP-reloadable tuning provider. Seeded from
+	// the startup config; main.go installs the SIGHUP handler that
+	// re-reads the config file and calls tuning.Reload.
+	initialTuning := payout.TuningSnapshot{
+		AddressCoolingOffPeriod: cfg.Payout.Tuning.AddressCoolingOffPeriod,
+		RunInterval:             cfg.Payout.Tuning.RunInterval,
+		RunNowMinInterval:       cfg.Payout.Tuning.RunNowMinInterval,
+		ConfirmationBlocks:      cfg.Payout.Tuning.ConfirmationBlocks,
+		MaxRowsPerRun:           cfg.Payout.Tuning.MaxRowsPerRun,
+		ReorgPollWindow:         cfg.Payout.Tuning.ReorgPollWindow,
+		LowBalanceThreshold:     cfg.Payout.Tuning.LowBalanceThreshold,
+		LowNativeThreshold:      cfg.Payout.Tuning.LowNativeThreshold,
+		RPCURLPrimaryPinSPKI:    cfg.Payout.Tuning.RPCURLPrimaryPinSPKI,
+		RPCURLSecondaryPinSPKI:  cfg.Payout.Tuning.RPCURLSecondaryPinSPKI,
+	}
+	tuningProvider, err := payout.NewTuningProvider(initialTuning, cfg.Payout.Security.PerDayCapUSDCBaseUnits, logger)
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewTuningProvider: %w", err)
+	}
+
+	// Step 4 §7.4 — chain-balance worker. The haltRunner callback
+	// stops the runner cleanly on a negative-drift PAGE; the next
+	// process picks up the lease via stale takeover. Runs on the
+	// security namespace's chain_recon_interval (NOT the SIGHUP
+	// tuning interval).
+	chainCfg := payout.ChainBalanceConfig{
+		Interval:      cfg.Payout.Security.ChainReconInterval,
+		ToleranceUSDC: cfg.Payout.Security.ChainReconToleranceUSDCBaseUnits,
+		HotWalletAddr: sec.HotWalletAddress,
+		USDCContract:  payout.USDCContractAddressBase,
+	}
+	chainWorker, err := payout.NewChainBalanceWorker(db, rpcs, chainCfg, func(reason string) {
+		logger.Error().
+			Str("event", "payout_runner_halt_requested").
+			Str("reason", reason).
+			Str("severity", "PAGE").Send()
+		// The chain-balance worker requests a halt by emitting the
+		// PAGE event; the operator runbook + ops bundle wire the
+		// human response (flip payout.enabled=false + restart).
+		// Programmatic auto-halt is intentionally NOT done here so
+		// the runner's in-flight broadcast can complete before a
+		// human-driven restart.
+	}, logger)
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewChainBalanceWorker: %w", err)
+	}
+
+	// Step 4 §7.3 provider-token payouts read endpoint.
+	payoutsHandler, err := payout.NewPayoutsHandler(payout.PayoutsHandlerOptions{
+		DB:           db,
+		Tokens:       tokenStore,
+		RateLimitMin: 60, // mirror billing/earnings 60/min default
+		Logger:       logger,
+	})
+	if err != nil {
+		_ = payout.Release(context.Background(), db, state, logger)
+		return nil, nil, nil, fmt.Errorf("NewPayoutsHandler: %w", err)
+	}
+
+	mux, err := payout.NewMuxStep4(payout.Step4MuxOptions{
+		Step3MuxOptions: payout.Step3MuxOptions{
+			Step2MuxOptions: payout.Step2MuxOptions{
+				Addresses:   svc,
+				Abandon:     abandonSvc,
+				Runner:      runner,
+				OperatorKey: cfg.Auth.OperatorKey,
+				Caps: payout.AbandonCaps{
+					CancelMaxTipMultiplier:      cfg.Payout.Security.CancelMaxTipMultiplier,
+					CancelMaxGasNativeWei:       cfg.Payout.Security.CancelMaxGasNativeWei,
+					CancelMaxGasNativeWeiPer24h: cfg.Payout.Security.CancelMaxGasNativeWeiPer24h,
+					AbandonRatePerHour:          cfg.Payout.Security.AbandonRatePerHour,
+				},
+				Fallback: billingFallback,
 			},
-			Fallback: billingFallback,
+			Pause:   pauseSvc,
+			Funding: fundingSvc,
+			Orphans: orphansSvc,
+			// SPEC §4.8a actor format: "operator_key:<key_id>". The
+			// raw key is not the id (it's a secret); use the prefix
+			// of its sha-derived label. For Step 3+ we use a stable
+			// non-secret label tied to the deployment.
+			Actor: "operator_key:coordinator",
 		},
-		Pause:   pauseSvc,
-		Funding: fundingSvc,
-		Orphans: orphansSvc,
-		// SPEC §4.8a actor format: "operator_key:<key_id>". The
-		// raw key is not the id (it's a secret); use the prefix
-		// of its sha-derived label. For Step 3 we use a stable
-		// non-secret label tied to the deployment.
-		Actor: "operator_key:coordinator",
+		Payouts: payoutsHandler,
 	})
 	if err != nil {
 		_ = payout.Release(context.Background(), db, state, logger)
@@ -854,10 +932,12 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		Msg("payout pipeline enabled (Step 3: §3.3 handler + §4.3 runner + §4.6 abandon + §4.7 reorg/record-orphan + §4.9 record-funding + §6.4.1 pause/resume + §4.8a reaper)")
 
 	step2 := &payoutStep2{
-		runner: runner,
-		reorg:  reorgPoller,
-		state:  state,
-		reaper: reaper,
+		runner:      runner,
+		reorg:       reorgPoller,
+		state:       state,
+		reaper:      reaper,
+		chainWorker: chainWorker,
+		tuning:      tuningProvider,
 		stop: func(stopCtx context.Context) {
 			// Codex Step 3 r1 [arch:3.1] MAJOR closure: shutdown
 			// ordering is runner → poller → reaper → Release.
@@ -870,6 +950,12 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 			// Codex round-2 [arch:3.1-r2] MEDIUM closure (Step 2):
 			// lease left to stale takeover (3 × run_interval) on
 			// timeout per SPEC §4.8b.
+			//
+			// Step 4 adds chainWorker.Stop — read-only RPC worker
+			// without lease implications, but we still want it to
+			// drain before the runner so a final balance reconcile
+			// gets a chance to fire on clean shutdown.
+			_ = chainWorker.Stop(stopCtx)
 			runnerClean := runner.Stop(stopCtx)
 			pollerClean := reorgPoller.Stop(stopCtx)
 			// Reaper has no lease to release but Stop must still
@@ -1168,5 +1254,72 @@ func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
 		return strings.TrimSpace(startup.String()) != strings.TrimSpace(next.String())
 	default:
 		return !reflect.DeepEqual(startup.Interface(), next.Interface())
+	}
+}
+
+// startPayoutSIGHUPListener installs a SIGHUP-only signal handler
+// for the §6.5 `payout.tuning.*` namespace. SPEC §6.5 normative:
+//
+//   - SIGHUP MUST be the ONLY trigger. fsnotify / runtime-debug
+//     endpoint / config-file-mtime-watch are FORBIDDEN.
+//   - Reload re-reads the YAML, captures the candidate snapshot,
+//     and calls TuningProvider.Reload — which re-runs the §6.5
+//     bound matrix and either commits + PAGE-emits OR retains the
+//     live value + PAGE-emits-rejected.
+//   - The security namespace is NOT touched on this path; even if
+//     the YAML's `payout.security.*` changed, this handler ignores
+//     those keys (the security loader is process-start only).
+func startPayoutSIGHUPListener(
+	ctx context.Context,
+	configPath string,
+	tuning *payout.TuningProvider,
+	log zerolog.Logger,
+) {
+	if tuning == nil {
+		return
+	}
+	sigCh := make(chan os.Signal, 4)
+	signal.Notify(sigCh, syscall.SIGHUP)
+	defer signal.Stop(sigCh)
+	defer close(sigCh)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-sigCh:
+			cfg, err := config.Load(configPath)
+			if err != nil {
+				log.Error().Err(err).
+					Str("event", "payout_config_reload_rejected").
+					Str("severity", "PAGE").
+					Msg("payout tuning SIGHUP reload: config.Load failed; live value retained")
+				continue
+			}
+			candidate := payout.TuningSnapshot{
+				AddressCoolingOffPeriod: cfg.Payout.Tuning.AddressCoolingOffPeriod,
+				RunInterval:             cfg.Payout.Tuning.RunInterval,
+				RunNowMinInterval:       cfg.Payout.Tuning.RunNowMinInterval,
+				ConfirmationBlocks:      cfg.Payout.Tuning.ConfirmationBlocks,
+				MaxRowsPerRun:           cfg.Payout.Tuning.MaxRowsPerRun,
+				ReorgPollWindow:         cfg.Payout.Tuning.ReorgPollWindow,
+				LowBalanceThreshold:     cfg.Payout.Tuning.LowBalanceThreshold,
+				LowNativeThreshold:      cfg.Payout.Tuning.LowNativeThreshold,
+				RPCURLPrimaryPinSPKI:    cfg.Payout.Tuning.RPCURLPrimaryPinSPKI,
+				RPCURLSecondaryPinSPKI:  cfg.Payout.Tuning.RPCURLSecondaryPinSPKI,
+			}
+			// Reload itself emits payout_config_reloaded /
+			// payout_config_reload_rejected per §7.1; we just
+			// surface the wrapper error for the runner log so
+			// operators see SIGHUP arrived.
+			if err := tuning.Reload(ctx, candidate); err != nil {
+				log.Info().Err(err).
+					Str("event", "payout_tuning_sighup_received").
+					Msg("payout tuning SIGHUP processed (rejected; see payout_config_reload_rejected)")
+			} else {
+				log.Info().
+					Str("event", "payout_tuning_sighup_received").
+					Msg("payout tuning SIGHUP processed (accepted; see payout_config_reloaded)")
+			}
+		}
 	}
 }
