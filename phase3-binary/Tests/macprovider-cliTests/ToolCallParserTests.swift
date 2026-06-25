@@ -6,7 +6,7 @@ import MacProviderCore
 final class ToolCallParserTests: XCTestCase {
     func testSingleQwenToolCall() throws {
         let parsed = ToolCallParser.parseToolCalls(
-            rawOutput: #"<tool_call>{"name":"get_weather","arguments":{"city":"Vilnius"}}</tool_call>"#,
+            rawOutput: #"<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
         )
 
@@ -14,24 +14,73 @@ final class ToolCallParserTests: XCTestCase {
         let call = try XCTUnwrap(parsed.toolCalls.first)
         XCTAssertEqual(parsed.toolCalls.count, 1)
         XCTAssertTrue(call.id.hasPrefix("call_"))
-        XCTAssertEqual(call.functionName, "get_weather")
-        XCTAssertEqual(try argumentValue(call.arguments, key: "city") as? String, "Vilnius")
+        XCTAssertEqual(call.functionName, "find_definition")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
     }
 
     func testMultipleQwenToolCalls() throws {
         let parsed = ToolCallParser.parseToolCalls(
-            rawOutput: #"<tool_call>{"name":"get_weather","arguments":{"city":"Vilnius"}}</tool_call><tool_call>{"name":"get_time","arguments":{"city":"Kaunas"}}</tool_call>"#,
+            rawOutput: #"<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call><tool_call>{"name":"list_references","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
         )
 
         XCTAssertNil(parsed.cleanedContent)
-        XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["get_weather", "get_time"])
-        XCTAssertEqual(try argumentValue(parsed.toolCalls[1].arguments, key: "city") as? String, "Kaunas")
+        XCTAssertEqual(parsed.toolCalls.map(\.functionName), ["find_definition", "list_references"])
+        XCTAssertEqual(try argumentValue(parsed.toolCalls[1].arguments, key: "symbol") as? String, "ToolCallParser")
+    }
+
+    func testQwenPythonStyleToolCall() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<tool_call>find_definition(symbol="ToolCallParser")</tool_call>"#,
+            modelID: "mlx-community/Qwen3-32B-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertNil(parsed.cleanedContent)
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(parsed.toolCalls.count, 1)
+        XCTAssertEqual(call.functionName, "find_definition")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
+    }
+
+    func testQwenDelimiterParsesIndependentOfModelID() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<tool_call>find_definition(symbol="ToolCallParser")</tool_call>"#,
+            modelID: "mlx-community/Other-Instruct-7B-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(parsed.toolCalls.count, 1)
+        XCTAssertEqual(call.functionName, "find_definition")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
+    }
+
+    func testQwenPythonStyleToolCallKeepsThinkingOutOfToolArguments() throws {
+        let raw = """
+        <think>
+        I should use the provided tool.
+        </think>
+
+        <tool_call>
+        find_definition(symbol='ToolCallParser')
+        </tool_call>
+        """
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-32B-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "find_definition")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
+        XCTAssertEqual(parsed.cleanedContent?.trimmingCharacters(in: .whitespacesAndNewlines), "<think>\nI should use the provided tool.\n</think>")
     }
 
     func testToolCallWithNoArgumentsUsesEmptyObjectString() throws {
         let parsed = ToolCallParser.parseToolCalls(
-            rawOutput: #"<tool_call>{"name":"get_weather"}</tool_call>"#,
+            rawOutput: #"<tool_call>{"name":"explain_current_file"}</tool_call>"#,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
         )
 
@@ -40,7 +89,7 @@ final class ToolCallParserTests: XCTestCase {
     }
 
     func testExplicitNullArgumentsFallBackToPlainText() {
-        let raw = #"<tool_call>{"name":"get_weather","arguments":null}</tool_call>"#
+        let raw = #"<tool_call>{"name":"find_definition","arguments":null}</tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
@@ -51,7 +100,7 @@ final class ToolCallParserTests: XCTestCase {
     }
 
     func testMalformedToolCallJSONFallsBackToPlainText() {
-        let raw = #"<tool_call>{"name":"get_weather","arguments":</tool_call>"#
+        let raw = #"<tool_call>{"name":"find_definition","arguments":</tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
@@ -61,8 +110,68 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertTrue(parsed.toolCalls.isEmpty)
     }
 
+    func testMalformedPythonStyleToolCallFallsBackToPlainText() {
+        let raw = #"<tool_call>find_definition("ToolCallParser")</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-32B-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testDuplicatePythonStyleArgumentsFallBackToPlainText() {
+        let raw = #"<tool_call>find_definition(symbol="ToolCallParser", symbol="Other")</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-32B-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testDuplicateJSONObjectArgumentsFallBackToPlainText() {
+        let raw = #"<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser","symbol":"Other"}}</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testDuplicateJSONStringArgumentsFallBackToPlainText() {
+        let raw = #"<tool_call>{"name":"find_definition","arguments":"{\"symbol\":\"ToolCallParser\",\"symbol\":\"Other\"}"}</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testUnknownModelWithoutToolDelimiterDoesNotParsePythonStyleText() {
+        let raw = #"find_definition(symbol="ToolCallParser")"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Other-Instruct-7B-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
     func testNonObjectArgumentsFallBackToPlainText() {
-        let raw = #"<tool_call>{"name":"get_weather","arguments":["Vilnius"]}</tool_call>"#
+        let raw = #"<tool_call>{"name":"find_definition","arguments":["ToolCallParser"]}</tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
@@ -74,7 +183,7 @@ final class ToolCallParserTests: XCTestCase {
 
     func testMixedProseAndToolCallKeepsCleanedContent() throws {
         let parsed = ToolCallParser.parseToolCalls(
-            rawOutput: #"I'll check that.<tool_call>{"name":"get_weather","arguments":{"city":"Vilnius"}}</tool_call>"#,
+            rawOutput: #"I'll check that.<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
         )
 
@@ -84,21 +193,33 @@ final class ToolCallParserTests: XCTestCase {
 
     func testLlamaParametersNormalizeToArgumentsString() throws {
         let parsed = ToolCallParser.parseToolCalls(
-            rawOutput: #"<|python_tag|>{"name":"get_weather","parameters":{"city":"Vilnius"}}<|eom_id|>"#,
+            rawOutput: #"<|python_tag|>{"name":"find_definition","parameters":{"symbol":"ToolCallParser"}}<|eom_id|>"#,
             modelID: "mlx-community/Llama-3.3-70B-Instruct-4bit"
         )
 
         let call = try XCTUnwrap(parsed.toolCalls.first)
-        XCTAssertEqual(call.functionName, "get_weather")
-        XCTAssertEqual(try argumentValue(call.arguments, key: "city") as? String, "Vilnius")
+        XCTAssertEqual(call.functionName, "find_definition")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
+    }
+
+    func testLlamaPythonStyleToolCall() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<|python_tag|>find_definition(symbol="ToolCallParser")<|eom_id|>"#,
+            modelID: "mlx-community/Llama-3.3-70B-Instruct-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertEqual(call.functionName, "find_definition")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
     }
 
     func testUndeclaredFunctionFallsBackToPlainText() {
-        let raw = #"<tool_call>{"name":"delete_city","arguments":{"city":"Vilnius"}}</tool_call>"#
+        let raw = #"<tool_call>{"name":"delete_symbol","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit",
-            allowedFunctionNames: ["get_weather"]
+            allowedFunctionNames: ["find_definition"]
         )
 
         XCTAssertEqual(parsed.cleanedContent, raw)
@@ -111,12 +232,12 @@ final class ToolCallParserTests: XCTestCase {
                 "type": .string("function"),
                 "x_tool_extra": .string("must-not-reach-template"),
                 "function": .object([
-                    "name": .string("get_weather"),
-                    "description": .string("Get weather"),
+                    "name": .string("find_definition"),
+                    "description": .string("Find where a code symbol is defined"),
                     "parameters": .object([
                         "type": .string("object"),
                         "properties": .object([
-                            "city": .object(["type": .string("string")]),
+                            "symbol": .object(["type": .string("string")]),
                         ]),
                     ]),
                     "x_function_extra": .string("must-not-reach-template"),
@@ -129,8 +250,8 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(tool["type"] as? String, "function")
         XCTAssertNil(tool["x_tool_extra"])
         let function = try! XCTUnwrap(tool["function"] as? [String: Any])
-        XCTAssertEqual(function["name"] as? String, "get_weather")
-        XCTAssertEqual(function["description"] as? String, "Get weather")
+        XCTAssertEqual(function["name"] as? String, "find_definition")
+        XCTAssertEqual(function["description"] as? String, "Find where a code symbol is defined")
         XCTAssertNotNil(function["parameters"])
         XCTAssertNil(function["x_function_extra"])
     }
