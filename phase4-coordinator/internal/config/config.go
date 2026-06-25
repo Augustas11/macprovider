@@ -35,6 +35,43 @@ type Config struct {
 	Endpoints                    EndpointsConfig              `yaml:"endpoints"`
 	Explorer                     ExplorerConfig               `yaml:"explorer"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
+	// Payout is the SPEC-016 payout-pipeline configuration.
+	// Default Enabled=false ships the schema migrations + handlers
+	// idle; flipping to true activates the §3.3 endpoint (Step 1)
+	// and the runner cycle (Step 2+, not present yet). See SPEC-016
+	// §6.5 for the dual-loader namespace split (Step 4).
+	Payout PayoutConfig `yaml:"payout"`
+}
+
+// PayoutConfig is the operator-facing root of the SPEC-016
+// `payout.*` namespace. At Step 1 only the security.hot_wallet_address
+// and a single tuning knob (address_cooling_off_period) are read;
+// the §6.5 dual-loader split lands in Step 4 with the full key set.
+type PayoutConfig struct {
+	Enabled  bool                 `yaml:"enabled"`
+	Security PayoutSecurityConfig `yaml:"security"`
+	Tuning   PayoutTuningConfig   `yaml:"tuning"`
+}
+
+// PayoutSecurityConfig holds SPEC-016 §6.5 `payout.security.*` keys
+// — the IMMUTABLE-at-startup subset. Step 1 only needs the hot wallet
+// address; Step 4 grows this struct with caps + RPC pins.
+type PayoutSecurityConfig struct {
+	// HotWalletAddress is the operator hot wallet on Base mainnet.
+	// SPEC §3.2 step 5 uses it as the EIP-712 verifyingContract;
+	// §3.4 stamps it into provider_payout_addresses.registered_against_hot_wallet
+	// on every successful INSERT/UPDATE.
+	HotWalletAddress string `yaml:"hot_wallet_address"`
+}
+
+// PayoutTuningConfig holds SPEC-016 §6.5 `payout.tuning.*` keys —
+// the SIGHUP-reloadable subset (full hot-reload lands in Step 4;
+// Step 1 only reads the cooling-off period at startup).
+type PayoutTuningConfig struct {
+	// AddressCoolingOffPeriod is the §3.3 cooling-off window for
+	// freshly-registered or rotated addresses. Default 24h.
+	// SPEC §3.1 floor: 1h.
+	AddressCoolingOffPeriod time.Duration `yaml:"address_cooling_off_period"`
 }
 
 type ListenConfig struct {
@@ -424,6 +461,12 @@ func Default() Config {
 		Auth: AuthConfig{
 			RequireProviderTokens: true,
 		},
+		Payout: PayoutConfig{
+			Enabled: false,
+			Tuning: PayoutTuningConfig{
+				AddressCoolingOffPeriod: 24 * time.Hour,
+			},
+		},
 	}
 }
 
@@ -786,6 +829,14 @@ func (c Config) Validate() error {
 			if err := ValidateEndpointURL(p.EndpointURL); err != nil {
 				return fmt.Errorf("provider %q endpoint_url must be a valid https URL (http allowed only for 127.0.0.1/localhost)", p.ProviderID)
 			}
+		}
+	}
+	if c.Payout.Enabled {
+		if c.Payout.Security.HotWalletAddress == "" {
+			return fmt.Errorf("payout.security.hot_wallet_address must be set when payout.enabled is true")
+		}
+		if c.Payout.Tuning.AddressCoolingOffPeriod < time.Hour {
+			return fmt.Errorf("payout.tuning.address_cooling_off_period must be >= 1h (SPEC-016 §3.1)")
 		}
 	}
 	return nil

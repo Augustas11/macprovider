@@ -19,6 +19,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/buyer"
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	"github.com/augstar/macprovider-coordinator/internal/explorer"
+	"github.com/augstar/macprovider-coordinator/internal/payout"
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
@@ -308,8 +309,23 @@ func main() {
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
 	)
 	providerMux.Handle("/admin/ledger/", billingHandler)
+
+	// SPEC-016 §4.1 — wire the payout package. Migrations + asserts
+	// run unconditionally so a future flip of payout.enabled does
+	// not require a schema migration window; the §3.3 handler is
+	// only mounted on the listener when payout.enabled is true.
+	payoutAddresses, payoutMuxHandler, err := setupPayout(context.Background(), reqLogStore.DB(), cfg, tokenStore, billingHandler, logger)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "payout: %v\n", err)
+		os.Exit(1)
+	}
+	_ = payoutAddresses // satisfies billing.PayoutAddressReader (consumed by Step 2 runner wiring)
 	if cfg.Auth.RequireProviderTokens {
-		providerMux.Handle("/providers/", billingHandler)
+		if payoutMuxHandler != nil {
+			providerMux.Handle("/providers/", payoutMuxHandler)
+		} else {
+			providerMux.Handle("/providers/", billingHandler)
+		}
 	}
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerServer.Handler())
@@ -324,6 +340,7 @@ func main() {
 	startAuditLogRetentionPruner(shutdownCtx, auditStore, cfg.Storage.AuditLogRetentionDays, logger)
 	startAdmissionRetentionPruner(shutdownCtx, wsServer.Admission(), cfg.Admission.ProvisionalRetentionDays, logger)
 	startGitHubAuthStatePruner(shutdownCtx, tokenStore, logger)
+	startPayoutNoncePruner(shutdownCtx, payoutAddresses, logger)
 
 	go func() {
 		logger.Info().Str("addr", providerAddr).Msg("provider websocket server listening")
@@ -532,6 +549,107 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 	prune()
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				prune()
+			}
+		}
+	}()
+}
+
+// setupPayout runs SPEC-016 §4.1 / §4.8 / §4.8a startup
+// invariants — apply migrations, assert PRAGMAs and same-DB
+// pin, INSERT OR IGNORE the payout_runner_state row, bootstrap-
+// seed runtime_flags (gated by the three-table empty check),
+// assert trigger presence, and return an AddressesService
+// satisfying billing.PayoutAddressReader plus an http.Handler
+// for the §3.3 endpoint.
+//
+// When payout.enabled = false the migrations + asserts still
+// run (so the schema is ready) but the returned http.Handler
+// is nil and the runner does not start. This matches SPEC-016
+// §0 "design-only" disposition at v0.1.x.
+func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore *auth.Store, billingFallback http.Handler, logger zerolog.Logger) (*payout.AddressesService, http.Handler, error) {
+	if db == nil {
+		return nil, nil, fmt.Errorf("db is required")
+	}
+	if err := payout.Migrate(ctx, db); err != nil {
+		return nil, nil, fmt.Errorf("migrate: %w", err)
+	}
+	if err := payout.AssertPragmas(ctx, db); err != nil {
+		return nil, nil, fmt.Errorf("assert pragmas: %w", err)
+	}
+	if err := payout.AssertSameDB(ctx, db); err != nil {
+		return nil, nil, fmt.Errorf("assert same-db: %w", err)
+	}
+	now := time.Now().UTC()
+	if err := payout.InitRunnerStateRow(ctx, db, now); err != nil {
+		return nil, nil, fmt.Errorf("init runner_state: %w", err)
+	}
+	if err := payout.BootstrapRuntimeFlags(ctx, db, now, logger); err != nil {
+		// payout_invariant_violation already emitted by
+		// BootstrapRuntimeFlags. HALT before listeners come up.
+		return nil, nil, fmt.Errorf("bootstrap runtime_flags: %w", err)
+	}
+	if err := payout.AssertTriggersPresent(ctx, db); err != nil {
+		return nil, nil, fmt.Errorf("assert triggers: %w", err)
+	}
+	if !cfg.Payout.Enabled {
+		logger.Info().Msg("payout pipeline disabled (payout.enabled=false); schema applied, handlers idle")
+		return nil, nil, nil
+	}
+	sec, err := payout.LoadSecurityConfig(cfg.Payout.Security.HotWalletAddress)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load security config: %w", err)
+	}
+	denyList, err := payout.NewDenyList(sec.HotWalletAddress)
+	if err != nil {
+		return nil, nil, fmt.Errorf("deny-list: %w", err)
+	}
+	pauseReader, err := payout.NewPauseReader(db)
+	if err != nil {
+		return nil, nil, fmt.Errorf("pause reader: %w", err)
+	}
+	svc, err := payout.NewAddressesService(db, sec, denyList, tokenStore, tokenStore, pauseReader, cfg.Payout.Tuning.AddressCoolingOffPeriod, logger)
+	if err != nil {
+		return nil, nil, fmt.Errorf("addresses service: %w", err)
+	}
+	mux, err := payout.NewMux(svc, billingFallback)
+	if err != nil {
+		return nil, nil, fmt.Errorf("payout mux: %w", err)
+	}
+	logger.Info().
+		Str("hot_wallet_address", sec.HotWalletAddress).
+		Dur("address_cooling_off_period", cfg.Payout.Tuning.AddressCoolingOffPeriod).
+		Msg("payout pipeline enabled (Step 1: §3.3 registration handler)")
+	return svc, mux, nil
+}
+
+// startPayoutNoncePruner runs the SPEC §3.2 step 5 background
+// cleanup at a steady cadence. Runs every minute; the actual
+// retention is enforced inside PruneNonces against a fixed
+// 10-minute window. Lifecycle is bound to shutdownCtx.
+func startPayoutNoncePruner(ctx context.Context, svc *payout.AddressesService, logger zerolog.Logger) {
+	if svc == nil {
+		return
+	}
+	prune := func() {
+		n, err := svc.PruneNonces(context.Background())
+		if err != nil {
+			logger.Warn().Err(err).Msg("payout address-nonce prune failed")
+			return
+		}
+		if n > 0 {
+			logger.Debug().Int64("deleted", n).Msg("payout address-nonce pruned")
+		}
+	}
+	prune()
+	go func() {
+		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		for {
 			select {

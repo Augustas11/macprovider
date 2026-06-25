@@ -3,10 +3,12 @@ module github.com/augstar/macprovider-coordinator
 go 1.26
 
 require (
+	github.com/decred/dcrd/dcrec/secp256k1/v4 v4.4.0
 	github.com/go-chi/chi/v5 v5.3.0
 	github.com/gobwas/ws v1.4.0
 	github.com/google/uuid v1.6.0
 	github.com/rs/zerolog v1.35.1
+	golang.org/x/crypto v0.42.0
 	golang.org/x/text v0.37.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.52.0

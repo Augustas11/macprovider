@@ -6,20 +6,30 @@ import (
 )
 
 // WithPragmas builds a modernc.org/sqlite DSN with the project's standard
-// pragma set (busy_timeout, foreign_keys, WAL, synchronous=NORMAL).
+// pragma set (busy_timeout, foreign_keys, WAL, synchronous=FULL).
 //
 // ARCH-5: this helper is byte-identical to phase5-gateway/internal/storage/
 // sqlite/dsn.go::sqliteDSN. The duplication is intentional — coordinator and
 // gateway are deployed as independent Go modules, and introducing a shared
 // library would re-couple them on every DSN tweak. See audits/2026-06-10/
 // REPO_AUDIT.md (ARCH-5) for the conscious-debt reasoning.
+//
+// SPEC-016 §3.1 requires synchronous=FULL on every connection
+// touching provider_payout_addresses or payout_attempts. Because
+// the coordinator shares one *sql.DB handle across requestlog,
+// billing, audit, and payout (SPEC-016 §4.8a / §4.8b same-DB
+// pins make the shared handle structurally necessary), the DSN
+// is the only place to set the per-connection pragma. The prior
+// value was NORMAL; the change carries a non-trivial write-
+// throughput cost on every billing/requestlog INSERT, and is
+// called out explicitly in SPEC-016 IMPL Step 1 audit prompt.
 func WithPragmas(path string) string {
 	values := url.Values{}
 	for _, pragma := range []string{
 		"busy_timeout=5000",
 		"foreign_keys=1",
 		"journal_mode(WAL)",
-		"synchronous(NORMAL)",
+		"synchronous(FULL)",
 	} {
 		values.Add("_pragma", pragma)
 	}
