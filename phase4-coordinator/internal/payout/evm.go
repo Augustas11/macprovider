@@ -216,9 +216,16 @@ func DecodeSignedEIP1559(signedTxBytes []byte) (tx EIP1559Tx, yParity uint8, r, 
 		return tx, 0, r, s, fmt.Errorf("DecodeSignedEIP1559: envelope is not type 0x02 (got 0x%02x)", signedTxBytes[0])
 	}
 	body := signedTxBytes[1:]
-	items, _, derr := rlpDecodeList(body)
+	items, consumed, kinds, derr := rlpDecodeListWithKinds(body)
 	if derr != nil {
 		return tx, 0, r, s, fmt.Errorf("DecodeSignedEIP1559: RLP decode body: %w", derr)
+	}
+	// Closes codex round-1 [code:1.4] MEDIUM: trailing bytes after
+	// the top-level list MUST be rejected. A signer that emits an
+	// envelope plus garbage tail bytes is misbehaving — accepting
+	// the prefix would weaken the §4.3 step 6 pre-broadcast guard.
+	if consumed != len(body) {
+		return tx, 0, r, s, fmt.Errorf("DecodeSignedEIP1559: trailing %d bytes after top-level list", len(body)-consumed)
 	}
 	if len(items) != 12 {
 		return tx, 0, r, s, fmt.Errorf("DecodeSignedEIP1559: expected 12 fields, got %d", len(items))
@@ -244,12 +251,14 @@ func DecodeSignedEIP1559(signedTxBytes []byte) (tx EIP1559Tx, yParity uint8, r, 
 	copy(to[:], items[5])
 	value := new(big.Int).SetBytes(items[6])
 	data := items[7]
-	// items[8] = access list — must be empty list for the §4.3
-	// hot path. RLP-encoded empty list is the single byte 0xc0.
-	// Our decoder returns a flat list of byte slices, so items[8]
-	// should be a 0-length byte slice prepared by rlpDecodeList
-	// when it sees an empty inner list. We accept either an
-	// empty slice OR a fully-zero one as belt-and-braces.
+	// items[8] = access list — MUST be the empty list 0xc0, NOT
+	// the empty string 0x80. Closes codex round-1 [code:1.4]:
+	// before, a 0x80-encoded empty string passed because both
+	// values surfaced as a zero-length byte slice. The kinds[]
+	// array now distinguishes string-vs-list at the RLP level.
+	if kinds[8] != rlpKindList {
+		return tx, 0, r, s, fmt.Errorf("access_list must be RLP list (got kind=%d)", kinds[8])
+	}
 	if len(items[8]) != 0 {
 		return tx, 0, r, s, errors.New("access_list must be empty for §4.3 hot path")
 	}
@@ -414,13 +423,103 @@ func rlpList(items [][]byte) []byte {
 	return out
 }
 
+// rlpKind distinguishes the RLP item type at the wire level so
+// the EIP-1559 decoder can reject a misencoded access-list slot
+// (0x80 empty string vs 0xc0 empty list).
+type rlpKind int
+
+const (
+	rlpKindString rlpKind = 1
+	rlpKindList   rlpKind = 2
+)
+
+// rlpDecodeListWithKinds parses an RLP-encoded list and returns
+// the inner item byte slices, the consumed byte count, the item
+// kinds, and any error. The kinds slice is parallel with the
+// items slice.
+func rlpDecodeListWithKinds(b []byte) ([][]byte, int, []rlpKind, error) {
+	if len(b) == 0 {
+		return nil, 0, nil, errors.New("rlpDecodeListWithKinds: empty input")
+	}
+	prefix := b[0]
+	var payloadLen int
+	var headerLen int
+	switch {
+	case prefix >= 0xc0 && prefix <= 0xf7:
+		payloadLen = int(prefix - 0xc0)
+		headerLen = 1
+	case prefix >= 0xf8 && prefix <= 0xff:
+		ll := int(prefix - 0xf7)
+		if len(b) < 1+ll {
+			return nil, 0, nil, errors.New("rlpDecodeListWithKinds: truncated long-list header")
+		}
+		payloadLen = int(bigEndianRead(b[1 : 1+ll]))
+		headerLen = 1 + ll
+	default:
+		return nil, 0, nil, fmt.Errorf("rlpDecodeListWithKinds: prefix 0x%02x is not a list", prefix)
+	}
+	if len(b) < headerLen+payloadLen {
+		return nil, 0, nil, errors.New("rlpDecodeListWithKinds: truncated list payload")
+	}
+	payload := b[headerLen : headerLen+payloadLen]
+	out := [][]byte{}
+	kinds := []rlpKind{}
+	for len(payload) > 0 {
+		item, used, kind, err := rlpDecodeItemWithKind(payload)
+		if err != nil {
+			return nil, 0, nil, err
+		}
+		out = append(out, item)
+		kinds = append(kinds, kind)
+		payload = payload[used:]
+	}
+	return out, headerLen + payloadLen, kinds, nil
+}
+
+// rlpDecodeItemWithKind extends rlpDecodeItem with the wire-kind
+// distinction so the EIP-1559 decoder can enforce that the
+// access-list slot is encoded as an empty LIST (0xc0), not as an
+// empty STRING (0x80).
+func rlpDecodeItemWithKind(b []byte) ([]byte, int, rlpKind, error) {
+	if len(b) == 0 {
+		return nil, 0, 0, errors.New("rlpDecodeItemWithKind: empty input")
+	}
+	prefix := b[0]
+	switch {
+	case prefix < 0x80:
+		return []byte{prefix}, 1, rlpKindString, nil
+	case prefix == 0x80:
+		return []byte{}, 1, rlpKindString, nil
+	case prefix >= 0x81 && prefix <= 0xb7:
+		l := int(prefix - 0x80)
+		if len(b) < 1+l {
+			return nil, 0, 0, errors.New("rlpDecodeItemWithKind: truncated short-string")
+		}
+		return b[1 : 1+l], 1 + l, rlpKindString, nil
+	case prefix >= 0xb8 && prefix <= 0xbf:
+		ll := int(prefix - 0xb7)
+		if len(b) < 1+ll {
+			return nil, 0, 0, errors.New("rlpDecodeItemWithKind: truncated long-string header")
+		}
+		l := int(bigEndianRead(b[1 : 1+ll]))
+		if len(b) < 1+ll+l {
+			return nil, 0, 0, errors.New("rlpDecodeItemWithKind: truncated long-string payload")
+		}
+		return b[1+ll : 1+ll+l], 1 + ll + l, rlpKindString, nil
+	case prefix == 0xc0:
+		return []byte{}, 1, rlpKindList, nil
+	case prefix >= 0xc1 && prefix <= 0xf7:
+		return nil, 0, 0, errors.New("rlpDecodeItemWithKind: nested non-empty list payload not supported in this scope")
+	case prefix >= 0xf8 && prefix <= 0xff:
+		return nil, 0, 0, errors.New("rlpDecodeItemWithKind: nested long-list payload not supported in this scope")
+	}
+	return nil, 0, 0, fmt.Errorf("rlpDecodeItemWithKind: unexpected prefix 0x%02x", prefix)
+}
+
 // rlpDecodeList parses an RLP-encoded list and returns the inner
 // item byte slices, the consumed byte count, and any error.
-//
-// For SPEC-016 EIP-1559 decoding we expect a flat list of
-// scalar/byte-string items at the top level (the access-list
-// position is allowed to be the empty list 0xc0, which we
-// surface as a zero-length byte slice for the caller).
+// Wrapper that drops the kinds — kept for callers that don't
+// need the kind distinction (test code, simple paths).
 func rlpDecodeList(b []byte) ([][]byte, int, error) {
 	if len(b) == 0 {
 		return nil, 0, errors.New("rlpDecodeList: empty input")

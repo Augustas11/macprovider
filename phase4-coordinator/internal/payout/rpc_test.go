@@ -227,7 +227,7 @@ func TestHTTPRPCClient_TransactionReceipt_OK(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer server.Close()
-	client := NewHTTPRPCClient(server.URL, "test", time.Second)
+	client := NewHTTPRPCClient(server.URL, "test", "", time.Second)
 	r, err := client.TransactionReceipt(context.Background(), "0xabcdef")
 	if err != nil {
 		t.Fatalf("TransactionReceipt: %v", err)
@@ -266,7 +266,7 @@ func TestHTTPRPCClient_TransactionReceipt_NotFound(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client := NewHTTPRPCClient(server.URL, "test", time.Second)
+	client := NewHTTPRPCClient(server.URL, "test", "", time.Second)
 	r, err := client.TransactionReceipt(context.Background(), "0xabcdef")
 	if err != nil {
 		t.Fatalf("TransactionReceipt: %v", err)
@@ -288,7 +288,7 @@ func TestHTTPRPCClient_RPCError(t *testing.T) {
 		})
 	}))
 	defer server.Close()
-	client := NewHTTPRPCClient(server.URL, "test", time.Second)
+	client := NewHTTPRPCClient(server.URL, "test", "", time.Second)
 	_, err := client.SendRawTransaction(context.Background(), []byte{0x02})
 	if err == nil {
 		t.Fatal("expected RPC error")

@@ -278,16 +278,18 @@ UPDATE payout_attempts
 			writeError(w, http.StatusInternalServerError, "internal_error")
 			return
 		}
-		// INSERT cancel row.
+		// INSERT cancel row. gas_reserved_native_wei carries the
+		// estimate so the 24h aggregate cap counts pending cancels
+		// per codex round-1 [sec:2.1] closure.
 		if _, err := conn.ExecContext(ctx, `
 INSERT INTO payout_attempts
   (payout_id, attempt_seq, chain, from_address, to_address,
    amount_base_units, nonce, raw_signed_tx, tx_hash,
-   is_cancel_self_transfer, updated_at_utc)
-VALUES (?, ?, 'base-mainnet', ?, ?, 1, ?, ?, ?, 1, ?)`,
+   is_cancel_self_transfer, gas_reserved_native_wei, updated_at_utc)
+VALUES (?, ?, 'base-mainnet', ?, ?, 1, ?, ?, ?, 1, ?, ?)`,
 			req.PayoutID, cancelSeq, strings.ToLower(s.Security.HotWalletAddress),
 			strings.ToLower(s.Security.HotWalletAddress), origNonce,
-			signedBytes, txHash, now,
+			signedBytes, txHash, gasEstimate, now,
 		); err != nil {
 			if isUniqueViolation(err) {
 				// idx_pa_from_nonce_active partial UNIQUE
@@ -460,14 +462,33 @@ func estimateCancelGas(tipMultiplier float64) int64 {
 	return int64(21_000) * (baseFee + tip)
 }
 
+// sumCancelGasLast24h returns the rolling 24h aggregate cancel
+// gas — the live tally that the §4.6 endpoint compares against
+// cancel_max_gas_native_wei_per_24h.
+//
+// Codex round-1 [sec:2.1] HIGH closure: the SUM now coalesces
+// gas_used_native_wei (post-confirm) with gas_reserved_native_wei
+// (post-INSERT, pre-confirm). Without this, a stolen operator
+// key could fire abandon-attempt repeatedly while prior cancels
+// are still pending — each request would see the same
+// undercounted aggregate.
+//
+// The WHERE clause filters abandoned_at_utc IS NULL so abandoned
+// cancels drop out of the budget. Confirmed rows are matched by
+// broadcast_at_utc; pending unbroadcast cancels are also counted
+// (their broadcast_at_utc is NULL but their reservation lives).
 func sumCancelGasLast24h(ctx context.Context, conn *sql.Conn, fromAddress, since string) (int64, error) {
 	var n sql.NullInt64
 	if err := conn.QueryRowContext(ctx, `
-SELECT COALESCE(SUM(gas_used_native_wei), 0) FROM payout_attempts
+SELECT COALESCE(SUM(COALESCE(gas_used_native_wei, gas_reserved_native_wei)), 0)
+  FROM payout_attempts
  WHERE from_address = ?
    AND is_cancel_self_transfer = 1
-   AND broadcast_at_utc IS NOT NULL
-   AND broadcast_at_utc >= ?`, strings.ToLower(fromAddress), since,
+   AND abandoned_at_utc IS NULL
+   AND (
+        (broadcast_at_utc IS NOT NULL AND broadcast_at_utc >= ?)
+        OR (broadcast_at_utc IS NULL AND gas_reserved_native_wei IS NOT NULL)
+   )`, strings.ToLower(fromAddress), since,
 	).Scan(&n); err != nil {
 		return 0, err
 	}

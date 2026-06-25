@@ -200,6 +200,8 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 
 	paid, capped, failed, skipped := 0, 0, 0, 0
 	defer func() {
+		// §7.1 payout_run_finished — full field set per
+		// codex round-1 [arch:3.4] closure.
 		r.opts.Logger.Info().
 			Str("event", "payout_run_finished").
 			Str("run_id", runID).
@@ -208,6 +210,8 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 			Int("capped", capped).
 			Int("failed", failed).
 			Int("skipped_no_addr", skipped).
+			Int("skipped_funds", 0).
+			Str("error_text", "").
 			Send()
 	}()
 
@@ -278,6 +282,7 @@ func (r *Runner) processRow(ctx context.Context, runID string, row ReadyRow) (ro
 	}
 
 	// Pre-broadcast cap check (cheap; the durable check is in §4.3 step 4 in-txn).
+	// §7.1 payout_capped — full field set.
 	if amount > r.opts.PerPayoutCapBaseUnits {
 		r.opts.Logger.Warn().
 			Str("event", "payout_capped").
@@ -306,32 +311,190 @@ func (r *Runner) processRow(ctx context.Context, runID string, row ReadyRow) (ro
 		// Already confirmed — step 8 directly.
 		return r.claimAndLog(ctx, runID, row, existing)
 	}
+	// Step 5 NORMATIVE (closes codex round-1 [code:1.1]): if the
+	// previous cycle persisted raw_signed_tx + tx_hash but crashed
+	// or lost lease before broadcast (broadcast_at_utc IS NULL),
+	// the next holder MUST rebroadcast the persisted bytes
+	// bit-for-bit. Re-signing is FORBIDDEN per §4.6. SPEC §4.3 step
+	// 5 path "broadcast (but not confirmed) → jump to step 7 to
+	// poll" applies only AFTER the broadcast happens; before that,
+	// the persisted-bytes path takes precedence.
+	if existing != nil && len(existing.RawSignedTx) > 0 && !existing.BroadcastAtUtc.Valid && !existing.AbandonedAtUtc.Valid {
+		return r.rebroadcastAndPoll(ctx, conn, runID, row, existing)
+	}
 	if existing != nil && existing.BroadcastAtUtc.Valid && !existing.ConfirmedAtUtc.Valid {
 		// Step 7 polling.
 		return r.pollAndConfirm(ctx, conn, runID, row, existing)
 	}
 
-	// No existing live attempt — cancel pre-check + fresh allocation.
+	// No existing live non-cancel attempt — cancel pre-check + fresh allocation.
+	// Closes codex round-1 [code:1.2]: implement the full state
+	// machine (unbroadcast → rebroadcast/stamp/poll;
+	// broadcast-unconfirmed → cancel-specific poll/mark-confirmed;
+	// confirmed → INFO emit + proceed to fresh allocation without
+	// calling ClaimPayoutReady).
 	cancels, err := LookupLiveCancels(ctx, conn, row.PayoutID)
 	if err != nil {
 		return rowOutcomeFailed, fmt.Errorf("LookupLiveCancels: %w", err)
 	}
+	cancelsBlockFresh := false
 	for _, c := range cancels {
-		// A live cancel HALTS fresh non-cancel allocation per §4.3
-		// step 5 cancel pre-check. The HALT does NOT emit
-		// invariant_violation — a live cancel is legitimate state.
-		if !c.BroadcastAtUtc.Valid {
-			// Unbroadcast — re-broadcast persisted bytes.
+		c := c // shadow for closure-safety
+		switch {
+		case !c.BroadcastAtUtc.Valid:
+			// Unbroadcast cancel: rebroadcast persisted bytes,
+			// stamp broadcast_at_utc on accept, then poll
+			// next cycle. Fresh allocation HALTS this cycle.
 			r.rebroadcastCancel(ctx, runID, c)
+			cancelsBlockFresh = true
+		case c.BroadcastAtUtc.Valid && !c.ConfirmedAtUtc.Valid:
+			// Broadcast-unconfirmed cancel: poll via
+			// cancel-specific verification. Fresh allocation
+			// HALTS until confirmation (or operator abandon).
+			if outcome := r.pollCancelOnce(ctx, runID, c); outcome == rowOutcomePaid {
+				// confirmed during this cycle → don't HALT;
+				// fresh allocation can proceed below (SPEC
+				// §4.3 step 5 confirmed-cancel branch).
+				continue
+			}
+			cancelsBlockFresh = true
+		case c.ConfirmedAtUtc.Valid:
+			// Confirmed cancel: nonce gap is filled — proceed
+			// to fresh non-cancel allocation. SPEC §4.3 step 5
+			// confirmed-cancel branch: do NOT call
+			// ClaimPayoutReady (cancels do NOT consume
+			// ledger_payout_ready); the
+			// payout_cancel_self_transfer_confirmed INFO emit
+			// is the responsibility of the transition cycle
+			// (MarkConfirmedAtTx clears
+			// cancel_reconfirm_stale_paged_at_utc). A
+			// subsequently-loaded confirmed cancel here does
+			// NOT re-emit per v0.1.15 round-16 MED-1 closure.
 		}
-		// In either unbroadcast or broadcast-unconfirmed state, we
-		// skip fresh allocation.
-		_ = c
+	}
+	if cancelsBlockFresh {
 		return rowOutcomeSkipped, nil
 	}
 
 	// Fresh allocation (§4.3 step 5 — INSERT inside BEGIN IMMEDIATE).
 	return r.allocateBuildSignBroadcast(ctx, runID, row, amount)
+}
+
+// rebroadcastAndPoll handles the SPEC §4.3 step 5 "persisted but
+// unbroadcast" path: rebroadcast the byte-identical envelope on
+// both RPCs (re-signing FORBIDDEN), stamp broadcast_at_utc on
+// accept, then transition to pollAndConfirm. Closes
+// [code:1.1] MAJOR.
+func (r *Runner) rebroadcastAndPoll(ctx context.Context, conn *sql.Conn, runID string, row ReadyRow, attempt *AttemptRow) (rowOutcome, error) {
+	if !attempt.TxHash.Valid {
+		// Defensive: a row with raw_signed_tx but no tx_hash is a
+		// SPEC violation. Surface as invariant.
+		r.emitInvariantViolation(row.PayoutID, "raw_signed_tx_without_hash", fmt.Sprintf("attempt_seq=%d", attempt.AttemptSeq))
+		return rowOutcomeFailed, nil
+	}
+	// Post-COMMIT lease re-read before broadcast (mirrors §4.3 step 6).
+	if err := SelfFence(ctx, r.opts.DB, r.state); err != nil {
+		return rowOutcomeFailed, err
+	}
+	acceptedAny, _, _, primErr, secErr := r.opts.RPCs.BroadcastBoth(ctx, attempt.RawSignedTx)
+	if !acceptedAny {
+		// Both rejected — leave broadcast_at_utc NULL; the next
+		// cycle retries. M4-style nonce-collision check inline.
+		if IsNonceTooLow(primErr) || IsNonceTooLow(secErr) {
+			// Chain-serialized race: the prior holder already
+			// broadcast these bytes (or a peer at the same
+			// nonce did). Stamp broadcast_at_utc and proceed
+			// to poll — the chain is the source of truth.
+			now := r.opts.NowFn().UTC().Format(time.RFC3339Nano)
+			_ = StampBroadcastAt(ctx, r.opts.DB, row.PayoutID, attempt.AttemptSeq, now)
+			return r.pollAndConfirm(ctx, conn, runID, row, attempt)
+		}
+		r.opts.Logger.Warn().
+			Err(primErr).
+			Err(secErr).
+			Int64("payout_id", row.PayoutID).
+			Int("attempt_seq", attempt.AttemptSeq).
+			Msg("persisted-bytes rebroadcast rejected by both RPCs (will retry next cycle)")
+		return rowOutcomeFailed, nil
+	}
+	now := r.opts.NowFn().UTC().Format(time.RFC3339Nano)
+	if err := StampBroadcastAt(ctx, r.opts.DB, row.PayoutID, attempt.AttemptSeq, now); err != nil {
+		r.opts.Logger.Warn().Err(err).Msg("StampBroadcastAt failed after rebroadcast")
+	}
+	return r.pollAndConfirm(ctx, conn, runID, row, attempt)
+}
+
+// pollCancelOnce polls a broadcast-unconfirmed cancel row via
+// cancel-specific §4.3 step 7 verification (tx.to == hot_wallet,
+// no Transfer log, value == 1 wei). On confirmation it stamps
+// confirmed_at_utc + block_number + gas_used_native_wei and
+// emits payout_cancel_self_transfer_confirmed INFO per §7.1
+// (v0.1.15 transition-only emission).
+//
+// Returns rowOutcomePaid on confirmation (semantic abuse — the
+// outcome is just a signal that the cancel transitioned; the
+// runner doesn't count it as a paid provider payout). Other
+// outcomes mean "still pending" or "polling failed".
+func (r *Runner) pollCancelOnce(ctx context.Context, runID string, cancel AttemptRow) rowOutcome {
+	if !cancel.TxHash.Valid {
+		return rowOutcomeFailed
+	}
+	txHash := cancel.TxHash.String
+	recA, errA := r.opts.RPCs.Primary.TransactionReceipt(ctx, txHash)
+	recB, errB := r.opts.RPCs.Secondary.TransactionReceipt(ctx, txHash)
+	if errA != nil || errB != nil {
+		return rowOutcomeFailed
+	}
+	if recA == nil || recB == nil {
+		return rowOutcomeFailed
+	}
+	if !ReceiptsAgree(recA, recB) {
+		r.emitRPCDisagreement(cancel.PayoutID, cancel.AttemptSeq, recA, recB)
+		return rowOutcomeFailed
+	}
+	head, err := r.opts.RPCs.Primary.BlockNumber(ctx)
+	if err != nil {
+		return rowOutcomeFailed
+	}
+	if int64(head)-int64(recA.BlockNumber) < int64(r.opts.ConfirmationBlocks) {
+		return rowOutcomeFailed
+	}
+	if recA.Status != 1 {
+		return rowOutcomeFailed
+	}
+	// Cancel-specific chain-side verification.
+	if !addressEqualFold(recA.To, r.opts.Security.HotWalletAddress) {
+		r.emitChainValueMismatch(cancel.PayoutID, cancel.AttemptSeq, txHash, "cancel_self_transfer_mismatch",
+			fmt.Sprintf("receipt.to=%s != hot_wallet", recA.To))
+		return rowOutcomeFailed
+	}
+	for _, log := range recA.Logs {
+		// Cancel is a native self-transfer; there MUST be NO Transfer log.
+		if log.Address == strings.ToLower(USDCContractAddressBase) {
+			r.emitChainValueMismatch(cancel.PayoutID, cancel.AttemptSeq, txHash, "cancel_self_transfer_mismatch",
+				"unexpected USDC Transfer log on cancel tx")
+			return rowOutcomeFailed
+		}
+	}
+	now := r.opts.NowFn().UTC().Format(time.RFC3339Nano)
+	rowsAffected, err := r.markConfirmedStandalone(ctx, cancel.PayoutID, cancel.AttemptSeq,
+		int64(recA.BlockNumber), int64(recA.GasUsed), now)
+	if err != nil || rowsAffected == 0 {
+		return rowOutcomeFailed
+	}
+	// §7.1 transition-only INFO emit.
+	r.opts.Logger.Info().
+		Str("event", "payout_cancel_self_transfer_confirmed").
+		Str("run_id", runID).
+		Int64("payout_id", cancel.PayoutID).
+		Int("attempt_seq", cancel.AttemptSeq).
+		Int64("nonce", cancel.Nonce).
+		Str("tx_hash", txHash).
+		Uint64("block_number", recA.BlockNumber).
+		Uint64("gas_used_native_wei", recA.GasUsed).
+		Str("ts_utc", now).
+		Send()
+	return rowOutcomePaid
 }
 
 func (r *Runner) allocateBuildSignBroadcast(ctx context.Context, runID string, row ReadyRow, amount int64) (rowOutcome, error) {
@@ -430,10 +593,13 @@ func (r *Runner) allocateBuildSignBroadcast(ctx context.Context, runID string, r
 	signed, txHash, err := r.opts.Signer.SignTx(ctx, unsigned)
 	if err != nil {
 		if errors.Is(err, ErrSignerUnavailable) {
+			// §7.1 payout_signer_unavailable: from_address,
+			// error_class, ts_utc.
 			r.opts.Logger.Error().
 				Str("event", "payout_signer_unavailable").
 				Str("from_address", r.opts.Security.HotWalletAddress).
-				Err(err).
+				Str("error_class", err.Error()).
+				Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
 				Send()
 		}
 		return rowOutcomeFailed, fmt.Errorf("Signer.SignTx: %w", err)
@@ -565,8 +731,12 @@ func (r *Runner) pollAndConfirm(ctx context.Context, conn *sql.Conn, runID strin
 			Msg("receipt status != 1 (tx reverted)")
 		return rowOutcomeFailed, nil
 	}
-	// Chain-side value verification (a, b, c).
-	if err := r.verifyChainSideTransfer(ctx, attempt, recPri); err != nil {
+	// Chain-side value verification (a, b, c) on BOTH receipts —
+	// closes codex round-1 [sec:2.2] HIGH / [code:1.3] MEDIUM:
+	// a malicious primary RPC can return a minimal receipt that
+	// passes ReceiptsAgree while serving fabricated tx-by-hash
+	// and log data; the secondary must independently confirm.
+	if err := r.verifyChainSideTransfer(ctx, attempt, recPri, recSec); err != nil {
 		r.emitChainValueMismatch(row.PayoutID, attempt.AttemptSeq, txHash, "transfer_log_mismatch", err.Error())
 		return rowOutcomeFailed, err
 	}
@@ -580,11 +750,14 @@ func (r *Runner) pollAndConfirm(ctx context.Context, conn *sql.Conn, runID strin
 		// Concurrent abandon or already-confirmed — skip.
 		return rowOutcomeSkipped, nil
 	}
-	// §4.3 step 8 — Claim.
+	// §4.3 step 8 — Claim. Carry block_number + nonce so the
+	// §7.1 payout_paid emit includes them.
 	freshAttempt := &AttemptRow{
-		PayoutID:   row.PayoutID,
-		AttemptSeq: attempt.AttemptSeq,
-		TxHash:     sql.NullString{String: txHash, Valid: true},
+		PayoutID:    row.PayoutID,
+		AttemptSeq:  attempt.AttemptSeq,
+		TxHash:      sql.NullString{String: txHash, Valid: true},
+		BlockNumber: sql.NullInt64{Int64: int64(recPri.BlockNumber), Valid: true},
+		Nonce:       attempt.Nonce,
 	}
 	_ = conn // future trigger-presence intra-tx check anchors here
 	return r.claimAndLog(ctx, runID, row, freshAttempt)
@@ -594,14 +767,20 @@ func (r *Runner) pollAndConfirm(ctx context.Context, conn *sql.Conn, runID strin
 // payout_failed.
 func (r *Runner) claimAndLog(ctx context.Context, runID string, row ReadyRow, attempt *AttemptRow) (rowOutcome, error) {
 	claimed, err := r.opts.Claimer.ClaimPayoutReady(ctx, row.PayoutID, row.GrossCredits, attempt.TxHash.String, "USDC-BASE")
+	nowStr := r.opts.NowFn().UTC().Format(time.RFC3339Nano)
 	if err != nil {
+		// §7.1 payout_failed: run_id, payout_id, attempt_seq,
+		// provider_id, stage, error_class, error_text, ts_utc.
 		r.opts.Logger.Error().
 			Str("event", "payout_failed").
 			Str("run_id", runID).
 			Int64("payout_id", row.PayoutID).
+			Int("attempt_seq", attempt.AttemptSeq).
+			Str("provider_id", row.ProviderID).
 			Str("stage", "claim").
 			Str("error_class", "claim_error").
-			Err(err).
+			Str("error_text", err.Error()).
+			Str("ts_utc", nowStr).
 			Send()
 		return rowOutcomeFailed, fmt.Errorf("ClaimPayoutReady: %w", err)
 	}
@@ -610,10 +789,21 @@ func (r *Runner) claimAndLog(ctx context.Context, runID string, row ReadyRow, at
 			Str("event", "payout_failed").
 			Str("run_id", runID).
 			Int64("payout_id", row.PayoutID).
+			Int("attempt_seq", attempt.AttemptSeq).
+			Str("provider_id", row.ProviderID).
 			Str("stage", "claim").
 			Str("error_class", "not_ready_or_amount_changed").
+			Str("error_text", "").
+			Str("ts_utc", nowStr).
 			Send()
 		return rowOutcomeFailed, nil
+	}
+	// §7.1 payout_paid: run_id, payout_id, attempt_seq,
+	// provider_id, amount_usdc_base_units, tx_hash,
+	// block_number, nonce, ts_utc.
+	blockNumber := int64(0)
+	if attempt.BlockNumber.Valid {
+		blockNumber = attempt.BlockNumber.Int64
 	}
 	r.opts.Logger.Info().
 		Str("event", "payout_paid").
@@ -623,6 +813,9 @@ func (r *Runner) claimAndLog(ctx context.Context, runID string, row ReadyRow, at
 		Str("provider_id", row.ProviderID).
 		Int64("amount_usdc_base_units", row.ProviderCredits).
 		Str("tx_hash", attempt.TxHash.String).
+		Int64("block_number", blockNumber).
+		Int64("nonce", attempt.Nonce).
+		Str("ts_utc", nowStr).
 		Send()
 	return rowOutcomePaid, nil
 }
@@ -709,13 +902,22 @@ func (r *Runner) verifySignedTx(unsigned EIP1559Tx, signed []byte, returnedTxHas
 	return nil
 }
 
-// verifyChainSideTransfer implements §4.3 step 7 (a, b, c).
-func (r *Runner) verifyChainSideTransfer(ctx context.Context, attempt *AttemptRow, receipt *Receipt) error {
+// verifyChainSideTransfer implements §4.3 step 7 (a, b, c) on
+// BOTH RPC receipts and BOTH eth_getTransactionByHash returns.
+// Closes codex round-1 [sec:2.2] HIGH / [code:1.3] MEDIUM: a
+// malicious primary RPC could pass ReceiptsAgree's minimal field
+// set while serving fabricated tx-by-hash data + log arrays;
+// independent verification on both sides defangs this.
+func (r *Runner) verifyChainSideTransfer(ctx context.Context, attempt *AttemptRow, recA, recB *Receipt) error {
 	usdcAddrLower := strings.ToLower(USDCContractAddressBase)
-	if receipt.To != usdcAddrLower {
-		return fmt.Errorf("receipt.to %s != USDC %s", receipt.To, usdcAddrLower)
+	if recA.To != usdcAddrLower {
+		return fmt.Errorf("primary receipt.to %s != USDC %s", recA.To, usdcAddrLower)
 	}
-	// (a) Fetch the full tx and assert input byte-equality on BOTH RPCs.
+	if recB.To != usdcAddrLower {
+		return fmt.Errorf("secondary receipt.to %s != USDC %s", recB.To, usdcAddrLower)
+	}
+	// (a) Fetch the full tx on BOTH RPCs and assert input
+	// byte-equality on BOTH.
 	txA, err := r.opts.RPCs.Primary.TransactionByHash(ctx, attempt.TxHash.String)
 	if err != nil || txA == nil {
 		return fmt.Errorf("eth_getTransactionByHash primary: %v", err)
@@ -728,15 +930,23 @@ func (r *Runner) verifyChainSideTransfer(ctx context.Context, attempt *AttemptRo
 	if err != nil {
 		return fmt.Errorf("rebuild calldata: %w", err)
 	}
-	if !bytes.Equal(txA.Input, want) || !bytes.Equal(txB.Input, want) {
-		return errors.New("tx.input byte-mismatch on either RPC")
+	if !bytes.Equal(txA.Input, want) {
+		return errors.New("primary tx.input byte-mismatch")
 	}
-	// (b) Recover sender == hot wallet (use tx.from which both RPCs
-	// agree on by Construction; ecrecover is the §4.3 step 6 path).
+	if !bytes.Equal(txB.Input, want) {
+		return errors.New("secondary tx.input byte-mismatch")
+	}
+	// (b) Both RPCs MUST agree tx.from == hot wallet.
 	if !addressEqualFold(txA.From, r.opts.Security.HotWalletAddress) {
 		return fmt.Errorf("primary tx.from %s != hot_wallet", txA.From)
 	}
-	// (c) Exactly one Transfer log matching.
+	if !addressEqualFold(txB.From, r.opts.Security.HotWalletAddress) {
+		return fmt.Errorf("secondary tx.from %s != hot_wallet", txB.From)
+	}
+	if !addressEqualFold(txA.From, txB.From) {
+		return fmt.Errorf("tx.from disagreement: primary=%s secondary=%s", txA.From, txB.From)
+	}
+	// (c) Exactly one Transfer log matching on BOTH receipts.
 	hot, err := PadAddressTopic(r.opts.Security.HotWalletAddress)
 	if err != nil {
 		return err
@@ -748,6 +958,18 @@ func (r *Runner) verifyChainSideTransfer(ctx context.Context, attempt *AttemptRo
 	transferTopic := "0x" + hex.EncodeToString(transferEventTopic)
 	hotTopic := "0x" + hex.EncodeToString(hot)
 	toTopic := "0x" + hex.EncodeToString(to)
+	if cnt := countMatchingTransferLog(recA, usdcAddrLower, transferTopic, hotTopic, toTopic, attempt.AmountBaseUnits); cnt != 1 {
+		return fmt.Errorf("primary matching Transfer log count = %d, want 1", cnt)
+	}
+	if cnt := countMatchingTransferLog(recB, usdcAddrLower, transferTopic, hotTopic, toTopic, attempt.AmountBaseUnits); cnt != 1 {
+		return fmt.Errorf("secondary matching Transfer log count = %d, want 1", cnt)
+	}
+	return nil
+}
+
+// countMatchingTransferLog counts logs in receipt that match the
+// canonical USDC Transfer signature with the expected from/to/amount.
+func countMatchingTransferLog(receipt *Receipt, usdcAddrLower, transferTopic, hotTopic, toTopic string, amount int64) int {
 	matchCount := 0
 	for _, log := range receipt.Logs {
 		if log.Address != usdcAddrLower {
@@ -765,17 +987,13 @@ func (r *Runner) verifyChainSideTransfer(ctx context.Context, attempt *AttemptRo
 		if log.Topics[2] != toTopic {
 			continue
 		}
-		// abi.decode(data, uint256) == amount.
 		got := new(big.Int).SetBytes(log.Data)
-		want := big.NewInt(attempt.AmountBaseUnits)
+		want := big.NewInt(amount)
 		if got.Cmp(want) == 0 {
 			matchCount++
 		}
 	}
-	if matchCount != 1 {
-		return fmt.Errorf("matching Transfer log count = %d, want 1", matchCount)
-	}
-	return nil
+	return matchCount
 }
 
 func (r *Runner) markConfirmedStandalone(ctx context.Context, payoutID int64, attemptSeq int,

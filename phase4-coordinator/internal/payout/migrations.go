@@ -12,9 +12,14 @@ import (
 )
 
 // Migrate applies every SPEC-016 schema migration to db in
-// lexicographic filename order. Each migration is idempotent
-// (CREATE TABLE/INDEX/TRIGGER IF NOT EXISTS) so re-running on
-// the same DB is a no-op.
+// lexicographic filename order. Each migration MAY use either
+// idempotent statements (CREATE TABLE/INDEX/TRIGGER IF NOT
+// EXISTS) or non-idempotent statements (ALTER TABLE ADD COLUMN);
+// the runner tracks applied migration names in
+// payout_schema_applied so re-runs are safe even when SQLite
+// cannot natively enforce idempotency on the statement (e.g.
+// ALTER TABLE ADD COLUMN — codex round-1 [sec:2.1] closure
+// added migration 0010 which uses ALTER).
 //
 // SPEC-016 §3.1 / §4.7 / §4.8a / §4.8b / §4.9 pin every
 // SPEC-016 table to the SAME SQLite database file as SPEC-005's
@@ -26,6 +31,13 @@ import (
 func Migrate(ctx context.Context, db *sql.DB) error {
 	if db == nil {
 		return fmt.Errorf("payout.Migrate: db is required")
+	}
+	if _, err := db.ExecContext(ctx, `
+CREATE TABLE IF NOT EXISTS payout_schema_applied (
+    name TEXT PRIMARY KEY,
+    applied_at_utc TEXT NOT NULL
+)`); err != nil {
+		return fmt.Errorf("payout.Migrate: bootstrap tracking table: %w", err)
 	}
 	entries, err := fs.ReadDir(migrations.FS, ".")
 	if err != nil {
@@ -44,12 +56,28 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 	}
 	sort.Strings(names)
 	for _, name := range names {
+		var applied string
+		err := db.QueryRowContext(ctx,
+			`SELECT name FROM payout_schema_applied WHERE name = ?`, name,
+		).Scan(&applied)
+		if err == nil && applied == name {
+			continue // already applied
+		}
+		if err != nil && err != sql.ErrNoRows {
+			return fmt.Errorf("payout.Migrate: lookup %s: %w", name, err)
+		}
 		body, err := fs.ReadFile(migrations.FS, name)
 		if err != nil {
 			return fmt.Errorf("payout.Migrate: read %s: %w", name, err)
 		}
 		if _, err := db.ExecContext(ctx, string(body)); err != nil {
 			return fmt.Errorf("payout.Migrate: exec %s: %w", name, err)
+		}
+		if _, err := db.ExecContext(ctx,
+			`INSERT INTO payout_schema_applied (name, applied_at_utc) VALUES (?, ?)`,
+			name, "0",
+		); err != nil {
+			return fmt.Errorf("payout.Migrate: record %s: %w", name, err)
 		}
 	}
 	return nil

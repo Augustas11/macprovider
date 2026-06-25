@@ -3,6 +3,9 @@ package payout
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -110,20 +113,54 @@ type HTTPRPCClient struct {
 }
 
 // NewHTTPRPCClient constructs a client against the given URL.
-// label is a non-secret operator-readable name. TLS cert pinning
-// (SPEC §4.4 SPKI) is handled at the transport layer by the
-// caller — this constructor does not configure pinning itself
-// (TODO: thread the pin through Step 4 config-loader).
-func NewHTTPRPCClient(url, label string, timeout time.Duration) *HTTPRPCClient {
+// label is a non-secret operator-readable name. Optional SPKI
+// pin is the 64-hex-char SHA-256 of the SubjectPublicKeyInfo
+// expected from the served cert chain. SPEC §4.4 / §6.5.
+func NewHTTPRPCClient(url, label, spkiPin string, timeout time.Duration) *HTTPRPCClient {
 	if timeout == 0 {
 		timeout = 20 * time.Second
+	}
+	transport := &http.Transport{
+		ForceAttemptHTTP2:   true,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
+	if spkiPin != "" {
+		transport.TLSClientConfig = &tls.Config{
+			VerifyPeerCertificate: makeSPKIPinVerifier(spkiPin),
+		}
 	}
 	return &HTTPRPCClient{
 		URL: url,
 		HTTPClient: &http.Client{
-			Timeout: timeout,
+			Timeout:   timeout,
+			Transport: transport,
 		},
 		label: label,
+	}
+}
+
+// makeSPKIPinVerifier returns a TLS VerifyPeerCertificate callback
+// that asserts the leaf cert's SubjectPublicKeyInfo SHA-256
+// hash matches the configured pin. The pin must be 64 hex chars
+// (case-insensitive); config parse-time bounds enforce this.
+// Closes codex round-1 [arch:3.3] MEDIUM.
+func makeSPKIPinVerifier(spkiPin string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	wantLower := strings.ToLower(spkiPin)
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return errors.New("SPKI pin: peer sent no certs")
+		}
+		cert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return fmt.Errorf("SPKI pin: parse leaf cert: %w", err)
+		}
+		hash := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+		got := hex.EncodeToString(hash[:])
+		if got != wantLower {
+			return fmt.Errorf("SPKI pin mismatch: want %s got %s", wantLower, got)
+		}
+		return nil
 	}
 }
 

@@ -112,6 +112,26 @@ type PayoutSecurityConfig struct {
 	// PauseResumeMinInterval is the §6.4.1 endpoint rate-limit
 	// floor. Default 60s. Step 3 wiring.
 	PauseResumeMinInterval time.Duration `yaml:"pause_resume_min_interval"`
+
+	// EncryptedWalletPath is the on-disk AES-256-GCM-encrypted
+	// secp256k1 wallet file. SPEC §6.3 production path; the
+	// runner decrypts at startup using the KEK supplied via
+	// systemd LoadCredential= (preferred) or
+	// MACPROVIDER_PAYOUT_WALLET_KEK env var. Required when
+	// payout.enabled=true unless DevMode is also true.
+	EncryptedWalletPath string `yaml:"encrypted_wallet_path"`
+
+	// EncryptedWalletOnDiskHex indicates the wallet file is
+	// stored as hex-encoded bytes (vs raw bytes). Default false
+	// (raw bytes).
+	EncryptedWalletOnDiskHex bool `yaml:"encrypted_wallet_on_disk_hex"`
+
+	// DevMode permits loading the wallet from the dev-only env
+	// var (MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY) instead
+	// of the encrypted file + KEK production path. NEVER enable
+	// in production. Step 2 [sec:2.3] HIGH closure: dev path
+	// MUST be explicitly opted-in.
+	DevMode bool `yaml:"dev_mode"`
 }
 
 // PayoutTuningConfig holds SPEC-016 §6.5 `payout.tuning.*` keys —
@@ -970,6 +990,9 @@ func (c Config) Validate() error {
 		}
 		if c.Payout.Security.PauseResumeMinInterval < time.Second {
 			return fmt.Errorf("payout.security.pause_resume_min_interval must be >= 1s")
+		}
+		if !c.Payout.Security.DevMode && c.Payout.Security.EncryptedWalletPath == "" {
+			return fmt.Errorf("payout.security.encrypted_wallet_path must be set when payout.enabled=true (SPEC §6.3); set payout.security.dev_mode=true ONLY for non-production hosts")
 		}
 		if c.Payout.Tuning.AddressCoolingOffPeriod < time.Hour {
 			return fmt.Errorf("payout.tuning.address_cooling_off_period must be >= 1h (SPEC-016 §3.1)")

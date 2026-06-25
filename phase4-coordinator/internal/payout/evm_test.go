@@ -181,6 +181,35 @@ func TestEIP1559_DecodeRejectsNonType02(t *testing.T) {
 	}
 }
 
+// TestEIP1559_DecodeRejectsTrailingBytes locks codex round-1
+// [code:1.4]: bytes after the top-level list MUST be rejected.
+func TestEIP1559_DecodeRejectsTrailingBytes(t *testing.T) {
+	priv, _ := loadKnownKey(t)
+	calldata, _ := USDCTransferCalldata("0x000000000000000000000000000000000000dEaD", 1)
+	usdcBytes, _ := AddressBytes(USDCContractAddressBase)
+	var to [20]byte
+	copy(to[:], usdcBytes[:])
+	tx := EIP1559Tx{
+		ChainID:              BaseMainnetChainID,
+		Nonce:                1,
+		MaxPriorityFeePerGas: big.NewInt(1),
+		MaxFeePerGas:         big.NewInt(1),
+		GasLimit:             21000,
+		To:                   to,
+		Value:                big.NewInt(0),
+		Data:                 calldata,
+	}
+	digest, _ := tx.SigningHash()
+	compact := ecdsa.SignCompact(priv, digest[:], false)
+	signed, _ := tx.SignedRLP(compact[0]-27, compact[1:33], compact[33:65])
+	// Append a garbage byte.
+	tampered := append([]byte(nil), signed...)
+	tampered = append(tampered, 0xff)
+	if _, _, _, _, err := DecodeSignedEIP1559(tampered); err == nil {
+		t.Fatal("expected error for trailing byte")
+	}
+}
+
 // loadKnownKey is also defined in eip712_test.go; this duplicate
 // is in evm_test.go via blank-import (no — we keep one definition
 // in eip712_test.go and reuse it here since tests in the same
@@ -201,4 +230,3 @@ func TestPadAddressTopic(t *testing.T) {
 		}
 	}
 }
-
