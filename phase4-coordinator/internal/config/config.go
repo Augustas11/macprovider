@@ -54,24 +54,108 @@ type PayoutConfig struct {
 }
 
 // PayoutSecurityConfig holds SPEC-016 §6.5 `payout.security.*` keys
-// — the IMMUTABLE-at-startup subset. Step 1 only needs the hot wallet
-// address; Step 4 grows this struct with caps + RPC pins.
+// — the IMMUTABLE-at-startup subset. Step 2 grows this struct with
+// caps + RPC URLs + abandon caps; Step 4 will land the full §6.5
+// dual-loader split (SIGHUP-only tuning, fsnotify-forbidden, etc.).
+// At Step 2 the values are read once at process start and not
+// re-loaded; no SIGHUP handler touches these.
 type PayoutSecurityConfig struct {
 	// HotWalletAddress is the operator hot wallet on Base mainnet.
 	// SPEC §3.2 step 5 uses it as the EIP-712 verifyingContract;
 	// §3.4 stamps it into provider_payout_addresses.registered_against_hot_wallet
 	// on every successful INSERT/UPDATE.
 	HotWalletAddress string `yaml:"hot_wallet_address"`
+
+	// RPCURLPrimary / RPCURLSecondary are the two Base mainnet
+	// JSON-RPC endpoints. SPEC §4.4 REQUIRES two; single-RPC is
+	// REJECTED at v0.1.x. The two MUST be loaded from SEPARATE
+	// secrets paths (§4.4 trust-separation requirement); this is
+	// enforced operationally via config-file layout, not by IMPL.
+	RPCURLPrimary   string `yaml:"rpc_url_primary"`
+	RPCURLSecondary string `yaml:"rpc_url_secondary"`
+
+	// PerPayoutCapUSDCBaseUnits is the §5.2 per-payout ceiling.
+	// Default $500 = 500_000_000 base units.
+	PerPayoutCapUSDCBaseUnits int64 `yaml:"per_payout_cap_usdc_base_units"`
+
+	// PerDayCapUSDCBaseUnits is the §5.3 rolling 24h ceiling.
+	// Default $5,000 = 5_000_000_000 base units.
+	PerDayCapUSDCBaseUnits int64 `yaml:"per_day_cap_usdc_base_units"`
+
+	// CancelMaxTipMultiplier is the §4.6 cap on the tip multiplier
+	// supplied by the operator on /admin/payout/abandon-attempt.
+	// Default 5×. Requests above are silently floored with a
+	// cap_applied log entry.
+	CancelMaxTipMultiplier float64 `yaml:"cancel_max_tip_multiplier"`
+
+	// CancelMaxGasNativeWei is the §4.6 per-cancel gas ceiling.
+	// Default 0.01 ETH = 1e16 wei. Requests above 422 reject.
+	CancelMaxGasNativeWei int64 `yaml:"cancel_max_gas_native_wei"`
+
+	// CancelMaxGasNativeWeiPer24h is the §4.6 24h aggregate gas
+	// ceiling. Default 0.05 ETH = 5e16 wei. SUM over confirmed
+	// cancels in the window + the current-request estimate.
+	CancelMaxGasNativeWeiPer24h int64 `yaml:"cancel_max_gas_native_wei_per_24h"`
+
+	// AbandonRatePerHour is the §4.6 per-operator-token rate
+	// limit on the abandon endpoint. Default 3.
+	AbandonRatePerHour int `yaml:"abandon_rate_per_hour"`
+
+	// ChainReconInterval is the §4.4 / §7.4 chain-balance recon
+	// cadence (Step 4 wiring, Step 2 reads the value). Default 1h.
+	ChainReconInterval time.Duration `yaml:"chain_recon_interval"`
+
+	// ChainReconToleranceUSDCBaseUnits is the §4.4 drift
+	// threshold. Default $0.10 = 100_000 base units.
+	ChainReconToleranceUSDCBaseUnits int64 `yaml:"chain_recon_tolerance_usdc_base_units"`
+
+	// PauseResumeMinInterval is the §6.4.1 endpoint rate-limit
+	// floor. Default 60s. Step 3 wiring.
+	PauseResumeMinInterval time.Duration `yaml:"pause_resume_min_interval"`
 }
 
 // PayoutTuningConfig holds SPEC-016 §6.5 `payout.tuning.*` keys —
-// the SIGHUP-reloadable subset (full hot-reload lands in Step 4;
-// Step 1 only reads the cooling-off period at startup).
+// the SIGHUP-reloadable subset (full hot-reload semantics land in
+// Step 4; Step 2 just reads the values at startup). Hard bounds
+// per §6.5 are enforced at parse time.
 type PayoutTuningConfig struct {
 	// AddressCoolingOffPeriod is the §3.3 cooling-off window for
 	// freshly-registered or rotated addresses. Default 24h.
 	// SPEC §3.1 floor: 1h.
 	AddressCoolingOffPeriod time.Duration `yaml:"address_cooling_off_period"`
+
+	// RunInterval is the §4.2 runner cadence. Default 6h.
+	// SPEC §6.5 bounds: [5m, 24h].
+	RunInterval time.Duration `yaml:"run_interval"`
+
+	// RunNowMinInterval rate-limits the §4.2 admin run-now endpoint.
+	// Default 60s. SPEC §6.5 bounds: [10s, 1h].
+	RunNowMinInterval time.Duration `yaml:"run_now_min_interval"`
+
+	// ConfirmationBlocks is the §4.3 step 7 receipt-depth threshold
+	// for the two-RPC confirm. Default 5. SPEC §6.5 bounds
+	// [5, 200] (v0.1.20 round-20 M2 closure widened from [2, 50]).
+	ConfirmationBlocks int `yaml:"confirmation_blocks"`
+
+	// MaxRowsPerRun caps the §4.3 step 1 SELECT. Default 50.
+	// SPEC §6.5 bounds: [1, 500].
+	MaxRowsPerRun int `yaml:"max_rows_per_run"`
+
+	// ReorgPollWindow is the §4.7 re-poll window for already-
+	// confirmed rows. Default 24h. SPEC §6.5 bounds [1h, 168h]
+	// (v0.1.20 round-20 M1 closure).
+	ReorgPollWindow time.Duration `yaml:"reorg_poll_window"`
+
+	// LowBalanceThreshold / LowNativeThreshold drive §6.2 alerts
+	// (Step 4 wiring; Step 2 reads). Defaults: 0 (disabled).
+	LowBalanceThreshold int64 `yaml:"low_balance_threshold"`
+	LowNativeThreshold  int64 `yaml:"low_native_threshold"`
+
+	// RPCURLPrimaryPinSPKI / RPCURLSecondaryPinSPKI are optional
+	// SHA-256 SPKI cert pins for the two RPCs (§4.4). 64-hex chars
+	// or empty.
+	RPCURLPrimaryPinSPKI   string `yaml:"rpc_url_primary_pin_spki"`
+	RPCURLSecondaryPinSPKI string `yaml:"rpc_url_secondary_pin_spki"`
 }
 
 type ListenConfig struct {
@@ -463,8 +547,24 @@ func Default() Config {
 		},
 		Payout: PayoutConfig{
 			Enabled: false,
+			Security: PayoutSecurityConfig{
+				PerPayoutCapUSDCBaseUnits:        500_000_000,    // $500
+				PerDayCapUSDCBaseUnits:           5_000_000_000,  // $5,000
+				CancelMaxTipMultiplier:           5.0,
+				CancelMaxGasNativeWei:            10_000_000_000_000_000, // 0.01 ETH (1e16)
+				CancelMaxGasNativeWeiPer24h:      50_000_000_000_000_000, // 0.05 ETH (5e16)
+				AbandonRatePerHour:               3,
+				ChainReconInterval:               time.Hour,
+				ChainReconToleranceUSDCBaseUnits: 100_000, // $0.10
+				PauseResumeMinInterval:           60 * time.Second,
+			},
 			Tuning: PayoutTuningConfig{
 				AddressCoolingOffPeriod: 24 * time.Hour,
+				RunInterval:             6 * time.Hour,
+				RunNowMinInterval:       60 * time.Second,
+				ConfirmationBlocks:      5,
+				MaxRowsPerRun:           50,
+				ReorgPollWindow:         24 * time.Hour,
 			},
 		},
 	}
@@ -835,8 +935,74 @@ func (c Config) Validate() error {
 		if c.Payout.Security.HotWalletAddress == "" {
 			return fmt.Errorf("payout.security.hot_wallet_address must be set when payout.enabled is true")
 		}
+		if c.Payout.Security.RPCURLPrimary == "" || c.Payout.Security.RPCURLSecondary == "" {
+			return fmt.Errorf("payout.security.rpc_url_primary and rpc_url_secondary must both be set (SPEC-016 §4.4 two-RPC discipline)")
+		}
+		if c.Payout.Security.RPCURLPrimary == c.Payout.Security.RPCURLSecondary {
+			return fmt.Errorf("payout.security.rpc_url_primary and rpc_url_secondary must differ (SPEC-016 §4.4 trust separation)")
+		}
+		if c.Payout.Security.PerPayoutCapUSDCBaseUnits <= 0 {
+			return fmt.Errorf("payout.security.per_payout_cap_usdc_base_units must be > 0")
+		}
+		if c.Payout.Security.PerDayCapUSDCBaseUnits <= 0 {
+			return fmt.Errorf("payout.security.per_day_cap_usdc_base_units must be > 0")
+		}
+		if c.Payout.Security.PerDayCapUSDCBaseUnits < c.Payout.Security.PerPayoutCapUSDCBaseUnits {
+			return fmt.Errorf("payout.security.per_day_cap_usdc_base_units must be >= per_payout_cap_usdc_base_units")
+		}
+		if c.Payout.Security.CancelMaxTipMultiplier < 1.0 {
+			return fmt.Errorf("payout.security.cancel_max_tip_multiplier must be >= 1.0")
+		}
+		if c.Payout.Security.CancelMaxGasNativeWei <= 0 {
+			return fmt.Errorf("payout.security.cancel_max_gas_native_wei must be > 0")
+		}
+		if c.Payout.Security.CancelMaxGasNativeWeiPer24h < c.Payout.Security.CancelMaxGasNativeWei {
+			return fmt.Errorf("payout.security.cancel_max_gas_native_wei_per_24h must be >= cancel_max_gas_native_wei")
+		}
+		if c.Payout.Security.AbandonRatePerHour <= 0 {
+			return fmt.Errorf("payout.security.abandon_rate_per_hour must be > 0")
+		}
+		if c.Payout.Security.ChainReconInterval < time.Minute {
+			return fmt.Errorf("payout.security.chain_recon_interval must be >= 1m")
+		}
+		if c.Payout.Security.ChainReconToleranceUSDCBaseUnits <= 0 {
+			return fmt.Errorf("payout.security.chain_recon_tolerance_usdc_base_units must be > 0")
+		}
+		if c.Payout.Security.PauseResumeMinInterval < time.Second {
+			return fmt.Errorf("payout.security.pause_resume_min_interval must be >= 1s")
+		}
 		if c.Payout.Tuning.AddressCoolingOffPeriod < time.Hour {
 			return fmt.Errorf("payout.tuning.address_cooling_off_period must be >= 1h (SPEC-016 §3.1)")
+		}
+		if c.Payout.Tuning.RunInterval < 5*time.Minute || c.Payout.Tuning.RunInterval > 24*time.Hour {
+			return fmt.Errorf("payout.tuning.run_interval must be in [5m, 24h] (SPEC-016 §6.5)")
+		}
+		if c.Payout.Tuning.RunNowMinInterval < 10*time.Second || c.Payout.Tuning.RunNowMinInterval > time.Hour {
+			return fmt.Errorf("payout.tuning.run_now_min_interval must be in [10s, 1h] (SPEC-016 §6.5)")
+		}
+		if c.Payout.Tuning.ConfirmationBlocks < 5 || c.Payout.Tuning.ConfirmationBlocks > 200 {
+			return fmt.Errorf("payout.tuning.confirmation_blocks must be in [5, 200] (SPEC-016 §6.5 v0.1.20 round-20 M2 closure widened from [2, 50])")
+		}
+		if c.Payout.Tuning.MaxRowsPerRun < 1 || c.Payout.Tuning.MaxRowsPerRun > 500 {
+			return fmt.Errorf("payout.tuning.max_rows_per_run must be in [1, 500] (SPEC-016 §6.5)")
+		}
+		if c.Payout.Tuning.ReorgPollWindow < time.Hour || c.Payout.Tuning.ReorgPollWindow > 168*time.Hour {
+			return fmt.Errorf("payout.tuning.reorg_poll_window must be in [1h, 168h] (SPEC-016 §6.5 v0.1.20 round-20 M1 closure)")
+		}
+		if c.Payout.Tuning.LowBalanceThreshold < 0 {
+			return fmt.Errorf("payout.tuning.low_balance_threshold must be >= 0")
+		}
+		if c.Payout.Tuning.LowBalanceThreshold > 0 && c.Payout.Tuning.LowBalanceThreshold > 2*c.Payout.Security.PerDayCapUSDCBaseUnits {
+			return fmt.Errorf("payout.tuning.low_balance_threshold must be <= 2 * per_day_cap_usdc_base_units (SPEC-016 §6.5)")
+		}
+		if c.Payout.Tuning.LowNativeThreshold < 0 || c.Payout.Tuning.LowNativeThreshold > 1_000_000_000_000_000_000 {
+			return fmt.Errorf("payout.tuning.low_native_threshold must be in [0, 1e18] (SPEC-016 §6.5)")
+		}
+		if err := validateSPKIPin(c.Payout.Tuning.RPCURLPrimaryPinSPKI, "payout.tuning.rpc_url_primary_pin_spki"); err != nil {
+			return err
+		}
+		if err := validateSPKIPin(c.Payout.Tuning.RPCURLSecondaryPinSPKI, "payout.tuning.rpc_url_secondary_pin_spki"); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -935,6 +1101,27 @@ func validateExplorerWindow(prefix string, maxDays, defaultHours, minDays, maxDa
 	}
 	if defaultHours < 1 || defaultHours > maxDays*24 {
 		return fmt.Errorf("%s_default_window_hours must be between 1 and %d", prefix, maxDays*24)
+	}
+	return nil
+}
+
+// validateSPKIPin checks SPEC-016 §6.5 syntactic bounds on a
+// pinned SHA-256 SPKI fingerprint. Empty disables pinning;
+// otherwise the value MUST be exactly 64 hex chars (lowercase
+// or uppercase). Content-correctness (the value actually matching
+// the RPC's served cert) is operational, not parse-time.
+func validateSPKIPin(value, name string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) != 64 {
+		return fmt.Errorf("%s must be empty or 64 hex chars (got %d chars)", name, len(value))
+	}
+	for _, r := range value {
+		if (r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F') {
+			continue
+		}
+		return fmt.Errorf("%s must be empty or a valid 64-hex-char SHA-256", name)
 	}
 	return nil
 }
