@@ -353,8 +353,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	reader := bufio.NewReaderSize(resp.Body, maxStreamingLineBytes)
 	var cancelOnce sync.Once
 	cancelCoordinator := func() {
 		cancelOnce.Do(cancelUpstream)
@@ -371,22 +370,63 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	var emitted int64
 	var reported *tokenUsage
 	invalidReportedUsage := false
-	for scanner.Scan() {
+	settleReported := func(outcome string) {
+		usage := *reported
+		observedCompletion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
+		if observedCompletion > usage.CompletionTokens {
+			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome)
+			return
+		}
+		s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome)
+	}
+	settleTruncated := func() {
+		if reported != nil {
+			settleReported("stream_truncated")
+			return
+		}
+		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated")
+	}
+	forwardLine := func(line []byte) bool {
 		select {
 		case <-r.Context().Done():
 			if reported != nil {
-				s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
-				return
+				settleReported("client_disconnect")
+				return false
 			}
 			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
-			return
+			return false
 		default:
 		}
-		line := scanner.Text()
-		if strings.HasPrefix(line, "data: ") {
-			data := strings.TrimPrefix(line, "data: ")
+		text := strings.TrimRight(string(line), "\r\n")
+		if data, ok := sseDataValue(text); ok {
 			if data != "[DONE]" {
-				emitted += int64(len(data))
+				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
+				if !parseOK {
+					slog.Warn("streaming gateway estimate saw malformed chunk; truncating stream", "request_id", requestID(r))
+					writeSSEError(w, "Upstream stream returned malformed data", "stream_malformed")
+					if flusher != nil {
+						flusher.Flush()
+					}
+					cancelCoordinator()
+					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
+					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed")
+					return false
+				}
+				if deltaBytes > 0 {
+					projectedCompletion := estimateTokensFromBytes(emitted + deltaBytes)
+					maxCompletion := maxStreamingCompletionTokens(promptEstimate, maxUsageTokens)
+					if projectedCompletion > maxCompletion {
+						slog.Warn("streaming gateway estimate exceeded request maximum; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", projectedCompletion, "max_completion_tokens", maxCompletion)
+						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "stream_output_exceeded")
+						if flusher != nil {
+							flusher.Flush()
+						}
+						cancelCoordinator()
+						s.settleAfterCommit(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded")
+						return false
+					}
+					emitted += deltaBytes
+				}
 				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens); ok {
 					if err != nil {
 						invalidReportedUsage = true
@@ -395,40 +435,84 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					} else if !invalidReportedUsage {
 						reported = &usage
 					}
+				} else if !hasChoices {
+					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
+					writeSSEError(w, "Upstream stream returned malformed data", "stream_malformed")
+					if flusher != nil {
+						flusher.Flush()
+					}
+					cancelCoordinator()
+					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
+					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed")
+					return false
 				}
 			}
 		}
-		_, _ = w.Write([]byte(line + "\n"))
+		if _, err := w.Write(line); err != nil {
+			slog.Warn("streaming buyer write failed", "request_id", requestID(r), "error", err)
+			if reported != nil {
+				settleReported("client_disconnect")
+				return false
+			}
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			return false
+		}
 		if flusher != nil {
 			flusher.Flush()
 		}
+		return true
 	}
-	if errors.Is(r.Context().Err(), context.Canceled) {
-		if reported != nil {
-			s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "client_disconnect")
+	for {
+		line, err := reader.ReadSlice('\n')
+		if errors.Is(err, bufio.ErrBufferFull) {
+			slog.Error("streaming coordinator line exceeded limit", "request_id", requestID(r), "max_line_bytes", maxStreamingLineBytes)
+			writeSSEError(w, "Upstream stream failed", "stream_truncated")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			settleTruncated()
 			return
 		}
-		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
-		return
-	}
-	if err := scanner.Err(); err != nil {
+		if len(line) > 0 {
+			if !forwardLine(line) {
+				return
+			}
+		}
+		if err == nil {
+			continue
+		}
+		if err == io.EOF {
+			break
+		}
+		if errors.Is(r.Context().Err(), context.Canceled) {
+			if reported != nil {
+				settleReported("client_disconnect")
+				return
+			}
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			return
+		}
 		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
 		writeSSEError(w, "Upstream stream failed", "stream_truncated")
 		if flusher != nil {
 			flusher.Flush()
 		}
+		settleTruncated()
+		return
+	}
+	if errors.Is(r.Context().Err(), context.Canceled) {
 		if reported != nil {
-			s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "stream_truncated")
+			settleReported("client_disconnect")
 			return
 		}
-		s.settleAfterCommit(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), maxUsageTokens, "gateway_estimated", "stream_truncated")
+		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
 		return
 	}
 	if reported != nil && !invalidReportedUsage {
-		s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "ok")
+		settleReported("ok")
 		return
 	}
-	s.settleAfterCommit(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), maxUsageTokens, "gateway_estimated", "ok")
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "ok")
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
@@ -482,7 +566,7 @@ func openAIErrorCode(body []byte) string {
 
 func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens int64, cancelCoordinator func()) {
 	cancelCoordinator()
-	s.settleAfterCommit(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), maxUsageTokens, "gateway_estimated", "client_disconnect")
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "client_disconnect")
 }
 
 func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) bool {
@@ -544,6 +628,105 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 	return s.store.SettleReservation(context.Background(), settlement)
 }
 
+func estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens int64) int64 {
+	completion := estimateTokensFromBytes(emitted)
+	maxCompletion := maxStreamingCompletionTokens(promptEstimate, maxUsageTokens)
+	if completion > maxCompletion {
+		return maxCompletion
+	}
+	return completion
+}
+
+func maxStreamingCompletionTokens(promptEstimate, maxUsageTokens int64) int64 {
+	maxCompletion := maxUsageTokens - promptEstimate
+	if maxCompletion < 0 {
+		return 0
+	}
+	return maxCompletion
+}
+
+func estimateTokensFromBytes(n int64) int64 {
+	return int64(math.Ceil(float64(n) / 4.0))
+}
+
+func streamingCompletionDeltaBytes(data string) (int64, bool, bool) {
+	var envelope struct {
+		Choices []struct {
+			Delta json.RawMessage `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+		return 0, false, false
+	}
+	var n int64
+	for _, choice := range envelope.Choices {
+		if len(choice.Delta) == 0 || bytes.Equal(choice.Delta, []byte("null")) {
+			continue
+		}
+		deltaBytes, ok := generatedDeltaStringBytes(choice.Delta)
+		if !ok {
+			return 0, false, false
+		}
+		n += deltaBytes
+	}
+	return n, len(envelope.Choices) > 0, true
+}
+
+func generatedDeltaStringBytes(raw json.RawMessage) (int64, bool) {
+	var delta any
+	if err := json.Unmarshal(raw, &delta); err != nil {
+		return 0, false
+	}
+	if _, ok := delta.(map[string]any); !ok {
+		return 0, false
+	}
+	return countGeneratedDeltaStrings("", delta), true
+}
+
+func countGeneratedDeltaStrings(key string, value any) int64 {
+	switch v := value.(type) {
+	case map[string]any:
+		var n int64
+		for childKey, childValue := range v {
+			n += countGeneratedDeltaStrings(childKey, childValue)
+		}
+		return n
+	case []any:
+		var n int64
+		for _, childValue := range v {
+			n += countGeneratedDeltaStrings(key, childValue)
+		}
+		return n
+	case string:
+		if !countDeltaStringKey(key) {
+			return 0
+		}
+		return int64(len(v))
+	default:
+		return 0
+	}
+}
+
+func countDeltaStringKey(key string) bool {
+	switch strings.ToLower(key) {
+	case "", "role", "id", "type", "name":
+		return false
+	default:
+		return true
+	}
+}
+
+func sseDataValue(line string) (string, bool) {
+	if !strings.HasPrefix(line, "data:") {
+		return "", false
+	}
+	value := strings.TrimPrefix(line, "data:")
+	if strings.HasPrefix(value, " ") {
+		value = strings.TrimPrefix(value, " ")
+	}
+	return value, true
+}
+
 func demoTokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
@@ -554,6 +737,7 @@ func demoTokenHash(token string) string {
 // ============================================================
 
 const maxUpstreamResponseBodyBytes = int64(16 << 20)
+const maxStreamingLineBytes = 1024 * 1024
 
 func readLimitedBody(r io.Reader, maxBytes int64) ([]byte, error) {
 	if maxBytes < 0 {
@@ -607,7 +791,7 @@ func writeSSEError(w http.ResponseWriter, message, code string) {
 	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "api_error", "code": code}})
 	_, _ = w.Write([]byte("data: "))
 	_, _ = w.Write(payload)
-	_, _ = w.Write([]byte("\n\n"))
+	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
 }
 
 func parseChatRequest(body []byte) (chatRequest, error) {
@@ -661,7 +845,7 @@ func usageFromJSON(body []byte, maxUsageTokens int64) (tokenUsage, bool, error) 
 	if sum > maxUsageTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total exceeds request maximum")
 	}
-	if rawUsage.TotalTokens != nil && usage.TotalTokens != 0 && usage.TotalTokens != sum {
+	if rawUsage.TotalTokens != nil && usage.TotalTokens != sum {
 		return tokenUsage{}, true, fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
 	}
 	usage.TotalTokens = sum

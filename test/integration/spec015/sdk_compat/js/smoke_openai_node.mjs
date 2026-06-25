@@ -15,6 +15,7 @@ const model = process.env.MACPROVIDER_SPEC015_MODEL || "llama-3.2-3b-instruct";
 const client = new OpenAI({
   apiKey: process.env.MACPROVIDER_SPEC015_API_KEY || "test-key",
   baseURL: baseURL(endpoint),
+  fetch: globalThis.fetch,
   timeout: 30000,
 });
 
