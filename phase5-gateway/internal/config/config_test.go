@@ -15,6 +15,13 @@ func TestQuotaReaperDefaults(t *testing.T) {
 	}
 }
 
+func TestGatewayHeaderTimeoutDefaultCoversLargeModelFirstResponse(t *testing.T) {
+	cfg := Default()
+	if cfg.Timeouts.CoordinatorHeaderTimeoutSeconds < 60 {
+		t.Fatalf("CoordinatorHeaderTimeoutSeconds=%d want >=60", cfg.Timeouts.CoordinatorHeaderTimeoutSeconds)
+	}
+}
+
 func TestQuotaReaperConfigValidation(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mutate func(*Config)
