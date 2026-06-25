@@ -1,23 +1,17 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.17 (2026-06-25, draft — round-18 codex
-audit fix pass: 0 CRIT + 0 MAJOR + 2 MED absorbed; 4 LOW
-still deferred. Codex round-18 surfaced two follow-on
-gaps in v0.1.16's stale-page suppression: (1) crash
-between marker-CAS COMMIT and journalctl emit could
-permanently suppress the PAGE; (2) §4.7 step-4 SQL
-literal block didn't actually clear the marker column
-even though the prose said it did. v0.1.17 adds §4.8c
-`cancel_reconfirm_stale_outbox` table + reaper (same
-pattern as §4.8a runtime_flag_audit) and fixes the
-step-4 SQL to literally include the marker clear. Audit
+**Version:** 0.1.18 (2026-06-25, draft — round-19 codex
+audit declared CONVERGED at 0/0/0; v0.1.18 sweeps the 4
+deferred LOWs from round-11 for completeness before PR
+merge consideration. No normative changes. Audit
 history: round-9 codex 2/5/2 → v0.1.8; round-10 codex
-0/3/5/7 → v0.1.9; round-11 codex 0/2/2/4 → v0.1.10;
-round-12 codex 0/1/0/4 → v0.1.11; round-13 codex
-0/0/1/4 → v0.1.12; round-14 codex 0/1/0/4 → v0.1.13;
-round-15 codex 0/2/1/0 → v0.1.14; round-16 codex
-0/0/3/0 → v0.1.15; round-17 codex 0/0/1/0 → v0.1.16;
-round-18 codex 0/0/2/0 → v0.1.17.)
+0/3/5/7 → v0.1.9; round-11 codex 0/2/2/4 → v0.1.10
+(LOWs deferred); round-12 codex 0/1/0/4 → v0.1.11;
+round-13 codex 0/0/1/4 → v0.1.12; round-14 codex 0/1/0/4
+→ v0.1.13; round-15 codex 0/2/1/0 → v0.1.14; round-16
+codex 0/0/3/0 → v0.1.15; round-17 codex 0/0/1/0 →
+v0.1.16; round-18 codex 0/0/2/0 → v0.1.17; round-19
+codex CONVERGED 0/0/0 → v0.1.18 sweeps 4 deferred LOWs.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -32,6 +26,86 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.18 (2026-06-25, draft — sweep 4 deferred LOWs;
+codex round-19 CONVERGED already declared at 0/0/0):**
+
+Codex round-19 audit on v0.1.17 (commit 7be223d) declared
+the SPEC CONVERGED at 0 CRITICAL + 0 MAJOR + 0 MEDIUM.
+The 4 LOWs deferred since round-11 are SQL/wording
+hygiene; v0.1.18 sweeps them for completeness before PR
+merge consideration. No normative requirements change.
+
+LOW (closed):
+
+- **LOW-1: §4.3 self-fencing event name corrected from
+  `payout_runner_lease_conflict` to
+  `payout_runner_lease_lost`.** The `_conflict` event
+  semantically signals lease-ACQUIRE failure (per §4.8b
+  acquire algorithm); the correct event for post-acquire
+  token-mismatch (self-fencing detection) is `_lost`.
+
+- **LOW-2: §4.8a reaper CAS SQL shorthand aligned with
+  sync emitter's full form** including `RETURNING id`.
+  Both the sync emitter and the reaper now use identical
+  CAS predicates.
+
+- **LOW-3: Section order swapped from §4.8 → §4.8b →
+  §4.8a to §4.8 → §4.8a → §4.8b** (then §4.8c) for
+  natural alphabetical ordering. Physical block-swap;
+  section titles AND cross-references unchanged.
+
+- **LOW-4: Stale "§4.3 step 5" Signer-behavior
+  cross-reference updated to "§4.3 step 6"** — stale
+  since the v0.1.8 §4.3 step renumbering when the
+  singleton-runner lease became new step 3 and bumped
+  build/sign/broadcast from step 5 to step 6. Inline
+  closure citation added.
+
+POSITIVE codex round-19 (the convergence verdict):
+- Round-18 MED-1 (outbox + reaper for stale PAGE) closed.
+- Round-18 MED-2 (§4.7 step-4 SQL literal marker clear)
+  closed.
+- §4.8c table FK / unemitted index / unique index / same-DB
+  pin all verified.
+- `event_id` in §7.1 stale PAGE schema; new
+  `payout_stale_outbox_reaped` WARN event in §7.1 + §9
+  BetterStack prereq.
+- No new replay / MEV / Signer / reorg / race / operator-key
+  drain defects found in round-19.
+- FK ON DELETE RESTRICT acceptable (audit-retention; no
+  operator-recovery path depends on deleting payout_attempts).
+- Shared-vs-separate reaper goroutine acceptable (contract
+  is the mandatory CAS+emit behavior, not goroutine topology).
+- 5-minute reaper threshold intentionally aligned with
+  §4.8a (not a money-path tuning parameter).
+- Timestamp drift not a spec gap (the literal SQL uses
+  the same `:now` for marker and outbox
+  `stale_started_at_utc`).
+- Markdown fences balanced; `git diff --check` clean.
+
+Net spec change: small (~50 lines — 4 LOW fixes +
+v0.1.18 change-log entry; §4.8a/b block-swap is
+~118 lines moved but no content change).
+
+**Audit-loop trajectory (codex rounds only — final):**
+- round-9  (v0.1.7): 2 CRIT + 5 MAJOR + 2 MED
+- round-10 (v0.1.8): 0 CRIT + 3 MAJOR + 5 MED + 7 LOW
+- round-11 (v0.1.9): 0 CRIT + 2 MAJOR + 2 MED + 4 LOW
+- round-12 (v0.1.10): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-13 (v0.1.11): 0 CRIT + 0 MAJOR + 1 MED + 4 LOW
+- round-14 (v0.1.12): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-15 (v0.1.13): 0 CRIT + 2 MAJOR + 1 MED + 0 LOW
+- round-16 (v0.1.14): 0 CRIT + 0 MAJOR + 3 MED + 0 LOW
+- round-17 (v0.1.15): 0 CRIT + 0 MAJOR + 1 MED + 0 LOW
+- round-18 (v0.1.16): 0 CRIT + 0 MAJOR + 2 MED + 0 LOW
+- round-19 (v0.1.17): **CONVERGED 0/0/0**
+- v0.1.18 = post-convergence LOW sweep, ship-ready.
+
+Audited at /Users/augstar/macprovider-poc/.omc/artifacts/ask/
+codex-audit-spec-016-v0-1-17-...-2026-06-25T05-45-54-573Z.md
+
+Authored in /Users/augstar/macprovider-poc-spec016 worktree.
 
 **v0.1.17 (2026-06-25, draft — round-18 codex audit fix
 pass, 2 MED absorbed):**
@@ -2454,9 +2528,15 @@ any step on error and logging structurally:
    inside the same `BEGIN IMMEDIATE` transaction as step
    3(b) below; if the token has changed (i.e. another
    process took over), the current process MUST self-halt
-   the cycle and emit `payout_runner_lease_conflict` per
-   §7.1 (severity=PAGE). The token comparison is the
-   "self-fencing" check that protects against the
+   the cycle and emit `payout_runner_lease_lost` per
+   §7.1 (severity=PAGE). v0.1.18 (codex round-11 LOW-1
+   closure): the prior wording used
+   `payout_runner_lease_conflict` here, but that event
+   semantically signals lease-ACQUIRE failure (per §4.8b
+   acquire algorithm), not post-acquire token loss; the
+   correct event for self-fencing detection is
+   `payout_runner_lease_lost`. The token comparison is
+   the "self-fencing" check that protects against the
    classic stop-the-world-GC-then-resume scenario.
 
    (b) **Per-attempt `BEGIN IMMEDIATE` transaction.** A
@@ -3804,124 +3884,6 @@ an IMPL to place the INSERT inside `runner.Start()` AFTER
 the loop begins, re-opening the v0.1.3 C2 fake-funding
 closure for one cycle.
 
-### 4.8b Singleton-runner lease table (v0.1.9 — codex round-10 MAJOR-2 closure)
-
-The §4.3 step 3 singleton-runner lease guard requires a
-concrete table + algorithm. The v0.1.8 prose referenced
-`(host, pid, started_at_utc)` and a heartbeat without
-defining the schema or takeover semantics — codex round-10
-correctly flagged this as not implementable.
-
-```sql
-CREATE TABLE IF NOT EXISTS payout_runner_lease (
-    id                       INTEGER PRIMARY KEY CHECK(id = 1),
-    holder_host              TEXT NOT NULL,
-    holder_pid               INTEGER NOT NULL,
-    holder_started_at_utc    TEXT NOT NULL,
-    holder_token             TEXT NOT NULL,   -- random 16-byte
-                                              -- hex; rotates on
-                                              -- every (re)acquire
-    heartbeat_at_utc         TEXT NOT NULL,
-    acquired_at_utc          TEXT NOT NULL,
-    takeover_count           INTEGER NOT NULL DEFAULT 0
-);
-
--- Bootstrap seed: zero-row table by default (no lease until
--- the first runner process acquires it).
-```
-
-**Lease semantics (NORMATIVE):**
-
-- **Acquire.** On runner start, IMPL MUST attempt acquire
-  in a single `BEGIN IMMEDIATE` transaction:
-  1. `SELECT * FROM payout_runner_lease WHERE id = 1`.
-  2. If no row exists, `INSERT` a row with the current
-     process's `(holder_host, holder_pid,
-     holder_started_at_utc, fresh holder_token,
-     heartbeat_at_utc=now, acquired_at_utc=now,
-     takeover_count=0)`. COMMIT. Lease acquired.
-  3. If a row exists AND `heartbeat_at_utc >= now -
-     (3 × payout.tuning.run_interval)` (the holder is
-     alive), the acquire FAILS. Emit
-     `payout_runner_lease_conflict` per §7.1
-     (severity=PAGE) and refuse to start the runner.
-  4. If a row exists AND `heartbeat_at_utc < now -
-     (3 × payout.tuning.run_interval)` (the holder is
-     stale), perform a TAKEOVER: `UPDATE
-     payout_runner_lease SET holder_host=<this host>,
-     holder_pid=<this pid>, holder_started_at_utc=
-     <this started time>, holder_token=<fresh 16-byte
-     hex>, heartbeat_at_utc=now, acquired_at_utc=now,
-     takeover_count=takeover_count+1 WHERE id=1`. COMMIT.
-     Lease acquired via takeover. Emit a new
-     `payout_runner_lease_taken_over` event per §7.1
-     (severity=PAGE — takeover is rare and operationally
-     significant).
-
-- **Heartbeat.** While running, the IMPL MUST update
-  `heartbeat_at_utc = now` on the lease row at least
-  every `payout.tuning.run_interval` (the heartbeat
-  cadence and the run cadence are the same). The heartbeat
-  UPDATE MUST be a `BEGIN IMMEDIATE` transaction that ALSO
-  re-asserts `WHERE holder_token = <this process's
-  acquired token>`; if the UPDATE affects 0 rows, this
-  process has been taken over and MUST self-halt with
-  `payout_runner_lease_lost` (severity=PAGE).
-
-- **Self-fencing on every §4.3 step.** Before each step
-  4, 5, 6, 7, 8 of §4.3, the IMPL MUST re-read
-  `holder_token` from the lease row (within the same
-  `BEGIN IMMEDIATE` transaction as the step 3(b) txn
-  for steps 4–5; standalone read for steps 6–8) and
-  compare to the in-memory acquired token. Mismatch
-  triggers self-halt + `payout_runner_lease_lost`. This
-  defeats the stop-the-world-GC class where this process
-  stalled long enough for a takeover, then resumed and
-  tried to broadcast a tx the new holder doesn't know
-  about.
-
-- **Release.** On clean shutdown, the IMPL MUST `DELETE
-  FROM payout_runner_lease WHERE id=1 AND holder_token =
-  <acquired token>` so the next process can acquire
-  without waiting the takeover-stale window. A crash skips
-  this; the next process triggers takeover after the
-  stale window elapses.
-
-- **Same-DB pin.** The `payout_runner_lease` table MUST
-  live in the same SQLite database file as
-  `payout_runner_state`, `payout_attempts`,
-  `runtime_flags`, and SPEC-005's `ledger_payout_ready`
-  (mirrors §3.1 / §4.7 / §4.8a pins). IMPL MUST share one
-  `*sql.DB` handle across the lease, runner, and §6.4.1
-  endpoints — otherwise the §4.3 step 3(b) BEGIN IMMEDIATE
-  cannot atomically re-read the lease token alongside the
-  cap re-check.
-
-**Two new §7.1 events:**
-
-- `payout_runner_lease_taken_over` (severity=PAGE) — fields
-  `prior_holder_host, prior_holder_pid, prior_holder_started_at_utc,
-  prior_heartbeat_at_utc, new_holder_host, new_holder_pid,
-  takeover_count, ts_utc`.
-- `payout_runner_lease_lost` (severity=PAGE) — fields
-  `local_pid, local_holder_token, observed_holder_token,
-  observed_holder_host, observed_holder_pid, ts_utc`.
-
-IMPL test required (1): spawn two coordinator processes in
-quick succession against the same DB; assert the first
-acquires the lease and the second emits
-`payout_runner_lease_conflict` and exits.
-
-IMPL test required (2): kill the lease-holder process with
-`-9`; wait `3 × run_interval`; spawn a new coordinator; assert
-takeover succeeds and `payout_runner_lease_taken_over` is
-emitted with `takeover_count=1`.
-
-IMPL test required (3): in a single process, manually
-overwrite the lease row's `holder_token` to a different value;
-on the next §4.3 cycle, assert the self-fencing check halts the
-runner with `payout_runner_lease_lost`.
-
 ### 4.8a Runtime flags table (v0.1.7 — `runtime.*` persistence)
 
 ```sql
@@ -4069,12 +4031,17 @@ WHERE emitted_to_log = 0 AND occurred_at_utc < now -
 synchronous emitter crashed before the compare-and-set
 above). For each row, the reaper MUST:
 
-1. Run the SAME compare-and-set claim
-   (`UPDATE ... SET emitted_to_log = 1 WHERE id = <row id>
-   AND emitted_to_log = 0`) — closes codex round-10 MED-7
-   double-emit class (without CAS, the reaper and a
-   late-running synchronous emitter could both emit the
-   same row).
+1. Run the SAME compare-and-set claim — v0.1.18 (codex
+   round-11 LOW-2 closure) aligns the SQL shorthand with
+   the sync emitter's full form, including
+   `RETURNING id`:
+   `UPDATE runtime_flag_audit SET emitted_to_log = 1
+   WHERE id = <row id> AND emitted_to_log = 0 RETURNING
+   id`. If the UPDATE returns 0 rows, another emitter has
+   already claimed this row; skip the log emit. (Closes
+   codex round-10 MED-7 double-emit class — without
+   CAS, the reaper and a late-running synchronous
+   emitter could both emit the same row.)
 2. If the claim succeeded, emit the §7.1 zerolog event
    with `event_id = <audit id>` AND increment the
    `payout_flag_audit_reaped` counter per §7.1
@@ -4224,6 +4191,124 @@ only — the cap-check at §4.6 reads from
 is_cancel_self_transfer = 1 AND broadcast_at_utc >=
 now - 24h)` directly, NOT from this column (which would
 miss cancel transfers across runs).
+
+### 4.8b Singleton-runner lease table (v0.1.9 — codex round-10 MAJOR-2 closure)
+
+The §4.3 step 3 singleton-runner lease guard requires a
+concrete table + algorithm. The v0.1.8 prose referenced
+`(host, pid, started_at_utc)` and a heartbeat without
+defining the schema or takeover semantics — codex round-10
+correctly flagged this as not implementable.
+
+```sql
+CREATE TABLE IF NOT EXISTS payout_runner_lease (
+    id                       INTEGER PRIMARY KEY CHECK(id = 1),
+    holder_host              TEXT NOT NULL,
+    holder_pid               INTEGER NOT NULL,
+    holder_started_at_utc    TEXT NOT NULL,
+    holder_token             TEXT NOT NULL,   -- random 16-byte
+                                              -- hex; rotates on
+                                              -- every (re)acquire
+    heartbeat_at_utc         TEXT NOT NULL,
+    acquired_at_utc          TEXT NOT NULL,
+    takeover_count           INTEGER NOT NULL DEFAULT 0
+);
+
+-- Bootstrap seed: zero-row table by default (no lease until
+-- the first runner process acquires it).
+```
+
+**Lease semantics (NORMATIVE):**
+
+- **Acquire.** On runner start, IMPL MUST attempt acquire
+  in a single `BEGIN IMMEDIATE` transaction:
+  1. `SELECT * FROM payout_runner_lease WHERE id = 1`.
+  2. If no row exists, `INSERT` a row with the current
+     process's `(holder_host, holder_pid,
+     holder_started_at_utc, fresh holder_token,
+     heartbeat_at_utc=now, acquired_at_utc=now,
+     takeover_count=0)`. COMMIT. Lease acquired.
+  3. If a row exists AND `heartbeat_at_utc >= now -
+     (3 × payout.tuning.run_interval)` (the holder is
+     alive), the acquire FAILS. Emit
+     `payout_runner_lease_conflict` per §7.1
+     (severity=PAGE) and refuse to start the runner.
+  4. If a row exists AND `heartbeat_at_utc < now -
+     (3 × payout.tuning.run_interval)` (the holder is
+     stale), perform a TAKEOVER: `UPDATE
+     payout_runner_lease SET holder_host=<this host>,
+     holder_pid=<this pid>, holder_started_at_utc=
+     <this started time>, holder_token=<fresh 16-byte
+     hex>, heartbeat_at_utc=now, acquired_at_utc=now,
+     takeover_count=takeover_count+1 WHERE id=1`. COMMIT.
+     Lease acquired via takeover. Emit a new
+     `payout_runner_lease_taken_over` event per §7.1
+     (severity=PAGE — takeover is rare and operationally
+     significant).
+
+- **Heartbeat.** While running, the IMPL MUST update
+  `heartbeat_at_utc = now` on the lease row at least
+  every `payout.tuning.run_interval` (the heartbeat
+  cadence and the run cadence are the same). The heartbeat
+  UPDATE MUST be a `BEGIN IMMEDIATE` transaction that ALSO
+  re-asserts `WHERE holder_token = <this process's
+  acquired token>`; if the UPDATE affects 0 rows, this
+  process has been taken over and MUST self-halt with
+  `payout_runner_lease_lost` (severity=PAGE).
+
+- **Self-fencing on every §4.3 step.** Before each step
+  4, 5, 6, 7, 8 of §4.3, the IMPL MUST re-read
+  `holder_token` from the lease row (within the same
+  `BEGIN IMMEDIATE` transaction as the step 3(b) txn
+  for steps 4–5; standalone read for steps 6–8) and
+  compare to the in-memory acquired token. Mismatch
+  triggers self-halt + `payout_runner_lease_lost`. This
+  defeats the stop-the-world-GC class where this process
+  stalled long enough for a takeover, then resumed and
+  tried to broadcast a tx the new holder doesn't know
+  about.
+
+- **Release.** On clean shutdown, the IMPL MUST `DELETE
+  FROM payout_runner_lease WHERE id=1 AND holder_token =
+  <acquired token>` so the next process can acquire
+  without waiting the takeover-stale window. A crash skips
+  this; the next process triggers takeover after the
+  stale window elapses.
+
+- **Same-DB pin.** The `payout_runner_lease` table MUST
+  live in the same SQLite database file as
+  `payout_runner_state`, `payout_attempts`,
+  `runtime_flags`, and SPEC-005's `ledger_payout_ready`
+  (mirrors §3.1 / §4.7 / §4.8a pins). IMPL MUST share one
+  `*sql.DB` handle across the lease, runner, and §6.4.1
+  endpoints — otherwise the §4.3 step 3(b) BEGIN IMMEDIATE
+  cannot atomically re-read the lease token alongside the
+  cap re-check.
+
+**Two new §7.1 events:**
+
+- `payout_runner_lease_taken_over` (severity=PAGE) — fields
+  `prior_holder_host, prior_holder_pid, prior_holder_started_at_utc,
+  prior_heartbeat_at_utc, new_holder_host, new_holder_pid,
+  takeover_count, ts_utc`.
+- `payout_runner_lease_lost` (severity=PAGE) — fields
+  `local_pid, local_holder_token, observed_holder_token,
+  observed_holder_host, observed_holder_pid, ts_utc`.
+
+IMPL test required (1): spawn two coordinator processes in
+quick succession against the same DB; assert the first
+acquires the lease and the second emits
+`payout_runner_lease_conflict` and exits.
+
+IMPL test required (2): kill the lease-holder process with
+`-9`; wait `3 × run_interval`; spawn a new coordinator; assert
+takeover succeeds and `payout_runner_lease_taken_over` is
+emitted with `takeover_count=1`.
+
+IMPL test required (3): in a single process, manually
+overwrite the lease row's `holder_token` to a different value;
+on the next §4.3 cycle, assert the self-fencing check halts the
+runner with `payout_runner_lease_lost`.
 
 ### 4.8c Cancel reconfirm-stale outbox (v0.1.17 — codex round-18 MED-1 closure)
 
@@ -4747,8 +4832,12 @@ Error semantics:
   a regression test asserting this.
 
 The v0.2 KMS substitution implements this exact interface;
-no §4.3 step 5 change is required because the synchronous
-return contract is preserved.
+no §4.3 step 6 change is required because the synchronous
+return contract is preserved. (v0.1.18 codex round-11 LOW-4
+closure: prior wording referenced "§4.3 step 5" — stale
+since the v0.1.8 §4.3 step renumbering, when the
+singleton-runner lease became new step 3 and bumped sign/
+build/broadcast from step 5 to step 6.)
 
 ### 6.4 Key rotation
 
