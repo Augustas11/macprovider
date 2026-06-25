@@ -203,12 +203,15 @@ UPDATE payout_runner_lease
 		_ = conn.QueryRowContext(ctx,
 			`SELECT holder_token, holder_host, holder_pid FROM payout_runner_lease WHERE id = 1`,
 		).Scan(&observedToken, &observedHost, &observedPID)
+		// Codex Step 3 r1 [sec:3] MEDIUM closure: lease tokens
+		// are runtime secrets used for self-fencing; emit only
+		// the 8-char prefix (mirrors main.go's stale-out warn).
 		log.Error().
 			Str("event", "payout_runner_lease_lost").
 			Str("severity", "PAGE").
 			Int("local_pid", state.HolderPID).
-			Str("local_holder_token", state.HolderToken).
-			Str("observed_holder_token", observedToken).
+			Str("local_holder_token_prefix", tokenPrefix(state.HolderToken)).
+			Str("observed_holder_token_prefix", tokenPrefix(observedToken)).
 			Str("observed_holder_host", observedHost).
 			Int64("observed_holder_pid", observedPID).
 			Str("ts_utc", formatUTC(now)).
@@ -309,6 +312,17 @@ func freshLeaseToken() (string, error) {
 
 func formatUTC(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
+}
+
+// tokenPrefix returns the first 8 characters of a holder_token
+// for logging purposes (codex Step 3 r1 [sec:3] MEDIUM closure).
+// Tokens shorter than 8 chars are returned verbatim; a malformed
+// short token leaks no more information than its length.
+func tokenPrefix(s string) string {
+	if len(s) <= 8 {
+		return s
+	}
+	return s[:8]
 }
 
 // canonicalAddressForCompare lowers an address; lease.go does not

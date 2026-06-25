@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -37,7 +38,13 @@ import (
 // (Step 3) needs the external id. Architect r2 validated this
 // substitution.
 
-// ReorgPoller runs the §4.7 re-poll cycle.
+// ReorgPoller runs the §4.7 re-poll cycle. Codex Step 3 r1
+// [arch:3.1] MAJOR closure: the poller owns its goroutine via
+// Start/Stop so the shutdown closure can wait for an in-flight
+// poll cycle to drain before the runner lease is released.
+// Without this, a mid-RPC poll could write to payout_attempts
+// after the lease has already been Released and the next
+// process Acquired.
 type ReorgPoller struct {
 	DB          *sql.DB
 	RPCs        TwoRPCs
@@ -46,6 +53,12 @@ type ReorgPoller struct {
 	RunInterval time.Duration
 	Logger      zerolog.Logger
 	NowFn       func() time.Time
+
+	mu       sync.Mutex
+	cancel   context.CancelFunc
+	done     chan struct{}
+	started  bool
+	stopOnce sync.Once
 }
 
 // Run executes one re-poll cycle: for every confirmed, non-
@@ -253,4 +266,73 @@ func classifyRPCErr(err error) string {
 		return fmt.Sprintf("rpc_%d", rpcErr.Code)
 	}
 	return "network"
+}
+
+// Start launches a background goroutine that runs the poll
+// cycle at the configured cadence. Codex Step 3 r1 [arch:3.1]
+// MAJOR closure: the poller owns its lifecycle so the shutdown
+// closure can wait for it to drain before releasing the runner
+// lease. Mirrors Runner.Start / Reaper.Start.
+//
+// First pass runs immediately so a process that restarts after a
+// reorg catches it inside the first cadence window.
+//
+// Idempotent — repeat calls are a no-op.
+func (p *ReorgPoller) Start(ctx context.Context) {
+	p.mu.Lock()
+	if p.started {
+		p.mu.Unlock()
+		return
+	}
+	innerCtx, cancel := context.WithCancel(ctx)
+	p.cancel = cancel
+	p.done = make(chan struct{})
+	p.started = true
+	p.mu.Unlock()
+
+	go func() {
+		defer close(p.done)
+		ticker := time.NewTicker(p.RunInterval)
+		defer ticker.Stop()
+		// Eager first pass — gives the freshly-started process a
+		// snapshot of the reorg state before the first cadence
+		// tick fires.
+		if _, err := p.Run(innerCtx); err != nil {
+			p.Logger.Warn().Err(err).Msg("payout reorg poller first cycle errored")
+		}
+		for {
+			select {
+			case <-innerCtx.Done():
+				return
+			case <-ticker.C:
+				if _, err := p.Run(innerCtx); err != nil {
+					p.Logger.Warn().Err(err).Msg("payout reorg poller errored")
+				}
+			}
+		}
+	}()
+}
+
+// Stop signals the loop to exit and waits up to ctx.Done() for
+// it to finish the current poll. Returns true on clean exit,
+// false on ctx timeout. Mirrors Runner.Stop and Reaper.Stop so
+// main.go shutdown ordering composes uniformly.
+func (p *ReorgPoller) Stop(ctx context.Context) bool {
+	p.mu.Lock()
+	if !p.started {
+		p.mu.Unlock()
+		return true
+	}
+	p.mu.Unlock()
+	p.stopOnce.Do(func() {
+		if p.cancel != nil {
+			p.cancel()
+		}
+	})
+	select {
+	case <-p.done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }

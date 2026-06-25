@@ -215,7 +215,10 @@ func (s *PauseResumeService) ReapOnce(ctx context.Context) (int, error) {
 	reaped := 0
 	for _, id := range ids {
 		if ctx.Err() != nil {
-			return reaped, ctx.Err()
+			// Codex Step 3 r1 [code:1.6] LOW closure: graceful
+			// shutdown is not a reaper error. Return reaped, nil
+			// so the outer reaper loop logs success.
+			return reaped, nil
 		}
 		err := s.writer.ClaimAndEmit(ctx, id, func(row AuditRow) {
 			// The reaped event emits the original §7.1 event
@@ -224,11 +227,23 @@ func (s *PauseResumeService) ReapOnce(ctx context.Context) (int, error) {
 			// counter event.
 			eventName := flagFlipEventName(row.NewValue)
 			s.emitFlipEvent(eventName, row)
+			// Codex Step 3 r1 [code:1.2] MEDIUM closure: emit
+			// the full §7.1 field set for payout_flag_audit_reaped.
+			occurred, _ := time.Parse(time.RFC3339Nano, row.OccurredAtUTC)
+			lagSec := int64(0)
+			if !occurred.IsZero() {
+				lagSec = int64(s.nowFn().Sub(occurred).Seconds())
+			}
 			s.log.Warn().
 				Str("event", "payout_flag_audit_reaped").
 				Int64("event_id", row.ID).
-				Str("flag", row.FlagName).
+				Int64("flag_audit_id", row.ID).
+				Str("flag_name", row.FlagName).
+				Int("old_value", row.OldValue).
 				Int("new_value", row.NewValue).
+				Str("occurred_at_utc", row.OccurredAtUTC).
+				Int64("reap_lag_seconds", lagSec).
+				Str("ts_utc", s.nowFn().UTC().Format(time.RFC3339Nano)).
 				Str("severity", "WARN").
 				Send()
 			reaped++

@@ -340,7 +340,11 @@ func main() {
 	// Start the runner lifecycle if Step 2 is wired.
 	if payoutS2 != nil {
 		payoutS2.runner.Start(shutdownCtx)
-		startPayoutReorgPoller(shutdownCtx, payoutS2.reorg, cfg.Payout.Tuning.RunInterval, logger)
+		// Codex Step 3 r1 [arch:3.1] MAJOR closure: the poller
+		// owns its own lifecycle via Start/Stop; shutdownCtx is
+		// threaded into every poll cycle so a graceful shutdown
+		// interrupts mid-RPC instead of using context.Background().
+		payoutS2.reorg.Start(shutdownCtx)
 		// Step 3 §4.8a + §4.8c reaper.
 		if payoutS2.reaper != nil {
 			payoutS2.reaper.Start(shutdownCtx)
@@ -787,6 +791,7 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		RPCs:             &rpcs,
 		HotWalletAddress: sec.HotWalletAddress,
 		USDCAddress:      payout.USDCContractAddressBase,
+		Actor:            "operator_key:coordinator",
 		Logger:           logger,
 	})
 	if err != nil {
@@ -854,25 +859,33 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		state:  state,
 		reaper: reaper,
 		stop: func(stopCtx context.Context) {
-			// Runner.Stop waits for any in-flight cycle to finish.
-			// Codex round-2 [arch:3.1-r2] MEDIUM closure: only
-			// Release the lease when Stop confirms a CLEAN exit;
-			// on shutdown-timeout the runner may still be holding
-			// the broadcast critical section, and releasing the
-			// lease would let the next process acquire and race
-			// the original holder's in-flight tx.
-			cleanExit := runner.Stop(stopCtx)
-			// Reaper has no lease to release; stop it after the
-			// runner so any final §4.8a write that COMMITs during
-			// runner shutdown still has the reaper's safety net.
+			// Codex Step 3 r1 [arch:3.1] MAJOR closure: shutdown
+			// ordering is runner → poller → reaper → Release.
+			// Each Stop returns bool; we release the lease only
+			// when ALL THREE confirm clean exit. If any returned
+			// false the runner OR the poller may still be holding
+			// the chain-write critical section, and releasing the
+			// lease would let the next process Acquire mid-write.
+			//
+			// Codex round-2 [arch:3.1-r2] MEDIUM closure (Step 2):
+			// lease left to stale takeover (3 × run_interval) on
+			// timeout per SPEC §4.8b.
+			runnerClean := runner.Stop(stopCtx)
+			pollerClean := reorgPoller.Stop(stopCtx)
+			// Reaper has no lease to release but Stop must still
+			// complete; we don't gate Release on its bool because
+			// reaper.Stop hitting the timeout cannot corrupt
+			// chain state.
 			_ = reaper.Stop(stopCtx)
-			if cleanExit {
+			if runnerClean && pollerClean {
 				_ = payout.Release(stopCtx, db, state, logger)
 			} else {
 				logger.Warn().
 					Str("event", "payout_runner_lease_left_to_stale_out").
 					Str("holder_token_prefix", state.HolderToken[:8]).
-					Msg("payout shutdown timed out before runner cycle finished; lease left for stale takeover (SPEC §4.8b)")
+					Bool("runner_clean", runnerClean).
+					Bool("poller_clean", pollerClean).
+					Msg("payout shutdown timed out before runner+poller drained; lease left for stale takeover (SPEC §4.8b)")
 			}
 		},
 	}
@@ -992,32 +1005,12 @@ func hexDecode(s string) ([]byte, error) {
 	return hex.DecodeString(s)
 }
 
-// startPayoutReorgPoller runs the SPEC §4.7 reorg-poll cycle at
-// the configured cadence. Lifecycle is bound to shutdownCtx.
-func startPayoutReorgPoller(ctx context.Context, poller *payout.ReorgPoller, interval time.Duration, logger zerolog.Logger) {
-	if poller == nil {
-		return
-	}
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		// Run immediately at startup so the first cycle catches any
-		// reorg that happened during the previous process's lifetime.
-		if _, err := poller.Run(context.Background()); err != nil {
-			logger.Warn().Err(err).Msg("payout reorg poller first cycle errored")
-		}
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if _, err := poller.Run(context.Background()); err != nil {
-					logger.Warn().Err(err).Msg("payout reorg poller errored")
-				}
-			}
-		}
-	}()
-}
+// Codex Step 3 r1 [arch:3.1] MAJOR closure: the standalone
+// startPayoutReorgPoller helper that used to live here is
+// retired; the poller now owns its own Start/Stop lifecycle so
+// the shutdown closure can wait for it to drain alongside the
+// runner before the lease is released. See
+// internal/payout/reorg.go for the Start/Stop primitives.
 
 // startPayoutNoncePruner runs the SPEC §3.2 step 5 background
 // cleanup at a steady cadence. Runs every minute; the actual

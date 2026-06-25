@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"strings"
 	"time"
@@ -36,6 +37,7 @@ type FundingService struct {
 	rpcs             *TwoRPCs
 	hotWalletAddress string // EIP-55 checksummed
 	usdcAddress      string // EIP-55 checksummed (USDC contract on Base)
+	actor            string // §7.1 actor=operator_key:<label>
 	log              zerolog.Logger
 	nowFn            func() time.Time
 }
@@ -46,8 +48,13 @@ type FundingOptions struct {
 	RPCs             *TwoRPCs
 	HotWalletAddress string
 	USDCAddress      string
-	Logger           zerolog.Logger
-	NowFn            func() time.Time
+	// Actor is the §7.1 actor=operator_key field surfaced on
+	// payout_funding_recorded. Non-secret label like
+	// "operator_key:coordinator". Codex Step 3 r1 [code:1.4]
+	// MEDIUM closure.
+	Actor  string
+	Logger zerolog.Logger
+	NowFn  func() time.Time
 }
 
 // NewFundingService constructs the service. usdcAddress is the
@@ -73,6 +80,7 @@ func NewFundingService(opts FundingOptions) (*FundingService, error) {
 		rpcs:             opts.RPCs,
 		hotWalletAddress: opts.HotWalletAddress,
 		usdcAddress:      opts.USDCAddress,
+		actor:            opts.Actor,
 		log:              opts.Logger,
 		nowFn:            nowFn,
 	}, nil
@@ -215,7 +223,41 @@ SELECT count(*) FROM sqlite_master
 		writeError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	if bootstrapComplete != 0 {
+	// Step 2b — durable bootstrap-reopen defense (codex Step 3 r1
+	// [sec:1] CRITICAL closure). An attacker with raw DB write
+	// could DROP trg_prs_bootstrap_one_way (the one-way trigger),
+	// UPDATE payout_bootstrap_complete back to 0, CREATE the
+	// trigger again, and then call source='manual'. At THIS point
+	// the trigger-count check passes (count=3) AND the flag is
+	// back to 0. The attack class is closed by binding manual-
+	// funding acceptance to DURABLE payout history: if ANY
+	// payout_attempts row has ever confirmed, source='manual' is
+	// FORBIDDEN regardless of the flag's current value.
+	var confirmedExists int
+	if err := conn.QueryRowContext(r.Context(), `
+SELECT EXISTS(
+    SELECT 1 FROM payout_attempts
+     WHERE confirmed_at_utc IS NOT NULL
+     LIMIT 1
+)`).Scan(&confirmedExists); err != nil {
+		s.log.Error().Err(err).Send()
+		writeError(w, http.StatusInternalServerError, "internal_error")
+		return
+	}
+	if bootstrapComplete != 0 || confirmedExists != 0 {
+		// If the flag was reset to 0 but a confirmed row exists,
+		// emit payout_invariant_violation where='bootstrap_flag_reopened'
+		// per §7.1 (severity=PAGE) BEFORE returning 422. This is
+		// the tamper-signal class — the SPEC §4.8a sentinel-asymmetry
+		// detector at startup HALTs on this; but a runtime endpoint
+		// hit can see it too if the attack lands between boots.
+		if bootstrapComplete == 0 && confirmedExists != 0 {
+			s.log.Error().
+				Str("event", "payout_invariant_violation").
+				Str("where", "bootstrap_flag_reopened").
+				Str("severity", "PAGE").
+				Msg("source='manual' rejected: payout_bootstrap_complete=0 but confirmed payout_attempts exist (DROP+RESET+CREATE tamper signal)")
+		}
 		writeError(w, http.StatusUnprocessableEntity, "bootstrap_complete")
 		return
 	}
@@ -241,7 +283,7 @@ SELECT count(*) FROM sqlite_master
 	}
 	committed = true
 
-	s.emitFundingRecorded(req, "manual")
+	s.emitFundingRecorded(req, "manual", s.actor)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"ok":     true,
 		"source": "manual",
@@ -307,7 +349,7 @@ func (s *FundingService) serveRPCConfirmed(
 		writeError(w, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	s.emitFundingRecorded(req, "rpc-confirmed")
+	s.emitFundingRecorded(req, "rpc-confirmed", s.actor)
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"ok":     true,
 		"source": "rpc-confirmed",
@@ -347,9 +389,23 @@ func verifyFundingReceipt(rec *Receipt, req recordFundingRequest, fromLower, toL
 		if !strings.EqualFold(logTo, toLower) {
 			continue
 		}
-		logValue := uint256FromData(lg.Data)
-		if logValue != uint64(req.AmountBaseUnits) {
-			return fmt.Errorf("transfer log value %d != request amount %d", logValue, req.AmountBaseUnits)
+		// Codex Step 3 r1 [sec:2] HIGH closure: strict uint256
+		// decode. The ABI mandates a 32-byte word; reject any
+		// other length AND any non-zero high 24 bytes (would
+		// represent a value > uint64 max that the previous
+		// low-8-byte parser would silently truncate to match).
+		if len(lg.Data) != 32 {
+			return fmt.Errorf("transfer log value must be 32 bytes, got %d", len(lg.Data))
+		}
+		for i := 0; i < 24; i++ {
+			if lg.Data[i] != 0 {
+				return fmt.Errorf("transfer log value exceeds uint64 (non-zero byte at offset %d)", i)
+			}
+		}
+		got := new(big.Int).SetBytes(lg.Data)
+		want := big.NewInt(req.AmountBaseUnits)
+		if got.Cmp(want) != 0 {
+			return fmt.Errorf("transfer log value %s != request amount %d", got.String(), req.AmountBaseUnits)
 		}
 		return nil
 	}
@@ -365,24 +421,6 @@ func addressFromTopic(topic string) string {
 		return topic
 	}
 	return "0x" + t[len(t)-40:]
-}
-
-// uint256FromData decodes the value from a Transfer log's Data
-// field (32 bytes big-endian). Only safe for values that fit in
-// uint64 — funding amounts are < 2^64 in practice.
-func uint256FromData(data []byte) uint64 {
-	if len(data) == 0 {
-		return 0
-	}
-	start := 0
-	if len(data) > 8 {
-		start = len(data) - 8
-	}
-	var n uint64
-	for _, b := range data[start:] {
-		n = (n << 8) | uint64(b)
-	}
-	return n
 }
 
 // insertFundingRowTx INSERTs into payout_hot_wallet_funding using
@@ -438,8 +476,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 
 // emitFundingRecorded emits the §7.1 payout_funding_recorded event.
 // Field set per §7.1 row: from_address, to_address,
-// amount_base_units, tx_hash, block_number, source, ts_utc.
-func (s *FundingService) emitFundingRecorded(req recordFundingRequest, source string) {
+// amount_base_units, tx_hash, block_number, source, operator_note,
+// actor=operator_key, ts_utc. Codex Step 3 r1 [code:1.4] MEDIUM
+// closure added operator_note + actor.
+func (s *FundingService) emitFundingRecorded(req recordFundingRequest, source, actor string) {
 	s.log.Info().
 		Str("event", "payout_funding_recorded").
 		Str("from_address", strings.ToLower(req.FromAddress)).
@@ -448,7 +488,8 @@ func (s *FundingService) emitFundingRecorded(req recordFundingRequest, source st
 		Str("tx_hash", strings.ToLower(req.TxHash)).
 		Uint64("block_number", req.BlockNumber).
 		Str("source", source).
+		Str("operator_note", req.OperatorNote).
+		Str("actor", actor).
 		Str("ts_utc", s.nowFn().UTC().Format(time.RFC3339Nano)).
 		Send()
 }
-

@@ -188,7 +188,11 @@ SELECT lpr.provider_id,
 	stamp := s.nowFn().UTC().Format(time.RFC3339Nano)
 	txHashLower := strings.ToLower(strings.TrimSpace(req.OrphanTxHash))
 
-	// Step 2 — INSERT the orphan row with snapshot columns.
+	// Step 2 — INSERT the orphan row with snapshot columns. Codex
+	// Step 3 r1 [code:1.1] MEDIUM closure: a UNIQUE INDEX on
+	// (payout_id, attempt_seq, orphan_tx_hash) WHERE
+	// resolved_at_utc IS NULL (migration 0011) makes the duplicate
+	// path a 409, not a 500 or a silent duplicate row.
 	res, err := conn.ExecContext(ctx, `
 INSERT INTO payout_reorg_orphans
     (payout_id, attempt_seq, orphan_tx_hash, last_seen_block,
@@ -201,6 +205,10 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		providerID, providerCredits, grossCredits, amountBaseUnits,
 	)
 	if err != nil {
+		if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "orphan_already_recorded")
+			return
+		}
 		s.log.Error().Err(err).Send()
 		writeError(w, http.StatusInternalServerError, "internal_error")
 		return
@@ -320,6 +328,184 @@ func (s *OrphansService) emitOrphanResolved(orphanID int64, resolution, reason s
 		Str("reason", reason).
 		Str("ts_utc", s.nowFn().UTC().Format(time.RFC3339Nano)).
 		Send()
+}
+
+// ProduceStaleOutboxRows is the §4.7 step 5 RUNNER-OWNED
+// stale-transition producer (codex Step 3 r1 [arch:3.2] MAJOR
+// closure).
+//
+// SPEC §4.7 + §4.8c: when a reorg-reactivated cancel row has been
+// re-broadcast-ready-but-not-confirmed for longer than 3 ×
+// run_interval, the runner MUST do the NULL→now CAS on
+// payout_attempts.cancel_reconfirm_stale_paged_at_utc and insert
+// the cancel_reconfirm_stale_outbox row in the SAME BEGIN
+// IMMEDIATE transaction. The sync emit happens AFTER commit via
+// the shared ClaimAndEmitStaleOutbox helper.
+//
+// Selection criteria for a stale cancel row:
+//
+//   - is_cancel_self_transfer = 1
+//   - raw_signed_tx IS NOT NULL AND broadcast_at_utc IS NOT NULL
+//     (the cancel was broadcast)
+//   - confirmed_at_utc IS NULL (still un-reconfirmed after reorg)
+//   - cancel_reconfirm_stale_paged_at_utc IS NULL (no prior PAGE)
+//   - abandoned_at_utc IS NULL (operator hasn't intervened)
+//   - updated_at_utc < now - 3 × run_interval (stale threshold;
+//     the field doubles as reorg_reactivated_at_utc since the
+//     §4.7 LIVE-AGAIN UPDATE writes this column atomically with
+//     the confirmed_at_utc=NULL flip)
+//
+// Idempotent per-row via the partial UNIQUE INDEX
+// idx_crso_one_per_stale_period at the DB layer — if two
+// concurrent runners both selected the same row (lease takeover
+// race), the second INSERT would violate the UNIQUE constraint
+// and abort that row's txn without affecting others.
+//
+// Returns the count of rows that produced outbox rows.
+func ProduceStaleOutboxRows(
+	ctx context.Context, db *sql.DB, log zerolog.Logger,
+	now time.Time, runInterval time.Duration,
+) (int, error) {
+	cutoff := now.Add(-3 * runInterval).UTC().Format(time.RFC3339Nano)
+	rows, err := db.QueryContext(ctx, `
+SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
+  FROM payout_attempts
+ WHERE is_cancel_self_transfer = 1
+   AND raw_signed_tx IS NOT NULL
+   AND broadcast_at_utc IS NOT NULL
+   AND confirmed_at_utc IS NULL
+   AND cancel_reconfirm_stale_paged_at_utc IS NULL
+   AND abandoned_at_utc IS NULL
+   AND updated_at_utc < ?
+ ORDER BY updated_at_utc ASC`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("ProduceStaleOutboxRows: SELECT: %w", err)
+	}
+	type cand struct {
+		PayoutID         int64
+		AttemptSeq       int
+		Nonce            int64
+		TxHash           sql.NullString
+		BlockNumber      sql.NullInt64
+		ReorgReactivated string
+	}
+	var candidates []cand
+	for rows.Next() {
+		var c cand
+		if err := rows.Scan(&c.PayoutID, &c.AttemptSeq, &c.Nonce,
+			&c.TxHash, &c.BlockNumber, &c.ReorgReactivated); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		candidates = append(candidates, c)
+	}
+	rows.Close()
+
+	produced := 0
+	staleStarted := now.UTC().Format(time.RFC3339Nano)
+	for _, c := range candidates {
+		if ctx.Err() != nil {
+			return produced, ctx.Err()
+		}
+		// Per-row BEGIN IMMEDIATE: CAS the marker + INSERT outbox.
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			log.Error().Err(err).Int64("payout_id", c.PayoutID).
+				Int("attempt_seq", c.AttemptSeq).
+				Str("event", "payout_stale_outbox_producer_conn_failed").Send()
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+			conn.Close()
+			log.Error().Err(err).Int64("payout_id", c.PayoutID).Send()
+			continue
+		}
+		committed := false
+		// CAS: only flip NULL→now. If another runner beat us, the
+		// row count = 0 and we skip this row.
+		res, err := conn.ExecContext(ctx, `
+UPDATE payout_attempts
+   SET cancel_reconfirm_stale_paged_at_utc = ?
+ WHERE payout_id = ? AND attempt_seq = ?
+   AND cancel_reconfirm_stale_paged_at_utc IS NULL
+   AND confirmed_at_utc IS NULL`,
+			staleStarted, c.PayoutID, c.AttemptSeq,
+		)
+		if err != nil {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+			conn.Close()
+			log.Error().Err(err).Int64("payout_id", c.PayoutID).Send()
+			continue
+		}
+		affected, _ := res.RowsAffected()
+		if affected == 0 {
+			// Beaten by another runner OR re-confirmed in the
+			// same cycle. Skip.
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+			conn.Close()
+			continue
+		}
+		// Insert the outbox row. INSERT OR IGNORE protects against
+		// the rare (payout_id, attempt_seq, stale_started_at_utc)
+		// collision (same-second produce by two processes).
+		txHash := ""
+		if c.TxHash.Valid {
+			txHash = c.TxHash.String
+		}
+		lastBlock := int64(0)
+		if c.BlockNumber.Valid {
+			lastBlock = c.BlockNumber.Int64
+		}
+		if _, err := conn.ExecContext(ctx, `
+INSERT OR IGNORE INTO cancel_reconfirm_stale_outbox
+    (payout_id, attempt_seq, stale_started_at_utc, nonce, tx_hash,
+     last_seen_block, reorg_reactivated_at_utc)
+VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			c.PayoutID, c.AttemptSeq, staleStarted, c.Nonce, txHash,
+			lastBlock, c.ReorgReactivated,
+		); err != nil {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+			conn.Close()
+			log.Error().Err(err).Int64("payout_id", c.PayoutID).Send()
+			continue
+		}
+		if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+			conn.Close()
+			log.Error().Err(err).Int64("payout_id", c.PayoutID).Send()
+			continue
+		}
+		committed = true
+		conn.Close()
+		if committed {
+			produced++
+			// Post-commit sync CAS-claim emit. Look up the row
+			// we just produced (UNIQUE INDEX matches) and emit.
+			var outboxID int64
+			_ = db.QueryRowContext(ctx, `
+SELECT id FROM cancel_reconfirm_stale_outbox
+ WHERE payout_id = ? AND attempt_seq = ? AND stale_started_at_utc = ?`,
+				c.PayoutID, c.AttemptSeq, staleStarted,
+			).Scan(&outboxID)
+			if outboxID > 0 {
+				_ = ClaimAndEmitStaleOutbox(ctx, db, outboxID, func(row StaleOutboxRow) {
+					log.Error().
+						Str("event", "payout_cancel_self_transfer_reconfirm_stale").
+						Int64("event_id", row.ID).
+						Int64("payout_id", row.PayoutID).
+						Int("attempt_seq", row.AttemptSeq).
+						Str("stale_started_at_utc", row.StaleStartedAtUTC).
+						Int64("nonce", row.Nonce).
+						Str("tx_hash", row.TxHash).
+						Uint64("last_seen_block", row.LastSeenBlock).
+						Str("reorg_reactivated_at_utc", row.ReorgReactivatedAtUTC).
+						Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
+						Str("severity", "PAGE").Send()
+				})
+			}
+		}
+	}
+	return produced, nil
 }
 
 // ListUnemittedStaleOutboxOlderThan returns cancel_reconfirm_stale_outbox

@@ -158,15 +158,13 @@ func (r *Reaper) runOnce(ctx context.Context) {
 			Int("reaped", reaped).Send()
 	}
 
-	// §4.8c cancel_reconfirm_stale_outbox reaper.
-	if reaped, err := r.reapStaleOutbox(ctx); err != nil {
+	// §4.8c cancel_reconfirm_stale_outbox reaper. Per-row
+	// payout_stale_outbox_reaped emits happen inside the claim
+	// callback; we don't emit a separate aggregate event so the
+	// §7.1 field set lands on the per-row event.
+	if _, err := r.reapStaleOutbox(ctx); err != nil {
 		r.log.Error().Err(err).
 			Str("event", "payout_stale_outbox_reaper_failed").Send()
-	} else if reaped > 0 {
-		r.log.Warn().
-			Str("event", "payout_stale_outbox_reaped").
-			Int("reaped", reaped).
-			Str("severity", "WARN").Send()
 	}
 }
 
@@ -185,6 +183,12 @@ func (r *Reaper) reapStaleOutbox(ctx context.Context) (int, error) {
 			return reaped, ctx.Err()
 		}
 		err := ClaimAndEmitStaleOutbox(ctx, r.db, row.ID, func(row StaleOutboxRow) {
+			// Codex Step 3 r1 [code:1.3] MEDIUM closure: emit
+			// the full §7.1 field set (event_id + ts_utc on
+			// the PAGE event; updated_at_utc maps to
+			// reorg_reactivated_at_utc which is the field name
+			// the SPEC chose for the §4.8c outbox column).
+			tsUTC := r.nowFn().UTC().Format(time.RFC3339Nano)
 			r.log.Error().
 				Str("event", "payout_cancel_self_transfer_reconfirm_stale").
 				Int64("event_id", row.ID).
@@ -195,7 +199,25 @@ func (r *Reaper) reapStaleOutbox(ctx context.Context) (int, error) {
 				Str("tx_hash", row.TxHash).
 				Uint64("last_seen_block", row.LastSeenBlock).
 				Str("reorg_reactivated_at_utc", row.ReorgReactivatedAtUTC).
+				Str("updated_at_utc", row.ReorgReactivatedAtUTC).
+				Str("ts_utc", tsUTC).
 				Str("severity", "PAGE").Send()
+			// Per-row WARN counter event with field set per
+			// §7.1 (codex Step 3 r1 [code:1.3] MEDIUM closure).
+			staleStarted, _ := time.Parse(time.RFC3339Nano, row.StaleStartedAtUTC)
+			lagSec := int64(0)
+			if !staleStarted.IsZero() {
+				lagSec = int64(r.nowFn().Sub(staleStarted).Seconds())
+			}
+			r.log.Warn().
+				Str("event", "payout_stale_outbox_reaped").
+				Int64("event_id", row.ID).
+				Int64("payout_id", row.PayoutID).
+				Int("attempt_seq", row.AttemptSeq).
+				Str("stale_started_at_utc", row.StaleStartedAtUTC).
+				Int64("reap_lag_seconds", lagSec).
+				Str("ts_utc", tsUTC).
+				Str("severity", "WARN").Send()
 			reaped++
 		})
 		if err != nil {
