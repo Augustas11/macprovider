@@ -1,8 +1,8 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1 (2026-06-25, initial draft. Adopts locked Q1–Q4 design picks from codex advisor round of 2026-06-25 (artifact at `.omc/artifacts/ask/codex-i-m-designing-a-public-network-stats-api-for-macprovider-a-d-2026-06-25T18-18-42-442Z.md`): (Q1) separate rollup pipeline, (Q2) public overview + optional API keys on leaderboard, (Q3) bucketed earnings default + provider opt-in for exact `$`, (Q4) embed in coordinator binary. Pending codex round-1 audit.)
+**Version:** 0.1.1 (2026-06-25, draft — codex round-1 fix pass. Round 1 returned 3 CRITICAL + 10 MAJOR + 5 MINOR against v0.1: C1 added §9.1 normative `stats_*` table shapes; C2 added §5.4 partner-key contract; C3 replaced `providers.public_earnings_mode` with the SPEC-017-owned `provider_visibility` side table. MAJORs M1-M10 absorbed (14-field schema sync, §2.3 same-origin rewording, §5.7→§9.5 budget alignment, §7.2 grant list, §5.8 304 exemption, §9.6 backfill softening, §8.2 enum forward-compat, X-Stats-Generated-At everywhere, threshold rationales, `TBD` removed). MINORs m1-m5 also absorbed. Pending codex round-2 confirmation. Full r1 findings: `specs/SPEC-017-r1-audit.md`.)
 **Status:** Draft (design-only — no IMPL until v0.1 LOCKED and a separate `BUILD_SPEC_017_IMPL_PROMPT.md` written).
-**Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (public-surface header conventions, error envelope shape, version-prefix path style), SPEC-014 v0.8 (provider portal consumes same-origin authenticated `$` visibility — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline defines `rewards` $ semantics; locked version TBD — re-pin at SPEC-017 v0.1 LOCK time).
+**Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (public-surface header conventions, error envelope shape, version-prefix path style), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline defines `rewards` $ semantics).
 
 ---
 
@@ -13,6 +13,15 @@ Audit-narrative-by-round detail lives in the per-round audit files under
 entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
+
+**v0.1.1 (2026-06-25, draft — codex round-1 fix pass on v0.1):**
+Round 1 returned READY-WITH-FIX-PASS at 3/10/5. Fixes: C1 added
+normative `stats_*` table shapes (§9.1); C2 added partner-key
+issuance/storage/rotation contract (§5.4 + §3.7 expanded); C3
+replaced shared-`providers` storage assumption with the new
+SPEC-017-owned `provider_visibility` side table (§6.1); MAJORs
+M1-M10 absorbed; MINORs m1-m5 absorbed. Full narrative:
+`specs/SPEC-017-r1-audit.md`.
 
 **v0.1 (2026-06-25, initial draft):** Initial draft following the
 locked design decisions and the structure of the `BUILD_SPEC_017_NETWORK_STATS_API_v0_1_PROMPT.md` write prompt. No audit rounds yet.
@@ -84,10 +93,19 @@ This SPEC does NOT extend the buyer API (SPEC-006). Buyers do not
 consume `/v1/stats/*` on the hot path; SPEC-006 v0.9 remains unchanged.
 
 This SPEC does NOT extend the seller portal contract (SPEC-014). A
-SPEC-014 v0.9 follow-up will add the **earnings-visibility toggle UI**
-that flips a provider between bucketed (default) and exact `$` display;
-v0.1 of this SPEC defines only the storage column, the API behaviour,
-and the audit-log shape.
+SPEC-014 v0.9 candidate follow-up will add the **earnings-visibility
+toggle UI** that flips a provider between bucketed (default) and
+exact `$` display; v0.1 of this SPEC defines only the storage table
+(`provider_visibility`), the API behaviour, and the audit-log shape.
+
+This SPEC does NOT pin the in-repo location of the UI consumer that
+will render the Overview and Leaderboard screenshots that motivated
+SPEC-017. The current `frontdoor/console/index.html` is a buyer-side
+dashboard rendering a different shape; the screenshot-style Network
+Statistics widget lives on the vercel preview today (see
+[[macprovider-vercel-demo]]). Where the canonical UI consumer
+lands at production launch is a downstream UI-SPEC question — see
+§11 Q12.
 
 ### 1.5 Critical constraints
 
@@ -111,8 +129,9 @@ origin on every request.
 
 C6. **No state mutation.** v0.1 has no `POST`/`PUT`/`DELETE`. All
 visibility-toggle writes live on the SPEC-014 portal surface and reach
-this SPEC's data only via a shared `providers.public_earnings_mode`
-column.
+this SPEC's data only via the SPEC-017-owned `provider_visibility`
+side table (§6.1). v0.1 does NOT extend, alter, or assume any
+`providers` table in the locked SPEC-002 / SPEC-016 schemas.
 
 ---
 
@@ -161,13 +180,17 @@ queries `stats_*` only.
 ### 2.3 Earnings visibility — bucketed default + provider opt-in (Q3: pick B)
 
 The public `/v1/stats/leaderboard` body never includes exact `$` for a
-provider whose `public_earnings_mode = 'bucketed'`. Buckets per window
-are defined in §6.2. Providers MAY opt in via the SPEC-014 v0.9 portal
-toggle to surface exact `$` publicly; the API column `public_earnings_mode`
-governs which path the rollup produces.
+provider whose `provider_visibility.mode = 'bucketed'` (or who has no
+`provider_visibility` row at all). Buckets per window are defined in
+§6.2. Providers MAY opt in via the SPEC-014 v0.9 portal toggle to
+surface exact `$` publicly; the `provider_visibility.mode` column
+governs which path the rollup produces (§6.1).
 
-Same-origin authenticated portal views see exact `$` **for the
-logged-in provider's own row only**, regardless of mode (§6.4).
+The portal MUST surface own-provider exact `$` to the logged-in
+provider via SPEC-014-owned surfaces (e.g. the portal earnings
+dashboard), NOT via a special projection of `/v1/stats/leaderboard`.
+This endpoint serves the same JSON regardless of `Origin`; see §6.4
+for the uniformity invariant.
 
 **Why this and not (a) fine-as-is or (c) strip-all-$:**
 
@@ -231,16 +254,22 @@ window. The window is the same rolling-window definition as §3.2.
 
 ### 3.6 Public earnings mode
 
-Per-provider column `public_earnings_mode IN ('bucketed','exact')`.
-Default for new providers and grandfathered providers at cutover is
-`bucketed`. Changes are logged to an audit table (§6.5).
+A SPEC-017-owned row in the new `provider_visibility` side table
+(§6.1) with `mode IN ('bucketed','exact')`. Default for any
+provider absent from `provider_visibility`, or present with
+`mode = 'bucketed'`, is **bucketed**. Changes are logged to
+`provider_visibility_audit` (§6.5).
 
 ### 3.7 Partner key
 
-An opaque bearer token issued by the operator. Format: `mpk_` prefix
-+ 32 url-safe base64 chars. Stored in the new `partner_keys` table
-(§5.3). The token MUST NOT appear in any log line, only its
-`partner_keys.id` and `partner_keys.label` MAY appear.
+An opaque bearer token issued by the operator. Format: `mpk_`
+prefix + 32 url-safe base64 chars (33 chars total once the prefix is
+counted; the prefix is a literal namespace marker, not part of the
+random entropy). Full contract — issuance, hashed storage, rotation,
+revocation, allowed-origin validation, rate-limit keying — is pinned
+in §5.4. The token MUST NOT appear in any log line, response body, or
+metric label; only its `partner_keys.id` (opaque, non-secret) and
+`partner_keys.label` MAY appear.
 
 ### 3.8 Edge cache
 
@@ -288,7 +317,7 @@ explorer. Both reach Postgres but via distinct DB roles; see §7.2.
   §7.2.
 - nginx server-block for `stats.streamvc.live` reverse-proxying to the
   same coordinator backend on `/v1/stats/*`, with a dedicated rate-limit
-  zone (§5.5).
+  zone (§5.6).
 
 ### 4.3 Wire surface summary
 
@@ -299,7 +328,7 @@ explorer. Both reach Postgres but via distinct DB roles; see §7.2.
 | `GET /v1/stats/health` | None | short cache (10s) | no |
 
 `HEAD` MUST be supported on every `GET`. `OPTIONS` MUST return CORS
-preflight per §5.6. Any other verb MUST return `405 Method Not Allowed`
+preflight per §5.7. Any other verb MUST return `405 Method Not Allowed`
 with `Allow: GET, HEAD, OPTIONS`.
 
 ---
@@ -315,7 +344,7 @@ with `Allow: GET, HEAD, OPTIONS`.
 - Optional query: none in v0.1; unknown query parameters MUST be
   ignored (not rejected) to keep the contract forward-compatible.
 - Headers: `Accept: application/json` (default if omitted), `Origin`
-  (preflight handled per §5.6).
+  (preflight handled per §5.7).
 
 **Response (200 OK).**
 
@@ -386,7 +415,7 @@ with `Allow: GET, HEAD, OPTIONS`.
 
 **Errors.**
 
-- `503 Service Unavailable` — see §5.7.
+- `503 Service Unavailable` — see §5.8.
 
 ### 5.1.1 Overview field schema
 
@@ -471,7 +500,7 @@ MUST be logged.
 - `exact_earnings*` — these fields are ALWAYS present in the JSON to
   keep the schema stable across opt-in changes. Their value is `null`
   in the public projection unless the provider has
-  `public_earnings_mode = 'exact'`, in which case the value is a USD
+  `provider_visibility.mode = 'exact'`, in which case the value is a USD
   float with two-decimal precision.
 - `rank` — 1-based within the returned page, recomputed against the
   selected `sort` axis.
@@ -492,7 +521,7 @@ fields per row:
 ```
 
 Partner-only fields surface exact `$` for ALL providers regardless of
-`public_earnings_mode`. This is a deliberate trade: the partner key
+`provider_visibility.mode`. This is a deliberate trade: the partner key
 acts as an attribution and accountability surface (operator can
 revoke), in exchange for trusted exposure of bucketed providers'
 exact figures. See §6.6 for the legal posture this requires.
@@ -503,6 +532,9 @@ exact figures. See §6.6 for the legal posture this requires.
 - `Cache-Control: public, max-age=60, s-maxage=60, stale-while-revalidate=120`
 - `Vary: Accept-Encoding, Origin, Authorization`
 - `ETag: W/"<sha256-of-body>"`
+- `X-Stats-Generated-At: <generated_at>` (mirrors the `generated_at`
+  field for cache-key debugging; partner clients MUST tolerate this
+  header on every `/v1/stats/*` response)
 
 **Response headers (partner-key projection).**
 
@@ -516,8 +548,8 @@ exact figures. See §6.6 for the legal posture this requires.
 
 - `400` invalid `window`/`sort`/`limit`
 - `401` invalid or revoked `Authorization`
-- `429` rate limit exceeded (§5.5)
-- `503` rollup stale beyond §5.7 budget
+- `429` rate limit exceeded (§5.6)
+- `503` rollup stale beyond §5.8 budget
 
 ### 5.3 `GET /v1/stats/health`
 
@@ -543,9 +575,10 @@ exact figures. See §6.6 for the legal posture this requires.
 
 **Field-level rules.**
 
-- `status` — `"ok"` if every component is within its SLA (§4.1 of the
-  rollup spec, §5.7), `"degraded"` if any component is beyond budget,
-  `"down"` if `overview` or `leaderboard_24h` is beyond `2× budget`.
+- `status` — `"ok"` if every component is within its SLA (§9.5 target
+  staleness), `"degraded"` if any component is beyond target,
+  `"down"` if `overview` or `leaderboard_24h` is beyond its §5.8 503
+  budget.
 - `rollup_lag_seconds` — wall-clock seconds between now and the oldest
   component's `generated_at`.
 
@@ -554,13 +587,138 @@ exact figures. See §6.6 for the legal posture this requires.
 - `Cache-Control: public, max-age=10, s-maxage=10` (intentionally
   short: health is meant to drift in real time).
 - `Vary: Accept-Encoding, Origin`
+- `X-Stats-Generated-At: <generated_at>` (mirrors body field)
 
 **Errors.** This endpoint MUST return `200` even when components are
 degraded — partners use the JSON `status` field to drive their own UI.
 A non-200 response from `/health` means the coordinator process itself
 is unhealthy, not the rollup.
 
-### 5.4 Partner-only field stability contract
+### 5.4 Partner-key contract
+
+A partner key is an opaque bearer token (§3.7). The full lifecycle —
+issuance, hashed storage, rotation, revocation, allowed-origin
+validation, and rate-limit keying — is pinned in this section. The
+implementation MUST honor every clause; the contract is partner-facing
+and not negotiable per partner.
+
+#### 5.4.1 `partner_keys` table
+
+```sql
+CREATE TABLE partner_keys (
+  id                BIGSERIAL PRIMARY KEY,
+  label             TEXT NOT NULL,
+  token_hash        BYTEA NOT NULL,
+  token_hash_alg    TEXT NOT NULL DEFAULT 'sha256',
+  prefix            TEXT NOT NULL,
+  allowed_origins   TEXT[] NOT NULL DEFAULT '{}',
+  rate_limit_rpm    INT  NOT NULL DEFAULT 600,
+  rate_limit_burst  INT  NOT NULL DEFAULT 1200,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+  created_by        TEXT NOT NULL,
+  revoked_at        TIMESTAMPTZ,
+  revoked_reason    TEXT,
+  rotated_from_id   BIGINT REFERENCES partner_keys(id),
+  last_used_at      TIMESTAMPTZ,
+  UNIQUE (token_hash)
+);
+CREATE INDEX ON partner_keys (prefix);
+```
+
+Field rules:
+
+- `token_hash` — `sha256` of the raw token bytes, stored binary, NOT
+  the raw token. The raw token MUST NOT be persisted server-side
+  anywhere; once shown to the operator at issuance time it is unrecoverable.
+- `prefix` — the first 8 characters of the raw token (including the
+  `mpk_` namespace). Stored for log-correlation and last-4 display
+  in operator tooling, NOT for auth.
+- `allowed_origins` — an array of exact-match origin strings (e.g.
+  `https://partner.example.com`). Empty array means "no Origin
+  restriction" — public partner usage from any origin. See §5.7 CORS
+  rules for how this interacts with browser-side embedding.
+- `rate_limit_rpm` / `rate_limit_burst` — per-key per-endpoint limits.
+  The operator MAY set higher values per key; the API MUST clamp to
+  the configured values from `partner_keys`, not to a global default.
+- `revoked_at` — once set, the key MUST be rejected with 401. Lookup
+  is by `token_hash`, so a revoked key cannot be reactivated by clearing
+  `revoked_at` without operator action.
+- `rotated_from_id` — when a key is rotated (§5.4.4), the new key row
+  points at the predecessor for audit-trail continuity.
+
+#### 5.4.2 Issuance flow (v0.1)
+
+v0.1 issuance is **operator-driven only**. Self-serve issuance is
+deferred to a future SPEC-014 v0.10+ candidate (referenced in §11
+Q2). Concretely:
+
+1. Operator runs a coordinator CLI subcommand
+   `coordinator partner-keys issue --label "Acme Corp dashboard"
+   [--allowed-origin https://acme.example.com] [--rpm 600] [--burst 1200]`.
+2. The subcommand generates 32 random bytes, prefixes with `mpk_`,
+   url-safe base64-encodes the random bytes, hashes the resulting
+   token, INSERTs into `partner_keys`, and prints the raw token to
+   stdout exactly once.
+3. The operator delivers the token to the partner via a side channel
+   (email, signed message). The repository never persists the raw
+   token.
+
+#### 5.4.3 Authentication on request
+
+For each request carrying `Authorization: Bearer <token>`:
+
+1. The handler MUST extract `<token>`, compute `sha256(<token>)`, and
+   SELECT the matching `partner_keys` row by `token_hash`.
+2. If no row matches OR `revoked_at IS NOT NULL`, return 401 with
+   `code: "unauthorized"`. The handler MUST NOT distinguish the two
+   cases in the response (timing attack resistance).
+3. If the row matches, the handler MAY update `last_used_at` (best
+   effort, not transactional with the response).
+4. If `allowed_origins` is non-empty AND the request's `Origin` header
+   is not in that array, return 401 (NOT 403, to avoid leaking the
+   existence of the key to non-allowlisted callers).
+5. On success, all rate-limit accounting (§5.6) MUST key on
+   `partner_keys.id`, NOT on the raw token or on the client IP.
+
+#### 5.4.4 Rotation
+
+Operator rotates a key by issuing a new key with
+`--rotate-from <existing_id>`. The CLI MUST:
+
+1. INSERT a new row with `rotated_from_id = <existing_id>`.
+2. Leave the old row's `revoked_at` NULL initially (overlap window).
+3. Print the new raw token to stdout exactly once.
+
+The operator MAY set `revoked_at` on the predecessor at any time via
+`coordinator partner-keys revoke --id <id> --reason "rotated"`. v0.1
+does not pin a maximum overlap window; the operator MUST document
+revocation cadence in the partner's onboarding email.
+
+#### 5.4.5 Revocation
+
+`coordinator partner-keys revoke --id <id> --reason "<text>"` sets
+`revoked_at = now()` and `revoked_reason = <text>`. Revocation takes
+effect on the next request; v0.1 does NOT define a cache invalidation
+mechanism (the per-request lookup IS the revocation enforcement
+point).
+
+#### 5.4.6 Log redaction
+
+No log line — application, nginx, journald, metric label, or trace
+span — MAY contain the raw token, `token_hash`, or any substring of
+the random portion. The `prefix` field (8 chars) MAY appear in logs
+for correlation. The `partner_keys.id` and `partner_keys.label` MAY
+appear in logs.
+
+#### 5.4.7 Cache keying interaction
+
+The partner-key projection (§5.2) is private to the key. The §5.6
+rate-limit zones MUST key on `partner_keys.id`, not on a `Vary:
+Authorization` substring of the raw token. nginx-level caches MUST
+NOT cache the partner projection (the §5.2 `Cache-Control: private`
+plus the §5.6 rate-limit pattern enforces this).
+
+### 5.5 Partner-only field stability contract
 
 Fields under §5.2's partner-key projection are covered by the §8
 versioning policy: they MUST NOT change shape or be removed without a
@@ -571,7 +729,7 @@ version bump.
 Public-projection fields share the same contract; partner-only is
 just a tighter accountability surface.
 
-### 5.5 Rate limits
+### 5.6 Rate limits
 
 | Tier | Per-IP limit | Per-key limit | Burst | Enforced at |
 |---|---|---|---|---|
@@ -579,7 +737,7 @@ just a tighter accountability surface.
 | Partner keyed | n/a | 600 req/min per key per endpoint | 1200 | in-process bucket keyed by `partner_keys.id` |
 
 Both tiers MUST return `429 Too Many Requests` on exhaustion, with
-`Retry-After: <seconds>` and a JSON body per §5.8. nginx is the
+`Retry-After: <seconds>` and a JSON body per §5.9. nginx is the
 primary enforcement layer for the public tier so a misbehaving
 partner cannot starve the coordinator process; the in-process bucket
 exists as a defense-in-depth fallback.
@@ -587,7 +745,7 @@ exists as a defense-in-depth fallback.
 Cloudflare bot-management and CAPTCHA challenges MAY be layered above
 nginx; the SPEC does not mandate them but does not preclude them.
 
-### 5.6 CORS
+### 5.7 CORS
 
 - `/v1/stats/overview` and `/v1/stats/health` — `Access-Control-Allow-Origin:
   *`. Partner-friendly.
@@ -606,22 +764,30 @@ Preflight: respond to `OPTIONS` with
 `Access-Control-Allow-Headers: Authorization, Content-Type`,
 `Access-Control-Max-Age: 3600`.
 
-### 5.7 Staleness and 503 budget
+### 5.8 Staleness and 503 budget
 
-- `/v1/stats/overview` MUST serve a 503 if `stats_overview_current.generated_at`
-  is older than `120 seconds` (4× the normal 30s cadence).
-- `/v1/stats/leaderboard` MUST serve a 503 if the requested window's
-  `stats_leaderboard_<window>.generated_at` is older than `2× the
-  window's documented refresh cadence` from §4.4.
+The freshness SLA table in §9.5 is the single source of truth for
+each endpoint's 503 budget. Implementations MUST use the §9.5
+budgets verbatim; the prose below is informative.
+
+- `/v1/stats/overview` MUST serve a 503 when
+  `stats_overview_current.generated_at` is older than the §9.5
+  budget (`120s`).
+- `/v1/stats/leaderboard` MUST serve a 503 when the requested
+  window's `stats_leaderboard_<window>.generated_at` is older than
+  the §9.5 budget for that window.
 - A 503 from this surface MUST include `Retry-After: 30` and a JSON
-  body per §5.8 with `code: "stats_stale"`.
+  body per §5.9 with `code: "stats_stale"`.
 
 `/v1/stats/health` MUST NOT return 503 for stale rollups (§5.3); a 503
 from `/health` reflects the coordinator process itself.
 
-### 5.8 Error envelope
+### 5.9 Error envelope
 
-Every non-2xx response MUST use this exact shape:
+`304 Not Modified` is exempt from this envelope: it MUST be returned
+with an empty body and only the headers required by RFC 7232 (`ETag`,
+`Cache-Control`, `Vary`). All other non-2xx responses MUST use the
+exact shape below.
 
 ```json
 {
@@ -640,7 +806,7 @@ Code vocabulary (closed set for v0.1):
 | `bad_request` | 400 | malformed `window`/`sort`/`limit` |
 | `unauthorized` | 401 | invalid or revoked `Authorization` |
 | `rate_limited` | 429 | per-IP or per-key bucket exhausted |
-| `stats_stale` | 503 | rollup older than §5.7 budget |
+| `stats_stale` | 503 | rollup older than §5.8 budget |
 | `internal` | 500 | unhandled; MUST NOT leak stack/SQL |
 
 `retry_after_seconds` is present only for `rate_limited` and
@@ -650,19 +816,39 @@ Code vocabulary (closed set for v0.1):
 
 ## 6. Earnings visibility model
 
-### 6.1 Storage
+### 6.1 Storage — `provider_visibility` side table (SPEC-017-owned)
 
-A new column on the existing `providers` table:
+v0.1 does NOT alter, extend, or assume any `providers` table. The
+locked SPEC-002 v1.4 and SPEC-016 v0.1.19 storage models do not
+guarantee a `providers` table exists. Instead, SPEC-017 owns a new
+side table keyed by the provider identifier in use across the rest
+of the system (`provider_tokens.provider_id` per SPEC-002 §7;
+matching string type).
 
+```sql
+CREATE TABLE provider_visibility (
+  provider_id  TEXT PRIMARY KEY,
+  mode         TEXT NOT NULL DEFAULT 'bucketed'
+               CHECK (mode IN ('bucketed','exact')),
+  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 ```
-public_earnings_mode TEXT NOT NULL DEFAULT 'bucketed'
-  CHECK (public_earnings_mode IN ('bucketed', 'exact'))
-```
 
-Migration MUST set `'bucketed'` for every existing provider at cutover.
-The default for INSERTs is `'bucketed'`. The portal MUST NOT permit
-new-provider onboarding to set `'exact'` without an explicit
-post-onboarding action by the provider; see §6.5.
+Semantics:
+
+- A provider with NO row in `provider_visibility` is treated as
+  `mode = 'bucketed'`. This is the implicit default for new and
+  pre-existing providers; cutover does NOT require backfill.
+- The portal (SPEC-014 v0.9 candidate) writes to this table on
+  toggle. SPEC-017 v0.1 does NOT specify the portal's HTTP handler;
+  it only pins the storage shape.
+- The rollup MUST left-join `provider_visibility` when producing the
+  leaderboard projection; absence of a row is equivalent to
+  `mode = 'bucketed'`.
+
+This table is owned by SPEC-017. Adding the column to a future
+`providers` table (if SPEC-002 or SPEC-016 introduces one in a later
+version) is a v0.2+ migration concern, not a v0.1 LOCK gate.
 
 ### 6.2 Bucket thresholds (v0.1)
 
@@ -681,31 +867,57 @@ same thresholds, scoped to that metric). The rationale is that a
 provider with `work $0.50 + rewards $50` should not get `$$$` on
 both fields — the disclosure surface is per-axis.
 
-Q1 in §11 flags whether these stay absolute or shift to percentile-based
-in v0.2.
+**Threshold rationale (v0.1).** Boundaries are absolute USD figures
+chosen against the **current beta network's revenue density** —
+SPEC-016 v0.1.19 is still pre-IMPL and the current 7d leaderboard
+shows top earners at ~$52 (see the
+`SPEC-017-advisor-round-2026-06-25.md` artifact for the screenshot
+snapshot). At those magnitudes, `$$$` at `≥ $250 / 7d` correctly
+marks a clear top tier without exposing meaningful operator-level
+information. As the network grows, the absolute boundaries will
+under-fit (everyone tops out at `$$$`); Q1 in §11 flags whether
+v0.2 shifts to percentile-of-network-revenue. Until then, the
+operator MAY tighten the boundaries (e.g. raise `$$$` floor) as an
+additive change without a SPEC bump, provided the future-reserved
+slots `$$$$` and `$$$$$` are introduced per §8.2.1.
 
 ### 6.3 Provider opt-in flow (cross-SPEC handoff)
 
-The actual toggle UI is a SPEC-014 v0.9 follow-up. v0.1 of this SPEC
-pins only:
+The actual toggle UI is a SPEC-014 v0.9 candidate follow-up. v0.1 of
+this SPEC pins only:
 
-- A SQL UPDATE `providers SET public_earnings_mode = $1 WHERE id = $2`
-  is the sole state transition path.
-- The provider-portal API endpoint that triggers this UPDATE MUST
-  require provider authentication (SPEC-014 §authn) and MUST log to
-  the audit table in §6.5.
-- The change takes effect on the next rollup snapshot; v0.1 makes no
-  guarantee of sub-30s propagation.
+- The sole state-transition path is an `INSERT ... ON CONFLICT
+  (provider_id) DO UPDATE SET mode = EXCLUDED.mode, updated_at = now()`
+  against `provider_visibility` (§6.1).
+- The provider-portal API endpoint that triggers this state
+  transition MUST require provider authentication per SPEC-014 v0.8
+  §2 (the portal authn section in the locked SPEC-014) and MUST
+  insert a row into `provider_visibility_audit` (§6.5) within the
+  same database transaction.
+- The change takes effect on the next rollup snapshot for the
+  affected window; v0.1 makes no guarantee of sub-30s propagation
+  on shorter windows or sub-§9.2-cadence propagation on longer
+  windows.
+- SPEC-017 v0.1 does NOT require SPEC-014 v0.9 to be merged before
+  this SPEC can lock. Until the portal toggle ships, the visibility
+  defaults to `bucketed` for every provider; the table simply has
+  zero rows, which is semantically identical to "everyone bucketed."
 
-### 6.4 Same-origin authenticated views
+### 6.4 Same-origin uniformity invariant
 
-The same `GET /v1/stats/leaderboard` endpoint serves console, portal,
-and partners. The portal MUST NOT depend on this endpoint to surface
-the logged-in provider's own exact `$`; the portal's existing
-SPEC-014 surfaces already expose own-provider exact earnings.
+`GET /v1/stats/leaderboard` serves console, portal, and partners
+with identical JSON given identical inputs (window, sort, limit,
+Authorization). The implementation MUST NOT inspect `Origin` to
+decide what to return. There is no Origin-conditional projection,
+no Origin-conditional `$` exposure, and no Origin-conditional row
+filtering.
 
-This SPEC makes no special-case behaviour for `Origin:
-portal.streamvc.live`. The endpoint is uniform.
+Own-provider exact earnings, when needed by a logged-in provider in
+the portal UI, MUST come from a SPEC-014-owned surface (e.g. the
+portal's earnings dashboard endpoints), NOT from a special
+projection of this endpoint. SPEC-014 v0.8 §2 already pins the
+portal's authn surface; v0.9 will add the SPEC-017-aligned
+visibility toggle but will NOT make this endpoint privileged.
 
 ### 6.5 Audit table
 
@@ -729,17 +941,52 @@ changes (e.g. legal request) MUST set `actor_kind = 'operator'`.
 
 ### 6.6 Legal posture
 
-By default, every provider's `$` is bucketed publicly. The portal's
-opt-in screen (SPEC-014 v0.9) MUST display: "When you enable exact
-earnings display, the public API will publish your USD earnings per
-window. This is visible to anyone, including partners' websites." The
-provider's affirmative click is the consent record; the audit row in
-§6.5 is the durable evidence.
+#### 6.6.1 Public-projection consent
 
-Operator MAY override `'exact' → 'bucketed'` (but not the reverse)
-without provider consent in response to a legal hold or operator
-incident. Operator MUST NOT flip a provider to `'exact'` without the
-provider's affirmative consent.
+By default, every provider's `$` is bucketed publicly. The portal's
+opt-in screen (SPEC-014 v0.9 candidate) MUST display copy
+substantially equivalent to: "When you enable exact earnings
+display, the public Network Stats API will publish your USD
+earnings per window. This is visible to anyone on the public
+internet, including partners' websites and any third party that
+caches or republishes our data." The provider's affirmative click
+is the consent record; the audit row in §6.5 is the durable
+evidence.
+
+#### 6.6.2 Partner-key projection — broader exposure
+
+Operator-issued partner keys (§5.4) intentionally surface exact `$`
+for ALL providers, including providers with `mode = 'bucketed'`.
+This is the design's trade: the partner key is an attribution and
+revocability surface (the operator can revoke per §5.4.5), in
+exchange for trusted exposure to a small, named set of partners.
+
+The portal's onboarding flow MUST disclose this at the same time the
+provider account is created, in copy substantially equivalent to:
+"Bucketed earnings are hidden from the public Network Stats API, but
+trusted partners with an operator-issued API key see your exact
+earnings figures. The operator maintains the list of trusted
+partners and can revoke a partner's key at any time." Acknowledgment
+of this disclosure is part of the SPEC-014 v0.9 portal flow; v0.1 of
+this SPEC defines only the disclosure obligation, not the UI.
+
+Providers who object to partner-key exposure of their bucketed
+earnings have no v0.1 mechanism to suppress it. Q1' in §11
+explicitly flags whether v0.2 should add a per-provider "block from
+partner projection" toggle.
+
+#### 6.6.3 Operator override direction
+
+Operator MAY override `'exact' → 'bucketed'` (silencing the public
+projection) without provider consent in response to a legal hold or
+operator incident. Operator MUST NOT flip a provider to `'exact'`
+without the provider's affirmative consent recorded in §6.5 with
+`actor_kind = 'provider'`. The check is mechanical: any
+`provider_visibility_audit` row with `new_mode = 'exact'` MUST have
+`actor_kind = 'provider'`; a row with `new_mode = 'exact'` and
+`actor_kind = 'operator'` is a contract violation surfaced by a
+periodic operator audit script (the script itself is out of scope
+for v0.1).
 
 ---
 
@@ -773,24 +1020,37 @@ GRANT SELECT ON
   stats_leaderboard_7d,
   stats_leaderboard_30d,
   stats_leaderboard_all,
-  stats_health
+  stats_components_health,
+  provider_visibility
 TO stats_reader;
 ```
+
+The grant list MUST match the `stats_*` and SPEC-017-owned table
+inventory in §9.1 exactly. The `stats_components_health` table feeds
+`/v1/stats/health` (§5.3); the `provider_visibility` table is
+read-only at request time (writes come via the SPEC-014 portal
+surface using a different role). `provider_visibility_audit` is
+write-only at request time and is NOT in the handler's grant list.
+`stats_late_events` (§9.3) is rollup-internal and is NOT in the
+handler's grant list either.
 
 The stats handlers MUST connect with this role and MUST NOT share a
 connection pool with the explorer or billing handlers. A separate
 `*sql.DB` instance enforces this; tests MUST verify the connection
 attempt to billing tables fails.
 
-The rollup job runs with a separate role (`stats_rollup`) that has
-SELECT on OLTP tables and INSERT/UPDATE on `stats_*`. The two roles
-MUST NOT be the same.
+The rollup job runs with a separate role `stats_rollup` that has
+SELECT on OLTP tables and INSERT/UPDATE on `stats_*` plus
+`stats_late_events`. The two roles MUST NOT be the same. The portal
+toggle (SPEC-014 v0.9) runs with a third role `provider_portal`
+which has INSERT/UPDATE on `provider_visibility` and INSERT on
+`provider_visibility_audit`; it does NOT have any grant on `stats_*`.
 
 ### 7.3 Process isolation
 
 A panic in any `/v1/stats/*` handler MUST NOT crash the coordinator
 process. The HTTP mux MUST wrap the stats subtree in a `recover`
-middleware that logs the panic and returns a 500 with the §5.8
+middleware that logs the panic and returns a 500 with the §5.9
 envelope.
 
 ### 7.4 nginx config
@@ -801,7 +1061,7 @@ choice) MUST:
 
 - Define `limit_req_zone` for `/v1/stats/overview`, `/v1/stats/leaderboard`,
   `/v1/stats/health` separately.
-- Add headers per the §5.6 CORS policy.
+- Add headers per the §5.7 CORS policy.
 - Strip the `Authorization` header from access logs.
 - Set `proxy_cache_path` for the public projections only.
 - Honor `Vary: Authorization` by NOT caching the partner-key projection
@@ -813,7 +1073,13 @@ v0.1 does NOT require a Postgres read replica. The rollup job is the
 heaviest load this SPEC adds, and it runs out-of-band against the
 primary at a documented cadence.
 
-If the rollup primary impact exceeds 5% of OLTP CPU over a 7-day window
+**Threshold rationale (v0.1).** Pearl Postgres monitoring records 7-day
+OLTP CPU utilization in 5% buckets; a 5% delta is the smallest signal
+the current monitoring can reliably attribute to a single load source.
+A higher threshold (e.g. 10%) risks accumulating compounding load
+unnoticed; a lower threshold (e.g. 1%) is below the monitoring's
+attribution noise floor and would generate false positives. If the
+rollup primary impact exceeds 5% of OLTP CPU over a 7-day window
 (measurable via existing Pearl Postgres monitoring), a read-replica
 migration becomes mandatory and a separate spec/SPEC-017 v0.2 work
 item is triggered.
@@ -842,10 +1108,37 @@ that cross these boundaries.
 
 ### 8.2 Compatible changes
 
-Additive changes (new top-level fields, new optional query params with
-defaults, new buckets, new error codes appended to the §5.8 vocabulary)
-MAY ship without a version bump and MUST be documented in the
-public-facing changelog (§8.5).
+Additive changes MAY ship without a version bump and MUST be
+documented in the public-facing changelog (§8.5). Permitted additive
+changes:
+
+- New top-level JSON fields (any endpoint).
+- New optional query params with safe defaults.
+- New error codes appended to the §5.9 vocabulary, subject to §8.2.1
+  forward-compat rules below.
+- New bucket values appended to the §6.2 `$/$$/$$$/-` set, subject
+  to §8.2.1 forward-compat rules below.
+- Additive `partner_keys` row fields.
+
+### 8.2.1 Forward-compat rules for closed enums
+
+Bucket values (§6.2) and error codes (§5.9) are defined as closed
+sets at v0.1. Because adding a value to a closed set can silently
+break generated clients, partner dashboards, and validators, the
+following forward-compat rules apply to any v0.x addition:
+
+- The SPEC MUST reserve `$$$$` (next bucket up) and `$$$$$` (one
+  above that) as **future-reserved** values at v0.1 LOCK; clients
+  MUST tolerate seeing them in a response without error even though
+  v0.1 will never emit them.
+- The SPEC MUST reserve `code: "unknown_*"` as a future-reserved
+  error code prefix; clients MUST treat any unknown `code` value as
+  if it were a generic transient error (retry per `retry_after_seconds`
+  if present, else surface as a generic failure).
+- Adding any value NOT in the future-reserved set requires a
+  `/v2/*` bump (per §8.3).
+- The public changelog (§8.5) MUST cite which future-reserved slot
+  a new value consumes.
 
 ### 8.3 Breaking changes
 
@@ -860,8 +1153,9 @@ response during overlap.
 Once a `/v1/*` endpoint enters deprecation, every response MUST carry:
 
 - `Deprecation: true`
-- `Sunset: Tue, 25 Dec 2026 00:00:00 GMT` (whatever the operator-decided
-  sunset date is, RFC 8594 format)
+- `Sunset: Fri, 25 Dec 2026 00:00:00 GMT` (whatever the operator-decided
+  sunset date is, RFC 8594 / RFC 7231 IMF-fixdate format with
+  correct day-of-week)
 - `Link: <https://docs.streamvc.live/network-stats-api/v2-migration>;
   rel="deprecation"`
 
@@ -876,7 +1170,115 @@ number and the SPEC version that introduced the change.
 
 ## 9. Rollup pipeline
 
-### 9.1 Cadence
+### 9.1 Table schemas (normative)
+
+Every `stats_*` and `stats_components_health` table is owned by
+SPEC-017 and defined here. The handler's grant list in §7.2 MUST
+match this inventory exactly.
+
+```sql
+CREATE TABLE stats_overview_current (
+  singleton                BOOLEAN PRIMARY KEY DEFAULT TRUE
+    CHECK (singleton = TRUE),
+  generated_at             TIMESTAMPTZ NOT NULL,
+  tokens_in                BIGINT NOT NULL,
+  tokens_out               BIGINT NOT NULL,
+  requests                 BIGINT NOT NULL,
+  nodes_online             INT NOT NULL,
+  nodes_hardware_attested  INT NOT NULL,
+  bandwidth_gb_per_s       BIGINT NOT NULL,
+  network_power_kw         DOUBLE PRECISION NOT NULL,
+  network_utilization_pct  INT NOT NULL,
+  gpu_cores_total          INT NOT NULL,
+  cpu_cores_total          INT NOT NULL,
+  unified_ram_gb_total     INT NOT NULL,
+  models_serving           INT NOT NULL
+);
+
+CREATE TABLE stats_timeseries_rpm_30m (
+  bucket_start             TIMESTAMPTZ PRIMARY KEY,
+  requests                 BIGINT NOT NULL
+);
+
+CREATE TABLE stats_timeseries_tpm_30m (
+  bucket_start             TIMESTAMPTZ PRIMARY KEY,
+  input_tokens             BIGINT NOT NULL,
+  output_tokens            BIGINT NOT NULL
+);
+
+CREATE TABLE stats_leaderboard_24h (
+  provider_id              TEXT NOT NULL,
+  pseudonym                TEXT NOT NULL,
+  generated_at             TIMESTAMPTZ NOT NULL,
+  rank_earnings            INT NOT NULL,
+  rank_tokens              INT NOT NULL,
+  rank_jobs                INT NOT NULL,
+  earnings_usd             NUMERIC(18,2) NOT NULL DEFAULT 0,
+  earnings_work_usd        NUMERIC(18,2) NOT NULL DEFAULT 0,
+  earnings_rewards_usd     NUMERIC(18,2) NOT NULL DEFAULT 0,
+  earnings_bucket          TEXT NOT NULL,
+  earnings_work_bucket     TEXT NOT NULL,
+  earnings_rewards_bucket  TEXT NOT NULL,
+  tokens                   BIGINT NOT NULL DEFAULT 0,
+  jobs                     BIGINT NOT NULL DEFAULT 0,
+  first_seen_at            TIMESTAMPTZ,
+  last_seen_at             TIMESTAMPTZ,
+  PRIMARY KEY (provider_id)
+);
+CREATE INDEX ON stats_leaderboard_24h (rank_earnings);
+CREATE INDEX ON stats_leaderboard_24h (rank_tokens);
+CREATE INDEX ON stats_leaderboard_24h (rank_jobs);
+-- stats_leaderboard_7d, stats_leaderboard_30d, stats_leaderboard_all
+-- have IDENTICAL schemas to stats_leaderboard_24h above. The schema
+-- is shared so the handler can parametrize the table name by window.
+
+CREATE TABLE stats_components_health (
+  component                TEXT PRIMARY KEY,
+    -- one of: 'overview', 'timeseries',
+    --        'leaderboard_24h', 'leaderboard_7d',
+    --        'leaderboard_30d', 'leaderboard_all'
+  generated_at             TIMESTAMPTZ NOT NULL,
+  last_ok_at               TIMESTAMPTZ NOT NULL,
+  last_error_at            TIMESTAMPTZ,
+  last_error_message       TEXT
+);
+
+CREATE TABLE stats_late_events (
+  id                       BIGSERIAL PRIMARY KEY,
+  recorded_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+  event_unix_ts            BIGINT NOT NULL,
+  provider_id              TEXT NOT NULL,
+  delta_usd                NUMERIC(18,2),
+  delta_tokens             BIGINT,
+  source_billing_row       TEXT
+);
+```
+
+JSON-to-column mapping for `/v1/stats/overview` (§5.1):
+
+| JSON field | Source column |
+|---|---|
+| `network.tokens_served_total` | `tokens_in + tokens_out` |
+| `network.tokens_in_total` | `tokens_in` |
+| `network.tokens_out_total` | `tokens_out` |
+| `network.requests_total` | `requests` |
+| `network.nodes_online` | `nodes_online` |
+| `network.nodes_hardware_attested` | `nodes_hardware_attested` |
+| `network.bandwidth_gb_per_s` | `bandwidth_gb_per_s` |
+| `network.network_power_kw` | `network_power_kw` |
+| `network.network_utilization_pct` | `network_utilization_pct` |
+| `network.gpu_cores_total` | `gpu_cores_total` |
+| `network.cpu_cores_total` | `cpu_cores_total` |
+| `network.unified_ram_gb_total` | `unified_ram_gb_total` |
+| `network.avg_tokens_per_request` | derived: `(tokens_in+tokens_out) / max(1, requests)` |
+| `network.models_serving` | `models_serving` |
+
+The `provider_id → pseudonym` mapping is deterministic per provider
+and persisted in `stats_leaderboard_*.pseudonym`. The mapping
+function is operator-owned; v0.1 does NOT pin the function (§11 Q4
+flags pseudonym-rotation policy).
+
+### 9.2 Cadence
 
 | Table | Refresh cadence | Source query shape |
 |---|---|---|
@@ -891,7 +1293,7 @@ number and the SPEC version that introduced the change.
 These are the v0.1 floors. The operator MAY tighten them in production
 without a SPEC change; loosening them requires a SPEC bump.
 
-### 9.2 Late-event correction
+### 9.3 Late-event correction
 
 Billing-row corrections that arrive after a window's snapshot was
 written:
@@ -905,20 +1307,43 @@ written:
   Late events older than 48h are recorded in a `stats_late_events`
   table for periodic full-rebuild operator action.
 - A full rebuild of `stats_leaderboard_all` (and `30d`) MUST run nightly
-  at a low-traffic UTC hour (suggest 09:00 UTC), reconciling against
-  OLTP truth and overwriting the incremental snapshot.
+  at a low-traffic UTC hour (operator-configured; default 09:00 UTC,
+  chosen because Pearl VPS billing-event volume historically dips
+  60-80% between 06:00–10:00 UTC per the existing operator
+  observability — see [[m2-4-archive-rotate-operator-actions]] for the
+  established off-hours operator pattern), reconciling against OLTP
+  truth and overwriting the incremental snapshot.
 
-### 9.3 All-time accumulation vs recompute
+**Threshold rationale for 48h (v0.1).** SPEC-005 v0.3 §X-1 null-usage
+settlements reconcile within 24h in the worst case; doubling that to
+48h gives a 1× operator-safety margin against unforeseen reconciliation
+delays. Older late events are infrequent enough to handle via the
+nightly full-rebuild (operator-action gate) rather than per-tick
+merging. The threshold is operator-configurable in the rollup
+config; raising it makes the per-tick merge more expensive but does
+not break the contract.
+
+### 9.4 All-time accumulation vs recompute
 
 `stats_leaderboard_all` is incrementally accumulated between nightly
-rebuilds (§9.2). The nightly job rebuilds from scratch and overwrites,
+rebuilds (§9.3). The nightly job rebuilds from scratch and overwrites,
 which doubles as a drift-detection mechanism: if the rebuild differs
 from the incremental snapshot by more than 0.5% on any axis, an alert
 fires and the rebuild value wins.
 
-### 9.4 Freshness SLA
+**Threshold rationale for 0.5% (v0.1).** Postgres `NUMERIC(18,2)`
+plus the rollup's incremental accumulation pattern produces sub-1¢
+rounding drift per provider per tick. Across 327 providers and ~6h
+of ticks between rebuilds, accumulated drift of <0.5% is
+indistinguishable from arithmetic noise; ≥0.5% indicates a logic
+bug (missed billing row, double-count, wrong window boundary) and
+warrants an operator page. A tighter threshold (e.g. 0.1%) would
+false-positive on legitimate arithmetic noise; a looser one (e.g.
+2%) would silently hide a class of leaderboard-correctness bugs.
 
-| Endpoint | Target staleness | 503 budget (§5.7) |
+### 9.5 Freshness SLA
+
+| Endpoint | Target staleness | 503 budget (§5.8) |
 |---|---|---|
 | `/v1/stats/overview` | 30s | 120s |
 | `/v1/stats/leaderboard?window=24h` | 60s | 300s |
@@ -927,7 +1352,7 @@ fires and the rebuild value wins.
 | `/v1/stats/leaderboard?window=all` | 6 hours | 24 hours |
 | `/v1/stats/health` | n/a (advisory) | n/a |
 
-### 9.5 Failure modes
+### 9.6 Failure modes
 
 - Rollup job missed its tick: continue serving the previous snapshot
   with its existing `generated_at`; health endpoint reports `degraded`
@@ -939,19 +1364,32 @@ fires and the rebuild value wins.
   required (cross-ref: a new operator-runbook section, not in this
   SPEC).
 
-### 9.6 Backfill on cutover
+### 9.7 Backfill on cutover
 
-When SPEC-017 first ships, `stats_leaderboard_30d` and
-`stats_leaderboard_all` MUST be populated from full historical OLTP
-billing data before the public endpoints are enabled. The cutover
-runbook (operator follow-up, not in this SPEC) gates the nginx
-server-block activation on the backfill completing.
+v0.1 does NOT mandate full historical backfill of `stats_leaderboard_30d`
+and `stats_leaderboard_all` before public-endpoint cutover. The
+operator MAY choose either path:
 
-If full backfill is operationally infeasible, the operator MAY ship
-with rollup-start-date forward only, in which case the public response
-for `30d` and `all` MUST include a top-level `partial_history_since`
-RFC 3339 timestamp; this is an additive field (§8.2) and does not
-require a SPEC bump.
+**Path A — partial history (default for v0.1, lightweight):** ship
+with rollup-start-date forward only. The `/v1/stats/leaderboard`
+response for `30d` and `all` windows MUST include a top-level
+`partial_history_since` RFC 3339 timestamp. This is the additive
+v0.1 schema field; partners are responsible for surfacing the
+"window is short" caveat in their UI. Until `partial_history_since`
+is more than 30 days in the past (for `30d`) or more than the
+operator-defined `all` floor in the past, this field is REQUIRED in
+the response; once the rollup has accumulated enough history, the
+field MAY be omitted (additive, not breaking — partner clients MUST
+tolerate omission).
+
+**Path B — full backfill (operator opt-in, heavier):** populate
+`stats_leaderboard_30d` and `stats_leaderboard_all` from full
+historical OLTP billing data before flipping the nginx server-block.
+On this path the `partial_history_since` field is omitted from
+day 1.
+
+The choice between A and B is an operator runbook concern, not a
+SPEC LOCK gate. Q7 in §11 keeps the decision open for v0.2.
 
 ---
 
@@ -962,8 +1400,8 @@ implemented. Each is mechanically checkable in tests or an operator
 runbook step.
 
 - **AC-1.** `GET /v1/stats/overview` returns 200 with the §5.1 JSON
-  shape, all 13 `network.*` fields present, and exactly 30 points in
-  each timeseries.
+  shape, all 14 `network.*` fields present (per the §5.1.1 schema
+  table), and exactly 30 points in each timeseries.
 - **AC-2.** `GET /v1/stats/leaderboard` with no `window` query returns
   the `24h` window. With invalid `window=foo` returns 400 with
   `code: "bad_request"`.
@@ -971,14 +1409,15 @@ runbook step.
   `code: "unauthorized"` when an `Authorization: Bearer mpk_invalid`
   header is sent.
 - **AC-4.** Public leaderboard rows for providers with
-  `public_earnings_mode = 'bucketed'` have `exact_earnings*` fields
+  `provider_visibility.mode = 'bucketed'` (or no `provider_visibility`
+  row) have `exact_earnings*` fields
   present as JSON `null` (NOT missing).
 - **AC-5.** Public leaderboard rows for providers with
-  `public_earnings_mode = 'exact'` have `exact_earnings*` fields
+  `provider_visibility.mode = 'exact'` have `exact_earnings*` fields
   populated with USD floats to two-decimal precision.
 - **AC-6.** Partner-key leaderboard rows ALWAYS have `earnings_usd`,
   `earnings_work_usd`, `earnings_rewards_usd` populated regardless of
-  `public_earnings_mode`.
+  `provider_visibility.mode`.
 - **AC-7.** `GET /v1/stats/health` returns 200 even when components
   are `degraded`. Returns non-200 ONLY when the coordinator process
   itself is unhealthy.
@@ -988,9 +1427,10 @@ runbook step.
 - **AC-9.** `stats_reader` Postgres role CANNOT execute
   `SELECT 1 FROM billing_ledger LIMIT 1`; the query MUST return a
   permission-denied error.
-- **AC-10.** Toggling `public_earnings_mode` via the portal inserts
-  exactly one row into `provider_visibility_audit` with `actor_kind =
-  'provider'`.
+- **AC-10.** Toggling `provider_visibility.mode` via the portal
+  (SPEC-014 v0.9 candidate handler) inserts exactly one row into
+  `provider_visibility_audit` with `actor_kind = 'provider'`,
+  transactionally with the visibility-table UPSERT (§6.3).
 - **AC-11.** A panic in a `/v1/stats/*` handler does NOT crash the
   coordinator process; the next `/healthz` check on the coordinator
   returns OK and the panic is logged with `event=stats_handler_panic`.
@@ -1007,7 +1447,27 @@ runbook step.
   `Authorization` header value; only `partner_keys.id` and
   `partner_keys.label` appear.
 - **AC-16.** `internal/stats` Go package's import graph does NOT include
-  `internal/billing` or `internal/explorer` (enforced by a CI lint).
+  `internal/billing`, `internal/explorer`, `internal/ws`, or any
+  symbol from `internal/auth` other than a minimal Bearer parser
+  (the explicit boundary set from §7.6), enforced by a CI lint that
+  fails on any new import added to the forbidden set.
+- **AC-17.** `coordinator partner-keys issue --label X` (§5.4.2)
+  prints the raw token exactly once to stdout, INSERTs a row into
+  `partner_keys` with `token_hash = sha256(raw_token)`, and the raw
+  token does NOT appear in any log line, journald entry, or DB row
+  after subprocess exit.
+- **AC-18.** A request to `/v1/stats/leaderboard` with
+  `Authorization: Bearer <revoked_token>` returns 401 with
+  `code: "unauthorized"`. The 401 latency MUST be within ±20% of the
+  401 latency for `Bearer mpk_invalid` (timing-attack resistance, §5.4.3).
+- **AC-19.** A SELECT against `provider_visibility` for a `provider_id`
+  with no row returns zero rows; the leaderboard projection treats
+  this as `mode = 'bucketed'` (§6.1 left-join semantics). AC verified
+  by inserting a leaderboard row for a never-toggled provider and
+  asserting `exact_earnings*` are JSON null in the public projection.
+- **AC-20.** No `provider_visibility_audit` row exists with
+  `new_mode = 'exact' AND actor_kind = 'operator'` (§6.6.3 mechanical
+  check). Verified by a SQL fixture and a CI assertion.
 
 ---
 
@@ -1040,7 +1500,7 @@ challenge each and propose pins for v0.2.
   `coordinator.streamvc.live/v1/stats/*` only, (b) adding a separate
   `stats.streamvc.live` server-block, or (c) both. §7.1 currently pins
   (c); audit may push back.
-- **Q7 — Backfill on cutover.** §9.6 allows partial-history rollout
+- **Q7 — Backfill on cutover.** §9.7 allows partial-history rollout
   with a `partial_history_since` field. Is that acceptable for partner
   trust, or MUST full backfill be a hard gate before nginx flips on?
 - **Q8 — `models_serving` exact semantics.** §5.1.1 defines it as
@@ -1057,6 +1517,25 @@ challenge each and propose pins for v0.2.
   it (sort by earnings/tokens/jobs places it last; limit caps
   visibility). Should there be an explicit `include_inactive=false`
   default with `include_inactive=true` opt-in for partners?
+- **Q11 — Partner-projection opt-out.** §6.6.2 documents that partner
+  keys see exact `$` for every provider, including providers with
+  `mode = 'bucketed'`. Should v0.2 add a per-provider "block from
+  partner projection" toggle so providers can suppress exact $
+  exposure across BOTH public and partner surfaces? The legal
+  posture works either way; the question is whether the partner-trust
+  bargain is good enough as the operator-issued, operator-revocable
+  surface it is in v0.1. Surfaced by codex round 1, q1.
+- **Q12 — Network Stats UI canonical consumer.** The current
+  in-repo `frontdoor/console/index.html` is a buyer-side dashboard,
+  not the screenshot-style Network Statistics widget that motivated
+  this SPEC; that widget lives on the vercel preview today (see
+  [[macprovider-vercel-demo]]). Q12 asks where the canonical UI
+  consumer of `/v1/stats/*` will live at production launch:
+  (a) embedded in `frontdoor/console/index.html` as a new section,
+  (b) a new `frontdoor/network-stats/*` mini-app, or (c) lifted from
+  the vercel preview into the in-repo console. v0.1 of the API is
+  agnostic; this is a follow-up SPEC-? UI spec. Surfaced by codex
+  round 1, q2.
 
 ---
 
@@ -1076,5 +1555,5 @@ challenge each and propose pins for v0.2.
 - `specs/SPEC-016-payout-pipeline.md` §5.1 (rewards-$ semantics)
 - RFC 7234 (HTTP caching), RFC 8594 (Sunset header), RFC 2119 (MUST /
   SHOULD / MAY)
-- `.omc/artifacts/ask/codex-i-m-designing-a-public-network-stats-api-for-macprovider-a-d-2026-06-25T18-18-42-442Z.md`
+- `specs/SPEC-017-advisor-round-2026-06-25.md` (mirror of the source artifact at `.omc/artifacts/ask/codex-i-m-designing-a-public-network-stats-api-for-macprovider-a-d-2026-06-25T18-18-42-442Z.md` in the main checkout)
   (codex advisor round establishing the four locked decisions)
