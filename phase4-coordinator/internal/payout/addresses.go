@@ -3,6 +3,7 @@ package payout
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -96,8 +97,11 @@ type AddressesService struct {
 
 // NewAddressesService validates the wiring and returns a usable
 // service. Co-residency assertions (the runner sharing the same
-// process as the handler) live in main.go; this constructor only
-// validates that the SecurityConfig + dependencies are non-nil.
+// process as the handler) are enforced by
+// AssertPayoutRuntimeTopology in `topology.go` — main.go
+// invokes that hook BEFORE mounting the §3.3 handler. This
+// constructor only validates that the SecurityConfig + per-call
+// dependencies are non-nil.
 func NewAddressesService(db *sql.DB, sec SecurityConfig, dl *DenyList, tokens providerTokenValidator, identity providerIdentityChecker, pause pauseFlagReader, coolingOff time.Duration, log zerolog.Logger) (*AddressesService, error) {
 	if db == nil {
 		return nil, fmt.Errorf("payout.NewAddressesService: db is required")
@@ -330,8 +334,17 @@ func (s *AddressesService) ServePayoutAddress(w http.ResponseWriter, r *http.Req
 	// pattern at internal/auth/tokens.go:927 to take a write-
 	// intent lock at the top of the txn.
 	canonicalLower := strings.ToLower(canonical)
-	nonceLowerHex := strings.ToLower(strings.TrimPrefix(req.Nonce, "0x"))
-	nonceLowerHex = "0x" + nonceLowerHex
+	// Canonicalise the anti-replay nonce key from the DECODED
+	// bytes, NOT from the request-side string. The request-side
+	// string accepts both "0x" and "0X" prefixes (per the
+	// 0x/0X-prefix laxity in DecodeNonce32), so deriving the
+	// table key from the input would split the same bytes32
+	// nonce across two PK strings — the same EIP-712 signature
+	// could then be replayed once per prefix variant. Encoding
+	// from the post-decode bytes yields exactly one canonical
+	// "0x" + 64 lowercase hex chars per nonce value. Closes
+	// codex round-1 [code:1.2] MEDIUM.
+	nonceLowerHex := "0x" + hex.EncodeToString(nonce32[:])
 
 	conn, err := s.DB.Conn(ctx)
 	if err != nil {
@@ -382,13 +395,23 @@ func (s *AddressesService) ServePayoutAddress(w http.ResponseWriter, r *http.Req
 
 	// 10c. UPSERT provider_payout_addresses. First, read the
 	// existing row (if any) so we can derive old_address,
-	// rotated_from, status code, and pending_until_utc.
+	// rotated_from, status code, pending_until_utc, AND the
+	// existing payout_allowed flag.
+	//
+	// CRITICAL: SPEC §3.3 requires a 409 Conflict when
+	// payout_allowed=0 on the existing row, AND requires that
+	// rotation MUST NOT silently re-enable a compliance-disabled
+	// row. Reading payout_allowed inside the BEGIN IMMEDIATE
+	// transaction is the only correct ordering — a read outside
+	// the txn would race the §6.4.1 compliance-gate path. Closes
+	// codex round-1 [code:1.1] CRITICAL.
 	var existingAddress sql.NullString
+	var existingPayoutAllowed sql.NullInt64
 	row := conn.QueryRowContext(ctx,
-		`SELECT address FROM provider_payout_addresses WHERE provider_id=? AND chain=?`,
+		`SELECT address, payout_allowed FROM provider_payout_addresses WHERE provider_id=? AND chain=?`,
 		providerID, req.Chain,
 	)
-	if err := row.Scan(&existingAddress); err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if err := row.Scan(&existingAddress, &existingPayoutAllowed); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.emitFailure(r, providerID, "internal_error", req.Address)
 		writeError(w, http.StatusInternalServerError, "internal_error")
 		return
@@ -401,14 +424,33 @@ func (s *AddressesService) ServePayoutAddress(w http.ResponseWriter, r *http.Req
 	var status int
 	var oldAddress string
 	if existingAddress.Valid && existingAddress.String != "" {
+		// SPEC §3.3 compliance gate: payout_allowed=0 rejects
+		// rotation with 409 (not 400) and emits the rejection
+		// event with reason="payout_not_allowed". The row
+		// remains untouched; the nonce-replay INSERT we already
+		// performed earlier in this txn is rolled back via the
+		// `committed=false` defer.
+		if existingPayoutAllowed.Valid && existingPayoutAllowed.Int64 == 0 {
+			s.emitFailure(r, providerID, "payout_not_allowed", req.Address)
+			writeError(w, http.StatusConflict, "payout_not_allowed")
+			return
+		}
 		// Rotation: 200 OK + pending_until rewritten, rotated_from set.
+		// payout_allowed is PRESERVED — rotation does NOT silently
+		// re-enable a row that was already disabled. (If a future
+		// SPEC adds a re-enable path it MUST go through the
+		// §6.4.1 compliance-gate endpoint, not §3.3 rotation.)
 		oldAddress = existingAddress.String
+		preservedPayoutAllowed := int64(1)
+		if existingPayoutAllowed.Valid {
+			preservedPayoutAllowed = existingPayoutAllowed.Int64
+		}
 		if _, err := conn.ExecContext(ctx, `
 UPDATE provider_payout_addresses
-   SET address=?, payout_allowed=1, pending_until_utc=?, rotated_from=?,
+   SET address=?, payout_allowed=?, pending_until_utc=?, rotated_from=?,
        registered_at_utc=?, registered_against_hot_wallet=?
  WHERE provider_id=? AND chain=?`,
-			canonical, pendingUntilStr, existingAddress.String,
+			canonical, preservedPayoutAllowed, pendingUntilStr, existingAddress.String,
 			registeredAtUtcStr, s.Security.HotWalletAddress,
 			providerID, req.Chain,
 		); err != nil {

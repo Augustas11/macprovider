@@ -387,6 +387,171 @@ func TestServePayoutAddress_SignatureSkew(t *testing.T) {
 	}
 }
 
+// TestServePayoutAddress_RotationPreservesPayoutAllowed_Zero locks
+// codex round-1 [code:1.1] CRITICAL: a rotation against an existing
+// row whose payout_allowed=0 MUST return 409 Conflict and MUST NOT
+// silently re-enable the row.
+func TestServePayoutAddress_RotationPreservesPayoutAllowed_Zero(t *testing.T) {
+	db := openTestDB(t)
+	priv, providerAddr := signerForTest(t)
+	hotWallet := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	svc := newServiceForTest(t, db, hotWallet, "test-pid", "tok", &fakePause{})
+	r := newRouter(t, svc)
+
+	// Seed an existing row with payout_allowed=0 (the §8 compliance
+	// gate position the operator put the provider in).
+	canonicalHot, _ := CanonicalizeEIP55(hotWallet)
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO provider_payout_addresses
+  (provider_id, chain, address, payout_allowed, pending_until_utc,
+   rotated_from, registered_at_utc, registered_against_hot_wallet)
+VALUES ('test-pid', 'base-mainnet', '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa',
+        0, '2099-01-01T00:00:00Z', NULL, '2026-01-01T00:00:00Z', ?)`, canonicalHot); err != nil {
+		t.Fatalf("seed disabled row: %v", err)
+	}
+
+	// Submit a valid rotation request.
+	body := buildRequestBody(t, priv, "test-pid", providerAddr, hotWallet,
+		uint64(time.Now().Unix()), [32]byte{0xab, 0xcd, 0xef})
+	req := httptest.NewRequest("POST", "/providers/test-pid/payout-address", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("rotation against payout_allowed=0 expected 409, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "payout_not_allowed") {
+		t.Errorf("body=%q does not contain payout_not_allowed", rec.Body.String())
+	}
+	// Row MUST be unchanged: address still the seeded one,
+	// payout_allowed still 0.
+	var gotAddr string
+	var gotAllowed int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT address, payout_allowed FROM provider_payout_addresses WHERE provider_id='test-pid' AND chain='base-mainnet'`,
+	).Scan(&gotAddr, &gotAllowed); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if gotAddr != "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa" {
+		t.Errorf("address silently rotated under 409: got %q", gotAddr)
+	}
+	if gotAllowed != 0 {
+		t.Errorf("payout_allowed silently re-enabled: got %d, want 0", gotAllowed)
+	}
+}
+
+// TestServePayoutAddress_RotationPreservesPayoutAllowed_One is the
+// dual-direction sanity check: rotation against a row whose
+// payout_allowed=1 succeeds with 200 OK AND payout_allowed stays 1
+// (so the explicit preservation does not regress the happy path).
+func TestServePayoutAddress_RotationPreservesPayoutAllowed_One(t *testing.T) {
+	db := openTestDB(t)
+	priv, providerAddr := signerForTest(t)
+	hotWallet := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	svc := newServiceForTest(t, db, hotWallet, "test-pid", "tok", &fakePause{})
+	r := newRouter(t, svc)
+
+	canonicalHot, _ := CanonicalizeEIP55(hotWallet)
+	if _, err := db.ExecContext(context.Background(), `
+INSERT INTO provider_payout_addresses
+  (provider_id, chain, address, payout_allowed, pending_until_utc,
+   rotated_from, registered_at_utc, registered_against_hot_wallet)
+VALUES ('test-pid', 'base-mainnet', '0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa',
+        1, '2099-01-01T00:00:00Z', NULL, '2026-01-01T00:00:00Z', ?)`, canonicalHot); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	body := buildRequestBody(t, priv, "test-pid", providerAddr, hotWallet,
+		uint64(time.Now().Unix()), [32]byte{0x77, 0x88, 0x99})
+	req := httptest.NewRequest("POST", "/providers/test-pid/payout-address", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer tok")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("rotation against payout_allowed=1 expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var gotAllowed int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT payout_allowed FROM provider_payout_addresses WHERE provider_id='test-pid' AND chain='base-mainnet'`,
+	).Scan(&gotAllowed); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if gotAllowed != 1 {
+		t.Errorf("payout_allowed regressed on rotation: got %d, want 1", gotAllowed)
+	}
+}
+
+// TestServePayoutAddress_NonceCanonicalisation_0XReplayDefeated locks
+// codex round-1 [code:1.2] MEDIUM: a request whose request-side
+// nonce string uses the "0X" prefix MUST share the anti-replay
+// PK with the equivalent "0x" submission of the same 32 bytes.
+//
+// Strategy: submit one request with the canonical "0x" prefix,
+// then submit a second request that re-uses the same signed body
+// but rewrites the prefix to "0X". Both decode to the same nonce32
+// bytes; the second submission MUST be rejected with
+// nonce_replayed (NOT silently accepted as a fresh nonce). Note:
+// the second submission's signature is still valid for the SAME
+// nonce32 (signature was computed against the bytes, not the
+// prefix), so signature_mismatch is NOT the expected error.
+func TestServePayoutAddress_NonceCanonicalisation_0XReplayDefeated(t *testing.T) {
+	db := openTestDB(t)
+	priv, providerAddr := signerForTest(t)
+	hotWallet := "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"
+	svc := newServiceForTest(t, db, hotWallet, "test-pid", "tok", &fakePause{})
+	r := newRouter(t, svc)
+
+	nonce := [32]byte{0x11, 0x22, 0x33}
+	tsNow := uint64(time.Now().Unix())
+	body := buildRequestBody(t, priv, "test-pid", providerAddr, hotWallet, tsNow, nonce)
+
+	// First submission: canonical "0x" prefix.
+	req1 := httptest.NewRequest("POST", "/providers/test-pid/payout-address", strings.NewReader(body))
+	req1.Header.Set("Authorization", "Bearer tok")
+	rec1 := httptest.NewRecorder()
+	r.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusCreated && rec1.Code != http.StatusOK {
+		t.Fatalf("first submission expected 201/200, got %d body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	// Second submission: rewrite the nonce field's "0x" prefix
+	// to "0X". The bytes signed are identical (decodeSignatureHex
+	// case-folds the prefix), so the EIP-712 verification
+	// succeeds; the anti-replay table SHOULD trip on the canonical
+	// key derived from the decoded bytes.
+	canonicalNonceLower := "0x" + hex.EncodeToString(nonce[:])
+	upperPrefixNonce := "0X" + hex.EncodeToString(nonce[:])
+	mutated := strings.Replace(body,
+		`"nonce":"`+canonicalNonceLower+`"`,
+		`"nonce":"`+upperPrefixNonce+`"`,
+		1,
+	)
+	if mutated == body {
+		t.Fatal("test setup error: prefix rewrite did not apply")
+	}
+	req2 := httptest.NewRequest("POST", "/providers/test-pid/payout-address", strings.NewReader(mutated))
+	req2.Header.Set("Authorization", "Bearer tok")
+	rec2 := httptest.NewRecorder()
+	r.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Fatalf("0X-prefix replay expected 400 nonce_replayed, got %d body=%s", rec2.Code, rec2.Body.String())
+	}
+	if !strings.Contains(rec2.Body.String(), "nonce_replayed") {
+		t.Errorf("0X-prefix replay body=%q does not contain nonce_replayed", rec2.Body.String())
+	}
+	// Belt-and-suspenders: assert the table has exactly ONE row
+	// for this (canonical_address, nonce) tuple.
+	var nonceRows int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM provider_payout_address_nonces WHERE nonce=?`, canonicalNonceLower,
+	).Scan(&nonceRows); err != nil {
+		t.Fatalf("scan nonce rows: %v", err)
+	}
+	if nonceRows != 1 {
+		t.Errorf("anti-replay table row count = %d for canonical nonce; want exactly 1", nonceRows)
+	}
+}
+
 // intString avoids strconv import for one tiny use.
 func intString(n int64) string {
 	if n == 0 {

@@ -606,6 +606,20 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 	if err != nil {
 		return nil, nil, fmt.Errorf("load security config: %w", err)
 	}
+	// SPEC §3.3 co-residency invariant — assert BEFORE building
+	// any service so a misconfigured deployment fails fast at
+	// startup, not on the first request. Step 1 wires
+	// HandlerEnabled=true + RunnerCoResident=false (no runner
+	// yet); Step 2 will tighten this to require
+	// RunnerCoResident=true.
+	if err := payout.AssertPayoutRuntimeTopology(payout.PayoutRuntimeTopology{
+		HandlerEnabled:         true,
+		RunnerCoResident:       false,
+		HotWalletAddressPinned: sec.HotWalletAddress,
+		LinuxRequired:          false,
+	}); err != nil {
+		return nil, nil, fmt.Errorf("payout topology: %w", err)
+	}
 	denyList, err := payout.NewDenyList(sec.HotWalletAddress)
 	if err != nil {
 		return nil, nil, fmt.Errorf("deny-list: %w", err)
