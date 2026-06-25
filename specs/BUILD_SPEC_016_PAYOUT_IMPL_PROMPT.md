@@ -79,6 +79,7 @@ the checklist is complete.
    `payout.tuning.run_interval` (default 6h, bounds
    `[5m, 24h]`),
    `payout.tuning.confirmation_blocks` (default 5, bounds
+   `[5, 200]` — widened by SPEC v0.1.20 round-20 M2; was
    `[2, 50]`),
    `payout.tuning.address_cooling_off_period` (default 24h,
    floor 1h),
@@ -882,7 +883,8 @@ path).
     bounds at reload time (round-13 round-14 bounds
     matrix):
     `address_cooling_off_period >= 1h`;
-    `confirmation_blocks ∈ [2, 50]`;
+    `confirmation_blocks ∈ [5, 200]` (SPEC v0.1.20 round-20
+    M2 — was `[2, 50]`);
     `low_balance_threshold <= 2 × per_day_cap`;
     `low_native_threshold <= 1e18`;
     `run_interval ∈ [5m, 24h]`;

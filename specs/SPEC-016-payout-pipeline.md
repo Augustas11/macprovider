@@ -1,6 +1,6 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.19 (2026-06-25, draft — audit-narrative split. Splits the inlined codex round-9..19 audit findings out of this SPEC body into per-round `specs/SPEC-016-rN-audit.md` files per the established repo convention ([[feedback-spec-audit-file-convention]] / cf. SPEC-005-r1-audit.md, SPEC-005-r2-audit.md). NO normative changes — only reorganization of audit-narrative artifacts. The body shrinks from ~5,860 lines back to its normative core. Round-by-round audit detail now lives in `specs/SPEC-016-r9-audit.md` through `specs/SPEC-016-r19-audit.md`. Round-19 codex declared CONVERGED at 0/0/0 against v0.1.17; v0.1.18 swept 4 deferred LOWs; v0.1.19 is hygiene-only.)
+**Version:** 0.1.21 (2026-06-25, draft — codex round-21 fix pass on v0.1.20. Round 21 returned NEEDS FIX PASS 0/1/1/1 against v0.1.20: MAJOR-1 stale `[2, 50]` confirmation_blocks bound at §4.3 step 7 + BUILD prompt; MEDIUM-1 ambiguous IMPL test (4) wording in §4.8b; LOW-1 two-RPC re-poll budget undercounted RPC calls in §4.7. All three absorbed. Pending codex round-22 confirmation. Full r20 findings: `specs/SPEC-016-r20-audit.md`; r21 closure narrative: `specs/SPEC-016-r21-audit.md`.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -23,6 +23,43 @@ git-history-only). The change-log entries below are one-liners per
 version pointing at the corresponding audit file. Per
 [[feedback-spec-audit-file-convention]], audit narrative does NOT
 live in this SPEC body.
+
+**v0.1.21 (2026-06-25, draft — codex round-21 fix pass on
+v0.1.20):** Round 21 returned NEEDS FIX PASS 0/1/1/1. Fixes:
+MAJOR-1 (M2 fix-out) — stale `[2, 50]` confirmation_blocks
+bound at §4.3 step 7 line 1295 replaced with `[5, 200]`;
+two stale `[2, 50]` references in `BUILD_SPEC_016_PAYOUT_IMPL_PROMPT.md`
+(lines 82, 885) also updated to `[5, 200]`; "MUST explicitly
+set to opt out" prose corrected to "operators with config
+values in `[2, 4]` MUST raise to ≥5". MEDIUM-1 (M4 fix-out)
+— IMPL test (4) in §4.8b rewritten to pin the injection
+point AFTER the post-COMMIT lease re-read and removed the
+impossible cross-process lease-loss assertion; the test now
+explicitly asserts chain nonce-uniqueness is what serializes
+the race. LOW-1 (M1 fix-out) — §4.7 re-poll budget paragraph
+clarified to distinguish row re-polls vs RPC calls
+(`N_rows × 2` RPC calls because two-RPC discipline; 200 rows
+= 400 RPC calls per cycle). Full r21 closure narrative:
+`specs/SPEC-016-r21-audit.md`.
+
+**v0.1.20 (2026-06-25, draft — Claude-side cross-check absorbed):**
+Round-20 Claude cross-check (critic + analyst lenses, parallel)
+absorbed 3 criticals + 4 majors: C1 `Idempotency-Key` on
+`/admin/payout/record-funding` bound to `tx_hash` equality (§4.9);
+C2 `from_address == hot_wallet` rejected during bootstrap + §7.4
+query (E) detector + §3.2 deny-list framing extended (§4.9 / §7.4 /
+§3.2); C3 `amount_base_units == lpr.provider_credits` pre-INSERT
+invariant inside the §4.3 step 5 `BEGIN IMMEDIATE` transaction with
+new `payout_invariant_violation where='amount_credit_mismatch'`
+enum value; M1 normative `payout.tuning.reorg_poll_window` re-poll
+cadence for already-confirmed rows (§4.7 / §payout.tuning); M2
+finality-model paragraph + `confirmation_blocks` bounds widened
+from [2, 50] to [5, 200] (§payout.tuning / §1); M4 chain-nonce-
+uniqueness load-bearing explanatory paragraph + IMPL stall test
+(§4.8b); M5 §7.4 query (F) money-conservation aggregate invariant
++ weekly operational binding. M3 (EIP-712 `verifyingContract` UX)
+deferred — Step 1 verifier already committed; documented as known
+limitation in §3.2. Full audit narrative: `specs/SPEC-016-r20-audit.md`.
 
 **v0.1.19 (2026-06-25, draft — audit-narrative split):** Splits the
 inlined codex round-9..19 audit findings out of this SPEC body into
@@ -422,8 +459,13 @@ The IMPL MUST validate, before INSERT or UPDATE:
    contract address itself
    `0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`, known
    burn addresses (`0x000…dead`), and the configured hot-
-   wallet `from_address` (self-payment denial). Operator MAY
-   add more.
+   wallet address (self-payment denial). Operator MAY add
+   more. **The hot wallet is denied as a payout
+   DESTINATION here AND as a funding SOURCE in §4.9
+   `POST /admin/payout/record-funding`** (v0.1.20 round-20
+   C2 closure — the symmetric ban closes the bootstrap
+   `from = to = hot_wallet` self-funding inflation attack
+   class; see §4.9 400-response table and §7.4 query (E)).
 5. **EIP-712 proof-of-possession.** The request body MUST
    include a `signature` field — a 65-byte (r||s||v)
    hex-encoded EIP-712 typed-data signature over the
@@ -965,12 +1007,42 @@ any step on error and logging structurally:
      pre-check below; only AFTER it confirms that no live
      cancel self-transfer is blocking, generate a fresh
      nonce per §4.6 and a new `attempt_seq` (next integer
-     for this payout_id), INSERT the row into
+     for this payout_id), assert the C3 money-conservation
+     pre-INSERT invariant below, then INSERT the row into
      `payout_attempts` (the
      `idx_pa_one_live_non_cancel_per_payout` partial
      UNIQUE INDEX from §4.5 enforces at-most-one live
      non-cancel row per payout_id at the DB layer), then
      COMMIT the `BEGIN IMMEDIATE` transaction from step 3.
+
+   **C3 money-conservation pre-INSERT invariant
+   (NORMATIVE — v0.1.20 round-20 closure).** Inside the
+   `BEGIN IMMEDIATE` transaction from step 3 — BEFORE the
+   `INSERT` on `payout_attempts` — the IMPL MUST assert
+   `amount_base_units == lpr.provider_credits` (both
+   INTEGER, USDC base units, no implicit coercion). The
+   `lpr.provider_credits` value MUST be re-read inside
+   this transaction from `ledger_payout_ready` by
+   `payout_id`, NOT trusted from the §4.3 step 1 SELECT
+   (which is outside this txn). On mismatch the IMPL
+   MUST `ROLLBACK`, emit
+   `payout_invariant_violation where='amount_credit_mismatch'`
+   per §7.1 (severity=PAGE) with fields
+   `(payout_id, lpr_provider_credits,
+     computed_amount_base_units, attempt_seq)`,
+   and HALT the runner pending operator forensic review.
+   Rationale: §4.3 step 2 prose locks
+   `amount_base_units = provider_credits` as a unit
+   identity, but SPEC-005's `ClaimPayoutReady` only
+   validates `gross_credits` — any future code path or
+   refactor that lets `amount_base_units` drift from
+   `provider_credits` passes the `ClaimPayoutReady`
+   gross-check and burns operator USDC; the per-provider
+   §7.4 query (A) catches the drift only AFTER
+   `UPDATE … SET status='consumed'` has fired. Asserting
+   the identity at the write site closes the window. The
+   `where='amount_credit_mismatch'` enum value is added
+   to §7.1's `payout_invariant_violation` enum table.
 
    **Cancel-handling pre-check (NORMATIVE — closes
    codex round-14 MAJOR-1's confused-deputy class).**
@@ -1238,8 +1310,10 @@ any step on error and logging structurally:
 7. **Confirm via TWO independent RPCs (with chain-side
    value verification).** Poll both configured RPCs (§9.2)
    until both return a receipt at depth ≥
-   `payout.tuning.confirmation_blocks` (default 5; minimum 2;
-   maximum 50). The TWO receipts MUST agree on:
+   `payout.tuning.confirmation_blocks` (default 5; bounds
+   `[5, 200]` per §payout.tuning hard floors — v0.1.20
+   round-20 M2 closure widened bounds from `[2, 50]`). The
+   TWO receipts MUST agree on:
    - `tx_hash`
    - `block_hash` (NEW in v0.1.8 — closes the
      same-block-hash-different-block-content reorg gap)
@@ -1807,13 +1881,57 @@ rare in practice but possible. The
 (`phase4-coordinator/internal/billing/store.go:121-126`) is
 intentional and v0.1.1 does NOT bypass it.
 
+**Reorg poll cadence (NORMATIVE — v0.1.20 round-20 M1
+closure).** Without a mandated re-poll cadence for already-
+confirmed rows, the only signal that a confirmed payout has
+been reorged out is the §7.4 hourly chain-balance
+reconciliation — which catches the drift side-effect but
+cannot identify WHICH row reorged, forcing the operator into
+a manual basescan-vs-DB cross-check on every confirmed row.
+Every cadence cycle the runner MUST re-poll receipt status
+(via the §4.4 two-RPC discipline) for every
+`payout_attempts` row matching:
+
+```sql
+SELECT id, payout_id, attempt_seq, payout_external_id
+  FROM payout_attempts
+ WHERE confirmed_at_utc IS NOT NULL
+   AND abandoned_at_utc IS NULL
+   AND is_cancel_self_transfer = 0
+   AND confirmed_at_utc >= datetime('now', :neg_reorg_poll_window);
+```
+
+`:neg_reorg_poll_window` is derived from
+`payout.tuning.reorg_poll_window` (default `24h`, bounds
+`[1h, 168h]` — see §payout.tuning). Any row whose receipt
+becomes "not found" on either RPC enters the reorg path below
+with `(payout_id, attempt_seq, payout_external_id)`
+identified. **Budget accounting (NORMATIVE).** Per-cycle the
+runner issues at most `N_rows × 2` RPC calls (one per pinned
+RPC per row), where `N_rows = max_rows_per_run ×
+(reorg_poll_window / run_interval)`. At default values
+(`max_rows_per_run=50`, `reorg_poll_window=24h`,
+`run_interval=6h`) this is `200` row re-polls = `400` RPC
+calls per cycle (200 per RPC) — well within the §4.4 RPC
+budget which assumes ~10 req/s sustained per provider. The
+two-RPC discipline matches the §4.3 step 7 receipt fetch:
+both RPCs see the same row state OR a reorg is in progress.
+Re-poll failures that are RPC errors (5xx, network) on
+EITHER RPC are NOT reorgs; they emit
+`payout_reorg_poll_rpc_error` (severity=WARN) and the row
+remains confirmed pending the next cycle's re-poll.
+
 If the runner observes that a previously-confirmed
 PROVIDER-PAYOUT tx (`is_cancel_self_transfer = 0`) is no
 longer present in the canonical chain on either RPC (receipt
-returns "not found" after a prior confirmation), it MUST:
+returns "not found" after a prior confirmation — either via
+the cadence re-poll above OR via an unrelated chain-side
+operation), it MUST:
 
 1. Emit `payout_reorg_revert` per §7.1 (severity: page
-   operator).
+   operator) with the row identified
+   (`payout_id, attempt_seq, payout_external_id,
+   observed_via='reorg_poll_cadence' | 'incidental'`).
 2. NOT attempt automatic revert. The trigger forbids it; the
    runner has no bypass.
 3. NOT attempt a new transfer for the same `payout_id`. The
@@ -2681,6 +2799,48 @@ overwrite the lease row's `holder_token` to a different value;
 on the next §4.3 cycle, assert the self-fencing check halts the
 runner with `payout_runner_lease_lost`.
 
+**Chain-nonce uniqueness is load-bearing for the post-CAS
+broadcast race (NORMATIVE explanatory — v0.1.20 round-20 M4
+closure).** The §4.3 step 6 sequence is (a) CAS-persist the
+signed envelope inside `BEGIN IMMEDIATE`, (b) COMMIT, (c)
+re-read `holder_token` post-COMMIT, (d) only if lease still
+held, invoke `eth_sendRawTransaction`. Between (c) and (d) a
+GC stall or page fault can elapse `3 × run_interval` and elect
+a new lease holder. The new holder, on its next §4.3 cycle,
+sees the persisted-but-unbroadcast envelope and rebroadcasts
+it (re-signing is FORBIDDEN per §4.6). At that point both
+processes may broadcast the same signed envelope (same nonce,
+same signature, byte-identical). **The Base sequencer's
+nonce-uniqueness rule is what guarantees at most one of the
+two broadcasts confirms** — IMPL MUST NOT rely on a second
+software guard to make this single. This is not a defect; it
+is an architectural assumption made explicit.
+
+IMPL test required (4): the post-CAS broadcast race window.
+This test exists because the lease re-read at §4.3 step 6
+runs BEFORE the `eth_sendRawTransaction` syscall, but the
+window between that re-read and the syscall is unguarded by
+software — only chain nonce-uniqueness covers it. Inject a
+synthetic 30-second sleep AFTER the §4.3 step 6 post-COMMIT
+lease re-read returned OK, BEFORE the
+`eth_sendRawTransaction` syscall. Manually advance the lease
+heartbeat past `3 × run_interval` during the sleep so a
+takeover would succeed. Spawn a second process to acquire
+the lease; verify the second process rebroadcasts the
+persisted envelope. On the first process's resumed broadcast,
+assert it receives the RPC's `nonce too low` or `already known`
+response (NOT `successful`) and the first process records the
+broadcast outcome WITHOUT emitting a misleading
+`payout_invariant_violation`. The first process MAY emit a
+`payout_runner_lease_lost` on the NEXT cadence cycle when the
+self-fencing check (§4.8b "Self-fencing on every §4.3 step")
+re-reads the lease token, but that emit is NOT a requirement
+of this test — the requirement is that the chain serializes
+the two broadcasts via nonce-uniqueness without either process
+double-spending. Test FAILS if both processes' broadcasts
+return `successful` OR if the first process emits
+`payout_invariant_violation` on the nonce-collision response.
+
 ### 4.8c Cancel reconfirm-stale outbox (v0.1.17 — codex round-18 MED-1 closure)
 
 Durable delivery record for the §7.1
@@ -2785,7 +2945,8 @@ Records are inserted via:
 POST /admin/payout/record-funding
 Authorization: Bearer <operator_key>
 Content-Type: application/json
-Idempotency-Key: <opaque>
+Idempotency-Key: <tx_hash — case-insensitive, 0x-prefixed lowercase hex,
+                  MUST equal request body tx_hash>
 
 { "from_address": "0x...sender of funds...",
   "to_address":   "0x...hot wallet — MUST equal payout.security.hot_wallet_address...",
@@ -2799,10 +2960,32 @@ Response:
   201 Created — record inserted; payout_funding_recorded
                 event emitted per §7.1.
   400         — missing field / amount_base_units <= 0 /
-                to_address != payout.security.hot_wallet_address.
+                to_address != payout.security.hot_wallet_address /
+                from_address == payout.security.hot_wallet_address
+                (v0.1.20 round-20 C2 closure: hot wallet may not
+                fund itself — see §3.2 deny-list).
   409 Conflict — UNIQUE(tx_hash) violation (already recorded).
-  422         — receipt verification mismatch (see below).
+  422         — receipt verification mismatch (see below) /
+                idempotency_key_mismatch (v0.1.20 round-20 C1
+                closure: see "Idempotency binding" below).
 ```
+
+**Idempotency binding (NORMATIVE — v0.1.20 round-20 C1 closure).**
+The `Idempotency-Key` header MUST equal the request body's `tx_hash`
+field (case-insensitive equality on `0x`-prefixed lowercase hex).
+Mismatch → 422 `idempotency_key_mismatch`. This collapses two
+potential idempotency keys into one and lets the existing
+`UNIQUE(tx_hash)` constraint be the sole enforcer; the v0.1.19
+"opaque key" framing was decorative — a buggy retry loop or
+operator typo could submit the same logical funding event with a
+fresh `Idempotency-Key` and a fresh `tx_hash` (e.g. one character
+off), inflating `cumulative_funding_usdc_base_units` past the
+real on-chain balance. The §7.4 drift alarm only PAGES on
+NEGATIVE drift, so positive inflation silently absorbs missing
+on-chain USDC. Binding the header to `tx_hash` makes
+`UNIQUE(tx_hash)` the load-bearing dedup AND requires the
+operator to commit to the tx_hash they're recording before the
+request fires.
 
 **`source = 'rpc-confirmed'` (ongoing, post-bootstrap):**
 
@@ -3420,8 +3603,30 @@ at parse time AND at every reload):**
 
 - `payout.tuning.address_cooling_off_period` >= 1h.
   Setting below 1h defeats the §3.3 stolen-token defense.
-- `payout.tuning.confirmation_blocks` ∈ [2, 50]. Below 2
-  widens the reorg-revert window beyond v0.1.x assumptions.
+- `payout.tuning.confirmation_blocks` ∈ [5, 200] (v0.1.20
+  round-20 M2 closure — was [2, 50]). **Finality model
+  (NORMATIVE):** `confirmation_blocks` is a SOFT-finality
+  threshold only — soft finality on Base is reached at the
+  sequencer; hard finality requires L1 commitment
+  (minutes-to-hour latency). The v0.1.19 default `5`
+  (~10s) is sized for sub-$100 per-payout amounts on a
+  network that has not yet experienced a sequencer
+  incident. Base has had ≥7-block reorgs during sequencer
+  incidents in 2024-2025; operators MUST size
+  `confirmation_blocks` against the per-payout amount.
+  Recommended baseline at the default
+  `payout.security.per_payout_cap_usdc_base_units =
+  1_000_000_000` ($1,000) is `confirmation_blocks >= 30`
+  (~60s). The default itself remains `5` in v0.1.20 to
+  avoid invalidating Step 1 IMPL behavior; a v0.2 sweep
+  may raise the default to track typical per-payout
+  amounts. Below 5 is rejected at parse time even though
+  v0.1.19 allowed it — operators with config values in
+  `[2, 4]` MUST raise to ≥5 before upgrading. The v0.1.19
+  default `5` is at the new floor, so operators on default
+  config need no action. 200 is the new ceiling (was 50) to
+  express L1-commitment-aligned settings for high-value
+  payouts.
 - `payout.tuning.low_balance_threshold` <= 2 ×
   `payout.security.per_day_cap_usdc_base_units`. The
   v0.1.5 draft used 10× but that allowed silencing the
@@ -3435,6 +3640,15 @@ at parse time AND at every reload):**
 - `payout.tuning.run_interval` ∈ [5m, 24h].
 - `payout.tuning.run_now_min_interval` ∈ [10s, 1h].
 - `payout.tuning.max_rows_per_run` ∈ [1, 500].
+- `payout.tuning.reorg_poll_window` ∈ [1h, 168h]. Sets the
+  window within which already-confirmed PROVIDER-PAYOUT
+  rows are re-polled every cadence cycle (v0.1.20 round-20
+  M1 closure — see §4.7 "Reorg poll cadence"). Below 1h
+  is too tight (a single cycle of RPC outage skips the
+  re-poll for hot rows entirely); above 168h is more
+  cost than benefit (the §7.4 hourly chain-balance
+  reconciliation already catches the drift side-effect of
+  any week-old reorg).
 
 Bounds on `payout.tuning.rpc_url_*_pin_spki` are syntactic
 (64-hex-char SHA-256 or empty); content-correctness is
@@ -3454,6 +3668,9 @@ Keys:
   rotation by the RPC provider is the legitimate hot-reload
   case)
 - `payout.tuning.max_rows_per_run`
+- `payout.tuning.reorg_poll_window` (v0.1.20 round-20 M1
+  closure — re-poll cadence for already-confirmed rows; see
+  §4.7)
 
 Splitting the namespace gives operators tuning headroom
 (adjust `confirmation_blocks` after observing first-month
@@ -3504,7 +3721,8 @@ operator-key endpoints log actor=operator_key):
 | `payout_low_native_balance` | `from_address, native_wei, threshold_wei, ts_utc` |
 | `payout_insufficient_funds` | `run_id, payout_id, provider_id, required_usdc_base_units, available_usdc_base_units, ts_utc` |
 | `payout_daily_cap_tripped` | `run_id, window_paid_usdc_base_units, cap_usdc_base_units, ts_utc` |
-| `payout_reorg_revert` (v0.1.15 adds `is_cancel_self_transfer` discriminator) | `payout_id, attempt_seq, tx_hash, last_seen_block, rpc_source, is_cancel_self_transfer (0=provider-payout reorg per §4.7 provider path; 1=cancel-self-transfer reorg per §4.7 cancel carve-out), ts_utc` |
+| `payout_reorg_revert` (v0.1.15 adds `is_cancel_self_transfer` discriminator; v0.1.20 round-20 M1 closure adds `observed_via`) | `payout_id, attempt_seq, tx_hash, last_seen_block, rpc_source, is_cancel_self_transfer (0=provider-payout reorg per §4.7 provider path; 1=cancel-self-transfer reorg per §4.7 cancel carve-out), observed_via ('reorg_poll_cadence' = caught by the §4.7 mandated re-poll loop; 'incidental' = caught during some other RPC call), ts_utc` |
+| `payout_reorg_poll_rpc_error` (severity=WARN; NEW v0.1.20 round-20 M1 closure) | `payout_id, attempt_seq, tx_hash, rpc_source, error_class, ts_utc` |
 | `payout_rpc_disagreement` | `payout_id, attempt_seq, rpc_a_state, rpc_b_state, ts_utc` |
 | `payout_chain_balance_drift_positive` | `from_address, in_db_expected_usdc_base_units, on_chain_usdc_base_units, drift_usdc_base_units, ts_utc` |
 | `payout_chain_balance_drift_negative` (severity=PAGE) | `from_address, in_db_expected_usdc_base_units, on_chain_usdc_base_units, drift_usdc_base_units, ts_utc` |
@@ -3521,7 +3739,7 @@ operator-key endpoints log actor=operator_key):
 | `payout_balance_queried` | `from_address, actor=operator_key, ts_utc` |
 | `payout_allowed_changed` | `provider_id, old_allowed, new_allowed, reason, actor=operator_key, ts_utc` |
 | `payout_signer_unavailable` | `from_address, error_class, ts_utc` |
-| `payout_invariant_violation` | `where, detail, ts_utc` |
+| `payout_invariant_violation` (severity=PAGE) | `where (enum: 'amount_credit_mismatch' (NEW v0.1.20 round-20 C3 closure), 'attempt_row_missing_during_sign', 'attempt_state_changed_during_sign', 'duplicate live attempt', 'runtime_flag missing', 'runtime_flags_bootstrap_sentinel_missing', 'stale_unbroadcast_attempt', 'trigger missing'), detail, ts_utc` |
 | `provider_payout_address_changed` | per §3.4 |
 | `provider_payout_address_change_rejected` | `reason, provider_id, src_ip, submitted_fingerprint, ts_utc` |
 | `provider_payout_address_rejected_unknown_provider` | `provider_id, submitted_fingerprint, src_ip, ts_utc` |
@@ -3790,6 +4008,62 @@ added to provider outflow sums (queries (A) and (B)
 above). Pair with the new `payout_cancel_self_transfer_confirmed`
 §7.1 event for per-event visibility and the per-week query
 for roll-up reconciliation.
+
+```sql
+-- (E) Hot-wallet self-funding detection (v0.1.20 round-20
+-- C2 closure). Any funding row where the source equals the
+-- destination is a hard payout_invariant_violation — the
+-- hot wallet cannot legally fund itself; this row is
+-- either an operator-key compromise fake-funding attempt
+-- (worst case) or a hand-edit (still bad). The §4.9
+-- endpoint rejects from_address == to_address at insertion;
+-- query (E) catches any row that slipped past validation
+-- (DB hand-edit, schema drift, future endpoint adding the
+-- same data shape without the from/to check).
+SELECT id, from_address, to_address, amount_base_units,
+       tx_hash, block_number, observed_at_utc, source
+  FROM payout_hot_wallet_funding
+ WHERE lower(from_address) = lower(to_address);
+
+-- (F) Money-conservation invariant (v0.1.20 round-20 M5
+-- closure). The load-bearing aggregate invariant on the
+-- payout pipeline: sum of consumed ledger credits MUST
+-- equal sum of confirmed non-abandoned non-cancel
+-- on-chain transfers. Any non-zero conservation_delta is
+-- a money-correctness incident, NOT a warning. Query (A)
+-- catches per-provider drift but does not name the
+-- aggregate invariant; query (F) is the canonical check.
+SELECT
+  (SELECT COALESCE(SUM(provider_credits), 0)
+     FROM ledger_payout_ready
+    WHERE status = 'consumed'
+      AND payout_currency = 'USDC-BASE')
+  -
+  (SELECT COALESCE(SUM(amount_base_units), 0)
+     FROM payout_attempts pa
+     INNER JOIN ledger_payout_ready lpr
+        ON lpr.id = pa.payout_id
+    WHERE lpr.status = 'consumed'
+      AND lpr.payout_currency = 'USDC-BASE'
+      AND pa.confirmed_at_utc IS NOT NULL
+      AND pa.abandoned_at_utc IS NULL
+      AND pa.is_cancel_self_transfer = 0)
+  AS conservation_delta;
+```
+
+**Operational binding for query (F) (NORMATIVE — v0.1.20
+round-20 M5 closure).** The operator MUST run query (F)
+weekly. ANY non-zero `conservation_delta` is a SEV-1
+incident: the operator MUST halt the runner via
+`/admin/payout/runtime-flags` (`payout.enabled=false`)
+until the drift source is identified and resolved. Query
+(F) supersedes query (A) as the canonical money-
+conservation check at v0.1.20; (A) remains useful for
+per-provider attribution when (F) is non-zero. Query (E)
+is paired with (F) — operators run BOTH on the same
+cadence (a non-zero (E) likely manifests as a non-zero (F)
+if the fake-funding has not yet been paid out, but (E)
+identifies the row directly).
 
 ## 8 Compliance posture (FR-P6)
 
