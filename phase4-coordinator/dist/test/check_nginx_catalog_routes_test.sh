@@ -28,6 +28,29 @@ if ! grep -qE '^[[:space:]]*location[[:space:]]+/catalog/[[:space:]]+\{' <<<"$AC
   fail "missing active 'location /catalog/ { ... }' block"
 fi
 
+if ! grep -qE '^[[:space:]]*location[[:space:]]+=[[:space:]]+/v1/pool/check[[:space:]]+\{' <<<"$ACTIVE"; then
+  fail "missing active 'location = /v1/pool/check { ... }' block"
+fi
+
+POOL_CHECK_PROXY=$(awk '
+  /^[[:space:]]*location[[:space:]]+=[[:space:]]+\/v1\/pool\/check[[:space:]]+\{/ { in_block=1; depth=1; next }
+  in_block {
+    nopen=gsub(/\{/, "{")
+    nclose=gsub(/\}/, "}")
+    depth += nopen - nclose
+    if ($0 ~ /proxy_pass[[:space:]]+/) { print }
+    if (depth == 0) { in_block=0 }
+  }
+' <<<"$ACTIVE")
+expected_pool_proxy='proxy_pass http://127.0.0.1:8443/v1/pool/check$is_args$args'
+if ! grep -Fq "$expected_pool_proxy" <<<"$POOL_CHECK_PROXY"; then
+  fail "/v1/pool/check block proxy_pass is not $expected_pool_proxy; got: $(echo "$POOL_CHECK_PROXY" | tr -d '\n' | head -c 200)"
+fi
+POOL_PROXY_COUNT=$(grep -cE 'proxy_pass[[:space:]]+' <<<"$POOL_CHECK_PROXY" || true)
+if [ "$POOL_PROXY_COUNT" -ne 1 ]; then
+  fail "/v1/pool/check block has $POOL_PROXY_COUNT proxy_pass directives, want exactly 1"
+fi
+
 # Scope the proxy_pass assertion to the body of the /catalog/ block
 # ONLY. A repo-wide grep would false-pass because the v0.2
 # /v1/receipt-keys/ block already proxies to 127.0.0.1:8443; a
@@ -62,14 +85,18 @@ fi
 # `return 404` (the actual catch-all). Fail closed if no catch-all
 # is found — the ordering invariant cannot be asserted without it.
 CATALOG_LINE=$(grep -nE '^[[:space:]]*location[[:space:]]+/catalog/' <<<"$ACTIVE" | head -1 | cut -d: -f1)
+POOL_CHECK_LINE=$(grep -nE '^[[:space:]]*location[[:space:]]+=[[:space:]]+/v1/pool/check' <<<"$ACTIVE" | head -1 | cut -d: -f1)
 CATCHALL_LINE=$(awk '/^[[:space:]]*location[[:space:]]+\/[[:space:]]+\{/ { saved=NR; next } saved && /^[[:space:]]*return[[:space:]]+404/ { print saved; saved=0 }' <<<"$ACTIVE" | tail -1)
 if [ -z "$CATCHALL_LINE" ]; then
   fail "TLS catch-all 'location / { return 404; }' block not found — nginx conf shape changed; the catalog-route ordering assertion would silently pass without this anchor"
 elif [ -n "$CATALOG_LINE" ] && [ "$CATALOG_LINE" -gt "$CATCHALL_LINE" ]; then
   fail "/catalog/ block (line $CATALOG_LINE) declared AFTER the catch-all location / { return 404 } block (line $CATCHALL_LINE)"
 fi
+if [ -n "$POOL_CHECK_LINE" ] && [ "$POOL_CHECK_LINE" -gt "$CATCHALL_LINE" ]; then
+  fail "/v1/pool/check block (line $POOL_CHECK_LINE) declared AFTER the catch-all location / { return 404 } block (line $CATCHALL_LINE)"
+fi
 
 if [ "$FAIL" -eq 0 ]; then
-  ok "SPEC-015 v0.3 §M.4 catalog routes present in nginx conf"
+  ok "coordinator public catalog and pool-check routes present in nginx conf"
 fi
 exit "$FAIL"
