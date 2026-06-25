@@ -1,18 +1,16 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.8 (2026-06-25, draft — round-9 codex audit
-fix pass: 2 CRIT + 5 MAJOR + 2 MED absorbed. FIRST codex-
-lens fix-pass; rounds 1-8 were Claude-internal subagents
-and the user shifted the audit lens to codex mid-loop per
-[[feedback-codex-only-audits]]. Codex caught two money-OUT
-critical defect classes the Claude rounds all missed:
-orphan-binding bypass on §9.5b.1 compensation and
-pre-confirmation double-attempt on §4.3. Audit history:
-round-1 1/5, round-2 5/12/10, round-3 3/9/8, round-4 2/6/13,
-round-5 1/2/6, round-6 0/5/9, round-7 0/3/7 (Claude lenses);
-round-8 2/2/7 (Claude lenses) deferred most findings, applied
-3 convergent; round-9 2/5/2 (codex) all absorbed in v0.1.8.
-See git log for full per-round detail.)
+**Version:** 0.1.9 (2026-06-25, draft — round-10 codex audit
+fix pass: 0 CRIT + 3 MAJOR + 5 MED + 7 LOW absorbed. Codex
+round-10 verified all 9 round-9 fixes landed clean and
+surfaced 15 new findings (defense-in-depth + schema
+specificity + edge cases). v0.1.9 absorbs all 15. Audit
+history: round-1 1/5, round-2 5/12/10, round-3 3/9/8,
+round-4 2/6/13, round-5 1/2/6, round-6 0/5/9, round-7 0/3/7
+(Claude lenses); round-8 2/2/7 (Claude lenses) deferred
+most findings, applied 3 convergent; round-9 2/5/2 (codex)
+all absorbed in v0.1.8; round-10 0/3/5/7 (codex) all
+absorbed in v0.1.9. See git log for full per-round detail.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -27,6 +25,181 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.9 (2026-06-25, draft — round-10 codex audit fix pass,
+all 15 findings absorbed):**
+
+Codex round-10 verified all 9 round-9 fixes landed clean (no
+regressions) and surfaced 15 new findings: 0 CRIT + 3 MAJOR
++ 5 MED + 7 LOW. The MAJORs are defense-in-depth gaps and
+schema-specificity issues the prior rounds didn't surface;
+the MEDIUMs are accounting + atomicity edge cases; the LOWs
+are wording nits and step-renumber drift. v0.1.9 closes
+every finding.
+
+MAJOR (closed):
+
+- **codex MAJOR-1: §4.3 step 6 lacked pre-broadcast Signer
+  output verification.** v0.1.8's §4.3 step 7 chain-side
+  verification only catches a buggy/compromised Signer
+  AFTER the broadcast already moved funds on-chain. v0.1.9
+  adds a pre-broadcast local-decode check: after `SignTx`
+  returns and BEFORE persist+broadcast, IMPL MUST decode
+  `rawSignedTx` and assert nonce / chain_id / to / value=0 /
+  calldata / gas / locally-recomputed tx_hash / `ecrecover`'d
+  sender all match the unsigned-tx the runner built. Mismatch
+  emits `payout_chain_value_mismatch
+  mismatch_class='prebroadcast_signed_tx'` PAGE and halts
+  BEFORE broadcast. Notably: the recovered-sender check
+  uses `ecrecover`, not just `Signer.FromAddress()` — a
+  compromised Signer could lie about `FromAddress`.
+
+- **codex MAJOR-2: §4.3 step 3 singleton-runner lease
+  referenced fields/algorithm that didn't exist.** v0.1.8
+  prose mentioned `(host, pid, started_at_utc)` and
+  heartbeat staleness against a `payout_runner_state` row
+  that has none of those columns. v0.1.9 adds §4.8b
+  `payout_runner_lease` table with explicit schema
+  (`holder_host`, `holder_pid`, `holder_started_at_utc`,
+  `holder_token`, `heartbeat_at_utc`, `acquired_at_utc`,
+  `takeover_count`) + full acquire / heartbeat / takeover /
+  self-fencing / release algorithm. Self-fencing on every
+  §4.3 step closes the stop-the-world-GC + resume class.
+  Two new §7.1 events: `payout_runner_lease_taken_over`
+  (PAGE), `payout_runner_lease_lost` (PAGE). Three IMPL
+  tests pin the multi-process, stale-takeover, and
+  manual-token-overwrite cases.
+
+- **codex MAJOR-3: §5.3 per-day cap accounting ignored live
+  unbroadcast attempts.** If the §4.8b lease guard fails
+  open (clock skew during takeover, multi-process race),
+  process A INSERTs a live attempt with `broadcast_at_utc
+  IS NULL`; process B's §5.3 cap query SKIPS it (filter is
+  `broadcast_at_utc IS NOT NULL`); both broadcast and
+  exceed the day cap. v0.1.9 §5.3 rewrites the cap query
+  to include reserved-but-not-yet-broadcast rows (the (B)
+  disjunct: `broadcast_at_utc IS NULL AND
+  confirmed_at_utc IS NULL AND updated_at_utc >=
+  :now_minus_24h`). The candidate row's amount is added
+  inside the §4.3 step 3(b) BEGIN IMMEDIATE txn before
+  INSERT; cap-trip rolls back the txn.
+
+MEDIUM (closed):
+
+- **codex MED-4: bootstrap sentinel only defined one
+  missing-row direction.** v0.1.8 handled
+  sentinel-present-but-flag-missing (halt + invariant
+  violation) but not sentinel-missing-but-flag-present
+  (an attacker who deleted only the sentinel could
+  trigger reseed that overwrites an operator-set pause
+  to value=0). v0.1.9 rewrites the bootstrap action-table
+  to require ALL THREE runtime tables (`runtime_flags`,
+  `runtime_flag_audit`, `runtime_flags_bootstrapped`)
+  simultaneously empty for first-ever seed; any other
+  partial state emits invariant violation + halts.
+
+- **codex MED-5: orphan compensation bound to current
+  mutable `ledger_payout_ready.provider_credits`.**
+  Post-orphan mutation of the ledger row would have
+  changed what compensation is allowed. v0.1.9 adds four
+  `observed_*` snapshot columns to `payout_reorg_orphans`
+  (provider_id, provider_credits, gross_credits,
+  amount_base_units) captured at orphan-observation time
+  and immutable thereafter. §9.5b.1 binds compensation to
+  these snapshot columns, NOT to current `lpr.*` values.
+
+- **codex MED-6: §9.5b.1 422 summary contradicted the
+  detailed orphan-binding rule.** Summary said
+  gross/operator credits match the original orphaned row;
+  detail correctly said `gross_credits =
+  orig.provider_credits` (note: NOT `orig.gross_credits`)
+  and `operator_credits = 0`. v0.1.9 rewrites the 422
+  summary to match the detail and reference the snapshot
+  columns from MED-5.
+
+- **codex MED-7: §4.8a outbox reaper could double-emit.**
+  v0.1.8's reaper scanned `emitted_to_log=0` rows older
+  than 5min and re-emitted — but a slow synchronous
+  emitter that committed the audit row, logged the event,
+  and crashed BEFORE flipping `emitted_to_log=1` would
+  trigger the reaper to emit again. v0.1.9 wraps both the
+  synchronous and reaper emit paths in a compare-and-set
+  claim (`UPDATE ... SET emitted_to_log=1 WHERE id=<id>
+  AND emitted_to_log=0 RETURNING id`); only the
+  successful claim emits. Every emitted log line MUST
+  include `event_id = <audit id>` (also added to the
+  `payout_flag_audit_reaped` event row in §7.1);
+  downstream consumers MUST de-dupe by event_id.
+
+- **codex MED-8: §9 go-live BetterStack prereq list
+  was incomplete.** v0.1.8 enumerated 10 events but
+  missed every event added since v0.1.6 (4 new PAGE
+  events from v0.1.6/v0.1.7/v0.1.8 alone). v0.1.9
+  rewrites the prereq item 6 to require BetterStack to
+  match EVERY §7.1 event with severity=PAGE or WARN,
+  re-enumerates the full set including the 5 new v0.1.8
+  + v0.1.9 events, and adds a discipline rule that
+  future SPEC-016 vX.Y MUST extend this list when
+  adding new PAGE/WARN events.
+
+LOW (closed):
+
+- §4.3 step 7 (a) calldata wording: `||` → "byte
+  concatenation" + explicit 68-byte length assertion.
+- §4.8a bootstrap-seed SQL comment refactored as a
+  4-row ACTION TABLE that explicitly covers all
+  combinations of sentinel/flags/audit table population.
+- §4.8 trigger-presence prose: "Both bootstrap triggers"
+  → "All three bootstrap-related triggers" + enumerated.
+- The v0.1.8 LOW-12 stale step-5 reference codex flagged
+  at line 2618 turned out to be a correctly-numbered
+  reference in the cancel-broadcast retry path (step 5 IS
+  the attempt-record step that picks up the persisted
+  pending-attempt row); no change needed. (Audited and
+  verified across all `§4.3 step N` references in §3-§9.)
+- Two dangling `§9.6` references rewritten as "§9
+  prerequisite item 6" (the actual BetterStack item).
+- Two singular `payout_chain_balance_drift` references
+  rewritten as `payout_chain_balance_drift_positive` +
+  `payout_chain_balance_drift_negative` (the actual
+  event names).
+- Appendix B extended with 5 new v0.2 stubs covering all
+  the v0.1.7 round-8 single-lens findings that v0.1.7
+  change-log marked deferred (asymmetric pause/resume
+  rate-limit, file-path normative pin sweep, payout.enabled
+  carve-out tightening, runtime.* → payout.runtime.*
+  rename, automated bucketing CI check).
+
+POSITIVE FINDINGS confirmed by codex round-10 (no fix needed):
+
+- All 9 codex round-9 fixes verified clean on round-10
+  re-audit. No regressions.
+- The §4.3 chain-side value verification (round-9 MAJOR-3)
+  passes codex re-verification including the ABI selector
+  + Transfer-log topic constants check via `cast` against
+  real ERC-20 specs.
+- The §3.3 TOCTOU second pause check, the §4.8a outbox
+  table, the §4.9 three-trigger assertion, and the
+  §9.5b.1 strict equality all clean.
+
+New §7.1 events (2): `payout_runner_lease_taken_over`
+(PAGE), `payout_runner_lease_lost` (PAGE).
+
+New schema (1 table): `payout_runner_lease` with full
+acquire/heartbeat/takeover/self-fence/release algorithm.
+
+New §4.7 columns (4): `observed_provider_id`,
+`observed_provider_credits`, `observed_gross_credits`,
+`observed_amount_base_units` on `payout_reorg_orphans`.
+
+Per [[feedback-codex-only-audits]], round 11 will be codex
+via /ask codex against v0.1.9.
+
+Audited at /Users/augstar/macprovider-poc/.omc/artifacts/ask/
+codex-audit-spec-016-v0-1-8-...-2026-06-25T03-54-29-132Z.md
+
+This commit was authored in /Users/augstar/macprovider-poc-spec016
+(dedicated worktree for SPEC-016 audit loop).
 
 **v0.1.8 (2026-06-25, draft — round-9 codex audit fix pass,
 all 9 findings absorbed):**
@@ -1344,28 +1517,50 @@ any step on error and logging structurally:
 3. **Singleton-runner lease (NORMATIVE — closes the multi-
    process double-attempt class).** Steps 4–5 (cap re-check,
    attempt lookup, nonce allocation, attempt persistence)
-   MUST run under TWO compound guards:
-   (a) a DB-backed singleton runner lease — IMPL takes an
-   advisory lease row in `payout_runner_state` (or an
-   equivalent SQLite-backed mutex) at process start; only
-   the lease-holder process executes the runner. If the
-   lease is held by another `(host, pid, started_at_utc)`
-   and the holder is still alive (heartbeat updated within
-   the last `payout.tuning.run_interval × 3`), THIS process
-   MUST refuse to start the runner and emit
-   `payout_runner_lease_conflict` per §7.1 (severity=PAGE).
-   (b) a per-attempt `BEGIN IMMEDIATE` transaction that
-   spans the §5 cap re-read, nonce allocation, and
-   `payout_attempts` INSERT (steps 4–5). On COMMIT, the
-   row is observable by every other reader.
-   The new partial UNIQUE INDEX
-   `idx_pa_one_live_non_cancel_per_payout` (defined in
-   §4.5) is the DB-side belt-and-suspenders defense: even
-   if both the lease AND the BEGIN IMMEDIATE guards are
-   bypassed, the index forces the second INSERT to fail
-   with `UNIQUE constraint violation`, which IMPL MUST
-   catch and abort the run with
-   `payout_invariant_violation where='duplicate live attempt'`.
+   MUST run under THREE compound guards:
+
+   (a) **DB-backed singleton runner lease.** The IMPL MUST
+   hold a row in the `payout_runner_lease` table (schema
+   in §4.8b) for the duration of every cadence cycle. Lease
+   acquire, takeover, and heartbeat semantics are
+   normatively pinned in §4.8b (codex round-10 MAJOR-2
+   closure). Before executing ANY of step 4–5, the IMPL
+   MUST re-read its own `holder_token` from the lease row
+   inside the same `BEGIN IMMEDIATE` transaction as step
+   3(b) below; if the token has changed (i.e. another
+   process took over), the current process MUST self-halt
+   the cycle and emit `payout_runner_lease_conflict` per
+   §7.1 (severity=PAGE). The token comparison is the
+   "self-fencing" check that protects against the
+   classic stop-the-world-GC-then-resume scenario.
+
+   (b) **Per-attempt `BEGIN IMMEDIATE` transaction.** A
+   single SQLite transaction spans the §5 cap re-read
+   (using the reservation-aware query from §5.3 NEW v0.1.9
+   which counts live reserved attempts, NOT just
+   broadcasts), the §4.8b lease-token re-read, nonce
+   allocation, and `payout_attempts` INSERT (step 4–5). On
+   COMMIT, the row is observable by every other reader.
+   The `BEGIN IMMEDIATE` mode (not `BEGIN DEFERRED`) is
+   required so the txn takes a write lock at start, not at
+   first write — this serialises against any concurrent
+   §4.3 cycle attempting the same payout_id even if the
+   lease guard is bypassed.
+
+   (c) **DB-side belt-and-suspenders partial UNIQUE
+   INDEX.** The `idx_pa_one_live_non_cancel_per_payout`
+   index (defined in §4.5) forces the second INSERT to
+   fail with `UNIQUE constraint violation` even if both
+   guards (a) and (b) are bypassed. IMPL MUST catch and
+   abort the run with
+   `payout_invariant_violation where='duplicate live attempt'`
+   plus halt the runner pending operator forensic review.
+
+   The three guards compose: (a) prevents two processes
+   from starting the cycle; (b) prevents two cycles within
+   one process from racing; (c) catches any residual
+   bypass at the DB layer. Any one defense holding stops
+   the double-spend.
 4. **Cap check.** Apply §5 caps. If the row's amount exceeds
    per-payout cap, OR cumulative paid + broadcast amount this
    24h window would exceed per-day cap, skip the row and
@@ -1382,14 +1577,50 @@ any step on error and logging structurally:
    INDEX from §4.5 enforces at-most-one live non-cancel
    row per payout_id at the DB layer), then COMMIT the
    `BEGIN IMMEDIATE` transaction from step 3.
-6. **Build + sign + broadcast.** Build USDC `transfer(to,
-   amount)` calldata; build EIP-1559 tx with hot-wallet
-   sender, the computed nonce, chain id 8453, USDC contract
-   as `to`; sign via the `Signer` interface (§6.3). Persist
-   `raw_signed_tx` AND its computed `tx_hash` AND
-   `broadcast_at_utc` on the `payout_attempts` row BEFORE
-   invoking `eth_sendRawTransaction` on either RPC. A
-   process crash between persistence and broadcast leaves
+6. **Build + sign + verify-pre-broadcast + persist + broadcast.**
+   Build USDC `transfer(to, amount)` calldata; build EIP-1559
+   tx with hot-wallet sender, the computed nonce, chain id
+   8453, USDC contract as `to`; sign via the `Signer`
+   interface (§6.3).
+
+   **Pre-broadcast Signer-output verification (NORMATIVE —
+   closes codex round-10 MAJOR-1).** AFTER `SignTx` returns
+   and BEFORE persisting `raw_signed_tx` or invoking
+   `eth_sendRawTransaction`, the IMPL MUST locally decode
+   the returned `rawSignedTx` and assert ALL of the
+   following match the unsigned tx the runner built:
+   - `nonce` equals the runner-computed nonce
+   - `chain_id` equals 8453 (Base mainnet)
+   - `to` equals the configured USDC contract address
+     (`0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913`)
+   - `value` equals 0 (USDC transfer carries amount in
+     calldata, not in the tx value field)
+   - `input` (calldata) is byte-equal to the runner-built
+     calldata (`0xa9059cbb` selector + abi.encode(
+     effective_address, amount_base_units))
+   - `max_priority_fee_per_gas` and `max_fee_per_gas` are
+     within the bounds the runner computed
+   - locally recompute `tx_hash` from the signed envelope
+     and assert it equals the `txHash` the Signer returned
+   - locally `ecrecover` the signature and assert the
+     recovered address equals
+     `payout.security.hot_wallet_address` (NOT just trust
+     `Signer.FromAddress()` — a compromised Signer could
+     return a tx signed by a different key while
+     advertising the right `FromAddress`)
+
+   Any mismatch HALTS the runner BEFORE broadcast, emits
+   `payout_chain_value_mismatch mismatch_class='prebroadcast_signed_tx'`
+   per §7.1 (severity=PAGE), and pages the operator. The
+   pre-broadcast check defeats a Signer-compromise class
+   that the §4.3 step 7 chain-side verification only
+   catches AFTER funds move; the pre-broadcast check
+   stops the attack pre-flight.
+
+   THEN persist `raw_signed_tx` AND its computed `tx_hash`
+   AND `broadcast_at_utc` on the `payout_attempts` row
+   BEFORE invoking `eth_sendRawTransaction` on either RPC.
+   A process crash between persistence and broadcast leaves
    the row eligible for retry (§4.5) without nonce loss.
 7. **Confirm via TWO independent RPCs (with chain-side
    value verification).** Poll both configured RPCs (§9.2)
@@ -1416,13 +1647,17 @@ any step on error and logging structurally:
    (a) **Transaction input matches the expected ABI
    calldata.** Fetch the full transaction (not just the
    receipt) via `eth_getTransactionByHash` on each RPC and
-   assert `tx.input == "0xa9059cbb" || abi.encode(address,
-   uint256)` where `address = effective_address`
-   (left-padded to 32 bytes) and `uint256 =
-   amount_base_units`. The 4-byte selector
-   `0xa9059cbb` is the keccak256 prefix of
-   `transfer(address,uint256)` and is fixed across all
-   ERC-20 tokens; the IMPL MUST reject any other selector.
+   assert `tx.input` is byte-equal to the concatenation
+   `0xa9059cbb || abi.encode(address, uint256)` (i.e.
+   exactly 68 bytes: 4-byte selector + 32-byte
+   left-padded address + 32-byte uint256 amount), where
+   `address = effective_address` (left-padded to 32
+   bytes) and `uint256 = amount_base_units` (big-endian
+   uint256). The 4-byte selector `0xa9059cbb` is the
+   keccak256 prefix of `transfer(address,uint256)` and is
+   fixed across all ERC-20 tokens; the IMPL MUST reject
+   any other selector AND reject any `tx.input` length
+   other than exactly 68 bytes.
 
    (b) **Recovered sender equals the hot wallet.** Recover
    the `from` address from the tx signature (or trust the
@@ -1783,6 +2018,19 @@ CREATE TABLE IF NOT EXISTS payout_reorg_orphans (
     last_seen_block  INTEGER NOT NULL,
     observed_at_utc  TEXT NOT NULL,
     rpc_source       TEXT NOT NULL,
+    -- Snapshot columns (v0.1.9 — codex round-10 MED-5
+    -- closure): captured at orphan-observation time so
+    -- §9.5b.1 compensation binds to IMMUTABLE values, not
+    -- to current ledger_payout_ready.provider_credits
+    -- (which could be mutated post-orphan by a compromised
+    -- operator-key calling a hypothetical SPEC-005 admin
+    -- mutation endpoint). These columns are the canonical
+    -- compensation contract for the §9.5b.1 422
+    -- orphan_mismatch check.
+    observed_provider_id           TEXT    NOT NULL,
+    observed_provider_credits      INTEGER NOT NULL,
+    observed_gross_credits         INTEGER NOT NULL,
+    observed_amount_base_units     INTEGER NOT NULL,
     operator_resolution TEXT NULL,
     compensation_settlement_id INTEGER NULL REFERENCES ledger_payout_ready(id) ON DELETE RESTRICT,
     resolved_at_utc  TEXT NULL,
@@ -1790,6 +2038,18 @@ CREATE TABLE IF NOT EXISTS payout_reorg_orphans (
 );
 CREATE INDEX IF NOT EXISTS idx_pro_unresolved ON payout_reorg_orphans(observed_at_utc) WHERE resolved_at_utc IS NULL;
 ```
+
+The §4.7 orphan-recording flow (operator runbook +
+`/admin/payout/record-orphan` endpoint) MUST populate the
+four `observed_*` snapshot columns at INSERT time from a
+join against `ledger_payout_ready` AND `payout_attempts`:
+`observed_provider_id = lpr.provider_id`,
+`observed_provider_credits = lpr.provider_credits`,
+`observed_gross_credits = lpr.gross_credits`,
+`observed_amount_base_units = pa.amount_base_units`.
+Once written, these columns are immutable for the orphan
+row's lifetime; §9.5b.1 binds compensation to them, NOT
+to the current `lpr.*` values.
 
 `compensation_settlement_id` is the new SPEC-005 row's id
 issued to compensate the provider for the orphaned payment
@@ -1977,6 +2237,124 @@ an IMPL to place the INSERT inside `runner.Start()` AFTER
 the loop begins, re-opening the v0.1.3 C2 fake-funding
 closure for one cycle.
 
+### 4.8b Singleton-runner lease table (v0.1.9 — codex round-10 MAJOR-2 closure)
+
+The §4.3 step 3 singleton-runner lease guard requires a
+concrete table + algorithm. The v0.1.8 prose referenced
+`(host, pid, started_at_utc)` and a heartbeat without
+defining the schema or takeover semantics — codex round-10
+correctly flagged this as not implementable.
+
+```sql
+CREATE TABLE IF NOT EXISTS payout_runner_lease (
+    id                       INTEGER PRIMARY KEY CHECK(id = 1),
+    holder_host              TEXT NOT NULL,
+    holder_pid               INTEGER NOT NULL,
+    holder_started_at_utc    TEXT NOT NULL,
+    holder_token             TEXT NOT NULL,   -- random 16-byte
+                                              -- hex; rotates on
+                                              -- every (re)acquire
+    heartbeat_at_utc         TEXT NOT NULL,
+    acquired_at_utc          TEXT NOT NULL,
+    takeover_count           INTEGER NOT NULL DEFAULT 0
+);
+
+-- Bootstrap seed: zero-row table by default (no lease until
+-- the first runner process acquires it).
+```
+
+**Lease semantics (NORMATIVE):**
+
+- **Acquire.** On runner start, IMPL MUST attempt acquire
+  in a single `BEGIN IMMEDIATE` transaction:
+  1. `SELECT * FROM payout_runner_lease WHERE id = 1`.
+  2. If no row exists, `INSERT` a row with the current
+     process's `(holder_host, holder_pid,
+     holder_started_at_utc, fresh holder_token,
+     heartbeat_at_utc=now, acquired_at_utc=now,
+     takeover_count=0)`. COMMIT. Lease acquired.
+  3. If a row exists AND `heartbeat_at_utc >= now -
+     (3 × payout.tuning.run_interval)` (the holder is
+     alive), the acquire FAILS. Emit
+     `payout_runner_lease_conflict` per §7.1
+     (severity=PAGE) and refuse to start the runner.
+  4. If a row exists AND `heartbeat_at_utc < now -
+     (3 × payout.tuning.run_interval)` (the holder is
+     stale), perform a TAKEOVER: `UPDATE
+     payout_runner_lease SET holder_host=<this host>,
+     holder_pid=<this pid>, holder_started_at_utc=
+     <this started time>, holder_token=<fresh 16-byte
+     hex>, heartbeat_at_utc=now, acquired_at_utc=now,
+     takeover_count=takeover_count+1 WHERE id=1`. COMMIT.
+     Lease acquired via takeover. Emit a new
+     `payout_runner_lease_taken_over` event per §7.1
+     (severity=PAGE — takeover is rare and operationally
+     significant).
+
+- **Heartbeat.** While running, the IMPL MUST update
+  `heartbeat_at_utc = now` on the lease row at least
+  every `payout.tuning.run_interval` (the heartbeat
+  cadence and the run cadence are the same). The heartbeat
+  UPDATE MUST be a `BEGIN IMMEDIATE` transaction that ALSO
+  re-asserts `WHERE holder_token = <this process's
+  acquired token>`; if the UPDATE affects 0 rows, this
+  process has been taken over and MUST self-halt with
+  `payout_runner_lease_lost` (severity=PAGE).
+
+- **Self-fencing on every §4.3 step.** Before each step
+  4, 5, 6, 7, 8 of §4.3, the IMPL MUST re-read
+  `holder_token` from the lease row (within the same
+  `BEGIN IMMEDIATE` transaction as the step 3(b) txn
+  for steps 4–5; standalone read for steps 6–8) and
+  compare to the in-memory acquired token. Mismatch
+  triggers self-halt + `payout_runner_lease_lost`. This
+  defeats the stop-the-world-GC class where this process
+  stalled long enough for a takeover, then resumed and
+  tried to broadcast a tx the new holder doesn't know
+  about.
+
+- **Release.** On clean shutdown, the IMPL MUST `DELETE
+  FROM payout_runner_lease WHERE id=1 AND holder_token =
+  <acquired token>` so the next process can acquire
+  without waiting the takeover-stale window. A crash skips
+  this; the next process triggers takeover after the
+  stale window elapses.
+
+- **Same-DB pin.** The `payout_runner_lease` table MUST
+  live in the same SQLite database file as
+  `payout_runner_state`, `payout_attempts`,
+  `runtime_flags`, and SPEC-005's `ledger_payout_ready`
+  (mirrors §3.1 / §4.7 / §4.8a pins). IMPL MUST share one
+  `*sql.DB` handle across the lease, runner, and §6.4.1
+  endpoints — otherwise the §4.3 step 3(b) BEGIN IMMEDIATE
+  cannot atomically re-read the lease token alongside the
+  cap re-check.
+
+**Two new §7.1 events:**
+
+- `payout_runner_lease_taken_over` (severity=PAGE) — fields
+  `prior_holder_host, prior_holder_pid, prior_holder_started_at_utc,
+  prior_heartbeat_at_utc, new_holder_host, new_holder_pid,
+  takeover_count, ts_utc`.
+- `payout_runner_lease_lost` (severity=PAGE) — fields
+  `local_pid, local_holder_token, observed_holder_token,
+  observed_holder_host, observed_holder_pid, ts_utc`.
+
+IMPL test required (1): spawn two coordinator processes in
+quick succession against the same DB; assert the first
+acquires the lease and the second emits
+`payout_runner_lease_conflict` and exits.
+
+IMPL test required (2): kill the lease-holder process with
+`-9`; wait `3 × run_interval`; spawn a new coordinator; assert
+takeover succeeds and `payout_runner_lease_taken_over` is
+emitted with `takeover_count=1`.
+
+IMPL test required (3): in a single process, manually
+overwrite the lease row's `holder_token` to a different value;
+on the next §4.3 cycle, assert the self-fencing check halts the
+runner with `payout_runner_lease_lost`.
+
 ### 4.8a Runtime flags table (v0.1.7 — `runtime.*` persistence)
 
 ```sql
@@ -2027,17 +2405,35 @@ CREATE TABLE IF NOT EXISTS runtime_flags_bootstrapped (
     bootstrapped_at_utc TEXT NOT NULL
 );
 
--- First-ever-init seed (runs ONLY when the sentinel row
--- does NOT exist). Wrapped in a single SQLite transaction:
+-- First-ever-init seed runs ONLY when ALL THREE runtime
+-- tables are simultaneously empty (codex round-10 MED-4
+-- closes the sentinel-asymmetry case: v0.1.8 only checked
+-- the sentinel-present-but-flag-missing direction; the
+-- sentinel-missing-but-flag-present case could let an
+-- attacker who deleted only the sentinel trigger a reseed
+-- that overwrites an operator-set pause to value=0). The
+-- runtime_flag_audit table is checked too because any
+-- legitimate runtime_flags row must have a matching audit
+-- row by the §4.8a discipline.
 BEGIN IMMEDIATE;
-  -- Abort if sentinel exists (NOT first-ever boot).
-  -- IMPL MUST check this in Go BEFORE issuing the INSERTs
-  -- below; if SELECT count(*) FROM runtime_flags_bootstrapped > 0
-  -- AND SELECT count(*) FROM runtime_flags WHERE
-  -- name='registration_paused' = 0, EMIT
-  -- `payout_invariant_violation where='runtime_flag missing'
-  -- name='registration_paused'` and HALT before
-  -- accepting traffic. DO NOT recreate the row as value=0.
+  -- ACTION TABLE (IMPL MUST implement these checks in
+  -- Go BEFORE issuing the INSERTs below):
+  --
+  -- runtime_flags_bootstrapped: EMPTY,  runtime_flags: EMPTY,  runtime_flag_audit: EMPTY
+  --   → first-ever boot; proceed with INSERTs below.
+  -- runtime_flags_bootstrapped: NONEMPTY, runtime_flags: NONEMPTY, runtime_flag_audit: NONEMPTY-or-EMPTY
+  --   → normal restart; SKIP seed; let §6.4.1 audit-trail
+  --     discipline below handle the audit row check.
+  -- runtime_flags_bootstrapped: NONEMPTY, runtime_flags: EMPTY (for ANY closed-set flag)
+  --   → tampering or migration error; EMIT
+  --     `payout_invariant_violation where='runtime_flag missing'
+  --     name='<flag_name>'` per §7.1 (severity=PAGE) and HALT
+  --     before accepting traffic. DO NOT recreate the row.
+  -- runtime_flags_bootstrapped: EMPTY, runtime_flags: NONEMPTY OR runtime_flag_audit: NONEMPTY
+  --   → sentinel-tampering / partial-DB-restore; EMIT
+  --     `payout_invariant_violation where='runtime_flags_bootstrap_sentinel_missing'`
+  --     per §7.1 (severity=PAGE) and HALT before accepting
+  --     traffic. DO NOT reseed.
   INSERT INTO runtime_flags
     (name, value, updated_at_utc, updated_by_actor, updated_reason)
   VALUES
@@ -2086,18 +2482,48 @@ admin endpoint MUST perform the following in ONE
 If COMMIT fails, the §6.4.1 endpoint returns 500 and the
 §7.1 event is NOT emitted (because nothing committed —
 this is the consistent failure mode). AFTER COMMIT
-succeeds, the endpoint handler synchronously emits the
-§7.1 zerolog event from the just-committed audit row, then
-issues a follow-up UPDATE setting `emitted_to_log = 1`. A
-background reaper (cadence: every `payout.tuning.run_interval`)
-MUST scan `runtime_flag_audit WHERE emitted_to_log = 0
-AND occurred_at_utc < now - 5 minutes` and re-emit those
-events, on the theory that they committed but the
-emitter crashed before the synchronous log write. The
-reaper increments a `payout_flag_audit_reaped` counter
-per §7.1 (severity=WARN) so operators can detect a
-chronic emitter crash. The DB row IS the canonical audit
-record; the log line is a notification view of it.
+succeeds, the endpoint handler MUST:
+
+1. Run a compare-and-set claim in a `BEGIN IMMEDIATE`
+   txn: `UPDATE runtime_flag_audit SET emitted_to_log = 1
+   WHERE id = <committed audit id> AND emitted_to_log = 0
+   RETURNING id`. If the UPDATE returns 0 rows, another
+   emitter (sync or reaper) has already claimed this row;
+   skip the log emit.
+2. If the claim succeeded (returned 1 row), synchronously
+   emit the §7.1 zerolog event from the committed audit
+   row. The log line MUST include `event_id = <audit id>`
+   so downstream consumers can dedupe.
+
+A background reaper (cadence: every
+`payout.tuning.run_interval`) MUST scan `runtime_flag_audit
+WHERE emitted_to_log = 0 AND occurred_at_utc < now -
+5 minutes` for orphaned rows (committed but the
+synchronous emitter crashed before the compare-and-set
+above). For each row, the reaper MUST:
+
+1. Run the SAME compare-and-set claim
+   (`UPDATE ... SET emitted_to_log = 1 WHERE id = <row id>
+   AND emitted_to_log = 0`) — closes codex round-10 MED-7
+   double-emit class (without CAS, the reaper and a
+   late-running synchronous emitter could both emit the
+   same row).
+2. If the claim succeeded, emit the §7.1 zerolog event
+   with `event_id = <audit id>` AND increment the
+   `payout_flag_audit_reaped` counter per §7.1
+   (severity=WARN) so operators can detect a chronic
+   emitter crash. If the claim failed, skip.
+
+Downstream log consumers (BetterStack alert filter, log
+shippers, dashboards) MUST de-dupe events by `event_id` —
+the spec guarantees at-MOST-once delivery from any single
+emitter site (via CAS), but the network/forwarder layer
+between zerolog and the downstream consumer can still
+deliver duplicates; dedupe-by-event_id is the canonical
+defense.
+
+The DB row IS the canonical audit record; the log line is
+a notification view of it.
 
 **Audit-trail discipline (renamed from "cross-check
 against raw DB write" in v0.1.7).** Operators MUST scan
@@ -2145,8 +2571,10 @@ the §7.1 zerolog line is emitted AFTER commit; assert
 `emitted_to_log` flips to 1 after the log write.
 
 **Trigger-presence assertion (defense against DROP TRIGGER
-+ UPDATE bypass).** Both bootstrap triggers (and the
-`trg_lpr_terminal_status_guard` trigger from SPEC-005) are
++ UPDATE bypass).** All three bootstrap-related triggers
+(`trg_prs_bootstrap_one_way`, `trg_pa_bootstrap_flip`,
+`trg_pa_bootstrap_flip_insert`) and the
+`trg_lpr_terminal_status_guard` trigger from SPEC-005 are
 soft DB-side guards — a compromised actor with DB write
 access can `DROP TRIGGER` + mutate + `CREATE TRIGGER` to
 bypass them. v0.1.4 hardens this by requiring IMPL to
@@ -2374,16 +2802,49 @@ config + restart. v0.1 does NOT auto-split.
 `5_000_000_000` (i.e. $5,000). Computed against a rolling
 24h window using `broadcast_at_utc` (NOT `confirmed_at_utc`)
 so a broadcast burst cannot bypass the cap during the
-confirmation-lag window:
+confirmation-lag window. v0.1.9 (codex round-10 MAJOR-3
+closure) extends the query to ALSO count "reserved" attempts
+— rows INSERTed by §4.3 step 5 but not yet broadcast (e.g.
+crashed between persist+broadcast, OR a concurrent process
+inserting in parallel if the §4.8b lease guard somehow
+fails open). Without the reservation count, a parallel
+process whose lease check passes (e.g. clock skew during
+takeover) could INSERT an unbroadcast live attempt that
+the cap query skips because `broadcast_at_utc IS NULL`;
+both processes then proceed to broadcast and the day cap
+is exceeded.
 
 ```sql
+-- Reservation-aware query (NORMATIVE — codex round-10 MAJOR-3).
 SELECT COALESCE(SUM(amount_base_units), 0)
   FROM payout_attempts
- WHERE broadcast_at_utc IS NOT NULL
-   AND abandoned_at_utc IS NULL
-   AND broadcast_at_utc >= :now_minus_24h
-   AND broadcast_at_utc <= :now;
+ WHERE abandoned_at_utc IS NULL
+   AND (
+     -- (A) broadcasts in the rolling 24h window
+     (broadcast_at_utc IS NOT NULL
+      AND broadcast_at_utc >= :now_minus_24h
+      AND broadcast_at_utc <= :now)
+     OR
+     -- (B) live reserved attempts (INSERTed but not yet
+     --     broadcast). updated_at_utc bounds the freshness
+     --     so a long-stranded reservation doesn't pin the
+     --     cap forever; if a reservation older than 24h
+     --     hasn't broadcast, it should have been abandoned
+     --     or retried by the §4.5 retry path.
+     (broadcast_at_utc IS NULL
+      AND confirmed_at_utc IS NULL
+      AND updated_at_utc >= :now_minus_24h
+      AND updated_at_utc <= :now)
+   );
 ```
+
+The candidate row's `amount_base_units` is ADDED to the
+above sum INSIDE the §4.3 step 3(b) `BEGIN IMMEDIATE`
+transaction before the INSERT — i.e. the cap check
+includes the row about to be inserted. The cap check and
+the INSERT are atomic; if the candidate row would push
+the sum over the cap, the txn ROLLBACKs and `payout_capped`
+is emitted.
 
 The query includes `is_cancel_self_transfer = 1` rows so
 operator-triggered cancel transfers count against the same
@@ -2811,8 +3272,8 @@ old + new values for operator audit trail. **`payout_config_reloaded`
 is severity=PAGE** — a hot-reload of any tuning key is a
 high-signal operational event (operator-key compromise can
 weaponize this surface, see hard floors + reload-time
-re-enforcement below). The BetterStack filter §9.6 MUST
-match this event name.
+re-enforcement below). The BetterStack filter (§9
+prerequisite item 6) MUST match this event name.
 
 **Reload-time bound re-enforcement (REQUIRED).** Every
 config-parse-time bound on a `payout.tuning.*` key MUST
@@ -2935,14 +3396,18 @@ operator-key endpoints log actor=operator_key):
 | `provider_payout_address_rejected_unknown_provider` | `provider_id, submitted_fingerprint, src_ip, ts_utc` |
 | `payout_chain_value_mismatch` (severity=PAGE; NEW v0.1.8) | `payout_id, attempt_seq, tx_hash, mismatch_class (input_calldata, sender_recovery, transfer_log_count, transfer_log_to, transfer_log_amount, rpc_disagreement_on_logs), expected, observed, ts_utc` |
 | `payout_runner_lease_conflict` (severity=PAGE; NEW v0.1.8) | `local_pid, local_started_at_utc, holder_host, holder_pid, holder_started_at_utc, holder_heartbeat_at_utc, ts_utc` |
-| `payout_flag_audit_reaped` (severity=WARN; NEW v0.1.8) | `flag_audit_id, flag_name, old_value, new_value, occurred_at_utc, reap_lag_seconds, ts_utc` |
+| `payout_flag_audit_reaped` (severity=WARN; NEW v0.1.8; v0.1.9 adds `event_id`) | `event_id (=runtime_flag_audit.id), flag_audit_id, flag_name, old_value, new_value, occurred_at_utc, reap_lag_seconds, ts_utc` |
+| `payout_runner_lease_taken_over` (severity=PAGE; NEW v0.1.9) | `prior_holder_host, prior_holder_pid, prior_holder_started_at_utc, prior_heartbeat_at_utc, new_holder_host, new_holder_pid, takeover_count, ts_utc` |
+| `payout_runner_lease_lost` (severity=PAGE; NEW v0.1.9) | `local_pid, local_holder_token, observed_holder_token, observed_holder_host, observed_holder_pid, ts_utc` |
 
 ### 7.1.1 Where these events live
 
 All events listed above are JOURNALCTL-only at v0.1.2 (zerolog
 to stdout, captured by systemd-journald, archived per the
-existing pipeline + BetterStack filter §9.6). SQL-side
-promotion of `payout_chain_balance_drift`,
+existing pipeline + BetterStack filter per §9
+prerequisite item 6). SQL-side
+promotion of `payout_chain_balance_drift_positive`,
+`payout_chain_balance_drift_negative`,
 `payout_rpc_disagreement`, `payout_signer_unavailable`, and
 `payout_invariant_violation` to the existing audit-store
 schema (`phase4-coordinator/internal/audit/store.go`, which
@@ -3323,12 +3788,21 @@ discharged:
                    OR provider_credits exceeds
                    payout.security.per_payout_cap_usdc_base_units,
                    OR no matching unresolved orphan record,
-                   OR orphan-binding mismatch (provider_id,
-                   provider_credits, gross_credits, or
-                   operator_credits does not match the
-                   original orphaned row — closes codex
-                   round-9 CRIT-1; see normative
-                   requirements below).
+                   OR orphan-binding mismatch (codex
+                   round-9 CRIT-1 + round-10 MED-6 align
+                   summary with detail): request
+                   provider_id does not equal
+                   pro.observed_provider_id, OR request
+                   provider_credits does not equal
+                   pro.observed_provider_credits, OR
+                   request gross_credits does not equal
+                   pro.observed_provider_credits (NOTE:
+                   the compensation gross MUST equal the
+                   observed PROVIDER credits, not the
+                   observed gross — operator share is
+                   pinned to 0), OR request
+                   operator_credits != 0. See normative
+                   requirements below.
    ```
 
    Normative requirements on the SPEC-005 IMPL:
@@ -3365,33 +3839,44 @@ discharged:
      trail covers admin-inserted rows separately from
      settlement-emitted rows.
    - **The SPEC-005 IMPL MUST bind the compensation row to
-     the original orphaned `ledger_payout_ready` row's
-     provider_id AND credit values in the SAME SQLite
-     transaction as the INSERT.** Closes codex round-9
-     CRIT-1: the v0.1.7 wording only required existence of
-     an unresolved orphan row, not field-equality with the
-     compensation request body. A compromised operator key
-     could use one real orphan (say, $10 owed to provider A)
-     to authorize a compensation row of any size to any
-     provider B, bounded only by the per-call cap (e.g.
-     $1000 to attacker-controlled provider B). v0.1.8
-     requires the IMPL to parse `orig_payout_id` and
+     the original orphan's IMMUTABLE snapshot columns in
+     the SAME SQLite transaction as the INSERT.** Closes
+     codex round-9 CRIT-1 + round-10 MED-5: the binding is
+     to `payout_reorg_orphans.observed_*` (snapshot at
+     orphan-observation time per §4.7), NOT to
+     `ledger_payout_ready.*` (mutable). v0.1.8 originally
+     bound to current `lpr.*` values; v0.1.9 (codex round-10
+     MED-5 closure) tightens to the snapshot columns so a
+     compromised operator-key calling a future SPEC-005
+     ledger-mutation endpoint cannot change what
+     compensation is allowed for an already-observed
+     orphan. v0.1.9 (codex round-10 CRIT-1 framing):
+     the IMPL MUST parse `orig_payout_id` and
      `orig_attempt_seq` from the `idempotency_key` regex
-     match, then JOIN `payout_reorg_orphans pro` against
-     `ledger_payout_ready orig ON orig.id = pro.payout_id`
+     match, then `SELECT
+     observed_provider_id,
+     observed_provider_credits,
+     observed_gross_credits,
+     observed_amount_base_units,
+     compensation_settlement_id
+     FROM payout_reorg_orphans
+     WHERE payout_id = <orig_payout_id>
+     AND attempt_seq = <orig_attempt_seq>`
      in the SAME SQLite transaction as the INSERT, and
      assert ALL of:
-     - `pro.payout_id = <orig_payout_id>` (parsed from key)
-     - `pro.attempt_seq = <orig_attempt_seq>` (parsed from key)
-     - `pro.compensation_settlement_id IS NULL` (orphan not
-       yet compensated)
-     - request `provider_id = orig.provider_id`
-     - request `provider_credits = orig.provider_credits`
-     - request `gross_credits = orig.provider_credits`
-       (NOTE: equals provider_credits, NOT
-       `orig.gross_credits` — the compensation is
+     - exactly one row returned (else 422
+       `no_matching_orphan`)
+     - `compensation_settlement_id IS NULL` (else 422
+       `orphan_already_compensated`)
+     - request `provider_id = observed_provider_id`
+     - request `provider_credits = observed_provider_credits`
+     - request `gross_credits = observed_provider_credits`
+       (NOTE: equals `observed_provider_credits`, NOT
+       `observed_gross_credits` — the compensation is
        provider-only, no operator share, per the
-       `operator_credits = 0` pin below)
+       `operator_credits = 0` pin below; the original
+       `observed_gross_credits` is recorded for audit
+       trail but not used as the compensation target)
      - request `operator_credits = 0`
 
      Any miss returns 422 `orphan_mismatch` with a body
@@ -3438,17 +3923,45 @@ discharged:
      vX.Y+1 IMPL MUST use the same `*sql.DB` handle — a
      separate DB connection cannot satisfy "same SQLite
      transaction".
-6. **BetterStack alert filter extended** to match each
-   SPEC-016 event name (`payout_low_balance`,
-   `payout_low_native_balance`, `payout_insufficient_funds`,
-   `payout_reorg_revert`, `payout_rpc_disagreement`,
-   `payout_chain_balance_drift`, `payout_nonce_gap`,
-   `payout_capped`, `payout_failed`,
-   `provider_payout_address_change_rejected`). Operator MUST
-   verify with a synthetic alert before flipping
+6. **BetterStack alert filter extended** to match EVERY
+   §7.1 event with severity=PAGE or severity=WARN.
+   v0.1.9 (codex round-10 MED-8 closure) makes this
+   discipline normative — past versions enumerated a
+   subset and silently missed events added by later
+   minor revisions. The CURRENT minimum filter set
+   (always re-verify against §7.1 at IMPL time):
+   - `payout_low_balance` (WARN)
+   - `payout_low_native_balance` (WARN)
+   - `payout_insufficient_funds` (PAGE)
+   - `payout_reorg_revert` (PAGE)
+   - `payout_rpc_disagreement` (PAGE)
+   - `payout_chain_balance_drift_positive` (WARN)
+   - `payout_chain_balance_drift_negative` (PAGE)
+   - `payout_nonce_gap` (WARN)
+   - `payout_capped` (INFO — but include if operator wants
+     visibility into cap-trip churn)
+   - `payout_failed` (PAGE)
+   - `payout_attempt_abandoned` (PAGE)
+   - `payout_config_reloaded` (PAGE)
+   - `payout_config_reload_rejected` (PAGE)
+   - `payout_registration_paused` (PAGE — v0.1.6)
+   - `payout_registration_resumed` (PAGE — v0.1.6)
+   - `payout_invariant_violation` (PAGE)
+   - `payout_signer_unavailable` (PAGE)
+   - `payout_chain_value_mismatch` (PAGE — NEW v0.1.8)
+   - `payout_runner_lease_conflict` (PAGE — NEW v0.1.8)
+   - `payout_flag_audit_reaped` (WARN — NEW v0.1.8)
+   - `payout_runner_lease_taken_over` (PAGE — NEW v0.1.9)
+   - `payout_runner_lease_lost` (PAGE — NEW v0.1.9)
+   - `provider_payout_address_change_rejected` (WARN)
+   - `provider_payout_address_rejected_unknown_provider` (WARN)
+
+   Operator MUST verify with a synthetic alert per event
+   class (one per severity tier minimum) before flipping
    `payout.enabled: true`. (Per [[deve2-betterstack-live]],
    BetterStack monitor config lives in the BetterStack UI,
-   not the repo.)
+   not the repo.) Future SPEC-016 vX.Y MUST extend this
+   list when adding any new PAGE/WARN event.
 7. **Nginx routing on Pearl VPS** updated to proxy
    `/providers/{id}/payout-address`,
    `/providers/{id}/payouts`, and the new `/admin/payout/*`
@@ -3520,7 +4033,9 @@ fresh session after this v0.1.x merges. That prompt will:
   `/providers/{id}/earnings` and `/providers/{id}/payouts`
   into one endpoint with a versioned schema; SQL-side
   promotion of journalctl-only events
-  (`payout_chain_balance_drift`, `payout_rpc_disagreement`,
+  (`payout_chain_balance_drift_positive`,
+  `payout_chain_balance_drift_negative`,
+  `payout_rpc_disagreement`,
   `payout_signer_unavailable`, `payout_invariant_violation`)
   into `phase4-coordinator/internal/audit/store.go`. NOTE:
   `/admin/payout/abandon-attempt` (§4.6),
@@ -3562,11 +4077,59 @@ fresh session after this v0.1.x merges. That prompt will:
 - SPEC-016 v0.2 (filed by v0.1.7 round-8 SEC-MED): replace
   the one-table-at-a-time same-DB pins (`provider_payout_
   addresses` in §3.1; `payout_reorg_orphans` in §4.7;
-  `runtime_flags` in §4.8a) with a single top-level §4.0a
-  "ALL SPEC-016 tables in the same SQLite DB as SPEC-005's
-  `ledger_payout_ready`" normative paragraph + an IMPL
-  test that asserts via `PRAGMA database_list` from both
-  module entry points. Closes a class of "next-table-
-  forgot-the-pin" regression. Bundled with the §9.5b.1
-  ownership-inversion cleanup above so SPEC-005 v0.4 lands
-  the shared-DB contract on the canonical side.
+  `runtime_flags` in §4.8a; `payout_runner_lease` in §4.8b)
+  with a single top-level §4.0a "ALL SPEC-016 tables in
+  the same SQLite DB as SPEC-005's `ledger_payout_ready`"
+  normative paragraph + an IMPL test that asserts via
+  `PRAGMA database_list` from both module entry points.
+  Closes a class of "next-table-forgot-the-pin"
+  regression. Bundled with the §9.5b.1 ownership-inversion
+  cleanup above so SPEC-005 v0.4 lands the shared-DB
+  contract on the canonical side.
+- SPEC-016 v0.2 (filed by v0.1.7 round-8 CODE-MAJOR,
+  carried forward in v0.1.9 codex round-10 LOW-15
+  closure): asymmetric rate-limit on the §6.4.1
+  pause/resume endpoint pair. Codex round-9 flagged the
+  60s symmetric rate-limit as a DoS amplifier — a
+  compromised operator-key holder hits pause once and
+  the legitimate operator cannot resume for 60s. v0.2
+  candidate: pause = rate-limited, resume = unrate-limited
+  OR rate-limited at higher resolution; OR add a
+  challenge-token mint endpoint that the resume call
+  consumes.
+- SPEC-016 v0.2 (filed by v0.1.7 round-8 CODE-MED):
+  §4.8 references `cmd/coordinator/main.go` as a
+  normative implementation pin. v0.2 candidate: reword
+  to "during coordinator process startup BEFORE the
+  payout runner is started (synchronous happens-before
+  on the same `*sql.DB` handle)" + move the file path
+  to implementation guidance. Bundle with v0.2
+  normative-vs-implementation-guidance sweep across
+  the whole spec.
+- SPEC-016 v0.2 (filed by v0.1.7 round-8 CODE-MED):
+  `payout.enabled` master-switch carve-out wording is
+  too loose; future authors could argue any key is a
+  "master switch". v0.2: tighten to "ONLY
+  `payout.enabled` is permitted as a bare `payout.*`
+  key; this is grandfathered for backwards compatibility
+  with v0.1.0. NO new bare `payout.X` keys MAY be added
+  in any future SPEC-016 vX.Y."
+- SPEC-016 v0.2 (filed by v0.1.7 round-8 ARCH-MED,
+  carried forward in v0.1.9 codex round-10 LOW-15
+  closure): rename `runtime.*` → `payout.runtime.*` for
+  prefix discipline. The current `runtime.*` namespace
+  is top-level, not under `payout.*` — a future SPEC-NNN
+  wanting in-process flags would collide. Deferred
+  because v0.1.x already churned namespaces three times;
+  fold into the v0.2 ownership-inversion + global same-DB
+  pin batch.
+- SPEC-016 v0.2 (filed by v0.1.7 round-8 ARCH-MED,
+  partially closed in v0.1.7 §6.5 CLOSED-namespace
+  declaration): formalize a per-SPEC namespace-bucket
+  audit that compares the in-prose enumerated keys list
+  against grep of every `payout.*` reference in the body.
+  Half-refactor regressions are the dominant defect
+  class across rounds 2-8 of SPEC-016; an IMPL test
+  asserting "every `payout.*` mentioned in §3-§9 appears
+  in the §6.5 enumeration" would lock the bucketing
+  discipline at CI time.
