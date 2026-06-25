@@ -2,7 +2,17 @@
 
 Operator-paste prompt for **codex GPT-5** (via `omc ask codex` or
 `/ccg`) to perform an adversarial code / security / architecture review
-of the SPEC-016 Step 1 IMPL commit on branch `impl/spec-016-step-1`.
+of the SPEC-016 Step 1 IMPL commit on branch `impl/spec-016`.
+
+**PR consolidation note (operator decision, 2026-06-25):** the BUILD
+prompt at `specs/BUILD_SPEC_016_PAYOUT_IMPL_PROMPT.md` §2 / §7 / §8
+originally directed one PR per step (4 PRs total). The operator has
+revised this to a **single PR covering all four steps** of the full
+SPEC-016 IMPL. Each step's audit loop still runs independently
+(this prompt is Step 1's), but Steps 2 / 3 / 4 land as additional
+commits on `impl/spec-016`. The PR opens once after Step 4's audit
+converges to 0/0/0/0. No "push after Step 1 converges" intermediate
+step.
 
 Per [[feedback-codex-only-audits]] this loop is **codex-only**. Do NOT
 fire Claude internal subagents (`code-reviewer`, `security-reviewer`,
@@ -32,10 +42,13 @@ not commit, do not push, do not create branches.
 === BEGIN PROMPT ===
 
 You are performing an adversarial mid-stream review of commit
-`1df0235` on branch `impl/spec-016-step-1` in the
-Augustas11/macprovider repository. The branch is already checked out
-at `/Users/augstar/macprovider-poc`. Steps 2 / 3 / 4 of the IMPL have
-NOT landed yet — your scope is exclusively Step 1.
+`1df0235` on branch `impl/spec-016` in the Augustas11/macprovider
+repository. The branch is already checked out at
+`/Users/augstar/macprovider-poc`. Steps 2 / 3 / 4 of the IMPL have
+NOT landed yet — your scope is exclusively Step 1. The operator has
+chosen to land all four steps on a SINGLE branch + SINGLE PR (Steps
+2 / 3 / 4 will be additional commits on this same branch); your
+audit is the Step 1 mid-stream gate, NOT a pre-merge audit.
 
 This is a **read-only review**. You MUST NOT edit any file, commit,
 push, or modify the git state in any way. Your only output is the
@@ -683,7 +696,9 @@ structure:
 
 ## Verdict
 
-<one-line summary: PROCEED-TO-STEP-2 | FIX-THEN-PROCEED | BLOCK>
+<one-line summary: PROCEED-TO-STEP-2-ON-SAME-BRANCH | FIX-THEN-PROCEED | BLOCK>
+(Note: no push / PR yet — Steps 2 / 3 / 4 land as additional commits
+on `impl/spec-016` per the operator's single-PR plan.)
 
 ## Counts
 
@@ -781,19 +796,23 @@ with a clean report, that's fine; do not pad.
   citation density is HIGH (~10 SPEC subsections plus 11 audit-
   round narrative files).
 - If codex returns CRITICAL / MAJOR / MEDIUM findings, draft a
-  focused fix-pass on `impl/spec-016-step-1` (do NOT branch out)
-  and re-fire this audit prompt with the round number incremented
+  focused fix-pass on `impl/spec-016` (do NOT branch out) and
+  re-fire this audit prompt with the round number incremented
   (`SPEC-016-IMPL-STEP_1-r2-audit.md`, etc.) per
   [[feedback-spec-audit-file-convention]]. Loop until 0/0/0/0.
 - LOW findings MAY be deferred to
   `specs/SPEC-016-payout-pipeline.md` Appendix B per
   [[tracking-issue-scope-control]].
-- After 0/0/0/0 convergence + smoke check, push the branch and
-  open the PR per project [`CLAUDE.md`](../CLAUDE.md) PR rules
-  (the SPEC-005 admin endpoint hard prereq at §9.5b lands as a
-  separate SPEC PR; do NOT bundle).
+- After 0/0/0/0 convergence + smoke check, **proceed directly to
+  Step 2 IMPL on the same `impl/spec-016` branch.** Do NOT push,
+  do NOT open the PR yet — Steps 2 / 3 / 4 land as additional
+  commits, each with its own narrow audit prompt + loop, and the
+  PR opens once after Step 4's audit converges. The SPEC-005
+  admin endpoint hard prereq at §9.5b lands as a SEPARATE SPEC
+  PR; do NOT bundle.
 - The `/code-review ultra` parallel-fleet pass is the third
-  defense and runs on the PR AFTER this codex loop converges.
+  defense and runs on the final PR AFTER all four codex loops
+  (Steps 1 / 2 / 3 / 4) have each converged to 0/0/0/0.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code) (Opus
 4.7) for the SPEC-016 v0.1.19 IMPL Step 1.
