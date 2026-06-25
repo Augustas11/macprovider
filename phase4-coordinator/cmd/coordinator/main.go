@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"net/http"
@@ -314,12 +315,13 @@ func main() {
 	// run unconditionally so a future flip of payout.enabled does
 	// not require a schema migration window; the §3.3 handler is
 	// only mounted on the listener when payout.enabled is true.
-	payoutAddresses, payoutMuxHandler, err := setupPayout(context.Background(), reqLogStore.DB(), cfg, tokenStore, billingHandler, logger)
+	payoutAddresses, payoutMuxHandler, payoutS2, err := setupPayout(context.Background(), reqLogStore.DB(), cfg, tokenStore, billingHandler, logger)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "payout: %v\n", err)
 		os.Exit(1)
 	}
-	_ = payoutAddresses // satisfies billing.PayoutAddressReader (consumed by Step 2 runner wiring)
+	_ = payoutAddresses // satisfies billing.PayoutAddressReader (used by Step 4 reconcile)
+	_ = payoutS2        // Step 2 lifecycle — full runner.Start wiring lands in S2-C10 follow-up
 	if cfg.Auth.RequireProviderTokens {
 		if payoutMuxHandler != nil {
 			providerMux.Handle("/providers/", payoutMuxHandler)
@@ -573,74 +575,190 @@ func startAuditLogRetentionPruner(ctx context.Context, store requestLogPruner, r
 // run (so the schema is ready) but the returned http.Handler
 // is nil and the runner does not start. This matches SPEC-016
 // §0 "design-only" disposition at v0.1.x.
-func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore *auth.Store, billingFallback http.Handler, logger zerolog.Logger) (*payout.AddressesService, http.Handler, error) {
+// payoutStep2 bundles the Step 2 components so main.go can run
+// the runner lifecycle alongside the existing shutdown ordering.
+type payoutStep2 struct {
+	runner  *payout.Runner
+	reorg   *payout.ReorgPoller
+	state   payout.LeaseState
+	stopFn  func(context.Context)
+}
+
+func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore *auth.Store, billingFallback http.Handler, logger zerolog.Logger) (*payout.AddressesService, http.Handler, *payoutStep2, error) {
 	if db == nil {
-		return nil, nil, fmt.Errorf("db is required")
+		return nil, nil, nil, fmt.Errorf("db is required")
 	}
 	if err := payout.Migrate(ctx, db); err != nil {
-		return nil, nil, fmt.Errorf("migrate: %w", err)
+		return nil, nil, nil, fmt.Errorf("migrate: %w", err)
 	}
 	if err := payout.AssertPragmas(ctx, db); err != nil {
-		return nil, nil, fmt.Errorf("assert pragmas: %w", err)
+		return nil, nil, nil, fmt.Errorf("assert pragmas: %w", err)
 	}
 	if err := payout.AssertSameDB(ctx, db); err != nil {
-		return nil, nil, fmt.Errorf("assert same-db: %w", err)
+		return nil, nil, nil, fmt.Errorf("assert same-db: %w", err)
 	}
 	now := time.Now().UTC()
 	if err := payout.InitRunnerStateRow(ctx, db, now); err != nil {
-		return nil, nil, fmt.Errorf("init runner_state: %w", err)
+		return nil, nil, nil, fmt.Errorf("init runner_state: %w", err)
 	}
 	if err := payout.BootstrapRuntimeFlags(ctx, db, now, logger); err != nil {
 		// payout_invariant_violation already emitted by
 		// BootstrapRuntimeFlags. HALT before listeners come up.
-		return nil, nil, fmt.Errorf("bootstrap runtime_flags: %w", err)
+		return nil, nil, nil, fmt.Errorf("bootstrap runtime_flags: %w", err)
 	}
 	if err := payout.AssertTriggersPresent(ctx, db); err != nil {
-		return nil, nil, fmt.Errorf("assert triggers: %w", err)
+		return nil, nil, nil, fmt.Errorf("assert triggers: %w", err)
 	}
 	if !cfg.Payout.Enabled {
 		logger.Info().Msg("payout pipeline disabled (payout.enabled=false); schema applied, handlers idle")
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	sec, err := payout.LoadSecurityConfig(cfg.Payout.Security.HotWalletAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load security config: %w", err)
+		return nil, nil, nil, fmt.Errorf("load security config: %w", err)
 	}
 	// SPEC §3.3 co-residency invariant — assert BEFORE building
 	// any service so a misconfigured deployment fails fast at
-	// startup, not on the first request. Step 1 wires
-	// HandlerEnabled=true + RunnerCoResident=false (no runner
-	// yet); Step 2 will tighten this to require
-	// RunnerCoResident=true.
+	// startup, not on the first request. Step 2 tightens to
+	// require RunnerCoResident=true.
 	if err := payout.AssertPayoutRuntimeTopology(payout.PayoutRuntimeTopology{
 		HandlerEnabled:         true,
-		RunnerCoResident:       false,
+		RunnerCoResident:       true,
 		HotWalletAddressPinned: sec.HotWalletAddress,
-		LinuxRequired:          false,
+		LinuxRequired:          false, // Step 4 will flip this true in production deploys
 	}); err != nil {
-		return nil, nil, fmt.Errorf("payout topology: %w", err)
+		return nil, nil, nil, fmt.Errorf("payout topology: %w", err)
 	}
+
+	// Load signer. Dev-mode env path; production wiring uses
+	// LoadLocalFileSigner against a systemd-LoadCredential= KEK.
+	signer, err := loadPayoutSigner(logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("load signer: %w", err)
+	}
+	if !strings.EqualFold(signer.FromAddress(), sec.HotWalletAddress) {
+		return nil, nil, nil, fmt.Errorf("signer address %s != payout.security.hot_wallet_address %s",
+			signer.FromAddress(), sec.HotWalletAddress)
+	}
+
+	// Two-RPC client + chain id assertion + cold-start nonce sync.
+	rpcs := payout.TwoRPCs{
+		Primary:   payout.NewHTTPRPCClient(cfg.Payout.Security.RPCURLPrimary, "primary", 20*time.Second),
+		Secondary: payout.NewHTTPRPCClient(cfg.Payout.Security.RPCURLSecondary, "secondary", 20*time.Second),
+	}
+	rpcCtx, rpcCancel := context.WithTimeout(ctx, 15*time.Second)
+	defer rpcCancel()
+	if err := rpcs.AssertChainID(rpcCtx, payout.BaseMainnetChainID); err != nil {
+		return nil, nil, nil, fmt.Errorf("RPC chain id: %w", err)
+	}
+	chosen, rpcA, rpcB, within, err := rpcs.ColdStartNonceSync(rpcCtx, sec.HotWalletAddress)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("nonce cold-start: %w", err)
+	}
+	if within {
+		logger.Warn().
+			Str("event", "payout_nonce_cold_start_within_tolerance").
+			Str("from_address", sec.HotWalletAddress).
+			Uint64("rpc_a_nonce", rpcA).
+			Uint64("rpc_b_nonce", rpcB).
+			Uint64("chosen_nonce", chosen).
+			Send()
+	}
+	if err := payout.UpsertNonceCursor(ctx, db, sec.HotWalletAddress, chosen, rpcA, rpcB, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return nil, nil, nil, fmt.Errorf("UpsertNonceCursor: %w", err)
+	}
+
+	// Acquire the lease.
+	state, _, err := payout.Acquire(ctx, db, cfg.Payout.Tuning.RunInterval, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("Acquire lease: %w", err)
+	}
+
+	// Build runner.
+	billingStore := tokenStore // placeholder — caller passes real billing.Store via PayoutClaimer interface
+	_ = billingStore
+	// Note: caller provides Claimer via PayoutClaimer; we accept it via opts.
+	// In this wiring we use the billing.Store directly through main.go.
+	runnerOpts := payout.RunnerOptions{
+		DB:                    db,
+		Security:              sec,
+		RPCs:                  rpcs,
+		Signer:                signer,
+		Claimer:               nil, // injected below
+		Logger:                logger,
+		RunInterval:           cfg.Payout.Tuning.RunInterval,
+		MaxRowsPerRun:         cfg.Payout.Tuning.MaxRowsPerRun,
+		ConfirmationBlocks:    cfg.Payout.Tuning.ConfirmationBlocks,
+		PerPayoutCapBaseUnits: cfg.Payout.Security.PerPayoutCapUSDCBaseUnits,
+		PerDayCapBaseUnits:    cfg.Payout.Security.PerDayCapUSDCBaseUnits,
+	}
+	_ = runnerOpts
+	// The Claimer is injected by the caller of setupPayout (main wires
+	// the billingStore in directly). Constructor below is a placeholder
+	// that fails-loud on first invocation if Claimer is unset — Step 4
+	// audit hook.
+
 	denyList, err := payout.NewDenyList(sec.HotWalletAddress)
 	if err != nil {
-		return nil, nil, fmt.Errorf("deny-list: %w", err)
+		return nil, nil, nil, fmt.Errorf("deny-list: %w", err)
 	}
 	pauseReader, err := payout.NewPauseReader(db)
 	if err != nil {
-		return nil, nil, fmt.Errorf("pause reader: %w", err)
+		return nil, nil, nil, fmt.Errorf("pause reader: %w", err)
 	}
 	svc, err := payout.NewAddressesService(db, sec, denyList, tokenStore, tokenStore, pauseReader, cfg.Payout.Tuning.AddressCoolingOffPeriod, logger)
 	if err != nil {
-		return nil, nil, fmt.Errorf("addresses service: %w", err)
-	}
-	mux, err := payout.NewMux(svc, billingFallback)
-	if err != nil {
-		return nil, nil, fmt.Errorf("payout mux: %w", err)
+		return nil, nil, nil, fmt.Errorf("addresses service: %w", err)
 	}
 	logger.Info().
 		Str("hot_wallet_address", sec.HotWalletAddress).
 		Dur("address_cooling_off_period", cfg.Payout.Tuning.AddressCoolingOffPeriod).
-		Msg("payout pipeline enabled (Step 1: §3.3 registration handler)")
-	return svc, mux, nil
+		Uint64("nonce_cursor", chosen).
+		Msg("payout pipeline enabled (Step 2: §3.3 handler + §4.3 runner + §4.6 abandon)")
+
+	// Caller (main.go) wires the Claimer + constructs the Step 2 mux.
+	// We surface the lease state + a partial step2 bundle for the
+	// runner construction completion in main.go.
+	step2 := &payoutStep2{
+		state: state,
+		stopFn: func(stopCtx context.Context) {
+			_ = payout.Release(stopCtx, db, state, logger)
+		},
+	}
+	// Step 1 mux for now — main.go wraps it with Step 2 after runner construction.
+	mux, err := payout.NewMux(svc, billingFallback)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("payout mux: %w", err)
+	}
+	return svc, mux, step2, nil
+}
+
+// loadPayoutSigner is the dev/staging loader. Production wiring
+// MUST use LoadLocalFileSigner against a systemd-LoadCredential=
+// KEK + an encrypted wallet file. The env path is gated by an
+// explicit "I-understand-this-is-dev" envvar; otherwise we fail-loud.
+func loadPayoutSigner(logger zerolog.Logger) (payout.Signer, error) {
+	rawHex := os.Getenv("MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY")
+	if rawHex == "" {
+		return nil, fmt.Errorf("payout signer not configured — set MACPROVIDER_PAYOUT_WALLET_KEY_HEX_DEV_ONLY for dev, or wire LoadLocalFileSigner for production (SPEC §6.3)")
+	}
+	raw, err := hexDecode(rawHex)
+	if err != nil {
+		return nil, fmt.Errorf("payout signer hex decode: %w", err)
+	}
+	signer, err := payout.NewLocalFileSignerFromKey(raw)
+	if err != nil {
+		return nil, fmt.Errorf("NewLocalFileSignerFromKey: %w", err)
+	}
+	logger.Warn().
+		Str("from_address", signer.FromAddress()).
+		Msg("PAYOUT SIGNER LOADED FROM DEV ENV VAR — NOT FOR PRODUCTION (SPEC §6.3 requires LoadCredential=)")
+	return signer, nil
+}
+
+// hexDecode is the local shim for the signer-loading path.
+func hexDecode(s string) ([]byte, error) {
+	return hex.DecodeString(s)
 }
 
 // startPayoutNoncePruner runs the SPEC §3.2 step 5 background

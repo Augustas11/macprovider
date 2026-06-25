@@ -45,6 +45,14 @@ var step1PathTable = []PathTableEntry{
 	{Method: http.MethodPost, Path: "/providers/{provider_id}/payout-address", Realm: RealmProviderToken},
 }
 
+// step2PathTable extends step1PathTable with the Step 2 admin
+// routes. The wildcard fallback /providers/* remains anchored to
+// step1; Step 2 adds operator-key surfaces under /admin/payout/*.
+var step2PathTable = append([]PathTableEntry{
+	{Method: http.MethodPost, Path: "/admin/payout/abandon-attempt", Realm: RealmOperatorKey},
+	{Method: http.MethodPost, Path: "/admin/payout/run-now", Realm: RealmOperatorKey},
+}, step1PathTable...)
+
 // NewMux constructs the chi-based payout HTTP router. The
 // returned http.Handler is mounted by main.go on the existing
 // provider listener (the SPEC's `:8444` ws-mux listener) at the
@@ -88,6 +96,81 @@ func NewMux(addresses *AddressesService, fallback http.Handler) (http.Handler, e
 	return r, nil
 }
 
+// Step2MuxOptions bundles the Step 2 admin-route dependencies
+// for the extended router. Caller is responsible for verifying
+// operator-key auth BEFORE invoking the handlers; this constructor
+// installs a thin auth middleware that extracts the bearer and
+// hands `actor` to the abandon service for rate-limit scoping.
+type Step2MuxOptions struct {
+	Addresses   *AddressesService
+	Abandon     *AbandonService
+	Runner      *Runner
+	OperatorKey string
+	Caps        AbandonCaps
+	Fallback    http.Handler
+}
+
+// NewMuxStep2 returns a chi router with §3.3 + §4.6 + §4.2 admin
+// surfaces all registered. The path-table verifier asserts parity
+// with step2PathTable. The wildcard /providers/* fallback ALSO
+// catches /admin/payout/* not declared (defense-in-depth against
+// a future route added without table update).
+func NewMuxStep2(opts Step2MuxOptions) (http.Handler, error) {
+	if opts.Addresses == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep2: AddressesService required")
+	}
+	if opts.Abandon == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep2: AbandonService required")
+	}
+	if opts.Runner == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep2: Runner required")
+	}
+	if opts.OperatorKey == "" {
+		return nil, fmt.Errorf("payout.NewMuxStep2: OperatorKey required")
+	}
+	if opts.Fallback == nil {
+		return nil, fmt.Errorf("payout.NewMuxStep2: Fallback required")
+	}
+	r := chi.NewRouter()
+
+	r.Post("/providers/{provider_id}/payout-address", opts.Addresses.ServePayoutAddress)
+	r.HandleFunc("/providers/*", opts.Fallback.ServeHTTP)
+
+	// Operator-key auth shim for the admin routes.
+	auth := operatorKeyMiddleware(opts.OperatorKey)
+	r.With(auth).Post("/admin/payout/abandon-attempt", func(w http.ResponseWriter, req *http.Request) {
+		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
+	})
+	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
+		// §4.2 admin run-now: synchronous one-shot cycle. If a
+		// cycle is already in flight, the runner's mutex returns
+		// 409 inflight via the underlying RunOnce error.
+		if err := opts.Runner.RunOnce(req.Context()); err != nil {
+			writeError(w, http.StatusConflict, "cycle_in_flight_or_failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	})
+
+	if err := verifyPathTable(r, step2PathTable); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func operatorKeyMiddleware(operatorKey string) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			raw := bearerFromHeader(r.Header.Get("Authorization"))
+			if raw == "" || raw != operatorKey {
+				writeError(w, http.StatusUnauthorized, "unauthorized")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // verifyPathTable walks the chi router and asserts every
 // payout-owned route appears in the SPEC-declared table.
 // Routes registered via HandleFunc (the fallback delegate
@@ -109,7 +192,7 @@ func verifyPathTable(r chi.Router, table []PathTableEntry) error {
 		}
 		registered[key] = true
 		if _, ok := declared[key]; !ok {
-			return fmt.Errorf("payout.NewMux: route %s registered with chi but missing from SPEC §3.3 path-table", key)
+			return fmt.Errorf("payout: route %s registered with chi but missing from SPEC path-table", key)
 		}
 		return nil
 	})

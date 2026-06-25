@@ -83,19 +83,14 @@ func AssertPayoutRuntimeTopology(topo PayoutRuntimeTopology) error {
 	if topo.LinuxRequired && runtime.GOOS != "linux" {
 		return fmt.Errorf("payout.AssertPayoutRuntimeTopology: SPEC §6.3 requires runtime.GOOS=linux (got %q)", runtime.GOOS)
 	}
-	// Step 2 extension hook: when Step 2 lands the runner, this
-	// branch flips from advisory-skip to enforced "split-process
-	// rejected." For now we emit no error so Step 1 can ship
-	// handler-only; the SPEC §3.3 co-residency assertion ratchets
-	// strict the moment Step 2's runner becomes part of the
-	// process.
+	// Step 2 tightening (per architect r2 recommendation): the
+	// runner MUST be co-resident with the handler. A deployment
+	// that enables the handler but not the runner is a SPEC §3.3
+	// violation — the runner produces the chain confirmations
+	// that the handler's pending_until_utc rows are eventually
+	// paid from.
 	if topo.HandlerEnabled && !topo.RunnerCoResident {
-		// Step 1: RunnerCoResident=false is the EXPECTED state
-		// (runner not built yet). No error.
-		// Step 2 fix: change this branch to return a fail-fast
-		// error when topo.RunnerCoResident=false is no longer
-		// possible.
-		return nil
+		return fmt.Errorf("payout.AssertPayoutRuntimeTopology: HandlerEnabled=true but RunnerCoResident=false — split-process deployment rejected (SPEC §3.3)")
 	}
 	return nil
 }
