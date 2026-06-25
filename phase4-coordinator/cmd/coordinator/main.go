@@ -789,10 +789,21 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 		state:  state,
 		stop: func(stopCtx context.Context) {
 			// Runner.Stop waits for any in-flight cycle to finish.
-			runner.Stop(stopCtx)
-			// Release AFTER Stop so the next process can re-acquire
-			// without waiting the stale window.
-			_ = payout.Release(stopCtx, db, state, logger)
+			// Codex round-2 [arch:3.1-r2] MEDIUM closure: only
+			// Release the lease when Stop confirms a CLEAN exit;
+			// on shutdown-timeout the runner may still be holding
+			// the broadcast critical section, and releasing the
+			// lease would let the next process acquire and race
+			// the original holder's in-flight tx.
+			cleanExit := runner.Stop(stopCtx)
+			if cleanExit {
+				_ = payout.Release(stopCtx, db, state, logger)
+			} else {
+				logger.Warn().
+					Str("event", "payout_runner_lease_left_to_stale_out").
+					Str("holder_token_prefix", state.HolderToken[:8]).
+					Msg("payout shutdown timed out before runner cycle finished; lease left for stale takeover (SPEC §4.8b)")
+			}
 		},
 	}
 	return svc, mux, step2, nil
@@ -823,16 +834,22 @@ func loadPayoutSigner(cfg config.PayoutConfig, logger zerolog.Logger) (payout.Si
 		if err != nil {
 			return nil, fmt.Errorf("payout: resolve KEK: %w", err)
 		}
+		// Codex round-2 [sec:r2-2.1] MEDIUM closure: zeroize KEK
+		// on ALL paths (success + error). The defer wipes the
+		// slice before returning from this function, so an error
+		// during LoadLocalFileSigner doesn't leave KEK material
+		// in heap longer than necessary.
+		defer func() {
+			for i := range kek {
+				kek[i] = 0
+			}
+		}()
 		signer, err := payout.LoadLocalFileSigner(payout.EncryptedWalletFile{
 			Path:      cfg.Security.EncryptedWalletPath,
 			OnDiskHex: cfg.Security.EncryptedWalletOnDiskHex,
 		}, kek)
 		if err != nil {
 			return nil, fmt.Errorf("payout: LoadLocalFileSigner: %w", err)
-		}
-		// Zeroize KEK after construction.
-		for i := range kek {
-			kek[i] = 0
 		}
 		logger.Info().
 			Str("from_address", signer.FromAddress()).
@@ -849,13 +866,16 @@ func loadPayoutSigner(cfg config.PayoutConfig, logger zerolog.Logger) (payout.Si
 	if err != nil {
 		return nil, fmt.Errorf("payout signer hex decode: %w", err)
 	}
+	// Codex round-2 [sec:r2-2.1] MEDIUM closure: zeroize the dev
+	// plaintext on all paths.
+	defer func() {
+		for i := range raw {
+			raw[i] = 0
+		}
+	}()
 	signer, err := payout.NewLocalFileSignerFromKey(raw)
 	if err != nil {
 		return nil, fmt.Errorf("NewLocalFileSignerFromKey: %w", err)
-	}
-	// Zero the plaintext slice we just decoded.
-	for i := range raw {
-		raw[i] = 0
 	}
 	logger.Warn().
 		Str("from_address", signer.FromAddress()).

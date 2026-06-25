@@ -1,6 +1,7 @@
 package payout
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"net/http"
 
@@ -159,10 +160,15 @@ func NewMuxStep2(opts Step2MuxOptions) (http.Handler, error) {
 }
 
 func operatorKeyMiddleware(operatorKey string) func(http.Handler) http.Handler {
+	expected := []byte(operatorKey)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			raw := bearerFromHeader(r.Header.Get("Authorization"))
-			if raw == "" || raw != operatorKey {
+			// Codex round-2 [sec:r2-2.2] LOW closure: bearer
+			// equality MUST be constant-time. subtle.ConstantTimeCompare
+			// also requires equal-length inputs; check up-front.
+			given := []byte(raw)
+			if len(given) == 0 || len(given) != len(expected) || subtle.ConstantTimeCompare(given, expected) != 1 {
 				writeError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}

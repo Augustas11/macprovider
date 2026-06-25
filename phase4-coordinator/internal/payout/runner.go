@@ -131,12 +131,22 @@ func (r *Runner) Start(ctx context.Context) {
 }
 
 // Stop halts the cadence loop and waits for any in-flight cycle
-// to finish before returning. Call Release() afterward.
-func (r *Runner) Stop(ctx context.Context) {
+// to finish before returning. Returns true if the loop exited
+// cleanly (r.done fired), false if ctx.Done() fired first.
+//
+// Codex round-2 [arch:3.1-r2] MEDIUM closure: a "false" return
+// means the runner MIGHT still be mid-cycle; callers SHOULD let
+// the lease stale out (3 × run_interval) rather than calling
+// Release, so a slow shutdown doesn't race the next process's
+// Acquire against the original holder still finishing its
+// broadcast.
+func (r *Runner) Stop(ctx context.Context) bool {
 	close(r.stop)
 	select {
 	case <-r.done:
+		return true
 	case <-ctx.Done():
+		return false
 	}
 }
 
@@ -462,19 +472,32 @@ func (r *Runner) pollCancelOnce(ctx context.Context, runID string, cancel Attemp
 	if recA.Status != 1 {
 		return rowOutcomeFailed
 	}
-	// Cancel-specific chain-side verification.
+	// Cancel-specific chain-side verification on BOTH receipts.
+	// Closes codex round-2 [code:r2-2.1] MEDIUM: ReceiptsAgree
+	// only compares tx_hash/block/status/to; it does NOT compare
+	// log arrays, so a primary that fabricates an absent USDC
+	// log while the secondary carries an unexpected one would
+	// slip past a primary-only check.
 	if !addressEqualFold(recA.To, r.opts.Security.HotWalletAddress) {
 		r.emitChainValueMismatch(cancel.PayoutID, cancel.AttemptSeq, txHash, "cancel_self_transfer_mismatch",
-			fmt.Sprintf("receipt.to=%s != hot_wallet", recA.To))
+			fmt.Sprintf("primary receipt.to=%s != hot_wallet", recA.To))
 		return rowOutcomeFailed
 	}
-	for _, log := range recA.Logs {
-		// Cancel is a native self-transfer; there MUST be NO Transfer log.
-		if log.Address == strings.ToLower(USDCContractAddressBase) {
-			r.emitChainValueMismatch(cancel.PayoutID, cancel.AttemptSeq, txHash, "cancel_self_transfer_mismatch",
-				"unexpected USDC Transfer log on cancel tx")
-			return rowOutcomeFailed
-		}
+	if !addressEqualFold(recB.To, r.opts.Security.HotWalletAddress) {
+		r.emitChainValueMismatch(cancel.PayoutID, cancel.AttemptSeq, txHash, "cancel_self_transfer_mismatch",
+			fmt.Sprintf("secondary receipt.to=%s != hot_wallet", recB.To))
+		return rowOutcomeFailed
+	}
+	usdcLower := strings.ToLower(USDCContractAddressBase)
+	if hasUSDCTransferLog(recA, usdcLower) {
+		r.emitChainValueMismatch(cancel.PayoutID, cancel.AttemptSeq, txHash, "cancel_self_transfer_mismatch",
+			"primary: unexpected USDC Transfer log on cancel tx")
+		return rowOutcomeFailed
+	}
+	if hasUSDCTransferLog(recB, usdcLower) {
+		r.emitChainValueMismatch(cancel.PayoutID, cancel.AttemptSeq, txHash, "cancel_self_transfer_mismatch",
+			"secondary: unexpected USDC Transfer log on cancel tx")
+		return rowOutcomeFailed
 	}
 	now := r.opts.NowFn().UTC().Format(time.RFC3339Nano)
 	rowsAffected, err := r.markConfirmedStandalone(ctx, cancel.PayoutID, cancel.AttemptSeq,
@@ -536,11 +559,15 @@ func (r *Runner) allocateBuildSignBroadcast(ctx context.Context, runID string, r
 		return rowOutcomeFailed, fmt.Errorf("SumAmountWindow: %w", err)
 	}
 	if committedSum+amount > r.opts.PerDayCapBaseUnits {
+		// §7.1 payout_capped — full field set per codex round-2
+		// [arch:3.4-r2] MEDIUM closure.
 		r.opts.Logger.Warn().
 			Str("event", "payout_capped").
 			Str("run_id", runID).
 			Int64("payout_id", row.PayoutID).
+			Str("provider_id", row.ProviderID).
 			Str("reason", "per_day_cap").
+			Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
 			Send()
 		return rowOutcomeCapped, nil
 	}
@@ -965,6 +992,18 @@ func (r *Runner) verifyChainSideTransfer(ctx context.Context, attempt *AttemptRo
 		return fmt.Errorf("secondary matching Transfer log count = %d, want 1", cnt)
 	}
 	return nil
+}
+
+// hasUSDCTransferLog returns true iff the receipt carries any
+// log against the USDC contract — used by the cancel-self-
+// transfer verification to assert NO ERC-20 transfer occurred.
+func hasUSDCTransferLog(receipt *Receipt, usdcAddrLower string) bool {
+	for _, log := range receipt.Logs {
+		if log.Address == usdcAddrLower {
+			return true
+		}
+	}
+	return false
 }
 
 // countMatchingTransferLog counts logs in receipt that match the
