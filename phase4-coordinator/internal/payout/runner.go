@@ -124,9 +124,20 @@ type Runner struct {
 	// runningBalance tracks the hot wallet USDC balance across one
 	// RunOnce cycle. Set at top of RunOnce from a primary-RPC
 	// balanceOf read; nil when the read failed (callers treat as
-	// "unknown" and skip the check). On each rowOutcomePaid in the
-	// row loop, RunOnce deducts the paid amount in-memory so the
-	// next row sees the post-payout balance without an RPC call.
+	// "unknown" and skip the check).
+	//
+	// Deduction is co-located with the actual spend EVENT — NOT
+	// with rowOutcomePaid. Two paths spend hot-wallet USDC in this
+	// cycle and both call r.deductPaidAmount() immediately after
+	// BroadcastBoth returns acceptedAny + StampBroadcastAt persists:
+	//   - allocateBuildSignBroadcast (fresh row)
+	//   - rebroadcastAndPoll (persisted bytes broadcast this cycle)
+	// The two other paths that return rowOutcomePaid (claimAndLog
+	// for existing-confirmed; pollAndConfirm for prior-cycle
+	// broadcast) reflect spend that already happened in a PRIOR
+	// cycle — the top-of-cycle on-chain balance read already
+	// accounts for it, so a second deduction would double-count
+	// (Step 4 r7 [code:r7-1] HIGH closure).
 	//
 	// allocateBuildSignBroadcast reads runningBalance via the
 	// r.hotWalletBalance() helper just before the attempt INSERT
@@ -475,15 +486,18 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 		return runID, fmt.Errorf("SelectReadyPayouts: %w", err)
 	}
 
-	// Step 4 r5 [code:r5-1] HIGH closure (r6 [code:r6-1] HIGH refit):
-	// §4.3 step 6-7 + §7.1 line 3722 require a per-row hot-wallet USDC
-	// balance check before sign/broadcast. The CHECK lives inside
-	// allocateBuildSignBroadcast (after per-payout-cap + daily-cap +
-	// existing-attempt decisions); RunOnce just captures the cycle's
-	// initial balance and deducts paid amounts after each successful
-	// row so the next fresh-broadcast row sees the post-payout
-	// balance without another RPC call. On RPC failure the running
-	// balance stays nil and the in-broadcast check falls through.
+	// Step 4 r5 [code:r5-1] HIGH closure (r6 [code:r6-1] HIGH refit;
+	// r7 [code:r7-1] HIGH refit): §4.3 step 6-7 + §7.1 line 3722
+	// require a per-row hot-wallet USDC balance check before
+	// sign/broadcast. The CHECK lives inside allocateBuildSignBroadcast
+	// (after per-payout-cap + daily-cap + existing-attempt decisions);
+	// RunOnce just captures the cycle's initial balance here. Deduction
+	// of paid amounts happens INSIDE the broadcast paths (the two
+	// rowOutcomePaid sites that actually move money this cycle:
+	// allocateBuildSignBroadcast and rebroadcastAndPoll), NOT at the
+	// RunOnce outcome switch — see the runningBalance field comment
+	// above for the rationale. On RPC failure the running balance
+	// stays nil and the in-broadcast check falls through.
 	r.runningBalance, _ = r.currentHotWalletUSDCBalance(ctx)
 	defer func() { r.runningBalance = nil }()
 
@@ -938,10 +952,14 @@ func (r *Runner) allocateBuildSignBroadcast(ctx context.Context, runID string, r
 	// machine (caller) have all decided this row needs a fresh
 	// transfer. SPEC §4.3 step 6-7 + §7.1 line 3722.
 	//
-	// The running balance is captured at the top of RunOnce and
-	// deducted by RunOnce after each rowOutcomePaid. nil balance
-	// means the initial RPC read failed; we fall through and let
-	// downstream sign/broadcast surface the failure naturally.
+	// The running balance is captured at the top of RunOnce; the
+	// deduction for THIS fresh broadcast happens BELOW, immediately
+	// after BroadcastBoth returns acceptedAny + StampBroadcastAt
+	// persists (Step 4 r7 [code:r7-1] HIGH closure — only paths
+	// that actually move money this cycle deduct; claim/poll paths
+	// for prior-cycle spends don't). nil balance means the initial
+	// RPC read failed; we fall through and let downstream
+	// sign/broadcast surface the failure naturally.
 	if running := r.hotWalletBalance(); running != nil {
 		required := new(big.Int).SetInt64(amount)
 		if running.Cmp(required) < 0 {
