@@ -67,7 +67,7 @@ Environment overrides:
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
   MACPROVIDER_RELEASE_FORMAT     auto, pkg, or tar (default: auto)
   MACPROVIDER_NO_PROMPT=1        use defaults without interactive prompts
-  MACPROVIDER_NO_LAUNCHD=1       skip launchd service install
+  MACPROVIDER_NO_LAUNCHD=1       expert/debug only: skip launchd service install
   MACPROVIDER_SKIP_HF_CHECK=1    skip HuggingFace lookup on custom model id
 USAGE
 }
@@ -296,6 +296,20 @@ known_min_ram_gb_for_model() {
     mlx-community/Qwen2.5-Coder-32B-Instruct-4bit) printf "32" ;;
     mlx-community/Llama-3.3-70B-Instruct-4bit) printf "48" ;;
     mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit) printf "64" ;;
+  esac
+}
+
+known_weight_gb_for_model() {
+  case "$1" in
+    mlx-community/Llama-3.2-3B-Instruct-4bit) printf "2" ;;
+    mlx-community/Qwen3-4B-Instruct-2507-4bit) printf "2" ;;
+    mlx-community/Qwen2.5-7B-Instruct-4bit) printf "4" ;;
+    mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit) printf "4" ;;
+    mlx-community/Qwen2.5-14B-Instruct-4bit) printf "8" ;;
+    mlx-community/Qwen3-32B-4bit) printf "18" ;;
+    mlx-community/Qwen2.5-Coder-32B-Instruct-4bit) printf "17" ;;
+    mlx-community/Llama-3.3-70B-Instruct-4bit) printf "35" ;;
+    mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit) printf "40" ;;
   esac
 }
 
@@ -1014,11 +1028,11 @@ install_plist() {
   model="$1"
   provider_id="$2"
   coordinator_url="$3"
-  [ "$NO_LAUNCHD" = "1" ] && { log "Skipping launchd service install."; return; }
-  if ! prompt_yes_no "Install as a background service? [Y/n]" "Y"; then
-    log "Skipping launchd service install."
+  if [ "$NO_LAUNCHD" = "1" ]; then
+    log "Skipping launchd service install (MACPROVIDER_NO_LAUNCHD=1 expert/debug override)."
     return
   fi
+  log "Installing as a background launchd service."
 
   run mkdir -p "$(dirname "$PLIST_PATH")" "$LOG_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -1118,6 +1132,84 @@ start_manual_service() {
   MANUAL_PID="$(cat "$TMPDIR_PATH/manual.pid")"
 }
 
+cache_size_kb() {
+  path="$1"
+  if [ -d "$path" ]; then
+    du -sk "$path" 2>/dev/null | awk '{ print $1 }'
+  else
+    printf "0"
+  fi
+}
+
+format_kb_gib() {
+  kb="$1"
+  awk -v kb="$kb" 'BEGIN { printf "%.1f", kb / 1048576 }'
+}
+
+progress_bar() {
+  percent="$1"
+  width=20
+  filled=$(( percent * width / 100 ))
+  bar=""
+  i=0
+  while [ "$i" -lt "$width" ]; do
+    if [ "$i" -lt "$filled" ]; then
+      bar="${bar}#"
+    else
+      bar="${bar}."
+    fi
+    i=$((i + 1))
+  done
+  printf "[%s]" "$bar"
+}
+
+model_download_estimate_gb() {
+  model="$1"
+  estimate="$(known_weight_gb_for_model "$model")"
+  if [ -z "$estimate" ]; then
+    estimate="$(estimate_weights_gb_from_name "$model")"
+  fi
+  printf "%s" "${estimate:-0}"
+}
+
+model_cache_is_warm() {
+  current_kb="$1"
+  estimate_gb="$2"
+  if [ "$estimate_gb" -le 0 ]; then
+    return 0
+  fi
+  estimate_kb=$(( estimate_gb * 1048576 ))
+  warm_threshold_kb=$(( estimate_kb * 80 / 100 ))
+  [ "$current_kb" -ge "$warm_threshold_kb" ]
+}
+
+print_model_download_progress() {
+  cache_path="$1"
+  estimate_gb="$2"
+  elapsed="$3"
+  previous_kb="$4"
+  current_kb="$(cache_size_kb "$cache_path")"
+  delta_kb=$(( current_kb - previous_kb ))
+  [ "$delta_kb" -lt 0 ] && delta_kb=0
+
+  if [ "$estimate_gb" -gt 0 ] && [ "$current_kb" -gt 0 ]; then
+    estimate_kb=$(( estimate_gb * 1048576 ))
+    percent=$(( current_kb * 100 / estimate_kb ))
+    [ "$percent" -gt 99 ] && percent=99
+    bar="$(progress_bar "$percent")"
+    current_gib="$(format_kb_gib "$current_kb")"
+    delta_gib="$(format_kb_gib "$delta_kb")"
+    log "Model download ${bar} ${current_gib}/${estimate_gb} GiB (${percent}%, +${delta_gib} GiB; ${elapsed}s elapsed)."
+  elif [ "$current_kb" -gt 0 ]; then
+    current_gib="$(format_kb_gib "$current_kb")"
+    delta_gib="$(format_kb_gib "$delta_kb")"
+    log "Model download cache: ${current_gib} GiB (+${delta_gib} GiB; ${elapsed}s elapsed)."
+  else
+    log "Waiting for model download to start (${elapsed}s elapsed)."
+  fi
+  MODEL_PROGRESS_CACHE_KB="$current_kb"
+}
+
 wait_for_local_model() {
   model="$1"
   # F-603-V7-5: first install can take much longer if MLX has to download a
@@ -1125,14 +1217,33 @@ wait_for_local_model() {
   # installs 20 minutes with visible progress.
   local cache_check="$HOME/.cache/huggingface/hub/models--${model//\//--}"
   start_ts="$(date +%s)"
-  if [ -d "$cache_check" ]; then
+  estimate_gb="$(model_download_estimate_gb "$model")"
+  previous_cache_kb="$(cache_size_kb "$cache_check")"
+  if [ -d "$cache_check" ] && model_cache_is_warm "$previous_cache_kb" "$estimate_gb"; then
     deadline=$(( start_ts + 300 ))
-    next_progress=$(( start_ts + 30 ))
-    log "Waiting up to 5 min for local /v1/models (model cache detected)."
+    next_progress=$(( start_ts + 15 ))
+    if [ "$estimate_gb" -gt 0 ]; then
+      log "Waiting up to 5 min for local /v1/models (model cache detected; expected weights ~${estimate_gb} GiB)."
+    else
+      log "Waiting up to 5 min for local /v1/models (model cache detected)."
+    fi
+  elif [ -d "$cache_check" ]; then
+    deadline=$(( start_ts + 1200 ))
+    next_progress=$(( start_ts + 15 ))
+    cache_gib="$(format_kb_gib "$previous_cache_kb")"
+    if [ "$estimate_gb" -gt 0 ]; then
+      log "Waiting up to 20 min for local /v1/models (partial model cache detected: ${cache_gib}/${estimate_gb} GiB; continuing download for ${model})."
+    else
+      log "Waiting up to 20 min for local /v1/models (model cache detected but may still be downloading ${model})."
+    fi
   else
     deadline=$(( start_ts + 1200 ))
-    next_progress=$(( start_ts + 60 ))
-    log "Waiting up to 20 min for local /v1/models (first-time install; downloading ${model} ~4-5GB)."
+    next_progress=$(( start_ts + 15 ))
+    if [ "$estimate_gb" -gt 0 ]; then
+      log "Waiting up to 20 min for local /v1/models (first-time install; downloading ${model} ~${estimate_gb} GiB)."
+    else
+      log "Waiting up to 20 min for local /v1/models (first-time install; downloading ${model})."
+    fi
   fi
   port_seen=0
   while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -1155,14 +1266,14 @@ wait_for_local_model() {
       elapsed=$(( now - start_ts ))
       if [ "$port_seen" -eq 0 ]; then
         log "Still waiting for macprovider-cli to bind port ${PORT} (${elapsed}s elapsed)..."
+        print_model_download_progress "$cache_check" "$estimate_gb" "$elapsed" "$previous_cache_kb"
+        previous_cache_kb="$MODEL_PROGRESS_CACHE_KB"
       else
         log "Model still loading (${elapsed}s elapsed; first run may still be downloading from Hugging Face)..."
+        print_model_download_progress "$cache_check" "$estimate_gb" "$elapsed" "$previous_cache_kb"
+        previous_cache_kb="$MODEL_PROGRESS_CACHE_KB"
       fi
-      if [ -d "$cache_check" ]; then
-        next_progress=$(( now + 30 ))
-      else
-        next_progress=$(( now + 60 ))
-      fi
+      next_progress=$(( now + 15 ))
     fi
     sleep 2
   done
