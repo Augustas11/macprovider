@@ -1,17 +1,20 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.10 (2026-06-25, draft — round-11 codex
-audit fix pass: 0 CRIT + 2 MAJOR + 2 MED absorbed; 4 LOW
-deferred to v0.1.11/v0.2 per user-driven scope decision.
-Codex round-11 verified all 15 round-10 fixes landed
-clean. Audit history: round-1 1/5, round-2 5/12/10,
-round-3 3/9/8, round-4 2/6/13, round-5 1/2/6, round-6
-0/5/9, round-7 0/3/7 (Claude lenses); round-8 2/2/7
-(Claude lenses) deferred most, applied 3 convergent;
-round-9 2/5/2 (codex) all absorbed in v0.1.8; round-10
-0/3/5/7 (codex) all absorbed in v0.1.9; round-11 0/2/2/4
-(codex) MAJORs+MEDs absorbed in v0.1.10, LOWs deferred.
-See git log for full per-round detail.)
+**Version:** 0.1.11 (2026-06-25, draft — round-12 codex
+audit fix pass: 0 CRIT + 1 MAJOR + 0 MED absorbed; 4 LOW
+still deferred. Codex round-12 verified all 4 round-11
+MAJOR+MED closures landed clean and surfaced a single
+concurrent-abandon race against the v0.1.10 step 6 CAS;
+v0.1.11 closes it from both sides. Audit history:
+round-1 1/5, round-2 5/12/10, round-3 3/9/8, round-4
+2/6/13, round-5 1/2/6, round-6 0/5/9, round-7 0/3/7
+(Claude lenses); round-8 2/2/7 (Claude lenses) deferred
+most, applied 3 convergent; round-9 2/5/2 (codex) all
+absorbed in v0.1.8; round-10 0/3/5/7 (codex) all
+absorbed in v0.1.9; round-11 0/2/2/4 (codex)
+MAJORs+MEDs absorbed in v0.1.10; round-12 0/1/0/4
+(codex) sole MAJOR absorbed in v0.1.11. See git log
+for full per-round detail.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -26,6 +29,109 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.11 (2026-06-25, draft — round-12 codex audit fix
+pass, sole MAJOR absorbed):**
+
+Codex round-12 verified all 4 round-11 MAJOR+MED
+closures landed clean (MAJOR-1 stale halt + cap-counts-all,
+MAJOR-2 step-6 CAS, MED-1 §7.1 enum, MED-2 BetterStack
+per-event-name). Surfaced 1 new MAJOR: the v0.1.10 step-6
+CAS only gates on `raw_signed_tx IS NULL`. A concurrent
+`/admin/payout/abandon-attempt` racing the runner's
+signing phase can mark the attempt abandoned and broadcast
+a cancel tx at the same nonce — the runner then still
+CAS-persists and broadcasts the original, producing two
+competing txs. The 4 known-open LOWs from round-11 remain
+deferred per user scope decision.
+
+MAJOR (closed):
+
+- **codex round-12 MAJOR-1: CAS persist not fenced
+  against concurrent abandon / state changes.** v0.1.11
+  closes from BOTH sides simultaneously:
+
+  - **Runner side (§4.3 step 6):** the CAS predicate
+    is extended from `WHERE raw_signed_tx IS NULL` to
+    `WHERE raw_signed_tx IS NULL AND confirmed_at_utc IS
+    NULL AND abandoned_at_utc IS NULL`. If the CAS
+    affects 0 rows, IMPL re-reads the row in the same
+    txn to disambiguate: row missing → invariant
+    violation `attempt_row_missing_during_sign`; row
+    `abandoned_at_utc IS NOT NULL` or `confirmed_at_utc
+    IS NOT NULL` → discard envelope, emit invariant
+    violation `attempt_state_changed_during_sign
+    detail='<abandoned|confirmed>'`, halt; row already
+    has `raw_signed_tx IS NOT NULL` → discard envelope,
+    use existing bytes (re-signing FORBIDDEN per §4.6).
+
+  - **Operator side (§4.6 `/admin/payout/abandon-attempt`):**
+    new `409 {"error":"runner_active"}` response when
+    a fresh `payout_runner_lease` row exists
+    (heartbeat within `3 × payout.tuning.run_interval`).
+    The lease-presence check runs in the SAME `BEGIN
+    IMMEDIATE` transaction as the abandon-marker UPDATE
+    + cancel-row INSERT, so a lease that goes stale
+    mid-check still serializes correctly. Operators
+    abandon by first stopping the runner (flip
+    `payout.enabled: false` + SIGHUP, OR coordinator
+    restart which releases the lease on clean shutdown).
+    The lease-stale window (`3 × run_interval`, default
+    15min) is the maximum wait between stop and
+    abandon-eligibility.
+
+  Both defenses are required: the runner-active rejection
+  closes the race from the abandon side; the step-6 CAS
+  predicate extensions close it from the runner side. In
+  the unlikely event the lease is stale-but-runner-still-
+  stalled (clock skew, partial partition), the runner-side
+  CAS catches an abandon committed in the gap.
+
+  Also adds side-channel discipline (NORMATIVE): the
+  "discard the just-signed envelope" paths MUST NOT log
+  the `raw_signed_tx` bytes, the discarded `tx_hash`, or
+  any timing measurement of the sign+CAS critical
+  section. A log line with the discarded tx_hash would
+  let an attacker reading journalctl correlate which
+  nonces have been signed (useful for replay-mempool
+  attacks). `payout_invariant_violation` event fields are
+  capped at `(payout_id, attempt_seq, where, detail,
+  ts_utc)`; bytes never leave process memory before
+  zeroization.
+
+KNOWN-OPEN LOWs (still deferred per user scope decision):
+
+- LOW-1: §4.3 self-fencing prose uses
+  `payout_runner_lease_conflict` at one site; should be
+  `payout_runner_lease_lost` for post-acquire token loss.
+- LOW-2: §4.8a reaper CAS SQL shorthand omits
+  `RETURNING id` while sync emitter has it.
+- LOW-3: Section order is §4.8 → §4.8b → §4.8a; should
+  be §4.8a → §4.8b.
+- LOW-4: Stale "§4.3 step 5" reference at the
+  Signer-behavior cross-ref should be step 6.
+
+POSITIVE codex round-12 (no fix needed):
+- MAJOR-1 (round-11) closed cleanly: stale halt before
+  cap sum in same BEGIN IMMEDIATE; cap counts ALL non-
+  abandoned unbroadcast.
+- MED-1 (round-11) closed: `prebroadcast_signed_tx` in
+  §7.1 enum.
+- MED-2 (round-11) closed: BetterStack per-event-name.
+- Markdown fences balanced; no revived `§9.6` dangling
+  refs.
+
+Net spec change: modest (~120 lines — single MAJOR
+rewrite of step 6 CAS + §4.6 endpoint contract).
+
+Per [[feedback-codex-only-audits]], round 13 codex
+audit will follow. Convergence target: 0 CRIT + 0 MAJOR
++ 0 MED, LOWs OK to remain deferred.
+
+Audited at /Users/augstar/macprovider-poc/.omc/artifacts/ask/
+codex-audit-spec-016-v0-1-10-...-2026-06-25T04-51-34-762Z.md
+
+Authored in /Users/augstar/macprovider-poc-spec016 worktree.
 
 **v0.1.10 (2026-06-25, draft — round-11 codex audit fix
 pass, MAJORs+MEDs absorbed, 4 LOWs deferred):**
@@ -1772,14 +1878,61 @@ any step on error and logging structurally:
             updated_at_utc = :now
       WHERE payout_id = :payout_id
         AND attempt_seq = :attempt_seq
-        AND raw_signed_tx IS NULL;
-     -- If row count = 0: bytes already exist. Discard the
-     -- just-signed envelope (do NOT use it). Re-read the
-     -- existing raw_signed_tx from the row and use ONLY
-     -- those bytes for the rebroadcast below; re-signing is
-     -- FORBIDDEN per §4.6 nonce discipline.
+        AND raw_signed_tx IS NULL
+        AND confirmed_at_utc IS NULL
+        AND abandoned_at_utc IS NULL;
+     -- v0.1.11 (codex round-12 MAJOR-1 closure): the CAS
+     -- predicate now ALSO requires confirmed_at_utc IS NULL
+     -- AND abandoned_at_utc IS NULL. Without these, an
+     -- operator-key holder racing
+     -- /admin/payout/abandon-attempt against the runner's
+     -- signing phase could mark the attempt abandoned and
+     -- broadcast a cancel tx at the same nonce, then the
+     -- runner could still CAS-persist + broadcast the
+     -- original — producing two competing txs at the same
+     -- nonce. The new gated predicate + the §4.6
+     -- runner-active rejection (below) close this race
+     -- from both sides.
+     --
+     -- If row count = 0, IMPL MUST re-read the row in the
+     -- same txn to disambiguate:
+     --   - no row exists: should be impossible (FK on
+     --     payout_runner_lease + §4.3 step 3-5 just
+     --     INSERTed it); emit
+     --     payout_invariant_violation
+     --     where='attempt_row_missing_during_sign'
+     --     + ROLLBACK + halt.
+     --   - row exists, abandoned_at_utc IS NOT NULL OR
+     --     confirmed_at_utc IS NOT NULL: state changed
+     --     during sign (concurrent abandon, or confirm
+     --     races for an already-broadcast attempt). Discard
+     --     the just-signed envelope (do NOT broadcast, do
+     --     NOT log the raw signed bytes — see
+     --     side-channel discipline below), emit
+     --     payout_invariant_violation
+     --     where='attempt_state_changed_during_sign'
+     --     detail='<abandoned|confirmed>'
+     --     per §7.1 (severity=PAGE), ROLLBACK + halt.
+     --   - row exists, raw_signed_tx IS NOT NULL: bytes
+     --     already exist (prior cycle iteration or peer
+     --     process persisted them). Discard the just-signed
+     --     envelope and use the existing persisted bytes
+     --     for the rebroadcast below; re-signing is
+     --     FORBIDDEN per §4.6 nonce discipline.
    COMMIT;
    ```
+
+   **Side-channel discipline (NORMATIVE).** The
+   "discard the just-signed envelope" paths MUST NOT log
+   the `raw_signed_tx` bytes, the `tx_hash` of the
+   discarded envelope, or any timing measurement of the
+   sign+CAS critical section. A log line that contains
+   the discarded `tx_hash` would let an attacker who can
+   read journalctl correlate which nonces have already
+   been signed (useful for replay-mempool attacks).
+   `payout_invariant_violation` event fields are limited
+   to `(payout_id, attempt_seq, where, detail, ts_utc)`;
+   the bytes never leave process memory before zeroization.
 
    The CAS pattern closes the codex round-11 MAJOR-2 gap:
    without it, a runner that passes the pre-step-6 token
@@ -2134,7 +2287,40 @@ the exact bytes. Re-signing is FORBIDDEN.
                transaction.
     400      — missing confirm/Idempotency-Key/reason.
     409 Conflict — attempt already confirmed; nothing to
-                   abandon.
+                   abandon. OR (v0.1.11 codex round-12
+                   MAJOR-1 closure):
+                   `{"error":"runner_active"}` — the
+                   payout runner is actively holding the
+                   §4.8b lease (heartbeat fresh within
+                   `3 * payout.tuning.run_interval`). The
+                   operator MUST first stop the runner
+                   (flip `payout.enabled: false`, wait for
+                   the heartbeat to go stale OR restart
+                   the coordinator which releases the
+                   lease on clean shutdown) before
+                   abandoning an in-flight attempt. Without
+                   this gate, an operator-key holder
+                   racing abandon against the §4.3 step 6
+                   sign+CAS could mark the attempt
+                   abandoned and broadcast a cancel tx at
+                   the same nonce, then the runner's CAS
+                   would still see `raw_signed_tx IS NULL`
+                   (the abandon doesn't write
+                   raw_signed_tx) and might (without the
+                   step 6 CAS predicate extensions) have
+                   persisted + broadcast the original.
+                   The runner_active rejection closes the
+                   race from the abandon side; the step 6
+                   CAS predicate extensions (`AND
+                   confirmed_at_utc IS NULL AND
+                   abandoned_at_utc IS NULL`) close it
+                   from the runner side. BOTH defenses
+                   are required: in the unlikely event
+                   the lease is stale-but-runner-still-
+                   stalled-signing (clock skew, partial
+                   network partition), the runner-side
+                   CAS catches the abandon committed in
+                   the gap.
     422      — per-cancel gas spend would exceed
                payout.security.cancel_max_gas_native_wei ceiling
                OR per-24h aggregate gas spend would exceed
@@ -2142,6 +2328,48 @@ the exact bytes. Re-signing is FORBIDDEN.
     429      — exceeded payout.security.abandon_rate_per_hour
                (default 3).
   ```
+
+  **Runner-active rejection mechanics (v0.1.11 NORMATIVE).**
+  The endpoint handler MUST perform the lease-presence
+  check in the SAME `BEGIN IMMEDIATE` SQLite transaction
+  as the abandon-marker UPDATE + cancel-row INSERT:
+
+  ```sql
+  BEGIN IMMEDIATE;
+    -- Lease-active check (NEW v0.1.11): runner is
+    -- considered active iff a lease row exists AND its
+    -- heartbeat is within 3 * run_interval. The
+    -- heartbeat staleness window matches §4.8b takeover
+    -- semantics so the gating is symmetric.
+    SELECT 1 FROM payout_runner_lease
+     WHERE id = 1
+       AND heartbeat_at_utc >= datetime(:now, '-' ||
+           (3 * :run_interval_seconds) || ' seconds');
+    -- If row returned → return 409 runner_active + ROLLBACK.
+    -- If no row returned → proceed with the abandon
+    --   marker UPDATE + cancel-row INSERT.
+    UPDATE payout_attempts
+       SET abandoned_at_utc = :now,
+           abandoned_reason = :reason,
+           updated_at_utc   = :now
+     WHERE payout_id = :payout_id
+       AND attempt_seq = :attempt_seq;
+    -- ... (cancel-row INSERT as before if
+    -- broadcast_cancel_self_transfer=true) ...
+  COMMIT;
+  ```
+
+  Operator runbook impact: abandoning an in-flight
+  attempt now requires a runner stop. The
+  `/admin/payout/balance` endpoint and §7.4 reconciliation
+  remain available without the lease; only the
+  state-mutating abandon path requires runner quiescence.
+  Operator stops the runner via `payout.enabled: false`
+  in `coordinator.toml` + SIGHUP, OR via coordinator
+  restart (clean shutdown releases the lease per §4.8b).
+  The lease-stale window (`3 * payout.tuning.run_interval`,
+  default 15min at 5min cadence) is the maximum wait
+  between operator-initiated stop and abandon-eligibility.
 
   Configurables — ALL RUNTIME-IMMUTABLE (loaded only at
   process start; SIGHUP / file-watch hot-reload is FORBIDDEN
