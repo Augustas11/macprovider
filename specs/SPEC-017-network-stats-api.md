@@ -1,7 +1,7 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.6 (2026-06-25, draft — codex round-6 fix pass on v0.1.5. Round 6 returned 0 CRITICAL + 1 MAJOR + 1 MINOR. v0.1.6 absorbs: M1 added `GRANT USAGE, SELECT ON SEQUENCE ...` for all BIGSERIAL-backed tables across all roles (stats_rollup gets `stats_late_events_id_seq`; provider_portal gets `provider_visibility_audit_id_seq`; coordinator-CLI gets `partner_keys_id_seq` at issuance time — see §7.2.X notes); m1 AC-13 tightened from "204 (or 200)" to "204 only" to match §5.7's normative requirement. Pending codex round-7 confirmation; if r7 returns 0 CRITICAL + 0 MAJOR, v0.1.6 LOCKS. Full r6 findings: `specs/SPEC-017-r6-audit.md`.)
-**Status:** Draft (design-only — no IMPL until v0.1 LOCKED and a separate `BUILD_SPEC_017_IMPL_PROMPT.md` written).
+**Version:** 0.1.6 (2026-06-25, **LOCKED** — codex round-7 returned 0 CRITICAL + 0 MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK. v0.1.6 is the v0.1 LOCK of the Network Stats API contract. Audit trajectory across 7 rounds: r1 3C+10M+5m, r2 2C+5M+2m, r3 0C+4M+3m, r4 0C+4M+2m, r5 0C+2M+2m, r6 0C+1M+1m, r7 0/0/0 → LOCK. Per-round narrative: `specs/SPEC-017-r1-audit.md` through `specs/SPEC-017-r7-audit.md`.)
+**Status:** **LOCKED** at v0.1.6 (2026-06-25). Implementation work is gated by a separate `BUILD_SPEC_017_IMPL_PROMPT.md` (not in this PR — written after lock). The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
 ---
@@ -14,6 +14,11 @@ entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
 
+**v0.1.6 (2026-06-25, LOCKED):** Round 7 returned 0 CRITICAL + 0
+MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK. v0.1.6 is
+the LOCKED v0.1 of the Network Stats API contract — IMPL work is
+unblocked. Round-7 closure narrative: `specs/SPEC-017-r7-audit.md`.
+
 **v0.1.6 (2026-06-25, draft — codex round-6 fix pass on v0.1.5):**
 Round 6 returned 0 CRITICAL + 1 MAJOR + 1 MINOR. Fixes: M1 added
 `GRANT USAGE, SELECT ON SEQUENCE` for every BIGSERIAL backing
@@ -21,7 +26,7 @@ sequence (`stats_late_events_id_seq` to `stats_rollup`;
 `provider_visibility_audit_id_seq` to `provider_portal`;
 `partner_keys_id_seq` is operator-CLI-only and not granted to any
 DB role); m1 AC-13 tightened to require exactly 204 (matches §5.7).
-Lock target: r7 returns 0 CRITICAL + 0 MAJOR.
+Lock target met at r7.
 
 **v0.1.5 (2026-06-25, draft — codex round-5 fix pass on v0.1.4):**
 Round 5 returned 0 CRITICAL + 2 MAJOR + 2 MINOR. Fixes: M1 added
