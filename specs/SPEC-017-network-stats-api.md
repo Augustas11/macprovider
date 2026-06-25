@@ -1,6 +1,6 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.5 (2026-06-25, draft — codex round-5 fix pass on v0.1.4. Round 5 returned 0 CRITICAL + 2 MAJOR + 2 MINOR. v0.1.5 absorbs: M1 added `method_not_allowed` error code (HTTP 405) to §5.9 closed vocabulary and new AC-21 verifying the 405 envelope on a `POST /v1/stats/*`; M2 added SELECT grants to `stats_rollup` on its own `stats_*` tables to enable §9.3 incremental merge and §9.4 drift-detection without violating §7.2.5 role isolation; m1 §7.2.1 cross-ref §7.2.4 -> §7.2.5; m2 §12 advisor-artifact entry duplicate parenthetical removed. Pending codex round-6 confirmation; if r6 returns 0 CRITICAL + 0 MAJOR, v0.1.5 LOCKS. Full r5 findings: `specs/SPEC-017-r5-audit.md`.)
+**Version:** 0.1.6 (2026-06-25, draft — codex round-6 fix pass on v0.1.5. Round 6 returned 0 CRITICAL + 1 MAJOR + 1 MINOR. v0.1.6 absorbs: M1 added `GRANT USAGE, SELECT ON SEQUENCE ...` for all BIGSERIAL-backed tables across all roles (stats_rollup gets `stats_late_events_id_seq`; provider_portal gets `provider_visibility_audit_id_seq`; coordinator-CLI gets `partner_keys_id_seq` at issuance time — see §7.2.X notes); m1 AC-13 tightened from "204 (or 200)" to "204 only" to match §5.7's normative requirement. Pending codex round-7 confirmation; if r7 returns 0 CRITICAL + 0 MAJOR, v0.1.6 LOCKS. Full r6 findings: `specs/SPEC-017-r6-audit.md`.)
 **Status:** Draft (design-only — no IMPL until v0.1 LOCKED and a separate `BUILD_SPEC_017_IMPL_PROMPT.md` written).
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
@@ -13,6 +13,15 @@ Audit-narrative-by-round detail lives in the per-round audit files under
 entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
+
+**v0.1.6 (2026-06-25, draft — codex round-6 fix pass on v0.1.5):**
+Round 6 returned 0 CRITICAL + 1 MAJOR + 1 MINOR. Fixes: M1 added
+`GRANT USAGE, SELECT ON SEQUENCE` for every BIGSERIAL backing
+sequence (`stats_late_events_id_seq` to `stats_rollup`;
+`provider_visibility_audit_id_seq` to `provider_portal`;
+`partner_keys_id_seq` is operator-CLI-only and not granted to any
+DB role); m1 AC-13 tightened to require exactly 204 (matches §5.7).
+Lock target: r7 returns 0 CRITICAL + 0 MAJOR.
 
 **v0.1.5 (2026-06-25, draft — codex round-5 fix pass on v0.1.4):**
 Round 5 returned 0 CRITICAL + 2 MAJOR + 2 MINOR. Fixes: M1 added
@@ -717,6 +726,15 @@ CREATE TABLE partner_keys (
 CREATE INDEX ON partner_keys (prefix);
 ```
 
+The `partner_keys.id BIGSERIAL` backing sequence
+(`partner_keys_id_seq`) is consumed only by the operator CLI
+(`coordinator partner-keys issue`, §5.4.2) and the optional
+`partner_keys_writer` role (§7.2.4) does NOT need sequence USAGE
+since its grant is UPDATE-only on a single column. The CLI runs as
+the database superuser or as a dedicated migration role outside
+the runtime role inventory; v0.1 does NOT pin which (this is an
+operator-deployment detail).
+
 Field rules:
 
 - `token_hash` — `sha256` of the raw token bytes, stored binary, NOT
@@ -1264,6 +1282,9 @@ GRANT SELECT ON
   provider_visibility,
   provider_rewards_ledger
 TO stats_rollup;
+-- BIGSERIAL backing-sequence privileges required for the
+-- stats_late_events INSERT path (§9.3).
+GRANT USAGE, SELECT ON SEQUENCE stats_late_events_id_seq TO stats_rollup;
 -- + IMPL-authored SELECT grants on the locked OLTP source tables
 -- per SPEC-002 v1.4 §7 (provider/session) and SPEC-005 v0.3 §10
 -- (billing/ledger). See BUILD_SPEC_017_IMPL_PROMPT.md for the
@@ -1285,6 +1306,9 @@ REVOKE ALL ON SCHEMA public FROM provider_portal;
 GRANT USAGE ON SCHEMA public TO provider_portal;
 GRANT INSERT, UPDATE ON provider_visibility TO provider_portal;
 GRANT INSERT ON provider_visibility_audit TO provider_portal;
+-- BIGSERIAL backing-sequence privilege required for the
+-- provider_visibility_audit INSERT path (§6.5).
+GRANT USAGE, SELECT ON SEQUENCE provider_visibility_audit_id_seq TO provider_portal;
 ```
 
 This role is referenced by SPEC-014 v0.9 candidate; SPEC-017 v0.1
@@ -1773,8 +1797,9 @@ runbook step.
 - **AC-12.** A request to `/v1/stats/overview` with
   `If-None-Match: <ETag from prior response>` returns 304 Not Modified
   with no body, provided `generated_at` has not advanced.
-- **AC-13.** `OPTIONS /v1/stats/leaderboard` returns 204 (or 200) with
-  `Access-Control-Allow-Methods: GET, HEAD, OPTIONS` and
+- **AC-13.** `OPTIONS /v1/stats/leaderboard` returns 204 (NOT 200; §5.7
+  normatively pins 204) with an empty body,
+  `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`, and
   `Access-Control-Allow-Headers: Authorization, Content-Type`.
 - **AC-14.** When `stats_overview_current.generated_at` is more than
   120 seconds old, `/v1/stats/overview` returns 503 with
