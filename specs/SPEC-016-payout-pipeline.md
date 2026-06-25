@@ -1,21 +1,26 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.12 (2026-06-25, draft — round-13 codex
-audit fix pass: 0 CRIT + 0 MAJOR + 1 MED absorbed; 4 LOW
-still deferred. Codex round-13 verified v0.1.11 closed
-the round-12 MAJOR (both sides) and surfaced one
-follow-on MEDIUM: the v0.1.11 §4.6 runner-active SQL
-block omitted state-check predicates on the abandon
-UPDATE itself. v0.1.12 closes by gating the UPDATE on
-`confirmed_at_utc IS NULL AND abandoned_at_utc IS NULL`
-+ row-count disambiguation (404 / 409 already_confirmed /
-409 already_abandoned). Audit history: rounds 1-7
-Claude lenses; round-8 Claude convergent partial;
-round-9 codex 2/5/2 → v0.1.8; round-10 codex 0/3/5/7 →
-v0.1.9; round-11 codex 0/2/2/4 → v0.1.10 (LOWs
-deferred); round-12 codex 0/1/0/4 → v0.1.11; round-13
-codex 0/0/1/4 → v0.1.12. See git log for full
-per-round detail.)
+**Version:** 0.1.13 (2026-06-25, draft — round-14 codex
+audit fix pass: 0 CRIT + 1 MAJOR + 0 MED absorbed; 4 LOW
+still deferred. Codex round-14 surfaced a real money-OUT
+defect class the prior 13 rounds missed: §4.3 step 5
+lookup didn't filter cancel self-transfer rows; a
+confirmed cancel could be passed to `ClaimPayoutReady`,
+consuming the provider's `ledger_payout_ready` row
+without ever paying. §7.4 reconciliation excludes
+`is_cancel_self_transfer=1` from outflow sums, so the
+misclassification would NOT trip drift — silent provider
+loss. v0.1.13 closes via (a) §4.3 step 5 filter on
+`is_cancel_self_transfer = 0`, (b) new cancel-handling
+pre-check that handles live cancel rows separately, (c)
+cancel-specific chain-side verification (different
+constants from provider payouts; no ClaimPayoutReady
+call). Audit history: rounds 1-7 Claude lenses; round-8
+Claude convergent partial; round-9 codex 2/5/2 →
+v0.1.8; round-10 codex 0/3/5/7 → v0.1.9; round-11 codex
+0/2/2/4 → v0.1.10 (LOWs deferred); round-12 codex
+0/1/0/4 → v0.1.11; round-13 codex 0/0/1/4 → v0.1.12;
+round-14 codex 0/1/0/4 → v0.1.13.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -30,6 +35,123 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.13 (2026-06-25, draft — round-14 codex audit fix
+pass, real money-OUT defect closed):**
+
+Codex round-14 surfaced a money-OUT defect class the
+prior 13 rounds (and the Claude-only rounds 1-8 before
+them) all missed: §4.3 step 5 "Load any non-abandoned
+payout_attempts row" did NOT filter cancel self-transfer
+rows. A cold IMPL could literally:
+
+1. Operator (or compromised operator-key) calls
+   `/admin/payout/abandon-attempt` with
+   `broadcast_cancel_self_transfer=true`. A cancel row
+   gets INSERTed at the same nonce, broadcast, and
+   confirmed.
+2. Next §4.3 cycle: step 5 loads the confirmed
+   non-abandoned cancel row, jumps to step 8.
+3. Step 8 calls `ClaimPayoutReady(..., payoutExternalID=<cancel tx_hash>, ...)`.
+4. `ledger_payout_ready` row for the provider is now
+   consumed with `payout_external_id=<cancel tx_hash>`
+   and `status='consumed'`.
+5. §7.4 reconciliation excludes
+   `is_cancel_self_transfer=1` from outflow sums (correct
+   for cancel-gas accounting), so drift alarms do NOT
+   fire. The provider is silently unpaid.
+
+The defect is a confused-deputy class: cancel rows live
+in the same `payout_attempts` table as provider payouts
+but have completely different semantics (nonce-gap
+recovery vs paying the provider). v0.1.13 closes via
+THREE compounding fixes:
+
+MAJOR (closed):
+
+- **codex round-14 MAJOR-1: cancel self-transfer rows
+  could be treated as provider payout attempts.**
+
+  **(a) §4.3 step 5 lookup filter (NEW v0.1.13).** The
+  provider-payout attempt lookup SQL now explicitly
+  filters `WHERE payout_id = :payout_id AND
+  abandoned_at_utc IS NULL AND is_cancel_self_transfer
+  = 0`. Cancel rows are completely invisible to the
+  provider-payout path.
+
+  **(b) Cancel-handling pre-check (NEW v0.1.13).**
+  Before allocating a fresh non-cancel attempt, the
+  runner MUST query for live cancel rows for the same
+  `payout_id` and HALT fresh allocation until any live
+  cancel is either confirmed (nonce-gap filled) or
+  resolved by operator via abandon-attempt. Live cancel
+  rows that are unbroadcast get rebroadcast bit-for-bit
+  (re-signing FORBIDDEN per §4.6); broadcast-unconfirmed
+  rows get polled via §4.3 step 7 with cancel-specific
+  verification.
+
+  **(c) Cancel-specific chain-side verification
+  (NEW v0.1.13).** When confirming a cancel in §4.3
+  step 7, the verification constants differ from
+  provider payouts: `tx.to == hot_wallet_address` (not
+  USDC contract), no ERC-20 Transfer log to verify,
+  recovered sender still must equal hot_wallet_address.
+  On confirmation, do NOT call `ClaimPayoutReady`; do
+  NOT pass the cancel tx_hash to anything that consumes
+  `ledger_payout_ready`. Mismatch emits
+  `payout_chain_value_mismatch
+  mismatch_class='cancel_self_transfer_mismatch'`
+  (NEW v0.1.13 enum value) and HALTs.
+
+  All three are required: (a) prevents the
+  misclassification at lookup time; (b) ensures cancels
+  are properly handled (rebroadcast + poll + nonce-gap
+  fill); (c) catches any IMPL that bypasses (a) by
+  hand-rolling a separate confirm path.
+
+KNOWN-OPEN LOWs (4 — still deferred per user scope decision):
+- LOW-1: §4.3 self-fence emits
+  `payout_runner_lease_conflict`; should be
+  `payout_runner_lease_lost`.
+- LOW-2: §4.8a reaper CAS SQL shorthand omits
+  `RETURNING id`.
+- LOW-3: Section order §4.8 → §4.8b → §4.8a.
+- LOW-4: Stale §4.3 step 5 Signer-behavior cross-ref;
+  should be step 6.
+
+POSITIVE codex round-14 (no fix needed):
+- Round-13 MEDIUM-1 closed cleanly (§4.6 abandon
+  UPDATE gates on state predicates, row-count
+  disambiguation lands 404/409 bodies, cancel-row
+  INSERT gated to exactly-one-live-unconfirmed-non-
+  abandoned-row).
+- Markdown fences balanced, `git diff --check` clean,
+  no revived §9.6 refs, 4 known-deferred LOWs intact.
+
+Net spec change: substantive (~140 lines — new §4.3
+step 5 filter + cancel-handling pre-check + cancel-
+specific verification + §7.1 enum update).
+
+Audit-loop trajectory (codex rounds only):
+- round-9  (v0.1.7): 2 CRIT + 5 MAJOR + 2 MED
+- round-10 (v0.1.8): 0 CRIT + 3 MAJOR + 5 MED + 7 LOW
+- round-11 (v0.1.9): 0 CRIT + 2 MAJOR + 2 MED + 4 LOW
+- round-12 (v0.1.10): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-13 (v0.1.11): 0 CRIT + 0 MAJOR + 1 MED + 4 LOW
+- round-14 (v0.1.12): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+  (real money-OUT defect surfaced after 5 codex rounds
+   thought they had converged — vindicates the
+   audit-loop discipline)
+- v0.1.13 targets 0/0/0 + 4 deferred LOW pending round-15
+  codex re-verification.
+
+Per [[feedback-codex-only-audits]], round 15 codex audit
+will follow.
+
+Audited at /Users/augstar/macprovider-poc/.omc/artifacts/ask/
+codex-audit-spec-016-v0-1-12-...-2026-06-25T05-05-11-507Z.md
+
+Authored in /Users/augstar/macprovider-poc-spec016 worktree.
 
 **v0.1.12 (2026-06-25, draft — round-13 codex audit fix
 pass, sole MEDIUM absorbed):**
@@ -1882,17 +2004,119 @@ any step on error and logging structurally:
    24h window would exceed per-day cap, skip the row and
    emit `payout_capped`. The row remains `ready` for a
    future run.
-5. **Attempt record.** Load any non-abandoned
-   `payout_attempts` row for the payout_id. If
-   confirmed-and-non-abandoned, jump to step 8. If pending
-   (broadcast but not confirmed), jump to step 7 to poll. If
-   none exists, generate a fresh nonce per §4.6 and a new
-   `attempt_seq` (next integer for this payout_id), INSERT
-   the row into `payout_attempts` (the new
-   `idx_pa_one_live_non_cancel_per_payout` partial UNIQUE
-   INDEX from §4.5 enforces at-most-one live non-cancel
-   row per payout_id at the DB layer), then COMMIT the
-   `BEGIN IMMEDIATE` transaction from step 3.
+5. **Attempt record (PROVIDER-PAYOUT attempts only).**
+   v0.1.13 (codex round-14 MAJOR-1 closure): the lookup
+   MUST filter to provider-payout attempts ONLY — cancel
+   self-transfer rows (`is_cancel_self_transfer = 1`) are
+   nonce-gap recovery records and MUST NEVER be confused
+   with provider-payout attempts:
+
+   ```sql
+   SELECT * FROM payout_attempts
+    WHERE payout_id = :payout_id
+      AND abandoned_at_utc IS NULL
+      AND is_cancel_self_transfer = 0
+    ORDER BY attempt_seq DESC
+    LIMIT 1;
+   ```
+
+   - If confirmed-and-non-abandoned, jump to step 8.
+   - If pending (broadcast but not confirmed), jump to
+     step 7 to poll.
+   - If none exists, FIRST run the cancel-handling
+     pre-check below; only AFTER it confirms that no live
+     cancel self-transfer is blocking, generate a fresh
+     nonce per §4.6 and a new `attempt_seq` (next integer
+     for this payout_id), INSERT the row into
+     `payout_attempts` (the
+     `idx_pa_one_live_non_cancel_per_payout` partial
+     UNIQUE INDEX from §4.5 enforces at-most-one live
+     non-cancel row per payout_id at the DB layer), then
+     COMMIT the `BEGIN IMMEDIATE` transaction from step 3.
+
+   **Cancel-handling pre-check (NORMATIVE — closes
+   codex round-14 MAJOR-1's confused-deputy class).**
+   Before allocating a fresh non-cancel attempt, the
+   runner MUST query for live cancel self-transfer rows
+   for the same `payout_id`:
+
+   ```sql
+   SELECT attempt_seq, nonce, raw_signed_tx,
+          broadcast_at_utc, confirmed_at_utc
+     FROM payout_attempts
+    WHERE payout_id = :payout_id
+      AND is_cancel_self_transfer = 1
+      AND abandoned_at_utc IS NULL
+    ORDER BY attempt_seq ASC;
+   ```
+
+   For each row returned:
+
+   - **Unbroadcast** (`broadcast_at_utc IS NULL`): the
+     persisted bytes are from a prior cycle that crashed
+     between persist and broadcast. The runner MUST
+     rebroadcast the persisted `raw_signed_tx`
+     bit-for-bit (re-signing FORBIDDEN per §4.6) on both
+     RPCs and stamp `broadcast_at_utc = now()`. Then poll
+     for confirmation via §4.3 step 7 — BUT using
+     cancel-specific verification (see below), NOT the
+     standard provider-payout verification.
+
+   - **Broadcast, unconfirmed**
+     (`broadcast_at_utc IS NOT NULL AND confirmed_at_utc
+     IS NULL`): poll via §4.3 step 7 with cancel-specific
+     verification.
+
+   - **Confirmed** (`confirmed_at_utc IS NOT NULL`): the
+     nonce gap is filled. Record the confirmation in §7.4
+     observability (no `ClaimPayoutReady` call — cancel
+     rows do NOT consume `ledger_payout_ready`); proceed
+     to fresh non-cancel allocation.
+
+   If ANY cancel row is in the unbroadcast or
+   broadcast-unconfirmed state, the runner MUST HALT
+   fresh non-cancel allocation for this `payout_id`
+   until either the cancel confirms OR the operator
+   resolves the nonce gap via
+   `/admin/payout/abandon-attempt` (which itself
+   requires the runner-active gate per §4.6). The HALT
+   does NOT emit `payout_invariant_violation` — a
+   live cancel is a legitimate state.
+
+   **Cancel-specific chain-side verification (NORMATIVE).**
+   When confirming a cancel self-transfer in §4.3 step 7,
+   the chain-side value verification uses DIFFERENT
+   constants than the provider-payout case:
+   - `tx.to` MUST equal `payout.security.hot_wallet_address`
+     (NOT the USDC contract — cancels are native ETH
+     self-transfers at the same nonce; the calldata is
+     empty and `value = 1 base unit` per §4.6
+     `amount_base_units = 1`).
+   - There is NO Transfer log to verify (no ERC-20
+     transfer occurred).
+   - The recovered sender still MUST equal
+     `payout.security.hot_wallet_address`.
+   - On confirmation, do NOT call `ClaimPayoutReady`;
+     do NOT pass the cancel `tx_hash` to anything that
+     consumes `ledger_payout_ready`. Cancel rows are
+     audit/gas records only.
+
+   Any mismatch on the above emits
+   `payout_chain_value_mismatch
+   mismatch_class='cancel_self_transfer_mismatch'`
+   (NEW v0.1.13 enum value) and HALTs.
+
+   **Why this matters (money-OUT defect class).** Without
+   the filter + pre-check + cancel-specific verification,
+   a cold IMPL could literally implement "load any
+   non-abandoned attempt, if confirmed jump to step 8"
+   and pass a confirmed CANCEL self-transfer's `tx_hash`
+   to `ClaimPayoutReady`, consuming the provider's
+   `ledger_payout_ready` row without ever paying the
+   provider. §7.4 reconciliation queries already exclude
+   `is_cancel_self_transfer = 1` from outflow sums, so
+   the misclassification would NOT trip the drift alarm
+   — silent provider loss.
 6. **Build + sign + verify-pre-broadcast + persist + broadcast.**
    Build USDC `transfer(to, amount)` calldata; build EIP-1559
    tx with hot-wallet sender, the computed nonce, chain id
@@ -3971,7 +4195,7 @@ operator-key endpoints log actor=operator_key):
 | `provider_payout_address_changed` | per §3.4 |
 | `provider_payout_address_change_rejected` | `reason, provider_id, src_ip, submitted_fingerprint, ts_utc` |
 | `provider_payout_address_rejected_unknown_provider` | `provider_id, submitted_fingerprint, src_ip, ts_utc` |
-| `payout_chain_value_mismatch` (severity=PAGE; NEW v0.1.8; v0.1.10 adds `prebroadcast_signed_tx`) | `payout_id, attempt_seq, tx_hash, mismatch_class (prebroadcast_signed_tx, input_calldata, sender_recovery, transfer_log_count, transfer_log_to, transfer_log_amount, rpc_disagreement_on_logs), expected, observed, ts_utc` |
+| `payout_chain_value_mismatch` (severity=PAGE; NEW v0.1.8; v0.1.10 adds `prebroadcast_signed_tx`; v0.1.13 adds `cancel_self_transfer_mismatch`) | `payout_id, attempt_seq, tx_hash, mismatch_class (prebroadcast_signed_tx, input_calldata, sender_recovery, transfer_log_count, transfer_log_to, transfer_log_amount, rpc_disagreement_on_logs, cancel_self_transfer_mismatch), expected, observed, ts_utc` |
 | `payout_runner_lease_conflict` (severity=PAGE; NEW v0.1.8) | `local_pid, local_started_at_utc, holder_host, holder_pid, holder_started_at_utc, holder_heartbeat_at_utc, ts_utc` |
 | `payout_flag_audit_reaped` (severity=WARN; NEW v0.1.8; v0.1.9 adds `event_id`) | `event_id (=runtime_flag_audit.id), flag_audit_id, flag_name, old_value, new_value, occurred_at_utc, reap_lag_seconds, ts_utc` |
 | `payout_runner_lease_taken_over` (severity=PAGE; NEW v0.1.9) | `prior_holder_host, prior_holder_pid, prior_holder_started_at_utc, prior_heartbeat_at_utc, new_holder_host, new_holder_pid, takeover_count, ts_utc` |
