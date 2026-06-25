@@ -1,21 +1,18 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.14 (2026-06-25, draft — round-15 codex
-audit fix pass: 0 CRIT + 2 MAJOR + 1 MED absorbed; 4 LOW
-still deferred. Codex round-15 extended the same
-disciplines we applied to provider payouts (pre-broadcast
-verify, CAS, reorg handling, observability events) to the
-new v0.1.13 cancel-handling code. v0.1.14 absorbs all
-three follow-ons: cancel-broadcast preflight + CAS, cancel
-reorg recovery (separate from §4.7 provider-orphan flow),
-and concrete `payout_cancel_self_transfer_confirmed` event
-+ §7.4 query (D). Audit history: rounds 1-7 Claude
-lenses; round-8 Claude convergent partial; round-9 codex
-2/5/2 → v0.1.8; round-10 codex 0/3/5/7 → v0.1.9;
-round-11 codex 0/2/2/4 → v0.1.10 (LOWs deferred);
-round-12 codex 0/1/0/4 → v0.1.11; round-13 codex
-0/0/1/4 → v0.1.12; round-14 codex 0/1/0/4 → v0.1.13;
-round-15 codex 0/2/1/0 → v0.1.14.)
+**Version:** 0.1.15 (2026-06-25, draft — round-16 codex
+audit fix pass: 0 CRIT + 0 MAJOR + 3 MED absorbed; 4 LOW
+still deferred. Codex round-16 verified the v0.1.14
+cancel-handling closures landed clean and surfaced 3 MED
+hygiene/contract gaps in the new cancel paths: event
+transition-scoping, §7.1 schema discriminator field, and
+reconfirm-stale operator signal. v0.1.15 absorbs all 3.
+Audit history: round-9 codex 2/5/2 → v0.1.8; round-10
+codex 0/3/5/7 → v0.1.9; round-11 codex 0/2/2/4 →
+v0.1.10; round-12 codex 0/1/0/4 → v0.1.11; round-13
+codex 0/0/1/4 → v0.1.12; round-14 codex 0/1/0/4 →
+v0.1.13; round-15 codex 0/2/1/0 → v0.1.14; round-16
+codex 0/0/3/0 → v0.1.15.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -30,6 +27,124 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.15 (2026-06-25, draft — round-16 codex audit fix
+pass, 3 MED absorbed):**
+
+Codex round-16 verified all 3 v0.1.14 cancel-handling
+closures landed clean and surfaced 3 MED hygiene/contract
+gaps in the new cancel paths.
+
+MEDIUM (closed):
+
+- **codex round-16 MED-1: cancel-confirmed event was
+  specified as repeatable, not transition-only.** v0.1.14
+  §4.3 cancel-handling confirmed-branch said "every
+  pre-check that sees `confirmed_at_utc IS NOT NULL` MUST
+  emit `payout_cancel_self_transfer_confirmed`" — but a
+  confirmed cancel row remains live/non-abandoned, so if
+  fresh non-cancel allocation is blocked (e.g. by a
+  separate stuck reservation), later cycles would re-emit
+  the same "confirmed" event, breaking the
+  per-cancel-confirmation contract and creating INFO log
+  spam. v0.1.15 §4.3 clarifies: emit ONLY on the UPDATE
+  that transitions `confirmed_at_utc` from NULL to
+  non-NULL after cancel-specific §4.3 step 7
+  verification. A later pre-check that loads an
+  already-confirmed cancel MUST NOT re-emit. §7.4 query
+  (D) is the crash-recovery roll-up if the process dies
+  between DB transition and log emit (DB row is
+  canonical; event is notification view).
+
+- **codex round-16 MED-2: §7.1
+  `payout_reorg_revert` schema missing
+  `is_cancel_self_transfer` discriminator.** v0.1.14
+  §4.7 cancel-reorg path mandates emitting
+  `payout_reorg_revert` with field
+  `is_cancel_self_transfer=1`, but the §7.1 minimum
+  field table didn't include the field. A cold IMPL
+  could satisfy the table while dropping the only
+  log-level discriminator between provider-payout reorgs
+  and cancel reorgs — downstream alert filters /
+  dashboards built from §7.1 would lose the ability to
+  fan-out by event class. v0.1.15 adds the field to the
+  §7.1 row with explicit semantics (0=provider per §4.7
+  provider path; 1=cancel-self-transfer per §4.7 cancel
+  carve-out).
+
+- **codex round-16 MED-3: reorg-reactivated cancel had
+  operator-recovery path but no objective stale signal.**
+  v0.1.14 §4.7 cancel-reorg path clears `confirmed_at_utc`
+  while leaving `broadcast_at_utc IS NOT NULL`, so §4.3
+  polls as broadcast-unconfirmed. The spec said "if it
+  permanently fails to re-confirm" the operator MUST
+  abandon-and-replace, but did not define when both RPCs
+  returning "not found" becomes operator-actionable. A
+  literal IMPL could poll forever and silently hold
+  fresh payouts for the affected `payout_id`. v0.1.15
+  adds:
+  - New §7.1 event
+    `payout_cancel_self_transfer_reconfirm_stale`
+    (severity=PAGE) with fields `(run_id, payout_id,
+    attempt_seq, nonce, tx_hash, last_seen_block,
+    updated_at_utc, ts_utc)`.
+  - §4.7 cancel-reorg path rewrites step 5 to specify:
+    after `3 × payout.tuning.run_interval` measured from
+    the reorg UPDATE's `updated_at_utc`, if BOTH RPCs
+    still return "not found" for the tx, the runner
+    MUST emit the new PAGE event AND continue to HALT
+    fresh non-cancel allocation for that `payout_id`
+    until operator-resolved via §4.6 abandon-and-replace.
+    Event fires once per cancel-row-stale-transition
+    (IMPL tracks per-row "stale-paged" state to suppress
+    repeats).
+  - §9 BetterStack prereq item 6 enumeration extended to
+    include the new PAGE event.
+
+KNOWN-OPEN LOWs (4 — still deferred per user scope decision):
+unchanged.
+
+POSITIVE codex round-16 (no fix needed):
+- Round-15 MAJOR-1 (cancel broadcast preflight + CAS)
+  verified clean.
+- Round-15 MAJOR-2 (§4.7 cancel-reorg carve-out + cancel-
+  specific reactivation) substantively closed (the
+  enumerated stale signal above is a v0.1.14 hand-wave
+  the new event makes concrete).
+- Round-15 MED-1 (event/query exist) partially closed in
+  v0.1.14, fully closed in v0.1.15 with transition-scope
+  + reconfirm-stale.
+- Markdown / git diff --check clean; query (D) uses
+  existing columns only; 4 deferred LOWs intact.
+
+Net spec change: small (~95 lines — three localized
+edits: §4.3 cancel-confirmed-branch transition-scope
+clarification, §7.1 two-event-row update, §4.7 cancel-
+reorg path stale-signal addition, §9 prereq update).
+
+Audit-loop trajectory (codex rounds only):
+- round-9  (v0.1.7): 2 CRIT + 5 MAJOR + 2 MED
+- round-10 (v0.1.8): 0 CRIT + 3 MAJOR + 5 MED + 7 LOW
+- round-11 (v0.1.9): 0 CRIT + 2 MAJOR + 2 MED + 4 LOW
+- round-12 (v0.1.10): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-13 (v0.1.11): 0 CRIT + 0 MAJOR + 1 MED + 4 LOW
+- round-14 (v0.1.12): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-15 (v0.1.13): 0 CRIT + 2 MAJOR + 1 MED + 0 LOW
+- round-16 (v0.1.14): 0 CRIT + 0 MAJOR + 3 MED + 0 LOW
+  (cancel-handling-discipline wave is converging — rounds
+   14, 15, 16 each surfaced derivative findings of the
+   prior round's cancel-machinery introduction; v0.1.15
+   targets 0/0/0)
+- v0.1.15 targets 0 CRIT + 0 MAJOR + 0 MED + 4 deferred
+  LOW pending round-17 codex re-verification.
+
+Per [[feedback-codex-only-audits]], round 17 codex audit
+follows.
+
+Audited at /Users/augstar/macprovider-poc/.omc/artifacts/ask/
+codex-audit-spec-016-v0-1-14-...-2026-06-25T05-23-05-776Z.md
+
+Authored in /Users/augstar/macprovider-poc-spec016 worktree.
 
 **v0.1.14 (2026-06-25, draft — round-15 codex audit fix
 pass, 2 MAJOR + 1 MED absorbed):**
@@ -2217,15 +2332,27 @@ any step on error and logging structurally:
      verification.
 
    - **Confirmed** (`confirmed_at_utc IS NOT NULL`): the
-     nonce gap is filled. The IMPL MUST (NEW v0.1.14,
-     codex round-15 MEDIUM-1 closure):
+     nonce gap is filled. The IMPL MUST:
      - emit `payout_cancel_self_transfer_confirmed`
        per §7.1 (severity=INFO) with fields
        `(run_id, payout_id, attempt_seq, nonce, tx_hash,
-       block_number, gas_used_native_wei, ts_utc)`. This
-       is the canonical per-event observability hook;
-       §7.4 query (D) provides the weekly roll-up
-       counterpart.
+       block_number, gas_used_native_wei, ts_utc)` —
+       **but ONLY on the transition** from
+       `confirmed_at_utc IS NULL` to non-NULL (v0.1.15
+       codex round-16 MED-1 closure). Specifically, the
+       event MUST be emitted by the SAME §4.3 cycle that
+       runs the UPDATE setting `confirmed_at_utc =
+       <observed_at>` after passing cancel-specific §4.3
+       step 7 verification. A later pre-check that loads
+       an already-confirmed cancel row MUST NOT re-emit
+       this event (otherwise an INFO log would fire every
+       cycle until fresh non-cancel allocation makes
+       progress — breaks the "per-cancel-confirmation"
+       contract and creates log spam). §7.4 query (D) is
+       the crash-recovery canonical roll-up if the process
+       dies between the DB UPDATE commit and the INFO
+       log emit (the DB row IS the canonical record;
+       the event is a notification view).
      - NOT call `ClaimPayoutReady` (cancel rows do NOT
        consume `ledger_payout_ready`).
      - NOT modify `ledger_payout_ready` in any way.
@@ -3058,12 +3185,46 @@ longer canonical on either RPC, the IMPL MUST:
    AND confirmed_at_utc IS NULL` — broadcast-unconfirmed
    branch) and re-poll via §4.3 step 7 cancel-specific
    verification. If the cancel re-confirms on a different
-   block, the nonce gap is re-filled. If the cancel
-   permanently fails to re-confirm (e.g. the original
-   `raw_signed_tx`'s gas tip is no longer competitive at
-   the new chain tip), the operator MUST abandon-and-
-   replace via §4.6 (which itself requires runner-active
-   = false per v0.1.11 §4.6 gate).
+   block, the nonce gap is re-filled.
+
+   **Reconfirm-stale escalation (NEW v0.1.15 — codex
+   round-16 MED-3 closure).** If a cancel row reactivated
+   by this §4.7 path remains
+   `broadcast_at_utc IS NOT NULL AND confirmed_at_utc IS
+   NULL` AND BOTH RPCs return "not found" for the tx
+   for longer than `3 × payout.tuning.run_interval`
+   measured from the `updated_at_utc` written by the
+   reorg UPDATE in step 4, the runner MUST emit
+   `payout_cancel_self_transfer_reconfirm_stale`
+   per §7.1 (severity=PAGE, NEW v0.1.15) with fields
+   `(run_id, payout_id, attempt_seq, nonce, tx_hash,
+   last_seen_block, updated_at_utc, ts_utc)` AND MUST
+   continue to HALT fresh non-cancel allocation for this
+   `payout_id` until the operator resolves via §4.6
+   abandon-and-replace. The event fires once per
+   cancel-row-transition-into-stale (NOT every cycle) —
+   IMPL MUST track per-row "stale-paged" state in memory
+   or via a flag column to suppress repeats.
+
+   This event is an OPERATOR-RECOVERY SIGNAL ONLY;
+   automatic re-signing remains FORBIDDEN per §4.6 nonce
+   discipline. Without this signal, a literal IMPL would
+   poll the broadcast-unconfirmed cancel indefinitely
+   and silently hold fresh payouts for that `payout_id`
+   (the cancel-handling pre-check HALT is correct on its
+   own — fresh allocation MUST wait — but a permanently-
+   stranded cancel needs operator visibility, which the
+   PAGE event provides).
+
+   If the cancel re-confirms before the
+   `3 × run_interval` window elapses, the §4.3 step 7
+   verification UPDATE clears the stale-paged state and
+   emits `payout_cancel_self_transfer_confirmed` per the
+   transition-only discipline above. If the operator
+   abandons-and-replaces via §4.6, the abandoned cancel
+   row drops out of the cancel-handling pre-check
+   (filter is `abandoned_at_utc IS NULL`) and the fresh
+   non-cancel allocation proceeds.
 
    Fresh non-cancel allocation for the same `payout_id` is
    HALTED until the cancel re-confirms or is operator-
@@ -4472,7 +4633,7 @@ operator-key endpoints log actor=operator_key):
 | `payout_low_native_balance` | `from_address, native_wei, threshold_wei, ts_utc` |
 | `payout_insufficient_funds` | `run_id, payout_id, provider_id, required_usdc_base_units, available_usdc_base_units, ts_utc` |
 | `payout_daily_cap_tripped` | `run_id, window_paid_usdc_base_units, cap_usdc_base_units, ts_utc` |
-| `payout_reorg_revert` | `payout_id, attempt_seq, tx_hash, last_seen_block, rpc_source, ts_utc` |
+| `payout_reorg_revert` (v0.1.15 adds `is_cancel_self_transfer` discriminator) | `payout_id, attempt_seq, tx_hash, last_seen_block, rpc_source, is_cancel_self_transfer (0=provider-payout reorg per §4.7 provider path; 1=cancel-self-transfer reorg per §4.7 cancel carve-out), ts_utc` |
 | `payout_rpc_disagreement` | `payout_id, attempt_seq, rpc_a_state, rpc_b_state, ts_utc` |
 | `payout_chain_balance_drift_positive` | `from_address, in_db_expected_usdc_base_units, on_chain_usdc_base_units, drift_usdc_base_units, ts_utc` |
 | `payout_chain_balance_drift_negative` (severity=PAGE) | `from_address, in_db_expected_usdc_base_units, on_chain_usdc_base_units, drift_usdc_base_units, ts_utc` |
@@ -4498,7 +4659,8 @@ operator-key endpoints log actor=operator_key):
 | `payout_flag_audit_reaped` (severity=WARN; NEW v0.1.8; v0.1.9 adds `event_id`) | `event_id (=runtime_flag_audit.id), flag_audit_id, flag_name, old_value, new_value, occurred_at_utc, reap_lag_seconds, ts_utc` |
 | `payout_runner_lease_taken_over` (severity=PAGE; NEW v0.1.9) | `prior_holder_host, prior_holder_pid, prior_holder_started_at_utc, prior_heartbeat_at_utc, new_holder_host, new_holder_pid, takeover_count, ts_utc` |
 | `payout_runner_lease_lost` (severity=PAGE; NEW v0.1.9) | `local_pid, local_holder_token, observed_holder_token, observed_holder_host, observed_holder_pid, ts_utc` |
-| `payout_cancel_self_transfer_confirmed` (severity=INFO; NEW v0.1.14) | `run_id, payout_id, attempt_seq, nonce, tx_hash, block_number, gas_used_native_wei, ts_utc` |
+| `payout_cancel_self_transfer_confirmed` (severity=INFO; NEW v0.1.14; v0.1.15 clarifies transition-only emission) | `run_id, payout_id, attempt_seq, nonce, tx_hash, block_number, gas_used_native_wei, ts_utc` |
+| `payout_cancel_self_transfer_reconfirm_stale` (severity=PAGE; NEW v0.1.15) | `run_id, payout_id, attempt_seq, nonce, tx_hash, last_seen_block, updated_at_utc, ts_utc` |
 
 ### 7.1.1 Where these events live
 
@@ -5084,6 +5246,8 @@ discharged:
    - `payout_flag_audit_reaped` (WARN — NEW v0.1.8)
    - `payout_runner_lease_taken_over` (PAGE — NEW v0.1.9)
    - `payout_runner_lease_lost` (PAGE — NEW v0.1.9)
+   - `payout_cancel_self_transfer_confirmed` (INFO — NEW v0.1.14; OPTIONAL for the alert filter, INFO not PAGE/WARN, but include if operator wants per-cancel visibility)
+   - `payout_cancel_self_transfer_reconfirm_stale` (PAGE — NEW v0.1.15)
    - `provider_payout_address_change_rejected` (WARN)
    - `provider_payout_address_rejected_unknown_provider` (WARN)
 
