@@ -1,23 +1,23 @@
 # SPEC-016 — Provider payout pipeline (USDC on Base)
 
-**Version:** 0.1.16 (2026-06-25, draft — round-17 codex
-audit fix pass: 0 CRIT + 0 MAJOR + 1 MED absorbed; 4 LOW
-still deferred. Codex round-17 verified all 3 v0.1.15
-closures clean (transition-scope, discriminator field,
-reconfirm-stale event/threshold/re-arm) and surfaced one
-final follow-on: the reconfirm-stale suppression tracker
-was specified as "in memory or via flag column" — the
-in-memory option would re-page after every coordinator
-restart for an unresolved stale cancel. v0.1.16 mandates
-a durable SQLite column (`cancel_reconfirm_stale_paged_at_utc`
-on `payout_attempts`) + CAS-based once-per-transition
-emission. Audit history: round-9 codex 2/5/2 → v0.1.8;
-round-10 codex 0/3/5/7 → v0.1.9; round-11 codex 0/2/2/4
-→ v0.1.10; round-12 codex 0/1/0/4 → v0.1.11; round-13
-codex 0/0/1/4 → v0.1.12; round-14 codex 0/1/0/4 →
-v0.1.13; round-15 codex 0/2/1/0 → v0.1.14; round-16
-codex 0/0/3/0 → v0.1.15; round-17 codex 0/0/1/0 →
-v0.1.16.)
+**Version:** 0.1.17 (2026-06-25, draft — round-18 codex
+audit fix pass: 0 CRIT + 0 MAJOR + 2 MED absorbed; 4 LOW
+still deferred. Codex round-18 surfaced two follow-on
+gaps in v0.1.16's stale-page suppression: (1) crash
+between marker-CAS COMMIT and journalctl emit could
+permanently suppress the PAGE; (2) §4.7 step-4 SQL
+literal block didn't actually clear the marker column
+even though the prose said it did. v0.1.17 adds §4.8c
+`cancel_reconfirm_stale_outbox` table + reaper (same
+pattern as §4.8a runtime_flag_audit) and fixes the
+step-4 SQL to literally include the marker clear. Audit
+history: round-9 codex 2/5/2 → v0.1.8; round-10 codex
+0/3/5/7 → v0.1.9; round-11 codex 0/2/2/4 → v0.1.10;
+round-12 codex 0/1/0/4 → v0.1.11; round-13 codex
+0/0/1/4 → v0.1.12; round-14 codex 0/1/0/4 → v0.1.13;
+round-15 codex 0/2/1/0 → v0.1.14; round-16 codex
+0/0/3/0 → v0.1.15; round-17 codex 0/0/1/0 → v0.1.16;
+round-18 codex 0/0/2/0 → v0.1.17.)
 **Status:** Draft (design-only — no IMPL until operator funds hot
 wallet and discharges the eight §9 prerequisites).
 **Depends on:** SPEC-005 v0.3 (§5.1 unit definition; §10.1 WAL
@@ -32,6 +32,123 @@ filed as a separate follow-up).
 ---
 
 ## Change log
+
+**v0.1.17 (2026-06-25, draft — round-18 codex audit fix
+pass, 2 MED absorbed):**
+
+Codex round-18 verified v0.1.16's durable stale-paged
+column landed and surfaced two follow-on gaps:
+
+MEDIUM (closed):
+
+- **codex round-18 MED-1: stale PAGE could be durably
+  suppressed before emission.** v0.1.16's §4.7 step-5
+  CAS pattern set `cancel_reconfirm_stale_paged_at_utc
+  = :now` and COMMITed, then emitted the PAGE — but if
+  the coordinator crashed between COMMIT and the
+  journalctl emit, the marker stayed non-NULL while no
+  log line ever fired. Future cycles hit the 0-row CAS
+  path (marker already set), so the PAGE was PERMANENTLY
+  suppressed — re-opening the silent-stranded-cancel
+  visibility gap v0.1.15/v0.1.16 were trying to close.
+
+  v0.1.17 adds §4.8c `cancel_reconfirm_stale_outbox`
+  table (same outbox+reaper pattern as §4.8a
+  runtime_flag_audit from v0.1.9). The §4.7 step-5
+  CAS is rewritten to ALSO insert an outbox row in
+  the SAME `BEGIN IMMEDIATE` txn; after COMMIT, the
+  runner CAS-claims the outbox row (`UPDATE … SET
+  emitted_to_log = 1 WHERE id = … AND emitted_to_log =
+  0 RETURNING id`) and synchronously emits the PAGE
+  with `event_id = <outbox id>` only if the claim
+  succeeded. Background reaper scans
+  `emitted_to_log = 0` rows older than 5 minutes;
+  CAS-claims and emits with the same `event_id` for
+  downstream dedupe; increments new
+  `payout_stale_outbox_reaped` WARN counter per §7.1.
+
+  Outbox row has a UNIQUE index on `(payout_id,
+  attempt_seq, stale_started_at_utc)` —
+  belt-and-suspenders defense if the §4.7 step-5 CAS
+  pattern is bypassed.
+
+  IMPL test required: pre-seed cancel row with marker
+  NULL; trigger CAS; assert outbox row exists +
+  `emitted_to_log = 0`; restart; assert both marker AND
+  outbox row survive; assert reaper emits and flips
+  `emitted_to_log = 1`; second reaper pass detects no
+  orphan and emits no duplicate.
+
+- **codex round-18 MED-2: §4.7 step-4 literal SQL block
+  did not clear the new marker column.** v0.1.16
+  change-log AND §4.7 prose both said the reorg-
+  reactivation UPDATE clears `cancel_reconfirm_stale_paged_at_utc`,
+  but the actual SQL example in §4.7 step 4 only set
+  `confirmed_at_utc`/`block_number`/`gas_used_native_wei`
+  to NULL. A cold IMPL copying the SQL block literally
+  could miss the re-arm, leaving a previously marked
+  row unable to emit a fresh stale PAGE after a later
+  reactivation.
+
+  v0.1.17 closure: §4.7 step-4 SQL block now literally
+  includes
+  `cancel_reconfirm_stale_paged_at_utc = NULL` in the
+  UPDATE SET list, with an inline comment citing the
+  round-18 MED-2 closure rationale.
+
+KNOWN-OPEN LOWs (4 — still deferred per user scope decision):
+unchanged.
+
+POSITIVE codex round-18 (no fix needed):
+- Round-17 MED-1 (durable suppression column) verified
+  clean structurally; the outbox gap above is a follow-on
+  on top of that landing.
+- Cross-mutator ordering between §4.3 cancel-confirmed
+  branch and §4.7 reorg path is well-defined (transition-
+  only emit + BEGIN IMMEDIATE serialization).
+- The direct `payout_attempts` column addition is
+  acceptable for design-only spec.
+- No new replay / MEV / Signer / reorg / race / operator-
+  key drain defects.
+- BetterStack §9 prereq updated for new
+  `payout_stale_outbox_reaped` WARN event.
+- Markdown / git diff --check clean; 4 deferred LOWs
+  intact.
+
+Net spec change: substantive (~140 lines — new §4.8c
+outbox table + §4.7 step-5 CAS+outbox rewrite + §4.7
+step-4 SQL marker-clear + §7.1 two-event update + §9
+prereq update).
+
+New schema: 1 table (cancel_reconfirm_stale_outbox)
+with FK to payout_attempts + unique index + unemitted
+index.
+
+New §7.1 events (1) + extended (1):
+`payout_stale_outbox_reaped` (WARN); existing
+`payout_cancel_self_transfer_reconfirm_stale` extended
+with `event_id` field.
+
+Audit-loop trajectory (codex rounds only):
+- round-9  (v0.1.7): 2 CRIT + 5 MAJOR + 2 MED
+- round-10 (v0.1.8): 0 CRIT + 3 MAJOR + 5 MED + 7 LOW
+- round-11 (v0.1.9): 0 CRIT + 2 MAJOR + 2 MED + 4 LOW
+- round-12 (v0.1.10): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-13 (v0.1.11): 0 CRIT + 0 MAJOR + 1 MED + 4 LOW
+- round-14 (v0.1.12): 0 CRIT + 1 MAJOR + 0 MED + 4 LOW
+- round-15 (v0.1.13): 0 CRIT + 2 MAJOR + 1 MED + 0 LOW
+- round-16 (v0.1.14): 0 CRIT + 0 MAJOR + 3 MED + 0 LOW
+- round-17 (v0.1.15): 0 CRIT + 0 MAJOR + 1 MED + 0 LOW
+- round-18 (v0.1.16): 0 CRIT + 0 MAJOR + 2 MED + 0 LOW
+- v0.1.17 targets 0/0/0 + 4 deferred LOW pending round-19.
+
+Per [[feedback-codex-only-audits]], round 19 codex audit
+follows.
+
+Audited at /Users/augstar/macprovider-poc/.omc/artifacts/ask/
+codex-audit-spec-016-v0-1-16-...-2026-06-25T05-36-57-381Z.md
+
+Authored in /Users/augstar/macprovider-poc-spec016 worktree.
 
 **v0.1.16 (2026-06-25, draft — round-17 codex audit fix
 pass, 1 MED absorbed):**
@@ -3284,12 +3401,13 @@ longer canonical on either RPC, the IMPL MUST:
    ```sql
    BEGIN IMMEDIATE;
      UPDATE payout_attempts
-        SET confirmed_at_utc       = NULL,
-            block_number           = NULL,
-            gas_used_native_wei    = NULL,
-            last_error             = 'cancel_self_transfer_reorged:'
-                                     || :prior_tx_hash,
-            updated_at_utc         = :now
+        SET confirmed_at_utc                     = NULL,
+            block_number                         = NULL,
+            gas_used_native_wei                  = NULL,
+            cancel_reconfirm_stale_paged_at_utc  = NULL,  -- v0.1.17 codex round-18 MED-2 closure: re-arm stale-PAGE suppression marker
+            last_error                           = 'cancel_self_transfer_reorged:'
+                                                   || :prior_tx_hash,
+            updated_at_utc                       = :now
       WHERE payout_id   = :payout_id
         AND attempt_seq = :attempt_seq
         AND is_cancel_self_transfer = 1
@@ -3345,11 +3463,14 @@ longer canonical on either RPC, the IMPL MUST:
      fresh PAGE.
    - On crossing the `3 × run_interval` threshold with
      both RPCs still returning "not found", the runner
-     MUST atomically mark the row stale-paged ONLY if
-     the marker is currently NULL (CAS pattern):
+     MUST atomically mark the row stale-paged AND insert
+     a durable outbox row, ONLY if the marker is
+     currently NULL (CAS pattern + outbox — v0.1.17 codex
+     round-18 MED-1 closure):
 
      ```sql
      BEGIN IMMEDIATE;
+       -- (1) Stale-marker CAS: NULL → :now transition.
        UPDATE payout_attempts
           SET cancel_reconfirm_stale_paged_at_utc = :now,
               updated_at_utc                       = :now
@@ -3359,14 +3480,60 @@ longer canonical on either RPC, the IMPL MUST:
           AND abandoned_at_utc IS NULL
           AND confirmed_at_utc IS NULL
           AND cancel_reconfirm_stale_paged_at_utc IS NULL;
+       -- If UPDATE affected 0 rows → ROLLBACK and skip;
+       -- another emitter (this process or another via the
+       -- reaper) has already paged this cancel-row's
+       -- current stale period.
+       --
+       -- If UPDATE affected 1 row → ALSO insert outbox
+       -- row in this same txn:
+       INSERT INTO cancel_reconfirm_stale_outbox
+         (payout_id, attempt_seq, stale_started_at_utc,
+          nonce, tx_hash, last_seen_block,
+          reorg_reactivated_at_utc, emitted_to_log)
+       VALUES
+         (:payout_id, :attempt_seq, :now,
+          :nonce, :tx_hash, :last_seen_block,
+          :reorg_reactivated_at_utc, 0);
      COMMIT;
      ```
 
-     The PAGE event MUST be emitted ONLY if the CAS
-     UPDATE affected 1 row (transition NULL → :now). If
-     the UPDATE affected 0 rows, another emitter has
-     already paged this cancel-row's current stale
-     period; do NOT re-emit.
+     **Outbox pattern (NORMATIVE — same defect class as
+     v0.1.9 §4.8a runtime_flag_audit outbox).** A journalctl
+     /zerolog write is NOT transactionally atomic with the
+     SQLite CAS UPDATE. Without an outbox: a crash between
+     COMMIT and the journalctl emit leaves
+     `cancel_reconfirm_stale_paged_at_utc` non-NULL on the
+     row but NO log line ever fires; future cycles hit the
+     0-row path (CAS marker already set), so the PAGE is
+     PERMANENTLY suppressed — re-opening the silent-stranded-
+     cancel visibility gap. The outbox row IS the canonical
+     delivery record; the log line is a notification view of
+     it.
+
+     AFTER COMMIT, the runner MUST:
+     1. Compare-and-set claim the outbox row in a separate
+        `BEGIN IMMEDIATE` txn:
+        `UPDATE cancel_reconfirm_stale_outbox SET
+        emitted_to_log = 1 WHERE id = <committed outbox id>
+        AND emitted_to_log = 0 RETURNING id`.
+     2. If claim succeeded (1 row), synchronously emit the
+        §7.1 `payout_cancel_self_transfer_reconfirm_stale`
+        PAGE event from the committed outbox row with
+        `event_id = <outbox id>` for downstream dedupe.
+
+     A background reaper (cadence: every
+     `payout.tuning.run_interval`, MAY be the same goroutine
+     as the §4.8a runtime_flag_audit reaper) MUST scan
+     `cancel_reconfirm_stale_outbox WHERE emitted_to_log = 0
+     AND stale_started_at_utc < now - 5 minutes` for
+     orphaned rows (committed but the synchronous emitter
+     crashed). For each row, the reaper runs the SAME CAS
+     claim and, on success, emits the PAGE with `event_id`
+     AND increments a `payout_stale_outbox_reaped`
+     counter per §7.1 (severity=WARN) so operators can
+     detect chronic emitter crashes. Downstream log consumers
+     MUST de-dupe by `event_id`.
 
    - The §4.3 cancel-handling pre-check
      confirmed-branch (above) MUST clear
@@ -4057,6 +4224,72 @@ only — the cap-check at §4.6 reads from
 is_cancel_self_transfer = 1 AND broadcast_at_utc >=
 now - 24h)` directly, NOT from this column (which would
 miss cancel transfers across runs).
+
+### 4.8c Cancel reconfirm-stale outbox (v0.1.17 — codex round-18 MED-1 closure)
+
+Durable delivery record for the §7.1
+`payout_cancel_self_transfer_reconfirm_stale` PAGE event,
+written in the SAME `BEGIN IMMEDIATE` transaction as the
+§4.7 cancel-reorg stale-marker CAS. Closes the
+crash-between-COMMIT-and-emit silent-suppression class:
+without the outbox, a process crash after the CAS UPDATE
+COMMITs but before the journalctl emit would leave the
+marker non-NULL AND no PAGE ever fires (future cycles hit
+the 0-row CAS path → PERMANENTLY silent stranded cancel).
+
+Same outbox+reaper pattern as §4.8a `runtime_flag_audit`.
+
+```sql
+CREATE TABLE IF NOT EXISTS cancel_reconfirm_stale_outbox (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    payout_id                 INTEGER NOT NULL,
+    attempt_seq               INTEGER NOT NULL,
+    stale_started_at_utc      TEXT NOT NULL,  -- == the
+                                              -- NULL→:now
+                                              -- transition
+                                              -- ts on the
+                                              -- payout_attempts
+                                              -- row's
+                                              -- cancel_reconfirm_stale_paged_at_utc
+                                              -- column.
+    nonce                     INTEGER NOT NULL,
+    tx_hash                   TEXT NOT NULL,
+    last_seen_block           INTEGER NOT NULL,
+    reorg_reactivated_at_utc  TEXT NOT NULL,  -- the
+                                              -- updated_at_utc
+                                              -- written by
+                                              -- §4.7 step 4
+                                              -- reorg
+                                              -- reactivation
+    emitted_to_log            INTEGER NOT NULL DEFAULT 0 CHECK(emitted_to_log IN (0,1)),
+    FOREIGN KEY(payout_id, attempt_seq) REFERENCES payout_attempts(payout_id, attempt_seq) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_crso_unemitted
+    ON cancel_reconfirm_stale_outbox(id) WHERE emitted_to_log = 0;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_crso_one_per_stale_period
+    ON cancel_reconfirm_stale_outbox(payout_id, attempt_seq, stale_started_at_utc);
+```
+
+The `idx_crso_one_per_stale_period` UNIQUE constraint
+enforces at-most-one outbox row per (cancel-row,
+stale-period) tuple at the DB layer — belt-and-suspenders
+defense if the §4.7 step-5 CAS pattern is bypassed.
+
+**Same-DB pin.** The `cancel_reconfirm_stale_outbox` table
+MUST live in the same SQLite database file as
+`payout_attempts` (mirrors §3.1 / §4.7 / §4.8a / §4.8b
+pins). IMPL MUST share one `*sql.DB` handle across the
+runner and the reaper. The comprehensive "all SPEC-016
+tables in one DB" pin remains deferred to v0.2 per
+Appendix B.
+
+**IMPL test required.** Pre-seed a cancel row with
+`cancel_reconfirm_stale_paged_at_utc = NULL`; trigger the
+§4.7 step-5 CAS; assert the outbox row exists with
+`emitted_to_log = 0`; assert restart preserves both the
+marker AND the outbox row; assert reaper emits and flips
+to `emitted_to_log = 1`; assert a second reaper pass
+detects no orphan and emits no duplicate.
 
 ### 4.9 Hot-wallet funding records
 
@@ -4838,7 +5071,8 @@ operator-key endpoints log actor=operator_key):
 | `payout_runner_lease_taken_over` (severity=PAGE; NEW v0.1.9) | `prior_holder_host, prior_holder_pid, prior_holder_started_at_utc, prior_heartbeat_at_utc, new_holder_host, new_holder_pid, takeover_count, ts_utc` |
 | `payout_runner_lease_lost` (severity=PAGE; NEW v0.1.9) | `local_pid, local_holder_token, observed_holder_token, observed_holder_host, observed_holder_pid, ts_utc` |
 | `payout_cancel_self_transfer_confirmed` (severity=INFO; NEW v0.1.14; v0.1.15 clarifies transition-only emission) | `run_id, payout_id, attempt_seq, nonce, tx_hash, block_number, gas_used_native_wei, ts_utc` |
-| `payout_cancel_self_transfer_reconfirm_stale` (severity=PAGE; NEW v0.1.15) | `run_id, payout_id, attempt_seq, nonce, tx_hash, last_seen_block, updated_at_utc, ts_utc` |
+| `payout_cancel_self_transfer_reconfirm_stale` (severity=PAGE; NEW v0.1.15; v0.1.17 adds `event_id`) | `event_id (=cancel_reconfirm_stale_outbox.id), run_id, payout_id, attempt_seq, nonce, tx_hash, last_seen_block, updated_at_utc, ts_utc` |
+| `payout_stale_outbox_reaped` (severity=WARN; NEW v0.1.17) | `event_id (=cancel_reconfirm_stale_outbox.id), payout_id, attempt_seq, stale_started_at_utc, reap_lag_seconds, ts_utc` |
 
 ### 7.1.1 Where these events live
 
@@ -5426,6 +5660,7 @@ discharged:
    - `payout_runner_lease_lost` (PAGE — NEW v0.1.9)
    - `payout_cancel_self_transfer_confirmed` (INFO — NEW v0.1.14; OPTIONAL for the alert filter, INFO not PAGE/WARN, but include if operator wants per-cancel visibility)
    - `payout_cancel_self_transfer_reconfirm_stale` (PAGE — NEW v0.1.15)
+   - `payout_stale_outbox_reaped` (WARN — NEW v0.1.17)
    - `provider_payout_address_change_rejected` (WARN)
    - `provider_payout_address_rejected_unknown_provider` (WARN)
 
