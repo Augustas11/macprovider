@@ -42,12 +42,20 @@ in code.
 
 ## 1. Pre-flight checklist — §9 operator-action prerequisites
 
-IMPL MUST NOT ship to Pearl VPS — and SHOULD NOT begin
-broadcasting against any RPC, even on a staging chain —
-until ALL EIGHT [§9](SPEC-016-payout-pipeline.md) prerequisites are
-discharged. Code can land on `main` with `payout.enabled: false`
-(default), but the runner MUST NOT be flipped on in
-production until every box below is checked:
+**SPEC-016 [§9](SPEC-016-payout-pipeline.md) is unambiguous:
+"IMPL MUST NOT begin until ALL EIGHT prerequisites are
+discharged."** That gate is binding on this prompt — do
+NOT start writing code (not even Step 1 schema) until every
+box below is checked. The earlier draft of this prompt
+permitted "code can land on `main` with `payout.enabled:
+false`" and "Steps 1-3 can proceed without §9.1 / §9.2 /
+§9.5b"; both carve-outs were CRITICAL findings in the
+round-1 codex audit (see
+[`specs/SPEC-016-IMPL-PROMPT-audit.md`](SPEC-016-IMPL-PROMPT-audit.md)
+C1) and have been removed. The SPEC blocks the IMPL until
+the operator discharges all eight items; the operator-side
+work runs first, and the IMPL session is kicked off after
+the checklist is complete.
 
 1. **[§9.1] Hot wallet provisioned + funded.** Fresh Base
    address (or single-purpose existing address). Funded with
@@ -104,31 +112,77 @@ production until every box below is checked:
    author can implement cold against it). The SPEC-005 IMPL
    MUST:
    - parse `orig_payout_id` and `orig_attempt_seq` from the
-     `idempotency_key` regex `^reorg_compensation:\d+:\d+$`,
+     `idempotency_key` regex `^reorg_compensation:\d+:\d+$`
+     and REJECT 400 on mismatch;
+   - enforce `Idempotency-Key` HTTP header BYTE-EQUAL to the
+     JSON body `idempotency_key` field (REJECT 400 on
+     diff) — closes codex round-9 MED-8: replay detection
+     references the header while reconciliation depends on
+     the body/DB key, so equality MUST be enforced;
+   - replay: 409 Conflict on `Idempotency-Key` repeat
+     (return the original 201 body verbatim);
    - bind the compensation row to
      `payout_reorg_orphans.observed_*` (SNAPSHOT columns,
      NOT mutable `ledger_payout_ready.*` columns) in the SAME
-     SQLite transaction as the INSERT,
+     SQLite transaction as the INSERT — closes round-9
+     CRIT-1 / round-10 MED-5 operator-key-compromise
+     high-leverage drain;
+   - assert ALL of: exactly one matching orphan row;
+     `compensation_settlement_id IS NULL` (else 422
+     `orphan_already_compensated`);
+     request `provider_id == observed_provider_id`;
+     request `provider_credits == observed_provider_credits`;
+     request `gross_credits == observed_provider_credits`
+     (NOTE: equals `observed_provider_credits`, NOT
+     `observed_gross_credits` — compensation is provider-only,
+     no operator share);
+     request `operator_credits == 0`;
+     any miss returns 422 `orphan_mismatch` naming which
+     assertion failed;
    - enforce STRICT EQUALITY `gross_credits ==
-     provider_credits` (closes codex round-9 MED-9; pinned to
-     `observed_provider_credits`, NOT `observed_gross_credits`),
+     provider_credits` (closes codex round-9 MED-9; the
+     asymmetric `>` wording admitted
+     `provider_credits < gross_credits` which skims USDC
+     into reconciliation drift unaccountably);
    - cap `provider_credits` at
-     `payout.security.per_payout_cap_usdc_base_units`,
+     `payout.security.per_payout_cap_usdc_base_units` —
+     same per-payout cap §5.2 enforces on the runner;
+   - honor `min_payout_credits_override: 0` by inserting
+     `min_payout_credits = 0` on the row — the orphan
+     being compensated already cleared the SPEC-005 §5
+     threshold at original-payment time and MUST NOT
+     re-test it;
+   - **MUST NOT trigger a fresh settlement run.** Row goes
+     directly into `ledger_payout_ready`, NOT into
+     `ledger_request_credits`; no `settlement_id` linkage
+     on underlying request rows (compensation is
+     operator-funded out-of-band, not accrual-funded);
+   - emit a SPEC-005 structured log event
+     `ledger_payout_ready_admin_inserted` with
+     `provider_id, id, idempotency_key, reason,
+     actor=operator_key, ts_utc` so the operator audit
+     trail covers admin-inserted rows separately from
+     settlement-emitted rows;
    - preserve the existing trigger `trg_lpr_terminal_status_guard`
      by EXACT name (currently at
-     [`phase4-coordinator/internal/billing/store.go:121-126`](../phase4-coordinator/internal/billing/store.go)).
+     [`phase4-coordinator/internal/billing/store.go:121-126`](../phase4-coordinator/internal/billing/store.go)) —
+     SPEC-005 vX.Y+1 MUST NOT rename or drop it across
+     schema migrations; SPEC-016 §4.8 asserts presence by
+     exact name at every cadence cycle;
+   - **Same-SQLite-DB requirement (NORMATIVE).** The
+     SPEC-005 admin endpoint MUST query
+     `payout_reorg_orphans` (SPEC-016-owned, created in
+     `payout/orphans.go`) in the SAME SQLite transaction
+     as the `ledger_payout_ready` INSERT; the SPEC-005
+     vX.Y+1 IMPL MUST use the same `*sql.DB` handle — a
+     separate DB connection cannot satisfy "same SQLite
+     transaction".
    This SPEC-005 endpoint is a SEPARATE SPEC PR + IMPL —
    IMPL of SPEC-016 cannot ship without it.
-7. **[§9.6] Nginx routing on Pearl VPS** updated to proxy
-   `/providers/{id}/payout-address`,
-   `/providers/{id}/payouts`, and the new `/admin/payout/*`
-   endpoints through `coordinator.streamvc.live → :8444`;
-   portal CORS verified. The `coordinator.streamvc.live`
-   config is the touchpoint, NOT `portal.streamvc.live`.
-8. **[§9.7] BetterStack alert filter** updated to match EVERY
-   §7.1 event with severity=PAGE or severity=WARN by
+7. **[§9 item 6 — BetterStack] Alert filter** updated to match
+   EVERY §7.1 event with severity=PAGE or severity=WARN by
    **enumerated name** (NOT by severity tier — codex round-11
-   MED-2 closure). Re-verify the live list in §9 prereq item 6
+   MED-2 closure). Re-verify the live list in §9 item 6
    against §7.1 at IMPL time; the v0.1.19 list includes
    `payout_low_balance`, `payout_low_native_balance`,
    `payout_insufficient_funds`, `payout_reorg_revert`,
@@ -153,6 +207,12 @@ production until every box below is checked:
    operator wants per-cancel visibility. Operator MUST fire
    ONE synthetic alert per ENUMERATED PAGE/WARN event name
    before flipping `payout.enabled: true`.
+8. **[§9 item 7 — Nginx] Routing on Pearl VPS** updated to
+   proxy `/providers/{id}/payout-address`,
+   `/providers/{id}/payouts`, and the new `/admin/payout/*`
+   endpoints through `coordinator.streamvc.live → :8444`;
+   portal CORS verified. The `coordinator.streamvc.live`
+   config is the touchpoint, NOT `portal.streamvc.live`.
 9. **[§9.8] Backup + restore** for the encrypted wallet file
    AND the KEK, on separate media (NOT the same VPS). Loss of
    EITHER = total loss of access to hot-wallet funds. Operator
@@ -160,10 +220,9 @@ production until every box below is checked:
    the runner.
 
 Without items 1, 2, 3, 4, 5a, 5b, 6, 7, 8 (item 5 itself is
-the only soft prerequisite), IMPL is blocked. This checklist
-runs in parallel with the IMPL work — Steps 1-3 below can
-proceed without §9.1/9.2/9.5b, but **the cutover gate is the
-full checklist**.
+the only soft prerequisite), IMPL is blocked per SPEC §9
+closing sentence at SPEC L4166-4167. The checklist runs
+FIRST — IMPL kickoff is a downstream event.
 
 ## 2. Stepped-IMPL decomposition — 4 steps + 4 audit loops
 
@@ -207,7 +266,8 @@ one before pushing.
     `idx_ppa_provider`).
   - [§3.2] `provider_payout_address_nonces` replay table.
   - [§4.5] `payout_attempts` (PK `(payout_id, attempt_seq)`)
-    with FIVE partial UNIQUE / non-UNIQUE indexes:
+    with seven partial indexes (five non-UNIQUE + two
+    partial UNIQUE per SPEC L1408-1463):
     `idx_pa_from_nonce_active`, `idx_pa_unconfirmed`,
     `idx_pa_confirmed_recent`, `idx_pa_broadcast_recent`,
     `idx_pa_cancel_recent`, `idx_pa_one_active_per_payout`
@@ -232,11 +292,21 @@ one before pushing.
   - [§4.8b] `payout_runner_lease` (zero-row default).
   - [§4.8c] `cancel_reconfirm_stale_outbox`.
   - [§4.9] `payout_hot_wallet_funding` (UNIQUE on `tx_hash`).
-- **Same-DB pin enforcement.** All SPEC-016 tables MUST live
-  in the same SQLite database file as SPEC-005's
-  `ledger_payout_ready`. IMPL test required:
-  `PRAGMA database_list` from both `billing/` and `payout/`
-  entry points returns the same DB file.
+- **Per-table same-DB pins.** The SPEC currently locks
+  per-table pins (NOT a comprehensive all-table pin —
+  that is a v0.2 candidate per SPEC L2456-2457 and
+  L2738-2739; do NOT pre-empt the SPEC). Each of the
+  following tables MUST live in the same SQLite database
+  file as SPEC-005's `ledger_payout_ready`:
+  - `provider_payout_addresses` (§3.1)
+  - `payout_reorg_orphans` (§4.7)
+  - `runtime_flags` + `runtime_flag_audit` +
+    `runtime_flags_bootstrapped` (§4.8a)
+  - `payout_runner_lease` (§4.8b)
+  - `payout_hot_wallet_funding` (§4.9)
+  IMPL test required: `PRAGMA database_list` from both
+  `billing/` and `payout/` entry points returns the same
+  DB file for each table named above.
 - [§3.3] `POST /providers/{provider_id}/payout-address`
   handler in `payout/addresses.go`. Mounts on the `:8444`
   ws-mux listener. Use `chi` or `gorilla/mux` (NOT
@@ -262,6 +332,13 @@ one before pushing.
   chain, nonce, tsUtc}`. Every typed-data field MUST be
   field-by-field-verified equal to the request body (NOT just
   ecrecover-pass — a decorative field is a replay vector).
+- [§3.2 step 5] `ts_utc` (body field, unix seconds) MUST be
+  within ±5 minutes of the coordinator's clock. Outside the
+  window: REJECT 400 `signature_skew`. This is the
+  short-window bound that pairs with the 10-minute
+  nonce-table prune retention (window =
+  `min(skew_window, prune_retention)`) — extending one
+  without the other re-opens the replay window.
 - [§3.2] EIP-55 enforcement: pure lowercase / pure uppercase
   accepted (checksum-skipped per EIP-55 backward-compat);
   mixed-case with checksum mismatch is REJECTED. Canonical
@@ -345,6 +422,42 @@ import-graph test enforces `payout/ → billing/` one-way;
   txHash, error)`. NO `SignMessage` primitive (footgun per
   v0.1.3 carve-out). Concrete local-file `Signer` ships at
   v0.1.x; KMS is v0.2 (§6.6 forward pointer only).
+  - **`unsignedTxBytes` format (SPEC L3155-3164):**
+    EIP-2718 type-prefixed RLP-encoded unsigned EIP-1559
+    transaction (txType `0x02`) with empty signature
+    fields (V, R, S = 0) — i.e. the exact bytes that, when
+    keccak256-hashed and signed, produce the signing-hash
+    for an EIP-1559 tx. **Caller does NOT pre-hash.** KMS
+    implementations that require a 32-byte digest input
+    MUST keccak256 the `unsignedTxBytes` themselves.
+  - **Determinism guidance (SPEC L3165-3171):** for the
+    same input bytes called twice, the implementation
+    SHOULD return identical output bytes (deterministic
+    ECDSA via RFC 6979) but SPEC-016 does NOT depend on
+    determinism for idempotency — the chain-level nonce +
+    `raw_signed_tx` persistence (§4.3 step 6) is the
+    actual guarantee.
+  - **Cancellation (SPEC L3171-3173):** `ctx` supports
+    cancellation; KMS implementations MAY block on a
+    network call; the local-file implementation MUST NOT
+    block longer than 100 ms.
+  - **Error semantics (SPEC L3188-3203):** nil `err`
+    REQUIRES non-nil `rawSignedTx` AND non-empty
+    `txHash` (partial returns → panic in tests / fail-loud
+    in production). `ctx.Err() != nil` paths return
+    `err = ctx.Err()` and are treated as transient
+    (retried next cycle). "Wrong chain id" / "key
+    unavailable" / "policy refused (KMS)" MUST return a
+    typed error the runner distinguishes from transient —
+    these HALT the runner and page the operator via
+    `payout_signer_unavailable` per §7.1.
+    Implementation MUST NOT log, print, or return the
+    signing key in any error path (regression test
+    required).
+  - EIP-712 signature verification at §3.2 step 5 uses
+    `ecrecover` — a public-key operation. It does NOT
+    invoke the `Signer` interface, because verification
+    does not require the hot-wallet private key.
 - [§6.3] Process hardening at startup: `setrlimit(RLIMIT_CORE,
   0)`, `prctl(PR_SET_DUMPABLE, 0)`, `mlockall` with
   fail-loud on EPERM/ENOMEM (test asserts `VmLck` ≥
@@ -607,6 +720,26 @@ the runner cycle match §7.1 field-by-field.
     `trg_pa_bootstrap_flip` + `trg_pa_bootstrap_flip_insert`
     triggers; reverse flip REJECTED by
     `trg_prs_bootstrap_one_way`.
+  - **Intra-transaction bootstrap-trigger presence check
+    (NORMATIVE per §4.8a, SPEC L2514-2538).** The
+    `payout_bootstrap_complete` SELECT that gates the
+    `source='manual'` INSERT MUST be performed in the SAME
+    SQLite transaction as:
+    ```sql
+    SELECT count(*) FROM sqlite_master
+     WHERE type='trigger'
+       AND name IN ('trg_prs_bootstrap_one_way',
+                    'trg_pa_bootstrap_flip',
+                    'trg_pa_bootstrap_flip_insert');
+    ```
+    If `count != 3`, REJECT 422
+    `bootstrap_trigger_missing` AND emit
+    `payout_invariant_violation` per §7.1 (severity=PAGE).
+    This closes the DROP-trigger + reset-flag +
+    CREATE-trigger intra-cycle attack class — the two
+    AFTER-triggers alone cannot detect a drop+mutate+recreate
+    that completes between top-of-cycle checks, so the gate
+    fires at the money-path call boundary.
   - `source='rpc-confirmed'` REQUIRES receipt from BOTH
     RPCs with matching `to=USDC`, Transfer log with
     `to=hot_wallet`, `from=request.from_address`,
@@ -774,14 +907,26 @@ path).
     compatibility per §6.5; no new bare `payout.X` keys
     are permitted).
 - [§7.4] Reconciliation queries committed to
-  `phase4-coordinator/internal/payout/reconcile.sql`. The
-  file MUST contain queries (A) per-provider sum vs
-  on-chain, (B) NULL `payout_currency` regression detector,
-  (chain-balance recon `total_funded - total_paid_out`
-  excluding `is_cancel_self_transfer=1`), the 30d stale-
-  orphan query, the compensation-forgery (B), the
-  reorg-compensation-orphan-mismatch (C), and the cancel
-  observability query (D).
+  `phase4-coordinator/internal/payout/reconcile.sql`. SPEC
+  §7.4 names FOUR specific labeled queries —
+  **(A)** stale-orphan (unresolved >30d),
+  **(B)** compensation-forgery (orphan whose
+  `compensation_settlement_id` references a missing row),
+  **(C)** reorg-compensation orphan-mismatch
+  (`ledger_payout_ready` rows whose
+  `idempotency_key LIKE 'reorg_compensation:%'` without a
+  back-link),
+  **(D)** cancel-self-transfer observability roll-up.
+  The file MUST contain those four labeled queries verbatim
+  PLUS three un-labeled regression queries from SPEC §7.4:
+  the per-provider in-DB vs on-chain delta query (whose
+  `HAVING delta != 0` row is a reconciliation failure),
+  the NULL-`payout_currency` regression detector,
+  and the chain-balance recon
+  `total_funded - total_paid_out` query excluding
+  `is_cancel_self_transfer = 1` from outflow. DO NOT
+  reuse the (A)/(B)/(C)/(D) labels for the un-labeled
+  regression queries — the SPEC reserves those labels.
 - [§7.4] **Chain-balance reconciliation worker** at cadence
   `payout.security.chain_recon_interval` (default 1h). Both
   RPCs `balanceOf(hot_wallet)`; agreement within tolerance
@@ -883,7 +1028,7 @@ emits `payout_rpc_disagreement` (not silent fall-through);
 SPEC text; (e) the deploy gate rejects a placeholder-only
 example config.
 
-## 3. Audit-loop discipline (per [[feedback-build-audit-loop]] + [[feedback-codex-only-audits]])
+## 3. Audit-loop discipline (per [[feedback-build-audit-loop]] + [[feedback-codex-only-audits]] + [[feedback-spec-audit-loop-before-pr]])
 
 After each step's code lands on the feature branch:
 
