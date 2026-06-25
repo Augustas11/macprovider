@@ -88,8 +88,8 @@ type LocalFileSigner struct {
 //
 // Plaintext after decrypt: 32-byte secp256k1 private key.
 type EncryptedWalletFile struct {
-	Path       string
-	OnDiskHex  bool // true if file content is hex-encoded; false if raw bytes
+	Path      string
+	OnDiskHex bool // true if file content is hex-encoded; false if raw bytes
 }
 
 // LoadLocalFileSigner decrypts the wallet file at path using the

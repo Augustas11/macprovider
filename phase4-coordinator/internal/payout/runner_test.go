@@ -1,10 +1,12 @@
 package payout
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -425,4 +427,330 @@ VALUES ('p1', 'base-mainnet', '0x000000000000000000000000000000000000dEaD', 1, ?
 	if !errors.Is(err, ErrLeaseLost) {
 		t.Errorf("RunOnce err = %v, want ErrLeaseLost", err)
 	}
+}
+
+// TestRunner_RunOnce_InsufficientFundsHaltsAndEmits locks the
+// Step 4 r5 [code:r5-1] HIGH closure: SPEC §4.3 step 6-7 + §7.1
+// line 3722.
+//
+// Setup:
+//   - RPC returns balance = 100 USDC base units
+//   - Row 1: provider_credits = 80 → fits, processes (mock sends + confirms)
+//   - Row 2: provider_credits = 50 → running balance after row1 = 20 < 50 → halt
+//
+// Expected: payout_insufficient_funds emitted for row 2; payout_run_finished
+// reports skipped_funds=1.
+func TestRunner_RunOnce_InsufficientFundsHaltsAndEmits(t *testing.T) {
+	db := openTestDB(t)
+	rawHex := "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	raw, _ := hex.DecodeString(rawHex)
+	signer, err := NewLocalFileSignerFromKey(raw)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	hotAddr := signer.FromAddress()
+	canonicalHot, _ := CanonicalizeEIP55(hotAddr)
+	logBuf := &bytes.Buffer{}
+	logger := zerolog.New(logBuf)
+	state, _, err := Acquire(context.Background(), db, testRunInterval, logger)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if err := UpsertNonceCursor(context.Background(), db, hotAddr, 0, 0, 0, NowUTC()); err != nil {
+		t.Fatalf("UpsertNonceCursor: %v", err)
+	}
+
+	// Register two providers with payout addresses.
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339Nano)
+	addr1 := "0x000000000000000000000000000000000000aaa1"
+	addr2 := "0x000000000000000000000000000000000000aaa2"
+	for _, p := range []struct{ id, addr string }{{"p1", addr1}, {"p2", addr2}} {
+		_, _ = db.ExecContext(context.Background(), `
+INSERT INTO provider_payout_addresses
+  (provider_id, chain, address, payout_allowed, pending_until_utc,
+   rotated_from, registered_at_utc, registered_against_hot_wallet)
+VALUES (?, 'base-mainnet', ?, 1, ?, NULL, ?, ?)`,
+			p.id, p.addr, past, past, canonicalHot)
+	}
+
+	// Row 1: 80 base units.
+	id1 := insertReadyRow(t, db, "p1", "settle:p1:insufftest1")
+	_, _ = db.ExecContext(context.Background(),
+		`UPDATE ledger_payout_ready SET provider_credits=80, gross_credits=80 WHERE id=?`, id1)
+	// Row 2: 50 base units.
+	id2 := insertReadyRow(t, db, "p2", "settle:p2:insufftest2")
+	_, _ = db.ExecContext(context.Background(),
+		`UPDATE ledger_payout_ready SET provider_credits=50, gross_credits=50 WHERE id=?`, id2)
+
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+
+	// RPC: hot wallet balance = 100 USDC base units.
+	usdcBal := make([]byte, 32)
+	new(big.Int).SetUint64(100).FillBytes(usdcBal)
+	primary.callFn = func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+		return usdcBal, nil
+	}
+
+	// Row 1 send/receipt mocks for a happy-path confirm.
+	var capturedRaw []byte
+	primary.sendFn = func(_ context.Context, r []byte) (string, error) {
+		capturedRaw = append([]byte(nil), r...)
+		return TxHash(r), nil
+	}
+	secondary.sendFn = func(_ context.Context, r []byte) (string, error) {
+		return TxHash(r), nil
+	}
+	primary.receiptFn = func(_ context.Context, h string) (*Receipt, error) {
+		if capturedRaw == nil {
+			return nil, nil
+		}
+		hotTopic, _ := PadAddressTopic(canonicalHot)
+		toTopic, _ := PadAddressTopic(addr1)
+		return &Receipt{
+			TxHash: strings.ToLower(h), BlockNumber: 100, Status: 1,
+			From: strings.ToLower(canonicalHot),
+			To:   strings.ToLower(USDCContractAddressBase),
+			Logs: []ReceiptLog{{
+				Address: strings.ToLower(USDCContractAddressBase),
+				Topics: []string{
+					"0x" + hex.EncodeToString(transferEventTopic),
+					"0x" + hex.EncodeToString(hotTopic),
+					"0x" + hex.EncodeToString(toTopic),
+				},
+				Data: bigEndian32(80),
+			}},
+		}, nil
+	}
+	secondary.receiptFn = primary.receiptFn
+	primary.blockNumFn = func(_ context.Context) (uint64, error) { return 200, nil }
+	secondary.blockNumFn = primary.blockNumFn
+	primary.txByHashFn = func(_ context.Context, _ string) (*Transaction, error) {
+		want, _ := USDCTransferCalldata(addr1, 80)
+		return &Transaction{
+			Hash: "0xhash", From: strings.ToLower(canonicalHot),
+			To: strings.ToLower(USDCContractAddressBase), Input: want,
+			ChainID: BaseMainnetChainID,
+		}, nil
+	}
+	secondary.txByHashFn = primary.txByHashFn
+
+	claimer := &mockClaimer{claimed: true}
+	opts := RunnerOptions{
+		DB:                    db,
+		Security:              SecurityConfig{HotWalletAddress: hotAddr},
+		RPCs:                  TwoRPCs{Primary: primary, Secondary: secondary},
+		Signer:                signer,
+		Claimer:               claimer,
+		Logger:                logger,
+		RunInterval:           testRunInterval,
+		MaxRowsPerRun:         50,
+		ConfirmationBlocks:    5,
+		PerPayoutCapBaseUnits: 1_000_000_000_000,
+		PerDayCapBaseUnits:    10_000_000_000_000,
+		ReceiptPollInterval:   1 * time.Millisecond,
+		ReceiptPollTimeout:    100 * time.Millisecond,
+		NowFn:                 func() time.Time { return time.Now().UTC() },
+	}
+	runner, err := NewRunner(opts, state)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	if _, err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// Row 1 should have been claimed.
+	if len(claimer.calls) != 1 {
+		t.Errorf("claimer calls = %d, want 1 (only row 1 should process)", len(claimer.calls))
+	}
+
+	// payout_insufficient_funds must be present for row 2.
+	logs := logBuf.String()
+	if !strings.Contains(logs, "payout_insufficient_funds") {
+		t.Errorf("payout_insufficient_funds not emitted; logs:\n%s", logs)
+	}
+
+	// payout_run_finished must report skipped_funds=1.
+	if !strings.Contains(logs, `"skipped_funds":1`) {
+		t.Errorf("payout_run_finished skipped_funds != 1; logs:\n%s", logs)
+	}
+
+	// Row 2 attempt must NOT have been inserted.
+	var attemptCount int
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM payout_attempts WHERE payout_id=?`, id2,
+	).Scan(&attemptCount); err != nil {
+		t.Fatalf("query attempts: %v", err)
+	}
+	if attemptCount != 0 {
+		t.Errorf("row2 payout_attempts count = %d, want 0 (row should not have been processed)", attemptCount)
+	}
+}
+
+// TestRunner_RunOnce_DailyCapTrippedHaltsLoop locks the
+// Step 4 r5 [code:r5-2] HIGH closure: SPEC §4.3 step 4 + §7.1 line 3723.
+//
+// Setup (PerDayCapBaseUnits = 100):
+//   - Row 1: provider_credits = 60 → processes OK (window sum = 60)
+//   - Row 2: provider_credits = 60 → trips daily cap (60+60=120 > 100)
+//     → payout_daily_cap_tripped emitted, loop halts
+//   - Row 3: provider_credits = 10 → must NOT be processed
+//
+// Expected: payout_daily_cap_tripped emitted; row 3 NOT processed.
+func TestRunner_RunOnce_DailyCapTrippedHaltsLoop(t *testing.T) {
+	db := openTestDB(t)
+	rawHex := "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+	raw, _ := hex.DecodeString(rawHex)
+	signer, err := NewLocalFileSignerFromKey(raw)
+	if err != nil {
+		t.Fatalf("signer: %v", err)
+	}
+	hotAddr := signer.FromAddress()
+	canonicalHot, _ := CanonicalizeEIP55(hotAddr)
+	logBuf := &bytes.Buffer{}
+	logger := zerolog.New(logBuf)
+	state, _, err := Acquire(context.Background(), db, testRunInterval, logger)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	if err := UpsertNonceCursor(context.Background(), db, hotAddr, 0, 0, 0, NowUTC()); err != nil {
+		t.Fatalf("UpsertNonceCursor: %v", err)
+	}
+
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339Nano)
+	addrs := []string{
+		"0x000000000000000000000000000000000000bbb1",
+		"0x000000000000000000000000000000000000bbb2",
+		"0x000000000000000000000000000000000000bbb3",
+	}
+	for i, pid := range []string{"q1", "q2", "q3"} {
+		_, _ = db.ExecContext(context.Background(), `
+INSERT INTO provider_payout_addresses
+  (provider_id, chain, address, payout_allowed, pending_until_utc,
+   rotated_from, registered_at_utc, registered_against_hot_wallet)
+VALUES (?, 'base-mainnet', ?, 1, ?, NULL, ?, ?)`,
+			pid, addrs[i], past, past, canonicalHot)
+	}
+
+	// Three rows: 60, 60, 10. Daily cap = 100.
+	makeRow := func(pid, ikey string, credits int64) int64 {
+		id := insertReadyRow(t, db, pid, ikey)
+		_, _ = db.ExecContext(context.Background(),
+			`UPDATE ledger_payout_ready SET provider_credits=?, gross_credits=? WHERE id=?`, credits, credits, id)
+		return id
+	}
+	id1 := makeRow("q1", "settle:q1:captest1", 60)
+	id2 := makeRow("q2", "settle:q2:captest2", 60)
+	id3 := makeRow("q3", "settle:q3:captest3", 10)
+
+	primary := &mockRPCClient{label: "primary"}
+	secondary := &mockRPCClient{label: "secondary"}
+
+	// Balance probe: return large balance so insufficient-funds doesn't fire.
+	bigBal := make([]byte, 32)
+	new(big.Int).SetUint64(1_000_000_000).FillBytes(bigBal)
+	primary.callFn = func(_ context.Context, _ string, _ []byte) ([]byte, error) {
+		return bigBal, nil
+	}
+
+	// Row 1 happy-path: send+confirm.
+	var capturedRaw []byte
+	primary.sendFn = func(_ context.Context, r []byte) (string, error) {
+		capturedRaw = append([]byte(nil), r...)
+		return TxHash(r), nil
+	}
+	secondary.sendFn = func(_ context.Context, r []byte) (string, error) {
+		return TxHash(r), nil
+	}
+	primary.receiptFn = func(_ context.Context, h string) (*Receipt, error) {
+		if capturedRaw == nil {
+			return nil, nil
+		}
+		hotTopic, _ := PadAddressTopic(canonicalHot)
+		toTopic, _ := PadAddressTopic(addrs[0])
+		return &Receipt{
+			TxHash: strings.ToLower(h), BlockNumber: 100, Status: 1,
+			From: strings.ToLower(canonicalHot),
+			To:   strings.ToLower(USDCContractAddressBase),
+			Logs: []ReceiptLog{{
+				Address: strings.ToLower(USDCContractAddressBase),
+				Topics: []string{
+					"0x" + hex.EncodeToString(transferEventTopic),
+					"0x" + hex.EncodeToString(hotTopic),
+					"0x" + hex.EncodeToString(toTopic),
+				},
+				Data: bigEndian32(60),
+			}},
+		}, nil
+	}
+	secondary.receiptFn = primary.receiptFn
+	primary.blockNumFn = func(_ context.Context) (uint64, error) { return 200, nil }
+	secondary.blockNumFn = primary.blockNumFn
+	primary.txByHashFn = func(_ context.Context, _ string) (*Transaction, error) {
+		want, _ := USDCTransferCalldata(addrs[0], 60)
+		return &Transaction{
+			Hash: "0xhash", From: strings.ToLower(canonicalHot),
+			To: strings.ToLower(USDCContractAddressBase), Input: want,
+			ChainID: BaseMainnetChainID,
+		}, nil
+	}
+	secondary.txByHashFn = primary.txByHashFn
+
+	claimer := &mockClaimer{claimed: true}
+	opts := RunnerOptions{
+		DB:       db,
+		Security: SecurityConfig{HotWalletAddress: hotAddr},
+		RPCs:     TwoRPCs{Primary: primary, Secondary: secondary},
+		Signer:   signer,
+		Claimer:  claimer,
+		Logger:   logger,
+		// Per-day cap = 100; row1(60)+row2(60)=120 trips it.
+		PerPayoutCapBaseUnits: 1_000_000_000_000,
+		PerDayCapBaseUnits:    100,
+		RunInterval:           testRunInterval,
+		MaxRowsPerRun:         50,
+		ConfirmationBlocks:    5,
+		ReceiptPollInterval:   1 * time.Millisecond,
+		ReceiptPollTimeout:    100 * time.Millisecond,
+		NowFn:                 func() time.Time { return time.Now().UTC() },
+	}
+	runner, err := NewRunner(opts, state)
+	if err != nil {
+		t.Fatalf("NewRunner: %v", err)
+	}
+
+	if _, err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// Row 1 should have been claimed.
+	if len(claimer.calls) != 1 {
+		t.Errorf("claimer calls = %d, want 1 (only row 1 should process)", len(claimer.calls))
+	}
+
+	logs := logBuf.String()
+
+	// payout_daily_cap_tripped must be emitted (not payout_capped).
+	if !strings.Contains(logs, "payout_daily_cap_tripped") {
+		t.Errorf("payout_daily_cap_tripped not emitted; logs:\n%s", logs)
+	}
+	if strings.Contains(logs, `"reason":"per_day_cap"`) {
+		t.Errorf("payout_capped with reason=per_day_cap must NOT be emitted when daily cap trips; logs:\n%s", logs)
+	}
+
+	// Row 3 must not have been processed (no attempt row).
+	for _, id := range []int64{id2, id3} {
+		var c int
+		if err := db.QueryRowContext(context.Background(),
+			`SELECT COUNT(*) FROM payout_attempts WHERE payout_id=?`, id,
+		).Scan(&c); err != nil {
+			t.Fatalf("query attempts for id %d: %v", id, err)
+		}
+		if id == id3 && c != 0 {
+			t.Errorf("row3 (id=%d) payout_attempts count = %d, want 0 (halted by daily cap)", id3, c)
+		}
+	}
+	_ = id1 // row1 is expected to have an attempt
 }

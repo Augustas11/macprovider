@@ -14,9 +14,9 @@ import (
 // TestUSDCTransferCalldata_KnownVector locks the §4.3 step 7 (a)
 // expected calldata shape. The vector here is hand-derived:
 //
-//   selector  = 0xa9059cbb
-//   to        = 0x000...DEAD (canonical EIP-55 form below)
-//   amount    = 1_000_000 (1 USDC = 1e6 base units)
+//	selector  = 0xa9059cbb
+//	to        = 0x000...DEAD (canonical EIP-55 form below)
+//	amount    = 1_000_000 (1 USDC = 1e6 base units)
 //
 // Expected output is 68 bytes total.
 func TestUSDCTransferCalldata_KnownVector(t *testing.T) {
@@ -73,7 +73,7 @@ func TestEIP1559_RoundTripSignAndRecover(t *testing.T) {
 	tx := EIP1559Tx{
 		ChainID:              BaseMainnetChainID,
 		Nonce:                42,
-		MaxPriorityFeePerGas: big.NewInt(1_500_000_000), // 1.5 gwei
+		MaxPriorityFeePerGas: big.NewInt(1_500_000_000),  // 1.5 gwei
 		MaxFeePerGas:         big.NewInt(20_000_000_000), // 20 gwei
 		GasLimit:             100_000,
 		To:                   to,

@@ -51,19 +51,19 @@ type AddressReader interface {
 
 // RunnerOptions bundles construction-time dependencies.
 type RunnerOptions struct {
-	DB          *sql.DB
-	Security    SecurityConfig
-	RPCs        TwoRPCs
-	Signer      Signer
-	Claimer     PayoutClaimer
-	Logger      zerolog.Logger
-	RunInterval time.Duration
-	MaxRowsPerRun int
-	ConfirmationBlocks int
+	DB                    *sql.DB
+	Security              SecurityConfig
+	RPCs                  TwoRPCs
+	Signer                Signer
+	Claimer               PayoutClaimer
+	Logger                zerolog.Logger
+	RunInterval           time.Duration
+	MaxRowsPerRun         int
+	ConfirmationBlocks    int
 	PerPayoutCapBaseUnits int64
 	PerDayCapBaseUnits    int64
-	ReceiptPollInterval time.Duration
-	ReceiptPollTimeout  time.Duration
+	ReceiptPollInterval   time.Duration
+	ReceiptPollTimeout    time.Duration
 
 	// LowBalanceThreshold / LowNativeThreshold drive the §6.2
 	// balance-monitoring emits at the top of each cycle (Step 4).
@@ -110,9 +110,9 @@ type Runner struct {
 	// with payout_runner_halted_skipping_cycle emitted; admin
 	// run-now refuses with 409. Operator runbook drives recovery
 	// (flip payout.enabled=false + investigate + restart).
-	halted       atomic.Bool
-	haltReason   atomic.Value // string
-	haltedAtUTC  atomic.Value // string (RFC3339Nano)
+	halted      atomic.Bool
+	haltReason  atomic.Value // string
+	haltedAtUTC atomic.Value // string (RFC3339Nano)
 
 	// activeSnap is the §6.5 tuning snapshot captured at the top
 	// of RunOnce. Single-threaded under mu+inFlight (only one
@@ -368,10 +368,13 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 		Str("ts_utc", now.Format(time.RFC3339Nano)).
 		Send()
 
-	paid, capped, failed, skipped := 0, 0, 0, 0
+	paid, capped, failed, skipped, skippedFunds := 0, 0, 0, 0, 0
 	defer func() {
 		// §7.1 payout_run_finished — full field set per
 		// codex round-1 [arch:3.4] closure.
+		// Step 4 r5 [code:r5-1] HIGH closure: skipped_funds now
+		// reflects actual rows skipped due to insufficient funds;
+		// previously hardcoded 0.
 		r.opts.Logger.Info().
 			Str("event", "payout_run_finished").
 			Str("run_id", runID).
@@ -380,7 +383,7 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 			Int("capped", capped).
 			Int("failed", failed).
 			Int("skipped_no_addr", skipped).
-			Int("skipped_funds", 0).
+			Int("skipped_funds", skippedFunds).
 			Str("error_text", "").
 			Send()
 	}()
@@ -424,6 +427,15 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 		return runID, fmt.Errorf("SelectReadyPayouts: %w", err)
 	}
 
+	// Step 4 r5 [code:r5-1] HIGH closure: §4.3 step 6-7 + §7.1 line
+	// 3722 require a per-row hot-wallet USDC balance check before
+	// sign/broadcast. We read the balance once before the loop and
+	// deduct each successful payout's amount in-memory to avoid
+	// repeated RPC calls. On RPC error we fall through and let the
+	// sign path fail naturally (balance monitoring already alerted).
+	runningBalance, _ := r.currentHotWalletUSDCBalance(ctx)
+
+rowLoop:
 	for _, row := range rows {
 		if !row.EffectiveAddress.Valid {
 			// §4.3 step 1: NULL effective_address is a hard
@@ -432,6 +444,28 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 			failed++
 			continue
 		}
+
+		// Step 4 r5 [code:r5-1] HIGH closure: if we have a valid
+		// running balance and it is insufficient for this row, emit
+		// payout_insufficient_funds and halt the cycle.
+		if runningBalance != nil && row.ProviderCredits > 0 {
+			required := new(big.Int).SetInt64(row.ProviderCredits)
+			if runningBalance.Cmp(required) < 0 {
+				r.opts.Logger.Error().
+					Str("event", "payout_insufficient_funds").
+					Str("severity", "PAGE").
+					Str("run_id", runID).
+					Int64("payout_id", row.PayoutID).
+					Str("provider_id", row.ProviderID).
+					Str("required_usdc_base_units", required.String()).
+					Str("available_usdc_base_units", runningBalance.String()).
+					Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
+					Send()
+				skippedFunds++
+				break rowLoop
+			}
+		}
+
 		outcome, perr := r.processRow(ctx, runID, row)
 		if perr != nil {
 			r.opts.Logger.Error().
@@ -449,8 +483,19 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 		switch outcome {
 		case rowOutcomePaid:
 			paid++
+			// Deduct the paid amount from the running balance so the
+			// next row sees the post-payout balance without an RPC call.
+			if runningBalance != nil {
+				runningBalance.Sub(runningBalance, new(big.Int).SetInt64(row.ProviderCredits))
+			}
 		case rowOutcomeCapped:
 			capped++
+		case rowOutcomeDailyCapTripped:
+			// Step 4 r5 [code:r5-2] HIGH closure: daily cap trip halts
+			// all subsequent rows in this cycle per SPEC §4.3 step 4.
+			// Use a labeled break to exit the outer for loop.
+			capped++
+			break rowLoop
 		case rowOutcomeSkipped:
 			skipped++
 		case rowOutcomeFailed:
@@ -460,11 +505,38 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 	return runID, nil
 }
 
+// currentHotWalletUSDCBalance reads the hot wallet USDC balance from
+// the primary RPC. Returns (nil, err) on RPC or parse error — callers
+// treat nil as "balance unknown" and skip the check.
+//
+// Step 4 r5 [code:r5-1] HIGH closure: used by RunOnce to guard the
+// row loop against insufficient-funds sign/broadcast per SPEC §4.3
+// step 6-7 + §7.1 line 3722.
+func (r *Runner) currentHotWalletUSDCBalance(ctx context.Context) (*big.Int, error) {
+	hotLower := strings.ToLower(r.opts.Security.HotWalletAddress)
+	data := usdcBalanceCalldata(hotLower)
+	res, err := r.opts.RPCs.Primary.CallContract(ctx, USDCContractAddressBase, data)
+	if err != nil {
+		return nil, err
+	}
+	bal, ok := parseBalanceResult(res)
+	if !ok {
+		return nil, fmt.Errorf("currentHotWalletUSDCBalance: parse failed")
+	}
+	return bal, nil
+}
+
 type rowOutcome int
 
 const (
 	rowOutcomePaid rowOutcome = iota
 	rowOutcomeCapped
+	// rowOutcomeDailyCapTripped is returned by processRow (via
+	// allocateBuildSignBroadcast) when the per-day window sum would
+	// exceed PerDayCapBaseUnits. Distinct from rowOutcomeCapped
+	// (per-payout cap) so RunOnce can BREAK the row loop.
+	// Step 4 r5 [code:r5-2] HIGH closure.
+	rowOutcomeDailyCapTripped
 	rowOutcomeFailed
 	rowOutcomeSkipped
 )
@@ -776,17 +848,21 @@ func (r *Runner) allocateBuildSignBroadcast(ctx context.Context, runID string, r
 		return rowOutcomeFailed, fmt.Errorf("SumAmountWindow: %w", err)
 	}
 	if committedSum+amount > r.opts.PerDayCapBaseUnits {
-		// §7.1 payout_capped — full field set per codex round-2
-		// [arch:3.4-r2] MEDIUM closure.
+		// Step 4 r5 [code:r5-2] HIGH closure: SPEC §4.3 step 4 +
+		// §7.1 line 3723 require payout_daily_cap_tripped (NOT
+		// payout_capped) when the 24h window sum would exceed the
+		// daily cap. RunOnce breaks the row loop on this outcome so
+		// subsequent rows in the same cycle are skipped.
+		// payout_capped is reserved for per-payout cap.
 		r.opts.Logger.Warn().
-			Str("event", "payout_capped").
+			Str("event", "payout_daily_cap_tripped").
+			Str("severity", "WARN").
 			Str("run_id", runID).
-			Int64("payout_id", row.PayoutID).
-			Str("provider_id", row.ProviderID).
-			Str("reason", "per_day_cap").
+			Int64("window_paid_usdc_base_units", committedSum).
+			Int64("cap_usdc_base_units", r.opts.PerDayCapBaseUnits).
 			Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
 			Send()
-		return rowOutcomeCapped, nil
+		return rowOutcomeDailyCapTripped, nil
 	}
 
 	// §4.3 step 5 — C3 NORMATIVE invariant: re-read provider_credits
@@ -1094,7 +1170,7 @@ func (r *Runner) buildEIP1559(nonce int64, effectiveAddress string, amount int64
 	return EIP1559Tx{
 		ChainID:              BaseMainnetChainID,
 		Nonce:                uint64(nonce),
-		MaxPriorityFeePerGas: big.NewInt(2_000_000_000), // 2 gwei — production tuning lands in Step 4
+		MaxPriorityFeePerGas: big.NewInt(2_000_000_000),  // 2 gwei — production tuning lands in Step 4
 		MaxFeePerGas:         big.NewInt(50_000_000_000), // 50 gwei
 		GasLimit:             80_000,
 		To:                   to,

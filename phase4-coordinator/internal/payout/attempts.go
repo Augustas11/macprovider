@@ -247,7 +247,7 @@ VALUES (?, ?, 'base-mainnet', ?, ?, ?, ?, 0, ?)`,
 // Disambiguation on row-count = 0:
 //   - row missing                    → ErrAttemptRowMissing
 //   - confirmed_at_utc IS NOT NULL OR abandoned_at_utc IS NOT NULL
-//                                    → ErrAttemptStateChangedDuringSign
+//     → ErrAttemptStateChangedDuringSign
 //   - raw_signed_tx IS NOT NULL      → ErrRawSignedTxAlreadyPresent
 func CASPersistSignedTx(ctx context.Context, conn *sql.Conn, payoutID int64, attemptSeq int,
 	rawSignedTx []byte, txHash, nowUTC string,
@@ -275,10 +275,10 @@ UPDATE payout_attempts
 	}
 	// Disambiguate via a follow-up read.
 	var (
-		gotRow       int
-		isAbandoned  sql.NullString
-		isConfirmed  sql.NullString
-		hasSignedTx  sql.NullString
+		gotRow      int
+		isAbandoned sql.NullString
+		isConfirmed sql.NullString
+		hasSignedTx sql.NullString
 	)
 	row := conn.QueryRowContext(ctx, `
 SELECT 1, abandoned_at_utc, confirmed_at_utc,

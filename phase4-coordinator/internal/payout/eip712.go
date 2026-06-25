@@ -17,14 +17,18 @@ import (
 // catches typos at process start instead of at first request.
 
 // domainTypeHash = keccak256(
-//     "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+//
+//	"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+//
 // )
 var domainTypeHash = keccak256OfString(
 	"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)",
 )
 
 // payoutAddressRegistrationTypeHash = keccak256(
-//     "PayoutAddressRegistration(string providerId,address address,string chain,bytes32 nonce,uint64 tsUtc)"
+//
+//	"PayoutAddressRegistration(string providerId,address address,string chain,bytes32 nonce,uint64 tsUtc)"
+//
 // )
 //
 // The struct name "PayoutAddressRegistration" and field names
@@ -52,11 +56,11 @@ const PayoutChainID uint64 = 8453
 // the typed-data the recovered signer signed (SPEC §3.2 step 5
 // field-by-field equality discipline).
 type EIP712Inputs struct {
-	ProviderID      string // expected to equal URL-path provider_id
-	CanonicalAddr   string // canonical EIP-55, post-§3.2 step 2
-	Chain           string // exactly "base-mainnet"
-	Nonce32         [32]byte
-	TsUtc           uint64 // unix seconds
+	ProviderID        string // expected to equal URL-path provider_id
+	CanonicalAddr     string // canonical EIP-55, post-§3.2 step 2
+	Chain             string // exactly "base-mainnet"
+	Nonce32           [32]byte
+	TsUtc             uint64 // unix seconds
 	VerifyingContract string // canonical EIP-55, the operator's hot wallet
 }
 
@@ -104,12 +108,14 @@ func VerifyEIP712(inputs EIP712Inputs, signatureHex string) (digest [32]byte, er
 }
 
 // buildDigest computes the EIP-712 digest:
-//   digest = keccak256(0x19 || 0x01 || domainSeparator || structHash)
+//
+//	digest = keccak256(0x19 || 0x01 || domainSeparator || structHash)
 //
 // Per SPEC §3.2 step 5 the typed-data definition is:
-//   PayoutAddressRegistration(string providerId, address address,
-//                             string chain, bytes32 nonce,
-//                             uint64 tsUtc)
+//
+//	PayoutAddressRegistration(string providerId, address address,
+//	                          string chain, bytes32 nonce,
+//	                          uint64 tsUtc)
 //
 // EIP-712 atomic-type encoding:
 //   - string  → keccak256(utf8 bytes)

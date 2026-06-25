@@ -67,16 +67,16 @@ type pauseFlagReader interface {
 // successful and failed §3.3 attempt. Field names match
 // SPEC-016 §3.4 / §7.1 exactly.
 type addressEvent struct {
-	Event              string `json:"event"`
-	ProviderID         string `json:"provider_id"`
-	Chain              string `json:"chain,omitempty"`
-	OldAddress         string `json:"old_address,omitempty"`
-	NewAddress         string `json:"new_address,omitempty"`
-	PendingUntilUtc    string `json:"pending_until_utc,omitempty"`
-	Actor              string `json:"actor,omitempty"`
-	TsUtc              string `json:"ts_utc"`
-	Reason             string `json:"reason,omitempty"`
-	SrcIP              string `json:"src_ip,omitempty"`
+	Event                string `json:"event"`
+	ProviderID           string `json:"provider_id"`
+	Chain                string `json:"chain,omitempty"`
+	OldAddress           string `json:"old_address,omitempty"`
+	NewAddress           string `json:"new_address,omitempty"`
+	PendingUntilUtc      string `json:"pending_until_utc,omitempty"`
+	Actor                string `json:"actor,omitempty"`
+	TsUtc                string `json:"ts_utc"`
+	Reason               string `json:"reason,omitempty"`
+	SrcIP                string `json:"src_ip,omitempty"`
 	SubmittedFingerprint string `json:"submitted_fingerprint,omitempty"`
 }
 
@@ -93,16 +93,16 @@ type addressEvent struct {
 // write-time, not at runner-cycle time). CoolingOffPeriod remains
 // for the test path that doesn't wire a TuningProvider.
 type AddressesService struct {
-	DB                *sql.DB
-	Security          SecurityConfig
-	DenyList          *DenyList
-	Tokens            providerTokenValidator
-	Identity          providerIdentityChecker
-	Pause             pauseFlagReader
-	CoolingOffPeriod  time.Duration // fallback when Tuning == nil (test path)
-	Tuning            *TuningProvider
-	Log               zerolog.Logger
-	Now               func() time.Time // injectable for tests
+	DB               *sql.DB
+	Security         SecurityConfig
+	DenyList         *DenyList
+	Tokens           providerTokenValidator
+	Identity         providerIdentityChecker
+	Pause            pauseFlagReader
+	CoolingOffPeriod time.Duration // fallback when Tuning == nil (test path)
+	Tuning           *TuningProvider
+	Log              zerolog.Logger
+	Now              func() time.Time // injectable for tests
 }
 
 // currentCoolingOff returns the live address-registration
@@ -203,11 +203,11 @@ type registerRequest struct {
 //  7. Deny-list.
 //  8. ts_utc skew window.
 //  9. EIP-712 verification + typed-data field-by-field equality.
-// 10. BEGIN IMMEDIATE txn: TOCTOU pause re-check, anti-replay
+//  10. BEGIN IMMEDIATE txn: TOCTOU pause re-check, anti-replay
 //     INSERT, provider_payout_addresses UPSERT + stamp
 //     registered_against_hot_wallet from SecurityConfig (server
 //     side; the client value is silently ignored at decode).
-// 11. §3.4 audit-log emission with old_address / new_address /
+//  11. §3.4 audit-log emission with old_address / new_address /
 //     pending_until_utc in canonical EIP-55 form.
 //
 // Per SPEC every response — 201 / 200 / 4xx / 5xx — emits a

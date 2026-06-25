@@ -56,9 +56,9 @@ type ReorgPoller struct {
 	// Tuning.Snapshot() at the top of each poll cycle. Cadence
 	// (RunInterval) is NOT live-reloadable — change requires
 	// restart (documented limitation, Step 4 r1 [arch:4.2]).
-	Tuning      *TuningProvider
-	Logger      zerolog.Logger
-	NowFn       func() time.Time
+	Tuning *TuningProvider
+	Logger zerolog.Logger
+	NowFn  func() time.Time
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -261,12 +261,20 @@ UPDATE payout_attempts
 		// Operator abandoned in the gap; do NOT proceed.
 		return nil
 	}
+	// Step 4 r5 [code:r5-4] MEDIUM closure: §7.1 line 3724 requires
+	// last_seen_block and rpc_source in all payout_reorg_revert emits.
+	// Cancel self-transfer rows do not preserve a meaningful last
+	// confirmed block (the cancel DB row's block_number is cleared
+	// above by the UPDATE), so we emit 0 as a documented sentinel.
+	// rpc_source="both" because both RPCs agreed the tx was gone.
 	p.Logger.Error().
 		Str("event", "payout_reorg_revert").
 		Str("severity", "PAGE").
 		Int64("payout_id", payoutID).
 		Int("attempt_seq", attemptSeq).
 		Str("tx_hash", txHash).
+		Int64("last_seen_block", 0).
+		Str("rpc_source", "both").
 		Int("is_cancel_self_transfer", 1).
 		Str("observed_via", "reorg_poll_cadence").
 		Str("ts_utc", now).

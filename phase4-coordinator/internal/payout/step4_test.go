@@ -500,22 +500,22 @@ func TestEmitBalanceAlerts_NonZeroThresholdInvokesProbes(t *testing.T) {
 		t.Fatalf("UpsertNonceCursor: %v", err)
 	}
 	opts := RunnerOptions{
-		DB:                  db,
-		Security:            SecurityConfig{HotWalletAddress: hotAddr},
-		RPCs:                TwoRPCs{Primary: primary, Secondary: secondary},
-		Signer:              signer,
-		Claimer:             &mockClaimer{claimed: false},
-		Logger:              logger,
-		RunInterval:         testRunInterval,
-		MaxRowsPerRun:       50,
-		ConfirmationBlocks:  5,
+		DB:                    db,
+		Security:              SecurityConfig{HotWalletAddress: hotAddr},
+		RPCs:                  TwoRPCs{Primary: primary, Secondary: secondary},
+		Signer:                signer,
+		Claimer:               &mockClaimer{claimed: false},
+		Logger:                logger,
+		RunInterval:           testRunInterval,
+		MaxRowsPerRun:         50,
+		ConfirmationBlocks:    5,
 		PerPayoutCapBaseUnits: 1_000_000_000_000,
 		PerDayCapBaseUnits:    10_000_000_000_000,
 		ReceiptPollInterval:   1 * time.Millisecond,
 		ReceiptPollTimeout:    100 * time.Millisecond,
 		NowFn:                 func() time.Time { return time.Now().UTC() },
 		// Non-zero thresholds must activate the probes.
-		LowBalanceThreshold: 1_000_000, // $1 USDC base units
+		LowBalanceThreshold: 1_000_000,             // $1 USDC base units
 		LowNativeThreshold:  1_000_000_000_000_000, // 0.001 ETH
 	}
 	runner, err := NewRunner(opts, state)

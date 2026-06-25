@@ -63,19 +63,19 @@ type TuningSnapshot struct {
 // way to guarantee that is to make the bound-set the SAME
 // function call.
 var (
-	addressCoolingOffMin   = 1 * time.Hour
-	runIntervalMin         = 5 * time.Minute
-	runIntervalMax         = 24 * time.Hour
-	runNowMinIntervalMin   = 10 * time.Second
-	runNowMinIntervalMax   = 1 * time.Hour
-	confirmationBlocksMin  = 5
-	confirmationBlocksMax  = 200
-	maxRowsPerRunMin       = 1
-	maxRowsPerRunMax       = 500
-	reorgPollWindowMin     = 1 * time.Hour
-	reorgPollWindowMax     = 168 * time.Hour
-	lowNativeThresholdMax  = int64(1_000_000_000_000_000_000) // 1e18 wei
-	spkiPinRegex           = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
+	addressCoolingOffMin  = 1 * time.Hour
+	runIntervalMin        = 5 * time.Minute
+	runIntervalMax        = 24 * time.Hour
+	runNowMinIntervalMin  = 10 * time.Second
+	runNowMinIntervalMax  = 1 * time.Hour
+	confirmationBlocksMin = 5
+	confirmationBlocksMax = 200
+	maxRowsPerRunMin      = 1
+	maxRowsPerRunMax      = 500
+	reorgPollWindowMin    = 1 * time.Hour
+	reorgPollWindowMax    = 168 * time.Hour
+	lowNativeThresholdMax = int64(1_000_000_000_000_000_000) // 1e18 wei
+	spkiPinRegex          = regexp.MustCompile(`^[0-9a-fA-F]{64}$`)
 )
 
 // validateBounds applies the §6.5 hard-bound matrix to a candidate
@@ -95,56 +95,56 @@ func validateBounds(t TuningSnapshot, perDayCap int64) error {
 		return &BoundViolationError{
 			Field:     "payout.tuning.address_cooling_off_period",
 			Attempted: t.AddressCoolingOffPeriod.String(),
-			Bound:          fmt.Sprintf(">= %s", addressCoolingOffMin),
+			Bound:     fmt.Sprintf(">= %s", addressCoolingOffMin),
 		}
 	}
 	if t.RunInterval < runIntervalMin || t.RunInterval > runIntervalMax {
 		return &BoundViolationError{
-			Field:"payout.tuning.run_interval",
-			Attempted:t.RunInterval.String(),
-			Bound:          fmt.Sprintf("[%s, %s]", runIntervalMin, runIntervalMax),
+			Field:     "payout.tuning.run_interval",
+			Attempted: t.RunInterval.String(),
+			Bound:     fmt.Sprintf("[%s, %s]", runIntervalMin, runIntervalMax),
 		}
 	}
 	if t.RunNowMinInterval < runNowMinIntervalMin || t.RunNowMinInterval > runNowMinIntervalMax {
 		return &BoundViolationError{
-			Field:"payout.tuning.run_now_min_interval",
-			Attempted:t.RunNowMinInterval.String(),
-			Bound:          fmt.Sprintf("[%s, %s]", runNowMinIntervalMin, runNowMinIntervalMax),
+			Field:     "payout.tuning.run_now_min_interval",
+			Attempted: t.RunNowMinInterval.String(),
+			Bound:     fmt.Sprintf("[%s, %s]", runNowMinIntervalMin, runNowMinIntervalMax),
 		}
 	}
 	if t.ConfirmationBlocks < confirmationBlocksMin || t.ConfirmationBlocks > confirmationBlocksMax {
 		return &BoundViolationError{
-			Field:"payout.tuning.confirmation_blocks",
-			Attempted:fmt.Sprintf("%d", t.ConfirmationBlocks),
-			Bound:          fmt.Sprintf("[%d, %d]", confirmationBlocksMin, confirmationBlocksMax),
+			Field:     "payout.tuning.confirmation_blocks",
+			Attempted: fmt.Sprintf("%d", t.ConfirmationBlocks),
+			Bound:     fmt.Sprintf("[%d, %d]", confirmationBlocksMin, confirmationBlocksMax),
 		}
 	}
 	if t.MaxRowsPerRun < maxRowsPerRunMin || t.MaxRowsPerRun > maxRowsPerRunMax {
 		return &BoundViolationError{
-			Field:"payout.tuning.max_rows_per_run",
-			Attempted:fmt.Sprintf("%d", t.MaxRowsPerRun),
-			Bound:          fmt.Sprintf("[%d, %d]", maxRowsPerRunMin, maxRowsPerRunMax),
+			Field:     "payout.tuning.max_rows_per_run",
+			Attempted: fmt.Sprintf("%d", t.MaxRowsPerRun),
+			Bound:     fmt.Sprintf("[%d, %d]", maxRowsPerRunMin, maxRowsPerRunMax),
 		}
 	}
 	if t.ReorgPollWindow < reorgPollWindowMin || t.ReorgPollWindow > reorgPollWindowMax {
 		return &BoundViolationError{
-			Field:"payout.tuning.reorg_poll_window",
-			Attempted:t.ReorgPollWindow.String(),
-			Bound:          fmt.Sprintf("[%s, %s]", reorgPollWindowMin, reorgPollWindowMax),
+			Field:     "payout.tuning.reorg_poll_window",
+			Attempted: t.ReorgPollWindow.String(),
+			Bound:     fmt.Sprintf("[%s, %s]", reorgPollWindowMin, reorgPollWindowMax),
 		}
 	}
 	if t.LowNativeThreshold < 0 || t.LowNativeThreshold > lowNativeThresholdMax {
 		return &BoundViolationError{
-			Field:"payout.tuning.low_native_threshold",
-			Attempted:fmt.Sprintf("%d", t.LowNativeThreshold),
-			Bound:          fmt.Sprintf("[0, %d]", lowNativeThresholdMax),
+			Field:     "payout.tuning.low_native_threshold",
+			Attempted: fmt.Sprintf("%d", t.LowNativeThreshold),
+			Bound:     fmt.Sprintf("[0, %d]", lowNativeThresholdMax),
 		}
 	}
 	if t.LowBalanceThreshold < 0 {
 		return &BoundViolationError{
-			Field:"payout.tuning.low_balance_threshold",
-			Attempted:fmt.Sprintf("%d", t.LowBalanceThreshold),
-			Bound:          ">= 0",
+			Field:     "payout.tuning.low_balance_threshold",
+			Attempted: fmt.Sprintf("%d", t.LowBalanceThreshold),
+			Bound:     ">= 0",
 		}
 	}
 	// Cross-field: low_balance_threshold MUST be <= 2 × per_day_cap.
@@ -152,23 +152,23 @@ func validateBounds(t TuningSnapshot, perDayCap int64) error {
 	// (test path); skip the cross-field check in that case.
 	if perDayCap > 0 && t.LowBalanceThreshold > 2*perDayCap {
 		return &BoundViolationError{
-			Field:"payout.tuning.low_balance_threshold",
-			Attempted:fmt.Sprintf("%d", t.LowBalanceThreshold),
-			Bound:          fmt.Sprintf("<= 2 × per_day_cap (%d)", 2*perDayCap),
+			Field:     "payout.tuning.low_balance_threshold",
+			Attempted: fmt.Sprintf("%d", t.LowBalanceThreshold),
+			Bound:     fmt.Sprintf("<= 2 × per_day_cap (%d)", 2*perDayCap),
 		}
 	}
 	if t.RPCURLPrimaryPinSPKI != "" && !spkiPinRegex.MatchString(t.RPCURLPrimaryPinSPKI) {
 		return &BoundViolationError{
-			Field:"payout.tuning.rpc_url_primary_pin_spki",
-			Attempted:redactSPKI(t.RPCURLPrimaryPinSPKI),
-			Bound:          "64-hex-char SHA-256 or empty",
+			Field:     "payout.tuning.rpc_url_primary_pin_spki",
+			Attempted: redactSPKI(t.RPCURLPrimaryPinSPKI),
+			Bound:     "64-hex-char SHA-256 or empty",
 		}
 	}
 	if t.RPCURLSecondaryPinSPKI != "" && !spkiPinRegex.MatchString(t.RPCURLSecondaryPinSPKI) {
 		return &BoundViolationError{
-			Field:"payout.tuning.rpc_url_secondary_pin_spki",
-			Attempted:redactSPKI(t.RPCURLSecondaryPinSPKI),
-			Bound:          "64-hex-char SHA-256 or empty",
+			Field:     "payout.tuning.rpc_url_secondary_pin_spki",
+			Attempted: redactSPKI(t.RPCURLSecondaryPinSPKI),
+			Bound:     "64-hex-char SHA-256 or empty",
 		}
 	}
 	return nil
@@ -283,7 +283,12 @@ func (p *TuningProvider) Reload(ctx context.Context, candidate TuningSnapshot) (
 	old := p.Snapshot()
 	if bve := validateBounds(candidate, p.perDayCap); bve != nil {
 		p.emitRejected(bve)
-		return nil, fmt.Errorf("%w: %v", ErrTuningBoundViolation, bve)
+		// Step 4 r5 [code:r5-6] LOW closure: wrap both the sentinel
+		// error and the *BoundViolationError so callers can use
+		// errors.Is(err, ErrTuningBoundViolation) AND
+		// errors.As(err, &bve) to extract the structured violation.
+		// Double-%w is valid in Go 1.20+.
+		return nil, fmt.Errorf("%w: %w", ErrTuningBoundViolation, bve)
 	}
 	// Atomic store — the next Snapshot() call sees the new value.
 	p.v.Store(candidate)
@@ -377,10 +382,15 @@ func (p *TuningProvider) emitRejected(err error) {
 			Send()
 	} else {
 		// YAML-parse failure or other pre-bound error.
+		// Step 4 r5 [code:r5-7] LOW closure: use sanitized literal
+		// "config_load_failed" instead of err.Error() to prevent raw
+		// YAML content (which may contain secrets) from reaching logs.
+		// The raw error is available via the log.Error().Err() chain
+		// in the SIGHUP handler; emitRejected is a pure-signal path.
 		p.log.Error().
 			Str("event", "payout_config_reload_rejected").
 			Str("key", "yaml_parse").
-			Str("attempted_value", err.Error()).
+			Str("attempted_value", "config_load_failed").
 			Str("bound", "valid_yaml").
 			Str("actor", "operator_key:coordinator").
 			Str("ts_utc", tsUTC).

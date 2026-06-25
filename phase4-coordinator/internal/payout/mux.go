@@ -118,9 +118,9 @@ func NewMux(addresses *AddressesService, fallback http.Handler) (http.Handler, e
 // installs a thin auth middleware that extracts the bearer and
 // hands `actor` to the abandon service for rate-limit scoping.
 type Step2MuxOptions struct {
-	Addresses   *AddressesService
-	Abandon     *AbandonService
-	Runner      *Runner
+	Addresses *AddressesService
+	Abandon   *AbandonService
+	Runner    *Runner
 	// RunNow is the shared §4.2 run-now controller. Step 4 r2
 	// [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR closure:
 	// rate-limit + payout_run_now_invoked event wired through the

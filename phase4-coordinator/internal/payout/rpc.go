@@ -308,14 +308,14 @@ func (c *HTTPRPCClient) SendRawTransaction(ctx context.Context, rawSignedTx []by
 }
 
 type rpcReceiptRaw struct {
-	TransactionHash   string             `json:"transactionHash"`
-	BlockHash         string             `json:"blockHash"`
-	BlockNumber       string             `json:"blockNumber"`
-	Status            string             `json:"status"`
-	From              string             `json:"from"`
-	To                string             `json:"to"`
-	GasUsed           string             `json:"gasUsed"`
-	Logs              []rpcReceiptLogRaw `json:"logs"`
+	TransactionHash string             `json:"transactionHash"`
+	BlockHash       string             `json:"blockHash"`
+	BlockNumber     string             `json:"blockNumber"`
+	Status          string             `json:"status"`
+	From            string             `json:"from"`
+	To              string             `json:"to"`
+	GasUsed         string             `json:"gasUsed"`
+	Logs            []rpcReceiptLogRaw `json:"logs"`
 }
 
 type rpcReceiptLogRaw struct {

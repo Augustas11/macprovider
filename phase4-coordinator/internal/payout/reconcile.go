@@ -231,10 +231,10 @@ func hexDigit(c byte) uint8 {
 // Pure-value type — no shared mutable state with the SIGHUP
 // tuning provider. SPEC §6.5 architectural invariant.
 type ChainBalanceConfig struct {
-	Interval        time.Duration
-	ToleranceUSDC   int64 // base units
-	HotWalletAddr   string
-	USDCContract    string
+	Interval      time.Duration
+	ToleranceUSDC int64 // base units
+	HotWalletAddr string
+	USDCContract  string
 }
 
 // ChainBalanceWorker periodically reconciles in-DB

@@ -85,20 +85,20 @@ func NewPayoutsHandler(opts PayoutsHandlerOptions) (*PayoutsHandler, error) {
 // PayoutRow is one row of the §7.3 response. Sorted by
 // confirmed_at_utc DESC, NULL last.
 type PayoutRow struct {
-	PayoutID         int64   `json:"payout_id"`
-	AttemptSeq       int     `json:"attempt_seq"`
-	ProviderCredits  int64   `json:"provider_credits"`
-	AmountBaseUnits  int64   `json:"amount_base_units"`
-	Chain            string  `json:"chain"`
-	TxHash           *string `json:"tx_hash,omitempty"`
-	BlockNumber      *int64  `json:"block_number,omitempty"`
-	ConfirmedAtUTC   *string `json:"confirmed_at_utc,omitempty"`
-	BroadcastAtUTC   *string `json:"broadcast_at_utc,omitempty"`
-	AbandonedAtUTC   *string `json:"abandoned_at_utc,omitempty"`
-	IsCancelSelfTrn  bool    `json:"is_cancel_self_transfer"`
-	WindowStartUTC   string  `json:"window_start_utc"`
-	WindowEndUTC     string  `json:"window_end_utc"`
-	IdempotencyKey   string  `json:"idempotency_key"`
+	PayoutID        int64   `json:"payout_id"`
+	AttemptSeq      int     `json:"attempt_seq"`
+	ProviderCredits int64   `json:"provider_credits"`
+	AmountBaseUnits int64   `json:"amount_base_units"`
+	Chain           string  `json:"chain"`
+	TxHash          *string `json:"tx_hash,omitempty"`
+	BlockNumber     *int64  `json:"block_number,omitempty"`
+	ConfirmedAtUTC  *string `json:"confirmed_at_utc,omitempty"`
+	BroadcastAtUTC  *string `json:"broadcast_at_utc,omitempty"`
+	AbandonedAtUTC  *string `json:"abandoned_at_utc,omitempty"`
+	IsCancelSelfTrn bool    `json:"is_cancel_self_transfer"`
+	WindowStartUTC  string  `json:"window_start_utc"`
+	WindowEndUTC    string  `json:"window_end_utc"`
+	IdempotencyKey  string  `json:"idempotency_key"`
 }
 
 // ServePayouts handles GET /providers/{provider_id}/payouts.

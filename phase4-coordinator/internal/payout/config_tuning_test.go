@@ -186,24 +186,24 @@ func TestTuningStaticCheck_NoSecurityNamespaceReference(t *testing.T) {
 	// Add entries here when new PayoutSecurityConfig fields are added.
 	forbiddenIdents := map[string]bool{
 		// Type names.
-		"PayoutSecurityConfig":                true,
-		"SecurityConfig":                      true,
+		"PayoutSecurityConfig": true,
+		"SecurityConfig":       true,
 		// Field names — exact identifiers as declared in config.go.
-		"HotWalletAddress":                    true,
-		"RPCURLPrimary":                       true,
-		"RPCURLSecondary":                     true,
-		"PerPayoutCapUSDCBaseUnits":           true,
-		"PerDayCapUSDCBaseUnits":              true,
-		"CancelMaxTipMultiplier":              true,
-		"CancelMaxGasNativeWei":               true,
-		"CancelMaxGasNativeWeiPer24h":         true,
-		"AbandonRatePerHour":                  true,
-		"ChainReconInterval":                  true,
-		"ChainReconToleranceUSDCBaseUnits":    true,
-		"PauseResumeMinInterval":              true,
-		"EncryptedWalletPath":                 true,
-		"EncryptedWalletOnDiskHex":            true,
-		"DevMode":                             true,
+		"HotWalletAddress":                 true,
+		"RPCURLPrimary":                    true,
+		"RPCURLSecondary":                  true,
+		"PerPayoutCapUSDCBaseUnits":        true,
+		"PerDayCapUSDCBaseUnits":           true,
+		"CancelMaxTipMultiplier":           true,
+		"CancelMaxGasNativeWei":            true,
+		"CancelMaxGasNativeWeiPer24h":      true,
+		"AbandonRatePerHour":               true,
+		"ChainReconInterval":               true,
+		"ChainReconToleranceUSDCBaseUnits": true,
+		"PauseResumeMinInterval":           true,
+		"EncryptedWalletPath":              true,
+		"EncryptedWalletOnDiskHex":         true,
+		"DevMode":                          true,
 	}
 
 	cwd, err := os.Getwd()
@@ -282,10 +282,11 @@ func TestEmitRejected_YAMLParseFailure_EmitsStructuredS71Fields(t *testing.T) {
 	if got := evt["key"]; got != "yaml_parse" {
 		t.Errorf("key = %q, want yaml_parse", got)
 	}
-	if got := evt["attempted_value"]; got != "config_load_failed" && got != parseErr.Error() {
-		// Either the sanitized literal or the raw error is acceptable
-		// at the emitRejected level; the main.go SIGHUP path uses the
-		// sanitized literal — tested separately.
+	// Step 4 r5 [code:r5-7] LOW closure: emitRejected MUST emit the
+	// sanitized literal "config_load_failed" (not raw error text) so
+	// YAML contents — which may contain secrets — never reach the log.
+	if got := evt["attempted_value"]; got != "config_load_failed" {
+		t.Errorf("attempted_value = %q, want config_load_failed (must not expose raw YAML error)", got)
 	}
 	if got := evt["actor"]; got != "operator_key:coordinator" {
 		t.Errorf("actor = %q, want operator_key:coordinator", got)
@@ -354,9 +355,18 @@ func TestTuningProvider_ReloadRejectsChangedKeysBoundViolation_ReturnsNilChanged
 	if changedKeys != nil {
 		t.Errorf("changedKeys should be nil on bound violation, got: %v", changedKeys)
 	}
+	// Step 4 r5 [code:r5-6] LOW closure: Reload must wrap both the
+	// ErrTuningBoundViolation sentinel AND the *BoundViolationError so
+	// callers can extract the structured violation via errors.As.
 	var bve *BoundViolationError
-	if errors.As(reloadErr, &bve) {
-		// This branch should not hit because Reload wraps the error;
-		// test that the unwrapped cause IS *BoundViolationError.
+	if !errors.As(reloadErr, &bve) {
+		t.Error("errors.As(*BoundViolationError) should succeed — Reload must wrap bve")
+	} else {
+		if bve.Field == "" {
+			t.Error("BoundViolationError.Field is empty")
+		}
+		if bve.Attempted == "" {
+			t.Error("BoundViolationError.Attempted is empty")
+		}
 	}
 }

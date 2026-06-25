@@ -50,7 +50,8 @@ var transferSelector = []byte{0xa9, 0x05, 0x9c, 0xbb}
 // receipt log.
 //
 // keccak256("Transfer(address,address,uint256)") =
-//   0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
+//
+//	0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef
 var transferEventTopic = mustHexBytes("ddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
 
 // USDCTransferCalldata builds the ERC-20 calldata for

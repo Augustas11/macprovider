@@ -25,33 +25,33 @@ import (
 
 // AbandonRequest is the JSON body of POST /admin/payout/abandon-attempt.
 type AbandonRequest struct {
-	PayoutID                     int64   `json:"payout_id"`
-	AttemptSeq                   int     `json:"attempt_seq"`
-	BroadcastCancelSelfTransfer  bool    `json:"broadcast_cancel_self_transfer"`
-	Confirm                      bool    `json:"confirm"`
-	TipMultiplier                float64 `json:"tip_multiplier"`
-	Reason                       string  `json:"reason"`
+	PayoutID                    int64   `json:"payout_id"`
+	AttemptSeq                  int     `json:"attempt_seq"`
+	BroadcastCancelSelfTransfer bool    `json:"broadcast_cancel_self_transfer"`
+	Confirm                     bool    `json:"confirm"`
+	TipMultiplier               float64 `json:"tip_multiplier"`
+	Reason                      string  `json:"reason"`
 }
 
 // AbandonResponse is the 200 OK body.
 type AbandonResponse struct {
-	PayoutID                     int64  `json:"payout_id"`
-	AbandonedAttemptSeq          int    `json:"abandoned_attempt_seq"`
-	CancelAttemptSeq             *int   `json:"cancel_attempt_seq,omitempty"`
-	CancelTxHash                 string `json:"cancel_tx_hash,omitempty"`
-	CancelBroadcasted            bool   `json:"cancel_broadcasted"`
-	CapApplied                   bool   `json:"cap_applied,omitempty"`
+	PayoutID            int64  `json:"payout_id"`
+	AbandonedAttemptSeq int    `json:"abandoned_attempt_seq"`
+	CancelAttemptSeq    *int   `json:"cancel_attempt_seq,omitempty"`
+	CancelTxHash        string `json:"cancel_tx_hash,omitempty"`
+	CancelBroadcasted   bool   `json:"cancel_broadcasted"`
+	CapApplied          bool   `json:"cap_applied,omitempty"`
 }
 
 // AbandonService bundles the dependencies for the §4.6 endpoint.
 type AbandonService struct {
-	DB           *sql.DB
-	Security     SecurityConfig
-	RPCs         TwoRPCs
-	Signer       Signer
-	RunInterval  time.Duration
-	Logger       zerolog.Logger
-	NowFn        func() time.Time
+	DB          *sql.DB
+	Security    SecurityConfig
+	RPCs        TwoRPCs
+	Signer      Signer
+	RunInterval time.Duration
+	Logger      zerolog.Logger
+	NowFn       func() time.Time
 
 	// Per-actor rate-limit state.
 	mu         sync.Mutex
@@ -96,12 +96,13 @@ func NewAbandonService(db *sql.DB, sec SecurityConfig, rpcs TwoRPCs, signer Sign
 // step 6 side-channel discipline (cancel rows follow the same).
 //
 // SPEC v0.1.21 §4.6 status codes:
-//   200 OK     — atomic txn committed; cancel attempted post-COMMIT
-//   400        — missing fields
-//   404        — no matching (payout_id, attempt_seq) row
-//   409        — already_confirmed / already_abandoned / runner_active
-//   422        — gas-cap exceeded
-//   429        — per-actor rate limit exceeded
+//
+//	200 OK     — atomic txn committed; cancel attempted post-COMMIT
+//	400        — missing fields
+//	404        — no matching (payout_id, attempt_seq) row
+//	409        — already_confirmed / already_abandoned / runner_active
+//	422        — gas-cap exceeded
+//	429        — per-actor rate limit exceeded
 func (s *AbandonService) ServeAbandon(w http.ResponseWriter, r *http.Request, actor string,
 	caps AbandonCaps,
 ) {

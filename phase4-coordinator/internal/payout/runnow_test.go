@@ -321,8 +321,8 @@ type fakeRunner struct {
 	runOnceFn  func(ctx context.Context) (string, error)
 }
 
-func (f *fakeRunner) IsHalted() bool      { return f.halted }
-func (f *fakeRunner) HaltReason() string  { return f.haltReason }
+func (f *fakeRunner) IsHalted() bool     { return f.halted }
+func (f *fakeRunner) HaltReason() string { return f.haltReason }
 func (f *fakeRunner) RunOnce(ctx context.Context) (string, error) {
 	return f.runOnceFn(ctx)
 }

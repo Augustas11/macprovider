@@ -624,11 +624,11 @@ type payoutStep2 struct {
 	runner      *payout.Runner
 	reorg       *payout.ReorgPoller
 	state       payout.LeaseState
-	reaper      *payout.Reaper              // Step 3 §4.8a + §4.8c outbox reaper
-	chainWorker *payout.ChainBalanceWorker  // Step 4 §7.4
-	tuning      *payout.TuningProvider      // Step 4 §6.5 SIGHUP-reloadable
-	rpcs        payout.TwoRPCs              // Step 4 r3 [sec:r3-1] SPKI pin rotation: CloseIdleConnections on SIGHUP
-	stop        func(context.Context)       // calls Stop on every component then Release
+	reaper      *payout.Reaper             // Step 3 §4.8a + §4.8c outbox reaper
+	chainWorker *payout.ChainBalanceWorker // Step 4 §7.4
+	tuning      *payout.TuningProvider     // Step 4 §6.5 SIGHUP-reloadable
+	rpcs        payout.TwoRPCs             // Step 4 r3 [sec:r3-1] SPKI pin rotation: CloseIdleConnections on SIGHUP
+	stop        func(context.Context)      // calls Stop on every component then Release
 }
 
 func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore *auth.Store, claimer payout.PayoutClaimer, billingFallback http.Handler, logger zerolog.Logger) (*payout.AddressesService, http.Handler, *payoutStep2, error) {
@@ -744,16 +744,22 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("nonce cold-start: %w", err)
 	}
+	// Capture the cold-start timestamp once so the log event and the
+	// cursor write share the same wall time.
+	coldStartTS := time.Now().UTC().Format(time.RFC3339Nano)
 	if within {
+		// Step 4 r5 [code:r5-3] MEDIUM closure: §7.1 line 3729
+		// requires ts_utc in payout_nonce_cold_start_within_tolerance.
 		logger.Warn().
 			Str("event", "payout_nonce_cold_start_within_tolerance").
 			Str("from_address", sec.HotWalletAddress).
 			Uint64("rpc_a_nonce", rpcA).
 			Uint64("rpc_b_nonce", rpcB).
 			Uint64("chosen_nonce", chosen).
+			Str("ts_utc", coldStartTS).
 			Send()
 	}
-	if err := payout.UpsertNonceCursor(ctx, db, sec.HotWalletAddress, chosen, rpcA, rpcB, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+	if err := payout.UpsertNonceCursor(ctx, db, sec.HotWalletAddress, chosen, rpcA, rpcB, coldStartTS); err != nil {
 		return nil, nil, nil, fmt.Errorf("UpsertNonceCursor: %w", err)
 	}
 

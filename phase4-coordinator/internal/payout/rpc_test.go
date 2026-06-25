@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -370,12 +372,14 @@ func TestMakeSPKIPinVerifier_LiveRead(t *testing.T) {
 	}
 }
 
-// TestHTTPRPCClient_CloseIdleConnections locks the Step 4 r4
-// [code:r4-3] MEDIUM closure: CloseIdleConnections drains idle TLS
-// connections from the transport pool so the next RPC is forced to
-// perform a fresh handshake. Also verifies the nil-receiver guard
-// (defensive: calling CloseIdleConnections on a nil client or a
-// client with nil transport is a no-op, not a panic).
+// TestHTTPRPCClient_CloseIdleConnections locks the Step 4 r4/r5
+// [code:r4-3]/[code:r5-5] MEDIUM closure: CloseIdleConnections drains
+// idle connections from the transport pool so the next request opens a
+// NEW connection. Proved via httptest.Server ConnState instrumentation:
+// after req1 → CloseIdleConnections → req2, the server MUST have seen
+// 2 distinct connections (not reused the idle one from req1).
+//
+// Also verifies nil-receiver and nil-transport guards.
 func TestHTTPRPCClient_CloseIdleConnections(t *testing.T) {
 	// 1. Nil receiver is a no-op.
 	var nilClient *HTTPRPCClient
@@ -385,26 +389,55 @@ func TestHTTPRPCClient_CloseIdleConnections(t *testing.T) {
 	noTransport := &HTTPRPCClient{URL: "http://localhost", transport: nil}
 	noTransport.CloseIdleConnections() // must not panic
 
-	// 3. Real transport: make a request, verify CloseIdleConnections
-	//    completes without error (transport accepts the call).
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// 3. Step 4 r5 [code:r5-5] MEDIUM closure: prove the pool is actually
+	//    drained. We count distinct connections via ConnState callbacks.
+	//    After req1, the connection goes to StateIdle. After
+	//    CloseIdleConnections, that connection is closed (StateClosed).
+	//    req2 must open a NEW connection, visible as a second StateNew.
+	//
+	//    Use NewUnstartedServer to set ConnState before Start so there
+	//    is no concurrent access between the assignment and the server
+	//    goroutine reading it (which the race detector would catch).
+	var mu sync.Mutex
+	newConns := 0
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	}))
-	defer ts.Close()
-
-	client := NewHTTPRPCClient(ts.URL, "test", nil, 5*time.Second)
-
-	// Make a request so the transport has an idle connection in the pool.
-	resp, err := client.HTTPClient.Get(ts.URL) //nolint:noctx
-	if err != nil {
-		t.Fatalf("GET: %v", err)
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			mu.Lock()
+			newConns++
+			mu.Unlock()
+		}
 	}
-	resp.Body.Close()
+	srv.Start()
+	defer srv.Close()
 
-	// CloseIdleConnections must not panic and must not return an error
-	// (it is a void method). Calling it on a real transport is sufficient
-	// evidence; the pool is drained internally.
+	client := NewHTTPRPCClient(srv.URL, "test", nil, 5*time.Second)
+
+	// req1: land an idle connection in the pool.
+	resp1, err := client.HTTPClient.Get(srv.URL) //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET req1: %v", err)
+	}
+	resp1.Body.Close()
+
+	// Drain the idle pool.
 	client.CloseIdleConnections()
+
+	// req2: must open a fresh connection because the pool is empty.
+	resp2, err := client.HTTPClient.Get(srv.URL) //nolint:noctx
+	if err != nil {
+		t.Fatalf("GET req2: %v", err)
+	}
+	resp2.Body.Close()
+
+	mu.Lock()
+	got := newConns
+	mu.Unlock()
+	if got < 2 {
+		t.Errorf("server saw %d new connections, want >= 2 (CloseIdleConnections did not drain the pool)", got)
+	}
 }
 
 // TestSIGHUPCloseIdleComposition locks the [code:r4-3] MEDIUM closure:
@@ -423,9 +456,9 @@ func TestSIGHUPCloseIdleComposition(t *testing.T) {
 	secondaryKey := "payout.tuning.rpc_url_secondary_pin_spki"
 
 	cases := []struct {
-		name         string
-		changedKeys  []string
-		wantClose    bool
+		name        string
+		changedKeys []string
+		wantClose   bool
 	}{
 		{"no SPKI change — no close", []string{"payout.tuning.run_interval"}, false},
 		{"primary SPKI change — close", []string{spkiKey}, true},
