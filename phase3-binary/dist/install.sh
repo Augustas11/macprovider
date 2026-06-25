@@ -65,8 +65,9 @@ Environment overrides:
   MACPROVIDER_COORDINATOR_URL    coordinator WebSocket URL
   MACPROVIDER_PORT               local HTTP port
   MACPROVIDER_INSTALL_DIR        support dir for binary + bundles
+  MACPROVIDER_RELEASE_FORMAT     auto, pkg, or tar (default: auto)
   MACPROVIDER_NO_PROMPT=1        use defaults without interactive prompts
-  MACPROVIDER_NO_LAUNCHD=1       skip launchd service install
+  MACPROVIDER_NO_LAUNCHD=1       expert/debug only: skip launchd service install
   MACPROVIDER_SKIP_HF_CHECK=1    skip HuggingFace lookup on custom model id
 USAGE
 }
@@ -269,11 +270,47 @@ model_default_for_ram() {
   ram_gb="$1"
   if [ "$ram_gb" -lt 12 ]; then
     printf "mlx-community/Llama-3.2-3B-Instruct-4bit"
+  elif [ "$ram_gb" -lt 16 ]; then
+    printf "mlx-community/Qwen3-4B-Instruct-2507-4bit"
   elif [ "$ram_gb" -lt 24 ]; then
     printf "mlx-community/Qwen2.5-7B-Instruct-4bit"
-  else
+  elif [ "$ram_gb" -lt 32 ]; then
     printf "mlx-community/Qwen2.5-14B-Instruct-4bit"
+  elif [ "$ram_gb" -lt 48 ]; then
+    printf "mlx-community/Qwen3-32B-4bit"
+  elif [ "$ram_gb" -lt 64 ]; then
+    printf "mlx-community/Llama-3.3-70B-Instruct-4bit"
+  else
+    printf "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit"
   fi
+}
+
+known_min_ram_gb_for_model() {
+  case "$1" in
+    mlx-community/Llama-3.2-3B-Instruct-4bit) printf "8" ;;
+    mlx-community/Qwen3-4B-Instruct-2507-4bit) printf "12" ;;
+    mlx-community/Qwen2.5-7B-Instruct-4bit) printf "16" ;;
+    mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit) printf "16" ;;
+    mlx-community/Qwen2.5-14B-Instruct-4bit) printf "24" ;;
+    mlx-community/Qwen3-32B-4bit) printf "32" ;;
+    mlx-community/Qwen2.5-Coder-32B-Instruct-4bit) printf "32" ;;
+    mlx-community/Llama-3.3-70B-Instruct-4bit) printf "48" ;;
+    mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit) printf "64" ;;
+  esac
+}
+
+known_weight_gb_for_model() {
+  case "$1" in
+    mlx-community/Llama-3.2-3B-Instruct-4bit) printf "2" ;;
+    mlx-community/Qwen3-4B-Instruct-2507-4bit) printf "2" ;;
+    mlx-community/Qwen2.5-7B-Instruct-4bit) printf "4" ;;
+    mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit) printf "4" ;;
+    mlx-community/Qwen2.5-14B-Instruct-4bit) printf "8" ;;
+    mlx-community/Qwen3-32B-4bit) printf "18" ;;
+    mlx-community/Qwen2.5-Coder-32B-Instruct-4bit) printf "17" ;;
+    mlx-community/Llama-3.3-70B-Instruct-4bit) printf "35" ;;
+    mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit) printf "40" ;;
+  esac
 }
 
 # SPEC-003 v0.9 FR-D2: enforce safe HuggingFace repo id format.
@@ -342,6 +379,44 @@ estimate_weights_gb_from_name() {
     'BEGIN { gb = p * b; if (gb < 1) gb = 1; printf "%d", gb + 0.5 }'
 }
 
+hf_safetensors_gb_from_api_body() {
+  body="$1"
+  printf "%s" "$body" | tr '\n\r' '  ' | awk '
+    {
+      data = $0
+      while (match(data, /"rfilename"[[:space:]]*:[[:space:]]*"[^"]*\.safetensors"/)) {
+        data = substr(data, RSTART + RLENGTH)
+        window = substr(data, 1, 700)
+        if (match(window, /"size"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+          value = substr(window, RSTART, RLENGTH)
+          gsub(/[^0-9]/, "", value)
+          total += value + 0
+        }
+      }
+    }
+    END {
+      if (total > 0) {
+        printf "%d", int((total + 1073741824 - 1) / 1073741824)
+      }
+    }
+  '
+}
+
+ram_floor_for_weight_gb() {
+  weight_gb="$1"
+  awk -v w="$weight_gb" '
+    BEGIN {
+      if (w <= 2) print 8;
+      else if (w <= 3) print 12;
+      else if (w <= 5) print 16;
+      else if (w <= 9) print 24;
+      else if (w <= 20) print 32;
+      else if (w <= 38) print 48;
+      else print 64;
+    }
+  '
+}
+
 confirm_model_fit_override() {
   reason="$1"
   if [ "$NO_PROMPT" = "1" ]; then
@@ -351,9 +426,40 @@ confirm_model_fit_override() {
   prompt_yes_no "Proceed anyway? [y/N]" "N" || die 7 "aborted by user"
 }
 
+enforce_model_min_ram_floor() {
+  id="$1"
+  ram_gb="$2"
+  min_ram_gb="$3"
+  source="$4"
+  if [ "$ram_gb" -lt "$min_ram_gb" ]; then
+    confirm_model_fit_override "$source requires ${min_ram_gb} GB RAM for $id, but this Mac has ${ram_gb} GB"
+  else
+    log "Model fits: $id requires ${min_ram_gb} GB RAM by $source; this Mac has ${ram_gb} GB."
+  fi
+}
+
+enforce_model_ram_fit_from_weight_gb() {
+  id="$1"
+  ram_gb="$2"
+  weight_gb="$3"
+  source="$4"
+  min_ram_gb="$(ram_floor_for_weight_gb "$weight_gb")"
+  if [ "$ram_gb" -lt "$min_ram_gb" ]; then
+    confirm_model_fit_override "$source reports ~${weight_gb} GB safetensors; recommended RAM floor is ${min_ram_gb} GB for $id, but this Mac has ${ram_gb} GB"
+  else
+    log "Model fits: $source reports ~${weight_gb} GB safetensors; recommended RAM floor is ${min_ram_gb} GB and this Mac has ${ram_gb} GB."
+  fi
+}
+
 enforce_model_ram_fit() {
   id="$1"
   ram_gb="$2"
+  min_ram_gb="$(known_min_ram_gb_for_model "$id")"
+  if [ -n "$min_ram_gb" ]; then
+    enforce_model_min_ram_floor "$id" "$ram_gb" "$min_ram_gb" "model table"
+    return 0
+  fi
+
   est_gb="$(estimate_weights_gb_from_name "$id")"
   if [ -z "$est_gb" ]; then
     log "WARNING: could not estimate weight size from model name; skipping fit check."
@@ -380,7 +486,7 @@ catalog_min_ram_from_body() {
   printf "%s" "$catalog_body" | tr '\n\r' '  ' | awk -v id="$model_id" '
     BEGIN { RS = "}"; }
     index($0, "\"model_id\"") && index($0, "\"" id "\"") {
-      if (match($0, /"min_ram_gb"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+      if (match($0, /"min_ram_gb"[[:space:]]*:[[:space:]]*[1-9][0-9]*/)) {
         value = substr($0, RSTART, RLENGTH)
         gsub(/[^0-9]/, "", value)
         print value
@@ -402,25 +508,18 @@ check_catalog_ram_metadata() {
     return 1
   fi
 
-  poolz_url="$coordinator_base/poolz"
-  body_and_code="$(curl -sSL -m 5 -o - -w '\n__HTTP_STATUS__%{http_code}' "$poolz_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
+  catalog_url="$coordinator_base/catalog/current"
+  body_and_code="$(curl -sSL -m 5 -o - -w '\n__HTTP_STATUS__%{http_code}' "$catalog_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
   http_code="${body_and_code##*__HTTP_STATUS__}"
-  poolz_body="${body_and_code%__HTTP_STATUS__*}"
+  catalog_body="${body_and_code%__HTTP_STATUS__*}"
   if [ "$http_code" != "200" ]; then
-    log "WARNING: could not read catalog metadata from $poolz_url (status $http_code); using built-in model RAM estimates."
+    log "WARNING: could not read signed catalog $catalog_url (status $http_code); using built-in model RAM estimates."
     return 1
   fi
 
-  catalog_id="$(printf "%s" "$poolz_body" | sed -n 's/.*"catalog_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
+  catalog_id="$(printf "%s" "$catalog_body" | sed -n 's/.*"catalog_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
   if [ -z "$catalog_id" ]; then
-    log "WARNING: /poolz did not include catalog_id; using built-in model RAM estimates."
-    return 1
-  fi
-
-  catalog_url="$coordinator_base/catalog/$catalog_id"
-  catalog_body="$(curl -fsSL -m 5 "$catalog_url" 2>/dev/null || true)"
-  if [ -z "$catalog_body" ]; then
-    log "WARNING: could not read signed catalog $catalog_url; using built-in model RAM estimates."
+    log "WARNING: signed catalog did not include catalog_id; using built-in model RAM estimates."
     return 1
   fi
 
@@ -463,7 +562,7 @@ hf_check_model() {
     return 0
   fi
   log "Checking model $id on HuggingFace…"
-  api_url="https://huggingface.co/api/models/$id"
+  api_url="https://huggingface.co/api/models/$id?blobs=true"
   # -f omitted so 4xx bodies still reach us; status is routed explicitly below.
   body_and_code="$(curl -sSL -m 10 -o - -w '\n__HTTP_STATUS__%{http_code}' "$api_url" 2>/dev/null || printf '\n__HTTP_STATUS__network_error')"
   http_code="${body_and_code##*__HTTP_STATUS__}"
@@ -505,7 +604,12 @@ hf_check_model() {
     die 7 "model $id is not an MLX repo. macprovider runs MLX-format models only. Pick an mlx-community/* variant or convert with mlx_lm.convert."
   fi
 
-  enforce_model_ram_fit "$id" "$ram_gb"
+  hf_weight_gb="$(hf_safetensors_gb_from_api_body "$body")"
+  if [ -n "$hf_weight_gb" ]; then
+    enforce_model_ram_fit_from_weight_gb "$id" "$ram_gb" "$hf_weight_gb" "HuggingFace"
+  else
+    enforce_model_ram_fit "$id" "$ram_gb"
+  fi
 }
 
 choose_model() {
@@ -530,16 +634,28 @@ choose_model() {
   printf "[macprovider-install] Detected approximately %s GB RAM.\n" "$ram_gb" >&2
   printf "Choose a model:\n" >&2
   printf "  1) mlx-community/Llama-3.2-3B-Instruct-4bit      ~2 GB, 8 GB Macs\n" >&2
-  printf "  2) mlx-community/Qwen2.5-7B-Instruct-4bit        ~4 GB, 16 GB Macs\n" >&2
-  printf "  3) mlx-community/Qwen2.5-14B-Instruct-4bit       ~8 GB, 24 GB+ Macs\n" >&2
+  printf "  2) mlx-community/Qwen3-4B-Instruct-2507-4bit     ~2 GB, 12 GB+ Macs\n" >&2
+  printf "  3) mlx-community/Qwen2.5-7B-Instruct-4bit        ~4 GB, 16 GB Macs\n" >&2
+  printf "  4) mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit  ~4 GB, 16 GB+ Macs\n" >&2
+  printf "  5) mlx-community/Qwen2.5-14B-Instruct-4bit       ~8 GB, 24 GB+ Macs\n" >&2
+  printf "  6) mlx-community/Qwen3-32B-4bit                  ~18 GB, 32 GB+ Macs\n" >&2
+  printf "  7) mlx-community/Qwen2.5-Coder-32B-Instruct-4bit ~17 GB, 32 GB+ Macs\n" >&2
+  printf "  8) mlx-community/Llama-3.3-70B-Instruct-4bit     ~35 GB, 48 GB+ Macs\n" >&2
+  printf "  9) mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit ~40 GB, 64 GB+ Macs\n" >&2
   printf "  c) custom HuggingFace MLX model id\n" >&2
   printf "Selection [default: %s]: " "$default_model" >&2
   read_line
   selection="$REPLY"
   case "$selection" in
     1) printf "mlx-community/Llama-3.2-3B-Instruct-4bit" ;;
-    2) printf "mlx-community/Qwen2.5-7B-Instruct-4bit" ;;
-    3) printf "mlx-community/Qwen2.5-14B-Instruct-4bit" ;;
+    2) printf "mlx-community/Qwen3-4B-Instruct-2507-4bit" ;;
+    3) printf "mlx-community/Qwen2.5-7B-Instruct-4bit" ;;
+    4) printf "mlx-community/DeepSeek-R1-0528-Qwen3-8B-4bit" ;;
+    5) printf "mlx-community/Qwen2.5-14B-Instruct-4bit" ;;
+    6) printf "mlx-community/Qwen3-32B-4bit" ;;
+    7) printf "mlx-community/Qwen2.5-Coder-32B-Instruct-4bit" ;;
+    8) printf "mlx-community/Llama-3.3-70B-Instruct-4bit" ;;
+    9) printf "mlx-community/Qwen3-Next-80B-A3B-Instruct-4bit" ;;
     c|C)
       printf "HuggingFace model id (org/name): " >&2
       read_line
@@ -615,26 +731,63 @@ validate_inputs() {
 }
 
 latest_release_tag() {
-  api_url="https://api.github.com/repos/${GITHUB_REPO}/releases/latest"
+  # Scan the recent release list and pick the newest tag that names a
+  # macprovider-cli release (tag matches ^v[0-9], e.g. v1.3.1). The
+  # /releases/latest endpoint can't be trusted on its own: it returns
+  # whichever release is flagged "Latest" repo-wide, so any unrelated
+  # release published under the same repo (e.g. macprovider-verify
+  # under tag verify-vX.Y.Z) silently hijacks the installer.
+  api_url="https://api.github.com/repos/${GITHUB_REPO}/releases?per_page=30"
   json="$(curl -fsSL "$api_url")" || die 3 "failed to query GitHub Releases API: $api_url"
-  tag="$(printf "%s" "$json" | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
-  [ -n "$tag" ] || die 3 "GitHub Releases API response did not include tag_name"
+  tag="$(printf "%s" "$json" \
+    | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    | grep -E '^v[0-9]' \
+    | head -1)"
+  [ -n "$tag" ] || die 3 "no macprovider-cli release (tag ^v[0-9]) found in recent GitHub Releases"
   printf "%s" "$tag"
 }
 
 download_release() {
   tag="$1"
-  asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
+  tarball_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
+  pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
   base="https://github.com/${GITHUB_REPO}/releases/download/${tag}"
   TMPDIR_PATH="$(mktemp -d)"
-  tarball_path="$TMPDIR_PATH/$asset"
+  tarball_path="$TMPDIR_PATH/$tarball_asset"
+  pkg_path="$TMPDIR_PATH/$pkg_asset"
   checksums_path="$TMPDIR_PATH/checksums.txt"
   checksums_sig_path="$TMPDIR_PATH/checksums.txt.sig"
+  asset_path=""
+  asset_kind=""
 
-  log "Downloading $asset from GitHub Releases."
-  curl -fL "$base/$asset" -o "$tarball_path" || die 3 "failed to download release tarball"
   curl -fL "$base/checksums.txt" -o "$checksums_path" || die 3 "failed to download checksums.txt"
   curl -fL "$base/checksums.txt.sig" -o "$checksums_sig_path" || die 3 "failed to download checksums.txt.sig"
+  verify_checksum_signature
+
+  release_format="${MACPROVIDER_RELEASE_FORMAT:-auto}"
+  case "$release_format" in
+    auto|pkg|tar) ;;
+    *) die 7 "MACPROVIDER_RELEASE_FORMAT must be auto, pkg, or tar" ;;
+  esac
+
+  if [ "$release_format" != "tar" ]; then
+    pkg_expected="$(checksum_for_asset "$pkg_asset")"
+    if [ -n "$pkg_expected" ]; then
+      log "Downloading signed package $pkg_asset from GitHub Releases."
+      curl -fL "$base/$pkg_asset" -o "$pkg_path" || die 3 "failed to download release package"
+      asset_path="$pkg_path"
+      asset_kind="pkg"
+      log "Using signed package release asset: $pkg_asset"
+      return
+    fi
+    [ "$release_format" = "auto" ] || die 3 "checksums.txt has no entry for $pkg_asset"
+    log "Signed release manifest has no package for $tag; falling back to tarball."
+  fi
+
+  log "Downloading $tarball_asset from GitHub Releases."
+  curl -fL "$base/$tarball_asset" -o "$tarball_path" || die 3 "failed to download release tarball"
+  asset_path="$tarball_path"
+  asset_kind="tar"
 }
 
 write_checksum_public_key() {
@@ -663,41 +816,117 @@ verify_checksum_signature() {
   log "checksums.txt signature verified."
 }
 
+checksum_for_asset() {
+  asset_name="$1"
+  awk -v asset="$asset_name" '$2 == asset { print $1; exit }' "$checksums_path"
+}
+
 verify_sha256() {
-  expected="$(grep "  $(basename "$tarball_path")$" "$checksums_path" | awk '{print $1}' | head -1)"
-  [ -n "$expected" ] || die 4 "checksums.txt has no entry for $(basename "$tarball_path")"
-  actual="$(shasum -a 256 "$tarball_path" | awk '{print $1}')"
-  [ "$actual" = "$expected" ] || die 4 "checksum mismatch for $(basename "$tarball_path")"
+  asset_name="$(basename "$asset_path")"
+  expected="$(checksum_for_asset "$asset_name")"
+  [ -n "$expected" ] || die 4 "checksums.txt has no entry for $asset_name"
+  actual="$(shasum -a 256 "$asset_path" | awk '{print $1}')"
+  [ "$actual" = "$expected" ] || die 4 "checksum mismatch for $asset_name"
   log "SHA256 verified."
 }
 
 validate_tarball() {
-  entries="$(tar tzf "$tarball_path")" || die 5 "failed to list release tarball"
+  entries="$(tar tzf "$asset_path")" || die 5 "failed to list release tarball"
   [ -n "$entries" ] || die 5 "release tarball is empty"
 
+  validate_staged_entries "$entries" "tarball"
+  if tar tvzf "$asset_path" | awk '{print substr($1,1,1), $0}' | grep -E '^[lhbcp]' >/dev/null; then
+    die 5 "release tarball contains unsafe link or device members"
+  fi
+}
+
+validate_staged_entries() {
+  entries="$1"
+  label="$2"
   has_binary=0
   while IFS= read -r entry; do
-    case "$entry" in
-      ""|/*|*"/../"*|../*|*/..|..)
+    normalized_entry="$entry"
+    while :; do
+      case "$normalized_entry" in
+        ./*) normalized_entry="${normalized_entry#./}" ;;
+        *) break ;;
+      esac
+    done
+    case "$normalized_entry" in
+      ""|.) continue ;;
+    esac
+    case "$normalized_entry" in
+      /*|*"/../"*|../*|*/..|..)
         die 5 "unsafe tarball path: $entry"
         ;;
       macprovider-cli)
         has_binary=1
         ;;
+      THIRD-PARTY-NOTICES.txt)
+        ;;
       *.bundle|*.bundle/*)
         ;;
       *)
-        die 5 "unexpected tarball member: $entry"
+        die 5 "unexpected $label member: $entry"
         ;;
     esac
   done <<EOF
 $entries
 EOF
 
-  [ "$has_binary" -eq 1 ] || die 5 "release tarball does not contain macprovider-cli"
-  if tar tvzf "$tarball_path" | awk '{print substr($1,1,1), $0}' | grep -E '^[lhbcp]' >/dev/null; then
-    die 5 "release tarball contains unsafe link or device members"
+  [ "$has_binary" -eq 1 ] || die 5 "$label does not contain macprovider-cli"
+}
+
+validate_package() {
+  require_tool pkgutil
+  if command -v spctl >/dev/null 2>&1; then
+    spctl -a -vv -t install "$asset_path" || die 4 "package failed Gatekeeper assessment"
+    log "Package Gatekeeper assessment passed."
+  else
+    log "spctl not found; package checksum was verified but Gatekeeper assessment was skipped."
   fi
+  if command -v xcrun >/dev/null 2>&1 && xcrun --find stapler >/dev/null 2>&1; then
+    xcrun stapler validate "$asset_path" || die 4 "package stapler validation failed"
+    log "Package stapler validation passed."
+  else
+    log "stapler not found; local package stapler validation skipped."
+  fi
+}
+
+validate_release_payload() {
+  case "$asset_kind" in
+    tar) validate_tarball ;;
+    pkg) validate_package ;;
+    *) die 5 "release asset was not selected" ;;
+  esac
+}
+
+stage_release_payload() {
+  staging_dir="$TMPDIR_PATH/staging"
+  rm -rf "$staging_dir"
+  mkdir -p "$staging_dir"
+
+  case "$asset_kind" in
+    tar)
+      tar xzf "$asset_path" -C "$staging_dir" || die 5 "failed to extract release tarball"
+      ;;
+    pkg)
+      expanded_dir="$TMPDIR_PATH/pkg-expanded"
+      rm -rf "$expanded_dir"
+      pkgutil --expand-full "$asset_path" "$expanded_dir" || die 5 "failed to expand release package"
+      [ -d "$expanded_dir/Payload" ] || die 5 "expanded package does not contain Payload"
+      payload_entries="$(cd "$expanded_dir/Payload" && find . -mindepth 1 -print)" \
+        || die 5 "failed to list expanded package payload"
+      validate_staged_entries "$payload_entries" "package payload"
+      if find "$expanded_dir/Payload" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
+        die 5 "package payload contains unsafe link or device members"
+      fi
+      cp -R "$expanded_dir/Payload/." "$staging_dir"/
+      ;;
+    *)
+      die 5 "release asset was not selected"
+      ;;
+  esac
 }
 
 write_config() {
@@ -725,10 +954,7 @@ install_binary() {
     log "Would keep release support files in $INSTALL_DIR"
     return
   fi
-  staging_dir="$TMPDIR_PATH/staging"
-  rm -rf "$staging_dir"
-  mkdir -p "$staging_dir"
-  tar xzf "$tarball_path" -C "$staging_dir" || die 5 "failed to extract release tarball"
+  stage_release_payload
 
   # CRITICAL: mlx-swift loads Metal kernels from .bundle directories
   # adjacent to the binary. We install the REAL binary into $INSTALL_DIR
@@ -785,7 +1011,11 @@ clear_quarantine() {
     log "xattr not found; skipping quarantine cleanup."
     return
   fi
-  log "The current release is unsigned. Clearing com.apple.quarantine lets macOS run it."
+  if [ "${asset_kind:-}" = "pkg" ]; then
+    log "Package release passed Gatekeeper assessment; quarantine cleanup is not required."
+    return
+  fi
+  log "Tarball release may carry a quarantine attribute. Clearing it lets macOS run the CLI."
   if prompt_yes_no "Clear quarantine attribute on $BINARY_PATH and $INSTALL_DIR? [Y/n]" "Y"; then
     run xattr -dr com.apple.quarantine "$BINARY_PATH"
     run xattr -dr com.apple.quarantine "$INSTALL_DIR"
@@ -798,15 +1028,16 @@ install_plist() {
   model="$1"
   provider_id="$2"
   coordinator_url="$3"
-  [ "$NO_LAUNCHD" = "1" ] && { log "Skipping launchd service install."; return; }
-  if ! prompt_yes_no "Install as a background service? [Y/n]" "Y"; then
-    log "Skipping launchd service install."
+  if [ "$NO_LAUNCHD" = "1" ]; then
+    log "Skipping launchd service install (MACPROVIDER_NO_LAUNCHD=1 expert/debug override)."
     return
   fi
+  log "Installing as a background launchd service."
 
   run mkdir -p "$(dirname "$PLIST_PATH")" "$LOG_DIR"
   if [ "$DRY_RUN" -eq 1 ]; then
     log "Would render launchd plist to $PLIST_PATH"
+    log "Would enable launchd service: launchctl enable gui/$UID/live.streamvc.macprovider"
     log "Would bootstrap with: launchctl bootstrap gui/$UID $PLIST_PATH"
     return
   fi
@@ -815,6 +1046,7 @@ install_plist() {
 
   plutil -lint "$PLIST_PATH" >/dev/null || die 5 "rendered launchd plist is invalid"
   launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
+  launchctl enable "gui/$UID/live.streamvc.macprovider" || die 5 "failed to enable launchd service"
   launchctl bootstrap "gui/$UID" "$PLIST_PATH" || die 5 "failed to load launchd service"
   LAUNCHD_INSTALLED=1
 }
@@ -900,6 +1132,84 @@ start_manual_service() {
   MANUAL_PID="$(cat "$TMPDIR_PATH/manual.pid")"
 }
 
+cache_size_kb() {
+  path="$1"
+  if [ -d "$path" ]; then
+    du -sk "$path" 2>/dev/null | awk '{ print $1 }'
+  else
+    printf "0"
+  fi
+}
+
+format_kb_gib() {
+  kb="$1"
+  awk -v kb="$kb" 'BEGIN { printf "%.1f", kb / 1048576 }'
+}
+
+progress_bar() {
+  percent="$1"
+  width=20
+  filled=$(( percent * width / 100 ))
+  bar=""
+  i=0
+  while [ "$i" -lt "$width" ]; do
+    if [ "$i" -lt "$filled" ]; then
+      bar="${bar}#"
+    else
+      bar="${bar}."
+    fi
+    i=$((i + 1))
+  done
+  printf "[%s]" "$bar"
+}
+
+model_download_estimate_gb() {
+  model="$1"
+  estimate="$(known_weight_gb_for_model "$model")"
+  if [ -z "$estimate" ]; then
+    estimate="$(estimate_weights_gb_from_name "$model")"
+  fi
+  printf "%s" "${estimate:-0}"
+}
+
+model_cache_is_warm() {
+  current_kb="$1"
+  estimate_gb="$2"
+  if [ "$estimate_gb" -le 0 ]; then
+    return 0
+  fi
+  estimate_kb=$(( estimate_gb * 1048576 ))
+  warm_threshold_kb=$(( estimate_kb * 80 / 100 ))
+  [ "$current_kb" -ge "$warm_threshold_kb" ]
+}
+
+print_model_download_progress() {
+  cache_path="$1"
+  estimate_gb="$2"
+  elapsed="$3"
+  previous_kb="$4"
+  current_kb="$(cache_size_kb "$cache_path")"
+  delta_kb=$(( current_kb - previous_kb ))
+  [ "$delta_kb" -lt 0 ] && delta_kb=0
+
+  if [ "$estimate_gb" -gt 0 ] && [ "$current_kb" -gt 0 ]; then
+    estimate_kb=$(( estimate_gb * 1048576 ))
+    percent=$(( current_kb * 100 / estimate_kb ))
+    [ "$percent" -gt 99 ] && percent=99
+    bar="$(progress_bar "$percent")"
+    current_gib="$(format_kb_gib "$current_kb")"
+    delta_gib="$(format_kb_gib "$delta_kb")"
+    log "Model download ${bar} ${current_gib}/${estimate_gb} GiB (${percent}%, +${delta_gib} GiB; ${elapsed}s elapsed)."
+  elif [ "$current_kb" -gt 0 ]; then
+    current_gib="$(format_kb_gib "$current_kb")"
+    delta_gib="$(format_kb_gib "$delta_kb")"
+    log "Model download cache: ${current_gib} GiB (+${delta_gib} GiB; ${elapsed}s elapsed)."
+  else
+    log "Waiting for model download to start (${elapsed}s elapsed)."
+  fi
+  MODEL_PROGRESS_CACHE_KB="$current_kb"
+}
+
 wait_for_local_model() {
   model="$1"
   # F-603-V7-5: first install can take much longer if MLX has to download a
@@ -907,14 +1217,33 @@ wait_for_local_model() {
   # installs 20 minutes with visible progress.
   local cache_check="$HOME/.cache/huggingface/hub/models--${model//\//--}"
   start_ts="$(date +%s)"
-  if [ -d "$cache_check" ]; then
+  estimate_gb="$(model_download_estimate_gb "$model")"
+  previous_cache_kb="$(cache_size_kb "$cache_check")"
+  if [ -d "$cache_check" ] && model_cache_is_warm "$previous_cache_kb" "$estimate_gb"; then
     deadline=$(( start_ts + 300 ))
-    next_progress=$(( start_ts + 30 ))
-    log "Waiting up to 5 min for local /v1/models (model cache detected)."
+    next_progress=$(( start_ts + 15 ))
+    if [ "$estimate_gb" -gt 0 ]; then
+      log "Waiting up to 5 min for local /v1/models (model cache detected; expected weights ~${estimate_gb} GiB)."
+    else
+      log "Waiting up to 5 min for local /v1/models (model cache detected)."
+    fi
+  elif [ -d "$cache_check" ]; then
+    deadline=$(( start_ts + 1200 ))
+    next_progress=$(( start_ts + 15 ))
+    cache_gib="$(format_kb_gib "$previous_cache_kb")"
+    if [ "$estimate_gb" -gt 0 ]; then
+      log "Waiting up to 20 min for local /v1/models (partial model cache detected: ${cache_gib}/${estimate_gb} GiB; continuing download for ${model})."
+    else
+      log "Waiting up to 20 min for local /v1/models (model cache detected but may still be downloading ${model})."
+    fi
   else
     deadline=$(( start_ts + 1200 ))
-    next_progress=$(( start_ts + 60 ))
-    log "Waiting up to 20 min for local /v1/models (first-time install; downloading ${model} ~4-5GB)."
+    next_progress=$(( start_ts + 15 ))
+    if [ "$estimate_gb" -gt 0 ]; then
+      log "Waiting up to 20 min for local /v1/models (first-time install; downloading ${model} ~${estimate_gb} GiB)."
+    else
+      log "Waiting up to 20 min for local /v1/models (first-time install; downloading ${model})."
+    fi
   fi
   port_seen=0
   while [ "$(date +%s)" -lt "$deadline" ]; do
@@ -937,14 +1266,14 @@ wait_for_local_model() {
       elapsed=$(( now - start_ts ))
       if [ "$port_seen" -eq 0 ]; then
         log "Still waiting for macprovider-cli to bind port ${PORT} (${elapsed}s elapsed)..."
+        print_model_download_progress "$cache_check" "$estimate_gb" "$elapsed" "$previous_cache_kb"
+        previous_cache_kb="$MODEL_PROGRESS_CACHE_KB"
       else
         log "Model still loading (${elapsed}s elapsed; first run may still be downloading from Hugging Face)..."
+        print_model_download_progress "$cache_check" "$estimate_gb" "$elapsed" "$previous_cache_kb"
+        previous_cache_kb="$MODEL_PROGRESS_CACHE_KB"
       fi
-      if [ -d "$cache_check" ]; then
-        next_progress=$(( now + 30 ))
-      else
-        next_progress=$(( now + 60 ))
-      fi
+      next_progress=$(( now + 15 ))
     fi
     sleep 2
   done
@@ -1050,9 +1379,8 @@ main() {
   tag="$(latest_release_tag)"
   log "Latest release: $tag"
   download_release "$tag"
-  verify_checksum_signature
   verify_sha256
-  validate_tarball
+  validate_release_payload
   check_install_dir_clean
   install_binary
   check_path_hint

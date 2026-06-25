@@ -85,6 +85,10 @@ auth:
   # pre-bridge behavior.
   #   gateway_service_token: env:GATEWAY_SERVICE_TOKEN
   require_provider_tokens: true # Production/provider WS public exposure must require provider tokens.
+  # Public onboarding escape hatch: permit a first tokenless provisional
+  # provider to receive and persist its own provider_token. Tokenless reconnects
+  # for provider IDs with a used active token still fail closed.
+  allow_tokenless_provisional_bootstrap: true
 
 storage:
   db_path: "/var/lib/macprovider/coordinator.db"

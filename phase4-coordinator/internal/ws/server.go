@@ -442,17 +442,25 @@ func (s *Server) validateProviderToken(r *http.Request) (providerAuth, bool) {
 	// v0.8, `s.tokens != nil` implied strict enforcement (tokenless
 	// always rejected). With self-serve provisional minting, the token
 	// store has dual purpose — issuance AND enforcement — so the
-	// enforcement gate now depends on `cfg.Auth.RequireProviderTokens`
-	// only. When the flag is false (today's posture during the FR-C9.5
-	// settling window), tokenless connects are admitted with
+	// enforcement gate now depends on `cfg.Auth.RequireProviderTokens`.
+	// When the flag is false, tokenless connects are admitted with
 	// validated=false so the v1/v2 ack-write path can mint and return
-	// `assigned_provider_token`. Pinned-tier providers that fail the
-	// tokenless check are still rejected, but at `prepareProviderAdmission`
-	// (line 654) rather than at this gate — same close code, same reason
-	// string, same blast radius.
+	// `assigned_provider_token`. When the flag is true, the public
+	// onboarding path needs the narrower
+	// AllowTokenlessProvisionalBootstrap exception to reach the same
+	// self-mint/TOFU gate. Pinned-tier providers that fail the tokenless
+	// check are still rejected at `prepareProviderAdmission` rather than
+	// at this gate — same close code, same reason string, same blast
+	// radius.
 	if authz == "" {
 		if s.cfg.Auth.RequireProviderTokens {
-			return providerAuth{}, false
+			if !s.cfg.Auth.AllowTokenlessProvisionalBootstrap {
+				return providerAuth{}, false
+			}
+			if s.issuer == nil {
+				s.log.Error().Msg("tokenless provisional bootstrap is enabled but no token issuer is configured")
+				return providerAuth{}, false
+			}
 		}
 		return providerAuth{}, true
 	}
@@ -643,8 +651,7 @@ func (s *Server) resolveProvisionalToken(authParam providerAuth, providerID, pro
 			s.log.Info().Str("provider_id", providerID).Str("event", "fr_c9_4_race_loss_admit_quarantined").Msg("FR-C9.4 race-loss: concurrent connect won IssueToken; admitting bearer-less-duplicate (non-routable; operator MUST revoke before legitimate provider can reconnect cleanly)")
 			return provisionalTokenSkip, "", "", "", pool.AuthBearerlessDuplicate
 		}
-		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C10 pair_ot compound mint failed; closing tokenless connect (fail closed)")
-		return provisionalTokenRejectTOFU, "", "", "", pool.AuthMintFailed
+		s.log.Warn().Err(err).Str("provider_id", providerID).Msg("FR-C10 pair_ot compound mint failed; falling back to plain FR-C9 provider token mint")
 	}
 	_, token, err := s.issuer.IssueToken(ctx, providerID, providerName)
 	if err != nil {

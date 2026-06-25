@@ -2,7 +2,8 @@
 
 This package builds `macprovider-cli`, the Apple Silicon provider binary
 for Mac Provider. The distribution layer in `dist/` publishes a
-darwin-arm64 tarball and installs it as a user-level service.
+darwin-arm64 tarball, may also publish a stapled package delivery
+container, and installs the provider as a user-level service.
 
 ## Join the Network
 
@@ -16,8 +17,9 @@ curl -fsSL https://get.streamvc.live/install.sh | bash
 The installer:
 
 - Downloads `macprovider-cli-vX.Y.Z-darwin-arm64.tar.gz` from GitHub
-  Releases.
-- Verifies `checksums.txt.sig`, then verifies the release tarball
+  Releases, or prefers `macprovider-cli-vX.Y.Z-darwin-arm64.pkg` when
+  that stapled delivery container is present.
+- Verifies `checksums.txt.sig`, then verifies the selected release asset
   against `checksums.txt`.
 - Installs the binary and resource bundles under `~/macprovider`.
 - Selects a default MLX model from RAM: 3B for 8 GB, 7B for 16 GB, 14B
@@ -40,15 +42,15 @@ The installer:
 
 The public installer is intentionally independent of local build output:
 it assumes the matching release tarball already exists on GitHub
-Releases.
+Releases. The tarball remains the canonical self-update artifact until
+`macprovider-cli update` explicitly supports the package delivery path.
 
-## Trust Caveat
+## Trust Model
 
-The current binary is unsigned at the macOS app-signing layer.
 `install.sh` verifies the signed checksum manifest and SHA-256 before
-extracting, then asks before clearing the macOS quarantine attribute.
-This keeps the v1 install path working while Developer ID signing
-remains an open SPEC-003 operator question.
+extracting either release asset. Developer ID signed releases can include
+a stapled `.pkg` delivery container; older or compatibility releases keep
+using the signed/notarized tarball path.
 
 ## Provider economics (earnings, payouts, lifecycle)
 

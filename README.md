@@ -54,6 +54,16 @@ Provider Mac (MLX)
 
 New public installs join as **provisional providers** over outbound WebSocket tunneling and can be promoted to pinned by the operator after observation. No inbound port-forwarding is required on the provider Mac.
 
+For production public onboarding, the coordinator must run with both token gates set explicitly:
+
+```yaml
+auth:
+  require_provider_tokens: true
+  allow_tokenless_provisional_bootstrap: true
+```
+
+`require_provider_tokens` keeps normal provider reconnects fail-closed. `allow_tokenless_provisional_bootstrap` only admits the first tokenless provisional connect far enough to mint and persist its own `provider_token`; pinned providers and provider IDs whose active token has already been used still reject tokenless reconnects. Invite-only deployments can set the bootstrap flag to `false`, but then new Macs need an operator-preprovisioned `provider_token`.
+
 **Trust model — what the coordinator sees:** prompts and responses pass through the gateway to enable routing and billing. Model weights stay on the provider Mac and never leave. Buyer prompts and provider responses are processed as plaintext on provider hardware — providers can technically observe prompts and outputs that route through their machine. This is acceptable for cooperative deployments where buyer and provider have an established trust relationship; it is NOT a private-inference guarantee. A self-hosted coordinator is on the roadmap for buyers who need local-only trust.
 
 ## For Providers

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/augstar/macprovider-coordinator/internal/auth"
@@ -16,6 +17,7 @@ import (
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 	gobwas "github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"github.com/rs/zerolog"
 )
 
 // selfServeHarness centralizes the settling-window posture for FR-C9:
@@ -103,6 +105,142 @@ func TestSelfServeProvisionalTokenMintedOnHelloAck(t *testing.T) {
 	}
 }
 
+func TestProviderTokenBootstrapMintsWhenTokensRequired(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial tokenless bootstrap: %v", err)
+	}
+	defer conn.Close()
+
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("bootstrap-provider"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read bootstrap ack: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack.AssignedProviderToken == "" {
+		t.Fatalf("assigned_provider_token empty in bootstrap hello_ack: %#v", ack)
+	}
+	providerID, ok, err := store.ValidateToken(context.Background(), ack.AssignedProviderToken)
+	if err != nil || !ok || providerID != "bootstrap-provider" {
+		t.Fatalf("bootstrap token validation: provider_id=%q ok=%v err=%v", providerID, ok, err)
+	}
+	provider, ok := h.Registry.Resolve("bootstrap-provider", ack.AssignedID)
+	if !ok {
+		t.Fatalf("registry has no entry for assigned_id %q after bootstrap", ack.AssignedID)
+	}
+	if provider.AuthState != pool.AuthSelfMinted {
+		t.Fatalf("bootstrap auth_state = %q, want %q", provider.AuthState, pool.AuthSelfMinted)
+	}
+}
+
+func TestProviderTokenBootstrapRejectsPinnedTokenlessProvider(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+	})
+	defer h.HTTP.Close()
+
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, validHello("m4-anon"))
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("token rows after pinned reject = %d, want 0: %#v", len(records), records)
+	}
+}
+
+func TestProviderTokenBootstrapFallsBackWhenPairOTCompoundMintFails(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	if _, err := store.DB().ExecContext(context.Background(), `DROP TABLE pair_ots`); err != nil {
+		t.Fatalf("drop pair_ots: %v", err)
+	}
+
+	var logBuffer lockedBuffer
+	h := newProviderHarnessWithServerOptionsAndLogger(
+		t,
+		store,
+		[]providerws.Option{providerws.WithGitHubAuthStore(store)},
+		zerolog.New(&logBuffer),
+		func(cfg *config.Config) {
+			cfg.Providers = nil
+			cfg.Auth.RequireProviderTokens = true
+			cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+			cfg.Auth.GitHubOAuth.Enabled = true
+		},
+	)
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial tokenless bootstrap: %v", err)
+	}
+	defer conn.Close()
+
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("pair-fallback-provider"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	payload, op, err := wsutil.ReadServerData(conn)
+	if err != nil {
+		t.Fatalf("read fallback ack: %v", err)
+	}
+	if op != gobwas.OpText {
+		t.Fatalf("op = %v, want text", op)
+	}
+
+	var ack providerws.HelloAck
+	if err := json.Unmarshal(payload, &ack); err != nil {
+		t.Fatalf("ack json: %v", err)
+	}
+	if ack.AssignedProviderToken == "" {
+		t.Fatalf("assigned_provider_token empty after pair-OT fallback: %#v", ack)
+	}
+	if ack.PairOT != "" || ack.ClaimURL != "" {
+		t.Fatalf("pairing fields should be omitted after pair-OT fallback: pair_ot=%q claim_url=%q", ack.PairOT, ack.ClaimURL)
+	}
+	providerID, ok, err := store.ValidateToken(context.Background(), ack.AssignedProviderToken)
+	if err != nil || !ok || providerID != "pair-fallback-provider" {
+		t.Fatalf("fallback token validation: provider_id=%q ok=%v err=%v", providerID, ok, err)
+	}
+	if logs := logBuffer.String(); !strings.Contains(logs, "FR-C10 pair_ot compound mint failed; falling back to plain FR-C9 provider token mint") {
+		t.Fatalf("fallback warning not logged: %s", logs)
+	}
+}
+
 // SPEC-003 v0.8 FR-C9.1 — when a valid Bearer is presented, the
 // coordinator MUST NOT mint a duplicate. The ack MUST omit the field.
 func TestSelfServeProvisionalTokenNotMintedWhenBearerValidated(t *testing.T) {
@@ -156,6 +294,48 @@ type mintFailingStore struct {
 
 func (m mintFailingStore) IssueToken(ctx context.Context, providerID, providerName string) (auth.TokenRecord, string, error) {
 	return auth.TokenRecord{}, "", errors.New("synthetic mint failure")
+}
+
+type validatorOnlyStore struct {
+	store *auth.Store
+}
+
+func (v validatorOnlyStore) ValidateToken(ctx context.Context, token string) (string, bool, error) {
+	return v.store.ValidateToken(ctx, token)
+}
+
+func (v validatorOnlyStore) MarkTokenUsed(ctx context.Context, token string) error {
+	return v.store.MarkTokenUsed(ctx, token)
+}
+
+func (v validatorOnlyStore) ValidateAndMarkTokenUsed(ctx context.Context, token string) (string, bool, error) {
+	return v.store.ValidateAndMarkTokenUsed(ctx, token)
+}
+
+func TestProviderTokenBootstrapFailsClosedWithoutIssuer(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	h := newProviderHarnessWithTokenValidator(t, validatorOnlyStore{store: store}, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+	})
+	defer h.HTTP.Close()
+
+	code, reason := sendHelloExpectClose(t, h.HTTP.URL, validHello("miswired-bootstrap"))
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("token rows after issuer-missing reject = %d, want 0: %#v", len(records), records)
+	}
 }
 
 // SPEC-003 v0.8.4 FR-C9.1 (fix-pass-5 G) — mint failure on a transient
@@ -413,6 +593,63 @@ func TestSelfServeProvisionalTokenRejectedWhenExistingTokenUsed(t *testing.T) {
 	}
 }
 
+func TestProviderTokenBootstrapRejectsTokenlessWhenExistingTokenUsed(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	_, seedCleartext, err := store.IssueToken(context.Background(), "claimed-provider", "claimed-provider hostname")
+	if err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if err := store.MarkTokenUsed(context.Background(), seedCleartext); err != nil {
+		t.Fatalf("mark seed used: %v", err)
+	}
+	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
+		cfg.Providers = nil
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+	})
+	defer h.HTTP.Close()
+
+	conn, br, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial tokenless bootstrap: %v", err)
+	}
+	defer conn.Close()
+	if err := wsutil.WriteClientText(conn, mustJSON(validHello("claimed-provider"))); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+
+	var src io.Reader = conn
+	if br != nil {
+		src = br
+	}
+	frame, err := gobwas.ReadFrame(src)
+	if err != nil {
+		t.Fatalf("read tofu close: %v", err)
+	}
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close", frame.Header.OpCode)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
+
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("token rows after strict reject = %d, want 1: %#v", len(records), records)
+	}
+	if records[0].RevokedAt.Valid {
+		t.Fatalf("seed row should remain active after strict reject; revoked_at=%v", records[0].RevokedAt)
+	}
+}
+
 // SPEC-003 v0.8.4 (fix-pass-5) — DOCUMENTED BRANCH CHANGE.
 //
 // This test originally exercised the pool-registry eviction defense
@@ -575,6 +812,117 @@ func TestSelfServeProvisionalTokenMintedOnAuthResponseV2(t *testing.T) {
 	}
 	if !ok || providerID != "v2-self-serve" {
 		t.Fatalf("validated provider_id = %q ok=%v, want v2-self-serve true", providerID, ok)
+	}
+}
+
+func TestProviderTokenBootstrapMintsOnAuthResponseV2WhenTokensRequired(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+		cfg.Providers = nil
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial tokenless v2 bootstrap: %v", err)
+	}
+	defer conn.Close()
+
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	providerPublic := base64.RawURLEncoding.EncodeToString(providerPublicRaw)
+	if err := wsutil.WriteClientText(conn, mustJSON(validAuthInitial("v2-bootstrap", providerPublic))); err != nil {
+		t.Fatalf("write auth_request initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "v2-bootstrap", nil)
+	response := readAuthResponse(t, conn)
+
+	if response.Status != "accepted" {
+		t.Fatalf("auth_response.status = %q, want accepted: %+v", response.Status, response)
+	}
+	if response.AssignedProviderToken == "" {
+		t.Fatalf("v2 bootstrap auth_response.assigned_provider_token empty: %+v", response)
+	}
+	providerID, ok, err := store.ValidateToken(context.Background(), response.AssignedProviderToken)
+	if err != nil || !ok || providerID != "v2-bootstrap" {
+		t.Fatalf("v2 bootstrap token validation: provider_id=%q ok=%v err=%v", providerID, ok, err)
+	}
+	provider, ok := h.Registry.Resolve("v2-bootstrap", response.AssignedID)
+	if !ok {
+		t.Fatalf("registry has no entry for assigned_id %q after v2 bootstrap", response.AssignedID)
+	}
+	if provider.AuthState != pool.AuthSelfMinted {
+		t.Fatalf("v2 bootstrap auth_state = %q, want %q", provider.AuthState, pool.AuthSelfMinted)
+	}
+}
+
+func TestProviderTokenBootstrapRejectsTokenlessUsedTokenOnAuthResponseV2(t *testing.T) {
+	store, err := auth.OpenStore(filepath.Join(t.TempDir(), "coordinator.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer store.Close()
+	_, seedCleartext, err := store.IssueToken(context.Background(), "v2-claimed", "v2-claimed hostname")
+	if err != nil {
+		t.Fatalf("seed token: %v", err)
+	}
+	if err := store.MarkTokenUsed(context.Background(), seedCleartext); err != nil {
+		t.Fatalf("mark seed used: %v", err)
+	}
+	h := newProviderHarnessWithTokenValidator(t, store, func(cfg *config.Config) {
+		cfg.Auth.RequireProviderTokens = true
+		cfg.Auth.AllowTokenlessProvisionalBootstrap = true
+		cfg.Providers = nil
+	})
+	defer h.HTTP.Close()
+
+	conn, _, _, err := gobwas.Dial(context.Background(), wsURL(h.HTTP.URL))
+	if err != nil {
+		t.Fatalf("dial tokenless v2 used-token bootstrap: %v", err)
+	}
+	defer conn.Close()
+
+	_, providerPublicRaw, err := tier2.NewX25519Keypair()
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	providerPublic := base64.RawURLEncoding.EncodeToString(providerPublicRaw)
+	if err := wsutil.WriteClientText(conn, mustJSON(validAuthInitial("v2-claimed", providerPublic))); err != nil {
+		t.Fatalf("write auth_request initial: %v", err)
+	}
+	challenge := readAuthChallenge(t, conn)
+	writeAuthProof(t, conn, challenge, "v2-claimed", nil)
+
+	frame, err := gobwas.ReadFrame(conn)
+	if err != nil {
+		t.Fatalf("read v2 tofu close: %v", err)
+	}
+	if frame.Header.OpCode != gobwas.OpClose {
+		t.Fatalf("op = %v, want close", frame.Header.OpCode)
+	}
+	code, reason := gobwas.ParseCloseFrameData(frame.Payload)
+	if code != providerws.CloseInvalidToken || reason != "invalid_token" {
+		t.Fatalf("close = %d %q, want %d invalid_token", code, reason, providerws.CloseInvalidToken)
+	}
+
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		t.Fatalf("list tokens: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("token rows after v2 strict reject = %d, want 1: %#v", len(records), records)
+	}
+	if records[0].RevokedAt.Valid {
+		t.Fatalf("seed row should remain active after v2 strict reject; revoked_at=%v", records[0].RevokedAt)
 	}
 }
 

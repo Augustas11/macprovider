@@ -3019,8 +3019,11 @@ order. Any failed step short-circuits with the named result:
    `catalogFile` schema: top-level fields `catalog_id` (string),
    `expires_at` (RFC3339 UTC string), `issued_at` (RFC3339 UTC
    string), `models[]` (array of `{artifact_kind, hash_scope,
-   model_id, notes?, sha256, source}`), `signature{alg, key_id,
-   sig}`, `version` (int). Reject as `invalid` with `reason:
+   model_id, min_ram_gb?, notes?, sha256, source}`), `signature{alg,
+   key_id, sig}`, `version` (int). If present, `min_ram_gb` is a
+   positive integer RAM floor for installer/provider UX and is covered
+   by the catalog signature; it is NOT used for model-hash equality.
+   Reject as `invalid` with `reason:
    "catalog_format_invalid"` on any schema mismatch (missing
    required field, wrong type, malformed RFC3339, `sha256`
    field not matching `[0-9a-f]{64}` per
@@ -3333,9 +3336,11 @@ covered by the "effectively active catalog" condition above.
   `/v1/receipt-keys` posture.
 - **Cache-Control:** `public, max-age=300` (5 minutes; same as
   §10.7).
-- **Response:** the literal signed catalog file bytes, as
-  produced by `scripts/sign-catalog.go`. `Content-Type:
-  application/json`.
+- **Response:** the literal signed catalog bytes accepted by the
+  coordinator's catalog signature verification, as produced by
+  `scripts/sign-catalog.go`. Implementations MUST NOT reread and
+  serve mutable on-disk catalog bytes that have not passed the active
+  catalog verification state. `Content-Type: application/json`.
 - **404:** the `<catalog_id>` path segment does NOT match the
   effectively-active catalog's `catalog_id`, OR the
   coordinator has no effectively-active catalog per the §M.4
@@ -3346,6 +3351,16 @@ covered by the "effectively active catalog" condition above.
 - **5xx / 429:** verifier treats as fetch-failure → `inconclusive:
   catalog_unreachable`; no retry within the same verification
   invocation.
+
+**`GET /catalog/current` endpoint (SPEC-002 v1.6 candidate).**
+
+- Same authentication / rate-limit / cache posture as
+  `GET /catalog/<catalog_id>`.
+- **Response:** the same verified signed catalog bytes as
+  `GET /catalog/<active catalog_id>`, without requiring clients to
+  discover the active ID from operator-only `/poolz`.
+- **404:** no effectively-active catalog per the §M.4 three-condition
+  rule. Verifier treats as `inconclusive: catalog_unreachable`.
 
 **`GET /catalog/pubkey` endpoint (SPEC-002 v1.6 candidate).**
 

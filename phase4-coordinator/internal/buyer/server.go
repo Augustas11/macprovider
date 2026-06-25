@@ -16,7 +16,6 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
-	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -399,8 +398,9 @@ func (s *Server) Handler() http.Handler {
 	// SPEC-015 §M.4 — SPEC-002 v1.6 candidate annotations.
 	// Public, unauthenticated, rate-limited; serve the literal
 	// signed catalog file and the catalog signing pubkey so a buyer-
-	// side verifier can run the §M.3.2 catalog-check path against
-	// this coordinator.
+	// side verifier or public installer can run the §M.3.2 catalog-
+	// check path against this coordinator without reading /poolz.
+	r.Get("/catalog/current", s.handleCatalogCurrent)
 	r.Get("/catalog/pubkey", s.handleCatalogPubkey)
 	r.Get("/catalog/{catalog_id}", s.handleCatalogFile)
 	r.Post("/v1/chat/completions", s.handleChatCompletions)
@@ -740,32 +740,34 @@ func (s *Server) handleReceiptKeys(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// SPEC-015 §M.4 — serve the literal signed catalog file under the
+// SPEC-015 §M.4 — serve the verified signed catalog bytes under the
 // effectively-active catalog's id. Public, unauthenticated, rate-
 // limited (shares the receipt-keys bucket so a single attacker
 // cannot starve the buyer surface). 404 when (a) no catalog
 // configured, (b) catalog failed to load/verify, OR (c) the path
 // segment does not match the active catalog_id.
 func (s *Server) handleCatalogFile(w http.ResponseWriter, r *http.Request) {
+	s.serveCatalogFile(w, r, strings.TrimSpace(chi.URLParam(r, "catalog_id")))
+}
+
+// handleCatalogCurrent serves the effectively-active catalog without requiring
+// clients to discover catalog_id through operator-only /poolz.
+func (s *Server) handleCatalogCurrent(w http.ResponseWriter, r *http.Request) {
+	s.serveCatalogFile(w, r, "")
+}
+
+func (s *Server) serveCatalogFile(w http.ResponseWriter, r *http.Request, requested string) {
 	if !s.allowReceiptKeys(r) {
 		w.Header().Set("Retry-After", "1")
 		writeError(w, http.StatusTooManyRequests, "rate_limited", "Catalog endpoint rate limit exceeded")
 		return
 	}
-	cfg := s.tier2Config()
-	if !tier2.Active() || strings.TrimSpace(cfg.CatalogPath) == "" {
+	active, data, ok := tier2.CatalogSnapshot()
+	if !ok {
 		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
 		return
 	}
-	requested := strings.TrimSpace(chi.URLParam(r, "catalog_id"))
-	active := tier2.CatalogID()
-	if requested == "" || requested != active {
-		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
-		return
-	}
-	data, err := os.ReadFile(cfg.CatalogPath)
-	if err != nil {
-		s.log.Warn().Err(err).Str("catalog_path", cfg.CatalogPath).Msg("read catalog file failed")
+	if requested != "" && requested != active {
 		writeError(w, http.StatusNotFound, "catalog_not_found", "Catalog not found")
 		return
 	}

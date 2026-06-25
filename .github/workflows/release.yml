@@ -60,6 +60,240 @@ jobs:
           cd phase3-binary/dist
           ./package.sh "${{ steps.version.outputs.tag }}"
 
+      # SPEC-003 v0.8.2 follow-up: macOS 26.3.1+ tightened launchd's AMFI policy
+      # to reject adhoc-signed binaries under `launchctl bootstrap`. Earlier
+      # adhoc-signed releases (v1.2.x through v1.3.1) worked because they were
+      # loaded under earlier macOS versions; fresh installs of v1.3.1 on
+      # macOS 26.3.1 fail bootstrap with "5: Input/output error" because the
+      # binary has no CMS blob. See memory:
+      # macprovider-launchd-amfi-blocker-macos-26 for the full discovery
+      # writeup (2026-06-12 session).
+      #
+      # The fix: codesign the binary with a Developer ID Application cert
+      # and notarize via xcrun notarytool. The compatibility artifact remains
+      # a tarball containing a standalone Mach-O executable, which Apple's
+      # stapler cannot ticket directly. When a Developer ID Installer cert is
+      # also present, this step additionally builds, signs, notarizes, staples,
+      # and validates a flat pkg delivery container for install.sh to consume.
+      # Once the operator has an Apple Developer Program membership
+      # and populates the required secrets, signing activates automatically.
+      # Until then it is a documented no-op so the workflow still produces a
+      # release (operator can install under earlier macOS or run the binary
+      # outside launchd while the signing pipeline is being set up).
+      - name: Sign + notarize binary (conditional on operator secrets)
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD }}
+          APPLE_NOTARY_APPLE_ID: ${{ secrets.APPLE_NOTARY_APPLE_ID }}
+          APPLE_NOTARY_PASSWORD: ${{ secrets.APPLE_NOTARY_PASSWORD }}
+          APPLE_NOTARY_TEAM_ID: ${{ secrets.APPLE_NOTARY_TEAM_ID }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN_CREATED=0
+          WORK=""
+          SIGNING_TMP=""
+          NOTARIZE_ZIP=""
+          cleanup_signing_material() {
+            if [ -n "$SIGNING_TMP" ]; then
+              rm -rf "$SIGNING_TMP"
+            fi
+            if [ "$KEYCHAIN_CREATED" = "1" ]; then
+              security delete-keychain build.keychain >/dev/null 2>&1 || true
+            fi
+            if [ -n "$WORK" ]; then
+              rm -rf "$WORK"
+            fi
+          }
+          trap cleanup_signing_material EXIT
+
+          tag="${{ steps.version.outputs.tag }}"
+          src="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
+          test -f "$src"
+
+          if [ -z "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" ]; then
+            echo "::warning::APPLE_DEVELOPER_ID_CERT_P12_BASE64 secret not set;"
+            echo "::warning::shipping adhoc-signed binary. Fresh installs on"
+            echo "::warning::macOS 26.3.1+ will fail launchctl bootstrap until"
+            echo "::warning::the secret is populated. See memory:"
+            echo "::warning::macprovider-launchd-amfi-blocker-macos-26."
+            exit 0
+          fi
+
+          # Verify the remaining secrets are also present — partial setup
+          # would silently produce an unsigned-but-claims-to-be-signed asset.
+          missing=""
+          for var in APPLE_DEVELOPER_ID_CERT_PASSWORD APPLE_NOTARY_APPLE_ID \
+                     APPLE_NOTARY_PASSWORD APPLE_NOTARY_TEAM_ID; do
+            if [ -z "$(printf '%s' "${!var}")" ]; then
+              missing="$missing $var"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::Developer ID cert present but other Apple secrets missing:$missing" >&2
+            exit 1
+          fi
+          if [ -n "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64" ] && \
+             [ -z "$APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD" ]; then
+            echo "::error::Developer ID Installer cert present but APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD missing" >&2
+            exit 1
+          fi
+
+          # Step 1: import .p12 certificate identities into a transient
+          # keychain. The Application identity signs the executable; the
+          # Installer identity signs the staplable .pkg artifact.
+          KEYCHAIN_PASS=$(openssl rand -hex 16)
+          SIGNING_TMP=$(mktemp -d)
+          security create-keychain -p "$KEYCHAIN_PASS" build.keychain
+          KEYCHAIN_CREATED=1
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$KEYCHAIN_PASS" build.keychain
+          security set-keychain-settings -lut 3600 build.keychain
+
+          echo "$APPLE_DEVELOPER_ID_CERT_P12_BASE64" | base64 -d > "$SIGNING_TMP/cert.p12"
+          security import "$SIGNING_TMP/cert.p12" \
+            -k build.keychain \
+            -P "$APPLE_DEVELOPER_ID_CERT_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+
+          if [ -n "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64" ]; then
+            echo "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64" | base64 -d > "$SIGNING_TMP/installer-cert.p12"
+            security import "$SIGNING_TMP/installer-cert.p12" \
+              -k build.keychain \
+              -P "$APPLE_DEVELOPER_ID_INSTALLER_CERT_PASSWORD" \
+              -T /usr/bin/productsign \
+              -T /usr/bin/security
+          fi
+
+          # Required on macOS Sierra+ so the codesign tool can access the
+          # imported private key non-interactively.
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASS" build.keychain
+
+          # Step 2: codesign the binary with hardened runtime + secure
+          # timestamp. Both are notarization requirements.
+          SIGNING_ID=$(security find-identity -v -p codesigning build.keychain \
+                      | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          if [ -z "$SIGNING_ID" ]; then
+            echo "::error::No Developer ID Application identity found in imported cert" >&2
+            exit 1
+          fi
+          INSTALLER_ID=""
+          if [ -n "$APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64" ]; then
+            INSTALLER_ID=$(security find-identity -v build.keychain \
+                          | awk -F'"' '/Developer ID Installer/ {print $2; exit}')
+            if [ -z "$INSTALLER_ID" ]; then
+              echo "::error::No Developer ID Installer identity found in imported cert" >&2
+              exit 1
+            fi
+          fi
+
+          # Extract tarball so we can sign the binary in place, then repack.
+          WORK=$(mktemp -d)
+          tar xzf "$src" -C "$WORK"
+          test -x "$WORK/macprovider-cli"
+
+          codesign --force \
+            --options runtime \
+            --timestamp \
+            --sign "$SIGNING_ID" \
+            "$WORK/macprovider-cli"
+
+          # Verify the signature before notarizing — surfaces problems
+          # early (e.g. cert expired) without burning notary submission
+          # quota.
+          codesign --verify --strict --verbose=2 "$WORK/macprovider-cli"
+
+          # Step 3: notarize. notarytool needs a zip or dmg, not a raw
+          # binary, so wrap the binary in a transient zip for submission
+          # only. The tarball is what we ship. Apple's stapler cannot
+          # attach a ticket to a standalone executable, so Accepted
+          # notarization is the release gate for this artifact format
+          # (--wait blocks until notarization completes, typically 1-15
+          # minutes).
+          NOTARIZE_ZIP="$SIGNING_TMP/notary.zip"
+          (cd "$WORK" && /usr/bin/ditto -c -k --keepParent macprovider-cli "$NOTARIZE_ZIP")
+
+          xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --apple-id "$APPLE_NOTARY_APPLE_ID" \
+            --password "$APPLE_NOTARY_PASSWORD" \
+            --team-id "$APPLE_NOTARY_TEAM_ID" \
+            --wait
+          rm -f "$NOTARIZE_ZIP"
+
+          # Step 4: re-tar with the signed + notarized binary.
+          # Preserve the same internal layout package.sh produced; the
+          # only difference vs the input tarball is that
+          # ./macprovider-cli now carries a real signature chain.
+          rm -f "$src"
+          tar czf "$src" -C "$WORK" .
+
+          pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
+          if [ -n "$INSTALLER_ID" ]; then
+            # Step 5: build a signed, notarized, stapled flat package as the
+            # Apple-native delivery container. install.sh treats this as a
+            # verified payload container and still owns per-user config,
+            # launchd plist rendering, and support-file placement. A direct
+            # Installer.app install is blocked by the package preinstall script
+            # so operators do not bypass install.sh's user-level setup.
+            PKG_ROOT="$WORK/pkg-root"
+            PKG_SCRIPTS="$WORK/pkg-scripts"
+            mkdir -p "$PKG_ROOT"
+            mkdir -p "$PKG_SCRIPTS"
+            cp "$WORK/macprovider-cli" "$PKG_ROOT/macprovider-cli"
+            find "$WORK" -mindepth 1 -maxdepth 1 -name '*.bundle' -exec cp -R {} "$PKG_ROOT"/ \;
+            if [ -f "$WORK/THIRD-PARTY-NOTICES.txt" ]; then
+              cp "$WORK/THIRD-PARTY-NOTICES.txt" "$PKG_ROOT/THIRD-PARTY-NOTICES.txt"
+            fi
+            printf '%s\n' \
+              '#!/bin/sh' \
+              'echo "macprovider-cli.pkg is a signed delivery container for install.sh." >&2' \
+              'echo "Install with: curl -fsSL https://get.streamvc.live/install.sh | bash" >&2' \
+              'exit 1' \
+              > "$PKG_SCRIPTS/preinstall"
+            chmod 755 "$PKG_SCRIPTS/preinstall"
+
+            UNSIGNED_PKG="$WORK/macprovider-cli-unsigned.pkg"
+            SIGNED_PKG="$WORK/macprovider-cli.pkg"
+            pkgbuild \
+              --root "$PKG_ROOT" \
+              --scripts "$PKG_SCRIPTS" \
+              --identifier live.streamvc.macprovider.cli \
+              --version "${tag#v}" \
+              --install-location "/" \
+              "$UNSIGNED_PKG"
+            productsign --sign "$INSTALLER_ID" "$UNSIGNED_PKG" "$SIGNED_PKG"
+
+            xcrun notarytool submit "$SIGNED_PKG" \
+              --apple-id "$APPLE_NOTARY_APPLE_ID" \
+              --password "$APPLE_NOTARY_PASSWORD" \
+              --team-id "$APPLE_NOTARY_TEAM_ID" \
+              --wait
+            xcrun stapler staple "$SIGNED_PKG"
+            xcrun stapler validate "$SIGNED_PKG"
+            cp "$SIGNED_PKG" "$pkg_src"
+          else
+            rm -f "$pkg_src"
+            echo "::warning::APPLE_DEVELOPER_ID_INSTALLER_CERT_P12_BASE64 not set; skipping signed/stapled .pkg artifact."
+          fi
+
+          # Clean up keychain so secrets do not linger on the runner.
+          cleanup_signing_material
+          trap - EXIT
+
+          echo "  binary signed by: $SIGNING_ID"
+          echo "  notarization: accepted"
+          echo "  stapling: skipped for standalone executable tarball"
+          if [ -n "$INSTALLER_ID" ]; then
+            echo "  installer signed by: $INSTALLER_ID"
+            echo "  pkg notarization: accepted"
+            echo "  pkg stapling: validated"
+          fi
+
       - name: Tier-2 provider artifact preflight
         shell: bash
         run: |
@@ -76,6 +310,102 @@ jobs:
             PROVIDER_SHA256="" \
             scripts/check-tier2-provider-artifact.sh
 
+          pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
+          if [ ! -f "$pkg_src" ]; then
+            echo "No signed .pkg artifact present; tarball compatibility release preflight complete."
+            exit 0
+          fi
+
+          validate_payload_entries() {
+            payload_dir="$1"
+            label="$2"
+            entries="$(cd "$payload_dir" && find . -mindepth 1 -print)" || {
+              echo "::error::failed to list $label" >&2
+              exit 1
+            }
+            [ -n "$entries" ] || {
+              echo "::error::$label is empty" >&2
+              exit 1
+            }
+            has_binary=0
+            while IFS= read -r entry; do
+              normalized_entry="$entry"
+              while :; do
+                case "$normalized_entry" in
+                  ./*) normalized_entry="${normalized_entry#./}" ;;
+                  *) break ;;
+                esac
+              done
+              case "$normalized_entry" in
+                ""|.) continue ;;
+              esac
+              case "$normalized_entry" in
+                /*|*"/../"*|../*|*/..|..)
+                  echo "::error::unsafe $label path: $entry" >&2
+                  exit 1
+                  ;;
+                macprovider-cli)
+                  has_binary=1
+                  ;;
+                THIRD-PARTY-NOTICES.txt)
+                  ;;
+                *.bundle|*.bundle/*)
+                  ;;
+                *)
+                  echo "::error::unexpected $label member: $entry" >&2
+                  exit 1
+                  ;;
+              esac
+            done <<EOF
+          $entries
+          EOF
+            [ "$has_binary" -eq 1 ] || {
+              echo "::error::$label does not contain macprovider-cli" >&2
+              exit 1
+            }
+            if find "$payload_dir" \( -type l -o -type b -o -type c -o -type p \) -print -quit | grep -q .; then
+              echo "::error::$label contains unsafe link or device members" >&2
+              exit 1
+            fi
+          }
+
+          spctl -a -vv -t install "$pkg_src"
+          xcrun stapler validate "$pkg_src"
+
+          preflight_dir="$(mktemp -d)"
+          cleanup_preflight() {
+            rm -rf "$preflight_dir"
+          }
+          trap cleanup_preflight EXIT
+
+          tar_payload_dir="$preflight_dir/tar-payload"
+          pkg_expand_dir="$preflight_dir/pkg-expanded"
+          pkg_payload_tar="$preflight_dir/pkg-payload.tar.gz"
+          mkdir -p "$tar_payload_dir"
+          tar -xzf "phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz" -C "$tar_payload_dir" macprovider-cli
+          pkgutil --expand-full "$pkg_src" "$pkg_expand_dir"
+          test -x "$pkg_expand_dir/Payload/macprovider-cli"
+          validate_payload_entries "$pkg_expand_dir/Payload" "provider package payload"
+
+          tar_binary_sha="$(shasum -a 256 "$tar_payload_dir/macprovider-cli" | awk '{print $1}')"
+          pkg_binary_sha="$(shasum -a 256 "$pkg_expand_dir/Payload/macprovider-cli" | awk '{print $1}')"
+          if [ "$pkg_binary_sha" != "$tar_binary_sha" ]; then
+            echo "::error::package binary sha256 differs from tarball binary" >&2
+            exit 1
+          fi
+
+          pkg_version="$("$pkg_expand_dir/Payload/macprovider-cli" --version)"
+          if [ "$pkg_version" != "${tag#v}" ]; then
+            echo "::error::provider package version mismatch: got $pkg_version want ${tag#v}" >&2
+            exit 1
+          fi
+
+          tar czf "$pkg_payload_tar" -C "$pkg_expand_dir/Payload" .
+          PROVIDER_ARTIFACT="$pkg_payload_tar" \
+            PROVIDER_VERSION="${tag#v}" \
+            PROVIDER_SHA256="" \
+            scripts/check-tier2-provider-artifact.sh
+
       - name: Prepare release assets
         id: assets
         shell: bash
@@ -85,19 +415,30 @@ jobs:
           set -euo pipefail
           tag="${{ steps.version.outputs.tag }}"
           src="phase3-binary/dist/phase3-binary-m4-${tag}.tar.gz"
-          asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
+          pkg_src="phase3-binary/dist/phase3-binary-m4-${tag}.pkg"
+          tar_asset="macprovider-cli-${tag}-darwin-arm64.tar.gz"
+          pkg_asset="macprovider-cli-${tag}-darwin-arm64.pkg"
           test -f "$src"
           if [ -z "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" ]; then
             echo "MACPROVIDER_RELEASE_SIGNING_KEY_PEM secret is required" >&2
             exit 1
           fi
-          cp "$src" "$asset"
-          shasum -a 256 "$asset" > checksums.txt
+          cp "$src" "$tar_asset"
+          release_assets=("$tar_asset")
+          if [ -f "$pkg_src" ]; then
+            cp "$pkg_src" "$pkg_asset"
+            release_assets+=("$pkg_asset")
+          fi
+          : > checksums.txt
+          for release_asset in "${release_assets[@]}"; do
+            shasum -a 256 "$release_asset" >> checksums.txt
+          done
+          printf "%s\n" "${release_assets[@]}" > release-assets.txt
           printf "%s\n" "$MACPROVIDER_RELEASE_SIGNING_KEY_PEM" > release-signing-private.pem
           chmod 600 release-signing-private.pem
           openssl dgst -sha256 -sign release-signing-private.pem -out checksums.txt.sig checksums.txt
           rm -f release-signing-private.pem
-          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          echo "asset=$tar_asset" >> "$GITHUB_OUTPUT"
 
       - name: Prepare release notes
         shell: bash
@@ -112,9 +453,9 @@ jobs:
 
           Darwin arm64 build for Apple Silicon Macs.
 
-          This release is currently unsigned. SPEC-003 OQ-1/OQ-5 tracks
-          Developer ID signing and notarization; install.sh clears the
-          macOS quarantine attribute after explicit user confirmation.
+          This release is Developer ID signed and notarized when the
+          release operator secrets are populated. New releases may include
+          a stapled .pkg asset in addition to the compatibility tarball.
           EOF
           fi
 
@@ -125,8 +466,12 @@ jobs:
         run: |
           set -euo pipefail
           tag="${{ steps.version.outputs.tag }}"
+          release_assets=()
+          while IFS= read -r release_asset; do
+            [ -n "$release_asset" ] && release_assets+=("$release_asset")
+          done < release-assets.txt
           gh release create "$tag" \
-            "${{ steps.assets.outputs.asset }}" \
+            "${release_assets[@]}" \
             checksums.txt \
             checksums.txt.sig \
             --title "macprovider-cli $tag" \
