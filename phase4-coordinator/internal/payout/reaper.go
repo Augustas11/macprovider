@@ -183,15 +183,17 @@ func (r *Reaper) reapStaleOutbox(ctx context.Context) (int, error) {
 			return reaped, ctx.Err()
 		}
 		err := ClaimAndEmitStaleOutbox(ctx, r.db, row.ID, func(row StaleOutboxRow) {
-			// Codex Step 3 r1 [code:1.3] MEDIUM closure: emit
-			// the full §7.1 field set (event_id + ts_utc on
-			// the PAGE event; updated_at_utc maps to
-			// reorg_reactivated_at_utc which is the field name
-			// the SPEC chose for the §4.8c outbox column).
+			// Codex Step 3 r1 [code:1.3] MEDIUM closure +
+			// Step 3 r2 [arch:r2-3.3] MEDIUM closure: emit the
+			// full §7.1 field set (event_id + run_id +
+			// updated_at_utc + ts_utc on the PAGE event;
+			// updated_at_utc maps to reorg_reactivated_at_utc
+			// which is the SPEC §4.8c column name).
 			tsUTC := r.nowFn().UTC().Format(time.RFC3339Nano)
 			r.log.Error().
 				Str("event", "payout_cancel_self_transfer_reconfirm_stale").
 				Int64("event_id", row.ID).
+				Str("run_id", row.RunID).
 				Int64("payout_id", row.PayoutID).
 				Int("attempt_seq", row.AttemptSeq).
 				Str("stale_started_at_utc", row.StaleStartedAtUTC).

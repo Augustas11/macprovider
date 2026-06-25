@@ -222,26 +222,27 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 
 	// Step 3 — cancel-self-transfer carve-out. When the orphaned
 	// attempt is a cancel AND the runner-side stale marker is
-	// non-NULL (i.e. the cancel was reorg-reactivated), insert a
-	// cancel_reconfirm_stale_outbox row so the §4.7 PAGE event
-	// fires durably after the 3 × run_interval window.
+	// non-NULL (i.e. the cancel was reorg-reactivated), the
+	// runner-owned ProduceStaleOutboxRows producer (called every
+	// runner cycle) is the canonical path for emitting
+	// payout_cancel_self_transfer_reconfirm_stale via the
+	// cancel_reconfirm_stale_outbox table.
+	//
+	// Codex Step 3 r2 [arch:r2-3.2-B] MAJOR closure: the prior
+	// admin-side INSERT OR IGNORE was removed because it wrote
+	// the same outbox table without the runner's CAS on
+	// payout_attempts.cancel_reconfirm_stale_paged_at_utc AND
+	// without two-RPC verification — the UNIQUE INDEX is on
+	// (payout_id, attempt_seq, stale_started_at_utc) so admin
+	// and runner inserts with different timestamps could both
+	// survive, causing duplicate PAGE emissions per stale period.
+	// The runner is now the single producer; this branch only
+	// records the orphan observation.
 	//
 	// NO ledger_payout_ready revert on the cancel path — that is
 	// the v0.1.14 codex round-15 MAJOR-2 normative carve-out.
-	if isCancelSelf == 1 && reorgReactivatedAt.Valid && reorgReactivatedAt.String != "" {
-		if _, err := conn.ExecContext(ctx, `
-INSERT OR IGNORE INTO cancel_reconfirm_stale_outbox
-    (payout_id, attempt_seq, stale_started_at_utc, nonce, tx_hash,
-     last_seen_block, reorg_reactivated_at_utc)
-VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			req.PayoutID, req.AttemptSeq, stamp, nonce, txHashLower,
-			req.LastSeenBlock, reorgReactivatedAt.String,
-		); err != nil {
-			s.log.Error().Err(err).Send()
-			writeError(w, http.StatusInternalServerError, "internal_error")
-			return
-		}
-	}
+	_ = isCancelSelf       // retained for the §7.1 emit below
+	_ = reorgReactivatedAt // retained for the §7.1 emit below
 
 	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		s.log.Error().Err(err).Send()
@@ -332,15 +333,24 @@ func (s *OrphansService) emitOrphanResolved(orphanID int64, resolution, reason s
 
 // ProduceStaleOutboxRows is the §4.7 step 5 RUNNER-OWNED
 // stale-transition producer (codex Step 3 r1 [arch:3.2] MAJOR
-// closure).
+// closure; round 2 [arch:r2-3.2-A] MAJOR closure adds both-RPC
+// not-found verification; round 2 [arch:r2-3.3] + [code:r2-2.1]
+// MEDIUM closure persists run_id).
 //
 // SPEC §4.7 + §4.8c: when a reorg-reactivated cancel row has been
 // re-broadcast-ready-but-not-confirmed for longer than 3 ×
-// run_interval, the runner MUST do the NULL→now CAS on
+// run_interval AND BOTH RPCs still return "not found" for the
+// cancel tx, the runner MUST do the NULL→now CAS on
 // payout_attempts.cancel_reconfirm_stale_paged_at_utc and insert
 // the cancel_reconfirm_stale_outbox row in the SAME BEGIN
 // IMMEDIATE transaction. The sync emit happens AFTER commit via
 // the shared ClaimAndEmitStaleOutbox helper.
+//
+// The two-RPC check at the START of each candidate evaluation is
+// the v0.1.21 SPEC §4.7 escalation predicate: a cancel that one
+// of the two RPCs has already re-observed is NOT a stranded
+// cancel, so emitting the PAGE prematurely would mask the next
+// cycle's normal pollCancelOnce confirmation.
 //
 // Selection criteria for a stale cancel row:
 //
@@ -354,6 +364,9 @@ func (s *OrphansService) emitOrphanResolved(orphanID int64, resolution, reason s
 //     the field doubles as reorg_reactivated_at_utc since the
 //     §4.7 LIVE-AGAIN UPDATE writes this column atomically with
 //     the confirmed_at_utc=NULL flip)
+//   - PLUS: TwoRPCs.Primary AND TwoRPCs.Secondary BOTH return
+//     nil receipt + nil error for the tx_hash (codex Step 3 r2
+//     [arch:r2-3.2-A] MAJOR closure).
 //
 // Idempotent per-row via the partial UNIQUE INDEX
 // idx_crso_one_per_stale_period at the DB layer — if two
@@ -361,11 +374,25 @@ func (s *OrphansService) emitOrphanResolved(orphanID int64, resolution, reason s
 // race), the second INSERT would violate the UNIQUE constraint
 // and abort that row's txn without affecting others.
 //
-// Returns the count of rows that produced outbox rows.
+// runID is the §7.1 run_id captured at the top of the runner
+// cycle — persisted in cancel_reconfirm_stale_outbox.run_id so
+// the reaper can emit it on the recovery path without
+// reconstructing.
+//
+// Returns the count of rows that produced outbox rows. Passing
+// a zero-value TwoRPCs (i.e. nil clients) disables the producer
+// entirely and returns (0, nil); tests use this path to avoid
+// wiring mock RPCs when the producer is not under test.
 func ProduceStaleOutboxRows(
 	ctx context.Context, db *sql.DB, log zerolog.Logger,
+	rpcs TwoRPCs, runID string,
 	now time.Time, runInterval time.Duration,
 ) (int, error) {
+	if rpcs.Primary == nil || rpcs.Secondary == nil {
+		// Producer disabled — typically a test path. The reaper
+		// + admin orphan path provide the recovery floor.
+		return 0, nil
+	}
 	cutoff := now.Add(-3 * runInterval).UTC().Format(time.RFC3339Nano)
 	rows, err := db.QueryContext(ctx, `
 SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
@@ -407,6 +434,29 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
 		if ctx.Err() != nil {
 			return produced, ctx.Err()
 		}
+		// Codex Step 3 r2 [arch:r2-3.2-A] MAJOR closure: SPEC §4.7
+		// requires BOTH RPCs to still return "not found" before
+		// the stale PAGE fires. A cancel that one of the two
+		// RPCs has already re-observed is NOT a stranded cancel
+		// — the next pollCancelOnce cycle will re-confirm it.
+		// Skip silently; the next cycle re-evaluates.
+		if !c.TxHash.Valid || c.TxHash.String == "" {
+			continue
+		}
+		txHash := c.TxHash.String
+		recA, errA := rpcs.Primary.TransactionReceipt(ctx, txHash)
+		recB, errB := rpcs.Secondary.TransactionReceipt(ctx, txHash)
+		if errA != nil || errB != nil {
+			// RPC error is NOT a stale signal — skip; the reorg
+			// poll cycle's payout_reorg_poll_rpc_error will fire
+			// on the same row.
+			continue
+		}
+		if recA != nil || recB != nil {
+			// At least one RPC sees a receipt → the cancel is
+			// reconfirmable; do NOT page.
+			continue
+		}
 		// Per-row BEGIN IMMEDIATE: CAS the marker + INSERT outbox.
 		conn, err := db.Conn(ctx)
 		if err != nil {
@@ -447,11 +497,9 @@ UPDATE payout_attempts
 		}
 		// Insert the outbox row. INSERT OR IGNORE protects against
 		// the rare (payout_id, attempt_seq, stale_started_at_utc)
-		// collision (same-second produce by two processes).
-		txHash := ""
-		if c.TxHash.Valid {
-			txHash = c.TxHash.String
-		}
+		// collision (same-second produce by two processes). Codex
+		// Step 3 r2 [arch:r2-3.3] MEDIUM closure adds the run_id
+		// column so the reaper can emit the §7.1 run_id field.
 		lastBlock := int64(0)
 		if c.BlockNumber.Valid {
 			lastBlock = c.BlockNumber.Int64
@@ -459,10 +507,10 @@ UPDATE payout_attempts
 		if _, err := conn.ExecContext(ctx, `
 INSERT OR IGNORE INTO cancel_reconfirm_stale_outbox
     (payout_id, attempt_seq, stale_started_at_utc, nonce, tx_hash,
-     last_seen_block, reorg_reactivated_at_utc)
-VALUES (?, ?, ?, ?, ?, ?, ?)`,
+     last_seen_block, reorg_reactivated_at_utc, run_id)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 			c.PayoutID, c.AttemptSeq, staleStarted, c.Nonce, txHash,
-			lastBlock, c.ReorgReactivated,
+			lastBlock, c.ReorgReactivated, runID,
 		); err != nil {
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 			conn.Close()
@@ -489,9 +537,14 @@ SELECT id FROM cancel_reconfirm_stale_outbox
 			).Scan(&outboxID)
 			if outboxID > 0 {
 				_ = ClaimAndEmitStaleOutbox(ctx, db, outboxID, func(row StaleOutboxRow) {
+					// Codex Step 3 r2 [arch:r2-3.3] + [code:r2-2.1]
+					// MEDIUM closure: full §7.1 field set including
+					// run_id + updated_at_utc (== reorg_reactivated_at_utc
+					// per SPEC §4.8c column definition).
 					log.Error().
 						Str("event", "payout_cancel_self_transfer_reconfirm_stale").
 						Int64("event_id", row.ID).
+						Str("run_id", row.RunID).
 						Int64("payout_id", row.PayoutID).
 						Int("attempt_seq", row.AttemptSeq).
 						Str("stale_started_at_utc", row.StaleStartedAtUTC).
@@ -499,6 +552,7 @@ SELECT id FROM cancel_reconfirm_stale_outbox
 						Str("tx_hash", row.TxHash).
 						Uint64("last_seen_block", row.LastSeenBlock).
 						Str("reorg_reactivated_at_utc", row.ReorgReactivatedAtUTC).
+						Str("updated_at_utc", row.ReorgReactivatedAtUTC).
 						Str("ts_utc", now.UTC().Format(time.RFC3339Nano)).
 						Str("severity", "PAGE").Send()
 				})
@@ -516,7 +570,8 @@ func ListUnemittedStaleOutboxOlderThan(ctx context.Context, db *sql.DB, cutoff t
 	cutoffStr := cutoff.UTC().Format(time.RFC3339Nano)
 	rows, err := db.QueryContext(ctx, `
 SELECT id, payout_id, attempt_seq, stale_started_at_utc, nonce,
-       tx_hash, last_seen_block, reorg_reactivated_at_utc
+       tx_hash, last_seen_block, reorg_reactivated_at_utc,
+       COALESCE(run_id, '')
   FROM cancel_reconfirm_stale_outbox
  WHERE emitted_to_log = 0
    AND stale_started_at_utc < ?
@@ -531,7 +586,7 @@ SELECT id, payout_id, attempt_seq, stale_started_at_utc, nonce,
 		var r StaleOutboxRow
 		if err := rows.Scan(&r.ID, &r.PayoutID, &r.AttemptSeq,
 			&r.StaleStartedAtUTC, &r.Nonce, &r.TxHash,
-			&r.LastSeenBlock, &r.ReorgReactivatedAtUTC); err != nil {
+			&r.LastSeenBlock, &r.ReorgReactivatedAtUTC, &r.RunID); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -540,6 +595,11 @@ SELECT id, payout_id, attempt_seq, stale_started_at_utc, nonce,
 }
 
 // StaleOutboxRow is one cancel_reconfirm_stale_outbox row.
+// Codex Step 3 r2 [arch:r2-3.3] + [code:r2-2.1] MEDIUM closure
+// added RunID so the reaper can emit the SPEC §7.1 run_id field
+// on the recovery path. ReorgReactivatedAtUTC IS the
+// updated_at_utc value at LIVE-AGAIN time per §4.8c column
+// definition — emitters surface it as `updated_at_utc`.
 type StaleOutboxRow struct {
 	ID                    int64
 	PayoutID              int64
@@ -549,6 +609,7 @@ type StaleOutboxRow struct {
 	TxHash                string
 	LastSeenBlock         uint64
 	ReorgReactivatedAtUTC string
+	RunID                 string
 }
 
 // ClaimAndEmitStaleOutbox CAS-claims one cancel_reconfirm_stale_outbox
@@ -594,12 +655,13 @@ func ClaimAndEmitStaleOutbox(
 	var row StaleOutboxRow
 	err = conn.QueryRowContext(ctx, `
 SELECT id, payout_id, attempt_seq, stale_started_at_utc, nonce,
-       tx_hash, last_seen_block, reorg_reactivated_at_utc
+       tx_hash, last_seen_block, reorg_reactivated_at_utc,
+       COALESCE(run_id, '')
   FROM cancel_reconfirm_stale_outbox
  WHERE id = ?`, got,
 	).Scan(&row.ID, &row.PayoutID, &row.AttemptSeq,
 		&row.StaleStartedAtUTC, &row.Nonce, &row.TxHash,
-		&row.LastSeenBlock, &row.ReorgReactivatedAtUTC)
+		&row.LastSeenBlock, &row.ReorgReactivatedAtUTC, &row.RunID)
 	if err != nil {
 		return fmt.Errorf("read stale outbox row %d: %w", got, err)
 	}

@@ -226,11 +226,14 @@ func (r *Runner) RunOnce(ctx context.Context) error {
 	}()
 
 	// §4.7 step 5 runner-owned stale-transition production (codex
-	// Step 3 r1 [arch:3.2] MAJOR closure). Runs BEFORE the §4.3
-	// step 1 SELECT so the PAGE event for a stale cancel fires
-	// inside the same cycle that would otherwise blindly hold the
-	// stranded row indefinitely.
-	if produced, err := ProduceStaleOutboxRows(ctx, r.opts.DB, r.opts.Logger, now, r.opts.RunInterval); err != nil {
+	// Step 3 r1 [arch:3.2] MAJOR closure; r2 [arch:r2-3.2-A] adds
+	// two-RPC not-found verification; r2 [arch:r2-3.3] persists
+	// run_id). Runs BEFORE the §4.3 step 1 SELECT so the PAGE
+	// event for a stale cancel fires inside the same cycle that
+	// would otherwise blindly hold the stranded row indefinitely.
+	if produced, err := ProduceStaleOutboxRows(ctx, r.opts.DB, r.opts.Logger,
+		r.opts.RPCs, runID, now, r.opts.RunInterval,
+	); err != nil {
 		r.opts.Logger.Warn().Err(err).
 			Str("event", "payout_stale_outbox_producer_failed").Send()
 	} else if produced > 0 {
