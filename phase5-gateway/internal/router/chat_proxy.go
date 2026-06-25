@@ -386,7 +386,33 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		if strings.HasPrefix(line, "data: ") {
 			data := strings.TrimPrefix(line, "data: ")
 			if data != "[DONE]" {
-				emitted += int64(len(data))
+				deltaBytes, parseOK := streamingCompletionDeltaBytes(data)
+				if !parseOK {
+					slog.Warn("streaming gateway estimate saw malformed chunk; truncating stream", "request_id", requestID(r))
+					writeSSEError(w, "Upstream stream returned malformed data", "stream_malformed")
+					if flusher != nil {
+						flusher.Flush()
+					}
+					cancelCoordinator()
+					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
+					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed")
+					return
+				}
+				if deltaBytes > 0 {
+					projectedCompletion := estimateTokensFromBytes(emitted + deltaBytes)
+					maxCompletion := maxStreamingCompletionTokens(promptEstimate, maxUsageTokens)
+					if projectedCompletion > maxCompletion {
+						slog.Warn("streaming gateway estimate exceeded request maximum; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", projectedCompletion, "max_completion_tokens", maxCompletion)
+						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "stream_output_exceeded")
+						if flusher != nil {
+							flusher.Flush()
+						}
+						cancelCoordinator()
+						s.settleAfterCommit(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded")
+						return
+					}
+					emitted += deltaBytes
+				}
 				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens); ok {
 					if err != nil {
 						invalidReportedUsage = true
@@ -421,14 +447,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "stream_truncated")
 			return
 		}
-		s.settleAfterCommit(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), maxUsageTokens, "gateway_estimated", "stream_truncated")
+		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated")
 		return
 	}
 	if reported != nil && !invalidReportedUsage {
 		s.settleAfterCommit(r, subject, reported.PromptTokens, reported.CompletionTokens, maxUsageTokens, "provider_reported", "ok")
 		return
 	}
-	s.settleAfterCommit(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), maxUsageTokens, "gateway_estimated", "ok")
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "ok")
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
@@ -482,7 +508,7 @@ func openAIErrorCode(body []byte) string {
 
 func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens int64, cancelCoordinator func()) {
 	cancelCoordinator()
-	s.settleAfterCommit(r, subject, promptEstimate, int64(math.Ceil(float64(emitted)/4.0)), maxUsageTokens, "gateway_estimated", "client_disconnect")
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "client_disconnect")
 }
 
 func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) bool {
@@ -542,6 +568,53 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 		})
 	}
 	return s.store.SettleReservation(context.Background(), settlement)
+}
+
+func estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens int64) int64 {
+	completion := estimateTokensFromBytes(emitted)
+	maxCompletion := maxStreamingCompletionTokens(promptEstimate, maxUsageTokens)
+	if completion > maxCompletion {
+		return maxCompletion
+	}
+	return completion
+}
+
+func maxStreamingCompletionTokens(promptEstimate, maxUsageTokens int64) int64 {
+	maxCompletion := maxUsageTokens - promptEstimate
+	if maxCompletion < 0 {
+		return 0
+	}
+	return maxCompletion
+}
+
+func estimateTokensFromBytes(n int64) int64 {
+	return int64(math.Ceil(float64(n) / 4.0))
+}
+
+func streamingCompletionDeltaBytes(data string) (int64, bool) {
+	var envelope struct {
+		Choices []struct {
+			Delta struct {
+				Content   string `json:"content"`
+				ToolCalls []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(data), &envelope); err != nil {
+		return 0, false
+	}
+	var n int64
+	for _, choice := range envelope.Choices {
+		n += int64(len(choice.Delta.Content))
+		for _, toolCall := range choice.Delta.ToolCalls {
+			n += int64(len(toolCall.Function.Arguments))
+		}
+	}
+	return n, true
 }
 
 func demoTokenHash(token string) string {
@@ -607,7 +680,7 @@ func writeSSEError(w http.ResponseWriter, message, code string) {
 	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "api_error", "code": code}})
 	_, _ = w.Write([]byte("data: "))
 	_, _ = w.Write(payload)
-	_, _ = w.Write([]byte("\n\n"))
+	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
 }
 
 func parseChatRequest(body []byte) (chatRequest, error) {
@@ -661,7 +734,7 @@ func usageFromJSON(body []byte, maxUsageTokens int64) (tokenUsage, bool, error) 
 	if sum > maxUsageTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total exceeds request maximum")
 	}
-	if rawUsage.TotalTokens != nil && usage.TotalTokens != 0 && usage.TotalTokens != sum {
+	if rawUsage.TotalTokens != nil && usage.TotalTokens != sum {
 		return tokenUsage{}, true, fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
 	}
 	usage.TotalTokens = sum
