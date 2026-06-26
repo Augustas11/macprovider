@@ -255,7 +255,14 @@ func main() {
 		statsRollup.Start(shutdownCtx)
 		logger.Info().Str("backfill_mode", mode).Int64("partial_history_since_unix", partialUnix).Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
 	}
+	// Round-3 ARCH r3 LOW 2 fix: defers run LIFO, so a non-signal
+	// return path would call `Wait()` BEFORE the
+	// `stopBackground()` registered earlier — blocking forever on
+	// still-running rollup goroutines. Combining cancellation +
+	// drain in one defer registered AFTER the rollup is
+	// constructed guarantees cancellation always precedes Wait.
 	defer func() {
+		stopBackground()
 		if statsRollup != nil {
 			statsRollup.Wait()
 		}

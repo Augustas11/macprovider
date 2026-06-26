@@ -116,10 +116,12 @@ func runTimeseriesTpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
 		outTok int64
 	}
 	rows := make([]tpmRow, 0, 30)
-	const q = `
+	// CODE r3 HIGH 1: effective-token semantic (byte_estimated
+	// path).
+	q := `
         SELECT date_trunc('minute', lrc.ts_utc) AS bucket,
-               COALESCE(SUM(lrc.prompt_tokens), 0)::BIGINT     AS in_tok,
-               COALESCE(SUM(lrc.completion_tokens), 0)::BIGINT AS out_tok
+               COALESCE(SUM(` + effectivePromptTokensSQL("lrc") + `), 0)::BIGINT     AS in_tok,
+               COALESCE(SUM(` + effectiveCompletionTokensSQL("lrc") + `), 0)::BIGINT AS out_tok
           FROM ledger_request_credits lrc
           JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
          WHERE lrc.ts_utc >= $1 AND lrc.ts_utc < $2

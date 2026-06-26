@@ -230,10 +230,14 @@ type rewardsAgg struct {
 // any ledger row for a provider not in `provider_tokens` is
 // silently dropped.
 func aggregateWorkPerProvider(ctx context.Context, db *sql.DB, sinceUnix, endUnix int64) (map[string]workAgg, error) {
-	const q = `
+	// CODE r3 HIGH 1: effective-token semantic (byte_estimated
+	// path). The earlier `prompt_tokens + completion_tokens`
+	// turned NULL completion_tokens (byte_estimated rows) into a
+	// NULL sum, silently dropping their contribution.
+	q := `
         SELECT pt.provider_id,
                COALESCE(SUM(lrc.provider_credits), 0)::BIGINT AS credits,
-               COALESCE(SUM(lrc.prompt_tokens + lrc.completion_tokens), 0)::BIGINT AS tokens,
+               COALESCE(SUM(` + effectivePromptTokensSQL("lrc") + ` + ` + effectiveCompletionTokensSQL("lrc") + `), 0)::BIGINT AS tokens,
                COUNT(DISTINCT lrc.request_id)::BIGINT AS jobs,
                MIN(lrc.ts_utc) AS first_seen,
                MAX(lrc.ts_utc) AS last_seen

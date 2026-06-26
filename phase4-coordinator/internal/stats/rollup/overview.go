@@ -112,10 +112,13 @@ func runOverviewTick(ctx context.Context, db *sql.DB, cfg Config, snap SnapshotP
 // request may produce multiple credit rows on retry; the
 // public stats are about unique requests, not credit rows.
 func queryOverviewCumulatives(ctx context.Context, db *sql.DB, sinceUnix int64, tokensIn, tokensOut, requests *int64) error {
-	const q = `
+	// CODE r3 HIGH 1 fix: use SPEC-005 effective-token semantic
+	// so byte_estimated rows (completion_tokens=NULL) don't
+	// silently undercount via the NULL-arithmetic path.
+	q := `
         SELECT
-            COALESCE(SUM(lrc.prompt_tokens), 0)::BIGINT,
-            COALESCE(SUM(lrc.completion_tokens), 0)::BIGINT,
+            COALESCE(SUM(` + effectivePromptTokensSQL("lrc") + `), 0)::BIGINT,
+            COALESCE(SUM(` + effectiveCompletionTokensSQL("lrc") + `), 0)::BIGINT,
             COUNT(DISTINCT lrc.request_id)::BIGINT
           FROM ledger_request_credits lrc
           JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id

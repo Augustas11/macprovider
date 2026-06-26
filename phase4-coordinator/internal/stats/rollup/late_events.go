@@ -54,12 +54,14 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
 	cutoff := lateEventBoundary(now, cfg.LateEventsLookbackHours)
 	winStart := windowStart(window, now, cfg.PartialHistorySinceUnix)
 
-	// Lookback-old work-side rows.
-	const workQ = `
+	// Lookback-old work-side rows. CODE r3 HIGH 1: effective-
+	// token semantic so byte_estimated rows record the correct
+	// delta_tokens instead of zero (completion_tokens NULL).
+	workQ := `
         INSERT INTO stats_late_events (event_unix_ts, provider_id, delta_tokens, source_billing_row)
         SELECT EXTRACT(EPOCH FROM lrc.ts_utc)::BIGINT AS evt_ts,
                lrc.provider_id,
-               (COALESCE(lrc.prompt_tokens, 0) + COALESCE(lrc.completion_tokens, 0))::BIGINT,
+               (` + effectivePromptTokensSQL("lrc") + ` + ` + effectiveCompletionTokensSQL("lrc") + `)::BIGINT,
                'lrc:' || lrc.id::TEXT AS src
           FROM ledger_request_credits lrc
           JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id

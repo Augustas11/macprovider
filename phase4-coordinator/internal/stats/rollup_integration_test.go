@@ -34,9 +34,11 @@ package stats_test
 //     ledger row falls inside the requested window.
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -591,6 +593,185 @@ func TestShapeCRebuild_MVCCNoEmptyState(t *testing.T) {
 	}
 	if c != 5 {
 		t.Errorf("post-rebuild count = %d, want 5 (R1)", c)
+	}
+
+	// Round-3 CODE r3 MED 2 fix: post-commit equivalence is
+	// per-provider content-equality, not just COUNT. The rebuilt
+	// rows MUST contain exactly r0Providers + r1Extra with
+	// deterministic ranks. Compare the committed provider_id
+	// set against the expected set.
+	expected := map[string]struct{}{}
+	for _, p := range append(append([]string{}, r0Providers...), r1Extra...) {
+		expected[p] = struct{}{}
+	}
+	pidRows, err := adminDB.QueryContext(context.Background(),
+		`SELECT provider_id FROM stats_leaderboard_all`,
+	)
+	if err != nil {
+		t.Fatalf("query pids: %v", err)
+	}
+	defer pidRows.Close()
+	got := map[string]struct{}{}
+	for pidRows.Next() {
+		var p string
+		if err := pidRows.Scan(&p); err != nil {
+			t.Fatalf("scan pid: %v", err)
+		}
+		got[p] = struct{}{}
+	}
+	for p := range expected {
+		if _, ok := got[p]; !ok {
+			t.Errorf("R1 missing provider %q (post-commit equivalence)", p)
+		}
+	}
+	for p := range got {
+		if _, ok := expected[p]; !ok {
+			t.Errorf("R1 has unexpected provider %q (post-commit equivalence)", p)
+		}
+	}
+}
+
+// ==========================================================================
+// Drift detection integration: Round-3 CODE r3 MED 1 fix.
+// Pre-rebuild snapshot has earnings differing by >0.5% from the
+// rebuilt OLTP truth; nightly rebuild MUST (a) emit
+// `stats_rollup_drift_detected` in the captured zerolog, (b)
+// commit the rebuild value, NOT the pre-rebuild value.
+// ==========================================================================
+func TestRollupDriftDetectedAndRebuildWins(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	now := time.Now().UTC()
+
+	seedProviderTokens(t, adminDB, "p_drift")
+	// OLTP truth: $50.00 in provider_credits.
+	seedLedgerRow(t, adminDB, "p_drift", now.Add(-1*time.Hour), 100, 100, 50_000_000)
+
+	// Pre-rebuild: populate via a tick (so the snapshot matches OLTP),
+	// then MANUALLY corrupt stats_leaderboard_all to fake drift.
+	logger := zerolog.Nop()
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	// Fake drift: change the stored earnings_usd to differ by 100%
+	// (clearly above the 0.5% threshold).
+	if _, err := adminDB.ExecContext(context.Background(),
+		`UPDATE stats_leaderboard_all SET earnings_usd = 25.00 WHERE provider_id = 'p_drift'`,
+	); err != nil {
+		t.Fatalf("fake drift: %v", err)
+	}
+
+	// Capture zerolog by piping through a bytes.Buffer.
+	var buf bytes.Buffer
+	driftLogger := zerolog.New(&buf)
+	cfg := freshRollupConfig().DefaultsApplied()
+	if err := statsrollup.RunNightlyRebuild(context.Background(), rdb, cfg, driftLogger); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+
+	logOut := buf.String()
+	if !strings.Contains(logOut, "stats_rollup_drift_detected") {
+		t.Errorf("expected drift event in rebuild log; got: %s", logOut)
+	}
+	if !strings.Contains(logOut, `"axis":"earnings"`) {
+		t.Errorf("expected axis=earnings in drift event; got: %s", logOut)
+	}
+
+	// Post-commit value MUST be the rebuild value (50.00), not the
+	// corrupted incremental value (25.00).
+	var got string
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT earnings_usd FROM stats_leaderboard_all WHERE provider_id = 'p_drift'`,
+	).Scan(&got); err != nil {
+		t.Fatalf("scan post-rebuild: %v", err)
+	}
+	if got != "50.00" {
+		t.Errorf("post-rebuild earnings_usd = %q, want 50.00 (rebuild value wins)", got)
+	}
+}
+
+// ==========================================================================
+// byte_estimated token semantic: round-3 CODE r3 HIGH 1 fix.
+// A ledger row with usage_source='byte_estimated' has NULL
+// completion_tokens and a non-NULL estimated_completion_tokens.
+// The rollup MUST use the effective-token CASE expression so the
+// row's tokens contribute to overview/leaderboard/timeseries.
+// ==========================================================================
+func TestRollupByteEstimatedTokenSemantic(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	now := time.Now().UTC()
+
+	// Extend the OLTP stub with the estimated_completion_tokens
+	// + usage_source columns SPEC-005 ships. The stub created in
+	// applyMigrationsAndStubOLTP only has the basic columns —
+	// extend here.
+	if _, err := adminDB.ExecContext(context.Background(), `
+        ALTER TABLE ledger_request_credits
+            ADD COLUMN IF NOT EXISTS estimated_completion_tokens BIGINT,
+            ADD COLUMN IF NOT EXISTS usage_source TEXT NOT NULL DEFAULT 'provider_reported'
+    `); err != nil {
+		t.Fatalf("extend OLTP stub: %v", err)
+	}
+
+	seedProviderTokens(t, adminDB, "p_byte_est")
+
+	// Provider-reported row: completion_tokens = 50.
+	seedLedgerRow(t, adminDB, "p_byte_est", now.Add(-1*time.Hour), 100, 50, 1_000_000)
+
+	// Byte-estimated row: completion_tokens NULL,
+	// estimated_completion_tokens = 75.
+	if _, err := adminDB.ExecContext(context.Background(), `
+        INSERT INTO ledger_request_credits (request_id, attempt_n, provider_id, ts_utc,
+            prompt_tokens, completion_tokens, estimated_completion_tokens, usage_source, provider_credits)
+        VALUES ('req-byte-est', 0, 'p_byte_est', $1, 200, NULL, 75, 'byte_estimated', 2_000_000)
+    `, now.Add(-30*time.Minute)); err != nil {
+		t.Fatalf("seed byte_estimated row: %v", err)
+	}
+
+	logger := zerolog.Nop()
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	// Overview: tokens_in should be 100+200=300; tokens_out
+	// should be 50+75=125 (the byte_estimated row's
+	// estimated_completion_tokens contributes).
+	var tokensIn, tokensOut int64
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT tokens_in, tokens_out FROM stats_overview_current`,
+	).Scan(&tokensIn, &tokensOut); err != nil {
+		t.Fatalf("scan overview: %v", err)
+	}
+	if tokensIn != 300 {
+		t.Errorf("overview tokens_in = %d, want 300", tokensIn)
+	}
+	if tokensOut != 125 {
+		t.Errorf("overview tokens_out = %d, want 125 (byte_estimated must use estimated_completion_tokens)", tokensOut)
+	}
+
+	// Leaderboard: token total = 300 + 125 = 425.
+	var lbTokens int64
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT tokens FROM stats_leaderboard_24h WHERE provider_id = 'p_byte_est'`,
+	).Scan(&lbTokens); err != nil {
+		t.Fatalf("scan leaderboard: %v", err)
+	}
+	if lbTokens != 425 {
+		t.Errorf("leaderboard tokens = %d, want 425 (byte_estimated semantic)", lbTokens)
 	}
 }
 
