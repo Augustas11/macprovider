@@ -253,16 +253,20 @@ test_malformed_env_ref_fails() {
 }
 
 test_malformed_env_does_not_leak_hex_secret() {
-  # Audit-r6 (security + code lanes -> HIGH): a typoed env:<hex-secret>
-  # would otherwise reach the deploy log. Two leak paths:
-  #   (a) hex starting with a digit (e.g. HEX64 "0123...") — fails the
-  #       ENV_REF regex (NAME starts with [A-Za-z_]) -> malformed branch.
-  #   (b) hex starting with a letter (e.g. HEX64B "fedcba...") — passes
-  #       ENV_REF as a "valid env name", reaches the deferred-OK line
-  #       which previously echoed `env:fedcba...` to deploy logs.
-  # r6 fixes both: malformed redacts via `value redacted`; deferred-OK
-  # path adds a secret-shape sniff on the NAME and hard-fails with a
-  # redacted typo-suspect message when len>=32 and pure-hex.
+  # Audit-r6+r7: a typoed env:<hex-secret> would otherwise reach the
+  # deploy log. THREE leak paths the redaction must cover end-to-end:
+  #   (a) hex starting with a digit -> ENV_REF rejects NAME -> malformed
+  #       branch (audit-r6 fix).
+  #   (b) hex starting with a letter -> ENV_REF accepts NAME -> r6
+  #       check_hex_secret secret-shape sniff hard-fails first time.
+  #   (c) BUT hard() does not exit (just sets fail=1) so downstream C2c
+  #       paths still ran with that raw env name and re-emitted it
+  #       through _safe_describe / same-env-NAME WARN/OK messages
+  #       (audit-r7 fix: _safe_env_name centralizes redaction so the
+  #       same hex name cannot leak from ANY later diagnostic).
+  # This test pins the FULL-OUTPUT property: the bearer-shaped value
+  # must be ABSENT from the entire script output, not just the first
+  # failure line.
   local wd; wd="$(mk_workdir)"
 
   # Path (a) — hex starts with digit -> malformed.
@@ -271,14 +275,30 @@ test_malformed_env_does_not_leak_hex_secret() {
   run_check "$wd"
   assert_exit 1 "T7c-a env:<digit-leading-hex> typo -> FAIL"
   assert_contains "malformed env indirection" "T7c-a malformed message"
-  assert_absent "$HEX64" "T7c-a HEX64 not leaked into output"
+  assert_absent "$HEX64" "T7c-a HEX64 not leaked anywhere in output"
 
-  # Path (b) — hex starts with letter -> deferred-OK secret-shape sniff.
+  # Path (b)+(c) — hex starts with letter -> sniff hard-fails AND
+  # downstream C2c output must not re-leak.
   write_coord "$wd" "env:$HEX64B"
   run_check "$wd"
   assert_exit 1 "T7c-b env:<letter-leading-hex> typo -> FAIL"
   assert_contains "suspected secret-value typo" "T7c-b typo-suspect message"
-  assert_absent "$HEX64B" "T7c-b HEX64B not leaked into output"
+  assert_absent "$HEX64B" "T7c-b HEX64B not leaked anywhere in output (incl. C2c)"
+
+  # Path (b)+(c) on coordinator gateway_service_token field — same hazard.
+  local HEX64C=11112222333344445555666677778888999900001111222233334444aaaabbbb
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:$HEX64B"
+  run_check "$wd"
+  assert_exit 1 "T7c-c env:<letter-leading-hex> on gateway_service_token -> FAIL"
+  assert_absent "$HEX64B" "T7c-c HEX64B not leaked from gateway_service_token field (full output)"
+
+  # Path (b)+(c) on gateway service_token field — verifies all four
+  # check_hex_secret callers are covered.
+  write_coord "$wd" "\"$HEX64\""
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: env:$HEX64B"
+  run_check "$wd"
+  assert_exit 1 "T7c-d env:<letter-leading-hex> on gw service_token -> FAIL"
+  assert_absent "$HEX64B" "T7c-d HEX64B not leaked from gw service_token field (full output)"
 
   rm -rf "$wd"
 }

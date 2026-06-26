@@ -127,6 +127,24 @@ def ok(m):   print(f"  ok:   {m}")
 ENV_REF = re.compile(r"^env:([A-Za-z_][A-Za-z0-9_]*)$")
 PLACEHOLDER = re.compile(r"REPLACE|change-me|<required>|placeholder|xxx", re.I)
 
+def _safe_env_name(name):
+    """Render an env-var NAME safely. If the NAME is suspect (32+ chars,
+    pure hex) — i.e. an operator typoed a bearer-shaped secret where a
+    variable name belongs — return a redacted placeholder. Otherwise
+    return the name verbatim. Audit-r7 (security + code lanes -> HIGH)
+    found r6 redaction only covered the initial hard-fail; downstream
+    C2c WARN paths re-emitted the same hex-shaped env name through
+    _safe_describe and the same-env-NAME pairing details. Centralizing
+    the redaction here prevents the next layer of the same leak.
+
+    Defined before check_hex_secret so all secret-emitting paths can
+    share it without ordering hazards."""
+    if name is None:
+        return None
+    if len(name) >= 32 and re.fullmatch(r"[0-9a-fA-F]+", name):
+        return "<redacted: hex-shaped env name, possible secret typo>"
+    return name
+
 def check_hex_secret(label, raw):
     """Validate a 64-hex secret that may be inline or `env:NAME`-indirected.
 
@@ -168,13 +186,17 @@ def check_hex_secret(label, raw):
                  f"mean to inline the secret, or to reference an env var "
                  f"like env:COORDINATOR_OPERATOR_KEY?")
             return
+        # Use _safe_env_name on every render: even after the hex-shape
+        # hard-fail above, defense-in-depth keeps a hex env name out of
+        # any subsequent diagnostics that might reach this branch.
+        name_display = _safe_env_name(name)
         resolved = os.environ.get(name)
         if not resolved:
-            ok(f"{label} deferred to runtime via env:{name} "
+            ok(f"{label} deferred to runtime via env:{name_display} "
                f"(injected from /etc/macprovider/*.env at start; not resolvable in this gate)")
             return
         raw = resolved
-        src = f" (resolved from env:{name})"
+        src = f" (resolved from env:{name_display})"
     if PLACEHOLDER.search(raw):
         hard(f"{label} is a PLACEHOLDER{src} -> would break /poolz + /admin auth")
     elif not re.fullmatch(r"[0-9a-fA-F]{64}", raw):
@@ -235,7 +257,7 @@ def _safe_describe(raw):
         if not m:
             return "env malformed"
         name = m.group(1)
-        return f"env:{name} ({'resolved' if os.environ.get(name) else 'unresolved'})"
+        return f"env:{_safe_env_name(name)} ({'resolved' if os.environ.get(name) else 'unresolved'})"
     return "inline-redacted"
 
 def _resolved_value(raw):
@@ -275,7 +297,7 @@ def _check_distinct(label_a, raw_a, label_b, raw_b, same_file=True):
     na = _env_name(raw_a)
     nb = _env_name(raw_b)
     if same_file and na is not None and na == nb:
-        hard(f"C2c: {label_a} and {label_b} both reference env:{na} "
+        hard(f"C2c: {label_a} and {label_b} both reference env:{_safe_env_name(na)} "
              f"(same file -> same env at runtime); "
              f"resolution collapses to one value, rotation discipline violated")
         return
@@ -318,7 +340,7 @@ def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
     na = _env_name(raw_a)
     nb = _env_name(raw_b)
     if same_file and na is not None and na == nb:
-        ok(f"C2c pairing {label_a} == {label_b}: both reference env:{na} "
+        ok(f"C2c pairing {label_a} == {label_b}: both reference env:{_safe_env_name(na)} "
            f"(same file -> same value at runtime)")
         return
     a = _resolved_value(raw_a)
@@ -335,7 +357,7 @@ def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
         # operator typo in one env file is exactly the failure mode
         # this gate exists to catch.
         if na is not None and na == nb:
-            detail = (f"both reference env:{na} but coord and gateway "
+            detail = (f"both reference env:{_safe_env_name(na)} but coord and gateway "
                       f"systemd units source SEPARATE env files (coordinator.env "
                       f"vs gateway.env); they may resolve to different values")
         else:
