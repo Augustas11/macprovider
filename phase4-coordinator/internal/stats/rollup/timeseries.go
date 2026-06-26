@@ -17,8 +17,13 @@ import (
 // concurrent `stats_reader` selects see either the pre-tick
 // state or the post-tick state, never a partial mix.
 func runTimeseriesRpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
-	now := time.Now().UTC().Truncate(time.Minute)
-	windowStart := now.Add(-30 * time.Minute)
+	now := time.Now().UTC()
+	// `bucketEnd` is the upper-exclusive minute boundary for
+	// the per-minute aggregation; `now` (un-truncated) is the
+	// timestamp the health row records so freshness assertions
+	// don't lag by up to 60s.
+	bucketEnd := now.Truncate(time.Minute)
+	windowStart := bucketEnd.Add(-30 * time.Minute)
 
 	type rpmRow struct {
 		bucket time.Time
@@ -37,7 +42,7 @@ func runTimeseriesRpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
          GROUP BY bucket
          ORDER BY bucket
     `
-	cursor, err := db.QueryContext(ctx, q, windowStart, now)
+	cursor, err := db.QueryContext(ctx, q, windowStart, bucketEnd)
 	if err != nil {
 		return fmt.Errorf("rpm select: %w", err)
 	}
@@ -67,13 +72,13 @@ func runTimeseriesRpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
 
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM stats_timeseries_rpm_30m WHERE bucket_start < $1 OR bucket_start >= $2`,
-		windowStart, now,
+		windowStart, bucketEnd,
 	); err != nil {
 		return fmt.Errorf("rpm prune-old: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM stats_timeseries_rpm_30m WHERE bucket_start >= $1 AND bucket_start < $2`,
-		windowStart, now,
+		windowStart, bucketEnd,
 	); err != nil {
 		return fmt.Errorf("rpm clear-window: %w", err)
 	}
@@ -101,8 +106,9 @@ func runTimeseriesRpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
 // rpm and tpm are independent components in
 // stats_components_health.
 func runTimeseriesTpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
-	now := time.Now().UTC().Truncate(time.Minute)
-	windowStart := now.Add(-30 * time.Minute)
+	now := time.Now().UTC()
+	bucketEnd := now.Truncate(time.Minute)
+	windowStart := bucketEnd.Add(-30 * time.Minute)
 
 	type tpmRow struct {
 		bucket time.Time
@@ -122,7 +128,7 @@ func runTimeseriesTpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
          GROUP BY bucket
          ORDER BY bucket
     `
-	cursor, err := db.QueryContext(ctx, q, windowStart, now)
+	cursor, err := db.QueryContext(ctx, q, windowStart, bucketEnd)
 	if err != nil {
 		return fmt.Errorf("tpm select: %w", err)
 	}
@@ -152,13 +158,13 @@ func runTimeseriesTpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
 
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM stats_timeseries_tpm_30m WHERE bucket_start < $1 OR bucket_start >= $2`,
-		windowStart, now,
+		windowStart, bucketEnd,
 	); err != nil {
 		return fmt.Errorf("tpm prune-old: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM stats_timeseries_tpm_30m WHERE bucket_start >= $1 AND bucket_start < $2`,
-		windowStart, now,
+		windowStart, bucketEnd,
 	); err != nil {
 		return fmt.Errorf("tpm clear-window: %w", err)
 	}
