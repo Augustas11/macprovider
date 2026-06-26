@@ -18,6 +18,85 @@ func TestTokenPointersFromUsageObjectPreservesInvalidUsageForBillingFault(t *tes
 	}
 }
 
+// TestIsCommitWorthyDataLine is the unit-test edge matrix for the SSE
+// commit predicate added by issue #92 / codex r3. Locks the boundary
+// between "real provider work" (commits the stream) and "SSE-shape
+// garbage" (forces failover) so future tweaks to isCommitWorthyDataLine
+// cannot silently regress the security threshold.
+func TestIsCommitWorthyDataLine(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+		want bool
+	}{
+		// Real OpenAI streaming chunks — commit.
+		{"openai_delta_chunk", "data: {\"id\":\"chatcmpl-x\",\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n", true},
+		{"openai_usage_final_chunk", "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2}}\n", true},
+		{"openai_chunk_with_crlf", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n", true},
+		{"openai_chunk_no_space_after_colon", "data:{\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n", true},
+
+		// SSE-shape garbage that previously committed — must reject.
+		{"empty_data_line", "data: \n", false},
+		{"done_terminator", "data: [DONE]\n", false},
+		{"comment_line", ":\n", false},
+		{"empty_blank_line", "\n", false},
+		{"crlf_blank_line", "\r\n", false},
+		{"id_only_metadata", "data: {\"id\":\"x\"}\n", false},
+		{"object_only_metadata", "data: {\"object\":\"chat.completion.chunk\"}\n", false},
+		{"choices_null", "data: {\"choices\":null}\n", false},
+		{"choices_empty_array", "data: {\"choices\":[]}\n", false},
+		{"usage_null", "data: {\"usage\":null}\n", false},
+		{"usage_empty_object", "data: {\"usage\":{}}\n", false},
+		{"delta_only_metadata", "data: {\"delta\":{\"content\":\"hi\"}}\n", false},
+
+		// Wrong field name (case-sensitive per SSE spec).
+		{"capital_Data_prefix", "Data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n", false},
+		{"upper_DATA_prefix", "DATA: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n", false},
+
+		// Wrong content shape.
+		{"json_array_not_object", "data: [1,2,3]\n", false},
+		{"non_json_text", "data: hello world\n", false},
+		{"unterminated_json", "data: {\"choices\":\n", false},
+
+		// Non-data SSE fields.
+		{"event_field_only", "event: foo\n", false},
+		{"id_field_only", "id: 12345\n", false},
+		{"retry_field_only", "retry: 1000\n", false},
+
+		// Adversarial: [DONE] embedded inside an id — only the literal
+		// content "[DONE]" is filtered, not arbitrary substrings.
+		{"id_containing_DONE_literal", "data: {\"id\":\"[DONE]\",\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isCommitWorthyDataLine([]byte(tc.line))
+			if got != tc.want {
+				t.Fatalf("isCommitWorthyDataLine(%q) = %v, want %v", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestIsSSEBlankLine locks the blank-line terminator detection used
+// by the forwardStreaming pre-commit loop.
+func TestIsSSEBlankLine(t *testing.T) {
+	if !isSSEBlankLine([]byte("\n")) {
+		t.Fatal("\\n must be a blank line terminator")
+	}
+	if !isSSEBlankLine([]byte("\r\n")) {
+		t.Fatal("\\r\\n must be a blank line terminator")
+	}
+	if isSSEBlankLine([]byte("data: x\n")) {
+		t.Fatal("data: x\\n must NOT be a blank line terminator")
+	}
+	if isSSEBlankLine([]byte("data: x\r\n")) {
+		t.Fatal("data: x\\r\\n must NOT be a blank line terminator")
+	}
+	if isSSEBlankLine([]byte("")) {
+		t.Fatal("empty slice must NOT be a blank line terminator (ReadBytes never returns empty + nil)")
+	}
+}
+
 func TestEstimatedCompletionTokensFromBytes(t *testing.T) {
 	if got := estimatedCompletionTokensFromBytes(0, 4); got != nil {
 		t.Fatalf("zero-byte estimate = %v, want nil", *got)

@@ -2256,28 +2256,36 @@ var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 
 // isCommitWorthyDataLine reports whether the given SSE line counts as
 // real provider work for the purposes of forwardStreaming's commit
-// threshold. Codex r2 audit suggested: commit only after a `data:` line
-// carrying non-empty, non-`[DONE]`, JSON-parseable OpenAI chat-completion
-// chunk data — comment-only (`:`), unknown-field-only, blank-only, or
-// terminal-only (`data: [DONE]`) events are not enough.
+// threshold. Codex r3 audit tightened the predicate from "any expected
+// key present" to "value-shape valid OpenAI chunk content": the JSON
+// object MUST carry either a non-empty `choices` array (the usual
+// streaming-chunk shape) OR a non-empty `usage` object (the usage-only
+// final chunk OpenAI emits when stream_options.include_usage=true).
+// Metadata-only objects like `{"id":"x"}`, `{"object":"chat.completion.chunk"}`,
+// `{"choices":null}`, `{"choices":[]}`, `{"usage":{}}`, plus comment-only
+// (`:`) and terminator-only (`data: [DONE]`) lines do NOT commit.
 func isCommitWorthyDataLine(line []byte) bool {
 	trimmed := bytes.TrimRight(line, "\r\n")
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
 		return false
 	}
 	content := bytes.TrimSpace(trimmed[len("data:"):])
-	if len(content) == 0 {
-		return false
-	}
-	if bytes.Equal(content, []byte("[DONE]")) {
+	if len(content) == 0 || bytes.Equal(content, []byte("[DONE]")) {
 		return false
 	}
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(content, &parsed); err != nil {
 		return false
 	}
-	for _, key := range []string{"choices", "delta", "id", "usage", "object"} {
-		if _, ok := parsed[key]; ok {
+	if raw, ok := parsed["choices"]; ok {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+			return true
+		}
+	}
+	if raw, ok := parsed["usage"]; ok {
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err == nil && len(obj) > 0 {
 			return true
 		}
 	}
