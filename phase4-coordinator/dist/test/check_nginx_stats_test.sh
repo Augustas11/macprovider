@@ -171,15 +171,24 @@ NGINX_CID=$(docker run -d \
 # `0.0.0.0:PORT`, one IPv6 `[::]:PORT`); `head -1` keeps only
 # the IPv4 line so HOST_PORT is a single token instead of a
 # multiline value that breaks the BASE URL on local runs.
+#
+# Wrapped in a function because `docker restart` between
+# sub-tests REASSIGNS the host port (Docker Desktop does not
+# preserve random-port bindings across restart). Sub-tests that
+# follow a restart MUST call `refresh_base` so $BASE tracks the
+# new port. Without this the post-restart sub-tests target a
+# stale port → curl returns empty → every assertion fails.
+refresh_base() {
+  HOST_PORT=$(docker port "$NGINX_CID" 18080 | head -1 | sed 's/^.*://')
+  if [ -z "$HOST_PORT" ]; then fail "could not discover nginx host port"; exit 1; fi
+  BASE="http://127.0.0.1:${HOST_PORT}"
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if curl -sf "${BASE}/v1/stats/health" >/dev/null 2>&1; then return 0; fi
+    sleep 0.5
+  done
+}
 sleep 2
-HOST_PORT=$(docker port "$NGINX_CID" 18080 | head -1 | sed 's/^.*://')
-if [ -z "$HOST_PORT" ]; then fail "could not discover nginx host port"; exit 1; fi
-BASE="http://127.0.0.1:${HOST_PORT}"
-# Wait for nginx readiness.
-for i in 1 2 3 4 5; do
-  if curl -sf "${BASE}/v1/stats/health" >/dev/null 2>&1; then break; fi
-  sleep 0.5
-done
+refresh_base
 ok "nginx live at ${BASE}"
 
 # Step 4 — AC-8: 60 anonymous /overview succeed; 61st → 429 + envelope.
@@ -213,6 +222,7 @@ if [ "$PASS" -ne 100 ]; then fail "keyed-bypass: 100 keyed /leaderboard passes =
 # one bucket per endpoint). We've already exhausted /overview above,
 # so we restart nginx to get a fresh limiter state.
 docker restart "$NGINX_CID" >/dev/null
+refresh_base
 sleep 2
 PASS_O=0
 for i in $(seq 1 50); do
@@ -251,7 +261,15 @@ if ! grep -q '"code":"unauthorized"' <<<"$RESP3"; then fail "AC-3: response miss
 #       any other cache-using endpoint from getting served
 #       partner bytes off disk.
 docker restart "$NGINX_CID" >/dev/null
+refresh_base
 sleep 2
+# Clear any cache files left over from the prior /overview +
+# /leaderboard sub-tests so the BEFORE/AFTER delta below is a
+# clean count of THIS sub-test's writes. docker restart preserves
+# the on-disk cache mount, so without an explicit clear the
+# anonymous warm-up below is a cache HIT (no new file) and the
+# delta is zero → false-fail.
+rm -rf "$TMP/cache"/* 2>/dev/null || true
 # Count cache entries BEFORE.
 CACHE_BEFORE=$(find "$TMP/cache" -type f 2>/dev/null | wc -l | tr -d ' ')
 # Anonymous warm-up so the public projection IS allowed to land
@@ -290,6 +308,7 @@ fi
 # Step 7 — AC-15 access-log redaction. Run a keyed request, then
 # scan the host-mounted log file.
 docker restart "$NGINX_CID" >/dev/null
+refresh_base
 sleep 2
 BODY=$(printf 'C%.0s' $(seq 1 43))
 TOKEN2="mpk_${BODY}"

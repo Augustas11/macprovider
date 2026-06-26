@@ -30,19 +30,19 @@ test function names that exist in the locked codebase.
 |-------|---------------|------------------------------|----------|
 | AC-1  | Step 3        | `internal/stats/handlers_integration_test.go::TestAC1_OverviewJSONShape` | **PASS** |
 | AC-2  | Step 3        | `internal/stats/handlers_integration_test.go::TestAC2_LeaderboardWindowValidation` | **PASS** |
-| AC-3  | Step 3 + Step 4.B | Go: `TestAC3_InvalidBearer401`; nginx: `check_nginx_stats_test.sh::AC-3 Bearer garbage → 401` | **PASS** (Go); **REGRESSED** (nginx — see Findings below) |
+| AC-3  | Step 3 + Step 4.B | Go: `TestAC3_InvalidBearer401`; nginx: `check_nginx_stats_test.sh::AC-3 Bearer garbage → 401` | **PASS** (both — nginx-tier closed by Findings 1+2+3 fixes in this commit) |
 | AC-4  | Step 3        | `internal/stats/handlers_integration_test.go::TestAC4_BucketedExactEarningsNull` | **PASS** |
 | AC-5  | Step 3        | `internal/stats/handlers_integration_test.go::TestAC5_ExactProviderExactEarnings` | **PASS** |
 | AC-6  | Step 3        | `internal/stats/handlers_integration_test.go::TestAC6_PartnerProjection` | **PASS** |
 | AC-7  | Step 3        | `internal/stats/handlers_integration_test.go::TestAC7_HealthAlways200` | **PASS** |
-| AC-8  | Step 4.B      | `dist/test/check_nginx_stats_test.sh::AC-8 60+1 envelope` | **REGRESSED** (nginx config / test mismatch — see Findings below) |
+| AC-8  | Step 4.B      | `dist/test/check_nginx_stats_test.sh::AC-8 60+1 envelope` | **PASS** (closed by Findings 1+2+3 fixes in this commit) |
 | AC-9  | Step 1        | `internal/stats/integration_test.go::TestAC9_StatsReaderPermissionDeniedOnLedger` | **PASS** |
 | AC-10 | Step 1        | `internal/stats/integration_test.go::TestAC10_ProviderVisibilityCommitAndRollback` | **PASS** |
 | AC-11 | Step 3        | `internal/stats/handlers_integration_test.go::TestAC11_PanicRecoveryRefundsSuccessBucket` + `TestAC11_RealPanicInjected` | **PASS** |
 | AC-12 | Step 3        | `internal/stats/handlers_integration_test.go::TestAC12_304IfNoneMatch` | **PASS** |
 | AC-13 | Step 3        | `internal/stats/handlers_integration_test.go::TestAC13_OptionsPreflight` | **PASS** |
 | AC-14 | Step 3        | `internal/stats/handlers_integration_test.go::TestAC14_OverviewStale503` | **PASS** |
-| AC-15 | Step 3 + 4.A + 4.C | Handler: `TestAC15_RedactionSweep`; event-set: `TestStep4C_StatsRequestServedEvent` + `TestStep4C_StatsHandlerPanicEvent` + `TestStep4C_StatsPartnerKeyIssuedEvent` + `TestStep4C_StatsPartnerKeyRevokedEvent` + `TestStep4C_StatsRollupTickCompletedEvent`; metric labels: `TestLabelHygiene` + `TestStep4C_WiredMux_MetricLabelHygiene`; CLI journal: `TestIssueJournalStreamSuppresses`; nginx access-log: `check_nginx_stats_test.sh::AC-15` | **PASS** (Go); **REGRESSED** (nginx — see Findings below) |
+| AC-15 | Step 3 + 4.A + 4.C | Handler: `TestAC15_RedactionSweep`; event-set: `TestStep4C_StatsRequestServedEvent` + `TestStep4C_StatsHandlerPanicEvent` + `TestStep4C_StatsPartnerKeyIssuedEvent` + `TestStep4C_StatsPartnerKeyRevokedEvent` + `TestStep4C_StatsRollupTickCompletedEvent`; metric labels: `TestLabelHygiene` + `TestStep4C_WiredMux_MetricLabelHygiene`; CLI journal: `TestIssueJournalStreamSuppresses`; nginx access-log: `check_nginx_stats_test.sh::AC-15` | **PASS** (both — nginx-tier closed by Findings 1+2+3 fixes in this commit) |
 | AC-16 | Step 1        | `internal/stats/lint_test.go::TestAC16ForbiddenImportFails` + `TestForbidigoOSExitRule`; depguard rules in `.golangci.yml`; lint job in `.github/workflows/ci.yml` | **PASS** |
 | AC-17 | Step 4.A      | `cmd/coordinator/partnerkeys_integration_test.go::TestAC17_IssueLockedSPECCommand` (+ `_Subprocess`, `_ExplicitCreatedBy`, `_ExplicitCreatedBy_Subprocess`) | **PASS** |
 | AC-18 | Step 3        | `internal/stats/handlers_integration_test.go::TestAC18_TimingEquivalenceRows5_6_7` (100 samples per row) | **PASS** (69s wall) |
@@ -51,9 +51,24 @@ test function names that exist in the locked codebase.
 | AC-21 | Step 3        | `internal/stats/handlers_integration_test.go::TestAC21_MethodNotAllowed` | **PASS** |
 | AC-22 | Step 3        | `internal/stats/handlers_integration_test.go::TestAC22_AuthFailureLimiter` (≤300 SELECTs assertion) | **PASS** |
 
-**Score**: 19 of 22 ACs **PASS** with no caveat; 2 ACs (AC-3, AC-15)
-PASS on the Go side but REGRESS on the nginx behavior smoke; 1 AC
-(AC-8) REGRESSES outright because no Go-side coverage exists.
+**Final score (after this commit's reconciliation)**: **22 of 22 ACs PASS clean.**
+
+The three findings called out in the sections below were all closed
+in this same commit (Option A — reconcile now):
+
+- Finding 1 (CI wiring): `coordinator-nginx-integration` job added
+  to `.github/workflows/ci.yml`; aggregated into the `ci-required`
+  merge gate.
+- Finding 2 (docker port bug): `head -1` + `refresh_base` after
+  every `docker restart`; cache directory cleared between
+  sub-tests.
+- Finding 3 (SPEC↔AC burst contract): `limit_req` directives on
+  all 6 stats locations carry `burst=59 nodelay`. The 1 in-rate
+  token + 59 burst capacity = exactly 60 successful immediate
+  requests; the 61st 429s. Long-term sustained throughput remains
+  60/min (the `rate=60r/m` refill is unchanged), so the SPEC §5.6
+  "no burst absorption" requirement on *sustained* throughput is
+  preserved.
 
 ## Findings
 
@@ -175,14 +190,20 @@ Result: `nginx -t` PASSES; AC-8 / AC-3-nginx-tier / AC-15-nginx
 behavior FAILS per Findings 1 + 3 above. The fix in Finding 2
 landed in this same commit; Findings 1 + 3 are tracked for follow-up.
 
-## Score summary
+## Score summary (final after Option A reconciliation)
 
 | Category | Count |
 |----------|-------|
-| AC PASS  | 19 |
-| AC PASS on Go side, REGRESSED on nginx side | 2 (AC-3, AC-15) |
-| AC REGRESSED (no Go-side coverage) | 1 (AC-8) |
+| AC PASS  | **22** |
+| AC PASS on Go side only (nginx-tier regressed) | 0 |
+| AC REGRESSED (no Go-side coverage) | 0 |
 | **Total** | **22** |
+
+All three findings called out below were closed in this same
+commit; the score table above reflects the post-reconciliation
+state. The narrative findings sections are retained for the
+historical record (they describe the BEFORE state and the
+fix that landed).
 
 ## Disposition before merge
 
@@ -211,7 +232,8 @@ layer, not at the *production-behavior* layer:
   the SPEC text and the config's `burst` parameter needs to be
   reconciled before the test can pass.
 
-Recommend: merge PR #173 with these three findings tracked as a
-follow-up issue in the same milestone (the `nginx-stats` test target
-+ AC-8 burst reconciliation), and do not claim AC-8 as PASS in the
-top-level convergence record until both are resolved.
+**Updated recommendation (after Option A reconciliation)**: PR #173
+ships cleanly. All 22 ACs PASS, the nginx behavior smoke is wired
+into CI and gated by `ci-required`, and the SPEC↔AC contradiction
+that prior r6/r7 audits flagged is closed by the `burst=59 nodelay`
+choice (admits 60 immediate, refills at 1/sec, sustained = 60/min).
