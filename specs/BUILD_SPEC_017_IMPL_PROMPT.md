@@ -102,7 +102,7 @@ Audits MUST use codex via `omc ask codex` per [[feedback-codex-only-audits]] (NO
 Two distinct boundaries the lint MUST distinguish:
 
 - **Request-path packages** (`internal/stats`, `internal/stats/store`) — MUST NOT import `internal/billing`, `internal/explorer`, `internal/ws`, or `internal/auth` (except a minimal Bearer parser whose exact symbol the IMPL author names in the lint allowlist; e.g. `BearerToken(string) (token string, ok bool)`).
-- **Rollup package** (`internal/stats/rollup`) — MAY import billing/session/pool/explorer read-only paths but MUST NOT import `internal/stats` or `internal/stats/store` (one-way: rollup writes through the rollup role, never reads through the handler role).
+- **Rollup package** (`internal/stats/rollup`) — MAY import EXACTLY billing/session/pool read-only paths (the SPEC §4.2 carve-out). MUST NOT import `internal/explorer` (an operator-only admin surface; SPEC AC-16 names it in the forbidden set), MUST NOT import `internal/ws`, MUST NOT import `internal/auth` beyond a minimal helper if needed (same allowlist as request-path packages). MUST NOT import `internal/stats` or `internal/stats/store` (one-way: rollup writes through the rollup role, never reads through the handler role). If the rollup needs data currently exposed only through explorer helpers, factor those helpers into a neutral read-only package OR query through the rollup DAO/SQL layer directly.
 
 The lint (e.g. `depguard`) MUST be configured with both boundaries and MUST run in CI on every PR (AC-16). The lint MUST also forbid `os.Exit`, `log.Fatal`, `log.Fatalf`, and equivalent process-terminating calls anywhere under `internal/stats/*` to preserve the §7.3 recover-middleware guarantee.
 
@@ -123,7 +123,7 @@ The lint (e.g. `depguard`) MUST be configured with both boundaries and MUST run 
   - SELECT, INSERT, UPDATE, DELETE on EXACTLY: `stats_overview_current`, `stats_timeseries_rpm_30m`, `stats_timeseries_tpm_30m`, `stats_leaderboard_24h`, `stats_leaderboard_7d`, `stats_leaderboard_30d`, `stats_leaderboard_all`, `stats_components_health`, `stats_late_events` (9 tables total — enumerated per SPEC §7.2.2; do NOT use a `stats_*` shorthand).
   - SELECT on `provider_visibility`, `provider_rewards_ledger`.
   - `USAGE, SELECT ON SEQUENCE stats_late_events_id_seq`.
-  - PLUS IMPL-authored SELECT grants on the locked SPEC-002 + SPEC-005 OLTP source tables (the SPEC-005 ledger tables per §10 — typically `ledger_request_credits`, `ledger_operator_credits`, `ledger_payout_ready`, `ledger_reconciliation_runs`, plus `provider_tokens` from SPEC-002 §7). Re-verify the dependency-line-3 versions at IMPL time per §1 prereq 3.
+  - PLUS IMPL-authored SELECT grants on the locked SPEC-002 + SPEC-005 OLTP source tables (the SPEC-005 v0.3 ledger tables defined in §4.3-§4.8 — typically `ledger_request_credits`, `ledger_operator_credits`, `ledger_payout_ready`, `ledger_reconciliation_runs` — plus `provider_tokens` from SPEC-002 §7). SPEC-005 §10 covers crash recovery and reconciliation, not table definitions. Re-verify the dependency-line-3 versions at IMPL time per §1 prereq 3.
   - Explicit deny: `partner_keys`, `provider_visibility_audit`.
 - `provider_portal` (§7.2.3) — portal toggle role.
   - INSERT, UPDATE on `provider_visibility`.
@@ -167,7 +167,7 @@ Per current code at [`phase4-coordinator/cmd/coordinator/main.go`](../phase4-coo
 
 ### Step 2 — Rollup pipeline
 
-**Subpackage location:** `phase4-coordinator/internal/stats/rollup/`. Uses `stats_rollup` `*sql.DB`. MAY import billing/session/pool/explorer read-only paths since the rollup runs out-of-band.
+**Subpackage location:** `phase4-coordinator/internal/stats/rollup/`. Uses `stats_rollup` `*sql.DB`. MAY import EXACTLY billing/session/pool read-only paths since the rollup runs out-of-band. MUST NOT import `internal/explorer` (operator-only admin surface; AC-16 forbidden set).
 
 **Provider-identity trust gate (per §1 prereq 4):** before writing rollup queries, verify the OLTP `provider_id` source field is sourced from authenticated `provider_token` plumbing (SPEC-002 v1.4 §7). If not, filter the rollup to authenticated rows OR block public cutover. The IMPL author MUST document the trust-source decision in the Step 2 PR description, and the SECURITY audit lane MUST verify the decision is consistent with [[provider-auth-unauthenticated-end-to-end]].
 
@@ -208,7 +208,11 @@ A seed SQL file under `phase4-coordinator/internal/stats/testdata/` MUST contain
 **Tests for Step 2:**
 
 - Unit: each rollup query produces deterministic output on the seed corpus.
-- Integration: a rollup tick advances `stats_*.generated_at`; `stats_components_health` rows update accordingly.
+- Integration: a rollup tick advances the correct freshness markers per-table (NOT a `stats_*.generated_at` shorthand — `stats_timeseries_*` and `stats_late_events` have NO `generated_at` column per §9.1):
+  - `stats_overview_current.generated_at` advances on every overview tick.
+  - Each `stats_leaderboard_24h|7d|30d|all.generated_at` advances at its cadence.
+  - `stats_timeseries_rpm_30m` / `stats_timeseries_tpm_30m` advance by INSERTing the newest `bucket_start` minute (the "freshness" signal for these tables is the newest `bucket_start`, not a `generated_at` column).
+  - `stats_components_health.generated_at` AND `last_ok_at` update for each component on success; `last_error_at` + `last_error_message` update on failure.
 - Integration (rollup-state assertions only — handler-response tests are Step 3): seed or age the `stats_components_health` row for `component = 'overview'` so that `now - generated_at > 120s`. Assert the table state directly (`SELECT generated_at, last_error_at FROM stats_components_health WHERE component = 'overview'`). The corresponding `/v1/stats/health` JSON status assertion (`status = "down"`) lives in Step 3, seeded from this Step 2 fixture. Separately, AC-14 for `/v1/stats/overview` 503 also lives in Step 3 and seeds `stats_overview_current.generated_at > 120s` — a different code path (handler freshness check vs health derivation).
 - Integration: late event at `T-30h` folds into `30d` snapshot on next refresh; event at `T-60h` lands in `stats_late_events` (the rollup role can write here; the handler role cannot read it per §7.2.1).
 - Integration: drift > 0.5% triggers `stats_rollup_drift_detected` event AND rebuild value wins (assert `stats_leaderboard_all.<axis>` matches rebuild, not incremental).
@@ -319,7 +323,9 @@ Step 3 OWNS these ACs (writes the test):
 - **AC-4** bucketed providers → `exact_earnings*: null` in public projection.
 - **AC-5** exact providers → `exact_earnings*` populated with 2-decimal float.
 - **AC-6** partner-key projection populates `earnings_usd` / `earnings_work_usd` / `earnings_rewards_usd` for ALL rows regardless of mode.
-- **AC-7** health 200 even when degraded. Plus the health derivation test: seed Step 2's aged `stats_components_health` fixture (component `overview`, `generated_at = now - 130s`); call `GET /v1/stats/health`; assert JSON `status = "down"` (or `"degraded"` depending on the budget; pin per §5.3 thresholds).
+- **AC-7** health 200 even when degraded. Plus the health derivation test, with two explicit fixtures (no ambiguity):
+  - **`down` fixture:** seed `stats_components_health` row for `component = 'overview'` with `generated_at = now - 130s` (beyond the §9.5 120s 503 budget per §5.3). Call `GET /v1/stats/health`. Assert JSON `status = "down"` exactly.
+  - **`degraded` fixture:** seed the same row with `generated_at = now - 45s` (beyond the §9.5 30s target staleness but within the 120s 503 budget). Call `GET /v1/stats/health`. Assert JSON `status = "degraded"` exactly.
 - **AC-11** panic recovery (injected panic; assert /healthz survives + `event=stats_handler_panic` logged with redaction).
 - **AC-12** 304 round-trip on If-None-Match.
 - **AC-13** OPTIONS `/v1/stats/leaderboard` returns EXACTLY 204 with empty body, `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`, `Access-Control-Allow-Headers: Authorization, Content-Type`.
@@ -357,7 +363,7 @@ Step 3 does NOT own (handled in other steps per matrix in §2.4):
 - **4.B Edge / nginx / rate-limit / cache.**
 - **4.C Observability, runbooks, changelog.**
 
-The SECURITY audit lane MUST produce findings in each of 4.A, 4.B, 4.C — a SECURITY lane that finds zero issues in any one subsection is suspicious.
+The SECURITY audit lane MUST explicitly sweep each of 4.A, 4.B, 4.C in its category walk — a no-finding subsection MUST still record the evidence checked (token-handling steps, log-sink scans, metric-label enumeration, etc.). A clean 0/0/0 SECURITY result is acceptable iff all three subsections produce evidence; an empty or unmentioned subsection is itself an audit-coverage gap.
 
 #### 4.A Partner-key CLI lifecycle
 
@@ -402,9 +408,16 @@ Issuance flow:
 - `limit_req zone=<name> nodelay;` (note: NO `burst=<n>` for the AC-8 surface — see below). Applied to each endpoint's `location` block.
 - `limit_req_status 429;` per endpoint location.
 
-**Burst reconciliation with AC-8 (operator-attention required):** SPEC §5.6 names "60 req/min, 120 burst" for the public tier; SPEC AC-8 requires "61st request from same IP within 60s returns 429". With nginx semantics `rate=60r/m` (1 req per 1s) and `burst=120` (120 token bucket), 61 requests within 60s would NOT trigger 429 — the burst budget would absorb up to ~120 excess. The two pins are inconsistent in plain nginx.
+**Burst conflict between locked §5.6 and locked AC-8 — Step 4.B is BLOCKED on SPEC reconciliation:**
 
-v0.1 IMPL resolution: configure the public AC-8 surface (`/v1/stats/overview` + `/v1/stats/health` + public `/v1/stats/leaderboard`) WITHOUT burst (`limit_req zone=<name> nodelay;` — omit `burst=`). This makes AC-8's 61st-request 429 deterministic at the cost of legitimate spike absorption. If the operator wants legitimate burst absorption to match SPEC §5.6's `120 burst` value, the IMPL author MUST surface a SPEC v0.2 candidate to reconcile §5.6 vs AC-8 BEFORE shipping a production config with `burst=120`. Document the chosen config in the cutover runbook (Step 4.C) and flag the SPEC inconsistency in the convergence file.
+SPEC §5.6 names "60 req/min, 120 burst" for the public tier. SPEC AC-8 requires "61st request from same IP within 60s returns 429 with `Retry-After`". With nginx semantics `rate=60r/m` and `burst=120 nodelay`, 61 requests within 60s would NOT trigger 429 — the 120-token burst budget would absorb the excess. The two pins are mechanically inconsistent in plain nginx.
+
+**Both §5.6 and AC-8 are locked.** The IMPL author MUST NOT silently pick one over the other. Step 4.B production nginx rate-limit config is BLOCKED until the controlling contract has one mechanical behavior. Resolution paths (operator decides BEFORE Step 4.B kicks off):
+
+- **Path R1 (preferred):** file a SPEC v0.1.7 candidate that reconciles §5.6 and AC-8 (e.g. clarifies that "Burst 120" applies to short legitimate spikes but the per-IP token bucket refill rate triggers AC-8's 429 at the 61st request inside the 60s window only when burst tokens are exhausted; OR drops the `120 burst` figure from §5.6 to align with the AC; OR rewords AC-8 to a higher request count consistent with the locked burst). Run the codex SPEC-audit loop on v0.1.7 until 0/0/0; lock; THEN start Step 4.B.
+- **Path R2 (operator opts in to a divergence):** operator records an explicit decision in the cutover runbook + DECISION_CRITERIA entry that the v0.1 IMPL ships with EITHER (a) burst=0 (AC-8-correct, drops §5.6's 120 burst absorption) OR (b) burst=120 (§5.6-correct, breaks AC-8's 61st-request expectation). The operator's decision becomes the authoritative source for that contract until v0.1.7 closes; the SECURITY audit lane MUST surface the divergence as an INFO finding for the next SPEC round.
+
+**For CI / fixture tests only (NEVER as the shipped production config):** a non-production test harness MAY use `limit_req zone=<name> nodelay;` (omit `burst=`) to demonstrate AC-8 mechanics deterministically. The test harness MUST be labeled `# test-only — not the shipped §5.6 config` in the nginx-config file and MUST NOT be loaded by the production deploy script. This makes AC-8 mechanically verifiable in CI without prejudicing the §5.6 vs AC-8 SPEC reconciliation.
 
 Partner tier (`Authorization: Bearer mpk_*`) is in-process per §5.6 and does NOT use nginx `limit_req`, so the burst question doesn't apply there; the partner bucket uses `partner_keys.rate_limit_rpm` / `rate_limit_burst` columns directly.
 - Strip `Authorization` header from access logs (`log_format` excludes `$http_authorization`, or use `set $authorization "REDACTED"` pattern).
@@ -516,7 +529,7 @@ Per [[feedback-codex-only-audits]] and the SPEC audit-loop convention:
 - `specs/SPEC-017-r1-audit.md` through `r7-audit.md` — skim for the why behind each MUST.
 - `specs/SPEC-017-IMPL-PROMPT-{arch,code,security}-r1-audit.md` — round-1 findings absorbed into this v2 prompt.
 - [`specs/SPEC-002-coordinator.md`](SPEC-002-coordinator.md) — line 3 (current locked version), §4 (provider state), §7 (HTTP surfaces). Stats handlers mount here.
-- [`specs/SPEC-005-billing.md`](SPEC-005-billing.md) — line 3, §5.1 (work-$ semantics), §10 (ledger tables, the OLTP source for the rollup), §11.4 (tokens-out accounting).
+- [`specs/SPEC-005-billing.md`](SPEC-005-billing.md) — line 3, §5.1 (work-$ semantics), §4.3-§4.8 (ledger table definitions, the OLTP source for the rollup), §10 (crash recovery / reconciliation behavior), §11.4 (tokens-out accounting).
 - [`specs/SPEC-006-buyer-api.md`](SPEC-006-buyer-api.md) — line 3, §17 (header strip / X-MacProvider-* allowlist). Verify `X-Stats-Generated-At` does NOT collide.
 - [`specs/SPEC-014-provider-portal.md`](SPEC-014-provider-portal.md) — line 3, §2 (authn). The SPEC-014 v0.9 candidate will own the visibility-toggle UI; SPEC-017 IMPL provides the storage and CI fixture coverage.
 - [`specs/SPEC-016-payout-pipeline.md`](SPEC-016-payout-pipeline.md) — line 3 (re-pin at IMPL time; see §1 prereq 3).
