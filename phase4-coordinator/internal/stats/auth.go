@@ -3,7 +3,6 @@ package stats
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"net/http"
 	"strings"
 
@@ -18,6 +17,22 @@ import (
 // redaction middleware stashes the parsed Bearer token. Using
 // a typed struct value prevents cross-package retrieval.
 type authKey struct{}
+
+// authPresentKey marks the request as carrying an
+// Authorization header (regardless of whether the bearer
+// parsed). Round-1 ARCH C3 fix — the dispatcher must
+// distinguish absent Authorization (row 1, public) from
+// malformed Authorization (row 6, 401).
+type authPresentKey struct{}
+
+func withAuthPresentContext(ctx context.Context, present bool) context.Context {
+	return context.WithValue(ctx, authPresentKey{}, present)
+}
+
+func authPresentFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(authPresentKey{}).(bool)
+	return v
+}
 
 // authResult bundles the §5.4.3 dispatch outcome.
 type authResult struct {
@@ -104,9 +119,22 @@ func bearerFromContext(ctx context.Context) (string, bool) {
 func dispatchAuth(ctx context.Context, st *store.Store, r *http.Request) (authResult, error) {
 	bearer, ok := bearerFromContext(ctx)
 	if !ok || bearer == "" {
-		// Row 1: no Authorization — public projection.
-		// Origin still normalized for CORS reflection.
+		// Origin normalized for CORS reflection.
 		norm, valid := normalizeOrigin(r.Header.Get("Origin"))
+		if authPresentFromContext(ctx) {
+			// Round-1 ARCH C3 fix: Authorization header is
+			// present but failed to parse as Bearer — this is
+			// a malformed credential, NOT row 1. Treat as
+			// row 6 (no matching key) → 401.
+			return authResult{
+				projection:    "public",
+				statusCode:    http.StatusUnauthorized,
+				originPresent: valid,
+				originValue:   norm,
+				bearerPresent: true,
+			}, nil
+		}
+		// Row 1: no Authorization — public projection.
 		return authResult{
 			projection:    "public",
 			statusCode:    0,
@@ -139,16 +167,15 @@ func dispatchAuth(ctx context.Context, st *store.Store, r *http.Request) (authRe
 		return res, nil
 	}
 	if pk.RevokedAt.Valid {
-		// Row 7: matched-but-revoked → 401.
+		// Row 7: matched-but-revoked → 401. Round-1 CODE M3
+		// fix: removed the no-op ConstantTimeCompare touch —
+		// the timing equivalence guarantee is delivered by the
+		// shared `sha256 + SELECT by token_hash` work above
+		// (DB SELECT dominates branch cost), not by a sentinel
+		// compare. AC-18 statistical test verifies rows 5/6/7
+		// share the same latency band.
 		res.projection = "public"
 		res.statusCode = http.StatusUnauthorized
-		// Constant-time defense: even though we already
-		// returned on `pk == nil`, the SQL SELECT did the work
-		// — the time spent here is dominated by the SELECT.
-		// Keep one ConstantTimeCompare touch on a known-equal
-		// byte slice to ensure the branch carries the same
-		// cost shape.
-		_ = subtle.ConstantTimeCompare(hash[:], hash[:])
 		return res, nil
 	}
 

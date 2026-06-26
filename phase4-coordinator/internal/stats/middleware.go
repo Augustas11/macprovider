@@ -3,6 +3,7 @@ package stats
 import (
 	"net/http"
 	"runtime/debug"
+	"time"
 
 	"github.com/rs/zerolog"
 )
@@ -32,7 +33,17 @@ import (
 // bearer, stores it under authKey in r.Context, and replaces
 // the inbound header value with the literal string `REDACTED`
 // so any downstream log / trace / metric emitter that
-// inadvertently reads the header sees the redacted form.
+// inadvertently reads the header sees the redacted form. Round-1
+// SECURITY M2 defense-in-depth: ALSO redact `Cookie` and
+// `X-Api-Key` — future log/trace refactors that capture session
+// state or alternate API-key headers cannot leak secrets even
+// though SPEC-017 currently names only `Authorization`.
+//
+// Round-1 ARCH C3: the middleware records `authPresent` in
+// context whenever the Authorization header is present
+// regardless of bearer-parse success, so the dispatcher can
+// distinguish "no Authorization" (row 1, public projection)
+// from "malformed Authorization" (row 6, 401 unauthorized).
 //
 // Layer 1 of the §7.3 stack — runs first and is the SECURITY
 // guarantee against header-printing log libraries.
@@ -40,10 +51,20 @@ func redactionContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw := r.Header.Get("Authorization")
 		if raw != "" {
+			ctx := r.Context()
+			ctx = withAuthPresentContext(ctx, true)
 			if tok, ok := parseBearer(raw); ok {
-				r = r.WithContext(withBearerContext(r.Context(), tok))
+				ctx = withBearerContext(ctx, tok)
 			}
+			r = r.WithContext(ctx)
 			r.Header.Set("Authorization", "REDACTED")
+		}
+		// Round-1 SECURITY M2 defense-in-depth.
+		if r.Header.Get("Cookie") != "" {
+			r.Header.Set("Cookie", "REDACTED")
+		}
+		if r.Header.Get("X-Api-Key") != "" {
+			r.Header.Set("X-Api-Key", "REDACTED")
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -69,8 +90,15 @@ func recoverMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
 				if rec == nil {
 					return
 				}
-				// Defense-in-depth strip.
+				// Defense-in-depth strip — Authorization +
+				// Cookie + X-Api-Key (round-1 SECURITY M2).
 				r.Header.Set("Authorization", "REDACTED")
+				if r.Header.Get("Cookie") != "" {
+					r.Header.Set("Cookie", "REDACTED")
+				}
+				if r.Header.Get("X-Api-Key") != "" {
+					r.Header.Set("X-Api-Key", "REDACTED")
+				}
 				// Stack to a debug-only sink (zerolog Debug
 				// level). The public log line does NOT include
 				// the panic value's stringification — it could
@@ -89,7 +117,7 @@ func recoverMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
 				// Best-effort 500 emit. If the underlying
 				// handler already wrote a response, this will
 				// no-op via the ResponseWriter contract.
-				writeError(w, http.StatusInternalServerError, codeInternal, "internal error")
+				writeError(w, r, http.StatusInternalServerError, codeInternal, "internal error", time.Now().UTC(), nil)
 			}()
 			next.ServeHTTP(w, r)
 		})

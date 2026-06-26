@@ -4,7 +4,6 @@ import (
 	"net"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/stats/store"
@@ -23,6 +22,11 @@ import (
 //  6. post-auth success  (public 60 rpm or partner key rpm)
 //  7. handler            (overview / leaderboard / health)
 //
+// Round-1 ARCH C1 / CODE H6 / SECURITY M1 fix: freshness
+// pre-checks (overview/leaderboard) run BEFORE the post-auth
+// success-bucket debit, so a stale 503 cannot exhaust client
+// quotas.
+//
 // HEAD is added to the explicit method allowlist alongside
 // GET. Go's `http.ServeMux` does NOT auto-handle HEAD; we
 // dispatch HEAD identically to GET and rely on writeJSON to
@@ -37,10 +41,6 @@ type Mux struct {
 	trustedCIDRs  []*net.IPNet
 }
 
-// NewMux constructs the SPEC-017 handler tree. The caller
-// (cmd/coordinator/main.go) injects the stats_reader pool
-// and the operator-tunable CORS/backfill/partial-history
-// config.
 func NewMux(reader *store.Store, cors CORSConfig, backfillMode, partialSince string, trustedProxies []string, logger zerolog.Logger) *Mux {
 	return &Mux{
 		h: &Handler{
@@ -57,18 +57,8 @@ func NewMux(reader *store.Store, cors CORSConfig, backfillMode, partialSince str
 	}
 }
 
-// Handler returns the http.Handler the coordinator mounts on
-// `/v1/stats/`. The returned handler is the full middleware
-// stack — callers wrap it under their own mux registration:
-//
-//	mux.Handle("/v1/stats/", statsMux.Handler())
 func (m *Mux) Handler() http.Handler {
 	inner := http.HandlerFunc(m.dispatch)
-
-	// Layers 1-3 wrap the entire subtree (panic recovery,
-	// redaction, access logging). Layers 4-6 live inside
-	// dispatch() so they have access to the per-endpoint
-	// label.
 	with := http.Handler(inner)
 	with = accessLogMiddleware(m.logger)(with)
 	with = recoverMiddleware(m.logger)(with)
@@ -76,14 +66,10 @@ func (m *Mux) Handler() http.Handler {
 	return with
 }
 
-// dispatch is the inner-most routing layer. It performs:
-//
-//   - method allow-listing (GET, HEAD, OPTIONS only);
-//   - OPTIONS preflight short-circuit (§5.7);
-//   - endpoint extraction + 404 on unknown;
-//   - layers 4-6 (auth-failure, auth dispatch, post-auth success);
-//   - calls into the matching handler with the auth result.
+// dispatch is the inner-most routing layer.
 func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
+	now := time.Now().UTC()
+
 	if r.Method == http.MethodOptions {
 		servePreflight(w, r, m.h.CORS)
 		return
@@ -91,35 +77,31 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 
 	endpoint := trimEndpointFromPath(r.URL.Path)
 	if endpoint == "" {
-		// Unknown /v1/stats/* path → 404 with §5.9 envelope.
-		writeError(w, http.StatusNotFound, codeBadRequest, "unknown endpoint")
+		writeError(w, r, http.StatusNotFound, codeBadRequest, "unknown endpoint", now, nil)
 		return
 	}
 
 	switch r.Method {
 	case http.MethodGet, http.MethodHead:
 	default:
-		// Per §4.3 + AC-21: 405 with Allow header + §5.9
-		// envelope. Allow header must list every accepted
-		// method.
 		w.Header().Set("Allow", "GET, HEAD, OPTIONS")
-		writeError(w, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed")
+		writeError(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed", now, nil)
 		return
 	}
 
-	now := time.Now().UTC()
 	ip := clientIP(r, m.trustedCIDRs)
 
-	// Layer 4 — auth-failure tier (Authorization-present
-	// requests only; reserve-then-refund on 200 partner).
-	bearer, hasBearer := bearerFromContext(r.Context())
-	_ = bearer
+	// Layer 4 — auth-failure tier (Authorization-present only).
+	// Round-1 ARCH C3: present-but-malformed counts as
+	// Authorization-present (will 401 in layer 5, debits this
+	// tier).
+	authHeaderPresent := authPresentFromContext(r.Context())
 	reservedKey := ""
-	if hasBearer {
+	if authHeaderPresent {
 		reservedKey = "authfail|" + ip + "|" + endpoint
 		if !m.authFailLimit.allow(reservedKey, now, 300) {
-			w.Header().Set("Retry-After", "60")
-			writeError(w, http.StatusTooManyRequests, codeRateLimited, "rate limited")
+			retry := 60
+			writeError(w, r, http.StatusTooManyRequests, codeRateLimited, "rate limited", now, &retry)
 			return
 		}
 	}
@@ -127,28 +109,49 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	// Layer 5 — auth dispatcher (§5.4.3).
 	ar, err := dispatchAuth(r.Context(), m.h.Store, r)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "auth dispatch failed")
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "auth dispatch failed", now, nil)
 		return
 	}
 	if ar.statusCode == http.StatusUnauthorized {
-		// 401 takes the public Vary (response is not key-
-		// derived). CORS headers follow the public branch.
+		// Round-1 ARCH H6 / SECURITY L1 fix: rejected keyed
+		// requests with non-empty allowlists / revoked / no-
+		// match (rows 3, 5, 6, 7) MUST omit ACAO. The response
+		// body is not key-derived; we use public Vary but DO
+		// NOT echo Origin.
 		w.Header().Set("Vary", varyForPublic())
-		writeCORSHeaders(w, false, ar.originPresent, ar.originValue)
-		writeError(w, http.StatusUnauthorized, codeUnauthorized, "unauthorized")
+		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
 		return
 	}
 
-	// Layer 6 — post-auth success bucket. Stale 503 responses
-	// MUST NOT debit; the handler emits 503 BEFORE returning
-	// to the mux so the limiter never sees it.
+	// Round-1 ARCH C1 / CODE H6 / SECURITY M1 fix: freshness
+	// pre-check BEFORE post-auth bucket debit. The 503 stale
+	// path MUST NOT count against the client's success bucket
+	// (a rollup outage cannot exhaust quotas for healthy
+	// clients).
+	if endpoint == "overview" {
+		if stale, snapshotGen, perr := m.h.overviewStaleProbe(r.Context(), now); perr != nil {
+			writeError(w, r, http.StatusInternalServerError, codeInternal, "overview probe failed", now, nil)
+			return
+		} else if stale {
+			retry := 30
+			writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "overview is stale", snapshotGen, &retry)
+			return
+		}
+	} else if endpoint == "leaderboard" {
+		// Handler does its own per-window probe (it needs the
+		// window from query params); we just need to avoid
+		// debiting the post-auth bucket if it returns 503. The
+		// cleanest way is a response-status capture (below).
+	}
+
+	// Layer 6 — post-auth success bucket. Round-1 fix: use a
+	// response-recording wrapper so non-2xx responses (notably
+	// the leaderboard's per-window 503) refund the slot.
+	rec := &statusRecorder{ResponseWriter: w}
 	var allowed bool
 	switch ar.projection {
 	case "partner":
-		// Refund the auth-failure slot so valid keys are not
-		// double-counted across the two tiers (v0.1.8
-		// reserve-then-refund pattern).
-		if hasBearer {
+		if authHeaderPresent {
 			m.authFailLimit.refund(reservedKey, now)
 		}
 		limit := 600
@@ -157,27 +160,55 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		}
 		key := "partner|" + strconv.FormatInt(ar.matchedKey.ID, 10) + "|" + endpoint
 		allowed = m.partnerLimit.allow(key, now, limit)
+		defer func() {
+			if rec.status != 0 && (rec.status < 200 || rec.status >= 300) && rec.status != http.StatusNotModified {
+				m.partnerLimit.refund(key, now)
+			}
+		}()
 	default:
 		key := "public|" + ip + "|" + endpoint
 		allowed = m.publicLimit.allow(key, now, 60)
+		defer func() {
+			if rec.status != 0 && (rec.status < 200 || rec.status >= 300) && rec.status != http.StatusNotModified {
+				m.publicLimit.refund(key, now)
+			}
+		}()
 	}
 	if !allowed {
-		w.Header().Set("Retry-After", "60")
-		writeError(w, http.StatusTooManyRequests, codeRateLimited, "rate limited")
+		retry := 60
+		writeError(rec, r, http.StatusTooManyRequests, codeRateLimited, "rate limited", now, &retry)
 		return
 	}
 
 	// Layer 7 — handler.
 	switch endpoint {
 	case "overview":
-		m.h.handleOverview(w, r, ar)
+		m.h.handleOverview(rec, r, ar)
 	case "leaderboard":
-		m.h.handleLeaderboard(w, r, ar)
+		m.h.handleLeaderboard(rec, r, ar)
 	case "health":
-		m.h.handleHealth(w, r, ar)
+		m.h.handleHealth(rec, r, ar)
 	}
 }
 
-// Suppress unused warnings on shared helpers that the tests
-// reach for via different paths.
-var _ = strings.HasPrefix
+// statusRecorder wraps an http.ResponseWriter and remembers
+// the status code so the mux can refund the post-auth bucket
+// on non-2xx responses (round-1 ARCH C1 fix).
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusRecorder) WriteHeader(code int) {
+	if s.status == 0 {
+		s.status = code
+	}
+	s.ResponseWriter.WriteHeader(code)
+}
+
+func (s *statusRecorder) Write(b []byte) (int, error) {
+	if s.status == 0 {
+		s.status = http.StatusOK
+	}
+	return s.ResponseWriter.Write(b)
+}

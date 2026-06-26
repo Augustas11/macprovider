@@ -6,16 +6,20 @@ import (
 )
 
 // weakETag returns the §5.1 weak ETag string for the response
-// body. Format: `W/"<32-hex>"` (truncated sha256, 128 bits;
-// sufficient for the request-path collision resistance §5.1
-// targets). The leading `W/` marks it weak per RFC 7232.
+// body. Format: `W/"<64-hex>"` (full sha256, 256 bits) per
+// SPEC §5.1 + §5.2 lock: `W/"<sha256-of-body>"`. The leading
+// `W/` marks it weak per RFC 7232.
+//
+// Round-1 ARCH M2 / CODE — earlier draft truncated to 128 bits;
+// the SPEC says full sha256-of-body, so emit the full 64-hex
+// digest.
 //
 // Computed once per snapshot from the response body bytes —
 // the handler buffers the body, calls weakETag, sets the
 // header, then writes the body or empties for HEAD.
 func weakETag(body []byte) string {
 	sum := sha256.Sum256(body)
-	return `W/"` + hex.EncodeToString(sum[:16]) + `"`
+	return `W/"` + hex.EncodeToString(sum[:]) + `"`
 }
 
 // ifNoneMatchEquals does the RFC 7232 weak comparison: strip

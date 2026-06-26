@@ -20,10 +20,18 @@ func TestStatusFromFreshness(t *testing.T) {
 		{"overview_down_130s", "overview", 130, "down"},
 		// Zero generated_at = down.
 		{"timeseries_rpm_zero", "timeseries_rpm", -1, "down"},
-		// Leaderboard 7d uses a longer band.
+		// Leaderboard 7d uses 300s target / 1800s budget per §9.5.
 		{"leaderboard_7d_ok", "leaderboard_7d", 100, "ok"},
 		{"leaderboard_7d_degraded", "leaderboard_7d", 400, "degraded"},
-		{"leaderboard_7d_down", "leaderboard_7d", 1000, "down"},
+		{"leaderboard_7d_down", "leaderboard_7d", 2000, "down"},
+		// Leaderboard 30d 1800s target / 14400s budget.
+		{"leaderboard_30d_ok", "leaderboard_30d", 100, "ok"},
+		{"leaderboard_30d_degraded", "leaderboard_30d", 3600, "degraded"},
+		{"leaderboard_30d_down", "leaderboard_30d", 20000, "down"},
+		// Leaderboard all 21600s / 86400s.
+		{"leaderboard_all_ok", "leaderboard_all", 100, "ok"},
+		{"leaderboard_all_degraded", "leaderboard_all", 30000, "degraded"},
+		{"leaderboard_all_down", "leaderboard_all", 100000, "down"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

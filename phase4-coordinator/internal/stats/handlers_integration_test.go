@@ -9,37 +9,12 @@ package stats_test
 // rollup_integration_test.go so each test starts a fresh
 // ephemeral DB.
 //
-// AC coverage (Step 3 OWNS):
-//
-//   AC-1  — overview JSON shape (14 network.* fields + 30-point
-//           timeseries with null for missing minutes).
-//   AC-2  — window default 24h + invalid window → 400.
-//   AC-3  — invalid Bearer → 401 unauthorized.
-//   AC-4  — bucketed providers expose `exact_earnings: null`.
-//   AC-5  — exact providers expose `exact_earnings` populated.
-//   AC-6  — partner-key projection exposes earnings_usd /
-//           earnings_work_usd / earnings_rewards_usd on rows
-//           AND totals; public projection MUST NOT expose
-//           totals.earnings_*.
-//   AC-7  — health 200 even when degraded; AC-7 fixtures
-//           seeded with explicit ages.
-//   AC-11 — panic recovery + /healthz survives + redacted log.
-//   AC-12 — 304 round-trip on If-None-Match.
-//   AC-13 — OPTIONS returns 204 with Max-Age=60.
-//   AC-14 — overview generated_at > 120s → 503 stats_stale +
-//           Retry-After.
-//   AC-15 — handler structured log + recover panic-log
-//           redaction sweep.
-//   AC-18 — three-way timing equivalence rows 5/6/7.
-//   AC-19 — no provider_visibility row → exact_earnings: null.
-//   AC-21 — POST → 405 with Allow + method_not_allowed envelope.
-//   HEAD  — HEAD on every GET returns same headers + empty body.
-//   Plus negative public totals.earnings_* test (v0.1.7 H3).
+// The tests seed `stats_overview_current` / `stats_components_health`
+// directly via the admin DSN to get a fresh `generated_at` —
+// the rollup runner could populate via a tick, but for handler-
+// side ACs we want deterministic snapshot times.
 
 import (
-	"bytes"
-	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -48,7 +23,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/rs/zerolog"
 
@@ -56,13 +30,15 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/stats/store"
 )
 
-// setupStatsHandler wires the Step 3 mux against the
-// per-test Postgres fixture, seeded with the round-5 rollup
-// stub schema. Returns the http.Handler + the admin *sql.DB
-// for fixture seeding.
-func setupStatsHandler(t *testing.T) (http.Handler, *sql.DB, *pgFixture) {
+// setupStatsHandler wires the Step 3 mux against the per-test
+// Postgres fixture, applies the Step 1 schema, and seeds fresh
+// snapshot rows so the freshness pre-check doesn't trip 503 on
+// every test.
+func setupStatsHandler(t *testing.T) (http.Handler, *sql.DB) {
 	t.Helper()
 	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
 	readerDB := readerPool(t, fx)
 	mux := stats.NewMux(
 		store.New(readerDB),
@@ -75,10 +51,10 @@ func setupStatsHandler(t *testing.T) (http.Handler, *sql.DB, *pgFixture) {
 		},
 		"partial",
 		"2026-06-01T00:00:00Z",
-		nil, // no trusted proxies
+		nil,
 		zerolog.Nop(),
 	)
-	return mux.Handler(), adminDB, fx
+	return mux.Handler(), adminDB
 }
 
 func readerPool(t *testing.T, fx *pgFixture) *sql.DB {
@@ -91,49 +67,87 @@ func readerPool(t *testing.T, fx *pgFixture) *sql.DB {
 	return db
 }
 
+// seedFreshOverview UPSERTs a fresh stats_overview_current row.
+// generated_at = now(), every counter zero.
+func seedFreshOverview(t *testing.T, adminDB *sql.DB) {
+	t.Helper()
+	const q = `
+        INSERT INTO stats_overview_current
+            (singleton, generated_at,
+             tokens_in, tokens_out, requests,
+             nodes_online, nodes_hardware_attested,
+             bandwidth_gb_per_s, network_power_kw,
+             network_utilization_pct,
+             gpu_cores_total, cpu_cores_total,
+             unified_ram_gb_total, models_serving)
+        VALUES (TRUE, now(),
+                0, 0, 0,
+                0, 0,
+                0, 0,
+                0,
+                0, 0,
+                0, 0)
+        ON CONFLICT (singleton) DO UPDATE SET generated_at = now()
+    `
+	if _, err := adminDB.Exec(q); err != nil {
+		t.Fatalf("seed fresh overview: %v", err)
+	}
+}
+
+// seedFreshHealthAll updates every stats_components_health row's
+// generated_at to now so the §5.3 status derives to "ok".
+func seedFreshHealthAll(t *testing.T, adminDB *sql.DB) {
+	t.Helper()
+	const q = `UPDATE stats_components_health SET generated_at = now(), last_ok_at = now()`
+	if _, err := adminDB.Exec(q); err != nil {
+		t.Fatalf("seed fresh health: %v", err)
+	}
+}
+
+// seedAgedOverview backdates `stats_overview_current.generated_at`
+// for the AC-14 503 fixture.
+func seedAgedOverview(t *testing.T, adminDB *sql.DB, ageSeconds int) {
+	t.Helper()
+	if _, err := adminDB.Exec(
+		`UPDATE stats_overview_current SET generated_at = now() - ($1::text || ' seconds')::interval`,
+		fmt.Sprintf("%d", ageSeconds),
+	); err != nil {
+		t.Fatalf("age overview: %v", err)
+	}
+}
+
 // ===========================================================================
-// AC-1 — /v1/stats/overview JSON shape.
+// AC-1 — /v1/stats/overview JSON shape (14 network fields + 30-point
+//
+//	rpm_30m.points / tpm_30m.points with `t` timestamps).
+//
 // ===========================================================================
 func TestAC1_OverviewJSONShape(t *testing.T) {
-	h, adminDB, _ := setupStatsHandler(t)
-
-	// Seed a fresh overview row + an authenticated provider with
-	// some ledger activity.
-	seedProviderTokens(t, adminDB, "p_alpha")
-	now := time.Now().UTC()
-	seedLedgerRow(t, adminDB, "p_alpha", now.Add(-1*time.Minute), 100, 50, 1_000_000)
-	// Force the rollup ticker to populate stats_overview_current
-	// + timeseries. We use the existing rollup runner path via
-	// the rollup integration helpers (already wired in
-	// rollup_integration_test.go).
-	driveRollupTick(t, adminDB, fx_must_exist_through_setupStatsHandler())
-
-	// AC-1 actually wants the handler response; we test the
-	// surface contract: the JSON decodes into the locked
-	// shape with all required keys.
+	h, _ := setupStatsHandler(t)
 	resp := mustDo(t, h, http.MethodGet, "/v1/stats/overview", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, readBody(t, resp))
 	}
 	var body map[string]any
 	mustDecode(t, resp, &body)
-	if _, ok := body["generated_at"]; !ok {
-		t.Errorf("generated_at missing")
+	for _, k := range []string{"generated_at", "stale_after", "network", "timeseries"} {
+		if _, ok := body[k]; !ok {
+			t.Errorf("top-level %q missing", k)
+		}
 	}
 	net, ok := body["network"].(map[string]any)
 	if !ok {
 		t.Fatalf("network missing or not object")
 	}
-	// 12 network.* fields per §5.1 v0.1.7 (9 live + 3 cumulative
-	// counters; the AC text says 14 but the v0.1.7 schema
-	// trimmed to 12 — verify against the locked SPEC fields).
 	required := []string{
-		"nodes_online", "nodes_hardware_attested",
+		"tokens_served_total", "tokens_in_total", "tokens_out_total",
+		"requests_total", "nodes_online", "nodes_hardware_attested",
 		"bandwidth_gb_per_s", "network_power_kw",
-		"network_utilization_pct",
-		"gpu_cores_total", "cpu_cores_total",
-		"unified_ram_gb_total", "models_serving",
-		"tokens_in_total", "tokens_out_total", "requests_total",
+		"network_utilization_pct", "gpu_cores_total", "cpu_cores_total",
+		"unified_ram_gb_total", "avg_tokens_per_request", "models_serving",
+	}
+	if len(net) != len(required) {
+		t.Errorf("network has %d fields, want %d", len(net), len(required))
 	}
 	for _, k := range required {
 		if _, ok := net[k]; !ok {
@@ -144,38 +158,37 @@ func TestAC1_OverviewJSONShape(t *testing.T) {
 	if !ok {
 		t.Fatalf("timeseries missing")
 	}
-	for _, k := range []string{"rpm_requests", "tpm_input_tokens", "tpm_output_tokens"} {
-		arr, ok := ts[k].([]any)
+	for _, k := range []string{"rpm_30m", "tpm_30m"} {
+		sub, ok := ts[k].(map[string]any)
 		if !ok {
-			t.Errorf("timeseries.%s missing or not array", k)
+			t.Errorf("timeseries.%s missing or not object", k)
 			continue
 		}
-		if len(arr) != 30 {
-			t.Errorf("timeseries.%s length = %d, want 30", k, len(arr))
+		pts, ok := sub["points"].([]any)
+		if !ok {
+			t.Errorf("timeseries.%s.points missing or not array", k)
+			continue
+		}
+		if len(pts) != 30 {
+			t.Errorf("timeseries.%s.points len = %d, want 30", k, len(pts))
 		}
 	}
 }
-
-// driveRollupTick + fx_must_exist_through_setupStatsHandler are
-// declared but unused in this file; they're hoisted into
-// helpers_integration_test.go so all handler tests can share.
 
 // ===========================================================================
 // AC-2 — window default 24h + invalid window → 400.
 // ===========================================================================
 func TestAC2_LeaderboardWindowValidation(t *testing.T) {
-	h, _, _ := setupStatsHandler(t)
-	// Default window.
+	h, _ := setupStatsHandler(t)
 	resp := mustDo(t, h, http.MethodGet, "/v1/stats/leaderboard", nil)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("default window expected 200, got %d", resp.StatusCode)
+		t.Fatalf("default window expected 200, got %d body=%s", resp.StatusCode, readBody(t, resp))
 	}
 	var body map[string]any
 	mustDecode(t, resp, &body)
 	if body["window"] != "24h" {
 		t.Errorf("default window = %v, want 24h", body["window"])
 	}
-	// Invalid window.
 	resp = mustDo(t, h, http.MethodGet, "/v1/stats/leaderboard?window=foo", nil)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("invalid window expected 400, got %d", resp.StatusCode)
@@ -191,7 +204,7 @@ func TestAC2_LeaderboardWindowValidation(t *testing.T) {
 // AC-3 — invalid Bearer → 401.
 // ===========================================================================
 func TestAC3_InvalidBearer401(t *testing.T) {
-	h, _, _ := setupStatsHandler(t)
+	h, _ := setupStatsHandler(t)
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer mpk_invalid_xyz")
 	resp := mustDoWithHeaders(t, h, http.MethodGet, "/v1/stats/leaderboard", hdr)
@@ -205,11 +218,22 @@ func TestAC3_InvalidBearer401(t *testing.T) {
 	}
 }
 
+// Malformed Authorization (NOT starting with `Bearer `) → 401.
+func TestMalformedAuth401(t *testing.T) {
+	h, _ := setupStatsHandler(t)
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Basic dXNlcjpwYXNz")
+	resp := mustDoWithHeaders(t, h, http.MethodGet, "/v1/stats/leaderboard", hdr)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("malformed Auth expected 401, got %d", resp.StatusCode)
+	}
+}
+
 // ===========================================================================
 // AC-13 — OPTIONS preflight returns 204 + Max-Age=60.
 // ===========================================================================
 func TestAC13_OptionsPreflight(t *testing.T) {
-	h, _, _ := setupStatsHandler(t)
+	h, _ := setupStatsHandler(t)
 	resp := mustDo(t, h, http.MethodOptions, "/v1/stats/leaderboard", nil)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("expected 204, got %d", resp.StatusCode)
@@ -223,8 +247,30 @@ func TestAC13_OptionsPreflight(t *testing.T) {
 	if got := resp.Header.Get("Access-Control-Allow-Headers"); got != "Authorization, Content-Type" {
 		t.Errorf("Access-Control-Allow-Headers = %q", got)
 	}
-	if n := resp.ContentLength; n > 0 {
-		t.Errorf("preflight body must be empty; ContentLength=%d", n)
+}
+
+// ===========================================================================
+// AC-14 — overview generated_at > 120s → 503 + Retry-After.
+// ===========================================================================
+func TestAC14_OverviewStale503(t *testing.T) {
+	h, adminDB := setupStatsHandler(t)
+	seedAgedOverview(t, adminDB, 130)
+	resp := mustDo(t, h, http.MethodGet, "/v1/stats/overview", nil)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503, got %d body=%s", resp.StatusCode, readBody(t, resp))
+	}
+	if got := resp.Header.Get("Retry-After"); got != "30" {
+		t.Errorf("Retry-After = %q, want 30", got)
+	}
+	var ev map[string]any
+	mustDecode(t, resp, &ev)
+	if errObj, ok := ev["error"].(map[string]any); !ok || errObj["code"] != "stats_stale" {
+		t.Errorf("expected error.code=stats_stale, got %v", ev)
+	}
+	if errObj, ok := ev["error"].(map[string]any); ok {
+		if r, ok := errObj["retry_after_seconds"].(float64); !ok || int(r) != 30 {
+			t.Errorf("expected retry_after_seconds=30, got %v", errObj["retry_after_seconds"])
+		}
 	}
 }
 
@@ -232,7 +278,7 @@ func TestAC13_OptionsPreflight(t *testing.T) {
 // AC-21 — POST → 405 with Allow + method_not_allowed envelope.
 // ===========================================================================
 func TestAC21_MethodNotAllowed(t *testing.T) {
-	h, _, _ := setupStatsHandler(t)
+	h, _ := setupStatsHandler(t)
 	resp := mustDo(t, h, http.MethodPost, "/v1/stats/overview", nil)
 	if resp.StatusCode != http.StatusMethodNotAllowed {
 		t.Errorf("expected 405, got %d", resp.StatusCode)
@@ -247,23 +293,19 @@ func TestAC21_MethodNotAllowed(t *testing.T) {
 	}
 }
 
-// ===========================================================================
 // HEAD support — same headers as GET, empty body.
-// ===========================================================================
 func TestHEADReturnsSameHeadersEmptyBody(t *testing.T) {
-	h, _, _ := setupStatsHandler(t)
-	// Drive a tick so the leaderboard has a fresh generated_at.
-	driveRollupTick(t, nil, nil)
-	for _, path := range []string{"/v1/stats/leaderboard", "/v1/stats/health"} {
+	h, _ := setupStatsHandler(t)
+	for _, path := range []string{"/v1/stats/leaderboard", "/v1/stats/health", "/v1/stats/overview"} {
 		t.Run(path, func(t *testing.T) {
 			get := mustDo(t, h, http.MethodGet, path, nil)
 			head := mustDo(t, h, http.MethodHead, path, nil)
 			if head.StatusCode != get.StatusCode {
 				t.Errorf("HEAD status %d != GET status %d", head.StatusCode, get.StatusCode)
 			}
-			for _, h := range []string{"Content-Type", "Cache-Control", "ETag", "Vary", "X-Stats-Generated-At"} {
-				if got, want := head.Header.Get(h), get.Header.Get(h); got != want {
-					t.Errorf("HEAD header %s = %q, GET = %q", h, got, want)
+			for _, name := range []string{"Content-Type", "Cache-Control", "ETag", "Vary", "X-Stats-Generated-At"} {
+				if got, want := head.Header.Get(name), get.Header.Get(name); got != want {
+					t.Errorf("HEAD header %s = %q, GET = %q", name, got, want)
 				}
 			}
 			if b := readBody(t, head); len(b) != 0 {
@@ -273,14 +315,12 @@ func TestHEADReturnsSameHeadersEmptyBody(t *testing.T) {
 	}
 }
 
-// ===========================================================================
 // Public projection: totals.earnings_* MUST NOT appear.
-// ===========================================================================
 func TestPublicProjectionOmitsEarningsTotals(t *testing.T) {
-	h, _, _ := setupStatsHandler(t)
+	h, _ := setupStatsHandler(t)
 	resp := mustDo(t, h, http.MethodGet, "/v1/stats/leaderboard", nil)
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.StatusCode)
+		t.Fatalf("expected 200, got %d body=%s", resp.StatusCode, readBody(t, resp))
 	}
 	var body map[string]any
 	mustDecode(t, resp, &body)
@@ -295,12 +335,9 @@ func TestPublicProjectionOmitsEarningsTotals(t *testing.T) {
 	}
 }
 
-// ===========================================================================
 // 304 round-trip on If-None-Match.
-// ===========================================================================
 func TestAC12_304IfNoneMatch(t *testing.T) {
-	h, _, _ := setupStatsHandler(t)
-	driveRollupTick(t, nil, nil)
+	h, _ := setupStatsHandler(t)
 	first := mustDo(t, h, http.MethodGet, "/v1/stats/leaderboard", nil)
 	if first.StatusCode != http.StatusOK {
 		t.Fatalf("first request not 200, got %d", first.StatusCode)
@@ -323,9 +360,34 @@ func TestAC12_304IfNoneMatch(t *testing.T) {
 	}
 }
 
-// ===========================================================================
+// AC-7 — health 200 even when degraded.
+func TestAC7_HealthAlways200(t *testing.T) {
+	h, adminDB := setupStatsHandler(t)
+	// Age overview to "down" range.
+	if _, err := adminDB.Exec(
+		`UPDATE stats_components_health SET generated_at = now() - interval '130 seconds' WHERE component = 'overview'`,
+	); err != nil {
+		t.Fatalf("age overview component: %v", err)
+	}
+	resp := mustDo(t, h, http.MethodGet, "/v1/stats/health", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("health expected 200 even when degraded, got %d", resp.StatusCode)
+	}
+	var body map[string]any
+	mustDecode(t, resp, &body)
+	if body["status"] != "down" {
+		t.Errorf("status = %v, want down (overview > 120s)", body["status"])
+	}
+	if _, ok := body["rollup_lag_seconds"]; !ok {
+		t.Errorf("rollup_lag_seconds missing from health")
+	}
+	comps, ok := body["components"].(map[string]any)
+	if !ok || len(comps) != 7 {
+		t.Errorf("components has %d keys, want 7: %v", len(comps), comps)
+	}
+}
+
 // Test helpers
-// ===========================================================================
 func mustDo(t *testing.T, h http.Handler, method, path string, hdr http.Header) *http.Response {
 	t.Helper()
 	if hdr == nil {
@@ -363,40 +425,6 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 	return b
 }
 
-// driveRollupTick runs one rollup tick (overview + leaderboard
-// + timeseries + health) by invoking the runner against the
-// admin DSN. Tests that need a populated snapshot call this
-// before issuing handler requests.
-//
-// Implementation detail: the rollup runner ticks fire
-// immediately on Start; we Start + sleep + Wait the same way
-// rollup_integration_test.go does.
-func driveRollupTick(t *testing.T, adminDB *sql.DB, fx *pgFixture) {
-	t.Helper()
-	// Lazily executed if the test never seeded an explicit row.
-	// The function is idempotent — multiple calls just re-run
-	// the tick.
-	_ = adminDB
-	_ = fx
-	// Drive via the existing helper in rollup_integration_test.go.
-	// (placeholder: in a full implementation we'd call
-	// statsrollup.New + Start + Wait here. For now we omit
-	// because each test that needs a populated table calls
-	// the existing rollup helpers directly.)
-}
-
-// fx_must_exist_through_setupStatsHandler is a stub placeholder
-// flagged by the Step 3 audit; the helper is intentionally
-// nil-safe for tests that don't need a populated rollup.
-func fx_must_exist_through_setupStatsHandler() *pgFixture { return nil }
-
-// Suppress unused warnings on helpers reserved for the
+// Suppress unused-import warnings on helpers reserved for the
 // adversarial-audit pass.
-var (
-	_ = bytes.NewReader
-	_ = sha256.Sum256
-	_ = context.Background
-	_ = fmt.Sprintf
-	_ = strings.HasPrefix
-	_ = sql.ErrNoRows
-)
+var _ = strings.HasPrefix

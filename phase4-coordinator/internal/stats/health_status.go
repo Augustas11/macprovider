@@ -25,24 +25,31 @@ type healthThresholds struct {
 }
 
 func thresholdsForComponent(c string) healthThresholds {
-	// Per BUILD §F.2 + §9.5: overview at 30s/120s; rpm/tpm at
-	// 60s/300s (rolling minute granularity); per-window
-	// leaderboards at the matching cadence (24h: 60s/300s;
-	// 7d: 300s/900s; 30d: 1800s/3600s; all: 21600s/64800s ≈
-	// 6h/18h).
+	// SPEC §9.5 freshness SLA — verbatim per round-1 ARCH H5 /
+	// CODE H4 fix:
+	//
+	//   /v1/stats/overview              30s  / 120s
+	//   /v1/stats/leaderboard?window=24h 60s / 300s
+	//   /v1/stats/leaderboard?window=7d  5m  / 30m   = 300s / 1800s
+	//   /v1/stats/leaderboard?window=30d 30m / 4h    = 1800s / 14400s
+	//   /v1/stats/leaderboard?window=all 6h  / 24h   = 21600s / 86400s
+	//
+	// timeseries_rpm/tpm are advisory components (no §9.5 row);
+	// match the overview shape since they tick at the same
+	// cadence.
 	switch c {
 	case "overview":
 		return healthThresholds{targetSec: 30, budgetSec: 120}
 	case "timeseries_rpm", "timeseries_tpm":
-		return healthThresholds{targetSec: 60, budgetSec: 300}
+		return healthThresholds{targetSec: 30, budgetSec: 120}
 	case "leaderboard_24h":
 		return healthThresholds{targetSec: 60, budgetSec: 300}
 	case "leaderboard_7d":
-		return healthThresholds{targetSec: 300, budgetSec: 900}
+		return healthThresholds{targetSec: 300, budgetSec: 1800}
 	case "leaderboard_30d":
-		return healthThresholds{targetSec: 1800, budgetSec: 3600}
+		return healthThresholds{targetSec: 1800, budgetSec: 14400}
 	case "leaderboard_all":
-		return healthThresholds{targetSec: 21600, budgetSec: 64800}
+		return healthThresholds{targetSec: 21600, budgetSec: 86400}
 	}
 	// Unknown component falls back to the overview shape so
 	// future additions default to a strict bar.

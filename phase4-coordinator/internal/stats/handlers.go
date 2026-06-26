@@ -32,18 +32,46 @@ func (h *Handler) nowFn() time.Time {
 	return time.Now().UTC()
 }
 
+// overviewStaleProbe peeks at `stats_overview_current.generated_at`
+// for the §5.8 503 budget check. Called by the mux BEFORE the
+// post-auth success bucket debit so stale 503 responses do not
+// exhaust client quotas (round-1 ARCH C1 fix). Returns
+// (stale, snapshotGen, err).
+func (h *Handler) overviewStaleProbe(ctx context.Context, now time.Time) (bool, time.Time, error) {
+	ov, err := h.Store.Overview(ctx)
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	if ov == nil {
+		return true, time.Time{}, nil
+	}
+	return overviewStaleFor503(now, ov.GeneratedAt), ov.GeneratedAt, nil
+}
+
 // ===========================================================================
 // §5.1 /v1/stats/overview
 // ===========================================================================
 
+// overviewResponse mirrors the locked §5.1 wire shape:
+//
+//	{ generated_at, stale_after, network{14 fields},
+//	  timeseries{rpm_30m{bucket_seconds, points[]},
+//	             tpm_30m{bucket_seconds, points[]}} }
 type overviewResponse struct {
 	GeneratedAt string             `json:"generated_at"`
+	StaleAfter  string             `json:"stale_after"`
 	Network     overviewNetwork    `json:"network"`
 	Timeseries  overviewTimeseries `json:"timeseries"`
-	Meta        overviewMeta       `json:"meta"`
 }
 
+// overviewNetwork is the §5.1.1 14-field schema (12 distinct
+// counters + 2 derived: tokens_served_total and
+// avg_tokens_per_request).
 type overviewNetwork struct {
+	TokensServedTotal     int64   `json:"tokens_served_total"`
+	TokensInTotal         int64   `json:"tokens_in_total"`
+	TokensOutTotal        int64   `json:"tokens_out_total"`
+	RequestsTotal         int64   `json:"requests_total"`
 	NodesOnline           int     `json:"nodes_online"`
 	NodesHardwareAttested int     `json:"nodes_hardware_attested"`
 	BandwidthGBPerSec     int64   `json:"bandwidth_gb_per_s"`
@@ -52,59 +80,79 @@ type overviewNetwork struct {
 	GPUCoresTotal         int     `json:"gpu_cores_total"`
 	CPUCoresTotal         int     `json:"cpu_cores_total"`
 	UnifiedRAMGBTotal     int     `json:"unified_ram_gb_total"`
+	AvgTokensPerRequest   int64   `json:"avg_tokens_per_request"`
 	ModelsServing         int     `json:"models_serving"`
-	TokensInTotal         int64   `json:"tokens_in_total"`
-	TokensOutTotal        int64   `json:"tokens_out_total"`
-	RequestsTotal         int64   `json:"requests_total"`
 }
 
 type overviewTimeseries struct {
-	// Each is a 30-element array. Missing minutes render as
-	// JSON `null` per §5.1 — encoded as `*int64` with nil
-	// pointer per slot.
-	RpmRequests     []*int64 `json:"rpm_requests"`
-	TpmInputTokens  []*int64 `json:"tpm_input_tokens"`
-	TpmOutputTokens []*int64 `json:"tpm_output_tokens"`
+	Rpm30m timeseriesRpm `json:"rpm_30m"`
+	Tpm30m timeseriesTpm `json:"tpm_30m"`
 }
 
-type overviewMeta struct {
-	WindowSeconds int `json:"window_seconds"`
+type timeseriesRpm struct {
+	BucketSeconds int        `json:"bucket_seconds"`
+	Points        []rpmPoint `json:"points"`
 }
 
+// rpmPoint emits {"t": "...", "value": N|null}. Value uses
+// *int64 so JSON null distinguishes "no data" from "zero
+// traffic" per §5.1.
+type rpmPoint struct {
+	T     string `json:"t"`
+	Value *int64 `json:"value"`
+}
+
+type timeseriesTpm struct {
+	BucketSeconds int        `json:"bucket_seconds"`
+	Points        []tpmPoint `json:"points"`
+}
+
+type tpmPoint struct {
+	T            string `json:"t"`
+	InputTokens  *int64 `json:"input_tokens"`
+	OutputTokens *int64 `json:"output_tokens"`
+}
+
+// handleOverview implements §5.1.
+//
+// The stale-503 check has already passed in the mux's
+// freshness-before-debit pre-check; this handler can assume the
+// overview snapshot is within the §5.8 120s budget.
 func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar authResult) {
 	ctx := r.Context()
 	now := h.nowFn()
 
 	ov, err := h.Store.Overview(ctx)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "overview read failed")
-		return
-	}
-	if ov == nil || overviewStaleFor503(now, ov.GeneratedAt) {
-		// AC-14: 503 stale path. MUST be emitted AFTER cheap
-		// auth/CORS validation (already done) BUT BEFORE the
-		// post-auth success rate-limit debit (a rollup outage
-		// MUST NOT exhaust client quotas). The mux wraps this
-		// branch so the post-auth limiter sees a 503 sentinel.
-		w.Header().Set("Retry-After", "30")
-		writeError(w, http.StatusServiceUnavailable, codeStatsStale, "overview is stale")
+	if err != nil || ov == nil {
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "overview read failed", now, nil)
 		return
 	}
 
 	rpm, err := h.Store.RpmTimeseries(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "rpm read failed")
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "rpm read failed", now, nil)
 		return
 	}
 	tpm, err := h.Store.TpmTimeseries(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "tpm read failed")
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "tpm read failed", now, nil)
 		return
+	}
+
+	tokensServed := ov.TokensIn + ov.TokensOut
+	avgTokensPerRequest := int64(0)
+	if ov.Requests > 0 {
+		avgTokensPerRequest = tokensServed / ov.Requests
 	}
 
 	resp := overviewResponse{
 		GeneratedAt: ov.GeneratedAt.UTC().Format(time.RFC3339),
+		StaleAfter:  ov.GeneratedAt.Add(30 * time.Second).UTC().Format(time.RFC3339),
 		Network: overviewNetwork{
+			TokensServedTotal:     tokensServed,
+			TokensInTotal:         ov.TokensIn,
+			TokensOutTotal:        ov.TokensOut,
+			RequestsTotal:         ov.Requests,
 			NodesOnline:           ov.NodesOnline,
 			NodesHardwareAttested: ov.NodesHardwareAttested,
 			BandwidthGBPerSec:     ov.BandwidthGBPerSec,
@@ -113,17 +161,19 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 			GPUCoresTotal:         ov.GPUCoresTotal,
 			CPUCoresTotal:         ov.CPUCoresTotal,
 			UnifiedRAMGBTotal:     ov.UnifiedRAMGBTotal,
+			AvgTokensPerRequest:   avgTokensPerRequest,
 			ModelsServing:         ov.ModelsServing,
-			TokensInTotal:         ov.TokensIn,
-			TokensOutTotal:        ov.TokensOut,
-			RequestsTotal:         ov.Requests,
 		},
 		Timeseries: overviewTimeseries{
-			RpmRequests:     alignRpm30(rpm, now),
-			TpmInputTokens:  alignTpm30(tpm, now, func(t store.TimeseriesRow) int64 { return t.InTok }),
-			TpmOutputTokens: alignTpm30(tpm, now, func(t store.TimeseriesRow) int64 { return t.OutTok }),
+			Rpm30m: timeseriesRpm{
+				BucketSeconds: 60,
+				Points:        alignRpmPoints(rpm, now),
+			},
+			Tpm30m: timeseriesTpm{
+				BucketSeconds: 60,
+				Points:        alignTpmPoints(tpm, now),
+			},
 		},
-		Meta: overviewMeta{WindowSeconds: 30 * 60},
 	}
 
 	writeJSON(w, r, http.StatusOK, resp, ov.GeneratedAt,
@@ -132,11 +182,12 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 		ar)
 }
 
-// alignRpm30 builds the 30-element JSON-shaped array (one slot
-// per minute over the rolling 30 minutes ending at `now`),
-// emitting `nil` (= JSON null) for absent minutes per §5.1.
-func alignRpm30(rows []store.TimeseriesRow, now time.Time) []*int64 {
-	out := make([]*int64, 30)
+// alignRpmPoints builds the 30-element timestamped points array
+// per §5.1 — one per minute over the rolling 30 minutes ending
+// at now-1m. Missing minutes render as JSON null per §5.1 (the
+// pointer is nil; encoding/json emits `"value": null`).
+func alignRpmPoints(rows []store.TimeseriesRow, now time.Time) []rpmPoint {
+	out := make([]rpmPoint, 30)
 	end := now.Truncate(time.Minute)
 	start := end.Add(-30 * time.Minute)
 	byMin := make(map[int64]int64, len(rows))
@@ -145,28 +196,35 @@ func alignRpm30(rows []store.TimeseriesRow, now time.Time) []*int64 {
 	}
 	for i := 0; i < 30; i++ {
 		bucket := start.Add(time.Duration(i) * time.Minute)
+		p := rpmPoint{T: bucket.UTC().Format(time.RFC3339)}
 		if v, ok := byMin[bucket.Unix()]; ok {
 			vv := v
-			out[i] = &vv
+			p.Value = &vv
 		}
+		out[i] = p
 	}
 	return out
 }
 
-func alignTpm30(rows []store.TimeseriesRow, now time.Time, pick func(store.TimeseriesRow) int64) []*int64 {
-	out := make([]*int64, 30)
+func alignTpmPoints(rows []store.TimeseriesRow, now time.Time) []tpmPoint {
+	out := make([]tpmPoint, 30)
 	end := now.Truncate(time.Minute)
 	start := end.Add(-30 * time.Minute)
-	byMin := make(map[int64]int64, len(rows))
+	type pair struct{ in, out int64 }
+	byMin := make(map[int64]pair, len(rows))
 	for _, r := range rows {
-		byMin[r.Bucket.Truncate(time.Minute).Unix()] = pick(r)
+		byMin[r.Bucket.Truncate(time.Minute).Unix()] = pair{r.InTok, r.OutTok}
 	}
 	for i := 0; i < 30; i++ {
 		bucket := start.Add(time.Duration(i) * time.Minute)
+		p := tpmPoint{T: bucket.UTC().Format(time.RFC3339)}
 		if v, ok := byMin[bucket.Unix()]; ok {
-			vv := v
-			out[i] = &vv
+			in := v.in
+			outV := v.out
+			p.InputTokens = &in
+			p.OutputTokens = &outV
 		}
+		out[i] = p
 	}
 	return out
 }
@@ -177,44 +235,80 @@ func alignTpm30(rows []store.TimeseriesRow, now time.Time, pick func(store.Times
 
 type leaderboardResponse struct {
 	GeneratedAt         string                `json:"generated_at"`
+	StaleAfter          string                `json:"stale_after"`
 	Window              string                `json:"window"`
 	Sort                string                `json:"sort"`
-	Rows                []leaderboardRespRow  `json:"rows"`
-	Totals              leaderboardTotalsResp `json:"totals"`
-	Meta                leaderboardMeta       `json:"meta"`
+	Limit               int                   `json:"limit"`
 	PartialHistorySince string                `json:"partial_history_since,omitempty"`
-}
-
-type leaderboardRespRow struct {
-	Pseudonym      string  `json:"pseudonym"`
-	RankEarnings   int     `json:"rank_earnings"`
-	RankTokens     int     `json:"rank_tokens"`
-	RankJobs       int     `json:"rank_jobs"`
-	EarningsBucket string  `json:"earnings_bucket"`
-	ExactEarnings  *string `json:"exact_earnings"` // nil = JSON null
-	Tokens         int64   `json:"tokens"`
-	Jobs           int64   `json:"jobs"`
-	// Partner-only fields. omitempty so the public projection
-	// emits NEITHER an empty string nor the key.
-	EarningsUSD        string `json:"earnings_usd,omitempty"`
-	EarningsWorkUSD    string `json:"earnings_work_usd,omitempty"`
-	EarningsRewardsUSD string `json:"earnings_rewards_usd,omitempty"`
-	FirstSeenAt        string `json:"first_seen_at,omitempty"`
-	LastSeenAt         string `json:"last_seen_at,omitempty"`
-}
-
-type leaderboardTotalsResp struct {
-	ActiveAccounts int64 `json:"active_accounts"`
-	Tokens         int64 `json:"tokens"`
-	Jobs           int64 `json:"jobs"`
-	// Partner-only totals.
-	EarningsUSD        string `json:"earnings_usd,omitempty"`
-	EarningsWorkUSD    string `json:"earnings_work_usd,omitempty"`
-	EarningsRewardsUSD string `json:"earnings_rewards_usd,omitempty"`
+	Meta                leaderboardMeta       `json:"meta"`
+	Totals              leaderboardTotalsResp `json:"totals"`
+	Rows                []leaderboardRespRow  `json:"rows"`
 }
 
 type leaderboardMeta struct {
 	RewardsPopulated bool `json:"rewards_populated"`
+}
+
+// leaderboardRespRow is the §5.2 wire shape. `rank` is the
+// single per-axis rank (not three rank_* fields per the
+// round-1 audit). USD fields are JSON numbers (float64).
+//
+// The partner projection adds earnings_usd / earnings_work_usd
+// / earnings_rewards_usd / first_seen_at / last_seen_at. The
+// public projection sets `ExactEarnings` from the
+// total-earnings string iff visibility.mode = "exact".
+type leaderboardRespRow struct {
+	Rank           int    `json:"rank"`
+	Pseudonym      string `json:"pseudonym"`
+	EarningsBucket string `json:"earnings_bucket"`
+	Tokens         int64  `json:"tokens"`
+	Jobs           int64  `json:"jobs"`
+	// ExactEarnings is always present in JSON; null in the
+	// public projection unless visibility.mode = "exact".
+	ExactEarnings *float64 `json:"exact_earnings"`
+	// Partner-only — omitempty so public projection omits.
+	EarningsUSD        *float64 `json:"earnings_usd,omitempty"`
+	EarningsWorkUSD    *float64 `json:"earnings_work_usd,omitempty"`
+	EarningsRewardsUSD *float64 `json:"earnings_rewards_usd,omitempty"`
+	FirstSeenAt        string   `json:"first_seen_at,omitempty"`
+	LastSeenAt         string   `json:"last_seen_at,omitempty"`
+}
+
+type leaderboardTotalsResp struct {
+	Tokens         int64 `json:"tokens"`
+	Jobs           int64 `json:"jobs"`
+	ActiveAccounts int64 `json:"active_accounts"`
+	// Partner-only totals.
+	EarningsUSD        *float64 `json:"earnings_usd,omitempty"`
+	EarningsWorkUSD    *float64 `json:"earnings_work_usd,omitempty"`
+	EarningsRewardsUSD *float64 `json:"earnings_rewards_usd,omitempty"`
+}
+
+// leaderboardStaleBudgetSeconds returns the §9.5 503 budget
+// (in seconds) for the requested window. 24h→300, 7d→1800,
+// 30d→14400, all→86400.
+func leaderboardStaleBudgetSeconds(window string) int {
+	switch window {
+	case "24h":
+		return 300
+	case "7d":
+		return 1800
+	case "30d":
+		return 14400
+	case "all":
+		return 86400
+	}
+	return 300
+}
+
+// leaderboardSMaxAgeSeconds returns the per-projection s-maxage
+// the `stale_after` field is derived from. Public projection
+// caches for 60s; partner projection for 30s per §5.2.
+func leaderboardSMaxAgeSeconds(partner bool) int {
+	if partner {
+		return 30
+	}
+	return 60
 }
 
 func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar authResult) {
@@ -228,7 +322,7 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 	switch window {
 	case "24h", "7d", "30d", "all":
 	default:
-		writeError(w, http.StatusBadRequest, codeBadRequest, "invalid window")
+		writeError(w, r, http.StatusBadRequest, codeBadRequest, "invalid window", now, nil)
 		return
 	}
 
@@ -239,7 +333,7 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 	switch sort {
 	case "earnings", "tokens", "jobs":
 	default:
-		writeError(w, http.StatusBadRequest, codeBadRequest, "invalid sort")
+		writeError(w, r, http.StatusBadRequest, codeBadRequest, "invalid sort", now, nil)
 		return
 	}
 
@@ -247,7 +341,7 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 	if v := r.URL.Query().Get("limit"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 || n > 100 {
-			writeError(w, http.StatusBadRequest, codeBadRequest, "invalid limit")
+			writeError(w, r, http.StatusBadRequest, codeBadRequest, "invalid limit", now, nil)
 			return
 		}
 		limit = n
@@ -255,46 +349,84 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 
 	rows, err := h.Store.Leaderboard(ctx, window, sort, limit)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "leaderboard read failed")
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "leaderboard read failed", now, nil)
 		return
 	}
-	totals, err := h.Store.LeaderboardTotals(ctx, window)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "leaderboard totals read failed")
+
+	// §5.8 per-window staleness check — leaderboard's
+	// generated_at is the snapshot tick time (consistent across
+	// every row in a single tick). If older than the §9.5 budget
+	// emit 503 stats_stale BEFORE writing the body. Round-1
+	// ARCH C2 / CODE H7 fix.
+	var snapshotTime time.Time
+	if len(rows) > 0 {
+		snapshotTime = rows[0].GeneratedAt
+	}
+	if snapshotTime.IsZero() {
+		// No data yet — treat as stale for non-empty windows so
+		// partner UIs don't bind to a transient pre-rollup state.
+		// 24h with zero providers is a valid empty leaderboard;
+		// we use the table's generated_at (epoch sentinel) as
+		// the signal. The stale_for_503 helper uses the §9.5
+		// budget; epoch sentinel always exceeds it → 503.
+		if h.leaderboardStaleFor503(snapshotTime, now, window) {
+			retry := 30
+			writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "leaderboard is stale", now, &retry)
+			return
+		}
+	} else if h.leaderboardStaleFor503(snapshotTime, now, window) {
+		retry := 30
+		writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "leaderboard is stale", now, &retry)
 		return
 	}
+
 	rewardsPop, err := h.Store.RewardsPopulated(ctx, window)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "rewards_populated read failed")
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "rewards_populated read failed", now, nil)
 		return
 	}
 
 	partnerProj := ar.projection == "partner"
 
 	respRows := make([]leaderboardRespRow, 0, len(rows))
+	// Page-scoped sums for totals (round-1 ARCH H2 fix: totals
+	// scoped to the returned page, NOT the whole table).
+	var pageTokens, pageJobs int64
+	var pageEarn, pageEarnWork, pageEarnReward float64
+	distinct := make(map[string]struct{}, len(rows))
 	for _, r := range rows {
+		rank := r.RankEarnings
+		if sort == "tokens" {
+			rank = r.RankTokens
+		} else if sort == "jobs" {
+			rank = r.RankJobs
+		}
 		row := leaderboardRespRow{
+			Rank:           rank,
 			Pseudonym:      r.Pseudonym,
-			RankEarnings:   r.RankEarnings,
-			RankTokens:     r.RankTokens,
-			RankJobs:       r.RankJobs,
 			EarningsBucket: r.Bucket,
 			Tokens:         r.Tokens,
 			Jobs:           r.Jobs,
 		}
+		earn := parseUSD(r.EarningsTotalUSD)
+		work := parseUSD(r.EarningsWorkUSD)
+		reward := parseUSD(r.EarningsRewardsUSD)
 		// Public projection: exact_earnings populated iff
 		// visibility.mode = "exact"; otherwise null (default
 		// bucketed per AC-19 + §6.1 left-join semantics).
 		if r.VisibilityMode == "exact" {
-			v := r.EarningsTotalUSD
+			v := earn
 			row.ExactEarnings = &v
 		} else {
 			row.ExactEarnings = nil
 		}
 		if partnerProj {
-			row.EarningsUSD = r.EarningsTotalUSD
-			row.EarningsWorkUSD = r.EarningsWorkUSD
-			row.EarningsRewardsUSD = r.EarningsRewardsUSD
+			earnCopy := earn
+			workCopy := work
+			rewardCopy := reward
+			row.EarningsUSD = &earnCopy
+			row.EarningsWorkUSD = &workCopy
+			row.EarningsRewardsUSD = &rewardCopy
 			if r.FirstSeenAt.Valid {
 				row.FirstSeenAt = r.FirstSeenAt.Time.UTC().Format(time.RFC3339)
 			}
@@ -303,32 +435,28 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 			}
 		}
 		respRows = append(respRows, row)
+		pageTokens += r.Tokens
+		pageJobs += r.Jobs
+		if r.Jobs >= 1 {
+			distinct[r.ProviderID] = struct{}{}
+		}
+		pageEarn += earn
+		pageEarnWork += work
+		pageEarnReward += reward
 	}
 
 	tot := leaderboardTotalsResp{
-		ActiveAccounts: totals.ActiveAccounts,
-		Tokens:         totals.Tokens,
-		Jobs:           totals.Jobs,
+		Tokens:         pageTokens,
+		Jobs:           pageJobs,
+		ActiveAccounts: int64(len(distinct)),
 	}
 	if partnerProj {
-		tot.EarningsUSD = totals.EarningsUSD
-		tot.EarningsWorkUSD = totals.EarningsWork
-		tot.EarningsRewardsUSD = totals.EarningsReward
-	}
-
-	resp := leaderboardResponse{
-		GeneratedAt: totals.GeneratedAt.UTC().Format(time.RFC3339),
-		Window:      window,
-		Sort:        sort,
-		Rows:        respRows,
-		Totals:      tot,
-		Meta:        leaderboardMeta{RewardsPopulated: rewardsPop},
-	}
-
-	// partial_history_since exposed iff (config non-empty AND
-	// window is 30d or all AND now - since < window length).
-	if h.shouldExposePartialHistorySince(window, now) {
-		resp.PartialHistorySince = h.PartialSince
+		e := round2(pageEarn)
+		ew := round2(pageEarnWork)
+		er := round2(pageEarnReward)
+		tot.EarningsUSD = &e
+		tot.EarningsWorkUSD = &ew
+		tot.EarningsRewardsUSD = &er
 	}
 
 	cacheControl := "public, max-age=60, s-maxage=60, stale-while-revalidate=120"
@@ -338,7 +466,62 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 		vary = varyForPartner()
 	}
 
-	writeJSON(w, r, http.StatusOK, resp, totals.GeneratedAt, cacheControl, vary, ar)
+	smax := leaderboardSMaxAgeSeconds(partnerProj)
+	resp := leaderboardResponse{
+		GeneratedAt: snapshotTime.UTC().Format(time.RFC3339),
+		StaleAfter:  snapshotTime.Add(time.Duration(smax) * time.Second).UTC().Format(time.RFC3339),
+		Window:      window,
+		Sort:        sort,
+		Limit:       limit,
+		Meta:        leaderboardMeta{RewardsPopulated: rewardsPop},
+		Totals:      tot,
+		Rows:        respRows,
+	}
+
+	// partial_history_since exposed iff (config non-empty AND
+	// window is 30d or all AND now - since < window length).
+	if h.shouldExposePartialHistorySince(window, now) {
+		resp.PartialHistorySince = h.PartialSince
+	}
+
+	writeJSON(w, r, http.StatusOK, resp, snapshotTime, cacheControl, vary, ar)
+}
+
+// leaderboardStaleFor503 returns true iff the leaderboard
+// snapshot is older than the §9.5 503 budget for `window`.
+// Empty snapshot (zero time) is treated as stale.
+func (h *Handler) leaderboardStaleFor503(snapshotTime, now time.Time, window string) bool {
+	if snapshotTime.IsZero() {
+		return false // empty table is valid (no providers in window).
+	}
+	budget := time.Duration(leaderboardStaleBudgetSeconds(window)) * time.Second
+	return now.Sub(snapshotTime) > budget
+}
+
+func parseUSD(s string) float64 {
+	if s == "" {
+		return 0
+	}
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0
+	}
+	return v
+}
+
+func round2(v float64) float64 {
+	// Round to 2 decimals; JSON encoding picks shortest float
+	// repr, which for .00-aligned values may emit e.g. "5".
+	// SPEC §5.2 calls for "two-decimal precision"; clients
+	// parse JSON numbers without trailing-zero requirement.
+	return float64(int64(v*100+sign(v)*0.5)) / 100
+}
+
+func sign(v float64) float64 {
+	if v < 0 {
+		return -1
+	}
+	return 1
 }
 
 func (h *Handler) shouldExposePartialHistorySince(window string, now time.Time) bool {
@@ -357,12 +540,8 @@ func (h *Handler) shouldExposePartialHistorySince(window string, now time.Time) 
 	case "30d":
 		winLen = 30 * 24 * time.Hour
 	case "all":
-		// 'all' is open-ended; expose the field iff the rollup
-		// has not yet overlapped its window by the all-window
-		// proxy (1 year — operator MAY revisit). The locked
-		// SPEC §9.7 wording is "less than the window length";
-		// for "all" we approximate as 365d.
-		winLen = 365 * 24 * time.Hour
+		// 'all' is open-ended; expose iff < 90 days since since.
+		winLen = 90 * 24 * time.Hour
 	}
 	return now.Sub(t) < winLen
 }
@@ -371,16 +550,34 @@ func (h *Handler) shouldExposePartialHistorySince(window string, now time.Time) 
 // §5.3 /v1/stats/health
 // ===========================================================================
 
+// healthResponse mirrors the locked §5.3 wire shape:
+//
+//	{ status, generated_at, rollup_lag_seconds,
+//	  components{7 keys} }
 type healthResponse struct {
-	GeneratedAt string                     `json:"generated_at"`
-	Status      string                     `json:"status"`
-	Components  map[string]healthComponent `json:"components"`
+	Status           string                     `json:"status"`
+	GeneratedAt      string                     `json:"generated_at"`
+	RollupLagSeconds int                        `json:"rollup_lag_seconds"`
+	Components       map[string]healthComponent `json:"components"`
 }
 
 type healthComponent struct {
 	Status      string `json:"status"`
 	GeneratedAt string `json:"generated_at"`
-	LastErrorAt string `json:"last_error_at,omitempty"`
+}
+
+// healthComponentKeys is the locked §5.3 7-key set. The
+// handler emits every key even if a `stats_components_health`
+// row is missing — missing rows default to "down" with epoch
+// generated_at.
+var healthComponentKeys = []string{
+	"overview",
+	"timeseries_rpm",
+	"timeseries_tpm",
+	"leaderboard_24h",
+	"leaderboard_7d",
+	"leaderboard_30d",
+	"leaderboard_all",
 }
 
 func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request, ar authResult) {
@@ -389,47 +586,64 @@ func (h *Handler) handleHealth(w http.ResponseWriter, r *http.Request, ar authRe
 
 	comps, err := h.Store.ComponentsHealth(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "health read failed")
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "health read failed", now, nil)
 		return
 	}
-	compMap := make(map[string]healthComponent, len(comps))
-	overall := "ok"
+	byKey := make(map[string]time.Time, len(comps))
 	for _, c := range comps {
-		s := statusFromFreshness(now, c.GeneratedAt, c.Component)
-		entry := healthComponent{
+		byKey[c.Component] = c.GeneratedAt
+	}
+	compMap := make(map[string]healthComponent, 7)
+	var oldest time.Time
+	for _, k := range healthComponentKeys {
+		gen, ok := byKey[k]
+		if !ok {
+			gen = time.Time{}
+		}
+		s := statusFromFreshness(now, gen, k)
+		compMap[k] = healthComponent{
 			Status:      s,
-			GeneratedAt: c.GeneratedAt.UTC().Format(time.RFC3339),
+			GeneratedAt: gen.UTC().Format(time.RFC3339),
 		}
-		if c.LastErrorAt.Valid {
-			entry.LastErrorAt = c.LastErrorAt.Time.UTC().Format(time.RFC3339)
+		if !gen.IsZero() && (oldest.IsZero() || gen.Before(oldest)) {
+			oldest = gen
 		}
-		compMap[c.Component] = entry
-		// Aggregate worst-case.
-		if rank(s) > rank(overall) {
-			overall = s
+	}
+
+	// §5.3 top-level derivation:
+	//   "down" iff overview OR leaderboard_24h beyond §5.8 budget;
+	//   "degraded" iff any component beyond §9.5 target;
+	//   "ok" otherwise.
+	overall := "ok"
+	if compMap["overview"].Status == "down" || compMap["leaderboard_24h"].Status == "down" {
+		overall = "down"
+	} else {
+		for _, c := range compMap {
+			if c.Status == "degraded" || c.Status == "down" {
+				overall = "degraded"
+				break
+			}
+		}
+	}
+
+	lag := 0
+	if !oldest.IsZero() {
+		lag = int(now.Sub(oldest).Seconds())
+		if lag < 0 {
+			lag = 0
 		}
 	}
 
 	resp := healthResponse{
-		GeneratedAt: now.Format(time.RFC3339),
-		Status:      overall,
-		Components:  compMap,
+		Status:           overall,
+		GeneratedAt:      now.Format(time.RFC3339),
+		RollupLagSeconds: lag,
+		Components:       compMap,
 	}
 	// /v1/stats/health returns 200 even when degraded/down
-	// per §5.3. Use the request `now` as the generated-at for
-	// the X-Stats-Generated-At header.
+	// per §5.3.
 	writeJSON(w, r, http.StatusOK, resp, now,
 		"public, max-age=10, s-maxage=10", varyForPublic(), ar)
-}
-
-func rank(s string) int {
-	switch s {
-	case "down":
-		return 2
-	case "degraded":
-		return 1
-	}
-	return 0
 }
 
 // ===========================================================================
@@ -445,7 +659,8 @@ func rank(s string) int {
 func writeJSON(w http.ResponseWriter, r *http.Request, status int, body any, generatedAt time.Time, cacheControl, vary string, ar authResult) {
 	buf, err := json.Marshal(body)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, codeInternal, "marshal failed")
+		now := time.Now().UTC()
+		writeError(w, r, http.StatusInternalServerError, codeInternal, "marshal failed", now, nil)
 		return
 	}
 	etag := weakETag(buf)
@@ -484,15 +699,16 @@ var _ = context.Background
 // per-endpoint rate-limit buckets on. Returns one of
 // "overview", "leaderboard", "health" or "" for paths outside
 // the /v1/stats/* subtree.
+//
+// Round-1 SECURITY L2 fix: only EXACT-match paths are accepted;
+// `/v1/stats/overview/extra` returns "" (404) rather than
+// routing as `overview`.
 func trimEndpointFromPath(p string) string {
 	const prefix = "/v1/stats/"
 	if !strings.HasPrefix(p, prefix) {
 		return ""
 	}
 	rest := p[len(prefix):]
-	if i := strings.Index(rest, "/"); i >= 0 {
-		rest = rest[:i]
-	}
 	switch rest {
 	case "overview", "leaderboard", "health":
 		return rest

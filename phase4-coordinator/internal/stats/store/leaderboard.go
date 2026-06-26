@@ -136,9 +136,13 @@ func (s *Store) LeaderboardTotals(ctx context.Context, window string) (*Leaderbo
 // pre-computed into `stats_rewards_populated` for the given
 // window. Returns FALSE on no row (the empty-ledger semantic
 // per Step 2's bootstrap default).
+//
+// Round-1 ARCH H3 / CODE H3 fix: column name is
+// `rewards_populated` (NOT `populated`) per Step 2 migration
+// 001_stats_tables.up.sql.
 func (s *Store) RewardsPopulated(ctx context.Context, window string) (bool, error) {
 	const q = `
-        SELECT populated
+        SELECT rewards_populated
           FROM stats_rewards_populated
          WHERE window_label = $1
          LIMIT 1
