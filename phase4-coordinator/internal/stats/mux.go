@@ -191,11 +191,19 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() {
-		// Refund the success-bucket slot ONLY if the handler
-		// returned a non-2xx (and not 304). 503 stale / 500
-		// internal / 400 bad-request from inside the handler
-		// must not count against the success bucket.
-		if rec.status != 0 && (rec.status < 200 || rec.status >= 300) && rec.status != http.StatusNotModified {
+		// Refund the success-bucket slot if the handler did
+		// NOT return a 2xx (and not 304). 503 stale, 500
+		// internal, 400 bad-request from inside the handler
+		// must not count against the success bucket. Round-4
+		// SECURITY M1 fix: `rec.status == 0` also means the
+		// handler panicked before writing a status — the
+		// outer recover middleware will emit a 500, so this
+		// path is non-success and the slot MUST be refunded.
+		if rec.status == 0 {
+			refundLimiter.refund(refundKey, now)
+			return
+		}
+		if (rec.status < 200 || rec.status >= 300) && rec.status != http.StatusNotModified {
 			refundLimiter.refund(refundKey, now)
 		}
 	}()

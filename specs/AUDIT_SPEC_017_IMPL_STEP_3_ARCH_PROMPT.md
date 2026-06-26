@@ -173,9 +173,12 @@ Validation steps (run before writing findings):
   `internal/auth` (for shared hash helpers only),
   `internal/config`, `internal/stats/store`, `internal/pool`
   (only if handler needs Registry for snapshot — should not),
-  `github.com/rs/zerolog`. No imports of `internal/ws`,
-  `internal/explorer`, `internal/billing`, `internal/buyer`,
-  `internal/session`.
+  `github.com/rs/zerolog`, `golang.org/x/net/idna` (approved
+  Step 3 dep — required for RFC 6454 §5.7 Origin
+  normalization IDN → Punycode; see `.golangci.yml` preamble
+  for the lint-config record of this approval). No imports of
+  `internal/ws`, `internal/explorer`, `internal/billing`,
+  `internal/buyer`, `internal/session`.
 - `gofmt -l ./internal/stats` (clean expected).
 - `git diff --check origin/main...HEAD` (no whitespace errors
   in inspected files).
