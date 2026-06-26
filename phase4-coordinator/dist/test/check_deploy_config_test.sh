@@ -50,7 +50,9 @@
 #   T37 — C2c pairing mismatch via different env vars resolving differently     -> FAIL
 #   T38 — C2c pairing match via different env vars resolving to same value      -> pass
 #   T39 — C2c pairing cross-file same env:NAME unresolved (separate env files)  -> pass with explicit WARN
-#   T40 — C2c cross-file distinctness same env:NAME unresolved (separate files) -> skipped (no false-fail)
+#   T40 — C2c cross-file distinctness unresolved (no runtime backstop)          -> pass with WARN
+#   T41 — C2c pairing inline+env-unresolved (no runtime backstop)               -> pass with WARN
+#   T42 — C2c pairing both env-unresolved different names                       -> pass with WARN
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -709,19 +711,42 @@ test_c2c_pairing_cross_file_same_env_name_unverified_warn() {
   rm -rf "$wd"
 }
 
-test_c2c_cross_file_distinctness_same_env_name_skipped() {
-  # Audit-r3 corollary: cross-file _check_distinct (gateway operator_key
-  # vs coord gateway_service_token) must NOT static-fail on same env:NAME
-  # — that would false-fail a deploy where operator deliberately reused a
-  # name across two env files with different values. Skip with explicit
-  # "separate env files" message; runtime Validate is the backstop.
+test_c2c_cross_file_distinctness_unresolved_warns() {
+  # Audit-r4 finding (3-of-3 lanes): cross-file _check_distinct unresolved
+  # has NO runtime backstop (each module's Validate only sees its own
+  # file). r3 emitted ok-skip; r4 fix: WARN loudly, name the gap.
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:SHARED_NAME"
   write_gw "$wd" 300 "env:SHARED_NAME" "service_token: \"$HEX64B\""
   run_check "$wd" SHARED_NAME=
-  assert_exit 0 "T40 cross-file distinctness same env:NAME unresolved -> skipped (not static fail)"
-  assert_contains "C2c gateway coordinator.operator_key vs coordinator auth.gateway_service_token: skipped" "T40 cross-file skip message"
-  assert_contains "separate env files" "T40 separate-env-files scope message"
+  assert_exit 0 "T40 cross-file distinctness unresolved -> pass with WARN"
+  assert_contains "WARN: C2c gateway coordinator.operator_key vs coordinator auth.gateway_service_token: UNVERIFIED" "T40 cross-file warn message"
+  assert_contains "NO runtime backstop" "T40 backstop-gap explanation"
+  rm -rf "$wd"
+}
+
+test_c2c_pairing_inline_plus_env_unresolved_warns() {
+  # Audit-r4 (3-of-3): inline on one side + unresolved env on the other
+  # — pairing cannot be verified. r3 silently skipped; r4 must WARN.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64B\""
+  run_check "$wd" COORD_SVC=
+  assert_exit 0 "T41 pairing inline+env-unresolved -> pass with WARN"
+  assert_contains "C2c pairing gateway coordinator.service_token == coordinator auth.gateway_service_token: UNVERIFIED" "T41 pairing-warn message"
+  assert_contains "NO runtime backstop" "T41 backstop-gap explanation"
+  rm -rf "$wd"
+}
+
+test_c2c_pairing_different_env_unresolved_warns() {
+  # Audit-r4 (3-of-3): both sides env-deferred via DIFFERENT names —
+  # cannot prove pairing without resolving. WARN.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: env:GW_SVC"
+  run_check "$wd" COORD_SVC= GW_SVC=
+  assert_exit 0 "T42 pairing both-env-unresolved (diff names) -> pass with WARN"
+  assert_contains "C2c pairing gateway coordinator.service_token == coordinator auth.gateway_service_token: UNVERIFIED" "T42 pairing-warn message"
   rm -rf "$wd"
 }
 
@@ -770,7 +795,9 @@ test_c2c_pairing_inline_mismatch_fails
 test_c2c_pairing_env_resolved_mismatch_fails
 test_c2c_pairing_env_resolved_match_passes
 test_c2c_pairing_cross_file_same_env_name_unverified_warn
-test_c2c_cross_file_distinctness_same_env_name_skipped
+test_c2c_cross_file_distinctness_unresolved_warns
+test_c2c_pairing_inline_plus_env_unresolved_warns
+test_c2c_pairing_different_env_unresolved_warns
 
 echo
 echo "== summary =="

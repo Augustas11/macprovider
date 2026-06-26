@@ -244,9 +244,21 @@ def _check_distinct(label_a, raw_a, label_b, raw_b, same_file=True):
     a = _resolved_value(raw_a)
     b = _resolved_value(raw_b)
     if a is None or b is None:
-        scope = "same file" if same_file else "separate env files"
-        ok(f"C2c {label_a} vs {label_b}: skipped, deferred to runtime "
-           f"({scope}; each side fail-closes in its own Validate)")
+        if same_file:
+            # Same yaml -> same Validate() — its runtime distinctness check
+            # is the backstop.
+            ok(f"C2c {label_a} vs {label_b}: skipped, deferred to runtime "
+               f"(same file; module Validate enforces distinctness)")
+        else:
+            # Cross-file: NO runtime backstop. Each module's Validate
+            # only checks the two fields on its own side. WARN loudly so
+            # the operator knows the gate cannot prove this invariant.
+            warn(f"C2c {label_a} vs {label_b}: UNVERIFIED — cross-file "
+                 f"distinctness has NO runtime backstop (each module's "
+                 f"Validate only sees its own file). One or both env:NAME "
+                 f"refs are unresolved at gate time. To verify: source "
+                 f"/etc/macprovider/coordinator.env and gateway.env into "
+                 f"the gate process, or inline at least one side.")
         return
     if a == b:
         hard(f"C2c: {label_a} == {label_b} — rotation discipline violated; "
@@ -274,19 +286,29 @@ def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
     a = _resolved_value(raw_a)
     b = _resolved_value(raw_b)
     if a is None or b is None:
-        if not same_file and na is not None and na == nb:
-            # Cross-file same env name: explicit warn, not silent skip.
-            # Pairing is the load-bearing invariant; an operator typo in
-            # one env file is exactly what this gate is supposed to catch.
-            warn(f"C2c pairing {label_a} == {label_b}: UNVERIFIED — both "
-                 f"reference env:{na} but the coordinator and gateway "
-                 f"systemd units source SEPARATE env files; the gate cannot "
-                 f"read both. Verify manually that /etc/macprovider/"
-                 f"coordinator.env env:{na} == /etc/macprovider/gateway.env "
-                 f"env:{na}, or inline the secret on at least one side.")
+        if same_file:
+            ok(f"C2c pairing {label_a} == {label_b}: skipped, deferred to runtime "
+               f"(same file; module Validate enforces equality on resolution)")
             return
-        ok(f"C2c pairing {label_a} == {label_b}: skipped, deferred to runtime "
-           f"(one or both env:NAME refs unresolved at gate time)")
+        # Cross-file: NO runtime backstop — neither module's Validate
+        # can see the other's token. Audit-r4 finding (3-of-3 lanes):
+        # any unresolved side here must WARN loudly, not skip silently.
+        # Pairing is the load-bearing /internal/* invariant — an
+        # operator typo in one env file is exactly the failure mode
+        # this gate exists to catch.
+        if na is not None and na == nb:
+            detail = (f"both reference env:{na} but coord and gateway "
+                      f"systemd units source SEPARATE env files (coordinator.env "
+                      f"vs gateway.env); they may resolve to different values")
+        else:
+            detail = (f"raw_a={raw_a!r} raw_b={raw_b!r}; one or both "
+                      f"env:NAME refs unresolved at gate time")
+        warn(f"C2c pairing {label_a} == {label_b}: UNVERIFIED — "
+             f"cross-file pairing has NO runtime backstop. {detail}. "
+             f"To verify: source both /etc/macprovider/coordinator.env and "
+             f"gateway.env into the gate process, inline at least one "
+             f"side, or set SKIP_PAIRING_CHECK=1 only if you have "
+             f"manually verified equality.")
         return
     if a != b:
         hard(f"C2c: {label_a} != {label_b} — gateway sends a credential the "
