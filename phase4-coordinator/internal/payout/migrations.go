@@ -187,7 +187,7 @@ func stripExistingColumnAlters(ctx context.Context, db *sql.DB, body string) (st
 // land inside ignorable text.
 //
 // SQLite's string-literal rules: single-quote escapes the next
-// single quote via doubling (`''`); double-quote works the same
+// single quote via doubling (`”`); double-quote works the same
 // way for identifiers. The mask is conservative: any byte that
 // could plausibly be in literal/comment context is marked false.
 func buildExecutableMask(body string) []bool {
