@@ -7,6 +7,46 @@ import (
 	"time"
 )
 
+// TestStripExistingColumnAlters_SkipsCommentsAndStringLiterals is
+// the FULL-r2 [full-sec:r2-1] MEDIUM closure: the ADD COLUMN
+// regex must NOT match text inside `--` line comments or single/
+// double-quoted string literals. A future migration containing
+// such a form would otherwise trigger a spurious PRAGMA lookup
+// and a body rewrite.
+func TestStripExistingColumnAlters_SkipsCommentsAndStringLiterals(t *testing.T) {
+	db := openTestDB(t)
+	// payout_attempts already has gas_reserved_native_wei + run_id
+	// from migrations 0010 + 0012, so columnExists returns true for
+	// these. If the regex naively matched a commented or quoted
+	// ALTER, the rewrite would drop the surrounding statement and
+	// corrupt the migration body.
+	in := `-- the next migration WAS: ALTER TABLE payout_attempts ADD COLUMN gas_reserved_native_wei BLOB;
+SELECT 'ALTER TABLE payout_attempts ADD COLUMN run_id TEXT';
+CREATE TABLE IF NOT EXISTS audit_marker (k TEXT);
+`
+	out, err := stripExistingColumnAlters(context.Background(), db, in)
+	if err != nil {
+		t.Fatalf("stripExistingColumnAlters: %v", err)
+	}
+	if out != in {
+		t.Errorf("body changed; want byte-identical when only commented + quoted ALTERs\ninput=%q\noutput=%q", in, out)
+	}
+	// And the rewrite IS active for a real top-level ALTER on an
+	// existing column — same column the comment named, so we know
+	// the comment alone is what got skipped, not a general "no
+	// columns exist" branch.
+	in2 := `ALTER TABLE payout_attempts ADD COLUMN gas_reserved_native_wei INTEGER NULL;
+CREATE INDEX IF NOT EXISTS idx_marker ON audit_marker(k);
+`
+	out2, err := stripExistingColumnAlters(context.Background(), db, in2)
+	if err != nil {
+		t.Fatalf("stripExistingColumnAlters real ALTER: %v", err)
+	}
+	if !strings.Contains(out2, "already present, statement skipped") {
+		t.Errorf("expected real ALTER on existing column to be rewritten; got:\n%s", out2)
+	}
+}
+
 func TestMigrate_Idempotent(t *testing.T) {
 	db := openTestDB(t)
 	// Migrate already ran in openTestDB. Second pass must

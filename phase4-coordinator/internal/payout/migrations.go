@@ -124,15 +124,30 @@ CREATE TABLE IF NOT EXISTS payout_schema_applied (
 // conservative: it operates only on whole-statement matches and
 // preserves byte layout outside those matches, so newly authored
 // migrations are unaffected.
+//
+// FULL-r2 [full-sec:r2-1] MEDIUM closure: ignore -- line comments
+// and single/double-quoted string literals when locating ALTER
+// statements. A future migration that ships a commented or
+// quoted "ALTER TABLE x ADD COLUMN y ..." form would otherwise
+// trigger a spurious PRAGMA lookup and a rewrite that corrupts
+// the migration body. Trust boundary is "embedded authored asset",
+// but the parser robustness gap is worth closing.
 func stripExistingColumnAlters(ctx context.Context, db *sql.DB, body string) (string, error) {
 	matches := addColumnStmt.FindAllStringSubmatchIndex(body, -1)
 	if len(matches) == 0 {
 		return body, nil
 	}
+	skipMask := buildExecutableMask(body)
 	var b strings.Builder
 	prev := 0
 	for _, m := range matches {
 		start, end := m[0], m[1]
+		// Skip matches that begin inside a comment or string literal —
+		// the executable mask is true only at byte positions that
+		// belong to top-level executable SQL.
+		if !skipMask[start] {
+			continue
+		}
 		tableStart, tableEnd := m[2], m[3]
 		colStart, colEnd := m[4], m[5]
 		table := body[tableStart:tableEnd]
@@ -162,6 +177,56 @@ func stripExistingColumnAlters(ctx context.Context, db *sql.DB, body string) (st
 	}
 	b.WriteString(body[prev:])
 	return b.String(), nil
+}
+
+// buildExecutableMask returns a per-byte mask the same length as
+// body. Each entry is true when the byte at that index is part of
+// executable top-level SQL — i.e. NOT inside a `-- line comment`
+// and NOT inside a `' ... '` or `" ... "` string literal. The
+// caller uses the mask to filter regex matches that happen to
+// land inside ignorable text.
+//
+// SQLite's string-literal rules: single-quote escapes the next
+// single quote via doubling (`''`); double-quote works the same
+// way for identifiers. The mask is conservative: any byte that
+// could plausibly be in literal/comment context is marked false.
+func buildExecutableMask(body string) []bool {
+	mask := make([]bool, len(body))
+	inSingle := false
+	inDouble := false
+	inLineComment := false
+	for i := 0; i < len(body); i++ {
+		ch := body[i]
+		var next byte
+		if i+1 < len(body) {
+			next = body[i+1]
+		}
+		if inLineComment {
+			if ch == '\n' {
+				inLineComment = false
+				mask[i] = true
+				continue
+			}
+			continue
+		}
+		if !inSingle && !inDouble && ch == '-' && next == '-' {
+			// Start of a line comment.
+			inLineComment = true
+			continue
+		}
+		if !inDouble && ch == '\'' {
+			inSingle = !inSingle
+			continue
+		}
+		if !inSingle && ch == '"' {
+			inDouble = !inDouble
+			continue
+		}
+		if !inSingle && !inDouble {
+			mask[i] = true
+		}
+	}
+	return mask
 }
 
 // columnExists returns true when PRAGMA table_info(<table>) lists

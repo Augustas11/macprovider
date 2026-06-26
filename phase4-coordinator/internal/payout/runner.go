@@ -1205,17 +1205,28 @@ func (r *Runner) pollAndConfirm(ctx context.Context, conn *sql.Conn, runID strin
 	txHash := attempt.TxHash.String
 	deadline := time.Now().Add(r.opts.ReceiptPollTimeout)
 
+	// FULL-r2 [full-code:r2-1] HIGH closure: track an explicit
+	// confirmedDepth bool. The r1 closure rewrote depth to read
+	// both heads, but kept assigning recPri/recSec at the top of
+	// every iteration. If the LAST iteration before deadline
+	// returned non-nil but shallow receipts, the post-loop nil
+	// guard at line 1243 fell through and markConfirmedStandalone
+	// + ClaimPayoutReady marked paid on a shallow receipt —
+	// regressing r1-1 and violating SPEC §4.3 step 7. The
+	// confirmed receipts are now captured into recPri/recSec ONLY
+	// inside the break path, and the post-loop guard refuses to
+	// proceed when confirmedDepth is false.
 	var recPri, recSec *Receipt
+	confirmedDepth := false
 	for time.Now().Before(deadline) {
 		select {
 		case <-ctx.Done():
 			return rowOutcomeFailed, ctx.Err()
 		default:
 		}
-		var perrA, perrB error
-		recPri, perrA = r.opts.RPCs.Primary.TransactionReceipt(ctx, txHash)
-		recSec, perrB = r.opts.RPCs.Secondary.TransactionReceipt(ctx, txHash)
-		if perrA == nil && perrB == nil && recPri != nil && recSec != nil {
+		candidatePri, perrA := r.opts.RPCs.Primary.TransactionReceipt(ctx, txHash)
+		candidateSec, perrB := r.opts.RPCs.Secondary.TransactionReceipt(ctx, txHash)
+		if perrA == nil && perrB == nil && candidatePri != nil && candidateSec != nil {
 			// FULL-r1 [full-code:r1-1] HIGH closure: SPEC §4.3
 			// step 7 requires BOTH RPCs at depth >=
 			// ConfirmationBlocks. Read both heads and gate on the
@@ -1232,20 +1243,25 @@ func (r *Runner) pollAndConfirm(ctx context.Context, conn *sql.Conn, runID strin
 				continue
 			}
 			conf := int64(r.snap().ConfirmationBlocks)
-			depthPri := int64(headPri) - int64(recPri.BlockNumber)
-			depthSec := int64(headSec) - int64(recSec.BlockNumber)
+			depthPri := int64(headPri) - int64(candidatePri.BlockNumber)
+			depthSec := int64(headSec) - int64(candidateSec.BlockNumber)
 			if depthPri >= conf && depthSec >= conf {
+				recPri = candidatePri
+				recSec = candidateSec
+				confirmedDepth = true
 				break
 			}
 		}
 		time.Sleep(r.opts.ReceiptPollInterval)
 	}
-	if recPri == nil || recSec == nil {
+	if !confirmedDepth || recPri == nil || recSec == nil {
 		// Treat as transient — leave row pending; next cycle re-polls.
+		// confirmedDepth is the authority; the nil checks are defense-
+		// in-depth.
 		r.opts.Logger.Warn().
 			Int64("payout_id", row.PayoutID).
 			Str("tx_hash", txHash).
-			Msg("receipt poll deadline expired; will retry next cycle")
+			Msg("receipt poll deadline expired without both-RPC depth; will retry next cycle")
 		return rowOutcomeFailed, nil
 	}
 	// SPEC §4.3 step 7 — two-RPC agreement.

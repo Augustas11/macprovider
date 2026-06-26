@@ -2,6 +2,7 @@ package payout
 
 import (
 	"context"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -177,6 +178,126 @@ SELECT provider_id, registered_against_hot_wallet
 	}
 	if c.PayoutExternalID == "" || !strings.HasPrefix(c.PayoutExternalID, "0x") {
 		t.Errorf("PayoutExternalID = %q, want a 0x-prefixed tx hash", c.PayoutExternalID)
+	}
+}
+
+// TestRunner_PollAndConfirm_RejectsShallowSecondary is the
+// FULL-r2 [full-code:r2-2] MEDIUM closure: regression for the
+// FULL-r1 [full-code:r1-1] HIGH closure (both-RPC depth) and the
+// FULL-r2 [full-code:r2-1] HIGH closure (the shallow-receipt
+// post-deadline leak).
+//
+// Setup:
+//   - receipt.BlockNumber = 100 on both RPCs
+//   - Primary.BlockNumber() returns 200  (depth 100 >= 5 ✓)
+//   - Secondary.BlockNumber() returns 102 (depth 2  <  5 ✗)
+//   - ConfirmationBlocks = 5, ReceiptPollTimeout = 30ms (short)
+//
+// Expected: pollAndConfirm exits the loop on deadline WITHOUT
+// confirmedDepth=true; the post-loop guard returns rowOutcomeFailed,
+// no markConfirmedStandalone, no ClaimPayoutReady call.
+//
+// If the r1 guard regressed (pre-r2 behavior — non-nil shallow
+// receipts pass the post-loop nil-only check), this test would
+// see len(s.claimer.calls) == 1 and fail.
+func TestRunner_PollAndConfirm_RejectsShallowSecondary(t *testing.T) {
+	s := setupRunnerForTest(t)
+	db := s.db
+	hotAddr := s.hotAddr
+	canonicalHot, _ := CanonicalizeEIP55(hotAddr)
+
+	// Tighten the receipt poll budget so the test runs in <100ms.
+	// We can't reach into RunnerOptions post-construction, so we
+	// rely on the test default ReceiptPollTimeout (100ms — already
+	// short). The deadline trigger happens once primary returns
+	// depth-200 on every iteration but secondary stays at 102.
+	providerAddr := "0x000000000000000000000000000000000000bEEF"
+	past := time.Now().Add(-1 * time.Hour).UTC().Format(time.RFC3339Nano)
+	_, _ = db.ExecContext(context.Background(), `
+INSERT INTO provider_payout_addresses
+  (provider_id, chain, address, payout_allowed, pending_until_utc,
+   rotated_from, registered_at_utc, registered_against_hot_wallet)
+VALUES ('p-shallow', 'base-mainnet', ?, 1, ?, NULL, ?, ?)`,
+		providerAddr, past, past, canonicalHot)
+	payoutID := insertReadyRow(t, db, "p-shallow", "settle:p-shallow:e2e-shallow")
+	_, _ = db.ExecContext(context.Background(),
+		`UPDATE ledger_payout_ready SET provider_credits = 900000, gross_credits = 1000000 WHERE id = ?`,
+		payoutID)
+
+	// RPC mocks: receipt block is 100, but Secondary.BlockNumber
+	// returns 102 (depth 2 — below ConfirmationBlocks=5). Primary
+	// returns 200 (depth 100 — above threshold).
+	var capturedRaw []byte
+	s.primary.sendFn = func(_ context.Context, raw []byte) (string, error) {
+		capturedRaw = append([]byte(nil), raw...)
+		return TxHash(raw), nil
+	}
+	s.secondary.sendFn = func(_ context.Context, raw []byte) (string, error) {
+		return TxHash(raw), nil
+	}
+	makeReceipt := func(_ context.Context, h string) (*Receipt, error) {
+		if capturedRaw == nil {
+			return nil, nil
+		}
+		hot := strings.ToLower(canonicalHot)
+		hotTopic, _ := PadAddressTopic(canonicalHot)
+		toTopic, _ := PadAddressTopic(providerAddr)
+		return &Receipt{
+			TxHash:      strings.ToLower(h),
+			BlockHash:   "0xshallowblock",
+			BlockNumber: 100,
+			Status:      1,
+			From:        hot,
+			To:          strings.ToLower(USDCContractAddressBase),
+			GasUsed:     65000,
+			Logs: []ReceiptLog{
+				{
+					Address: strings.ToLower(USDCContractAddressBase),
+					Topics: []string{
+						"0x" + hex.EncodeToString(transferEventTopic),
+						"0x" + hex.EncodeToString(hotTopic),
+						"0x" + hex.EncodeToString(toTopic),
+					},
+					Data: bigEndian32(900_000),
+				},
+			},
+		}, nil
+	}
+	s.primary.receiptFn = makeReceipt
+	s.secondary.receiptFn = makeReceipt
+	s.primary.blockNumFn = func(_ context.Context) (uint64, error) { return 200, nil }   // depth 100 ≥ 5 ✓
+	s.secondary.blockNumFn = func(_ context.Context) (uint64, error) { return 102, nil } // depth   2 < 5 ✗
+	s.primary.txByHashFn = func(_ context.Context, _ string) (*Transaction, error) {
+		want, _ := USDCTransferCalldata(providerAddr, 900_000)
+		return &Transaction{
+			Hash:    "0xhash",
+			From:    strings.ToLower(canonicalHot),
+			To:      strings.ToLower(USDCContractAddressBase),
+			Input:   want,
+			ChainID: BaseMainnetChainID,
+		}, nil
+	}
+	s.secondary.txByHashFn = s.primary.txByHashFn
+
+	if _, err := s.runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+
+	// Shallow secondary -> no confirm, no claim.
+	if len(s.claimer.calls) != 0 {
+		t.Fatalf("claim calls = %d, want 0 (secondary head shallow); SPEC §4.3 step 7 violation",
+			len(s.claimer.calls))
+	}
+	// Persisted-bytes path stays available for the next cycle —
+	// raw_signed_tx + broadcast_at_utc set, confirmed_at_utc NULL.
+	var confirmed sql.NullString
+	if err := db.QueryRowContext(context.Background(),
+		`SELECT confirmed_at_utc FROM payout_attempts WHERE payout_id = ?`, payoutID,
+	).Scan(&confirmed); err != nil {
+		t.Fatalf("query confirmed_at_utc: %v", err)
+	}
+	if confirmed.Valid {
+		t.Errorf("confirmed_at_utc = %q; want NULL while secondary shallow", confirmed.String)
 	}
 }
 
