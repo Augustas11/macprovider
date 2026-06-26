@@ -61,10 +61,28 @@ SELECT id FROM ledger_config_snapshots
 	return id, err
 }
 
+// snapshotQueryer is the narrow surface snapshotAt needs — both *sql.DB and
+// *sql.Tx satisfy it. Issue #21: recovery.RecoverLedger runs inside a tx,
+// and at MaxOpenConns(1) it MUST issue per-row snapshot lookups against
+// the SAME tx (i.e. on the connection the tx pins) — calling s.db.* there
+// asks the pool for a second connection and deadlocks. Callers outside a
+// tx pass s.db; callers inside one pass their *sql.Tx.
+type snapshotQueryer interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
 func (s *Store) snapshotAt(ctx context.Context, t time.Time) (int64, RewardsConfig, int64, int64, error) {
+	return snapshotAtQueryer(ctx, s.db, t)
+}
+
+func snapshotAtTx(ctx context.Context, tx *sql.Tx, t time.Time) (int64, RewardsConfig, int64, int64, error) {
+	return snapshotAtQueryer(ctx, tx, t)
+}
+
+func snapshotAtQueryer(ctx context.Context, q snapshotQueryer, t time.Time) (int64, RewardsConfig, int64, int64, error) {
 	var id, providerShareBps, multiplierPPM int64
 	var rateJSON string
-	err := s.db.QueryRowContext(ctx, `
+	err := q.QueryRowContext(ctx, `
 SELECT id, provider_share_bps, global_multiplier_ppm, rate_card_json
   FROM ledger_config_snapshots
  WHERE effective_at_utc <= ?

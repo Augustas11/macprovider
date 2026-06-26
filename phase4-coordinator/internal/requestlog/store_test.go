@@ -593,3 +593,19 @@ func openTestStore(t *testing.T) *Store {
 	}
 	return store
 }
+
+// TestOpenStoreCapsPoolAtOneConn pins the SetMaxOpenConns(1) +
+// SetMaxIdleConns(1) discipline at the constructor that owns it. Issue
+// #21 / ARCH-3: billing reuses this *sql.DB via
+// billing.NewStore(reqLogStore.DB()), so the cap here serializes the
+// whole money-path. If a future contributor deletes the cap, this
+// test fails directly in the requestlog package; the parallel cap-
+// dependent nested-cursor regressions in internal/billing remain as
+// failure-mode coverage.
+func TestOpenStoreCapsPoolAtOneConn(t *testing.T) {
+	store := openTestStore(t)
+	stats := store.DB().Stats()
+	if stats.MaxOpenConnections != 1 {
+		t.Fatalf("MaxOpenConnections=%d, want 1 (issue #21 cap)", stats.MaxOpenConnections)
+	}
+}
