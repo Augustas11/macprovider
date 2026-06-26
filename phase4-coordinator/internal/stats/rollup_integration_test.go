@@ -239,10 +239,14 @@ func TestRollupLeaderboard24hBucketsAndLeftJoin(t *testing.T) {
 	// correct behavior — there's nothing to rank).
 	seedProviderTokens(t, adminDB, "p_tiny", "p_small", "p_huge")
 
-	// p_tiny — $0.005 (0.5¢, BELOW the $0.01 floor) → "-" bucket.
+	// p_tiny — $0.004 (sub-half-cent; rounds DOWN to $0.00 per
+	// FloatString(2) round-half-away-from-zero) → "-" bucket.
+	// Round-6 CODE r6 HIGH 1 fix: $0.005 now rounds UP to $0.01
+	// per SPEC §6.2 stored-NUMERIC(18,2) bucket comparison, so
+	// the strictly-below-half-cent value is the right "-" case.
 	// p_small — $4.99 → "$" bucket on 24h.
 	// p_huge — $50.00 → "$$$" bucket on 24h.
-	seedLedgerRow(t, adminDB, "p_tiny", now.Add(-1*time.Hour), 1, 1, 5_000) // 5_000 * 1.0 / 1e6 = $0.005
+	seedLedgerRow(t, adminDB, "p_tiny", now.Add(-1*time.Hour), 1, 1, 4_000) // 4_000 * 1.0 / 1e6 = $0.004 → $0.00 → "-"
 	seedLedgerRow(t, adminDB, "p_small", now.Add(-1*time.Hour), 10, 10, 4_990_000)
 	seedLedgerRow(t, adminDB, "p_huge", now.Add(-1*time.Hour), 100, 100, 50_000_000)
 
