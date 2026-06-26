@@ -2256,16 +2256,23 @@ var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 
 // isCommitWorthyDataLine reports whether the given SSE line counts as
 // real provider work for the purposes of forwardStreaming's commit
-// threshold. Codex r3 audit tightened the predicate from "any expected
-// key present" to "value-shape valid OpenAI chunk content": the JSON
-// object MUST carry either a non-empty `choices` array (the usual
-// streaming-chunk shape) OR a non-empty `usage` object (the usage-only
-// final chunk OpenAI emits when stream_options.include_usage=true).
-// Metadata-only objects like `{"id":"x"}`, `{"object":"chat.completion.chunk"}`,
-// `{"choices":null}`, `{"choices":[]}`, `{"usage":{}}`, plus comment-only
-// (`:`) and terminator-only (`data: [DONE]`) lines do NOT commit.
+// threshold. Codex r4 audit tightened the predicate from "non-empty
+// container" to "value-shape valid OpenAI chunk content":
+//   - `choices` must be a non-empty JSON array whose FIRST OBJECT element
+//     carries at least one of `delta`, `message`, `finish_reason` —
+//     the OpenAI streaming-chunk shape. Non-object elements (numbers,
+//     null, arrays), empty-object choices, and metadata-only choices
+//     (`{"index":0}`) all reject.
+//   - `usage` must be an object that decodes to numeric `completion_tokens`
+//     AND at least one of `prompt_tokens` / `total_tokens` — the OpenAI
+//     usage-final-chunk shape (emitted when stream_options.include_usage=true).
+//     Arbitrary `{"foo":"bar"}` or `{"prompt_tokens":1}` alone reject.
+//
+// A leading UTF-8 BOM (0xEF 0xBB 0xBF) on the line is tolerated for
+// SSE-source compatibility; some HTTP libraries emit one on stream init.
 func isCommitWorthyDataLine(line []byte) bool {
 	trimmed := bytes.TrimRight(line, "\r\n")
+	trimmed = bytes.TrimPrefix(trimmed, []byte{0xEF, 0xBB, 0xBF})
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
 		return false
 	}
@@ -2280,13 +2287,35 @@ func isCommitWorthyDataLine(line []byte) bool {
 	if raw, ok := parsed["choices"]; ok {
 		var arr []json.RawMessage
 		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
-			return true
+			for _, choice := range arr {
+				var obj map[string]json.RawMessage
+				if err := json.Unmarshal(choice, &obj); err != nil {
+					continue
+				}
+				if _, has := obj["delta"]; has {
+					return true
+				}
+				if _, has := obj["message"]; has {
+					return true
+				}
+				if _, has := obj["finish_reason"]; has {
+					return true
+				}
+			}
 		}
 	}
 	if raw, ok := parsed["usage"]; ok {
-		var obj map[string]json.RawMessage
-		if err := json.Unmarshal(raw, &obj); err == nil && len(obj) > 0 {
-			return true
+		var usage struct {
+			PromptTokens     *json.Number `json:"prompt_tokens"`
+			CompletionTokens *json.Number `json:"completion_tokens"`
+			TotalTokens      *json.Number `json:"total_tokens"`
+		}
+		dec := json.NewDecoder(bytes.NewReader(raw))
+		dec.UseNumber()
+		if err := dec.Decode(&usage); err == nil {
+			if usage.CompletionTokens != nil && (usage.PromptTokens != nil || usage.TotalTokens != nil) {
+				return true
+			}
 		}
 	}
 	return false

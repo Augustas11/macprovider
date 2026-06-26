@@ -66,6 +66,29 @@ func TestIsCommitWorthyDataLine(t *testing.T) {
 		// Adversarial: [DONE] embedded inside an id — only the literal
 		// content "[DONE]" is filtered, not arbitrary substrings.
 		{"id_containing_DONE_literal", "data: {\"id\":\"[DONE]\",\"choices\":[{\"delta\":{\"content\":\"x\"}}]}\n", true},
+
+		// r4 value-shape inside containers — reject malformed choices.
+		{"choices_integer_element", "data: {\"choices\":[1]}\n", false},
+		{"choices_null_element", "data: {\"choices\":[null]}\n", false},
+		{"choices_empty_object_element", "data: {\"choices\":[{}]}\n", false},
+		{"choices_metadata_only_element", "data: {\"choices\":[{\"index\":0}]}\n", false},
+
+		// r4 value-shape — accept choices carrying delta/message/finish_reason.
+		{"choices_with_message_field", "data: {\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n", true},
+		{"choices_with_finish_reason", "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n", true},
+		{"choices_with_finish_reason_null", "data: {\"choices\":[{\"finish_reason\":null}]}\n", true},
+
+		// r4 value-shape inside usage — reject non-OpenAI shapes.
+		{"usage_arbitrary_fields", "data: {\"usage\":{\"foo\":\"bar\"}}\n", false},
+		{"usage_only_prompt_tokens", "data: {\"usage\":{\"prompt_tokens\":4}}\n", false},
+		{"usage_only_completion_tokens", "data: {\"usage\":{\"completion_tokens\":4}}\n", false},
+		{"usage_non_numeric_tokens", "data: {\"usage\":{\"prompt_tokens\":\"a\",\"completion_tokens\":\"b\"}}\n", false},
+		// r4 — accept valid usage shapes.
+		{"usage_completion_plus_total", "data: {\"usage\":{\"completion_tokens\":4,\"total_tokens\":4}}\n", true},
+		{"usage_all_three_tokens", "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n", true},
+
+		// r4 — UTF-8 BOM tolerated.
+		{"bom_prefixed_valid_chunk", "\xef\xbb\xbfdata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

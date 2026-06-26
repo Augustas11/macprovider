@@ -668,6 +668,57 @@ func TestM92_RowSequence_HTTPStreamingDoneOnlyTriggersFailover(t *testing.T) {
 	}
 }
 
+// Scenario 11 (issue #92 codex r4 MINOR): legitimate provider first event
+// is a usage-only chunk (OpenAI shape when stream_options.include_usage=true
+// is set with no content chunks beforehand — rare but valid). The commit
+// predicate's `usage` branch must accept this, the pre-commit flow must
+// commit, and the buyer must see one successful row. Locks the security
+// boundary against future tightening that accidentally rejects the
+// legitimate usage-only path.
+func TestM92_RowSequence_HTTPStreamingUsageOnlyFirstChunkCommits(t *testing.T) {
+	const requestID = "55555555-9205-4205-8205-555555555555"
+	usageUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":2,\"total_tokens\":6}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer usageUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "usage", EndpointURL: usageUpstream.URL},
+	})
+	registerWithEndpoint(registry, "usage", "s1", "model-a", pool.StateReady, 20000, 1, usageUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-Request-ID": []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("usage-only-first-chunk rows = %d, want 1 (no failover, single committed success): %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusOK || rows[0].Retried != 0 || rows[0].ProviderAssignedID.String != "s1" {
+		t.Fatalf("rows[0] = %+v, want s1/200/retried=0", rows[0])
+	}
+}
+
 // Scenario 5 (M2-1d): WS-non-streaming queue-full → advance → success.
 //
 // Pins the Q3 close-out from the post-merge architect verification of
