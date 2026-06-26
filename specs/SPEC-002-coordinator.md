@@ -1,7 +1,15 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.4 (2026-06-22, SPEC-015 v0.1.3 /poolz receipt pubkey absorption)
+**Version:** 1.4.0 (2026-06-26, issue #92 streaming-commit predicate documented in FR-P11a; SPEC-015 v0.1.3 /poolz receipt pubkey absorption from 2026-06-22)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9)
+
+**Change log v1.4.0 (2026-06-26):**
+- **v1.4.0 (2026-06-26, issue #92):** FR-P11a streaming-failover paragraph
+  now defines "committed" with the post-#92 predicate inline. Adds the
+  buyer-visible TTFT note and the gateway `coordinator_header_timeout_seconds`
+  constraint (header timeout MUST be >= request budget, deploy-checked at
+  `phase4-coordinator/dist/check-deploy-config.sh` C2b). No wire-protocol
+  change; SPEC-001 unaffected.
 
 **Change log v1.4:**
 - **v1.4 (2026-06-22, SPEC-015 v0.1.3 absorption):** Adds two

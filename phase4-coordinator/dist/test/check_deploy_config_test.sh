@@ -32,6 +32,10 @@
 #   T19 — bootstrap flag nested under auth child       -> FAIL (direct child only)
 #   T20 — gateway C2 timeout absent                    -> FAIL (runtime default may violate C2)
 #   T21 — coordinator C2 timeout absent                -> FAIL (runtime default may violate C2)
+#   T22 — C2b header timeout absent, request_seconds=300 (= effective default) -> pass
+#   T23 — C2b header timeout absent, request_seconds=400 (> effective 300)     -> FAIL
+#   T24 — C2b header timeout=120 < request_seconds=300                         -> FAIL
+#   T25 — C2b header timeout=300 = request_seconds=300                         -> pass
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -402,6 +406,75 @@ EOF
   rm -rf "$wd"
 }
 
+# C2b regression tests (post-#92 / PR #167): the gateway response-header
+# timeout MUST be >= the coordinator request budget; otherwise slow-but-valid
+# streaming/non-streaming first-event scenarios false-fail. The check honors
+# the runtime default (300s) when the header field is absent.
+
+test_c2b_absent_header_default_matches_request_passes() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280
+  # gateway: explicit request=300, no header timeout (effective default 300).
+  cat > "$wd/gateway.yaml" <<EOF
+coordinator:
+  operator_key: "$HEX64"
+timeouts:
+  coordinator_request_seconds: 300
+EOF
+  run_check "$wd"
+  assert_exit 0 "T22 C2b absent header + request=300 -> pass"
+  assert_contains "C2b header timeout: absent -> default 300 >= gateway request 300s" "T22 expected ok line"
+  rm -rf "$wd"
+}
+
+test_c2b_absent_header_with_raised_request_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 380
+  # gateway: explicit request=400 but no header timeout (effective default 300 < 400).
+  cat > "$wd/gateway.yaml" <<EOF
+coordinator:
+  operator_key: "$HEX64"
+timeouts:
+  coordinator_request_seconds: 400
+EOF
+  run_check "$wd"
+  assert_exit 1 "T23 C2b absent header + request=400 -> FAIL"
+  assert_contains "coordinator_header_timeout_seconds is ABSENT" "T23 expected absent-header hard message"
+  rm -rf "$wd"
+}
+
+test_c2b_explicit_header_below_request_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280
+  cat > "$wd/gateway.yaml" <<EOF
+coordinator:
+  operator_key: "$HEX64"
+timeouts:
+  coordinator_request_seconds: 300
+  coordinator_header_timeout_seconds: 120
+EOF
+  run_check "$wd"
+  assert_exit 1 "T24 C2b explicit header 120 < request 300 -> FAIL"
+  assert_contains "is BELOW gateway coordinator_request_seconds" "T24 expected below-request hard message"
+  rm -rf "$wd"
+}
+
+test_c2b_explicit_header_equals_request_passes() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280
+  cat > "$wd/gateway.yaml" <<EOF
+coordinator:
+  operator_key: "$HEX64"
+timeouts:
+  coordinator_request_seconds: 300
+  coordinator_header_timeout_seconds: 300
+EOF
+  run_check "$wd"
+  assert_exit 0 "T25 C2b explicit header 300 = request 300 -> pass"
+  assert_contains "C2b header timeout: gateway header 300s >= gateway request 300s" "T25 expected ok line"
+  rm -rf "$wd"
+}
+
 # ---- run -------------------------------------------------------------------
 
 echo "== check-deploy-config.sh tests =="
@@ -429,6 +502,10 @@ test_bootstrap_flag_misplaced_fails
 test_bootstrap_flag_nested_under_auth_child_fails
 test_gateway_c2_timeout_absent_fails
 test_coordinator_c2_timeout_absent_fails
+test_c2b_absent_header_default_matches_request_passes
+test_c2b_absent_header_with_raised_request_fails
+test_c2b_explicit_header_below_request_fails
+test_c2b_explicit_header_equals_request_passes
 
 echo
 echo "== summary =="
