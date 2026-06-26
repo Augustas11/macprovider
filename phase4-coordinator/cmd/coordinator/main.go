@@ -65,11 +65,28 @@ func main() {
 	// of flag.Parse with "flag provided but not defined"). We
 	// intercept first.
 	if len(os.Args) >= 2 {
-		switch os.Args[1] {
+		arg1 := os.Args[1]
+		switch arg1 {
 		case "partner-keys":
 			os.Exit(runPartnerKeys(os.Args[2:]))
 		case "visibility":
 			os.Exit(runVisibility(os.Args[2:]))
+		}
+		// Round-1 CODE H1 fix: a non-flag first positional that
+		// is NEITHER a known daemon flag NOR a known CLI verb is
+		// a typo. Reject with usage so an operator who mistypes
+		// `coordinator visiblity revert ...` doesn't silently
+		// start the daemon (which would try to load
+		// coordinator.yaml). Daemon flags begin with `-`; CLI
+		// verbs are enumerated below.
+		if !strings.HasPrefix(arg1, "-") {
+			fmt.Fprintf(os.Stderr, "coordinator: unknown subcommand %q\n", arg1)
+			fmt.Fprintln(os.Stderr, "usage:")
+			fmt.Fprintln(os.Stderr, "  coordinator --config <path>     (daemon mode — default)")
+			fmt.Fprintln(os.Stderr, "  coordinator --version           (print build version)")
+			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
+			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
+			os.Exit(2)
 		}
 	}
 

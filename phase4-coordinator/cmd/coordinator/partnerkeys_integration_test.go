@@ -21,6 +21,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -384,6 +385,71 @@ func TestIssueBurstFlagRejected(t *testing.T) {
 	if !strings.Contains(stderr, "flag provided but not defined") &&
 		!strings.Contains(stderr, "burst") {
 		t.Errorf("stderr should reference unknown --burst; got %q", stderr)
+	}
+}
+
+// ===========================================================================
+// SECURITY r1 H1 — JOURNAL_STREAM (systemd-journal stdout capture) suppresses
+// the raw-token stdout print. With JOURNAL_STREAM set and no --token-out the
+// CLI MUST refuse, exit non-zero, and tell the operator to revoke the orphan
+// row.
+// ===========================================================================
+func TestIssueJournalStreamSuppresses(t *testing.T) {
+	fx, _ := startCLIPostgres(t)
+	t.Setenv("JOURNAL_STREAM", "1:2")
+	code, stdout, stderr, _, _ := runIssue(
+		"--admin-dsn", fx.adminDSN(),
+		"--label", "journaltest",
+	)
+	if code == 0 {
+		t.Fatalf("JOURNAL_STREAM should suppress stdout token; got exit 0 stdout=%q", stdout)
+	}
+	rawTokenInStdout := strings.Contains(stdout, "mpk_")
+	// Stdout receives only the metadata line, which does NOT include `mpk_*`.
+	if rawTokenInStdout {
+		t.Errorf("raw token leaked to stdout under JOURNAL_STREAM: %q", stdout)
+	}
+	if !strings.Contains(stderr, "JOURNAL_STREAM") {
+		t.Errorf("stderr should explain journal-stream refusal; got %q", stderr)
+	}
+	if !strings.Contains(stderr, "--token-out") {
+		t.Errorf("stderr should suggest --token-out remediation; got %q", stderr)
+	}
+}
+
+// ===========================================================================
+// SECURITY r1 H1 — --token-out FILE writes 0600 file + suppresses stdout.
+// ===========================================================================
+func TestIssueTokenOutWritesFile(t *testing.T) {
+	fx, _ := startCLIPostgres(t)
+	tmpDir := t.TempDir()
+	tokenPath := tmpDir + "/secret.token"
+	t.Setenv("JOURNAL_STREAM", "1:2")
+	code, stdout, stderr, _, _ := runIssue(
+		"--admin-dsn", fx.adminDSN(),
+		"--label", "fileout",
+		"--token-out", tokenPath,
+	)
+	if code != 0 {
+		t.Fatalf("--token-out should succeed; got exit=%d stderr=%q", code, stderr)
+	}
+	if strings.Contains(stdout, "mpk_") {
+		t.Errorf("raw token leaked to stdout despite --token-out: %q", stdout)
+	}
+	info, err := os.Stat(tokenPath)
+	if err != nil {
+		t.Fatalf("stat token file: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("token file mode = %v, want 0600", info.Mode().Perm())
+	}
+	contents, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("read token file: %v", err)
+	}
+	tok := strings.TrimSpace(string(contents))
+	if !tokenRegex.MatchString(tok) {
+		t.Errorf("token-out file content %q does not match %s", tok, tokenRegexRawString)
 	}
 }
 

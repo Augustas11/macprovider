@@ -39,7 +39,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/user"
 	"strings"
 	"time"
 
@@ -153,9 +152,11 @@ func (f *originsFlag) Set(v string) error { f.values = append(f.values, v); retu
 //  3. Hash with sha256(raw_utf8_bytes).
 //  4. If --rotate-from passed, verify predecessor row exists.
 //  5. INSERT new row with all SPEC-locked columns (NO
-//     rate_limit_burst — v0.1.8 removed).
+//     the per-key burst column dropped in v0.1.8).
 //  6. ONLY after the INSERT succeeds, print the raw token to
-//     stdout exactly once.
+//     the operator OUT-OF-BAND sink (stdout when invoked from
+//     a TTY; --token-out FILE when stdout is journal-captured
+//     per round-1 SECURITY H1).
 //
 // The "print after INSERT" ordering is load-bearing — printing
 // before the INSERT would let an operator deliver an unbound
@@ -169,6 +170,7 @@ func runPartnerKeysIssue(args []string, stdout, stderr io.Writer) int {
 	rpm := fs.Int("rpm", 600, "rate_limit_rpm")
 	createdBy := fs.String("created-by", "", "operator principal (defaults to $USER@hostname)")
 	rotateFrom := fs.Int64("rotate-from", 0, "predecessor partner_keys.id (rotation flow)")
+	tokenOut := fs.String("token-out", "", "write the raw mpk_* token to this file path with mode 0600 instead of stdout (mandatory when stdout is captured by systemd-journal — round-1 SECURITY H1)")
 	var origins originsFlag
 	fs.Var(&origins, "allowed-origin", "RFC 6454 allowed Origin (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -281,13 +283,56 @@ RETURNING id, created_at`
 		return 1
 	}
 
-	// Print metadata first (operator-facing diagnostic), then
-	// the raw token EXACTLY ONCE on its own line for easy copy.
-	// Both go to stdout — stderr stays clean for redirection.
+	// Print metadata first (operator-facing diagnostic). The
+	// metadata is journal-safe — contains only label / id /
+	// prefix / created_by / rotated_from_id / created_at.
 	fmt.Fprintf(stdout, "id=%d label=%s prefix=%s created_by=%s rotated_from_id=%s created_at=%s\n",
 		id, *label, prefix, principal, nullInt64String(rotatedFrom), createdAt.UTC().Format(time.RFC3339))
+
+	// Round-1 SECURITY H1: if stdout is captured by systemd-
+	// journal (JOURNAL_STREAM env set by systemd-run / systemd
+	// service units), printing the raw token to stdout would
+	// turn the one-time secret into a durable journal entry.
+	// In that case the IMPL refuses to print to stdout and
+	// requires --token-out FILE (file is opened O_CREAT|O_EXCL,
+	// mode 0600).
+	if *tokenOut != "" {
+		if err := writeTokenFile(*tokenOut, rawToken); err != nil {
+			fmt.Fprintf(stderr, "partner-keys issue: write token file: %v\n", err)
+			// The row IS already inserted — we tell the operator
+			// to revoke it before retrying so a leaked-but-unused
+			// row doesn't accumulate.
+			fmt.Fprintf(stderr, "partner-keys issue: token file write failed AFTER INSERT; the row id=%d is now orphaned. Revoke it with `coordinator partner-keys revoke --id %d --reason \"file-write-failed\"` before re-issuing.\n", id, id)
+			return 1
+		}
+		fmt.Fprintf(stdout, "token written to %s (mode 0600)\n", *tokenOut)
+		return 0
+	}
+	if os.Getenv("JOURNAL_STREAM") != "" {
+		fmt.Fprintln(stderr, "partner-keys issue: refusing to print raw token to stdout because JOURNAL_STREAM is set (systemd-journal would capture the token into a durable log).")
+		fmt.Fprintln(stderr, "Re-run with --token-out /path/to/secret.token (0600) to write the token to an operator-owned file instead.")
+		fmt.Fprintf(stderr, "partner-keys issue: row id=%d was INSERTed but the raw token was suppressed. Revoke with `coordinator partner-keys revoke --id %d --reason \"journal-stream-suppressed\"` and re-issue from an interactive shell or with --token-out.\n", id, id)
+		return 1
+	}
 	fmt.Fprintln(stdout, rawToken)
 	return 0
+}
+
+// writeTokenFile writes the raw token to the named path with
+// O_CREAT|O_EXCL|O_WRONLY + mode 0600 so an existing file at
+// the same path is NOT clobbered (the operator gets a clean
+// EEXIST error). The trailing newline matches the stdout
+// shape for easy `cat`-paste.
+func writeTokenFile(path, raw string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if _, err := f.WriteString(raw + "\n"); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 // runPartnerKeysRevoke implements `coordinator partner-keys
@@ -372,10 +417,13 @@ func runPartnerKeysRevoke(args []string, stdout, stderr io.Writer) int {
 }
 
 // runPartnerKeysList implements `coordinator partner-keys
-// list`. The SELECT column list deliberately omits
-// `token_hash` — even reading bytes into the driver buffer
-// (then dropping them before print) is a SECURITY-lane
-// concern (driver / connection-pool logs).
+// list`. The SELECT column list is pinned to the locked
+// §5.4.5 set: id, label, prefix, created_at, revoked_at,
+// last_used_at. `token_hash` MUST stay out (driver/pool log
+// risk); `rotated_from_id` is intentionally absent too
+// (round-1 ARCH/CODE M1 — extra column outside the locked
+// list surface; rotation lineage is surfaced at issue time
+// in the metadata line, NOT in `list`).
 func runPartnerKeysList(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("partner-keys list", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -398,7 +446,7 @@ func runPartnerKeysList(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	rows, err := db.QueryContext(ctx, `
-SELECT id, label, prefix, created_at, revoked_at, last_used_at, rotated_from_id
+SELECT id, label, prefix, created_at, revoked_at, last_used_at
   FROM partner_keys
  ORDER BY id`)
 	if err != nil {
@@ -406,27 +454,25 @@ SELECT id, label, prefix, created_at, revoked_at, last_used_at, rotated_from_id
 		return 1
 	}
 	defer rows.Close()
-	fmt.Fprintln(stdout, "id\tlabel\tprefix\tcreated_at\trevoked_at\tlast_used_at\trotated_from_id")
+	fmt.Fprintln(stdout, "id\tlabel\tprefix\tcreated_at\trevoked_at\tlast_used_at")
 	for rows.Next() {
 		var (
-			id          int64
-			label       string
-			prefix      string
-			createdAt   time.Time
-			revokedAt   sql.NullTime
-			lastUsedAt  sql.NullTime
-			rotatedFrom sql.NullInt64
+			id         int64
+			label      string
+			prefix     string
+			createdAt  time.Time
+			revokedAt  sql.NullTime
+			lastUsedAt sql.NullTime
 		)
-		if err := rows.Scan(&id, &label, &prefix, &createdAt, &revokedAt, &lastUsedAt, &rotatedFrom); err != nil {
+		if err := rows.Scan(&id, &label, &prefix, &createdAt, &revokedAt, &lastUsedAt); err != nil {
 			fmt.Fprintf(stderr, "partner-keys list: scan: %v\n", err)
 			return 1
 		}
-		fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
+		fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\t%s\n",
 			id, label, prefix,
 			createdAt.UTC().Format(time.RFC3339),
 			nullTimeString(revokedAt),
 			nullTimeString(lastUsedAt),
-			nullInt64String(rotatedFrom),
 		)
 	}
 	if err := rows.Err(); err != nil {
@@ -470,6 +516,12 @@ func generatePartnerToken() (string, [32]byte, error) {
 //   - else "unknown@unknown".
 //
 // AC-17 requires `created_by` to be NOT NULL and non-empty.
+//
+// Round-1 ARCH M2: deliberately NO os/user.Current fallback —
+// the locked SPEC §5.4.2 rule is "$USER unset → 'unknown'";
+// adding a third behavior would introduce environment-dependent
+// drift (e.g. UID lookups via NSS) that the audit-loop SHOULD
+// NOT have to ratify.
 func resolvePrincipal(explicit string) string {
 	if strings.TrimSpace(explicit) != "" {
 		return strings.TrimSpace(explicit)
@@ -477,8 +529,6 @@ func resolvePrincipal(explicit string) string {
 	userPart := "unknown"
 	if u := strings.TrimSpace(os.Getenv("USER")); u != "" {
 		userPart = u
-	} else if cur, err := user.Current(); err == nil && strings.TrimSpace(cur.Username) != "" {
-		userPart = strings.TrimSpace(cur.Username)
 	}
 	hostPart := "unknown"
 	if h, err := os.Hostname(); err == nil && strings.TrimSpace(h) != "" {
