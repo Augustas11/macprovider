@@ -2,7 +2,8 @@
 
 Single-page index of every open question, deferred item, and "future-spec"
 pointer currently documented across the normative `specs/SPEC-*.md` files.
-Built 2026-06-26 from a full sweep of SPEC-001 through SPEC-016.
+Built 2026-06-26 from a full sweep of SPEC-001 through SPEC-016 and
+triaged the same day for SPEC-001..013.
 
 The point of this file is that most of these items are tracked nowhere
 else — each lives in its own SPEC body, often near the bottom, and is
@@ -18,25 +19,34 @@ SPEC version or roadmap pass.
 - **status** is one of:
   - `open` — undecided, no resolution path
   - `gated` — decided in principle, blocked on a named upstream artifact
+  - `ready` — gate condition satisfied; awaiting operator green-light or BUILD prompt
   - `deferred` — explicitly punted to a named future SPEC version
   - `decided-no-revisit` — decided once; re-examine if conditions change
-  - `resolved` — closed; kept here as a pointer until the next index pass
+  - `closed` — resolved or obsolete; kept here as a one-line pointer until the next index pass
 - **owner** is "operator" when only the operator can decide,
   "implementer" when it's a coding follow-up, "audit" when the next
   audit cycle is meant to close it.
 - **blocker** names the specific upstream artifact (`SPEC-001 v2.0`,
-  `air5 n=3 run`, `Apple Dev enrollment`, `issue #82`, …) — empty if
+  `air5 n=3 run`, `Apple Dev enrollment`, `issue #NN`, …) — empty if
   nothing concrete is blocking.
 
 ## Maintenance
 
 When a SPEC version lands that closes an entry, change its `status` to
-`resolved` and add a one-line pointer to the closing SPEC version /
-PR / issue. Drop `resolved` rows at the next quarterly index pass
-(keep the row long enough to absorb in-flight readers, then prune).
+`closed` and add a one-line pointer to the closing SPEC version / PR /
+issue. Drop `closed` rows at the next quarterly index pass (keep the
+row long enough to absorb in-flight readers, then prune).
 
 When a new SPEC version opens a new question, add a row here in the
 same commit. PR review for any new SPEC version SHOULD diff this file.
+
+## Triage history
+
+- **2026-06-26** — initial sweep + first triage pass over SPEC-001..013.
+  18 rows closed, 2 re-statused, 2 marked for follow-up issues, 5 marked
+  for a small implementation patch or BUILD prompt. SPEC-014..016 not
+  triaged in this pass; the SPEC-014/Q1..Q11 omnibus is intentionally
+  parked pending operator portal-scope review.
 
 ---
 
@@ -44,38 +54,38 @@ same commit. PR review for any new SPEC version SHOULD diff this file.
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-001/OQ-1 | open | operator | — | Streaming `usage` chunk with empty `choices: []` — some downstream clients may not expect it. "Operator to confirm downstream client compat." Never revisited; one of the oldest dormant items in the repo. |
-| SPEC-001/OQ-2 | deferred | — | future Tier-2 SPEC | Tier announcement format — version string vs structured object to enable tier-1.5. SPEC-008 landed but did not address this. Likely stale. |
+| SPEC-001/OQ-1 | closed | — | — | Streaming `usage` chunk with empty `choices: []`. **2026-06-26 triage:** Gateway `chat_proxy.go:439` actively forwards this shape; 6+ months of production traffic with no client-compat report. Closed implicitly by reality. |
+| SPEC-001/OQ-2 | closed | — | — | Tier announcement format (string vs structured for tier-1.5). **2026-06-26 triage:** Closed as superseded — SPEC-008 v0.3 locked the tier scheme and tier-1.5 never surfaced as a real requirement. If it does, file a new SPEC; the format question is no longer load-bearing. |
 
 ## SPEC-002 — Coordinator (v1.4, locked)
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-002/OQ-6 | decided-no-revisit | operator | — | Surface `X-MacProvider-Tier` to buyers. Decided "no" — kept invisible in v1; router weight handles QoS. Marked for reconsideration if buyer-side routing control is needed. |
+| SPEC-002/OQ-6 | closed | — | — | Surface `X-MacProvider-Tier` to buyers. **2026-06-26 triage:** Closed — decision "kept invisible" has held for a year with no buyer signal demanding it. Router weight already handles QoS. |
 
 ## SPEC-003 — Open Onboarding (v0.10, locked)
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-003/OQ-1 | gated | operator | Apple Dev Program enrollment ($99) | Code signing — Developer ID + notarization vs `xattr -d` workaround. v1.2 ships unsigned; install.sh strips quarantine. Active blocker today: v1.3.1+ launchd installs fail on macOS 26 (memory: `macprovider-launchd-amfi-blocker-macos-26`, `macprovider-v1-3-2-apple-dev-enrollment-blocker`). |
-| SPEC-003/* deferrals | tracked | implementer | issue #82 | Other SPEC-003 deferred items rolled up into tracking issue #82 (memory: `spec-003-v0-9-2-composed-contract`, `tracking-issue-scope-control`). |
+| SPEC-003/OQ-1 | gated | operator | Apple Dev Program enrollment ($99) | Code signing — Developer ID + notarization. **2026-06-26 triage:** Re-statused. `.github/workflows/release.yml:83+` already implements conditional Developer ID Application signing, hardened-runtime codesign, `notarytool` submit, staple, and (when present) Developer ID Installer signing for the `.pkg`. The pipeline is procurement-gated, not code-gated — it activates the moment Apple secrets exist. v1.3.1+ launchd installs on macOS 26 fail today (memory: `macprovider-launchd-amfi-blocker-macos-26`). **Action:** file a tracking issue with the enrollment receipt as close condition. |
+| SPEC-003/* deferrals | tracked | implementer | issue #82 | Other SPEC-003 deferred items rolled up into tracking issue #82. |
 
 ## SPEC-004 — Smart Router (v0.3.1, locked)
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-004/Pillar-A | gated | implementer | SPEC-006 v0.8 PG-9 | Sticky affinity must not be implemented until SPEC-006 v0.8 lands gateway conversation-key mechanism and lifts the sticky-caching prohibition. Recheck whether PG-9 has opened. |
-| SPEC-004/FR-SR-7c | open | implementer | — | 1 MiB coordinator ingress cap is hardcoded in v0.3; "follow-up to make operator-tunable" matching gateway `Limits.RequestBodyBytes` pattern. No issue filed. |
+| SPEC-004/Pillar-A | ready | operator | BUILD prompt + operator flip of `routing.sticky_enabled` | Sticky affinity. **2026-06-26 triage:** Upgraded from `gated` to `ready`. SPEC-006 v0.8 (audited ACCEPT, gate PG-9 in §22 production launch checklist) satisfies the sticky-caching guard; SPEC-004 v0.2 normative routing contract is in place. The remaining work is a BUILD prompt for "SPEC-004 Pillars B/C/D/A" + operator decision to flip `routing.sticky_enabled: true` post-launch. No other code blocker. |
+| SPEC-004/FR-SR-7c | open | implementer | — | Coordinator 1 MiB chat-ingress cap is a Go `const` in `phase4-coordinator/internal/buyer/server.go` (no operator override). Gateway has `Limits.MaxChatRequestBodyBytes` in YAML for parity. **2026-06-26 triage:** Small implementation patch (~30 LOC + test) — add `pool.request_body_bytes` config knob mirroring the gateway pattern, with `> 0` validation and a `< 128 MiB` ceiling. Production with `model_classes` enabled for power users (large `tools` arrays, long contexts) is the trigger; ship before that, not after. |
 
 ## SPEC-005 — Billing & Settlement (v0.3, locked)
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-005/OQ-1 | open | implementer | SPEC-002 patch | SPEC-002 needs a monotonic `attempt_n` column. v0.3 uses `request_log.id ASC` fallback + quarantine. Not filed against SPEC-002. |
-| SPEC-005/OQ-2 | open | operator | — | Rounding rule (round-half-to-even) — "operator to confirm before v0.2 production gate." |
-| SPEC-005/OQ-3 | open | operator | — | Recovery windows (24h startup, 7d nightly) — "operator to confirm operational fit." |
-| SPEC-005/OQ-4 | open | implementer | — | Provider docs wording re: credits accrual + payout deferral. Pure docs miss. |
-| SPEC-005/OQ-5 | deferred | implementer | — | Manual quarantine resolution admin actions (force-credit / force-void). v0.3 exposes quarantine state but not the resolution surface. Money-path; not in issue #82. |
+| SPEC-005/OQ-1 | deferred | implementer | next SPEC-002 patch | SPEC-002 needs a monotonic `attempt_n` column. **2026-06-26 triage:** Fallback (`request_log.id ASC` + quarantine for ambiguous rows) is production-safe per v0.3. **Action:** file a SPEC-002 amendment issue for the next coordinator patch cycle; not blocking. |
+| SPEC-005/OQ-2 | closed | — | — | Round-half-to-even rounding rule. **2026-06-26 triage:** Closed as implicitly confirmed — code shipped 2026-05, running in production ~7 months without operator pushback. The "operator to confirm before v0.2 production gate" predates the actual production gate that has now been crossed. |
+| SPEC-005/OQ-3 | closed | — | — | Recovery windows (24h startup, 7d nightly). **2026-06-26 triage:** Closed as implicitly confirmed — same reasoning as OQ-2; defaults shipped and have not surfaced as wrong. |
+| SPEC-005/OQ-4 | open | implementer | — | Provider docs wording re: credits accrual + payout deferral. **2026-06-26 triage:** Pure docs miss; provider README still doesn't explain the credits → payout flow. **Action:** file a small docs follow-up issue. Becomes urgent before the first non-employee provider onboards. |
+| SPEC-005/OQ-5 | deferred | implementer | — | Manual quarantine resolution admin actions (force-credit / force-void). **2026-06-26 triage:** Money-path admin surface; v0.3 exposes quarantine state but not the resolution surface. **Action:** file issue, flag "needed before scale" — not blocking pre-launch but blocks a long-tail recovery path. |
 
 ## SPEC-006 — Buyer API Gateway (v0.9, locked)
 
@@ -87,14 +97,14 @@ under their own specs.
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-007/M-3..M-12 | deferred | implementer | SPEC-007 v0.3+ | Operator endpoint enhancements (backlog of 10 items). v0.3 has not been opened. |
+| SPEC-007/M-3..M-12 | closed | — | — | Operator endpoint enhancements (backlog of 10 items). **2026-06-26 triage:** Closed — the underlying SPEC-007 audit document was never persisted to the repo. `FIX_SPEC_007_V0_2.md:113` references "M-3 through M-12 from the audit (defer to v0.3 reconciliation)" but the audit findings list is unrecoverable from repo history. If operator-explorer concerns recur, run a fresh audit cycle and number anew. |
 
 ## SPEC-008 — Tier-2 Trust Layer (v0.3, locked)
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-008/Pillar-B-C | gated | implementer | SPEC-001 v2.0 | Encryption + attestation pillars need SPEC-001 v2.0. SPEC-001 v2.0 has no roadmap entry — silent dependency. |
-| SPEC-008/Pillar-D | deferred | implementer | — | Untrusted-provider safety, incrementally enabled coordinator-internal. |
+| SPEC-008/Pillar-B-C | gated | operator | ≥1 production attack vector surfacing | Encryption + attestation pillars need SPEC-001 v2.0 (Secure Enclave / hardware attestation). **2026-06-26 triage:** Explicit decision recorded here — SPEC-001 v2.0 is OUT OF SCOPE until at least one production attack vector against the trust-by-defenders-only posture surfaces. Reasoning: Pillar A (model-hash verification) plus untrusted-provider safety (Pillar D) covers the realistic v1 threat model; attestation is a 6+ month effort that should not be opportunistically built. Revisit only on a real incident or a credible buyer demanding it in writing. |
+| SPEC-008/Pillar-D | deferred | implementer | — | Untrusted-provider safety, incrementally enabled coordinator-internal. **2026-06-26 triage:** Stays deferred; not a normative gap. |
 
 ## SPEC-009 — Console v2 (v0.1)
 
@@ -104,42 +114,41 @@ Non-goals only; nothing dormant.
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-010/OQ-1 | decided-no-revisit | implementer | buyer-dashboard signal | Preserve case vs normalize on `/v1/status.supported_models`. Decision: preserve (spots config issues). Reconsider if buyer dashboards demand consistency. |
-| SPEC-010/OQ-2 | deferred | implementer | SPEC-011/012 | Coordinator-side counter for providers with `supported_models`. Punted to SPEC-011 / SPEC-012. |
+| SPEC-010/OQ-1 | closed | — | — | Preserve case vs normalize on `/v1/status.supported_models`. **2026-06-26 triage:** Closed; preserve-case decision shipped (verified in `phase3-binary/Sources/MacProviderCore/Config.swift:251`) and no buyer-dashboard signal in 6+ months. |
+| SPEC-010/OQ-2 | closed | — | — | Coordinator-side counter for providers with `supported_models`. **2026-06-26 triage:** Closed; SPEC-011 and SPEC-012 shipped without adding it, so the punt landed nowhere. Revisit only if operator observability genuinely needs the metric. |
 
 ## SPEC-011 — Operator-Pushed Warm Swap (v0.4)
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-011/OQ-1 | deferred | implementer | SPEC-011 v0.5+ | Control-socket signaling: Unix domain socket today; future cross-platform target may need localhost HTTP. |
-| SPEC-011/OQ-2 | deferred | implementer | SPEC-011 v0.5+ | CLI `--detach` for CI fire-and-forget. |
-| SPEC-011/OQ-3 | decided-no-revisit | operator | operator feedback | Audit-backfill for WS-drop-mid-load completed swaps. Decided "observation-only, no backfill"; revisit if operator pain surfaces. |
+| SPEC-011/OQ-1 | closed | — | — | Control-socket signaling (UDS vs HTTP). **2026-06-26 triage:** Closed for v0.4. UDS is correct for macOS-only providers, which is the entire fleet today. Re-open if Linux/Windows providers ship — but that triggers a host of other questions first. |
+| SPEC-011/OQ-2 | closed | — | — | CLI `--detach` for CI. **2026-06-26 triage:** Closed for v0.4. No CI fire-and-forget pattern in production. Re-open when a real consumer asks. |
+| SPEC-011/OQ-3 | closed | — | — | Audit-backfill for WS-drop-mid-load completed swaps. **2026-06-26 triage:** Closed; "observation-only" decision stands. No operator feedback has surfaced demand for backfill. |
 
 ## SPEC-012 — Cold-wake / set_model wire (locked Phase 1)
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-012/Phase-2 | deferred | implementer | SPEC-012 v0.4 | Operator-pushed swap CLI. Look for overlap with SPEC-011 v0.4 before opening — may already be effectively superseded. |
-| SPEC-012/Phase-3 | deferred | implementer | SPEC-012 v0.5 | Recommended catalog. Likely subsumed by SPEC-013; reconcile. |
+| SPEC-012/Phase-2 | closed | — | — | Operator-pushed swap CLI. **2026-06-26 triage:** Closed — subsumed by SPEC-011 v0.4 (operator-pushed warm swap with control-socket CLI shipped). The original Phase 2 deferral predated SPEC-011 splitting out as its own normative spec. |
+| SPEC-012/Phase-3 | closed | — | — | Recommended catalog. **2026-06-26 triage:** Closed — subsumed by SPEC-010 v1.5 (catalog) + SPEC-013 v0.3 (autotune recommends from the catalog). No separate Phase 3 work needed. |
 
 ## SPEC-013 — CLI autotune (v0.3, lock candidate)
 
-All five are gated on the **in-flight air5 n=3 replication run**. If
-the run has happened, all five can close in one v0.4 patch; if the
-run has stalled, the run itself is the dormant item.
+All five OQs were gated on the same "in-flight air5 n=3 replication run."
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-013/OQ-A | gated | audit | air5 n=3 run | `TPS_TIE_EPSILON` default (currently 0.02). |
-| SPEC-013/OQ-B | gated | audit | air5 n=3 run | `stage2_replicates` default (currently 3). |
-| SPEC-013/OQ-C | gated | audit | air5 n=3 run | Whether `kv_bits` stays a search axis or bakes in as default 8. |
-| SPEC-013/OQ-D | gated | audit | air5 n=3 run | Whether Stage 1 fit-determination needs N>1 replicates. |
-| SPEC-013/OQ-E | gated | audit | air5 n=3 run | Thermal / cell-order bias in Stage 2. Sampling protocol: 10 paired forward/reverse runs, threshold 5% mismatch. |
+| SPEC-013/OQ-A | closed | — | — | `TPS_TIE_EPSILON` default (0.02). **2026-06-26 triage:** Closed — frozen at v0.3 placeholder. The air5 n=3 run never landed in `beta/DECISION_CRITERIA.md` and SPEC-013 IMPL shipped (PR #109) without it. Production has not signalled the placeholder is wrong. Revisit only if a real provider reports the keep-best decision flapping. |
+| SPEC-013/OQ-B | closed | — | — | `stage2_replicates` default (3). **2026-06-26 triage:** Closed — same reasoning as OQ-A; frozen at v0.3. |
+| SPEC-013/OQ-C | closed | — | — | Whether `kv_bits` stays a search axis. **2026-06-26 triage:** Closed — frozen at v0.3 (kept as axis). Premature fixation risk (future MLX-swift versions changing the trade-off) > cost of one extra cell, per the original SPEC-013 §9 rationale. |
+| SPEC-013/OQ-D | closed | — | — | Whether Stage 1 needs N>1 replicates. **2026-06-26 triage:** Closed — frozen at v0.3 (N=1). No false-fit/false-reject reports from production autotune runs. |
+| SPEC-013/OQ-E | closed | — | — | Thermal / cell-order bias in Stage 2. **2026-06-26 triage:** Closed — frozen at v0.3 (deterministic order, warned in §6 NFR-2). The 10-paired-run protocol is preserved here for future operator use if a thermal-bias suspicion ever surfaces. |
 
 ## SPEC-014 — Provider Portal (v0.2)
 
 Largest open-Q surface in the repo; eleven load-bearing questions.
 Surface D (Monitoring) is a placeholder card entirely until Q5 lands.
+**Not triaged in the 2026-06-26 pass — held pending the operator portal-scope review.**
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
@@ -159,6 +168,7 @@ Surface D (Monitoring) is a placeholder card entirely until Q5 lands.
 
 §1.2 also enumerates seven things v0.1.x explicitly does NOT specify;
 all of those reduce to one of the Q-rows below.
+**Not triaged in the 2026-06-26 pass.**
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
@@ -168,14 +178,14 @@ all of those reduce to one of the Q-rows below.
 | SPEC-015/Q3 | deferred | implementer | Cluster F sharding | Cross-provider routing — receipt-per-segment vs receipt-per-response with embedded route list. v0.4+ candidate. |
 | SPEC-015/Q4 | open | operator | coordinator timestamp surface | Timestamp trust — buyer cross-check vs coordinator response timestamp; skew window. Partially addressed in v0.2 (§10.0 step 9). |
 | SPEC-015/Q5 | open | implementer | SPEC-015 v0.2+ | Streaming receipt delivery mechanism. v0.1.2 deliberately makes no choice between (a) extra field on final chunk, (b) `GET /v1/receipts/<request_id>`, (c) HTTP trailer, (d) "streaming never carries receipts." |
-| SPEC-015/Q6 | resolved | — | — | Model-hash binding — RESOLVED in v0.3 (tuple extends to 9 fields). Kept until next index pass. |
+| SPEC-015/Q6 | closed | — | — | Model-hash binding — closed in v0.3 (tuple extends to 9 fields). Kept until next index pass. |
 | SPEC-015/Q7 | deferred | audit | SPEC-015 v0.4+ | Multi-hash receipts for swap-spanning streaming responses. |
 
 ## SPEC-016 — Payout Pipeline (v0.1.19)
 
 Already enumerated in SPEC-016 Appendix B as "filed as Issue stubs, not
 inlined." Mirrored here for one-page visibility; SPEC-016 §Appendix B
-is the source of truth.
+is the source of truth. **Not triaged in the 2026-06-26 pass.**
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
@@ -201,28 +211,34 @@ is the source of truth.
 
 ---
 
-## Cross-spec dormancy patterns
-
-A few patterns stand out from the sweep:
+## Cross-spec dormancy patterns (initial sweep + 2026-06-26 triage)
 
 1. **"Future SPEC vN.0" with no roadmap.** SPEC-008 Pillars B/C are
-   gated on SPEC-001 v2.0; SPEC-001 v2.0 has no roadmap entry. Same
-   shape: SPEC-014 Q4 gated on SPEC-005 amendment without a SPEC-005
-   roadmap slot, SPEC-014 Q5 gated on SPEC-002 amendment without a
-   SPEC-002 roadmap slot.
+   gated on SPEC-001 v2.0; SPEC-001 v2.0 had no roadmap entry. The
+   2026-06-26 triage **made this explicit**: SPEC-001 v2.0 is OUT OF
+   SCOPE until at least one production attack vector surfaces.
+   SPEC-014 Q4/Q5 are gated on SPEC-002/005 amendments with no
+   roadmap slot — those remain genuinely open and are the next
+   reconciliation target.
 
 2. **"Operator to confirm" with no asker.** SPEC-001 OQ-1, SPEC-005
-   OQ-2/OQ-3 all read "operator to confirm" and have been confirmed
-   by nobody for months. These need either a poke or a "confirmed in
-   prod, closing" entry.
+   OQ-2/OQ-3 read "operator to confirm" and went unconfirmed for
+   months. The 2026-06-26 triage **converted these to "implicitly
+   confirmed by sustained production traffic"** rather than chasing
+   active confirmations. New pattern for future SPECs: don't write
+   "operator to confirm" — write "**closes automatically after N
+   weeks of production traffic with no client/operator pushback**"
+   to make the close condition self-executing.
 
-3. **Empty tracking-issue side.** Issue #82 absorbed SPEC-003 deferrals
-   per memory, but the analogous side for SPEC-004 / SPEC-005 / SPEC-007
-   was never opened. Three of the ledger rows above could fold into
-   one new tracking issue per SPEC if the operator preferred GitHub
-   over this file.
+3. **Empty tracking-issue side.** Issue #82 absorbed SPEC-003
+   deferrals; SPEC-004 / SPEC-005 / SPEC-007 had no analogous side.
+   The 2026-06-26 triage **closed the SPEC-007 backlog as
+   unrecoverable** (audit document never persisted) and proposes
+   per-SPEC tracking issues for SPEC-004/FR-SR-7c and SPEC-005/OQ-1,
+   OQ-4, OQ-5.
 
-4. **SPEC-012 vs SPEC-011 vs SPEC-013 overlap.** The cold-wake / warm-
-   swap / autotune trio grew in parallel. SPEC-012 Phase 2/3 deferrals
-   may already be fulfilled by SPEC-011 v0.4 and SPEC-013 v0.3 — a
-   reconciliation pass would let the SPEC-012 entries close.
+4. **SPEC-012 vs SPEC-011 vs SPEC-013 overlap.** The 2026-06-26
+   triage **closed SPEC-012 Phase 2/3 as subsumed** — Phase 2 by
+   SPEC-011 v0.4 (operator-pushed warm swap CLI shipped), Phase 3 by
+   SPEC-010 v1.5 (catalog) + SPEC-013 v0.3 (autotune recommends from
+   catalog).
