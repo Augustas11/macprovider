@@ -150,7 +150,7 @@ jobs:
           cache-dependency-path: phase4-coordinator/go.sum
       - name: Install golangci-lint
         run: |
-          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint/v2/cmd/golangci-lint@v2.12.2
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
       - name: make lint-coordinator
         run: make lint-coordinator

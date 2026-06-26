@@ -33,17 +33,18 @@ import (
 func TestAC16ForbiddenImportFails(t *testing.T) {
 	bin, err := exec.LookPath("golangci-lint")
 	if err != nil {
-		t.Skip("golangci-lint not on PATH; install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2")
+		t.Skip("golangci-lint not on PATH; install: go install github.com/golangci/golangci-lint/cmd/golangci-lint/v2/cmd/golangci-lint@v2.12.2")
 	}
 
 	// The fixture is `internal/stats/forbidden_import_fixture.go`
 	// with `//go:build linttest_fixture`. We invoke golangci-lint
 	// against the stats package with the tag enabled so the
 	// fixture is compiled and depguard scans it.
+	// golangci-lint v2 dropped --out-format; the default
+	// formatter writes to stdout in a parseable form.
 	cmd := exec.Command(bin, "run",
 		"--config=.golangci.yml",
 		"--build-tags=linttest_fixture",
-		"--out-format=line-number",
 		"./internal/stats/...",
 	)
 	cmd.Dir = repoCoordinatorRoot(t)
@@ -78,12 +79,13 @@ func TestAC16ForbiddenImportFails(t *testing.T) {
 func TestForbidigoOSExitRule(t *testing.T) {
 	bin, err := exec.LookPath("golangci-lint")
 	if err != nil {
-		t.Skip("golangci-lint not on PATH; install: go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2")
+		t.Skip("golangci-lint not on PATH; install: go install github.com/golangci/golangci-lint/cmd/golangci-lint/v2/cmd/golangci-lint@v2.12.2")
 	}
+	// golangci-lint v2 dropped --out-format; the default
+	// formatter writes to stdout in a parseable form.
 	cmd := exec.Command(bin, "run",
 		"--config=.golangci.yml",
 		"--build-tags=linttest_fixture",
-		"--out-format=line-number",
 		"./internal/stats/...",
 	)
 	cmd.Dir = repoCoordinatorRoot(t)

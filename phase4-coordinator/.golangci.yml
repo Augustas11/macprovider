@@ -1,26 +1,31 @@
-# SPEC-017 v0.1.8 — depguard import-graph lint (AC-16).
+# SPEC-017 v0.1.8 — depguard import-graph lint (AC-16) +
+# forbidigo os.Exit/log.Fatal ban for internal/stats/*.
 #
-# Two distinct boundaries enforced (BUILD §D.2 + §D.3):
+# golangci-lint v2 schema. Pinned binary version is v2.12.2
+# (see Makefile + .github/workflows/ci.yml). Earlier draft used
+# a hybrid v1/v2 syntax (round-2 CODE r2 HIGH E1 + ARCH r2 HIGH
+# D) that the linter rejected.
+#
+# Two boundaries (BUILD §D.2 + §D.3):
 #
 #   1. Request-path packages (internal/stats, internal/stats/store,
 #      internal/stats/migrations) MUST NOT import internal/billing,
-#      internal/explorer, internal/ws, or internal/auth (no
-#      Bearer-parser allowlist symbol in Step 1 since handlers do
-#      not exist yet; Step 3 will add a named allowlist entry
-#      here when it lands the BearerToken helper).
+#      internal/explorer, internal/ws, or internal/auth. Step 3
+#      will add a named Bearer-parser allowlist entry when the
+#      handler lands.
 #
 #   2. Rollup package (internal/stats/rollup) MAY import
 #      billing/session/pool read-only paths (the §4.2 carve-out)
-#      but MUST NOT import internal/explorer (an operator-only
-#      admin surface; SPEC AC-16 names it in the forbidden set)
-#      or internal/ws, and MUST NOT import internal/stats or
-#      internal/stats/store (the rollup is the writer side;
-#      handlers are the reader side; they share only the DB).
+#      but MUST NOT import internal/explorer, internal/ws,
+#      internal/stats, or internal/stats/store.
 #
-# Additionally, os.Exit / log.Fatal / log.Fatalf are forbidden
-# anywhere under internal/stats/* to preserve the §7.3
-# recover-middleware guarantee (BUILD §D.3). The forbidigo
-# linter catches the latter; depguard catches the former.
+# forbidigo bans os.Exit / log.Fatal / log.Fatalf under
+# internal/stats/* to preserve §7.3 recover-middleware guarantee
+# (BUILD §D.3). Other packages — notably cmd/coordinator/main.go
+# which IS the process-termination owner — are excluded via
+# linters.exclusions.rules.
+
+version: "2"
 
 run:
   timeout: 5m
@@ -31,58 +36,57 @@ linters:
     - depguard
     - forbidigo
 
-linters-settings:
-  depguard:
+  settings:
+    depguard:
+      rules:
+        stats-request-path:
+          list-mode: lax
+          files:
+            - "**/internal/stats/*.go"
+            - "**/internal/stats/store/**/*.go"
+            - "**/internal/stats/migrations/**/*.go"
+          deny:
+            - pkg: github.com/augstar/macprovider-coordinator/internal/billing
+              desc: SPEC-017 AC-16 — request-path packages must not import internal/billing
+            - pkg: github.com/augstar/macprovider-coordinator/internal/explorer
+              desc: SPEC-017 AC-16 — request-path packages must not import internal/explorer
+            - pkg: github.com/augstar/macprovider-coordinator/internal/ws
+              desc: SPEC-017 AC-16 — request-path packages must not import internal/ws
+            - pkg: github.com/augstar/macprovider-coordinator/internal/auth
+              desc: SPEC-017 AC-16 — request-path packages must not import internal/auth (Step 3 adds a named Bearer-parser allowlist; Step 1 forbids the whole package)
+        stats-rollup:
+          list-mode: lax
+          files:
+            - "**/internal/stats/rollup/**/*.go"
+          deny:
+            - pkg: github.com/augstar/macprovider-coordinator/internal/explorer
+              desc: SPEC-017 AC-16 — rollup must not import internal/explorer (operator-only admin surface)
+            - pkg: github.com/augstar/macprovider-coordinator/internal/ws
+              desc: SPEC-017 AC-16 — rollup must not import internal/ws
+            - pkg: github.com/augstar/macprovider-coordinator/internal/stats
+              desc: SPEC-017 AC-16 — rollup is the writer side; handlers are the reader side; they share only the database
+            - pkg: github.com/augstar/macprovider-coordinator/internal/stats/store
+              desc: SPEC-017 AC-16 — rollup must not import the read-side DAO
+
+    # forbidigo v2 schema: `pattern` is anchored to a regex; we
+    # anchor on `^...$` so the rule fires on the actual call site
+    # (not on every identifier whose name contains the substring
+    # `bool` etc — round-2 ARCH r2 HIGH D evidence).
+    forbidigo:
+      forbid:
+        - pattern: ^os\.Exit$
+          msg: "SPEC-017 §7.3 — internal/stats/* must not call os.Exit; propagate errors to cmd/coordinator/main.go"
+        - pattern: ^log\.Fatal$
+          msg: "SPEC-017 §7.3 — internal/stats/* must not call log.Fatal"
+        - pattern: ^log\.Fatalf$
+          msg: "SPEC-017 §7.3 — internal/stats/* must not call log.Fatalf"
+      analyze-types: false
+
+  exclusions:
     rules:
-      stats-request-path:
-        list-mode: lax
-        files:
-          - "**/internal/stats/*.go"
-          - "**/internal/stats/store/**/*.go"
-          - "**/internal/stats/migrations/**/*.go"
-        deny:
-          - pkg: github.com/augstar/macprovider-coordinator/internal/billing
-            desc: SPEC-017 AC-16 — request-path packages must not import internal/billing
-          - pkg: github.com/augstar/macprovider-coordinator/internal/explorer
-            desc: SPEC-017 AC-16 — request-path packages must not import internal/explorer
-          - pkg: github.com/augstar/macprovider-coordinator/internal/ws
-            desc: SPEC-017 AC-16 — request-path packages must not import internal/ws
-          - pkg: github.com/augstar/macprovider-coordinator/internal/auth
-            desc: SPEC-017 AC-16 — request-path packages must not import internal/auth (Step 3 adds a named Bearer-parser allowlist; Step 1 forbids the whole package)
-      stats-rollup:
-        list-mode: lax
-        files:
-          - "**/internal/stats/rollup/**/*.go"
-        deny:
-          - pkg: github.com/augstar/macprovider-coordinator/internal/explorer
-            desc: SPEC-017 AC-16 — rollup must not import internal/explorer (operator-only admin surface)
-          - pkg: github.com/augstar/macprovider-coordinator/internal/ws
-            desc: SPEC-017 AC-16 — rollup must not import internal/ws
-          - pkg: github.com/augstar/macprovider-coordinator/internal/stats
-            desc: SPEC-017 AC-16 — rollup is the writer side; handlers are the reader side; they share only the database
-          - pkg: github.com/augstar/macprovider-coordinator/internal/stats/store
-            desc: SPEC-017 AC-16 — rollup must not import the read-side DAO
-
-  forbidigo:
-    forbid:
-      - pattern: 'os\.Exit'
-        msg: "SPEC-017 §7.3 — internal/stats/* must not call os.Exit; propagate errors to cmd/coordinator/main.go"
-      - pattern: 'log\.Fatal'
-        msg: "SPEC-017 §7.3 — internal/stats/* must not call log.Fatal/log.Fatalf"
-      - pattern: 'log\.Fatalf'
-        msg: "SPEC-017 §7.3 — internal/stats/* must not call log.Fatalf"
-    exclude_godoc_examples: false
-    analyze-types: false
-
-issues:
-  exclude-rules:
-    # forbidigo's os.Exit / log.Fatal rules only apply inside
-    # internal/stats/*. Allow the existing patterns elsewhere
-    # (cmd/coordinator/main.go uses os.Exit by design — it IS the
-    # process-termination owner per §7.3).
-    - path-except: "internal/stats/.*\\.go"
-      linters:
-        - forbidigo
-
-  max-issues-per-linter: 0
-  max-same-issues: 0
+      # forbidigo applies ONLY under internal/stats/*. Other
+      # packages — cmd/coordinator/main.go especially — call
+      # os.Exit by design and must not be lint-blocked.
+      - path-except: internal/stats/
+        linters:
+          - forbidigo
