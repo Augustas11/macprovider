@@ -434,7 +434,10 @@ The recover-vs-redaction ordering issue is resolved by pinning a single stack an
      - Otherwise (direct-to-coordinator, no trusted proxy in front), use `r.RemoteAddr` directly. The implementation MUST NOT trust `X-Forwarded-For` from an untrusted immediate peer.
    Per SPEC §5.6 v0.1.8 auth-failure tier, the floor is 300 req/min per IP per endpoint (5× the public floor). On exceed: return 429 with §5.9 `rate_limited` envelope BEFORE the auth dispatcher runs ANY `sha256 + SELECT` work. AC-22 verifies. AC-18 timing samples MUST be taken below this threshold so timing equivalence is measured on non-limited 401s.
 5. **Auth dispatcher:** reads the bearer token from `r.Context().Value(authKey{})` (set in step 1), hashes via `sha256(token_utf8_bytes)`, performs SELECT against `partner_keys`, enforces §5.4.3 7-row decision table.
-6. **Post-auth success rate-limit middleware (per-tier):** keys on client IP (public tier success bucket per §5.6) or `partner_keys.id` (partner tier per §5.6 + §5.4.7). Tracks successful 2xx accounting only; stale-503 responses MUST NOT debit this bucket (so a rollup outage does not exhaust quotas for healthy clients). The public-tier bucket here is the "fallback when nginx is bypassed" surface §5.6 names.
+6. **Post-auth success rate-limit middleware (per-tier, per-endpoint):** keys on the **(tier subject, endpoint)** tuple per SPEC §5.6 ("60 req/min per IP per endpoint" / "600 req/min per key per endpoint"). The endpoint identifier is the route token (e.g. `"overview"`, `"leaderboard"`, `"health"`). v12 CODE r11 002 fix: the v11 prompt said "client IP or `partner_keys.id`" without the endpoint dimension — that would have let 60 `/overview` requests exhaust quota for `/leaderboard` on the same IP. Concrete keys:
+   - **Public tier success bucket:** key = `(client_ip, endpoint)`, limit = 60 req/min (per §5.6, defense-in-depth when nginx is bypassed).
+   - **Partner tier:** key = `(partner_keys.id, endpoint)`, limit = `partner_keys.rate_limit_rpm` (default 600). Per §5.6 + §5.4.7.
+   Tracks successful 2xx accounting only; stale-503 responses MUST NOT debit this bucket (so a rollup outage does not exhaust quotas for healthy clients). The auth-failure bucket above is also `(client_ip, endpoint)`-keyed for the same reason. A Step 3 test MUST prove: 50 `/v1/stats/overview` requests + 50 `/v1/stats/leaderboard` requests from the same IP both succeed (separate per-endpoint buckets, neither hits 60); 61 of either kind on its own returns 429.
 7. **Handler:** computes JSON, returns response. Recover MUST be set on `500 internal` with §5.9 envelope on panic.
 
 **Tests for the auth-failure tier (v0.1.8 AC-22 + SECURITY r5 H1 + ARCH r8 C1 / CODE r9 H1):**
@@ -456,9 +459,9 @@ Returns `500 internal` with the §5.9 envelope and `Content-Type: application/js
 
 **Rate limiting per §5.6 (v0.1.8 three-tier model):**
 
-- **Public tier (no Authorization)** — nginx `limit_req_zone` is PRIMARY (configured in Step 4.B), in-process bucket is FALLBACK. Hard 60 req/min per IP per endpoint; no burst absorption.
-- **Partner tier (valid Authorization → 200 partner projection)** — in-process bucket keyed on `partner_keys.id` (NOT raw token, NOT prefix). Hard limit per `partner_keys.rate_limit_rpm` (default 600). v0.1.8 removed the `rate_limit_burst` column; IMPL MUST clamp to `rate_limit_rpm` per-row, no burst.
-- **Auth-failure tier (Authorization present → 401 per §5.4.3 rows 3/5/6/7)** — in-process bucket pre-auth (see middleware stack step 4 above), keyed on IP+endpoint with trusted-proxy-allowlist client-IP derivation. Floor 300 req/min. Runs BEFORE `sha256+SELECT` so invalid-bearer floods cannot drive unbounded DB lookups. AC-22 verifies.
+- **Public tier (no Authorization)** — nginx `limit_req_zone` is PRIMARY (configured in Step 4.B), in-process bucket is FALLBACK. Hard 60 req/min **per (IP, endpoint)** tuple; no burst absorption. Per SPEC §5.6, the endpoint dimension is mandatory.
+- **Partner tier (valid Authorization → 200 partner projection)** — in-process bucket keyed on **(partner_keys.id, endpoint)** (NOT raw token, NOT prefix). Hard limit per `partner_keys.rate_limit_rpm` (default 600). v0.1.8 removed the `rate_limit_burst` column; IMPL MUST clamp to `rate_limit_rpm` per-row, no burst.
+- **Auth-failure tier (Authorization present → 401 per §5.4.3 rows 3/5/6/7)** — in-process bucket pre-auth (see middleware stack step 4 above), keyed on **(IP, endpoint)** with trusted-proxy-allowlist client-IP derivation. Floor 300 req/min. Runs BEFORE `sha256+SELECT` so invalid-bearer floods cannot drive unbounded DB lookups. AC-22 verifies.
 - 429 response includes `Retry-After: <seconds>` and §5.9 `rate_limited` envelope.
 
 **Tests for Step 3 — AC-to-step matrix (replaces "every AC in Step 3"):**
@@ -568,36 +571,43 @@ Issuance flow:
 
 **v0.1.8 — Authorization-aware nginx keying (binding, per SPEC §5.6).** The public-tier `limit_req_zone` MUST NOT throttle Authorization-bearing requests at the edge. The IMPL author picks one of these two shapes:
 
-- **Shape (a) — map-based bypass:**
+- **Shape (a) — map-based bypass, with per-endpoint zones (v12 CODE r11 002 fix):**
   ```nginx
   map $http_authorization $public_rl_key {
       ""      $binary_remote_addr;
       default "";
   }
-  limit_req_zone $public_rl_key zone=stats_public:10m rate=60r/m;
+  # Separate zone per endpoint so /overview, /leaderboard, /health do
+  # NOT share a 60-rpm quota per IP. SPEC §5.6 mandates per-endpoint.
+  limit_req_zone $public_rl_key zone=stats_overview:10m rate=60r/m;
+  limit_req_zone $public_rl_key zone=stats_leaderboard:10m rate=60r/m;
+  limit_req_zone $public_rl_key zone=stats_health:10m rate=60r/m;
   ```
-  When `Authorization` is present, the key is empty and the limiter does not count the request.
-- **Shape (b) — named-location dispatch (mechanically valid alternative; CODE r9 M2 fix replaces the prior `if ($http_authorization)` sketch which would have failed `nginx -t`):**
+  Each endpoint's `location` block references its own zone (e.g. `limit_req zone=stats_overview nodelay;` inside `location /v1/stats/overview`). When `Authorization` is present, the key is empty and the limiter does not count the request. v11 used a single shared `stats_public` zone, which would have let 60 `/overview` requests exhaust quota for `/leaderboard` on the same IP — that's CODE r11 002.
+- **Shape (b) — named-location dispatch (mechanically valid alternative; CODE r9 M2 fix replaces the prior `if ($http_authorization)` sketch which would have failed `nginx -t`; v12 CODE r11 002 adds per-endpoint zones):**
   ```nginx
   map $http_authorization $auth_present {
       ""      "0";
       default "1";
   }
-  limit_req_zone $binary_remote_addr zone=stats_public:10m rate=60r/m;
+  # Per-endpoint zones — same rationale as Shape (a).
+  limit_req_zone $binary_remote_addr zone=stats_overview:10m rate=60r/m;
+  limit_req_zone $binary_remote_addr zone=stats_leaderboard:10m rate=60r/m;
+  limit_req_zone $binary_remote_addr zone=stats_health:10m rate=60r/m;
 
   location /v1/stats/leaderboard {
-      error_page 418 = @keyed_pass;
+      error_page 418 = @keyed_pass_leaderboard;
       if ($auth_present = "1") { return 418; }
-      # public path: limit_req runs here
-      limit_req zone=stats_public nodelay;
+      limit_req zone=stats_leaderboard nodelay;
       limit_req_status 429;
       proxy_pass http://coordinator;
   }
 
-  location @keyed_pass {
+  location @keyed_pass_leaderboard {
       # keyed path: NO public limit_req; in-process per-key bucket caps in coordinator
       proxy_pass http://coordinator;
   }
+  # Mirror the pattern for /v1/stats/overview and /v1/stats/health with their own zones.
   ```
   The `error_page 418 = @keyed_pass` + `return 418` pattern is nginx's documented mechanism for conditional location dispatch and DOES pass `nginx -t`. The `if` directive is used only with `return`, which is one of the four directives nginx officially supports inside `if`.
 
@@ -629,6 +639,7 @@ A test MUST assert that after a successful partner-key request through nginx, th
 - Anonymous edge-cache equivalence (v0.1.7 — replacement for the prior `Bearer garbage` cache test): issue TWO anonymous public requests within s-maxage; assert nginx serves the same cached response body to both (proving the public projection caches across truly anonymous requests). Do NOT use `Authorization: Bearer garbage` as the second request — per locked AC-3, ANY present-but-invalid Bearer token MUST return `401 unauthorized` (the `proxy_cache_bypass $http_authorization` directive earlier in this section ensures any request carrying `Authorization` bypasses the public cache and reaches the handler, which then returns 401 per the §5.4.3 decision table). The earlier draft of this test (v7 commit `c45d644`) incorrectly told nginx to serve a cached public 200 to a `Bearer garbage` request — that contradicted AC-3 and the §5.4.3 row-6 hash+SELECT timing-equivalence rule. The v0.1.7 fix-pass commit removed it.
 - AC-3 nginx-tier confirmation (v0.1.7): send `GET /v1/stats/leaderboard` with `Authorization: Bearer garbage` through nginx; assert the response status is 401 with `code: "unauthorized"` (the handler reaches the §5.4.3 row-6 branch via the `proxy_cache_bypass $http_authorization` rule — nginx forwards every Authorization-bearing request to the coordinator) AND the response does NOT come from any cached public 200.
 - **§5.6 keyed-through-nginx bypass companion test (v0.1.8 ARCH r8 H1):** seed a valid partner key with `rate_limit_rpm = 600`. From a single client IP, issue 100 `/v1/stats/leaderboard` requests through nginx in 60s, each carrying `Authorization: Bearer <valid_token>`. Assert: nginx forwards ALL 100 to the coordinator (none rejected at the edge with `Retry-After`); the responses are 200 partner projection. This proves the Authorization-aware keying (map or split location below) actually bypasses the public 60 rpm limiter for valid keyed traffic. The companion test deliberately stays below the 600 rpm partner-tier cap so the only 429 surface that could fire is the unwanted public-tier double-throttle; if the test sees a public-tier 429, the nginx config is wrong.
+- **§5.6 per-endpoint isolation test (v12 CODE r11 002):** from a single client IP with no Authorization, issue 50 `/v1/stats/overview` requests followed by 50 `/v1/stats/leaderboard` requests through nginx in 60s. Assert: ALL 100 succeed at nginx (each endpoint has its own 60-rpm zone per the per-endpoint zone declarations above; the two zones do not share a quota). Then issue a 61st `/v1/stats/overview` request from the same IP within the same 60s; assert 429. Then issue a 51st `/v1/stats/leaderboard` request from the same IP; assert 200 (leaderboard still has 10 tokens left in its own zone). This proves the endpoint dimension is honored in the nginx config.
 - **`proxy_no_cache` write-suppression test (SECURITY r5 C1):** issue a partner-key request through nginx; inspect the nginx `proxy_cache_path` directory after the response. Assert NO cache entry exists for the URL+Authorization combination. Then issue an anonymous follow-up request to the same URL within s-maxage; assert the response carries cache status `MISS` or `BYPASS` (NOT `HIT`) — proving no shared cache served partner-projection bytes to an anonymous client.
 - Burst behavior: at the rate-limit threshold, excess requests are REJECTED with 429 promptly, NOT delayed (verifies `nodelay`).
 - Subdomain trust: request from `Origin: https://evil.streamvc.live` is rejected at the application layer (Step 3 CORS test); nginx forwards the request (does not block at edge).
