@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -33,6 +34,8 @@ func main() {
 		err = pruneTokens(os.Args[2:])
 	case "list-pair-ot-mints":
 		err = listPairOTMints(os.Args[2:])
+	case "pre-flip-audit":
+		err = preFlipAudit(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -301,6 +304,182 @@ func resolvePruneCutoff(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("expected duration (e.g. 168h) or RFC3339 timestamp")
 }
 
+// preFlipAudit is the SPEC-003 FR-C9.4 executable runbook gate (#82 item 3).
+// Operators MUST run this before flipping RequireProviderTokens=true to ensure
+// every active provider_tokens row has a `last_used_at` no older than
+// --max-last-used-age. A row with last_used_at IS NULL is ALWAYS treated as
+// stale — it means no provider has ever authenticated with Bearer using that
+// token, so flipping the flag would brick that provider.
+//
+// Exit codes:
+//
+//	0 — no stale active rows; safe to flip RequireProviderTokens=true
+//	1 — at least one stale active row; refuse to flip
+//	2 — usage / flag error (handled by flag.ExitOnError)
+//	*  other I/O failure (DB open / read), error printed to stderr
+//
+// Output format is human-readable by default; pass --json for machine-readable.
+// The full report is printed to stdout in both modes regardless of result, so
+// operators can pipe to deploy-pipeline gates.
+func preFlipAudit(args []string) error {
+	stale, err := preFlipAuditRun(args, os.Stdout)
+	if err != nil {
+		return err
+	}
+	if stale {
+		os.Exit(1)
+	}
+	return nil
+}
+
+// preFlipAuditRun is the testable core. Returns stale=true when any active
+// row failed the freshness check; the caller maps that to exit 1.
+func preFlipAuditRun(args []string, stdout io.Writer) (stale bool, err error) {
+	fs := flag.NewFlagSet("pre-flip-audit", flag.ExitOnError)
+	dbPath := fs.String("db", "coordinator.db", "path to coordinator SQLite database")
+	maxAge := fs.Duration("max-last-used-age", 24*time.Hour, "maximum allowed last_used_at age; rows older (or NULL) are stale")
+	jsonOut := fs.Bool("json", false, "emit machine-readable JSON instead of text")
+	if err := fs.Parse(args); err != nil {
+		return false, err
+	}
+	if *maxAge <= 0 {
+		return false, fmt.Errorf("--max-last-used-age must be positive, got %s", *maxAge)
+	}
+	// Fail closed if the operator points at a non-existent DB path.
+	// auth.OpenStore would otherwise create an empty SQLite file and the
+	// audit would silently return safe_to_flip=true on a typo'd path.
+	// The deploy gate must NEVER pass on phantom evidence.
+	if _, err := os.Stat(*dbPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, fmt.Errorf("coordinator DB %q does not exist; refusing to create an empty file for a deploy gate", *dbPath)
+		}
+		return false, fmt.Errorf("stat coordinator DB %q: %w", *dbPath, err)
+	}
+	store, err := auth.OpenStore(*dbPath)
+	if err != nil {
+		return false, err
+	}
+	defer store.Close()
+	records, err := store.ListTokens(context.Background())
+	if err != nil {
+		return false, err
+	}
+	// Parse each non-NULL last_used_at with the canonical layout
+	// auth/tokens.go nowString() writes. Failing closed on a parse
+	// error is a defense-in-depth check: production writes go through
+	// nowString(), but a corrupted or out-of-band write would otherwise
+	// pass the lex comparison silently.
+	const canonicalTimeLayout = "2006-01-02T15:04:05Z"
+	now := time.Now().UTC()
+	cutoff := now.Add(-*maxAge)
+	cutoffStr := cutoff.Format(canonicalTimeLayout)
+
+	type offender struct {
+		TokenPrefix  string  `json:"token_prefix"`
+		ProviderID   string  `json:"provider_id"`
+		ProviderName string  `json:"provider_name"`
+		CreatedAt    string  `json:"created_at"`
+		LastUsedAt   *string `json:"last_used_at"`
+		Reason       string  `json:"reason"`
+	}
+	offenders := []offender{}
+	activeCount := 0
+	for _, r := range records {
+		if r.RevokedAt.Valid {
+			continue
+		}
+		activeCount++
+		if !r.LastUsedAt.Valid {
+			offenders = append(offenders, offender{
+				TokenPrefix:  r.TokenPrefix,
+				ProviderID:   r.ProviderID,
+				ProviderName: r.ProviderName,
+				CreatedAt:    r.CreatedAt,
+				LastUsedAt:   nil,
+				Reason:       "last_used_at IS NULL (provider never authenticated with Bearer)",
+			})
+			continue
+		}
+		// Strict-layout parse — any deviation from the canonical UTC
+		// RFC3339Z second-precision shape is treated as stale (fail
+		// closed). Production writes ALWAYS use this layout; a deviant
+		// row is either corruption or an out-of-band write and the
+		// deploy gate must not pass on it.
+		//
+		// Round-trip check: Go's time.Parse with the "...05Z" layout
+		// permits fractional seconds (e.g. "...05.123Z") even though
+		// the layout omits them — see Go's time/format.go. So
+		// time.Parse succeeding is NECESSARY but NOT SUFFICIENT for
+		// canonical. We round-trip the parsed time back through Format
+		// with the same layout and require byte-identical equality
+		// to the stored string.
+		parsed, parseErr := time.Parse(canonicalTimeLayout, r.LastUsedAt.String)
+		canonicalRoundTrip := parseErr == nil && parsed.UTC().Format(canonicalTimeLayout) == r.LastUsedAt.String
+		if !canonicalRoundTrip {
+			v := r.LastUsedAt.String
+			reason := ""
+			if parseErr != nil {
+				reason = fmt.Sprintf("last_used_at %q is not canonical RFC3339Z second-precision UTC (parse error: %v); refusing to admit a non-canonical row", v, parseErr)
+			} else {
+				reason = fmt.Sprintf("last_used_at %q is not canonical RFC3339Z second-precision UTC (round-trip mismatch with %q); refusing to admit a non-canonical row", v, parsed.UTC().Format(canonicalTimeLayout))
+			}
+			offenders = append(offenders, offender{
+				TokenPrefix:  r.TokenPrefix,
+				ProviderID:   r.ProviderID,
+				ProviderName: r.ProviderName,
+				CreatedAt:    r.CreatedAt,
+				LastUsedAt:   &v,
+				Reason:       reason,
+			})
+			continue
+		}
+		if parsed.Before(cutoff) {
+			v := r.LastUsedAt.String
+			offenders = append(offenders, offender{
+				TokenPrefix:  r.TokenPrefix,
+				ProviderID:   r.ProviderID,
+				ProviderName: r.ProviderName,
+				CreatedAt:    r.CreatedAt,
+				LastUsedAt:   &v,
+				Reason:       fmt.Sprintf("last_used_at %s older than cutoff %s", v, cutoffStr),
+			})
+		}
+	}
+
+	if *jsonOut {
+		out := struct {
+			Cutoff       string     `json:"cutoff"`
+			MaxAge       string     `json:"max_last_used_age"`
+			ActiveTokens int        `json:"active_tokens"`
+			StaleCount   int        `json:"stale_count"`
+			Offenders    []offender `json:"offenders"`
+			SafeToFlip   bool       `json:"safe_to_flip"`
+		}{cutoffStr, maxAge.String(), activeCount, len(offenders), offenders, len(offenders) == 0}
+		b, mErr := json.MarshalIndent(out, "", "  ")
+		if mErr != nil {
+			return false, mErr
+		}
+		fmt.Fprintln(stdout, string(b))
+	} else {
+		fmt.Fprintf(stdout, "pre-flip-audit cutoff=%s max_age=%s active_tokens=%d stale=%d\n", cutoffStr, maxAge.String(), activeCount, len(offenders))
+		for _, o := range offenders {
+			lu := "NULL"
+			if o.LastUsedAt != nil {
+				lu = *o.LastUsedAt
+			}
+			fmt.Fprintf(stdout, "  STALE token_prefix=%s provider_id=%s provider_name=%q created_at=%s last_used_at=%s reason=%q\n",
+				o.TokenPrefix, o.ProviderID, o.ProviderName, o.CreatedAt, lu, o.Reason)
+		}
+		if len(offenders) == 0 {
+			fmt.Fprintln(stdout, "safe_to_flip=true (no stale active rows)")
+		} else {
+			fmt.Fprintf(stdout, "safe_to_flip=false (%d stale active rows; do NOT flip RequireProviderTokens=true until each is reconnected or revoked)\n", len(offenders))
+		}
+	}
+
+	return len(offenders) > 0, nil
+}
+
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: coordinator-cli <issue-token|revoke-token|list-tokens|revoke-and-kick|prune-tokens|list-pair-ot-mints|pre-flip-audit> [flags]")
 }
