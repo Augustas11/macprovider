@@ -42,7 +42,7 @@ That said, four items need confirmation BEFORE kickoff (two implementation-shape
 
 **Production-cutover deploy gates (operator side, MUST be discharged before nginx flip — but DO NOT block IMPL code-write or staging deploys):**
 
-5. **Postgres roles + DSN provisioning (HARD before any Pearl deploy of stats code).** Operator creates the Postgres roles and their passwords on the Pearl Postgres instance, applies the §9.1 / §6.1 / §6.5 / §5.4.1 migrations, and installs the four DSNs (`stats_reader_dsn`, `stats_rollup_dsn`, `provider_portal_dsn`, optionally `partner_keys_writer_dsn`) in the coordinator config/secrets store. Step 1's startup smoke verifies the DSNs and roles via a staging deploy BEFORE any Pearl rollout. The coordinator binary MUST be fail-closed: on startup, if `stats.enabled = true` and any required DSN is missing or any required role fails connection smoke, the process MUST refuse to start. If `stats.enabled = false` (default until cutover), the stats subtree mounts as a 503 stub (`{"status":"down","reason":"stats_disabled"}`) and the rest of the coordinator runs normally.
+5. **Postgres roles + DSN provisioning (HARD before any Pearl deploy of stats code).** Operator creates the Postgres roles and their passwords on the Pearl Postgres instance, applies the §9.1 / §6.1 / §6.5 / §5.4.1 migrations, and installs the four DSNs (`stats_reader_dsn`, `stats_rollup_dsn`, `provider_portal_dsn`, optionally `partner_keys_writer_dsn`) in the coordinator config/secrets store. Step 1's startup smoke verifies the DSNs and roles via a staging deploy BEFORE any Pearl rollout. The coordinator binary MUST be fail-closed: on startup, if `stats.enabled = true` and any required DSN is missing or any required role fails connection smoke, the process MUST refuse to start. If `stats.enabled = false` (default until cutover), the `/v1/stats/*` mux subtree is NOT registered with the HTTP router — requests to `/v1/stats/*` return a standard `404 Not Found` from the coordinator's existing mux fallback (NOT a custom JSON envelope with `code: "stats_disabled"`, which would violate the §5.9 closed code vocabulary). The rest of the coordinator runs normally.
 6. **DNS for `stats.streamvc.live`.** Operator points the new vhost at the same Pearl VPS IP as `coordinator.streamvc.live`. SOFT prereq — IMPL builds and unit-tests without DNS in place; integration smoke needs it.
 7. **Cloudflare configuration.** If Cloudflare fronts the new vhost (recommended per §5.6 / §7.4), operator configures rate-limit zones and bot-management rules before public cutover. SOFT prereq.
 8. **Nginx server-block on Pearl.** Operator deploys the new server-block (§7.4 + Step 4 directives below) and verifies TLS, cache directives, header strip on `Authorization`, dedicated `limit_req_zone`, fail-closed burst (§5.6 enforced via `nodelay`). SOFT prereq for IMPL but a HARD prereq for production cutover.
@@ -120,7 +120,7 @@ The lint (e.g. `depguard`) MUST be configured with both boundaries and MUST run 
   - SELECT on EXACTLY: `stats_overview_current`, `stats_timeseries_rpm_30m`, `stats_timeseries_tpm_30m`, `stats_leaderboard_24h`, `stats_leaderboard_7d`, `stats_leaderboard_30d`, `stats_leaderboard_all`, `stats_components_health`, `provider_visibility`, `partner_keys`.
   - Explicit deny: `stats_late_events` (rollup-internal per §9.1, §9.3), `provider_rewards_ledger` (rollup-internal per §9.1a), `provider_visibility_audit` (write-only at request time), and any OLTP billing/session/pool table.
 - `stats_rollup` (§7.2.2) — rollup job role.
-  - SELECT, INSERT, UPDATE, DELETE on the eight `stats_*` tables plus `stats_components_health` plus `stats_late_events`.
+  - SELECT, INSERT, UPDATE, DELETE on EXACTLY: `stats_overview_current`, `stats_timeseries_rpm_30m`, `stats_timeseries_tpm_30m`, `stats_leaderboard_24h`, `stats_leaderboard_7d`, `stats_leaderboard_30d`, `stats_leaderboard_all`, `stats_components_health`, `stats_late_events` (9 tables total — enumerated per SPEC §7.2.2; do NOT use a `stats_*` shorthand).
   - SELECT on `provider_visibility`, `provider_rewards_ledger`.
   - `USAGE, SELECT ON SEQUENCE stats_late_events_id_seq`.
   - PLUS IMPL-authored SELECT grants on the locked SPEC-002 + SPEC-005 OLTP source tables (the SPEC-005 ledger tables per §10 — typically `ledger_request_credits`, `ledger_operator_credits`, `ledger_payout_ready`, `ledger_reconciliation_runs`, plus `provider_tokens` from SPEC-002 §7). Re-verify the dependency-line-3 versions at IMPL time per §1 prereq 3.
@@ -130,10 +130,10 @@ The lint (e.g. `depguard`) MUST be configured with both boundaries and MUST run 
   - INSERT on `provider_visibility_audit`.
   - `USAGE, SELECT ON SEQUENCE provider_visibility_audit_id_seq`.
   - Explicit deny: any `stats_*`, any OLTP table.
-- `partner_keys_writer` (§7.2.4) — OPTIONAL.
-  - Column-scoped UPDATE on `partner_keys (last_used_at)` — NOT row-level UPDATE.
-  - **PLUS column-scoped SELECT on `partner_keys (id)`** — the worker's `UPDATE partner_keys SET last_used_at = $1 WHERE id = $2` SQL pattern requires SELECT privilege on `id` to evaluate the WHERE clause in PostgreSQL. Without this, the column-scoped UPDATE alone is insufficient and the worker fails at runtime. SPEC-017 §7.2.4 names "UPDATE (last_used_at) only" as the intent; the IMPL must add the minimal SELECT(id) needed to make that intent executable, and the SECURITY audit lane MUST verify the grant is narrowed to `(id)` and NOT widened to row-level SELECT (which would expose `token_hash` and other columns).
-  - Optional: skip the role if the operator chooses to not populate `last_used_at`.
+- `partner_keys_writer` (§7.2.4) — **OPTIONAL and DEFAULT-OFF for v0.1 IMPL.**
+  - SPEC §7.2.4 grants ONLY `UPDATE (last_used_at) ON partner_keys` — column-scoped, no SELECT on any column. In PostgreSQL, the worker's natural `UPDATE partner_keys SET last_used_at = $1 WHERE id = $2` pattern requires SELECT privilege on `id` to evaluate the WHERE clause, which the locked SPEC does NOT grant. This makes the role's natural worker SQL inexecutable under the locked grants.
+  - **Resolution for v0.1 IMPL: skip the role entirely.** Do NOT create `partner_keys_writer`, do NOT start the worker, do NOT populate `last_used_at`. The `last_used_at` column stays NULL for v0.1 — the operator loses last-used visibility but the role isolation stays exactly as the SPEC locks it.
+  - If a future operator wants `last_used_at` populated, the IMPL author MUST surface a SPEC v0.2 candidate (e.g. SECURITY DEFINER stored procedure + EXECUTE grant, or narrowed `SELECT(id) + UPDATE(last_used_at)` documented in the SPEC) — do NOT widen the grant in IMPL prompt or code without SPEC approval.
 
 **DB connection mechanics (bridge to current coordinator pattern):**
 
@@ -148,10 +148,10 @@ Per current code at [`phase4-coordinator/cmd/coordinator/main.go`](../phase4-coo
 
 - Unit: every `CREATE TABLE` round-trips via the migration runner (e.g. `golang-migrate`) up and down without orphans.
 - Integration (AC-9, mapped here from the AC matrix below): `stats_reader` returns permission-denied on `SELECT 1 FROM ledger_request_credits LIMIT 1` (NOT "relation does not exist"). Verify against at least one of `ledger_request_credits`, `ledger_operator_credits`, `ledger_payout_ready`, `ledger_reconciliation_runs` (the locked SPEC-005 v0.3 tables, re-verified at IMPL time).
-- Integration: `partner_keys_writer` runs the actual worker SQL `UPDATE partner_keys SET last_used_at = $1 WHERE id = $2` and SUCCEEDS (proves both `UPDATE(last_used_at)` and `SELECT(id)` grants are present). Then `UPDATE partner_keys SET allowed_origins = $1 WHERE id = $2` returns permission-denied (allowed_origins not in the column UPDATE grant). Then `SELECT token_hash FROM partner_keys WHERE id = $1` returns permission-denied (token_hash not in the column SELECT grant). The three-fixture test proves the narrowing is exact.
+- Integration: if `partner_keys_writer` role exists in this deploy, run `UPDATE partner_keys SET last_used_at = $1 WHERE id = $2` and document the result. Per SPEC §7.2.4 the locked grant is column-scoped UPDATE only with no SELECT; the WHERE clause likely fails with permission-denied. This is the EXPECTED behavior — record it in the test output as "writer-disabled per locked SPEC, last_used_at remains NULL for v0.1." A passing v0.1 IMPL skips this role entirely; the test exists to PROVE the SPEC's grant-narrowing intent is preserved, not to make the worker run.
 - Integration: `provider_portal` SELECT against any `stats_*` table returns permission-denied; INSERT to `provider_visibility_audit` succeeds with a row whose BIGSERIAL `id` was assigned (sequence grant works).
-- Integration (AC-16 lint smoke): a deliberate test package adding `import "phase4-coordinator/internal/billing"` under `internal/stats` (test fixture only, NOT shipped) fails `make lint`. Verify the rule applies to `internal/auth` too (other than the named Bearer-parser allowlist symbol).
-- Integration: `os.Exit("test")` under `internal/stats/` fails `make lint`.
+- Integration (AC-16 lint smoke): a deliberate test package adding `import "<module-path>/internal/billing"` under `internal/stats` (where `<module-path>` is the value in [`phase4-coordinator/go.mod`](../phase4-coordinator/go.mod) — verify before authoring the test; e.g. `github.com/augstar/macprovider-coordinator/internal/billing`) fails `make lint`. The test fixture MUST be a COMPILABLE import so the failure is from the depguard / import-graph lint diagnostic, NOT a compiler error from a bad import path. The lint output MUST be asserted by name (e.g. `depguard: forbidden import`), not just a non-zero exit code. Verify the rule applies to `<module-path>/internal/auth` too (other than the named Bearer-parser allowlist symbol).
+- Integration: a deliberate test file under `internal/stats/` calling `os.Exit(1)` (NOT `os.Exit("test")` — `os.Exit` takes an int and the wrong signature would fail typechecking before the lint runs) fails `make lint` with the named "no-process-termination-in-stats" rule. Same assertion-by-name discipline.
 - Integration (AC-19, mapped here): SQL fixture inserts a `stats_leaderboard_24h` row for `provider_id = 'never-toggled-xyz'` with NO matching `provider_visibility` row; assert the left-join in Step 3's handler treats this as `mode = 'bucketed'` (verified end-to-end in Step 3).
 - Integration (AC-20, mapped here): SQL CI assertion that `SELECT COUNT(*) FROM provider_visibility_audit WHERE new_mode = 'exact' AND actor_kind = 'operator'` returns 0; failure means the operator-side process violated §6.6.3.
 - Integration (AC-10 concrete transaction test): SPEC-017 v0.1 does not ship the portal handler (SPEC-014 v0.9 follow-up), but the storage contract MUST be tested at Step 1 using a test harness that drives the same `provider_portal` role. Test shape:
@@ -190,7 +190,7 @@ Per current code at [`phase4-coordinator/cmd/coordinator/main.go`](../phase4-coo
 
 **Backfill posture (both modes implemented; operator chooses at cutover):** per §9.7, implement both Path A (rollup-start-date forward + `partial_history_since` field set on `30d`/`all` responses while the window is shorter than its label) and Path B (synchronous backfill from full OLTP history before flipping `stats.streamvc.live` server-block on). Operator-config flag `stats.rollup.backfill_mode = "partial"|"full"` selects at runtime; default `"partial"`.
 
-**`partner_keys.last_used_at` channel:** updates routed via a buffered in-process Go channel (`chan partnerKeyTouch`) consumed by a dedicated worker running on the `partner_keys_writer` `*sql.DB` (per §5.4.3 step 2 + §7.2.4). The buffered-channel pattern keeps the response path off the write; channel buffer size + drop-on-overflow policy is the IMPL author's choice but MUST NOT block the response path. MAY be a no-op (worker not started) if the operator skips this update.
+**`partner_keys.last_used_at` updates: NOT IMPLEMENTED in v0.1.** Per the `partner_keys_writer` resolution in Step 1, the role is skipped for v0.1 and `last_used_at` stays NULL. Step 2 implements NO worker, NO channel, and Step 3's auth dispatcher (§5.4.3 step 2) does NOT emit any `last_used_at` touch. The SPEC §5.4.3 "MAY update `last_used_at` (best effort)" is satisfied by the default-off path. A future SPEC v0.2 candidate that pins an executable grant pattern will unblock the worker; do NOT add it in v0.1 IMPL.
 
 **Minimal fixture corpus for Step 2 tests** (mechanically reusable in Step 3 too):
 
@@ -209,7 +209,7 @@ A seed SQL file under `phase4-coordinator/internal/stats/testdata/` MUST contain
 
 - Unit: each rollup query produces deterministic output on the seed corpus.
 - Integration: a rollup tick advances `stats_*.generated_at`; `stats_components_health` rows update accordingly.
-- Integration (health SLA derivation against `stats_components_health` — NOT `stats_overview_current`): seed or age the `stats_components_health` row for `component = 'overview'` so that `now - generated_at > 120s` (past the §5.8 503 budget). Call `GET /v1/stats/health` (Step 3 dependency, OR run against a Step 3 stub if Step 3 has not landed). Assert JSON `status = "down"` per §5.3. Separately, the AC-14 test for `/v1/stats/overview` 503 lives in Step 3 and seeds `stats_overview_current.generated_at > 120s` directly — that is a different path (the request handler's freshness check, not the health-derivation path).
+- Integration (rollup-state assertions only — handler-response tests are Step 3): seed or age the `stats_components_health` row for `component = 'overview'` so that `now - generated_at > 120s`. Assert the table state directly (`SELECT generated_at, last_error_at FROM stats_components_health WHERE component = 'overview'`). The corresponding `/v1/stats/health` JSON status assertion (`status = "down"`) lives in Step 3, seeded from this Step 2 fixture. Separately, AC-14 for `/v1/stats/overview` 503 also lives in Step 3 and seeds `stats_overview_current.generated_at > 120s` — a different code path (handler freshness check vs health derivation).
 - Integration: late event at `T-30h` folds into `30d` snapshot on next refresh; event at `T-60h` lands in `stats_late_events` (the rollup role can write here; the handler role cannot read it per §7.2.1).
 - Integration: drift > 0.5% triggers `stats_rollup_drift_detected` event AND rebuild value wins (assert `stats_leaderboard_all.<axis>` matches rebuild, not incremental).
 - Property: `provider_id → pseudonym` mapping is deterministic per provider (same `provider_id` → same pseudonym across snapshots; pseudonym is stable per provider per §3.3).
@@ -248,7 +248,7 @@ Implementation rules:
 - ALWAYS compute `sha256(<token>_utf8_bytes)` and ALWAYS SELECT by `token_hash` for every keyed request — no in-memory key cache that would survive revocation per §5.4.5. No early-return on prefix mismatch (would create timing side-channel).
 - Any in-process comparison of secret-derived bytes MUST use `subtle.ConstantTimeCompare` — do NOT use `==`, `bytes.Equal`, or string comparison.
 - Rows 6 and 7 MUST have indistinguishable response latency (±20% variance per AC-18 statistical test of 100+ requests).
-- On success, route `last_used_at` update through the `chan partnerKeyTouch` channel (NOT inline SQL on the response path).
+- On success, do NOT touch `last_used_at` in v0.1 (per the §7.2.4 default-off resolution above). The auth dispatcher returns success directly; no channel emit, no SQL touch.
 
 **CORS per §5.7 — preflight is key-agnostic** (browsers don't send Authorization on preflight). The handler MUST NOT evaluate per-key allowlist at OPTIONS time. Per-key allowlist enforced ONLY on GET. CORS allowed origins MUST use exact-match strings; sibling-subdomain wildcards (e.g. `*.streamvc.live`) FORBIDDEN — `console.streamvc.live`, `portal.streamvc.live`, `stats.streamvc.live` have distinct trust roles.
 
@@ -288,10 +288,10 @@ The subsequent GET is then evaluated by the §5.4.3 7-row decision table EXACTLY
 
 The recover-vs-redaction ordering issue is resolved by pinning a single stack and giving the recover middleware its own first-line `Authorization` strip. The chain MUST be:
 
-1. **Redaction-context middleware (outermost):** runs first on the inbound request. Reads `Authorization`, replaces it with `REDACTED` in the request's logging context, and stores the parsed bearer token in a goroutine-local handle for the auth dispatcher (the only consumer). Every downstream log/trace/metric emitter reads from the redacted context, NOT the raw request header.
+1. **Redaction-context middleware (outermost):** runs first on the inbound request. Reads `Authorization`, replaces the header value with `REDACTED` in the request's logging context (`r.Header.Set` or a request-clone pattern), and stores the parsed bearer token in `r.Context()` under an unexported typed key — e.g. `type authKey struct{}` + `r = r.WithContext(context.WithValue(r.Context(), authKey{}, parsedToken))`. The auth dispatcher (step 4 below) retrieves the token via `r.Context().Value(authKey{})`. NO goroutine-local storage, NO package globals, NO `sync.Map` keyed by goroutine ID — those patterns are non-idiomatic Go and unsafe under concurrent serving. The unexported typed key prevents accidental cross-package retrieval. Every downstream log/trace/metric emitter reads ONLY the redacted header context; the raw token in `r.Context()` is consumed by the auth dispatcher and discarded after the SELECT.
 2. **Recover middleware:** wraps the entire `/v1/stats/*` subtree (all methods including GET, HEAD, OPTIONS, and the 405 path for other verbs). On panic: log `event=stats_handler_panic` (structured) using the REDACTED context — so `Authorization` is already `REDACTED`, no raw token, no `token_hash`, no raw SQL, no stack in the public log line. Stack MAY go to a debug-only sink. The recover middleware MUST ALSO perform its own first-line `Authorization` strip as defense-in-depth (in case the redaction context is bypassed for any reason); this is the SECURITY guarantee.
 3. **Access-logging / tracing middleware:** reads only the redacted context.
-4. **Auth dispatcher:** reads the goroutine-local bearer handle from step 1, hashes via `sha256(token_utf8_bytes)`, performs SELECT, enforces §5.4.3 7-row decision table.
+4. **Auth dispatcher:** reads the bearer token from `r.Context().Value(authKey{})` (set in step 1), hashes via `sha256(token_utf8_bytes)`, performs SELECT against `partner_keys`, enforces §5.4.3 7-row decision table.
 5. **Rate-limit middleware (in-process):** keys on client IP (public tier) or `partner_keys.id` (partner tier).
 6. **Handler:** computes JSON, returns response. Recover MUST be set on `500 internal` with §5.9 envelope on panic.
 
@@ -319,7 +319,7 @@ Step 3 OWNS these ACs (writes the test):
 - **AC-4** bucketed providers → `exact_earnings*: null` in public projection.
 - **AC-5** exact providers → `exact_earnings*` populated with 2-decimal float.
 - **AC-6** partner-key projection populates `earnings_usd` / `earnings_work_usd` / `earnings_rewards_usd` for ALL rows regardless of mode.
-- **AC-7** health 200 even when degraded.
+- **AC-7** health 200 even when degraded. Plus the health derivation test: seed Step 2's aged `stats_components_health` fixture (component `overview`, `generated_at = now - 130s`); call `GET /v1/stats/health`; assert JSON `status = "down"` (or `"degraded"` depending on the budget; pin per §5.3 thresholds).
 - **AC-11** panic recovery (injected panic; assert /healthz survives + `event=stats_handler_panic` logged with redaction).
 - **AC-12** 304 round-trip on If-None-Match.
 - **AC-13** OPTIONS `/v1/stats/leaderboard` returns EXACTLY 204 with empty body, `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`, `Access-Control-Allow-Headers: Authorization, Content-Type`.
@@ -369,7 +369,7 @@ Flags:
 - `--allowed-origin <url>` (repeatable, optional) — populates `allowed_origins`. Multiple = allowlist. Empty = no Origin restriction.
 - `--rpm <int>` (default 600) — populates `rate_limit_rpm`.
 - `--burst <int>` (default 1200) — populates `rate_limit_burst`.
-- `--created-by <text>` (required — the `created_by TEXT NOT NULL` column per §5.4.1; populate from operator principal or current OS user; CI test verifies the row's `created_by` is non-empty).
+- `--created-by <text>` (OPTIONAL — if omitted, defaults to a non-empty operator principal: `$USER@$(hostname)` from environment, or `"unknown@<hostname>"` if `$USER` is unset; populates the `created_by TEXT NOT NULL` column per §5.4.1). The default MUST be non-empty so the locked SPEC AC-17 command `coordinator partner-keys issue --label X` (NO `--created-by` flag) still passes argument validation, generates a token, and INSERTs a row with non-empty `created_by`. CI tests run BOTH the bare AC-17 command AND the explicit `--created-by ops@example.com` variant.
 - `--rotate-from <existing_id>` (optional) — see rotation flow below.
 
 Issuance flow:
@@ -389,7 +389,8 @@ Issuance flow:
 
 **Tests for 4.A:**
 
-- AC-17: `coordinator partner-keys issue --label X --created-by ops@example.com` prints exactly one 47-character token starting with `mpk_`, body matches `/^[A-Za-z0-9_-]{43}$/`, INSERTs a row with non-empty `created_by`. Subprocess exit followed by `journalctl --since=...` shows the raw token does NOT appear; `token_hash` does NOT appear; the 43-char random body substring does NOT appear.
+- AC-17 (locked SPEC command): `coordinator partner-keys issue --label X` prints exactly one 47-character token starting with `mpk_`, body matches `/^[A-Za-z0-9_-]{43}$/`, INSERTs a row with non-empty `created_by` (auto-filled from `$USER@hostname` per the default rule above). Subprocess exit followed by `journalctl --since=...` shows the raw token does NOT appear; `token_hash` does NOT appear; the 43-char random body substring does NOT appear.
+- AC-17 (explicit --created-by variant): `coordinator partner-keys issue --label X --created-by ops@example.com` does the same and the row's `created_by` is exactly `ops@example.com`.
 - Rotation overlap: issue key A; issue key B with `--rotate-from <A>`; assert both unlock the partner projection BEFORE revoking A; then `revoke --id <A>`; assert A returns 401 on the very next request while B still works.
 - CLI smoke: `partner-keys revoke --id 99999` (non-existent) returns clean error, NOT a panic.
 
@@ -398,8 +399,14 @@ Issuance flow:
 **Nginx server-block on Pearl** for `stats.streamvc.live` AND a path-prefix block for `coordinator.streamvc.live/v1/stats/*`. Required directives:
 
 - `limit_req_zone` declaration per endpoint at the `http` block (defines the zone — no `nodelay` here; `nodelay` is invalid on `limit_req_zone`).
-- `limit_req zone=<name> burst=<n> nodelay;` directive applied to each endpoint's `location` block (fail-closed; 429 returns immediately, NOT queued-then-served per SECURITY H3).
+- `limit_req zone=<name> nodelay;` (note: NO `burst=<n>` for the AC-8 surface — see below). Applied to each endpoint's `location` block.
 - `limit_req_status 429;` per endpoint location.
+
+**Burst reconciliation with AC-8 (operator-attention required):** SPEC §5.6 names "60 req/min, 120 burst" for the public tier; SPEC AC-8 requires "61st request from same IP within 60s returns 429". With nginx semantics `rate=60r/m` (1 req per 1s) and `burst=120` (120 token bucket), 61 requests within 60s would NOT trigger 429 — the burst budget would absorb up to ~120 excess. The two pins are inconsistent in plain nginx.
+
+v0.1 IMPL resolution: configure the public AC-8 surface (`/v1/stats/overview` + `/v1/stats/health` + public `/v1/stats/leaderboard`) WITHOUT burst (`limit_req zone=<name> nodelay;` — omit `burst=`). This makes AC-8's 61st-request 429 deterministic at the cost of legitimate spike absorption. If the operator wants legitimate burst absorption to match SPEC §5.6's `120 burst` value, the IMPL author MUST surface a SPEC v0.2 candidate to reconcile §5.6 vs AC-8 BEFORE shipping a production config with `burst=120`. Document the chosen config in the cutover runbook (Step 4.C) and flag the SPEC inconsistency in the convergence file.
+
+Partner tier (`Authorization: Bearer mpk_*`) is in-process per §5.6 and does NOT use nginx `limit_req`, so the burst question doesn't apply there; the partner bucket uses `partner_keys.rate_limit_rpm` / `rate_limit_burst` columns directly.
 - Strip `Authorization` header from access logs (`log_format` excludes `$http_authorization`, or use `set $authorization "REDACTED"` pattern).
 - `proxy_cache_path` for public projections ONLY. The partner-key projection (carries `Cache-Control: private`) MUST NOT be cached at nginx — gate via `proxy_cache_bypass $http_authorization` so any request with `Authorization` bypasses the cache.
 - `proxy_set_header X-Forwarded-For` per existing coordinator pattern.
@@ -414,6 +421,7 @@ Issuance flow:
 - Edge-cache cross-contamination test: issue keyed request, then anonymous request from same IP within s-maxage; assert keyed response was NOT served to the anonymous request (different body, no exact-$ leak). Verify `Vary: Authorization` is honored AND `Cache-Control: private` on keyed responses prevents nginx caching.
 - Burst behavior: at the rate-limit threshold, excess requests are REJECTED with 429 promptly, NOT delayed (verifies `nodelay`).
 - Subdomain trust: request from `Origin: https://evil.streamvc.live` is rejected at the application layer (Step 3 CORS test); nginx forwards the request (does not block at edge).
+- **AC-15 nginx access-log redaction (Step 4.B share):** send a keyed `/v1/stats/leaderboard` request through nginx using a valid `mpk_*` token. Wait for log flush. Scan the nginx access log file (path per the operator config) and assert ZERO occurrences of: the raw token string, the substring of the random 43-char body, the value `mpk_<any>` beyond what `prefix` legitimately carries in operator-permitted log lines, the literal `token_hash`, or any base64-like 43-char sequence. The expected log line shows `Authorization: REDACTED` or omits the header entirely per the §7.4 access-log strip directive.
 
 #### 4.C Observability, runbooks, changelog
 
@@ -482,7 +490,7 @@ This obligation does NOT block public cutover (the public `/v1/stats/leaderboard
 | AC-12 | Step 3 | If-None-Match round-trip |
 | AC-13 | Step 3 | OPTIONS preflight |
 | AC-14 | Step 3 | seeded stale generated_at |
-| AC-15 | Step 3 + Step 4.A | log/metric/trace sweep across journalctl, nginx logs, metrics |
+| AC-15 | Step 3 + Step 4.A + Step 4.B + Step 4.C | redaction sweep distributed: Step 3 covers handler structured logs + recover panic logs + trace spans; Step 4.A covers CLI journalctl; Step 4.B covers nginx access logs (send a keyed `/v1/stats/leaderboard` GET through nginx, then scan the access log for raw token / `Authorization` / `token_hash` / random-portion substring); Step 4.C covers Prometheus metric labels |
 | AC-16 | Step 1 | CI lint |
 | AC-17 | Step 4.A | CLI integration + journalctl assertion |
 | AC-18 | Step 3 | timing statistical test (100+ requests) |
