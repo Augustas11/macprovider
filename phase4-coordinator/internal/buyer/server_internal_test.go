@@ -85,6 +85,23 @@ func TestIsCommitWorthyDataLine(t *testing.T) {
 		{"choices_with_finish_reason_int", "data: {\"choices\":[{\"finish_reason\":1}]}\n", false},
 		{"choices_with_finish_reason_empty_string", "data: {\"choices\":[{\"finish_reason\":\"\"}]}\n", false},
 
+		// post-r6 fresh security-lane MAJOR (PR #167 3-lane audit):
+		// arbitrary-key delta/message must NOT pass on non-empty alone.
+		{"choices_with_delta_empty_key", "data: {\"choices\":[{\"delta\":{\"\":0}}]}\n", false},
+		{"choices_with_delta_unknown_key", "data: {\"choices\":[{\"delta\":{\"x\":\"y\"}}]}\n", false},
+		{"choices_with_delta_content_empty", "data: {\"choices\":[{\"delta\":{\"content\":\"\"}}]}\n", false},
+		{"choices_with_delta_role_empty", "data: {\"choices\":[{\"delta\":{\"role\":\"\"}}]}\n", false},
+		{"choices_with_delta_tool_calls_empty_array", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[]}}]}\n", false},
+		{"choices_with_delta_function_call_empty", "data: {\"choices\":[{\"delta\":{\"function_call\":{}}}]}\n", false},
+		// post-r6 — accept known-field delta/message variants.
+		{"choices_with_delta_role_string", "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n", true},
+		{"choices_with_delta_content_string", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n", true},
+		{"choices_with_delta_refusal_string", "data: {\"choices\":[{\"delta\":{\"refusal\":\"i cannot\"}}]}\n", true},
+		{"choices_with_delta_reasoning_string", "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n", true},
+		{"choices_with_delta_tool_calls_array", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"f\"}}]}}]}\n", true},
+		{"choices_with_delta_function_call_object", "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"f\"}}}]}\n", true},
+		{"choices_with_message_content_string", "data: {\"choices\":[{\"message\":{\"content\":\"hi\"}}]}\n", true},
+
 		// r4 value-shape inside usage — reject non-OpenAI shapes.
 		{"usage_arbitrary_fields", "data: {\"usage\":{\"foo\":\"bar\"}}\n", false},
 		{"usage_only_prompt_tokens", "data: {\"usage\":{\"prompt_tokens\":4}}\n", false},

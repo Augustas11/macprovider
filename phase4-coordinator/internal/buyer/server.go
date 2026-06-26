@@ -2109,7 +2109,6 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	reader := bufio.NewReader(resp.Body)
 	var preCommit bytes.Buffer
 	var lineBuf bytes.Buffer
-	committed := false
 	sawCommitWorthyDataLine := false
 	flusher, _ := w.(http.Flusher)
 	var promptTok, completionTok *int64
@@ -2198,8 +2197,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// Commit transition: write SSE headers, flush the buffered first
 	// event(s) to the buyer in one shot, then drop into the original
 	// line-by-line forwarding loop for the remainder of the stream.
+	// From this point on, errors are committed-terminal — wsForwardCancelled
+	// / wsForwardProviderDisconnectedCommitted / wsForwardComplete only.
 	writeBuyerHeaders()
-	committed = true
 	if _, writeErr := w.Write(preCommit.Bytes()); writeErr != nil {
 		s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer pre-commit write failed")
 		return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
@@ -2209,7 +2209,6 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	if flusher != nil {
 		flusher.Flush()
 	}
-	_ = committed // documents the post-commit phase below
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
@@ -2261,14 +2260,18 @@ var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 //
 //   - `choices` must be a non-empty JSON array where AT LEAST ONE
 //     element (not necessarily the first) is an object carrying one of:
-//       - `delta`: a NON-EMPTY object (matches OpenAI role/content/
-//         tool_calls/function_call delta payloads; `{"delta":{}}` and
-//         `{"delta":null}` reject — these are no-work signals)
-//       - `message`: a NON-EMPTY object (matches the non-streaming
-//         message-shape variants; empty message rejects)
-//       - `finish_reason`: a STRING of length >= 1 (matches `"stop"`,
-//         `"length"`, `"tool_calls"`, etc.; numeric or empty/null
-//         finish_reason rejects)
+//
+//   - `delta`: an object carrying at least one KNOWN OpenAI field
+//     (content/role/refusal/reasoning non-empty string, tool_calls
+//     non-empty array, function_call non-empty object).
+//     Arbitrary-key objects like `{"":0}` or `{"x":"y"}` reject.
+//
+//   - `message`: same allowlist as `delta` (matches non-streaming
+//     message-shape variants)
+//
+//   - `finish_reason`: a STRING of length >= 1 (matches `"stop"`,
+//     `"length"`, `"tool_calls"`, etc.; numeric or empty/null
+//     finish_reason rejects)
 //
 //   - `usage` must decode to non-negative INTEGER `completion_tokens`
 //     in [0, maxRequestLogUsageTokens] AND at least one of
@@ -2300,10 +2303,10 @@ func isCommitWorthyDataLine(line []byte) bool {
 				if err := json.Unmarshal(choice, &obj); err != nil {
 					continue
 				}
-				if raw, has := obj["delta"]; has && isNonEmptyJSONObject(raw) {
+				if raw, has := obj["delta"]; has && hasOpenAIDeltaSignal(raw) {
 					return true
 				}
-				if raw, has := obj["message"]; has && isNonEmptyJSONObject(raw) {
+				if raw, has := obj["message"]; has && hasOpenAIDeltaSignal(raw) {
 					return true
 				}
 				if raw, has := obj["finish_reason"]; has && isNonEmptyJSONString(raw) {
@@ -2321,14 +2324,58 @@ func isCommitWorthyDataLine(line []byte) bool {
 }
 
 // isNonEmptyJSONObject reports whether raw decodes to a JSON object
-// (map) with at least one key. Used by isCommitWorthyDataLine to
-// reject delta:{} / delta:null / message:{} as no-work signals.
+// (map) with at least one key. Retained for general-purpose checks;
+// the commit predicate uses hasOpenAIDeltaSignal instead since
+// post-PR-167 security review showed `{"":0}` would otherwise pass.
 func isNonEmptyJSONObject(raw json.RawMessage) bool {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return false
 	}
 	return len(obj) > 0
+}
+
+// hasOpenAIDeltaSignal reports whether raw decodes to a JSON object
+// carrying at least one KNOWN OpenAI delta/message field with a value
+// that signals real provider work. The fresh security-review lane on
+// PR #167 caught that `isNonEmptyJSONObject` accepted `{"":0}` /
+// `{"x":"y"}` — a 37-byte payload that gamed the commit threshold
+// while delivering nothing. This allowlist closes that gap.
+//
+// Accepted shapes:
+//   - content: non-empty string (the streaming token delta)
+//   - role: non-empty string (the role-assignment first chunk)
+//   - refusal: non-empty string (safety-refusal stream)
+//   - tool_calls: non-empty array (function/tool calling)
+//   - function_call: non-empty object (legacy function calling)
+//   - reasoning: non-empty string (reasoning-model trace stream)
+func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return false
+	}
+	if raw, has := obj["content"]; has && isNonEmptyJSONString(raw) {
+		return true
+	}
+	if raw, has := obj["role"]; has && isNonEmptyJSONString(raw) {
+		return true
+	}
+	if raw, has := obj["refusal"]; has && isNonEmptyJSONString(raw) {
+		return true
+	}
+	if raw, has := obj["reasoning"]; has && isNonEmptyJSONString(raw) {
+		return true
+	}
+	if raw, has := obj["tool_calls"]; has {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+			return true
+		}
+	}
+	if raw, has := obj["function_call"]; has && isNonEmptyJSONObject(raw) {
+		return true
+	}
+	return false
 }
 
 // isNonEmptyJSONString reports whether raw decodes to a JSON string

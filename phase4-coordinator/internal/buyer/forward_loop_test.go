@@ -417,12 +417,16 @@ func TestM92_RowSequence_HTTPStreamingZeroBodyTriggersFailover(t *testing.T) {
 // non-blank-then-blank check and triggers failover.
 func TestM92_RowSequence_HTTPStreamingOneBytePartialTriggersFailover(t *testing.T) {
 	const requestID = "11111111-9201-4201-8201-111111111111"
+	// Distinctive sentinel — a regex-unfriendly two-byte payload that cannot
+	// appear in the legitimate failover stream below, so the body assertion
+	// can be a clean unconditional "sentinel must not leak".
+	const badSentinel = "\xfb\xad"
 	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
-		_, _ = w.Write([]byte("x"))
+		_, _ = w.Write([]byte(badSentinel))
 	}))
 	defer badUpstream.Close()
 	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -464,8 +468,11 @@ func TestM92_RowSequence_HTTPStreamingOneBytePartialTriggersFailover(t *testing.
 	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
 		t.Fatalf("provider = %q, want ok (after failover from 1-byte-EOF provider)", rr.Header().Get("X-MacProvider-Provider"))
 	}
-	if bytes.Contains(rr.Body.Bytes(), []byte("x")) && !bytes.Contains(rr.Body.Bytes(), []byte(`"ok"`)) {
-		t.Fatalf("body shows the malicious 1-byte payload but not the failover stream; body=%s", rr.Body.String())
+	if bytes.Contains(rr.Body.Bytes(), []byte(badSentinel)) {
+		t.Fatalf("buyer body leaked the malicious pre-commit sentinel %q; body=%q", badSentinel, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"ok"`)) {
+		t.Fatalf("body missing failover provider's stream; body=%q", rr.Body.String())
 	}
 	rows := queryAllRequestLogRows(t, dbPath)
 	if len(rows) != 2 {
