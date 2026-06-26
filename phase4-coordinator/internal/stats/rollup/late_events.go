@@ -70,7 +70,7 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
                (` + effectivePromptTokensSQL("lrc") + ` + ` + effectiveCompletionTokensSQL("lrc") + `)::BIGINT,
                'lrc:' || lrc.id::TEXT AS src
           FROM ledger_request_credits lrc
-          JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
+          JOIN ` + authenticatedProvidersRelation + ` pt ON pt.provider_id = lrc.provider_id
          WHERE EXTRACT(EPOCH FROM lrc.ts_utc) < $1
            AND ($2 = 0 OR EXTRACT(EPOCH FROM lrc.ts_utc) >= $2)
            AND GREATEST(lrc.created_at_utc, COALESCE(lrc.updated_at_utc, lrc.created_at_utc)) > $3

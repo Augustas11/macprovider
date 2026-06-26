@@ -47,3 +47,30 @@ func effectiveCompletionTokensSQL(alias string) string {
 func effectivePromptTokensSQL(alias string) string {
 	return "COALESCE(" + alias + ".prompt_tokens, 0)"
 }
+
+// authenticatedProvidersRelation is the rollup's SQL fragment
+// for the authenticated-provider set, used in place of a raw
+// `provider_tokens` JOIN.
+//
+// Round-8 CODE r8 HIGH 1 fix: the real `provider_tokens` schema
+// (`phase4-coordinator/internal/auth/tokens.go:247`) allows
+// MULTIPLE rows per `provider_id` over time — one active plus N
+// revoked historical rows, enforced via a partial unique index
+// only on unrevoked rows. A raw
+// `JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id`
+// multiplies the LHS by the count of `provider_tokens` rows for
+// each provider, inflating overview tokens, leaderboard
+// earnings, timeseries buckets, etc., once any provider has any
+// revoke/reissue history.
+//
+// The fix collapses `provider_tokens` to its DISTINCT provider
+// IDs before joining. v0.1 IMPL trust-source policy is
+// "authenticated-EVER," not "currently-active" — a provider
+// with all-revoked tokens has historical activity that SHOULD
+// be visible in lifetime leaderboards (`stats_leaderboard_all`).
+// v0.2 may pin a stricter "active-only" policy; that would
+// change this relation to add `WHERE revoked_at IS NULL`.
+//
+// Excluding empty provider_id matches the partial-unique-index
+// predicate in the auth schema.
+const authenticatedProvidersRelation = `(SELECT DISTINCT provider_id FROM provider_tokens WHERE provider_id <> '')`

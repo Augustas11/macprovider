@@ -226,7 +226,7 @@ func runIncrementalLeaderboardUpdate(ctx context.Context, db *sql.DB, cfg Config
 func queryActiveProvidersInLookback(ctx context.Context, db *sql.DB, lookbackStart, endUnix int64) ([]string, error) {
 	const q = `
         SELECT DISTINCT pt.provider_id
-          FROM provider_tokens pt
+          FROM ` + authenticatedProvidersRelation + ` pt
          WHERE EXISTS (
              SELECT 1 FROM ledger_request_credits lrc
               WHERE lrc.provider_id = pt.provider_id
@@ -271,7 +271,7 @@ func computeLeaderboardRowForProvider(ctx context.Context, db *sql.DB, cfg Confi
                MIN(lrc.ts_utc) AS first_seen,
                MAX(lrc.ts_utc) AS last_seen
           FROM ledger_request_credits lrc
-          JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
+          JOIN ` + authenticatedProvidersRelation + ` pt ON pt.provider_id = lrc.provider_id
          WHERE pt.provider_id = $1
            AND ($2 = 0 OR EXTRACT(EPOCH FROM lrc.ts_utc) >= $2)
            AND EXTRACT(EPOCH FROM lrc.ts_utc) < $3
@@ -297,7 +297,7 @@ func computeLeaderboardRowForProvider(ctx context.Context, db *sql.DB, cfg Confi
         SELECT COALESCE(SUM(prl.amount_usd), 0) AS amount,
                MAX(prl.unix_ts) AS last_unix_ts
           FROM provider_rewards_ledger prl
-          JOIN provider_tokens pt ON pt.provider_id = prl.provider_id
+          JOIN ` + authenticatedProvidersRelation + ` pt ON pt.provider_id = prl.provider_id
          WHERE pt.provider_id = $1
            AND ($2 = 0 OR prl.unix_ts >= $2)
            AND prl.unix_ts < $3

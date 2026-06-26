@@ -121,7 +121,7 @@ func queryOverviewCumulatives(ctx context.Context, db *sql.DB, sinceUnix int64, 
             COALESCE(SUM(` + effectiveCompletionTokensSQL("lrc") + `), 0)::BIGINT,
             COUNT(DISTINCT lrc.request_id)::BIGINT
           FROM ledger_request_credits lrc
-          JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
+          JOIN ` + authenticatedProvidersRelation + ` pt ON pt.provider_id = lrc.provider_id
          WHERE ($1 = 0 OR EXTRACT(EPOCH FROM lrc.ts_utc) >= $1)
            AND lrc.fault_flag = 'none'
            AND lrc.quarantined = FALSE

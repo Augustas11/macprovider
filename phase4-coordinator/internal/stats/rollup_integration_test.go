@@ -63,6 +63,14 @@ import (
 // fresh here. Ordering matters: drop ledger_request_credits
 // before provider_tokens (no FK between them in stubs, but
 // keep an explicit order for readability).
+// Round-8 CODE r8 HIGH 1 fix: stub now mirrors the real
+// auth/tokens.go schema — `id BIGSERIAL PRIMARY KEY`,
+// `token_hash UNIQUE`, `provider_id` (NOT a primary key, can
+// have multiple revoked + one active row), `revoked_at`, plus
+// the partial-unique-on-active index. The earlier stub used
+// `provider_id TEXT PRIMARY KEY` which masked the
+// raw-JOIN-multiplication bug present against the production
+// schema.
 const rollupOLTPStubDDL = `
 DROP TABLE IF EXISTS ledger_request_credits CASCADE;
 DROP TABLE IF EXISTS provider_tokens CASCADE;
@@ -83,9 +91,15 @@ CREATE TABLE ledger_request_credits (
     quarantined                 BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE TABLE provider_tokens (
-    provider_id  TEXT PRIMARY KEY,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    id           BIGSERIAL PRIMARY KEY,
+    token_hash   TEXT NOT NULL UNIQUE,
+    provider_id  TEXT NOT NULL DEFAULT '',
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    revoked_at   TIMESTAMPTZ
 );
+CREATE UNIQUE INDEX provider_tokens_one_active_per_provider
+    ON provider_tokens(provider_id)
+    WHERE revoked_at IS NULL AND provider_id <> '';
 `
 
 func setupRollupFixture(t *testing.T) (*pgFixture, *sql.DB) {
@@ -109,17 +123,39 @@ func setupRollupFixture(t *testing.T) (*pgFixture, *sql.DB) {
 }
 
 // seedProviderTokens populates provider_tokens. The rollup joins
-// on this table for authenticated provider-identity per the
+// the table through `authenticatedProvidersRelation` (DISTINCT
+// provider_id) for authenticated provider-identity per the
 // Step 1 trust-source decision; any provider NOT in this table
 // is INVISIBLE to the rollup.
+//
+// Each call adds ONE active (`revoked_at IS NULL`) row per
+// provider_id. The partial unique index prevents a second active
+// row for the same provider_id; the helper uses
+// `ON CONFLICT (token_hash) DO NOTHING` so repeated seeds of the
+// same provider are idempotent under the unique token_hash.
 func seedProviderTokens(t *testing.T, db *sql.DB, providerIDs ...string) {
 	t.Helper()
 	for _, pid := range providerIDs {
 		if _, err := db.ExecContext(context.Background(),
-			`INSERT INTO provider_tokens (provider_id) VALUES ($1) ON CONFLICT DO NOTHING`, pid,
+			`INSERT INTO provider_tokens (token_hash, provider_id) VALUES ($1, $2) ON CONFLICT (token_hash) DO NOTHING`,
+			fmt.Sprintf("hash-%s-active", pid), pid,
 		); err != nil {
 			t.Fatalf("seed provider_tokens %s: %v", pid, err)
 		}
+	}
+}
+
+// seedRevokedProviderToken inserts a REVOKED historical row for
+// the given provider_id. Used by the round-8 raw-JOIN regression
+// to assert rollup aggregates DON'T multiply when a provider has
+// revoke/reissue history.
+func seedRevokedProviderToken(t *testing.T, db *sql.DB, providerID, suffix string) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(),
+		`INSERT INTO provider_tokens (token_hash, provider_id, revoked_at) VALUES ($1, $2, now())`,
+		fmt.Sprintf("hash-%s-revoked-%s", providerID, suffix), providerID,
+	); err != nil {
+		t.Fatalf("seed revoked provider_tokens %s/%s: %v", providerID, suffix, err)
 	}
 }
 
@@ -1525,5 +1561,92 @@ func TestRollupLateEventUpdatedAtCorrection(t *testing.T) {
 	}
 	if postCount != 1 {
 		t.Errorf("post-update late event count = %d, want 1 (GREATEST(created, updated) > lastOK should record this correction)", postCount)
+	}
+}
+
+// ==========================================================================
+// Round-8 CODE r8 HIGH 1 regression: providers with one ACTIVE
+// + N REVOKED `provider_tokens` rows MUST NOT multiply rollup
+// aggregates. Pre-fix the raw JOIN multiplied work credits +
+// token sums + job counts by the count of provider_tokens rows
+// for the provider. Post-fix the rollup joins through
+// `(SELECT DISTINCT provider_id FROM provider_tokens WHERE
+// provider_id <> '')` so revoked history is collapsed to a
+// single row per provider in the JOIN.
+// ==========================================================================
+func TestRollupNoMultiplicationOnRevokedTokenHistory(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+	now := time.Now().UTC()
+
+	// p_history: one active + two revoked rows (3 total in
+	// provider_tokens). One ledger row of $1.00 / 200 tokens / 1
+	// job. Post-fix the leaderboard row must report exactly
+	// those values, not 3x them.
+	seedProviderTokens(t, adminDB, "p_history")
+	seedRevokedProviderToken(t, adminDB, "p_history", "old1")
+	seedRevokedProviderToken(t, adminDB, "p_history", "old2")
+	seedLedgerRow(t, adminDB, "p_history", now.Add(-1*time.Hour), 100, 100, 1_000_000)
+
+	// Control: p_simple has the standard one-active-row case.
+	// Both providers should look identical after the rollup
+	// (same credits / tokens / jobs / earnings).
+	seedProviderTokens(t, adminDB, "p_simple")
+	seedLedgerRow(t, adminDB, "p_simple", now.Add(-1*time.Hour), 100, 100, 1_000_000)
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	// Leaderboard 24h: each provider must have $1.00 / 200
+	// tokens / 1 job — NOT 3x for p_history.
+	type row struct {
+		earnings string
+		tokens   int64
+		jobs     int64
+	}
+	got := map[string]row{}
+	rows, err := adminDB.QueryContext(context.Background(),
+		`SELECT provider_id, earnings_usd, tokens, jobs FROM stats_leaderboard_24h ORDER BY provider_id`,
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid string
+		var r row
+		if err := rows.Scan(&pid, &r.earnings, &r.tokens, &r.jobs); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got[pid] = r
+	}
+
+	want := row{earnings: "1.00", tokens: 200, jobs: 1}
+	if got["p_history"] != want {
+		t.Errorf("p_history aggregates: got=%+v want=%+v (revoked token rows multiplied!)", got["p_history"], want)
+	}
+	if got["p_simple"] != want {
+		t.Errorf("p_simple aggregates: got=%+v want=%+v (control)", got["p_simple"], want)
+	}
+
+	// Overview cumulative: tokens_in should be 200 (100 from each
+	// provider), tokens_out 200, requests 2 — not multiplied by
+	// the count of provider_tokens rows.
+	var tokensIn, tokensOut, requests int64
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT tokens_in, tokens_out, requests FROM stats_overview_current`,
+	).Scan(&tokensIn, &tokensOut, &requests); err != nil {
+		t.Fatalf("overview scan: %v", err)
+	}
+	if tokensIn != 200 || tokensOut != 200 || requests != 2 {
+		t.Errorf("overview cumulative: tokensIn=%d tokensOut=%d requests=%d, want (200,200,2)", tokensIn, tokensOut, requests)
 	}
 }

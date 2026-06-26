@@ -282,7 +282,7 @@ func aggregateWorkPerProvider(ctx context.Context, db *sql.DB, sinceUnix, endUni
                MIN(lrc.ts_utc) AS first_seen,
                MAX(lrc.ts_utc) AS last_seen
           FROM ledger_request_credits lrc
-          JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
+          JOIN ` + authenticatedProvidersRelation + ` pt ON pt.provider_id = lrc.provider_id
          WHERE ($1 = 0 OR EXTRACT(EPOCH FROM lrc.ts_utc) >= $1)
            AND EXTRACT(EPOCH FROM lrc.ts_utc) < $2
            AND lrc.fault_flag = 'none'
@@ -333,7 +333,7 @@ func aggregateRewardsPerProvider(ctx context.Context, db *sql.DB, sinceUnix, end
                MIN(prl.unix_ts) AS first_unix_ts,
                MAX(prl.unix_ts) AS last_unix_ts
           FROM provider_rewards_ledger prl
-          JOIN provider_tokens pt ON pt.provider_id = prl.provider_id
+          JOIN ` + authenticatedProvidersRelation + ` pt ON pt.provider_id = prl.provider_id
          WHERE ($1 = 0 OR prl.unix_ts >= $1)
            AND prl.unix_ts < $2
          GROUP BY prl.provider_id
@@ -386,7 +386,7 @@ func loadProviderVisibility(ctx context.Context, db *sql.DB) (map[string]visibil
         SELECT pt.provider_id,
                COALESCE(pv.mode, 'bucketed') AS mode,
                COALESCE(pv.blocked_from_partner_projection, FALSE) AS blocked
-          FROM provider_tokens pt
+          FROM ` + authenticatedProvidersRelation + ` pt
           LEFT JOIN provider_visibility pv ON pv.provider_id = pt.provider_id
     `
 	rows, err := db.QueryContext(ctx, q)

@@ -35,7 +35,7 @@ func runTimeseriesRpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
         SELECT date_trunc('minute', lrc.ts_utc) AS bucket,
                COUNT(DISTINCT lrc.request_id)::BIGINT AS count
           FROM ledger_request_credits lrc
-          JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
+          JOIN ` + authenticatedProvidersRelation + ` pt ON pt.provider_id = lrc.provider_id
          WHERE lrc.ts_utc >= $1 AND lrc.ts_utc < $2
            AND lrc.fault_flag = 'none'
            AND lrc.quarantined = FALSE
@@ -123,7 +123,7 @@ func runTimeseriesTpmTick(ctx context.Context, db *sql.DB, cfg Config) error {
                COALESCE(SUM(` + effectivePromptTokensSQL("lrc") + `), 0)::BIGINT     AS in_tok,
                COALESCE(SUM(` + effectiveCompletionTokensSQL("lrc") + `), 0)::BIGINT AS out_tok
           FROM ledger_request_credits lrc
-          JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
+          JOIN ` + authenticatedProvidersRelation + ` pt ON pt.provider_id = lrc.provider_id
          WHERE lrc.ts_utc >= $1 AND lrc.ts_utc < $2
            AND lrc.fault_flag = 'none'
            AND lrc.quarantined = FALSE
