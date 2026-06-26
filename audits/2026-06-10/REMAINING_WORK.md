@@ -4,18 +4,9 @@ _Forward-looking punch list from the 2026-06-10 audit verification pass. Items i
 
 **Sweep update 2026-06-22:** five items graduated to `RESOLVED` based on live evidence (`audits/2026-06-22/CLUSTER_HANDOFF.md` §1 production probe + Pearl journald/systemd verification + branch-protection API write): **ARCH-1** + **CODE-1** (PR [#91](https://github.com/Augustas11/macprovider/pull/91) M2-1c + PR [#93](https://github.com/Augustas11/macprovider/pull/93) M2-1d close-out merged); **XSEC-1** (live tokenless WS rejection at `coordinator.streamvc.live`); **DEVE-7** (Pearl `macprovider-monitor.service` runs as `User=macprovider`, no root-yaml regex); operator-pending checklist items **M1-4** (`nginx -T` confirms `limit_req_zone` live) and **M3-4** (`phase3-binary (swift test)` added to required status checks on `main`). **M3-2 / SECU-4**: env-file architecture deployed and verified, but runtime cutover proof (gateway → coordinator `/internal/*` calls using `service_token`) is gated on real buyer traffic returning — currently blocked by the air5 production incident triaged in §"New issues surfaced (2026-06-22)" below.
 
+**Sweep update 2026-06-26:** **ARCH-1** + **CODE-1** promoted from `RESOLVED_DIFFERENTLY` to `RESOLVED` and their per-finding entries removed per the doc contract (RESOLVED items do not appear). M2-1e (issue #94, PR — fix/m2-1e-forward-with-failover-core) extracts the shared `forwardWithFailover` core that the architect's named close-out called for, on top of M2-1c (PR #91) + M2-1d (PR #93). The three sequence helpers (`forwardStreamSequence`, `forwardWSNonStreamSequence`, `forwardHTTPSequence`) are now thin wrappers that build per-transport callbacks; the failover state machine — dispatch → committed early-exit → success → failoverCandidate → shouldRetry → advanceToNextProvider — lives in exactly one place. The FOUR audit-flagged INTENTIONAL per-transport differences (HTTP per-attempt timeout, WS-non-streaming failoverEligible+retryable=false fast-fail, streaming committed early-exit, and the M2-1e-discovered WS-non-streaming queue-full retry-budget bypass) remain flagged in the callbacks, not flattened. `forward_loop_test.go` 11 row-sequence scenarios byte-identical to PR #91 baseline; `go test ./internal/buyer -race -count=5` green in 10.5s.
+
 ## Severity-ordered punch list
-
-### [High] ARCH-1 — handleChatCompletions god-function with three diverging copies of failover state machine
-
-- **Status:** `RESOLVED_DIFFERENTLY` (flipped 2026-06-22)
-- **Recalibrated severity:** Medium → closed
-- **Detail:** **Evidence** PR #36 (27559ae) fixed the two confirmed divergences (queue-full→StateBusy in the streaming path; explicitRetries++ unified inside `advanceToNextProvider`). PR #48 (8f18f5a, M2-1a) extracted `advanceToNextProvider` helper. PR #61 (a2a1063, M2-1b) introduced `transportResult` + 3 classifiers at `buyer/transport_result.go`. PR [#91](https://github.com/Augustas11/macprovider/pull/91) (3d5f209, M2-1c) collapsed the three transport loops into three sequence helpers (`forwardStreamSequence`, `forwardWSNonStreamSequence`, `forwardHTTPSequence`) on `*Server`, each driven by `transportResult` flags + `*forwardState`. PR [#93](https://github.com/Augustas11/macprovider/pull/93) (966f6df, M2-1d) closed the shared-state bypass at the WS queue-full path — commit message tagged "ARCH-1 / CODE-1 close-out". Post-merge architect verification documented in memory [post-merge-verification-caught-overclaim](../../.claude/projects/-Users-augstar-macprovider-poc/memory/post-merge-verification-caught-overclaim.md). **Shape change vs original audit sketch** Audit asked for one `forwardWithFailover`; M2-1c landed three transport-typed helpers because success/error/SSE rendering paths are genuinely different. The audit's underlying intent — "every retry-semantics edit touches exactly one place per transport, not three near-duplicate inline loop bodies" — is met. **Original citation** Audit cited `buyer/server.go:840-1350` and three loops at 1056-1153, 1154-1245, 1246-1349.
-
-### [High] CODE-1 — Drift across three copies of failover state machine (merged with ARCH-1)
-
-- **Status:** `RESOLVED_DIFFERENTLY` (flipped 2026-06-22, merged with ARCH-1)
-- **Detail:** See ARCH-1 above. PR [#91](https://github.com/Augustas11/macprovider/pull/91) + PR [#93](https://github.com/Augustas11/macprovider/pull/93) jointly closed the structural deduplication; the drift correctness fixes had shipped earlier in PR #36.
 
 ### [High] DEVE-2 — The 3am story — single Gmail channel co-hosted on VPS, no external check
 
@@ -95,7 +86,7 @@ Tasks that did not reach `RESOLVED` (each maps to one or more findings above; th
 | M2-3 | `PARTIAL` | SetMaxOpenConns(1) on coordinator stores |
 | QW-5 | `PARTIAL` | SetMaxOpenConns(1) on coordinator stores |
 | M1-6 | `PARTIAL` | Deploy-gate hardening |
-| M2-1 | `RESOLVED_DIFFERENTLY` (2026-06-22) | M2-1c (PR #91) + M2-1d (PR #93) landed; ARCH-1 / CODE-1 close-out commit message + post-merge architect verification. |
+| M2-1 | `RESOLVED` (2026-06-26) | M2-1c (PR #91) + M2-1d (PR #93) + M2-1e (issue #94) landed; shared `forwardWithFailover` core extracted; ARCH-1 / CODE-1 RESOLVED. |
 | M3-9 | `PARTIAL` | Gateway server.go file split (Phase 1) |
 | M1-1 | `RESOLVED` (2026-06-22) | Live in production — tokenless WS rejected with `invalid_token` at `coordinator.streamvc.live`. |
 | M1-7 | `CODE_SHIPPED_OPERATOR_PENDING` | Bump modernc.org/sqlite |
