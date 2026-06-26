@@ -129,20 +129,65 @@ unique findings; round-2 fixes landed on top of `2130a87`:
 - ARCH/CODE L1 — whitespace at EOF in Step 4.B r4 audit file.
   Closed via trailing-newline normalization.
 
-## Per-lane trajectory (in-progress)
+## Per-lane trajectory (LOCKED at r5 / r2)
 
 | Lane     | Round | Verdict                | Counts                          |
 |----------|-------|------------------------|---------------------------------|
 | ARCH     | r1    | NOT READY TO LOCK      | 1C / 3H / 1M / 1L / 9 INFO      |
 | ARCH     | r2    | NOT READY TO LOCK      | 0C / 0H / 3M / 1L / 10 INFO     |
 | ARCH     | r3    | REQUEST CHANGES        | 0C / 0H / 1M / 1L / 12 INFO     |
+| ARCH     | r4    | REQUEST CHANGES        | 0C / 0H / 1M / 1L / 13 INFO     |
+| ARCH     | r5    | **READY TO LOCK**      | 0C / 0H / 0M / 0L / 15 INFO     |
 | CODE     | r1    | NOT READY TO LOCK      | 0C / 5H / 3M / 2L / various INFO |
 | CODE     | r2    | NOT READY TO LOCK      | 0C / 2H / 2M / 0L / various      |
 | CODE     | r3    | NOT READY TO LOCK      | 0C / 0H / 3M / 2L / 9 INFO       |
+| CODE     | r4    | NOT READY TO LOCK      | 0C / 0H / 2M / 0L / 10 INFO      |
+| CODE     | r5    | **READY TO LOCK**      | 0C / 0H / 0M / 0L / 12 INFO      |
 | SECURITY | r1    | NOT CONVERGED          | 1C / 1H / 0M / 2L / 8 INFO      |
-| SECURITY | r2    | READY TO LOCK          | 0C / 0H / 0M / 2L / 9 INFO       |
+| SECURITY | r2    | **READY TO LOCK**      | 0C / 0H / 0M / 2L / 9 INFO       |
 
-Round 4 fires after the round-3 fix commit (this commit) lands.
+All three lanes locked. Step 4.C **CONVERGED** on HEAD `fef509c`.
+
+## Round-4 + round-5 closure (added at lock)
+
+### Round 4 (HEAD `bb7c77e`)
+
+- ARCH r4 M1 + CODE r4 M1 — wired hygiene test still had three
+  shape gaps: non-SPEC-shaped seeded token, deny list missing
+  the actual seeded token/prefix/generic `mpk_`, and no
+  family-presence inventory check. **Closed in round 4**: bearer
+  is now a SPEC-shaped `mpk_` + 43-char body; deny list now
+  includes `{bearer, prefix, "mpk_", "mpk_garbage", "garbage",
+  "evil.streamvc.live", "Bearer ", "token_hash"}`; before the
+  label scan the test asserts every required family
+  (`stats_request_total`, `stats_partner_key_request_total`,
+  `stats_rollup_lag_seconds`, `stats_rollup_errors_total`,
+  `stats_rate_limit_exceeded_total`) has at least one gathered
+  sample; the partner request asserts 200 (test seeds
+  `provider_tokens` + ledger row + drives one rollup tick
+  beforehand).
+- CODE r4 M2 — partner-key issue/revoke event landing tests
+  lived behind `//go:build integration` in `cmd/coordinator/`,
+  but `make test-coordinator-integration` only ran
+  `./internal/stats/...`. **Closed in round 4**: target expanded
+  to also run `./cmd/coordinator/...`. The existing CI workflow
+  at `.github/workflows/ci.yml:186-187` invokes the make target
+  unchanged.
+- ARCH r4 L1 — stale "legacy `delta_ratio` kept for backward
+  compatibility" comment in `rollup/rebuild.go`. **Closed in
+  round 4**: comment reworded — `delta_ratio` was removed from
+  the locked `stats_*` event by round-2 ARCH M2 and survives
+  only on the untagged debug-only triage line.
+
+### Round 5 (HEAD `fef509c`)
+
+ARCH r5 and CODE r5 both returned **READY TO LOCK** at
+0C / 0H / 0M / 0L. ARCH r5 produced 15 INFO entries; CODE r5
+produced 12 INFO entries plus an explicit "Round-4 closure
+checks" section confirming all three round-4 blockers closed.
+SECURITY had already locked at r2. Nine lanes total locked
+across Step 4 (4.A ARCH/CODE/SECURITY + 4.B ARCH/CODE/SECURITY
++ 4.C ARCH/CODE/SECURITY).
 
 ## Step 4.C deliverables (cumulative)
 
