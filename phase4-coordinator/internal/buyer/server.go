@@ -205,7 +205,6 @@ type Server struct {
 	// warn-log per conversation_key to defend against hostile-gateway
 	// log flooding. Issue #266 T1 operational-hygiene item.
 	stickyMismatchLimiter *stickyMismatchLimiter
-	internalAuthKey       string
 	gatewayServiceToken   string
 	requireGatewayContext bool
 	tier2Mu               sync.RWMutex
