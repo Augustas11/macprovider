@@ -1,7 +1,7 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.7 (2026-06-26, **LOCKED** — codex round-8 returned 0 CRITICAL + 0 MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK on first re-audit. Round 8 narrative: `specs/SPEC-017-r8-audit.md`. v0.1.7 absorbs the Claude adversarial-verifier (critic) + product-designer fix pass on locked v0.1.6: 5 HIGH (H1 ACAO+credentials, H2 Vary:Authorization fragments public cache, H3 totals.earnings_usd correlation leak, H4 partial_history_since contract drift, H5 origin-reject timing gap) + 7 MEDIUM (M1 timeseries split, M2 cumulative-vs-windowed, M3 stats_late_events retention, M4 RFC 6454 normalization, M5 rebuild atomicity, M6 bucket rounding, M7 preflight Max-Age vs revocation) from the critic lane, plus 2 HIGH + 1 MEDIUM from designer lane (D-H1 partner-projection consent + launch sequencing, D-H2 rewards_populated signal, D-M1 strip per-axis buckets). Trajectory 8 rounds: r1 3C+10M+5m, r2 2C+5M+2m, r3 0C+4M+3m, r4 0C+4M+2m, r5 0C+2M+2m, r6 0C+1M+1m, r7 0/0/0 → LOCK v0.1.6, r8 (Claude fix pass) 0/0/0 → LOCK v0.1.7.)
-**Status:** **LOCKED** at v0.1.7 (2026-06-26). v0.1.6 was the prior LOCK; v0.1.7 supersedes it. The IMPL prompt (`BUILD_SPEC_017_IMPL_PROMPT.md`) is re-anchored to v0.1.7 via a v7+ revision (separately audited). The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
+**Version:** 0.1.8 (2026-06-26, draft — IMPL-prompt-audit-driven fix pass surfacing two SPEC contradictions: (1) §9.4 named rebuild Shape A (TRUNCATE) and Shape B (ALTER RENAME) but the §7.2.2 `stats_rollup` grant set lacks both privileges; v0.1.8 adds Shape C (single-transaction DELETE + INSERT) which IS executable under the locked grants. (2) §5.6 "burst 120" was mechanically inconsistent with AC-8 (61st request returns 429); v0.1.8 drops the burst column from the §5.6 table — public tier is now a hard 60 req/min with no burst absorption. Plus an Authorization-aware nginx keying rule so partner-keyed requests are not double-counted at the public-tier limiter. Round narrative: `specs/SPEC-017-r9-audit.md`. LOCK target: codex round returns 0/0/0.)
+**Status:** Unlocked at v0.1.8 pending codex re-audit. v0.1.7 was the prior LOCK. The IMPL prompt is re-anchored to v0.1.8 after the SPEC re-locks. The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
 ---
@@ -13,6 +13,41 @@ Audit-narrative-by-round detail lives in the per-round audit files under
 entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
+
+**v0.1.8 (2026-06-26, draft — IMPL-prompt-audit-driven SPEC fix pass):**
+The 3-lane codex IMPL-prompt audit on the v0.1.7-anchored IMPL prompt
+surfaced two SPEC contradictions that could only be resolved by a
+SPEC bump:
+
+- **§9.4 vs §7.2.2 grant mismatch:** §9.4 listed Shape A (TRUNCATE) and
+  Shape B (ALTER RENAME + DROP) as the nightly-rebuild atomicity
+  shapes, but the locked §7.2.2 `stats_rollup` role has only
+  SELECT/INSERT/UPDATE/DELETE on the rollup tables. Both shapes are
+  inexecutable. v0.1.8 adds **Shape C** (single-transaction DELETE +
+  INSERT) which IS executable under the locked grants. Shapes A and B
+  remain documented as alternatives that require an operator-side
+  grant widening; Shape C is the v0.1 default. PostgreSQL MVCC
+  guarantees the leaderboard handler never observes an empty state
+  during the Shape C transaction.
+- **§5.6 burst vs AC-8:** §5.6 named "burst 120" for the public tier
+  but AC-8 requires the 61st request from the same IP within 60s to
+  return 429. With nginx `rate=60r/m burst=120 nodelay`, the 120-token
+  burst would absorb the 61st request. v0.1.8 drops the burst column
+  entirely from the §5.6 table — public tier is a hard 60 req/min per
+  IP per endpoint, partner tier a hard 600 req/min per key per
+  endpoint. AC-8 is now mechanically achievable with `limit_req
+  zone=<name> nodelay;` and no `burst=`. Step 4.B in the IMPL prompt
+  is no longer hard-blocked.
+- **Authorization-aware nginx keying (v0.1.8 §5.6 addition):** the
+  public-tier `limit_req_zone` MUST NOT throttle Authorization-bearing
+  requests at the edge (partner-keyed traffic is rate-limited by
+  `partner_keys.rate_limit_rpm` in-process per §5.4.7 and would
+  otherwise be double-counted). The SPEC pins two acceptable nginx
+  shapes (map-based bypass OR split location block) and a companion
+  test for the partner-tier no-throttle invariant.
+
+Lock target: codex round-9 against v0.1.8 returns 0/0/0. Round
+narrative path: `specs/SPEC-017-r9-audit.md`.
 
 **v0.1.7 (2026-06-26, LOCKED — codex round-8 0/0/0):** Two Claude subagents (critic adversarial
 verifier + product designer) audited v0.1.6 against codex's blind spots.
@@ -1062,16 +1097,53 @@ just a tighter accountability surface.
 
 ### 5.6 Rate limits
 
-| Tier | Per-IP limit | Per-key limit | Burst | Enforced at |
-|---|---|---|---|---|
-| Public anon | 60 req/min per IP per endpoint | n/a | 120 | nginx `limit_req_zone` (primary), in-process bucket (fallback) |
-| Partner keyed | n/a | 600 req/min per key per endpoint | 1200 | in-process bucket keyed by `partner_keys.id` |
+| Tier | Per-IP limit | Per-key limit | Enforced at |
+|---|---|---|---|
+| Public anon | 60 req/min per IP per endpoint | n/a | nginx `limit_req_zone` (primary), in-process bucket (fallback) |
+| Partner keyed | n/a | 600 req/min per key per endpoint | in-process bucket keyed by `partner_keys.id` |
+
+**v0.1.8 reconciliation with AC-8.** Earlier drafts (v0.1.6 / v0.1.7)
+named "burst 120" / "burst 1200" in this table. That was mechanically
+inconsistent with AC-8 (which requires the 61st request from the
+same IP within 60s to return 429) under plain nginx `limit_req`
+semantics: a 120-token burst would absorb the 61st request, not
+reject it. v0.1.8 drops the burst column entirely. The public tier
+is a hard 60 req/min per IP per endpoint with no burst absorption;
+the partner tier is a hard 600 req/min per key per endpoint with no
+burst absorption. AC-8 is now mechanically achievable with
+`limit_req zone=<name> nodelay;` (no `burst=` parameter) on the
+public-tier location.
 
 Both tiers MUST return `429 Too Many Requests` on exhaustion, with
 `Retry-After: <seconds>` and a JSON body per §5.9. nginx is the
 primary enforcement layer for the public tier so a misbehaving
 partner cannot starve the coordinator process; the in-process bucket
 exists as a defense-in-depth fallback.
+
+**Authorization-aware nginx keying (v0.1.8).** The public-tier
+`limit_req_zone` MUST NOT throttle Authorization-bearing requests at
+the edge — partner-keyed traffic is rate-limited by
+`partner_keys.rate_limit_rpm` in-process (§5.4.7) and would otherwise
+be double-counted. The nginx config MUST either:
+
+- (a) Use an `nginx map` so the public `limit_req_zone` key is empty
+  when `Authorization` is present (effectively bypassing the public
+  limiter for keyed requests):
+  ```nginx
+  map $http_authorization $public_rl_key {
+      ""      $binary_remote_addr;
+      default "";
+  }
+  limit_req_zone $public_rl_key zone=stats_public:10m rate=60r/m;
+  ```
+- (b) Split keyed traffic into a separate location block that does
+  NOT carry the public `limit_req` directive.
+
+The IMPL author picks (a) or (b); the test (AC-8 keyed-bypass
+companion) MUST send 100+ requests with a valid partner key through
+nginx and assert ALL succeed at the edge layer (in-process partner
+bucket may still cap them per §5.6 partner-tier — that's the
+authoritative limit for keyed traffic).
 
 Cloudflare bot-management and CAPTCHA challenges MAY be layered above
 nginx; the SPEC does not mandate them but does not preclude them.
@@ -1994,12 +2066,19 @@ which doubles as a drift-detection mechanism: if the rebuild differs
 from the incremental snapshot by more than 0.5% on any axis, an alert
 fires and the rebuild value wins.
 
-**Rebuild atomicity (v0.1.7, binding).** The nightly rebuild MUST
-execute in a single PostgreSQL transaction so the leaderboard never
-serves a half-rebuilt state. Two implementation shapes are acceptable;
-the operator picks one and pins it in the rollup config:
+**Rebuild atomicity (v0.1.7, tightened in v0.1.8).** The nightly
+rebuild MUST execute in a single PostgreSQL transaction so the
+leaderboard never serves a half-rebuilt state. Three implementation
+shapes are acceptable; the operator picks one and pins it in the
+rollup config. **Shape C is the only shape executable under the
+v0.1.7 §7.2.2 `stats_rollup` grant set (SELECT/INSERT/UPDATE/DELETE
+on the `stats_*` tables); Shapes A and B require additional
+privileges that v0.1 does NOT grant and require either an operator
+deploy-time grant widening OR a SPEC v0.2 widening of §7.2.2.** Until
+then, IMPL code MUST use Shape C.
 
-- **Shape A — temp-table swap inside transaction:**
+- **Shape A — temp-table swap inside transaction** (requires
+  `TRUNCATE` + temp-table creation privilege beyond v0.1 §7.2.2):
   ```sql
   BEGIN;
   CREATE TEMP TABLE _new_leaderboard_all (LIKE stats_leaderboard_all
@@ -2009,7 +2088,8 @@ the operator picks one and pins it in the rollup config:
   INSERT INTO stats_leaderboard_all SELECT * FROM _new_leaderboard_all;
   COMMIT;
   ```
-- **Shape B — atomic table rename:**
+- **Shape B — atomic table rename** (requires `ALTER TABLE RENAME`
+  + `DROP TABLE` privilege beyond v0.1 §7.2.2):
   ```sql
   BEGIN;
   -- INSERT computed rows into stats_leaderboard_all_new ...
@@ -2018,6 +2098,22 @@ the operator picks one and pins it in the rollup config:
   DROP TABLE stats_leaderboard_all_old;
   COMMIT;
   ```
+- **Shape C — single-transaction DELETE + INSERT** (v0.1.8 addition,
+  executable under the locked §7.2.2 grants):
+  ```sql
+  BEGIN ISOLATION LEVEL READ COMMITTED;
+  DELETE FROM stats_leaderboard_all;
+  INSERT INTO stats_leaderboard_all (provider_id, pseudonym, generated_at,
+    rank_earnings, rank_tokens, rank_jobs, earnings_usd, earnings_work_usd,
+    earnings_rewards_usd, earnings_bucket, tokens, jobs, first_seen_at,
+    last_seen_at)
+  SELECT ... FROM ... ; -- the rebuilt source query
+  COMMIT;
+  ```
+  PostgreSQL MVCC means concurrent `stats_reader` SELECTs see the
+  pre-DELETE snapshot until the transaction commits, then see the
+  post-INSERT snapshot. There is no window where the handler observes
+  an empty leaderboard. Shape C is the v0.1 default.
 
 A failed transaction MUST roll back without disturbing the running
 incremental snapshot. The rebuild MUST NOT interleave per-provider
