@@ -71,6 +71,21 @@ func (l *limiter) allow(key string, now time.Time, limit int) bool {
 	return true
 }
 
+// CountForTest returns the current per-window count for `key`,
+// or 0 if no bucket entry exists for the active window.
+// Exported only for round-7 CODE M coverage; production code
+// MUST NOT call this.
+func (l *limiter) CountForTest(key string, now time.Time) int {
+	min := now.Unix() / 60
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	b, ok := l.windows[key]
+	if !ok || b.windowMinute != min {
+		return 0
+	}
+	return b.count
+}
+
 // refund decrements the active-window count for `key`. Used by
 // the auth-failure reserve-then-refund pattern when the auth
 // dispatcher returns 200 partner — the reserved slot is

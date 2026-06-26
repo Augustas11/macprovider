@@ -240,3 +240,11 @@ func (s *statusRecorder) Write(b []byte) (int, error) {
 	}
 	return s.ResponseWriter.Write(b)
 }
+
+// AuthFailureCountForTest returns the auth-failure tier
+// bucket count for (ip, endpoint) at `now`. Exported only
+// for round-7 CODE M coverage of the reserve-then-refund
+// invariant. Production MUST NOT call this.
+func (m *Mux) AuthFailureCountForTest(ip, endpoint string, now time.Time) int {
+	return m.authFailLimit.CountForTest("authfail|"+ip+"|"+endpoint, now)
+}

@@ -24,6 +24,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -441,11 +442,26 @@ var _ = strings.HasPrefix
 // bucket.
 // ===========================================================================
 func TestAC22_AuthFailureLimiter(t *testing.T) {
-	h, _ := setupStatsHandler(t)
+	// Round-7 CODE M closure: build the mux against a store
+	// we hold a reference to so we can query
+	// LookupHashCountForTest after the flood to prove the
+	// auth-failure limiter capped DB load at ≤300 SELECTs.
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+	reader := readerPool(t, fx)
+	st := store.New(reader)
+	h := stats.NewMux(
+		st,
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"2026-06-01T00:00:00Z",
+		nil,
+		zerolog.Nop(),
+	).Handler()
+
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer mpk_invalid")
-	// Send 350 invalid-bearer requests. The 301st onward must
-	// return 429 (auth-failure tier 300 rpm).
 	var ok401, rate429 int
 	for i := 0; i < 350; i++ {
 		resp := mustDoWithHeaders(t, h, http.MethodGet, "/v1/stats/leaderboard", hdr)
@@ -462,6 +478,11 @@ func TestAC22_AuthFailureLimiter(t *testing.T) {
 	}
 	if rate429 != 50 {
 		t.Errorf("got %d 429s, want 50 (350 - 300)", rate429)
+	}
+	// DB SELECT count proves the limiter capped load at ≤300
+	// (the 50 429s short-circuited BEFORE the auth dispatcher).
+	if got := st.LookupHashCountForTest(); got > 300 {
+		t.Errorf("partner_keys SELECT count = %d, want ≤300 (auth-failure limiter must cap pre-SELECT DB load)", got)
 	}
 }
 
@@ -1105,6 +1126,8 @@ func TestAC11_RealPanicInjected(t *testing.T) {
 		"cookiesecretvalue_xyz789",  // Cookie substring
 		rawApiKey,                   // X-Api-Key value
 		"apikey_alsosecret_4242",    // X-Api-Key substring
+		rawTokenHash,                // round-7 SECURITY M: literal token_hash value
+		"token_hash",                // round-7 SECURITY M: literal field name
 	} {
 		if strings.Contains(logOut, leak) {
 			t.Errorf("panic-log leaked %q: %s", leak, logOut)
@@ -1492,14 +1515,15 @@ func TestValidPartnerKey500ReqNoAuthFailureCap(t *testing.T) {
 	}
 
 	reader := readerPool(t, fx)
-	mux := stats.NewMux(
+	muxObj := stats.NewMux(
 		store.New(reader),
 		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
 		"partial",
 		"",
 		nil,
 		zerolog.Nop(),
-	).Handler()
+	)
+	mux := muxObj.Handler()
 
 	hdr := http.Header{}
 	hdr.Set("Authorization", "Bearer "+bearer)
@@ -1519,6 +1543,13 @@ func TestValidPartnerKey500ReqNoAuthFailureCap(t *testing.T) {
 	}
 	if rate429 != 0 {
 		t.Errorf("valid partner 500 req: got %d 429s, want 0 (refund path must release auth-failure slots)", rate429)
+	}
+	// Round-7 CODE M closure: auth-failure bucket count MUST
+	// be 0 after the run — every reservation was refunded by
+	// the dispatcher-success path. httptest's default
+	// RemoteAddr is 192.0.2.1:1234.
+	if c := muxObj.AuthFailureCountForTest("192.0.2.1", "leaderboard", time.Now().UTC()); c != 0 {
+		t.Errorf("auth-failure bucket count after 500 valid req = %d, want 0 (refund leaked %d slots)", c, c)
 	}
 }
 
@@ -1540,5 +1571,100 @@ func TestSiblingSubdomainReject(t *testing.T) {
 	}
 	if acao != "*" {
 		t.Errorf("preflight ACAO = %q, want * (no allowlist match)", acao)
+	}
+}
+
+// ===========================================================================
+// §5.7 server-to-server partner case (empty allowlist, Origin
+// absent). Locked SPEC requires 200 partner projection +
+// ACAO omitted + Allow-Credentials omitted. Browsers can't
+// reach this path; non-browser clients ignore CORS headers.
+// ===========================================================================
+func TestSection_5_7_ServerToServerOmitsACAO(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+	if _, err := adminDB.Exec(`UPDATE stats_components_health SET generated_at = now() WHERE component LIKE 'leaderboard_%'`); err != nil {
+		t.Fatalf("seed health: %v", err)
+	}
+
+	bearer := "mpk_s2s_test_token"
+	hash := sha256Hex(bearer)
+	if _, err := adminDB.Exec(
+		`INSERT INTO partner_keys (label, token_hash, prefix, allowed_origins, created_by)
+         VALUES ('s2s', decode($1, 'hex'), 'mpk_s2s', '{}', 'test')`,
+		hash,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	reader := readerPool(t, fx)
+	mux := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"",
+		nil,
+		zerolog.Nop(),
+	).Handler()
+
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+bearer)
+	// NO Origin header (server-to-server context).
+	resp := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/leaderboard", hdr)
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("s2s empty-allowlist expected 200 partner, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("s2s ACAO = %q, want \"\" (must be OMITTED per §5.7 row 4)", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Errorf("s2s Allow-Credentials = %q, want \"\" (must be OMITTED with absent Origin)", got)
+	}
+	// Vary on partner projection still includes Authorization
+	// even though there's no Origin.
+	vary := resp.Header.Get("Vary")
+	if !strings.Contains(vary, "Authorization") {
+		t.Errorf("partner Vary missing Authorization: %q", vary)
+	}
+}
+
+// ===========================================================================
+// No-trace-span invariant — Step 3 source MUST NOT import any
+// distributed-tracing surface (opentelemetry, otel, span,
+// trace). Trace spans are a Step 4.C concern; the handler
+// package keeps redaction simple by never carrying span data
+// in v0.1. If this test starts failing, AC-15's trace-span
+// redaction sweep must be re-enforced at the same time.
+// ===========================================================================
+func TestNoTraceImports(t *testing.T) {
+	entries, err := os.ReadDir("../../internal/stats")
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	forbidden := []string{
+		"go.opentelemetry.io",
+		"opencensus.io",
+		"otel.Tracer",
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile("../../internal/stats/" + name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		for _, banned := range forbidden {
+			if bytes.Contains(b, []byte(banned)) {
+				t.Errorf("%s references %q — Step 3 forbids trace surfaces until AC-15 trace-span redaction sweep is added (v0.2/Step 4.C)", name, banned)
+			}
+		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,6 +24,14 @@ import (
 // updates are deferred per the §7.2.4 default-off resolution.
 type Store struct {
 	db *sql.DB
+
+	// lookupHashCount tracks LookupPartnerKeyByHash invocations
+	// for the round-6/7 AC-22 SQL-load test. Incremented before
+	// the SELECT runs so the count proves the auth-failure
+	// limiter capped DB load BEFORE the dispatcher reached the
+	// SELECT. Production reads are best-effort (atomic int64);
+	// no semantic effect on the request path.
+	lookupHashCount atomic.Int64
 }
 
 // New wraps a *sql.DB authenticated as stats_reader.
@@ -33,6 +42,16 @@ func New(db *sql.DB) *Store {
 // DB returns the underlying *sql.DB for direct queries by test
 // code. Production code SHOULD use the typed methods.
 func (s *Store) DB() *sql.DB { return s.db }
+
+// LookupHashCountForTest returns the number of
+// LookupPartnerKeyByHash invocations since Store creation.
+// The exported seam exists for round-7 CODE M coverage —
+// proves the auth-failure limiter capped DB load at ≤300
+// SELECTs even when 350 invalid-bearer requests arrived.
+// Production code MUST NOT call this.
+func (s *Store) LookupHashCountForTest() int64 {
+	return s.lookupHashCount.Load()
+}
 
 // PartnerKey is the subset of `partner_keys` columns the Step 3
 // auth dispatcher consumes per SPEC §5.4.3.
@@ -96,6 +115,7 @@ func (s *Store) ActivePartnerOrigins(ctx context.Context) ([]string, error) {
 // mismatch or prefix mismatch — every keyed request runs the
 // same hash + SELECT.
 func (s *Store) LookupPartnerKeyByHash(ctx context.Context, tokenHash []byte) (*PartnerKey, error) {
+	s.lookupHashCount.Add(1)
 	const q = `
         SELECT id, label, prefix, allowed_origins, rate_limit_rpm, revoked_at
           FROM partner_keys
