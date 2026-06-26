@@ -23,7 +23,6 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
-	statsmigrations "github.com/augstar/macprovider-coordinator/internal/stats/migrations"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 
@@ -146,22 +145,20 @@ func main() {
 			fmt.Fprintf(os.Stderr, "stats: %v\n", err)
 			os.Exit(1)
 		}
-		// Apply migrations using the rollup pool — it has CREATE
-		// privileges in development and test environments; in
-		// production the operator applies migrations out-of-band
-		// before coordinator boot (and SPEC-017 §F.2 SECURITY
-		// invariant: migrations MUST NOT run as a runtime role).
-		// Production deployments set
-		// STATS_SKIP_MIGRATIONS_AT_BOOT=1 to skip; default behavior
-		// for non-production keeps the bootstrap path frictionless.
-		if os.Getenv("STATS_SKIP_MIGRATIONS_AT_BOOT") != "1" {
-			if err := statsmigrations.Apply(context.Background(), statsPools.Rollup); err != nil {
-				fmt.Fprintf(os.Stderr, "stats migrations: %v\n", err)
-				_ = statsPools.Close()
-				os.Exit(1)
-			}
-		}
-		logger.Info().Msg("SPEC-017 stats pools opened (reader, rollup, provider_portal); /v1/stats/* will be mounted by Step 3")
+		// MIGRATIONS ARE NOT RUN AT COORDINATOR BOOT (round-1
+		// CRITICAL fix across all three lanes: SECURITY r1
+		// CRIT-2, CODE r1 HIGH C2, ARCH r1 HIGH C1). The earlier
+		// draft applied migrations through the stats_rollup
+		// runtime pool with a STATS_SKIP_MIGRATIONS_AT_BOOT=1
+		// opt-out — that defaulted to over-privileging the
+		// runtime role and made the safe production path a
+		// remember-this-env-var footgun. Migrations are now
+		// operator-side: invoke `statsmigrations.Apply` from an
+		// admin DSN via psql or a follow-up
+		// `coordinator stats migrate --admin-dsn=...`
+		// subcommand. The integration test harness applies
+		// migrations through its own admin DSN.
+		logger.Info().Msg("SPEC-017 stats pools opened (reader, rollup, provider_portal); migrations are operator-applied; /v1/stats/* will be mounted by Step 3")
 	} else {
 		logger.Info().Msg("SPEC-017 stats DISABLED via config (default); /v1/stats/* not registered")
 	}

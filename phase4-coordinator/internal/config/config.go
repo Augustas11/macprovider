@@ -549,6 +549,27 @@ func (c *Config) resolveEnv() error {
 	} else {
 		c.Auth.GatewayServiceToken = v
 	}
+	// Round-1 SECURITY r1 MEDIUM 1: stats DSN fields go through
+	// the same env-indirection resolver. Operators inject DSNs
+	// at deploy time as `env:STATS_READER_DSN` etc.; storing
+	// plaintext DSNs in coordinator.yaml is a SECURITY footgun.
+	statsDSNs := []struct {
+		field string
+		dst   *string
+	}{
+		{"stats.reader_dsn", &c.Stats.ReaderDSN},
+		{"stats.rollup_dsn", &c.Stats.RollupDSN},
+		{"stats.provider_portal_dsn", &c.Stats.ProviderPortalDSN},
+		{"stats.partner_keys.writer_dsn", &c.Stats.PartnerKeys.WriterDSN},
+		{"stats.partner_keys_admin_dsn", &c.Stats.PartnerKeysAdminDSN},
+	}
+	for _, f := range statsDSNs {
+		v, err := resolveEnvValue(f.field, *f.dst)
+		if err != nil {
+			return err
+		}
+		*f.dst = v
+	}
 	if raw, ok := os.LookupEnv("GITHUB_OAUTH_ENABLED"); ok {
 		switch raw {
 		case "true":

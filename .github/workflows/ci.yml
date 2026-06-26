@@ -154,6 +154,15 @@ jobs:
           echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
       - name: make lint-coordinator
         run: make lint-coordinator
+      - name: AC-16 fixture assertion (golangci-lint diagnostic fires by name)
+        # Round-1 ARCH r1 HIGH E fix: TestAC16ForbiddenImportFails
+        # + TestForbidigoOSExitRule skip when golangci-lint is
+        # absent. The default `make test-coordinator` runs before
+        # golangci-lint is installed; here, after the lint binary
+        # is on PATH, run the targeted assertions so the fixture
+        # diagnostic is actually checked in CI.
+        run: |
+          cd phase4-coordinator && go test -count=1 -run 'TestAC16ForbiddenImportFails|TestForbidigoOSExitRule' ./internal/stats/
 
   coordinator-stats-integration:
     name: phase4-coordinator (stats Postgres AC-9/10/19/20)

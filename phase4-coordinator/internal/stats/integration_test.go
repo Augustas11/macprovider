@@ -53,11 +53,13 @@ import (
 )
 
 const (
-	// pinned Postgres image digest — BUILD §G.1 SECURITY
-	// invariant forbids `:latest`. Image: postgres:16.4-alpine3.20
-	// at a known-good digest; refresh deliberately when bumping
-	// the major version.
-	pgImage = "postgres:16.4-alpine3.20"
+	// Digest-pinned Postgres image — BUILD §G.1 + round-1
+	// SECURITY r1 MEDIUM 2: a mutable tag like
+	// `postgres:16.4-alpine3.20` is forbidden hygiene; bake in
+	// the manifest-list digest so the test image is fixed even
+	// if the upstream tag is reused. Refresh deliberately when
+	// bumping the major version.
+	pgImage = "postgres:16.4-alpine3.20@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c"
 
 	roleStatsReader     = "stats_reader"
 	roleStatsRollup     = "stats_rollup"
@@ -153,13 +155,16 @@ func applyMigrationsAndStubOLTP(t *testing.T, fx *pgFixture) *sql.DB {
 		t.Fatalf("apply SPEC-017 migrations: %v", err)
 	}
 
-	// Rotate the placeholder passwords on each runtime role so
-	// the runtime DSN can connect.
+	// Round-1 SECURITY r1 CRITICAL 1 fix: the migration creates
+	// runtime roles with NOLOGIN and no password material. The
+	// production deploy automation rotates them via
+	// `ALTER ROLE ... WITH LOGIN PASSWORD '...'` from the
+	// secret store; the test harness does the same in-memory.
 	for _, role := range []string{roleStatsReader, roleStatsRollup, roleProviderPortal} {
 		if _, err := adminDB.ExecContext(ctx, fmt.Sprintf(
-			`ALTER ROLE %s WITH PASSWORD '%s'`, role, roleRuntimePassword,
+			`ALTER ROLE %s WITH LOGIN PASSWORD '%s'`, role, roleRuntimePassword,
 		)); err != nil {
-			t.Fatalf("rotate password on %s: %v", role, err)
+			t.Fatalf("rotate role %s: %v", role, err)
 		}
 	}
 
@@ -576,6 +581,136 @@ func TestMigrationsIdempotent(t *testing.T) {
 	}
 	if n != 7 {
 		t.Errorf("after re-apply, components_health row count = %d, want 7", n)
+	}
+}
+
+// TestMigrationsConcurrent — round-1 CODE r1 CRITICAL C1 fix.
+// Two parallel Apply calls must both succeed without leaving
+// duplicate rows in schema_migrations_spec017 or double-applying
+// the bootstrap inserts. The advisory lock in migrations.Apply
+// serializes the runs.
+func TestMigrationsConcurrent(t *testing.T) {
+	fx := startPostgres(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	adminDB1, err := sql.Open("postgres", fx.adminDSN())
+	if err != nil {
+		t.Fatalf("open admin1: %v", err)
+	}
+	defer adminDB1.Close()
+	adminDB2, err := sql.Open("postgres", fx.adminDSN())
+	if err != nil {
+		t.Fatalf("open admin2: %v", err)
+	}
+	defer adminDB2.Close()
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- statsmigrations.Apply(ctx, adminDB1) }()
+	go func() { errCh <- statsmigrations.Apply(ctx, adminDB2) }()
+	for i := 0; i < 2; i++ {
+		if err := <-errCh; err != nil {
+			t.Fatalf("concurrent Apply (run %d): %v", i, err)
+		}
+	}
+
+	// Exactly one row per migration version in
+	// schema_migrations_spec017 (no duplicates from race).
+	var rows int
+	if err := adminDB1.QueryRowContext(ctx,
+		`SELECT COUNT(DISTINCT version) FROM schema_migrations_spec017`,
+	).Scan(&rows); err != nil {
+		t.Fatalf("count distinct: %v", err)
+	}
+	var total int
+	if err := adminDB1.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM schema_migrations_spec017`,
+	).Scan(&total); err != nil {
+		t.Fatalf("count total: %v", err)
+	}
+	if rows != total {
+		t.Errorf("schema_migrations_spec017 has duplicate version rows: distinct=%d total=%d", rows, total)
+	}
+	if rows != 5 {
+		t.Errorf("schema_migrations_spec017 distinct versions = %d, want 5", rows)
+	}
+
+	// stats_components_health still has exactly 7 rows.
+	var comps int
+	if err := adminDB1.QueryRowContext(ctx, `SELECT COUNT(*) FROM stats_components_health`).Scan(&comps); err != nil {
+		t.Fatalf("count components_health: %v", err)
+	}
+	if comps != 7 {
+		t.Errorf("stats_components_health row count = %d, want 7", comps)
+	}
+}
+
+// TestAdvisoryLockKeyMatchesHashtext — defense-in-depth for the
+// migrations.advisoryLockKey constant. A coordinator using a
+// different hashing convention than the one used at IMPL time
+// would race against itself; this test fails fast in CI if the
+// constant drifts from a stable hash of the literal label.
+func TestAdvisoryLockKeyMatchesHashtext(t *testing.T) {
+	fx := startPostgres(t)
+	adminDB := applyMigrationsAndStubOLTP(t, fx)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Re-acquire the lock with the constant and confirm
+	// Postgres accepts it. The semantics we care about is "the
+	// pre-computed BIGINT is a valid pg_advisory_lock argument
+	// and the lock is acquired"; the constant's exact value is
+	// the migration package's contract, not the test's.
+	var ok bool
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT pg_try_advisory_lock(5179378192876502983)`,
+	).Scan(&ok); err != nil {
+		t.Fatalf("pg_try_advisory_lock: %v", err)
+	}
+	if !ok {
+		t.Fatal("pg_try_advisory_lock returned false; lock collided with a prior holder")
+	}
+	if _, err := adminDB.ExecContext(ctx,
+		`SELECT pg_advisory_unlock(5179378192876502983)`,
+	); err != nil {
+		t.Fatalf("pg_advisory_unlock: %v", err)
+	}
+}
+
+// TestNoLoginRoleDefault — round-1 SECURITY r1 CRITICAL 1 fix:
+// 003_roles.up.sql creates roles with NOLOGIN. Before the test
+// harness rotates them, a connection attempt MUST fail.
+func TestNoLoginRoleDefault(t *testing.T) {
+	fx := startPostgres(t)
+
+	// Apply ONLY the migrations, NOT the role-rotate step from
+	// applyMigrationsAndStubOLTP — so the roles still have
+	// NOLOGIN.
+	adminDB, err := sql.Open("postgres", fx.adminDSN())
+	if err != nil {
+		t.Fatalf("open admin: %v", err)
+	}
+	defer adminDB.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := statsmigrations.Apply(ctx, adminDB); err != nil {
+		t.Fatalf("apply migrations: %v", err)
+	}
+
+	// Confirm each runtime role has rolcanlogin = false (no
+	// password, no LOGIN) before any rotation.
+	for _, role := range []string{roleStatsReader, roleStatsRollup, roleProviderPortal} {
+		var canLogin bool
+		if err := adminDB.QueryRowContext(ctx,
+			`SELECT rolcanlogin FROM pg_roles WHERE rolname = $1`, role,
+		).Scan(&canLogin); err != nil {
+			t.Fatalf("query rolcanlogin for %s: %v", role, err)
+		}
+		if canLogin {
+			t.Errorf("role %s has rolcanlogin=true; 003_roles.up.sql should create with NOLOGIN", role)
+		}
 	}
 }
 

@@ -22,22 +22,32 @@
 -- exposing the coordinator to traffic (the deploy gate fails
 -- closed if any runtime DSN authentication fails).
 --
--- All roles are created with NOLOGIN-equivalent secret material;
--- DSN authentication will fail until the operator rotates the
--- password. This is intentional defense-in-depth: a forgotten
--- post-migration secret rotation surfaces as a startup smoke
--- failure (BUILD §C.3 fail-closed), not as a silent unauth'd pool.
+-- SECURITY: roles are created NOLOGIN with NO password material in
+-- the embedded migration (round-1 SECURITY r1 CRITICAL 1: a
+-- committed literal password — even a placeholder — is a CRITICAL
+-- finding because operators may forget to rotate before exposing
+-- the coordinator). The deploy automation MUST run
+-- `ALTER ROLE <name> WITH LOGIN PASSWORD '<from-secret-store>'`
+-- before flipping `stats.enabled = true`; a pool whose role still
+-- has NOLOGIN will fail the startup smoke (BUILD §C.3
+-- fail-closed) — the missing rotation surfaces immediately, not
+-- silently.
+--
+-- The integration test harness rotates the placeholder
+-- ephemerally in-process via an ALTER ROLE under the test's
+-- admin DSN (see integration_test.go) so the runtime-role
+-- connections succeed; no password is committed.
 
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stats_reader') THEN
-        CREATE ROLE stats_reader LOGIN PASSWORD '__set_at_deploy__';
+        CREATE ROLE stats_reader NOLOGIN;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'stats_rollup') THEN
-        CREATE ROLE stats_rollup LOGIN PASSWORD '__set_at_deploy__';
+        CREATE ROLE stats_rollup NOLOGIN;
     END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'provider_portal') THEN
-        CREATE ROLE provider_portal LOGIN PASSWORD '__set_at_deploy__';
+        CREATE ROLE provider_portal NOLOGIN;
     END IF;
 END
 $$;

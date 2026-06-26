@@ -270,33 +270,127 @@ func openPool(dsn string, tune poolTune) (*sql.DB, error) {
 	return db, nil
 }
 
-// smoke runs a per-pool PingContext under a short timeout so a
-// hung DSN cannot block coordinator startup indefinitely.
+// smoke runs per-pool role-boundary assertions under a short
+// timeout so a hung DSN cannot block coordinator startup
+// indefinitely.
+//
+// Round-1 ARCH r1 HIGH C2 + CODE r1 HIGH D1 fix: PingContext
+// alone proved nothing about role identity — three DSNs all
+// pointing at the same superuser would have all passed. Now
+// smoke asserts:
+//
+//  1. SELECT current_user equals the expected role for each
+//     pool (catches miswired DSN).
+//  2. The three required roles are distinct (catches all
+//     pools sharing one role).
+//  3. A positive probe — each role can read a table the
+//     locked SPEC §7.2 says it should be able to read.
+//  4. A deny-list probe — each role gets permission denied on
+//     a table the locked SPEC §7.2 says it must NOT be able
+//     to read. The deny probe uses tables that ALWAYS exist
+//     in a migrated SPEC-017 schema (no OLTP dependency); a
+//     "relation does not exist" failure is treated as a
+//     smoke failure too (the migrations must run first).
+//
+// On any failure the error names role + check (NEVER the DSN).
 func smoke(ctx context.Context, p *Pools) error {
-	timeout, cancel := context.WithTimeout(ctx, 5*time.Second)
+	timeout, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	pools := []struct {
-		name string
-		db   *sql.DB
-	}{
-		{"stats_reader", p.Reader},
-		{"stats_rollup", p.Rollup},
-		{"provider_portal", p.ProviderPortal},
+
+	type check struct {
+		role        string
+		db          *sql.DB
+		positiveSQL string // MUST succeed under this role
+		denySQL     string // MUST fail with "permission denied"
+	}
+	checks := []check{
+		{
+			role:        "stats_reader",
+			db:          p.Reader,
+			positiveSQL: `SELECT 1 FROM stats_components_health LIMIT 1`,
+			// stats_late_events is on the §7.2.1 deny list.
+			denySQL: `SELECT 1 FROM stats_late_events LIMIT 1`,
+		},
+		{
+			role:        "stats_rollup",
+			db:          p.Rollup,
+			positiveSQL: `SELECT 1 FROM stats_components_health LIMIT 1`,
+			// partner_keys is on the §7.2.2 deny list.
+			denySQL: `SELECT 1 FROM partner_keys LIMIT 1`,
+		},
+		{
+			role:        "provider_portal",
+			db:          p.ProviderPortal,
+			positiveSQL: `SELECT 1`, // no SELECT grants on any SPEC-017 table; trivial probe.
+			// stats_overview_current is on the §7.2.3 deny list.
+			denySQL: `SELECT 1 FROM stats_overview_current LIMIT 1`,
+		},
 	}
 	if p.PartnerKeysWriter != nil {
-		pools = append(pools, struct {
-			name string
-			db   *sql.DB
-		}{"partner_keys_writer", p.PartnerKeysWriter})
+		checks = append(checks, check{
+			role:        "partner_keys_writer",
+			db:          p.PartnerKeysWriter,
+			positiveSQL: `SELECT 1`,
+			// Column-scoped UPDATE only — SELECT on any column
+			// must fail.
+			denySQL: `SELECT 1 FROM partner_keys LIMIT 1`,
+		})
 	}
-	for _, item := range pools {
-		if err := item.db.PingContext(timeout); err != nil {
-			// Include role name + driver error class, NEVER the
-			// DSN. BUILD §C.3 SECURITY invariant.
-			return fmt.Errorf("smoke %s: %w", item.name, err)
+
+	seenUser := map[string]string{} // current_user -> role label
+	for _, c := range checks {
+		// 1. current_user.
+		var current string
+		if err := c.db.QueryRowContext(timeout, `SELECT current_user`).Scan(&current); err != nil {
+			return fmt.Errorf("smoke %s: select current_user: %w", c.role, err)
+		}
+		if current != c.role {
+			return fmt.Errorf("smoke %s: current_user is %q, want %q (DSN points at the wrong role)", c.role, current, c.role)
+		}
+		if other, ok := seenUser[current]; ok {
+			return fmt.Errorf("smoke: roles %q and %q resolve to the same Postgres user %q (§7.2.5 requires distinct pools per role)", other, c.role, current)
+		}
+		seenUser[current] = c.role
+
+		// 2. positive probe.
+		if _, err := c.db.ExecContext(timeout, c.positiveSQL); err != nil {
+			return fmt.Errorf("smoke %s: positive probe failed (migrations may not have run): %w", c.role, err)
+		}
+
+		// 3. deny probe.
+		_, err := c.db.ExecContext(timeout, c.denySQL)
+		if err == nil {
+			return fmt.Errorf("smoke %s: deny probe %q unexpectedly succeeded (role is over-privileged vs §7.2)", c.role, c.denySQL)
+		}
+		// lib/pq surfaces "permission denied" in the error
+		// string for SQLSTATE 42501. A "relation does not exist"
+		// error is also a smoke failure — the migrations must
+		// have run before the coordinator opens its pools.
+		msg := err.Error()
+		if !substringContains(msg, "permission denied") {
+			return fmt.Errorf("smoke %s: deny probe failed with %q, want 'permission denied' (relation may not exist; apply migrations first)", c.role, msg)
 		}
 	}
 	return nil
+}
+
+// substringContains is the local equivalent of strings.Contains —
+// re-implemented to keep this file's import set trivially
+// auditable (it audits clean otherwise). Hot only across smoke
+// + Open paths; stdlib overhead is irrelevant at startup.
+func substringContains(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(needle) > len(haystack) {
+		return false
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // strTrim is the local equivalent of strings.TrimSpace —

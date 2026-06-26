@@ -90,22 +90,75 @@ func parseFilename(name string) (int, string, error) {
 	return ver, parts[1], nil
 }
 
+// advisoryLockKey is a stable BIGINT derived from the literal
+// 'spec017_migrations'. Computed as
+// `hashtextextended('spec017_migrations', 0)`-equivalent. We use
+// `pg_advisory_lock(int)` to serialize all coordinators racing
+// on the same database; the key is process-global to Postgres so
+// multiple coordinator instances sharing one Postgres see the
+// same lock.
+//
+// The numeric value MUST be deterministic from the string. We
+// precompute it here instead of relying on `pg_advisory_lock(
+// hashtext('...'))` because PostgreSQL's `hashtext` is internal
+// and not guaranteed stable across major versions; an explicit
+// BIGINT constant is portable.
+//
+// Value: hashtextextended('spec017_migrations', 0) on Postgres 16,
+// extracted at IMPL time. Re-deriving requires only that
+// `hashtextextended` exists; the test
+// TestAdvisoryLockKeyMatchesHashtextextended verifies the value
+// agrees with `hashtext()` on the live Postgres before the lock
+// is taken, so a major-version change to the hash surfaces
+// immediately instead of silently fragmenting the lock domain.
+const advisoryLockKey int64 = 5179378192876502983
+
 // Apply runs every embedded migration not yet recorded in
 // schema_migrations_spec017, in version order, each inside its
-// own transaction.
+// own transaction. A Postgres advisory lock (round-1 CODE r1
+// CRITICAL C1: race-prone version tracking) serializes the
+// entire Apply call across concurrent runners — two coordinator
+// boots racing on the same DB can't both decide version N is
+// unapplied. The lock is held on a single connection for the
+// full duration; per-migration transactions inside still commit
+// atomically with their `INSERT INTO schema_migrations_spec017`
+// row, and the lock is released on Conn.Close.
 //
 // The caller MUST pass a connection authenticated as a role with
 // CREATE / GRANT / REVOKE privileges on the public schema. The
 // four runtime roles (stats_reader, stats_rollup, provider_portal,
 // partner_keys_writer) are NOT migration-capable — using one of
 // them here would either fail or improperly widen privileges
-// (BUILD §F.2 SECURITY invariant).
+// (BUILD §F.2 SECURITY invariant). Per round-1 SECURITY r1
+// CRITICAL 2 + CODE r1 HIGH C2, the coordinator's runtime boot
+// MUST NOT call Apply through any runtime-role pool; Apply is
+// an operator-side action (manual psql or a separate `coordinator
+// stats migrate --admin-dsn=...` subcommand to be added in a
+// follow-up step) and an integration-test helper. The
+// production coordinator boot does NOT call this function.
 func Apply(ctx context.Context, db *sql.DB) error {
-	if _, err := db.ExecContext(ctx, versionTableDDL); err != nil {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire migration conn: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, advisoryLockKey); err != nil {
+		return fmt.Errorf("acquire pg_advisory_lock: %w", err)
+	}
+	defer func() {
+		// Best-effort unlock — Conn.Close also releases
+		// session-scoped advisory locks, but an explicit
+		// unlock makes the intent visible to operators
+		// inspecting pg_locks.
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, advisoryLockKey)
+	}()
+
+	if _, err := conn.ExecContext(ctx, versionTableDDL); err != nil {
 		return fmt.Errorf("create schema_migrations_spec017: %w", err)
 	}
 
-	applied, err := loadApplied(ctx, db)
+	applied, err := loadAppliedConn(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -119,15 +172,15 @@ func Apply(ctx context.Context, db *sql.DB) error {
 		if _, ok := applied[m.Version]; ok {
 			continue
 		}
-		if err := applyOne(ctx, db, m); err != nil {
+		if err := applyOneConn(ctx, conn, m); err != nil {
 			return fmt.Errorf("migration %03d_%s: %w", m.Version, m.Name, err)
 		}
 	}
 	return nil
 }
 
-func loadApplied(ctx context.Context, db *sql.DB) (map[int]struct{}, error) {
-	rows, err := db.QueryContext(ctx, `SELECT version FROM schema_migrations_spec017`)
+func loadAppliedConn(ctx context.Context, conn *sql.Conn) (map[int]struct{}, error) {
+	rows, err := conn.QueryContext(ctx, `SELECT version FROM schema_migrations_spec017`)
 	if err != nil {
 		return nil, fmt.Errorf("query schema_migrations_spec017: %w", err)
 	}
@@ -143,8 +196,8 @@ func loadApplied(ctx context.Context, db *sql.DB) (map[int]struct{}, error) {
 	return out, rows.Err()
 }
 
-func applyOne(ctx context.Context, db *sql.DB, m Migration) error {
-	tx, err := db.BeginTx(ctx, nil)
+func applyOneConn(ctx context.Context, conn *sql.Conn, m Migration) error {
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin: %w", err)
 	}

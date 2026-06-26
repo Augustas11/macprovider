@@ -9,11 +9,19 @@
 --
 -- All grants below run AFTER the table creates in 001 (BUILD §B.1).
 
+-- ===== Defense-in-depth: revoke from PUBLIC (round-1 CODE r1 B1). =====
+-- The earlier draft revoked from each runtime role before the
+-- grant block — a no-op because the role had no prior grant.
+-- The locked SPEC requires the deny boundary to be on PUBLIC,
+-- not the runtime roles. PUBLIC is the implicit grantee of any
+-- default privilege; revoking it here keeps a future Step 2/3
+-- table from auto-inheriting SELECT for everyone.
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+
 -- ===== stats_reader (§7.2.1) — request-path handler role. =====
--- Defense-in-depth: REVOKE ALL FROM PUBLIC before any GRANT so
--- default permissive privileges on PUBLIC do not leak past the
--- role boundary (BUILD §B.3).
-REVOKE ALL ON SCHEMA public FROM stats_reader;
 GRANT USAGE ON SCHEMA public TO stats_reader;
 
 GRANT SELECT ON
@@ -39,7 +47,6 @@ REVOKE ALL ON
 FROM stats_reader;
 
 -- ===== stats_rollup (§7.2.2) — rollup job role. =====
-REVOKE ALL ON SCHEMA public FROM stats_rollup;
 GRANT USAGE ON SCHEMA public TO stats_rollup;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON
@@ -74,7 +81,6 @@ REVOKE ALL ON partner_keys, provider_visibility_audit FROM stats_rollup;
 -- CRITICAL invariant).
 
 -- ===== provider_portal (§7.2.3) — portal toggle role. =====
-REVOKE ALL ON SCHEMA public FROM provider_portal;
 GRANT USAGE ON SCHEMA public TO provider_portal;
 
 GRANT INSERT, UPDATE ON provider_visibility TO provider_portal;
