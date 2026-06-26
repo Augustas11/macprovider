@@ -94,17 +94,53 @@ func runLeaderboardIncrementalTick(ctx context.Context, db *sql.DB, cfg Config, 
 func runIncrementalLeaderboardUpdate(ctx context.Context, db *sql.DB, cfg Config, window string, now, lastOK time.Time) error {
 	lookbackStart := lastOK.Add(-time.Duration(cfg.LateEventsLookbackHours) * time.Hour).Unix()
 	endUnix := now.Unix()
+	winStart := windowStart(window, now, cfg.PartialHistorySinceUnix)
 
-	// Step 1: find providers with new activity in
-	// `[lookback_start, now)`.
+	// Step 1a: find providers with new activity in
+	// `[lookback_start, now)`. These are "lookback-active":
+	// corrections + new rows have arrived for them.
 	activeProvs, err := queryActiveProvidersInLookback(ctx, db, lookbackStart, endUnix)
 	if err != nil {
 		return fmt.Errorf("incremental %s active providers: %w", window, err)
 	}
 
+	// Step 1b — round-4 ARCH r4 HIGH 1 fix: also recompute
+	// providers whose contributing rows just AGED OUT of the
+	// window. The "aging-out slice" is
+	// `[winStart - tickInterval, winStart)` — rows that crossed
+	// the window boundary between the previous tick and now.
+	// Without this, a provider with no new lookback activity
+	// but whose old rows just expired would carry an inflated
+	// total in the live snapshot until the nightly rebuild.
+	//
+	// `all` window has no aging-out (partial_history_since is
+	// fixed); skip for that case.
+	if window == "30d" {
+		tickInterval := cfg.Leaderboard30dInterval
+		agingStart := winStart - int64(tickInterval.Seconds()) - int64(cfg.LateEventsLookbackHours)*3600 // generous: include up to lastOK's age too
+		agingEnd := winStart
+		if agingStart < 0 {
+			agingStart = 0
+		}
+		agingProvs, err := queryActiveProvidersInLookback(ctx, db, agingStart, agingEnd)
+		if err != nil {
+			return fmt.Errorf("incremental %s aging-out providers: %w", window, err)
+		}
+		// Merge into activeProvs (de-duplicate).
+		seen := make(map[string]struct{}, len(activeProvs))
+		for _, p := range activeProvs {
+			seen[p] = struct{}{}
+		}
+		for _, p := range agingProvs {
+			if _, ok := seen[p]; !ok {
+				activeProvs = append(activeProvs, p)
+				seen[p] = struct{}{}
+			}
+		}
+	}
+
 	// Step 2: for each active provider, recompute the full
 	// window aggregate (provider-scoped).
-	winStart := windowStart(window, now, cfg.PartialHistorySinceUnix)
 	updates := make([]leaderboardRow, 0, len(activeProvs))
 	visibility, err := loadProviderVisibility(ctx, db)
 	if err != nil {
@@ -253,7 +289,8 @@ func computeLeaderboardRowForProvider(ctx context.Context, db *sql.DB, cfg Confi
 
 	// Rewards aggregate for ONE provider.
 	const rewardsQ = `
-        SELECT COALESCE(SUM(prl.amount_usd), 0) AS amount
+        SELECT COALESCE(SUM(prl.amount_usd), 0) AS amount,
+               MAX(prl.unix_ts) AS last_unix_ts
           FROM provider_rewards_ledger prl
           JOIN provider_tokens pt ON pt.provider_id = prl.provider_id
          WHERE pt.provider_id = $1
@@ -261,7 +298,8 @@ func computeLeaderboardRowForProvider(ctx context.Context, db *sql.DB, cfg Confi
            AND prl.unix_ts < $3
     `
 	var amtStr string
-	if err := db.QueryRowContext(ctx, rewardsQ, pid, winStart, endUnix).Scan(&amtStr); err != nil {
+	var rewardsLastUnixTs sql.NullInt64
+	if err := db.QueryRowContext(ctx, rewardsQ, pid, winStart, endUnix).Scan(&amtStr, &rewardsLastUnixTs); err != nil {
 		return leaderboardRow{}, false, err
 	}
 	rewardsUSD, _ := new(big.Rat).SetString(amtStr)
@@ -272,6 +310,21 @@ func computeLeaderboardRowForProvider(ctx context.Context, db *sql.DB, cfg Confi
 	// No activity at all → drop-out.
 	if w.jobs == 0 && rewardsUSD.Sign() == 0 {
 		return leaderboardRow{}, false, nil
+	}
+
+	// Round-4 ARCH r4 fix: last_seen_at combines work + rewards.
+	// Earlier draft used only work.last_seen_at; a rewards-only
+	// provider had NULL last_seen_at and the drop-out query
+	// missed them.
+	if rewardsLastUnixTs.Valid {
+		rewardsTime := time.Unix(rewardsLastUnixTs.Int64, 0).UTC()
+		if w.lastSeen == nil || rewardsTime.After(*w.lastSeen) {
+			w.lastSeen = &rewardsTime
+		}
+		if w.firstSeen == nil {
+			fs := rewardsTime
+			w.firstSeen = &fs
+		}
 	}
 
 	workUSD := usdFromCredits(w.credits, cfg.UsdPerMillionCredits)
@@ -306,8 +359,13 @@ func pseudonymizeRow(providerID string) string {
 
 // deleteDropOuts deletes providers in the snapshot whose
 // last_seen_at fell outside the window-start boundary AND who
-// are NOT in the current update set (those that are getting
-// UPSERTed with fresh data don't need deletion).
+// are NOT in the current update set.
+//
+// Round-4 ARCH r4 fix: also catches providers with NULL
+// last_seen_at — those are rewards-only providers from earlier
+// ticks whose rewards have aged out (computeLeaderboardRowForProvider
+// now sets last_seen_at from rewards too, but pre-fix rows may
+// still have NULL).
 //
 // `winStart == 0` means "all" window with no partial_history_since
 // — in that case there are no drop-outs by time (the window is
@@ -315,12 +373,13 @@ func pseudonymizeRow(providerID string) string {
 // updating get UPSERTed.
 func deleteDropOuts(ctx context.Context, tx *sql.Tx, table string, winStart int64, updatedSet map[string]struct{}) error {
 	if winStart == 0 {
-		// No time-based drop-outs for unbounded windows.
 		return nil
 	}
-	// Read provider_ids whose last_seen_at < winStart. Then
-	// DELETE the ones NOT in updatedSet.
-	q := fmt.Sprintf(`SELECT provider_id FROM %s WHERE EXTRACT(EPOCH FROM last_seen_at) < $1`, table)
+	q := fmt.Sprintf(`
+        SELECT provider_id FROM %s
+         WHERE last_seen_at IS NULL
+            OR EXTRACT(EPOCH FROM last_seen_at) < $1
+    `, table)
 	rows, err := tx.QueryContext(ctx, q, winStart)
 	if err != nil {
 		return err

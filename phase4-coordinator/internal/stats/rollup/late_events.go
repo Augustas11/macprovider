@@ -35,10 +35,11 @@ const lateEventsAdvisoryLockKey int64 = 7521693845691207413
 // 30d + all concurrent invocations so the anti-join cannot
 // race.
 //
-// v0.1 simplification: SPEC §9.3 incremental-merge optimization
-// stays deferred (cadence ticks still full-recompute the
-// window). The late-event TABLE is populated for nightly
-// reconciliation + operator forensics.
+// v0.1 implements the SPEC §9.3 incremental-merge cadence path
+// for 30d/all via `runLeaderboardIncrementalTick` in
+// `incremental.go` (round-3 ARCH r3 HIGH 1 fix). Late events
+// (rows older than the lookback) are recorded here and reconciled
+// by the nightly Shape C rebuild.
 func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string, now time.Time) error {
 	conn, err := db.Conn(ctx)
 	if err != nil {
