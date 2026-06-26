@@ -49,6 +49,52 @@ func partnerProjectionFromContext(ctx context.Context) bool {
 	return v
 }
 
+// partnerKeyIDKey carries the matched partner_keys.id through to
+// the access-log middleware so Step 4.C's stats_request_served
+// event can record which key id served the request (0 if anonymous).
+// The value is the INTEGER row id only — NEVER the prefix, label,
+// or raw token (SECURITY M5 label hygiene).
+type partnerKeyIDKey struct{}
+
+func withPartnerKeyIDContext(ctx context.Context, id int64) context.Context {
+	return context.WithValue(ctx, partnerKeyIDKey{}, id)
+}
+
+func partnerKeyIDFromContext(ctx context.Context) int64 {
+	v, _ := ctx.Value(partnerKeyIDKey{}).(int64)
+	return v
+}
+
+// requestObs is a mutable per-request observability struct
+// stored as a pointer in r.Context. Handlers write into it
+// (generated_at_age_ms); the outer access-log middleware reads
+// it AFTER the handler returns. Pointer semantics let the
+// middleware see updates even though the http.Request value
+// it holds is immutable through r.WithContext chains.
+type requestObs struct {
+	GeneratedAtAgeMs int64
+}
+
+type requestObsKey struct{}
+
+func withRequestObsContext(ctx context.Context) (context.Context, *requestObs) {
+	obs := &requestObs{}
+	return context.WithValue(ctx, requestObsKey{}, obs), obs
+}
+
+func requestObsFromContext(ctx context.Context) *requestObs {
+	v, _ := ctx.Value(requestObsKey{}).(*requestObs)
+	return v
+}
+
+func generatedAtAgeMsFromContext(ctx context.Context) int64 {
+	obs := requestObsFromContext(ctx)
+	if obs == nil {
+		return 0
+	}
+	return obs.GeneratedAtAgeMs
+}
+
 // authResult bundles the §5.4.3 dispatch outcome.
 type authResult struct {
 	// projection picks the response shape. One of:

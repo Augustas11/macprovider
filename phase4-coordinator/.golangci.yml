@@ -39,8 +39,9 @@ linters:
   settings:
     depguard:
       rules:
-        # SPEC-017 Step 3 approved external imports for the
-        # request-path package (`internal/stats/*.go`):
+        # SPEC-017 Step 3+4 approved external imports for the
+        # request-path package (`internal/stats/*.go`) and the
+        # metrics package (`internal/stats/metrics/*.go`):
         #
         #   - golang.org/x/net/idna — required for RFC 6454
         #     §5.7 Origin normalization (IDN → Punycode); the
@@ -48,6 +49,16 @@ linters:
         #     to defend against Unicode-confusable origin
         #     bypass. Approved Step 3 round 2 ARCH M1 / CODE
         #     M-1.
+        #
+        #   - github.com/prometheus/client_golang/prometheus +
+        #     .../promauto + .../promhttp — required for
+        #     SPEC §8 v0.1.8 metrics (Step 4.C BUILD §2 lists
+        #     the five locked metric names). Label-hygiene
+        #     constraints documented in
+        #     `internal/stats/metrics/metrics.go`. No alternate
+        #     metric backend is in scope for v0.1; future v0.2
+        #     swap to OpenTelemetry would require a fresh
+        #     allowlist amendment.
         #
         # All other imports are governed by `list-mode: lax`
         # (anything not in `deny:` below is permitted by

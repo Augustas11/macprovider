@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/augstar/macprovider-coordinator/internal/stats/store"
 	"github.com/rs/zerolog"
 )
@@ -32,9 +33,18 @@ type Mux struct {
 	publicLimit   *limiter
 	partnerLimit  *limiter
 	trustedCIDRs  []*net.IPNet
+	metrics       *metrics.Metrics // optional; nil → no metric emit
 }
 
 func NewMux(reader *store.Store, cors CORSConfig, backfillMode, partialSince string, trustedProxies []string, logger zerolog.Logger) *Mux {
+	return NewMuxWithMetrics(reader, cors, backfillMode, partialSince, trustedProxies, logger, nil)
+}
+
+// NewMuxWithMetrics is the Step 4.C constructor that accepts an
+// optional metrics handle. Tests that don't need metric assertions
+// can call NewMux for the nil-metrics behavior; production wires
+// the coordinator-owned Metrics from main.go.
+func NewMuxWithMetrics(reader *store.Store, cors CORSConfig, backfillMode, partialSince string, trustedProxies []string, logger zerolog.Logger, m *metrics.Metrics) *Mux {
 	return &Mux{
 		h: &Handler{
 			Store:        reader,
@@ -47,13 +57,14 @@ func NewMux(reader *store.Store, cors CORSConfig, backfillMode, partialSince str
 		publicLimit:   newLimiter(),
 		partnerLimit:  newLimiter(),
 		trustedCIDRs:  parseTrustedProxies(trustedProxies),
+		metrics:       m,
 	}
 }
 
 func (m *Mux) Handler() http.Handler {
 	inner := http.HandlerFunc(m.dispatch)
 	with := http.Handler(inner)
-	with = accessLogMiddleware(m.logger)(with)
+	with = accessLogMiddleware(m.logger, m.metrics)(with)
 	with = recoverMiddleware(m.logger)(with)
 	with = redactionContextMiddleware(with)
 	return with
@@ -128,7 +139,14 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		// projection so writeError picks the partner Cache-
 		// Control / Vary row for post-auth errors.
 		if ar.projection == "partner" {
-			r = r.WithContext(withPartnerProjectionContext(r.Context()))
+			ctx := withPartnerProjectionContext(r.Context())
+			if ar.matchedKey != nil {
+				// Step 4.C `stats_request_served` event needs the
+				// matched partner_keys.id; the access-log
+				// middleware reads this via partnerKeyIDFromContext.
+				ctx = withPartnerKeyIDContext(ctx, ar.matchedKey.ID)
+			}
+			r = r.WithContext(ctx)
 		}
 	} else {
 		// /overview + /health: synthesize a public authResult

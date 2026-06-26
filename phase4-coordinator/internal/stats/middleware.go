@@ -3,8 +3,10 @@ package stats
 import (
 	"net/http"
 	"runtime/debug"
+	"strconv"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/rs/zerolog"
 )
 
@@ -139,21 +141,64 @@ func RecoverForTest(logger zerolog.Logger, next http.Handler) http.Handler {
 	return redactionContextMiddleware(with)
 }
 
-// accessLogMiddleware reads the redacted request context only.
-// v0.1 IMPL emits a minimal structured line per request; full
-// trace/span instrumentation is a Step 4.C concern.
-func accessLogMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
+// accessLogMiddleware emits the SPEC-017 §8 v0.1.8 locked
+// `stats_request_served` structured event for every request that
+// reaches the /v1/stats/* mux.
+//
+// Step 4.C fields (per BUILD §2 Step 4.C):
+//   - endpoint        — overview / leaderboard / health / "" for 404
+//   - status          — final HTTP status code emitted by the stack
+//   - latency_ms      — wall-clock from middleware entry to handler return
+//   - generated_at_age_ms — set by handler via withGeneratedAtAgeContext (0 if unset)
+//   - partner_key_id  — set by §5.4.3 dispatcher via partnerKeyIDKey (0 if unset)
+//
+// The event reads only the REDACTED header view (redaction
+// middleware ran upstream); raw tokens, body substrings, and
+// token_hash bytes are structurally unreachable from here.
+func accessLogMiddleware(logger zerolog.Logger, m *metrics.Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			// The redaction middleware already replaced
-			// Authorization with REDACTED on r.Header. Reading
-			// r.Header.Get("Authorization") here returns
-			// "REDACTED" — never the raw token.
-			next.ServeHTTP(w, r)
-			// Intentionally light: the access log shape is
-			// pinned in Step 4.C (nginx + structured-log
-			// taxonomy). v0.1 IMPL emits the line at INFO via
-			// the recover/auth/etc. layers themselves.
+			start := time.Now()
+			ctx, _ := withRequestObsContext(r.Context())
+			r = r.WithContext(ctx)
+			rec := &statusRecorder{ResponseWriter: w}
+			next.ServeHTTP(rec, r)
+			status := rec.status
+			if status == 0 {
+				// Panic-before-write — recover middleware
+				// already emitted a 500; treat the access-log
+				// event as a 500 for observability parity.
+				status = http.StatusInternalServerError
+			}
+			endpoint := trimEndpointFromPath(r.URL.Path)
+			ageMs := generatedAtAgeMsFromContext(r.Context())
+			pkid := partnerKeyIDFromContext(r.Context())
+			logger.Info().
+				Str("event", "stats_request_served").
+				Str("endpoint", endpoint).
+				Str("method", r.Method).
+				Int("status", status).
+				Int64("latency_ms", time.Since(start).Milliseconds()).
+				Int64("generated_at_age_ms", ageMs).
+				Int64("partner_key_id", pkid).
+				Msg("stats request served")
+
+			// Step 4.C — Prometheus metrics. nil-safe so tests
+			// using the default Mux constructor (no metrics)
+			// don't have to register a registry.
+			if m != nil {
+				tier := "public"
+				if pkid != 0 {
+					tier = "partner"
+				}
+				m.RequestTotal.WithLabelValues(endpoint, strconv.Itoa(status), tier).Inc()
+				if pkid != 0 {
+					m.PartnerKeyRequestTotal.WithLabelValues(strconv.FormatInt(pkid, 10)).Inc()
+				}
+				if status == http.StatusTooManyRequests {
+					m.RateLimitExceededTotal.WithLabelValues(tier, endpoint).Inc()
+				}
+			}
 		})
 	}
 }

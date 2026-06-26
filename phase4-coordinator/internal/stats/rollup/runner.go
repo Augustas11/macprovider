@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	"github.com/rs/zerolog"
 )
 
@@ -26,6 +27,14 @@ type Runner struct {
 	logger   zerolog.Logger
 	stopOnce sync.Once
 	wg       sync.WaitGroup
+	metrics  *metrics.Metrics // optional; nil → no metric emit
+}
+
+// WithMetrics attaches a Step 4.C metrics handle. Optional;
+// callers that don't need metric emission omit this.
+func (r *Runner) WithMetrics(m *metrics.Metrics) *Runner {
+	r.metrics = m
+	return r
 }
 
 // New constructs a Runner. The caller MUST inject:
@@ -185,6 +194,7 @@ func (r *Runner) spawnTick(ctx context.Context, name string, interval time.Durat
 // 3/4 log/db propagation cannot persist arbitrary strings —
 // round-1 SECURITY r1 MED-2 fix.
 func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(context.Context) error) {
+	start := time.Now()
 	defer func() {
 		if rec := recover(); rec != nil {
 			class := classifyPanic(rec)
@@ -195,6 +205,9 @@ func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(c
 				Msg("rollup tick panic recovered; job will continue at next interval")
 			if c != "" {
 				_ = healthFail(context.Background(), r.db, c, time.Now().UTC(), "panic: "+class)
+			}
+			if r.metrics != nil && c != "" {
+				r.metrics.RollupErrorsTotal.WithLabelValues(string(c)).Inc()
 			}
 		}
 	}()
@@ -207,7 +220,23 @@ func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(c
 		if c != "" {
 			_ = healthFail(context.Background(), r.db, c, time.Now().UTC(), err.Error())
 		}
+		if r.metrics != nil && c != "" {
+			r.metrics.RollupErrorsTotal.WithLabelValues(string(c)).Inc()
+		}
+		return
 	}
+	// Step 4.C — locked §8.5 event for a successful rollup tick.
+	// Fields per BUILD §2 Step 4.C: component, generated_at,
+	// duration_ms. `generated_at` here is the wall-clock tick
+	// completion time (the underlying job ALSO writes
+	// stats_components_health.generated_at to the same value).
+	finishedAt := time.Now().UTC()
+	r.logger.Info().
+		Str("event", "stats_rollup_tick_completed").
+		Str("component", string(c)).
+		Time("generated_at", finishedAt).
+		Int64("duration_ms", finishedAt.Sub(start).Milliseconds()).
+		Msg("stats rollup tick completed")
 }
 
 // classifyPanic returns a bounded redacted classification of a

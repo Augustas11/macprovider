@@ -23,10 +23,14 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
+	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
 	statsstore "github.com/augstar/macprovider-coordinator/internal/stats/store"
+
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
+	prom "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	// SPEC-017 v0.1.8 — register the Postgres driver under the
 	// "postgres" name used by internal/stats.Open. lib/pq is the
@@ -528,7 +532,17 @@ func main() {
 	// stats.streamvc.live/v1/stats/*; nginx vhost config
 	// (Step 4.B) routes both to this provider port.
 	if statsPools != nil {
-		statsHandler := stats.NewMux(
+		// SPEC-017 v0.1.8 Step 4.C — Prometheus metrics. The
+		// coordinator owns its own registry (not the global
+		// DefaultRegisterer) so concurrent test runs don't
+		// double-register. The /metrics handler is mounted on
+		// the provider port (8444) which is loopback-only per
+		// Pearl posture (nginx fronts the public ports; the
+		// metrics endpoint is reachable only via SSH/operator
+		// tunnel).
+		statsRegistry := prom.NewRegistry()
+		statsMetrics := statsmetrics.New(statsRegistry)
+		statsHandler := stats.NewMuxWithMetrics(
 			statsstore.New(statsPools.Reader),
 			stats.CORSConfig{
 				AccessControlMaxAgeSeconds: cfg.Stats.CORS.AccessControlMaxAgeSeconds,
@@ -538,9 +552,20 @@ func main() {
 			cfg.Stats.Rollup.PartialHistorySince,
 			cfg.Stats.TrustedProxies,
 			logger.With().Str("subsystem", "stats_handlers").Logger(),
+			statsMetrics,
 		).Handler()
 		providerMux.Handle("/v1/stats/", statsHandler)
-		logger.Info().Msg("SPEC-017 stats handlers mounted at /v1/stats/{overview,leaderboard,health}")
+		providerMux.Handle("/metrics", promhttp.HandlerFor(statsRegistry, promhttp.HandlerOpts{}))
+		logger.Info().Msg("SPEC-017 stats handlers + /metrics mounted on provider port")
+
+		// Wire rollup lag observation periodically — gauge value
+		// = now - stats_components_health.generated_at per
+		// component. Background goroutine; cancelled with
+		// shutdownCtx.
+		if statsRollup != nil {
+			statsRollup.WithMetrics(statsMetrics)
+			go observeRollupLag(shutdownCtx, statsPools.Reader, statsMetrics, logger)
+		}
 	}
 
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
@@ -899,5 +924,53 @@ func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
 		return strings.TrimSpace(startup.String()) != strings.TrimSpace(next.String())
 	default:
 		return !reflect.DeepEqual(startup.Interface(), next.Interface())
+	}
+}
+
+// observeRollupLag periodically updates the
+// stats_rollup_lag_seconds gauge per §9.5 component, reading
+// each component's generated_at from stats_components_health.
+// Runs at a 15s cadence; cancelled when ctx.Done() fires.
+//
+// Read-only via the reader pool — does NOT contend with the
+// rollup writer pool.
+func observeRollupLag(ctx context.Context, readerDB *sql.DB, m *statsmetrics.Metrics, logger zerolog.Logger) {
+	tick := time.NewTicker(15 * time.Second)
+	defer tick.Stop()
+	components := []string{
+		"overview",
+		"timeseries_rpm",
+		"timeseries_tpm",
+		"leaderboard_24h",
+		"leaderboard_7d",
+		"leaderboard_30d",
+		"leaderboard_all",
+	}
+	const q = `SELECT generated_at FROM stats_components_health WHERE component = $1`
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			now := time.Now().UTC()
+			for _, c := range components {
+				var ts time.Time
+				row := readerDB.QueryRowContext(ctx, q, c)
+				if err := row.Scan(&ts); err != nil {
+					// Missing row / read error → record zero
+					// rather than skipping; absence of an update
+					// is itself a signal a downstream dashboard
+					// may want to alert on.
+					m.RollupLagSeconds.WithLabelValues(c).Set(0)
+					continue
+				}
+				lag := now.Sub(ts).Seconds()
+				if lag < 0 {
+					lag = 0
+				}
+				m.RollupLagSeconds.WithLabelValues(c).Set(lag)
+			}
+			_ = logger // keep import used; no per-tick log line
+		}
 	}
 }

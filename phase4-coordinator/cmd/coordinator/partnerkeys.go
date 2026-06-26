@@ -34,6 +34,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -283,6 +284,21 @@ RETURNING id, created_at`
 		return 1
 	}
 
+	// Step 4.C — locked §8.5 event for a successful issuance.
+	// Fields per BUILD §2 Step 4.C: partner_keys.id, label,
+	// created_by, rotated_from_id_or_null. NEVER the raw token,
+	// 43-char body, or token_hash bytes. The event lands on
+	// stderr-bound zerolog so it survives JOURNAL_STREAM-aware
+	// stdout suppression (operator still gets the audit trail).
+	emitPartnerKeyEvent(stderr, "stats_partner_key_issued", map[string]any{
+		"id":              id,
+		"label":           *label,
+		"prefix":          prefix,
+		"created_by":      principal,
+		"rotated_from_id": nullInt64String(rotatedFrom),
+		"created_at":      createdAt.UTC().Format(time.RFC3339),
+	})
+
 	// Print metadata first (operator-facing diagnostic). The
 	// metadata is journal-safe — contains only label / id /
 	// prefix / created_by / rotated_from_id / created_at.
@@ -412,8 +428,35 @@ func runPartnerKeysRevoke(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "partner-keys revoke: id=%d UPDATE matched 0 rows for an unknown reason\n", *id)
 		return 1
 	}
+	// Step 4.C — locked §8.5 event for a successful revoke.
+	// Fields per BUILD §2 Step 4.C: partner_keys.id, reason, actor.
+	actor := resolvePrincipal("")
+	emitPartnerKeyEvent(stderr, "stats_partner_key_revoked", map[string]any{
+		"id":     *id,
+		"reason": *reason,
+		"actor":  actor,
+	})
+
 	fmt.Fprintf(stdout, "revoked id=%d reason=%s\n", *id, *reason)
 	return 0
+}
+
+// emitPartnerKeyEvent writes a JSON-shaped structured event line
+// to the operator-facing log sink (stderr) without dragging in
+// zerolog (the CLI subcommands shouldn't pay zerolog import cost
+// + interface ceremony for two emit sites). The minimal line is
+// `{"event":"...","ts":"<RFC3339>",...}` so log shippers can
+// pattern-match the same way they do for daemon-side events.
+//
+// Field set must NEVER contain the raw token, 43-char body, or
+// token_hash bytes — see partnerkeys.go callers for the closed
+// per-event field map.
+func emitPartnerKeyEvent(w io.Writer, event string, fields map[string]any) {
+	fields["event"] = event
+	fields["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	_ = enc.Encode(fields)
 }
 
 // runPartnerKeysList implements `coordinator partner-keys

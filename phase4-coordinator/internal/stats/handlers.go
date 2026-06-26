@@ -139,6 +139,12 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 		return
 	}
 
+	// Step 4.C observability tap — record snapshot freshness
+	// for the access-log middleware to emit on stats_request_served.
+	if obs := requestObsFromContext(r.Context()); obs != nil {
+		obs.GeneratedAtAgeMs = time.Since(ov.GeneratedAt).Milliseconds()
+	}
+
 	tokensServed := ov.TokensIn + ov.TokensOut
 	avgTokensPerRequest := int64(0)
 	if ov.Requests > 0 {
@@ -392,6 +398,12 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 		retry := 30
 		writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "leaderboard is stale", now, &retry)
 		return
+	}
+
+	// Step 4.C observability tap (post-freshness check so we
+	// only record age for the response we actually return).
+	if obs := requestObsFromContext(r.Context()); obs != nil {
+		obs.GeneratedAtAgeMs = time.Since(snapshotTime).Milliseconds()
 	}
 
 	rewardsPop, err := h.Store.RewardsPopulated(ctx, window)

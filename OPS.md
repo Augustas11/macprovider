@@ -611,3 +611,132 @@ first-session provider.
 
 `list-tokens` is read-only and safe to run any time; the output is
 a TSV that pipes cleanly into `awk` / `grep` / `column`.
+
+## 10. SPEC-017 Network Stats API — operator runbook
+
+SPEC-017 v0.1.8 ships the public Network Stats API at
+`https://stats.streamvc.live/v1/stats/{overview,leaderboard,health}`.
+The handler is in-process (same `coordinator` binary), the rollup
+runs on a per-table cadence, and nginx fronts the public surface
+with rate-limit + cache directives per BUILD §2 Step 4.B.
+
+### 10.1 Rotating a partner key
+
+```bash
+# Issue a successor (returns the new raw token EXACTLY ONCE on
+# stdout). If invoking under systemd-run / journalctl, set
+# `--token-out /tmp/partner-rotated.token` (mode 0600) instead.
+sudo -u macprovider /opt/macprovider/coordinator partner-keys issue \
+  --label "ACME inc rotated 2026-09-01" \
+  --rotate-from 17
+
+# Operator-decided overlap window (default suggestion: 7 days). After
+# the partner confirms they've cut over, revoke the predecessor:
+sudo -u macprovider /opt/macprovider/coordinator partner-keys revoke \
+  --id 17 --reason "rotation completed"
+```
+
+The predecessor row stays `revoked_at = NULL` after the new issue —
+revoking is a separate operator action. Both keys unlock the partner
+projection until the revoke fires.
+
+### 10.2 Revoking a partner key in incident
+
+```bash
+# Takes effect on the next request (no in-memory cache).
+sudo -u macprovider /opt/macprovider/coordinator partner-keys revoke \
+  --id 23 --reason "key suspected exposed in <PARTNER>'s GitHub repo"
+```
+
+The next request bearing this token returns 401 with the §5.9
+`unauthorized` envelope. Existing in-flight requests complete.
+
+### 10.3 Restarting the rollup scheduler after a panic-restart loop
+
+The Step 2 runner recovers per-tick panics in-place; the goroutine
+continues at the next interval. A persistent panic surface indicates
+a rollup-code bug; mitigation is to disable the offending component
+via the `stats.rollup.<component>_interval = 0` config knob and
+investigate before re-enabling.
+
+```bash
+# Check which component is panicking
+sudo journalctl -u macprovider-coordinator -n 200 | grep stats_rollup_panic
+
+# Disable the offending component, restart, file an issue
+sudo nano /opt/macprovider/coordinator.yaml   # set the interval to 0
+sudo systemctl restart macprovider-coordinator
+```
+
+### 10.4 Emergency provider-visibility revert (operator-only)
+
+If a provider's `exact` visibility setting was clearly opted-in by
+mistake (e.g. legal/safety incident), the operator may flip the row
+back to `bucketed` with an audit trail:
+
+```bash
+sudo -u macprovider /opt/macprovider/coordinator visibility revert \
+  --id <provider_id> \
+  --reason "incident IR-2026-09 — leaked exact $ via public scrape"
+```
+
+The CLI HARDCODES `new_mode='bucketed'` and `actor_kind='operator'`;
+there is NO operator path to write `mode='exact'`. The
+`bucketed → exact` direction is exclusively the SPEC-014 v0.9
+provider-authenticated portal flow.
+
+`coordinator visibility exact ...` hard-rejects with a clear
+operator-redirect message. AC-20 CI assertion catches any
+`new_mode='exact' AND actor_kind='operator'` row in
+`provider_visibility_audit` on every PR.
+
+### 10.5 Partner-key exact-dollar exposure — provider disclosure obligation
+
+Per SPEC-017 §6.6.2 (v0.1.7-tightened to a hard launch-sequencing
+MUST):
+
+> Trusted partners with an operator-issued API key see every
+> provider's exact earnings figures (`earnings_usd`,
+> `earnings_work_usd`, `earnings_rewards_usd`), even when the
+> provider's public mode is `bucketed`.
+
+Providers MUST be informed of this exposure at onboarding time.
+SPEC-014 v0.9 owns the in-portal disclosure; until that surface
+ships, this OPS.md section is the authoritative copy.
+
+#### Cutover-runbook gate (BLOCKING for first PRODUCTION partner-key issuance)
+
+The operator MUST NOT issue any partner key against the production
+coordinator until ALL THREE conditions are satisfied on
+`portal.streamvc.live`:
+
+1. SPEC-014 v0.9 has merged AND is deployed to
+   `portal.streamvc.live`.
+2. The §6.6.2 disclosure copy above is shown on the
+   provider-account-creation page AND on a static portal page
+   that every existing provider sees on their next portal login.
+3. This runbook contains a signed-off entry naming the SPEC-014
+   v0.9 commit SHA + the date both disclosure surfaces went live.
+
+Staging keys against staging coordinators for AC fixtures or partner
+integration dry-runs are EXEMPT. Staging keys MUST NOT be returnable
+from a production coordinator response.
+
+#### Sign-off template
+
+```
+PARTNER-KEY PRODUCTION ISSUANCE SIGN-OFF — SPEC-017 v0.1.8 §6.6.2
+
+SPEC-014 v0.9 commit SHA       : <fill: 40-char SHA>
+SPEC-014 v0.9 portal deploy date: <fill: YYYY-MM-DD>
+Provider-creation disclosure live: <fill: YES/NO + date>
+Existing-provider disclosure live: <fill: YES/NO + date>
+Operator name + role            : <fill: e.g. "augstar — sole operator">
+Signed off at                   : <fill: ISO 8601 UTC>
+```
+
+**Current status (2026-06-26): NOT YET SATISFIED.** SPEC-014 v0.9
+disclosure deployment is the remaining cutover prerequisite before
+any production partner-key issuance. The Step 4.C PR may merge
+with this template in place; the live sign-off is the operator-side
+gate executed AFTER the merge.
