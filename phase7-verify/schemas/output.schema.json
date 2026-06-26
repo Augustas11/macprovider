@@ -118,6 +118,22 @@
                 "type": "object",
                 "required": [
                   "kind",
+                  "ca_file_path"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "non_default_tls_trust"
+                  },
+                  "ca_file_path": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
                   "unix_ts",
                   "system_time",
                   "delta_seconds"
@@ -382,6 +398,22 @@
                 "type": "object",
                 "required": [
                   "kind",
+                  "ca_file_path"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "non_default_tls_trust"
+                  },
+                  "ca_file_path": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
                   "unix_ts",
                   "system_time",
                   "delta_seconds"
@@ -611,6 +643,22 @@
                     "const": "non_default_coordinator"
                   },
                   "coordinator_host": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind",
+                  "ca_file_path"
+                ],
+                "properties": {
+                  "kind": {
+                    "const": "non_default_tls_trust"
+                  },
+                  "ca_file_path": {
                     "type": "string"
                   }
                 },

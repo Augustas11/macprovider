@@ -79,6 +79,15 @@ var (
 	// followed by net/http after the first response.
 	ErrRedirectOffPath = errors.New("redirect target path differs from the original receipt-keys request")
 	ErrFetchFailed     = errors.New("receipt key fetch failed")
+	// ErrPrivateCoordinatorDenied fires when --coordinator points to a
+	// loopback / RFC1918 / link-local host and the
+	// MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR=1 escape hatch is
+	// not set. This is a CLI invocation policy violation (the operator
+	// pointed the verifier at a private-network coordinator without
+	// opting in), so cli.exitForError maps it to exit 64 (EX_USAGE)
+	// per SPEC-015 §10.4.3 rather than the default exit 70 (software
+	// error). Issue #126.
+	ErrPrivateCoordinatorDenied = errors.New("--coordinator host is loopback/private")
 )
 
 var providerIDPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
@@ -112,6 +121,16 @@ func Resolve(providerID string, explicitPubkey []byte, opts ResolveOpts) (Resolv
 		now = opts.Now
 	}
 	warnings := coordinatorWarnings(target.host)
+	// Issue #128: surface silent TLS trust widening so a buyer running
+	// under a wrapper script where MACPROVIDER_VERIFY_TLS_CA_FILE has
+	// been set sees a visible indicator in the warnings[] array (and
+	// on stderr unless --quiet). The actual cert-pool augmentation
+	// happens deeper inside configuredClient; this helper just checks
+	// the same env-var + readable-PEM precondition so the warning
+	// fires only on real widening, not on env-var-set-but-file-broken.
+	if w, ok := nonDefaultTLSTrustWarning(); ok {
+		warnings = append(warnings, w)
+	}
 
 	if len(explicitPubkey) > 0 && len(explicitPubkey) != 32 {
 		return ResolvedRoot{}, fmt.Errorf("%w: got %d bytes", receipt.ErrPubkeyLength, len(explicitPubkey))
@@ -404,6 +423,44 @@ func extraTLSRootsFromEnv() *x509.CertPool {
 	return pool
 }
 
+// nonDefaultTLSTrustWarning returns the SPEC-015 v0.3.4
+// `non_default_tls_trust` warning IFF the same env-var honoring
+// extraTLSRootsFromEnv performs returns a non-nil augmented pool,
+// AND ok=true. Mirroring the same successful-augmentation predicate
+// (file readable + PEM parseable) keeps the warning precise — it
+// fires only when the operator's `MACPROVIDER_VERIFY_TLS_CA_FILE`
+// actually widened the trust pool, not when the env var was set
+// but the file was unreadable / unparseable (no actual widening,
+// no need to warn). Issue #128. The env var is re-read here because
+// the warning is built at the Resolve()-layer (where the warnings[]
+// slice is owned) but the augmentation happens deeper inside
+// configuredClient — duplicating the env-var + file read is a
+// micro-cost only paid when the env var is actually set, which is
+// rare and operator-deliberate.
+func nonDefaultTLSTrustWarning() (Warning, bool) {
+	path := os.Getenv("MACPROVIDER_VERIFY_TLS_CA_FILE")
+	if path == "" {
+		return Warning{}, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return Warning{}, false
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil || pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(data) {
+		return Warning{}, false
+	}
+	return Warning{
+		Kind: "non_default_tls_trust",
+		Fields: map[string]any{
+			"ca_file_path": path,
+		},
+	}, true
+}
+
 func transportWithRootCAs(base http.RoundTripper, roots *x509.CertPool) http.RoundTripper {
 	var transport *http.Transport
 	if base == nil {
@@ -441,7 +498,11 @@ func normalizeCoordinator(raw string) (coordinatorTarget, error) {
 	}
 	host := parsed.Hostname()
 	if isPrivateOrLoopback(host) && os.Getenv(allowPrivateCoordinatorEnv) != "1" {
-		return coordinatorTarget{}, fmt.Errorf("--coordinator host %q is loopback/private; set %s=1 to allow", host, allowPrivateCoordinatorEnv)
+		// Wrap ErrPrivateCoordinatorDenied so cli.exitForError can map
+		// to exit 64 (EX_USAGE) per SPEC-015 §10.4.3. The error message
+		// itself preserves the human-friendly hostname + escape-hatch
+		// env var name. Issue #126.
+		return coordinatorTarget{}, fmt.Errorf("%w: host %q; set %s=1 to allow", ErrPrivateCoordinatorDenied, host, allowPrivateCoordinatorEnv)
 	}
 	parsed.Path = strings.TrimRight(parsed.Path, "/")
 	if parsed.Path != "" {
