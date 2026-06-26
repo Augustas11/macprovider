@@ -180,7 +180,7 @@ func Default() Config {
 		Capacity: CapacityConfig{
 			MonthlyBudgetUSD: 500, ReadyProviderDegradedThreshold: 1, ProjectedCostTier1Percent: 80, TierCooldownSeconds: 3600,
 		},
-		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, CoordinatorHeaderTimeoutSeconds: 60, StreamingCancelMS: 500},
+		Timeouts: TimeoutsConfig{CoordinatorRequestSeconds: 300, CoordinatorHeaderTimeoutSeconds: 300, StreamingCancelMS: 500},
 		CORS:     CORSConfig{AllowedOrigins: []string{"https://console.streamvc.live", "https://streamvc.live"}},
 		Routing:  RoutingConfig{StickyEnabled: false, StickyTTLS: 1800},
 		Explorer: ExplorerConfig{Enabled: false},
@@ -361,6 +361,17 @@ func (c Config) Validate() error {
 	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.CoordinatorHeaderTimeoutSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 {
 		return fmt.Errorf("timeouts must be positive")
 	}
+	// Post-#92 / PR #167: header timeout must be >= request budget so a
+	// slow-but-valid streaming first-event (or non-streaming completion)
+	// doesn't false-fail before the coordinator's own request_timeout_s
+	// runs out. The deploy gate at phase4-coordinator/dist/check-deploy-config.sh
+	// (C2b) enforces this at deploy time; this runtime check ensures a
+	// gateway started outside the deploy gate (direct `gateway -config` /
+	// `gateway -check`) also refuses an unsafe local config.
+	if c.Timeouts.CoordinatorHeaderTimeoutSeconds < c.Timeouts.CoordinatorRequestSeconds {
+		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.coordinator_request_seconds (%d) — see SPEC-002 FR-P11a (post-#92)",
+			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.CoordinatorRequestSeconds)
+	}
 	if c.Routing.StickyTTLS <= 0 {
 		return fmt.Errorf("routing.sticky_ttl_s must be > 0")
 	}
@@ -449,11 +460,16 @@ func (c Config) CoordinatorTimeout() time.Duration {
 }
 
 // CoordinatorHeaderTimeout is the max time to wait for the coordinator to
-// start sending response headers after the request is fully written. It must
-// cover non-streaming first-response latency for large local models, because
-// the coordinator cannot send headers until the provider returns a complete
-// non-streaming response. Body streaming continues unaffected after headers
-// are committed.
+// start sending response headers after the request is fully written. Both
+// modes can defer header-commit until the full request budget elapses:
+//   - Non-streaming: coordinator buffers the entire response, so headers
+//     arrive at completion (bounded by provider inference latency).
+//   - Streaming (post-#92): headers wait for the first commit-worthy SSE
+//     event from the provider; pre-event garbage no longer commits.
+// Therefore this MUST be >= CoordinatorRequestSeconds so a slow-but-valid
+// provider does not false-fail as coordinator_unavailable before the
+// coordinator's own routing.request_timeout_s has elapsed. The deploy-time
+// guard at phase4-coordinator/dist/check-deploy-config.sh C2b enforces this.
 func (c Config) CoordinatorHeaderTimeout() time.Duration {
 	return time.Duration(c.Timeouts.CoordinatorHeaderTimeoutSeconds) * time.Second
 }

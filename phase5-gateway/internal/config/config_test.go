@@ -15,10 +15,43 @@ func TestQuotaReaperDefaults(t *testing.T) {
 	}
 }
 
-func TestGatewayHeaderTimeoutDefaultCoversLargeModelFirstResponse(t *testing.T) {
+// Post-#92 (PR #167): header timeout must be >= the request budget so a
+// slow-but-valid streaming first-event (or non-streaming completion)
+// doesn't false-fail before the coordinator's own request_timeout_s
+// runs out. See SPEC-002 v1.4.0 §FR-P11a + check-deploy-config.sh C2b.
+func TestGatewayHeaderTimeoutDefaultCoversFullRequestBudget(t *testing.T) {
 	cfg := Default()
-	if cfg.Timeouts.CoordinatorHeaderTimeoutSeconds < 60 {
-		t.Fatalf("CoordinatorHeaderTimeoutSeconds=%d want >=60", cfg.Timeouts.CoordinatorHeaderTimeoutSeconds)
+	if cfg.Timeouts.CoordinatorHeaderTimeoutSeconds < cfg.Timeouts.CoordinatorRequestSeconds {
+		t.Fatalf("CoordinatorHeaderTimeoutSeconds=%d MUST be >= CoordinatorRequestSeconds=%d (post-#92: streaming headers don't commit until first valid SSE event)",
+			cfg.Timeouts.CoordinatorHeaderTimeoutSeconds, cfg.Timeouts.CoordinatorRequestSeconds)
+	}
+}
+
+// Validate must reject configs where CoordinatorHeaderTimeoutSeconds is
+// below CoordinatorRequestSeconds — this is the runtime backstop for the
+// deploy-time check-deploy-config.sh C2b gate. A gateway started outside
+// the deploy gate (direct `gateway -config` / `gateway -check`) MUST
+// still refuse the unsafe relation.
+func TestValidateRejectsHeaderTimeoutBelowRequestBudget(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Timeouts.CoordinatorRequestSeconds = 400
+	cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 60
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted header=60 < request=400; expected rejection per post-#92 SPEC-002 FR-P11a")
+	}
+	for _, want := range []string{"coordinator_header_timeout_seconds", "coordinator_request_seconds", "SPEC-002 FR-P11a"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate() error = %q, missing substring %q (diagnostic must name both fields + spec ref)", err.Error(), want)
+		}
+	}
+}
+
+// Validate must accept the canonical case where the two timeouts are equal.
+func TestValidateAcceptsEqualHeaderAndRequestTimeout(t *testing.T) {
+	cfg := validTestConfig() // both default to 300
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected default config (both timeouts = 300): %v", err)
 	}
 }
 

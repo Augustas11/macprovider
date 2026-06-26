@@ -605,8 +605,12 @@ func (s *scenario) writeGatewayYAML(gwPort int, stickyEnabled bool, serviceToken
 			"tier_cooldown_seconds":             3600,
 		},
 		"timeouts": map[string]any{
+			// Post-#92 (PR #167): coordinator_header_timeout_seconds MUST
+			// be >= coordinator_request_seconds per SPEC-002 FR-P11a.
+			// Match the production default (300) so the gateway's runtime
+			// Validate() accepts the fixture.
 			"coordinator_request_seconds":        60,
-			"coordinator_header_timeout_seconds": 10,
+			"coordinator_header_timeout_seconds": 60,
 			"streaming_cancel_ms":                500,
 		},
 		"cors": map[string]any{

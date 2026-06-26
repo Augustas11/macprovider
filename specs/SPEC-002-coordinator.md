@@ -1,7 +1,15 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.4 (2026-06-22, SPEC-015 v0.1.3 /poolz receipt pubkey absorption)
+**Version:** 1.4.0 (2026-06-26, issue #92 streaming-commit predicate documented in FR-P11a; SPEC-015 v0.1.3 /poolz receipt pubkey absorption from 2026-06-22)
 **Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9)
+
+**Change log v1.4.0 (2026-06-26):**
+- **v1.4.0 (2026-06-26, issue #92):** FR-P11a streaming-failover paragraph
+  now defines "committed" with the post-#92 predicate inline. Adds the
+  buyer-visible TTFT note and the gateway `coordinator_header_timeout_seconds`
+  constraint (header timeout MUST be >= request budget, deploy-checked at
+  `phase4-coordinator/dist/check-deploy-config.sh` C2b). No wire-protocol
+  change; SPEC-001 unaffected.
 
 **Change log v1.4:**
 - **v1.4 (2026-06-22, SPEC-015 v0.1.3 absorption):** Adds two
@@ -997,7 +1005,25 @@ request id in logs. For streaming responses, failover is allowed only
 before HTTP status/body bytes are committed; after a chunk has been
 emitted, dead-WS failure MUST mark the provider unavailable and
 terminate the SSE stream with an error event whose code is
-`provider_disconnected`. Explicit `X-MacProvider-Provider` and
+`provider_disconnected`. **(v1.4.0, issue #92):** "committed" is
+defined as "the coordinator has observed a complete, well-formed
+first OpenAI-compatible SSE event from the provider — a `data:` line
+with a JSON object carrying either `choices[].delta` with at least
+one of `content`, `role`, `refusal`, `reasoning`, `tool_calls`,
+`function_call` (value-typed: strings non-empty, arrays/objects
+non-empty), `choices[].message` (same allowlist), `choices[].finish_reason`
+(non-empty string), OR a top-level `usage` object with non-negative
+integer `completion_tokens` AND one of `prompt_tokens` / `total_tokens`,
+all within `maxRequestLogUsageTokens`". Anything weaker — a 200 status
+line without body, a single byte, an SSE comment-only event, a
+`data: [DONE]` terminator-only event, metadata-only JSON, or an
+arbitrary-key delta/message — is NOT committed; the coordinator MUST
+return `wsForwardProviderDisconnected` and failover (subject to the
+same `failover_enabled` + pin rules). The buyer-visible consequence
+is that HTTP response headers wait for the first commit-worthy event;
+buyer clients MUST tolerate up to `coordinator_request_seconds` of
+TTFT and gateway `coordinator_header_timeout_seconds` MUST be set
+accordingly (>= `coordinator_request_seconds`). Explicit `X-MacProvider-Provider` and
 `X-MacProvider-Session` pins MUST NOT fail over because the buyer
 requested that provider/session. The buyer MUST receive one coherent
 response or one clean OpenAI-compatible error envelope; the buyer MUST

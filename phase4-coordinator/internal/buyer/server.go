@@ -16,6 +16,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -152,6 +153,8 @@ const (
 	breakerFaultDeadWS              breakerFault = "dead_ws_mid_inference"
 	breakerFaultRelayTimeout        breakerFault = "relay_timeout_mid_inference"
 	breakerFaultZeroTokenCompletion breakerFault = "zero_token_completion"
+	breakerFaultHTTPStreamDead      breakerFault = "http_stream_disconnected_mid_inference"
+	breakerFaultHTTPStreamTimeout   breakerFault = "http_stream_timed_out_mid_inference"
 )
 
 func WithPreflight(fn PreflightFunc) Option {
@@ -2064,6 +2067,14 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if r.Context().Err() != nil {
 			return wsForwardCancelled, 0, requestLogAttempt{}
 		}
+		// Issue #92 r2 fix: when providerhttp.Client.Timeout fires before
+		// response headers arrive, classify as wsForwardTimedOut (504) so
+		// the unified loop's TimedOut accounting fires and the breaker
+		// counts a timeout (not a generic failure).
+		if isStreamingTimeoutErr(err, attemptCtx) {
+			s.handleProviderFailure(provider, http.StatusGatewayTimeout)
+			return wsForwardTimedOut, http.StatusGatewayTimeout, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Provider timed out before response headers", FaultFlag: billing.FaultBreakerQualifying}
+		}
 		return wsForwardFailed, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: err.Error()}
 	}
 	defer resp.Body.Close()
@@ -2078,22 +2089,30 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		return wsForwardFailed, resp.StatusCode, attempt
 	}
 
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
-	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
-	w.WriteHeader(http.StatusOK)
-	// NOTE: HTTP-streaming sticky write is deferred to after io.EOF (clean
-	// stream completion), per the SPEC-004 v0.2 audit. Storing affinity
-	// upfront would pin the conversation to a provider that may disconnect
-	// mid-stream, leaving the sticky entry pointing at a degraded route.
-	// The store call now lives in the io.EOF branch below; the
-	// wsForwardProviderDisconnectedCommitted branch intentionally does NOT
-	// write sticky (the provider failed mid-flight).
-	flusher, _ := w.(http.Flusher)
-
+	// Issue #92: do NOT WriteHeader until the provider has streamed at
+	// least one COMPLETE valid SSE event — a `data:` line carrying a
+	// non-empty, non-`[DONE]`, JSON-parseable OpenAI-shaped chunk,
+	// terminated by a blank line. The codex audit found that a weaker
+	// threshold (1 byte, then "any non-blank line + blank line") still
+	// let an adversarial provider commit 200 OK + sticky storage by
+	// sending a few bytes of SSE-shaped garbage (`x\n\n`, `:\n\n`,
+	// `data: [DONE]\n\n`) and EOFing. The protocol-aware threshold
+	// raises the bar to "produced one well-formed chat-completion chunk".
+	//
+	// Memory bound: pre-commit reads byte-by-byte and aborts as soon as
+	// cumulative pre-commit bytes exceed maxPreCommitStreamingBytes. A
+	// malicious provider streaming a giant unterminated line cannot
+	// force unbounded buffering into bufio.Reader.
+	//
+	// The audit-flagged INTENTIONAL semantic of "first valid chunk
+	// received then disconnected = committed" is preserved: this guard
+	// only fires before the first commit-worthy event arrives. Once
+	// committed, EOF/error are committed-terminal exactly as before.
 	reader := bufio.NewReader(resp.Body)
+	var preCommit bytes.Buffer
+	var lineBuf bytes.Buffer
+	sawCommitWorthyDataLine := false
+	flusher, _ := w.(http.Flusher)
 	var promptTok, completionTok *int64
 	bytesEmitted := 0
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
@@ -2102,6 +2121,95 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(bytesEmitted)
 		}
 		return attempt
+	}
+	writeBuyerHeaders := func() {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+		w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+		w.WriteHeader(http.StatusOK)
+	}
+	// NOTE: HTTP-streaming sticky write is deferred to after io.EOF (clean
+	// stream completion), per the SPEC-004 v0.2 audit. Storing affinity
+	// upfront would pin the conversation to a provider that may disconnect
+	// mid-stream, leaving the sticky entry pointing at a degraded route.
+	// The store call now lives in the io.EOF branch below; the
+	// wsForwardProviderDisconnectedCommitted branch intentionally does NOT
+	// write sticky (the provider failed mid-flight).
+
+	// Pre-commit phase: byte-by-byte read so the cap is honored even
+	// against a single unterminated line larger than the cap. On every
+	// '\n' the accumulated line is processed: tokens extracted, appended
+	// to preCommit, and the commit predicate (a commit-worthy data line
+	// followed by a blank-line terminator) is evaluated.
+	preCommitErr := func() error {
+		for {
+			b, err := reader.ReadByte()
+			if err != nil {
+				return err
+			}
+			if preCommit.Len()+lineBuf.Len() >= maxPreCommitStreamingBytes {
+				s.log.Warn().Int("bytes", preCommit.Len()+lineBuf.Len()).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded pre-commit buffer cap")
+				return errPreCommitCapExceeded
+			}
+			lineBuf.WriteByte(b)
+			if b != '\n' {
+				continue
+			}
+			line := lineBuf.Bytes()
+			if p, c := tokenPointersFromSSE(line); p != nil || c != nil {
+				promptTok, completionTok = p, c
+			}
+			preCommit.Write(line)
+			lineBuf.Reset()
+			if isSSEBlankLine(line) {
+				if sawCommitWorthyDataLine {
+					return nil // commit
+				}
+				continue
+			}
+			if isCommitWorthyDataLine(line) {
+				sawCommitWorthyDataLine = true
+			}
+		}
+	}()
+	if preCommitErr != nil {
+		if errors.Is(preCommitErr, errPreCommitCapExceeded) {
+			s.handleProviderFailure(provider, http.StatusBadGateway)
+			return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider exceeded pre-commit buffer without commit-worthy event", FaultFlag: billing.FaultBreakerQualifying}
+		}
+		if r.Context().Err() != nil {
+			return wsForwardCancelled, 0, requestLogAttempt{}
+		}
+		if isStreamingTimeoutErr(preCommitErr, attemptCtx) {
+			s.log.Warn().Err(preCommitErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider timed out before first commit-worthy event")
+			s.handleProviderFailure(provider, http.StatusGatewayTimeout)
+			return wsForwardTimedOut, http.StatusGatewayTimeout, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Provider timed out before first commit-worthy event", FaultFlag: billing.FaultBreakerQualifying}
+		}
+		if preCommitErr == io.EOF {
+			s.log.Warn().Int("pre_commit_bytes", preCommit.Len()).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider closed before first commit-worthy event")
+		} else {
+			s.log.Warn().Err(preCommitErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider disconnected before first commit-worthy event")
+		}
+		s.handleProviderFailure(provider, http.StatusBadGateway)
+		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider disconnected before first commit-worthy event", FaultFlag: billing.FaultBreakerQualifying}
+	}
+
+	// Commit transition: write SSE headers, flush the buffered first
+	// event(s) to the buyer in one shot, then drop into the original
+	// line-by-line forwarding loop for the remainder of the stream.
+	// From this point on, errors are committed-terminal — wsForwardCancelled
+	// / wsForwardProviderDisconnectedCommitted / wsForwardComplete only.
+	writeBuyerHeaders()
+	if _, writeErr := w.Write(preCommit.Bytes()); writeErr != nil {
+		s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer pre-commit write failed")
+		return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+	}
+	bytesEmitted = preCommit.Len()
+	preCommit.Reset()
+	if flusher != nil {
+		flusher.Flush()
 	}
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -2128,13 +2236,253 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if r.Context().Err() != nil {
 			return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
 		}
-		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
+		if isStreamingTimeoutErr(err, attemptCtx) {
+			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider timed out during streaming")
+			s.recordBreakerFault(provider, breakerFaultHTTPStreamTimeout, requestID)
+		} else {
+			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
+			s.recordBreakerFault(provider, breakerFaultHTTPStreamDead, requestID)
+		}
 		writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
 		if flusher != nil {
 			flusher.Flush()
 		}
 		return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider disconnected during streaming", billing.FaultBreakerQualifying)
 	}
+}
+
+// errPreCommitCapExceeded is the sentinel returned by forwardStreaming's
+// pre-commit phase when cumulative bytes hit maxPreCommitStreamingBytes
+// before a commit-worthy event arrives. Distinguished from io.EOF /
+// timeout / network errors so the caller can log a specific reason.
+var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
+
+// isCommitWorthyDataLine reports whether the given SSE line counts as
+// real provider work for the purposes of forwardStreaming's commit
+// threshold. Codex r5 audit tightened the predicate from "field present"
+// to "field value-typed and bounded":
+//
+//   - `choices` must be a non-empty JSON array where AT LEAST ONE
+//     element (not necessarily the first) is an object carrying one of:
+//
+//   - `delta`: an object carrying at least one KNOWN OpenAI field
+//     (content/role/refusal/reasoning non-empty string, tool_calls
+//     non-empty array, function_call non-empty object).
+//     Arbitrary-key objects like `{"":0}` or `{"x":"y"}` reject.
+//
+//   - `message`: same allowlist as `delta` (matches non-streaming
+//     message-shape variants)
+//
+//   - `finish_reason`: a STRING of length >= 1 (matches `"stop"`,
+//     `"length"`, `"tool_calls"`, etc.; numeric or empty/null
+//     finish_reason rejects)
+//
+//   - `usage` must decode to non-negative INTEGER `completion_tokens`
+//     in [0, maxRequestLogUsageTokens] AND at least one of
+//     `prompt_tokens` / `total_tokens` also non-negative integer within
+//     the same range. Floats, negatives, overflow, and string-typed
+//     token counts reject.
+//
+// A leading UTF-8 BOM (0xEF 0xBB 0xBF) on the line is tolerated for
+// SSE-source compatibility; some HTTP libraries emit one on stream init.
+func isCommitWorthyDataLine(line []byte) bool {
+	trimmed := bytes.TrimRight(line, "\r\n")
+	trimmed = bytes.TrimPrefix(trimmed, []byte{0xEF, 0xBB, 0xBF})
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return false
+	}
+	content := bytes.TrimSpace(trimmed[len("data:"):])
+	if len(content) == 0 || bytes.Equal(content, []byte("[DONE]")) {
+		return false
+	}
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(content, &parsed); err != nil {
+		return false
+	}
+	if raw, ok := parsed["choices"]; ok {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+			for _, choice := range arr {
+				var obj map[string]json.RawMessage
+				if err := json.Unmarshal(choice, &obj); err != nil {
+					continue
+				}
+				if raw, has := obj["delta"]; has && hasOpenAIDeltaSignal(raw) {
+					return true
+				}
+				if raw, has := obj["message"]; has && hasOpenAIDeltaSignal(raw) {
+					return true
+				}
+				if raw, has := obj["finish_reason"]; has && isNonEmptyJSONString(raw) {
+					return true
+				}
+			}
+		}
+	}
+	if raw, ok := parsed["usage"]; ok {
+		if isValidUsageObject(raw) {
+			return true
+		}
+	}
+	return false
+}
+
+// isNonEmptyJSONObject reports whether raw decodes to a JSON object
+// (map) with at least one key. Retained for general-purpose checks;
+// the commit predicate uses hasOpenAIDeltaSignal instead since
+// post-PR-167 security review showed `{"":0}` would otherwise pass.
+func isNonEmptyJSONObject(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return false
+	}
+	return len(obj) > 0
+}
+
+// hasOpenAIDeltaSignal reports whether raw decodes to a JSON object
+// carrying at least one KNOWN OpenAI delta/message field with a value
+// that signals real provider work. The fresh security-review lane on
+// PR #167 caught that `isNonEmptyJSONObject` accepted `{"":0}` /
+// `{"x":"y"}` — a 37-byte payload that gamed the commit threshold
+// while delivering nothing. This allowlist closes that gap.
+//
+// Accepted shapes:
+//   - content: non-empty string (the streaming token delta)
+//   - role: non-empty string (the role-assignment first chunk)
+//   - refusal: non-empty string (safety-refusal stream)
+//   - tool_calls: non-empty array (function/tool calling)
+//   - function_call: non-empty object (legacy function calling)
+//   - reasoning: non-empty string (reasoning-model trace stream)
+func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return false
+	}
+	if raw, has := obj["content"]; has && isNonEmptyJSONString(raw) {
+		return true
+	}
+	if raw, has := obj["role"]; has && isNonEmptyJSONString(raw) {
+		return true
+	}
+	if raw, has := obj["refusal"]; has && isNonEmptyJSONString(raw) {
+		return true
+	}
+	if raw, has := obj["reasoning"]; has && isNonEmptyJSONString(raw) {
+		return true
+	}
+	if raw, has := obj["tool_calls"]; has {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
+			return true
+		}
+	}
+	if raw, has := obj["function_call"]; has && isNonEmptyJSONObject(raw) {
+		return true
+	}
+	return false
+}
+
+// isNonEmptyJSONString reports whether raw decodes to a JSON string
+// of length >= 1. Used by isCommitWorthyDataLine to require
+// finish_reason to be a real string ("stop", "length", etc.) — null
+// / numeric / empty-string finish_reason rejects.
+func isNonEmptyJSONString(raw json.RawMessage) bool {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return false
+	}
+	return len(s) > 0
+}
+
+// isValidUsageObject reports whether raw decodes to an OpenAI usage
+// object with non-negative integer completion_tokens AND at least one
+// other non-negative integer token field, all within
+// maxRequestLogUsageTokens. Floats, negatives, overflow, and
+// non-numeric token counts reject.
+func isValidUsageObject(raw json.RawMessage) bool {
+	var usage struct {
+		PromptTokens     *json.Number `json:"prompt_tokens"`
+		CompletionTokens *json.Number `json:"completion_tokens"`
+		TotalTokens      *json.Number `json:"total_tokens"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&usage); err != nil {
+		return false
+	}
+	completion, ok := validatedTokenCount(usage.CompletionTokens)
+	if !ok {
+		return false
+	}
+	if _, ok := validatedTokenCount(usage.PromptTokens); ok {
+		_ = completion
+		return true
+	}
+	if _, ok := validatedTokenCount(usage.TotalTokens); ok {
+		return true
+	}
+	return false
+}
+
+// validatedTokenCount checks that n is a non-negative integer in the
+// range [0, maxRequestLogUsageTokens]. Returns (value, true) on
+// success, (0, false) on failure or nil input.
+func validatedTokenCount(n *json.Number) (int64, bool) {
+	if n == nil {
+		return 0, false
+	}
+	v, err := n.Int64()
+	if err != nil {
+		return 0, false
+	}
+	if v < 0 || v > maxRequestLogUsageTokens {
+		return 0, false
+	}
+	return v, true
+}
+
+// maxPreCommitStreamingBytes caps how much pre-commit body forwardStreaming
+// will buffer before declaring the provider malformed/adversarial. 16 KiB
+// covers any reasonable first SSE event from current OpenAI-compatible
+// providers (typical first chunk is < 1 KiB).
+const maxPreCommitStreamingBytes = 16 * 1024
+
+// isSSEBlankLine reports whether the given bufio.Reader.ReadBytes('\n')
+// result is the blank-line event terminator used by SSE — either "\n"
+// or "\r\n".
+func isSSEBlankLine(line []byte) bool {
+	if len(line) == 1 && line[0] == '\n' {
+		return true
+	}
+	if len(line) == 2 && line[0] == '\r' && line[1] == '\n' {
+		return true
+	}
+	return false
+}
+
+// isStreamingTimeoutErr reports whether a body-read error or context state
+// should be classified as a provider timeout. Covers three timeout sources
+// the forwardStreaming pre-commit path can hit:
+//  1. attemptCtx deadline (the per-attempt timeout in forwardStreaming).
+//  2. providerhttp.Client.Timeout, which surfaces as a wrapped
+//     net.OpError carrying *url.Error / os.ErrDeadlineExceeded — these
+//     do not match errors.Is(ctx.Err(), context.DeadlineExceeded) yet.
+//  3. Direct context.DeadlineExceeded wrapped in the read error itself.
+func isStreamingTimeoutErr(err error, attemptCtx context.Context) bool {
+	if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
 }
 
 func statusForForwardResult(result wsForwardResult) int {

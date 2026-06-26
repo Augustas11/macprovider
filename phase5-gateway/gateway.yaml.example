@@ -79,10 +79,18 @@ capacity:
 
 timeouts:
   coordinator_request_seconds: 300
-  # Non-streaming inference does not commit coordinator response headers until
-  # the provider returns a full response. Keep this above expected first
-  # response latency for large local models.
-  coordinator_header_timeout_seconds: 60
+  # NEITHER streaming nor non-streaming coordinator responses commit headers
+  # until provider work begins:
+  #   - Non-streaming: coordinator buffers the entire response, so headers
+  #     arrive at completion.
+  #   - Streaming (post-#92): headers wait for the first commit-worthy SSE
+  #     event from the provider; pre-event garbage no longer commits.
+  # In both cases, the coordinator can legitimately take up to
+  # coordinator_request_seconds before sending headers for slow large-model
+  # inference. Keep this >= coordinator_request_seconds so a slow-but-valid
+  # provider doesn't false-fail with coordinator_unavailable here, while the
+  # 300s total bound still fails fast on a truly hung coordinator.
+  coordinator_header_timeout_seconds: 300
   streaming_cancel_ms: 500
 
 routing:
