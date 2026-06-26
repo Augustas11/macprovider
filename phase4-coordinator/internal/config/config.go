@@ -716,14 +716,15 @@ type CoordinatorAdvertisedVersion struct {
 type AuthConfig struct {
 	OperatorKey  string            `yaml:"operator_key"`
 	OperatorKeys map[string]string `yaml:"operator_keys"`
-	// GatewayServiceToken is the optional service-to-service credential
-	// the gateway uses when calling internal/admin coordinator endpoints
-	// (M3-2 / SECU-4). When set, the coordinator accepts EITHER
-	// OperatorKey OR GatewayServiceToken on the internal-bearer auth
-	// path; this allows the operator key to be rotated independently of
-	// the live gateway upstream credential. Empty = legacy-only
-	// (OperatorKey is the sole accepted credential), preserving
-	// pre-bridge behavior.
+	// GatewayServiceToken is the REQUIRED service-to-service credential
+	// the gateway uses when calling /internal/* coordinator endpoints
+	// (M3-2 / SECU-4; post-2026-07-12 cutover gate). The coordinator
+	// accepts ONLY GatewayServiceToken on the internal-bearer auth path
+	// — the legacy operator_key fallback was removed in PR #172 (issue
+	// #87 item 3). Must be non-empty AND distinct from OperatorKey:
+	// equal values defeat the operator-vs-service credential split
+	// because the operator credential would still authenticate
+	// /internal/* by value.
 	GatewayServiceToken string `yaml:"gateway_service_token"`
 	// RequireProviderTokens fails closed for public provider WebSocket
 	// exposure. Disable only for isolated local development or one-off
@@ -1588,8 +1589,15 @@ func (c Config) Validate() error {
 	if c.Auth.OperatorKey == "" {
 		return fmt.Errorf("auth.operator_key must be set")
 	}
-	if c.Coordinator.RequireGatewayContext && c.Auth.GatewayServiceToken == "" && c.Auth.OperatorKey == "" {
-		return fmt.Errorf("auth.gateway_service_token or auth.operator_key must be set when coordinator.require_gateway_context is true")
+	// Post-PR #172 (issue #87 item 3, 2026-07-12 cutover): the legacy
+	// operator_key fallback on /internal/* is gone, so the coordinator
+	// MUST have a distinct gateway_service_token or every /internal/*
+	// gateway call fails 401.
+	if c.Auth.GatewayServiceToken == "" {
+		return fmt.Errorf("auth.gateway_service_token must be set (post-M3-2 cutover: required for /internal/* gateway auth)")
+	}
+	if c.Auth.GatewayServiceToken == c.Auth.OperatorKey {
+		return fmt.Errorf("auth.gateway_service_token must differ from auth.operator_key (rotation discipline: equal values defeat the operator-vs-service credential split)")
 	}
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err

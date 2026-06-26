@@ -163,21 +163,74 @@ def check_hex_secret(label, raw):
 # --- operator_key (inline literal or env:NAME deferred to runtime) ---
 check_hex_secret("coordinator operator_key", g_section(coord, "auth", "operator_key"))
 
+# --- gateway_service_token (coordinator side) — REQUIRED post-2026-07-12 cutover ---
+# PR #172 (issue #87 item 3) removed the legacy operator_key fallback on
+# /internal/*; the coordinator now accepts ONLY gateway_service_token there.
+# A coordinator deployed without auth.gateway_service_token boots but rejects
+# every gateway call to /internal/routing + /internal/sticky, taking the
+# buyer path offline.
+check_hex_secret("coordinator gateway_service_token",
+                 g_section(coord, "auth", "gateway_service_token"))
+
 # --- gateway credentials (same hazard class as the coordinator key) ---
 # Only checkable when the gateway config is present (not coordinator-only
-# SKIP_C2_CHECK mode). operator_key is REQUIRED by the gateway (config.go
-# Validate); service_token is OPTIONAL — preferred over operator_key for
-# upstream calls when set — so it is validated only when present. The gateway
-# runtime already fails closed on an unset/empty env:NAME or an empty
-# operator_key (config.go resolveEnvValue + Validate); the residual gap is an
-# INLINE placeholder, which is non-empty and so boots with a junk credential
-# that silently fails gateway->coordinator auth. That is what this catches,
-# symmetric to the coordinator operator_key check above.
+# SKIP_C2_CHECK mode). Both operator_key (for /poolz proxying) and
+# service_token (for /internal/* upstream calls) are REQUIRED by gateway
+# config.go Validate() post-2026-07-12 cutover. The gateway runtime fails
+# closed on an unset/empty env:NAME or an empty token; the residual gap
+# this gate catches is an INLINE placeholder, which is non-empty and so
+# boots with a junk credential that silently fails gateway->coordinator
+# auth, symmetric to the coordinator operator_key check above.
 if gw:
     check_hex_secret("gateway operator_key", g_section(gw, "coordinator", "operator_key"))
-    gw_service_token = g_section(gw, "coordinator", "service_token")
-    if gw_service_token is not None:
-        check_hex_secret("gateway service_token", gw_service_token)
+    check_hex_secret("gateway service_token", g_section(gw, "coordinator", "service_token"))
+
+# --- C2c: operator/service token distinctness (rotation discipline) ---
+# Post-cutover, the operator_key and gateway_service_token are the only two
+# bearer classes on the coordinator: operator_key on /poolz + /admin/*,
+# service_token on /internal/*. If they collapse to the same value, the
+# operator credential still authenticates /internal/* by value, defeating
+# the operator-vs-service split this PR is meant to finish. Check on each
+# side (coordinator self, gateway self) AND cross-file (gateway operator_key
+# vs coordinator gateway_service_token, when both resolvable).
+def _resolved_value(raw):
+    """Return the resolvable value or None if deferred/malformed/missing."""
+    if not raw:
+        return None
+    if raw.startswith("env:"):
+        m = ENV_REF.match(raw)
+        if not m:
+            return None
+        return os.environ.get(m.group(1)) or None
+    return raw
+
+def _check_distinct(label_a, raw_a, label_b, raw_b):
+    a = _resolved_value(raw_a)
+    b = _resolved_value(raw_b)
+    if a is None or b is None:
+        ok(f"C2c {label_a} vs {label_b}: skipped (one or both deferred to runtime)")
+        return
+    if a == b:
+        hard(f"C2c: {label_a} == {label_b} — rotation discipline violated; "
+             f"operator credential would still authenticate /internal/* by value")
+    else:
+        ok(f"C2c {label_a} vs {label_b}: distinct")
+
+coord_op = g_section(coord, "auth", "operator_key")
+coord_svc = g_section(coord, "auth", "gateway_service_token")
+_check_distinct("coordinator auth.operator_key", coord_op,
+                "coordinator auth.gateway_service_token", coord_svc)
+
+if gw:
+    gw_op = g_section(gw, "coordinator", "operator_key")
+    gw_svc = g_section(gw, "coordinator", "service_token")
+    _check_distinct("gateway coordinator.operator_key", gw_op,
+                    "gateway coordinator.service_token", gw_svc)
+    # Cross-file: gateway operator_key (proxied to coordinator for /poolz)
+    # vs coordinator gateway_service_token. If equal across files, same
+    # value collapse — same hazard.
+    _check_distinct("gateway coordinator.operator_key", gw_op,
+                    "coordinator auth.gateway_service_token", coord_svc)
 
 # --- require_provider_tokens ---
 # Security-sensitive: the binary default is `true` (fail-closed), but a

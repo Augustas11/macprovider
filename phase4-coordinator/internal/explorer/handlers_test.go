@@ -1056,6 +1056,7 @@ insert into ledger_payout_ready (
 	}
 	cfg := config.Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.GatewayServiceToken = "gateway-service-token"
 	cfg.Explorer.Enabled = true
 	if mutate != nil {
 		mutate(&cfg)

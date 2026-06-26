@@ -24,7 +24,7 @@
 #   T11 — gateway operator_key env:NAME unset          -> pass, "deferred to runtime"
 #   T12 — gateway operator_key absent                  -> FAIL (gateway requires it)
 #   T13 — gateway service_token present + placeholder  -> FAIL
-#   T14 — gateway service_token absent                 -> silent (optional field)
+#   T14 — gateway service_token absent                 -> FAIL (REQUIRED post-cutover)
 #   T15 — bootstrap flag absent                        -> FAIL (explicit onboarding choice required)
 #   T16 — bootstrap flag false                         -> pass with clean-install warning
 #   T17 — bootstrap flag invalid                       -> FAIL
@@ -40,6 +40,11 @@
 #   T27 — mixed-fleet deadline malformed                                        -> FAIL
 #   T28 — mixed-fleet deadline expired                                          -> FAIL
 #   T29 — mixed-fleet deadline future                                           -> pass
+#   T30 — C2c coordinator auth.gateway_service_token absent                     -> FAIL
+#   T31 — C2c coord operator_key == gateway_service_token (inline same)         -> FAIL
+#   T32 — C2c gateway operator_key == service_token (inline same)               -> FAIL
+#   T33 — C2c cross-file gw operator_key == coord gateway_service_token         -> FAIL
+#   T34 — C2c all tokens env-deferred                                           -> skipped (pass)
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -56,6 +61,9 @@ command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed" >&2; 
 HEX64=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 PAST_RFC3339="$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
 FUTURE_RFC3339="$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ"))')"
+# Second 64-hex constant, distinct from HEX64, for tests that exercise the
+# C2c operator-vs-service-token distinctness invariant added in PR #172.
+HEX64B=fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 
 PASS=0
 FAIL=0
@@ -70,17 +78,24 @@ mk_workdir() { mktemp -d -t check-deploy-config-test.XXXXXX; }
 
 # Write a coordinator.yaml whose operator_key is $1 (verbatim, already
 # quoted/unquoted by the caller) plus the fields the gate needs to otherwise
-# pass: an explicit require_provider_tokens and a C2-clean request_timeout_s.
+# pass: an explicit require_provider_tokens, a C2-clean request_timeout_s,
+# and a distinct gateway_service_token (REQUIRED post-2026-07-12 cutover).
+# $4 overrides the gateway_service_token line (defaults to inline HEX64B,
+# distinct from HEX64 so C2c passes). Pass "" to omit it entirely (for
+# tests that exercise the missing-token failure path).
 write_coord() {
   local wd="$1" opkey="$2" rt="${3:-280}"
-  cat > "$wd/coordinator.yaml" <<EOF
-auth:
-  operator_key: $opkey
-  require_provider_tokens: true
-  allow_tokenless_provisional_bootstrap: true
-routing:
-  request_timeout_s: $rt
-EOF
+  local svcline="gateway_service_token: \"$HEX64B\""
+  if [ "$#" -ge 4 ]; then svcline="$4"; fi
+  {
+    echo "auth:"
+    echo "  operator_key: $opkey"
+    [ -n "$svcline" ] && echo "  $svcline"
+    echo "  require_provider_tokens: true"
+    echo "  allow_tokenless_provisional_bootstrap: true"
+    echo "routing:"
+    echo "  request_timeout_s: $rt"
+  } > "$wd/coordinator.yaml"
 }
 
 write_coord_bootstrap() {
@@ -88,6 +103,7 @@ write_coord_bootstrap() {
   cat > "$wd/coordinator.yaml" <<EOF
 auth:
   operator_key: "$HEX64"
+  gateway_service_token: "$HEX64B"
   require_provider_tokens: true
   $bootstrap_line
 routing:
@@ -98,9 +114,13 @@ EOF
 # Write a minimal gateway.yaml carrying the key the C2 cross-check reads plus
 # the coordinator.operator_key the gateway-credential check now validates.
 # $2 = coordinator_request_seconds, $3 = operator_key value (verbatim),
-# $4 = service_token line (verbatim, including key) or "" to omit it entirely.
+# $4 = service_token line (verbatim, including key); default seeds an
+# inline HEX64B service_token line so existing tests pass the post-cutover
+# REQUIRED check. Pass "" to omit it (exercises missing-token failure).
 write_gw() {
-  local wd="$1" gwt="${2:-300}" opkey="${3:-env:COORDINATOR_OPERATOR_KEY}" svc="${4:-}"
+  local wd="$1" gwt="${2:-300}" opkey="${3:-env:COORDINATOR_OPERATOR_KEY}"
+  local svc="service_token: \"$HEX64B\""
+  if [ "$#" -ge 4 ]; then svc="$4"; fi
   {
     echo "coordinator:"
     echo "  operator_key: $opkey"
@@ -297,14 +317,16 @@ test_gateway_service_token_placeholder_fails() {
   rm -rf "$wd"
 }
 
-test_gateway_service_token_absent_is_silent() {
-  # Optional field: absence must not emit a missing/FAIL line for it.
+test_gateway_service_token_absent_fails_post_cutover() {
+  # Post-PR #172 (issue #87 item 3, 2026-07-12 cutover): service_token is
+  # REQUIRED on the gateway side. Absence must hard-fail; without it the
+  # gateway can't reach any /internal/* coordinator endpoint.
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\""
-  write_gw "$wd" 300 "\"$HEX64\""   # no service_token line at all
+  write_gw "$wd" 300 "\"$HEX64\"" ""   # explicit "": omit service_token line
   run_check "$wd"
-  assert_exit 0 "T14 gateway service_token absent -> pass"
-  assert_absent "service_token" "T14 optional service_token stays silent"
+  assert_exit 1 "T14 gateway service_token absent -> FAIL (post-cutover REQUIRED)"
+  assert_contains "gateway service_token missing" "T14 missing-service-token message"
   rm -rf "$wd"
 }
 
@@ -425,6 +447,7 @@ test_c2b_absent_header_default_matches_request_passes() {
   cat > "$wd/gateway.yaml" <<EOF
 coordinator:
   operator_key: "$HEX64"
+  service_token: "$HEX64B"
 timeouts:
   coordinator_request_seconds: 300
 EOF
@@ -472,6 +495,7 @@ test_c2b_explicit_header_equals_request_passes() {
   cat > "$wd/gateway.yaml" <<EOF
 coordinator:
   operator_key: "$HEX64"
+  service_token: "$HEX64B"
 timeouts:
   coordinator_request_seconds: 300
   coordinator_header_timeout_seconds: 300
@@ -538,6 +562,70 @@ EOF
   rm -rf "$wd"
 }
 
+# --- C2c regression tests (PR #172 / issue #87 item 3) ---
+# C2c covers two invariants:
+#   (1) coordinator auth.gateway_service_token is REQUIRED post-cutover.
+#   (2) operator_key and service_token must be DISTINCT — equal values would
+#       let the operator credential authenticate /internal/* by value,
+#       collapsing the operator-vs-service credential split.
+
+test_c2c_coord_service_token_absent_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd"
+  # write_coord with explicit "" 4th arg = omit gateway_service_token line.
+  write_coord "$wd" "\"$HEX64\"" 280 ""
+  run_check "$wd"
+  assert_exit 1 "T30 coordinator gateway_service_token absent -> FAIL"
+  assert_contains "coordinator gateway_service_token missing" "T30 missing-token message"
+  rm -rf "$wd"
+}
+
+test_c2c_coord_operator_equals_service_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_gw "$wd"
+  # Both coordinator tokens inline = same HEX64 value -> distinctness violated.
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: \"$HEX64\""
+  run_check "$wd"
+  assert_exit 1 "T31 coord operator_key == gateway_service_token -> FAIL"
+  assert_contains "C2c: coordinator auth.operator_key == coordinator auth.gateway_service_token" "T31 C2c distinctness message"
+  rm -rf "$wd"
+}
+
+test_c2c_gateway_operator_equals_service_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\""
+  # Both gateway tokens inline = same HEX64 value -> distinctness violated.
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64\""
+  run_check "$wd"
+  assert_exit 1 "T32 gateway operator_key == service_token -> FAIL"
+  assert_contains "C2c: gateway coordinator.operator_key == gateway coordinator.service_token" "T32 C2c gateway distinctness message"
+  rm -rf "$wd"
+}
+
+test_c2c_cross_file_gw_operator_equals_coord_service_fails() {
+  local wd; wd="$(mk_workdir)"
+  # gateway operator_key = HEX64; coordinator gateway_service_token = HEX64 (same).
+  # Cross-file equality means the operator credential the gateway uses for /poolz
+  # is also accepted by the coordinator as the /internal/* credential.
+  write_coord "$wd" "\"$HEX64B\"" 280 "gateway_service_token: \"$HEX64\""
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64B\""
+  run_check "$wd"
+  assert_exit 1 "T33 cross-file gw operator_key == coord gateway_service_token -> FAIL"
+  assert_contains "C2c: gateway coordinator.operator_key == coordinator auth.gateway_service_token" "T33 cross-file distinctness message"
+  rm -rf "$wd"
+}
+
+test_c2c_deferred_env_skipped() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "env:OPERATOR_KEY" 280 "gateway_service_token: env:COORD_SVC_TOKEN"
+  write_gw "$wd" 300 "env:COORDINATOR_OPERATOR_KEY" "service_token: env:GW_SVC_TOKEN"
+  # All env vars unset -> all tokens deferred -> C2c skipped (cannot judge).
+  run_check "$wd" OPERATOR_KEY= COORD_SVC_TOKEN= COORDINATOR_OPERATOR_KEY= GW_SVC_TOKEN=
+  assert_exit 0 "T34 all env tokens deferred -> C2c skipped + pass overall"
+  assert_contains "skipped (one or both deferred to runtime)" "T34 deferred skip message"
+  rm -rf "$wd"
+}
+
 # ---- run -------------------------------------------------------------------
 
 echo "== check-deploy-config.sh tests =="
@@ -557,7 +645,7 @@ test_gateway_operator_key_inline_placeholder_fails
 test_gateway_operator_key_env_unset_deferred
 test_gateway_operator_key_absent_fails
 test_gateway_service_token_placeholder_fails
-test_gateway_service_token_absent_is_silent
+test_gateway_service_token_absent_fails_post_cutover
 test_bootstrap_flag_absent_fails
 test_bootstrap_flag_false_warns_but_passes
 test_bootstrap_flag_invalid_fails
@@ -573,6 +661,11 @@ test_model_hash_legacy_deadline_env_missing_fails
 test_model_hash_legacy_deadline_malformed_fails
 test_model_hash_legacy_deadline_expired_fails
 test_model_hash_legacy_deadline_future_passes
+test_c2c_coord_service_token_absent_fails
+test_c2c_coord_operator_equals_service_fails
+test_c2c_gateway_operator_equals_service_fails
+test_c2c_cross_file_gw_operator_equals_coord_service_fails
+test_c2c_deferred_env_skipped
 
 echo
 echo "== summary =="

@@ -82,6 +82,7 @@ func TestAC02_ExplorerValidation(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			cfg := Default()
 			cfg.Auth.OperatorKey = "operator-key"
+			cfg.Auth.GatewayServiceToken = "gateway-service-token"
 			tc.mutate(&cfg)
 			err := cfg.Validate()
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
@@ -94,6 +95,7 @@ func TestAC02_ExplorerValidation(t *testing.T) {
 func TestAC03_ExplorerAllowsEmptyGatewayBaseURLWhenEnabled(t *testing.T) {
 	cfg := Default()
 	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Auth.GatewayServiceToken = "gateway-service-token"
 	cfg.Explorer.Enabled = true
 	cfg.Explorer.GatewayBaseURL = ""
 

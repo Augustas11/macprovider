@@ -13,10 +13,12 @@ import (
 // environment (M3-2 / DEVE-7).
 func TestLoadResolvesEnvOperatorKey(t *testing.T) {
 	t.Setenv("M3_2_TEST_OPERATOR_KEY", "0123456789abcdefABCDEFghijklmnop")
+	t.Setenv("M3_2_TEST_GATEWAY_TOKEN_DEFAULT", "fedcba9876543210FEDCBAzyxwvutsrq")
 
 	cfg := writeMinimalConfig(t, `
 auth:
   operator_key: env:M3_2_TEST_OPERATOR_KEY
+  gateway_service_token: env:M3_2_TEST_GATEWAY_TOKEN_DEFAULT
 `)
 	if cfg.Auth.OperatorKey != "0123456789abcdefABCDEFghijklmnop" {
 		t.Fatalf("OperatorKey=%q want %q", cfg.Auth.OperatorKey, "0123456789abcdefABCDEFghijklmnop")
