@@ -69,28 +69,32 @@ func TestStep4C_WiredMux_MetricLabelHygiene(t *testing.T) {
 	_ = doReq("/v1/stats/leaderboard?window=24h", "garbage", "")
 	_ = doReq("/v1/stats/overview", "", "https://evil.streamvc.live")
 
-	// Round-3 ARCH M1 / CODE M2 fix: seed a real partner_keys
-	// row + send a real `Bearer mpk_*` leaderboard request so
-	// `stats_partner_key_request_total{partner_key_id}` is
-	// emitted through the production auth dispatcher + access-log
-	// middleware (NOT a synthetic
-	// `m.PartnerKeyRequestTotal.WithLabelValues("17").Inc()`).
-	// This proves the round-2 PartnerKeyID-on-requestObs context
-	// propagation actually reaches the metric label.
-	bearer := "mpk_step4c_partner_secret_token"
+	// Round-4 ARCH M1 / CODE M1 fix: use a SPEC-shaped 47-char
+	// token (`mpk_` + 43 base64url chars) so any future regression
+	// that lets the raw token or its 43-char body land in a metric
+	// label is caught by both the 43-char body-shape regex AND the
+	// expanded denylist below.
+	const tokenBody = "AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWwX" // 47 chars total mpk_... bytes
+	bearer := "mpk_" + tokenBody[:43]
+	prefix := bearer[:8]
 	hash := sha256Hex(bearer)
+	// Seed ledger + token data BEFORE the partner request so the
+	// rollup tick produces a leaderboard_24h row and the partner
+	// projection returns 200 (round-4 CODE M1 fix direction —
+	// "assert the partner request returns 200").
+	seedProviderTokens(t, adminDB, "p_step4c")
+	seedLedgerRow(t, adminDB, "p_step4c", time.Now().UTC().Add(-1*time.Hour), 100, 100, 1_000_000)
+	driveOneRollupTick(t, fx)
 	if _, err := adminDB.Exec(
 		`INSERT INTO partner_keys (label, token_hash, prefix, allowed_origins, rate_limit_rpm, created_by)
-         VALUES ('step4c-wired', decode($1, 'hex'), 'mpk_step', '{}', 600, 'test')`,
-		hash,
+         VALUES ('step4c-wired', decode($1, 'hex'), $2, '{}', 600, 'test')`,
+		hash, prefix,
 	); err != nil {
 		t.Fatalf("seed partner_keys: %v", err)
 	}
-	// Seed leaderboard_24h fixture rows so the partner request
-	// returns 200 (otherwise the freshness check 503s and the
-	// metric still fires but we want to exercise the success path).
-	driveOneRollupTick(t, fx)
-	_ = doReq("/v1/stats/leaderboard?window=24h", bearer, "")
+	if got := doReq("/v1/stats/leaderboard?window=24h", bearer, ""); got != http.StatusOK {
+		t.Fatalf("partner leaderboard expected 200, got %d", got)
+	}
 
 	// Round-2 CODE M1 fix: exercise all five required metric
 	// families. The public-tier 60 rpm limiter fires on the
@@ -126,8 +130,41 @@ func TestStep4C_WiredMux_MetricLabelHygiene(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gather: %v", err)
 	}
+	// Round-4 ARCH M1 / CODE M1 fix: assert ALL five required
+	// metric families landed at least one sample. Catches a future
+	// regression that stops emitting one of them — the prior
+	// "scan whatever is gathered" loop would silently pass when a
+	// family was missing.
+	requiredFamilies := []string{
+		"stats_request_total",
+		"stats_partner_key_request_total",
+		"stats_rollup_lag_seconds",
+		"stats_rollup_errors_total",
+		"stats_rate_limit_exceeded_total",
+	}
+	seenFamilies := map[string]int{}
+	for _, mf := range families {
+		seenFamilies[mf.GetName()] = len(mf.GetMetric())
+	}
+	for _, req := range requiredFamilies {
+		if seenFamilies[req] == 0 {
+			t.Errorf("required metric family %q not present in gather (or had 0 samples); seen=%v",
+				req, seenFamilies)
+		}
+	}
+
 	bodyShape := regexp.MustCompile(`[A-Za-z0-9_-]{43}`)
-	deny := []string{"mpk_garbage", "garbage", "evil.streamvc.live", "Bearer ", "token_hash"}
+	// Round-4 ARCH M1 / CODE M1 fix: deny list now includes the
+	// actual seeded raw token + its 8-char prefix + the generic
+	// `mpk_` fragment so a regression that places ANY token-
+	// derived string in a label (e.g. labeling
+	// stats_partner_key_request_total with partner_keys.prefix
+	// instead of partner_keys.id) is caught.
+	deny := []string{
+		bearer, prefix, "mpk_",
+		"mpk_garbage", "garbage", "evil.streamvc.live",
+		"Bearer ", "token_hash",
+	}
 	for _, mf := range families {
 		for _, mt := range mf.GetMetric() {
 			for _, lp := range mt.GetLabel() {

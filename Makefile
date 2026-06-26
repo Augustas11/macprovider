@@ -20,7 +20,7 @@ test-coordinator:
 # `make test-coordinator` does NOT require a Docker daemon.
 # CI runs this as a separate job that provides the daemon.
 test-coordinator-integration:
-	cd phase4-coordinator && go test -tags=integration -timeout 5m ./internal/stats/...
+	cd phase4-coordinator && go test -tags=integration -timeout 5m ./internal/stats/... ./cmd/coordinator/...
 
 # SPEC-017 AC-16 — golangci-lint with depguard + forbidigo.
 # Pinned version so the target is hermetic on a fresh checkout.

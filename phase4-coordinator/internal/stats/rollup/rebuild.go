@@ -208,8 +208,14 @@ func emitDriftEvents(window string, pre map[string]preRebuildRow, rebuilt []lead
 // rebuild_value, incremental_value)`. `component` is derived
 // from `window` (e.g. `leaderboard_30d`) so Step 4 alerting can
 // match without a window-to-component translation. `divergence_pct`
-// is `ratio * 100`; legacy `delta_ratio` is kept for backward
-// compatibility with any in-flight dashboards.
+// is `ratio * 100`.
+//
+// Round-4 ARCH r4 LOW 1 fix: `delta_ratio` was REMOVED from the
+// locked `stats_*` event (round-2 ARCH M2 narrowed the field set
+// to {component, axis, divergence_pct, rebuild_value,
+// incremental_value}). It survives only on the untagged
+// debug-only triage line below for operator drill-down; do not
+// pin it on `event=stats_rollup_drift_detected` in dashboards.
 //
 // `rebuild` is the post-recompute value; `incremental` is the
 // pre-rebuild snapshot. The function uses ABSOLUTE delta so a
