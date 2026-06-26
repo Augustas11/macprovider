@@ -70,6 +70,14 @@ fail() { echo "FAIL: $*" >&2; FAIL=1; }
 ok()   { echo "ok: $*"; }
 
 mkdir -p "$TMP/conf.d" "$TMP/sites-enabled" "$TMP/cache" "$TMP/log"
+# nginx runs as UID 101 inside the container, but the mounted
+# host directories are owned by the script's UID. On Linux Docker
+# (GitHub Actions runners), the UIDs don't map across the bind
+# mount so nginx cannot write to $TMP/cache or $TMP/log — the
+# proxy_cache write-suppression test then sees a permanently
+# empty cache directory and false-fails. Docker Desktop on Mac
+# squashes UIDs across the mount so this is a no-op locally.
+chmod 0777 "$TMP/cache" "$TMP/log"
 cp "$DIST_DIR/nginx-snippets/stats-shared.conf"           "$TMP/conf.d/stats-shared.conf"
 cp "$DIST_DIR/nginx-snippets/stats-security-headers.conf" "$TMP/conf.d/stats-security-headers.conf"
 
