@@ -8,6 +8,7 @@ settlement mutator. It is not a parallel analytics store.
 ## 1. Change log
 | Version | Date | Author | Summary |
 |---|---|---|---|
+| triage 2026-06-26 | 2026-06-26 | docs/OPEN_QUESTIONS.md | M-3 through M-12 (deferred-to-v0.3 audit findings) closed as unrecoverable — the underlying audit document was never persisted to the repo and the findings list is not reconstructible from history. If operator-explorer concerns recur, run a fresh audit cycle and number anew. No version bump; no normative change. |
 | v0.2 | 2026-06-01 | operator | resolved B-1 by dropping the explorer bearer env knob and pinning bearer source to `auth.operator_key`; resolved B-2 by making SPEC-005 payout mutation a future payout-rail contract; resolved B-3 with D15 shared gateway admin bearer; resolved M-1 with exact `email` and prefix `email_prefix` semantics; resolved M-2 with per-endpoint window knobs. Deferred to v0.3: M-3 through M-12. Future infra follow-up: coordinator `env:` resolution for `auth.operator_key`. |
 | v0.1 | 2026-06-01 | operator | initial draft against locked decisions D1-D14 |
 ## 2. Locked decisions

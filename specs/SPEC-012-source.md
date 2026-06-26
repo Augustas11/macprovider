@@ -12,6 +12,9 @@ active model on a running provider; (2) restart causes WS reconnect +
 cold load + red dashboard; (3) buyer console picker shows only loaded
 model; (4) no discovery of expected HF IDs.
 
+**Triage note 2026-06-26 (no version bump, no normative change):**
+- Phase 2 (§3 + §5) and Phase 3 (§3 + §6) marked RESOLVED as SUBSUMED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-012. Phase 2 → SPEC-011 v0.4; Phase 3 → SPEC-010 v1.5 + SPEC-013 v0.3.
+
 **Change log v0.3 (this revision — round-2 audit response):**
 
 - **Audit response (round 2, Codex GPT-5)**: closes all 12 MAJORs
@@ -182,6 +185,8 @@ Closes G-1 (warm-swap mechanism), G-2 and G-3 (capability protocol).
 
 ### Phase 2 — Operator-pushed swap CLI (DEFERRED to v0.4)
 
+_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as SUBSUMED — SPEC-011 v0.4 split out as the normative spec for operator-pushed warm swap and shipped the CLI + UDS control socket. No separate SPEC-012 v0.4 needed._
+
 Closes the operator-facing UX of G-1 (the CLI piece).
 
 - `macprovider models switch <id>` on the provider host. Provider
@@ -195,6 +200,8 @@ coordinator behavior. Splitting it lets Phase 1 ship without
 binary-CLI surface changes blocking the coordinator rollout.
 
 ### Phase 3 — Recommended catalog (DEFERRED to v0.5)
+
+_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as SUBSUMED — SPEC-010 v1.5 (catalog data) + SPEC-013 v0.3 (autotune recommends from the catalog) cover the G-5 surface. No separate SPEC-012 v0.5 needed._
 
 Closes G-5.
 
@@ -948,6 +955,8 @@ status contract that bounds this risk.
 
 ## 5. Phase 2 outline (DEFERRED; design-locked)
 
+_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as SUBSUMED by SPEC-011 v0.4 — see §3 Phase 2 note._
+
 Phase 2 is the operator-facing CLI on the provider host. It adds no
 new coordinator behavior; the wire is Phase 1.
 
@@ -966,6 +975,8 @@ Phase 2 spec deferred to SPEC-010 v0.3.
 ---
 
 ## 6. Phase 3 outline (DEFERRED; non-normative)
+
+_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as SUBSUMED by SPEC-010 v1.5 + SPEC-013 v0.3 — see §3 Phase 3 note._
 
 Phase 3 closes G-5: operator discovery of recommended models.
 
