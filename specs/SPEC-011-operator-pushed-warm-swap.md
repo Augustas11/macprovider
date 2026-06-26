@@ -11,6 +11,9 @@ frame which R-3.1.6 binary-side validation depends on.
 candidate per §6.1), SPEC-002 v1.3.4 (becomes v1.3.5
 candidate per §6.2), SPEC-004 v0.3.1, SPEC-008 v0.3.
 
+**Triage note 2026-06-26 (no version bump, no normative change):**
+- §7 OQ-1 (control-socket transport), OQ-2 (CLI block-vs-detach), and OQ-3 (audit-backfill for WS-drop-mid-load swaps) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-011.
+
 **Change log v0.5 (round-3 polish pass — LOCK candidate):**
 Round-3 verdict was LOCK-READY pending narrow polish with
 0 CRITICAL / 0 MAJOR / 2 MINOR (specs/SPEC-011-audit.md
@@ -1704,16 +1707,16 @@ Resolved in v0.2 (outline-audit round-2 decisions):
 
 Open for v0.5 (if pursued):
 
-- **OQ-1** Control-socket signaling: v0.4 picks Unix domain
+- **OQ-1** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed for v0.4 — UDS is correct for the macOS-only provider fleet that exists today; re-open only if Linux/Windows providers ship._ Control-socket signaling: v0.4 picks Unix domain
   socket at `$TMPDIR/macprovider-cli/ctl.sock` (macOS-native
   per R-3.1.5). If a future cross-platform target (Linux
   servers, containers) needs a different transport, v0.5
   may add a localhost HTTP alternative or a platform-
   conditional default.
-- **OQ-2** CLI block-vs-detach: v0.4 picks block-with-stderr-
+- **OQ-2** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed for v0.4 — no CI fire-and-forget consumer exists today; re-open when a real consumer asks._ CLI block-vs-detach: v0.4 picks block-with-stderr-
   progress. v0.5 may add `--detach` for CI fire-and-forget
   if demand surfaces.
-- **OQ-3** Audit-backfill for WS-drop-mid-load completed
+- **OQ-3** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed — the "observation-only" decision stands; no operator pain reported in practice._ Audit-backfill for WS-drop-mid-load completed
   swaps: v0.4 explicitly decides "no backfill, observation-
   only." If operators report this gap as painful in
   practice, v0.5 may add a binary-side "swap-completed-while-

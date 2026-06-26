@@ -17,6 +17,10 @@ pre-SPEC-013.
 
 ## Change log
 
+### Triage note 2026-06-26 (no version bump, no normative change)
+
+§9 OQ-A..D marked RESOLVED inline as frozen at v0.3 placeholder defaults; OQ-E's v0.4 trigger condition (5% mismatch on the 10-paired-run sampling protocol) remains conditionally normative if a thermal-bias suspicion surfaces in production. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-013.
+
 ### v0.3 (2026-06-18) — round-2 audit response (LOCK candidate)
 
 Codex round 2 (`specs/SPEC-013-audit.md` § Round 2) returned
@@ -1603,6 +1607,8 @@ also skip the 1B entry.
 ---
 
 ## 9. Open questions
+
+_TRIAGE NOTE 2026-06-26 (`docs/OPEN_QUESTIONS.md`): OQ-A..D below are RESOLVED as **frozen at v0.3 placeholder defaults**. The air5 n=3 replication run that gated the v0.2 confirm/adjust cycle never landed in `beta/DECISION_CRITERIA.md`, and SPEC-013 IMPL shipped (PR #109) without it. Production has not signalled the placeholders are wrong. **OQ-E remains conditionally normative** — the §9 OQ-E decision threshold (5% mismatch on the 10-paired-run sampling protocol) still binds future implementers IF a thermal-bias suspicion ever surfaces in production; the freeze closes the air5-gating only, not the v0.4 trigger condition._
 
 All four open questions below are flagged as **pending the in-flight
 air5 n=3 replication run**. Each names the placeholder default and

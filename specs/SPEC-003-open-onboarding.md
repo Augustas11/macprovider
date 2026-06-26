@@ -1171,7 +1171,7 @@ their own integration testing.**
 
 ## 11. Open questions
 
-**OQ-1. Code signing strategy.**
+**OQ-1. Code signing strategy.** _RESOLVED 2026-06-25 (PR #62, #148, #149) — Apple Developer ID enrollment landed and the release pipeline now ships Developer-ID-signed + notarized + stapled `.pkg` assets alongside the compatibility tarball. v1.6.1 (2026-06-25) is the first release with the stapled `.pkg`. macOS 26.3.1 launchd AMFI rejection of adhoc-signed binaries is unblocked. The "Phase 6+" deferral below is superseded._
 Apple Developer ID signing ($99/yr) vs `xattr -d com.apple.quarantine`
 workaround. SPEC-001 NFR-6 says "signed with Developer ID, not
 notarized." For `install.sh` strangers, the xattr workaround is
