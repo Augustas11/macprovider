@@ -28,17 +28,16 @@ import (
 //   - HIGH: aggregate queries now apply `[start, end)` bounds
 //     with `now` as the exclusive upper bound; future-dated
 //     rows cannot leak in (CODE r1 HIGH 1).
-//   - HIGH: provider_visibility left-join applied at storage
-//     time — the rollup persists the EFFECTIVE
-//     `provider_visibility` tuple by skipping the provider's
-//     row entirely from leaderboard storage when
-//     `blocked_from_partner_projection = TRUE` (the v0.1
-//     column stub is now load-bearing for rollup behavior;
-//     v0.1 ships zero blocked providers per §6.1 default but
-//     the code path is correct for v0.2 when SPEC-014 v0.9
-//     starts writing the column). The COALESCE'd default
-//     `mode='bucketed' AND blocked=FALSE` continues to surface
-//     all no-row providers (ARCH r1 HIGH 3 + CODE r1 MEDIUM 1).
+//   - HIGH: provider_visibility left-join is read (default
+//     tuple `mode='bucketed' AND blocked=FALSE` for absent
+//     rows) but the rollup MUST NOT branch on
+//     `blocked_from_partner_projection` in v0.1 (§6.1 + §11
+//     Q11 + BUILD §6 explicitly defer the partner-projection
+//     suppression semantics to v0.2). The earlier round-1
+//     draft skipped blocked providers from storage; round-2
+//     reversed that — blocked providers STILL appear in v0.1
+//     leaderboard storage. v0.2 will pin the suppression
+//     contract (ARCH r1 HIGH 3 + r2 unanimous HIGH 1 fix).
 //   - HIGH: single tick-time `now` value used for every row
 //     and the health update — Step 3's handler/ETag/staleness
 //     derivation will see one consistent generated_at per
@@ -129,15 +128,15 @@ type leaderboardRow struct {
 // only `provider_id` values that can enter `stats_leaderboard_*`
 // storage are SPEC-002 v1.4 §7 authenticated.
 //
-// The function also applies the §6.1 `provider_visibility`
-// left-join semantics at storage time: providers with
-// `blocked_from_partner_projection = TRUE` are EXCLUDED from
-// the leaderboard storage entirely (v0.1 has no such providers
-// per the SPEC default; the column stub becomes load-bearing
-// when SPEC-014 v0.9 starts writing it). The `mode` column is
-// read but not persisted — Step 3's handler reads it directly
-// from `provider_visibility` for the public/partner projection
-// split (with default tuple bucketed via COALESCE).
+// The function loads `provider_visibility` (the §6.1 left-join
+// data) for join-evidence completeness, but per the round-2
+// audit fix the rollup MUST NOT branch on
+// `blocked_from_partner_projection` in v0.1 — SPEC §6.1 + §11
+// Q11 + BUILD §6 defer that suppression semantic to v0.2.
+// The `mode` column is read but not persisted — Step 3's
+// handler reads it directly from `provider_visibility` for the
+// public/partner projection split (with default tuple bucketed
+// via COALESCE).
 func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window string, now time.Time) ([]leaderboardRow, error) {
 	since := windowStart(window, now, cfg.PartialHistorySinceUnix)
 	endUnix := now.Unix()
