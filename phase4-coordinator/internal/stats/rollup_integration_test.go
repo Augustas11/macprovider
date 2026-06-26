@@ -1569,10 +1569,9 @@ func TestRollupLateEventUpdatedAtCorrection(t *testing.T) {
 // + N REVOKED `provider_tokens` rows MUST NOT multiply rollup
 // aggregates. Pre-fix the raw JOIN multiplied work credits +
 // token sums + job counts by the count of provider_tokens rows
-// for the provider. Post-fix the rollup joins through
-// `(SELECT DISTINCT provider_id FROM provider_tokens WHERE
-// provider_id <> '')` so revoked history is collapsed to a
-// single row per provider in the JOIN.
+// for the provider. Post-fix the rollup joins through a SELECT
+// DISTINCT subquery over non-empty provider_id so revoked
+// history collapses to one row per provider in the JOIN.
 // ==========================================================================
 func TestRollupNoMultiplicationOnRevokedTokenHistory(t *testing.T) {
 	fx, adminDB := setupRollupFixture(t)
@@ -1648,5 +1647,91 @@ func TestRollupNoMultiplicationOnRevokedTokenHistory(t *testing.T) {
 	}
 	if tokensIn != 200 || tokensOut != 200 || requests != 2 {
 		t.Errorf("overview cumulative: tokensIn=%d tokensOut=%d requests=%d, want (200,200,2)", tokensIn, tokensOut, requests)
+	}
+}
+
+// ==========================================================================
+// Round-9 CODE r9 MEDIUM 1 regression: the incremental 30d/all
+// path MUST preserve `first_seen_at` parity with the full
+// recompute path. Pre-fix it only carried MAX(rewards.unix_ts),
+// so rewards-only providers had `first_seen_at = last reward
+// time` (wrong; should be the earliest reward time), and mixed
+// providers could lose an earlier rewards timestamp during an
+// incremental tick.
+// ==========================================================================
+func TestRollupIncrementalRewardsFirstSeenParity(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+	now := time.Now().UTC()
+
+	// p_rewards has THREE rewards rows in the 30d window: an
+	// early one (T-20d), a middle one (T-10d), and a recent one
+	// (T-1h, within the 48h lookback so the incremental tick
+	// reconsiders this provider).
+	earlyTs := now.Add(-20 * 24 * time.Hour).Unix()
+	midTs := now.Add(-10 * 24 * time.Hour).Unix()
+	lateTs := now.Add(-1 * time.Hour).Unix()
+	seedProviderTokens(t, adminDB, "p_rewards")
+	for _, c := range []struct {
+		ts  int64
+		usd string
+	}{{earlyTs, "1.00"}, {midTs, "1.00"}, {lateTs, "1.00"}} {
+		if _, err := adminDB.ExecContext(context.Background(),
+			`INSERT INTO provider_rewards_ledger (provider_id, unix_ts, amount_usd) VALUES ($1, $2, $3)`,
+			"p_rewards", c.ts, c.usd,
+		); err != nil {
+			t.Fatalf("seed reward: %v", err)
+		}
+	}
+
+	// Bootstrap tick: full recompute. first_seen_at MUST be
+	// earlyTs.
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	var firstSeen, lastSeen time.Time
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT first_seen_at, last_seen_at FROM stats_leaderboard_30d WHERE provider_id = 'p_rewards'`,
+	).Scan(&firstSeen, &lastSeen); err != nil {
+		t.Fatalf("bootstrap scan: %v", err)
+	}
+	if firstSeen.Unix() != earlyTs {
+		t.Errorf("bootstrap first_seen = %d, want %d (earliest reward ts)", firstSeen.Unix(), earlyTs)
+	}
+	if lastSeen.Unix() != lateTs {
+		t.Errorf("bootstrap last_seen = %d, want %d (latest reward ts)", lastSeen.Unix(), lateTs)
+	}
+
+	// Incremental tick: p_rewards is lookback-active (late reward
+	// at T-1h), so the incremental path recomputes its row. The
+	// recomputed row MUST preserve first_seen_at = earlyTs.
+	runner2, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New runner2: %v", err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	runner2.Start(ctx2)
+	time.Sleep(500 * time.Millisecond)
+	cancel2()
+	runner2.Wait()
+
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT first_seen_at, last_seen_at FROM stats_leaderboard_30d WHERE provider_id = 'p_rewards'`,
+	).Scan(&firstSeen, &lastSeen); err != nil {
+		t.Fatalf("incremental scan: %v", err)
+	}
+	if firstSeen.Unix() != earlyTs {
+		t.Errorf("incremental first_seen = %d, want %d (earliest reward ts preserved)", firstSeen.Unix(), earlyTs)
+	}
+	if lastSeen.Unix() != lateTs {
+		t.Errorf("incremental last_seen = %d, want %d (latest reward ts preserved)", lastSeen.Unix(), lateTs)
 	}
 }

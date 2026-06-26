@@ -293,8 +293,17 @@ func computeLeaderboardRowForProvider(ctx context.Context, db *sql.DB, cfg Confi
 	}
 
 	// Rewards aggregate for ONE provider.
+	// Round-9 CODE r9 MEDIUM 1 fix: the incremental path now
+	// selects BOTH `MIN(unix_ts)` and `MAX(unix_ts)`, mirroring
+	// the full-recompute semantic in `aggregateRewardsPerProvider`.
+	// Prior draft only carried `MAX`, so incremental updates for
+	// rewards-only or mixed providers could (a) overwrite
+	// `first_seen_at` with the latest rewards timestamp on
+	// rewards-only providers, or (b) drop an earlier rewards
+	// timestamp on mixed providers.
 	const rewardsQ = `
         SELECT COALESCE(SUM(prl.amount_usd), 0) AS amount,
+               MIN(prl.unix_ts) AS first_unix_ts,
                MAX(prl.unix_ts) AS last_unix_ts
           FROM provider_rewards_ledger prl
           JOIN ` + authenticatedProvidersRelation + ` pt ON pt.provider_id = prl.provider_id
@@ -303,8 +312,8 @@ func computeLeaderboardRowForProvider(ctx context.Context, db *sql.DB, cfg Confi
            AND prl.unix_ts < $3
     `
 	var amtStr string
-	var rewardsLastUnixTs sql.NullInt64
-	if err := db.QueryRowContext(ctx, rewardsQ, pid, winStart, endUnix).Scan(&amtStr, &rewardsLastUnixTs); err != nil {
+	var rewardsFirstUnixTs, rewardsLastUnixTs sql.NullInt64
+	if err := db.QueryRowContext(ctx, rewardsQ, pid, winStart, endUnix).Scan(&amtStr, &rewardsFirstUnixTs, &rewardsLastUnixTs); err != nil {
 		return leaderboardRow{}, false, err
 	}
 	rewardsUSD, _ := new(big.Rat).SetString(amtStr)
@@ -317,18 +326,20 @@ func computeLeaderboardRowForProvider(ctx context.Context, db *sql.DB, cfg Confi
 		return leaderboardRow{}, false, nil
 	}
 
-	// Round-4 ARCH r4 fix: last_seen_at combines work + rewards.
-	// Earlier draft used only work.last_seen_at; a rewards-only
-	// provider had NULL last_seen_at and the drop-out query
-	// missed them.
-	if rewardsLastUnixTs.Valid {
-		rewardsTime := time.Unix(rewardsLastUnixTs.Int64, 0).UTC()
-		if w.lastSeen == nil || rewardsTime.After(*w.lastSeen) {
-			w.lastSeen = &rewardsTime
+	// Round-4 ARCH r4 + round-9 CODE r9 MED 1 fix: first_seen and
+	// last_seen combine work + rewards. firstSeen takes the
+	// EARLIEST of (work.firstSeen, rewards.firstUnixTs); lastSeen
+	// takes the LATEST of (work.lastSeen, rewards.lastUnixTs).
+	if rewardsFirstUnixTs.Valid {
+		rewardsFirst := time.Unix(rewardsFirstUnixTs.Int64, 0).UTC()
+		if w.firstSeen == nil || rewardsFirst.Before(*w.firstSeen) {
+			w.firstSeen = &rewardsFirst
 		}
-		if w.firstSeen == nil {
-			fs := rewardsTime
-			w.firstSeen = &fs
+	}
+	if rewardsLastUnixTs.Valid {
+		rewardsLast := time.Unix(rewardsLastUnixTs.Int64, 0).UTC()
+		if w.lastSeen == nil || rewardsLast.After(*w.lastSeen) {
+			w.lastSeen = &rewardsLast
 		}
 	}
 
