@@ -991,6 +991,164 @@ func TestAggregateStatusExcludesNonPublishingProviderFromUnion(t *testing.T) {
 	}
 }
 
+// SPEC-003 v0.8.3 FR-C9.4 — bearerless-duplicate sessions are admitted to
+// /poolz for operator visibility but are non-routable. The gateway's buyer-
+// facing /v1/status aggregation MUST exclude them so the headline "Ready"
+// count and per-model availability don't promise capacity the coordinator
+// will refuse to route. Tracking issue #82 item 1.
+func TestAggregateStatusExcludesBearerlessDuplicatesFromCapacity(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"ready","slots_free":2,"slots_total":2,"max_context_tokens":4096,"auth_state":"bearer_validated"},
+			{"model_id":"llama","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"auth_state":"bearerless_duplicate"},
+			{"model_id":"llama","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"auth_state":"self_minted"},
+			{"model_id":"llama","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096}
+		],
+		"summary":{"total_providers":4,"ready":3,"total_slots":5,"free_slots":5}
+	}`), 1, fixedNow())
+
+	if out.Pool.TotalProviders != 3 {
+		t.Fatalf("TotalProviders=%d, want 3 (bearerless duplicate excluded)", out.Pool.TotalProviders)
+	}
+	if out.Pool.Ready != 3 {
+		t.Fatalf("Pool.Ready=%d, want 3 (bearerless duplicate excluded)", out.Pool.Ready)
+	}
+	if len(out.Models) != 1 {
+		t.Fatalf("models=%+v, want one model entry", out.Models)
+	}
+	m := out.Models[0]
+	if m.ProviderCount != 3 {
+		t.Fatalf("model.ProviderCount=%d, want 3 (bearerless duplicate excluded)", m.ProviderCount)
+	}
+	if m.ReadyProviderCount != 3 {
+		t.Fatalf("model.ReadyProviderCount=%d, want 3 (bearerless duplicate excluded)", m.ReadyProviderCount)
+	}
+	if m.TotalSlots != 4 {
+		t.Fatalf("model.TotalSlots=%d, want 4 (1 from bearerless duplicate excluded)", m.TotalSlots)
+	}
+	if m.SlotsFree != 4 {
+		t.Fatalf("model.SlotsFree=%d, want 4 (1 from bearerless duplicate excluded)", m.SlotsFree)
+	}
+	if !m.Available || m.Availability != "available" {
+		t.Fatalf("model availability=%+v, want available", m)
+	}
+}
+
+// All-bearerless pool MUST collapse to no-ready capacity even when the
+// coordinator's summary echoes a non-zero total. The Ready=0 promise is the
+// load-bearing invariant — buyers MUST NOT see Available=true for a model
+// whose only sessions are non-routable bearerless duplicates.
+func TestAggregateStatusAllBearerlessPoolReportsNoCapacity(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"auth_state":"bearerless_duplicate"}
+		],
+		"summary":{"total_providers":1,"ready":0,"total_slots":1,"free_slots":0}
+	}`), 1, fixedNow())
+
+	if out.Pool.Ready != 0 {
+		t.Fatalf("Pool.Ready=%d, want 0", out.Pool.Ready)
+	}
+	if out.Status != "idle" {
+		t.Fatalf("status=%q, want idle", out.Status)
+	}
+	if len(out.Models) != 0 {
+		t.Fatalf("models=%+v, want no model entries (bearerless skipped before model registration)", out.Models)
+	}
+}
+
+// Regression for the IMPL r1 MEDIUM finding: when /poolz returns pool rows
+// that are ALL bearerless_duplicate AND the coordinator's summary reports a
+// non-zero Ready, the old fallback (`out.Pool.TotalProviders == 0`)
+// reintroduced the excluded Ready capacity into the buyer-visible status.
+// The fix gates the fallback on `len(poolz.Pool) == 0` instead, so an
+// all-bearerless pool collapses to no capacity even if the coordinator's
+// summary is non-zero. (A non-zero coordinator summary.ready alongside an
+// all-bearerless pool is a misconfigured-coordinator shape, but the gateway
+// MUST NOT amplify it into a buyer-visible promise.)
+func TestAggregateStatusAllBearerlessPoolIgnoresSummaryFallback(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[
+			{"model_id":"llama","state":"ready","slots_free":2,"slots_total":2,"max_context_tokens":4096,"auth_state":"bearerless_duplicate"}
+		],
+		"summary":{"total_providers":3,"ready":2,"total_slots":4,"free_slots":2}
+	}`), 1, fixedNow())
+
+	if out.Pool.TotalProviders != 0 {
+		t.Fatalf("Pool.TotalProviders=%d, want 0 (summary fallback MUST NOT fire when pool rows are present)", out.Pool.TotalProviders)
+	}
+	if out.Pool.Ready != 0 {
+		t.Fatalf("Pool.Ready=%d, want 0 (summary fallback MUST NOT reintroduce excluded Ready)", out.Pool.Ready)
+	}
+	if out.Status != "idle" {
+		t.Fatalf("status=%q, want idle", out.Status)
+	}
+}
+
+// Summary-fallback positive case: a coordinator that returns ONLY a summary
+// (no pool rows) is still honored by the gateway — this preserves the
+// pre-existing behavior the fallback was added for. The condition is "no
+// detailed pool rows," not "no aggregated capacity after filtering."
+func TestAggregateStatusSummaryFallbackFiresOnlyWhenPoolIsEmpty(t *testing.T) {
+	out := aggregateStatus(decodePoolz(t, `{
+		"pool":[],
+		"summary":{"total_providers":2,"ready":2,"total_slots":4,"free_slots":3}
+	}`), 1, fixedNow())
+
+	if out.Pool.TotalProviders != 2 {
+		t.Fatalf("Pool.TotalProviders=%d, want 2 (summary fallback)", out.Pool.TotalProviders)
+	}
+	if out.Pool.Ready != 2 {
+		t.Fatalf("Pool.Ready=%d, want 2 (summary fallback)", out.Pool.Ready)
+	}
+}
+
+// SPEC-003 v0.8.3 enum coverage — pins per-value routability so future
+// changes (issue #82 item 2 will flip `mint_failed` semantics) MUST update
+// this test and SPEC-002 v1.4.1's aggregation rule together. Only
+// `bearerless_duplicate` is excluded today; everything else — including
+// empty (pre-v0.8.3 coordinator), `bearer_validated`, `self_minted`,
+// `mint_failed`, and unknown future values — aggregates normally.
+func TestAggregateStatusAuthStateRoutabilityCoverage(t *testing.T) {
+	cases := []struct {
+		name      string
+		authState string
+		wantReady int
+	}{
+		{name: "empty (pre-v0.8.3 coordinator)", authState: "", wantReady: 1},
+		{name: "bearer_validated", authState: "bearer_validated", wantReady: 1},
+		{name: "self_minted", authState: "self_minted", wantReady: 1},
+		{name: "mint_failed (currently routable; flips in #82 item 2)", authState: "mint_failed", wantReady: 1},
+		{name: "unknown future value (defensive default = aggregate)", authState: "future_value_xyz", wantReady: 1},
+		{name: "bearerless_duplicate (the only excluded value)", authState: "bearerless_duplicate", wantReady: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			payload := fmt.Sprintf(`{
+				"pool":[
+					{"model_id":"llama","state":"ready","slots_free":1,"slots_total":1,"max_context_tokens":4096,"auth_state":%q}
+				],
+				"summary":{"total_providers":1,"ready":%d,"total_slots":1,"free_slots":1}
+			}`, tc.authState, tc.wantReady)
+			out := aggregateStatus(decodePoolz(t, payload), 1, fixedNow())
+			if out.Pool.Ready != tc.wantReady {
+				t.Fatalf("auth_state=%q: Pool.Ready=%d, want %d", tc.authState, out.Pool.Ready, tc.wantReady)
+			}
+		})
+	}
+}
+
+// Drift-prevention: the string literal in server.go MUST track SPEC-002
+// v1.4.1's normative enum value. If the SPEC ever renames
+// `bearerless_duplicate`, this test pins the gateway-side const so the
+// rename surfaces as a test failure before silent capacity over-promising.
+func TestAuthStateBearerlessDuplicateConstantMatchesSpec(t *testing.T) {
+	const want = "bearerless_duplicate"
+	if authStateBearerlessDuplicate != want {
+		t.Fatalf("authStateBearerlessDuplicate = %q, want %q (SPEC-002 v1.4.1 FR-O2 aggregation rule)", authStateBearerlessDuplicate, want)
+	}
+}
+
 func TestStatusCoordinatorUnreachableRemainsDown(t *testing.T) {
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		return nil, errors.New("coordinator unavailable")

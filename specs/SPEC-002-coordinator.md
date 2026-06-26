@@ -1,7 +1,78 @@
 # SPEC-002 — Phase 4 Coordinator: Mac Provider Request Router
 
-**Version:** 1.4.0 (2026-06-26, issue #92 streaming-commit predicate documented in FR-P11a; SPEC-015 v0.1.3 /poolz receipt pubkey absorption from 2026-06-22)
-**Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9)
+**Version:** 1.4.1 (2026-06-26, SPEC-003 v0.8.3 FR-C9.4 `/poolz` `auth_state` field absorbed; gateway aggregation rule for non-routable sessions added — issue #82 item 1)
+**Depends on:** SPEC-001 v1.4 (Phase 3 binary wire protocol, locked; v1.4 adds installer custom-model selection + `models browse` + fit guard on top of the v1.3 absorbed in §7.8/§7.9); SPEC-003 FR-C9.4 composed contract — base AuthState enum (`bearer_validated`, `self_minted`, `bearerless_duplicate`) introduced in v0.8.3; `mint_failed` reserved value added in v0.8.4.
+
+**Change log v1.4.1 (2026-06-26, additive — issue #82 item 1):**
+- FR-O2 `/poolz` provider row gains the optional `auth_state` string
+  field (`omitempty`). Enum: `bearer_validated`, `self_minted`,
+  `bearerless_duplicate` (SPEC-003 v0.8.3 FR-C9.4), plus the
+  `mint_failed` value reserved by SPEC-003 v0.8.4. Absent / empty
+  preserves pre-v0.8.3 behavior (routable). The field is
+  documentational on the coordinator side (`pool.Provider.AuthState`
+  has been emitted via the embedded `pool.Provider` struct since
+  SPEC-003 v0.8.3) and is now normatively part of the SPEC-002
+  `/poolz` contract surface. **Observability scope:** today only
+  `bearer_validated`, `self_minted`, `bearerless_duplicate`, and the
+  empty pre-v0.8.3 value actually appear on registered `/poolz` rows.
+  `mint_failed` is a reserved enum value — the coordinator returns it
+  internally from `resolveProvisionalToken` on transient DB-write
+  failure but immediately closes the WebSocket with `CloseInvalidToken`
+  before the session is registered (`phase4-coordinator/internal/ws/server.go`
+  `handleHello` / `handleAuthRequest` close paths), so it does NOT
+  currently surface as a `/poolz` row. Issue #82 item 2 may publish
+  an observable non-routable `mint_failed` row in the future — when
+  it does, the aggregation rule below MUST be re-evaluated.
+- Adds normative aggregation rule for downstream `/poolz` consumers
+  (SPEC-006 gateway `/v1/status`): provider rows with
+  `auth_state == "bearerless_duplicate"` MUST be excluded from ALL
+  buyer-facing capacity counters derived from the detailed pool
+  array, including top-level `Pool.TotalProviders`, top-level
+  `Pool.Ready`, per-model `ProviderCount`, per-model
+  `ReadyProviderCount`, slot totals, model availability, and
+  per-model `supported_models` unions. This mirrors
+  `pool.Provider.RoutingEligible()` on the coordinator side — a
+  bearerless duplicate is admitted to `/poolz` for operator
+  visibility but is non-routable; counting it would over-promise
+  capacity the coordinator will refuse to route. Other `auth_state`
+  values (empty, `bearer_validated`, `self_minted`, and currently
+  `mint_failed` — which never appears on registered rows today) are
+  aggregated normally; the eventual `mint_failed`-becomes-observable
+  decision is intentionally deferred to issue #82 item 2 and is NOT
+  in scope for v1.4.1.
+- **Buyer-vs-operator counter separation (Q1 resolution).** On
+  buyer-facing surfaces derived from `/poolz` (the SPEC-006 gateway
+  `/v1/status`), `total_providers` is a routable-eligible count, not
+  a raw session count — it excludes `bearerless_duplicate` rows by
+  the aggregation rule above. The operator-facing `/poolz` body
+  itself still surfaces ALL admitted sessions in its `pool` array
+  (including bearerless duplicates) and in its top-level `summary`;
+  operator visibility is preserved precisely because operators must
+  be able to see WHY a session is non-routable. Consumers that need
+  raw operator-visible session counts MUST read the `/poolz`
+  `summary` block (which is coordinator-emitted and includes
+  bearerless rows in `total_providers`); consumers that surface
+  buyer-facing counts MUST apply the aggregation rule.
+- **Summary-fallback prohibition (covers the all-bearerless edge
+  case).** Auth-state-aware consumers that derive buyer-facing
+  counts from `/poolz` MUST NOT use the coordinator-supplied
+  `summary` block as a fallback to repopulate counts that have been
+  excluded by the aggregation rule when the detailed `pool` array
+  was present. The coordinator's `summary.total_providers` is
+  `len(providers)` on the coordinator side (includes bearerless);
+  using it as a fallback after filtering would reintroduce excluded
+  capacity. The gateway IMPL gates its summary fallback on
+  `len(poolz.Pool) == 0` (no detailed rows at all), not on
+  `out.Pool.TotalProviders == 0` after filtering.
+- Wire-additive change. Pre-v1.4.1 consumers that ignore unknown
+  fields continue to work unchanged; the only behaviour change is
+  the gateway aggregation exclusion. No SPEC-001 wire change.
+- **Cross-spec follow-up (deferred).** SPEC-006 (buyer-facing gateway)
+  currently describes `/v1/status` without the `auth_state`
+  exclusion. A SPEC-006 amendment carrying a pointer to this rule is
+  the right place to surface the invariant for implementers reading
+  the gateway spec alone; that amendment is out of scope for
+  v1.4.1 and lands as part of issue #82 closure.
 
 **Change log v1.4.0 (2026-06-26):**
 - **v1.4.0 (2026-06-26, issue #92):** FR-P11a streaming-failover paragraph
@@ -1368,6 +1439,7 @@ Response:
       "connected_at": "2026-05-27T12:00:00Z",
       "binary_version": "0.1.0",
       "endpoint_url": "https://m4.streamvc.live",
+      "auth_state": "bearer_validated",
       "receipt_pubkey": "<base64-32-byte-ed25519>" | null,
       "receipt_pubkey_prev": null | {
         "pubkey": "<base64-32-byte-ed25519>",
@@ -1396,7 +1468,54 @@ Response:
 }
 ```
 
-The `summary` block is the SPEC-006 v0.3 gateway input for `/v1/status`; the detailed `pool` array is operator-only and MUST NOT be exposed to buyers by the gateway.
+The `summary` block is the raw coordinator/operator summary; per the SPEC-002 v1.4.1 aggregation rule below, the SPEC-006 gateway derives buyer-facing `/v1/status` counters from the detailed `pool` array (applying the `auth_state == "bearerless_duplicate"` exclusion) when those rows are present, and MAY fall back to `summary` only when the coordinator omitted the detailed `pool` array entirely. The detailed `pool` array is operator-only and MUST NOT be exposed to buyers by the gateway.
+
+SPEC-002 v1.4.1 documents the optional `auth_state` field shown above
+(SPEC-003 FR-C9.4 absorption — base enum from v0.8.3, `mint_failed`
+reserved by v0.8.4, emitted by the coordinator via embedded
+`pool.Provider.AuthState`). Enum values are `bearer_validated`
+(connect carried a matching Bearer header), `self_minted` (FR-C9.1
+fresh provisional mint, cleartext returned in the ack frame),
+`bearerless_duplicate` (tokenless connect for a provider_id that
+already has an unrevoked token row — admitted for operator visibility
+but non-routable per FR-C9.4), and the reserved `mint_failed` value
+(FR-C9.1 mint attempted but the DB write failed with a non-constraint
+error; today the connect is closed with `CloseInvalidToken` before
+session registration so this value does NOT currently surface on
+registered `/poolz` rows — issue #82 item 2 may change that). The
+field is `omitempty`; absent / empty preserves pre-v0.8.3 behavior
+(routable, billable).
+
+**Aggregation rule for buyer-facing consumers (normative).**
+Downstream `/poolz` consumers that derive buyer-facing capacity
+(SPEC-006 gateway `/v1/status`) MUST exclude rows with `auth_state ==
+"bearerless_duplicate"` from EVERY counter they expose:
+- top-level `Pool.TotalProviders` and top-level `Pool.Ready`,
+- per-model `ProviderCount`, per-model `ReadyProviderCount`,
+- per-model slot totals (`TotalSlots`, `SlotsFree`),
+- per-model availability flags,
+- per-model `supported_models` unions.
+Counting bearerless rows on the buyer surface would over-promise
+capacity the coordinator will refuse to route.
+
+Operator-facing `/poolz` output is not subject to this rule: the raw
+`pool` array still surfaces ALL admitted sessions (including
+bearerless duplicates), and the coordinator-emitted `summary` block
+still counts them in `total_providers` — operator visibility into
+WHY a session is non-routable depends on it. Buyer-facing aggregators
+applying the rule above MUST NOT fall back to the coordinator
+`summary` block to repopulate counters that have been excluded; the
+summary includes bearerless rows in `total_providers` (it is
+`len(providers)` on the coordinator side), so using it as a fallback
+after filtering would silently reintroduce the excluded capacity.
+The gateway implementation lives at
+`phase5-gateway/internal/router/server.go` `aggregateStatus`; its
+summary fallback gates on `len(poolz.Pool) == 0`, not on
+`out.Pool.TotalProviders == 0` after filtering.
+
+SPEC-006 (buyer-facing gateway) currently describes `/v1/status`
+without this exclusion — a SPEC-006 amendment carrying the pointer
+to this rule is deferred to issue #82 closure.
 
 SPEC-015 v0.1.3 adds the two receipt fields shown above as the SPEC-002
 v1.4 absorption. `receipt_pubkey` is `null` when the provider did not
