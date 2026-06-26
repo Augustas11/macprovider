@@ -387,7 +387,7 @@ The subsequent GET is then evaluated by the §5.4.3 7-row decision table EXACTLY
 - Partner-key, `allowed_origins = '{}'`, browser context (Origin present): `Access-Control-Allow-Origin: <normalized Origin>` (echoed) + `Access-Control-Allow-Credentials: true`.
 - Partner-key, `allowed_origins = '{}'`, server-to-server (Origin absent): OMIT `Access-Control-Allow-Origin` entirely; OMIT `Allow-Credentials`. Non-browser clients ignore CORS headers; this avoids the Fetch-spec violation where a credentialed response with `ACAO: *` is rejected by browsers.
 
-The handler MUST enforce this split — using `ACAO: *` on any partner-key projection response (any of rows 2/3/4 of the v0.1.7 §5.7 table) is a CRITICAL bug. SECURITY audit lane MUST sweep for this with a fixture that drives all 7 §5.7 rows.
+The handler MUST enforce this split — using `ACAO: *` on any partner-key projection response (rows 3, 4, and 5 of the locked v0.1.8 §5.7 table — empty-allowlist browser context, empty-allowlist server-to-server, and non-empty-allowlist matched Origin) is a CRITICAL bug. The public `/leaderboard` no-key response (row 2) MUST still emit `ACAO: *` per locked §5.7 — do NOT apply the partner-key `ACAO != *` rule to it. (v13 CODE r12 001 fix: the v12 prompt incorrectly named "rows 2/3/4" which would have implementers reject `ACAO: *` on the legitimate public row 2.) The SECURITY audit lane MUST sweep for this with a fixture that drives all 7 §5.7 rows.
 
 **Error envelope per §5.9 closed code vocabulary** — `bad_request`, `unauthorized`, `method_not_allowed`, `rate_limited`, `stats_stale`, `internal`. 304 exempt per §5.9 first paragraph. The IMPL author MUST NOT introduce new codes.
 
