@@ -503,6 +503,14 @@ type statusModel struct {
 	SupportedModels []string `json:"supported_models,omitempty"`
 }
 
+// authStateBearerlessDuplicate is the wire value the coordinator emits for
+// SPEC-003 v0.8.3 FR-C9.4 bearer-less duplicate sessions on /poolz. The
+// authoritative const lives at phase4-coordinator/internal/pool/provider.go
+// `AuthBearerlessDuplicate`; the gateway cannot import that package, so the
+// value is mirrored here as a string literal. SPEC-002 v1.4.1 is the
+// normative contract — if these ever drift, fix SPEC-002 first.
+const authStateBearerlessDuplicate = "bearerless_duplicate"
+
 type poolzResponse struct {
 	Pool []struct {
 		ProviderID               string   `json:"provider_id"`
@@ -519,6 +527,14 @@ type poolzResponse struct {
 		OperatorIdentity         string   `json:"operator_identity"`
 		SupportedModels          []string `json:"supported_models,omitempty"`
 		PublishesSupportedModels bool     `json:"publishes_supported_models,omitempty"`
+		// SPEC-003 v0.8.3 FR-C9.4 auth_state — empty / bearer_validated /
+		// self_minted are routable; bearerless_duplicate is non-routable
+		// (admitted for /poolz visibility, excluded from buyer traffic +
+		// billing). The gateway mirrors pool.Provider.RoutingEligible() by
+		// dropping bearerless_duplicate entries from /v1/status capacity
+		// aggregation so the buyer-visible status doesn't promise capacity
+		// the coordinator will refuse to route.
+		AuthState string `json:"auth_state,omitempty"`
 	} `json:"pool"`
 	Summary struct {
 		TotalProviders int `json:"total_providers"`
@@ -587,6 +603,16 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		Coordinator: coordinatorStatus{Status: "up", CheckedAt: now.Format(time.RFC3339)},
 	}
 	for _, p := range poolz.Pool {
+		// SPEC-003 v0.8.3 FR-C9.4 — bearerless duplicates are admitted to
+		// /poolz for operator visibility but are non-routable (excluded by
+		// pool.Provider.RoutingEligible). They MUST NOT contribute to the
+		// gateway's buyer-facing capacity counts: counting them would
+		// over-promise capacity that the coordinator will refuse to route,
+		// and would taint per-model availability (a model whose only
+		// "ready" entry is a bearerless duplicate would appear available).
+		if p.AuthState == authStateBearerlessDuplicate {
+			continue
+		}
 		out.Pool.TotalProviders++
 		switch p.State {
 		case "ready":
@@ -633,7 +659,16 @@ func aggregateStatus(poolz poolzResponse, readyThreshold int, now time.Time) sta
 		}
 		stats[p.ModelID] = st
 	}
-	if out.Pool.TotalProviders == 0 && poolz.Summary.TotalProviders > 0 {
+	// SPEC-002 v1.4.1 — the summary fallback only fires when the coordinator
+	// omitted the detailed `pool` array entirely (e.g. a redacted/summary-only
+	// response). It MUST NOT fire when `pool` rows ARE present but all have
+	// been excluded by the bearerless-duplicate gate above; otherwise the
+	// coordinator's summary (which includes bearerless rows in
+	// `total_providers`) would reintroduce excluded capacity on the buyer-
+	// facing surface. The condition is on `len(poolz.Pool)`, not on
+	// `out.Pool.TotalProviders`, so an all-bearerless pool collapses to no-
+	// capacity instead of falling through to the summary.
+	if len(poolz.Pool) == 0 && poolz.Summary.TotalProviders > 0 {
 		out.Pool.TotalProviders = poolz.Summary.TotalProviders
 		out.Pool.Ready = poolz.Summary.Ready
 	}
