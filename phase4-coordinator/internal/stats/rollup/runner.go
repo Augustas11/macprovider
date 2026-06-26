@@ -89,11 +89,19 @@ func (r *Runner) Start(ctx context.Context) {
 	r.spawnTick(ctx, "leaderboard_7d", r.cfg.Leaderboard7dInterval, componentLeaderboard7d, func(c context.Context) error {
 		return runLeaderboardTick(c, r.db, r.cfg, "7d")
 	})
+	// SPEC §9.3: 30d + all use the incremental-merge cadence
+	// path (round-3 ARCH r3 HIGH 1 fix). The bootstrap tick
+	// inside runLeaderboardIncrementalTick still does a full
+	// recompute when stats_components_health.last_ok_at is at
+	// the epoch sentinel; subsequent ticks only update active-
+	// in-lookback providers, so a T-60h row arriving after the
+	// bootstrap lands in stats_late_events but does NOT fold
+	// into the live snapshot until the nightly Shape C rebuild.
 	r.spawnTick(ctx, "leaderboard_30d", r.cfg.Leaderboard30dInterval, componentLeaderboard30d, func(c context.Context) error {
-		return runLeaderboardTick(c, r.db, r.cfg, "30d")
+		return runLeaderboardIncrementalTick(c, r.db, r.cfg, "30d")
 	})
 	r.spawnTick(ctx, "leaderboard_all", r.cfg.LeaderboardAllInterval, componentLeaderboardAll, func(c context.Context) error {
-		return runLeaderboardTick(c, r.db, r.cfg, "all")
+		return runLeaderboardIncrementalTick(c, r.db, r.cfg, "all")
 	})
 	// rewards_populated ticks at the leaderboard_24h cadence —
 	// the cheapest frequent cadence among the four windows.

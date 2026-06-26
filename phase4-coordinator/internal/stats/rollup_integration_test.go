@@ -1045,9 +1045,20 @@ func TestRollupBlockedProviderStillAppearsInV01(t *testing.T) {
 }
 
 // ==========================================================================
-// Late-event detection: T-30h folds into 30d (inside lookback);
-// T-60h lands in stats_late_events (outside lookback). Step 2
-// round-1 ARCH r1 HIGH 1 + CODE r1 CRIT-2 fix.
+// Late-event detection under SPEC §9.3 incremental semantics
+// (round-3 ARCH r3 HIGH 1 fix):
+//
+//   - T-30h (inside 48h lookback): folds into 30d snapshot at
+//     the bootstrap tick.
+//   - T-60h (outside 48h lookback) inserted AFTER bootstrap:
+//     does NOT fold into the live 30d/all snapshot (the
+//     incremental tick only scans the lookback window). DOES
+//     land in stats_late_events for the nightly Shape C rebuild
+//     to reconcile.
+//
+// This is the SPEC-compliant behavior: late-arriving corrections
+// don't disturb the live snapshot mid-day; the nightly rebuild
+// is the reconciliation moment.
 // ==========================================================================
 func TestRollupLateEventDetection(t *testing.T) {
 	fx, adminDB := setupRollupFixture(t)
@@ -1056,11 +1067,10 @@ func TestRollupLateEventDetection(t *testing.T) {
 
 	now := time.Now().UTC()
 	seedProviderTokens(t, adminDB, "p_recent", "p_late")
-	// T-30h (inside 48h lookback) — folds into 30d snapshot.
+	// T-30h (inside 48h lookback) seeded BEFORE bootstrap.
 	seedLedgerRow(t, adminDB, "p_recent", now.Add(-30*time.Hour), 10, 10, 1_000_000)
-	// T-60h (outside 48h lookback) — lands in stats_late_events.
-	seedLedgerRow(t, adminDB, "p_late", now.Add(-60*time.Hour), 20, 20, 2_000_000)
 
+	// Bootstrap tick: live snapshot picks up T-30h.
 	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -1079,21 +1089,15 @@ func TestRollupLateEventDetection(t *testing.T) {
 		t.Fatalf("scan 30d recent: %v", err)
 	}
 	if n != 1 {
-		t.Errorf("p_recent (T-30h, inside lookback) missing from 30d snapshot: count=%d", n)
+		t.Errorf("p_recent (T-30h, inside lookback) missing from 30d snapshot after bootstrap: count=%d", n)
 	}
 
-	// p_late in stats_late_events.
-	if err := adminDB.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM stats_late_events WHERE provider_id = 'p_late'`,
-	).Scan(&n); err != nil {
-		t.Fatalf("scan late events: %v", err)
-	}
-	if n < 1 {
-		t.Errorf("p_late (T-60h, outside lookback) missing from stats_late_events: count=%d", n)
-	}
+	// Now insert T-60h (late arrival) AFTER bootstrap. Under
+	// incremental semantics, the next tick's lookback (48h) does
+	// NOT see it; it lands in stats_late_events but NOT in the
+	// live snapshot.
+	seedLedgerRow(t, adminDB, "p_late", now.Add(-60*time.Hour), 20, 20, 2_000_000)
 
-	// Re-run the rollup: late events are idempotent — no duplicate
-	// row for p_late.
 	runner2, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
 	if err != nil {
 		t.Fatalf("New 2: %v", err)
@@ -1104,14 +1108,61 @@ func TestRollupLateEventDetection(t *testing.T) {
 	cancel2()
 	runner2.Wait()
 
-	var n2 int
+	// p_late must NOT be in the live 30d snapshot (incremental
+	// tick scans only the 48h lookback; T-60h is outside).
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_leaderboard_30d WHERE provider_id = 'p_late'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("scan 30d late: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("p_late (T-60h, OUTSIDE lookback, arrived AFTER bootstrap) appeared in live 30d snapshot: count=%d (SPEC §9.3 violated)", n)
+	}
+
+	// p_late MUST be in stats_late_events.
 	if err := adminDB.QueryRowContext(context.Background(),
 		`SELECT COUNT(*) FROM stats_late_events WHERE provider_id = 'p_late'`,
-	).Scan(&n2); err != nil {
-		t.Fatalf("scan late events 2: %v", err)
+	).Scan(&n); err != nil {
+		t.Fatalf("scan late events: %v", err)
 	}
-	if n2 != n {
-		t.Errorf("late events not idempotent: first run=%d second run=%d", n, n2)
+	if n < 1 {
+		t.Errorf("p_late missing from stats_late_events: count=%d", n)
+	}
+
+	// Idempotency: re-run; late events shouldn't double-insert.
+	prevCount := n
+	runner3, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New 3: %v", err)
+	}
+	ctx3, cancel3 := context.WithCancel(context.Background())
+	runner3.Start(ctx3)
+	time.Sleep(500 * time.Millisecond)
+	cancel3()
+	runner3.Wait()
+
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_late_events WHERE provider_id = 'p_late'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("scan late events 3: %v", err)
+	}
+	if n != prevCount {
+		t.Errorf("late events not idempotent: prev=%d after re-run=%d", prevCount, n)
+	}
+
+	// Nightly Shape C rebuild reconciles — after that, p_late
+	// SHOULD appear in the live snapshot.
+	cfg := freshRollupConfig().DefaultsApplied()
+	if err := statsrollup.RunNightlyRebuild(context.Background(), rdb, cfg, logger); err != nil {
+		t.Fatalf("nightly rebuild: %v", err)
+	}
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_leaderboard_30d WHERE provider_id = 'p_late'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("scan 30d late post-rebuild: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("p_late missing from 30d after nightly Shape C rebuild reconciliation: count=%d", n)
 	}
 }
 
