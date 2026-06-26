@@ -13,26 +13,24 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// TestInternalRoutingAcceptsBothCredentials locks in the codex PR #73
-// HIGH-1 fix for the gateway-internal class: `/internal/routing` and
-// `/internal/sticky` (the paths the gateway actually calls upstream)
-// accept EITHER operator_key OR gateway_service_token. The audit-log
-// line names which credential matched so the operator can watch the
-// M3-2 cutover for gateway-origin calls still landing on operator_key.
-//
-// The implementation also evaluates BOTH credentials before branching
-// (closing the codex MEDIUM short-circuit timing oracle). This test
-// pins the visible behavior; the timing-oracle invariant is asserted at
-// the helper level in internal/auth.
-func TestInternalRoutingAcceptsBothCredentials(t *testing.T) {
+// TestInternalRoutingAcceptsServiceTokenOnly locks the M3-2 / SECU-4
+// post-cutover contract for `/internal/routing` and `/internal/sticky`
+// (the paths the gateway actually calls upstream): the gateway_service_token
+// is the SOLE accepted credential. PR #87 item 3 removed the legacy
+// operator_key fallback once the 30-day clean-cutover gate fired
+// (2026-07-12, audit-log proof of zero gateway-origin operator_key
+// admits on /internal/* throughout the window). An operator-key-shaped
+// bearer hitting this path post-cutover MUST 401 — that's the
+// security gain the removal locked in.
+func TestInternalRoutingAcceptsServiceTokenOnly(t *testing.T) {
 	tests := []struct {
 		name       string
 		bearer     string
 		wantStatus int
 		wantLogKey string // "" means no audit-log line expected
 	}{
-		{name: "operator_key accepted (legacy)", bearer: "operator-secret", wantStatus: http.StatusOK, wantLogKey: "operator_key"},
-		{name: "service_token accepted (post-cutover)", bearer: "service-secret", wantStatus: http.StatusOK, wantLogKey: "service_token"},
+		{name: "service_token accepted", bearer: "service-secret", wantStatus: http.StatusOK, wantLogKey: "service_token"},
+		{name: "operator-key-shaped bearer rejected post-cutover", bearer: "operator-secret", wantStatus: http.StatusUnauthorized, wantLogKey: ""},
 		{name: "unknown bearer rejected", bearer: "wrong", wantStatus: http.StatusUnauthorized, wantLogKey: ""},
 		{name: "no bearer rejected", bearer: "", wantStatus: http.StatusUnauthorized, wantLogKey: ""},
 	}
@@ -46,7 +44,6 @@ func TestInternalRoutingAcceptsBothCredentials(t *testing.T) {
 				registry,
 				logger,
 				time.Unix(1716768000, 0),
-				buyer.WithInternalAuthKey("operator-secret"),
 				buyer.WithGatewayServiceToken("service-secret"),
 			)
 
@@ -72,28 +69,25 @@ func TestInternalRoutingAcceptsBothCredentials(t *testing.T) {
 			if !strings.Contains(logs, `"event":"internal_bearer_accepted"`) || !strings.Contains(logs, wantKey) {
 				t.Fatalf("audit log missing %q; got: %s", wantKey, logs)
 			}
-			otherKey := "operator_key"
-			if tc.wantLogKey == "operator_key" {
-				otherKey = "service_token"
-			}
-			if strings.Contains(logs, `"key":"`+otherKey+`"`) {
-				t.Fatalf("audit log should not contain key=%s; got: %s", otherKey, logs)
+			// Post-cutover the operator_key class can never appear on /internal/*.
+			if strings.Contains(logs, `"key":"operator_key"`) {
+				t.Fatalf("audit log contained key=operator_key post-cutover; got: %s", logs)
 			}
 		})
 	}
 }
 
-// TestInternalStickyDeleteAcceptsBothCredentials covers the second
-// gateway-internal path (DELETE /internal/sticky). Same dual-credential
-// contract as /internal/routing.
-func TestInternalStickyDeleteAcceptsBothCredentials(t *testing.T) {
+// TestInternalStickyDeleteAcceptsServiceTokenOnly covers the second
+// gateway-internal path (DELETE /internal/sticky). Same post-cutover
+// service_token-only contract as /internal/routing.
+func TestInternalStickyDeleteAcceptsServiceTokenOnly(t *testing.T) {
 	cases := []struct {
 		name       string
 		bearer     string
 		wantStatus int
 	}{
-		{name: "operator_key accepted", bearer: "operator-secret", wantStatus: http.StatusOK},
 		{name: "service_token accepted", bearer: "service-secret", wantStatus: http.StatusOK},
+		{name: "operator-key-shaped bearer rejected post-cutover", bearer: "operator-secret", wantStatus: http.StatusUnauthorized},
 		{name: "rejected unknown", bearer: "nope", wantStatus: http.StatusUnauthorized},
 	}
 	for _, tc := range cases {
@@ -103,7 +97,6 @@ func TestInternalStickyDeleteAcceptsBothCredentials(t *testing.T) {
 				registry,
 				zerolog.Nop(),
 				time.Unix(1716768000, 0),
-				buyer.WithInternalAuthKey("operator-secret"),
 				buyer.WithGatewayServiceToken("service-secret"),
 			)
 			req := httptest.NewRequest(http.MethodDelete, "/internal/sticky?account_id=acct-1", nil)

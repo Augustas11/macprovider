@@ -48,14 +48,14 @@ type CoordinatorConfig struct {
 	BuyerURL    string `yaml:"buyer_url"`
 	OperatorURL string `yaml:"operator_url"`
 	OperatorKey string `yaml:"operator_key"`
-	// ServiceToken is the optional service-to-service credential the
-	// gateway sends on UPSTREAM calls to the coordinator (M3-2 /
-	// SECU-4). When set, it is preferred over OperatorKey on every
-	// outbound /poolz, /internal/*, /admin/* request; OperatorKey
-	// remains the fallback so an upgraded gateway can still talk to a
-	// not-yet-upgraded coordinator. Gateway's OWN admin-plane auth
-	// (operatorAuthorized) keeps using OperatorKey — that's the
-	// human-admin credential and is intentionally separate.
+	// ServiceToken is the REQUIRED service-to-service credential the
+	// gateway sends on UPSTREAM /internal/* calls to the coordinator
+	// (M3-2 / SECU-4). Post PR #87 item 3 this is the ONLY accepted
+	// credential on the coordinator's /internal/routing and
+	// /internal/sticky endpoints — the legacy OperatorKey fallback was
+	// removed once the 30-day clean-cutover gate fired (2026-07-12).
+	// OperatorKey remains for /poolz proxying (operator-only path).
+	// Validate() now requires ServiceToken non-empty.
 	ServiceToken      string `yaml:"service_token"`
 	PoolzPollInterval int    `yaml:"poolz_poll_interval_s"`
 }
@@ -340,6 +340,13 @@ func (c Config) Validate() error {
 	if c.Coordinator.OperatorKey == "" {
 		return fmt.Errorf("coordinator.operator_key must be set")
 	}
+	// Post-PR #87 item 3 (2026-07-12 cutover gate): service_token is now
+	// REQUIRED — the coordinator no longer accepts the legacy operator_key
+	// fallback on /internal/*, so a gateway without service_token can't
+	// route any buyer traffic.
+	if c.Coordinator.ServiceToken == "" {
+		return fmt.Errorf("coordinator.service_token must be set (post-M3-2 cutover: required for /internal/* upstream calls)")
+	}
 	if c.Coordinator.PoolzPollInterval <= 0 {
 		return fmt.Errorf("coordinator.poolz_poll_interval_s must be > 0")
 	}
@@ -536,24 +543,16 @@ func (c Config) Address() string {
 	return fmt.Sprintf("%s:%d", c.Listen.BindAddress, c.Listen.Port)
 }
 
-// UpstreamCoordinatorBearer returns the credential the gateway should
-// send on UPSTREAM calls to the coordinator (M3-2 / SECU-4). Prefer
-// ServiceToken when set; fall back to OperatorKey for backward
-// compatibility with not-yet-upgraded coordinators. Empty return means
-// the gateway is misconfigured — Validate guarantees OperatorKey is
+// UpstreamCoordinatorBearer returns the credential the gateway sends on
+// UPSTREAM /internal/* calls to the coordinator (M3-2 / SECU-4). Post
+// PR #87 item 3 (2026-07-12 cutover gate), this is the
+// gateway_service_token ONLY — the legacy OperatorKey fallback was
+// removed once 30 days of clean audit-log evidence showed zero
+// gateway-origin operator_key admits on /internal/*. Empty return means
+// the gateway is misconfigured; Validate guarantees ServiceToken is
 // non-empty, so this only returns "" if a future caller bypasses Load.
-//
-// TODO(m3-2-cleanup): remove the OperatorKey fallback in a dedicated PR
-// once live coordinator audit logs show zero gateway-origin
-// `key=operator_key` for 30 days post-OperatorKey-rotation. Tracked in
-// audits/2026-06-10/M3-2_LEGACY_FALLBACK_REMOVAL.md. Until that gate is
-// met, removing the fallback would break the cutover for not-yet-
-// upgraded operators.
 func (c CoordinatorConfig) UpstreamCoordinatorBearer() string {
-	if c.ServiceToken != "" {
-		return c.ServiceToken
-	}
-	return c.OperatorKey
+	return c.ServiceToken
 }
 
 func (c Config) CoordinatorTimeout() time.Duration {

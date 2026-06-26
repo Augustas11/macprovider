@@ -1,5 +1,20 @@
 # M3-2: legacy OperatorKey fallback removal (post-cutover)
 
+**Status (2026-06-26):** REMOVED in PR #87 item 3 (branch
+`fix/m3-2-legacy-fallback-removal-v2`, prepared 2026-06-26, merge
+target 2026-07-12 per the 30-day clean-cutover gate). The
+gateway_service_token is now the SOLE accepted credential on
+`/internal/routing` and `/internal/sticky`; the gateway's
+`UpstreamCoordinatorBearer()` returns ServiceToken directly (no
+fallback) and `Validate()` requires it non-empty. Audit-log shape
+preserved (`event=internal_bearer_accepted key=service_token`).
+
+What follows below is the pre-removal tracker — kept for historical
+reference; sections about the bridge being "current state" no longer
+apply.
+
+---
+
 Tracked removal task for the dual-credential bridge added in PR #73
 (M3-2 / SECU-4) and scoped down by its codex security audit fixup
 (HIGH-1, HIGH-2, MED, LOW).

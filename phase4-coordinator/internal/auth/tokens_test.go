@@ -1163,11 +1163,11 @@ func TestOperatorOnlyBearerMatches(t *testing.T) {
 	}
 }
 
-// TestGatewayInternalBearerMatchesScoping pins the codex PR #73 HIGH-1
-// fix at the helper level for the gateway-internal class: BOTH the
-// operator key and the gateway service token are accepted. The kind
-// return identifies which one matched so the call-site can audit-log
-// correctly.
+// TestGatewayInternalBearerMatchesScoping pins the M3-2 / SECU-4
+// gateway-internal credential check after PR #87 item 3 removed the
+// legacy operator_key fallback. The helper now accepts the
+// gateway_service_token ONLY; any other bearer (including what was
+// formerly the operator-key fallback) returns BearerKindNone.
 func TestGatewayInternalBearerMatchesScoping(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -1175,15 +1175,15 @@ func TestGatewayInternalBearerMatchesScoping(t *testing.T) {
 		want     auth.InternalBearerKind
 		wantName string
 	}{
-		{name: "service_token preferred", bearer: "service-secret", want: auth.BearerKindServiceToken, wantName: "service_token"},
-		{name: "operator_key fallback", bearer: "operator-secret", want: auth.BearerKindOperatorKey, wantName: "operator_key"},
+		{name: "service_token accepted", bearer: "service-secret", want: auth.BearerKindServiceToken, wantName: "service_token"},
+		{name: "operator-key shaped bearer rejected post-cutover", bearer: "operator-secret", want: auth.BearerKindNone, wantName: ""},
 		{name: "no match", bearer: "wrong", want: auth.BearerKindNone, wantName: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			headers := http.Header{}
 			headers.Set("Authorization", "Bearer "+tc.bearer)
-			got := auth.GatewayInternalBearerMatches(headers, "operator-secret", "service-secret")
+			got := auth.GatewayInternalBearerMatches(headers, "service-secret")
 			if got != tc.want {
 				t.Fatalf("kind=%v want=%v", got, tc.want)
 			}
@@ -1194,53 +1194,22 @@ func TestGatewayInternalBearerMatchesScoping(t *testing.T) {
 	}
 }
 
-// TestGatewayInternalBearerMatchesEmptyConfigs ensures that an empty
-// gateway_service_token cannot widen the auth surface (matches the
-// invariant in M3-2 / SECU-4), and that an empty operator_key denies
-// even when the request's bearer is also empty.
-func TestGatewayInternalBearerMatchesEmptyConfigs(t *testing.T) {
+// TestGatewayInternalBearerMatchesEmptyServiceToken pins the M1-5 /
+// SECU-5 invariant: an empty service_token DENIES, even when the
+// request also carries an empty bearer. Post-#87-item-3 the operator
+// key is no longer accepted as a fallback, so a misconfigured
+// coordinator (no service_token) cannot route any /internal/* traffic.
+func TestGatewayInternalBearerMatchesEmptyServiceToken(t *testing.T) {
+	// Non-empty bearer + empty service_token → DENY.
 	headers := http.Header{}
-	headers.Set("Authorization", "Bearer operator-secret")
-
-	// Empty service_token, valid operator_key → accept under operator.
-	if got := auth.GatewayInternalBearerMatches(headers, "operator-secret", ""); got != auth.BearerKindOperatorKey {
-		t.Fatalf("empty service_token broke operator fallback: %v", got)
-	}
-	// Empty operator_key, valid service_token → accept under service.
 	headers.Set("Authorization", "Bearer service-secret")
-	if got := auth.GatewayInternalBearerMatches(headers, "", "service-secret"); got != auth.BearerKindServiceToken {
-		t.Fatalf("empty operator_key broke service accept: %v", got)
+	if got := auth.GatewayInternalBearerMatches(headers, ""); got != auth.BearerKindNone {
+		t.Fatalf("empty service_token accepted: %v", got)
 	}
-	// Both empty → always deny, even when the request also has empty bearer.
+	// Empty bearer + empty service_token → DENY.
 	empty := http.Header{}
-	if got := auth.GatewayInternalBearerMatches(empty, "", ""); got != auth.BearerKindNone {
-		t.Fatalf("both empty configs admitted: %v", got)
-	}
-}
-
-// TestGatewayInternalBearerMatchesEvaluatesBoth asserts the MEDIUM
-// timing-oracle fix from codex PR #73: the helper must evaluate BOTH
-// credentials before branching. We can't directly observe the branch
-// at this level, but we can pin the public contract that no short-
-// circuit is exposed by checking the helper succeeds when EITHER
-// credential is correct and only the OTHER is configured. (A naive
-// implementation that broke on empty would fail one of these.)
-func TestGatewayInternalBearerMatchesEvaluatesBoth(t *testing.T) {
-	headers := http.Header{}
-	// service_token matches; operator_key is non-empty but unmatched.
-	headers.Set("Authorization", "Bearer svc")
-	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindServiceToken {
-		t.Fatalf("svc match: %v", got)
-	}
-	// operator_key matches; service_token is non-empty but unmatched.
-	headers.Set("Authorization", "Bearer op")
-	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindOperatorKey {
-		t.Fatalf("op match: %v", got)
-	}
-	// Neither matches.
-	headers.Set("Authorization", "Bearer nope")
-	if got := auth.GatewayInternalBearerMatches(headers, "op", "svc"); got != auth.BearerKindNone {
-		t.Fatalf("nope: %v", got)
+	if got := auth.GatewayInternalBearerMatches(empty, ""); got != auth.BearerKindNone {
+		t.Fatalf("both empty admitted: %v", got)
 	}
 }
 

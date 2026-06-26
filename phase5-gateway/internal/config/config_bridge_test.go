@@ -7,25 +7,28 @@ import (
 	"testing"
 )
 
-// TestUpstreamCoordinatorBearerPrefersServiceToken locks in the M3-2
-// bridge: when both ServiceToken and OperatorKey are set, the gateway
-// MUST send ServiceToken on upstream calls. The audit-log line on the
-// coordinator side then reports key=service_token, which is the signal
-// the operator watches to know the cutover landed.
-func TestUpstreamCoordinatorBearerPrefersServiceToken(t *testing.T) {
+// TestUpstreamCoordinatorBearerReturnsServiceToken locks the post-PR-#87-item-3
+// contract: UpstreamCoordinatorBearer returns the ServiceToken directly,
+// no longer falls back to OperatorKey. Validate() guarantees ServiceToken
+// is non-empty so the empty-return case can only happen if a caller bypasses
+// Load — which this test pins to "" so a regression to the old fallback
+// would surface as a test failure rather than a silent re-introduction of
+// the legacy operator_key on /internal/* paths.
+func TestUpstreamCoordinatorBearerReturnsServiceToken(t *testing.T) {
 	c := CoordinatorConfig{OperatorKey: "operator", ServiceToken: "service"}
 	if got := c.UpstreamCoordinatorBearer(); got != "service" {
 		t.Fatalf("UpstreamCoordinatorBearer=%q want %q", got, "service")
 	}
 }
 
-// TestUpstreamCoordinatorBearerFallsBackToOperatorKey verifies the
-// pre-cutover state: a not-yet-configured ServiceToken falls back to
-// OperatorKey so existing deployments keep working unchanged.
-func TestUpstreamCoordinatorBearerFallsBackToOperatorKey(t *testing.T) {
+// TestUpstreamCoordinatorBearerNoFallbackToOperatorKey verifies that the
+// removed legacy fallback stays removed: empty ServiceToken returns ""
+// (NOT OperatorKey). A regression to the old behavior would re-introduce
+// the cutover-defeating dual-credential path on the wire.
+func TestUpstreamCoordinatorBearerNoFallbackToOperatorKey(t *testing.T) {
 	c := CoordinatorConfig{OperatorKey: "operator", ServiceToken: ""}
-	if got := c.UpstreamCoordinatorBearer(); got != "operator" {
-		t.Fatalf("UpstreamCoordinatorBearer=%q want %q", got, "operator")
+	if got := c.UpstreamCoordinatorBearer(); got != "" {
+		t.Fatalf("UpstreamCoordinatorBearer=%q want empty (post-#87 fallback removal)", got)
 	}
 }
 

@@ -756,7 +756,7 @@ func TestInternalRoutingExposesTier2ActivationMetadata(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithTier2Config(config.Tier2Config{ObserveEnabled: true}),
 	)
 	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
@@ -853,7 +853,7 @@ func TestInternalRoutingExposesTier2BehavioralSafetyMetadata(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithTier2Config(tier2Cfg),
 	)
 	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
@@ -892,7 +892,7 @@ func TestInternalRoutingExposesEncryptedLegAndAttestationMetadata(t *testing.T) 
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 	)
 	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
 	req.Header.Set("Authorization", "Bearer operator-key")
@@ -998,7 +998,7 @@ func TestInternalRoutingReflectsActualHashCoverage(t *testing.T) {
 				registry,
 				zerolog.Nop(),
 				time.Unix(1716768000, 0),
-				buyer.WithInternalAuthKey("operator-key"),
+				buyer.WithGatewayServiceToken("operator-key"),
 				buyer.WithTier2Config(tc.cfg),
 			)
 			req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
@@ -1059,7 +1059,7 @@ func TestObservedModelHashEvidenceIgnoresPreTier2Hashes(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithTier2Config(config.Tier2Config{ObserveEnabled: true}),
 	)
 	req := httptest.NewRequest(http.MethodGet, "/internal/routing", nil)
@@ -3728,7 +3728,7 @@ func TestChatCompletionsRejectsSpoofedInternalRoutingHeaders(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 	)
 
 	headers := http.Header{
@@ -3749,7 +3749,7 @@ func TestChatCompletionsRejectsSpoofedInternalRoutingHeaders(t *testing.T) {
 
 func TestInternalStickyDeleteRequiresBearer(t *testing.T) {
 	registry := pool.NewRegistry(nil)
-	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithInternalAuthKey("operator-key"))
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithGatewayServiceToken("operator-key"))
 
 	req := httptest.NewRequest(http.MethodDelete, "/internal/sticky?account_id=acct_1", nil)
 	rr := httptest.NewRecorder()
@@ -3803,7 +3803,7 @@ func TestStickyAffinityDoesNotOverrideOutsideObjectiveEpsilon(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRoutingConfig(config.RoutingConfig{
 			StickyEnabled:           true,
 			StickyTTLS:              1800,
@@ -6484,7 +6484,7 @@ func TestSessionHardPinReturns503EvenWithStickyEnabled(t *testing.T) {
 				registry,
 				zerolog.Nop(),
 				time.Unix(1716768000, 0),
-				buyer.WithInternalAuthKey("operator-key"),
+				buyer.WithGatewayServiceToken("operator-key"),
 				buyer.WithRoutingConfig(config.RoutingConfig{
 					StickyEnabled:    stickyEnabled,
 					StickyTTLS:       1800,
@@ -6568,7 +6568,7 @@ func TestStickyWritesOnHTTPStreamingCleanEOF(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRoutingConfig(config.RoutingConfig{
 			StickyEnabled:    true,
 			StickyTTLS:       1800,
@@ -6637,7 +6637,7 @@ func TestStickyMissesGracefullyWhenProviderIsBreakerHeld(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRoutingConfig(config.RoutingConfig{
 			StickyEnabled:    true,
 			StickyTTLS:       1800,
@@ -6711,7 +6711,7 @@ func TestStickyMissesGracefullyWhenProviderIsRemoved(t *testing.T) {
 		registry,
 		zerolog.Nop(),
 		time.Unix(1716768000, 0),
-		buyer.WithInternalAuthKey("operator-key"),
+		buyer.WithGatewayServiceToken("operator-key"),
 		buyer.WithRoutingConfig(config.RoutingConfig{
 			StickyEnabled:    true,
 			StickyTTLS:       1800,
@@ -6800,7 +6800,7 @@ func TestDefaultConfigPreservesBaselineProviderSelection(t *testing.T) {
 			registry,
 			zerolog.Nop(),
 			time.Unix(1716768000, 0),
-			buyer.WithInternalAuthKey("operator-key"),
+			buyer.WithGatewayServiceToken("operator-key"),
 			buyer.WithRoutingConfig(routing),
 		)
 	}

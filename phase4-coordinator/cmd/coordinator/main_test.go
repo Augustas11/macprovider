@@ -880,6 +880,7 @@ func reloadTestServers(cfg config.Config) (config.Config, *pool.Registry, *provi
 
 func reloadTestServersWithLogger(cfg config.Config, logger zerolog.Logger) (config.Config, *pool.Registry, *providerws.Server, *buyer.Server) {
 	cfg.Auth.OperatorKey = "0123456789abcdefABCDEFghijklmnop"
+	cfg.Auth.GatewayServiceToken = cfg.Auth.OperatorKey
 	cfg.Pool.WarmupGateEnabled = false
 	registry := pool.NewRegistry(nil)
 	wsServer := providerws.NewServer(cfg, registry, logger)
@@ -888,7 +889,7 @@ func reloadTestServersWithLogger(cfg config.Config, logger zerolog.Logger) (conf
 		logger,
 		time.Unix(1716768000, 0),
 		buyer.WithTier2Config(cfg.Tier2),
-		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
+		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
 	)
 	return cfg, registry, wsServer, buyerServer
 }

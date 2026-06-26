@@ -197,6 +197,9 @@ func TestProxyTrustedCIDRValidation(t *testing.T) {
 func validTestConfig() Config {
 	cfg := Default()
 	cfg.Coordinator.OperatorKey = "operator-key"
+	// Post-PR #87 item 3: service_token is required for /internal/*
+	// upstream calls; Validate() now rejects empty.
+	cfg.Coordinator.ServiceToken = "service-token"
 	cfg.Auth.KeyHashSecret = "key-hash-secret"
 	cfg.Auth.Demo.SigningSecret = "demo-secret"
 	cfg.Auth.OAuth.GitHub.ClientID = "client-id"
