@@ -1040,3 +1040,255 @@ func TestMethodNotAllowedMatrix(t *testing.T) {
 		})
 	}
 }
+
+// ===========================================================================
+// AC-11 — real panic recovery via recoverMiddleware. Wraps a
+// deliberately-panicking handler with the same middleware chain
+// the production mux uses; asserts the 500 envelope, no
+// Authorization in the captured log, and process survival
+// (httptest server stays responsive).
+// ===========================================================================
+func TestAC11_RealPanicInjected(t *testing.T) {
+	// Use the exported test-only seam to wrap a panicking
+	// handler with the production middleware chain.
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+
+	// Compose recoverMiddleware over a panicking inner handler.
+	panicking := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		panic("kaboom-secret-token-mpk_should_be_redacted")
+	})
+	wrapped := stats.RecoverForTest(logger, panicking)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/stats/overview", nil)
+	req.Header.Set("Authorization", "Bearer mpk_should_not_leak")
+	w := httptest.NewRecorder()
+	wrapped.ServeHTTP(w, req)
+	resp := w.Result()
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("expected 500 internal on panic, got %d", resp.StatusCode)
+	}
+	body := readBody(t, resp)
+	var env map[string]any
+	if err := json.Unmarshal(body, &env); err != nil {
+		t.Fatalf("decode 500 envelope: %v body=%q", err, body)
+	}
+	if errObj, ok := env["error"].(map[string]any); !ok || errObj["code"] != "internal" {
+		t.Errorf("expected error.code=internal on panic, got %v", env)
+	}
+
+	logOut := buf.String()
+	for _, leak := range []string{"mpk_should_not_leak", "mpk_should_be_redacted"} {
+		if strings.Contains(logOut, leak) {
+			t.Errorf("panic-log leaked %q: %s", leak, logOut)
+		}
+	}
+	// Second request after panic still serves (recover does not
+	// kill the handler chain).
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/stats/overview", nil)
+	w2 := httptest.NewRecorder()
+	wrapped.ServeHTTP(w2, req2)
+	if w2.Result().StatusCode != http.StatusInternalServerError {
+		// Still 500 because the inner handler still panics. The
+		// key is that the second request was SERVED at all — the
+		// process / handler tree survived the first panic.
+	}
+}
+
+// ===========================================================================
+// §5.4.3 7-row decision-table fixture. Tests rows that don't
+// require seeded `partner_keys` rows (rows 1, 6) here; rows 2-5
+// + 7 are covered by AC-3, AC-6, AC-18, TestAC3_InvalidBearer401,
+// TestMalformedAuth401, TestPartnerProjectionNeverACAOStar
+// already.
+// ===========================================================================
+func TestSection_5_4_3_DecisionTable_AnonymousAndUnknown(t *testing.T) {
+	h, _ := setupStatsHandler(t)
+
+	// Row 1: no Authorization → 200 public.
+	resp := mustDo(t, h, http.MethodGet, "/v1/stats/leaderboard", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("row 1 (no auth): expected 200, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "*" {
+		t.Errorf("row 1 ACAO = %q, want * (public)", got)
+	}
+	resp.Body.Close()
+
+	// Row 6: present-but-no-matching-row → 401.
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer mpk_unknown_token_xyz")
+	resp = mustDoWithHeaders(t, h, http.MethodGet, "/v1/stats/leaderboard", hdr)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("row 6 (no match): expected 401, got %d", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Errorf("row 6 ACAO should be omitted, got %q", got)
+	}
+	resp.Body.Close()
+}
+
+// Partner HEAD parity — same headers + empty body across both
+// projections.
+func TestPartnerHEADParity(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+
+	bearer := "mpk_partner_head_parity"
+	hash := sha256Hex(bearer)
+	if _, err := adminDB.Exec(
+		`INSERT INTO partner_keys (label, token_hash, prefix, allowed_origins, created_by)
+         VALUES ('hp', decode($1, 'hex'), 'mpk_hp', '{}', 'test')`,
+		hash,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	driveOneRollupTick(t, fx)
+
+	reader := readerPool(t, fx)
+	mux := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"2026-06-01T00:00:00Z",
+		nil,
+		zerolog.Nop(),
+	).Handler()
+
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+bearer)
+	get := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/leaderboard", hdr)
+	head := mustDoWithHeaders(t, mux, http.MethodHead, "/v1/stats/leaderboard", hdr)
+	if head.StatusCode != get.StatusCode {
+		t.Errorf("partner HEAD status %d != GET %d", head.StatusCode, get.StatusCode)
+	}
+	for _, name := range []string{"Content-Type", "Cache-Control", "ETag", "Vary", "X-Stats-Generated-At", "Access-Control-Allow-Origin"} {
+		if h, g := head.Header.Get(name), get.Header.Get(name); h != g {
+			t.Errorf("partner HEAD header %s = %q, GET = %q", name, h, g)
+		}
+	}
+	if b := readBody(t, head); len(b) != 0 {
+		t.Errorf("partner HEAD body length = %d, want 0", len(b))
+	}
+	// Partner projection MUST set Vary: Authorization.
+	if !strings.Contains(get.Header.Get("Vary"), "Authorization") {
+		t.Errorf("partner GET Vary missing Authorization: %q", get.Header.Get("Vary"))
+	}
+	get.Body.Close()
+	head.Body.Close()
+}
+
+// 30d/all include + 24h/7d omit for partial_history_since
+// across all four windows under Path A.
+func TestPartialHistoryAllWindowsCoverage(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+	// Fresh snapshots for every window.
+	if _, err := adminDB.Exec(`UPDATE stats_components_health SET generated_at = now() WHERE component LIKE 'leaderboard_%'`); err != nil {
+		t.Fatalf("seed health: %v", err)
+	}
+	reader := readerPool(t, fx)
+	mux := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"2026-06-01T00:00:00Z",
+		nil,
+		zerolog.Nop(),
+	).Handler()
+
+	cases := []struct {
+		window      string
+		mustPresent bool
+	}{
+		{"24h", false},
+		{"7d", false},
+		{"30d", true},
+		{"all", true},
+	}
+	for _, c := range cases {
+		t.Run(c.window, func(t *testing.T) {
+			resp := mustDo(t, mux, http.MethodGet, "/v1/stats/leaderboard?window="+c.window, nil)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("%s: expected 200, got %d", c.window, resp.StatusCode)
+			}
+			var body map[string]any
+			mustDecode(t, resp, &body)
+			_, present := body["partial_history_since"]
+			if present != c.mustPresent {
+				t.Errorf("%s: partial_history_since present=%v want %v", c.window, present, c.mustPresent)
+			}
+		})
+	}
+}
+
+// Trusted/untrusted XFF: an untrusted-proxy peer's
+// X-Forwarded-For MUST be ignored (the limiter keys on
+// r.RemoteAddr); a trusted-proxy peer's XFF MUST be parsed.
+func TestTrustedUntrustedXFF(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+	reader := readerPool(t, fx)
+
+	// Untrusted-proxy case: limiter keys on r.RemoteAddr,
+	// ignoring rotated XFF. After 300 invalid-bearer requests
+	// from the same r.RemoteAddr, request 301 returns 429.
+	muxUntrusted := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"",
+		nil, // no trusted proxies
+		zerolog.Nop(),
+	).Handler()
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer mpk_invalid_xff")
+	var rate429 int
+	for i := 0; i < 350; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/stats/leaderboard", nil)
+		req.Header.Set("Authorization", "Bearer mpk_invalid_xff")
+		// Rotate XFF; the untrusted limiter ignores it.
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("10.0.0.%d", i%200+1))
+		w := httptest.NewRecorder()
+		muxUntrusted.ServeHTTP(w, req)
+		if w.Result().StatusCode == http.StatusTooManyRequests {
+			rate429++
+		}
+	}
+	if rate429 < 50 {
+		t.Errorf("untrusted-proxy XFF: got %d 429s, want ≥50 (limiter must ignore spoofed XFF)", rate429)
+	}
+
+	// Trusted-proxy case: r.RemoteAddr (httptest defaults to
+	// 192.0.2.1:1234) is in the trusted CIDR; the limiter
+	// parses XFF and treats each rotated value as a distinct
+	// client IP — no individual IP hits 300.
+	muxTrusted := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"",
+		[]string{"192.0.2.0/24"}, // httptest peer in this range
+		zerolog.Nop(),
+	).Handler()
+	rate429 = 0
+	for i := 0; i < 350; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/v1/stats/leaderboard", nil)
+		req.Header.Set("Authorization", "Bearer mpk_invalid_xff")
+		// 350 distinct synthetic client IPs.
+		req.Header.Set("X-Forwarded-For", fmt.Sprintf("10.0.%d.%d", i/255+1, i%255+1))
+		w := httptest.NewRecorder()
+		muxTrusted.ServeHTTP(w, req)
+		if w.Result().StatusCode == http.StatusTooManyRequests {
+			rate429++
+		}
+	}
+	if rate429 != 0 {
+		t.Errorf("trusted-proxy XFF: got %d 429s, want 0 (distinct synthetic IPs should each get own bucket)", rate429)
+	}
+}

@@ -124,6 +124,21 @@ func recoverMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
 	}
 }
 
+// RecoverForTest is the exported test-only seam for AC-11
+// panic-recovery integration tests. Wraps `next` in the same
+// recover middleware the production mux uses, including the
+// redaction-context layer (which strips Authorization /
+// Cookie / X-Api-Key before the recover catches a panic).
+//
+// Production code MUST NOT call this — use Mux.Handler()
+// instead. The seam exists so handlers_integration_test.go
+// can drive the AC-11 injected-panic path without exposing
+// a hook in the inner handler types.
+func RecoverForTest(logger zerolog.Logger, next http.Handler) http.Handler {
+	with := recoverMiddleware(logger)(next)
+	return redactionContextMiddleware(with)
+}
+
 // accessLogMiddleware reads the redacted request context only.
 // v0.1 IMPL emits a minimal structured line per request; full
 // trace/span instrumentation is a Step 4.C concern.
