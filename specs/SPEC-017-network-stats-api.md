@@ -1,7 +1,7 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.6 (2026-06-25, **LOCKED** — codex round-7 returned 0 CRITICAL + 0 MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK. v0.1.6 is the v0.1 LOCK of the Network Stats API contract. Audit trajectory across 7 rounds: r1 3C+10M+5m, r2 2C+5M+2m, r3 0C+4M+3m, r4 0C+4M+2m, r5 0C+2M+2m, r6 0C+1M+1m, r7 0/0/0 → LOCK. Per-round narrative: `specs/SPEC-017-r1-audit.md` through `specs/SPEC-017-r7-audit.md`.)
-**Status:** **LOCKED** at v0.1.6 (2026-06-25). Implementation work is gated by a separate `BUILD_SPEC_017_IMPL_PROMPT.md` (not in this PR — written after lock). The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
+**Version:** 0.1.7 (2026-06-26, draft — Claude adversarial-verifier + product-designer fix pass on locked v0.1.6. Absorbs 5 HIGH (H1 ACAO+credentials, H2 Vary:Authorization fragments public cache, H3 totals.earnings_usd correlation leak, H4 partial_history_since contract drift, H5 origin-reject timing gap) + 7 MEDIUM (M1 timeseries split, M2 cumulative-vs-windowed, M3 stats_late_events retention, M4 RFC 6454 normalization, M5 rebuild atomicity, M6 bucket rounding, M7 preflight Max-Age vs revocation) from the critic lane, plus 2 HIGH + 1 MEDIUM from designer lane (D-H1 partner-projection consent + launch sequencing, D-H2 rewards_populated signal, D-M1 strip per-axis buckets). LOCK target: codex round returns 0 CRITICAL + 0 MAJOR + 0 MINOR. v0.1.6 lineage preserved below.)
+**Status:** Unlocked at v0.1.7 pending codex re-audit. v0.1.6 was the prior LOCK. IMPL prompt (`BUILD_SPEC_017_IMPL_PROMPT.md`) is re-anchored to v0.1.7 after SPEC re-locks. The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
 ---
@@ -13,6 +13,85 @@ Audit-narrative-by-round detail lives in the per-round audit files under
 entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
+
+**v0.1.7 (2026-06-26, draft — Claude adversarial + product-designer fix
+pass on locked v0.1.6):** Two Claude subagents (critic adversarial
+verifier + product designer) audited v0.1.6 against codex's blind spots.
+Critic returned 0 CRITICAL + 5 HIGH + 7 MEDIUM (+ LOW omitted per fix
+scope); designer returned 2 HIGH + 1 MEDIUM. v0.1.7 absorbs every HIGH
+and MEDIUM:
+
+- **H1** (§5.7, §5.2): partner-key projection MUST NEVER emit
+  `Access-Control-Allow-Origin: *`. When the matched key has empty
+  `allowed_origins` and a browser `Origin` is present, ACAO echoes the
+  Origin and emits `Allow-Credentials: true`; when Origin is absent
+  (non-browser context), ACAO is omitted entirely. The §5.7 decision
+  table is rewritten accordingly.
+- **H2** (§5.2): public projection drops `Authorization` from its `Vary`
+  header (the response does not branch on it). Only the partner-key
+  projection carries `Vary: ..., Authorization`. Edge cache no longer
+  fragments by malformed `Authorization` variations.
+- **H3** (§5.2): public projection's `totals.earnings_usd` /
+  `_work_usd` / `_rewards_usd` are stripped. Public `totals` keeps
+  `tokens`, `jobs`, `active_accounts` only. Partner-key projection
+  retains exact-$ totals. Removes the correlation attack where
+  `totals.earnings_usd` + per-row `rank_earnings` + `tokens` let
+  partners back-out approximate exact-$ for bucketed top-N.
+- **H4** (§5.2, §9.7): `partial_history_since` is added to the §5.2
+  JSON shape and field-level rules. Partner clients MUST tolerate both
+  presence and omission.
+- **H5** (§5.4.3, AC-18): the Origin-rejection 401 path MUST perform
+  the same `sha256 + SELECT by token_hash` work as the no-row 401 path
+  before short-circuiting. AC-18 is extended to assert ±20% timing
+  equivalence across no-row, revoked, AND rejected-origin 401 paths.
+- **M1** (§5.3, §9.1): `timeseries` is split into `timeseries_rpm` and
+  `timeseries_tpm` components in `stats_components_health` and in the
+  `/v1/stats/health` JSON. The single conflated `timeseries` component
+  is removed.
+- **M2** (§5.1.1, §9.2): cumulative-vs-windowed semantics pinned.
+  `tokens_in_total`, `tokens_out_total`, `requests_total`, and
+  `tokens_served_total` (overview) are cumulative all-time counters.
+  All `stats_leaderboard_*` figures are windowed. §9.2 source-query
+  column rewritten to remove the "or all-time for cumulative fields"
+  ambiguity.
+- **M3** (§9.1, §9.3): `stats_late_events` retention pinned. The
+  nightly job MUST DELETE `stats_late_events` rows older than 90 days
+  (operator-configurable, must be ≥30 days).
+- **M4** (§5.4.3, §5.7): RFC 6454 ASCII serialization comparison
+  pinned. Origin comparison is case-insensitive on scheme and host,
+  default ports stripped (`:80` for http, `:443` for https), trailing
+  slash/path/query rejected.
+- **M5** (§9.4): nightly rebuild MUST execute in a single PostgreSQL
+  transaction so the leaderboard never serves a half-rebuilt state.
+- **M6** (§6.2): bucket-boundary semantics pinned. Comparisons use the
+  `NUMERIC(18,2)` underlying value; bracket notation `[a, b)` means a
+  is inclusive and b is exclusive (e.g. `$5.00 → $$`, `$4.99 → $`).
+- **M7** (§5.7): `Access-Control-Max-Age` dropped from 3600 to 60 so
+  partner-key revocation propagates to browser preflight within a
+  minute, not an hour.
+- **D-H1** (§6.1, §6.6.2): `blocked_from_partner_projection BOOLEAN`
+  column stub added to `provider_visibility`. v0.1 semantics defer to
+  v0.2 (rollup does not yet consume the column); the storage shape is
+  pinned so v0.2 portal work has somewhere to write. §6.6.2 adds a
+  launch-sequencing block: production partner-key issuance under
+  §5.4.2 MUST NOT begin until SPEC-014 v0.9 disclosure UI ships.
+- **D-H2** (§5.2, §9.1a): top-level `meta.rewards_populated` boolean
+  added to `/v1/stats/leaderboard`. Signals whether
+  `provider_rewards_ledger` has any rows in the requested window.
+  Partner dashboards use this to decide whether to render the rewards
+  split or treat it as "rewards data not yet available."
+- **D-M1** (§5.2, §6.2, §9.1): per-axis buckets stripped from v0.1.
+  Public and partner responses now expose only `earnings_bucket`
+  (computed against total `work + rewards`). The
+  `earnings_work_bucket` / `earnings_rewards_bucket` JSON fields and
+  the matching DB columns are removed; partner-only exact-$
+  per-axis (`earnings_work_usd`, `earnings_rewards_usd`) preserves the
+  fidelity for trusted partners. §11 Q9 is marked CLOSED (resolved by
+  the strip).
+
+Lock target: codex round-1 against v0.1.7 returns 0 CRITICAL + 0
+MAJOR + 0 MINOR. Round narrative: `specs/SPEC-017-r8-audit.md`
+forward.
 
 **v0.1.6 (2026-06-25, LOCKED):** Round 7 returned 0 CRITICAL + 0
 MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK. v0.1.6 is
@@ -514,22 +593,28 @@ with `Allow: GET, HEAD, OPTIONS`.
 
 ### 5.1.1 Overview field schema
 
-| Field | Type | Unit | Source |
-|---|---|---|---|
-| `tokens_served_total` | int64 | tokens | `stats_overview_current.tokens_in + tokens_out` |
-| `tokens_in_total` | int64 | tokens | `stats_overview_current.tokens_in` |
-| `tokens_out_total` | int64 | tokens | `stats_overview_current.tokens_out` |
-| `requests_total` | int64 | count | `stats_overview_current.requests` |
-| `nodes_online` | int32 | count | live pool registry snapshot, cached 30s |
-| `nodes_hardware_attested` | int32 | count | subset of `nodes_online` with `attestation_ok = true` |
-| `bandwidth_gb_per_s` | int64 | GB/s | sum of `provider_bandwidth_gbps` over online nodes |
-| `network_power_kw` | float64 | kW | sum of `provider_estimated_power_kw` over online nodes |
-| `network_utilization_pct` | int32 | percent (0–100) | recent-window load average |
-| `gpu_cores_total` | int32 | count | sum over online providers |
-| `cpu_cores_total` | int32 | count | sum over online providers (P+E) |
-| `unified_ram_gb_total` | int32 | GB | sum over online providers |
-| `avg_tokens_per_request` | int32 | tokens | `tokens_served_total / max(1, requests_total)` |
-| `models_serving` | int32 | count | distinct `model_id` advertised by ≥1 online provider |
+All `_total` fields below are **cumulative all-time counters** (since
+rollup-start), NOT 24h-windowed values. They mirror the cumulative-
+counter mental model partners and operators expect from a "total"
+suffix. The `stats_leaderboard_*` figures (§5.2, §9.1) are **windowed**;
+the suffix distinction is normative.
+
+| Field | Type | Unit | Semantics | Source |
+|---|---|---|---|---|
+| `tokens_served_total` | int64 | tokens | cumulative all-time | `stats_overview_current.tokens_in + tokens_out` |
+| `tokens_in_total` | int64 | tokens | cumulative all-time | `stats_overview_current.tokens_in` |
+| `tokens_out_total` | int64 | tokens | cumulative all-time | `stats_overview_current.tokens_out` |
+| `requests_total` | int64 | count | cumulative all-time | `stats_overview_current.requests` |
+| `nodes_online` | int32 | count | live (point-in-time snapshot) | live pool registry snapshot, cached 30s |
+| `nodes_hardware_attested` | int32 | count | live (point-in-time snapshot) | subset of `nodes_online` with `attestation_ok = true` |
+| `bandwidth_gb_per_s` | int64 | GB/s | live (point-in-time snapshot) | sum of `provider_bandwidth_gbps` over online nodes |
+| `network_power_kw` | float64 | kW | live (point-in-time snapshot) | sum of `provider_estimated_power_kw` over online nodes |
+| `network_utilization_pct` | int32 | percent (0–100) | recent-window load average | recent-window load average |
+| `gpu_cores_total` | int32 | count | live (point-in-time snapshot) | sum over online providers |
+| `cpu_cores_total` | int32 | count | live (point-in-time snapshot) | sum over online providers (P+E) |
+| `unified_ram_gb_total` | int32 | GB | live (point-in-time snapshot) | sum over online providers |
+| `avg_tokens_per_request` | int32 | tokens | cumulative all-time | `tokens_served_total / max(1, requests_total)` |
+| `models_serving` | int32 | count | live (point-in-time snapshot) | distinct `model_id` advertised by ≥1 online provider |
 
 All integer fields MUST fit in JSON-safe `int64` (≤ 2^53 − 1). The
 rollup MUST clamp at ingestion if any source overflows; clamp events
@@ -557,13 +642,14 @@ MUST be logged.
 {
   "generated_at": "2026-06-25T18:14:00Z",
   "stale_after":   "2026-06-25T18:15:00Z",
-  "window":        "7d",
+  "window":        "30d",
   "sort":          "earnings",
   "limit":         50,
+  "partial_history_since": "2026-04-12T00:00:00Z",
+  "meta": {
+    "rewards_populated": false
+  },
   "totals": {
-    "earnings_usd":      1300.0,
-    "earnings_work_usd": 77.0,
-    "earnings_rewards_usd": 1200.0,
     "tokens":            2525400000,
     "jobs":              900700,
     "active_accounts":   302
@@ -573,13 +659,9 @@ MUST be logged.
       "rank": 1,
       "pseudonym": "beamy-puppy-4259",
       "earnings_bucket": "$$$",
-      "earnings_work_bucket": "$",
-      "earnings_rewards_bucket": "$$$",
       "tokens": 119900000,
       "jobs":   55300,
-      "exact_earnings": null,
-      "exact_earnings_work": null,
-      "exact_earnings_rewards": null
+      "exact_earnings": null
     }
   ]
 }
@@ -598,45 +680,98 @@ MUST be logged.
   (which is the rollup-side budget) and NOT the §5.8 503 budget
   (which is the hard staleness ceiling); the three are intentionally
   distinct timescales.
+- `partial_history_since` — optional, RFC 3339 UTC. Present iff the
+  operator chose §9.7 Path A (partial backfill) AND the rollup's
+  earliest in-window data point is more recent than the canonical
+  window start (e.g. for `window=30d`, less than 30 days of history
+  has accumulated). Once the rollup has fully overlapped its window,
+  the field MAY be omitted (additive removal, NOT a breaking change
+  per §8.2). Partner clients MUST tolerate both presence and
+  omission and SHOULD surface a "window is short" badge in their UI
+  while the field is present. See §9.7 for the operator-side
+  emission rule.
+- `meta.rewards_populated` — boolean. `true` iff
+  `provider_rewards_ledger` (§9.1a) has at least one row with
+  `unix_ts` inside the requested window. `false` otherwise (including
+  the v0.1 cutover state where the ledger ships empty). When `false`,
+  every row's `earnings_rewards_usd` (partner projection) is `0.00`
+  by construction; partner dashboards SHOULD treat the rewards split
+  as "not yet available" rather than as a meaningful zero. The field
+  is REQUIRED in every response — partners MAY rely on it without a
+  presence check.
 - `pseudonym` — stable per provider across snapshots and across windows
   (§3.3). Length ≤ 32 chars, `[a-z0-9-]` only.
-- `earnings_bucket`, `earnings_work_bucket`, `earnings_rewards_bucket`
-  — one of `"$"`, `"$$"`, `"$$$"`, or the string `"-"` (provider had
-  zero `$` in the window). Values defined in §6.2.
-- `exact_earnings*` — these fields are ALWAYS present in the JSON to
-  keep the schema stable across opt-in changes. Their value is `null`
-  in the public projection unless the provider has
-  `provider_visibility.mode = 'exact'`, in which case the value is a USD
-  float with two-decimal precision.
+- `earnings_bucket` — one of `"$"`, `"$$"`, `"$$$"`, or the string
+  `"-"` (provider had zero `$` in the window). Values defined in
+  §6.2. v0.1 ships only this single-axis bucket; per-axis
+  (work/rewards) buckets are NOT exposed publicly to avoid the
+  combined-axis disclosure leak §11 Q9 previously deferred. Partners
+  who need the work/rewards split MUST use the partner-key
+  projection's exact-$ fields below.
+- `exact_earnings` — single-axis exact USD figure for total earnings
+  (`work + rewards`), with two-decimal precision. ALWAYS present in
+  the JSON to keep the schema stable across opt-in changes; value is
+  `null` in the public projection unless the provider has
+  `provider_visibility.mode = 'exact'`, in which case it is the USD
+  float. Per-axis exact-$ split is partner-key-only.
+- `totals.tokens / totals.jobs / totals.active_accounts` — windowed
+  sums over the same `(window, sort, limit)` page. `tokens` and
+  `jobs` are int64 windowed sums; `active_accounts` is the distinct
+  count of providers with `≥1 job` in the window. Public projection
+  does NOT expose `totals.earnings_*` — windowed exact-$ totals are
+  partner-key-only (§5.2 partner projection) to prevent the
+  `totals.earnings_usd / rank_earnings / tokens` correlation attack
+  on bucketed top-N providers.
 - `rank` — 1-based within the returned page, recomputed against the
   selected `sort` axis.
 
 **Response (200 OK, partner-key projection).**
 
-Identical to the public projection, plus the following partner-only
-fields per row:
+Identical to the public projection, with the following additive
+fields:
 
 ```json
 {
-  "earnings_usd":         52.00,
-  "earnings_work_usd":     3.87,
-  "earnings_rewards_usd": 48.13,
-  "first_seen_at":        "2026-04-12T11:24:00Z",
-  "last_seen_at":         "2026-06-25T18:01:00Z"
+  "totals": {
+    "earnings_usd":        1300.0,
+    "earnings_work_usd":     77.0,
+    "earnings_rewards_usd": 1223.0,
+    "tokens":          2525400000,
+    "jobs":               900700,
+    "active_accounts":       302
+  },
+  "rows": [
+    {
+      "earnings_usd":         52.00,
+      "earnings_work_usd":     3.87,
+      "earnings_rewards_usd": 48.13,
+      "first_seen_at":        "2026-04-12T11:24:00Z",
+      "last_seen_at":         "2026-06-25T18:01:00Z"
+    }
+  ]
 }
 ```
 
-Partner-only fields surface exact `$` for ALL providers regardless of
-`provider_visibility.mode`. This is a deliberate trade: the partner key
-acts as an attribution and accountability surface (operator can
-revoke), in exchange for trusted exposure of bucketed providers'
-exact figures. See §6.6 for the legal posture this requires.
+`totals.earnings_usd / earnings_work_usd / earnings_rewards_usd`
+(windowed exact-$ sums) and the per-row `earnings_usd /
+earnings_work_usd / earnings_rewards_usd / first_seen_at /
+last_seen_at` are partner-key-only. They surface exact `$` for ALL
+providers regardless of `provider_visibility.mode`. This is a
+deliberate trade: the partner key acts as an attribution and
+accountability surface (operator can revoke), in exchange for
+trusted exposure of bucketed providers' exact figures. See §6.6 for
+the legal posture this requires AND the launch-sequencing
+precondition (§6.6.2: partner-key issuance MUST NOT begin in
+production until SPEC-014 v0.9 disclosure UI ships).
 
 **Response headers (public projection).**
 
 - `Content-Type: application/json; charset=utf-8`
 - `Cache-Control: public, max-age=60, s-maxage=60, stale-while-revalidate=120`
-- `Vary: Accept-Encoding, Origin, Authorization`
+- `Vary: Accept-Encoding, Origin` (NOT `Authorization` — the public
+  projection does not branch on it; including `Authorization` here
+  would fragment edge cache by every malformed/probe `Authorization`
+  variation)
 - `ETag: W/"<sha256-of-body>"`
 - `X-Stats-Generated-At: <generated_at>` (mirrors the `generated_at`
   field for cache-key debugging; partner clients MUST tolerate this
@@ -644,11 +779,29 @@ exact figures. See §6.6 for the legal posture this requires.
 
 **Response headers (partner-key projection).**
 
-- Same as above, but `Cache-Control: private, max-age=30, s-maxage=30`.
-- The `Authorization` header MUST be considered part of the cache key
-  at every layer below the origin (`Vary: Authorization` does this for
-  CDNs that honor it; nginx-level rate-limit zones MUST be keyed on
-  `partner_keys.id`, not on the raw token).
+- Same as above EXCEPT:
+  - `Cache-Control: private, max-age=30, s-maxage=30` (the partner
+    projection MUST NOT be cached by any shared cache).
+  - `Vary: Accept-Encoding, Origin, Authorization` (the partner
+    projection branches on `Authorization`; `Vary: Authorization`
+    here is meaningful because the underlying cache directive is
+    `private`, so the only consumer of `Vary` is the partner's own
+    browser/SDK cache).
+  - `Access-Control-Allow-Origin` — see §5.7. The partner-key
+    projection MUST NEVER emit `Access-Control-Allow-Origin: *`
+    because §5.7 row 4 mandates `Access-Control-Allow-Credentials:
+    true`, and per the Fetch spec a credentialed response with
+    `Allow-Origin: *` is rejected by browsers. The handler echoes
+    the matched `Origin` (with empty `allowed_origins`, the Origin
+    is echoed as-presented after RFC 6454 normalization; with
+    non-empty `allowed_origins`, the request is rejected at auth
+    unless Origin exact-matches an allowlist entry per §5.4.3).
+  - When `Authorization` is present-and-valid but `Origin` is absent
+    (server-to-server context), `Access-Control-Allow-Origin` is
+    omitted entirely. Browsers don't reach this code path; non-browser
+    partner clients ignore CORS headers.
+- nginx-level rate-limit zones MUST be keyed on `partner_keys.id`, not
+  on the raw token (§5.6 and §5.4.7).
 
 **Errors.**
 
@@ -669,15 +822,25 @@ exact figures. See §6.6 for the legal posture this requires.
   "generated_at":      "2026-06-25T18:14:00Z",
   "rollup_lag_seconds": 12,
   "components": {
-    "overview":    {"status": "ok", "generated_at": "2026-06-25T18:14:00Z"},
-    "timeseries":  {"status": "ok", "generated_at": "2026-06-25T18:14:00Z"},
-    "leaderboard_24h": {"status": "ok", "generated_at": "2026-06-25T18:13:00Z"},
-    "leaderboard_7d":  {"status": "ok", "generated_at": "2026-06-25T18:10:00Z"},
-    "leaderboard_30d": {"status": "ok", "generated_at": "2026-06-25T17:30:00Z"},
-    "leaderboard_all": {"status": "ok", "generated_at": "2026-06-25T17:00:00Z"}
+    "overview":         {"status": "ok", "generated_at": "2026-06-25T18:14:00Z"},
+    "timeseries_rpm":   {"status": "ok", "generated_at": "2026-06-25T18:14:00Z"},
+    "timeseries_tpm":   {"status": "ok", "generated_at": "2026-06-25T18:14:00Z"},
+    "leaderboard_24h":  {"status": "ok", "generated_at": "2026-06-25T18:13:00Z"},
+    "leaderboard_7d":   {"status": "ok", "generated_at": "2026-06-25T18:10:00Z"},
+    "leaderboard_30d":  {"status": "ok", "generated_at": "2026-06-25T17:30:00Z"},
+    "leaderboard_all":  {"status": "ok", "generated_at": "2026-06-25T17:00:00Z"}
   }
 }
 ```
+
+The `components` map has exactly 7 entries (`overview`,
+`timeseries_rpm`, `timeseries_tpm`, and four `leaderboard_*` keys).
+The earlier single `timeseries` key is removed because the two
+timeseries tables (§9.1 `stats_timeseries_rpm_30m` /
+`stats_timeseries_tpm_30m`) drift independently and conflating them
+hides single-axis rollup-job failure. Partners reading the health
+JSON MUST match exact keys; an unknown key is treated as a new
+additive component per §8.2.
 
 **Field-level rules.**
 
@@ -817,10 +980,31 @@ Operational rules:
    role.
 3. On success, all rate-limit accounting (§5.6) MUST key on
    `partner_keys.id`, NOT on the raw token or on the client IP.
-4. The 401 latency for "no row" and the 401 latency for "revoked"
-   MUST be indistinguishable within ±20% (AC-18). This forces the
-   implementation to perform the same hash + SELECT pattern in both
-   paths.
+4. **Timing-equivalence (binding):** the 401 latencies for "no row"
+   (no `token_hash` match), "revoked" (match with `revoked_at IS NOT
+   NULL`), and "rejected origin" (match with non-empty
+   `allowed_origins` whose entries do not contain a normalized Origin)
+   MUST all be indistinguishable within ±20% (AC-18). This forces the
+   handler to perform the SAME `sha256 + SELECT by token_hash` work
+   on every 401 path. The "rejected origin" path MUST NOT
+   short-circuit on the Origin check before doing the hash+SELECT —
+   doing so would let an attacker confirm a key's existence by
+   timing a rejected-Origin probe against a non-existent-key probe.
+5. **RFC 6454 Origin normalization:** all Origin comparisons (this
+   section + §5.7 preflight) MUST normalize per RFC 6454 §6.2 ASCII
+   serialization before comparing:
+   - Scheme is lowercased.
+   - Host is lowercased; IDN MUST be ASCII-encoded (Punycode) first.
+   - Default ports are stripped (`:80` for http, `:443` for https).
+   - Trailing slash, path, query string, or fragment makes the
+     header malformed; the handler MUST treat such an Origin header
+     as if absent (and apply the "absent Origin" branch from the
+     §5.4.3 decision table).
+   The `allowed_origins` array values are operator-supplied at CLI
+   issuance time and MUST already be in this normalized form;
+   `coordinator partner-keys issue` MUST reject any
+   `--allowed-origin` value that does not parse to its own
+   normalized form (idempotency check).
 
 Note on the "absent Origin + non-empty allowlist" rule: this is the
 deliberate choice that a non-empty `allowed_origins` array means
@@ -898,16 +1082,28 @@ nginx; the SPEC does not mandate them but does not preclude them.
 
 §5.4.3 owns the (Authorization, Origin) branch decision for
 authenticated requests. This section pins the `Access-Control-*`
-response headers that each branch emits.
+response headers that each branch emits. All Origin comparisons in
+this table use the RFC 6454 normalization rule pinned in §5.4.3
+rule 5.
 
-| Branch | Request kind | `Access-Control-Allow-Origin` | Other CORS headers |
-|---|---|---|---|
-| `/overview`, `/health`, anonymous | any Origin or none | `*` | `Access-Control-Allow-Methods: GET, HEAD, OPTIONS` |
-| `/leaderboard` public (no key) | any Origin or none | `*` | same as above |
-| `/leaderboard` partner-key, `allowed_origins = '{}'` | any Origin or none | `*` | same as above |
-| `/leaderboard` partner-key, `allowed_origins` non-empty, Origin in allowlist | matched Origin | echo `Origin` (NOT `*`) | same as above, plus `Access-Control-Allow-Credentials: true` |
-| `/leaderboard` partner-key, `allowed_origins` non-empty, Origin not in allowlist | rejected at auth (§5.4.3) | omit (401 response carries no CORS allow header) | n/a |
-| `/leaderboard` partner-key, `allowed_origins` non-empty, Origin absent | rejected at auth (§5.4.3) | omit | n/a |
+| # | Branch | Request kind | `Access-Control-Allow-Origin` | Other CORS headers |
+|---|---|---|---|---|
+| 1 | `/overview`, `/health`, anonymous | any Origin or none | `*` | `Access-Control-Allow-Methods: GET, HEAD, OPTIONS` |
+| 2 | `/leaderboard` public (no key) | any Origin or none | `*` | same as above |
+| 3 | `/leaderboard` partner-key, `allowed_origins = '{}'`, browser context (Origin present) | Origin present | echo normalized `Origin` (NEVER `*`) | same as above, plus `Access-Control-Allow-Credentials: true` |
+| 4 | `/leaderboard` partner-key, `allowed_origins = '{}'`, server-to-server (Origin absent) | Origin absent | omit `Access-Control-Allow-Origin` entirely | omit `Access-Control-Allow-Credentials` |
+| 5 | `/leaderboard` partner-key, `allowed_origins` non-empty, Origin matches allowlist | matched Origin | echo normalized `Origin` (NEVER `*`) | same as row 3, plus `Access-Control-Allow-Credentials: true` |
+| 6 | `/leaderboard` partner-key, `allowed_origins` non-empty, Origin not in allowlist | rejected at auth (§5.4.3) | omit (401 response carries no CORS allow header) | n/a |
+| 7 | `/leaderboard` partner-key, `allowed_origins` non-empty, Origin absent | rejected at auth (§5.4.3) | omit | n/a |
+
+The previous draft's row 3 emitted `Access-Control-Allow-Origin: *`
+for the partner-key path when `allowed_origins = '{}'`. That was
+broken: per the Fetch spec, a credentialed response with
+`Access-Control-Allow-Origin: *` is rejected by browsers, and the
+partner projection is precisely the credentialed path. The v0.1.7
+rule above splits row 3 into "browser context (Origin present)" and
+"server-to-server (Origin absent)" so the partner projection never
+emits `*` in a credentialed response.
 
 **Preflight (`OPTIONS`).** Browser CORS preflight does NOT carry
 the actual `Authorization` token (only `Access-Control-Request-Headers:
@@ -918,13 +1114,20 @@ try. Preflight uses a permissive, key-agnostic rule:
 - `OPTIONS /v1/stats/*` returns 204 with empty body.
 - `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`.
 - `Access-Control-Allow-Headers: Authorization, Content-Type`.
-- `Access-Control-Max-Age: 3600`.
-- `Access-Control-Allow-Origin`: if `Origin` matches **any** entry
+- `Access-Control-Max-Age: 60` (v0.1.6 had `3600`; lowered in v0.1.7
+  so partner-key revocation propagates to the browser preflight
+  cache within a minute, not within an hour). Operators MAY raise
+  via runtime config, but MUST NOT exceed 300 seconds (5 min) for
+  v0.1; raising further requires a SPEC bump because it widens the
+  revocation tail.
+- `Access-Control-Allow-Origin`: normalize the request's `Origin`
+  per §5.4.3 rule 5. If the normalized Origin matches **any** entry
   in the operator-configured global partner-origin allowlist
   (collected as the union of every active `partner_keys.allowed_origins`
-  array, plus the well-known origins `console.streamvc.live` and
-  `portal.streamvc.live`), echo `Origin` and also emit
-  `Access-Control-Allow-Credentials: true`. Otherwise emit `*`.
+  array, plus the well-known origins `https://console.streamvc.live`
+  and `https://portal.streamvc.live`), echo the normalized Origin
+  and also emit `Access-Control-Allow-Credentials: true`. Otherwise
+  emit `*` and DO NOT emit `Allow-Credentials`.
 
 Per-key allowlist enforcement is the responsibility of the actual
 GET (§5.4.3); preflight permissiveness MUST NOT be interpreted by
@@ -1000,24 +1203,35 @@ matching string type).
 
 ```sql
 CREATE TABLE provider_visibility (
-  provider_id  TEXT PRIMARY KEY,
-  mode         TEXT NOT NULL DEFAULT 'bucketed'
-               CHECK (mode IN ('bucketed','exact')),
-  updated_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+  provider_id                       TEXT PRIMARY KEY,
+  mode                              TEXT NOT NULL DEFAULT 'bucketed'
+                                    CHECK (mode IN ('bucketed','exact')),
+  blocked_from_partner_projection   BOOLEAN NOT NULL DEFAULT FALSE,
+  updated_at                        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ```
 
 Semantics:
 
 - A provider with NO row in `provider_visibility` is treated as
-  `mode = 'bucketed'`. This is the implicit default for new and
-  pre-existing providers; cutover does NOT require backfill.
+  `mode = 'bucketed'` AND `blocked_from_partner_projection = FALSE`.
+  This is the implicit default for new and pre-existing providers;
+  cutover does NOT require backfill.
 - The portal (SPEC-014 v0.9 candidate) writes to this table on
   toggle. SPEC-017 v0.1 does NOT specify the portal's HTTP handler;
   it only pins the storage shape.
 - The rollup MUST left-join `provider_visibility` when producing the
-  leaderboard projection; absence of a row is equivalent to
-  `mode = 'bucketed'`.
+  leaderboard projection; absence of a row is equivalent to the
+  default tuple above.
+- `blocked_from_partner_projection` is a **column stub** in v0.1.
+  The v0.1 rollup does NOT consume it (partner-key projection still
+  surfaces exact-$ for every provider per §5.2 and §6.6.2). The
+  column is pinned now so SPEC v0.2 portal work has a stable
+  storage shape to write into without a migration. §11 Q11 tracks
+  the v0.2 semantic — whether opt-out blocks the partner projection
+  entirely, replaces it with bucketed values, or surfaces a marker
+  field. v0.1 implementations MUST add the column at schema-create
+  time and MUST NOT branch on it.
 
 This table is owned by SPEC-017. Adding the column to a future
 `providers` table (if SPEC-002 or SPEC-016 introduces one in a later
@@ -1035,10 +1249,30 @@ provider's total earnings (`work + rewards`) over the window:
 | `$$` | `[$5, $50)` | `[$25, $250)` | `[$100, $1000)` | `[$250, $5000)` |
 | `$$$` | `≥ $50` | `≥ $250` | `≥ $1000` | `≥ $5000` |
 
-Work and rewards each get their own bucket (computed against the
-same thresholds, scoped to that metric). The rationale is that a
-provider with `work $0.50 + rewards $50` should not get `$$$` on
-both fields — the disclosure surface is per-axis.
+v0.1.7 ships **one** bucket axis only — `earnings_bucket`, computed
+against the total `work + rewards` `NUMERIC(18,2)` figure per
+provider per window. The previous draft's per-axis buckets
+(`earnings_work_bucket`, `earnings_rewards_bucket`) are removed
+because (a) per-axis disclosure increases the leakable surface
+without commensurate partner value (§11 Q9 deferred this), and (b)
+until `provider_rewards_ledger` is populated (§9.1a), the
+`rewards` axis is `$0.00` for every provider and the bucket is
+mechanically `"-"` — leaking the empty-state signal to clients. Partners
+who need the work/rewards split MUST use the partner-key projection's
+exact-$ fields (`earnings_work_usd`, `earnings_rewards_usd`).
+
+**Bucket-boundary semantics (v0.1.7).** Bracket notation `[a, b)`
+means `a` is inclusive and `b` is exclusive. Comparisons are against
+the underlying `NUMERIC(18,2)` value of `earnings_usd` (sum of
+`earnings_work_usd + earnings_rewards_usd`) per provider per window:
+
+- `$5.00 → $$` (lower bound, inclusive).
+- `$4.99 → $` (just below `$$` floor).
+- `$49.99 → $$`; `$50.00 → $$$`.
+- No additional rounding occurs at bucket-assignment time;
+  `NUMERIC(18,2)` is already two-decimal exact. The rollup MUST
+  compare against the stored numeric value, NOT a stringified
+  representation.
 
 **Threshold rationale (v0.1).** Boundaries are absolute USD figures
 chosen against the **current beta network's revenue density** —
@@ -1163,10 +1397,37 @@ partners and can revoke a partner's key at any time." Acknowledgment
 of this disclosure is part of the SPEC-014 v0.9 portal flow; v0.1 of
 this SPEC defines only the disclosure obligation, not the UI.
 
+**Launch-sequencing precondition (v0.1.7, binding):** production
+issuance of partner keys under §5.4.2 — that is, any
+`coordinator partner-keys issue` invocation on a non-staging
+coordinator that produces a key delivered to a real partner — MUST
+NOT begin until **all** of the following are true on the live
+Pearl coordinator:
+
+1. SPEC-014 v0.9 has merged and is deployed to
+   `portal.streamvc.live`.
+2. The §6.6.2 disclosure copy (above) is being shown on the
+   provider-account creation page AND on a static portal page that
+   every existing provider is shown on their next portal login
+   (one-time disclosure for pre-existing accounts).
+3. The operator runbook (out of scope for this SPEC) has a
+   recorded sign-off entry naming the SPEC-014 v0.9 commit SHA and
+   the date both disclosure surfaces went live.
+
+Operators MAY issue **staging** keys against staging coordinators
+for AC-1..AC-21 fixture work, smoke testing, and partner-side
+dry-run integration BEFORE the SPEC-014 v0.9 surface ships;
+staging keys MUST NOT be returnable on a production response. The
+keys themselves are distinguishable by the `prefix` (§5.4.1) plus
+the operator's record of which environment issued them, NOT by a
+namespace flag in the token — the network has no protocol field
+for "staging vs production keys" and v0.1.7 does not add one.
+
 Providers who object to partner-key exposure of their bucketed
-earnings have no v0.1 mechanism to suppress it. Q11 in §11
-explicitly flags whether v0.2 should add a per-provider "block from
-partner projection" toggle.
+earnings have no v0.1 wire mechanism to suppress it
+(`provider_visibility.blocked_from_partner_projection` is a v0.1.7
+column stub per §6.1; the rollup does not yet consume it). §11 Q11
+tracks the v0.2 semantic.
 
 #### 6.6.3 Operator override direction
 
@@ -1534,8 +1795,6 @@ CREATE TABLE stats_leaderboard_24h (
   earnings_work_usd        NUMERIC(18,2) NOT NULL DEFAULT 0,
   earnings_rewards_usd     NUMERIC(18,2) NOT NULL DEFAULT 0,
   earnings_bucket          TEXT NOT NULL,
-  earnings_work_bucket     TEXT NOT NULL,
-  earnings_rewards_bucket  TEXT NOT NULL,
   tokens                   BIGINT NOT NULL DEFAULT 0,
   jobs                     BIGINT NOT NULL DEFAULT 0,
   first_seen_at            TIMESTAMPTZ,
@@ -1548,12 +1807,23 @@ CREATE INDEX ON stats_leaderboard_24h (rank_jobs);
 -- stats_leaderboard_7d, stats_leaderboard_30d, stats_leaderboard_all
 -- have IDENTICAL schemas to stats_leaderboard_24h above. The schema
 -- is shared so the handler can parametrize the table name by window.
+--
+-- v0.1.7 removed earnings_work_bucket and earnings_rewards_bucket
+-- (per-axis buckets are no longer exposed; §6.2 strips them and §5.2
+-- ships only `earnings_bucket`). The exact-$ work/rewards split is
+-- preserved in earnings_work_usd and earnings_rewards_usd for the
+-- partner-key projection.
 
 CREATE TABLE stats_components_health (
   component                TEXT PRIMARY KEY,
-    -- one of: 'overview', 'timeseries',
-    --        'leaderboard_24h', 'leaderboard_7d',
-    --        'leaderboard_30d', 'leaderboard_all'
+    -- exactly one of:
+    --   'overview',
+    --   'timeseries_rpm', 'timeseries_tpm',
+    --   'leaderboard_24h', 'leaderboard_7d',
+    --   'leaderboard_30d', 'leaderboard_all'
+    -- v0.1.7 split the single 'timeseries' key into
+    -- 'timeseries_rpm' and 'timeseries_tpm' so single-axis rollup-job
+    -- failure is visible (the two tables drift independently).
   generated_at             TIMESTAMPTZ NOT NULL,
   last_ok_at               TIMESTAMPTZ NOT NULL,
   last_error_at            TIMESTAMPTZ,
@@ -1627,28 +1897,56 @@ v0.1 therefore does NOT claim a locked source for
    that splits work/rewards normatively, or (b) a new SPEC dedicated
    to network incentives. See §11 Q13.
 4. Until that source spec lands, the operator MAY ship with zero
-   rows in `provider_rewards_ledger`. In that case `earnings_rewards_usd`
-   is `0.00` and `earnings_rewards_bucket` is `"-"` for every row;
-   the public surface remains a stable contract.
+   rows in `provider_rewards_ledger`. In that case
+   `earnings_rewards_usd` is `0.00` for every row (partner
+   projection); the public surface remains a stable contract.
+5. The leaderboard handler MUST set the top-level response field
+   `meta.rewards_populated` (§5.2) to:
+   - `true` iff `SELECT 1 FROM provider_rewards_ledger WHERE
+     unix_ts >= <window_start_unix> AND unix_ts < <window_end_unix>
+     LIMIT 1` returns a row at rollup time;
+   - `false` otherwise (including the v0.1 cutover state, where
+     the ledger ships empty for every window).
+
+   The rollup pre-computes `rewards_populated` per window and
+   persists it (e.g. as a denormalized column on
+   `stats_components_health` keyed by `leaderboard_<window>`, or
+   as a small `stats_rewards_populated` lookup table — the storage
+   shape is implementation-authored; the wire field is normative).
+   The handler MUST NOT compute `rewards_populated` synchronously
+   from `provider_rewards_ledger` on the request path.
 
 This is the cleanest honest path: the partner-facing schema is
-locked at v0.1; the economic source is decoupled. A future SPEC bump
-of the rewards source does NOT require a `/v2/*` URL bump.
+locked at v0.1; the economic source is decoupled; partners get a
+machine-readable signal for whether the rewards split is meaningful
+yet. A future SPEC bump of the rewards source does NOT require a
+`/v2/*` URL bump.
 
 ### 9.2 Cadence
 
 | Table | Refresh cadence | Source query shape |
 |---|---|---|
-| `stats_overview_current` | every 30s | aggregate over last 24h (or all-time for cumulative fields) |
+| `stats_overview_current` | every 30s | `tokens_in / tokens_out / requests` are cumulative all-time counters (SUM since rollup-start, NOT a 24h window). Live point-in-time columns (`nodes_online`, `nodes_hardware_attested`, `bandwidth_gb_per_s`, `network_power_kw`, `gpu_cores_total`, `cpu_cores_total`, `unified_ram_gb_total`, `models_serving`) are snapshots of the pool registry. `network_utilization_pct` is the recent-window load average. |
 | `stats_timeseries_rpm_30m` | every 30s, rolling | aggregate per-minute counts last 30 minutes |
 | `stats_timeseries_tpm_30m` | every 30s, rolling | aggregate per-minute tokens last 30 minutes |
-| `stats_leaderboard_24h` | every 60s | per-provider sums over last 24h |
-| `stats_leaderboard_7d` | every 5 min | per-provider sums over last 7d |
-| `stats_leaderboard_30d` | every 30 min | per-provider sums over last 30d |
-| `stats_leaderboard_all` | every 6 hours | per-provider sums since rollup-start |
+| `stats_leaderboard_24h` | every 60s | per-provider sums over last 24h (windowed) |
+| `stats_leaderboard_7d` | every 5 min | per-provider sums over last 7d (windowed) |
+| `stats_leaderboard_30d` | every 30 min | per-provider sums over last 30d (windowed) |
+| `stats_leaderboard_all` | every 6 hours | per-provider sums since rollup-start (windowed; `window=all` is the cumulative-since-rollup-start window) |
 
 These are the v0.1 floors. The operator MAY tighten them in production
 without a SPEC change; loosening them requires a SPEC bump.
+
+**Cumulative vs windowed (v0.1.7, binding):** the `/v1/stats/overview`
+endpoint exposes cumulative-all-time counters with the `_total`
+suffix. The `/v1/stats/leaderboard` endpoint exposes windowed sums
+parametrized by `?window=`. The two timescales never alias — a
+single number on overview is never the same number on leaderboard,
+because the overview is cumulative and the leaderboard is windowed.
+The exception is `window=all`: a `stats_leaderboard_all` per-provider
+sum IS over the same since-rollup-start range as the overview's
+`_total` counters, but on a per-provider rather than network-wide
+basis.
 
 ### 9.3 Late-event correction
 
@@ -1680,6 +1978,16 @@ merging. The threshold is operator-configurable in the rollup
 config; raising it makes the per-tick merge more expensive but does
 not break the contract.
 
+**`stats_late_events` retention (v0.1.7, binding).** The nightly
+full-rebuild job MUST also DELETE `stats_late_events` rows with
+`recorded_at < now() - INTERVAL '90 days'` after the rebuild
+completes successfully (i.e. after the §9.4 atomic-swap transaction
+commits). Without this retention rule the table grows unbounded on a
+busy network. Operators MAY raise the retention via config but MUST
+NOT set it below 30 days (the floor protects after-the-fact
+forensic investigation of stale billing-row corrections). Lowering
+below 30 days requires a SPEC bump.
+
 ### 9.4 All-time accumulation vs recompute
 
 `stats_leaderboard_all` is incrementally accumulated between nightly
@@ -1687,6 +1995,39 @@ rebuilds (§9.3). The nightly job rebuilds from scratch and overwrites,
 which doubles as a drift-detection mechanism: if the rebuild differs
 from the incremental snapshot by more than 0.5% on any axis, an alert
 fires and the rebuild value wins.
+
+**Rebuild atomicity (v0.1.7, binding).** The nightly rebuild MUST
+execute in a single PostgreSQL transaction so the leaderboard never
+serves a half-rebuilt state. Two implementation shapes are acceptable;
+the operator picks one and pins it in the rollup config:
+
+- **Shape A — temp-table swap inside transaction:**
+  ```sql
+  BEGIN;
+  CREATE TEMP TABLE _new_leaderboard_all (LIKE stats_leaderboard_all
+    INCLUDING ALL) ON COMMIT DROP;
+  -- INSERT computed rows into _new_leaderboard_all ...
+  TRUNCATE stats_leaderboard_all;
+  INSERT INTO stats_leaderboard_all SELECT * FROM _new_leaderboard_all;
+  COMMIT;
+  ```
+- **Shape B — atomic table rename:**
+  ```sql
+  BEGIN;
+  -- INSERT computed rows into stats_leaderboard_all_new ...
+  ALTER TABLE stats_leaderboard_all RENAME TO stats_leaderboard_all_old;
+  ALTER TABLE stats_leaderboard_all_new RENAME TO stats_leaderboard_all;
+  DROP TABLE stats_leaderboard_all_old;
+  COMMIT;
+  ```
+
+A failed transaction MUST roll back without disturbing the running
+incremental snapshot. The rebuild MUST NOT interleave per-provider
+UPSERT operations against the live `stats_leaderboard_all` outside
+a transaction.
+
+The `stats_leaderboard_30d` nightly rebuild (§9.3) is subject to the
+same atomicity rule.
 
 **Threshold rationale for 0.5% (v0.1).** Postgres `NUMERIC(18,2)`
 plus the rollup's incremental accumulation pattern produces sub-1¢
@@ -1734,14 +2075,27 @@ operator MAY choose either path:
 **Path A — partial history (default for v0.1, lightweight):** ship
 with rollup-start-date forward only. The `/v1/stats/leaderboard`
 response for `30d` and `all` windows MUST include a top-level
-`partial_history_since` RFC 3339 timestamp. This is the additive
-v0.1 schema field; partners are responsible for surfacing the
-"window is short" caveat in their UI. Until `partial_history_since`
-is more than 30 days in the past (for `30d`) or more than the
-operator-defined `all` floor in the past, this field is REQUIRED in
-the response; once the rollup has accumulated enough history, the
-field MAY be omitted (additive, not breaking — partner clients MUST
-tolerate omission).
+`partial_history_since` RFC 3339 timestamp (the response shape is
+pinned in §5.2). This is the additive v0.1 schema field; partners
+are responsible for surfacing the "window is short" caveat in their
+UI. Concretely:
+
+- For `window=30d`, the field is REQUIRED in the response as long as
+  `partial_history_since` is **less than** 30 days in the past (i.e.
+  the rollup has accumulated under 30 days of history). Once the
+  rollup has ≥30 days of history, the field MAY be omitted (additive
+  removal, not breaking per §8.2 — partner clients MUST tolerate
+  omission).
+- For `window=all`, the field is REQUIRED as long as the rollup has
+  accumulated less than the operator-defined `all` floor (e.g. 90
+  days). Once the rollup has accumulated more, the field MAY be
+  omitted.
+- For `window=24h` and `window=7d`, the field is OMITTED (those
+  windows are short enough that the rollup-start lag is irrelevant
+  in production after the first week).
+
+The §5.2 example body shows `partial_history_since` present; an
+omitted-field example would simply drop the line.
 
 **Path B — full backfill (operator opt-in, heavier):** populate
 `stats_leaderboard_30d` and `stats_leaderboard_all` from full
@@ -1771,14 +2125,21 @@ runbook step.
   header is sent.
 - **AC-4.** Public leaderboard rows for providers with
   `provider_visibility.mode = 'bucketed'` (or no `provider_visibility`
-  row) have `exact_earnings*` fields
-  present as JSON `null` (NOT missing).
+  row) have the single `exact_earnings` field present as JSON `null`
+  (NOT missing). The v0.1.7 public projection exposes only
+  `exact_earnings`; the previous per-axis fields
+  `exact_earnings_work` / `exact_earnings_rewards` are removed.
 - **AC-5.** Public leaderboard rows for providers with
-  `provider_visibility.mode = 'exact'` have `exact_earnings*` fields
-  populated with USD floats to two-decimal precision.
+  `provider_visibility.mode = 'exact'` have `exact_earnings` populated
+  with a USD float to two-decimal precision (total `work + rewards`).
 - **AC-6.** Partner-key leaderboard rows ALWAYS have `earnings_usd`,
   `earnings_work_usd`, `earnings_rewards_usd` populated regardless of
-  `provider_visibility.mode`.
+  `provider_visibility.mode`. The partner-key projection's top-level
+  `totals.earnings_usd`, `totals.earnings_work_usd`, and
+  `totals.earnings_rewards_usd` are ALSO populated; the public
+  projection MUST NOT include any of those `totals.earnings_*` keys
+  (asserted negatively in AC-6 — public response is rejected if any
+  `totals.earnings_*` key is present).
 - **AC-7.** `GET /v1/stats/health` returns 200 even when components
   are `degraded`. Returns non-200 ONLY when the coordinator process
   itself is unhealthy.
@@ -1826,13 +2187,24 @@ runbook step.
   match `/^[A-Za-z0-9_-]{43}$/` (no padding).
 - **AC-18.** A request to `/v1/stats/leaderboard` with
   `Authorization: Bearer <revoked_token>` returns 401 with
-  `code: "unauthorized"`. The 401 latency MUST be within ±20% of the
-  401 latency for `Bearer mpk_invalid` (timing-attack resistance, §5.4.3).
+  `code: "unauthorized"`. The v0.1.7 timing-equivalence assertion
+  (§5.4.3 rule 4) is a three-way comparison: the 401 latencies for
+  (a) `Bearer mpk_invalid` (no-row), (b) `Bearer <revoked_token>`
+  (matched but revoked), and (c) `Bearer <valid_token>` with
+  `Origin: https://attacker.example` against a key whose
+  `allowed_origins` does NOT contain that origin (rejected-origin)
+  MUST all fall within ±20% of each other. The implementation MUST
+  perform `sha256 + SELECT by token_hash` in all three paths,
+  including (c); short-circuiting on Origin before the hash+SELECT
+  is a contract violation.
 - **AC-19.** A SELECT against `provider_visibility` for a `provider_id`
   with no row returns zero rows; the leaderboard projection treats
-  this as `mode = 'bucketed'` (§6.1 left-join semantics). AC verified
-  by inserting a leaderboard row for a never-toggled provider and
-  asserting `exact_earnings*` are JSON null in the public projection.
+  this as `mode = 'bucketed'` AND `blocked_from_partner_projection =
+  FALSE` (§6.1 left-join semantics). AC verified by inserting a
+  leaderboard row for a never-toggled provider and asserting
+  `exact_earnings` is JSON null in the public projection (single
+  field per v0.1.7; the per-axis exact-$ fields have been removed
+  from the public projection).
 - **AC-20.** No `provider_visibility_audit` row exists with
   `new_mode = 'exact' AND actor_kind = 'operator'` (§6.6.3 mechanical
   check). Verified by a SQL fixture and a CI assertion.
@@ -1885,24 +2257,30 @@ challenge each and propose pins for v0.2.
   "distinct `model_id` advertised by ≥1 online provider." Should it
   count attested-only, or all? The provider portal currently surfaces
   attested-only.
-- **Q9 — Bucket value when work and rewards differ in tier.** §6.2
-  computes per-axis. If a provider has `work $0.50 + rewards $50` over
-  24h, the row shows `earnings_bucket = "$$$"` (combined ≥ $50),
-  `earnings_work_bucket = "$"`, `earnings_rewards_bucket = "$$$"`.
-  Is the combined-bucket disclosure too revealing on its own?
+- **Q9 — Bucket value when work and rewards differ in tier (CLOSED in
+  v0.1.7).** Resolved by D-M1 in the v0.1.7 fix pass: v0.1 ships only
+  the single `earnings_bucket` axis (computed against total
+  `work + rewards`). The per-axis buckets `earnings_work_bucket` and
+  `earnings_rewards_bucket` are removed from §5.2 and §9.1. Partners
+  who need the work/rewards split MUST use the partner-key projection's
+  exact-$ fields. The combined-axis-disclosure concern Q9 raised is no
+  longer reachable in the v0.1 wire surface.
 - **Q10 — Empty-row policy.** If a provider has zero traffic over a
   window, does it appear in the leaderboard? v0.1 implicitly excludes
   it (sort by earnings/tokens/jobs places it last; limit caps
   visibility). Should there be an explicit `include_inactive=false`
   default with `include_inactive=true` opt-in for partners?
-- **Q11 — Partner-projection opt-out.** §6.6.2 documents that partner
-  keys see exact `$` for every provider, including providers with
-  `mode = 'bucketed'`. Should v0.2 add a per-provider "block from
-  partner projection" toggle so providers can suppress exact $
-  exposure across BOTH public and partner surfaces? The legal
-  posture works either way; the question is whether the partner-trust
-  bargain is good enough as the operator-issued, operator-revocable
-  surface it is in v0.1. Surfaced by codex round 1, q1.
+- **Q11 — Partner-projection opt-out (PARTIAL in v0.1.7).** §6.6.2
+  documents that partner keys see exact `$` for every provider,
+  including providers with `mode = 'bucketed'`. v0.1.7 added the
+  `provider_visibility.blocked_from_partner_projection BOOLEAN`
+  column stub (§6.1) so the storage shape is pinned; v0.1 rollup
+  does NOT consume it. Q11 v0.2 question is now narrower: WHEN the
+  rollup honors the column (next IMPL milestone), what should the
+  partner-key projection return for a blocked provider — drop the
+  row entirely, return bucketed-only (matching public), or surface
+  a `blocked_from_partner_projection: true` marker? Surfaced by
+  codex round 1, q1.
 - **Q12 — Network Stats UI canonical consumer.** The current
   in-repo `frontdoor/console/index.html` is a buyer-side dashboard,
   not the screenshot-style Network Statistics widget that motivated
