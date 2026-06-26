@@ -2078,6 +2078,29 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		return wsForwardFailed, resp.StatusCode, attempt
 	}
 
+	// Issue #92: do NOT WriteHeader before confirming the provider streams
+	// at least one body byte. Peek first; if upstream EOFs/errors with zero
+	// bytes ever sent, return wsForwardProviderDisconnected (not Committed)
+	// so the unified failover loop can route to a healthy provider. Without
+	// this, a malicious or buggy provider can collect attribution credit
+	// for a 200-OK-empty response by closing the body immediately after
+	// status. The audit-flagged INTENTIONAL semantic of "first chunk
+	// received then disconnected = committed" (line below) is preserved:
+	// this guard only affects the path BEFORE any byte ever arrived.
+	reader := bufio.NewReader(resp.Body)
+	if _, peekErr := reader.Peek(1); peekErr != nil {
+		s.log.Warn().Err(peekErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider sent zero body bytes")
+		if r.Context().Err() != nil {
+			return wsForwardCancelled, 0, requestLogAttempt{}
+		}
+		if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+			s.handleProviderFailure(provider, http.StatusGatewayTimeout)
+			return wsForwardTimedOut, http.StatusGatewayTimeout, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Provider timed out before first byte", FaultFlag: billing.FaultBreakerQualifying}
+		}
+		s.handleProviderFailure(provider, http.StatusBadGateway)
+		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider disconnected before first byte", FaultFlag: billing.FaultBreakerQualifying}
+	}
+
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -2092,8 +2115,6 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// wsForwardProviderDisconnectedCommitted branch intentionally does NOT
 	// write sticky (the provider failed mid-flight).
 	flusher, _ := w.(http.Flusher)
-
-	reader := bufio.NewReader(resp.Body)
 	var promptTok, completionTok *int64
 	bytesEmitted := 0
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
