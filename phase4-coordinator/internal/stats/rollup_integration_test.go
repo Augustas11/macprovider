@@ -448,7 +448,48 @@ func TestRollupLateEventsRetention(t *testing.T) {
 // Shape C rebuild atomicity — 3 sub-assertions.
 // ==========================================================================
 
-// (i) Failed rebuild rolls back; pre-rebuild snapshot preserved.
+// snapshotLeaderboardAll returns the FULL content of
+// stats_leaderboard_all (ordered by provider_id), for the
+// post-commit equivalence assertion (round-4 CODE r4 MEDIUM 1
+// fix: previous draft compared only COUNT(*) which could pass
+// while ranks/earnings/buckets were wrong).
+type leaderboardRowSnapshot struct {
+	pid                                string
+	rankEarnings, rankTokens, rankJobs int
+	earnings, work, rewards            string
+	tokens, jobs                       int64
+	bucket                             string
+}
+
+func snapshotLeaderboardAll(t *testing.T, db *sql.DB) []leaderboardRowSnapshot {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), `
+        SELECT provider_id, rank_earnings, rank_tokens, rank_jobs,
+               earnings_usd, earnings_work_usd, earnings_rewards_usd,
+               tokens, jobs, earnings_bucket
+          FROM stats_leaderboard_all
+         ORDER BY provider_id
+    `)
+	if err != nil {
+		t.Fatalf("snapshot leaderboard_all: %v", err)
+	}
+	defer rows.Close()
+	var out []leaderboardRowSnapshot
+	for rows.Next() {
+		var r leaderboardRowSnapshot
+		if err := rows.Scan(&r.pid, &r.rankEarnings, &r.rankTokens, &r.rankJobs,
+			&r.earnings, &r.work, &r.rewards,
+			&r.tokens, &r.jobs, &r.bucket); err != nil {
+			t.Fatalf("snapshot scan: %v", err)
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// (i) Failed rebuild rolls back; pre-rebuild snapshot preserved
+//
+//	by FULL CONTENT (not just COUNT) per round-4 CODE r4 MED 1.
 func TestShapeCRebuild_FailedRollback(t *testing.T) {
 	fx, adminDB := setupRollupFixture(t)
 	rdb := rollupDB(t, fx)
@@ -468,15 +509,10 @@ func TestShapeCRebuild_FailedRollback(t *testing.T) {
 	cancel()
 	runner.Wait()
 
-	// Snapshot R0.
-	var r0Count int
-	if err := adminDB.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM stats_leaderboard_all`,
-	).Scan(&r0Count); err != nil {
-		t.Fatalf("R0 count: %v", err)
-	}
-	if r0Count != 1 {
-		t.Fatalf("R0 count = %d, want 1", r0Count)
+	// Snapshot R0 by FULL CONTENT.
+	r0 := snapshotLeaderboardAll(t, adminDB)
+	if len(r0) != 1 {
+		t.Fatalf("R0 row count = %d, want 1", len(r0))
 	}
 
 	// Force a rebuild error by adding a CHECK (false) constraint
@@ -497,15 +533,19 @@ func TestShapeCRebuild_FailedRollback(t *testing.T) {
 		t.Fatal("expected rebuild to fail due to CHECK constraint; got nil")
 	}
 
-	// R0 should still be there.
-	var r0CountAfter int
-	if err := adminDB.QueryRowContext(context.Background(),
-		`SELECT COUNT(*) FROM stats_leaderboard_all`,
-	).Scan(&r0CountAfter); err != nil {
-		t.Fatalf("R0 after count: %v", err)
+	// R0 content must be IDENTICAL after the rolled-back rebuild
+	// (rank/earnings/bucket equality, not just row count).
+	r0After := snapshotLeaderboardAll(t, adminDB)
+	if len(r0After) != len(r0) {
+		t.Errorf("rollback row count drift: pre=%d post=%d", len(r0), len(r0After))
 	}
-	if r0CountAfter != r0Count {
-		t.Errorf("rollback failed: pre=%d post=%d", r0Count, r0CountAfter)
+	for i := range r0 {
+		if i >= len(r0After) {
+			break
+		}
+		if r0[i] != r0After[i] {
+			t.Errorf("R0 content drift at row %d: pre=%+v post=%+v", i, r0[i], r0After[i])
+		}
 	}
 
 	// Clean up the constraint.
