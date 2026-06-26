@@ -108,14 +108,17 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 			reservedKey = "authfail|" + ip + "|" + endpoint
 			if !m.authFailLimit.allow(reservedKey, now, 300) {
 				retry := 60
-				// Round-1 CODE H1 fix: tag the request as
-				// auth-failure tier so the access-log middleware
-				// labels the rate_limit_exceeded counter
-				// correctly. Without this the 429 lands as
-				// `tier="public"` and dashboards can't
-				// distinguish auth-failure floods from public
-				// quota exhaustion.
-				r = r.WithContext(withTierOverrideContext(r.Context(), "auth_failure"))
+				// Round-2 ARCH M1 reversion: the locked Step 4.C
+				// metric contract pins `tier` to the closed set
+				// `{public, partner}` (BUILD §2 Step 4.C). The
+				// earlier `tier="auth_failure"` write was a
+				// contract violation. Auth-failure 429s remain
+				// labeled `tier="public"`; operators differentiate
+				// them via the `stats_rate_limit_exceeded_total`
+				// curve at `endpoint="leaderboard"` (only path
+				// that runs the auth-failure tier per §4.3)
+				// versus 429s on /overview + /health which can
+				// only fire from the public 60 rpm limiter.
 				writeError(w, r, http.StatusTooManyRequests, codeRateLimited, "rate limited", now, &retry)
 				return
 			}
@@ -148,13 +151,16 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		// Control / Vary row for post-auth errors.
 		if ar.projection == "partner" {
 			ctx := withPartnerProjectionContext(r.Context())
-			if ar.matchedKey != nil {
-				// Step 4.C `stats_request_served` event needs the
-				// matched partner_keys.id; the access-log
-				// middleware reads this via partnerKeyIDFromContext.
-				ctx = withPartnerKeyIDContext(ctx, ar.matchedKey.ID)
-			}
 			r = r.WithContext(ctx)
+			// Round-2 CODE H1 fix: write the matched id into the
+			// mutable requestObs pointer; the outer access-log
+			// middleware reads it via partnerKeyIDFromContext.
+			// (See auth.go for the pointer-in-context rationale.)
+			if ar.matchedKey != nil {
+				if obs := requestObsFromContext(r.Context()); obs != nil {
+					obs.PartnerKeyID = ar.matchedKey.ID
+				}
+			}
 		}
 	} else {
 		// /overview + /health: synthesize a public authResult

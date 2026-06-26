@@ -106,15 +106,12 @@ func recoverMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
 				// the panic value's stringification — it could
 				// carry SQL state, env var values, or other
 				// sensitive substrings.
-				// Round-1 ARCH H1 fix: emit ONLY the locked
-				// `stats_handler_panic` event with the BUILD §2
+				// Round-2 CODE H2 fix: emit ONLY the locked
 				// Step 4.C field set (`request_id`, `route`).
-				// `panic_type` retained (type-only, not the
-				// payload string) so dashboards can group by
-				// recovered class without taking the public
-				// log line beyond the locked taxonomy. The
-				// `_stack` tag was widening the event surface
-				// beyond the six-event contract.
+				// `panic_type` was dropping out of the contract;
+				// recovered-class triage moves to the debug stack
+				// dump (untagged, NOT part of the public
+				// six-event taxonomy).
 				requestID := r.Header.Get("X-Request-Id")
 				if requestID == "" {
 					requestID = r.Header.Get("X-Correlation-Id")
@@ -123,12 +120,14 @@ func recoverMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
 					Str("event", "stats_handler_panic").
 					Str("route", trimEndpointFromPath(r.URL.Path)).
 					Str("request_id", requestID).
-					Type("panic_type", rec).
 					Msg("stats handler panicked; returning 500 internal")
 				// Private debug-only stack dump WITHOUT a
-				// `stats_*` event tag (NOT part of the public
-				// event taxonomy; intended for operator triage).
+				// `stats_*` event tag. Includes the recovered
+				// class for triage (type-only, not the payload
+				// string — the payload could contain SQL state,
+				// env-var values, or other sensitive substrings).
 				logger.Debug().
+					Type("panic_type", rec).
 					Bytes("stack", debug.Stack()).
 					Msg("stats handler panic stack (debug-only, untagged)")
 				// Best-effort 500 emit. If the underlying
@@ -188,10 +187,13 @@ func accessLogMiddleware(logger zerolog.Logger, m *metrics.Metrics) func(http.Ha
 			endpoint := trimEndpointFromPath(r.URL.Path)
 			ageMs := generatedAtAgeMsFromContext(r.Context())
 			pkid := partnerKeyIDFromContext(r.Context())
+			// Round-2 ARCH M2 fix: locked field set is
+			// {endpoint, status, latency_ms, generated_at_age_ms,
+			// partner_key_id_or_null} per BUILD §2 Step 4.C.
+			// `method` was outside that contract and is dropped.
 			logger.Info().
 				Str("event", "stats_request_served").
 				Str("endpoint", endpoint).
-				Str("method", r.Method).
 				Int("status", status).
 				Int64("latency_ms", time.Since(start).Milliseconds()).
 				Int64("generated_at_age_ms", ageMs).
@@ -201,17 +203,15 @@ func accessLogMiddleware(logger zerolog.Logger, m *metrics.Metrics) func(http.Ha
 			// Step 4.C — Prometheus metrics. nil-safe so tests
 			// using the default Mux constructor (no metrics)
 			// don't have to register a registry.
-			if m != nil {
+			// Round-2 ARCH M1 fix: only emit metrics for the
+			// three locked endpoints; the 404-on-unknown-/v1/stats/*
+			// path returns endpoint="" from trimEndpointFromPath
+			// and would otherwise pollute the closed
+			// `endpoint ∈ {overview, leaderboard, health}` set.
+			if m != nil && endpoint != "" {
 				tier := "public"
 				if pkid != 0 {
 					tier = "partner"
-				}
-				// Round-1 CODE H1: the auth-failure limiter
-				// reject sets a context override BEFORE this
-				// middleware reads the tier; use it when
-				// present so the counter labels are accurate.
-				if over := tierOverrideFromContext(r.Context()); over != "" {
-					tier = over
 				}
 				m.RequestTotal.WithLabelValues(endpoint, strconv.Itoa(status), tier).Inc()
 				if pkid != 0 {

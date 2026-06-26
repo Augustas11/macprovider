@@ -24,8 +24,8 @@ import (
 
 var (
 	bodyShape = regexp.MustCompile(`[A-Za-z0-9_-]{43}`)
-	allowTier = map[string]bool{"public": true, "partner": true, "auth_failure": true}
-	allowEP   = map[string]bool{"overview": true, "leaderboard": true, "health": true, "": true}
+	allowTier = map[string]bool{"public": true, "partner": true}
+	allowEP   = map[string]bool{"overview": true, "leaderboard": true, "health": true}
 	allowComp = map[string]bool{
 		"overview": true, "timeseries_rpm": true, "timeseries_tpm": true,
 		"leaderboard_24h": true, "leaderboard_7d": true,
@@ -52,7 +52,7 @@ func TestLabelHygiene(t *testing.T) {
 	m.RollupLagSeconds.WithLabelValues("leaderboard_24h").Set(0)
 	m.RollupErrorsTotal.WithLabelValues("timeseries_rpm").Inc()
 	m.RateLimitExceededTotal.WithLabelValues("public", "overview").Inc()
-	m.RateLimitExceededTotal.WithLabelValues("auth_failure", "leaderboard").Inc()
+	m.RateLimitExceededTotal.WithLabelValues("partner", "leaderboard").Inc()
 
 	families, err := reg.Gather()
 	if err != nil {

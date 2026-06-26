@@ -228,18 +228,28 @@ func emitDriftIfExceeds(window, axis, pid string, incremental, rebuild, threshol
 	if ratio <= threshold {
 		return
 	}
+	// Round-2 ARCH M2 fix: locked field set per BUILD §2 Step
+	// 4.C is {component, axis, divergence_pct, rebuild_value,
+	// incremental_value}. `window`, `provider_id_sample`,
+	// `delta_ratio`, and `threshold` were widening the contract.
+	// Triage detail moves to a separate debug-only line (NOT
+	// tagged as a stats_* event).
 	logger.Warn().
 		Str("event", "stats_rollup_drift_detected").
+		Str("component", string(componentForWindow(window))).
+		Str("axis", axis).
+		Float64("divergence_pct", ratio*100).
+		Float64("rebuild_value", rebuild).
+		Float64("incremental_value", incremental).
+		Msg("rollup drift exceeds threshold; rebuild value wins")
+	logger.Debug().
 		Str("component", string(componentForWindow(window))).
 		Str("window", window).
 		Str("axis", axis).
 		Str("provider_id_sample", pid).
-		Float64("divergence_pct", ratio*100).
 		Float64("delta_ratio", ratio).
-		Float64("rebuild_value", rebuild).
-		Float64("incremental_value", incremental).
 		Float64("threshold", threshold).
-		Msg("rollup drift exceeds threshold; rebuild value wins")
+		Msg("rollup drift triage detail (debug-only, untagged)")
 }
 
 func ratToFloat(r *big.Rat) float64 {

@@ -49,30 +49,36 @@ func partnerProjectionFromContext(ctx context.Context) bool {
 	return v
 }
 
-// partnerKeyIDKey carries the matched partner_keys.id through to
-// the access-log middleware so Step 4.C's stats_request_served
-// event can record which key id served the request (0 if anonymous).
-// The value is the INTEGER row id only — NEVER the prefix, label,
-// or raw token (SECURITY M5 label hygiene).
-type partnerKeyIDKey struct{}
-
-func withPartnerKeyIDContext(ctx context.Context, id int64) context.Context {
-	return context.WithValue(ctx, partnerKeyIDKey{}, id)
-}
-
+// partnerKeyIDFromContext reads the matched partner_keys.id
+// from the mutable observability struct. Round-2 CODE H1 fix:
+// the value lives in `requestObs.PartnerKeyID`, NOT in a
+// separate immutable context value, so the outer access-log
+// middleware (which holds the original request) can observe
+// dispatcher updates.
 func partnerKeyIDFromContext(ctx context.Context) int64 {
-	v, _ := ctx.Value(partnerKeyIDKey{}).(int64)
-	return v
+	obs := requestObsFromContext(ctx)
+	if obs == nil {
+		return 0
+	}
+	return obs.PartnerKeyID
 }
 
 // requestObs is a mutable per-request observability struct
-// stored as a pointer in r.Context. Handlers write into it
-// (generated_at_age_ms); the outer access-log middleware reads
-// it AFTER the handler returns. Pointer semantics let the
-// middleware see updates even though the http.Request value
-// it holds is immutable through r.WithContext chains.
+// stored as a pointer in r.Context. Handlers + the mux
+// dispatcher write into it; the outer access-log middleware
+// reads it AFTER `next.ServeHTTP` returns. Pointer semantics
+// let the middleware see updates even though the http.Request
+// value it holds is immutable through r.WithContext chains.
+//
+// Round-2 CODE H1 fix: PartnerKeyID and TierOverride also live
+// on this struct (not in separate immutable context values)
+// because the dispatcher does `r = r.WithContext(...)` on its
+// local r — the outer access-log middleware's r still points
+// at the parent context. The pointer-in-context pattern is
+// the only way to propagate observability back out.
 type requestObs struct {
 	GeneratedAtAgeMs int64
+	PartnerKeyID     int64
 }
 
 type requestObsKey struct{}
@@ -93,24 +99,6 @@ func generatedAtAgeMsFromContext(ctx context.Context) int64 {
 		return 0
 	}
 	return obs.GeneratedAtAgeMs
-}
-
-// tierOverrideKey lets the dispatcher tag a request as
-// `auth_failure` tier when the auth-failure limiter fires 429
-// pre-SELECT. Without this, the access-log middleware would
-// label that 429 as `tier="public"` (the default for any
-// request without a matched partner_key) and dashboards
-// couldn't distinguish public quota exhaustion from invalid-
-// bearer floods (round-1 CODE H1 fix).
-type tierOverrideKey struct{}
-
-func withTierOverrideContext(ctx context.Context, tier string) context.Context {
-	return context.WithValue(ctx, tierOverrideKey{}, tier)
-}
-
-func tierOverrideFromContext(ctx context.Context) string {
-	v, _ := ctx.Value(tierOverrideKey{}).(string)
-	return v
 }
 
 // authResult bundles the §5.4.3 dispatch outcome.

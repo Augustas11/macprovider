@@ -14,7 +14,11 @@
 //     bytes. Cardinality is bounded by the operator-issued key set
 //     (typically tens, not thousands).
 //
-//   - `tier` is a closed set: "public" or "partner".
+//   - `tier` is a closed set: "public" or "partner". The
+//     locked Step 4.C contract per BUILD §2 pins this to two
+//     values; there is no `auth_failure` tier. Auth-failure
+//     limiter 429s are emitted as `tier="public"` (the request
+//     never reached a partner-key match).
 //
 //   - `endpoint` is a closed set: "overview" / "leaderboard" /
 //     "health" (mirrors the Step 3 mux verbs).
@@ -86,7 +90,7 @@ func New(reg prometheus.Registerer) *Metrics {
 		RateLimitExceededTotal: f.NewCounterVec(
 			prometheus.CounterOpts{
 				Name: "stats_rate_limit_exceeded_total",
-				Help: "Count of requests rejected by the in-process rate limiter, labeled by tier (public/partner/auth_failure) and endpoint.",
+				Help: "Count of requests rejected by the in-process rate limiter, labeled by tier (public/partner) and endpoint.",
 			},
 			[]string{"tier", "endpoint"},
 		),

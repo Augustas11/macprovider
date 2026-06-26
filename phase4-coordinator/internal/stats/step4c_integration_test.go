@@ -64,6 +64,21 @@ func TestStep4C_WiredMux_MetricLabelHygiene(t *testing.T) {
 	_ = doReq("/v1/stats/leaderboard?window=24h", "garbage", "")
 	_ = doReq("/v1/stats/overview", "", "https://evil.streamvc.live")
 
+	// Round-2 CODE M1 fix: exercise all five required metric
+	// families. The public-tier 60 rpm limiter fires on the
+	// 61st `/v1/stats/overview` request from the same IP; drive
+	// 61 to land at least one row in `stats_rate_limit_exceeded_total`.
+	for i := 0; i < 65; i++ {
+		_ = doReq("/v1/stats/overview", "", "")
+	}
+	// Manually nudge the lag gauge + the rollup-errors counter
+	// so all 5 metrics gather non-empty samples. (The real
+	// observers run on background goroutines / rollup ticks
+	// which are exercised by separate integration suites; the
+	// hygiene test only needs *something* in every label set.)
+	m.RollupLagSeconds.WithLabelValues("overview").Set(0.5)
+	m.RollupErrorsTotal.WithLabelValues("leaderboard_24h").Inc()
+
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatalf("gather: %v", err)
@@ -135,8 +150,9 @@ func TestStep4C_StatsRequestServedEvent(t *testing.T) {
 	}
 }
 
-// TestStep4C_StatsHandlerPanicEvent — locked field set: route +
-// request_id + panic_type. No `path`, no `_stack` event tag.
+// TestStep4C_StatsHandlerPanicEvent — locked field set per BUILD
+// §2 Step 4.C: `request_id`, `route`. NO `panic_type`, NO
+// `_stack` event tag, NO `path`, NO `method`.
 func TestStep4C_StatsHandlerPanicEvent(t *testing.T) {
 	var buf bytes.Buffer
 	logger := zerolog.New(&buf)
@@ -163,5 +179,29 @@ func TestStep4C_StatsHandlerPanicEvent(t *testing.T) {
 	}
 	if strings.Contains(out, `"event":"stats_handler_panic_stack"`) {
 		t.Errorf("forbidden stats_handler_panic_stack event still emitted: %q", out)
+	}
+	// Round-2 ARCH M2: the panic event itself MUST NOT carry
+	// extra fields beyond {route, request_id}. The debug-stack
+	// log line (untagged) MAY carry panic_type; we filter the
+	// Error-level line out of `out` by counting only stat-event
+	// occurrences.
+	statsEventLines := strings.Count(out, `"event":"stats_handler_panic"`)
+	if statsEventLines != 1 {
+		t.Fatalf("expected exactly 1 stats_handler_panic event; got %d: %q", statsEventLines, out)
+	}
+	// Extract the error-level line containing the event tag.
+	for _, line := range strings.Split(out, "\n") {
+		if !strings.Contains(line, `"event":"stats_handler_panic"`) {
+			continue
+		}
+		if strings.Contains(line, `"panic_type"`) {
+			t.Errorf("stats_handler_panic event contains forbidden panic_type field: %q", line)
+		}
+		if strings.Contains(line, `"method"`) {
+			t.Errorf("stats_handler_panic event contains forbidden method field: %q", line)
+		}
+		if strings.Contains(line, `"path"`) {
+			t.Errorf("stats_handler_panic event contains forbidden path field: %q", line)
+		}
 	}
 }

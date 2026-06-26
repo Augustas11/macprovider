@@ -72,11 +72,23 @@ func TestEmitDriftPayloadRedaction(t *testing.T) {
 	if !strings.Contains(s, "stats_rollup_drift_detected") {
 		t.Fatalf("event not emitted: %s", s)
 	}
+	// Round-2 ARCH M2 reshape (Step 4.C): the stats_*
+	// drift_detected event now carries only the locked field
+	// set {component, axis, divergence_pct, rebuild_value,
+	// incremental_value}. provider_id_sample and delta_ratio
+	// moved to a separate debug-level untagged triage line —
+	// which a zerolog-with-default-level-debug logger will
+	// emit but we should not pin in the public event contract.
+	// The buf carries BOTH the Warn (stats_*) line and the
+	// Debug (untagged) triage line. Verify the legacy
+	// triage fields still appear *somewhere* in the buffer
+	// (covered by the untagged Debug line) and that the
+	// stats_* event itself is the locked-field-set shape.
 	if !strings.Contains(s, "provider-abc-123") {
-		t.Errorf("provider_id_sample missing: %s", s)
+		t.Errorf("provider_id_sample missing from triage debug line: %s", s)
 	}
 	if !strings.Contains(s, "delta_ratio") {
-		t.Errorf("delta_ratio missing: %s", s)
+		t.Errorf("delta_ratio missing from triage debug line: %s", s)
 	}
 	// Round-6 CODE r6 MEDIUM 1 fix: BUILD §6 pinned schema
 	// requires `component` and `divergence_pct`. The current
