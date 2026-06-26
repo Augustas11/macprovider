@@ -33,7 +33,7 @@ import (
 func TestAC16ForbiddenImportFails(t *testing.T) {
 	bin, err := exec.LookPath("golangci-lint")
 	if err != nil {
-		t.Skip("golangci-lint not on PATH; install: go install github.com/golangci/golangci-lint/cmd/golangci-lint/v2/cmd/golangci-lint@v2.12.2")
+		t.Skip("golangci-lint not on PATH; install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2")
 	}
 
 	// The fixture is `internal/stats/forbidden_import_fixture.go`
@@ -79,7 +79,7 @@ func TestAC16ForbiddenImportFails(t *testing.T) {
 func TestForbidigoOSExitRule(t *testing.T) {
 	bin, err := exec.LookPath("golangci-lint")
 	if err != nil {
-		t.Skip("golangci-lint not on PATH; install: go install github.com/golangci/golangci-lint/cmd/golangci-lint/v2/cmd/golangci-lint@v2.12.2")
+		t.Skip("golangci-lint not on PATH; install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2")
 	}
 	// golangci-lint v2 dropped --out-format; the default
 	// formatter writes to stdout in a parseable form.

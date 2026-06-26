@@ -26,7 +26,7 @@ test-coordinator-integration:
 # Pinned version so the target is hermetic on a fresh checkout.
 lint-coordinator:
 	@command -v golangci-lint >/dev/null 2>&1 || { \
-		echo "golangci-lint not found; install: go install github.com/golangci/golangci-lint/cmd/golangci-lint/v2/cmd/golangci-lint@v2.12.2"; \
+		echo "golangci-lint not found; install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2"; \
 		exit 1; \
 	}
 	cd phase4-coordinator && golangci-lint run --config=.golangci.yml ./...

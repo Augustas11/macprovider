@@ -63,6 +63,8 @@ linters:
               desc: SPEC-017 AC-16 — rollup must not import internal/explorer (operator-only admin surface)
             - pkg: github.com/augstar/macprovider-coordinator/internal/ws
               desc: SPEC-017 AC-16 — rollup must not import internal/ws
+            - pkg: github.com/augstar/macprovider-coordinator/internal/auth
+              desc: SPEC-017 AC-16 — rollup must not import internal/auth (round-3 ARCH r3 MEDIUM; if a future step needs a narrow Bearer-parser helper, introduce that explicit allowlist via a SPEC-bumped rule update)
             - pkg: github.com/augstar/macprovider-coordinator/internal/stats
               desc: SPEC-017 AC-16 — rollup is the writer side; handlers are the reader side; they share only the database
             - pkg: github.com/augstar/macprovider-coordinator/internal/stats/store
