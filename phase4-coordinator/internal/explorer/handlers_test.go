@@ -140,6 +140,71 @@ func TestSessionDetailGatewayOnlyReturnsEmptyLocalArrays(t *testing.T) {
 	}
 }
 
+// Test82Item4_ProviderMapExposesAuthState verifies that the explorer
+// admin surface includes the SPEC-003 FR-C9.4 auth_state value for every
+// provider in the list + detail views, so operators can see WHY a
+// session is non-routable (e.g. bearerless_duplicate) without needing to
+// cross-reference /poolz.
+func Test82Item4_ProviderMapExposesAuthState(t *testing.T) {
+	cases := []struct {
+		name      string
+		authState pool.AuthState
+		// What the rendered JSON's "auth_state" field MUST contain.
+		wantJSONFrag string
+	}{
+		{"bearer_validated", pool.AuthBearerValidated, `"auth_state":"bearer_validated"`},
+		{"self_minted", pool.AuthSelfMinted, `"auth_state":"self_minted"`},
+		{"bearerless_duplicate", pool.AuthBearerlessDuplicate, `"auth_state":"bearerless_duplicate"`},
+		{"mint_failed", pool.AuthMintFailed, `"auth_state":"mint_failed"`},
+		{"empty_legacy", pool.AuthState(""), `"auth_state":""`},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			h, db := newTestExplorer(t, nil)
+			left, right := net.Pipe()
+			t.Cleanup(func() { _ = left.Close(); _ = right.Close() })
+			providerID := "provider_" + tc.name
+			registry := pool.NewRegistry(nil)
+			registry.Register(&pool.Provider{
+				ProviderID: providerID,
+				AssignedID: "assigned_" + tc.name,
+				ModelID:    "llama",
+				State:      pool.StateReady,
+				SlotsFree:  1,
+				SlotsTotal: 1,
+				AuthState:  tc.authState,
+			}, left)
+			h.pool = registry
+			if _, err := db.ExecContext(context.Background(), `
+insert into provider_tokens (token_hash, token_prefix, provider_id, provider_name, created_at)
+values (?, ?, ?, ?, ?)`,
+				"hash-"+tc.name, "tok_"+tc.name, providerID, tc.name, fixedExplorerTime().Format(time.RFC3339Nano)); err != nil {
+				t.Fatalf("seed provider token: %v", err)
+			}
+
+			// List view.
+			respList := requestExplorer(t, h, http.MethodGet, "/admin/explorer/providers", "operator-key")
+			if respList.Code != http.StatusOK {
+				t.Fatalf("list status=%d body=%s", respList.Code, respList.Body.String())
+			}
+			if !strings.Contains(respList.Body.String(), tc.wantJSONFrag) {
+				t.Fatalf("list missing %q: %s", tc.wantJSONFrag, respList.Body.String())
+			}
+
+			// Detail view.
+			respDetail := requestExplorer(t, h, http.MethodGet, "/admin/explorer/providers/"+providerID, "operator-key")
+			if respDetail.Code != http.StatusOK {
+				t.Fatalf("detail status=%d body=%s", respDetail.Code, respDetail.Body.String())
+			}
+			if !strings.Contains(respDetail.Body.String(), tc.wantJSONFrag) {
+				t.Fatalf("detail missing %q: %s", tc.wantJSONFrag, respDetail.Body.String())
+			}
+		})
+	}
+}
+
 func TestAC08_ProviderDirectoryCombinesPoolAndTokenStatus(t *testing.T) {
 	h, db := newTestExplorer(t, nil)
 	left, right := net.Pipe()
