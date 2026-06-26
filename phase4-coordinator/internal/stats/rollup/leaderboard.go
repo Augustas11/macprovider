@@ -193,7 +193,13 @@ func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window 
 			rewardsUSD = r.amount
 		}
 
-		totalUSD := new(big.Rat).Add(workUSD, rewardsUSD)
+		// Round-6 CODE r6 HIGH 1 fix: round work / rewards / total
+		// USD to NUMERIC(18,2)-equivalent BEFORE bucketing AND
+		// before storage so the bucket label and the persisted
+		// earnings agree at SPEC §6.2 contract boundaries.
+		workUSD = roundToCents(workUSD)
+		rewardsUSD = roundToCents(rewardsUSD)
+		totalUSD := roundToCents(new(big.Rat).Add(workUSD, rewardsUSD))
 		bucket, err := Bucket(window, totalUSD)
 		if err != nil {
 			return nil, fmt.Errorf("bucket %s: %w", pid, err)

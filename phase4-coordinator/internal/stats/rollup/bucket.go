@@ -76,6 +76,26 @@ func thresholdsForWindow(window string) (bucketThresholds, bool) {
 	return bucketThresholds{}, false
 }
 
+// roundToCents rounds a USD-shaped *big.Rat to two decimal
+// digits, matching the rounding the SQL boundary applies via
+// `(*big.Rat).FloatString(2)` (Go's `FloatString` rounds halves
+// away from zero). Round-6 CODE r6 HIGH 1 fix: SPEC §6.2 says
+// the bucket label is compared against the STORED
+// `NUMERIC(18,2)` value, not the pre-round rational. Callers
+// MUST apply this before `Bucket(...)` and before persisting,
+// so the bucket and the stored earnings always agree at exact
+// contract boundaries (e.g. $0.005, $4.995, $49.995).
+func roundToCents(r *big.Rat) *big.Rat {
+	if r == nil {
+		return new(big.Rat)
+	}
+	out, ok := new(big.Rat).SetString(r.FloatString(2))
+	if !ok {
+		return new(big.Rat)
+	}
+	return out
+}
+
 // usdFromCredits converts SPEC-005 v0.3 INTEGER provider_credits
 // to a NUMERIC(18,2)-shaped *big.Rat USD value per the operator
 // config knob. SPEC-016 v0.1.19 has not normatively pinned the

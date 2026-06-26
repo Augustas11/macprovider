@@ -202,6 +202,15 @@ func emitDriftEvents(window string, pre map[string]preRebuildRow, rebuilt []lead
 // dollar magnitudes the leaderboard tracks, sub-cent rounding
 // is below threshold.
 //
+// Round-6 CODE r6 MEDIUM 1 fix: the event payload now matches
+// the BUILD §6 pinned structured-log contract
+// `stats_rollup_drift_detected (component, axis, divergence_pct,
+// rebuild_value, incremental_value)`. `component` is derived
+// from `window` (e.g. `leaderboard_30d`) so Step 4 alerting can
+// match without a window-to-component translation. `divergence_pct`
+// is `ratio * 100`; legacy `delta_ratio` is kept for backward
+// compatibility with any in-flight dashboards.
+//
 // `rebuild` is the post-recompute value; `incremental` is the
 // pre-rebuild snapshot. The function uses ABSOLUTE delta so a
 // negative rebuild-vs-incremental delta (incremental had MORE)
@@ -221,9 +230,11 @@ func emitDriftIfExceeds(window, axis, pid string, incremental, rebuild, threshol
 	}
 	logger.Warn().
 		Str("event", "stats_rollup_drift_detected").
+		Str("component", string(componentForWindow(window))).
 		Str("window", window).
 		Str("axis", axis).
 		Str("provider_id_sample", pid).
+		Float64("divergence_pct", ratio*100).
 		Float64("delta_ratio", ratio).
 		Float64("rebuild_value", rebuild).
 		Float64("incremental_value", incremental).

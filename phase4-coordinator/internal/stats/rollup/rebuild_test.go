@@ -78,6 +78,15 @@ func TestEmitDriftPayloadRedaction(t *testing.T) {
 	if !strings.Contains(s, "delta_ratio") {
 		t.Errorf("delta_ratio missing: %s", s)
 	}
+	// Round-6 CODE r6 MEDIUM 1 fix: BUILD §6 pinned schema
+	// requires `component` and `divergence_pct`. The current
+	// payload includes both alongside the legacy fields.
+	if !strings.Contains(s, `"component":"leaderboard_30d"`) {
+		t.Errorf(`component="leaderboard_30d" missing: %s`, s)
+	}
+	if !strings.Contains(s, "divergence_pct") {
+		t.Errorf("divergence_pct missing: %s", s)
+	}
 	// Should NOT contain any DSN-shaped substring.
 	for _, leak := range []string{"postgres://", "password", "host=", "token_hash"} {
 		if strings.Contains(s, leak) {

@@ -333,7 +333,13 @@ func computeLeaderboardRowForProvider(ctx context.Context, db *sql.DB, cfg Confi
 	}
 
 	workUSD := usdFromCredits(w.credits, cfg.UsdPerMillionCredits)
-	totalUSD := new(big.Rat).Add(workUSD, rewardsUSD)
+	// Round-6 CODE r6 HIGH 1 fix: round work/rewards/total to
+	// NUMERIC(18,2) before bucketing AND before storage so the
+	// incremental path matches the full-recompute precision at
+	// SPEC §6.2 contract boundaries.
+	workUSD = roundToCents(workUSD)
+	rewardsUSD = roundToCents(rewardsUSD)
+	totalUSD := roundToCents(new(big.Rat).Add(workUSD, rewardsUSD))
 	bucket, err := Bucket(window, totalUSD)
 	if err != nil {
 		return leaderboardRow{}, false, err

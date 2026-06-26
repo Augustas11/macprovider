@@ -119,3 +119,62 @@ func dollarsToRat(dollars float64) *big.Rat {
 	cents := int64(dollars * 100)
 	return big.NewRat(cents, 100)
 }
+
+// TestRoundToCentsBucketBoundaries — round-6 CODE r6 HIGH 1 fix:
+// SPEC §6.2 says the bucket label MUST agree with the
+// NUMERIC(18,2) value stored in the leaderboard table.
+// `roundToCents` applies the same FloatString(2) rounding the
+// SQL boundary applies, BEFORE bucketing. These cases would
+// have failed in the pre-fix path (unrounded *big.Rat bucketed
+// while storage rounded the same value into a different
+// bucket).
+func TestRoundToCentsBucketBoundaries(t *testing.T) {
+	type cell struct {
+		num, den int64
+		window   string
+		wantS    string
+		wantB    string
+	}
+	cases := []cell{
+		// $0.005 — half-cent → 0.01 → "$" (not "-")
+		{5, 1000, "24h", "0.01", "$"},
+		// $4.995 — half-cent → 5.00 → "$$" (not "$")
+		{4995, 1000, "24h", "5.00", "$$"},
+		// $49.995 — half-cent → 50.00 → "$$$" (not "$$")
+		{49995, 1000, "24h", "50.00", "$$$"},
+		// $0.004 — strictly below half-cent → 0.00 → "-"
+		{4, 1000, "24h", "0.00", "-"},
+		// $99.994 → 99.99 → "$" (30d threshold $100)
+		{99994, 1000, "30d", "99.99", "$"},
+		// $99.995 → 100.00 → "$$" (30d threshold $100)
+		{99995, 1000, "30d", "100.00", "$$"},
+	}
+	for _, c := range cases {
+		raw := big.NewRat(c.num, c.den)
+		rounded := roundToCents(raw)
+		gotS := rounded.FloatString(2)
+		if gotS != c.wantS {
+			t.Errorf("roundToCents(%d/%d).FloatString(2) = %q, want %q", c.num, c.den, gotS, c.wantS)
+			continue
+		}
+		gotB, err := Bucket(c.window, rounded)
+		if err != nil {
+			t.Errorf("Bucket(%s, %s) err=%v", c.window, gotS, err)
+			continue
+		}
+		if gotB != c.wantB {
+			t.Errorf("Bucket(%s, roundToCents(%d/%d)=%s) = %q, want %q", c.window, c.num, c.den, gotS, gotB, c.wantB)
+		}
+	}
+}
+
+// TestRoundToCentsNil — nil input returns a safe zero *big.Rat.
+func TestRoundToCentsNil(t *testing.T) {
+	got := roundToCents(nil)
+	if got == nil {
+		t.Fatal("roundToCents(nil) returned nil; want zero *big.Rat")
+	}
+	if got.Sign() != 0 {
+		t.Errorf("roundToCents(nil).Sign() = %d, want 0", got.Sign())
+	}
+}
