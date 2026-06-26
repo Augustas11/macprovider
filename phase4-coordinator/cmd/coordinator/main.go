@@ -23,6 +23,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
+	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 
@@ -34,6 +35,22 @@ import (
 
 	"github.com/rs/zerolog"
 )
+
+// parseRFC3339Unix returns the unix-second value of an RFC 3339
+// timestamp string, or 0 if the input is empty / unparseable.
+// Used to translate cfg.Stats.Rollup.PartialHistorySince
+// (operator-set RFC 3339) into the unix-second boundary the
+// rollup package consumes.
+func parseRFC3339Unix(s string) int64 {
+	if s == "" {
+		return 0
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return 0
+	}
+	return t.Unix()
+}
 
 // version is overridden at build time via
 //
@@ -171,9 +188,46 @@ func main() {
 			_ = statsPools.Close()
 		}
 	}()
-	_ = statsPools // silenced until Step 3 mounts handlers
 	shutdownCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
+	// SPEC-017 v0.1.8 Step 2 — rollup runner. Reads OLTP source
+	// tables via `statsPools.Rollup`, writes the seven
+	// stats_* + stats_components_health + stats_rewards_populated
+	// surfaces, and emits structured drift-detection events. Per
+	// SPEC §7.2.5 the rollup MUST NOT use Reader / ProviderPortal
+	// pools — `New(statsPools.Rollup, ...)` enforces.
+	//
+	// The default SnapshotProvider (ZeroSnapshotProvider) returns
+	// zero values for the §5.1.1 live-snapshot fields (nodes_*,
+	// bandwidth_*, network_*, *_cores_total, models_serving).
+	// Operators with a real pool.Registry-derived snapshot wire
+	// it by injecting a custom SnapshotProvider here. v0.1 IMPL
+	// ships the zero default with an OPS.md note.
+	var statsRollup *statsrollup.Runner
+	if statsPools != nil {
+		rollupCfg := statsrollup.Config{
+			BackfillMode:            cfg.Stats.Rollup.BackfillMode,
+			PartialHistorySinceUnix: parseRFC3339Unix(cfg.Stats.Rollup.PartialHistorySince),
+			LateEventsRetentionDays: cfg.Stats.Rollup.LateEventsRetentionDays,
+			UsdPerMillionCredits:    cfg.Stats.Rollup.UsdPerMillionCredits,
+			DriftThresholdRatio:     cfg.Stats.Rollup.DriftThresholdRatio,
+			NightlyRebuildHourUTC:   cfg.Stats.Rollup.NightlyRebuildHourUTC,
+			LateEventsLookbackHours: cfg.Stats.Rollup.LateEventsLookbackHours,
+		}
+		var err error
+		statsRollup, err = statsrollup.New(statsPools.Rollup, rollupCfg, statsrollup.ZeroSnapshotProvider{}, logger.With().Str("subsystem", "stats_rollup").Logger())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stats rollup: %v\n", err)
+			os.Exit(1)
+		}
+		statsRollup.Start(shutdownCtx)
+		logger.Info().Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
+	}
+	defer func() {
+		if statsRollup != nil {
+			statsRollup.Wait()
+		}
+	}()
 	wsOpts := []providerws.Option{}
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
