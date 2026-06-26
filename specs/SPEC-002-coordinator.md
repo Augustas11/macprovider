@@ -15,6 +15,9 @@
   `/poolz` JSON shape absorption only; durable receipt-key storage is
   deferred to future specs.
 
+**Triage note 2026-06-26 (no version bump, no normative change):**
+- §12 OQ-6 (`X-MacProvider-Tier` to buyers) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-002.
+
 **Change log v1.3.5:**
 - **v1.3.5 (2026-06-06, SPEC-010 v1.5 + SPEC-011 v0.5 + SPEC-001 v1.3 absorption):** Adds coordinator-side surface for three now-LOCKED companion specs. SPEC-010 v1.5 adds the `Provider` data-model extension (`SupportedModels[]`, `PublishesSupportedModels`); opt-in `/v1/status.supported_models` echo per R-3.3.3 / AC-21. SPEC-011 v0.5 adds heartbeat parsing for optional `model_hash` + `loading: bool` per R-3.3.0 / R-3.3.1; REPLACES the locked `ApplyHeartbeat` hash-clearing semantics with a two-path (legacy clear / SPEC-011 re-verify) contract at `phase4-coordinator/internal/pool/provider.go:411-432`; adds NEW §7.10 audit-log infrastructure + normative `operator_model_swap` event schema. ALSO adds a new normative §7.8 v2 `auth_request` provider handshake section — the v2 contract has been in code since SPEC-002 v1.2.x but was never normatively documented in SPEC-002; v1.3.5 closes that gap on the coordinator side (matching SPEC-001 v1.3 §6.7 binary-side closure). ALSO adds a new normative §7.9 auth-attempt lifecycle section (10-minute timeout per `s.now().Add(10 * time.Minute)` at server.go:355; per-attempt state release on success/reject/expiry/disconnect); takes over as the source of truth from SPEC-010 v1.5 R-3.1.10 clauses 1 and 5 per SPEC-010 §6.2 transition note. L-1 baseline preserved literally: a v1.3 binary in the unset/unset cell continues to be accepted and processed exactly as a pre-SPEC-010/SPEC-011 binary per SPEC-001 v1.3 §6.7.3 cell 1 and SPEC-010 §4.1 back-compat analysis. NO new buyer HTTP surface; NO routing-behavior change; NO Tier-2 (SPEC-008) expansion; NO change to existing FR-P* numbering or AC numbering.
 
@@ -3817,7 +3820,7 @@ No open questions remain from v1.0.x. v1.0.2 resolved all prior open items into
 normative requirements (see FR-P11 for the HTTP 530 handling that was
 previously OQ-1).
 
-**OQ-6. How to surface tier=provisional to buyers.**
+**OQ-6. How to surface tier=provisional to buyers.** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed — the "do NOT surface" current position has held for a year with no buyer signal demanding tier visibility. Router weight already handles QoS. Revisit only if a buyer use case for routing control surfaces in writing._
 Current design: the tier is invisible to buyers. A buyer cannot
 distinguish a response from a pinned provider vs a provisional
 provider. Should the coordinator add an `X-MacProvider-Tier` response

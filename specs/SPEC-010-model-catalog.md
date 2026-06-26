@@ -7,6 +7,9 @@ audit — convergence target: 0 CRITICAL / 0 MAJOR → LOCK)
 **Companion to (LOCKED):** SPEC-001 v1.2.4, SPEC-002 v1.3.4,
 SPEC-004 v0.3.1, SPEC-008 v0.3, SPEC-006 v0.8.1.
 
+**Triage note 2026-06-26 (no version bump, no normative change):**
+- §7 OQ-1 (case preservation) and OQ-2 (admission counter) marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-010.
+
 **Change log v1.5 (round-5 polish pass — lock candidate):**
 Round-5 verdict was READY TO LOCK with 0 CRITICAL / 0 MAJOR /
 3 MINOR / 0 QUESTION (specs/SPEC-010-audit.md round 5). v1.5
@@ -1302,13 +1305,13 @@ predicate available for SPEC-011 / SPEC-012 to consume.
 
 ## 7. Open questions
 
-- **OQ-1** Should `/v1/status.supported_models` per-entry echo
+- **OQ-1** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed — preserve-case shipped (`phase3-binary/Sources/MacProviderCore/Config.swift:251`) and produced no buyer-dashboard signal in 6+ months._ Should `/v1/status.supported_models` per-entry echo
   preserve the provider's chosen case (R-3.1.7's "wire format
   preserves case") or always normalize? v1.0 chooses
   preserve-case to give operators a way to spot
   case-normalization issues in their config; reconsider if
   buyer-side dashboards demand consistency.
-- **OQ-2** Should the coordinator log a counter
+- **OQ-2** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed — SPEC-011 and SPEC-012 shipped without adding the counter, so the punt landed nowhere. Revisit only if operator observability genuinely needs the metric._ Should the coordinator log a counter
   (`spec010_providers_with_supported_models`) at admission for
   operator metrics? Currently no — v1.0 produces no new log
   events to preserve L-1. SPEC-011/SPEC-012 can add metrics as

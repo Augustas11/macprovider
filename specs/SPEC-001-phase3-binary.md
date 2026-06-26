@@ -15,6 +15,9 @@ behavior, so a coordinator running with `auth.require_provider_tokens=false`
 continues to accept tokenless legacy fleets. Flag flip on the
 coordinator is the compatibility cutoff for old binaries.
 
+**Triage note 2026-06-26 (no version bump, no normative change):**
+- §10 OQ-1 (streaming usage chunk client compat) and OQ-2 (tier announcement format) are marked RESOLVED inline. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-001.
+
 **Change log v1.6:**
 - **v1.6 (2026-06-22, SPEC-015 v0.1.3 absorption):** Adds one
   parser-optional field to the v2 `auth_request` initial-stage frame:
@@ -2899,7 +2902,7 @@ SPEC-011 v0.5 R-3.2.3 and R-3.1.5 field reference.
 
 ## 10. Open questions for operator
 
-**OQ-1. Streaming usage chunk — client compatibility.**
+**OQ-1. Streaming usage chunk — client compatibility.** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed implicitly — gateway `chat_proxy.go:439` actively forwards this shape and 6+ months of production traffic produced no client-compat report._
 FR-7 specifies the usage chunk with `choices: []`. Some clients (e.g.,
 LiteLLM, certain OpenAI SDK versions) may not expect a chunk with empty
 choices. Alternative: embed usage in the final content chunk alongside
@@ -2907,7 +2910,7 @@ choices. Alternative: embed usage in the final content chunk alongside
 behavior as of May 2025). Operator should confirm which downstream
 clients will consume this and test.
 
-**OQ-2. Tier announcement format.**
+**OQ-2. Tier announcement format.** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as superseded — SPEC-008 v0.3 locked the tier scheme; tier-1.5 never surfaced as a real requirement. If it does, file a new SPEC._
 FR-14 sends `tier: 1` as an integer. Should this be a version string
 (`"tier-1"`) or a structured object (`{"level": 1, "capabilities": [...]}`)
 to allow for tier 1.5 or partial upgrades? The spec picks integer for

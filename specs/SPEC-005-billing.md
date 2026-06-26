@@ -3,6 +3,9 @@
 **Version:** 0.3 (2026-05-31, Claude R2 + cross-spec FIX pass)
 **Depends on:** SPEC-001 v1.2.4, SPEC-002 v1.3.4, SPEC-003 v0.7, SPEC-004 v0.3.1, SPEC-006 v0.8.2
 
+**Triage note 2026-06-26 (no version bump, no normative change):**
+- §OQ-2 (round-half-to-even) and §OQ-3 (24h/7d recovery windows) marked RESOLVED inline as implicitly confirmed by sustained production traffic. Pointer: `docs/OPEN_QUESTIONS.md` 2026-06-26 triage row for SPEC-005. OQ-1 / OQ-4 / OQ-5 remain open and are routed to follow-up issues per the ledger.
+
 **Change log v0.3:**
 - 2026-06-01 SPEC-007 v0.2 cross-spec fix: renames the misleading settlement
   consumer surface to the payout-rail consumer contract. The `spec_007_claim`
@@ -1482,9 +1485,13 @@ A future SPEC-002 monotonic attempt_n remains a cross-spec patch candidate, not 
 
 ### OQ-2: Rounding rule acceptance
 
+_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as implicitly confirmed — round-half-to-even shipped 2026-05 and has run in production ~7 months with no operator pushback. The pre-production-gate confirmation condition is moot once the gate has been crossed._
+
 This draft chooses round half to even. Operator should confirm before v0.2.
 
 ### OQ-3: Recovery windows
+
+_RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed as implicitly confirmed — 24h startup + 7d nightly shipped 2026-05 and have not surfaced as wrong in ~7 months of production. Same reasoning as OQ-2._
 
 Defaults are 24h startup and 7d nightly. Operator should confirm the operational fit.
 
