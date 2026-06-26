@@ -16,6 +16,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -2078,42 +2079,22 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		return wsForwardFailed, resp.StatusCode, attempt
 	}
 
-	// Issue #92: do NOT WriteHeader before confirming the provider streams
-	// at least one body byte. Peek first; if upstream EOFs/errors with zero
-	// bytes ever sent, return wsForwardProviderDisconnected (not Committed)
-	// so the unified failover loop can route to a healthy provider. Without
-	// this, a malicious or buggy provider can collect attribution credit
-	// for a 200-OK-empty response by closing the body immediately after
-	// status. The audit-flagged INTENTIONAL semantic of "first chunk
-	// received then disconnected = committed" (line below) is preserved:
-	// this guard only affects the path BEFORE any byte ever arrived.
+	// Issue #92: do NOT WriteHeader until the provider has streamed at
+	// least one COMPLETE SSE event (i.e. one or more event lines followed
+	// by the \n\n / \r\n\r\n event terminator). The codex audit on the
+	// initial commit (79e0b2c) verified that a 1-byte threshold still let
+	// a malicious provider send one arbitrary byte and EOF, with the
+	// buyer committing 200 OK + sticky storage as if the provider had
+	// completed real work. The full-event threshold raises the bar to
+	// "provider produced at least one well-formed SSE event" before
+	// committed-semantics apply. The audit-flagged INTENTIONAL semantic
+	// of "first chunk received then disconnected = committed" is preserved:
+	// this guard only fires before the first complete event arrives. Once
+	// committed, EOF/error are committed-terminal exactly as before.
 	reader := bufio.NewReader(resp.Body)
-	if _, peekErr := reader.Peek(1); peekErr != nil {
-		s.log.Warn().Err(peekErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider sent zero body bytes")
-		if r.Context().Err() != nil {
-			return wsForwardCancelled, 0, requestLogAttempt{}
-		}
-		if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
-			s.handleProviderFailure(provider, http.StatusGatewayTimeout)
-			return wsForwardTimedOut, http.StatusGatewayTimeout, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Provider timed out before first byte", FaultFlag: billing.FaultBreakerQualifying}
-		}
-		s.handleProviderFailure(provider, http.StatusBadGateway)
-		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider disconnected before first byte", FaultFlag: billing.FaultBreakerQualifying}
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("X-Accel-Buffering", "no")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
-	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
-	w.WriteHeader(http.StatusOK)
-	// NOTE: HTTP-streaming sticky write is deferred to after io.EOF (clean
-	// stream completion), per the SPEC-004 v0.2 audit. Storing affinity
-	// upfront would pin the conversation to a provider that may disconnect
-	// mid-stream, leaving the sticky entry pointing at a degraded route.
-	// The store call now lives in the io.EOF branch below; the
-	// wsForwardProviderDisconnectedCommitted branch intentionally does NOT
-	// write sticky (the provider failed mid-flight).
+	var preCommit bytes.Buffer
+	committed := false
+	sawNonBlankLine := false
 	flusher, _ := w.(http.Flusher)
 	var promptTok, completionTok *int64
 	bytesEmitted := 0
@@ -2124,38 +2105,160 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		}
 		return attempt
 	}
+	writeBuyerHeaders := func() {
+		w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+		w.Header().Set("X-Accel-Buffering", "no")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+		w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+		w.WriteHeader(http.StatusOK)
+	}
+	// NOTE: HTTP-streaming sticky write is deferred to after io.EOF (clean
+	// stream completion), per the SPEC-004 v0.2 audit. Storing affinity
+	// upfront would pin the conversation to a provider that may disconnect
+	// mid-stream, leaving the sticky entry pointing at a degraded route.
+	// The store call now lives in the io.EOF branch below; the
+	// wsForwardProviderDisconnectedCommitted branch intentionally does NOT
+	// write sticky (the provider failed mid-flight).
 	for {
 		line, err := reader.ReadBytes('\n')
 		if len(line) > 0 {
 			if p, c := tokenPointersFromSSE(line); p != nil || c != nil {
 				promptTok, completionTok = p, c
 			}
-			if _, writeErr := w.Write(line); writeErr != nil {
-				s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
-				return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
-			}
-			bytesEmitted += len(line)
-			if flusher != nil {
-				flusher.Flush()
+			if committed {
+				if _, writeErr := w.Write(line); writeErr != nil {
+					s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
+					return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+				}
+				bytesEmitted += len(line)
+				if flusher != nil {
+					flusher.Flush()
+				}
+			} else {
+				preCommit.Write(line)
+				// Pre-commit buffer cap: a provider that hasn't terminated
+				// a single SSE event after 16 KiB is either malformed or
+				// adversarial. Treat as uncommitted disconnect.
+				if preCommit.Len() > maxPreCommitStreamingBytes {
+					s.log.Warn().Int("bytes", preCommit.Len()).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider exceeded pre-commit buffer without event terminator")
+					s.handleProviderFailure(provider, http.StatusBadGateway)
+					return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider exceeded pre-commit buffer without event terminator", FaultFlag: billing.FaultBreakerQualifying}
+				}
+				// SSE event terminator: a blank line ("\n" or "\r\n") that
+				// follows at least one non-blank line. sawNonBlankLine
+				// blocks adversarial providers that try to commit by
+				// sending bare "\n\n" / "\r\n\r\n" with no actual event
+				// content preceding the terminator.
+				if !isSSEBlankLine(line) {
+					sawNonBlankLine = true
+				} else if sawNonBlankLine {
+					writeBuyerHeaders()
+					committed = true
+					payload := preCommit.Bytes()
+					if _, writeErr := w.Write(payload); writeErr != nil {
+						s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer pre-commit write failed")
+						return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+					}
+					bytesEmitted = len(payload)
+					preCommit.Reset()
+					if flusher != nil {
+						flusher.Flush()
+					}
+				}
 			}
 		}
 		if err == nil {
 			continue
 		}
+		// Read error path. Pre-commit and committed have different rules:
+		// pre-commit returns uncommitted-disconnect/timeout (failover
+		// eligible); committed preserves the audit-flagged committed
+		// semantics (cancelled/disconnected-committed/clean-EOF).
 		if err == io.EOF {
-			s.stickyStore(r.Header, provider, modelScope)
-			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted)}
+			if committed {
+				s.stickyStore(r.Header, provider, modelScope)
+				return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted)}
+			}
+			s.log.Warn().Int("pre_commit_bytes", preCommit.Len()).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider closed before first complete SSE event")
+			s.handleProviderFailure(provider, http.StatusBadGateway)
+			return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider closed before first complete SSE event", FaultFlag: billing.FaultBreakerQualifying}
 		}
 		if r.Context().Err() != nil {
-			return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+			if committed {
+				return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+			}
+			return wsForwardCancelled, 0, requestLogAttempt{}
 		}
-		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
-		writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
-		if flusher != nil {
-			flusher.Flush()
+		if isStreamingTimeoutErr(err, attemptCtx) {
+			if committed {
+				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider timed out during streaming")
+				writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider disconnected during streaming", billing.FaultBreakerQualifying)
+			}
+			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider timed out before first complete SSE event")
+			s.handleProviderFailure(provider, http.StatusGatewayTimeout)
+			return wsForwardTimedOut, http.StatusGatewayTimeout, requestLogAttempt{Status: http.StatusGatewayTimeout, Error: "Provider timed out before first complete SSE event", FaultFlag: billing.FaultBreakerQualifying}
 		}
-		return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider disconnected during streaming", billing.FaultBreakerQualifying)
+		if committed {
+			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
+			writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider disconnected during streaming", billing.FaultBreakerQualifying)
+		}
+		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider disconnected before first complete SSE event")
+		s.handleProviderFailure(provider, http.StatusBadGateway)
+		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider disconnected before first complete SSE event", FaultFlag: billing.FaultBreakerQualifying}
 	}
+}
+
+// maxPreCommitStreamingBytes caps how much pre-commit body forwardStreaming
+// will buffer before declaring the provider malformed/adversarial. 16 KiB
+// covers any reasonable first SSE event from current OpenAI-compatible
+// providers (typical first chunk is < 1 KiB).
+const maxPreCommitStreamingBytes = 16 * 1024
+
+// isSSEBlankLine reports whether the given bufio.Reader.ReadBytes('\n')
+// result is the blank-line event terminator used by SSE — either "\n"
+// or "\r\n".
+func isSSEBlankLine(line []byte) bool {
+	if len(line) == 1 && line[0] == '\n' {
+		return true
+	}
+	if len(line) == 2 && line[0] == '\r' && line[1] == '\n' {
+		return true
+	}
+	return false
+}
+
+// isStreamingTimeoutErr reports whether a body-read error or context state
+// should be classified as a provider timeout. Covers three timeout sources
+// the forwardStreaming pre-commit path can hit:
+//  1. attemptCtx deadline (the per-attempt timeout in forwardStreaming).
+//  2. providerhttp.Client.Timeout, which surfaces as a wrapped
+//     net.OpError carrying *url.Error / os.ErrDeadlineExceeded — these
+//     do not match errors.Is(ctx.Err(), context.DeadlineExceeded) yet.
+//  3. Direct context.DeadlineExceeded wrapped in the read error itself.
+func isStreamingTimeoutErr(err error, attemptCtx context.Context) bool {
+	if errors.Is(attemptCtx.Err(), context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
 }
 
 func statusForForwardResult(result wsForwardResult) int {

@@ -408,6 +408,132 @@ func TestM92_RowSequence_HTTPStreamingZeroBodyTriggersFailover(t *testing.T) {
 	}
 }
 
+// Scenario 7 (issue #92 codex audit MAJOR): HTTP-streaming provider sends
+// exactly 1 byte then EOFs. The initial #92 fix (Peek(1)) considered this
+// "first byte received" and committed 200 OK + sticky to the provider,
+// which let the provider collect attribution credit for ~zero work. The
+// final fix requires a complete first SSE event (\n\n terminator after at
+// least one non-blank line) before commit. The 1-byte body fails the
+// non-blank-then-blank check and triggers failover.
+func TestM92_RowSequence_HTTPStreamingOneBytePartialTriggersFailover(t *testing.T) {
+	const requestID = "11111111-9201-4201-8201-111111111111"
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("x"))
+	}))
+	defer badUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"ok\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "bad", EndpointURL: badUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "bad", "s1", "model-a", pool.StateReady, 20000, 1, badUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider = %q, want ok (after failover from 1-byte-EOF provider)", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("x")) && !bytes.Contains(rr.Body.Bytes(), []byte(`"ok"`)) {
+		t.Fatalf("body shows the malicious 1-byte payload but not the failover stream; body=%s", rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2 (1-byte then success): %#v", len(rows), rows)
+	}
+	if rows[0].ProviderAssignedID.String != "s1" || rows[0].Status != http.StatusBadGateway || rows[0].Retried != 0 {
+		t.Fatalf("rows[0] = %+v, want s1/502/retried=0 (1-byte body MUST NOT be Committed)", rows[0])
+	}
+	if rows[1].ProviderAssignedID.String != "s2" || rows[1].Status != http.StatusOK || rows[1].Retried != 1 {
+		t.Fatalf("rows[1] = %+v, want s2/200/retried=1", rows[1])
+	}
+}
+
+// Scenario 8 (issue #92 codex audit MINOR): legitimate provider sends its
+// first SSE event after a brief delay. Header propagation MUST wait for
+// the first complete event (commit boundary) — but the buyer ultimately
+// sees a successful 200 + the streamed content. This pins the buyer-
+// visible semantic change introduced by #92: status code arrives later
+// than pre-fix, but a single-attempt success row is the outcome (no
+// spurious failover triggered by the delay).
+func TestM92_RowSequence_HTTPStreamingSlowFirstEventCommits(t *testing.T) {
+	const requestID = "22222222-9202-4202-8202-222222222222"
+	slowUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(50 * time.Millisecond)
+		_, _ = w.Write([]byte("data: {\"id\":\"slow\",\"choices\":[{\"delta\":{\"content\":\"hi\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer slowUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "slow", EndpointURL: slowUpstream.URL},
+	})
+	registerWithEndpoint(registry, "slow", "s1", "model-a", pool.StateReady, 20000, 1, slowUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-Request-ID": []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"hi"`)) {
+		t.Fatalf("body missing slow provider's stream; body=%s", rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("slow-first-event rows = %d, want 1 (no failover, single committed success): %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusOK || rows[0].Retried != 0 || rows[0].ProviderAssignedID.String != "s1" {
+		t.Fatalf("rows[0] = %+v, want s1/200/retried=0", rows[0])
+	}
+}
+
 // Scenario 5 (M2-1d): WS-non-streaming queue-full → advance → success.
 //
 // Pins the Q3 close-out from the post-merge architect verification of
