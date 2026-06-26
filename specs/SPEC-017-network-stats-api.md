@@ -1,7 +1,7 @@
 # SPEC-017 — Network Stats API
 
-**Version:** 0.1.7 (2026-06-26, draft — Claude adversarial-verifier + product-designer fix pass on locked v0.1.6. Absorbs 5 HIGH (H1 ACAO+credentials, H2 Vary:Authorization fragments public cache, H3 totals.earnings_usd correlation leak, H4 partial_history_since contract drift, H5 origin-reject timing gap) + 7 MEDIUM (M1 timeseries split, M2 cumulative-vs-windowed, M3 stats_late_events retention, M4 RFC 6454 normalization, M5 rebuild atomicity, M6 bucket rounding, M7 preflight Max-Age vs revocation) from the critic lane, plus 2 HIGH + 1 MEDIUM from designer lane (D-H1 partner-projection consent + launch sequencing, D-H2 rewards_populated signal, D-M1 strip per-axis buckets). LOCK target: codex round returns 0 CRITICAL + 0 MAJOR + 0 MINOR. v0.1.6 lineage preserved below.)
-**Status:** Unlocked at v0.1.7 pending codex re-audit. v0.1.6 was the prior LOCK. IMPL prompt (`BUILD_SPEC_017_IMPL_PROMPT.md`) is re-anchored to v0.1.7 after SPEC re-locks. The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
+**Version:** 0.1.7 (2026-06-26, **LOCKED** — codex round-8 returned 0 CRITICAL + 0 MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK on first re-audit. Round 8 narrative: `specs/SPEC-017-r8-audit.md`. v0.1.7 absorbs the Claude adversarial-verifier (critic) + product-designer fix pass on locked v0.1.6: 5 HIGH (H1 ACAO+credentials, H2 Vary:Authorization fragments public cache, H3 totals.earnings_usd correlation leak, H4 partial_history_since contract drift, H5 origin-reject timing gap) + 7 MEDIUM (M1 timeseries split, M2 cumulative-vs-windowed, M3 stats_late_events retention, M4 RFC 6454 normalization, M5 rebuild atomicity, M6 bucket rounding, M7 preflight Max-Age vs revocation) from the critic lane, plus 2 HIGH + 1 MEDIUM from designer lane (D-H1 partner-projection consent + launch sequencing, D-H2 rewards_populated signal, D-M1 strip per-axis buckets). Trajectory 8 rounds: r1 3C+10M+5m, r2 2C+5M+2m, r3 0C+4M+3m, r4 0C+4M+2m, r5 0C+2M+2m, r6 0C+1M+1m, r7 0/0/0 → LOCK v0.1.6, r8 (Claude fix pass) 0/0/0 → LOCK v0.1.7.)
+**Status:** **LOCKED** at v0.1.7 (2026-06-26). v0.1.6 was the prior LOCK; v0.1.7 supersedes it. The IMPL prompt (`BUILD_SPEC_017_IMPL_PROMPT.md`) is re-anchored to v0.1.7 via a v7+ revision (separately audited). The §11 open questions remain genuine v0.2+ design questions, not v0.1 blockers.
 **Depends on:** SPEC-002 v1.4 (coordinator binary hosts the new `/v1/stats/*` mount; §4.2 §7.2 isolation seams), SPEC-005 v0.3 (billing settlement defines `work` $ semantics in §5.1 and tokens-out accounting in §11.4), SPEC-006 v0.9 (version-prefix path style and public-surface conventions; SPEC-017 does NOT claim error-envelope compatibility with SPEC-006 — see §5.9), SPEC-014 v0.8 (provider portal consumes own-provider exact earnings via its own surfaces — visibility-toggle UI is a follow-up SPEC-014 v0.9 candidate, not in this SPEC), SPEC-016 v0.1.19 (payout pipeline; v0.1.19 does NOT normatively define a `rewards` split — SPEC-017 defers that source semantic to operator-defined ledger per §9.1a + Q13).
 
 ---
@@ -14,8 +14,7 @@ entries below are one-liners per version pointing at the corresponding
 audit file. Per [[feedback-spec-audit-file-convention]], audit narrative
 does NOT live in this SPEC body.
 
-**v0.1.7 (2026-06-26, draft — Claude adversarial + product-designer fix
-pass on locked v0.1.6):** Two Claude subagents (critic adversarial
+**v0.1.7 (2026-06-26, LOCKED — codex round-8 0/0/0):** Two Claude subagents (critic adversarial
 verifier + product designer) audited v0.1.6 against codex's blind spots.
 Critic returned 0 CRITICAL + 5 HIGH + 7 MEDIUM (+ LOW omitted per fix
 scope); designer returned 2 HIGH + 1 MEDIUM. v0.1.7 absorbs every HIGH
@@ -89,9 +88,8 @@ and MEDIUM:
   fidelity for trusted partners. §11 Q9 is marked CLOSED (resolved by
   the strip).
 
-Lock target: codex round-1 against v0.1.7 returns 0 CRITICAL + 0
-MAJOR + 0 MINOR. Round narrative: `specs/SPEC-017-r8-audit.md`
-forward.
+Codex round 8 confirmed lock: 0 CRITICAL + 0 MAJOR + 0 MINOR + 0
+QUESTIONS, READY TO LOCK. Round narrative: `specs/SPEC-017-r8-audit.md`.
 
 **v0.1.6 (2026-06-25, LOCKED):** Round 7 returned 0 CRITICAL + 0
 MAJOR + 0 MINOR + 0 QUESTIONS, verdict READY TO LOCK. v0.1.6 is
