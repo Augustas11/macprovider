@@ -53,6 +53,7 @@
 #   T40 — C2c cross-file distinctness unresolved (no runtime backstop)          -> pass with WARN
 #   T41 — C2c pairing inline+env-unresolved (no runtime backstop)               -> pass with WARN
 #   T42 — C2c pairing both env-unresolved different names                       -> pass with WARN
+#   T43 — WARN-bearing run surfaces "config-drift summary: N WARN(s)"           -> pass
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -728,6 +729,8 @@ test_c2c_cross_file_distinctness_unresolved_warns() {
 test_c2c_pairing_inline_plus_env_unresolved_warns() {
   # Audit-r4 (3-of-3): inline on one side + unresolved env on the other
   # — pairing cannot be verified. r3 silently skipped; r4 must WARN.
+  # Audit-r5 (3-of-3): the WARN must NOT print the inline raw value —
+  # earlier `raw_a={raw!r}` leaked a live bearer into deploy output.
   local wd; wd="$(mk_workdir)"
   write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
   write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64B\""
@@ -735,6 +738,11 @@ test_c2c_pairing_inline_plus_env_unresolved_warns() {
   assert_exit 0 "T41 pairing inline+env-unresolved -> pass with WARN"
   assert_contains "C2c pairing gateway coordinator.service_token == coordinator auth.gateway_service_token: UNVERIFIED" "T41 pairing-warn message"
   assert_contains "NO runtime backstop" "T41 backstop-gap explanation"
+  # Regression guards (audit-r5): the WARN must redact the inline value
+  # and classify safely. HEX64B must NEVER appear in WARN/OK output.
+  assert_absent "$HEX64B" "T41 redacted: HEX64B inline value not leaked"
+  assert_contains "inline-redacted" "T41 inline side classified as inline-redacted"
+  assert_contains "env:COORD_SVC (unresolved)" "T41 env side classified safely"
   rm -rf "$wd"
 }
 
@@ -747,6 +755,23 @@ test_c2c_pairing_different_env_unresolved_warns() {
   run_check "$wd" COORD_SVC= GW_SVC=
   assert_exit 0 "T42 pairing both-env-unresolved (diff names) -> pass with WARN"
   assert_contains "C2c pairing gateway coordinator.service_token == coordinator auth.gateway_service_token: UNVERIFIED" "T42 pairing-warn message"
+  rm -rf "$wd"
+}
+
+test_warn_count_surfaced_in_summary() {
+  # Audit-r5 MINOR (3-of-3): final pass line was bare "config-drift
+  # check passed" even when WARNs had fired — easy to miss in a wall
+  # of OKs. Summary line now reports the WARN count (exact number
+  # depends on which optional fields are unset; here we assert the
+  # line shape and the manual-verification prompt).
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64B\""
+  run_check "$wd" COORD_SVC=
+  assert_exit 0 "T43 WARN-bearing run still passes overall"
+  assert_contains "config-drift summary:" "T43 summary line present"
+  assert_contains "WARN(s)" "T43 WARN count surfaced in summary"
+  assert_contains "manual verification" "T43 summary prompts manual verification (UNVERIFIED prompt active)"
   rm -rf "$wd"
 }
 
@@ -798,6 +823,7 @@ test_c2c_pairing_cross_file_same_env_name_unverified_warn
 test_c2c_cross_file_distinctness_unresolved_warns
 test_c2c_pairing_inline_plus_env_unresolved_warns
 test_c2c_pairing_different_env_unresolved_warns
+test_warn_count_surfaced_in_summary
 
 echo
 echo "== summary =="

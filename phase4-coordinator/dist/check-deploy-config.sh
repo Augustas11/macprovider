@@ -104,9 +104,11 @@ def g_section(src, section, key):
     return None
 
 fail = 0
+warns = 0
 def hard(m):
     global fail; print(f"  FAIL: {m}"); fail = 1
-def warn(m): print(f"  WARN: {m}")
+def warn(m):
+    global warns; print(f"  WARN: {m}"); warns += 1
 def ok(m):   print(f"  ok:   {m}")
 
 # Secrets may be inlined as a literal value OR indirected to a runtime
@@ -199,6 +201,22 @@ def _env_name(raw):
         return None
     m = ENV_REF.match(raw)
     return m.group(1) if m else None
+
+def _safe_describe(raw):
+    """Classify a secret-bearing field WITHOUT printing its value.
+    Audit-r5 (3-of-3 lanes) found that printing raw_a/raw_b in WARN
+    messages can leak a live bearer token into deploy/wrapper logs.
+    Categories: absent | inline-redacted | env:NAME (resolved|unresolved)
+    | env malformed."""
+    if not raw:
+        return "absent"
+    if raw.startswith("env:"):
+        m = ENV_REF.match(raw)
+        if not m:
+            return "env malformed"
+        name = m.group(1)
+        return f"env:{name} ({'resolved' if os.environ.get(name) else 'unresolved'})"
+    return "inline-redacted"
 
 def _resolved_value(raw):
     """Return the resolved value (whitespace-trimmed) or None if deferred/
@@ -301,14 +319,18 @@ def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
                       f"systemd units source SEPARATE env files (coordinator.env "
                       f"vs gateway.env); they may resolve to different values")
         else:
-            detail = (f"raw_a={raw_a!r} raw_b={raw_b!r}; one or both "
+            # Safe classification only — NEVER print the raw value
+            # (audit-r5 caught the live bearer leak via raw!r format).
+            detail = (f"{label_a}={_safe_describe(raw_a)}, "
+                      f"{label_b}={_safe_describe(raw_b)}; one or both "
                       f"env:NAME refs unresolved at gate time")
         warn(f"C2c pairing {label_a} == {label_b}: UNVERIFIED — "
              f"cross-file pairing has NO runtime backstop. {detail}. "
              f"To verify: source both /etc/macprovider/coordinator.env and "
-             f"gateway.env into the gate process, inline at least one "
-             f"side, or set SKIP_PAIRING_CHECK=1 only if you have "
-             f"manually verified equality.")
+             f"gateway.env into the gate process, inline both sides for "
+             f"the gate to compare, or perform a manual smoke check after "
+             f"deploy (curl /internal/routing with the gateway service "
+             f"token: 401 = mismatch).")
         return
     if a != b:
         hard(f"C2c: {label_a} != {label_b} — gateway sends a credential the "
@@ -503,6 +525,15 @@ if gw:
                 ok(f"C2b header timeout: gateway header {ght}s >= gateway request {gwt}s")
 else:
     print("  note: gateway.yaml not provided -> skipped C2 timer cross-check")
+
+# Surface WARN count so a final "passed" line cannot hide an UNVERIFIED
+# cross-file C2c (audit-r5 MINOR): operators scanning wrapper output
+# would otherwise miss the manual-verification prompt.
+if warns:
+    print(f"\nconfig-drift summary: {warns} WARN(s) — review above; some C2c "
+          f"invariants may require manual verification (see UNVERIFIED lines)")
+else:
+    print("\nconfig-drift summary: 0 WARN(s)")
 
 sys.exit(1 if fail else 0)
 PY
