@@ -32,12 +32,12 @@ import (
 //
 //  2. SUBSEQUENT TICKS (incremental):
 //     a. Identify providers with NEW activity in the lookback
-//        window `[lastOK - lookback_hours, now)`.
+//     window `[lastOK - lookback_hours, now)`.
 //     b. For each such active provider, recompute their FULL
-//        window aggregate and UPSERT (covers corrections + new
-//        rows in the lookback).
+//     window aggregate and UPSERT (covers corrections + new
+//     rows in the lookback).
 //     c. Providers in the snapshot whose last_seen_at falls out
-//        of the window length get DELETEd (drop-out detection).
+//     of the window length get DELETEd (drop-out detection).
 //     d. Re-rank the snapshot deterministically.
 //     e. Update stats_components_health.last_ok_at.
 //
@@ -83,9 +83,10 @@ func runLeaderboardIncrementalTick(ctx context.Context, db *sql.DB, cfg Config, 
 	// Late events run AFTER the tick commits (matches §9.3:
 	// older-than-lookback rows that arrived since last_ok_at
 	// are recorded for nightly reconciliation but do NOT fold
-	// into the live snapshot — which is exactly what the
-	// incremental path guarantees).
-	if err := detectLateEvents(ctx, db, cfg, window, now); err != nil {
+	// into the live snapshot). lastOK is the PREVIOUS tick's
+	// timestamp — detectLateEvents filters by
+	// created_at_utc > lastOK.
+	if err := detectLateEvents(ctx, db, cfg, window, now, lastOK); err != nil {
 		return fmt.Errorf("incremental %s late events: %w", window, err)
 	}
 	return nil

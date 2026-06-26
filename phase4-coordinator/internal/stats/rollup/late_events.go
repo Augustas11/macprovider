@@ -40,7 +40,7 @@ const lateEventsAdvisoryLockKey int64 = 7521693845691207413
 // `incremental.go` (round-3 ARCH r3 HIGH 1 fix). Late events
 // (rows older than the lookback) are recorded here and reconciled
 // by the nightly Shape C rebuild.
-func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string, now time.Time) error {
+func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string, now, lastOK time.Time) error {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("late events acquire conn: %w", err)
@@ -54,10 +54,11 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
 	}()
 	cutoff := lateEventBoundary(now, cfg.LateEventsLookbackHours)
 	winStart := windowStart(window, now, cfg.PartialHistorySinceUnix)
+	arrivalCutoff := lastOK.Unix()
 
-	// Lookback-old work-side rows. CODE r3 HIGH 1: effective-
-	// token semantic so byte_estimated rows record the correct
-	// delta_tokens instead of zero (completion_tokens NULL).
+	// Work-side late events: ts_utc < lookback AND
+	// created_at_utc > lastOK (arrived since last successful
+	// tick). CODE r3 HIGH 1 effective-token semantic preserved.
 	workQ := `
         INSERT INTO stats_late_events (event_unix_ts, provider_id, delta_tokens, source_billing_row)
         SELECT EXTRACT(EPOCH FROM lrc.ts_utc)::BIGINT AS evt_ts,
@@ -68,6 +69,7 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
           JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
          WHERE EXTRACT(EPOCH FROM lrc.ts_utc) < $1
            AND ($2 = 0 OR EXTRACT(EPOCH FROM lrc.ts_utc) >= $2)
+           AND EXTRACT(EPOCH FROM lrc.created_at_utc) > $3
            AND lrc.fault_flag = 'none'
            AND lrc.quarantined = FALSE
            AND NOT EXISTS (
@@ -75,29 +77,18 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
                 WHERE sle.source_billing_row = 'lrc:' || lrc.id::TEXT
            )
     `
-	if _, err := conn.ExecContext(ctx, workQ, cutoff, winStart); err != nil {
+	if _, err := conn.ExecContext(ctx, workQ, cutoff, winStart, arrivalCutoff); err != nil {
 		return fmt.Errorf("late events work: %w", err)
 	}
 
-	// Lookback-old rewards-side rows.
-	const rewardsQ = `
-        INSERT INTO stats_late_events (event_unix_ts, provider_id, delta_usd, source_billing_row)
-        SELECT prl.unix_ts,
-               prl.provider_id,
-               prl.amount_usd,
-               'prl:' || prl.id::TEXT AS src
-          FROM provider_rewards_ledger prl
-          JOIN provider_tokens pt ON pt.provider_id = prl.provider_id
-         WHERE prl.unix_ts < $1
-           AND ($2 = 0 OR prl.unix_ts >= $2)
-           AND NOT EXISTS (
-               SELECT 1 FROM stats_late_events sle
-                WHERE sle.source_billing_row = 'prl:' || prl.id::TEXT
-           )
-    `
-	if _, err := conn.ExecContext(ctx, rewardsQ, cutoff, winStart); err != nil {
-		return fmt.Errorf("late events rewards: %w", err)
-	}
+	// Rewards-side late events are NOT recorded in v0.1 IMPL
+	// because SPEC §9.1a's `provider_rewards_ledger` schema has
+	// no created_at column — there is no arrival watermark
+	// available to filter "old historical row" vs "newly-arrived
+	// correction." The nightly Shape C rebuild still reconciles
+	// any rewards-row corrections that drift the snapshot.
+	// v0.2 SPEC bump adding created_at to §9.1a would unblock
+	// symmetric rewards-side late-event recording.
 
 	return nil
 }

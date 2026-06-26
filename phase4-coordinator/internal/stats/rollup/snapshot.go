@@ -23,15 +23,15 @@ type SnapshotProvider interface {
 // `stats_overview_current` columns the rollup writes at every
 // overview tick.
 type OverviewSnapshot struct {
-	NodesOnline            int
-	NodesHardwareAttested  int
-	BandwidthGBPerSec      int64
-	NetworkPowerKW         float64
-	NetworkUtilizationPct  int
-	GPUCoresTotal          int
-	CPUCoresTotal          int
-	UnifiedRAMGBTotal      int
-	ModelsServing          int
+	NodesOnline           int
+	NodesHardwareAttested int
+	BandwidthGBPerSec     int64
+	NetworkPowerKW        float64
+	NetworkUtilizationPct int
+	GPUCoresTotal         int
+	CPUCoresTotal         int
+	UnifiedRAMGBTotal     int
+	ModelsServing         int
 	// At is the moment the snapshot was taken; the rollup uses
 	// it as the `stats_overview_current.generated_at` value
 	// when it writes (subject to the tick-time override below).

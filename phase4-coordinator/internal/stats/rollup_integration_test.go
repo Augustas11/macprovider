@@ -72,6 +72,7 @@ CREATE TABLE ledger_request_credits (
     attempt_n                   INTEGER NOT NULL,
     provider_id                 TEXT NOT NULL,
     ts_utc                      TIMESTAMPTZ NOT NULL,
+    created_at_utc              TIMESTAMPTZ NOT NULL DEFAULT now(),
     prompt_tokens               BIGINT,
     completion_tokens           BIGINT,
     estimated_completion_tokens BIGINT,

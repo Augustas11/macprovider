@@ -91,12 +91,13 @@ func runLeaderboardTick(ctx context.Context, db *sql.DB, cfg Config, window stri
 	// to reconcile. This runs AFTER the tick commits so a
 	// retention failure doesn't roll back the tick.
 	if window == "30d" || window == "all" {
-		if err := detectLateEvents(ctx, db, cfg, window, now); err != nil {
-			// Non-fatal: late-event detection failure is logged
-			// upstream via stats_components_health; the next
-			// nightly rebuild will reconcile from OLTP truth
-			// regardless. We return the error so the caller
-			// surfaces it.
+		// The bootstrap path runs this from the full-recompute
+		// tick (this function). lastOK at bootstrap time is
+		// `now` (we just wrote it). detectLateEvents filters
+		// arrivals AFTER lastOK so the bootstrap call records
+		// zero rows — exactly what we want (bootstrap recompute
+		// already incorporated everything).
+		if err := detectLateEvents(ctx, db, cfg, window, now, now); err != nil {
 			return fmt.Errorf("leaderboard %s late events: %w", window, err)
 		}
 	}
@@ -193,7 +194,31 @@ func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window 
 			return nil, fmt.Errorf("bucket %s: %w", pid, err)
 		}
 
-		_ = hasWork // explicit: w defaults to zero workAgg if no work rows; rewardsUSD captures rewards-only providers
+		_ = hasWork
+
+		// Round-4 CODE r4 HIGH 1 fix: rewards-only providers
+		// previously had NULL last_seen_at because the field came
+		// from work-side MIN/MAX. Now combine with rewards
+		// MIN/MAX so the drop-out query in incremental.go can
+		// keep them alive while their reward unix_ts is still
+		// inside the window.
+		firstSeen := w.firstSeen
+		lastSeen := w.lastSeen
+		if hasRewards {
+			if r.firstUnixTs.Valid {
+				rewardsFirst := time.Unix(r.firstUnixTs.Int64, 0).UTC()
+				if firstSeen == nil || rewardsFirst.Before(*firstSeen) {
+					firstSeen = &rewardsFirst
+				}
+			}
+			if r.lastUnixTs.Valid {
+				rewardsLast := time.Unix(r.lastUnixTs.Int64, 0).UTC()
+				if lastSeen == nil || rewardsLast.After(*lastSeen) {
+					lastSeen = &rewardsLast
+				}
+			}
+		}
+
 		rows = append(rows, leaderboardRow{
 			ProviderID:         pid,
 			Pseudonym:          pseudonymize(pid),
@@ -202,8 +227,8 @@ func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window 
 			EarningsRewardsUSD: rewardsUSD,
 			Tokens:             w.tokens,
 			Jobs:               w.jobs,
-			FirstSeenAt:        w.firstSeen,
-			LastSeenAt:         w.lastSeen,
+			FirstSeenAt:        firstSeen,
+			LastSeenAt:         lastSeen,
 			Bucket:             bucket,
 		})
 	}
@@ -221,7 +246,9 @@ type workAgg struct {
 }
 
 type rewardsAgg struct {
-	amount *big.Rat
+	amount      *big.Rat
+	firstUnixTs sql.NullInt64
+	lastUnixTs  sql.NullInt64
 }
 
 // aggregateWorkPerProvider sums work-side counters per provider
@@ -280,10 +307,18 @@ func aggregateWorkPerProvider(ctx context.Context, db *sql.DB, sinceUnix, endUni
 // enforces the Step 1 trust-source decision — a rewards-only
 // provider absent from `provider_tokens` CANNOT enter the
 // leaderboard. SECURITY r1 CRIT-1 + ARCH r1 CRIT-1.
+// aggregateRewardsPerProvider returns per-provider rewards
+// totals AND first/last unix timestamps so the leaderboard
+// row's last_seen_at can reflect rewards-only providers
+// (round-4 CODE r4 HIGH 1 fix: NULL last_seen_at on
+// rewards-only rows caused the incremental drop-out query
+// to delete them on the next tick).
 func aggregateRewardsPerProvider(ctx context.Context, db *sql.DB, sinceUnix, endUnix int64) (map[string]rewardsAgg, error) {
 	const q = `
         SELECT prl.provider_id,
-               COALESCE(SUM(prl.amount_usd), 0) AS amount
+               COALESCE(SUM(prl.amount_usd), 0) AS amount,
+               MIN(prl.unix_ts) AS first_unix_ts,
+               MAX(prl.unix_ts) AS last_unix_ts
           FROM provider_rewards_ledger prl
           JOIN provider_tokens pt ON pt.provider_id = prl.provider_id
          WHERE ($1 = 0 OR prl.unix_ts >= $1)
@@ -298,14 +333,15 @@ func aggregateRewardsPerProvider(ctx context.Context, db *sql.DB, sinceUnix, end
 	out := make(map[string]rewardsAgg)
 	for rows.Next() {
 		var pid, amtStr string
-		if err := rows.Scan(&pid, &amtStr); err != nil {
+		var first, last sql.NullInt64
+		if err := rows.Scan(&pid, &amtStr, &first, &last); err != nil {
 			return nil, err
 		}
 		amt, ok := new(big.Rat).SetString(amtStr)
 		if !ok {
 			amt = new(big.Rat)
 		}
-		out[pid] = rewardsAgg{amount: amt}
+		out[pid] = rewardsAgg{amount: amt, firstUnixTs: first, lastUnixTs: last}
 	}
 	return out, rows.Err()
 }

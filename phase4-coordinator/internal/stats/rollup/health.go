@@ -13,13 +13,13 @@ import (
 type component string
 
 const (
-	componentOverview        component = "overview"
-	componentTimeseriesRpm   component = "timeseries_rpm"
-	componentTimeseriesTpm   component = "timeseries_tpm"
-	componentLeaderboard24h  component = "leaderboard_24h"
-	componentLeaderboard7d   component = "leaderboard_7d"
-	componentLeaderboard30d  component = "leaderboard_30d"
-	componentLeaderboardAll  component = "leaderboard_all"
+	componentOverview       component = "overview"
+	componentTimeseriesRpm  component = "timeseries_rpm"
+	componentTimeseriesTpm  component = "timeseries_tpm"
+	componentLeaderboard24h component = "leaderboard_24h"
+	componentLeaderboard7d  component = "leaderboard_7d"
+	componentLeaderboard30d component = "leaderboard_30d"
+	componentLeaderboardAll component = "leaderboard_all"
 )
 
 // healthOK marks the component as having a fresh successful
