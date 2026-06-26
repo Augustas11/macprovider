@@ -166,9 +166,13 @@ NGINX_CID=$(docker run -d \
   -v "$TMP/log:/var/log/nginx" \
   "$NGINX_IMAGE")
 
-# Discover the host-mapped port.
+# Discover the host-mapped port. Docker Desktop with IPv6
+# enabled emits TWO lines for each published port (one IPv4
+# `0.0.0.0:PORT`, one IPv6 `[::]:PORT`); `head -1` keeps only
+# the IPv4 line so HOST_PORT is a single token instead of a
+# multiline value that breaks the BASE URL on local runs.
 sleep 2
-HOST_PORT=$(docker port "$NGINX_CID" 18080 | sed 's/^.*://')
+HOST_PORT=$(docker port "$NGINX_CID" 18080 | head -1 | sed 's/^.*://')
 if [ -z "$HOST_PORT" ]; then fail "could not discover nginx host port"; exit 1; fi
 BASE="http://127.0.0.1:${HOST_PORT}"
 # Wait for nginx readiness.
