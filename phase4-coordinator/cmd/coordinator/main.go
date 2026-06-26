@@ -132,6 +132,10 @@ func main() {
 				BackfillMode:            cfg.Stats.Rollup.BackfillMode,
 				PartialHistorySince:     cfg.Stats.Rollup.PartialHistorySince,
 				LateEventsRetentionDays: cfg.Stats.Rollup.LateEventsRetentionDays,
+				UsdPerMillionCredits:    cfg.Stats.Rollup.UsdPerMillionCredits,
+				DriftThresholdRatio:     cfg.Stats.Rollup.DriftThresholdRatio,
+				NightlyRebuildHourUTC:   cfg.Stats.Rollup.NightlyRebuildHourUTC,
+				LateEventsLookbackHours: cfg.Stats.Rollup.LateEventsLookbackHours,
 			},
 			CORS: stats.CORSConfig{
 				AccessControlMaxAgeSeconds: cfg.Stats.CORS.AccessControlMaxAgeSeconds,

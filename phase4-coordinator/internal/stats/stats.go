@@ -69,8 +69,9 @@ type PartnerKeysConfig struct {
 	WriterDSN                string
 }
 
-// RollupConfig — Step 1 declares fields Step 2 needs so Step 2's
-// PR is a code-only change. Step 1 itself does not consume Rollup.
+// RollupConfig pins the operator-tunable knobs the Step 2 rollup
+// package consumes. Step 1 declared the seam; Step 2 fills the
+// rollup tick implementations.
 type RollupConfig struct {
 	// BackfillMode is one of "partial" (Path A, default) or
 	// "full" (Path B). See SPEC §9.7.
@@ -79,9 +80,23 @@ type RollupConfig struct {
 	// in Path A. Empty when BackfillMode = "full".
 	PartialHistorySince string
 	// LateEventsRetentionDays — SPEC §9.3 (v0.1.7). Default 90;
-	// floor 30. The rollup refuses to start (or clamps + warns)
-	// if below floor (Step 2 decides the failure mode).
+	// floor 30. Pin: clamp+warn for values in (0, 30); a 0 means
+	// "use default" (90).
 	LateEventsRetentionDays int
+	// UsdPerMillionCredits — credits→USD conversion factor.
+	// Default 1.0. earnings_work_usd = provider_credits *
+	// UsdPerMillionCredits / 1_000_000.
+	UsdPerMillionCredits float64
+	// DriftThresholdRatio — fractional divergence threshold for
+	// the nightly rebuild's drift-detection log emission per
+	// SPEC §9.4. Default 0.005 (0.5%).
+	DriftThresholdRatio float64
+	// NightlyRebuildHourUTC — UTC hour [0,23] for the nightly
+	// stats_leaderboard_all + stats_leaderboard_30d rebuild.
+	// Default 9 per SPEC §9.3.
+	NightlyRebuildHourUTC int
+	// LateEventsLookbackHours — SPEC §9.3 48h default.
+	LateEventsLookbackHours int
 }
 
 // CORSConfig — Step 1 declares fields Step 3 needs so Step 3's

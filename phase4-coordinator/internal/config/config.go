@@ -96,8 +96,32 @@ type StatsRollupConfig struct {
 	// consume.
 	PartialHistorySince string `yaml:"partial_history_since"`
 	// LateEventsRetentionDays — SPEC §9.3 (v0.1.7). Default 90;
-	// floor 30. Step 2 owns the floor-clamp behavior.
+	// floor 30. Step 2 floor-clamps with a WARN log; below-floor
+	// values DO NOT fail startup (chosen pin: clamp+warn).
 	LateEventsRetentionDays int `yaml:"late_events_retention_days"`
+	// UsdPerMillionCredits — credits→USD conversion factor.
+	// SPEC-005 v0.3 stores `ledger_request_credits.provider_credits`
+	// as INTEGER credits; SPEC-016 v0.1.19 has not normatively
+	// pinned a credit→USD ratio. SPEC-017 v0.1 IMPL exposes this
+	// as a single operator-tunable factor: rollup computes
+	// `earnings_work_usd = provider_credits * UsdPerMillionCredits
+	// / 1_000_000`. Default 1.0 (1 USD per million credits).
+	// Operator MAY override per ramp; the formula is documented
+	// in OPS.md.
+	UsdPerMillionCredits float64 `yaml:"usd_per_million_credits"`
+	// DriftThresholdRatio — fractional divergence (>0.005 = >0.5%
+	// per SPEC §9.4) at which the nightly rebuild emits
+	// `stats_rollup_drift_detected`. Operator MAY tune within
+	// [0.001, 0.05]; default 0.005.
+	DriftThresholdRatio float64 `yaml:"drift_threshold_ratio"`
+	// NightlyRebuildHourUTC — UTC hour [0,23] for the nightly
+	// `stats_leaderboard_all` + `stats_leaderboard_30d` rebuild.
+	// Default 9 per SPEC §9.3 (operator-pin off-hours).
+	NightlyRebuildHourUTC int `yaml:"nightly_rebuild_hour_utc"`
+	// LateEventsLookbackHours — SPEC §9.3 48h default; operator
+	// MAY raise to 72/96. Lower than 24 breaks the 1× SPEC-005
+	// reconciliation-margin invariant.
+	LateEventsLookbackHours int `yaml:"late_events_lookback_hours"`
 }
 
 type StatsCORSConfig struct {
@@ -480,6 +504,10 @@ func Default() Config {
 			Rollup: StatsRollupConfig{
 				BackfillMode:            "partial",
 				LateEventsRetentionDays: 90,
+				UsdPerMillionCredits:    1.0,
+				DriftThresholdRatio:     0.005,
+				NightlyRebuildHourUTC:   9,
+				LateEventsLookbackHours: 48,
 			},
 			CORS: StatsCORSConfig{
 				AccessControlMaxAgeSeconds: 60,
@@ -1013,8 +1041,26 @@ func (c Config) validateStats() error {
 	default:
 		return fmt.Errorf("stats.rollup.backfill_mode must be one of {partial, full} (got %q)", s.Rollup.BackfillMode)
 	}
-	if s.Rollup.LateEventsRetentionDays != 0 && s.Rollup.LateEventsRetentionDays < 30 {
-		return fmt.Errorf("stats.rollup.late_events_retention_days must be >= 30 (SPEC §9.3 floor)")
+	// LateEventsRetentionDays: chosen pin per BUILD §2 Step 2 is
+	// CLAMP+WARN (handled at rollup boot, not config validation).
+	// We still reject below 30 here ONLY if explicitly set to
+	// a negative value; zero = use default (90). A value in
+	// (0, 30) is permitted but will be clamped to 30 by the
+	// rollup with a WARN log.
+	if s.Rollup.LateEventsRetentionDays < 0 {
+		return fmt.Errorf("stats.rollup.late_events_retention_days must be >= 0 (0 = default 90, values in (0,30) clamped to 30 with WARN)")
+	}
+	if s.Rollup.UsdPerMillionCredits < 0 {
+		return fmt.Errorf("stats.rollup.usd_per_million_credits must be >= 0")
+	}
+	if s.Rollup.DriftThresholdRatio != 0 && (s.Rollup.DriftThresholdRatio < 0.001 || s.Rollup.DriftThresholdRatio > 0.05) {
+		return fmt.Errorf("stats.rollup.drift_threshold_ratio must be in [0.001, 0.05] when set (SPEC §9.4 default 0.005)")
+	}
+	if s.Rollup.NightlyRebuildHourUTC < 0 || s.Rollup.NightlyRebuildHourUTC > 23 {
+		return fmt.Errorf("stats.rollup.nightly_rebuild_hour_utc must be in [0, 23]")
+	}
+	if s.Rollup.LateEventsLookbackHours != 0 && s.Rollup.LateEventsLookbackHours < 24 {
+		return fmt.Errorf("stats.rollup.late_events_lookback_hours must be >= 24 (SPEC §9.3 1× reconciliation-margin floor)")
 	}
 	if s.CORS.AccessControlMaxAgeSeconds < 0 || s.CORS.AccessControlMaxAgeSeconds > 300 {
 		return fmt.Errorf("stats.cors.access_control_max_age_seconds must be between 0 and 300 (SPEC §5.7)")
