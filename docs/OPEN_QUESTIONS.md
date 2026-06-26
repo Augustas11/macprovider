@@ -47,6 +47,16 @@ same commit. PR review for any new SPEC version SHOULD diff this file.
   for a small implementation patch or BUILD prompt. SPEC-014..016 not
   triaged in this pass; the SPEC-014/Q1..Q11 omnibus is intentionally
   parked pending operator portal-scope review.
+- **2026-06-26 (correction same day)** — SPEC-003/OQ-1 corrected from
+  `gated` to `closed`. The initial pass relied on memory entries
+  (`macprovider-launchd-amfi-blocker-macos-26`,
+  `macprovider-v1-3-2-apple-dev-enrollment-blocker`) that were ~48
+  hours stale: Apple Developer Program enrollment is in fact done and
+  PR #62 + PR #148 + PR #149 landed the full Developer-ID-signed +
+  notarized + stapled .pkg pipeline. v1.6.1 (2026-06-25) ships the
+  first stapled .pkg asset. Pattern reinforced: re-check memory
+  entries against recent commits before treating them as load-bearing
+  in a triage call (memory: `before-recommending-from-memory`).
 
 ---
 
@@ -67,7 +77,7 @@ same commit. PR review for any new SPEC version SHOULD diff this file.
 
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
-| SPEC-003/OQ-1 | gated | operator | Apple Dev Program enrollment ($99) | Code signing — Developer ID + notarization. **2026-06-26 triage:** Re-statused. `.github/workflows/release.yml:83+` already implements conditional Developer ID Application signing, hardened-runtime codesign, `notarytool` submit, staple, and (when present) Developer ID Installer signing for the `.pkg`. The pipeline is procurement-gated, not code-gated — it activates the moment Apple secrets exist. v1.3.1+ launchd installs on macOS 26 fail today (memory: `macprovider-launchd-amfi-blocker-macos-26`). **Action:** file a tracking issue with the enrollment receipt as close condition. |
+| SPEC-003/OQ-1 | closed | — | — | Code signing — Developer ID + notarization. **2026-06-26 triage (corrected later same day):** CLOSED. Apple Developer Program is enrolled and the release pipeline is live. PR #62 (`release: conditional Developer ID signing + notarization (unblocks macOS 26.3.1 launchd)`, merged 2026-06-24) shipped the pipeline activation; PR #148 (`release: skip raw CLI stapling after notarization`) and PR #149 (`release: add signed stapled pkg asset`) finished the .pkg flow; v1.6.1 (2026-06-25) is the first release whose `macprovider-cli-v1.6.1-darwin-arm64.pkg` asset is Developer-ID-signed, notarized, and stapled. The earlier "gated on procurement" row in this same pass was wrong — it relied on stale memory (`macprovider-launchd-amfi-blocker-macos-26`, `macprovider-v1-3-2-apple-dev-enrollment-blocker`) that was ~48 hours out of date. Those memories have been updated. |
 | SPEC-003/* deferrals | tracked | implementer | issue #82 | Other SPEC-003 deferred items rolled up into tracking issue #82. |
 
 ## SPEC-004 — Smart Router (v0.3.1, locked)
