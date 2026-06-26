@@ -366,6 +366,47 @@ func TestAC12_304IfNoneMatch(t *testing.T) {
 	}
 }
 
+// Final adversarial audit (claude-subagent HIGH 1) — a 304
+// Not Modified response from a cross-origin conditional GET
+// MUST carry `Access-Control-Allow-Origin` per the Fetch spec.
+// SPEC §5.7 carves out no 304 exception. Without this header
+// a browser issuing a `If-None-Match` request from
+// console.streamvc.live / portal.streamvc.live silently
+// rejects the response as a CORS failure even though the
+// response is functionally correct. Run BOTH cacheable
+// endpoints (/overview AND /leaderboard) so the SPEC-AC-12
+// `/overview` path is exercised alongside the leaderboard one.
+func TestAC12_304IfNoneMatch_CORSHeadersPresent(t *testing.T) {
+	h, _ := setupStatsHandler(t)
+	for _, path := range []string{"/v1/stats/overview", "/v1/stats/leaderboard"} {
+		t.Run(path, func(t *testing.T) {
+			hdr1 := http.Header{}
+			hdr1.Set("Origin", "https://console.streamvc.live")
+			first := mustDoWithHeaders(t, h, http.MethodGet, path, hdr1)
+			if first.StatusCode != http.StatusOK {
+				t.Fatalf("first request not 200, got %d body=%s", first.StatusCode, readBody(t, first))
+			}
+			if got := first.Header.Get("Access-Control-Allow-Origin"); got == "" {
+				t.Fatalf("200 response missing Access-Control-Allow-Origin (sanity check)")
+			}
+			etag := first.Header.Get("ETag")
+			if etag == "" {
+				t.Fatalf("ETag missing on first response")
+			}
+			hdr2 := http.Header{}
+			hdr2.Set("Origin", "https://console.streamvc.live")
+			hdr2.Set("If-None-Match", etag)
+			second := mustDoWithHeaders(t, h, http.MethodGet, path, hdr2)
+			if second.StatusCode != http.StatusNotModified {
+				t.Fatalf("expected 304, got %d body=%s", second.StatusCode, readBody(t, second))
+			}
+			if got := second.Header.Get("Access-Control-Allow-Origin"); got == "" {
+				t.Errorf("304 response MUST carry Access-Control-Allow-Origin per Fetch spec; got empty")
+			}
+		})
+	}
+}
+
 // AC-7 — health 200 even when degraded.
 func TestAC7_HealthAlways200(t *testing.T) {
 	h, adminDB := setupStatsHandler(t)

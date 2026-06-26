@@ -626,13 +626,22 @@ with rate-limit + cache directives per BUILD §2 Step 4.B.
 # Issue a successor (returns the new raw token EXACTLY ONCE on
 # stdout). If invoking under systemd-run / journalctl, set
 # `--token-out /tmp/partner-rotated.token` (mode 0600) instead.
+#
+# `--config` MUST be passed explicitly: a manual `sudo -u
+# macprovider /opt/macprovider/coordinator ...` invocation does
+# NOT inherit the systemd unit's WorkingDirectory or env file
+# (see macprovider-coordinator.service); without `--config` the
+# CLI looks for the relative path `coordinator.yaml` in the
+# current working directory and fails to resolve the admin DSN.
 sudo -u macprovider /opt/macprovider/coordinator partner-keys issue \
+  --config /opt/macprovider/coordinator.yaml \
   --label "ACME inc rotated 2026-09-01" \
   --rotate-from 17
 
 # Operator-decided overlap window (default suggestion: 7 days). After
 # the partner confirms they've cut over, revoke the predecessor:
 sudo -u macprovider /opt/macprovider/coordinator partner-keys revoke \
+  --config /opt/macprovider/coordinator.yaml \
   --id 17 --reason "rotation completed"
 ```
 
@@ -651,7 +660,9 @@ to confirm the row state and re-run with the correct id.
 
 ```bash
 # Takes effect on the next request (no in-memory cache).
+# `--config` MUST be passed explicitly (see §10.1 note).
 sudo -u macprovider /opt/macprovider/coordinator partner-keys revoke \
+  --config /opt/macprovider/coordinator.yaml \
   --id 23 --reason "key suspected exposed in <PARTNER>'s GitHub repo"
 ```
 
@@ -695,7 +706,9 @@ mistake (e.g. legal/safety incident), the operator may flip the row
 back to `bucketed` with an audit trail:
 
 ```bash
+# `--config` MUST be passed explicitly (see §10.1 note).
 sudo -u macprovider /opt/macprovider/coordinator visibility revert \
+  --config /opt/macprovider/coordinator.yaml \
   --id <provider_id> \
   --reason "incident IR-2026-09 — leaked exact $ via public scrape"
 ```

@@ -24,10 +24,14 @@ Status: **CONVERGED.** All 9 audit lanes locked
 >     <URL OR file path to the signed acknowledgment>.
 
 Live production sign-off status: **NOT YET SATISFIED.**
-PR #173 ships the *capability*; the gate is wired and
-non-bypassable. Operator must record the sign-off before
+PR #173 ships the *capability*; the gate is **operationally
+enforced via this runbook (OPS.md §10.5) — the binary does NOT
+block the INSERT.** SPEC §6.6.2 itself only mandates the runbook
+sign-off; code-level enforcement was never required by the
+controlling contract. Operator must record the sign-off before
 running `coordinator partner-keys issue ...` against
-production.
+production. The earlier wording "wired and non-bypassable" was
+misleading — corrected during the final adversarial audit.
 
 ## Audit-lane lock matrix
 

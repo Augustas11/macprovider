@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
 	"sync"
 	"time"
 
@@ -212,6 +213,23 @@ func (r *Runner) spawnTick(ctx context.Context, name string, interval time.Durat
 // short hint) rather than serialized raw, so downstream Step
 // 3/4 log/db propagation cannot persist arbitrary strings —
 // round-1 SECURITY r1 MED-2 fix.
+//
+// Final adversarial audit (codex CODE MEDIUM 1+2):
+//   - The healthFail write uses a SHORT BOUNDED context derived
+//     from the tick context's CANCELLATION SIGNAL but with its
+//     own 5s timeout. Previously this used context.Background()
+//     which made the write uncancellable on shutdown — a slow
+//     or partitioned DB could hold `Runner.Wait()` indefinitely.
+//     We still record the error/panic on best-effort even when
+//     the tick context is already done, so health state reflects
+//     the failure for the next operator query.
+//   - `err.Error()` for ordinary returned errors is now passed
+//     through `redactErrMsg` instead of stored raw. The
+//     classifier strips DSN-shaped substrings, token-hash bytes,
+//     and the `mpk_` token prefix before persisting into
+//     stats_components_health.last_error_message. classifyPanic
+//     already handled the panic path; this closes the parallel
+//     gap on the error path.
 func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(context.Context) error) {
 	start := time.Now()
 	defer func() {
@@ -223,7 +241,9 @@ func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(c
 				Str("recovered_class", class).
 				Msg("rollup tick panic recovered; job will continue at next interval")
 			if c != "" {
-				_ = healthFail(context.Background(), r.db, c, time.Now().UTC(), "panic: "+class)
+				healthCtx, cancel := boundedHealthCtx(ctx)
+				_ = healthFail(healthCtx, r.db, c, time.Now().UTC(), "panic: "+class)
+				cancel()
 			}
 			if r.metrics != nil && c != "" {
 				r.metrics.RollupErrorsTotal.WithLabelValues(string(c)).Inc()
@@ -237,7 +257,9 @@ func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(c
 			Str("job", name).
 			Msg("rollup tick error; health row updated; will retry next tick")
 		if c != "" {
-			_ = healthFail(context.Background(), r.db, c, time.Now().UTC(), err.Error())
+			healthCtx, cancel := boundedHealthCtx(ctx)
+			_ = healthFail(healthCtx, r.db, c, time.Now().UTC(), redactErrMsg(err.Error()))
+			cancel()
 		}
 		if r.metrics != nil && c != "" {
 			r.metrics.RollupErrorsTotal.WithLabelValues(string(c)).Inc()
@@ -284,6 +306,59 @@ func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(c
 // wired (operator-side, not in this code).
 func classifyPanic(rec any) string {
 	return fmt.Sprintf("%T", rec)
+}
+
+// boundedHealthCtx returns a context for the post-tick health
+// write. We do NOT propagate `ctx` directly because a cancelled
+// parent context would abort the health write before the
+// operator gets a record of the failure. But we also must NOT
+// use `context.Background()` (the previous behavior) because a
+// slow or partitioned DB could hold `Runner.Wait()` past
+// shutdown indefinitely. The compromise: a fresh 5s timeout
+// context disconnected from the parent's cancellation. The
+// runner's `Wait()` will still drain because the per-tick
+// goroutine returns once `runOne` returns (within 5s of the
+// healthFail attempt).
+//
+// Final adversarial audit (codex CODE MEDIUM 1) fix.
+func boundedHealthCtx(_ context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), 5*time.Second)
+}
+
+// redactErrMsg strips secret-shaped substrings from a returned
+// `err.Error()` before persisting it into
+// stats_components_health.last_error_message. The previous
+// behavior stored the raw string, so any lower-layer error
+// carrying a DSN, partner-key token, or token_hash hex string
+// would persist into the health row. This function applies the
+// minimal viable redaction set: any DSN-shaped prefix
+// (`postgres://`, `postgresql://`), any `mpk_*` token-shaped
+// substring, any `token_hash=...` form, and any 32+-hex-char
+// run (token_hash bytes are 64 hex chars). Truncates to 256
+// chars after redaction so an attacker who supplies a long
+// hostile error string cannot bloat the health row.
+//
+// Final adversarial audit (codex CODE MEDIUM 2) fix.
+func redactErrMsg(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	out := msg
+	for _, pattern := range []string{
+		`postgres://[^\s"]*`,
+		`postgresql://[^\s"]*`,
+		`mpk_[A-Za-z0-9_-]+`,
+		`token_hash=[A-Fa-f0-9]+`,
+		`\b[A-Fa-f0-9]{32,}\b`,
+	} {
+		re := regexp.MustCompile(pattern)
+		out = re.ReplaceAllString(out, "<REDACTED>")
+	}
+	const maxLen = 256
+	if len(out) > maxLen {
+		out = out[:maxLen]
+	}
+	return out
 }
 
 // spawnNightlyRebuild fires the §9.4 rebuild at the configured

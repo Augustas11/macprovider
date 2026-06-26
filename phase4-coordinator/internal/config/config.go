@@ -1024,6 +1024,24 @@ func (c Config) validateStats() error {
 	if !s.Enabled {
 		return nil
 	}
+	// Final adversarial audit (codex SECURITY MEDIUM 1) — when
+	// stats are enabled, `/metrics` is mounted on the provider
+	// mux at provider-port. The Prometheus metric
+	// `stats_partner_key_request_total{partner_key_id=...}`
+	// is a partner-key enumeration oracle if it ever lands on
+	// a public interface, so fail closed at config-validation
+	// time: refuse to start if listen.bind_address is not a
+	// loopback host. Pearl deploy runs `127.0.0.1:8444`; a
+	// future operator who mis-types `0.0.0.0` or `::` gets a
+	// clear startup error instead of an exposed enumeration
+	// surface.
+	bindHost := strings.TrimSpace(c.Listen.BindAddress)
+	if bindHost == "" {
+		return fmt.Errorf("listen.bind_address must be set (loopback required when stats.enabled is true)")
+	}
+	if !isLoopbackHost(bindHost) {
+		return fmt.Errorf("stats.enabled=true requires listen.bind_address to be a loopback host (127.0.0.1, ::1, or localhost); got %q. The /metrics endpoint mounts on the provider port and a non-loopback bind exposes the stats_partner_key_request_total enumeration oracle. Place the coordinator behind a reverse proxy that terminates the public surface (e.g. nginx) and keep the binary bound to loopback", bindHost)
+	}
 	if strings.TrimSpace(s.ReaderDSN) == "" {
 		return fmt.Errorf("stats.reader_dsn must be set when stats.enabled is true")
 	}

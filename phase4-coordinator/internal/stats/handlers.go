@@ -696,9 +696,22 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, body any, gen
 		return
 	}
 	etag := weakETag(buf)
+	// Final adversarial audit (claude-subagent HIGH 1) — the
+	// 304 Not Modified branch MUST emit the same §5.7 CORS
+	// headers as the 200 branch. The Fetch spec requires
+	// `Access-Control-Allow-Origin` on EVERY cross-origin
+	// response (including 304), so a browser issuing a
+	// conditional GET with `If-None-Match` from
+	// console.streamvc.live / portal.streamvc.live would
+	// otherwise reject the response as a CORS failure even
+	// though the response is functionally correct. SPEC §5.7's
+	// CORS table carves out no 304 exception. Move the CORS
+	// header write BEFORE the 304 branch so both paths emit it.
+	writeCORSHeaders(w, ar.projection == "partner", ar.originPresent, ar.originValue)
 	if ifNoneMatchEquals(r.Header.Get("If-None-Match"), etag) {
-		// 304 carries only RFC 7232 headers per §5.9. No body,
-		// no X-Stats-Generated-At.
+		// 304 carries the RFC 7232 conditional-GET headers per
+		// §5.9 (no body, no X-Stats-Generated-At) AND the
+		// projection-aware CORS headers emitted above.
 		w.Header().Set("ETag", etag)
 		w.Header().Set("Cache-Control", cacheControl)
 		w.Header().Set("Vary", vary)
@@ -711,7 +724,6 @@ func writeJSON(w http.ResponseWriter, r *http.Request, status int, body any, gen
 	w.Header().Set("Cache-Control", cacheControl)
 	w.Header().Set("Vary", vary)
 	w.Header().Set("X-Stats-Generated-At", generatedAt.UTC().Format(time.RFC3339))
-	writeCORSHeaders(w, ar.projection == "partner", ar.originPresent, ar.originValue)
 
 	w.WriteHeader(status)
 	if r.Method == http.MethodHead {

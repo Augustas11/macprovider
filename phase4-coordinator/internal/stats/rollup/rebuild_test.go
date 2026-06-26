@@ -140,3 +140,72 @@ func TestClassifyPanic(t *testing.T) {
 type driverError string
 
 func (d driverError) Error() string { return string(d) }
+
+// TestRedactErrMsg — final adversarial audit (codex CODE MEDIUM
+// 2) fix: rollup tick errors that include DSN-shaped, token-
+// shaped, or token-hash-shaped substrings MUST NOT persist
+// those bytes into stats_components_health.last_error_message.
+// classifyPanic already handles the panic path with type-only;
+// redactErrMsg handles the ordinary-return-error path.
+func TestRedactErrMsg(t *testing.T) {
+	cases := []struct {
+		name     string
+		in       string
+		mustOmit []string
+	}{
+		{
+			"dsn_postgres",
+			`pq: connection refused at postgres://user:hunter2@db.example.com:5432/x?sslmode=disable`,
+			[]string{"postgres://", "hunter2"},
+		},
+		{
+			"dsn_postgresql",
+			`dial tcp: lookup failed (postgresql://app:s3cret@10.0.0.5/stats)`,
+			[]string{"postgresql://", "s3cret"},
+		},
+		{
+			"mpk_token_leaked",
+			`unknown row for mpk_AaBbCcDdEeFfGgHhIiJjKkLlMmNnOoPpQqRrSsTtUuVvWw`,
+			[]string{"mpk_AaBb"},
+		},
+		{
+			"token_hash_leaked",
+			`auth failed: token_hash=ABCDEF0123456789ABCDEF0123456789 not in table`,
+			[]string{"token_hash=", "ABCDEF0123456789"},
+		},
+		{
+			"raw_64hex_token_hash",
+			`lookup miss: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcd`,
+			[]string{"0123456789abcdef"},
+		},
+		{
+			"clean_message_preserved",
+			`pg: relation "stats_components_health" does not exist`,
+			nil,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := redactErrMsg(tc.in)
+			for _, banned := range tc.mustOmit {
+				if strings.Contains(out, banned) {
+					t.Errorf("redactErrMsg leaked %q in output %q (input %q)", banned, out, tc.in)
+				}
+			}
+			if tc.mustOmit == nil && !strings.Contains(out, "stats_components_health") {
+				t.Errorf("clean message corrupted: %q -> %q", tc.in, out)
+			}
+		})
+	}
+}
+
+// TestRedactErrMsgTruncatesLong — final adversarial audit
+// (codex CODE MEDIUM 2) fix: a hostile lower-layer error
+// returning megabytes of text must not bloat the health row.
+func TestRedactErrMsgTruncatesLong(t *testing.T) {
+	huge := strings.Repeat("x", 10_000)
+	out := redactErrMsg(huge)
+	if len(out) > 256 {
+		t.Errorf("redactErrMsg did not truncate to 256 chars; got %d", len(out))
+	}
+}
