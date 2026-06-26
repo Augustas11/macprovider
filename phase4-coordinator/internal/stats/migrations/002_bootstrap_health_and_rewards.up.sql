@@ -18,10 +18,10 @@ VALUES
     ('leaderboard_all',  'epoch'::timestamptz, 'epoch'::timestamptz)
 ON CONFLICT (component) DO NOTHING;
 
-INSERT INTO stats_rewards_populated (window, rewards_populated, generated_at)
+INSERT INTO stats_rewards_populated (window_label, rewards_populated, generated_at)
 VALUES
     ('24h', FALSE, 'epoch'::timestamptz),
     ('7d',  FALSE, 'epoch'::timestamptz),
     ('30d', FALSE, 'epoch'::timestamptz),
     ('all', FALSE, 'epoch'::timestamptz)
-ON CONFLICT (window) DO NOTHING;
+ON CONFLICT (window_label) DO NOTHING;

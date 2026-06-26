@@ -183,9 +183,14 @@ CREATE INDEX IF NOT EXISTS provider_rewards_ledger_pid_ts_idx
 -- the handler (Step 3) reads. The handler MUST NOT compute this
 -- synchronously from provider_rewards_ledger (the request-path role
 -- does not have SELECT on the ledger — that is by design).
+-- Column name `window` is RESERVED in PostgreSQL (used for window
+-- functions). v0.1.8 IMPL uses `window_label` for the storage
+-- column; the wire-protocol field exposed by Step 3's handler
+-- remains `meta.rewards_populated` per the locked SPEC §5.2,
+-- keyed by the same {24h,7d,30d,all} values.
 CREATE TABLE IF NOT EXISTS stats_rewards_populated (
-    window             TEXT PRIMARY KEY
-                       CHECK (window IN ('24h','7d','30d','all')),
+    window_label       TEXT PRIMARY KEY
+                       CHECK (window_label IN ('24h','7d','30d','all')),
     rewards_populated  BOOLEAN NOT NULL DEFAULT FALSE,
     generated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
