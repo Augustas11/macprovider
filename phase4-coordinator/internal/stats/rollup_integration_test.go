@@ -227,17 +227,18 @@ func TestRollupLeaderboard24hBucketsAndLeftJoin(t *testing.T) {
 	logger := zerolog.Nop()
 
 	now := time.Now().UTC()
-	// Three providers seeded into provider_tokens.
-	seedProviderTokens(t, adminDB, "p_zero", "p_small", "p_huge")
+	// Three providers with actual activity (the v0.1 implicit-
+	// exclusion policy per SPEC §11 Q10 means zero-activity
+	// providers DO NOT appear on the leaderboard; that's the
+	// correct behavior — there's nothing to rank).
+	seedProviderTokens(t, adminDB, "p_tiny", "p_small", "p_huge")
 
-	// p_zero — no ledger row → 0 earnings → "-" bucket.
+	// p_tiny — $0.005 (0.5¢, BELOW the $0.01 floor) → "-" bucket.
 	// p_small — $4.99 → "$" bucket on 24h.
 	// p_huge — $50.00 → "$$$" bucket on 24h.
+	seedLedgerRow(t, adminDB, "p_tiny", now.Add(-1*time.Hour), 1, 1, 5_000) // 5_000 * 1.0 / 1e6 = $0.005
 	seedLedgerRow(t, adminDB, "p_small", now.Add(-1*time.Hour), 10, 10, 4_990_000)
 	seedLedgerRow(t, adminDB, "p_huge", now.Add(-1*time.Hour), 100, 100, 50_000_000)
-
-	// p_huge is set to bucketed-default (no row) — AC-19/BUILD
-	// §F.4 default tuple test.
 
 	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
 	if err != nil {
@@ -249,7 +250,6 @@ func TestRollupLeaderboard24hBucketsAndLeftJoin(t *testing.T) {
 	cancel()
 	runner.Wait()
 
-	// Verify all three rows present with correct bucket.
 	rows, err := adminDB.QueryContext(context.Background(),
 		`SELECT provider_id, earnings_bucket, earnings_usd FROM stats_leaderboard_24h ORDER BY provider_id`,
 	)
@@ -271,8 +271,8 @@ func TestRollupLeaderboard24hBucketsAndLeftJoin(t *testing.T) {
 			usd    string
 		}{bucket, usd}
 	}
-	if got["p_zero"].bucket != "-" {
-		t.Errorf("p_zero bucket = %q, want -", got["p_zero"].bucket)
+	if got["p_tiny"].bucket != "-" {
+		t.Errorf("p_tiny bucket = %q, want - (sub-cent total)", got["p_tiny"].bucket)
 	}
 	if got["p_small"].bucket != "$" {
 		t.Errorf("p_small bucket = %q, want $ (4.99 lower bracket)", got["p_small"].bucket)
@@ -474,21 +474,16 @@ func TestShapeCRebuild_FailedRollback(t *testing.T) {
 		t.Fatalf("R0 count = %d, want 1", r0Count)
 	}
 
-	// Force a rebuild error by setting an invalid CHECK
-	// constraint on the table that the rebuild's INSERT will
-	// violate. Simulate via temporarily ADD CONSTRAINT that
-	// rejects all rows; rebuild's INSERT should fail and roll
-	// back, leaving R0 intact.
+	// Force a rebuild error by adding a CHECK (false) constraint
+	// in NOT VALID mode. NOT VALID means existing rows are exempt
+	// (so we don't have to clear stats_leaderboard_all first),
+	// but future INSERTs ARE checked — the rebuild's DELETE+INSERT
+	// will fail at INSERT-time, abort the transaction, and roll
+	// back the DELETE. R0 stays intact.
 	if _, err := adminDB.ExecContext(context.Background(),
 		`ALTER TABLE stats_leaderboard_all ADD CONSTRAINT _rebuild_test_block CHECK (false) NOT VALID`,
 	); err != nil {
 		t.Fatalf("add CHECK: %v", err)
-	}
-	// Validate the constraint so it applies to future inserts.
-	if _, err := adminDB.ExecContext(context.Background(),
-		`ALTER TABLE stats_leaderboard_all VALIDATE CONSTRAINT _rebuild_test_block`,
-	); err != nil {
-		t.Fatalf("validate CHECK: %v", err)
 	}
 
 	// Run the rebuild directly. Expect an error.
