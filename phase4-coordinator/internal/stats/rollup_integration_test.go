@@ -53,8 +53,18 @@ import (
 // per the trust-source decision record; the test stub shape
 // matches the SPEC-005 column names with Postgres TIMESTAMPTZ
 // for ts_utc (vs SQLite TEXT in the live billing store).
+//
+// Note: Step 1's `applyMigrationsAndStubOLTP` helper already
+// creates these tables as `id BIGSERIAL PRIMARY KEY` only — the
+// AC-9 permission test only needs the table identity. Step 2's
+// rollup needs the full column set, so we DROP and CREATE
+// fresh here. Ordering matters: drop ledger_request_credits
+// before provider_tokens (no FK between them in stubs, but
+// keep an explicit order for readability).
 const rollupOLTPStubDDL = `
-CREATE TABLE IF NOT EXISTS ledger_request_credits (
+DROP TABLE IF EXISTS ledger_request_credits CASCADE;
+DROP TABLE IF EXISTS provider_tokens CASCADE;
+CREATE TABLE ledger_request_credits (
     id                   BIGSERIAL PRIMARY KEY,
     request_id           TEXT NOT NULL,
     attempt_n            INTEGER NOT NULL,
@@ -66,7 +76,7 @@ CREATE TABLE IF NOT EXISTS ledger_request_credits (
     fault_flag           TEXT NOT NULL DEFAULT 'none',
     quarantined          BOOLEAN NOT NULL DEFAULT FALSE
 );
-CREATE TABLE IF NOT EXISTS provider_tokens (
+CREATE TABLE provider_tokens (
     provider_id  TEXT PRIMARY KEY,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -79,10 +89,10 @@ func setupRollupFixture(t *testing.T) (*pgFixture, *sql.DB) {
 	if _, err := adminDB.ExecContext(context.Background(), rollupOLTPStubDDL); err != nil {
 		t.Fatalf("create rollup OLTP stub: %v", err)
 	}
-	// Grants from migration 005 fired against an empty
-	// ledger_request_credits stub; refresh now that the actual
-	// stub-with-columns exists. The defensive DO block in 005
-	// only grants SELECT, so re-running is idempotent.
+	// The DROP+CREATE in rollupOLTPStubDDL invalidates the
+	// grants that migration 005's DO block applied to the
+	// original id-only stubs. Re-grant SELECT on the freshly
+	// created tables.
 	if _, err := adminDB.ExecContext(context.Background(), `
         GRANT SELECT ON ledger_request_credits TO stats_rollup;
         GRANT SELECT ON provider_tokens TO stats_rollup;
