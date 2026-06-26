@@ -121,6 +121,15 @@ type leaderboardRow struct {
 	RankEarnings int
 	RankTokens   int
 	RankJobs     int
+	// Round-5 ARCH r5 HIGH 1 fix: visibility tuple flows into the
+	// rollup row via the LEFT JOIN of provider_tokens ⋈
+	// provider_visibility with COALESCE defaults. v0.1 MUST NOT
+	// branch on VisibilityBlocked (§6.1 + §11 Q11 + BUILD §6 defer
+	// the partner-projection suppression to v0.2). The fields are
+	// carried for Step 3's handler to read from the rollup's
+	// production output rather than performing its own JOIN.
+	VisibilityMode    string
+	VisibilityBlocked bool
 }
 
 // computeLeaderboardRows aggregates the OLTP source for one
@@ -129,15 +138,16 @@ type leaderboardRow struct {
 // only `provider_id` values that can enter `stats_leaderboard_*`
 // storage are SPEC-002 v1.4 §7 authenticated.
 //
-// The function loads `provider_visibility` (the §6.1 left-join
-// data) for join-evidence completeness, but per the round-2
-// audit fix the rollup MUST NOT branch on
-// `blocked_from_partner_projection` in v0.1 — SPEC §6.1 + §11
-// Q11 + BUILD §6 defer that suppression semantic to v0.2.
-// The `mode` column is read but not persisted — Step 3's
-// handler reads it directly from `provider_visibility` for the
-// public/partner projection split (with default tuple bucketed
-// via COALESCE).
+// Round-5 ARCH r5 HIGH 1 fix: the §6.1 left-join is no longer a
+// discarded side-read. `loadProviderVisibility` now LEFT JOINs
+// `provider_tokens` ⋈ `provider_visibility` with COALESCE
+// defaults (`mode='bucketed'`, `blocked=FALSE` for absent rows),
+// returning one entry per authenticated provider. The result is
+// carried on every `leaderboardRow` as `VisibilityMode` /
+// `VisibilityBlocked`. v0.1 MUST NOT branch on
+// `VisibilityBlocked` (§6.1 + §11 Q11 + BUILD §6 defer that
+// suppression semantic to v0.2); Step 3's handler reads the
+// rollup's output, not its own JOIN.
 func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window string, now time.Time) ([]leaderboardRow, error) {
 	since := windowStart(window, now, cfg.PartialHistorySinceUnix)
 	endUnix := now.Unix()
@@ -166,18 +176,13 @@ func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window 
 	zeroRat := big.NewRat(0, 1)
 	rows := make([]leaderboardRow, 0, len(providerIDs))
 	for pid := range providerIDs {
-		// Round-2 ARCH/CODE/SECURITY r2 unanimous HIGH 1 fix:
-		// v0.1 §6.1 + §11 Q11 + BUILD §6 explicitly forbid
-		// branching on `blocked_from_partner_projection`. The
-		// rollup MAY load the column for join-evidence (left-
-		// join semantics demonstration) but MUST NOT remove
-		// the provider from leaderboard storage based on it.
-		// SPEC v0.2 will define the partner-projection
-		// suppression semantics; v0.1 ships the column as a
-		// stub only. Reading the value into `_` keeps the
-		// load-bearing default-tuple coverage from r1 while
-		// honoring the v0.1 contract.
-		_ = visibility[pid] // intentional read; do NOT branch on .Blocked in v0.1
+		// Round-5 ARCH r5 HIGH 1 fix: visibility is now a true
+		// LEFT JOIN with COALESCE defaults (see loadProviderVisibility).
+		// `vis` is always populated for every authenticated provider:
+		// explicit `mode`/`blocked` if a provider_visibility row
+		// exists; default `mode='bucketed'`, `blocked=FALSE` otherwise.
+		// v0.1 MUST NOT branch on vis.Blocked.
+		vis := visibility[pid]
 
 		w, hasWork := work[pid]
 		workUSD := usdFromCredits(w.credits, cfg.UsdPerMillionCredits)
@@ -230,6 +235,8 @@ func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window 
 			FirstSeenAt:        firstSeen,
 			LastSeenAt:         lastSeen,
 			Bucket:             bucket,
+			VisibilityMode:     vis.Mode,
+			VisibilityBlocked:  vis.Blocked,
 		})
 	}
 
@@ -353,10 +360,28 @@ type visibilityRow struct {
 	Blocked bool
 }
 
+// loadProviderVisibility builds the §6.1 LEFT JOIN production
+// seam: one row per authenticated provider in `provider_tokens`,
+// with explicit visibility values when a `provider_visibility`
+// row exists and COALESCE defaults (`mode='bucketed'`,
+// `blocked=FALSE`) when it does not.
+//
+// Round-5 ARCH r5 HIGH 1 fix: this used to be a discarded
+// `SELECT * FROM provider_visibility` whose result was assigned
+// to `_`. The rollup now owns the LEFT JOIN + default-tuple
+// semantic: every `leaderboardRow` carries `VisibilityMode` /
+// `VisibilityBlocked` derived from this query. v0.1 MUST NOT
+// branch on `VisibilityBlocked` — that suppression contract is
+// deferred to v0.2 — but the values flow through the rollup's
+// production output so Step 3's handler reads the rollup's
+// truth rather than re-JOINing the OLTP-shape view.
 func loadProviderVisibility(ctx context.Context, db *sql.DB) (map[string]visibilityRow, error) {
 	const q = `
-        SELECT provider_id, mode, blocked_from_partner_projection
-          FROM provider_visibility
+        SELECT pt.provider_id,
+               COALESCE(pv.mode, 'bucketed') AS mode,
+               COALESCE(pv.blocked_from_partner_projection, FALSE) AS blocked
+          FROM provider_tokens pt
+          LEFT JOIN provider_visibility pv ON pv.provider_id = pt.provider_id
     `
 	rows, err := db.QueryContext(ctx, q)
 	if err != nil {

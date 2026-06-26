@@ -136,22 +136,58 @@ type preRebuildRow struct {
 }
 
 // emitDriftEvents compares the pre-rebuild snapshot against the
-// rebuilt rows axis-by-axis. >threshold drift on any axis fires
-// a `stats_rollup_drift_detected` event. The rebuild value has
-// already won (committed in the same transaction); this log
-// surfaces the divergence to the operator alerting pipeline.
+// rebuilt rows axis-by-axis over the UNION of provider IDs. A
+// >threshold delta on any axis fires `stats_rollup_drift_detected`.
+// The rebuild value has already won (committed in the same
+// transaction); this log surfaces the divergence to the operator
+// alerting pipeline.
+//
+// Round-5 ARCH r5 HIGH 2 fix: prior draft iterated only the
+// rebuilt set, so providers that the incremental snapshot
+// contained but the full recompute correctly DROPPED were
+// silently deleted without drift events firing. That is exactly
+// the stale-extra-row class §9.4 wants operators to know about.
+// We now iterate `pre ∪ rebuilt`, treating missing-from-rebuilt
+// as zero (drop-out) and missing-from-pre as zero (new
+// provider).
 func emitDriftEvents(window string, pre map[string]preRebuildRow, rebuilt []leaderboardRow, threshold float64, logger zerolog.Logger) {
 	if threshold <= 0 {
 		threshold = 0.005
 	}
+	rebuiltByPID := make(map[string]leaderboardRow, len(rebuilt))
 	for _, r := range rebuilt {
-		prev, ok := pre[r.ProviderID]
-		if !ok {
-			continue
+		rebuiltByPID[r.ProviderID] = r
+	}
+	pids := make(map[string]struct{}, len(pre)+len(rebuilt))
+	for pid := range pre {
+		pids[pid] = struct{}{}
+	}
+	for pid := range rebuiltByPID {
+		pids[pid] = struct{}{}
+	}
+	for pid := range pids {
+		prev, hasPrev := pre[pid]
+		curr, hasCurr := rebuiltByPID[pid]
+
+		var prevEarn float64
+		var prevTokens, prevJobs int64
+		if hasPrev {
+			prevEarn = ratToFloat(prev.Earnings)
+			prevTokens = prev.Tokens
+			prevJobs = prev.Jobs
 		}
-		emitDriftIfExceeds(window, "earnings", r.ProviderID, ratToFloat(prev.Earnings), ratToFloat(r.EarningsTotalUSD), threshold, logger)
-		emitDriftIfExceeds(window, "tokens", r.ProviderID, float64(prev.Tokens), float64(r.Tokens), threshold, logger)
-		emitDriftIfExceeds(window, "jobs", r.ProviderID, float64(prev.Jobs), float64(r.Jobs), threshold, logger)
+
+		var currEarn float64
+		var currTokens, currJobs int64
+		if hasCurr {
+			currEarn = ratToFloat(curr.EarningsTotalUSD)
+			currTokens = curr.Tokens
+			currJobs = curr.Jobs
+		}
+
+		emitDriftIfExceeds(window, "earnings", pid, prevEarn, currEarn, threshold, logger)
+		emitDriftIfExceeds(window, "tokens", pid, float64(prevTokens), float64(currTokens), threshold, logger)
+		emitDriftIfExceeds(window, "jobs", pid, float64(prevJobs), float64(currJobs), threshold, logger)
 	}
 }
 

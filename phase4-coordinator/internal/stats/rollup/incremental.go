@@ -152,16 +152,20 @@ func runIncrementalLeaderboardUpdate(ctx context.Context, db *sql.DB, cfg Config
 		if perr != nil {
 			return fmt.Errorf("incremental %s provider %s: %w", window, pid, perr)
 		}
-		// Read provider_visibility but do NOT branch on .Blocked
-		// (round-2 audit fix — v0.1 stub-only). v0.2 will pin
-		// suppression semantic.
-		_ = visibility[pid]
 		if !ok {
 			// Provider had no data in the window — drop them by
 			// emitting a tombstone row with the zero bucket;
 			// we'll actually DELETE in step 3.
 			continue
 		}
+		// Round-5 ARCH r5 HIGH 1 fix: carry visibility through the
+		// incremental path too. `loadProviderVisibility` returns
+		// COALESCE'd defaults for every authenticated provider, so
+		// the lookup always yields a populated tuple. v0.1 MUST
+		// NOT branch on row.VisibilityBlocked.
+		vis := visibility[pid]
+		row.VisibilityMode = vis.Mode
+		row.VisibilityBlocked = vis.Blocked
 		updates = append(updates, row)
 	}
 

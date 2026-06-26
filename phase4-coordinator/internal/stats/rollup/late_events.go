@@ -54,11 +54,15 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
 	}()
 	cutoff := lateEventBoundary(now, cfg.LateEventsLookbackHours)
 	winStart := windowStart(window, now, cfg.PartialHistorySinceUnix)
-	arrivalCutoff := lastOK.Unix()
 
 	// Work-side late events: ts_utc < lookback AND
-	// created_at_utc > lastOK (arrived since last successful
-	// tick). CODE r3 HIGH 1 effective-token semantic preserved.
+	// GREATEST(created_at_utc, updated_at_utc) > lastOK
+	// (row arrived OR was corrected since last successful tick).
+	// Round-5 CODE r5 HIGH 1 fix: prior round filtered only on
+	// created_at_utc, missing SPEC-005 correction shape where an
+	// existing old billing row is UPDATEd after lastOK. lastOK is
+	// passed as TIMESTAMPTZ (not truncated unix seconds) so
+	// sub-second precision is preserved.
 	workQ := `
         INSERT INTO stats_late_events (event_unix_ts, provider_id, delta_tokens, source_billing_row)
         SELECT EXTRACT(EPOCH FROM lrc.ts_utc)::BIGINT AS evt_ts,
@@ -69,7 +73,7 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
           JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
          WHERE EXTRACT(EPOCH FROM lrc.ts_utc) < $1
            AND ($2 = 0 OR EXTRACT(EPOCH FROM lrc.ts_utc) >= $2)
-           AND EXTRACT(EPOCH FROM lrc.created_at_utc) > $3
+           AND GREATEST(lrc.created_at_utc, COALESCE(lrc.updated_at_utc, lrc.created_at_utc)) > $3
            AND lrc.fault_flag = 'none'
            AND lrc.quarantined = FALSE
            AND NOT EXISTS (
@@ -77,7 +81,7 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
                 WHERE sle.source_billing_row = 'lrc:' || lrc.id::TEXT
            )
     `
-	if _, err := conn.ExecContext(ctx, workQ, cutoff, winStart, arrivalCutoff); err != nil {
+	if _, err := conn.ExecContext(ctx, workQ, cutoff, winStart, lastOK); err != nil {
 		return fmt.Errorf("late events work: %w", err)
 	}
 

@@ -73,6 +73,7 @@ CREATE TABLE ledger_request_credits (
     provider_id                 TEXT NOT NULL,
     ts_utc                      TIMESTAMPTZ NOT NULL,
     created_at_utc              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at_utc              TIMESTAMPTZ,
     prompt_tokens               BIGINT,
     completion_tokens           BIGINT,
     estimated_completion_tokens BIGINT,
@@ -638,38 +639,61 @@ func TestShapeCRebuild_MVCCNoEmptyState(t *testing.T) {
 		t.Errorf("post-rebuild count = %d, want 5 (R1)", c)
 	}
 
-	// Round-3 CODE r3 MED 2 fix: post-commit equivalence is
-	// per-provider content-equality, not just COUNT. The rebuilt
-	// rows MUST contain exactly r0Providers + r1Extra with
-	// deterministic ranks. Compare the committed provider_id
-	// set against the expected set.
-	expected := map[string]struct{}{}
-	for _, p := range append(append([]string{}, r0Providers...), r1Extra...) {
-		expected[p] = struct{}{}
-	}
-	pidRows, err := adminDB.QueryContext(context.Background(),
-		`SELECT provider_id FROM stats_leaderboard_all`,
+	// Round-5 CODE r5 MEDIUM 1 fix: post-commit equivalence is
+	// FULL-ROW equality against the deterministic rebuild output,
+	// not just provider_id set. Pre-fix this test allowed any
+	// (rank, earnings, bucket, tokens, jobs, pseudonym) so a
+	// rebuild that committed the right providers with wrong
+	// derived columns would silently pass.
+	//
+	// Build expected R1 by running computeLeaderboardRows through
+	// the exported test seam — that is the same code path the
+	// rebuild uses, so this is a deterministic equivalence
+	// assertion across every contract column.
+	cfgWithDefaults := freshRollupConfig().DefaultsApplied()
+	expectedRows, err := statsrollup.ComputeLeaderboardRowsForTest(
+		context.Background(), adminDB, cfgWithDefaults, "all", time.Now().UTC(),
 	)
 	if err != nil {
-		t.Fatalf("query pids: %v", err)
+		t.Fatalf("compute expected R1: %v", err)
 	}
-	defer pidRows.Close()
-	got := map[string]struct{}{}
-	for pidRows.Next() {
-		var p string
-		if err := pidRows.Scan(&p); err != nil {
-			t.Fatalf("scan pid: %v", err)
+	if len(expectedRows) != 5 {
+		t.Fatalf("expected 5 R1 rows from OLTP recompute, got %d", len(expectedRows))
+	}
+
+	got := snapshotLeaderboardAll(t, adminDB)
+	if len(got) != len(expectedRows) {
+		t.Fatalf("R1 row count: got=%d, want=%d", len(got), len(expectedRows))
+	}
+
+	// Index expected by provider_id (snapshotLeaderboardAll already
+	// orders by provider_id; do the same for expected).
+	expByPID := make(map[string]statsrollup.LeaderboardRowForTest, len(expectedRows))
+	for _, r := range expectedRows {
+		expByPID[r.ProviderID] = r
+	}
+	for _, g := range got {
+		e, ok := expByPID[g.pid]
+		if !ok {
+			t.Errorf("R1 contains unexpected provider %q", g.pid)
+			continue
 		}
-		got[p] = struct{}{}
-	}
-	for p := range expected {
-		if _, ok := got[p]; !ok {
-			t.Errorf("R1 missing provider %q (post-commit equivalence)", p)
+		if g.rankEarnings != e.RankEarnings || g.rankTokens != e.RankTokens || g.rankJobs != e.RankJobs {
+			t.Errorf("R1 rank drift for %q: got (E=%d,T=%d,J=%d) want (E=%d,T=%d,J=%d)",
+				g.pid, g.rankEarnings, g.rankTokens, g.rankJobs,
+				e.RankEarnings, e.RankTokens, e.RankJobs)
 		}
-	}
-	for p := range got {
-		if _, ok := expected[p]; !ok {
-			t.Errorf("R1 has unexpected provider %q (post-commit equivalence)", p)
+		if g.earnings != e.EarningsTotalUSD || g.work != e.EarningsWorkUSD || g.rewards != e.EarningsRewardsUSD {
+			t.Errorf("R1 USD drift for %q: got (total=%q,work=%q,rewards=%q) want (total=%q,work=%q,rewards=%q)",
+				g.pid, g.earnings, g.work, g.rewards,
+				e.EarningsTotalUSD, e.EarningsWorkUSD, e.EarningsRewardsUSD)
+		}
+		if g.tokens != e.Tokens || g.jobs != e.Jobs {
+			t.Errorf("R1 tokens/jobs drift for %q: got (tokens=%d,jobs=%d) want (tokens=%d,jobs=%d)",
+				g.pid, g.tokens, g.jobs, e.Tokens, e.Jobs)
+		}
+		if g.bucket != e.Bucket {
+			t.Errorf("R1 bucket drift for %q: got %q want %q", g.pid, g.bucket, e.Bucket)
 		}
 	}
 }
@@ -1243,5 +1267,259 @@ func TestRollupIgnoresUnauthenticatedProviders(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "p_auth" {
 		t.Errorf("leaderboard = %v, want only [p_auth] (p_spoof must NOT appear — provider_tokens trust-source)", got)
+	}
+}
+
+// ==========================================================================
+// Round-5 ARCH r5 HIGH 1 fix: visibility LEFT JOIN + default tuple.
+// Three providers exercise the no-row, explicit 'exact', and
+// explicit 'bucketed' cases; all three MUST appear in the
+// leaderboard (v0.1 rollup does NOT branch on blocked/mode).
+// ==========================================================================
+func TestRollupVisibilityDefaultTuple(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+	now := time.Now().UTC()
+
+	seedProviderTokens(t, adminDB, "p_no_row", "p_exact", "p_bucketed")
+	for _, pid := range []string{"p_no_row", "p_exact", "p_bucketed"} {
+		seedLedgerRow(t, adminDB, pid, now.Add(-1*time.Hour), 100, 100, 1_000_000)
+	}
+	if _, err := adminDB.ExecContext(context.Background(),
+		`INSERT INTO provider_visibility (provider_id, mode, blocked_from_partner_projection)
+         VALUES ('p_exact', 'exact', FALSE), ('p_bucketed', 'bucketed', FALSE)`,
+	); err != nil {
+		t.Fatalf("seed visibility: %v", err)
+	}
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	// All three providers must appear: no-row gets COALESCE default
+	// 'bucketed'/FALSE; explicit 'exact' / 'bucketed' both pass
+	// through the LEFT JOIN unchanged. Storage equality across the
+	// three modes proves v0.1 does not branch on visibility.
+	rows, err := adminDB.QueryContext(context.Background(),
+		`SELECT provider_id FROM stats_leaderboard_24h ORDER BY provider_id`,
+	)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer rows.Close()
+	var got []string
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		got = append(got, pid)
+	}
+	expected := []string{"p_bucketed", "p_exact", "p_no_row"}
+	if len(got) != len(expected) {
+		t.Fatalf("provider count: got=%v want=%v", got, expected)
+	}
+	for i := range got {
+		if got[i] != expected[i] {
+			t.Errorf("provider[%d]: got=%q want=%q", i, got[i], expected[i])
+		}
+	}
+
+	// Prove the seam end-to-end by reading visibility off the
+	// rollup row via the test seam — confirms the COALESCE'd
+	// default tuple flows from the LEFT JOIN into in-memory rows.
+	computed, err := statsrollup.ComputeLeaderboardRowsForTest(
+		context.Background(), adminDB, freshRollupConfig().DefaultsApplied(), "24h", now,
+	)
+	if err != nil {
+		t.Fatalf("ComputeLeaderboardRowsForTest: %v", err)
+	}
+	byPID := map[string]statsrollup.LeaderboardRowForTest{}
+	for _, r := range computed {
+		byPID[r.ProviderID] = r
+	}
+	if got := byPID["p_no_row"]; got.VisibilityMode != "bucketed" || got.VisibilityBlocked {
+		t.Errorf("p_no_row default tuple: got mode=%q blocked=%v want mode=bucketed blocked=false",
+			got.VisibilityMode, got.VisibilityBlocked)
+	}
+	if got := byPID["p_exact"]; got.VisibilityMode != "exact" || got.VisibilityBlocked {
+		t.Errorf("p_exact: got mode=%q blocked=%v want mode=exact blocked=false",
+			got.VisibilityMode, got.VisibilityBlocked)
+	}
+	if got := byPID["p_bucketed"]; got.VisibilityMode != "bucketed" || got.VisibilityBlocked {
+		t.Errorf("p_bucketed: got mode=%q blocked=%v want mode=bucketed blocked=false",
+			got.VisibilityMode, got.VisibilityBlocked)
+	}
+}
+
+// ==========================================================================
+// Round-5 ARCH r5 HIGH 2 fix: drift detection MUST fire for
+// providers that the full recompute removes (stale extra rows in
+// the incremental snapshot). Prior draft iterated only the
+// rebuilt set, silently dropping such providers without emitting
+// a drift event.
+// ==========================================================================
+func TestRollupDriftFiresOnProviderDeletedByRebuild(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	now := time.Now().UTC()
+
+	// One real provider so the rebuild has at least one
+	// non-zero row (and a baseline to compare against).
+	seedProviderTokens(t, adminDB, "p_real")
+	seedLedgerRow(t, adminDB, "p_real", now.Add(-1*time.Hour), 100, 100, 1_000_000)
+
+	// Run a bootstrap tick to populate stats_leaderboard_all.
+	logger := zerolog.Nop()
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	// Inject a STALE row directly into stats_leaderboard_all for a
+	// provider that has NO OLTP source. The nightly Shape C
+	// rebuild MUST (a) delete this row, (b) emit a drift event
+	// because the pre-rebuild snapshot had earnings=$10.00 while
+	// the rebuild's truth is $0.00 (drop-out).
+	if _, err := adminDB.ExecContext(context.Background(), `
+        INSERT INTO stats_leaderboard_all
+            (provider_id, pseudonym, generated_at,
+             rank_earnings, rank_tokens, rank_jobs,
+             earnings_usd, earnings_work_usd, earnings_rewards_usd,
+             earnings_bucket, tokens, jobs, first_seen_at, last_seen_at)
+        VALUES ('p_stale', 'node-stale-x', $1,
+                99, 99, 99,
+                '10.00', '10.00', '0.00',
+                '$', 100, 1, $1, $1)
+    `, now); err != nil {
+		t.Fatalf("inject stale row: %v", err)
+	}
+
+	var buf bytes.Buffer
+	driftLogger := zerolog.New(&buf)
+	cfg := freshRollupConfig().DefaultsApplied()
+	if err := statsrollup.RunNightlyRebuild(context.Background(), rdb, cfg, driftLogger); err != nil {
+		t.Fatalf("rebuild: %v", err)
+	}
+
+	// (a) Stale row is gone.
+	var n int
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_leaderboard_all WHERE provider_id = 'p_stale'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("p_stale survived rebuild: count = %d (want 0)", n)
+	}
+
+	// (b) Drift event fired with provider_id_sample = p_stale.
+	logOut := buf.String()
+	if !strings.Contains(logOut, "stats_rollup_drift_detected") {
+		t.Errorf("expected drift event for deleted provider; got: %s", logOut)
+	}
+	if !strings.Contains(logOut, `"provider_id_sample":"p_stale"`) {
+		t.Errorf("expected drift event provider_id_sample=p_stale; got: %s", logOut)
+	}
+}
+
+// ==========================================================================
+// Round-5 CODE r5 HIGH 1 fix: late-event detection MUST cover
+// SPEC-005 row UPDATEs (existing old row corrected after lastOK),
+// not just newly-inserted old rows. The GREATEST(created_at_utc,
+// updated_at_utc) > lastOK watermark catches both shapes.
+// ==========================================================================
+func TestRollupLateEventUpdatedAtCorrection(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	now := time.Now().UTC()
+
+	seedProviderTokens(t, adminDB, "p_upd")
+
+	// Insert a T-60h row with created_at_utc also at T-60h
+	// (well BEFORE the bootstrap tick's lastOK will be set). The
+	// row is outside the 48h lookback so it sits in OLTP but
+	// won't be picked up by the incremental tick's active-window
+	// scan.
+	oldTs := now.Add(-60 * time.Hour)
+	if _, err := adminDB.ExecContext(context.Background(), `
+        INSERT INTO ledger_request_credits
+            (request_id, attempt_n, provider_id, ts_utc, created_at_utc,
+             prompt_tokens, completion_tokens, provider_credits)
+        VALUES ('req-upd-1', 0, 'p_upd', $1, $1, 10, 10, 1000)
+    `, oldTs); err != nil {
+		t.Fatalf("seed old row: %v", err)
+	}
+
+	// Bootstrap tick: lastOK advances to ~now. The T-60h row is
+	// within the 30d window so it folds into the bootstrap full
+	// recompute, then late-event detection runs with lastOK=now.
+	// At this point GREATEST(created, COALESCE(updated, created))
+	// = T-60h < lastOK, so the row is NOT a late event yet.
+	logger := zerolog.Nop()
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	var preCount int
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_late_events WHERE source_billing_row = 'lrc:1'`,
+	).Scan(&preCount); err != nil {
+		t.Fatalf("pre count: %v", err)
+	}
+	if preCount != 0 {
+		t.Fatalf("pre-update late event count = %d, want 0 (lastOK not yet beat by created/updated)", preCount)
+	}
+
+	// UPDATE: simulate a SPEC-005 correction landing on the old
+	// row AFTER the bootstrap. updated_at_utc moves into the
+	// future so GREATEST(created, updated) > lastOK.
+	postUpdate := now.Add(1 * time.Second)
+	if _, err := adminDB.ExecContext(context.Background(),
+		`UPDATE ledger_request_credits SET completion_tokens = 11, updated_at_utc = $1 WHERE request_id = 'req-upd-1'`,
+		postUpdate,
+	); err != nil {
+		t.Fatalf("update row: %v", err)
+	}
+
+	// Drive an incremental 30d tick by re-invoking the runner.
+	// 30d/all ticks call detectLateEvents internally after the
+	// snapshot commits, with lastOK from the previous tick.
+	runner2, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New runner2: %v", err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	runner2.Start(ctx2)
+	time.Sleep(500 * time.Millisecond)
+	cancel2()
+	runner2.Wait()
+
+	var postCount int
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_late_events WHERE source_billing_row = 'lrc:1'`,
+	).Scan(&postCount); err != nil {
+		t.Fatalf("post count: %v", err)
+	}
+	if postCount != 1 {
+		t.Errorf("post-update late event count = %d, want 1 (GREATEST(created, updated) > lastOK should record this correction)", postCount)
 	}
 }
