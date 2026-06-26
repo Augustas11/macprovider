@@ -47,6 +47,7 @@ NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"
 # Both files MUST exist before this deploy proceeds; they are
 # installed below alongside the coordinator vhost.
 NGINX_STATS_SHARED="$DIST_DIR/nginx-snippets/stats-shared.conf"
+NGINX_STATS_SECHEADERS="$DIST_DIR/nginx-snippets/stats-security-headers.conf"
 NGINX_STATS_SITE="$DIST_DIR/nginx-stats.streamvc.live.conf"
 CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}"
 
@@ -57,7 +58,7 @@ CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}
 # operator forgot to run build-linux.sh after the M2 update that
 # extended it. Fail closed — do NOT silently deploy with a stale CLI.
 for f in "$BINARY" "$CLI_BINARY" "$CONFIG" "$SERVICE" "$NGINX_SITE" \
-         "$NGINX_STATS_SHARED" "$NGINX_STATS_SITE"; do
+         "$NGINX_STATS_SHARED" "$NGINX_STATS_SECHEADERS" "$NGINX_STATS_SITE"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
@@ -307,8 +308,9 @@ $SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-coordinator-full.conf"
 # and the stats vhost. Installation step below is wired BEFORE
 # the coordinator vhost full-TLS install so `nginx -t` does not
 # trip on missing zone names.).
-$SCP "$NGINX_STATS_SHARED" "$VPS_USER@$VPS_HOST:/tmp/nginx-stats-shared.conf"
-$SCP "$NGINX_STATS_SITE"   "$VPS_USER@$VPS_HOST:/tmp/nginx-stats.streamvc.live.conf"
+$SCP "$NGINX_STATS_SHARED"     "$VPS_USER@$VPS_HOST:/tmp/nginx-stats-shared.conf"
+$SCP "$NGINX_STATS_SECHEADERS" "$VPS_USER@$VPS_HOST:/tmp/nginx-stats-security-headers.conf"
+$SCP "$NGINX_STATS_SITE"       "$VPS_USER@$VPS_HOST:/tmp/nginx-stats.streamvc.live.conf"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   $SCP "$CATALOG_SOURCE" "$VPS_USER@$VPS_HOST:/tmp/tier2-catalog.json"
 fi
@@ -360,37 +362,47 @@ fi
 # config in place — earlier versions used in-place sed surgery on the full
 # config and corrupted brace balance on first run.
 
-log "step 5/9: install port-80 stub nginx site (for ACME challenge)"
+# SPEC-017 v0.1.8 Step 4.B — stats.streamvc.live is a first-class
+# public hostname per SPEC §7.1; deploy applies the SAME ACME
+# stub + certbot + uncomment pipeline used for the coordinator
+# hostname (round-4 ARCH r2 H1 / CODE r2 C1 fix).
+STATS_DOMAIN="${STATS_DOMAIN:-stats.streamvc.live}"
+
+log "step 5/9: install port-80 stub nginx sites (for ACME challenge) for both hostnames"
 $SSH "set -e
   install -d -o www-data -g www-data -m 0755 /var/www/html
-  cat > /etc/nginx/sites-available/$DOMAIN <<'NGINX_STUB'
+  for d in $DOMAIN $STATS_DOMAIN; do
+    cat > /etc/nginx/sites-available/\$d <<NGINX_STUB
 # Stub site — replaced by the full TLS config after Let's Encrypt cert
 # is obtained. Only handles HTTP-01 challenge + redirect to https.
 server {
     listen 80;
     listen [::]:80;
-    server_name $DOMAIN;
+    server_name \$d;
     location /.well-known/acme-challenge/ {
         root /var/www/html;
     }
     location / {
-        return 301 https://\$host\$request_uri;
+        return 301 https://\\\$host\\\$request_uri;
     }
 }
 NGINX_STUB
-  ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
+    ln -sf /etc/nginx/sites-available/\$d /etc/nginx/sites-enabled/\$d
+  done
   nginx -t
   systemctl reload nginx
 "
 
-log "step 6/9: obtain Let's Encrypt cert via certbot webroot (idempotent)"
+log "step 6/9: obtain Let's Encrypt certs via certbot webroot for both hostnames (idempotent)"
 $SSH "set -e
-  if [ -f /etc/letsencrypt/live/$DOMAIN/fullchain.pem ]; then
-    echo '  cert already present at /etc/letsencrypt/live/$DOMAIN/ — skipping issuance'
-  else
-    certbot certonly --webroot -w /var/www/html -d $DOMAIN \\
-      --non-interactive --agree-tos --email $EMAIL
-  fi
+  for d in $DOMAIN $STATS_DOMAIN; do
+    if [ -f /etc/letsencrypt/live/\$d/fullchain.pem ]; then
+      echo \"  cert already present at /etc/letsencrypt/live/\$d/ — skipping issuance\"
+    else
+      certbot certonly --webroot -w /var/www/html -d \$d \\
+        --non-interactive --agree-tos --email $EMAIL
+    fi
+  done
 "
 
 log "step 6b/9: install SPEC-017 nginx artifacts + full TLS site"
@@ -402,9 +414,18 @@ $SSH "set -e
   # stats.streamvc.live serves the same handler from a dedicated
   # hostname.
   install -o root -g root -m 0644 /tmp/nginx-stats-shared.conf /etc/nginx/conf.d/stats-shared.conf
-  install -o root -g root -m 0644 /tmp/nginx-stats.streamvc.live.conf /etc/nginx/sites-available/stats.streamvc.live
-  ln -sf /etc/nginx/sites-available/stats.streamvc.live /etc/nginx/sites-enabled/stats.streamvc.live
-  rm -f /tmp/nginx-stats-shared.conf /tmp/nginx-stats.streamvc.live.conf
+  install -o root -g root -m 0644 /tmp/nginx-stats-security-headers.conf /etc/nginx/conf.d/stats-security-headers.conf
+  install -o root -g root -m 0644 /tmp/nginx-stats.streamvc.live.conf /etc/nginx/sites-available/$STATS_DOMAIN
+  ln -sf /etc/nginx/sites-available/$STATS_DOMAIN /etc/nginx/sites-enabled/$STATS_DOMAIN
+  rm -f /tmp/nginx-stats-shared.conf /tmp/nginx-stats-security-headers.conf /tmp/nginx-stats.streamvc.live.conf
+
+  # Round-4 ARCH H1 / CODE C1 fix — uncomment the stats vhost
+  # ssl_certificate lines now that the certbot run above produced
+  # /etc/letsencrypt/live/$STATS_DOMAIN/. Without this step the
+  # newly-enabled \`listen 443 ssl\` server has commented-out cert
+  # directives and the nginx -t below fails closed.
+  sed -i 's|# ssl_certificate /etc/letsencrypt|ssl_certificate /etc/letsencrypt|g' /etc/nginx/sites-available/$STATS_DOMAIN
+  sed -i 's|# ssl_certificate_key /etc/letsencrypt|ssl_certificate_key /etc/letsencrypt|g' /etc/nginx/sites-available/$STATS_DOMAIN
 
   install -o root -g root -m 0644 /tmp/nginx-coordinator-full.conf /etc/nginx/sites-available/$DOMAIN
   rm -f /tmp/nginx-coordinator-full.conf
