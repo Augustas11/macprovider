@@ -96,7 +96,16 @@ http {
 EOF
 
 # Step 1 — nginx -t.
+#
+# `--add-host=host.docker.internal:host-gateway` is required on
+# Linux Docker (GitHub Actions runners): nginx checks DNS at
+# config-test time and `host.docker.internal` does not resolve
+# by default on Linux. Docker Desktop on Mac/Windows auto-
+# resolves this hostname, so the flag is a no-op there. Without
+# the flag, `nginx -t` fails with
+# `[emerg] host not found in upstream "host.docker.internal"`.
 docker run --rm \
+  --add-host=host.docker.internal:host-gateway \
   -v "$TMP/nginx.conf:/etc/nginx/nginx.conf:ro" \
   -v "$TMP/conf.d:/etc/nginx/conf.d:ro" \
   -v "$TMP/sites-enabled:/etc/nginx/sites-enabled:ro" \
