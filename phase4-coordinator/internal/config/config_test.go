@@ -229,3 +229,61 @@ func TestTier2ValidationPreservesDefaultsAndRejectsUnsafeConfig(t *testing.T) {
 		t.Fatalf("response anomaly factor err=%v", err)
 	}
 }
+
+// Issue #125: trusted-proxy CIDR validation pins for ProxyConfig.
+
+func TestDefaultProxyConfigTrustsLoopbackOnly(t *testing.T) {
+	cfg := Default()
+	if got, want := len(cfg.Proxy.TrustedProxies), 2; got != want {
+		t.Fatalf("default trusted_proxies len=%d want %d", got, want)
+	}
+	prefixes, err := cfg.TrustedProxyPrefixes()
+	if err != nil {
+		t.Fatalf("TrustedProxyPrefixes default parse: %v", err)
+	}
+	if len(prefixes) != 2 {
+		t.Fatalf("default prefixes len=%d want 2", len(prefixes))
+	}
+	if !prefixes[0].Contains(prefixes[0].Addr()) || prefixes[0].String() != "127.0.0.0/8" {
+		t.Fatalf("default[0] = %q want 127.0.0.0/8", prefixes[0].String())
+	}
+	if prefixes[1].String() != "::1/128" {
+		t.Fatalf("default[1] = %q want ::1/128", prefixes[1].String())
+	}
+}
+
+func TestTrustedProxyPrefixesRejectsDefaultRouteIPv4(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Proxy.TrustedProxies = []string{"0.0.0.0/0"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "default-route prefix") {
+		t.Fatalf("Validate(0.0.0.0/0) err=%v, want default-route rejection (every caller would be header-trusted)", err)
+	}
+}
+
+func TestTrustedProxyPrefixesRejectsDefaultRouteIPv6(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Proxy.TrustedProxies = []string{"::/0"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "default-route prefix") {
+		t.Fatalf("Validate(::/0) err=%v, want default-route rejection", err)
+	}
+}
+
+func TestTrustedProxyPrefixesRejectsMalformedCIDR(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Proxy.TrustedProxies = []string{"not-a-cidr"}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "proxy.trusted_proxies") {
+		t.Fatalf("Validate(not-a-cidr) err=%v, want parse-error rejection", err)
+	}
+}
+
+func TestTrustedProxyPrefixesEmptyAllowed(t *testing.T) {
+	cfg := Default()
+	cfg.Auth.OperatorKey = "operator-key"
+	cfg.Proxy.TrustedProxies = nil // strictest posture
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("empty trusted_proxies Validate err=%v, want nil (empty list is strictest posture, valid)", err)
+	}
+}

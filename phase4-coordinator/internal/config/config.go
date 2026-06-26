@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -34,7 +35,31 @@ type Config struct {
 	Settlement                   SettlementConfig             `yaml:"settlement"`
 	Endpoints                    EndpointsConfig              `yaml:"endpoints"`
 	Explorer                     ExplorerConfig               `yaml:"explorer"`
+	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
+}
+
+// ProxyConfig configures how the coordinator interprets `X-Forwarded-For` /
+// `X-Real-IP` headers when deriving per-buyer rate-limit keys. Issue #125
+// (post-PR-#124 follow-up): production sits behind nginx on loopback, so
+// the default trusted-proxies list `["127.0.0.0/8", "::1/128"]` covers
+// that topology. Operators deploying behind a remote LB or non-loopback
+// reverse proxy MUST add the proxy's CIDR(s) here; otherwise the
+// coordinator will treat the proxy as untrusted and key the rate-limit
+// bucket on the proxy's IP — collapsing all upstream buyers into one
+// shared bucket. Conversely, expanding this list to non-actual-proxy
+// CIDRs lets attackers in those CIDRs spoof their bucket key via
+// `X-Forwarded-For`; treat the list as security-sensitive.
+type ProxyConfig struct {
+	// TrustedProxies is a list of CIDR ranges whose `X-Forwarded-For` /
+	// `X-Real-IP` headers the coordinator will honor when deriving the
+	// per-source rate-limit key for `/v1/pool/check`, `/v1/receipt-keys/*`,
+	// and `/catalog/*`. Default `["127.0.0.0/8", "::1/128"]` matches the
+	// production nginx-on-localhost topology (see
+	// `phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf`).
+	// Invalid CIDRs and default-route prefixes (`0.0.0.0/0`, `::/0`)
+	// fail `config.Load` at startup via `TrustedProxyPrefixes`.
+	TrustedProxies []string `yaml:"trusted_proxies"`
 }
 
 type ListenConfig struct {
@@ -424,6 +449,14 @@ func Default() Config {
 		Auth: AuthConfig{
 			RequireProviderTokens: true,
 		},
+		Proxy: ProxyConfig{
+			// Default trusts loopback only. Production sits behind nginx on
+			// localhost, so the default keys rate-limit buckets on the
+			// X-Real-IP / X-Forwarded-For headers nginx sets. Operators with
+			// a remote LB MUST add the proxy CIDR(s) explicitly; spoofing
+			// risk if anything else is added. Issue #125.
+			TrustedProxies: []string{"127.0.0.0/8", "::1/128"},
+		},
 	}
 }
 
@@ -575,6 +608,43 @@ func (c Config) ProviderWSMaxUnauthenticatedConnPerIP() int {
 	return count
 }
 
+// TrustedProxyPrefixes parses c.Proxy.TrustedProxies into a slice of
+// netip.Prefix values for the buyer Server's rate-limit-key derivation.
+// Returns an error if any CIDR is malformed OR if the operator has
+// listed a default-route prefix (0.0.0.0/0, ::/0); those would let
+// every public caller spoof their bucket key via X-Forwarded-For —
+// almost certainly a config bug, never a deliberate posture, so
+// reject at Validate time. Issue #125 security-lane finding.
+//
+// Callers should invoke this at startup (config.Load already calls
+// it via Validate) so the hot path never re-parses. An empty
+// TrustedProxies list returns a nil slice (callers treat as "no
+// proxy is trusted; always use r.RemoteAddr").
+func (c Config) TrustedProxyPrefixes() ([]netip.Prefix, error) {
+	if len(c.Proxy.TrustedProxies) == 0 {
+		return nil, nil
+	}
+	out := make([]netip.Prefix, 0, len(c.Proxy.TrustedProxies))
+	for _, raw := range c.Proxy.TrustedProxies {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(trimmed)
+		if err != nil {
+			return nil, fmt.Errorf("proxy.trusted_proxies[%q]: %w", raw, err)
+		}
+		// Reject default-route prefixes — trusting every IP means
+		// every caller can spoof their bucket key. Issue #125
+		// security-lane L2.
+		if p.Bits() == 0 {
+			return nil, fmt.Errorf("proxy.trusted_proxies[%q]: default-route prefix is not a valid trusted proxy (every caller would be header-trusted)", raw)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 func (c Config) ProviderByID() map[string]ProviderConfig {
 	out := make(map[string]ProviderConfig, len(c.Providers))
 	for _, p := range c.Providers {
@@ -586,6 +656,9 @@ func (c Config) ProviderByID() map[string]ProviderConfig {
 func (c Config) Validate() error {
 	if c.Auth.OperatorKey == "" {
 		return fmt.Errorf("auth.operator_key must be set")
+	}
+	if _, err := c.TrustedProxyPrefixes(); err != nil {
+		return err
 	}
 	if err := c.validateGitHubOAuth(); err != nil {
 		return err

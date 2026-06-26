@@ -16,6 +16,7 @@ import (
 	mrand "math/rand"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"sort"
 	"strings"
@@ -82,6 +83,12 @@ type Server struct {
 	receiptKeysLimiters    map[string]receiptKeysBucket
 	receiptKeysMaxEntries  int
 	receiptKeysTTL         time.Duration
+	// trustedProxies is the parsed CIDR set whose X-Forwarded-For /
+	// X-Real-IP headers the rate-limit keying honors. Pre-parsed at
+	// construction (config.go TrustedProxyPrefixes) so the hot path
+	// never re-parses. Default loopback-only — see WithTrustedProxies.
+	// Issue #125.
+	trustedProxies         []netip.Prefix
 	billingMu              sync.RWMutex
 	billing                *billing.Store
 	billingCfg             config.RewardsConfig
@@ -243,6 +250,25 @@ func WithLimitsConfig(cfg config.LimitsConfig) Option {
 	}
 }
 
+// WithTrustedProxies sets the parsed trusted-proxy CIDR set the
+// rate-limit keying honors. When r.RemoteAddr falls inside one of
+// these prefixes, the coordinator parses X-Forwarded-For (rightmost
+// untrusted hop) / X-Real-IP to derive the per-source key for
+// /v1/pool/check, /v1/receipt-keys/*, and /catalog/* buckets;
+// otherwise r.RemoteAddr is used unmodified so an attacker on the
+// open internet cannot spoof their bucket key by sending those
+// headers themselves. Issue #125.
+//
+// Pass the result of config.Config.TrustedProxyPrefixes(); Validate
+// already rejected malformed CIDRs at Load time. A nil/empty list
+// trusts NO proxy — only direct connections, matching the strictest
+// possible production posture.
+func WithTrustedProxies(prefixes []netip.Prefix) Option {
+	return func(s *Server) {
+		s.trustedProxies = append(s.trustedProxies[:0], prefixes...)
+	}
+}
+
 func (s *Server) SetTier2Config(cfg config.Tier2Config) {
 	s.tier2Mu.Lock()
 	defer s.tier2Mu.Unlock()
@@ -383,6 +409,13 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		receiptKeysLimiters:    map[string]receiptKeysBucket{},
 		receiptKeysMaxEntries:  4096,
 		receiptKeysTTL:         5 * time.Minute,
+		// Default trusted-proxy set mirrors config.Default()'s
+		// loopback-only posture so callers that construct via NewServer
+		// without WithTrustedProxies keep the production nginx-on-
+		// loopback behavior (X-Real-IP / X-Forwarded-For honored only
+		// when r.RemoteAddr is 127.0.0.0/8 or ::1). WithTrustedProxies
+		// replaces this set. Issue #125.
+		trustedProxies:         []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
 		now:                    func() time.Time { return time.Now().UTC() },
 		version:                "dev",
 	}
@@ -810,7 +843,7 @@ func (s *Server) handleCatalogPubkey(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) allowPoolCheck(r *http.Request) bool {
-	key := poolCheckClientKey(r)
+	key := s.poolCheckClientKey(r)
 	now := s.now()
 	s.poolCheckMu.Lock()
 	defer s.poolCheckMu.Unlock()
@@ -830,7 +863,7 @@ func (s *Server) allowReceiptKeys(r *http.Request) bool {
 		receiptKeysRatePerSecond = 10.0
 		receiptKeysBurst         = 10.0
 	)
-	key := poolCheckClientKey(r)
+	key := s.poolCheckClientKey(r)
 	now := s.now()
 	s.receiptKeysMu.Lock()
 	defer s.receiptKeysMu.Unlock()
@@ -907,39 +940,147 @@ func (s *Server) evictReceiptKeyEntries(now time.Time) {
 // poolCheckClientKey returns the per-source key used for the
 // /poolz, /v1/receipt-keys/*, and /catalog/* rate-limit buckets.
 //
-// Production sits behind nginx on loopback (see
-// phase4-coordinator/dist/nginx-coordinator.streamvc.live.conf) so
-// every public buyer's r.RemoteAddr is 127.0.0.1 — keying on that
-// alone collapses every public buyer into one shared bucket and lets
-// any single caller starve the rate-limit pool for everyone else.
+// When r.RemoteAddr falls inside the configured trusted-proxy CIDR
+// set (`proxy.trusted_proxies`; default `["127.0.0.0/8", "::1/128"]`
+// covers the production nginx-on-localhost topology) the helper
+// honors the forwarded-for chain:
 //
-// Mirrors ws.remoteIPForUnauthSemaphore: when r.RemoteAddr is a
-// loopback address, honor X-Real-IP (which the on-host nginx site
-// sets). Direct, non-loopback hits (no proxy in front) use
-// r.RemoteAddr unchanged so an attacker on the open internet cannot
-// spoof their bucket key.
-func poolCheckClientKey(r *http.Request) string {
+//  1. `X-Forwarded-For`: rightmost-untrusted hop — the closest IP in
+//     the chain that is NOT itself in the trusted-proxy set. This is
+//     the standard "rightmost untrusted" pattern (`MDN
+//     X-Forwarded-For`); it survives chained trusted proxies (LB →
+//     nginx → coordinator) without admitting a buyer-supplied
+//     leftmost IP into the bucket key.
+//  2. `X-Real-IP`: nginx's single-hop alias if the operator's nginx
+//     site sets it (`proxy_set_header X-Real-IP $remote_addr`) but
+//     does NOT set `X-Forwarded-For`.
+//  3. Fallback to r.RemoteAddr (the trusted-proxy's IP) if neither
+//     header is usable.
+//
+// When r.RemoteAddr is OUTSIDE the trusted set, the helper IGNORES
+// both forwarded headers entirely and returns r.RemoteAddr's IP. An
+// attacker on the open internet cannot spoof their bucket key by
+// sending `X-Forwarded-For` / `X-Real-IP` themselves; only operators
+// who explicitly trust a proxy CIDR opt their setup into header-
+// based keying.
+//
+// Issue #125. Mirrors ws.remoteIPForUnauthSemaphore in shape (which
+// still implements the narrower loopback-only X-Real-IP path; that
+// path is deliberately not unified into this helper because the WS
+// admission semaphore lives in a different package and its surface
+// is intentionally minimal — a future PR may converge both onto a
+// shared `httpip` helper).
+func (s *Server) poolCheckClientKey(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil || host == "" {
 		host = r.RemoteAddr
 	}
-	if isLoopbackHost(host) {
-		if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
-			return realIP
+	hostAddr, parseErr := netip.ParseAddr(host)
+	if parseErr != nil {
+		// Unparseable r.RemoteAddr — never trust the forwarded headers
+		// in this case; return whatever we have so the bucket key is
+		// at least deterministic per malformed peer.
+		if host == "" {
+			return r.RemoteAddr
+		}
+		return host
+	}
+	if !isTrustedProxy(hostAddr, s.trustedProxies) {
+		// Direct (untrusted) connection — IGNORE X-Forwarded-For /
+		// X-Real-IP, key on the actual peer.
+		return host
+	}
+	// Trusted proxy. Walk X-Forwarded-For right-to-left for the first
+	// non-trusted hop; that is the buyer-visible IP we want to key on.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if client := rightmostUntrustedXFF(xff, s.trustedProxies); client != "" {
+			return client
 		}
 	}
-	if host == "" {
-		return r.RemoteAddr
+	// X-Real-IP: parse via netip.ParseAddr to canonicalize and reject
+	// junk (issue #125 security-lane L1). nginx's standard
+	// `proxy_set_header X-Real-IP $remote_addr` produces a bare IP
+	// without port, so a port-bearing value is treated as malformed
+	// and falls through. An attacker who sneaks a non-IP value past a
+	// trusted proxy cannot poison the bucket key — we use the canonical
+	// addr.String() form instead.
+	if realIP := strings.TrimSpace(r.Header.Get("X-Real-IP")); realIP != "" {
+		if addr, err := netip.ParseAddr(realIP); err == nil {
+			return addr.String()
+		}
 	}
 	return host
 }
 
+// isLoopbackHost is retained for legacy callers that may still consult
+// it directly. Issue #125 routes the rate-limit key derivation through
+// the configured trusted-proxy CIDR set instead, but the helper stays
+// for any non-rate-limit callsite that wants a quick loopback check.
 func isLoopbackHost(host string) bool {
 	ip := net.ParseIP(host)
 	if ip == nil {
 		return false
 	}
 	return ip.IsLoopback()
+}
+
+// isTrustedProxy reports whether addr falls inside any of the
+// configured trusted-proxy prefixes. Pure function — both
+// poolCheckClientKey and rightmostUntrustedXFF call it so the
+// prefix-membership check is in exactly one place (architect-lane
+// follow-up to issue #125). A nil/empty trusted slice returns false
+// — strictest possible posture (no proxy is trusted; always key on
+// r.RemoteAddr).
+func isTrustedProxy(addr netip.Addr, trusted []netip.Prefix) bool {
+	for _, p := range trusted {
+		if p.Contains(addr) {
+			return true
+		}
+	}
+	return false
+}
+
+// rightmostUntrustedXFF walks X-Forwarded-For from RIGHT to LEFT
+// (last hop nearest the coordinator → first hop nearest the buyer)
+// and returns the first entry whose IP is NOT in the trusted-proxy
+// set. That entry is the buyer-visible IP — survives chained trusted
+// proxies (LB → nginx → coordinator) without admitting a buyer-
+// supplied leftmost IP.
+//
+// Behavior:
+//   - Returns "" on empty header / unparseable hops / all-hops-trusted
+//     (the caller's fallback path then runs).
+//   - Each hop is trimmed; brackets stripped if present
+//     ([2001:db8::1]:443 → 2001:db8::1).
+//   - Hops with attached :port are split via net.SplitHostPort before
+//     the prefix check; bare IPs (no port) keep their literal value;
+//     either way the final IP is parsed via netip.ParseAddr.
+//
+// MDN: "Take care when leftmost values are user-controlled. Use the
+// rightmost-untrusted entry instead." We do exactly that.
+func rightmostUntrustedXFF(header string, trusted []netip.Prefix) string {
+	hops := strings.Split(header, ",")
+	for i := len(hops) - 1; i >= 0; i-- {
+		raw := strings.TrimSpace(hops[i])
+		if raw == "" {
+			continue
+		}
+		// Strip optional [v6]:port or v4:port suffix.
+		host := raw
+		if h, _, err := net.SplitHostPort(raw); err == nil {
+			host = h
+		}
+		// Strip lone IPv6 brackets if no port was present.
+		host = strings.Trim(host, "[]")
+		addr, err := netip.ParseAddr(host)
+		if err != nil {
+			continue
+		}
+		if !isTrustedProxy(addr, trusted) {
+			return addr.String()
+		}
+	}
+	return ""
 }
 
 type modelsResponse struct {

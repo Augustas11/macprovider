@@ -2550,6 +2550,18 @@ Unknown providers return the same 200 shape with `"state": "unknown"`.
 {"error":{"code":"rate_limited","message":"Pool check rate limit exceeded"}}
 ```
 
+**Rate-limit source-IP derivation (issue #125).** The per-source rate-
+limit bucket key is derived as follows: if `r.RemoteAddr` falls inside
+one of the operator-configured `proxy.trusted_proxies` CIDR ranges
+(default `["127.0.0.0/8", "::1/128"]` covers the production nginx-on-
+localhost topology), the coordinator parses the `X-Forwarded-For`
+header rightmost-untrusted-hop first, falling back to `X-Real-IP`,
+then to `r.RemoteAddr`. For peers outside the trusted-proxy CIDR set
+the `X-Forwarded-For` / `X-Real-IP` headers are IGNORED — direct
+internet callers cannot spoof their bucket key. Operators MUST keep
+`proxy.trusted_proxies` narrow; expanding it to non-actual-proxy CIDRs
+admits spoofing.
+
 Purpose: SPEC-003 v0.6 `install.sh` self-test calls this endpoint after
 first WebSocket connect to confirm that a freshly installed provider has
 registered with the coordinator. It is also a generic provider-registered
