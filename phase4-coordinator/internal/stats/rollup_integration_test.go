@@ -67,16 +67,18 @@ const rollupOLTPStubDDL = `
 DROP TABLE IF EXISTS ledger_request_credits CASCADE;
 DROP TABLE IF EXISTS provider_tokens CASCADE;
 CREATE TABLE ledger_request_credits (
-    id                   BIGSERIAL PRIMARY KEY,
-    request_id           TEXT NOT NULL,
-    attempt_n            INTEGER NOT NULL,
-    provider_id          TEXT NOT NULL,
-    ts_utc               TIMESTAMPTZ NOT NULL,
-    prompt_tokens        BIGINT,
-    completion_tokens    BIGINT,
-    provider_credits     BIGINT NOT NULL DEFAULT 0,
-    fault_flag           TEXT NOT NULL DEFAULT 'none',
-    quarantined          BOOLEAN NOT NULL DEFAULT FALSE
+    id                          BIGSERIAL PRIMARY KEY,
+    request_id                  TEXT NOT NULL,
+    attempt_n                   INTEGER NOT NULL,
+    provider_id                 TEXT NOT NULL,
+    ts_utc                      TIMESTAMPTZ NOT NULL,
+    prompt_tokens               BIGINT,
+    completion_tokens           BIGINT,
+    estimated_completion_tokens BIGINT,
+    usage_source                TEXT NOT NULL DEFAULT 'provider_reported',
+    provider_credits            BIGINT NOT NULL DEFAULT 0,
+    fault_flag                  TEXT NOT NULL DEFAULT 'none',
+    quarantined                 BOOLEAN NOT NULL DEFAULT FALSE
 );
 CREATE TABLE provider_tokens (
     provider_id  TEXT PRIMARY KEY,
@@ -709,17 +711,9 @@ func TestRollupByteEstimatedTokenSemantic(t *testing.T) {
 	rdb := rollupDB(t, fx)
 	now := time.Now().UTC()
 
-	// Extend the OLTP stub with the estimated_completion_tokens
-	// + usage_source columns SPEC-005 ships. The stub created in
-	// applyMigrationsAndStubOLTP only has the basic columns —
-	// extend here.
-	if _, err := adminDB.ExecContext(context.Background(), `
-        ALTER TABLE ledger_request_credits
-            ADD COLUMN IF NOT EXISTS estimated_completion_tokens BIGINT,
-            ADD COLUMN IF NOT EXISTS usage_source TEXT NOT NULL DEFAULT 'provider_reported'
-    `); err != nil {
-		t.Fatalf("extend OLTP stub: %v", err)
-	}
+	// estimated_completion_tokens + usage_source are now part
+	// of the base rollupOLTPStubDDL so all tests can exercise
+	// SPEC-005's byte_estimated semantic.
 
 	seedProviderTokens(t, adminDB, "p_byte_est")
 
