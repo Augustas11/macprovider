@@ -111,21 +111,36 @@ ok "nginx -t passes against composed config"
 # handler) that returns 200 for `Bearer mpk_*` and 401 for any
 # other Authorization value. Anonymous → 200.
 cat > "$TMP/upstream.py" <<'PYEOF'
+# Upstream mock with distinguishable keyed vs anonymous bodies so
+# the cache write-suppression assertion can prove that a keyed
+# response was not served to a subsequent anonymous request.
 import http.server, socketserver, sys
 class H(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         auth = self.headers.get("Authorization", "")
         if auth and not auth.startswith("Bearer mpk_"):
+            # AC-3: malformed Bearer → 401 §5.9 envelope.
             self.send_response(401)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(b'{"error":{"code":"unauthorized","message":"unauthorized"}}')
             return
+        if auth.startswith("Bearer mpk_"):
+            # Partner projection — deliberately distinct body so
+            # an anonymous follow-up that gets this body would
+            # prove cache poisoning.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Cache-Control", "private, max-age=30, s-maxage=30")
+            self.end_headers()
+            self.wfile.write(b'{"projection":"partner","exact":42}')
+            return
+        # Anonymous public projection.
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Cache-Control", "public, max-age=30, s-maxage=30")
         self.end_headers()
-        self.wfile.write(b'{"ok":true}')
+        self.wfile.write(b'{"projection":"public"}')
     def log_message(self, fmt, *args): pass
 PORT = int(sys.argv[1])
 with socketserver.TCPServer(("127.0.0.1", PORT), H) as s:
@@ -209,6 +224,64 @@ if [ "$PASS_O" -ne 50 ] || [ "$PASS_L" -ne 50 ]; then
   fail "per-endpoint isolation: /overview=$PASS_O /leaderboard=$PASS_L, want 50/50"
 fi
 [ "$FAIL" -eq 0 ] && ok "per-endpoint isolation: 50 /overview + 50 /leaderboard share no quota"
+
+# Step 6b — AC-3 (nginx-tier): `Bearer garbage` reaches upstream,
+# which returns 401. nginx must NOT short-circuit at the edge and
+# must NOT serve a cached public 200 (proxy_cache_bypass on
+# Authorization ensures it).
+RESP3=$(curl -s -i -H "Authorization: Bearer garbage" "${BASE}/v1/stats/leaderboard")
+if ! grep -q '^HTTP/1.1 401' <<<"$RESP3"; then fail "AC-3: Bearer garbage did not return 401 through nginx: $(head -1 <<<"$RESP3")"; fi
+if ! grep -q '"code":"unauthorized"' <<<"$RESP3"; then fail "AC-3: response missing unauthorized envelope"; fi
+[ "$FAIL" -eq 0 ] && ok "AC-3 (nginx-tier): Bearer garbage → 401 envelope through nginx"
+
+# Step 6c — proxy_no_cache write-suppression (SECURITY r5 C1).
+# Two assertions, both required by BUILD Step 4.B:
+#   (a) the anonymous follow-up to a keyed request MUST NOT
+#       receive the partner-projection body (no shared-cache
+#       leak across projections);
+#   (b) the keyed request MUST NOT write an entry to the
+#       on-disk `proxy_cache_path` directory. This is the
+#       stronger invariant — `proxy_cache_bypass` alone only
+#       blocks cache READS; `proxy_no_cache` adds the
+#       write-suppression that prevents a future request to
+#       any other cache-using endpoint from getting served
+#       partner bytes off disk.
+docker restart "$NGINX_CID" >/dev/null
+sleep 2
+# Count cache entries BEFORE.
+CACHE_BEFORE=$(find "$TMP/cache" -type f 2>/dev/null | wc -l | tr -d ' ')
+# Anonymous warm-up so the public projection IS allowed to land
+# in the cache (proves the cache itself works — distinguishes
+# "no entry" from "cache disabled entirely").
+curl -sf -o /dev/null "${BASE}/v1/stats/leaderboard"
+sleep 1
+CACHE_AFTER_PUBLIC=$(find "$TMP/cache" -type f 2>/dev/null | wc -l | tr -d ' ')
+if [ "$CACHE_AFTER_PUBLIC" -le "$CACHE_BEFORE" ]; then
+  fail "cache test: public projection did NOT land in cache (cache may be misconfigured): before=$CACHE_BEFORE after=$CACHE_AFTER_PUBLIC"
+fi
+
+# Keyed request.
+KEYED_BODY=$(curl -s -H "Authorization: Bearer $TOKEN" "${BASE}/v1/stats/leaderboard")
+if ! grep -q '"projection":"partner"' <<<"$KEYED_BODY"; then
+  fail "cache test: keyed response did not return partner projection: $KEYED_BODY"
+fi
+sleep 1
+CACHE_AFTER_KEYED=$(find "$TMP/cache" -type f 2>/dev/null | wc -l | tr -d ' ')
+if [ "$CACHE_AFTER_KEYED" -ne "$CACHE_AFTER_PUBLIC" ]; then
+  fail "cache test: keyed request added cache entries (SECURITY r5 C1 violation): before=$CACHE_AFTER_PUBLIC after=$CACHE_AFTER_KEYED"
+fi
+
+# Anonymous follow-up — different IP equivalent (same TCP conn
+# but proxy_cache_key is the URL, not the client IP). The body
+# must be the public projection, NEVER the partner one.
+ANON_BODY=$(curl -s "${BASE}/v1/stats/leaderboard")
+if grep -q '"projection":"partner"' <<<"$ANON_BODY"; then
+  fail "cache test: anonymous follow-up returned PARTNER projection — proxy_no_cache write-suppression broken: $ANON_BODY"
+fi
+if ! grep -q '"projection":"public"' <<<"$ANON_BODY"; then
+  fail "cache test: anonymous follow-up missing public projection: $ANON_BODY"
+fi
+[ "$FAIL" -eq 0 ] && ok "proxy_no_cache write-suppression: keyed request added 0 cache entries; anonymous follow-up served public projection only"
 
 # Step 7 — AC-15 access-log redaction. Run a keyed request, then
 # scan the host-mounted log file.
