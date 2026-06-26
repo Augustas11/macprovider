@@ -73,16 +73,28 @@ func TestIsCommitWorthyDataLine(t *testing.T) {
 		{"choices_empty_object_element", "data: {\"choices\":[{}]}\n", false},
 		{"choices_metadata_only_element", "data: {\"choices\":[{\"index\":0}]}\n", false},
 
-		// r4 value-shape — accept choices carrying delta/message/finish_reason.
+		// r4/r5 value-shape — accept choices carrying real OpenAI signals.
 		{"choices_with_message_field", "data: {\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"}}]}\n", true},
-		{"choices_with_finish_reason", "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n", true},
-		{"choices_with_finish_reason_null", "data: {\"choices\":[{\"finish_reason\":null}]}\n", true},
+		{"choices_with_finish_reason_string", "data: {\"choices\":[{\"finish_reason\":\"stop\"}]}\n", true},
+		// r5 — reject value-typed gaming: delta:null/{} / message:{} /
+		// finish_reason:null / finish_reason:int are no-work signals.
+		{"choices_with_delta_null", "data: {\"choices\":[{\"delta\":null}]}\n", false},
+		{"choices_with_delta_empty_object", "data: {\"choices\":[{\"delta\":{}}]}\n", false},
+		{"choices_with_message_empty_object", "data: {\"choices\":[{\"message\":{}}]}\n", false},
+		{"choices_with_finish_reason_null", "data: {\"choices\":[{\"finish_reason\":null}]}\n", false},
+		{"choices_with_finish_reason_int", "data: {\"choices\":[{\"finish_reason\":1}]}\n", false},
+		{"choices_with_finish_reason_empty_string", "data: {\"choices\":[{\"finish_reason\":\"\"}]}\n", false},
 
 		// r4 value-shape inside usage — reject non-OpenAI shapes.
 		{"usage_arbitrary_fields", "data: {\"usage\":{\"foo\":\"bar\"}}\n", false},
 		{"usage_only_prompt_tokens", "data: {\"usage\":{\"prompt_tokens\":4}}\n", false},
 		{"usage_only_completion_tokens", "data: {\"usage\":{\"completion_tokens\":4}}\n", false},
 		{"usage_non_numeric_tokens", "data: {\"usage\":{\"prompt_tokens\":\"a\",\"completion_tokens\":\"b\"}}\n", false},
+		// r5 — reject usage with non-integer / negative / overflow values.
+		{"usage_negative_tokens", "data: {\"usage\":{\"prompt_tokens\":-1,\"completion_tokens\":-1}}\n", false},
+		{"usage_float_tokens", "data: {\"usage\":{\"prompt_tokens\":1.5,\"completion_tokens\":2.5}}\n", false},
+		{"usage_overflow_tokens", "data: {\"usage\":{\"prompt_tokens\":99999999999999,\"completion_tokens\":99999999999999}}\n", false},
+		{"usage_all_zero_tokens", "data: {\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":0,\"total_tokens\":0}}\n", true}, // zero work is a valid OpenAI usage payload
 		// r4 — accept valid usage shapes.
 		{"usage_completion_plus_total", "data: {\"usage\":{\"completion_tokens\":4,\"total_tokens\":4}}\n", true},
 		{"usage_all_three_tokens", "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":2,\"total_tokens\":5}}\n", true},

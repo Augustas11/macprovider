@@ -2256,17 +2256,25 @@ var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 
 // isCommitWorthyDataLine reports whether the given SSE line counts as
 // real provider work for the purposes of forwardStreaming's commit
-// threshold. Codex r4 audit tightened the predicate from "non-empty
-// container" to "value-shape valid OpenAI chunk content":
-//   - `choices` must be a non-empty JSON array whose FIRST OBJECT element
-//     carries at least one of `delta`, `message`, `finish_reason` —
-//     the OpenAI streaming-chunk shape. Non-object elements (numbers,
-//     null, arrays), empty-object choices, and metadata-only choices
-//     (`{"index":0}`) all reject.
-//   - `usage` must be an object that decodes to numeric `completion_tokens`
-//     AND at least one of `prompt_tokens` / `total_tokens` — the OpenAI
-//     usage-final-chunk shape (emitted when stream_options.include_usage=true).
-//     Arbitrary `{"foo":"bar"}` or `{"prompt_tokens":1}` alone reject.
+// threshold. Codex r5 audit tightened the predicate from "field present"
+// to "field value-typed and bounded":
+//
+//   - `choices` must be a non-empty JSON array where AT LEAST ONE
+//     element (not necessarily the first) is an object carrying one of:
+//       - `delta`: a NON-EMPTY object (matches OpenAI role/content/
+//         tool_calls/function_call delta payloads; `{"delta":{}}` and
+//         `{"delta":null}` reject — these are no-work signals)
+//       - `message`: a NON-EMPTY object (matches the non-streaming
+//         message-shape variants; empty message rejects)
+//       - `finish_reason`: a STRING of length >= 1 (matches `"stop"`,
+//         `"length"`, `"tool_calls"`, etc.; numeric or empty/null
+//         finish_reason rejects)
+//
+//   - `usage` must decode to non-negative INTEGER `completion_tokens`
+//     in [0, maxRequestLogUsageTokens] AND at least one of
+//     `prompt_tokens` / `total_tokens` also non-negative integer within
+//     the same range. Floats, negatives, overflow, and string-typed
+//     token counts reject.
 //
 // A leading UTF-8 BOM (0xEF 0xBB 0xBF) on the line is tolerated for
 // SSE-source compatibility; some HTTP libraries emit one on stream init.
@@ -2292,33 +2300,94 @@ func isCommitWorthyDataLine(line []byte) bool {
 				if err := json.Unmarshal(choice, &obj); err != nil {
 					continue
 				}
-				if _, has := obj["delta"]; has {
+				if raw, has := obj["delta"]; has && isNonEmptyJSONObject(raw) {
 					return true
 				}
-				if _, has := obj["message"]; has {
+				if raw, has := obj["message"]; has && isNonEmptyJSONObject(raw) {
 					return true
 				}
-				if _, has := obj["finish_reason"]; has {
+				if raw, has := obj["finish_reason"]; has && isNonEmptyJSONString(raw) {
 					return true
 				}
 			}
 		}
 	}
 	if raw, ok := parsed["usage"]; ok {
-		var usage struct {
-			PromptTokens     *json.Number `json:"prompt_tokens"`
-			CompletionTokens *json.Number `json:"completion_tokens"`
-			TotalTokens      *json.Number `json:"total_tokens"`
-		}
-		dec := json.NewDecoder(bytes.NewReader(raw))
-		dec.UseNumber()
-		if err := dec.Decode(&usage); err == nil {
-			if usage.CompletionTokens != nil && (usage.PromptTokens != nil || usage.TotalTokens != nil) {
-				return true
-			}
+		if isValidUsageObject(raw) {
+			return true
 		}
 	}
 	return false
+}
+
+// isNonEmptyJSONObject reports whether raw decodes to a JSON object
+// (map) with at least one key. Used by isCommitWorthyDataLine to
+// reject delta:{} / delta:null / message:{} as no-work signals.
+func isNonEmptyJSONObject(raw json.RawMessage) bool {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return false
+	}
+	return len(obj) > 0
+}
+
+// isNonEmptyJSONString reports whether raw decodes to a JSON string
+// of length >= 1. Used by isCommitWorthyDataLine to require
+// finish_reason to be a real string ("stop", "length", etc.) — null
+// / numeric / empty-string finish_reason rejects.
+func isNonEmptyJSONString(raw json.RawMessage) bool {
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return false
+	}
+	return len(s) > 0
+}
+
+// isValidUsageObject reports whether raw decodes to an OpenAI usage
+// object with non-negative integer completion_tokens AND at least one
+// other non-negative integer token field, all within
+// maxRequestLogUsageTokens. Floats, negatives, overflow, and
+// non-numeric token counts reject.
+func isValidUsageObject(raw json.RawMessage) bool {
+	var usage struct {
+		PromptTokens     *json.Number `json:"prompt_tokens"`
+		CompletionTokens *json.Number `json:"completion_tokens"`
+		TotalTokens      *json.Number `json:"total_tokens"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&usage); err != nil {
+		return false
+	}
+	completion, ok := validatedTokenCount(usage.CompletionTokens)
+	if !ok {
+		return false
+	}
+	if _, ok := validatedTokenCount(usage.PromptTokens); ok {
+		_ = completion
+		return true
+	}
+	if _, ok := validatedTokenCount(usage.TotalTokens); ok {
+		return true
+	}
+	return false
+}
+
+// validatedTokenCount checks that n is a non-negative integer in the
+// range [0, maxRequestLogUsageTokens]. Returns (value, true) on
+// success, (0, false) on failure or nil input.
+func validatedTokenCount(n *json.Number) (int64, bool) {
+	if n == nil {
+		return 0, false
+	}
+	v, err := n.Int64()
+	if err != nil {
+		return 0, false
+	}
+	if v < 0 || v > maxRequestLogUsageTokens {
+		return 0, false
+	}
+	return v, true
 }
 
 // maxPreCommitStreamingBytes caps how much pre-commit body forwardStreaming
