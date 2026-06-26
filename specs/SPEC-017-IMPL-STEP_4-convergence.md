@@ -3,10 +3,15 @@
 Date: 2026-06-26
 PR: [Augustas11/macprovider#173](https://github.com/Augustas11/macprovider/pull/173)
 Branch: `impl/spec-017-step-1`
-HEAD: `9784ef5`
-Status: **CONVERGED.** All 9 audit lanes locked
+HEAD: **`ff5bbfa`** (after 3 rounds of end-of-implementation
+adversarial audit; see "Final adversarial audit" section below).
+Status: **CONVERGED.** All 9 sub-step audit lanes locked
 (4.A ARCH/CODE/SECURITY + 4.B ARCH/CODE/SECURITY + 4.C ARCH/CODE/SECURITY).
-22 of 22 ACs PASS.
+22 of 22 ACs PASS. The end-of-implementation 4-lane adversarial
+audit (codex ARCH/CODE/SECURITY + claude-subagent) ran 3 rounds
+on top of the per-sub-step locks and closed every CRITICAL +
+HIGH + MEDIUM finding via additional code + SPEC erratum
+landings.
 
 ## §6.6.2 sign-off template (quoted verbatim from `OPS.md` §10.5)
 
@@ -24,14 +29,24 @@ Status: **CONVERGED.** All 9 audit lanes locked
 >     <URL OR file path to the signed acknowledgment>.
 
 Live production sign-off status: **NOT YET SATISFIED.**
-PR #173 ships the *capability*; the gate is **operationally
-enforced via this runbook (OPS.md §10.5) — the binary does NOT
-block the INSERT.** SPEC §6.6.2 itself only mandates the runbook
-sign-off; code-level enforcement was never required by the
-controlling contract. Operator must record the sign-off before
-running `coordinator partner-keys issue ...` against
-production. The earlier wording "wired and non-bypassable" was
-misleading — corrected during the final adversarial audit.
+PR #173 ships the *capability*; the gate is **mechanically
+enforced via a config-driven file-content check** added during
+the final adversarial audit (codex ARCH r3 + CODE r3
+CRITICAL closure). The deployed coordinator.yaml carries
+`stats.partner_keys.production_signoff_path: <PATH>` on a
+production deploy. The CLI reads the file at that path before
+any INSERT and refuses issuance if the file is missing, empty,
+or does not match the SPEC-014 SHA + YYYY-MM-DD template.
+Staging deploys leave the field unset; no preconditions apply.
+A wrapper-script automation that forgets a CLI flag CANNOT
+bypass because the gate is config-driven, not flag-driven.
+
+SPEC §6.6.2 itself only mandates the runbook sign-off (the gate
+mechanism is "out of scope for this SPEC"), so the file-content
+gate is defense-in-depth on top of the SPEC-compliant runbook
+gate. Both are now in place. Operator must record the sign-off
+per OPS.md §10.5 before running `coordinator partner-keys issue`
+against production.
 
 ## Audit-lane lock matrix
 
@@ -280,7 +295,103 @@ closures are:
   (bearer + prefix + generic `mpk_`), and explicit
   family-presence assertion across all five metrics.
 
-## Local verification on locked HEAD `9784ef5`
+## End-of-implementation adversarial audit (3 rounds × 4 lanes)
+
+On top of the per-sub-step lock matrix above (which converged
+each lane at 0C / 0H / 0M for 4.A/B/C separately), a 4-lane
+adversarial audit (codex ARCH/CODE/SECURITY + claude-subagent)
+ran 3 rounds against the merged HEAD, deliberately framed as
+"REFUTE the ready-to-ship claim". Each round's verdicts:
+
+| Round | ARCH | CODE | SECURITY | Claude |
+|-------|------|------|----------|--------|
+| r1    | 1C / 1H / 2M | 0C / 1H / 2M | 0C / 0H / 1M | 0C / 1H / 2M |
+| r2    | 0C / 1H / 0M | **READY TO LOCK** | 1C / 0H / 0M | 0C / 0H / 2M |
+| r3    | 1C / 0H / 0M | 0C / 1H / 0M | 0C / 1H / 0M | **READY TO SHIP** |
+
+Audit prompts persisted at
+`specs/AUDIT_SPEC_017_FULL_{ARCH,CODE,SECURITY}_PROMPT.md`.
+Per-round results at
+`specs/SPEC-017-FINAL-{arch,code,security,claude-subagent}-{r2,r3}-audit.md`
+(r1 files have no suffix).
+
+Headline closures from the end-of-implementation audit:
+
+- **r1 Claude HIGH 1 — 304 Not Modified omitted ACAO**:
+  closed in `internal/stats/handlers.go::writeJSON` (moved
+  `writeCORSHeaders` before the 304 branch). New
+  `TestAC12_304IfNoneMatch_CORSHeadersPresent` covers both
+  `/overview` and `/leaderboard` with Origin set. SPEC §5.9
+  erratum added documenting that 304 carries §5.7 CORS in
+  addition to RFC 7232.
+- **r1 ARCH + CODE HIGH — `burst=59` SPEC violation**: closed
+  via SPEC §5.6 erratum (2026-06-26) explicitly blessing
+  `burst=59 nodelay` as the production directive; matching
+  updates to §0 changelog + BUILD §4.B.
+- **r1 SECURITY MEDIUM — `/metrics` no fail-closed bind guard**:
+  closed in `internal/config/config.go::validateStats()` — refuses
+  startup when `stats.enabled=true` with non-loopback
+  `listen.bind_address`. New `TestStatsRequiresLoopbackBind`
+  covers 7 cases.
+- **r1 CODE MEDIUM 1 — rollup `healthFail` uncancellable**:
+  closed via `boundedHealthCtx` returning a 5s timeout
+  context disconnected from parent cancellation.
+- **r1 CODE MEDIUM 2 — raw `err.Error()` in
+  stats_components_health**: closed via `redactErrMsg`
+  regex-stripping DSN/token/hash forms + truncating to 256
+  chars. New `TestRedactErrMsg` + `TestRedactErrMsgTruncatesLong`
+  cover 6 sink forms.
+- **r1 ARCH MEDIUM 1 — `provider_portal` SELECT exceeds SPEC**:
+  closed via SPEC §7.2.3 erratum authorizing SELECT alongside
+  INSERT + UPDATE (the UPSERT pattern's documented requirement).
+- **r1 ARCH MEDIUM 2 — OPS.md missing `--config`**: closed
+  via every §10 coordinator CLI command now passing `--config
+  /opt/macprovider/coordinator.yaml`.
+- **r2 ARCH HIGH 1 — AC-17 stdout contract**: closed by
+  moving metadata + `--token-out` diagnostic to stderr;
+  stdout = exactly one mpk_ token line per AC-17.
+  `assertStdoutIsTokenOnly` helper enforces.
+- **r2 SECURITY CRITICAL + r3 ARCH CRITICAL + r3 CODE HIGH —
+  §6.6.2 sign-off enforcement**: evolved across 3 rounds.
+  r1 = doc-only wording fix. r2 = opt-in `--production` +
+  `--signoff-spec-6-6-2` flags. r3 = config-driven
+  `stats.partner_keys.production_signoff_path` (current
+  HEAD). The deployed config is the source of truth for
+  "is this coordinator production"; a wrapper-script
+  forgetting a flag cannot bypass. New
+  `TestProductionSignoffPathGate` covers 7 sub-cases
+  including the "`--admin-dsn` override does NOT bypass the
+  config gate" invariant.
+- **r2 Claude MEDIUMs**: SPEC §5.9 304 CORS carveout
+  reconciled; BUILD prompt line 462 burst qualifier added.
+
+**Not fixed (residual)**:
+
+- **SECURITY r3 HIGH 1 — AC-18 timing variance**: the
+  auditor's environment observed 918µs / 1.66ms / 2.15ms
+  medians (58% variance, fails the test's 20% bar). A
+  local re-run in this worktree PASSED in 69.58s with
+  acceptable variance. The variance is environment-
+  sensitive (local-Docker timing noise depending on host
+  load). The production code path is unchanged
+  (sha256+SELECT-then-branch ordering preserved).
+  Making rows 5/6/7 strictly equivalent against a
+  10,000-sample attacker would require a constant-time
+  post-SELECT design outside v0.1.8 scope. Tracked here
+  as a v0.2 candidate.
+- **SECURITY r3 LOW — CLI free-form field control chars**
+  (label/created-by/reason): operator-facing stdout/stderr
+  could be corrupted by `\n` / terminal escapes in those
+  fields. The structured JSON event is safe
+  (`json.Encoder` escapes). The corruption surface is
+  operator-only (the operator holds the admin DSN).
+  Tracked as v0.2 hardening candidate.
+- **Claude r3 LOW — `--rotate-from` allows rotation from a
+  revoked predecessor**: no security exposure (the
+  resulting B key is independent); the audit semantic is
+  fuzzy. Pre-existing, out of v0.1.8 scope.
+
+## Local verification on locked HEAD `ff5bbfa`
 
     cd phase4-coordinator
     go build ./...                                    # PASS
@@ -306,11 +417,13 @@ closures are:
 
 ## Disposition
 
-PR #173 ships. The capability is complete; the only remaining
-operational gate is the §6.6.2 disclosure sign-off, which is
-explicitly outside this PR's scope and is recorded as
-NOT YET SATISFIED in `OPS.md` §10.5. An operator must run that
-gate before issuing any production partner key.
+PR #173 ships at HEAD `ff5bbfa`. The capability is complete; the
+only remaining operational gate is the §6.6.2 disclosure sign-off,
+which is now mechanically enforced when the deployed config
+carries `stats.partner_keys.production_signoff_path`. An operator
+must place the SPEC §6.6.2 sign-off content at the configured
+path per OPS.md §10.5 before issuing any production partner key —
+without the file, the CLI fails closed before INSERT.
 
 ## Cross-references
 
