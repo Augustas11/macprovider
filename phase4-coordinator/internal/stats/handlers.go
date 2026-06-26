@@ -167,11 +167,19 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 		Timeseries: overviewTimeseries{
 			Rpm30m: timeseriesRpm{
 				BucketSeconds: 60,
-				Points:        alignRpmPoints(rpm, now),
+				// Round-2 ARCH C1 / CODE H4 fix: align points
+				// to the snapshot, NOT request time. The ETag
+				// is sha256(body); a request-time anchor would
+				// shift bucket timestamps every minute and
+				// produce a different ETag without a snapshot
+				// advance. SPEC §5.1 locks ETag as "computed
+				// once per rollup snapshot and reused until
+				// generated_at advances."
+				Points: alignRpmPoints(rpm, ov.GeneratedAt),
 			},
 			Tpm30m: timeseriesTpm{
 				BucketSeconds: 60,
-				Points:        alignTpmPoints(tpm, now),
+				Points:        alignTpmPoints(tpm, ov.GeneratedAt),
 			},
 		},
 	}
@@ -186,9 +194,12 @@ func (h *Handler) handleOverview(w http.ResponseWriter, r *http.Request, ar auth
 // per §5.1 — one per minute over the rolling 30 minutes ending
 // at now-1m. Missing minutes render as JSON null per §5.1 (the
 // pointer is nil; encoding/json emits `"value": null`).
-func alignRpmPoints(rows []store.TimeseriesRow, now time.Time) []rpmPoint {
+// alignRpmPoints anchors the 30-element grid to `anchor`, which
+// MUST be the snapshot timestamp (NOT request time). The grid
+// ends at anchor.Truncate(minute) and runs 30 minutes back.
+func alignRpmPoints(rows []store.TimeseriesRow, anchor time.Time) []rpmPoint {
 	out := make([]rpmPoint, 30)
-	end := now.Truncate(time.Minute)
+	end := anchor.Truncate(time.Minute)
 	start := end.Add(-30 * time.Minute)
 	byMin := make(map[int64]int64, len(rows))
 	for _, r := range rows {
@@ -206,9 +217,9 @@ func alignRpmPoints(rows []store.TimeseriesRow, now time.Time) []rpmPoint {
 	return out
 }
 
-func alignTpmPoints(rows []store.TimeseriesRow, now time.Time) []tpmPoint {
+func alignTpmPoints(rows []store.TimeseriesRow, anchor time.Time) []tpmPoint {
 	out := make([]tpmPoint, 30)
-	end := now.Truncate(time.Minute)
+	end := anchor.Truncate(time.Minute)
 	start := end.Add(-30 * time.Minute)
 	type pair struct{ in, out int64 }
 	byMin := make(map[int64]pair, len(rows))
@@ -355,26 +366,29 @@ func (h *Handler) handleLeaderboard(w http.ResponseWriter, r *http.Request, ar a
 
 	// §5.8 per-window staleness check — leaderboard's
 	// generated_at is the snapshot tick time (consistent across
-	// every row in a single tick). If older than the §9.5 budget
-	// emit 503 stats_stale BEFORE writing the body. Round-1
-	// ARCH C2 / CODE H7 fix.
+	// every row in a single tick). Round-2 ARCH H1 / CODE H3
+	// fix: when the leaderboard table is empty, read
+	// stats_components_health.leaderboard_<window>.generated_at
+	// as the snapshot timestamp; empty + valid snapshot is a
+	// legitimate empty page, but a missing/epoch snapshot is
+	// a 503.
 	var snapshotTime time.Time
 	if len(rows) > 0 {
 		snapshotTime = rows[0].GeneratedAt
-	}
-	if snapshotTime.IsZero() {
-		// No data yet — treat as stale for non-empty windows so
-		// partner UIs don't bind to a transient pre-rollup state.
-		// 24h with zero providers is a valid empty leaderboard;
-		// we use the table's generated_at (epoch sentinel) as
-		// the signal. The stale_for_503 helper uses the §9.5
-		// budget; epoch sentinel always exceeds it → 503.
-		if h.leaderboardStaleFor503(snapshotTime, now, window) {
-			retry := 30
-			writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "leaderboard is stale", now, &retry)
+	} else {
+		gen, gerr := h.Store.ComponentGeneratedAt(ctx, "leaderboard_"+window)
+		if gerr != nil {
+			writeError(w, r, http.StatusInternalServerError, codeInternal, "components_health read failed", now, nil)
 			return
 		}
-	} else if h.leaderboardStaleFor503(snapshotTime, now, window) {
+		snapshotTime = gen
+	}
+	if snapshotTime.IsZero() {
+		retry := 30
+		writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "leaderboard is stale", now, &retry)
+		return
+	}
+	if h.leaderboardStaleFor503(snapshotTime, now, window) {
 		retry := 30
 		writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "leaderboard is stale", now, &retry)
 		return
@@ -525,6 +539,12 @@ func sign(v float64) float64 {
 }
 
 func (h *Handler) shouldExposePartialHistorySince(window string, now time.Time) bool {
+	// Round-2 CODE H5 fix: gate on BackfillMode == "partial"
+	// per §9.7 Path A. Path B (full) MUST omit the field even
+	// if a stale PartialSince config value is left behind.
+	if h.BackfillMode != "partial" {
+		return false
+	}
 	if h.PartialSince == "" {
 		return false
 	}

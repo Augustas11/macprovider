@@ -39,6 +39,22 @@ linters:
   settings:
     depguard:
       rules:
+        # SPEC-017 Step 3 approved external imports for the
+        # request-path package (`internal/stats/*.go`):
+        #
+        #   - golang.org/x/net/idna — required for RFC 6454
+        #     §5.7 Origin normalization (IDN → Punycode); the
+        #     handler MUST normalize before allowlist compare
+        #     to defend against Unicode-confusable origin
+        #     bypass. Approved Step 3 round 2 ARCH M1 / CODE
+        #     M-1.
+        #
+        # All other imports are governed by `list-mode: lax`
+        # (anything not in `deny:` below is permitted by
+        # default; the explicit allowlist comment is the
+        # convention so future contributors don't reintroduce
+        # billing/explorer/ws/auth without the SPEC owner's
+        # sign-off).
         stats-request-path:
           list-mode: lax
           files:

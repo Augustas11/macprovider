@@ -109,6 +109,12 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	// Layer 5 — auth dispatcher (§5.4.3).
 	ar, err := dispatchAuth(r.Context(), m.h.Store, r)
 	if err != nil {
+		// Auth dispatcher error → 500. Refund the auth-failure
+		// reservation (round-2 CODE H2 fix — non-401 outcomes
+		// MUST release the slot).
+		if authHeaderPresent {
+			m.authFailLimit.refund(reservedKey, now)
+		}
 		writeError(w, r, http.StatusInternalServerError, codeInternal, "auth dispatch failed", now, nil)
 		return
 	}
@@ -117,10 +123,21 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		// requests with non-empty allowlists / revoked / no-
 		// match (rows 3, 5, 6, 7) MUST omit ACAO. The response
 		// body is not key-derived; we use public Vary but DO
-		// NOT echo Origin.
+		// NOT echo Origin. The auth-failure tier KEEPS the
+		// reservation since this is exactly the 401 case the
+		// tier exists to throttle.
 		w.Header().Set("Vary", varyForPublic())
 		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
 		return
+	}
+
+	// Round-2 CODE H2 fix: auth succeeded → refund the auth-
+	// failure reservation BEFORE any subsequent error path
+	// (freshness pre-check, rate-limit, handler error). Valid
+	// partner-key requests that produce stale 503 / 500 must
+	// not count against the auth-failure 300 rpm bucket.
+	if authHeaderPresent {
+		m.authFailLimit.refund(reservedKey, now)
 	}
 
 	// Round-1 ARCH C1 / CODE H6 / SECURITY M1 fix: freshness
@@ -151,9 +168,6 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	var allowed bool
 	switch ar.projection {
 	case "partner":
-		if authHeaderPresent {
-			m.authFailLimit.refund(reservedKey, now)
-		}
 		limit := 600
 		if ar.matchedKey != nil && ar.matchedKey.RateLimitRPM > 0 {
 			limit = ar.matchedKey.RateLimitRPM

@@ -41,22 +41,28 @@ type errorBody struct {
 // body bytes per §4.3 (CRITICAL per round-1 CODE C1). 304 is
 // a separate path and never goes through this writer.
 //
+// Round-2 CODE H1 fix: writeError now derives the response's
+// Cache-Control + Vary from the request path, so every non-304
+// `/v1/stats/*` error response carries the endpoint's locked
+// header row instead of a blanket `no-store`. The locked SPEC
+// header table applies to BOTH success and error responses;
+// §5.9 exempts only 304 from carrying a JSON body, not the
+// per-endpoint Cache-Control.
+//
 // `now` is the request time used for `X-Stats-Generated-At` so
 // every non-304 response carries the header per BUILD §2 Step 3
 // CODE r8 M2 (round-1 ARCH M3 / CODE H6).
 func writeError(w http.ResponseWriter, r *http.Request, status int, code, message string, now time.Time, retryAfter *int) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
+	cc, vary := errorHeadersForRequest(r, status)
+	w.Header().Set("Cache-Control", cc)
+	w.Header().Set("Vary", vary)
 	w.Header().Set("X-Stats-Generated-At", now.UTC().Format(time.RFC3339))
 	if retryAfter != nil && *retryAfter > 0 {
-		// HTTP-level Retry-After header (mirrors body field for
-		// clients that read headers but not body).
 		w.Header().Set("Retry-After", itoaPos(*retryAfter))
 	}
 	w.WriteHeader(status)
 	if r != nil && r.Method == http.MethodHead {
-		// HEAD MUST return identical headers + empty body
-		// (§4.3 + CODE r1 C1 fix).
 		return
 	}
 	buf, _ := json.Marshal(errorEnvelope{Error: errorBody{
@@ -66,6 +72,33 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 	}})
 	_, _ = w.Write(buf)
 	_, _ = w.Write([]byte{'\n'})
+}
+
+// errorHeadersForRequest picks the Cache-Control + Vary row
+// that matches the request's endpoint. Errors carry the same
+// row as the corresponding endpoint success response so the
+// edge cache key is stable across stale-503, rate-limit-429,
+// bad-request-400 and the eventual 200 from the same path.
+//
+// Public projection for all error paths (we cannot know the
+// projection on 4xx/5xx — Vary: Authorization on errors would
+// fragment caches by every bad-Authorization probe).
+func errorHeadersForRequest(r *http.Request, status int) (string, string) {
+	if r == nil {
+		return "no-store", "Accept-Encoding, Origin"
+	}
+	switch trimEndpointFromPath(r.URL.Path) {
+	case "overview":
+		return "public, max-age=30, s-maxage=30, stale-while-revalidate=60",
+			"Accept-Encoding, Origin"
+	case "leaderboard":
+		return "public, max-age=60, s-maxage=60, stale-while-revalidate=120",
+			"Accept-Encoding, Origin"
+	case "health":
+		return "public, max-age=10, s-maxage=10",
+			"Accept-Encoding, Origin"
+	}
+	return "no-store", "Accept-Encoding, Origin"
 }
 
 // itoaPos is a tiny positive-int → string helper that avoids

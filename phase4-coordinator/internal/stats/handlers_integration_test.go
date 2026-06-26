@@ -15,6 +15,9 @@ package stats_test
 // side ACs we want deterministic snapshot times.
 
 import (
+	"bytes"
+	"context"
+	sha256pkg "crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -23,10 +26,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rs/zerolog"
 
 	"github.com/augstar/macprovider-coordinator/internal/stats"
+	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
 	"github.com/augstar/macprovider-coordinator/internal/stats/store"
 )
 
@@ -428,3 +433,268 @@ func readBody(t *testing.T, resp *http.Response) []byte {
 // Suppress unused-import warnings on helpers reserved for the
 // adversarial-audit pass.
 var _ = strings.HasPrefix
+
+// ===========================================================================
+// AC-22 — auth-failure tier 300 rpm pre-SELECT cap. Invalid
+// bearer floods MUST trip 429 BEFORE the SELECT, and absent-
+// Authorization requests MUST NOT debit the auth-failure
+// bucket.
+// ===========================================================================
+func TestAC22_AuthFailureLimiter(t *testing.T) {
+	h, _ := setupStatsHandler(t)
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer mpk_invalid")
+	// Send 350 invalid-bearer requests. The 301st onward must
+	// return 429 (auth-failure tier 300 rpm).
+	var ok401, rate429 int
+	for i := 0; i < 350; i++ {
+		resp := mustDoWithHeaders(t, h, http.MethodGet, "/v1/stats/leaderboard", hdr)
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			ok401++
+		case http.StatusTooManyRequests:
+			rate429++
+		}
+		resp.Body.Close()
+	}
+	if ok401 != 300 {
+		t.Errorf("got %d 401s, want 300 (auth-failure cap)", ok401)
+	}
+	if rate429 != 50 {
+		t.Errorf("got %d 429s, want 50 (350 - 300)", rate429)
+	}
+}
+
+// Absent-Authorization MUST NOT debit the auth-failure bucket.
+func TestAuthFailureLimiterIgnoresAbsentAuth(t *testing.T) {
+	h, _ := setupStatsHandler(t)
+	// Send 350 requests with NO Authorization. They all go
+	// through the public tier (60 rpm) — the auth-failure
+	// counter must stay at 0.
+	var ok200, rate429 int
+	for i := 0; i < 350; i++ {
+		resp := mustDo(t, h, http.MethodGet, "/v1/stats/leaderboard", nil)
+		switch resp.StatusCode {
+		case http.StatusOK:
+			ok200++
+		case http.StatusTooManyRequests:
+			rate429++
+		}
+		resp.Body.Close()
+	}
+	// Public tier 60 rpm — first 60 succeed, next 290 hit 429.
+	if ok200 != 60 {
+		t.Errorf("public tier first-60: got %d 200s, want 60", ok200)
+	}
+	if rate429 != 290 {
+		t.Errorf("public tier: got %d 429s, want 290", rate429)
+	}
+}
+
+// ===========================================================================
+// partial_history_since BackfillMode gate — Path A vs Path B.
+// ===========================================================================
+func TestPartialHistorySinceBackfillModeGate(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+
+	// Seed a 30d leaderboard row so the snapshot generated_at
+	// is fresh.
+	if _, err := adminDB.Exec(`UPDATE stats_components_health SET generated_at = now() WHERE component = 'leaderboard_30d'`); err != nil {
+		t.Fatalf("seed 30d health: %v", err)
+	}
+
+	reader := readerPool(t, fx)
+
+	// Path A: backfill_mode = partial; field MUST be present.
+	pathA := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"2026-06-01T00:00:00Z",
+		nil,
+		zerolog.Nop(),
+	).Handler()
+	respA := mustDo(t, pathA, http.MethodGet, "/v1/stats/leaderboard?window=30d", nil)
+	var bodyA map[string]any
+	mustDecode(t, respA, &bodyA)
+	if _, ok := bodyA["partial_history_since"]; !ok {
+		t.Errorf("Path A: partial_history_since missing on 30d")
+	}
+
+	// Path B: backfill_mode = full; field MUST be omitted even
+	// if a stale config value is left behind.
+	pathB := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"full",
+		"2026-06-01T00:00:00Z", // stale config — should be ignored
+		nil,
+		zerolog.Nop(),
+	).Handler()
+	respB := mustDo(t, pathB, http.MethodGet, "/v1/stats/leaderboard?window=30d", nil)
+	var bodyB map[string]any
+	mustDecode(t, respB, &bodyB)
+	if _, ok := bodyB["partial_history_since"]; ok {
+		t.Errorf("Path B: partial_history_since MUST be omitted on full backfill_mode, got %v", bodyB["partial_history_since"])
+	}
+
+	// Path A but window=24h: still omitted.
+	respC := mustDo(t, pathA, http.MethodGet, "/v1/stats/leaderboard?window=24h", nil)
+	var bodyC map[string]any
+	mustDecode(t, respC, &bodyC)
+	if _, ok := bodyC["partial_history_since"]; ok {
+		t.Errorf("Path A window=24h: partial_history_since MUST be omitted, got %v", bodyC["partial_history_since"])
+	}
+}
+
+// ===========================================================================
+// AC-15 redaction sweep — Authorization / Cookie / X-Api-Key
+// MUST NOT appear in any structured log.
+// ===========================================================================
+func TestAC15_RedactionSweep(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+	reader := readerPool(t, fx)
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	mux := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"2026-06-01T00:00:00Z",
+		nil,
+		logger,
+	).Handler()
+
+	// Send a request with all three secret-bearing headers.
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer mpk_secrettoken1234567890_abcdef")
+	hdr.Set("Cookie", "session=secretcookiebytes")
+	hdr.Set("X-Api-Key", "apikey_secret456")
+	resp := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/overview", hdr)
+	resp.Body.Close()
+
+	logOut := buf.String()
+	for _, leak := range []string{
+		"mpk_secrettoken1234567890_abcdef",
+		"secretcookiebytes",
+		"apikey_secret456",
+	} {
+		if strings.Contains(logOut, leak) {
+			t.Errorf("structured log leaked secret %q: %s", leak, logOut)
+		}
+	}
+}
+
+// ===========================================================================
+// AC-6 partner-key projection: with a valid Authorization, the
+// response MUST include earnings_usd / earnings_work_usd /
+// earnings_rewards_usd at row and totals level.
+// ===========================================================================
+func TestAC6_PartnerProjection(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+
+	// Seed a provider with activity and a partner_keys row.
+	now := time.Now().UTC()
+	seedProviderTokens(t, adminDB, "p_partner_test")
+	seedLedgerRow(t, adminDB, "p_partner_test", now.Add(-1*time.Hour), 100, 100, 1_000_000)
+
+	// Drive a rollup tick so the leaderboard table is populated.
+	// (We use the existing rollup runner from the rollup helpers.)
+	driveOneRollupTick(t, fx)
+
+	// Seed an active partner_keys row whose sha256(token) we know.
+	bearer := "mpk_test_partner_secret_token"
+	hash := sha256Hex(bearer)
+	if _, err := adminDB.Exec(
+		`INSERT INTO partner_keys (label, token_hash, prefix, allowed_origins, rate_limit_rpm, created_by)
+         VALUES ('test', decode($1, 'hex'), 'mpk_test', '{}', 600, 'test')`,
+		hash,
+	); err != nil {
+		t.Fatalf("seed partner_keys: %v", err)
+	}
+
+	reader := readerPool(t, fx)
+	mux := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"2026-06-01T00:00:00Z",
+		nil,
+		zerolog.Nop(),
+	).Handler()
+
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+bearer)
+	resp := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/leaderboard", hdr)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("partner projection expected 200, got %d body=%s", resp.StatusCode, readBody(t, resp))
+	}
+	var body map[string]any
+	mustDecode(t, resp, &body)
+
+	totals, ok := body["totals"].(map[string]any)
+	if !ok {
+		t.Fatalf("totals missing")
+	}
+	for _, k := range []string{"earnings_usd", "earnings_work_usd", "earnings_rewards_usd"} {
+		if _, present := totals[k]; !present {
+			t.Errorf("partner totals missing %s", k)
+		}
+	}
+	rows, ok := body["rows"].([]any)
+	if !ok || len(rows) == 0 {
+		t.Fatalf("rows missing or empty")
+	}
+	row0, _ := rows[0].(map[string]any)
+	for _, k := range []string{"earnings_usd", "earnings_work_usd", "earnings_rewards_usd"} {
+		if _, present := row0[k]; !present {
+			t.Errorf("partner row missing %s", k)
+		}
+	}
+}
+
+// sha256Hex returns the hex sha256 of `s`, for partner_keys
+// fixture seeding.
+func sha256Hex(s string) string {
+	h := sha256_local([]byte(s))
+	const hexdigits = "0123456789abcdef"
+	buf := make([]byte, 64)
+	for i, b := range h {
+		buf[i*2] = hexdigits[b>>4]
+		buf[i*2+1] = hexdigits[b&0x0f]
+	}
+	return string(buf)
+}
+
+func sha256_local(b []byte) [32]byte {
+	return sha256pkg.Sum256(b)
+}
+
+// driveOneRollupTick runs the rollup against the admin DSN
+// long enough to populate the per-window leaderboard tables.
+func driveOneRollupTick(t *testing.T, fx *pgFixture) {
+	t.Helper()
+	rdb, err := sql.Open("postgres", fx.roleDSN("stats_rollup"))
+	if err != nil {
+		t.Fatalf("open stats_rollup: %v", err)
+	}
+	defer rdb.Close()
+	logger := zerolog.Nop()
+	cfg := freshRollupConfig()
+	runner, err := statsrollup.New(rdb, cfg, statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("rollup runner: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+}
