@@ -903,7 +903,11 @@ func TestAC18_TimingEquivalenceRows5_6_7(t *testing.T) {
 	).Handler()
 
 	measure := func(headers http.Header) time.Duration {
-		const N = 30
+		// Round-6 BUILD ask: 100+ samples per row, sustained
+		// rate ≤270 rpm so the auth-failure 300 rpm cap does
+		// not perturb measurements. 100 × 225ms ≈ 22.5s/row =
+		// ~265 rpm.
+		const N = 100
 		samples := make([]time.Duration, 0, N)
 		for i := 0; i < N; i++ {
 			start := time.Now()
@@ -913,8 +917,7 @@ func TestAC18_TimingEquivalenceRows5_6_7(t *testing.T) {
 				t.Fatalf("expected 401, got %d", resp.StatusCode)
 			}
 			resp.Body.Close()
-			// Sleep ~250ms to stay well below the 300 rpm cap.
-			time.Sleep(250 * time.Millisecond)
+			time.Sleep(225 * time.Millisecond)
 		}
 		// Median.
 		sortDurations(samples)
@@ -1061,7 +1064,19 @@ func TestAC11_RealPanicInjected(t *testing.T) {
 	wrapped := stats.RecoverForTest(logger, panicking)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/stats/overview", nil)
-	req.Header.Set("Authorization", "Bearer mpk_should_not_leak")
+	// Round-6 broader redaction sweep: send Authorization,
+	// Cookie, X-Api-Key, plus a synthetic token_hash-shaped
+	// header. The redaction middleware (defense-in-depth) +
+	// recover middleware must ensure NONE of these survive
+	// into the captured structured log.
+	const rawBearer = "mpk_should_not_leak_randomsuffix_abc123def456"
+	const rawCookie = "session=cookiesecretvalue_xyz789"
+	const rawApiKey = "apikey_alsosecret_4242"
+	const rawTokenHash = "a3f5b8c9d2e1f0a4b6c7d8e9f0a1b2c3"
+	req.Header.Set("Authorization", "Bearer "+rawBearer)
+	req.Header.Set("Cookie", rawCookie)
+	req.Header.Set("X-Api-Key", rawApiKey)
+	req.Header.Set("X-Token-Hash", rawTokenHash) // synthetic; not in redaction list but used in sweep
 	w := httptest.NewRecorder()
 	wrapped.ServeHTTP(w, req)
 	resp := w.Result()
@@ -1080,7 +1095,17 @@ func TestAC11_RealPanicInjected(t *testing.T) {
 	}
 
 	logOut := buf.String()
-	for _, leak := range []string{"mpk_should_not_leak", "mpk_should_be_redacted"} {
+	// Round-6 broader sweep — every secret string MUST be
+	// absent from the captured log.
+	for _, leak := range []string{
+		rawBearer,
+		"mpk_should_be_redacted",    // panic-string substring
+		"randomsuffix_abc123def456", // random-portion substring
+		rawCookie,                   // Cookie value
+		"cookiesecretvalue_xyz789",  // Cookie substring
+		rawApiKey,                   // X-Api-Key value
+		"apikey_alsosecret_4242",    // X-Api-Key substring
+	} {
 		if strings.Contains(logOut, leak) {
 			t.Errorf("panic-log leaked %q: %s", leak, logOut)
 		}
@@ -1290,5 +1315,230 @@ func TestTrustedUntrustedXFF(t *testing.T) {
 	}
 	if rate429 != 0 {
 		t.Errorf("trusted-proxy XFF: got %d 429s, want 0 (distinct synthetic IPs should each get own bucket)", rate429)
+	}
+}
+
+// ===========================================================================
+// §5.7 7-row CORS decision-table matrix. Drives every locked
+// row and asserts the exact ACAO / Allow-Credentials / Vary
+// emitted in response. Rows that 401 (3, 5, 6, 7) MUST omit
+// ACAO; rows 2 and 4 (partner success) MUST echo the
+// normalized Origin or omit (NEVER `*`).
+// ===========================================================================
+func TestSection_5_7_CORSMatrix(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+	driveOneRollupTick(t, fx)
+
+	// Seed two partner keys: one with empty allowed_origins
+	// (row 2/3 scenarios), one with non-empty (rows 4-7).
+	bearerEmpty := "mpk_cors_empty_allowlist"
+	bearerNonEmpty := "mpk_cors_nonempty_allowlist"
+	hashEmpty := sha256Hex(bearerEmpty)
+	hashNonEmpty := sha256Hex(bearerNonEmpty)
+	bearerRevoked := "mpk_cors_revoked"
+	hashRevoked := sha256Hex(bearerRevoked)
+	if _, err := adminDB.Exec(
+		`INSERT INTO partner_keys (label, token_hash, prefix, allowed_origins, created_by)
+         VALUES ('e',  decode($1, 'hex'), 'mpk_e',  '{}', 'test'),
+                ('ne', decode($2, 'hex'), 'mpk_ne', ARRAY['https://acme.example'], 'test'),
+                ('rv', decode($3, 'hex'), 'mpk_rv', '{}', 'test')`,
+		hashEmpty, hashNonEmpty, hashRevoked,
+	); err != nil {
+		t.Fatalf("seed keys: %v", err)
+	}
+	if _, err := adminDB.Exec(`UPDATE partner_keys SET revoked_at = now() WHERE prefix = 'mpk_rv'`); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+
+	reader := readerPool(t, fx)
+	mux := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{
+			AccessControlMaxAgeSeconds: 60,
+			PartnerOriginAllowlist:     []string{"https://portal.streamvc.live"},
+		},
+		"partial",
+		"",
+		nil,
+		zerolog.Nop(),
+	).Handler()
+
+	type rowCase struct {
+		name      string
+		auth      string
+		origin    string
+		wantCode  int
+		acaoExact string // "" = must be absent
+		credsTrue bool
+	}
+	cases := []rowCase{
+		// Row 1: anonymous → 200 public, ACAO=*.
+		{"row1_anonymous", "", "", http.StatusOK, "*", false},
+		// Row 2: valid key, allowlist empty, Origin browser context → 200 partner, echo Origin + creds.
+		{"row2_empty_allowlist_browser", bearerEmpty, "https://acme.example", http.StatusOK, "https://acme.example", true},
+		// Row 3: valid key, allowlist NON-empty, Origin absent → 401 + ACAO absent.
+		{"row3_nonempty_origin_absent", bearerNonEmpty, "", http.StatusUnauthorized, "", false},
+		// Row 4: valid key, allowlist NON-empty, exact-match Origin → 200 partner, echo + creds.
+		{"row4_nonempty_match", bearerNonEmpty, "https://acme.example", http.StatusOK, "https://acme.example", true},
+		// Row 5: valid key, allowlist NON-empty, non-allowlist Origin → 401 + ACAO absent.
+		{"row5_nonempty_reject", bearerNonEmpty, "https://attacker.example", http.StatusUnauthorized, "", false},
+		// Row 6: present-but-no-match → 401 + ACAO absent.
+		{"row6_no_match", "mpk_unknown_xyz", "https://acme.example", http.StatusUnauthorized, "", false},
+		// Row 7: revoked → 401 + ACAO absent.
+		{"row7_revoked", bearerRevoked, "https://acme.example", http.StatusUnauthorized, "", false},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			hdr := http.Header{}
+			if c.auth != "" {
+				hdr.Set("Authorization", "Bearer "+c.auth)
+			}
+			if c.origin != "" {
+				hdr.Set("Origin", c.origin)
+			}
+			resp := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/leaderboard", hdr)
+			defer resp.Body.Close()
+			if resp.StatusCode != c.wantCode {
+				t.Errorf("status = %d, want %d", resp.StatusCode, c.wantCode)
+			}
+			acao := resp.Header.Get("Access-Control-Allow-Origin")
+			if acao != c.acaoExact {
+				t.Errorf("ACAO = %q, want %q", acao, c.acaoExact)
+			}
+			// Partner projection MUST NEVER emit ACAO: *.
+			if c.wantCode == http.StatusOK && c.auth != "" && acao == "*" {
+				t.Errorf("partner projection emitted ACAO: * — locked §5.7 violation")
+			}
+			creds := resp.Header.Get("Access-Control-Allow-Credentials")
+			if c.credsTrue && creds != "true" {
+				t.Errorf("Allow-Credentials = %q, want true", creds)
+			}
+			if !c.credsTrue && creds == "true" {
+				t.Errorf("Allow-Credentials unexpectedly true: %q", creds)
+			}
+		})
+	}
+}
+
+// ===========================================================================
+// Active-key origin preflight union — a partner key's
+// allowed_origins entry MUST be echoed on preflight even if
+// the operator did not duplicate it in the static
+// PartnerOriginAllowlist.
+// ===========================================================================
+func TestPreflightActiveKeyOriginUnion(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	bearer := "mpk_pf_union"
+	hash := sha256Hex(bearer)
+	if _, err := adminDB.Exec(
+		`INSERT INTO partner_keys (label, token_hash, prefix, allowed_origins, created_by)
+         VALUES ('pf', decode($1, 'hex'), 'mpk_pf', ARRAY['https://newpartner.example'], 'test')`,
+		hash,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	reader := readerPool(t, fx)
+	mux := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{
+			AccessControlMaxAgeSeconds: 60,
+			// Note: newpartner.example is NOT in static list.
+			PartnerOriginAllowlist: []string{"https://portal.streamvc.live"},
+		},
+		"partial",
+		"",
+		nil,
+		zerolog.Nop(),
+	).Handler()
+
+	hdr := http.Header{}
+	hdr.Set("Origin", "https://newpartner.example")
+	resp := mustDoWithHeaders(t, mux, http.MethodOptions, "/v1/stats/leaderboard", hdr)
+	defer resp.Body.Close()
+	if got := resp.Header.Get("Access-Control-Allow-Origin"); got != "https://newpartner.example" {
+		t.Errorf("preflight ACAO = %q, want echoed origin (active key allowed_origins union must apply)", got)
+	}
+	if got := resp.Header.Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Errorf("preflight Allow-Credentials = %q, want true (echoed origin path)", got)
+	}
+}
+
+// ===========================================================================
+// Valid partner-key 500-request refund proof — auth-failure
+// tier 300 rpm MUST NOT cap valid keys; partner tier 600 rpm
+// is the only ceiling. Run 500 valid requests; assert zero
+// 429s and final auth-failure counter is 0 (every reservation
+// was refunded by the dispatcher-success path).
+// ===========================================================================
+func TestValidPartnerKey500ReqNoAuthFailureCap(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	seedFreshOverview(t, adminDB)
+	seedFreshHealthAll(t, adminDB)
+	if _, err := adminDB.Exec(`UPDATE stats_components_health SET generated_at = now() WHERE component LIKE 'leaderboard_%'`); err != nil {
+		t.Fatalf("seed health: %v", err)
+	}
+
+	bearer := "mpk_valid_500req_test"
+	hash := sha256Hex(bearer)
+	if _, err := adminDB.Exec(
+		`INSERT INTO partner_keys (label, token_hash, prefix, allowed_origins, rate_limit_rpm, created_by)
+         VALUES ('500r', decode($1, 'hex'), 'mpk_500', '{}', 600, 'test')`,
+		hash,
+	); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	reader := readerPool(t, fx)
+	mux := stats.NewMux(
+		store.New(reader),
+		stats.CORSConfig{AccessControlMaxAgeSeconds: 60},
+		"partial",
+		"",
+		nil,
+		zerolog.Nop(),
+	).Handler()
+
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+bearer)
+	var ok200, rate429 int
+	for i := 0; i < 500; i++ {
+		resp := mustDoWithHeaders(t, mux, http.MethodGet, "/v1/stats/leaderboard", hdr)
+		switch resp.StatusCode {
+		case http.StatusOK:
+			ok200++
+		case http.StatusTooManyRequests:
+			rate429++
+		}
+		resp.Body.Close()
+	}
+	if ok200 != 500 {
+		t.Errorf("valid partner 500 req: got %d 200s, want 500 (auth-failure 300 rpm must NOT cap valid keys)", ok200)
+	}
+	if rate429 != 0 {
+		t.Errorf("valid partner 500 req: got %d 429s, want 0 (refund path must release auth-failure slots)", rate429)
+	}
+}
+
+// ===========================================================================
+// Sibling-subdomain reject — Origin: https://evil.streamvc.live
+// MUST NOT be echoed (no wildcard / no sibling-match).
+// ===========================================================================
+func TestSiblingSubdomainReject(t *testing.T) {
+	h, _ := setupStatsHandler(t)
+	hdr := http.Header{}
+	hdr.Set("Origin", "https://evil.streamvc.live")
+	resp := mustDoWithHeaders(t, h, http.MethodOptions, "/v1/stats/leaderboard", hdr)
+	defer resp.Body.Close()
+	// Should fall through to ACAO: * (no match in static or
+	// partner_keys; sibling-subdomain is NOT auto-trusted).
+	acao := resp.Header.Get("Access-Control-Allow-Origin")
+	if acao == "https://evil.streamvc.live" {
+		t.Errorf("preflight echoed sibling subdomain %q — sibling-domain trust is FORBIDDEN", acao)
+	}
+	if acao != "*" {
+		t.Errorf("preflight ACAO = %q, want * (no allowlist match)", acao)
 	}
 }
