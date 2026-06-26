@@ -80,10 +80,13 @@ func main() {
 
 	// coordinatorTransport clones the default transport and adds
 	// ResponseHeaderTimeout so buyers get a bounded failure if the coordinator
-	// holds the connection without sending headers. This timeout must still be
-	// long enough for non-streaming large-model inference, because the
-	// coordinator cannot send headers until a complete non-streaming response
-	// is available. Streaming response bodies continue unaffected after headers.
+	// holds the connection without sending headers. This timeout must be at
+	// least as long as coordinator_request_seconds — neither non-streaming
+	// (full-buffer) nor streaming (post-#92: first commit-worthy SSE event)
+	// coordinator responses commit headers earlier than provider work
+	// completion. A 60s default pre-#92 silently failed any non-streaming
+	// inference > 60s and now any streaming inference whose first valid event
+	// took > 60s; the new 300s default tracks the full request budget.
 	coordinatorTransport := http.DefaultTransport.(*http.Transport).Clone()
 	coordinatorTransport.ResponseHeaderTimeout = cfg.CoordinatorHeaderTimeout()
 	coordinatorClient := &http.Client{

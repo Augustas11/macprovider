@@ -153,6 +153,8 @@ const (
 	breakerFaultDeadWS              breakerFault = "dead_ws_mid_inference"
 	breakerFaultRelayTimeout        breakerFault = "relay_timeout_mid_inference"
 	breakerFaultZeroTokenCompletion breakerFault = "zero_token_completion"
+	breakerFaultHTTPStreamDead      breakerFault = "http_stream_disconnected_mid_inference"
+	breakerFaultHTTPStreamTimeout   breakerFault = "http_stream_timed_out_mid_inference"
 )
 
 func WithPreflight(fn PreflightFunc) Option {
@@ -2236,8 +2238,10 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		}
 		if isStreamingTimeoutErr(err, attemptCtx) {
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider timed out during streaming")
+			s.recordBreakerFault(provider, breakerFaultHTTPStreamTimeout, requestID)
 		} else {
 			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("provider disconnected during streaming")
+			s.recordBreakerFault(provider, breakerFaultHTTPStreamDead, requestID)
 		}
 		writeSSEError(w, "Provider disconnected during streaming", "provider_disconnected")
 		if flusher != nil {

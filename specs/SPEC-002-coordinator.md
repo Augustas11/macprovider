@@ -994,7 +994,25 @@ request id in logs. For streaming responses, failover is allowed only
 before HTTP status/body bytes are committed; after a chunk has been
 emitted, dead-WS failure MUST mark the provider unavailable and
 terminate the SSE stream with an error event whose code is
-`provider_disconnected`. Explicit `X-MacProvider-Provider` and
+`provider_disconnected`. **(v1.4.0, issue #92):** "committed" is
+defined as "the coordinator has observed a complete, well-formed
+first OpenAI-compatible SSE event from the provider — a `data:` line
+with a JSON object carrying either `choices[].delta` with at least
+one of `content`, `role`, `refusal`, `reasoning`, `tool_calls`,
+`function_call` (value-typed: strings non-empty, arrays/objects
+non-empty), `choices[].message` (same allowlist), `choices[].finish_reason`
+(non-empty string), OR a top-level `usage` object with non-negative
+integer `completion_tokens` AND one of `prompt_tokens` / `total_tokens`,
+all within `maxRequestLogUsageTokens`". Anything weaker — a 200 status
+line without body, a single byte, an SSE comment-only event, a
+`data: [DONE]` terminator-only event, metadata-only JSON, or an
+arbitrary-key delta/message — is NOT committed; the coordinator MUST
+return `wsForwardProviderDisconnected` and failover (subject to the
+same `failover_enabled` + pin rules). The buyer-visible consequence
+is that HTTP response headers wait for the first commit-worthy event;
+buyer clients MUST tolerate up to `coordinator_request_seconds` of
+TTFT and gateway `coordinator_header_timeout_seconds` MUST be set
+accordingly (>= `coordinator_request_seconds`). Explicit `X-MacProvider-Provider` and
 `X-MacProvider-Session` pins MUST NOT fail over because the buyer
 requested that provider/session. The buyer MUST receive one coherent
 response or one clean OpenAI-compatible error envelope; the buyer MUST

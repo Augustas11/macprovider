@@ -3098,7 +3098,7 @@ capacity:
   tier_cooldown_seconds: 3600
 timeouts:
   coordinator_request_seconds: 300
-  coordinator_header_timeout_seconds: 60
+  coordinator_header_timeout_seconds: 300
   streaming_cancel_ms: 500
 `, allPublicAPI)
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {

@@ -248,6 +248,28 @@ if gw:
                  f"attribution (SPEC-002 FR-P11a C2). Set coordinator < gateway.")
         else:
             ok(f"C2 timer ordering: coordinator {rt}s < gateway {gwt}s")
+
+    # C2b cross-component check (added post-#92):
+    # gateway coordinator_header_timeout_seconds bounds how long the gateway
+    # waits for response headers from the coordinator. Post-#92, the
+    # coordinator commits streaming headers only after the first valid SSE
+    # event arrives; combined with non-streaming headers always arriving at
+    # completion, this header timeout must be >= the gateway request budget
+    # OR a class of slow-but-valid first-event scenarios will false-fail as
+    # coordinator_unavailable before the coordinator's own request_timeout_s
+    # has elapsed. (See issue #92 architect-lane audit + follow-up #171.)
+    ght = g_section(gw, "timeouts", "coordinator_header_timeout_seconds")
+    if ght is None:
+        warn("C2b: gateway timeouts.coordinator_header_timeout_seconds absent -> default 300 applies (post-#92)")
+    else:
+        if int(ght) < int(gwt):
+            hard(f"C2b: gateway coordinator_header_timeout_seconds ({ght}) is BELOW gateway "
+                 f"coordinator_request_seconds ({gwt}). Slow-but-valid streaming/non-streaming "
+                 f"providers will false-fail with coordinator_unavailable before the request "
+                 f"budget is exhausted. Set coordinator_header_timeout_seconds >= "
+                 f"coordinator_request_seconds (typically equal).")
+        else:
+            ok(f"C2b header timeout: gateway header {ght}s >= gateway request {gwt}s")
 else:
     print("  note: gateway.yaml not provided -> skipped C2 timer cross-check")
 
