@@ -361,6 +361,17 @@ func (c Config) Validate() error {
 	if c.Timeouts.CoordinatorRequestSeconds <= 0 || c.Timeouts.CoordinatorHeaderTimeoutSeconds <= 0 || c.Timeouts.StreamingCancelMS <= 0 {
 		return fmt.Errorf("timeouts must be positive")
 	}
+	// Post-#92 / PR #167: header timeout must be >= request budget so a
+	// slow-but-valid streaming first-event (or non-streaming completion)
+	// doesn't false-fail before the coordinator's own request_timeout_s
+	// runs out. The deploy gate at phase4-coordinator/dist/check-deploy-config.sh
+	// (C2b) enforces this at deploy time; this runtime check ensures a
+	// gateway started outside the deploy gate (direct `gateway -config` /
+	// `gateway -check`) also refuses an unsafe local config.
+	if c.Timeouts.CoordinatorHeaderTimeoutSeconds < c.Timeouts.CoordinatorRequestSeconds {
+		return fmt.Errorf("timeouts.coordinator_header_timeout_seconds (%d) must be >= timeouts.coordinator_request_seconds (%d) — see SPEC-002 FR-P11a (post-#92)",
+			c.Timeouts.CoordinatorHeaderTimeoutSeconds, c.Timeouts.CoordinatorRequestSeconds)
+	}
 	if c.Routing.StickyTTLS <= 0 {
 		return fmt.Errorf("routing.sticky_ttl_s must be > 0")
 	}

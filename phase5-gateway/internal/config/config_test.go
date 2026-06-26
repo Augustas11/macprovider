@@ -27,6 +27,34 @@ func TestGatewayHeaderTimeoutDefaultCoversFullRequestBudget(t *testing.T) {
 	}
 }
 
+// Validate must reject configs where CoordinatorHeaderTimeoutSeconds is
+// below CoordinatorRequestSeconds — this is the runtime backstop for the
+// deploy-time check-deploy-config.sh C2b gate. A gateway started outside
+// the deploy gate (direct `gateway -config` / `gateway -check`) MUST
+// still refuse the unsafe relation.
+func TestValidateRejectsHeaderTimeoutBelowRequestBudget(t *testing.T) {
+	cfg := validTestConfig()
+	cfg.Timeouts.CoordinatorRequestSeconds = 400
+	cfg.Timeouts.CoordinatorHeaderTimeoutSeconds = 60
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("Validate() accepted header=60 < request=400; expected rejection per post-#92 SPEC-002 FR-P11a")
+	}
+	for _, want := range []string{"coordinator_header_timeout_seconds", "coordinator_request_seconds", "SPEC-002 FR-P11a"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate() error = %q, missing substring %q (diagnostic must name both fields + spec ref)", err.Error(), want)
+		}
+	}
+}
+
+// Validate must accept the canonical case where the two timeouts are equal.
+func TestValidateAcceptsEqualHeaderAndRequestTimeout(t *testing.T) {
+	cfg := validTestConfig() // both default to 300
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() rejected default config (both timeouts = 300): %v", err)
+	}
+}
+
 func TestQuotaReaperConfigValidation(t *testing.T) {
 	for name, tc := range map[string]struct {
 		mutate func(*Config)

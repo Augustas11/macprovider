@@ -386,6 +386,7 @@ EOF
   run_check "$wd"
   assert_exit 1 "T20 gateway C2 timeout absent -> FAIL"
   assert_contains "timeouts.coordinator_request_seconds is ABSENT" "T20 missing gateway C2 message"
+  assert_absent "Traceback" "T20 output stays clean (no python traceback from C2b)"
   rm -rf "$wd"
 }
 

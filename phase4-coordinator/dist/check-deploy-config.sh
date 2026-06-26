@@ -259,28 +259,31 @@ if gw:
     # coordinator_unavailable before the coordinator's own request_timeout_s
     # has elapsed. (See issue #92 architect-lane audit + follow-up #171.)
     #
+    # Skip when gwt is None: the C2 absent-request hard() above already
+    # emitted the diagnostic, and evaluating int(gwt) here would Traceback.
     # Absent header treated as effective 300 (the gateway runtime default at
     # phase5-gateway/internal/config/config.go:183). The compare-against-effective
     # logic catches the edge case where coordinator_request_seconds is raised
     # above 300 without also setting coordinator_header_timeout_seconds.
-    ght = g_section(gw, "timeouts", "coordinator_header_timeout_seconds")
-    effective_ght = int(ght) if ght is not None else 300
-    if int(gwt) > effective_ght:
-        if ght is None:
-            hard(f"C2b: gateway timeouts.coordinator_header_timeout_seconds is ABSENT — "
-                 f"runtime default 300 < coordinator_request_seconds ({gwt}). Set "
-                 f"coordinator_header_timeout_seconds >= {gwt} explicitly.")
+    if gwt is not None:
+        ght = g_section(gw, "timeouts", "coordinator_header_timeout_seconds")
+        effective_ght = int(ght) if ght is not None else 300
+        if int(gwt) > effective_ght:
+            if ght is None:
+                hard(f"C2b: gateway timeouts.coordinator_header_timeout_seconds is ABSENT — "
+                     f"runtime default 300 < coordinator_request_seconds ({gwt}). Set "
+                     f"coordinator_header_timeout_seconds >= {gwt} explicitly.")
+            else:
+                hard(f"C2b: gateway coordinator_header_timeout_seconds ({ght}) is BELOW gateway "
+                     f"coordinator_request_seconds ({gwt}). Slow-but-valid streaming/non-streaming "
+                     f"providers will false-fail with coordinator_unavailable before the request "
+                     f"budget is exhausted. Set coordinator_header_timeout_seconds >= "
+                     f"coordinator_request_seconds (typically equal).")
         else:
-            hard(f"C2b: gateway coordinator_header_timeout_seconds ({ght}) is BELOW gateway "
-                 f"coordinator_request_seconds ({gwt}). Slow-but-valid streaming/non-streaming "
-                 f"providers will false-fail with coordinator_unavailable before the request "
-                 f"budget is exhausted. Set coordinator_header_timeout_seconds >= "
-                 f"coordinator_request_seconds (typically equal).")
-    else:
-        if ght is None:
-            ok(f"C2b header timeout: absent -> default 300 >= gateway request {gwt}s")
-        else:
-            ok(f"C2b header timeout: gateway header {ght}s >= gateway request {gwt}s")
+            if ght is None:
+                ok(f"C2b header timeout: absent -> default 300 >= gateway request {gwt}s")
+            else:
+                ok(f"C2b header timeout: gateway header {ght}s >= gateway request {gwt}s")
 else:
     print("  note: gateway.yaml not provided -> skipped C2 timer cross-check")
 
