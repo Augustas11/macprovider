@@ -45,10 +45,12 @@
 #   T32 — C2c gateway operator_key == service_token (inline same)               -> FAIL
 #   T33 — C2c cross-file gw operator_key == coord gateway_service_token         -> FAIL
 #   T34 — C2c all tokens env-deferred                                           -> skipped (pass)
-#   T35 — C2c same env:NAME on both sides (static catch, env unresolved)        -> FAIL
+#   T35 — C2c same env:NAME within same yaml file (static catch)                -> FAIL
 #   T36 — C2c pairing gw service_token != coord service_token (inline)          -> FAIL
 #   T37 — C2c pairing mismatch via different env vars resolving differently     -> FAIL
 #   T38 — C2c pairing match via different env vars resolving to same value      -> pass
+#   T39 — C2c pairing cross-file same env:NAME unresolved (separate env files)  -> pass with explicit WARN
+#   T40 — C2c cross-file distinctness same env:NAME unresolved (separate files) -> skipped (no false-fail)
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -626,22 +628,26 @@ test_c2c_deferred_env_skipped() {
   # All env vars unset -> all tokens deferred -> C2c skipped (cannot judge).
   run_check "$wd" OPERATOR_KEY= COORD_SVC_TOKEN= COORDINATOR_OPERATOR_KEY= GW_SVC_TOKEN=
   assert_exit 0 "T34 all env tokens deferred -> C2c skipped + pass overall"
-  assert_contains "skipped (one or both deferred to runtime)" "T34 deferred skip message"
+  assert_contains "skipped, deferred to runtime" "T34 deferred skip message"
   rm -rf "$wd"
 }
 
-test_c2c_same_env_name_bypass_caught() {
-  # Audit-r2 finding: env:SHARED on both sides resolves to the same value
-  # at runtime, but the unresolved env var made _resolved_value return None
-  # which previously caused _check_distinct to skip. Static catch: same env
-  # NAME -> hard fail before resolution.
+test_c2c_same_env_name_same_file_static_fail() {
+  # Audit-r2 finding (refined audit-r3): same env:NAME on both sides of a
+  # SAME-file distinctness check is a static-catch hard fail because both
+  # fields resolve from the same systemd env file at runtime. (Cross-file
+  # same-env-NAME is unsafe to assume — see T36 — because coordinator and
+  # gateway units source separate env files.)
   local wd; wd="$(mk_workdir)"
-  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:SHARED_TOKEN"
-  write_gw "$wd" 300 "env:SHARED_TOKEN"
-  # SHARED_TOKEN unset on purpose — the check must NOT depend on resolution.
+  write_gw "$wd"
+  # Both coordinator-side tokens reference the SAME env var name within
+  # coordinator.yaml -> same coordinator.env at runtime -> collapse to one
+  # value -> hard fail before resolution.
+  write_coord "$wd" "env:SHARED_TOKEN" 280 "gateway_service_token: env:SHARED_TOKEN"
   run_check "$wd" SHARED_TOKEN=
-  assert_exit 1 "T35 same env:NAME on both sides -> FAIL (static catch)"
-  assert_contains "both reference env:SHARED_TOKEN" "T35 same-env-name message"
+  assert_exit 1 "T35 same env:NAME within coordinator.yaml -> FAIL (same-file static catch)"
+  assert_contains "both reference env:SHARED_TOKEN" "T35 same-env-name same-file message"
+  assert_contains "same file -> same env at runtime" "T35 same-file scope message"
   rm -rf "$wd"
 }
 
@@ -685,6 +691,40 @@ test_c2c_pairing_env_resolved_match_passes() {
   rm -rf "$wd"
 }
 
+test_c2c_pairing_cross_file_same_env_name_unverified_warn() {
+  # Audit-r3 finding (3/3 lanes): coord and gw systemd units source
+  # SEPARATE env files (/etc/macprovider/coordinator.env vs gateway.env).
+  # Same env:NAME on both sides does NOT prove same value — the env files
+  # can disagree. r2 wrongly treated this as a proven pass; r3 fix: WARN
+  # (loud, not silent) so the operator knows the gate cannot verify and
+  # must check both env files manually.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:SHARED_SVC"
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: env:SHARED_SVC"
+  run_check "$wd" SHARED_SVC=
+  # Exit 0 — WARN is not a hard fail, but the message is loud.
+  assert_exit 0 "T39 pairing cross-file same env:NAME unresolved -> pass with explicit WARN"
+  assert_contains "UNVERIFIED" "T39 unverified-warn message"
+  assert_contains "SEPARATE env files" "T39 separate-env-files explanation"
+  rm -rf "$wd"
+}
+
+test_c2c_cross_file_distinctness_same_env_name_skipped() {
+  # Audit-r3 corollary: cross-file _check_distinct (gateway operator_key
+  # vs coord gateway_service_token) must NOT static-fail on same env:NAME
+  # — that would false-fail a deploy where operator deliberately reused a
+  # name across two env files with different values. Skip with explicit
+  # "separate env files" message; runtime Validate is the backstop.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:SHARED_NAME"
+  write_gw "$wd" 300 "env:SHARED_NAME" "service_token: \"$HEX64B\""
+  run_check "$wd" SHARED_NAME=
+  assert_exit 0 "T40 cross-file distinctness same env:NAME unresolved -> skipped (not static fail)"
+  assert_contains "C2c gateway coordinator.operator_key vs coordinator auth.gateway_service_token: skipped" "T40 cross-file skip message"
+  assert_contains "separate env files" "T40 separate-env-files scope message"
+  rm -rf "$wd"
+}
+
 # ---- run -------------------------------------------------------------------
 
 echo "== check-deploy-config.sh tests =="
@@ -725,10 +765,12 @@ test_c2c_coord_operator_equals_service_fails
 test_c2c_gateway_operator_equals_service_fails
 test_c2c_cross_file_gw_operator_equals_coord_service_fails
 test_c2c_deferred_env_skipped
-test_c2c_same_env_name_bypass_caught
+test_c2c_same_env_name_same_file_static_fail
 test_c2c_pairing_inline_mismatch_fails
 test_c2c_pairing_env_resolved_mismatch_fails
 test_c2c_pairing_env_resolved_match_passes
+test_c2c_pairing_cross_file_same_env_name_unverified_warn
+test_c2c_cross_file_distinctness_same_env_name_skipped
 
 echo
 echo "== summary =="

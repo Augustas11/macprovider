@@ -215,21 +215,38 @@ def _resolved_value(raw):
         return v.strip() if v else None
     return raw.strip()
 
-def _check_distinct(label_a, raw_a, label_b, raw_b):
-    # Same-env-NAME bypass: env:SHARED on both sides resolves to the same
-    # value at runtime, but _resolved_value returns None if the env var is
-    # unset at gate time. Catch that statically before falling through.
+def _check_distinct(label_a, raw_a, label_b, raw_b, same_file=True):
+    """C2c distinctness: assert two secret-bearing fields are NOT equal.
+
+    same_file=True (default): both fields live in the SAME yaml file (and
+        therefore the SAME systemd env file at runtime). Same env:NAME on
+        both sides is a static-catch hard fail — resolution would collapse
+        them to the same value.
+
+    same_file=False: fields live in different yaml files (coordinator.yaml
+        vs gateway.yaml), which the coordinator and gateway units source
+        from SEPARATE env files (/etc/macprovider/coordinator.env and
+        /etc/macprovider/gateway.env per the dist .service units). Same
+        env:NAME on both sides does NOT prove same value at runtime — the
+        two env files can define the variable differently. Don't false-fail
+        a safe deploy: skip as 'unverified' when either side is unresolved,
+        leaving runtime Validate() as the backstop on each side. Cross-file
+        same-env-name same-value is still a runtime hazard, but no single
+        deploy-gate process can read both env files unambiguously.
+    """
     na = _env_name(raw_a)
     nb = _env_name(raw_b)
-    if na is not None and na == nb:
-        hard(f"C2c: {label_a} and {label_b} both reference env:{na} — "
-             f"runtime resolution collapses them to the same value; "
-             f"rotation discipline violated")
+    if same_file and na is not None and na == nb:
+        hard(f"C2c: {label_a} and {label_b} both reference env:{na} "
+             f"(same file -> same env at runtime); "
+             f"resolution collapses to one value, rotation discipline violated")
         return
     a = _resolved_value(raw_a)
     b = _resolved_value(raw_b)
     if a is None or b is None:
-        ok(f"C2c {label_a} vs {label_b}: skipped (one or both deferred to runtime)")
+        scope = "same file" if same_file else "separate env files"
+        ok(f"C2c {label_a} vs {label_b}: skipped, deferred to runtime "
+           f"({scope}; each side fail-closes in its own Validate)")
         return
     if a == b:
         hard(f"C2c: {label_a} == {label_b} — rotation discipline violated; "
@@ -237,24 +254,39 @@ def _check_distinct(label_a, raw_a, label_b, raw_b):
     else:
         ok(f"C2c {label_a} vs {label_b}: distinct")
 
-def _check_pair_equal(label_a, raw_a, label_b, raw_b):
+def _check_pair_equal(label_a, raw_a, label_b, raw_b, same_file=False):
     """C2c pairing: assert two fields hold the SAME secret (gateway sends
     coordinator.service_token on the wire; coordinator accepts only its
     own auth.gateway_service_token). A mismatch boots green and 401s every
     /internal/* call.
 
-    Same-env-NAME on both sides resolves to the same value at runtime, so
-    treat that as a pass even though _resolved_value can't read it now."""
+    same_file defaults to False since the canonical pairing crosses files.
+    For same-file pairings the same-env-NAME shortcut proves equality;
+    cross-file does NOT (see _check_distinct's docstring on separate env
+    files). For cross-file unresolved env, mark unverified and warn — the
+    operator must verify by reading both env files (the gate cannot)."""
     na = _env_name(raw_a)
     nb = _env_name(raw_b)
-    if na is not None and na == nb:
+    if same_file and na is not None and na == nb:
         ok(f"C2c pairing {label_a} == {label_b}: both reference env:{na} "
-           f"(resolves to same value at runtime)")
+           f"(same file -> same value at runtime)")
         return
     a = _resolved_value(raw_a)
     b = _resolved_value(raw_b)
     if a is None or b is None:
-        ok(f"C2c pairing {label_a} == {label_b}: skipped (one or both deferred to runtime)")
+        if not same_file and na is not None and na == nb:
+            # Cross-file same env name: explicit warn, not silent skip.
+            # Pairing is the load-bearing invariant; an operator typo in
+            # one env file is exactly what this gate is supposed to catch.
+            warn(f"C2c pairing {label_a} == {label_b}: UNVERIFIED — both "
+                 f"reference env:{na} but the coordinator and gateway "
+                 f"systemd units source SEPARATE env files; the gate cannot "
+                 f"read both. Verify manually that /etc/macprovider/"
+                 f"coordinator.env env:{na} == /etc/macprovider/gateway.env "
+                 f"env:{na}, or inline the secret on at least one side.")
+            return
+        ok(f"C2c pairing {label_a} == {label_b}: skipped, deferred to runtime "
+           f"(one or both env:NAME refs unresolved at gate time)")
         return
     if a != b:
         hard(f"C2c: {label_a} != {label_b} — gateway sends a credential the "
@@ -264,26 +296,37 @@ def _check_pair_equal(label_a, raw_a, label_b, raw_b):
 
 coord_op = g_section(coord, "auth", "operator_key")
 coord_svc = g_section(coord, "auth", "gateway_service_token")
+# Same-file: both fields are in coordinator.yaml and resolve from
+# coordinator.env, so same env:NAME -> same value at runtime (static fail).
 _check_distinct("coordinator auth.operator_key", coord_op,
-                "coordinator auth.gateway_service_token", coord_svc)
+                "coordinator auth.gateway_service_token", coord_svc,
+                same_file=True)
 
 if gw:
     gw_op = g_section(gw, "coordinator", "operator_key")
     gw_svc = g_section(gw, "coordinator", "service_token")
+    # Same-file: both fields are in gateway.yaml and resolve from
+    # gateway.env, so same env:NAME -> same value at runtime (static fail).
     _check_distinct("gateway coordinator.operator_key", gw_op,
-                    "gateway coordinator.service_token", gw_svc)
+                    "gateway coordinator.service_token", gw_svc,
+                    same_file=True)
     # Cross-file: gateway operator_key (proxied to coordinator for /poolz)
-    # vs coordinator gateway_service_token. If equal across files, same
-    # value collapse — same hazard.
+    # vs coordinator gateway_service_token. Same env:NAME does NOT prove
+    # same value because coord and gw units source separate env files.
+    # Skip unresolved with an explicit message; runtime backstop on each
+    # side prevents an unsafe boot for the equal-values-in-one-file case.
     _check_distinct("gateway coordinator.operator_key", gw_op,
-                    "coordinator auth.gateway_service_token", coord_svc)
+                    "coordinator auth.gateway_service_token", coord_svc,
+                    same_file=False)
     # C2c pairing: gateway sends coordinator.service_token on /internal/*;
-    # coordinator accepts ONLY its own auth.gateway_service_token. These
-    # are the two ends of the same shared secret — a mismatch is an instant
-    # /internal/* outage that both module Validate()s would miss because
-    # each can only see its own file.
+    # coordinator accepts ONLY its own auth.gateway_service_token. Cross-file
+    # by definition. Same env:NAME on both sides DOES NOT prove pairing
+    # (separate env files). Mismatches are detectable only when both
+    # values are resolvable at gate time; otherwise WARN, do not pass
+    # silently — pairing is the load-bearing /internal/* invariant.
     _check_pair_equal("gateway coordinator.service_token", gw_svc,
-                      "coordinator auth.gateway_service_token", coord_svc)
+                      "coordinator auth.gateway_service_token", coord_svc,
+                      same_file=False)
 
 # --- require_provider_tokens ---
 # Security-sensitive: the binary default is `true` (fail-closed), but a
