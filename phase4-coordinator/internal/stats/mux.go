@@ -11,27 +11,20 @@ import (
 )
 
 // Mux is the SPEC-017 §7.1 mux. Exposes
-// /v1/stats/{overview,leaderboard,health} with the pinned
-// 7-layer middleware stack from BUILD §2 Step 3:
+// /v1/stats/{overview,leaderboard,health}.
 //
-//  1. redaction-context  (outermost — strips Authorization)
-//  2. recover            (panic → 500 + structured log)
-//  3. access-log/trace
-//  4. auth-failure tier  (per-IP 300 rpm, Authorization-only)
-//  5. auth dispatcher    (§5.4.3 7-row)
-//  6. post-auth success  (public 60 rpm or partner key rpm)
-//  7. handler            (overview / leaderboard / health)
+// SPEC §4.3 auth scoping (round-3 ARCH C1 fix):
 //
-// Round-1 ARCH C1 / CODE H6 / SECURITY M1 fix: freshness
-// pre-checks (overview/leaderboard) run BEFORE the post-auth
-// success-bucket debit, so a stale 503 cannot exhaust client
-// quotas.
+//	/overview      — Auth: None (Authorization IGNORED).
+//	/leaderboard   — Auth: optional Bearer <partner_key>;
+//	                 §5.4.3 7-row decision table applies.
+//	/health        — Auth: None.
 //
-// HEAD is added to the explicit method allowlist alongside
-// GET. Go's `http.ServeMux` does NOT auto-handle HEAD; we
-// dispatch HEAD identically to GET and rely on writeJSON to
-// drop the body. POST / PUT / DELETE / PATCH → 405 with
-// `Allow: GET, HEAD, OPTIONS` + §5.9 envelope.
+// Only `/v1/stats/leaderboard` runs the auth-failure tier and
+// the §5.4.3 dispatcher. `/overview` and `/health` get a
+// synthesized public authResult so they emit public-tier CORS
+// + Vary regardless of what the request Authorization header
+// looks like.
 type Mux struct {
 	h             *Handler
 	logger        zerolog.Logger
@@ -66,12 +59,11 @@ func (m *Mux) Handler() http.Handler {
 	return with
 }
 
-// dispatch is the inner-most routing layer.
 func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 
 	if r.Method == http.MethodOptions {
-		servePreflight(w, r, m.h.CORS)
+		servePreflight(w, r, m.h.Store, m.h.CORS)
 		return
 	}
 
@@ -91,60 +83,69 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 
 	ip := clientIP(r, m.trustedCIDRs)
 
-	// Layer 4 — auth-failure tier (Authorization-present only).
-	// Round-1 ARCH C3: present-but-malformed counts as
-	// Authorization-present (will 401 in layer 5, debits this
-	// tier).
-	authHeaderPresent := authPresentFromContext(r.Context())
-	reservedKey := ""
-	if authHeaderPresent {
-		reservedKey = "authfail|" + ip + "|" + endpoint
-		if !m.authFailLimit.allow(reservedKey, now, 300) {
-			retry := 60
-			writeError(w, r, http.StatusTooManyRequests, codeRateLimited, "rate limited", now, &retry)
+	// Round-3 ARCH C1 fix: only /leaderboard runs the
+	// auth-failure tier + §5.4.3 dispatcher. /overview and
+	// /health are §4.3 `Auth: None`; Authorization is ignored.
+	var ar authResult
+	if endpoint == "leaderboard" {
+		// Layer 4 — auth-failure tier (Authorization-present
+		// only). Round-3 CODE H1: only schedule the refund
+		// AFTER allow returns true.
+		authHeaderPresent := authPresentFromContext(r.Context())
+		reservedKey := ""
+		if authHeaderPresent {
+			reservedKey = "authfail|" + ip + "|" + endpoint
+			if !m.authFailLimit.allow(reservedKey, now, 300) {
+				retry := 60
+				writeError(w, r, http.StatusTooManyRequests, codeRateLimited, "rate limited", now, &retry)
+				return
+			}
+		}
+
+		// Layer 5 — auth dispatcher.
+		var err error
+		ar, err = dispatchAuth(r.Context(), m.h.Store, r)
+		if err != nil {
+			if authHeaderPresent {
+				m.authFailLimit.refund(reservedKey, now)
+			}
+			writeError(w, r, http.StatusInternalServerError, codeInternal, "auth dispatch failed", now, nil)
 			return
 		}
-	}
-
-	// Layer 5 — auth dispatcher (§5.4.3).
-	ar, err := dispatchAuth(r.Context(), m.h.Store, r)
-	if err != nil {
-		// Auth dispatcher error → 500. Refund the auth-failure
-		// reservation (round-2 CODE H2 fix — non-401 outcomes
-		// MUST release the slot).
+		if ar.statusCode == http.StatusUnauthorized {
+			// Rejected keyed — omit ACAO per §5.7 rows 3/5/6/7.
+			w.Header().Set("Vary", varyForPublic())
+			writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
+			return
+		}
+		// Auth succeeded — release the auth-failure slot before
+		// any subsequent error path can keep the reservation
+		// against a valid partner key.
 		if authHeaderPresent {
 			m.authFailLimit.refund(reservedKey, now)
 		}
-		writeError(w, r, http.StatusInternalServerError, codeInternal, "auth dispatch failed", now, nil)
-		return
-	}
-	if ar.statusCode == http.StatusUnauthorized {
-		// Round-1 ARCH H6 / SECURITY L1 fix: rejected keyed
-		// requests with non-empty allowlists / revoked / no-
-		// match (rows 3, 5, 6, 7) MUST omit ACAO. The response
-		// body is not key-derived; we use public Vary but DO
-		// NOT echo Origin. The auth-failure tier KEEPS the
-		// reservation since this is exactly the 401 case the
-		// tier exists to throttle.
-		w.Header().Set("Vary", varyForPublic())
-		writeError(w, r, http.StatusUnauthorized, codeUnauthorized, "unauthorized", now, nil)
-		return
-	}
-
-	// Round-2 CODE H2 fix: auth succeeded → refund the auth-
-	// failure reservation BEFORE any subsequent error path
-	// (freshness pre-check, rate-limit, handler error). Valid
-	// partner-key requests that produce stale 503 / 500 must
-	// not count against the auth-failure 300 rpm bucket.
-	if authHeaderPresent {
-		m.authFailLimit.refund(reservedKey, now)
+		// Round-3 CODE H2: tag the request context with the
+		// projection so writeError picks the partner Cache-
+		// Control / Vary row for post-auth errors.
+		if ar.projection == "partner" {
+			r = r.WithContext(withPartnerProjectionContext(r.Context()))
+		}
+	} else {
+		// /overview + /health: synthesize a public authResult
+		// with normalized Origin for CORS reflection. The
+		// Authorization header (if any) is IGNORED.
+		norm, valid := normalizeOrigin(r.Header.Get("Origin"))
+		ar = authResult{
+			projection:    "public",
+			statusCode:    0,
+			originPresent: valid,
+			originValue:   norm,
+			bearerPresent: false,
+		}
 	}
 
-	// Round-1 ARCH C1 / CODE H6 / SECURITY M1 fix: freshness
-	// pre-check BEFORE post-auth bucket debit. The 503 stale
-	// path MUST NOT count against the client's success bucket
-	// (a rollup outage cannot exhaust quotas for healthy
-	// clients).
+	// Round-1 freshness pre-check for overview (must run BEFORE
+	// post-auth success-bucket debit).
 	if endpoint == "overview" {
 		if stale, snapshotGen, perr := m.h.overviewStaleProbe(r.Context(), now); perr != nil {
 			writeError(w, r, http.StatusInternalServerError, codeInternal, "overview probe failed", now, nil)
@@ -154,18 +155,16 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, r, http.StatusServiceUnavailable, codeStatsStale, "overview is stale", snapshotGen, &retry)
 			return
 		}
-	} else if endpoint == "leaderboard" {
-		// Handler does its own per-window probe (it needs the
-		// window from query params); we just need to avoid
-		// debiting the post-auth bucket if it returns 503. The
-		// cleanest way is a response-status capture (below).
 	}
 
-	// Layer 6 — post-auth success bucket. Round-1 fix: use a
-	// response-recording wrapper so non-2xx responses (notably
-	// the leaderboard's per-window 503) refund the slot.
+	// Layer 6 — post-auth success bucket. Round-3 CODE H1 fix:
+	// only schedule the refund AFTER allow returned true; a
+	// rejected bucket call must NOT decrement the existing
+	// count on the 429 path.
 	rec := &statusRecorder{ResponseWriter: w}
 	var allowed bool
+	var refundKey string
+	var refundLimiter *limiter
 	switch ar.projection {
 	case "partner":
 		limit := 600
@@ -174,25 +173,32 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		}
 		key := "partner|" + strconv.FormatInt(ar.matchedKey.ID, 10) + "|" + endpoint
 		allowed = m.partnerLimit.allow(key, now, limit)
-		defer func() {
-			if rec.status != 0 && (rec.status < 200 || rec.status >= 300) && rec.status != http.StatusNotModified {
-				m.partnerLimit.refund(key, now)
-			}
-		}()
+		if allowed {
+			refundKey = key
+			refundLimiter = m.partnerLimit
+		}
 	default:
 		key := "public|" + ip + "|" + endpoint
 		allowed = m.publicLimit.allow(key, now, 60)
-		defer func() {
-			if rec.status != 0 && (rec.status < 200 || rec.status >= 300) && rec.status != http.StatusNotModified {
-				m.publicLimit.refund(key, now)
-			}
-		}()
+		if allowed {
+			refundKey = key
+			refundLimiter = m.publicLimit
+		}
 	}
 	if !allowed {
 		retry := 60
-		writeError(rec, r, http.StatusTooManyRequests, codeRateLimited, "rate limited", now, &retry)
+		writeError(w, r, http.StatusTooManyRequests, codeRateLimited, "rate limited", now, &retry)
 		return
 	}
+	defer func() {
+		// Refund the success-bucket slot ONLY if the handler
+		// returned a non-2xx (and not 304). 503 stale / 500
+		// internal / 400 bad-request from inside the handler
+		// must not count against the success bucket.
+		if rec.status != 0 && (rec.status < 200 || rec.status >= 300) && rec.status != http.StatusNotModified {
+			refundLimiter.refund(refundKey, now)
+		}
+	}()
 
 	// Layer 7 — handler.
 	switch endpoint {
@@ -207,7 +213,7 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 
 // statusRecorder wraps an http.ResponseWriter and remembers
 // the status code so the mux can refund the post-auth bucket
-// on non-2xx responses (round-1 ARCH C1 fix).
+// on non-2xx responses.
 type statusRecorder struct {
 	http.ResponseWriter
 	status int

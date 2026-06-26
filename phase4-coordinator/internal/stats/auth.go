@@ -34,6 +34,21 @@ func authPresentFromContext(ctx context.Context) bool {
 	return v
 }
 
+// projectionKey marks the request as carrying a partner-key
+// projection after a successful §5.4.3 row 2 / row 4 auth.
+// writeError reads this to pick the partner Cache-Control /
+// Vary row for post-auth errors (round-3 CODE H2 fix).
+type projectionKey struct{}
+
+func withPartnerProjectionContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, projectionKey{}, true)
+}
+
+func partnerProjectionFromContext(ctx context.Context) bool {
+	v, _ := ctx.Value(projectionKey{}).(bool)
+	return v
+}
+
 // authResult bundles the §5.4.3 dispatch outcome.
 type authResult struct {
 	// projection picks the response shape. One of:

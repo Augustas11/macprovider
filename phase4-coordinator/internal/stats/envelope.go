@@ -75,23 +75,38 @@ func writeError(w http.ResponseWriter, r *http.Request, status int, code, messag
 }
 
 // errorHeadersForRequest picks the Cache-Control + Vary row
-// that matches the request's endpoint. Errors carry the same
-// row as the corresponding endpoint success response so the
-// edge cache key is stable across stale-503, rate-limit-429,
-// bad-request-400 and the eventual 200 from the same path.
+// that matches the request's endpoint AND projection. Errors
+// carry the same row as the corresponding endpoint success
+// response so the edge cache key is stable across stale-503,
+// rate-limit-429, bad-request-400 and the eventual 200 from
+// the same path.
 //
-// Public projection for all error paths (we cannot know the
-// projection on 4xx/5xx — Vary: Authorization on errors would
-// fragment caches by every bad-Authorization probe).
+// Round-3 CODE H2 fix: post-auth partner-key requests that
+// produce 4xx/5xx errors after the dispatcher succeeded MUST
+// use the partner Cache-Control row (`private, max-age=30,
+// s-maxage=30`) + partner Vary (`Accept-Encoding, Origin,
+// Authorization`). The mux tags r.Context with the partner
+// projection marker after dispatchAuth returns success; the
+// auth-failed 401 path leaves the marker unset and falls
+// through to the public row.
+//
+// Public projection is used for: row 1 anonymous, any 4xx/5xx
+// before/during auth dispatch (including 401), and all error
+// paths on /overview + /health (which are §4.3 Auth: None).
 func errorHeadersForRequest(r *http.Request, status int) (string, string) {
 	if r == nil {
 		return "no-store", "Accept-Encoding, Origin"
 	}
+	partner := partnerProjectionFromContext(r.Context())
 	switch trimEndpointFromPath(r.URL.Path) {
 	case "overview":
 		return "public, max-age=30, s-maxage=30, stale-while-revalidate=60",
 			"Accept-Encoding, Origin"
 	case "leaderboard":
+		if partner {
+			return "private, max-age=30, s-maxage=30",
+				"Accept-Encoding, Origin, Authorization"
+		}
 		return "public, max-age=60, s-maxage=60, stale-while-revalidate=120",
 			"Accept-Encoding, Origin"
 	case "health":

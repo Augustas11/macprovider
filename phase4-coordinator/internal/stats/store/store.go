@@ -45,6 +45,49 @@ type PartnerKey struct {
 	RevokedAt      sql.NullTime
 }
 
+// ActivePartnerOrigins returns the union of `allowed_origins`
+// arrays from every non-revoked partner_keys row, used by the
+// §5.7 preflight to echo Origins that an active partner key
+// would accept. Deduped + lowercased; the handler additionally
+// applies RFC 6454 normalization before the case-insensitive
+// compare.
+//
+// Round-3 ARCH H1 fix: preflight was using only the static
+// PartnerOriginAllowlist from config, missing key-row Origins.
+func (s *Store) ActivePartnerOrigins(ctx context.Context) ([]string, error) {
+	const q = `
+        SELECT allowed_origins
+          FROM partner_keys
+         WHERE revoked_at IS NULL
+    `
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("active_partner_origins: %w", err)
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, 16)
+	for rows.Next() {
+		var arr []string
+		if err := rows.Scan(pqArray(&arr)); err != nil {
+			return nil, err
+		}
+		for _, o := range arr {
+			if o == "" {
+				continue
+			}
+			seen[o] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(seen))
+	for o := range seen {
+		out = append(out, o)
+	}
+	return out, nil
+}
+
 // LookupPartnerKeyByHash performs the §5.4.3 hash-keyed SELECT.
 // Returns (nil, nil) on no match — distinguished from error so
 // the dispatcher can branch to row 6 of the decision table.
