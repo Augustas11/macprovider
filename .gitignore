@@ -48,3 +48,4 @@ phase4-coordinator/dist/coordinator.yaml
 # Phase 1 experiment artifacts (removed from tracking in M3-5; DEVE-8)
 /logs/
 /results/
+phase4-coordinator/stats.test

@@ -5,14 +5,31 @@
 # keep CI and local on the same targets. CI jobs use the per-service
 # targets below to preserve parallel jobs and failure isolation.
 
-.PHONY: test test-coordinator test-gateway test-integration test-dist \
+.PHONY: test test-coordinator test-coordinator-integration test-gateway test-integration test-dist \
         vet vet-coordinator vet-gateway \
+        lint-coordinator \
         build-linux check fmt
 
 test: test-coordinator test-gateway test-integration test-dist
 
 test-coordinator:
 	cd phase4-coordinator && go test ./...
+
+# SPEC-017 Step 1 — Postgres-dependent integration tests
+# (AC-9 / AC-10 / AC-19 / AC-20). Tagged with `integration` so
+# `make test-coordinator` does NOT require a Docker daemon.
+# CI runs this as a separate job that provides the daemon.
+test-coordinator-integration:
+	cd phase4-coordinator && go test -tags=integration -timeout 5m ./internal/stats/... ./cmd/coordinator/...
+
+# SPEC-017 AC-16 — golangci-lint with depguard + forbidigo.
+# Pinned version so the target is hermetic on a fresh checkout.
+lint-coordinator:
+	@command -v golangci-lint >/dev/null 2>&1 || { \
+		echo "golangci-lint not found; install: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2"; \
+		exit 1; \
+	}
+	cd phase4-coordinator && golangci-lint run --config=.golangci.yml ./...
 
 test-gateway:
 	cd phase5-gateway && go test ./...
@@ -34,6 +51,7 @@ test-dist:
 	bash phase4-coordinator/dist/test/check_deploy_config_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_receipt_buffers_test.sh
 	bash phase4-coordinator/dist/test/check_nginx_catalog_routes_test.sh
+	bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
 	SPEC015_NGINX_LIVE_OPTIONAL=$${SPEC015_NGINX_LIVE_OPTIONAL:-1} bash phase4-coordinator/dist/test/check_nginx_receipt_header_live_test.sh
 	bash scripts/test-install-launchd-enable.sh
 

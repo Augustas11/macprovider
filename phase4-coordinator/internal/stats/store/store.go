@@ -1,0 +1,241 @@
+package store
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"sync/atomic"
+	"time"
+)
+
+// Store is the SPEC-017 request-path DAO. It reads via the
+// `stats_reader` role's *sql.DB. Per SPEC §7.2.1 the
+// stats_reader role has SELECT on stats_overview_current,
+// stats_timeseries_{rpm,tpm}_30m, stats_leaderboard_*,
+// stats_components_health, stats_rewards_populated,
+// partner_keys, provider_visibility — and is explicitly
+// DENIED on ledger_* + provider_rewards_ledger +
+// provider_tokens + provider_visibility_audit. The Step 1
+// grants migration enforces this; the handler stack relies on
+// it.
+//
+// Store methods MUST NOT issue INSERT / UPDATE / DELETE. v0.1
+// IMPL emits no writes from the handler path; `last_used_at`
+// updates are deferred per the §7.2.4 default-off resolution.
+type Store struct {
+	db *sql.DB
+
+	// lookupHashCount tracks LookupPartnerKeyByHash invocations
+	// for the round-6/7 AC-22 SQL-load test. Incremented before
+	// the SELECT runs so the count proves the auth-failure
+	// limiter capped DB load BEFORE the dispatcher reached the
+	// SELECT. Production reads are best-effort (atomic int64);
+	// no semantic effect on the request path.
+	lookupHashCount atomic.Int64
+}
+
+// New wraps a *sql.DB authenticated as stats_reader.
+func New(db *sql.DB) *Store {
+	return &Store{db: db}
+}
+
+// DB returns the underlying *sql.DB for direct queries by test
+// code. Production code SHOULD use the typed methods.
+func (s *Store) DB() *sql.DB { return s.db }
+
+// LookupHashCountForTest returns the number of
+// LookupPartnerKeyByHash invocations since Store creation.
+// The exported seam exists for round-7 CODE M coverage —
+// proves the auth-failure limiter capped DB load at ≤300
+// SELECTs even when 350 invalid-bearer requests arrived.
+// Production code MUST NOT call this.
+func (s *Store) LookupHashCountForTest() int64 {
+	return s.lookupHashCount.Load()
+}
+
+// PartnerKey is the subset of `partner_keys` columns the Step 3
+// auth dispatcher consumes per SPEC §5.4.3.
+type PartnerKey struct {
+	ID             int64
+	Label          string
+	Prefix         string
+	AllowedOrigins []string
+	RateLimitRPM   int
+	RevokedAt      sql.NullTime
+}
+
+// ActivePartnerOrigins returns the union of `allowed_origins`
+// arrays from every non-revoked partner_keys row, used by the
+// §5.7 preflight to echo Origins that an active partner key
+// would accept. Deduped + lowercased; the handler additionally
+// applies RFC 6454 normalization before the case-insensitive
+// compare.
+//
+// Round-3 ARCH H1 fix: preflight was using only the static
+// PartnerOriginAllowlist from config, missing key-row Origins.
+func (s *Store) ActivePartnerOrigins(ctx context.Context) ([]string, error) {
+	const q = `
+        SELECT allowed_origins
+          FROM partner_keys
+         WHERE revoked_at IS NULL
+    `
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("active_partner_origins: %w", err)
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{}, 16)
+	for rows.Next() {
+		var arr []string
+		if err := rows.Scan(pqArray(&arr)); err != nil {
+			return nil, err
+		}
+		for _, o := range arr {
+			if o == "" {
+				continue
+			}
+			seen[o] = struct{}{}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(seen))
+	for o := range seen {
+		out = append(out, o)
+	}
+	return out, nil
+}
+
+// LookupPartnerKeyByHash performs the §5.4.3 hash-keyed SELECT.
+// Returns (nil, nil) on no match — distinguished from error so
+// the dispatcher can branch to row 6 of the decision table.
+// Per the v0.1.7 timing-equivalence rule (§5.4.3 rule 4), the
+// caller MUST NOT early-return before this SELECT on Origin
+// mismatch or prefix mismatch — every keyed request runs the
+// same hash + SELECT.
+func (s *Store) LookupPartnerKeyByHash(ctx context.Context, tokenHash []byte) (*PartnerKey, error) {
+	s.lookupHashCount.Add(1)
+	const q = `
+        SELECT id, label, prefix, allowed_origins, rate_limit_rpm, revoked_at
+          FROM partner_keys
+         WHERE token_hash = $1
+         LIMIT 1
+    `
+	var pk PartnerKey
+	if err := s.db.QueryRowContext(ctx, q, tokenHash).Scan(
+		&pk.ID, &pk.Label, &pk.Prefix, pqArray(&pk.AllowedOrigins), &pk.RateLimitRPM, &pk.RevokedAt,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("lookup partner_key: %w", err)
+	}
+	return &pk, nil
+}
+
+// OverviewRow is the singleton snapshot row read by
+// /v1/stats/overview. Field names mirror the locked §5.1 JSON
+// keys to make the marshal mapping unambiguous.
+type OverviewRow struct {
+	GeneratedAt           time.Time
+	TokensIn              int64
+	TokensOut             int64
+	Requests              int64
+	NodesOnline           int
+	NodesHardwareAttested int
+	BandwidthGBPerSec     int64
+	NetworkPowerKW        float64
+	NetworkUtilizationPct int
+	GPUCoresTotal         int
+	CPUCoresTotal         int
+	UnifiedRAMGBTotal     int
+	ModelsServing         int
+}
+
+func (s *Store) Overview(ctx context.Context) (*OverviewRow, error) {
+	const q = `
+        SELECT generated_at,
+               tokens_in, tokens_out, requests,
+               nodes_online, nodes_hardware_attested,
+               bandwidth_gb_per_s, network_power_kw,
+               network_utilization_pct,
+               gpu_cores_total, cpu_cores_total,
+               unified_ram_gb_total, models_serving
+          FROM stats_overview_current
+         WHERE singleton = TRUE
+         LIMIT 1
+    `
+	var r OverviewRow
+	if err := s.db.QueryRowContext(ctx, q).Scan(
+		&r.GeneratedAt,
+		&r.TokensIn, &r.TokensOut, &r.Requests,
+		&r.NodesOnline, &r.NodesHardwareAttested,
+		&r.BandwidthGBPerSec, &r.NetworkPowerKW,
+		&r.NetworkUtilizationPct,
+		&r.GPUCoresTotal, &r.CPUCoresTotal,
+		&r.UnifiedRAMGBTotal, &r.ModelsServing,
+	); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("overview select: %w", err)
+	}
+	return &r, nil
+}
+
+// TimeseriesRow is one minute bucket. Missing minutes (NO row
+// in the 30-minute window) MUST render as JSON `null` in the
+// handler per §5.1 — NOT as zero. The handler fills the
+// 30-point array by aligning Bucket against the rolling
+// window and emitting null for absent minutes.
+type TimeseriesRow struct {
+	Bucket time.Time
+	Value  int64 // requests for rpm; combined inTok/outTok via two fields below for tpm
+	InTok  int64
+	OutTok int64
+}
+
+func (s *Store) RpmTimeseries(ctx context.Context) ([]TimeseriesRow, error) {
+	const q = `
+        SELECT bucket_start, requests
+          FROM stats_timeseries_rpm_30m
+         ORDER BY bucket_start
+    `
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("rpm select: %w", err)
+	}
+	defer rows.Close()
+	var out []TimeseriesRow
+	for rows.Next() {
+		var t TimeseriesRow
+		if err := rows.Scan(&t.Bucket, &t.Value); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) TpmTimeseries(ctx context.Context) ([]TimeseriesRow, error) {
+	const q = `
+        SELECT bucket_start, input_tokens, output_tokens
+          FROM stats_timeseries_tpm_30m
+         ORDER BY bucket_start
+    `
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("tpm select: %w", err)
+	}
+	defer rows.Close()
+	var out []TimeseriesRow
+	for rows.Next() {
+		var t TimeseriesRow
+		if err := rows.Scan(&t.Bucket, &t.InTok, &t.OutTok); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}

@@ -35,8 +35,128 @@ type Config struct {
 	Settlement                   SettlementConfig             `yaml:"settlement"`
 	Endpoints                    EndpointsConfig              `yaml:"endpoints"`
 	Explorer                     ExplorerConfig               `yaml:"explorer"`
+	Stats                        StatsConfig                  `yaml:"stats"`
 	Proxy                        ProxyConfig                  `yaml:"proxy"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
+}
+
+// StatsConfig is the SPEC-017 Network Stats API config block.
+//
+// All DSN fields are sourced from env at deploy time per the
+// existing config-loader env-override pattern; storing plaintext
+// DSNs in coordinator.yaml is a SECURITY violation and the
+// validator MAY refuse to start if a DSN appears literal-shaped
+// in the YAML file. v0.1 IMPL trusts the env-override path; the
+// validator does not pattern-match against the YAML body
+// (operator-managed secret hygiene).
+//
+// Stats.Enabled defaults to false so existing coordinator
+// deployments continue to function unchanged at upgrade time —
+// the /v1/stats/* mux subtree is not registered until the
+// operator flips this flag (BUILD §C.4).
+type StatsConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// DSNs per active runtime role. When Enabled = true, the
+	// three always-required DSNs MUST be non-empty.
+	ReaderDSN         string `yaml:"reader_dsn"`
+	RollupDSN         string `yaml:"rollup_dsn"`
+	ProviderPortalDSN string `yaml:"provider_portal_dsn"`
+
+	// PartnerKeys gates the optional partner_keys_writer pool.
+	// v0.1 default: LastUsedAtUpdatesEnabled=false; WriterDSN
+	// unused (BUILD §C.2).
+	PartnerKeys StatsPartnerKeysConfig `yaml:"partner_keys"`
+
+	// PartnerKeysAdminDSN is the CLI operator DSN (Step 4.A).
+	// Step 1 declares the field; coordinator startup MUST NOT
+	// open a pool for it (BUILD §D.6 / SECURITY §B.1).
+	PartnerKeysAdminDSN string `yaml:"partner_keys_admin_dsn"`
+
+	Rollup StatsRollupConfig `yaml:"rollup"`
+	CORS   StatsCORSConfig   `yaml:"cors"`
+
+	// TrustedProxies — operator-allowlisted X-Forwarded-For
+	// trusted hops, consumed by Step 3's auth-failure tier
+	// limiter for client-IP derivation (SPEC §5.6 v0.1.8 +
+	// SECURITY r5 H1). Step 1 declares; Step 3 consumes.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+}
+
+type StatsPartnerKeysConfig struct {
+	LastUsedAtUpdatesEnabled bool   `yaml:"last_used_at_updates_enabled"`
+	WriterDSN                string `yaml:"writer_dsn"`
+
+	// ProductionSignoffPath is the v0.1.8 erratum
+	// (2026-06-26) mechanical gate for SPEC §6.6.2's
+	// launch-sequencing precondition. When this field is set
+	// on a deployed coordinator config, `partner-keys issue`
+	// reads the file at this path AND requires its content
+	// to match the SPEC-014 SHA + YYYY-MM-DD sign-off
+	// template (see OPS.md §10.5). Issuance fails closed if
+	// the file is missing, empty, or malformed.
+	//
+	// When this field is UNSET (empty), the coordinator is
+	// treated as staging — no preconditions apply, and
+	// `partner-keys issue` operates against fixture DSNs
+	// without sign-off. Production deploys MUST set this
+	// field in coordinator.yaml; staging / test fixtures
+	// MUST NOT.
+	//
+	// ARCH r3 CRITICAL closure: the gate is config-driven
+	// (rather than opt-in via a `--production` CLI flag) so
+	// a wrapper-script automation that forgets the flag
+	// cannot accidentally bypass the runbook sign-off. The
+	// deployed config is the source of truth for
+	// "is this coordinator production".
+	ProductionSignoffPath string `yaml:"production_signoff_path"`
+}
+
+type StatsRollupConfig struct {
+	// BackfillMode is "partial" (Path A, default per
+	// [[macprovider-vercel-demo]] thin-ship pattern) or "full"
+	// (Path B). See SPEC §9.7.
+	BackfillMode string `yaml:"backfill_mode"`
+	// PartialHistorySince is the RFC 3339 rollup-start
+	// timestamp. Empty when BackfillMode = "full". Step 2/3
+	// consume.
+	PartialHistorySince string `yaml:"partial_history_since"`
+	// LateEventsRetentionDays — SPEC §9.3 (v0.1.7). Default 90;
+	// floor 30. Step 2 floor-clamps with a WARN log; below-floor
+	// values DO NOT fail startup (chosen pin: clamp+warn).
+	LateEventsRetentionDays int `yaml:"late_events_retention_days"`
+	// UsdPerMillionCredits — credits→USD conversion factor.
+	// SPEC-005 v0.3 stores `ledger_request_credits.provider_credits`
+	// as INTEGER credits; SPEC-016 v0.1.19 has not normatively
+	// pinned a credit→USD ratio. SPEC-017 v0.1 IMPL exposes this
+	// as a single operator-tunable factor: rollup computes
+	// `earnings_work_usd = provider_credits * UsdPerMillionCredits
+	// / 1_000_000`. Default 1.0 (1 USD per million credits).
+	// Operator MAY override per ramp; the formula is documented
+	// in OPS.md.
+	UsdPerMillionCredits float64 `yaml:"usd_per_million_credits"`
+	// DriftThresholdRatio — fractional divergence (>0.005 = >0.5%
+	// per SPEC §9.4) at which the nightly rebuild emits
+	// `stats_rollup_drift_detected`. Operator MAY tune within
+	// [0.001, 0.05]; default 0.005.
+	DriftThresholdRatio float64 `yaml:"drift_threshold_ratio"`
+	// NightlyRebuildHourUTC — UTC hour [0,23] for the nightly
+	// `stats_leaderboard_all` + `stats_leaderboard_30d` rebuild.
+	// Default 9 per SPEC §9.3 (operator-pin off-hours).
+	NightlyRebuildHourUTC int `yaml:"nightly_rebuild_hour_utc"`
+	// LateEventsLookbackHours — SPEC §9.3 48h default; operator
+	// MAY raise to 72/96. Lower than 24 breaks the 1× SPEC-005
+	// reconciliation-margin invariant.
+	LateEventsLookbackHours int `yaml:"late_events_lookback_hours"`
+}
+
+type StatsCORSConfig struct {
+	// AccessControlMaxAgeSeconds — SPEC §5.7 v0.1.7 default 60,
+	// operator may raise via runtime config to ≤300; >300
+	// requires a SPEC bump. Step 3 consumes; Step 1 only
+	// declares.
+	AccessControlMaxAgeSeconds int      `yaml:"access_control_max_age_seconds"`
+	PartnerOriginAllowlist     []string `yaml:"partner_origin_allowlist"`
 }
 
 // ProxyConfig configures how the coordinator interprets `X-Forwarded-For` /
@@ -428,6 +548,20 @@ func Default() Config {
 				RateLimitPerMinute: 60,
 			},
 		},
+		Stats: StatsConfig{
+			Enabled: false,
+			Rollup: StatsRollupConfig{
+				BackfillMode:            "partial",
+				LateEventsRetentionDays: 90,
+				UsdPerMillionCredits:    1.0,
+				DriftThresholdRatio:     0.005,
+				NightlyRebuildHourUTC:   9,
+				LateEventsLookbackHours: 48,
+			},
+			CORS: StatsCORSConfig{
+				AccessControlMaxAgeSeconds: 60,
+			},
+		},
 		Explorer: ExplorerConfig{
 			Enabled:                       false,
 			BindPath:                      "/admin/explorer/",
@@ -499,6 +633,27 @@ func (c *Config) resolveEnv() error {
 		return err
 	} else {
 		c.Auth.GatewayServiceToken = v
+	}
+	// Round-1 SECURITY r1 MEDIUM 1: stats DSN fields go through
+	// the same env-indirection resolver. Operators inject DSNs
+	// at deploy time as `env:STATS_READER_DSN` etc.; storing
+	// plaintext DSNs in coordinator.yaml is a SECURITY footgun.
+	statsDSNs := []struct {
+		field string
+		dst   *string
+	}{
+		{"stats.reader_dsn", &c.Stats.ReaderDSN},
+		{"stats.rollup_dsn", &c.Stats.RollupDSN},
+		{"stats.provider_portal_dsn", &c.Stats.ProviderPortalDSN},
+		{"stats.partner_keys.writer_dsn", &c.Stats.PartnerKeys.WriterDSN},
+		{"stats.partner_keys_admin_dsn", &c.Stats.PartnerKeysAdminDSN},
+	}
+	for _, f := range statsDSNs {
+		v, err := resolveEnvValue(f.field, *f.dst)
+		if err != nil {
+			return err
+		}
+		*f.dst = v
 	}
 	if raw, ok := os.LookupEnv("GITHUB_OAUTH_ENABLED"); ok {
 		switch raw {
@@ -838,6 +993,9 @@ func (c Config) Validate() error {
 	if err := c.validateExplorer(); err != nil {
 		return err
 	}
+	if err := c.validateStats(); err != nil {
+		return err
+	}
 	if _, ok := c.Rewards.RateCard["default"]; !ok {
 		return fmt.Errorf("rewards.rate_card must contain default")
 	}
@@ -938,6 +1096,89 @@ func (c Config) validateExplorer() error {
 		if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
 			return fmt.Errorf("explorer.gateway_base_url must use https unless targeting loopback")
 		}
+	}
+	return nil
+}
+
+// validateStats enforces the SPEC-017 §7.2 + BUILD §C structural
+// constraints on the stats config block.
+//
+// Stats.Enabled=false (the v0.1 default) skips ALL validation
+// below; an operator that has not flipped the gate cannot brick
+// startup by leaving Stats fields empty.
+//
+// When Stats.Enabled=true the three required runtime DSNs MUST
+// be set (fail-closed per BUILD §C.3). PartnerKeys.WriterDSN is
+// only required when last_used_at_updates_enabled=true. The CLI
+// admin DSN is OPTIONAL even when stats is enabled (BUILD §B.2).
+//
+// Numeric ranges:
+//   - LateEventsRetentionDays — SPEC §9.3 v0.1.7 floor 30; default 90.
+//   - AccessControlMaxAgeSeconds — SPEC §5.7 v0.1.7 cap 300; default 60.
+//   - BackfillMode — SPEC §9.7 enum {"partial","full"}; default "partial".
+func (c Config) validateStats() error {
+	s := c.Stats
+	if !s.Enabled {
+		return nil
+	}
+	// Final adversarial audit (codex SECURITY MEDIUM 1) — when
+	// stats are enabled, `/metrics` is mounted on the provider
+	// mux at provider-port. The Prometheus metric
+	// `stats_partner_key_request_total{partner_key_id=...}`
+	// is a partner-key enumeration oracle if it ever lands on
+	// a public interface, so fail closed at config-validation
+	// time: refuse to start if listen.bind_address is not a
+	// loopback host. Pearl deploy runs `127.0.0.1:8444`; a
+	// future operator who mis-types `0.0.0.0` or `::` gets a
+	// clear startup error instead of an exposed enumeration
+	// surface.
+	bindHost := strings.TrimSpace(c.Listen.BindAddress)
+	if bindHost == "" {
+		return fmt.Errorf("listen.bind_address must be set (loopback required when stats.enabled is true)")
+	}
+	if !isLoopbackHost(bindHost) {
+		return fmt.Errorf("stats.enabled=true requires listen.bind_address to be a loopback host (127.0.0.1, ::1, or localhost); got %q. The /metrics endpoint mounts on the provider port and a non-loopback bind exposes the stats_partner_key_request_total enumeration oracle. Place the coordinator behind a reverse proxy that terminates the public surface (e.g. nginx) and keep the binary bound to loopback", bindHost)
+	}
+	if strings.TrimSpace(s.ReaderDSN) == "" {
+		return fmt.Errorf("stats.reader_dsn must be set when stats.enabled is true")
+	}
+	if strings.TrimSpace(s.RollupDSN) == "" {
+		return fmt.Errorf("stats.rollup_dsn must be set when stats.enabled is true")
+	}
+	if strings.TrimSpace(s.ProviderPortalDSN) == "" {
+		return fmt.Errorf("stats.provider_portal_dsn must be set when stats.enabled is true")
+	}
+	if s.PartnerKeys.LastUsedAtUpdatesEnabled && strings.TrimSpace(s.PartnerKeys.WriterDSN) == "" {
+		return fmt.Errorf("stats.partner_keys.writer_dsn must be set when stats.partner_keys.last_used_at_updates_enabled is true")
+	}
+	switch s.Rollup.BackfillMode {
+	case "", "partial", "full":
+	default:
+		return fmt.Errorf("stats.rollup.backfill_mode must be one of {partial, full} (got %q)", s.Rollup.BackfillMode)
+	}
+	// LateEventsRetentionDays: chosen pin per BUILD §2 Step 2 is
+	// CLAMP+WARN (handled at rollup boot, not config validation).
+	// We still reject below 30 here ONLY if explicitly set to
+	// a negative value; zero = use default (90). A value in
+	// (0, 30) is permitted but will be clamped to 30 by the
+	// rollup with a WARN log.
+	if s.Rollup.LateEventsRetentionDays < 0 {
+		return fmt.Errorf("stats.rollup.late_events_retention_days must be >= 0 (0 = default 90, values in (0,30) clamped to 30 with WARN)")
+	}
+	if s.Rollup.UsdPerMillionCredits < 0 {
+		return fmt.Errorf("stats.rollup.usd_per_million_credits must be >= 0")
+	}
+	if s.Rollup.DriftThresholdRatio != 0 && (s.Rollup.DriftThresholdRatio < 0.001 || s.Rollup.DriftThresholdRatio > 0.05) {
+		return fmt.Errorf("stats.rollup.drift_threshold_ratio must be in [0.001, 0.05] when set (SPEC §9.4 default 0.005)")
+	}
+	if s.Rollup.NightlyRebuildHourUTC < 0 || s.Rollup.NightlyRebuildHourUTC > 23 {
+		return fmt.Errorf("stats.rollup.nightly_rebuild_hour_utc must be in [0, 23]")
+	}
+	if s.Rollup.LateEventsLookbackHours != 0 && s.Rollup.LateEventsLookbackHours < 24 {
+		return fmt.Errorf("stats.rollup.late_events_lookback_hours must be >= 24 (SPEC §9.3 1× reconciliation-margin floor)")
+	}
+	if s.CORS.AccessControlMaxAgeSeconds < 0 || s.CORS.AccessControlMaxAgeSeconds > 300 {
+		return fmt.Errorf("stats.cors.access_control_max_age_seconds must be between 0 and 300 (SPEC §5.7)")
 	}
 	return nil
 }

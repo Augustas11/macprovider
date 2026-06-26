@@ -125,6 +125,92 @@ jobs:
       - name: Run fixture integration test
         run: cd phase7-verify && go test -race -count=1 -tags=integration -timeout 60s .
 
+  coordinator-lint:
+    name: phase4-coordinator (golangci-lint depguard AC-16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # SPEC-017 AC-16 — import-graph lint. Runs depguard + forbidigo
+    # on every PR. Step 1 adds a fixture under
+    # internal/stats/testdata/forbidden_import_fixture/ that
+    # imports internal/billing from internal/stats; the test
+    # `TestAC16ForbiddenImportFails` invokes `go vet` on the
+    # fixture and asserts the named diagnostic. The repo-wide
+    # `golangci-lint run` invoked here MUST NOT include the
+    # fixture; the fixture lives under `testdata/` which Go's
+    # toolchain excludes by convention.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+      - name: Install golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+      - name: make lint-coordinator
+        run: make lint-coordinator
+      - name: AC-16 fixture assertion (golangci-lint diagnostic fires by name)
+        # Round-1 ARCH r1 HIGH E fix: TestAC16ForbiddenImportFails
+        # + TestForbidigoOSExitRule skip when golangci-lint is
+        # absent. The default `make test-coordinator` runs before
+        # golangci-lint is installed; here, after the lint binary
+        # is on PATH, run the targeted assertions so the fixture
+        # diagnostic is actually checked in CI.
+        run: |
+          cd phase4-coordinator && go test -count=1 -run 'TestAC16ForbiddenImportFails|TestForbidigoOSExitRule' ./internal/stats/
+
+  coordinator-stats-integration:
+    name: phase4-coordinator (stats Postgres AC-9/10/19/20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # SPEC-017 Step 1 — Postgres-dependent integration tests.
+    # testcontainers-go spins ephemeral Postgres per test; the
+    # ubuntu-latest runner ships with Docker. Tests live under
+    # //go:build integration so `make test-coordinator` on a
+    # daemon-less host does not fail.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+      - name: make test-coordinator-integration
+        run: make test-coordinator-integration
+
+  coordinator-nginx-integration:
+    name: phase4-coordinator (nginx Step 4.B behavior smoke)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # SPEC-017 Step 4.B — nginx config + behavior smoke. Validates
+    # AC-8 (60+1 anonymous rate limit), AC-3 nginx-tier (Bearer
+    # garbage → 401 envelope through nginx), AC-15 nginx-tier
+    # (access-log redaction), keyed-bypass behavior, per-endpoint
+    # isolation, and proxy_no_cache write-suppression (SECURITY r5 C1).
+    #
+    # The script header claimed CI ran this job since Step 4.B
+    # landed, but no workflow invoked the script until this entry.
+    # Without it AC-8 had zero automated regression protection on
+    # main. Filed during the SPEC-017 v0.1.8 end-of-implementation
+    # 22-AC sweep.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Verify docker daemon
+        run: docker info >/dev/null
+      - name: Run nginx behavior smoke
+        run: bash phase4-coordinator/dist/test/check_nginx_stats_test.sh
+
   integration:
     name: integration (cross-service)
     runs-on: ubuntu-latest
@@ -274,6 +360,7 @@ jobs:
     timeout-minutes: 5
     needs:
       - coordinator
+      - coordinator-nginx-integration
       - gateway
       - phase7-verify
       - phase7-verify-integration
@@ -288,6 +375,7 @@ jobs:
         shell: bash
         env:
           COORDINATOR_RESULT: ${{ needs.coordinator.result }}
+          NGINX_INTEGRATION_RESULT: ${{ needs.coordinator-nginx-integration.result }}
           GATEWAY_RESULT: ${{ needs.gateway.result }}
           PHASE7_VERIFY_RESULT: ${{ needs.phase7-verify.result }}
           PHASE7_VERIFY_INTEGRATION_RESULT: ${{ needs.phase7-verify-integration.result }}
@@ -302,6 +390,7 @@ jobs:
           failed=0
           for check in \
             "phase4-coordinator (go vet + test):${COORDINATOR_RESULT}" \
+            "phase4-coordinator (nginx Step 4.B behavior smoke):${NGINX_INTEGRATION_RESULT}" \
             "phase5-gateway (go vet + test):${GATEWAY_RESULT}" \
             "phase7-verify (go vet + test):${PHASE7_VERIFY_RESULT}" \
             "phase7-verify integration (fixtures):${PHASE7_VERIFY_INTEGRATION_RESULT}" \

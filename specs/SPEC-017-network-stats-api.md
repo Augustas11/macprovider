@@ -29,15 +29,18 @@ SPEC bump:
   grant widening; Shape C is the v0.1 default. PostgreSQL MVCC
   guarantees the leaderboard handler never observes an empty state
   during the Shape C transaction.
-- **§5.6 burst vs AC-8:** §5.6 named "burst 120" for the public tier
-  but AC-8 requires the 61st request from the same IP within 60s to
-  return 429. With nginx `rate=60r/m burst=120 nodelay`, the 120-token
-  burst would absorb the 61st request. v0.1.8 drops the burst column
-  entirely from the §5.6 table — public tier is a hard 60 req/min per
-  IP per endpoint, partner tier a hard 600 req/min per key per
-  endpoint. AC-8 is now mechanically achievable with `limit_req
-  zone=<name> nodelay;` and no `burst=`. Step 4.B in the IMPL prompt
-  is no longer hard-blocked.
+- **§5.6 burst vs AC-8 (v0.1.8 erratum 2026-06-26):** §5.6 v0.1.6/.7
+  named "burst 120" for the public tier; v0.1.8 drops the burst
+  column from the §5.6 table because long-term burst absorption was
+  the actual contract being refuted by AC-8. The mechanically correct
+  production directive is `limit_req zone=<name> burst=59 nodelay;`
+  — admits exactly 60 immediate, rejects the 61st with 429, and
+  refills at strict 1 token/sec so sustained throughput stays at
+  60/min. Earlier v0.1.8 SPEC text said "no `burst=` parameter"; that
+  was incorrect on nginx semantics (with default burst=0 the bucket
+  admits only 1 immediate, failing AC-8's "60 succeed" assertion).
+  The locked production posture is `burst=59 nodelay` per the
+  erratum in §5.6 below.
 - **Authorization-aware nginx keying (v0.1.8 §5.6 addition):** the
   public-tier `limit_req_zone` MUST NOT throttle Authorization-bearing
   requests at the edge (partner-keyed traffic is rate-limited by
@@ -1113,12 +1116,44 @@ named "burst 120" / "burst 1200" in this table. That was mechanically
 inconsistent with AC-8 (which requires the 61st request from the
 same IP within 60s to return 429) under plain nginx `limit_req`
 semantics: a 120-token burst would absorb the 61st request, not
-reject it. v0.1.8 drops the burst column entirely. The public tier
-is a hard 60 req/min per IP per endpoint with no burst absorption;
-the partner tier is a hard 600 req/min per key per endpoint with no
-burst absorption. AC-8 is now mechanically achievable with
-`limit_req zone=<name> nodelay;` (no `burst=` parameter) on the
-public-tier location.
+reject it. v0.1.8 drops the burst column from the §5.6 table. The
+public tier is a hard 60 req/min per IP per endpoint; the partner
+tier is a hard 600 req/min per key per endpoint. The locked
+sustained-rate contract is 60/min (public) and 600/min/key
+(partner); there is no LONG-TERM burst amplification.
+
+**v0.1.8 erratum (added 2026-06-26 during the SPEC-017 v0.1.8
+end-of-implementation adversarial audit).** The earlier text of
+this paragraph said "AC-8 is now mechanically achievable with
+`limit_req zone=<name> nodelay;` (no `burst=` parameter)". That
+was incorrect on nginx semantics: with the default `burst=0` the
+initially-empty leaky bucket admits at most 1 request immediately
+and then strictly 1 request per second; a tight burst of 60
+requests within the same second produces 1 successful response
+and 59 immediate 429s, failing AC-8's "60 succeed" assertion. The
+mechanically correct production directive is:
+
+```nginx
+limit_req zone=<name> burst=59 nodelay;
+```
+
+This admits the first 60 requests immediately (1 in-rate token +
+59 burst capacity) and rejects the 61st with 429 + `Retry-After:
+60` + the §5.9 envelope. The `rate=60r/m` refill (= 1 token/sec)
+is unchanged, so over any 60-second window after the bucket is
+spent, no more than 60 additional requests are admitted —
+sustained throughput remains exactly 60/min. The `burst=59 nodelay`
+parameter is a SHORT-TERM bucket capacity for the
+mechanical AC-8 contract; it is NOT long-term burst absorption.
+The phrase "no burst absorption" in this section refers to
+sustained-throughput amplification, NOT to the short-term bucket
+capacity nginx requires to admit the AC's named 60-request burst.
+
+Implementations MUST use `burst=59 nodelay` on every public-tier
+stats `limit_req` directive. The partner tier (in-process bucket)
+similarly admits 600 immediate then strict 1/100ms refill;
+"no burst absorption" applies to the sustained rate in the same
+sense.
 
 Both tiers MUST return `429 Too Many Requests` on exhaustion, with
 `Retry-After: <seconds>` and a JSON body per §5.9. nginx is the
@@ -1254,9 +1289,19 @@ its own envelope shape with additional fields). Partners reusing a
 SPEC-006-aware client SHOULD NOT assume schema parity; this is a
 narrower envelope by design.
 
-`304 Not Modified` is exempt: it MUST be returned with an empty body
-and only the headers required by RFC 7232 (`ETag`, `Cache-Control`,
-`Vary`). All other non-2xx responses MUST use the exact shape below.
+`304 Not Modified` is exempt from the JSON envelope: it MUST be
+returned with an empty body and the headers required by RFC 7232
+(`ETag`, `Cache-Control`, `Vary`) PLUS the projection-aware CORS
+headers from §5.7 (`Access-Control-Allow-Origin`,
+`Access-Control-Allow-Credentials` on partner projection,
+`Access-Control-Max-Age` on preflight). v0.1.8 erratum
+(2026-06-26): the Fetch spec requires `Access-Control-Allow-Origin`
+on every cross-origin response including 304; a 304 without ACAO
+silently fails as a CORS error in browsers issuing conditional
+GETs from `console.streamvc.live` / `portal.streamvc.live`. The
+earlier text omitted CORS from the 304 carveout, which would
+break browser-side partner integrations. All other non-2xx
+responses MUST use the exact shape below.
 
 ```json
 {
@@ -1664,7 +1709,7 @@ script (out of scope for v0.1).
 CREATE ROLE provider_portal LOGIN PASSWORD '<from-env>';
 REVOKE ALL ON SCHEMA public FROM provider_portal;
 GRANT USAGE ON SCHEMA public TO provider_portal;
-GRANT INSERT, UPDATE ON provider_visibility TO provider_portal;
+GRANT SELECT, INSERT, UPDATE ON provider_visibility TO provider_portal;
 GRANT INSERT ON provider_visibility_audit TO provider_portal;
 -- BIGSERIAL backing-sequence privilege required for the
 -- provider_visibility_audit INSERT path (§6.5).
@@ -1674,6 +1719,19 @@ GRANT USAGE, SELECT ON SEQUENCE provider_visibility_audit_id_seq TO provider_por
 This role is referenced by SPEC-014 v0.9 candidate; SPEC-017 v0.1
 pins the grant set for that role here so the portal IMPL has a
 locked target. No `stats_*` grants. No OLTP grants.
+
+**v0.1.8 erratum (added 2026-06-26).** The grant set was widened
+from `INSERT, UPDATE` to `SELECT, INSERT, UPDATE` on
+`provider_visibility`. The portal's bucketed-vs-exact toggle uses
+an UPSERT path that requires `SELECT` to read the prior row state
+before the conditional UPDATE (the portal does not blindly INSERT
+because that would clobber audit history). The earlier minimum
+grant was insufficient under Postgres' RLS-free `ON CONFLICT`
+shape. `SELECT` is scoped to the role; the portal still cannot
+read any `stats_*` table, the OLTP ledger, or `partner_keys`. The
+implementation migration at
+`internal/stats/migrations/004_grants.up.sql:86-118` documents
+this deviation inline.
 
 #### 7.2.4 `partner_keys_writer` — last_used_at writer
 

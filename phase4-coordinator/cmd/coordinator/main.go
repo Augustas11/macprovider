@@ -23,10 +23,32 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/stats"
+	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
+	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
+	statsstore "github.com/augstar/macprovider-coordinator/internal/stats/store"
+
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
+	prom "github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	// SPEC-017 v0.1.8 — register the Postgres driver under the
+	// "postgres" name used by internal/stats.Open. lib/pq is the
+	// only Postgres driver in go.mod for v0.1; switching to pgx
+	// requires a SPEC v0.2 conversation.
+	_ "github.com/lib/pq"
+
 	"github.com/rs/zerolog"
 )
+
+// parseRFC3339Strict parses an RFC 3339 timestamp and returns an
+// explicit error on parse failure. Used in the stats rollup
+// boot path where backfill_mode = "partial" requires the
+// boundary to be valid (round-1 ARCH r1 HIGH 2 fix).
+func parseRFC3339Strict(s string) (time.Time, error) {
+	return time.Parse(time.RFC3339, s)
+}
 
 // version is overridden at build time via
 //
@@ -36,6 +58,43 @@ import (
 var version = "dev"
 
 func main() {
+	// SPEC-017 v0.1.8 Step 4.A — subcommand dispatch. When the
+	// first positional arg is a known operator-CLI verb, route
+	// to the corresponding handler and exit with its code. The
+	// daemon path is preserved below for argv shapes that DON'T
+	// match (the historical `coordinator --config=... --version`
+	// invocations).
+	//
+	// Why before flag.Parse(): the daemon's flag set rejects
+	// non-flag positional args ("partner-keys" would error out
+	// of flag.Parse with "flag provided but not defined"). We
+	// intercept first.
+	if len(os.Args) >= 2 {
+		arg1 := os.Args[1]
+		switch arg1 {
+		case "partner-keys":
+			os.Exit(runPartnerKeys(os.Args[2:]))
+		case "visibility":
+			os.Exit(runVisibility(os.Args[2:]))
+		}
+		// Round-1 CODE H1 fix: a non-flag first positional that
+		// is NEITHER a known daemon flag NOR a known CLI verb is
+		// a typo. Reject with usage so an operator who mistypes
+		// `coordinator visiblity revert ...` doesn't silently
+		// start the daemon (which would try to load
+		// coordinator.yaml). Daemon flags begin with `-`; CLI
+		// verbs are enumerated below.
+		if !strings.HasPrefix(arg1, "-") {
+			fmt.Fprintf(os.Stderr, "coordinator: unknown subcommand %q\n", arg1)
+			fmt.Fprintln(os.Stderr, "usage:")
+			fmt.Fprintln(os.Stderr, "  coordinator --config <path>     (daemon mode — default)")
+			fmt.Fprintln(os.Stderr, "  coordinator --version           (print build version)")
+			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
+			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
+			os.Exit(2)
+		}
+	}
+
 	configPath := flag.String("config", "coordinator.yaml", "path to coordinator YAML config")
 	showVersion := flag.Bool("version", false, "print build version and exit")
 	flag.Parse()
@@ -96,8 +155,161 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
 		os.Exit(1)
 	}
+	// SPEC-017 v0.1.8 Step 1 — Postgres pools for the Network
+	// Stats API. Fail-closed per BUILD §C.3: any missing required
+	// runtime DSN or any failed startup smoke aborts coordinator
+	// boot BEFORE any HTTP listener binds. When cfg.Stats.Enabled
+	// is false (the v0.1 default), Open returns stats.ErrDisabled
+	// and the /v1/stats/* mux subtree is NOT registered later;
+	// 404 from the existing mux fallback is the correct posture
+	// (NOT a custom JSON envelope, which would violate the §5.9
+	// closed code vocabulary — BUILD §C.4).
+	//
+	// The CLI operator DSN (cfg.Stats.PartnerKeysAdminDSN) is
+	// declared but INTENTIONALLY NOT OPENED here — the
+	// coordinator process should never hold an
+	// INSERT-on-partner_keys connection at runtime. Step 4.A's
+	// `coordinator partner-keys issue/revoke` subcommands open
+	// that DSN at invocation time only. SECURITY §B.1 invariant.
+	var statsPools *stats.Pools
+	if cfg.Stats.Enabled {
+		statsCfg := stats.Config{
+			Enabled:             cfg.Stats.Enabled,
+			ReaderDSN:           cfg.Stats.ReaderDSN,
+			RollupDSN:           cfg.Stats.RollupDSN,
+			ProviderPortalDSN:   cfg.Stats.ProviderPortalDSN,
+			PartnerKeys:         stats.PartnerKeysConfig{LastUsedAtUpdatesEnabled: cfg.Stats.PartnerKeys.LastUsedAtUpdatesEnabled, WriterDSN: cfg.Stats.PartnerKeys.WriterDSN},
+			PartnerKeysAdminDSN: cfg.Stats.PartnerKeysAdminDSN,
+			Rollup: stats.RollupConfig{
+				BackfillMode:            cfg.Stats.Rollup.BackfillMode,
+				PartialHistorySince:     cfg.Stats.Rollup.PartialHistorySince,
+				LateEventsRetentionDays: cfg.Stats.Rollup.LateEventsRetentionDays,
+				UsdPerMillionCredits:    cfg.Stats.Rollup.UsdPerMillionCredits,
+				DriftThresholdRatio:     cfg.Stats.Rollup.DriftThresholdRatio,
+				NightlyRebuildHourUTC:   cfg.Stats.Rollup.NightlyRebuildHourUTC,
+				LateEventsLookbackHours: cfg.Stats.Rollup.LateEventsLookbackHours,
+			},
+			CORS: stats.CORSConfig{
+				AccessControlMaxAgeSeconds: cfg.Stats.CORS.AccessControlMaxAgeSeconds,
+				PartnerOriginAllowlist:     cfg.Stats.CORS.PartnerOriginAllowlist,
+			},
+			TrustedProxies: cfg.Stats.TrustedProxies,
+		}
+		var err error
+		statsPools, err = stats.Open(context.Background(), statsCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stats: %v\n", err)
+			os.Exit(1)
+		}
+		// MIGRATIONS ARE NOT RUN AT COORDINATOR BOOT (round-1
+		// CRITICAL fix across all three lanes: SECURITY r1
+		// CRIT-2, CODE r1 HIGH C2, ARCH r1 HIGH C1). The earlier
+		// draft applied migrations through the stats_rollup
+		// runtime pool with a STATS_SKIP_MIGRATIONS_AT_BOOT=1
+		// opt-out — that defaulted to over-privileging the
+		// runtime role and made the safe production path a
+		// remember-this-env-var footgun. Migrations are now
+		// operator-side: invoke `statsmigrations.Apply` from an
+		// admin DSN via psql or a follow-up
+		// `coordinator stats migrate --admin-dsn=...`
+		// subcommand. The integration test harness applies
+		// migrations through its own admin DSN.
+		logger.Info().Msg("SPEC-017 stats pools opened (reader, rollup, provider_portal); migrations are operator-applied; /v1/stats/* will be mounted by Step 3")
+	} else {
+		logger.Info().Msg("SPEC-017 stats DISABLED via config (default); /v1/stats/* not registered")
+	}
+	defer func() {
+		if statsPools != nil {
+			_ = statsPools.Close()
+		}
+	}()
 	shutdownCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
+	// SPEC-017 v0.1.8 Step 2 — rollup runner. Reads OLTP source
+	// tables via `statsPools.Rollup`, writes the seven
+	// stats_* + stats_components_health + stats_rewards_populated
+	// surfaces, and emits structured drift-detection events. Per
+	// SPEC §7.2.5 the rollup MUST NOT use Reader / ProviderPortal
+	// pools — `New(statsPools.Rollup, ...)` enforces.
+	//
+	// The default SnapshotProvider (ZeroSnapshotProvider) returns
+	// zero values for the §5.1.1 live-snapshot fields (nodes_*,
+	// bandwidth_*, network_*, *_cores_total, models_serving).
+	// Operators with a real pool.Registry-derived snapshot wire
+	// it by injecting a custom SnapshotProvider here. v0.1 IMPL
+	// ships the zero default with an OPS.md note.
+	var statsRollup *statsrollup.Runner
+	if statsPools != nil {
+		// Round-1 ARCH r1 HIGH 2 fix: BackfillMode must be the
+		// authoritative selector. "full" forces
+		// PartialHistorySinceUnix = 0 (the boundary the rollup
+		// queries against; 0 = no lower-bound filter); "partial"
+		// requires a non-empty partial_history_since and fails
+		// startup if it doesn't parse.
+		mode := cfg.Stats.Rollup.BackfillMode
+		if mode == "" {
+			mode = "partial"
+		}
+		var partialUnix int64
+		switch mode {
+		case "full":
+			partialUnix = 0
+		case "partial":
+			// Round-2 ARCH r2 HIGH 2 fix: backfill_mode = "partial"
+			// requires a non-empty RFC 3339 partial_history_since
+			// when stats.enabled = true. Path A semantics demand
+			// a rollup-start boundary that Step 3 can emit as
+			// the JSON `partial_history_since` field. Empty +
+			// partial would silently behave like "full" while
+			// leaving Step 3 with no field to emit — two
+			// conforming sessions could disagree about which
+			// path is in effect. Force the operator to be
+			// explicit.
+			if cfg.Stats.Rollup.PartialHistorySince == "" {
+				fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.partial_history_since must be non-empty when backfill_mode = 'partial'; use backfill_mode = 'full' for unconstrained history\n")
+				os.Exit(1)
+			}
+			parsed, perr := parseRFC3339Strict(cfg.Stats.Rollup.PartialHistorySince)
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.partial_history_since must parse as RFC 3339 when backfill_mode = 'partial' (got %q): %v\n", cfg.Stats.Rollup.PartialHistorySince, perr)
+				os.Exit(1)
+			}
+			partialUnix = parsed.Unix()
+		default:
+			fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.backfill_mode must be 'partial' or 'full' (got %q)\n", mode)
+			os.Exit(1)
+		}
+
+		rollupCfg := statsrollup.Config{
+			BackfillMode:            mode,
+			PartialHistorySinceUnix: partialUnix,
+			LateEventsRetentionDays: cfg.Stats.Rollup.LateEventsRetentionDays,
+			UsdPerMillionCredits:    cfg.Stats.Rollup.UsdPerMillionCredits,
+			DriftThresholdRatio:     cfg.Stats.Rollup.DriftThresholdRatio,
+			NightlyRebuildHourUTC:   cfg.Stats.Rollup.NightlyRebuildHourUTC,
+			LateEventsLookbackHours: cfg.Stats.Rollup.LateEventsLookbackHours,
+		}
+		var err error
+		statsRollup, err = statsrollup.New(statsPools.Rollup, rollupCfg, statsrollup.ZeroSnapshotProvider{}, logger.With().Str("subsystem", "stats_rollup").Logger())
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stats rollup: %v\n", err)
+			os.Exit(1)
+		}
+		statsRollup.Start(shutdownCtx)
+		logger.Info().Str("backfill_mode", mode).Int64("partial_history_since_unix", partialUnix).Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
+	}
+	// Round-3 ARCH r3 LOW 2 fix: defers run LIFO, so a non-signal
+	// return path would call `Wait()` BEFORE the
+	// `stopBackground()` registered earlier — blocking forever on
+	// still-running rollup goroutines. Combining cancellation +
+	// drain in one defer registered AFTER the rollup is
+	// constructed guarantees cancellation always precedes Wait.
+	defer func() {
+		stopBackground()
+		if statsRollup != nil {
+			statsRollup.Wait()
+		}
+	}()
 	wsOpts := []providerws.Option{}
 	wsOpts = append(wsOpts, providerws.WithVersion(version))
 	wsOpts = append(wsOpts, providerws.WithAdmissionStore(admissionStore))
@@ -313,6 +525,51 @@ func main() {
 	if cfg.Auth.RequireProviderTokens {
 		providerMux.Handle("/providers/", billingHandler)
 	}
+
+	// SPEC-017 v0.1.8 Step 3 — /v1/stats/* mux subtree. Mounts
+	// only when stats.enabled = true. The handler stack uses
+	// the stats_reader pool exclusively (no admin DSN, no
+	// rollup pool). Per BUILD §2 Step 3 the same binary serves
+	// both coordinator.streamvc.live/v1/stats/* and
+	// stats.streamvc.live/v1/stats/*; nginx vhost config
+	// (Step 4.B) routes both to this provider port.
+	if statsPools != nil {
+		// SPEC-017 v0.1.8 Step 4.C — Prometheus metrics. The
+		// coordinator owns its own registry (not the global
+		// DefaultRegisterer) so concurrent test runs don't
+		// double-register. The /metrics handler is mounted on
+		// the provider port (8444) which is loopback-only per
+		// Pearl posture (nginx fronts the public ports; the
+		// metrics endpoint is reachable only via SSH/operator
+		// tunnel).
+		statsRegistry := prom.NewRegistry()
+		statsMetrics := statsmetrics.New(statsRegistry)
+		statsHandler := stats.NewMuxWithMetrics(
+			statsstore.New(statsPools.Reader),
+			stats.CORSConfig{
+				AccessControlMaxAgeSeconds: cfg.Stats.CORS.AccessControlMaxAgeSeconds,
+				PartnerOriginAllowlist:     cfg.Stats.CORS.PartnerOriginAllowlist,
+			},
+			cfg.Stats.Rollup.BackfillMode,
+			cfg.Stats.Rollup.PartialHistorySince,
+			cfg.Stats.TrustedProxies,
+			logger.With().Str("subsystem", "stats_handlers").Logger(),
+			statsMetrics,
+		).Handler()
+		providerMux.Handle("/v1/stats/", statsHandler)
+		providerMux.Handle("/metrics", promhttp.HandlerFor(statsRegistry, promhttp.HandlerOpts{}))
+		logger.Info().Msg("SPEC-017 stats handlers + /metrics mounted on provider port")
+
+		// Wire rollup lag observation periodically — gauge value
+		// = now - stats_components_health.generated_at per
+		// component. Background goroutine; cancelled with
+		// shutdownCtx.
+		if statsRollup != nil {
+			statsRollup.WithMetrics(statsMetrics)
+			go observeRollupLag(shutdownCtx, statsPools.Reader, statsMetrics, logger)
+		}
+	}
+
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerServer.Handler())
 	errs := make(chan error, 2)
@@ -687,5 +944,31 @@ func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
 		return strings.TrimSpace(startup.String()) != strings.TrimSpace(next.String())
 	default:
 		return !reflect.DeepEqual(startup.Interface(), next.Interface())
+	}
+}
+
+// observeRollupLag periodically updates the
+// stats_rollup_lag_seconds gauge per §9.5 component, reading
+// each component's generated_at from stats_components_health.
+// Runs at a 15s cadence; cancelled when ctx.Done() fires.
+//
+// Read-only via the reader pool — does NOT contend with the
+// rollup writer pool.
+//
+// Round-3 ARCH r3 MEDIUM 1 / CODE r3 MEDIUM 2 fix: the per-tick
+// SQL pass moved into `statsrollup.ObserveRollupLagOnce` so the
+// Step 4.C wired-mux hygiene test can drive the gauge through the
+// same production code path instead of a synthetic Set() call.
+func observeRollupLag(ctx context.Context, readerDB *sql.DB, m *statsmetrics.Metrics, logger zerolog.Logger) {
+	tick := time.NewTicker(15 * time.Second)
+	defer tick.Stop()
+	_ = logger // keep import used; no per-tick log line
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			statsrollup.ObserveRollupLagOnce(ctx, readerDB, m)
+		}
 	}
 }
