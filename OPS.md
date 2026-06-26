@@ -623,9 +623,11 @@ with rate-limit + cache directives per BUILD §2 Step 4.B.
 ### 10.1 Rotating a partner key
 
 ```bash
-# Issue a successor (returns the new raw token EXACTLY ONCE on
-# stdout). If invoking under systemd-run / journalctl, set
-# `--token-out /tmp/partner-rotated.token` (mode 0600) instead.
+# Issue a successor. stdout is EXACTLY ONE raw mpk_* token line
+# (AC-17 contract); the operator-facing metadata (`id=... label=...
+# prefix=... ...`) lands on stderr. If invoking under
+# systemd-run / journalctl, set `--token-out /tmp/partner-rotated.token`
+# (mode 0600) instead and stdout will be empty.
 #
 # `--config` MUST be passed explicitly: a manual `sudo -u
 # macprovider /opt/macprovider/coordinator ...` invocation does
@@ -633,8 +635,17 @@ with rate-limit + cache directives per BUILD §2 Step 4.B.
 # (see macprovider-coordinator.service); without `--config` the
 # CLI looks for the relative path `coordinator.yaml` in the
 # current working directory and fails to resolve the admin DSN.
+#
+# PRODUCTION issuance: pass `--production` AND
+# `--signoff-spec-6-6-2 "..."` after the §6.6.2 sign-off (§10.5)
+# is recorded. The CLI fails closed without the signoff value;
+# the signoff string is persisted into the
+# `stats_partner_key_issued` event for post-hoc audit. Staging
+# issuance (the default) has no preconditions.
 sudo -u macprovider /opt/macprovider/coordinator partner-keys issue \
   --config /opt/macprovider/coordinator.yaml \
+  --production \
+  --signoff-spec-6-6-2 "SPEC-014 sha=<sha> disclosure-live=<YYYY-MM-DD> ack=ops@example.com" \
   --label "ACME inc rotated 2026-09-01" \
   --rotate-from 17
 

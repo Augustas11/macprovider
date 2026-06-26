@@ -245,15 +245,44 @@ func runList(args ...string) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
-// extractRawTokenLine returns the last line of stdout (the
-// printed token) and the entire stdout. AC-17 contract:
-// metadata first, then a single line with the raw token.
+// extractRawTokenLine returns the raw token line printed on
+// stdout. Final adversarial audit (ARCH r2 HIGH 1) rewrote
+// AC-17's stdout contract: stdout is now exactly one raw-token
+// line, no metadata. The metadata (`id=... label=... ...`) moved
+// to stderr so secret-ingestion scripts that capture stdout
+// receive a single 47-char token and nothing else. This helper
+// asserts stdout matches `^mpk_[A-Za-z0-9_-]{43}\n?$` and
+// returns the token; tests that need a relaxed reading (e.g.
+// JOURNAL_STREAM-suppressed paths where stdout is empty by
+// design) should not use this helper.
 func extractRawTokenLine(stdout string) string {
-	lines := strings.Split(strings.TrimRight(stdout, "\n"), "\n")
+	s := strings.TrimRight(stdout, "\n")
+	lines := strings.Split(s, "\n")
 	if len(lines) == 0 {
 		return ""
 	}
 	return lines[len(lines)-1]
+}
+
+// assertStdoutIsTokenOnly enforces the ARCH r2 HIGH 1 fix:
+// stdout from `partner-keys issue` (without --token-out) MUST
+// be exactly one raw-token line. Tests use this in place of
+// `extractRawTokenLine` when they want to assert the strict
+// AC-17 contract rather than tolerating extra lines.
+func assertStdoutIsTokenOnly(t *testing.T, stdout string) {
+	t.Helper()
+	s := strings.TrimRight(stdout, "\n")
+	if !tokenRegex.MatchString(s) {
+		t.Fatalf("stdout is not exactly one mpk_ token (AC-17 contract): %q", stdout)
+	}
+	if strings.Contains(s, "\n") {
+		t.Fatalf("stdout contains multiple lines (AC-17 contract: exactly one token line): %q", stdout)
+	}
+	for _, banned := range []string{"id=", "label=", "prefix=", "created_by=", "rotated_from_id=", "created_at="} {
+		if strings.Contains(stdout, banned) {
+			t.Errorf("stdout contains metadata fragment %q (must be on stderr per AC-17 fix): %q", banned, stdout)
+		}
+	}
 }
 
 // ===========================================================================
@@ -315,12 +344,19 @@ func TestAC17_IssueLockedSPECCommand(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("issue exit=%d stderr=%q", code, stderr)
 	}
+	// Final adversarial audit (ARCH r2 HIGH 1) — stdout MUST be
+	// exactly one raw token line, no metadata. Metadata appears
+	// on stderr instead.
+	assertStdoutIsTokenOnly(t, stdout)
 	raw := extractRawTokenLine(stdout)
-	if !tokenRegex.MatchString(raw) {
-		t.Fatalf("issued token %q does not match %s", raw, tokenRegexRawString)
-	}
 	if len(raw) != 47 {
 		t.Fatalf("issued token %q length %d, want 47", raw, len(raw))
+	}
+	// stderr MUST carry the operator-facing metadata.
+	for _, want := range []string{"id=", "label=X", "prefix=" + raw[:8], "created_by=", "created_at="} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("stderr missing metadata fragment %q: %q", want, stderr)
+		}
 	}
 	// Verify DB row.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -507,6 +543,99 @@ func TestRotationOverlap(t *testing.T) {
 }
 
 // ===========================================================================
+// Final adversarial audit (SECURITY r2 CRITICAL) — production sign-off gate.
+// `coordinator partner-keys issue` MUST refuse production issuance unless
+// the operator has acknowledged the SPEC §6.6.2 launch-sequencing precondition
+// via --signoff-spec-6-6-2. Staging issuance (the default) has no preconditions.
+// ===========================================================================
+func TestProductionRequiresSignoff(t *testing.T) {
+	fx, _ := startCLIPostgres(t)
+
+	t.Run("staging default needs no signoff", func(t *testing.T) {
+		code, _, stderr, _, _ := runIssue(
+			"--admin-dsn", fx.adminDSN(),
+			"--label", "staging-key",
+		)
+		if code != 0 {
+			t.Fatalf("staging issue without --production should succeed; got exit=%d stderr=%q", code, stderr)
+		}
+	})
+
+	t.Run("--production without signoff fails closed", func(t *testing.T) {
+		code, stdout, stderr, _, _ := runIssue(
+			"--admin-dsn", fx.adminDSN(),
+			"--label", "prod-key-no-signoff",
+			"--production",
+		)
+		if code == 0 {
+			t.Fatalf("--production without --signoff-spec-6-6-2 MUST fail closed; got exit=0 stdout=%q", stdout)
+		}
+		if !strings.Contains(stderr, "signoff-spec-6-6-2") {
+			t.Errorf("error must name the missing flag; got %q", stderr)
+		}
+		if !strings.Contains(stderr, "OPS.md") {
+			t.Errorf("error should point operator at the runbook; got %q", stderr)
+		}
+	})
+
+	t.Run("--production with malformed signoff fails", func(t *testing.T) {
+		code, _, stderr, _, _ := runIssue(
+			"--admin-dsn", fx.adminDSN(),
+			"--label", "prod-key-bad-signoff",
+			"--production",
+			"--signoff-spec-6-6-2", "I acknowledge",
+		)
+		if code == 0 {
+			t.Fatalf("--production with malformed signoff MUST fail")
+		}
+		// Either the SHA or the date check should trip.
+		if !strings.Contains(stderr, "SPEC-014") && !strings.Contains(stderr, "YYYY-MM-DD") {
+			t.Errorf("error should explain what's missing; got %q", stderr)
+		}
+	})
+
+	t.Run("--production with well-formed signoff succeeds + event carries it", func(t *testing.T) {
+		code, stdout, stderr, _, _ := runIssue(
+			"--admin-dsn", fx.adminDSN(),
+			"--label", "prod-key-real",
+			"--production",
+			"--signoff-spec-6-6-2", "SPEC-014 sha=abc1234 disclosure-live=2026-09-01 acknowledged by ops@example.com",
+		)
+		if code != 0 {
+			t.Fatalf("--production with well-formed signoff should succeed; got exit=%d stderr=%q", code, stderr)
+		}
+		assertStdoutIsTokenOnly(t, stdout)
+		// Event carries the signoff for post-hoc audit.
+		if !strings.Contains(stderr, `"event":"stats_partner_key_issued"`) {
+			t.Errorf("stats_partner_key_issued event missing: %q", stderr)
+		}
+		if !strings.Contains(stderr, `"production":true`) {
+			t.Errorf("event missing production:true: %q", stderr)
+		}
+		if !strings.Contains(stderr, `"signoff_spec_6_6_2"`) {
+			t.Errorf("event missing signoff_spec_6_6_2 field: %q", stderr)
+		}
+		if !strings.Contains(stderr, "SPEC-014 sha=abc1234") {
+			t.Errorf("event missing the signoff value: %q", stderr)
+		}
+	})
+
+	t.Run("signoff without --production fails loud", func(t *testing.T) {
+		code, _, stderr, _, _ := runIssue(
+			"--admin-dsn", fx.adminDSN(),
+			"--label", "staging-but-signoff",
+			"--signoff-spec-6-6-2", "SPEC-014 sha=abc1234 disclosure-live=2026-09-01",
+		)
+		if code == 0 {
+			t.Fatalf("signoff without --production should fail loud (not silently drop)")
+		}
+		if !strings.Contains(stderr, "without --production") {
+			t.Errorf("error should explain the mismatch; got %q", stderr)
+		}
+	})
+}
+
+// ===========================================================================
 // `revoke --id 99999` (non-existent) — clean error, NOT a panic.
 // ===========================================================================
 func TestRevokeNonexistent(t *testing.T) {
@@ -594,6 +723,16 @@ func TestIssueTokenOutWritesFile(t *testing.T) {
 	// Round-2 CODE M2: same prefix-vs-full-token distinction.
 	if tokenRegex.FindString(stdout) != "" {
 		t.Errorf("raw 47-char token leaked to stdout despite --token-out: %q", stdout)
+	}
+	// Final adversarial audit (ARCH r2 HIGH 1) — with
+	// --token-out, stdout is empty (the operator-facing
+	// "token written to ..." diagnostic moved to stderr per
+	// the AC-17 stdout-is-token-only contract).
+	if strings.TrimSpace(stdout) != "" {
+		t.Errorf("stdout MUST be empty when --token-out is used (AC-17 fix); got %q", stdout)
+	}
+	if !strings.Contains(stderr, "token written to "+tokenPath) {
+		t.Errorf("stderr should carry the operator-facing token-out diagnostic; got %q", stderr)
 	}
 	info, err := os.Stat(tokenPath)
 	if err != nil {

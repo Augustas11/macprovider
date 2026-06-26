@@ -1289,9 +1289,19 @@ its own envelope shape with additional fields). Partners reusing a
 SPEC-006-aware client SHOULD NOT assume schema parity; this is a
 narrower envelope by design.
 
-`304 Not Modified` is exempt: it MUST be returned with an empty body
-and only the headers required by RFC 7232 (`ETag`, `Cache-Control`,
-`Vary`). All other non-2xx responses MUST use the exact shape below.
+`304 Not Modified` is exempt from the JSON envelope: it MUST be
+returned with an empty body and the headers required by RFC 7232
+(`ETag`, `Cache-Control`, `Vary`) PLUS the projection-aware CORS
+headers from §5.7 (`Access-Control-Allow-Origin`,
+`Access-Control-Allow-Credentials` on partner projection,
+`Access-Control-Max-Age` on preflight). v0.1.8 erratum
+(2026-06-26): the Fetch spec requires `Access-Control-Allow-Origin`
+on every cross-origin response including 304; a 304 without ACAO
+silently fails as a CORS error in browsers issuing conditional
+GETs from `console.streamvc.live` / `portal.streamvc.live`. The
+earlier text omitted CORS from the 304 carveout, which would
+break browser-side partner integrations. All other non-2xx
+responses MUST use the exact shape below.
 
 ```json
 {

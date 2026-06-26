@@ -459,7 +459,7 @@ Returns `500 internal` with the §5.9 envelope and `Content-Type: application/js
 
 **Rate limiting per §5.6 (v0.1.8 three-tier model):**
 
-- **Public tier (no Authorization)** — nginx `limit_req_zone` is PRIMARY (configured in Step 4.B), in-process bucket is FALLBACK. Hard 60 req/min **per (IP, endpoint)** tuple; no burst absorption. Per SPEC §5.6, the endpoint dimension is mandatory.
+- **Public tier (no Authorization)** — nginx `limit_req_zone` is PRIMARY (configured in Step 4.B), in-process bucket is FALLBACK. Hard 60 req/min **per (IP, endpoint)** tuple; no LONG-TERM burst absorption (short-term `burst=59 nodelay` bucket is mechanically required at the nginx layer for AC-8's "60 succeed; 61st 429s" contract — see §5.6 v0.1.8 erratum + Step 4.B nginx directive). Per SPEC §5.6, the endpoint dimension is mandatory.
 - **Partner tier (valid Authorization → 200 partner projection)** — in-process bucket keyed on **(partner_keys.id, endpoint)** (NOT raw token, NOT prefix). Hard limit per `partner_keys.rate_limit_rpm` (default 600). v0.1.8 removed the `rate_limit_burst` column; IMPL MUST clamp to `rate_limit_rpm` per-row, no burst.
 - **Auth-failure tier (Authorization present → 401 per §5.4.3 rows 3/5/6/7)** — in-process bucket pre-auth (see middleware stack step 4 above), keyed on **(IP, endpoint)** with trusted-proxy-allowlist client-IP derivation. Floor 300 req/min. Runs BEFORE `sha256+SELECT` so invalid-bearer floods cannot drive unbounded DB lookups. AC-22 verifies.
 - 429 response includes `Retry-After: <seconds>` and §5.9 `rate_limited` envelope.
