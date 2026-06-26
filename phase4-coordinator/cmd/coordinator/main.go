@@ -36,20 +36,12 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// parseRFC3339Unix returns the unix-second value of an RFC 3339
-// timestamp string, or 0 if the input is empty / unparseable.
-// Used to translate cfg.Stats.Rollup.PartialHistorySince
-// (operator-set RFC 3339) into the unix-second boundary the
-// rollup package consumes.
-func parseRFC3339Unix(s string) int64 {
-	if s == "" {
-		return 0
-	}
-	t, err := time.Parse(time.RFC3339, s)
-	if err != nil {
-		return 0
-	}
-	return t.Unix()
+// parseRFC3339Strict parses an RFC 3339 timestamp and returns an
+// explicit error on parse failure. Used in the stats rollup
+// boot path where backfill_mode = "partial" requires the
+// boundary to be valid (round-1 ARCH r1 HIGH 2 fix).
+func parseRFC3339Strict(s string) (time.Time, error) {
+	return time.Parse(time.RFC3339, s)
 }
 
 // version is overridden at build time via
@@ -205,9 +197,44 @@ func main() {
 	// ships the zero default with an OPS.md note.
 	var statsRollup *statsrollup.Runner
 	if statsPools != nil {
+		// Round-1 ARCH r1 HIGH 2 fix: BackfillMode must be the
+		// authoritative selector. "full" forces
+		// PartialHistorySinceUnix = 0 (the boundary the rollup
+		// queries against; 0 = no lower-bound filter); "partial"
+		// requires a non-empty partial_history_since and fails
+		// startup if it doesn't parse.
+		mode := cfg.Stats.Rollup.BackfillMode
+		if mode == "" {
+			mode = "partial"
+		}
+		var partialUnix int64
+		switch mode {
+		case "full":
+			partialUnix = 0
+		case "partial":
+			if cfg.Stats.Rollup.PartialHistorySince == "" {
+				// Allow empty for dev/test: partial mode with
+				// no boundary behaves identically to full at
+				// the OLTP-scan layer. The §9.7 Step 3
+				// `partial_history_since` JSON field is only
+				// emitted when a boundary is set.
+				partialUnix = 0
+			} else {
+				parsed, perr := parseRFC3339Strict(cfg.Stats.Rollup.PartialHistorySince)
+				if perr != nil {
+					fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.partial_history_since must parse as RFC 3339 when backfill_mode = 'partial' (got %q): %v\n", cfg.Stats.Rollup.PartialHistorySince, perr)
+					os.Exit(1)
+				}
+				partialUnix = parsed.Unix()
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.backfill_mode must be 'partial' or 'full' (got %q)\n", mode)
+			os.Exit(1)
+		}
+
 		rollupCfg := statsrollup.Config{
-			BackfillMode:            cfg.Stats.Rollup.BackfillMode,
-			PartialHistorySinceUnix: parseRFC3339Unix(cfg.Stats.Rollup.PartialHistorySince),
+			BackfillMode:            mode,
+			PartialHistorySinceUnix: partialUnix,
 			LateEventsRetentionDays: cfg.Stats.Rollup.LateEventsRetentionDays,
 			UsdPerMillionCredits:    cfg.Stats.Rollup.UsdPerMillionCredits,
 			DriftThresholdRatio:     cfg.Stats.Rollup.DriftThresholdRatio,
@@ -221,7 +248,7 @@ func main() {
 			os.Exit(1)
 		}
 		statsRollup.Start(shutdownCtx)
-		logger.Info().Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
+		logger.Info().Str("backfill_mode", mode).Int64("partial_history_since_unix", partialUnix).Msg("SPEC-017 stats rollup started (overview/timeseries/leaderboards/rewards_populated/nightly_rebuild)")
 	}
 	defer func() {
 		if statsRollup != nil {

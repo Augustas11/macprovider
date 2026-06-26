@@ -14,25 +14,40 @@ import (
 
 // runLeaderboardTick recomputes a single `stats_leaderboard_*`
 // window from scratch. The window argument is one of
-// {"24h", "7d", "30d", "all"} — used both to pick the target
-// table and the bucket-threshold set (§6.2).
+// {"24h", "7d", "30d", "all"}.
 //
-// Per BUILD §F.4 + ARCH r7 H2, the rollup OWNS the
-// `provider_visibility` left-join (default tuple `mode='bucketed'
-// AND blocked=FALSE`) AND the `earnings_bucket` computation per
-// §6.2 bracket semantics. The handler in Step 3 only reads what
-// the rollup wrote; bucket/projection logic does NOT live in the
-// handler path.
+// Round-1 fixes absorbed:
 //
-// Per BUILD §F.3 + the Step 1 trust-source decision, every
-// leaderboard row's provider_id traces back to a JOIN on the
-// authenticated SPEC-002 v1.4 §7 `provider_tokens` table.
+//   - CRITICAL: rewards aggregation now JOINs `provider_tokens`
+//     so rewards-only providers absent from the authenticated
+//     trust source cannot enter the leaderboard storage
+//     (SECURITY r1 CRIT-1 + ARCH r1 CRIT-1).
+//   - CRITICAL: missing rewards default → `big.NewRat(0,1)` —
+//     no nil-pointer panic for work-only providers (CODE r1
+//     CRIT-1).
+//   - HIGH: aggregate queries now apply `[start, end)` bounds
+//     with `now` as the exclusive upper bound; future-dated
+//     rows cannot leak in (CODE r1 HIGH 1).
+//   - HIGH: provider_visibility left-join applied at storage
+//     time — the rollup persists the EFFECTIVE
+//     `provider_visibility` tuple by skipping the provider's
+//     row entirely from leaderboard storage when
+//     `blocked_from_partner_projection = TRUE` (the v0.1
+//     column stub is now load-bearing for rollup behavior;
+//     v0.1 ships zero blocked providers per §6.1 default but
+//     the code path is correct for v0.2 when SPEC-014 v0.9
+//     starts writing the column). The COALESCE'd default
+//     `mode='bucketed' AND blocked=FALSE` continues to surface
+//     all no-row providers (ARCH r1 HIGH 3 + CODE r1 MEDIUM 1).
+//   - HIGH: single tick-time `now` value used for every row
+//     and the health update — Step 3's handler/ETag/staleness
+//     derivation will see one consistent generated_at per
+//     window (CODE r1 HIGH 3).
 //
 // Per BUILD §C.1, the leaderboard rebuild MAY use the Step 1
 // non-Shape-C path (per-window UPSERT each tick). The Shape C
-// single-tx DELETE+INSERT is required ONLY for the nightly full
-// rebuild of `stats_leaderboard_30d` and `stats_leaderboard_all`
-// (see rebuild.go).
+// single-tx DELETE+INSERT atomicity across BOTH 30d AND all
+// is required for the nightly full rebuild — see rebuild.go.
 func runLeaderboardTick(ctx context.Context, db *sql.DB, cfg Config, window string) error {
 	now := time.Now().UTC()
 	rows, err := computeLeaderboardRows(ctx, db, cfg, window, now)
@@ -60,7 +75,7 @@ func runLeaderboardTick(ctx context.Context, db *sql.DB, cfg Config, window stri
 		return fmt.Errorf("leaderboard %s delete: %w", window, err)
 	}
 	for _, r := range rows {
-		if err := insertLeaderboardRow(ctx, tx, table, r); err != nil {
+		if err := insertLeaderboardRow(ctx, tx, table, r, now); err != nil {
 			return fmt.Errorf("leaderboard %s insert %s: %w", window, r.ProviderID, err)
 		}
 	}
@@ -72,6 +87,20 @@ func runLeaderboardTick(ctx context.Context, db *sql.DB, cfg Config, window stri
 		return fmt.Errorf("leaderboard %s commit: %w", window, err)
 	}
 	committed = true
+
+	// 30d / all also detect late events for the nightly rebuild
+	// to reconcile. This runs AFTER the tick commits so a
+	// retention failure doesn't roll back the tick.
+	if window == "30d" || window == "all" {
+		if err := detectLateEvents(ctx, db, cfg, window, now); err != nil {
+			// Non-fatal: late-event detection failure is logged
+			// upstream via stats_components_health; the next
+			// nightly rebuild will reconcile from OLTP truth
+			// regardless. We return the error so the caller
+			// surfaces it.
+			return fmt.Errorf("leaderboard %s late events: %w", window, err)
+		}
+	}
 	return nil
 }
 
@@ -94,25 +123,30 @@ type leaderboardRow struct {
 	RankJobs     int
 }
 
-// computeLeaderboardRows runs the OLTP source query for one
-// window, joins on provider_tokens + provider_visibility, runs
-// the work+rewards $ aggregation, computes bucket, and sorts
-// for rank computation.
+// computeLeaderboardRows aggregates the OLTP source for one
+// window with `now` as the exclusive upper bound (`[start, end)`).
+// Both work and rewards aggregates JOIN `provider_tokens` so the
+// only `provider_id` values that can enter `stats_leaderboard_*`
+// storage are SPEC-002 v1.4 §7 authenticated.
+//
+// The function also applies the §6.1 `provider_visibility`
+// left-join semantics at storage time: providers with
+// `blocked_from_partner_projection = TRUE` are EXCLUDED from
+// the leaderboard storage entirely (v0.1 has no such providers
+// per the SPEC default; the column stub becomes load-bearing
+// when SPEC-014 v0.9 starts writing it). The `mode` column is
+// read but not persisted — Step 3's handler reads it directly
+// from `provider_visibility` for the public/partner projection
+// split (with default tuple bucketed via COALESCE).
 func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window string, now time.Time) ([]leaderboardRow, error) {
 	since := windowStart(window, now, cfg.PartialHistorySinceUnix)
+	endUnix := now.Unix()
 
-	// Two-step approach:
-	// 1. Aggregate ledger_request_credits per provider for the
-	//    window (joined on provider_tokens for authenticated id).
-	// 2. Sum provider_rewards_ledger per provider for the same
-	//    window.
-	// Then merge in-process. This avoids a Postgres OUTER JOIN
-	// over two heterogeneous aggregations.
-	work, err := aggregateWorkPerProvider(ctx, db, since)
+	work, err := aggregateWorkPerProvider(ctx, db, since, endUnix)
 	if err != nil {
 		return nil, fmt.Errorf("work aggregate: %w", err)
 	}
-	rewards, err := aggregateRewardsPerProvider(ctx, db, since)
+	rewards, err := aggregateRewardsPerProvider(ctx, db, since, endUnix)
 	if err != nil {
 		return nil, fmt.Errorf("rewards aggregate: %w", err)
 	}
@@ -129,18 +163,35 @@ func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window 
 		providerIDs[pid] = struct{}{}
 	}
 
+	zeroRat := big.NewRat(0, 1)
 	rows := make([]leaderboardRow, 0, len(providerIDs))
 	for pid := range providerIDs {
-		w := work[pid]
-		r := rewards[pid]
-		_ = visibility[pid] // visibility tuple is read by the handler; rollup ensures the left-join row exists in the leaderboard regardless of mode/blocked
+		// HIGH 3 fix: provider_visibility left-join default
+		// tuple — absent row defaults to `mode='bucketed' AND
+		// blocked=FALSE`. v0.1 storage filter: when blocked,
+		// EXCLUDE the row from the leaderboard so neither
+		// the public nor partner projection in Step 3 sees it.
+		v, present := visibility[pid]
+		if present && v.Blocked {
+			continue
+		}
+
+		w, hasWork := work[pid]
 		workUSD := usdFromCredits(w.credits, cfg.UsdPerMillionCredits)
-		rewardsUSD := r.amount
+
+		r, hasRewards := rewards[pid]
+		rewardsUSD := zeroRat
+		if hasRewards && r.amount != nil {
+			rewardsUSD = r.amount
+		}
+
 		totalUSD := new(big.Rat).Add(workUSD, rewardsUSD)
 		bucket, err := Bucket(window, totalUSD)
 		if err != nil {
 			return nil, fmt.Errorf("bucket %s: %w", pid, err)
 		}
+
+		_ = hasWork // explicit: w defaults to zero workAgg if no work rows; rewardsUSD captures rewards-only providers
 		rows = append(rows, leaderboardRow{
 			ProviderID:         pid,
 			Pseudonym:          pseudonymize(pid),
@@ -171,7 +222,12 @@ type rewardsAgg struct {
 	amount *big.Rat
 }
 
-func aggregateWorkPerProvider(ctx context.Context, db *sql.DB, sinceUnix int64) (map[string]workAgg, error) {
+// aggregateWorkPerProvider sums work-side counters per provider
+// within the half-open window `[since, end)`. JOIN on
+// `provider_tokens` is the Step 1 trust-source enforcement —
+// any ledger row for a provider not in `provider_tokens` is
+// silently dropped.
+func aggregateWorkPerProvider(ctx context.Context, db *sql.DB, sinceUnix, endUnix int64) (map[string]workAgg, error) {
 	const q = `
         SELECT pt.provider_id,
                COALESCE(SUM(lrc.provider_credits), 0)::BIGINT AS credits,
@@ -182,11 +238,12 @@ func aggregateWorkPerProvider(ctx context.Context, db *sql.DB, sinceUnix int64) 
           FROM ledger_request_credits lrc
           JOIN provider_tokens pt ON pt.provider_id = lrc.provider_id
          WHERE ($1 = 0 OR EXTRACT(EPOCH FROM lrc.ts_utc) >= $1)
+           AND EXTRACT(EPOCH FROM lrc.ts_utc) < $2
            AND lrc.fault_flag = 'none'
            AND lrc.quarantined = FALSE
          GROUP BY pt.provider_id
     `
-	rows, err := db.QueryContext(ctx, q, sinceUnix)
+	rows, err := db.QueryContext(ctx, q, sinceUnix, endUnix)
 	if err != nil {
 		return nil, err
 	}
@@ -212,14 +269,22 @@ func aggregateWorkPerProvider(ctx context.Context, db *sql.DB, sinceUnix int64) 
 	return out, rows.Err()
 }
 
-func aggregateRewardsPerProvider(ctx context.Context, db *sql.DB, sinceUnix int64) (map[string]rewardsAgg, error) {
+// aggregateRewardsPerProvider sums `provider_rewards_ledger`
+// per provider within `[since, end)`. JOIN on `provider_tokens`
+// enforces the Step 1 trust-source decision — a rewards-only
+// provider absent from `provider_tokens` CANNOT enter the
+// leaderboard. SECURITY r1 CRIT-1 + ARCH r1 CRIT-1.
+func aggregateRewardsPerProvider(ctx context.Context, db *sql.DB, sinceUnix, endUnix int64) (map[string]rewardsAgg, error) {
 	const q = `
-        SELECT provider_id, COALESCE(SUM(amount_usd), 0) AS amount
-          FROM provider_rewards_ledger
-         WHERE ($1 = 0 OR unix_ts >= $1)
-         GROUP BY provider_id
+        SELECT prl.provider_id,
+               COALESCE(SUM(prl.amount_usd), 0) AS amount
+          FROM provider_rewards_ledger prl
+          JOIN provider_tokens pt ON pt.provider_id = prl.provider_id
+         WHERE ($1 = 0 OR prl.unix_ts >= $1)
+           AND prl.unix_ts < $2
+         GROUP BY prl.provider_id
     `
-	rows, err := db.QueryContext(ctx, q, sinceUnix)
+	rows, err := db.QueryContext(ctx, q, sinceUnix, endUnix)
 	if err != nil {
 		return nil, err
 	}
@@ -280,15 +345,11 @@ func windowStart(window string, now time.Time, partialHistorySinceUnix int64) in
 	case "30d":
 		return now.Add(-30 * 24 * time.Hour).Unix()
 	case "all":
-		// `all` is cumulative-since-rollup-start.
 		return partialHistorySinceUnix
 	}
 	return 0
 }
 
-// leaderboardTableForWindow returns the stats_leaderboard_*
-// table name for a window string. Returns "" for an unknown
-// window (caller checks).
 func leaderboardTableForWindow(window string) string {
 	switch window {
 	case "24h":
@@ -303,8 +364,6 @@ func leaderboardTableForWindow(window string) string {
 	return ""
 }
 
-// componentForWindow maps a window string to its
-// stats_components_health row name.
 func componentForWindow(window string) component {
 	switch window {
 	case "24h":
@@ -328,10 +387,6 @@ func pseudonymize(providerID string) string {
 	return "node-" + hex.EncodeToString(sum[:4])
 }
 
-// assignRanks fills RankEarnings / RankTokens / RankJobs after
-// sorting rows. Ties are broken by provider_id text so the rank
-// is deterministic across ticks (no pseudonym churn from rank
-// thrash).
 func assignRanks(rows []leaderboardRow) {
 	rankBy(rows, func(a, b leaderboardRow) bool {
 		c := a.EarningsTotalUSD.Cmp(b.EarningsTotalUSD)
@@ -367,12 +422,12 @@ func rankBy(rows []leaderboardRow, less func(a, b leaderboardRow) bool, assign f
 	}
 }
 
-// insertLeaderboardRow writes a single row using NUMERIC(18,2)
-// formatting for $ columns. The rat.FloatString(2) discipline
-// rounds to 2 decimals (toward zero); Postgres NUMERIC will
-// store the exact value.
-func insertLeaderboardRow(ctx context.Context, db sqlExecer, table string, r leaderboardRow) error {
-	now := time.Now().UTC()
+// insertLeaderboardRow writes a single row using the tick's
+// shared `now` for `generated_at`. CODE r1 HIGH 3 fix: every
+// row in a single tick has the SAME generated_at, equal to the
+// stats_components_health row for the window. Step 3's
+// handler/ETag/staleness derivation can rely on that.
+func insertLeaderboardRow(ctx context.Context, db sqlExecer, table string, r leaderboardRow, generatedAt time.Time) error {
 	q := fmt.Sprintf(`
         INSERT INTO %s (
             provider_id, pseudonym, generated_at,
@@ -389,7 +444,7 @@ func insertLeaderboardRow(ctx context.Context, db sqlExecer, table string, r lea
         )
     `, table)
 	_, err := db.ExecContext(ctx, q,
-		r.ProviderID, r.Pseudonym, now,
+		r.ProviderID, r.Pseudonym, generatedAt,
 		r.RankEarnings, r.RankTokens, r.RankJobs,
 		r.EarningsTotalUSD.FloatString(2),
 		r.EarningsWorkUSD.FloatString(2),

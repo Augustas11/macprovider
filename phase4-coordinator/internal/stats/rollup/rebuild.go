@@ -10,61 +10,50 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// runNightlyRebuild performs the §9.4 full rebuild of
-// `stats_leaderboard_30d` AND `stats_leaderboard_all`. Per
-// SPEC §9.4 v0.1.8, the rebuild uses Shape C (DELETE+INSERT in
-// one PostgreSQL transaction). Concurrent `stats_reader`
-// SELECTs see either the pre-DELETE snapshot or the post-INSERT
-// snapshot — never a partial mix — by virtue of PostgreSQL MVCC.
+// runNightlyRebuild performs the §9.4 v0.1.8 Shape C full
+// rebuild of `stats_leaderboard_30d` AND `stats_leaderboard_all`
+// in a SINGLE PostgreSQL transaction (round-1 ARCH r1 CRIT-2
+// fix). Per SPEC §9.4, the rebuild MUST execute atomically so
+// no observer sees a half-rebuilt state — that invariant
+// extends across BOTH tables: a failure mid-rebuild MUST leave
+// BOTH at their pre-rebuild snapshots.
 //
-// Drift detection runs DURING the rebuild: the rollup compares
-// each rebuilt provider's (earnings, tokens, jobs) against the
-// pre-rebuild incremental snapshot. >cfg.DriftThresholdRatio
-// (default 0.005 = 0.5%) on any axis emits a structured
-// `stats_rollup_drift_detected` log event.
+// Drift detection runs PER WINDOW DURING the rebuild: each
+// rebuilt provider's (earnings, tokens, jobs) is compared
+// against the pre-rebuild incremental snapshot.
+// >cfg.DriftThresholdRatio (default 0.005 = 0.5%) on any axis
+// emits a structured `stats_rollup_drift_detected` log event.
 //
-// The 90-day retention DELETE on `stats_late_events` runs AFTER
-// the rebuild commits (BUILD §C.3 + §9.3): it is a separate,
+// The 90-day retention DELETE on `stats_late_events` runs
+// AFTER the rebuild commits (BUILD §C.3 + §9.3): separate
 // idempotent step that can be retried independently of the
 // rebuild atomicity.
 func runNightlyRebuild(ctx context.Context, db *sql.DB, cfg Config, logger zerolog.Logger) error {
-	for _, window := range []string{"30d", "all"} {
-		if err := rebuildWindow(ctx, db, cfg, window, logger); err != nil {
-			return fmt.Errorf("nightly rebuild %s: %w", window, err)
-		}
-	}
-	if err := runLateEventsRetention(ctx, db, cfg); err != nil {
-		// Retention failure does NOT roll back the rebuild
-		// (BUILD §C.3 pin: separate idempotent step). Log and
-		// continue.
-		logger.Warn().Err(err).Msg("stats_late_events retention DELETE failed; will retry next nightly tick")
-	}
-	return nil
-}
-
-// rebuildWindow runs the §9.4 Shape C rebuild for one window
-// AND drift-checks the rebuild against the pre-rebuild
-// incremental snapshot.
-func rebuildWindow(ctx context.Context, db *sql.DB, cfg Config, window string, logger zerolog.Logger) error {
 	now := time.Now().UTC()
-	table := leaderboardTableForWindow(window)
-	if table == "" {
-		return fmt.Errorf("rollup: rebuild unknown window %q", window)
-	}
+	windows := []string{"30d", "all"}
 
-	pre, err := snapshotLeaderboard(ctx, db, table)
-	if err != nil {
-		return fmt.Errorf("snapshot pre: %w", err)
-	}
+	pre := make(map[string]map[string]preRebuildRow, len(windows))
+	rebuilt := make(map[string][]leaderboardRow, len(windows))
 
-	rebuilt, err := computeLeaderboardRows(ctx, db, cfg, window, now)
-	if err != nil {
-		return fmt.Errorf("compute: %w", err)
+	// Compute all rebuilt row sets BEFORE opening the
+	// transaction (heavy work outside the tx so the lock window
+	// is minimal).
+	for _, w := range windows {
+		preSnap, err := snapshotLeaderboard(ctx, db, leaderboardTableForWindow(w))
+		if err != nil {
+			return fmt.Errorf("nightly rebuild %s snapshot: %w", w, err)
+		}
+		pre[w] = preSnap
+		rows, err := computeLeaderboardRows(ctx, db, cfg, w, now)
+		if err != nil {
+			return fmt.Errorf("nightly rebuild %s compute: %w", w, err)
+		}
+		rebuilt[w] = rows
 	}
 
 	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
-		return fmt.Errorf("begin: %w", err)
+		return fmt.Errorf("nightly rebuild begin: %w", err)
 	}
 	committed := false
 	defer func() {
@@ -73,24 +62,41 @@ func rebuildWindow(ctx context.Context, db *sql.DB, cfg Config, window string, l
 		}
 	}()
 
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s`, table)); err != nil {
-		return fmt.Errorf("delete: %w", err)
-	}
-	for _, r := range rebuilt {
-		if err := insertLeaderboardRow(ctx, tx, table, r); err != nil {
-			return fmt.Errorf("insert %s: %w", r.ProviderID, err)
+	for _, w := range windows {
+		table := leaderboardTableForWindow(w)
+		if table == "" {
+			return fmt.Errorf("rollup: nightly rebuild unknown window %q", w)
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s`, table)); err != nil {
+			return fmt.Errorf("nightly rebuild %s delete: %w", w, err)
+		}
+		for _, r := range rebuilt[w] {
+			if err := insertLeaderboardRow(ctx, tx, table, r, now); err != nil {
+				return fmt.Errorf("nightly rebuild %s insert %s: %w", w, r.ProviderID, err)
+			}
+		}
+		if err := healthOK(ctx, tx, componentForWindow(w), now); err != nil {
+			return fmt.Errorf("nightly rebuild %s health: %w", w, err)
 		}
 	}
 
-	if err := healthOK(ctx, tx, componentForWindow(window), now); err != nil {
-		return err
-	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
+		return fmt.Errorf("nightly rebuild commit: %w", err)
 	}
 	committed = true
 
-	emitDriftEvents(window, pre, rebuilt, cfg.DriftThresholdRatio, logger)
+	// Drift detection (post-commit log emission only — the
+	// rebuild value already won by virtue of overwriting the
+	// pre-rebuild rows in the same transaction).
+	for _, w := range windows {
+		emitDriftEvents(w, pre[w], rebuilt[w], cfg.DriftThresholdRatio, logger)
+	}
+
+	// §9.3 90-day retention DELETE — separate idempotent step;
+	// failure does NOT roll back the rebuild.
+	if err := runLateEventsRetention(ctx, db, cfg); err != nil {
+		logger.Warn().Err(err).Msg("stats_late_events retention DELETE failed; will retry next nightly tick")
+	}
 	return nil
 }
 
@@ -130,10 +136,9 @@ type preRebuildRow struct {
 }
 
 // emitDriftEvents compares the pre-rebuild snapshot against the
-// rebuilt rows axis-by-axis. Per SPEC §9.4 v0.1, >0.5% drift on
-// any axis fires a `stats_rollup_drift_detected` structured log
-// event. The rebuild value already wins (it overwrote the
-// pre-rebuild rows in the same transaction); this loop only
+// rebuilt rows axis-by-axis. >threshold drift on any axis fires
+// a `stats_rollup_drift_detected` event. The rebuild value has
+// already won (committed in the same transaction); this log
 // surfaces the divergence to the operator alerting pipeline.
 func emitDriftEvents(window string, pre map[string]preRebuildRow, rebuilt []leaderboardRow, threshold float64, logger zerolog.Logger) {
 	if threshold <= 0 {
@@ -142,7 +147,6 @@ func emitDriftEvents(window string, pre map[string]preRebuildRow, rebuilt []lead
 	for _, r := range rebuilt {
 		prev, ok := pre[r.ProviderID]
 		if !ok {
-			// New provider since last rebuild — no drift base.
 			continue
 		}
 		emitDriftIfExceeds(window, "earnings", r.ProviderID, ratToFloat(prev.Earnings), ratToFloat(r.EarningsTotalUSD), threshold, logger)
@@ -189,9 +193,7 @@ func ratToFloat(r *big.Rat) float64 {
 
 // runLateEventsRetention deletes stats_late_events rows older
 // than the operator-configured retention window. Runs AFTER the
-// nightly rebuild transaction commits (separate idempotent step
-// per BUILD §C.3 + §9.3). A retention failure does NOT roll back
-// the rebuild.
+// nightly rebuild transaction commits per §9.3.
 func runLateEventsRetention(ctx context.Context, db *sql.DB, cfg Config) error {
 	q := `DELETE FROM stats_late_events WHERE recorded_at < now() - ($1::text || ' days')::interval`
 	_, err := db.ExecContext(ctx, q, fmt.Sprintf("%d", cfg.LateEventsRetentionDays))

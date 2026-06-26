@@ -585,6 +585,266 @@ func TestShapeCRebuild_MVCCNoEmptyState(t *testing.T) {
 }
 
 // ==========================================================================
+// Work-only provider with EMPTY rewards ledger — Step 2 round-1
+// CODE r1 CRITICAL 1 regression test. Earlier draft panicked on
+// nil reward amount; now defaults to zero.
+// ==========================================================================
+func TestRollupWorkOnlyEmptyRewards(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+
+	seedProviderTokens(t, adminDB, "p_work_only")
+	now := time.Now().UTC()
+	seedLedgerRow(t, adminDB, "p_work_only", now.Add(-1*time.Hour), 100, 100, 10_000_000)
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	// All four leaderboard windows MUST have the row (no panic).
+	for _, w := range []string{"24h", "7d", "30d", "all"} {
+		var n int
+		table := "stats_leaderboard_" + w
+		if err := adminDB.QueryRowContext(context.Background(),
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE provider_id = 'p_work_only'`, table),
+		).Scan(&n); err != nil {
+			t.Fatalf("scan %s: %v", w, err)
+		}
+		if n != 1 {
+			t.Errorf("%s missing p_work_only (empty rewards must NOT panic): count=%d", w, n)
+		}
+	}
+
+	// Health row freshness verifies no panic occurred.
+	var genAt time.Time
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT generated_at FROM stats_components_health WHERE component = 'leaderboard_24h'`,
+	).Scan(&genAt); err != nil {
+		t.Fatalf("scan health: %v", err)
+	}
+	if time.Since(genAt) > 5*time.Second {
+		t.Errorf("leaderboard_24h health not fresh: %v", genAt)
+	}
+}
+
+// ==========================================================================
+// Rewards-only provider absent from provider_tokens MUST NOT
+// enter the leaderboard — Step 2 round-1 CRITICAL trust-source
+// fix verification.
+// ==========================================================================
+func TestRollupRewardsOnlyUnauthenticatedRejected(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+
+	// p_spoof is in provider_rewards_ledger but NOT in provider_tokens.
+	// The pre-fix code allowed this to enter the leaderboard via the
+	// rewards aggregation path.
+	if _, err := adminDB.ExecContext(context.Background(),
+		`INSERT INTO provider_rewards_ledger (provider_id, unix_ts, amount_usd) VALUES ('p_spoof', $1, 1000.00)`,
+		time.Now().UTC().Add(-12*time.Hour).Unix(),
+	); err != nil {
+		t.Fatalf("seed spoofed reward: %v", err)
+	}
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	var n int
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_leaderboard_24h WHERE provider_id = 'p_spoof'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("p_spoof entered leaderboard via rewards-only path; provider_tokens trust-source was bypassed (count=%d)", n)
+	}
+}
+
+// ==========================================================================
+// generated_at consistency: all rows in a leaderboard tick share
+// the same generated_at, equal to the stats_components_health row.
+// Step 2 round-1 CODE r1 HIGH 3 fix.
+// ==========================================================================
+func TestRollupGeneratedAtConsistency(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+
+	now := time.Now().UTC()
+	seedProviderTokens(t, adminDB, "p_a", "p_b", "p_c")
+	for _, pid := range []string{"p_a", "p_b", "p_c"} {
+		seedLedgerRow(t, adminDB, pid, now.Add(-1*time.Hour), 10, 10, 1_000_000)
+	}
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	// Count distinct generated_at values in stats_leaderboard_24h —
+	// must be exactly 1 (one tick).
+	var distinct int
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(DISTINCT generated_at) FROM stats_leaderboard_24h`,
+	).Scan(&distinct); err != nil {
+		t.Fatalf("scan distinct: %v", err)
+	}
+	if distinct != 1 {
+		t.Errorf("stats_leaderboard_24h has %d distinct generated_at values; want 1 (one tick)", distinct)
+	}
+
+	// Compare to stats_components_health row.
+	var leaderboardGen, healthGen time.Time
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT MAX(generated_at) FROM stats_leaderboard_24h`,
+	).Scan(&leaderboardGen); err != nil {
+		t.Fatalf("scan leaderboard: %v", err)
+	}
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT generated_at FROM stats_components_health WHERE component = 'leaderboard_24h'`,
+	).Scan(&healthGen); err != nil {
+		t.Fatalf("scan health: %v", err)
+	}
+	if !leaderboardGen.Equal(healthGen) {
+		t.Errorf("leaderboard_24h generated_at (%v) != health generated_at (%v); same-tick invariant violated", leaderboardGen, healthGen)
+	}
+}
+
+// ==========================================================================
+// blocked_from_partner_projection = TRUE excludes provider from
+// leaderboard storage entirely (v0.1.7 column stub becomes
+// load-bearing here). Step 2 round-1 ARCH r1 HIGH 3 fix.
+// ==========================================================================
+func TestRollupBlockedProviderExcluded(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+
+	seedProviderTokens(t, adminDB, "p_blocked")
+	now := time.Now().UTC()
+	seedLedgerRow(t, adminDB, "p_blocked", now.Add(-1*time.Hour), 100, 100, 1_000_000)
+
+	// Mark as blocked.
+	if _, err := adminDB.ExecContext(context.Background(),
+		`INSERT INTO provider_visibility (provider_id, mode, blocked_from_partner_projection)
+         VALUES ('p_blocked', 'bucketed', TRUE)`,
+	); err != nil {
+		t.Fatalf("seed blocked: %v", err)
+	}
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	var n int
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_leaderboard_24h WHERE provider_id = 'p_blocked'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("p_blocked appeared in leaderboard despite blocked_from_partner_projection=TRUE: count=%d", n)
+	}
+}
+
+// ==========================================================================
+// Late-event detection: T-30h folds into 30d (inside lookback);
+// T-60h lands in stats_late_events (outside lookback). Step 2
+// round-1 ARCH r1 HIGH 1 + CODE r1 CRIT-2 fix.
+// ==========================================================================
+func TestRollupLateEventDetection(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+
+	now := time.Now().UTC()
+	seedProviderTokens(t, adminDB, "p_recent", "p_late")
+	// T-30h (inside 48h lookback) — folds into 30d snapshot.
+	seedLedgerRow(t, adminDB, "p_recent", now.Add(-30*time.Hour), 10, 10, 1_000_000)
+	// T-60h (outside 48h lookback) — lands in stats_late_events.
+	seedLedgerRow(t, adminDB, "p_late", now.Add(-60*time.Hour), 20, 20, 2_000_000)
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(500 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	// p_recent in 30d snapshot.
+	var n int
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_leaderboard_30d WHERE provider_id = 'p_recent'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("scan 30d recent: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("p_recent (T-30h, inside lookback) missing from 30d snapshot: count=%d", n)
+	}
+
+	// p_late in stats_late_events.
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_late_events WHERE provider_id = 'p_late'`,
+	).Scan(&n); err != nil {
+		t.Fatalf("scan late events: %v", err)
+	}
+	if n < 1 {
+		t.Errorf("p_late (T-60h, outside lookback) missing from stats_late_events: count=%d", n)
+	}
+
+	// Re-run the rollup: late events are idempotent — no duplicate
+	// row for p_late.
+	runner2, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New 2: %v", err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	runner2.Start(ctx2)
+	time.Sleep(500 * time.Millisecond)
+	cancel2()
+	runner2.Wait()
+
+	var n2 int
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM stats_late_events WHERE provider_id = 'p_late'`,
+	).Scan(&n2); err != nil {
+		t.Fatalf("scan late events 2: %v", err)
+	}
+	if n2 != n {
+		t.Errorf("late events not idempotent: first run=%d second run=%d", n, n2)
+	}
+}
+
+// ==========================================================================
 // Provider not in provider_tokens is INVISIBLE to the rollup
 // (Step 1 trust-source decision; BUILD §F.3).
 // ==========================================================================

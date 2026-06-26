@@ -125,23 +125,30 @@ func RunLateEventsRetention(ctx context.Context, db *sql.DB, cfg Config) error {
 	return runLateEventsRetention(ctx, db, cfg)
 }
 
-// spawnTick is the shared scaffold for the per-table jobs. It
-// owns the recover middleware, the panic→health-fail bookkeeping,
-// AND the time.Ticker stop logic tied to the context.
+// spawnTick is the shared scaffold for the per-table jobs.
+//
+// Round-1 ARCH r1 HIGH 4 + CODE r1 HIGH 2 + SECURITY r1 MED-1
+// fix: panic recovery now runs PER TICK, not per goroutine.
+// A tick that panics records the health failure (with a
+// REDACTED payload — round-1 SECURITY r1 MED-2 fix) and the
+// goroutine continues to the next ticker fire, restarting that
+// component. The whole-goroutine recover stays only as a
+// final defence-in-depth backstop in case the per-tick
+// recovery itself panics (extremely unlikely).
 func (r *Runner) spawnTick(ctx context.Context, name string, interval time.Duration, c component, fn func(context.Context) error) {
 	r.wg.Add(1)
 	go func() {
 		defer r.wg.Done()
 		defer func() {
+			// Backstop: if the per-tick recover (inside runOne)
+			// itself panics (would be a bug in our recover
+			// path), we still don't crash the coordinator.
 			if rec := recover(); rec != nil {
 				r.logger.Error().
-					Str("event", "stats_rollup_panic").
+					Str("event", "stats_rollup_panic_backstop").
 					Str("job", name).
-					Interface("recovered", rec).
-					Msg("rollup tick panic recovered")
-				if c != "" {
-					_ = healthFail(context.Background(), r.db, c, time.Now().UTC(), fmt.Sprintf("panic: %v", rec))
-				}
+					Str("recovered_class", classifyPanic(rec)).
+					Msg("rollup tick goroutine-level panic backstop fired; job will not restart until coordinator reboot")
 			}
 		}()
 
@@ -163,7 +170,26 @@ func (r *Runner) spawnTick(ctx context.Context, name string, interval time.Durat
 	}()
 }
 
+// runOne wraps a single tick with per-tick panic recovery so a
+// panicking tick records a health failure AND returns control
+// to the ticker loop. Panic payloads are CLASSIFIED (type name +
+// short hint) rather than serialized raw, so downstream Step
+// 3/4 log/db propagation cannot persist arbitrary strings —
+// round-1 SECURITY r1 MED-2 fix.
 func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(context.Context) error) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			class := classifyPanic(rec)
+			r.logger.Error().
+				Str("event", "stats_rollup_panic").
+				Str("job", name).
+				Str("recovered_class", class).
+				Msg("rollup tick panic recovered; job will continue at next interval")
+			if c != "" {
+				_ = healthFail(context.Background(), r.db, c, time.Now().UTC(), "panic: "+class)
+			}
+		}
+	}()
 	if err := fn(ctx); err != nil {
 		r.logger.Warn().
 			Err(err).
@@ -174,6 +200,25 @@ func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(c
 			_ = healthFail(context.Background(), r.db, c, time.Now().UTC(), err.Error())
 		}
 	}
+}
+
+// classifyPanic returns a bounded redacted classification of a
+// panic value. Type name + at most 64 characters of the panic's
+// short hint. Round-1 SECURITY r1 MED-2: avoid persisting
+// arbitrary strings into structured logs / stats_components_health
+// .last_error_message.
+func classifyPanic(rec any) string {
+	const maxHint = 64
+	hint := fmt.Sprintf("%T", rec)
+	// Append a short summary for common error-like types; truncate.
+	if err, ok := rec.(error); ok {
+		s := err.Error()
+		if len(s) > maxHint {
+			s = s[:maxHint]
+		}
+		hint += ": " + s
+	}
+	return hint
 }
 
 // spawnNightlyRebuild fires the §9.4 rebuild at the configured
@@ -189,8 +234,8 @@ func (r *Runner) spawnNightlyRebuild(ctx context.Context) {
 				r.logger.Error().
 					Str("event", "stats_rollup_panic").
 					Str("job", "nightly_rebuild").
-					Interface("recovered", rec).
-					Msg("nightly rebuild panic recovered")
+					Str("recovered_class", classifyPanic(rec)).
+					Msg("nightly rebuild panic recovered; will retry tomorrow")
 			}
 		}()
 		heartbeat := time.NewTicker(1 * time.Minute)
