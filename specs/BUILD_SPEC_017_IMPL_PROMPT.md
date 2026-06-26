@@ -154,14 +154,46 @@ Per current code at [`phase4-coordinator/cmd/coordinator/main.go`](../phase4-coo
 - Integration: a deliberate test file under `internal/stats/` calling `os.Exit(1)` (NOT `os.Exit("test")` — `os.Exit` takes an int and the wrong signature would fail typechecking before the lint runs) fails `make lint` with the named "no-process-termination-in-stats" rule. Same assertion-by-name discipline.
 - Integration (AC-19, mapped here): SQL fixture inserts a `stats_leaderboard_24h` row for `provider_id = 'never-toggled-xyz'` with NO matching `provider_visibility` row; assert the left-join in Step 3's handler treats this as `mode = 'bucketed'` (verified end-to-end in Step 3).
 - Integration (AC-20, mapped here): SQL CI assertion that `SELECT COUNT(*) FROM provider_visibility_audit WHERE new_mode = 'exact' AND actor_kind = 'operator'` returns 0; failure means the operator-side process violated §6.6.3.
-- Integration (AC-10 concrete transaction test): SPEC-017 v0.1 does not ship the portal handler (SPEC-014 v0.9 follow-up), but the storage contract MUST be tested at Step 1 using a test harness that drives the same `provider_portal` role. Test shape:
-  - BEGIN transaction with `provider_portal` role.
-  - `INSERT INTO provider_visibility (provider_id, mode) VALUES ('p1', 'bucketed') ON CONFLICT DO UPDATE SET mode = 'exact', updated_at = now()` (the UPSERT pattern SPEC-014 v0.9 will use).
-  - `INSERT INTO provider_visibility_audit (provider_id, old_mode, new_mode, actor_kind, actor_id, source_ip, user_agent) VALUES ('p1', 'bucketed', 'exact', 'provider', 'p1', '127.0.0.1', 'test')`.
-  - COMMIT.
-  - Assert: exactly one row in `provider_visibility_audit` for `provider_id = 'p1'`, with `new_mode = 'exact' AND actor_kind = 'provider'`.
-  - Repeat with intentional error before commit (force ROLLBACK); assert: no rows in either table (transactional atomicity).
-  - This proves the storage contract is mechanically achievable under the `provider_portal` grant set; the SPEC-014 v0.9 handler PR will reuse this test fixture as a regression smoke.
+- Integration (AC-10 concrete transaction test): SPEC-017 v0.1 does not ship the portal handler (SPEC-014 v0.9 follow-up), but the storage contract MUST be tested at Step 1 using a test harness that drives the same `provider_portal` role. The UPSERT shape is pinned by SPEC §6.3 — note the explicit conflict target on `(provider_id)`, which is required by PostgreSQL for `DO UPDATE`.
+
+  **Subcase A — `bucketed → exact` toggle (commit path):**
+  ```sql
+  -- 1. Setup: pre-seed p1 as bucketed (outside the provider_portal transaction; any role with INSERT privilege works in fixture setup).
+  INSERT INTO provider_visibility (provider_id, mode) VALUES ('p1', 'bucketed');
+
+  -- 2. Toggle transaction, run as provider_portal role:
+  BEGIN;
+  INSERT INTO provider_visibility (provider_id, mode)
+  VALUES ('p1', 'exact')
+  ON CONFLICT (provider_id) DO UPDATE
+    SET mode = EXCLUDED.mode, updated_at = now();
+  INSERT INTO provider_visibility_audit
+    (provider_id, old_mode, new_mode, actor_kind, actor_id, source_ip, user_agent)
+  VALUES
+    ('p1', 'bucketed', 'exact', 'provider', 'p1', '127.0.0.1', 'test');
+  COMMIT;
+  ```
+  Assert BOTH:
+  - `SELECT mode FROM provider_visibility WHERE provider_id = 'p1'` returns `'exact'`.
+  - `SELECT COUNT(*) FROM provider_visibility_audit WHERE provider_id = 'p1' AND old_mode = 'bucketed' AND new_mode = 'exact' AND actor_kind = 'provider'` returns exactly `1`.
+
+  **Subcase B — rollback path (uses a DISTINCT provider so subcase A's state is undisturbed):**
+  ```sql
+  BEGIN;
+  INSERT INTO provider_visibility (provider_id, mode) VALUES ('p_rollback', 'exact');
+  INSERT INTO provider_visibility_audit
+    (provider_id, old_mode, new_mode, actor_kind, actor_id, source_ip, user_agent)
+  VALUES
+    ('p_rollback', 'bucketed', 'exact', 'provider', 'p_rollback', '127.0.0.1', 'test');
+  -- intentional error to force ROLLBACK; e.g. RAISE EXCEPTION or violate a constraint:
+  INSERT INTO provider_visibility (provider_id, mode) VALUES ('p_rollback', 'bucketed'); -- PK conflict, no ON CONFLICT clause → error → transaction aborts
+  COMMIT; -- has no effect since the prior error already aborted
+  ```
+  Assert:
+  - `SELECT COUNT(*) FROM provider_visibility WHERE provider_id = 'p_rollback'` returns `0`.
+  - `SELECT COUNT(*) FROM provider_visibility_audit WHERE provider_id = 'p_rollback'` returns `0`.
+
+  This proves the storage contract is mechanically achievable under the `provider_portal` grant set AND transactional. The SPEC-014 v0.9 handler PR will reuse this test fixture as a regression smoke.
 
 **Step 1 audit prompt authoring** (BEFORE writing step 1 code): three lanes, files named per §2.1.
 
