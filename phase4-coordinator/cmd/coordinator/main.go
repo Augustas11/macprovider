@@ -22,8 +22,17 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/pool"
 	"github.com/augstar/macprovider-coordinator/internal/providerhttp"
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
+	"github.com/augstar/macprovider-coordinator/internal/stats"
+	statsmigrations "github.com/augstar/macprovider-coordinator/internal/stats/migrations"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
+
+	// SPEC-017 v0.1.8 — register the Postgres driver under the
+	// "postgres" name used by internal/stats.Open. lib/pq is the
+	// only Postgres driver in go.mod for v0.1; switching to pgx
+	// requires a SPEC v0.2 conversation.
+	_ "github.com/lib/pq"
+
 	"github.com/rs/zerolog"
 )
 
@@ -95,6 +104,73 @@ func main() {
 		fmt.Fprintf(os.Stderr, "billing config snapshot: %v\n", err)
 		os.Exit(1)
 	}
+	// SPEC-017 v0.1.8 Step 1 — Postgres pools for the Network
+	// Stats API. Fail-closed per BUILD §C.3: any missing required
+	// runtime DSN or any failed startup smoke aborts coordinator
+	// boot BEFORE any HTTP listener binds. When cfg.Stats.Enabled
+	// is false (the v0.1 default), Open returns stats.ErrDisabled
+	// and the /v1/stats/* mux subtree is NOT registered later;
+	// 404 from the existing mux fallback is the correct posture
+	// (NOT a custom JSON envelope, which would violate the §5.9
+	// closed code vocabulary — BUILD §C.4).
+	//
+	// The CLI operator DSN (cfg.Stats.PartnerKeysAdminDSN) is
+	// declared but INTENTIONALLY NOT OPENED here — the
+	// coordinator process should never hold an
+	// INSERT-on-partner_keys connection at runtime. Step 4.A's
+	// `coordinator partner-keys issue/revoke` subcommands open
+	// that DSN at invocation time only. SECURITY §B.1 invariant.
+	var statsPools *stats.Pools
+	if cfg.Stats.Enabled {
+		statsCfg := stats.Config{
+			Enabled:             cfg.Stats.Enabled,
+			ReaderDSN:           cfg.Stats.ReaderDSN,
+			RollupDSN:           cfg.Stats.RollupDSN,
+			ProviderPortalDSN:   cfg.Stats.ProviderPortalDSN,
+			PartnerKeys:         stats.PartnerKeysConfig{LastUsedAtUpdatesEnabled: cfg.Stats.PartnerKeys.LastUsedAtUpdatesEnabled, WriterDSN: cfg.Stats.PartnerKeys.WriterDSN},
+			PartnerKeysAdminDSN: cfg.Stats.PartnerKeysAdminDSN,
+			Rollup: stats.RollupConfig{
+				BackfillMode:            cfg.Stats.Rollup.BackfillMode,
+				PartialHistorySince:     cfg.Stats.Rollup.PartialHistorySince,
+				LateEventsRetentionDays: cfg.Stats.Rollup.LateEventsRetentionDays,
+			},
+			CORS: stats.CORSConfig{
+				AccessControlMaxAgeSeconds: cfg.Stats.CORS.AccessControlMaxAgeSeconds,
+				PartnerOriginAllowlist:     cfg.Stats.CORS.PartnerOriginAllowlist,
+			},
+			TrustedProxies: cfg.Stats.TrustedProxies,
+		}
+		var err error
+		statsPools, err = stats.Open(context.Background(), statsCfg)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "stats: %v\n", err)
+			os.Exit(1)
+		}
+		// Apply migrations using the rollup pool — it has CREATE
+		// privileges in development and test environments; in
+		// production the operator applies migrations out-of-band
+		// before coordinator boot (and SPEC-017 §F.2 SECURITY
+		// invariant: migrations MUST NOT run as a runtime role).
+		// Production deployments set
+		// STATS_SKIP_MIGRATIONS_AT_BOOT=1 to skip; default behavior
+		// for non-production keeps the bootstrap path frictionless.
+		if os.Getenv("STATS_SKIP_MIGRATIONS_AT_BOOT") != "1" {
+			if err := statsmigrations.Apply(context.Background(), statsPools.Rollup); err != nil {
+				fmt.Fprintf(os.Stderr, "stats migrations: %v\n", err)
+				_ = statsPools.Close()
+				os.Exit(1)
+			}
+		}
+		logger.Info().Msg("SPEC-017 stats pools opened (reader, rollup, provider_portal); /v1/stats/* will be mounted by Step 3")
+	} else {
+		logger.Info().Msg("SPEC-017 stats DISABLED via config (default); /v1/stats/* not registered")
+	}
+	defer func() {
+		if statsPools != nil {
+			_ = statsPools.Close()
+		}
+	}()
+	_ = statsPools // silenced until Step 3 mounts handlers
 	shutdownCtx, stopBackground := context.WithCancel(context.Background())
 	defer stopBackground()
 	wsOpts := []providerws.Option{}

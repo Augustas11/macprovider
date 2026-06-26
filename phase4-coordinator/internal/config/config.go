@@ -34,7 +34,79 @@ type Config struct {
 	Settlement                   SettlementConfig             `yaml:"settlement"`
 	Endpoints                    EndpointsConfig              `yaml:"endpoints"`
 	Explorer                     ExplorerConfig               `yaml:"explorer"`
+	Stats                        StatsConfig                  `yaml:"stats"`
 	Providers                    []ProviderConfig             `yaml:"providers"`
+}
+
+// StatsConfig is the SPEC-017 Network Stats API config block.
+//
+// All DSN fields are sourced from env at deploy time per the
+// existing config-loader env-override pattern; storing plaintext
+// DSNs in coordinator.yaml is a SECURITY violation and the
+// validator MAY refuse to start if a DSN appears literal-shaped
+// in the YAML file. v0.1 IMPL trusts the env-override path; the
+// validator does not pattern-match against the YAML body
+// (operator-managed secret hygiene).
+//
+// Stats.Enabled defaults to false so existing coordinator
+// deployments continue to function unchanged at upgrade time —
+// the /v1/stats/* mux subtree is not registered until the
+// operator flips this flag (BUILD §C.4).
+type StatsConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// DSNs per active runtime role. When Enabled = true, the
+	// three always-required DSNs MUST be non-empty.
+	ReaderDSN         string `yaml:"reader_dsn"`
+	RollupDSN         string `yaml:"rollup_dsn"`
+	ProviderPortalDSN string `yaml:"provider_portal_dsn"`
+
+	// PartnerKeys gates the optional partner_keys_writer pool.
+	// v0.1 default: LastUsedAtUpdatesEnabled=false; WriterDSN
+	// unused (BUILD §C.2).
+	PartnerKeys StatsPartnerKeysConfig `yaml:"partner_keys"`
+
+	// PartnerKeysAdminDSN is the CLI operator DSN (Step 4.A).
+	// Step 1 declares the field; coordinator startup MUST NOT
+	// open a pool for it (BUILD §D.6 / SECURITY §B.1).
+	PartnerKeysAdminDSN string `yaml:"partner_keys_admin_dsn"`
+
+	Rollup StatsRollupConfig `yaml:"rollup"`
+	CORS   StatsCORSConfig   `yaml:"cors"`
+
+	// TrustedProxies — operator-allowlisted X-Forwarded-For
+	// trusted hops, consumed by Step 3's auth-failure tier
+	// limiter for client-IP derivation (SPEC §5.6 v0.1.8 +
+	// SECURITY r5 H1). Step 1 declares; Step 3 consumes.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+}
+
+type StatsPartnerKeysConfig struct {
+	LastUsedAtUpdatesEnabled bool   `yaml:"last_used_at_updates_enabled"`
+	WriterDSN                string `yaml:"writer_dsn"`
+}
+
+type StatsRollupConfig struct {
+	// BackfillMode is "partial" (Path A, default per
+	// [[macprovider-vercel-demo]] thin-ship pattern) or "full"
+	// (Path B). See SPEC §9.7.
+	BackfillMode string `yaml:"backfill_mode"`
+	// PartialHistorySince is the RFC 3339 rollup-start
+	// timestamp. Empty when BackfillMode = "full". Step 2/3
+	// consume.
+	PartialHistorySince string `yaml:"partial_history_since"`
+	// LateEventsRetentionDays — SPEC §9.3 (v0.1.7). Default 90;
+	// floor 30. Step 2 owns the floor-clamp behavior.
+	LateEventsRetentionDays int `yaml:"late_events_retention_days"`
+}
+
+type StatsCORSConfig struct {
+	// AccessControlMaxAgeSeconds — SPEC §5.7 v0.1.7 default 60,
+	// operator may raise via runtime config to ≤300; >300
+	// requires a SPEC bump. Step 3 consumes; Step 1 only
+	// declares.
+	AccessControlMaxAgeSeconds int      `yaml:"access_control_max_age_seconds"`
+	PartnerOriginAllowlist     []string `yaml:"partner_origin_allowlist"`
 }
 
 type ListenConfig struct {
@@ -403,6 +475,16 @@ func Default() Config {
 				RateLimitPerMinute: 60,
 			},
 		},
+		Stats: StatsConfig{
+			Enabled: false,
+			Rollup: StatsRollupConfig{
+				BackfillMode:            "partial",
+				LateEventsRetentionDays: 90,
+			},
+			CORS: StatsCORSConfig{
+				AccessControlMaxAgeSeconds: 60,
+			},
+		},
 		Explorer: ExplorerConfig{
 			Enabled:                       false,
 			BindPath:                      "/admin/explorer/",
@@ -765,6 +847,9 @@ func (c Config) Validate() error {
 	if err := c.validateExplorer(); err != nil {
 		return err
 	}
+	if err := c.validateStats(); err != nil {
+		return err
+	}
 	if _, ok := c.Rewards.RateCard["default"]; !ok {
 		return fmt.Errorf("rewards.rate_card must contain default")
 	}
@@ -865,6 +950,53 @@ func (c Config) validateExplorer() error {
 		if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
 			return fmt.Errorf("explorer.gateway_base_url must use https unless targeting loopback")
 		}
+	}
+	return nil
+}
+
+// validateStats enforces the SPEC-017 §7.2 + BUILD §C structural
+// constraints on the stats config block.
+//
+// Stats.Enabled=false (the v0.1 default) skips ALL validation
+// below; an operator that has not flipped the gate cannot brick
+// startup by leaving Stats fields empty.
+//
+// When Stats.Enabled=true the three required runtime DSNs MUST
+// be set (fail-closed per BUILD §C.3). PartnerKeys.WriterDSN is
+// only required when last_used_at_updates_enabled=true. The CLI
+// admin DSN is OPTIONAL even when stats is enabled (BUILD §B.2).
+//
+// Numeric ranges:
+//   - LateEventsRetentionDays — SPEC §9.3 v0.1.7 floor 30; default 90.
+//   - AccessControlMaxAgeSeconds — SPEC §5.7 v0.1.7 cap 300; default 60.
+//   - BackfillMode — SPEC §9.7 enum {"partial","full"}; default "partial".
+func (c Config) validateStats() error {
+	s := c.Stats
+	if !s.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(s.ReaderDSN) == "" {
+		return fmt.Errorf("stats.reader_dsn must be set when stats.enabled is true")
+	}
+	if strings.TrimSpace(s.RollupDSN) == "" {
+		return fmt.Errorf("stats.rollup_dsn must be set when stats.enabled is true")
+	}
+	if strings.TrimSpace(s.ProviderPortalDSN) == "" {
+		return fmt.Errorf("stats.provider_portal_dsn must be set when stats.enabled is true")
+	}
+	if s.PartnerKeys.LastUsedAtUpdatesEnabled && strings.TrimSpace(s.PartnerKeys.WriterDSN) == "" {
+		return fmt.Errorf("stats.partner_keys.writer_dsn must be set when stats.partner_keys.last_used_at_updates_enabled is true")
+	}
+	switch s.Rollup.BackfillMode {
+	case "", "partial", "full":
+	default:
+		return fmt.Errorf("stats.rollup.backfill_mode must be one of {partial, full} (got %q)", s.Rollup.BackfillMode)
+	}
+	if s.Rollup.LateEventsRetentionDays != 0 && s.Rollup.LateEventsRetentionDays < 30 {
+		return fmt.Errorf("stats.rollup.late_events_retention_days must be >= 30 (SPEC §9.3 floor)")
+	}
+	if s.CORS.AccessControlMaxAgeSeconds < 0 || s.CORS.AccessControlMaxAgeSeconds > 300 {
+		return fmt.Errorf("stats.cors.access_control_max_age_seconds must be between 0 and 300 (SPEC §5.7)")
 	}
 	return nil
 }

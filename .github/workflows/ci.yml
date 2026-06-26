@@ -125,6 +125,58 @@ jobs:
       - name: Run fixture integration test
         run: cd phase7-verify && go test -race -count=1 -tags=integration -timeout 60s .
 
+  coordinator-lint:
+    name: phase4-coordinator (golangci-lint depguard AC-16)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # SPEC-017 AC-16 — import-graph lint. Runs depguard + forbidigo
+    # on every PR. Step 1 adds a fixture under
+    # internal/stats/testdata/forbidden_import_fixture/ that
+    # imports internal/billing from internal/stats; the test
+    # `TestAC16ForbiddenImportFails` invokes `go vet` on the
+    # fixture and asserts the named diagnostic. The repo-wide
+    # `golangci-lint run` invoked here MUST NOT include the
+    # fixture; the fixture lives under `testdata/` which Go's
+    # toolchain excludes by convention.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+      - name: Install golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.62.2
+          echo "$(go env GOPATH)/bin" >> $GITHUB_PATH
+      - name: make lint-coordinator
+        run: make lint-coordinator
+
+  coordinator-stats-integration:
+    name: phase4-coordinator (stats Postgres AC-9/10/19/20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # SPEC-017 Step 1 — Postgres-dependent integration tests.
+    # testcontainers-go spins ephemeral Postgres per test; the
+    # ubuntu-latest runner ships with Docker. Tests live under
+    # //go:build integration so `make test-coordinator` on a
+    # daemon-less host does not fail.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: phase4-coordinator/go.mod
+          cache-dependency-path: phase4-coordinator/go.sum
+      - name: make test-coordinator-integration
+        run: make test-coordinator-integration
+
   integration:
     name: integration (cross-service)
     runs-on: ubuntu-latest
