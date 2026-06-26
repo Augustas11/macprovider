@@ -152,7 +152,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.wfile.write(b'{"projection":"public"}')
     def log_message(self, fmt, *args): pass
 PORT = int(sys.argv[1])
-with socketserver.TCPServer(("127.0.0.1", PORT), H) as s:
+with socketserver.TCPServer(("0.0.0.0", PORT), H) as s:
     s.serve_forever()
 PYEOF
 python3 "$TMP/upstream.py" "$UPSTREAM_PORT" > "$TMP/upstream.log" 2>&1 &

@@ -180,6 +180,17 @@ func (f *cliPgFixture) Close(ctx context.Context) {
 // `adminDSN()` to point the CLI at it).
 func startCLIPostgres(t *testing.T) (*cliPgFixture, *sql.DB) {
 	t.Helper()
+	// GitHub Actions Linux runners have JOURNAL_STREAM set in
+	// the base env (the runner itself runs under systemd-journal),
+	// which trips the round-1 SECURITY H1 token-suppression check
+	// in `partner-keys issue` and breaks every test that doesn't
+	// explicitly set --token-out. Clear it here; tests that
+	// intentionally exercise the JOURNAL_STREAM-suppressed path
+	// (TestIssueJournalStreamSuppresses, TestIssueTokenOutWritesFile,
+	// TestStep4C_StatsPartnerKeyIssuedEvent's JOURNAL_STREAM
+	// sub-case) re-set it via t.Setenv AFTER startCLIPostgres,
+	// and the later t.Setenv takes precedence + restores cleanly.
+	t.Setenv("JOURNAL_STREAM", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	c, err := tcpg.Run(ctx, cliPgImage,
