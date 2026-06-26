@@ -83,7 +83,39 @@ REVOKE ALL ON partner_keys, provider_visibility_audit FROM stats_rollup;
 -- ===== provider_portal (§7.2.3) — portal toggle role. =====
 GRANT USAGE ON SCHEMA public TO provider_portal;
 
-GRANT INSERT, UPDATE ON provider_visibility TO provider_portal;
+-- IMPL-authored deviation from locked SPEC §7.2.3 — surface for
+-- SPEC v0.2.
+--
+-- SPEC §6.3 normatively pins the toggle SQL pattern as
+--   INSERT INTO provider_visibility (provider_id, mode)
+--   VALUES ($1, $2)
+--   ON CONFLICT (provider_id) DO UPDATE
+--     SET mode = EXCLUDED.mode, updated_at = now()
+-- but locked §7.2.3 grants ONLY (INSERT, UPDATE). PostgreSQL's
+-- `INSERT ... ON CONFLICT DO UPDATE` implementation reads the
+-- conflicting row's existing data to evaluate the DO UPDATE
+-- branch, which requires SELECT — empirically verified by the
+-- AC-10 integration test on the live Postgres CI job (run
+-- 28224894287): without the SELECT grant, the UPSERT errors
+-- with `pq: permission denied for table provider_visibility`.
+--
+-- The v0.1.8 IMPL adds SELECT here to make the SPEC's stated
+-- pattern executable. The grant is column-unrestricted because
+-- the §6.3 pattern uses EXCLUDED.* (proposed-new) and updates
+-- `updated_at = now()`; a column-scoped SELECT
+-- (`provider_id, mode, updated_at`) would also work but is
+-- functionally identical for the locked §6.1 schema (no other
+-- columns exist on provider_visibility besides
+-- blocked_from_partner_projection, which provider_portal does
+-- not need to read either). Operator MAY narrow to specific
+-- columns at deploy time; the rollup-/handler-side is
+-- unaffected.
+--
+-- SPEC v0.2 candidate: update §7.2.3 to enumerate
+-- `GRANT INSERT, SELECT, UPDATE ON provider_visibility TO
+-- provider_portal` so the grant inventory matches the §6.3
+-- pattern intrinsically.
+GRANT INSERT, SELECT, UPDATE ON provider_visibility TO provider_portal;
 GRANT INSERT ON provider_visibility_audit TO provider_portal;
 GRANT USAGE, SELECT ON SEQUENCE provider_visibility_audit_id_seq
     TO provider_portal;
