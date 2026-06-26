@@ -326,7 +326,9 @@ operator-key admin traffic that bypasses the gateway. The buyer-facing
 nginx vhost in front of the gateway uses `client_max_body_size 8M`; the
 coordinator is the second, tighter ceiling.
 
-**Implementation gap (tracked as a followup).** The v0.3.1 implementation
+**Implementation gap (tracked as a followup).** _RESOLVED 2026-06-26 (`docs/OPEN_QUESTIONS.md` triage): closed. The "gap" described below was closed in code after v0.3.1 was written. `phase4-coordinator/internal/config/config.go:112` defines `Limits.MaxChatRequestBodyBytes int64` (yaml: `limits.max_chat_request_body_bytes`), default `1 << 20`, validated `> 0` and `<= 128 MiB`. `phase4-coordinator/internal/buyer/server.go:1121-1133` enforces the cap with `io.LimitReader(r.Body, maxBodyBytes+1)` and returns `413 request_too_large` with the OpenAI-shape envelope. Operator-tunable without a code rebuild — exactly what this paragraph asked for._
+
+The v0.3.1 implementation
 hardcodes the cap as a Go `const` in `internal/buyer/server.go` with no
 operator override. The gateway exposes its equivalent as
 `Limits.RequestBodyBytes` in `gateway.yaml` (configurable with > 0

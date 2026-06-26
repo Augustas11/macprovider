@@ -47,16 +47,30 @@ same commit. PR review for any new SPEC version SHOULD diff this file.
   for a small implementation patch or BUILD prompt. SPEC-014..016 not
   triaged in this pass; the SPEC-014/Q1..Q11 omnibus is intentionally
   parked pending operator portal-scope review.
-- **2026-06-26 (correction same day)** — SPEC-003/OQ-1 corrected from
-  `gated` to `closed`. The initial pass relied on memory entries
-  (`macprovider-launchd-amfi-blocker-macos-26`,
-  `macprovider-v1-3-2-apple-dev-enrollment-blocker`) that were ~48
-  hours stale: Apple Developer Program enrollment is in fact done and
-  PR #62 + PR #148 + PR #149 landed the full Developer-ID-signed +
-  notarized + stapled .pkg pipeline. v1.6.1 (2026-06-25) ships the
-  first stapled .pkg asset. Pattern reinforced: re-check memory
-  entries against recent commits before treating them as load-bearing
-  in a triage call (memory: `before-recommending-from-memory`).
+- **2026-06-26 (corrections same day)** — three rows flipped to
+  `closed` after re-checking SPEC body claims against current code:
+  - **SPEC-003/OQ-1**: `gated` → `closed`. Apple Developer Program is
+    enrolled; PR #62 + #148 + #149 + #150 shipped the full Developer-
+    ID-signed + notarized + stapled `.pkg` pipeline. v1.6.1
+    (2026-06-25) is the first release shipping the stapled `.pkg`.
+    Initial triage was based on memory entries
+    (`macprovider-launchd-amfi-blocker-macos-26`,
+    `macprovider-v1-3-2-apple-dev-enrollment-blocker`) that were ~48
+    hours stale; those memories have been updated.
+  - **SPEC-004/FR-SR-7c**: `open` → `closed`. The "Implementation gap"
+    paragraph in SPEC-004 §FR-SR-7c was stale: the operator-tunable
+    `limits.max_chat_request_body_bytes` config knob exists
+    (`config.go:112`) with `> 0`/`<= 128 MiB` validation; the buyer
+    server enforces it with `io.LimitReader` + `413` at
+    `server.go:1121-1133`.
+  - **SPEC-005/OQ-4**: `open` → `closed`. `doc/provider-economics.md:137-140`
+    addresses this OQ by name. A separate v0.4 docs refresh will be
+    needed once SPEC-016 USDC pipeline lands.
+  - **Pattern reinforced**: when a SPEC body says "we should do X" or
+    "implementation gap," check the code first — three of the four
+    "open/gated" rows from the initial triage pass were already
+    addressed in code or docs after the SPEC body was written. Memory
+    (`before-recommending-from-memory`) deserves the same skepticism.
 
 ---
 
@@ -85,7 +99,7 @@ same commit. PR review for any new SPEC version SHOULD diff this file.
 | id | status | owner | blocker | summary |
 |---|---|---|---|---|
 | SPEC-004/Pillar-A | ready | operator | BUILD prompt + operator flip of `routing.sticky_enabled` | Sticky affinity. **2026-06-26 triage:** Upgraded from `gated` to `ready`. SPEC-006 v0.8 (audited ACCEPT, gate PG-9 in §22 production launch checklist) satisfies the sticky-caching guard; SPEC-004 v0.2 normative routing contract is in place. The remaining work is a BUILD prompt for "SPEC-004 Pillars B/C/D/A" + operator decision to flip `routing.sticky_enabled: true` post-launch. No other code blocker. |
-| SPEC-004/FR-SR-7c | open | implementer | — | Coordinator 1 MiB chat-ingress cap is a Go `const` in `phase4-coordinator/internal/buyer/server.go` (no operator override). Gateway has `Limits.MaxChatRequestBodyBytes` in YAML for parity. **2026-06-26 triage:** Small implementation patch (~30 LOC + test) — add `pool.request_body_bytes` config knob mirroring the gateway pattern, with `> 0` validation and a `< 128 MiB` ceiling. Production with `model_classes` enabled for power users (large `tools` arrays, long contexts) is the trigger; ship before that, not after. |
+| SPEC-004/FR-SR-7c | closed | — | — | **2026-06-26 triage (corrected later same day):** CLOSED. The "Implementation gap" paragraph in SPEC-004 §FR-SR-7c was stale: code shipped after v0.3.1 was written. `phase4-coordinator/internal/config/config.go:112` defines `Limits.MaxChatRequestBodyBytes int64` (yaml `limits.max_chat_request_body_bytes`), default `1 << 20`, validated `> 0` and `<= 128 MiB`. `phase4-coordinator/internal/buyer/server.go:1121-1133` enforces it with `io.LimitReader` + `413 request_too_large`. Operator-tunable without a code rebuild — the asked-for fix. |
 
 ## SPEC-005 — Billing & Settlement (v0.3, locked)
 
@@ -94,7 +108,7 @@ same commit. PR review for any new SPEC version SHOULD diff this file.
 | SPEC-005/OQ-1 | deferred | implementer | next SPEC-002 patch | SPEC-002 needs a monotonic `attempt_n` column. **2026-06-26 triage:** Fallback (`request_log.id ASC` + quarantine for ambiguous rows) is production-safe per v0.3. **Action:** file a SPEC-002 amendment issue for the next coordinator patch cycle; not blocking. |
 | SPEC-005/OQ-2 | closed | — | — | Round-half-to-even rounding rule. **2026-06-26 triage:** Closed as implicitly confirmed — code shipped 2026-05, running in production ~7 months without operator pushback. The "operator to confirm before v0.2 production gate" predates the actual production gate that has now been crossed. |
 | SPEC-005/OQ-3 | closed | — | — | Recovery windows (24h startup, 7d nightly). **2026-06-26 triage:** Closed as implicitly confirmed — same reasoning as OQ-2; defaults shipped and have not surfaced as wrong. |
-| SPEC-005/OQ-4 | open | implementer | — | Provider docs wording re: credits accrual + payout deferral. **2026-06-26 triage:** Pure docs miss; provider README still doesn't explain the credits → payout flow. **Action:** file a small docs follow-up issue. Becomes urgent before the first non-employee provider onboards. |
+| SPEC-005/OQ-4 | closed | — | — | Provider docs wording re: credits accrual + payout deferral. **2026-06-26 triage (corrected later same day):** CLOSED. `doc/provider-economics.md:137-140` already addresses this by name: "v1 payout boundary (SPEC-005 AC-DOCS-HONESTY / OQ-4). v1 accrues credits and emits payout-ready rows; the actual payout rail (USDC settlement) requires SPEC-007 and an operator decision." `phase3-binary/README.md` links readers to that doc. A separate v0.4 docs refresh will be needed once SPEC-016 USDC pipeline lands and the answer becomes "automatically paid" — but that's a SPEC-016 follow-up, not this OQ. |
 | SPEC-005/OQ-5 | deferred | implementer | — | Manual quarantine resolution admin actions (force-credit / force-void). **2026-06-26 triage:** Money-path admin surface; v0.3 exposes quarantine state but not the resolution surface. **Action:** file issue, flag "needed before scale" — not blocking pre-launch but blocks a long-tail recovery path. |
 
 ## SPEC-006 — Buyer API Gateway (v0.9, locked)
@@ -243,9 +257,13 @@ is the source of truth. **Not triaged in the 2026-06-26 pass.**
 3. **Empty tracking-issue side.** Issue #82 absorbed SPEC-003
    deferrals; SPEC-004 / SPEC-005 / SPEC-007 had no analogous side.
    The 2026-06-26 triage **closed the SPEC-007 backlog as
-   unrecoverable** (audit document never persisted) and proposes
-   per-SPEC tracking issues for SPEC-004/FR-SR-7c and SPEC-005/OQ-1,
-   OQ-4, OQ-5.
+   unrecoverable** (audit document never persisted) and **closed
+   SPEC-004/FR-SR-7c and SPEC-005/OQ-4 after discovering both were
+   already addressed in code/docs** the SPEC body hadn't been updated
+   to reflect. Per-SPEC tracking issues filed for SPEC-005/OQ-1 (cross-
+   spec SPEC-002 amendment), SPEC-005/OQ-5 (quarantine resolution
+   admin), and SPEC-004/Pillar-A (BUILD prompt + operator green-light
+   on `routing.sticky_enabled`).
 
 4. **SPEC-012 vs SPEC-011 vs SPEC-013 overlap.** The 2026-06-26
    triage **closed SPEC-012 Phase 2/3 as subsumed** — Phase 2 by
