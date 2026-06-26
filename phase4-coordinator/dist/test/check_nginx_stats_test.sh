@@ -179,9 +179,15 @@ NGINX_CID=$(docker run -d \
   -v "$TMP/nginx.conf:/etc/nginx/nginx.conf:ro" \
   -v "$TMP/conf.d:/etc/nginx/conf.d:ro" \
   -v "$TMP/sites-enabled:/etc/nginx/sites-enabled:ro" \
-  -v "$TMP/cache:/var/cache/nginx/stats" \
   -v "$TMP/log:/var/log/nginx" \
   "$NGINX_IMAGE")
+# Cache directory uses a CONTAINER-LOCAL anonymous volume
+# instead of a bind mount. On Linux Docker, nginx (UID 101)
+# cannot write to a bind-mounted host directory owned by a
+# different UID even with mode 0777, because nginx fails an
+# fstatat() check before write. Container-local volume sidesteps
+# the UID mismatch entirely; the cache counter below uses
+# `docker exec ... find` to count files inside the container.
 
 # Discover the host-mapped port. Docker Desktop with IPv6
 # enabled emits TWO lines for each published port (one IPv4
@@ -282,28 +288,28 @@ refresh_base
 sleep 2
 # Clear any cache files left over from the prior /overview +
 # /leaderboard sub-tests so the BEFORE/AFTER delta below is a
-# clean count of THIS sub-test's writes. docker restart preserves
-# the on-disk cache mount, so without an explicit clear the
-# anonymous warm-up below is a cache HIT (no new file) and the
-# delta is zero → false-fail.
-rm -rf "$TMP/cache"/* 2>/dev/null || true
-# Count cache entries BEFORE.
-CACHE_BEFORE=$(find "$TMP/cache" -type f 2>/dev/null | wc -l | tr -d ' ')
+# clean count of THIS sub-test's writes. The cache lives in a
+# container-local anonymous volume, so clear via docker exec.
+docker exec "$NGINX_CID" sh -c 'rm -rf /var/cache/nginx/stats/*' 2>/dev/null || true
+
+# Count cache entries BEFORE via docker exec (container-local
+# volume — see the docker run block above).
+count_cache() {
+  docker exec "$NGINX_CID" sh -c 'find /var/cache/nginx/stats -type f 2>/dev/null | wc -l' | tr -d ' \r\n'
+}
+CACHE_BEFORE=$(count_cache)
 # Anonymous warm-up so the public projection IS allowed to land
 # in the cache (proves the cache itself works — distinguishes
-# "no entry" from "cache disabled entirely"). Capture status
-# code + body for diagnostics so a future false-fail surfaces
-# whether curl returned 502 (upstream unreachable) or 200 + no
-# cache write (permissions or temp-path issue).
+# "no entry" from "cache disabled entirely").
 WARM_STATUS=$(curl -s -o "$TMP/warm-body.txt" -w '%{http_code}' "${BASE}/v1/stats/leaderboard")
 sleep 1
-CACHE_AFTER_PUBLIC=$(find "$TMP/cache" -type f 2>/dev/null | wc -l | tr -d ' ')
+CACHE_AFTER_PUBLIC=$(count_cache)
 if [ "$CACHE_AFTER_PUBLIC" -le "$CACHE_BEFORE" ]; then
   echo "DEBUG: warm-up status=${WARM_STATUS}; body=$(head -c200 "$TMP/warm-body.txt" 2>/dev/null)" >&2
   echo "DEBUG: nginx error log (last 30 lines):" >&2
   docker exec "$NGINX_CID" tail -30 /var/log/nginx/error.log 2>&1 >&2 || true
   echo "DEBUG: cache dir inside container:" >&2
-  docker exec "$NGINX_CID" sh -c 'ls -la /var/cache/nginx/stats/ 2>&1 && id' >&2 || true
+  docker exec "$NGINX_CID" sh -c 'ls -la /var/cache/nginx/stats/ 2>&1; id' >&2 || true
   fail "cache test: public projection did NOT land in cache (cache may be misconfigured): before=$CACHE_BEFORE after=$CACHE_AFTER_PUBLIC"
 fi
 
@@ -313,7 +319,7 @@ if ! grep -q '"projection":"partner"' <<<"$KEYED_BODY"; then
   fail "cache test: keyed response did not return partner projection: $KEYED_BODY"
 fi
 sleep 1
-CACHE_AFTER_KEYED=$(find "$TMP/cache" -type f 2>/dev/null | wc -l | tr -d ' ')
+CACHE_AFTER_KEYED=$(count_cache)
 if [ "$CACHE_AFTER_KEYED" -ne "$CACHE_AFTER_PUBLIC" ]; then
   fail "cache test: keyed request added cache entries (SECURITY r5 C1 violation): before=$CACHE_AFTER_PUBLIC after=$CACHE_AFTER_KEYED"
 fi
