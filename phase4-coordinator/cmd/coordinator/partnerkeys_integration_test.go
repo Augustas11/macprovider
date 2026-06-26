@@ -21,19 +21,94 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/lib/pq"
+	"github.com/rs/zerolog"
 	tc "github.com/testcontainers/testcontainers-go"
 	tcpg "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
 
+	"github.com/augstar/macprovider-coordinator/internal/stats"
 	statsmigrations "github.com/augstar/macprovider-coordinator/internal/stats/migrations"
+	statsstore "github.com/augstar/macprovider-coordinator/internal/stats/store"
 )
+
+// seedRotationHandlerFixture seeds the minimum rollup state
+// needed for the Step 3 leaderboard handler to return 200
+// instead of 503 stale: a fresh stats_components_health row
+// for `leaderboard_24h` and a single stats_leaderboard_24h
+// row. The handler reads through the stats_reader role, which
+// is granted SELECT on these tables by Step 1's grants
+// migration.
+func seedRotationHandlerFixture(t *testing.T, adminDB *sql.DB) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, q := range []string{
+		`INSERT INTO stats_components_health (component, generated_at)
+		 VALUES ('leaderboard_24h', now())
+		 ON CONFLICT (component) DO UPDATE SET generated_at = now()`,
+		`INSERT INTO stats_components_health (component, generated_at)
+		 VALUES ('overview', now())
+		 ON CONFLICT (component) DO UPDATE SET generated_at = now()`,
+		`INSERT INTO stats_rewards_populated (singleton, rewards_populated, generated_at)
+		 VALUES (TRUE, FALSE, now())
+		 ON CONFLICT (singleton) DO UPDATE SET generated_at = now()`,
+		`INSERT INTO stats_leaderboard_24h (
+			provider_id, rank, tokens, jobs, active_accounts,
+			earnings_usd, earnings_work_usd, earnings_rewards_usd,
+			first_seen_at, last_seen_at, generated_at)
+		 VALUES ('p1', 1, 100, 5, 1,
+			1.0, 0.5, 0.5,
+			now()-interval '1 day', now(), now())
+		 ON CONFLICT (provider_id) DO UPDATE SET generated_at = now()`,
+	} {
+		if _, err := adminDB.ExecContext(ctx, q); err != nil {
+			t.Fatalf("seed rotation fixture: %v\nquery: %s", err, q)
+		}
+	}
+	// Rotate the stats_reader role to a known password so the
+	// handler can connect through it (same pattern as Step 3's
+	// applyMigrationsAndStubOLTP — runtime roles are created
+	// NOLOGIN in the migration; test harness rotates them in
+	// memory).
+	if _, err := adminDB.ExecContext(ctx,
+		`ALTER ROLE stats_reader WITH LOGIN PASSWORD 'cli-rotation-test-pw'`,
+	); err != nil {
+		t.Fatalf("rotate stats_reader: %v", err)
+	}
+}
+
+func newStatsHandlerForCLIRotation(t *testing.T, fx *cliPgFixture) http.Handler {
+	t.Helper()
+	readerDSN := fmt.Sprintf("postgres://stats_reader:cli-rotation-test-pw@%s:%s/%s?sslmode=disable",
+		fx.host, fx.port, fx.dbName)
+	readerDB, err := sql.Open("postgres", readerDSN)
+	if err != nil {
+		t.Fatalf("open stats_reader: %v", err)
+	}
+	t.Cleanup(func() { _ = readerDB.Close() })
+	mux := stats.NewMux(
+		statsstore.New(readerDB),
+		stats.CORSConfig{
+			AccessControlMaxAgeSeconds: 60,
+			PartnerOriginAllowlist:     nil,
+		},
+		"full",
+		"",
+		nil,
+		zerolog.Nop(),
+	)
+	return mux.Handler()
+}
 
 const (
 	cliPgImage          = "postgres:16.4-alpine3.20@sha256:5660c2cbfea50c7a9127d17dc4e48543eedd3d7a41a595a2dfa572471e37e64c"
@@ -146,6 +221,53 @@ func extractRawTokenLine(stdout string) string {
 		return ""
 	}
 	return lines[len(lines)-1]
+}
+
+// ===========================================================================
+// AC-17 (subprocess) — round-2 CODE M1 closure: drive the locked SPEC
+// command through `exec.Command(coordinatorBinary, ...)` so argv parsing,
+// env, and the dispatcher all execute in the production code path.
+//
+// In-process variants below (`TestAC17_IssueLockedSPECCommand`,
+// `TestAC17_IssueExplicitCreatedBy`, etc.) retain unit-style coverage
+// of the same surface; this subprocess test additionally proves that
+// `main()` correctly routes the verb and the binary's CSPRNG / sha256 /
+// base64url assembly works end-to-end.
+// ===========================================================================
+func TestAC17_IssueLockedSPECCommand_Subprocess(t *testing.T) {
+	fx, adminDB := startCLIPostgres(t)
+	bin := locateCoordinatorBinary(t)
+	cmd := exec.Command(bin, "partner-keys", "issue",
+		"--admin-dsn", fx.adminDSN(),
+		"--label", "X")
+	// Explicitly UNSET JOURNAL_STREAM so the test mirrors an
+	// interactive operator invocation, not a systemd-captured
+	// one (the journal-stream branch is exercised separately
+	// in `TestIssueJournalStreamSuppresses`).
+	cmd.Env = append(os.Environ(), "JOURNAL_STREAM=")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("subprocess AC-17 exit=%v stderr=%q", err, stderr.String())
+	}
+	raw := extractRawTokenLine(stdout.String())
+	if !tokenRegex.MatchString(raw) {
+		t.Fatalf("subprocess token %q does not match %s; stdout=%q",
+			raw, tokenRegexRawString, stdout.String())
+	}
+	// Verify DB row landed.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var label, prefix string
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT label, prefix FROM partner_keys ORDER BY id DESC LIMIT 1`,
+	).Scan(&label, &prefix); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if label != "X" || prefix != raw[:8] {
+		t.Errorf("row mismatch: label=%q prefix=%q (raw[:8]=%q)", label, prefix, raw[:8])
+	}
 }
 
 // ===========================================================================
@@ -404,10 +526,13 @@ func TestIssueJournalStreamSuppresses(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("JOURNAL_STREAM should suppress stdout token; got exit 0 stdout=%q", stdout)
 	}
-	rawTokenInStdout := strings.Contains(stdout, "mpk_")
-	// Stdout receives only the metadata line, which does NOT include `mpk_*`.
-	if rawTokenInStdout {
-		t.Errorf("raw token leaked to stdout under JOURNAL_STREAM: %q", stdout)
+	// Round-2 CODE M2: assert on the FULL 47-char raw token,
+	// NOT the 8-char `mpk_xxxx` prefix. The metadata line
+	// legitimately carries `prefix=mpk_xxxx` per SPEC §5.4.6
+	// (prefix is operator-permitted; the random 43-char body
+	// is the secret).
+	if tokenRegex.FindString(stdout) != "" {
+		t.Errorf("raw 47-char token leaked to stdout under JOURNAL_STREAM: %q", stdout)
 	}
 	if !strings.Contains(stderr, "JOURNAL_STREAM") {
 		t.Errorf("stderr should explain journal-stream refusal; got %q", stderr)
@@ -433,8 +558,9 @@ func TestIssueTokenOutWritesFile(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--token-out should succeed; got exit=%d stderr=%q", code, stderr)
 	}
-	if strings.Contains(stdout, "mpk_") {
-		t.Errorf("raw token leaked to stdout despite --token-out: %q", stdout)
+	// Round-2 CODE M2: same prefix-vs-full-token distinction.
+	if tokenRegex.FindString(stdout) != "" {
+		t.Errorf("raw 47-char token leaked to stdout despite --token-out: %q", stdout)
 	}
 	info, err := os.Stat(tokenPath)
 	if err != nil {
@@ -494,11 +620,218 @@ func TestTokenRedactionOnFailedInsert(t *testing.T) {
 		t.Errorf("stdout on failed INSERT should be empty; got %q", outB)
 	}
 	// Stderr should NOT contain the previous token, body, or
-	// `token_hash`.
+	// `token_hash`. Round-2 CODE M2 strengthening: also assert
+	// stderr does NOT contain ANY 43-char base64url body (the
+	// failing run's generated body is unknowable to the test —
+	// the structural assertion is "no 43-char body of any
+	// shape leaks into stderr").
 	if strings.Contains(stderrB, rawA) || strings.Contains(stderrB, bodyA) {
 		t.Errorf("stderr leaked prior token / body: %q", stderrB)
 	}
 	if strings.Contains(stderrB, "token_hash =") || strings.Contains(stderrB, "token_hash:") {
 		t.Errorf("stderr leaked token_hash field: %q", stderrB)
+	}
+	if anyBodyRegex.FindString(stderrB) != "" {
+		t.Errorf("stderr contains a 43-char base64url body substring (potential token leak): %q", stderrB)
+	}
+}
+
+// anyBodyRegex matches the 43-char base64url body shape of any
+// `mpk_<body>` token. Used to scan stderr / error paths for
+// "any token body" leaks — even one we didn't generate
+// ourselves (because, by design, we cannot know what the
+// failing run's CSPRNG produced).
+var anyBodyRegex = regexp.MustCompile(`[A-Za-z0-9_-]{43}`)
+
+// ===========================================================================
+// AC-17 subprocess — explicit --created-by variant (CODE r2 M1).
+// ===========================================================================
+func TestAC17_IssueExplicitCreatedBy_Subprocess(t *testing.T) {
+	fx, adminDB := startCLIPostgres(t)
+	bin := locateCoordinatorBinary(t)
+	cmd := exec.Command(bin, "partner-keys", "issue",
+		"--admin-dsn", fx.adminDSN(),
+		"--label", "X",
+		"--created-by", "ops@example.com")
+	cmd.Env = append(os.Environ(), "JOURNAL_STREAM=")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("subprocess --created-by exit=%v stderr=%q", err, stderr.String())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var createdBy string
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT created_by FROM partner_keys ORDER BY id DESC LIMIT 1`,
+	).Scan(&createdBy); err != nil {
+		t.Fatalf("select: %v", err)
+	}
+	if createdBy != "ops@example.com" {
+		t.Errorf("created_by = %q, want ops@example.com", createdBy)
+	}
+}
+
+// ===========================================================================
+// RFC 6454 idempotency subprocess (CODE r2 M1) — the canonical-passes /
+// non-canonical-rejects cases through the compiled binary.
+// ===========================================================================
+func TestIssueAllowedOriginRFC6454_Subprocess(t *testing.T) {
+	fx, _ := startCLIPostgres(t)
+	bin := locateCoordinatorBinary(t)
+	for _, c := range []struct {
+		name     string
+		origin   string
+		wantPass bool
+	}{
+		{"canonical", "https://acme.example", true},
+		{"mixed-case-trailing-slash", "HTTPS://Acme.Example/", false},
+		{"default-port-443", "https://acme.example:443", false},
+	} {
+		c := c
+		t.Run(c.name, func(t *testing.T) {
+			cmd := exec.Command(bin, "partner-keys", "issue",
+				"--admin-dsn", fx.adminDSN(),
+				"--label", c.name,
+				"--allowed-origin", c.origin)
+			cmd.Env = append(os.Environ(), "JOURNAL_STREAM=")
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			passed := err == nil
+			if passed != c.wantPass {
+				t.Errorf("origin %q passed=%v want %v stderr=%q",
+					c.origin, passed, c.wantPass, stderr.String())
+			}
+		})
+	}
+}
+
+// ===========================================================================
+// --burst subprocess (CODE r2 M1) — v0.1.8 removed; flag must reject.
+// ===========================================================================
+func TestIssueBurstFlagRejected_Subprocess(t *testing.T) {
+	fx, _ := startCLIPostgres(t)
+	bin := locateCoordinatorBinary(t)
+	cmd := exec.Command(bin, "partner-keys", "issue",
+		"--admin-dsn", fx.adminDSN(),
+		"--label", "X",
+		"--burst", "100")
+	cmd.Env = append(os.Environ(), "JOURNAL_STREAM=")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("--burst should be rejected; got exit 0 stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "burst") {
+		t.Errorf("stderr should reference --burst; got %q", stderr.String())
+	}
+}
+
+// ===========================================================================
+// Revoke nonexistent subprocess (CODE r2 M1) — clean exit 1 + no panic.
+// ===========================================================================
+func TestRevokeNonexistent_Subprocess(t *testing.T) {
+	fx, _ := startCLIPostgres(t)
+	bin := locateCoordinatorBinary(t)
+	cmd := exec.Command(bin, "partner-keys", "revoke",
+		"--admin-dsn", fx.adminDSN(),
+		"--id", "99999",
+		"--reason", "test")
+	cmd.Env = append(os.Environ(), "JOURNAL_STREAM=")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	if ee, ok := err.(*exec.ExitError); !ok || ee.ExitCode() != 1 {
+		t.Fatalf("revoke nonexistent should exit 1; got %v stderr=%q", err, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no row with id=99999") {
+		t.Errorf("stderr should explain missing row; got %q", stderr.String())
+	}
+}
+
+// ===========================================================================
+// Rotation through Step 3 handler (CODE r2 M1) — issue A + B (--rotate-from
+// A) via subprocess, hit the Step 3 leaderboard handler with both keys,
+// assert both return 200 partner projection BEFORE revoking A. Then revoke
+// A via subprocess, assert A → 401 and B → 200.
+// ===========================================================================
+func TestRotationThroughHandler_Subprocess(t *testing.T) {
+	fx, adminDB := startCLIPostgres(t)
+	bin := locateCoordinatorBinary(t)
+
+	issueViaCLI := func(label string, rotateFrom string) string {
+		args := []string{"partner-keys", "issue",
+			"--admin-dsn", fx.adminDSN(),
+			"--label", label}
+		if rotateFrom != "" {
+			args = append(args, "--rotate-from", rotateFrom)
+		}
+		cmd := exec.Command(bin, args...)
+		cmd.Env = append(os.Environ(), "JOURNAL_STREAM=")
+		var stdout, stderr bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("issue %s: %v stderr=%q", label, err, stderr.String())
+		}
+		raw := extractRawTokenLine(stdout.String())
+		if !tokenRegex.MatchString(raw) {
+			t.Fatalf("issue %s: token %q does not match", label, raw)
+		}
+		return raw
+	}
+
+	rawA := issueViaCLI("A", "")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var aID int64
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT id FROM partner_keys WHERE label='A' ORDER BY id DESC LIMIT 1`,
+	).Scan(&aID); err != nil {
+		t.Fatalf("find A id: %v", err)
+	}
+	rawB := issueViaCLI("B", fmt.Sprintf("%d", aID))
+
+	// Stand up the Step 3 handler against this DB. We seed the
+	// leaderboard rollup just enough for the partner projection
+	// to render (a single row in stats_leaderboard_24h + a fresh
+	// stats_components_health entry) so the handler returns 200
+	// instead of 503 stale.
+	seedRotationHandlerFixture(t, adminDB)
+	mux := newStatsHandlerForCLIRotation(t, fx)
+
+	probe := func(token string) int {
+		req := httptest.NewRequest(http.MethodGet,
+			"http://stats.streamvc.live/v1/stats/leaderboard?window=24h", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	if got := probe(rawA); got != http.StatusOK {
+		t.Fatalf("A pre-revoke: got %d, want 200", got)
+	}
+	if got := probe(rawB); got != http.StatusOK {
+		t.Fatalf("B pre-revoke: got %d, want 200", got)
+	}
+
+	// Revoke A.
+	cmd := exec.Command(bin, "partner-keys", "revoke",
+		"--admin-dsn", fx.adminDSN(),
+		"--id", fmt.Sprintf("%d", aID),
+		"--reason", "rotation completed")
+	cmd.Env = append(os.Environ(), "JOURNAL_STREAM=")
+	var rstderr bytes.Buffer
+	cmd.Stderr = &rstderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("revoke A: %v stderr=%q", err, rstderr.String())
+	}
+
+	if got := probe(rawA); got != http.StatusUnauthorized {
+		t.Errorf("A post-revoke: got %d, want 401", got)
+	}
+	if got := probe(rawB); got != http.StatusOK {
+		t.Errorf("B post-revoke: got %d, want 200", got)
 	}
 }
