@@ -30,17 +30,19 @@ Other locked v0.1.8 behavior:
 - §6.6.2 partner-key exact-$ disclosure obligation; OPS.md
   §10.5 sign-off template.
 
-Delivered in PR [Augustas11/macprovider#173][pr173] across four
-audit-converged steps:
+Delivered in PR [Augustas11/macprovider#173][pr173] across six
+audit-converged steps (all six landed on a single PR so each row
+cites #173; future v0.2 releases will split per-step PRs and the
+table will carry distinct numbers):
 
-| Step | Scope | Audit-loop rounds |
-|------|-------|-------------------|
-| 1    | Postgres pools + 4-role grants + lint surface       | 1 round |
-| 2    | Rollup runner (7 components) + drift detection + retention | 10 rounds |
-| 3    | HTTP handlers + 7-layer middleware + §5.4.3 dispatcher | 8 rounds |
-| 4.A  | `coordinator partner-keys` + `coordinator visibility revert` CLI | 4 rounds |
-| 4.B  | Nginx vhost + cache + rate-limit + Pearl deploy pipeline | 4 rounds |
-| 4.C  | Structured-log events + Prometheus metrics + OPS.md + this changelog | (this PR) |
+| Step | PR | Scope | Audit-loop rounds |
+|------|-----|-------|-------------------|
+| 1    | [#173][pr173] | Postgres pools + 4-role grants + lint surface       | 1 round |
+| 2    | [#173][pr173] | Rollup runner (7 components) + drift detection + retention | 10 rounds |
+| 3    | [#173][pr173] | HTTP handlers + 7-layer middleware + §5.4.3 dispatcher | 8 rounds |
+| 4.A  | [#173][pr173] | `coordinator partner-keys` + `coordinator visibility revert` CLI | 4 rounds |
+| 4.B  | [#173][pr173] | Nginx vhost + cache + rate-limit + Pearl deploy pipeline | 4 rounds |
+| 4.C  | [#173][pr173] | Structured-log events + Prometheus metrics + OPS.md + this changelog | (this PR) |
 
 Step 4.C metrics surface (per `internal/stats/metrics/metrics.go`):
 

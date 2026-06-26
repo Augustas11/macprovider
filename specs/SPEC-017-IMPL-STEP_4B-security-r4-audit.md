@@ -166,4 +166,3 @@ stats nginx config sets `error_log debug`.
   Docker skip for the nginx behavior smoke.
 - INFO: `git diff --check` passes on the reviewed Step 4.B nginx, deploy, CI,
   and audit files.
-

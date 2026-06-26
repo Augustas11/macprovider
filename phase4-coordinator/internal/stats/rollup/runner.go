@@ -230,6 +230,17 @@ func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(c
 	// duration_ms. `generated_at` here is the wall-clock tick
 	// completion time (the underlying job ALSO writes
 	// stats_components_health.generated_at to the same value).
+	//
+	// Round-1 CODE H3 fix: only emit the event for ticks that own
+	// a §9.5 component identity. The `rewards_populated` tick has
+	// `c=""` because the underlying rewards-populated state is
+	// scalar (per §6.4 — covers all four leaderboard windows
+	// jointly) and isn't a §9.5 component. Emitting an empty
+	// `component` would corrupt downstream dashboards grouping by
+	// component.
+	if c == "" {
+		return
+	}
 	finishedAt := time.Now().UTC()
 	r.logger.Info().
 		Str("event", "stats_rollup_tick_completed").
@@ -271,6 +282,14 @@ func (r *Runner) spawnNightlyRebuild(ctx context.Context) {
 					Str("job", "nightly_rebuild").
 					Str("recovered_class", classifyPanic(rec)).
 					Msg("nightly rebuild panic recovered; will retry tomorrow")
+				// Round-1 CODE H2 fix: per SPEC §9.4 the
+				// nightly rebuild is a rollup path; its
+				// panic MUST increment stats_rollup_errors_total
+				// for the affected leaderboard components.
+				if r.metrics != nil {
+					r.metrics.RollupErrorsTotal.WithLabelValues("leaderboard_30d").Inc()
+					r.metrics.RollupErrorsTotal.WithLabelValues("leaderboard_all").Inc()
+				}
 			}
 		}()
 		heartbeat := time.NewTicker(1 * time.Minute)
@@ -292,6 +311,13 @@ func (r *Runner) spawnNightlyRebuild(ctx context.Context) {
 				lastFiredOn = doy
 				if err := runNightlyRebuild(ctx, r.db, r.cfg, r.logger); err != nil {
 					r.logger.Warn().Err(err).Msg("nightly rebuild error; will retry tomorrow")
+					// Round-1 CODE H2 fix: nightly rebuild
+					// error path mirrors the panic path's metric
+					// emit (SPEC §9.6).
+					if r.metrics != nil {
+						r.metrics.RollupErrorsTotal.WithLabelValues("leaderboard_30d").Inc()
+						r.metrics.RollupErrorsTotal.WithLabelValues("leaderboard_all").Inc()
+					}
 				}
 			}
 		}

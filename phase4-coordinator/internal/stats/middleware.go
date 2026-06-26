@@ -106,16 +106,31 @@ func recoverMiddleware(logger zerolog.Logger) func(http.Handler) http.Handler {
 				// the panic value's stringification — it could
 				// carry SQL state, env var values, or other
 				// sensitive substrings.
+				// Round-1 ARCH H1 fix: emit ONLY the locked
+				// `stats_handler_panic` event with the BUILD §2
+				// Step 4.C field set (`request_id`, `route`).
+				// `panic_type` retained (type-only, not the
+				// payload string) so dashboards can group by
+				// recovered class without taking the public
+				// log line beyond the locked taxonomy. The
+				// `_stack` tag was widening the event surface
+				// beyond the six-event contract.
+				requestID := r.Header.Get("X-Request-Id")
+				if requestID == "" {
+					requestID = r.Header.Get("X-Correlation-Id")
+				}
 				logger.Error().
 					Str("event", "stats_handler_panic").
-					Str("path", r.URL.Path).
-					Str("method", r.Method).
+					Str("route", trimEndpointFromPath(r.URL.Path)).
+					Str("request_id", requestID).
 					Type("panic_type", rec).
 					Msg("stats handler panicked; returning 500 internal")
+				// Private debug-only stack dump WITHOUT a
+				// `stats_*` event tag (NOT part of the public
+				// event taxonomy; intended for operator triage).
 				logger.Debug().
-					Str("event", "stats_handler_panic_stack").
 					Bytes("stack", debug.Stack()).
-					Msg("stats handler panic stack")
+					Msg("stats handler panic stack (debug-only, untagged)")
 				// Best-effort 500 emit. If the underlying
 				// handler already wrote a response, this will
 				// no-op via the ResponseWriter contract.
@@ -190,6 +205,13 @@ func accessLogMiddleware(logger zerolog.Logger, m *metrics.Metrics) func(http.Ha
 				tier := "public"
 				if pkid != 0 {
 					tier = "partner"
+				}
+				// Round-1 CODE H1: the auth-failure limiter
+				// reject sets a context override BEFORE this
+				// middleware reads the tier; use it when
+				// present so the counter labels are accurate.
+				if over := tierOverrideFromContext(r.Context()); over != "" {
+					tier = over
 				}
 				m.RequestTotal.WithLabelValues(endpoint, strconv.Itoa(status), tier).Inc()
 				if pkid != 0 {

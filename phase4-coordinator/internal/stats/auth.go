@@ -95,6 +95,24 @@ func generatedAtAgeMsFromContext(ctx context.Context) int64 {
 	return obs.GeneratedAtAgeMs
 }
 
+// tierOverrideKey lets the dispatcher tag a request as
+// `auth_failure` tier when the auth-failure limiter fires 429
+// pre-SELECT. Without this, the access-log middleware would
+// label that 429 as `tier="public"` (the default for any
+// request without a matched partner_key) and dashboards
+// couldn't distinguish public quota exhaustion from invalid-
+// bearer floods (round-1 CODE H1 fix).
+type tierOverrideKey struct{}
+
+func withTierOverrideContext(ctx context.Context, tier string) context.Context {
+	return context.WithValue(ctx, tierOverrideKey{}, tier)
+}
+
+func tierOverrideFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(tierOverrideKey{}).(string)
+	return v
+}
+
 // authResult bundles the §5.4.3 dispatch outcome.
 type authResult struct {
 	// projection picks the response shape. One of:

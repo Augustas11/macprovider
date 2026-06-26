@@ -640,6 +640,13 @@ The predecessor row stays `revoked_at = NULL` after the new issue —
 revoking is a separate operator action. Both keys unlock the partner
 projection until the revoke fires.
 
+**If this fails:** if the `issue` command exits non-zero AFTER the
+INSERT (e.g. operator's terminal closed during the stdout print, or
+`--token-out` file write failed), the CLI's stderr names the orphan
+row id and the exact `revoke` command to run before re-issuing. If
+`revoke` itself fails, inspect via `coordinator partner-keys list`
+to confirm the row state and re-run with the correct id.
+
 ### 10.2 Revoking a partner key in incident
 
 ```bash
@@ -650,6 +657,12 @@ sudo -u macprovider /opt/macprovider/coordinator partner-keys revoke \
 
 The next request bearing this token returns 401 with the §5.9
 `unauthorized` envelope. Existing in-flight requests complete.
+
+**If this fails:** the CLI returns `no row with id=N` when the id
+doesn't exist OR `id=N was already revoked at <ts>` if it had been
+previously revoked — both are clean exits and require no further
+action. If `revoke` returns a Postgres connection error, fix the
+admin DSN / connectivity and re-run; the revoke is idempotent.
 
 ### 10.3 Restarting the rollup scheduler after a panic-restart loop
 
@@ -667,6 +680,13 @@ sudo journalctl -u macprovider-coordinator -n 200 | grep stats_rollup_panic
 sudo nano /opt/macprovider/coordinator.yaml   # set the interval to 0
 sudo systemctl restart macprovider-coordinator
 ```
+
+**If this fails:** if the coordinator process itself crashed (not
+just one rollup tick), systemd auto-restarts via the unit's
+`Restart=on-failure` directive — confirm with `systemctl status
+macprovider-coordinator`. If the unit enters a tight restart
+loop, disable it (`systemctl disable --now macprovider-coordinator`)
+and investigate offline before re-enabling.
 
 ### 10.4 Emergency provider-visibility revert (operator-only)
 
@@ -689,6 +709,14 @@ provider-authenticated portal flow.
 operator-redirect message. AC-20 CI assertion catches any
 `new_mode='exact' AND actor_kind='operator'` row in
 `provider_visibility_audit` on every PR.
+
+**If this fails:** the CLI prints `no provider_visibility row for
+id=<X>` when the provider has never opted into `exact` (default is
+`bucketed` — nothing to revert) OR `id=<X> is already 'bucketed'
+(nothing to revert)` for the same row twice. Both are clean exits
+and write nothing. If `revert` fails with a Postgres error, fix
+the admin DSN and retry — the whole revert runs in one
+transaction, so no partial state exists.
 
 ### 10.5 Partner-key exact-dollar exposure — provider disclosure obligation
 

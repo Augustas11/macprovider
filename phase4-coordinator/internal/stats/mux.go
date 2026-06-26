@@ -108,6 +108,14 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 			reservedKey = "authfail|" + ip + "|" + endpoint
 			if !m.authFailLimit.allow(reservedKey, now, 300) {
 				retry := 60
+				// Round-1 CODE H1 fix: tag the request as
+				// auth-failure tier so the access-log middleware
+				// labels the rate_limit_exceeded counter
+				// correctly. Without this the 429 lands as
+				// `tier="public"` and dashboards can't
+				// distinguish auth-failure floods from public
+				// quota exhaustion.
+				r = r.WithContext(withTierOverrideContext(r.Context(), "auth_failure"))
 				writeError(w, r, http.StatusTooManyRequests, codeRateLimited, "rate limited", now, &retry)
 				return
 			}

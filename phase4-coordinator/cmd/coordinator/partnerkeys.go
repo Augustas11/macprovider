@@ -287,16 +287,17 @@ RETURNING id, created_at`
 	// Step 4.C — locked §8.5 event for a successful issuance.
 	// Fields per BUILD §2 Step 4.C: partner_keys.id, label,
 	// created_by, rotated_from_id_or_null. NEVER the raw token,
-	// 43-char body, or token_hash bytes. The event lands on
+	// 43-char body, token_hash bytes, OR the `prefix` substring
+	// (round-1 ARCH H2 / SECURITY H1 — prefix is operator-
+	// permitted in §5.4.5 list output but is OUTSIDE the
+	// narrower structured-event taxonomy). The event lands on
 	// stderr-bound zerolog so it survives JOURNAL_STREAM-aware
 	// stdout suppression (operator still gets the audit trail).
 	emitPartnerKeyEvent(stderr, "stats_partner_key_issued", map[string]any{
 		"id":              id,
 		"label":           *label,
-		"prefix":          prefix,
 		"created_by":      principal,
 		"rotated_from_id": nullInt64String(rotatedFrom),
-		"created_at":      createdAt.UTC().Format(time.RFC3339),
 	})
 
 	// Print metadata first (operator-facing diagnostic). The
