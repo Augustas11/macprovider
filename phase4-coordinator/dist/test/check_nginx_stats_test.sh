@@ -291,11 +291,19 @@ rm -rf "$TMP/cache"/* 2>/dev/null || true
 CACHE_BEFORE=$(find "$TMP/cache" -type f 2>/dev/null | wc -l | tr -d ' ')
 # Anonymous warm-up so the public projection IS allowed to land
 # in the cache (proves the cache itself works — distinguishes
-# "no entry" from "cache disabled entirely").
-curl -sf -o /dev/null "${BASE}/v1/stats/leaderboard"
+# "no entry" from "cache disabled entirely"). Capture status
+# code + body for diagnostics so a future false-fail surfaces
+# whether curl returned 502 (upstream unreachable) or 200 + no
+# cache write (permissions or temp-path issue).
+WARM_STATUS=$(curl -s -o "$TMP/warm-body.txt" -w '%{http_code}' "${BASE}/v1/stats/leaderboard")
 sleep 1
 CACHE_AFTER_PUBLIC=$(find "$TMP/cache" -type f 2>/dev/null | wc -l | tr -d ' ')
 if [ "$CACHE_AFTER_PUBLIC" -le "$CACHE_BEFORE" ]; then
+  echo "DEBUG: warm-up status=${WARM_STATUS}; body=$(head -c200 "$TMP/warm-body.txt" 2>/dev/null)" >&2
+  echo "DEBUG: nginx error log (last 30 lines):" >&2
+  docker exec "$NGINX_CID" tail -30 /var/log/nginx/error.log 2>&1 >&2 || true
+  echo "DEBUG: cache dir inside container:" >&2
+  docker exec "$NGINX_CID" sh -c 'ls -la /var/cache/nginx/stats/ 2>&1 && id' >&2 || true
   fail "cache test: public projection did NOT land in cache (cache may be misconfigured): before=$CACHE_BEFORE after=$CACHE_AFTER_PUBLIC"
 fi
 
