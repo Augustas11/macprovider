@@ -24,6 +24,7 @@ import (
 	"github.com/augstar/macprovider-coordinator/internal/requestlog"
 	"github.com/augstar/macprovider-coordinator/internal/stats"
 	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
+	statsstore "github.com/augstar/macprovider-coordinator/internal/stats/store"
 	"github.com/augstar/macprovider-coordinator/internal/tier2"
 	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 
@@ -481,6 +482,30 @@ func main() {
 	if cfg.Auth.RequireProviderTokens {
 		providerMux.Handle("/providers/", billingHandler)
 	}
+
+	// SPEC-017 v0.1.8 Step 3 — /v1/stats/* mux subtree. Mounts
+	// only when stats.enabled = true. The handler stack uses
+	// the stats_reader pool exclusively (no admin DSN, no
+	// rollup pool). Per BUILD §2 Step 3 the same binary serves
+	// both coordinator.streamvc.live/v1/stats/* and
+	// stats.streamvc.live/v1/stats/*; nginx vhost config
+	// (Step 4.B) routes both to this provider port.
+	if statsPools != nil {
+		statsHandler := stats.NewMux(
+			statsstore.New(statsPools.Reader),
+			stats.CORSConfig{
+				AccessControlMaxAgeSeconds: cfg.Stats.CORS.AccessControlMaxAgeSeconds,
+				PartnerOriginAllowlist:     cfg.Stats.CORS.PartnerOriginAllowlist,
+			},
+			cfg.Stats.Rollup.BackfillMode,
+			cfg.Stats.Rollup.PartialHistorySince,
+			cfg.Stats.TrustedProxies,
+			logger.With().Str("subsystem", "stats_handlers").Logger(),
+		).Handler()
+		providerMux.Handle("/v1/stats/", statsHandler)
+		logger.Info().Msg("SPEC-017 stats handlers mounted at /v1/stats/{overview,leaderboard,health}")
+	}
+
 	providerHTTP := newHTTPServer(providerAddr, providerMux)
 	buyerHTTP := newHTTPServer(buyerAddr, buyerServer.Handler())
 	errs := make(chan error, 2)
