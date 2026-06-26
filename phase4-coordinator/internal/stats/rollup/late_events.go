@@ -7,6 +7,20 @@ import (
 	"time"
 )
 
+// lateEventsAdvisoryLockKey serializes concurrent
+// `detectLateEvents` calls across the 30d + all per-window
+// goroutines. Without it, two NOT EXISTS-anti-join INSERTs
+// running concurrently under READ COMMITTED can both observe
+// the absence of a `source_billing_row` and both insert it,
+// producing duplicate rows (CODE r2 HIGH 2 fix).
+//
+// Same pattern as the Step 1 migrations advisory lock — a
+// stable precomputed BIGINT derived from the literal
+// `spec017_late_events`. Re-derive with `hashtextextended()` on
+// Postgres 16 if the value ever drifts; the const is the
+// migration package's contract.
+const lateEventsAdvisoryLockKey int64 = 7521693845691207413
+
 // detectLateEvents records billing-row corrections older than
 // the §9.3 lookback boundary into `stats_late_events`. v0.1 IMPL
 // runs this AFTER each 30d/all rollup tick (BUILD §C.3 + §9.3:
@@ -14,23 +28,29 @@ import (
 //
 // Selection: any OLTP row joining authenticated `provider_tokens`
 // AND `ts_utc < (now - LateEventsLookbackHours)` is a candidate.
-// Dedup: `NOT EXISTS` on `source_billing_row` so re-running on
-// every tick is idempotent (no UNIQUE constraint on
-// `stats_late_events` per SPEC §9.1; we enforce uniqueness at
-// INSERT-time via the anti-join). Per BUILD §D.3, the helper
-// supplies `event_unix_ts`, `provider_id`, `delta_tokens`, and
-// `source_billing_row` — `delta_usd` is NULL because the row's
-// per-event USD requires the per-snapshot credits→USD conversion
-// factor which is not the v0.1 IMPL's responsibility here.
+// Dedup: `NOT EXISTS` on `source_billing_row` so re-running is
+// idempotent (no UNIQUE constraint on `stats_late_events` per
+// SPEC §9.1). A Postgres advisory lock (acquired on a dedicated
+// connection for the duration of this function) serializes the
+// 30d + all concurrent invocations so the anti-join cannot
+// race.
 //
-// v0.1 simplification documented in this file's earlier draft:
-// the SPEC §9.3 INCREMENTAL MERGE optimization is deferred.
-// `detectLateEvents` exists now (round-1 ARCH r1 HIGH 1 + CODE
-// r1 CRIT-2 fix) so the late-event TABLE is populated for
-// operator forensics and the nightly rebuild's reconciliation
-// data path, but the incremental-merge optimization itself
-// (avoiding the full recompute) remains a v0.2 candidate.
+// v0.1 simplification: SPEC §9.3 incremental-merge optimization
+// stays deferred (cadence ticks still full-recompute the
+// window). The late-event TABLE is populated for nightly
+// reconciliation + operator forensics.
 func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string, now time.Time) error {
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("late events acquire conn: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `SELECT pg_advisory_lock($1)`, lateEventsAdvisoryLockKey); err != nil {
+		return fmt.Errorf("late events acquire lock: %w", err)
+	}
+	defer func() {
+		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, lateEventsAdvisoryLockKey)
+	}()
 	cutoff := lateEventBoundary(now, cfg.LateEventsLookbackHours)
 	winStart := windowStart(window, now, cfg.PartialHistorySinceUnix)
 
@@ -52,7 +72,7 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
                 WHERE sle.source_billing_row = 'lrc:' || lrc.id::TEXT
            )
     `
-	if _, err := db.ExecContext(ctx, workQ, cutoff, winStart); err != nil {
+	if _, err := conn.ExecContext(ctx, workQ, cutoff, winStart); err != nil {
 		return fmt.Errorf("late events work: %w", err)
 	}
 
@@ -72,7 +92,7 @@ func detectLateEvents(ctx context.Context, db *sql.DB, cfg Config, window string
                 WHERE sle.source_billing_row = 'prl:' || prl.id::TEXT
            )
     `
-	if _, err := db.ExecContext(ctx, rewardsQ, cutoff, winStart); err != nil {
+	if _, err := conn.ExecContext(ctx, rewardsQ, cutoff, winStart); err != nil {
 		return fmt.Errorf("late events rewards: %w", err)
 	}
 

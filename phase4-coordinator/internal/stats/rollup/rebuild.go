@@ -155,15 +155,27 @@ func emitDriftEvents(window string, pre map[string]preRebuildRow, rebuilt []lead
 	}
 }
 
-func emitDriftIfExceeds(window, axis, pid string, prev, current, threshold float64, logger zerolog.Logger) {
-	denom := current
-	if denom == 0 {
-		denom = prev
+// emitDriftIfExceeds implements the pinned SPEC §9.4 v0.1 drift
+// formula: `(rebuild - incremental) / max(rebuild, 1) > threshold`.
+//
+// Round-2 CODE r2 MEDIUM 1 fix: the earlier draft used a
+// `current ?: prev` denominator which overstated drift for
+// sub-unit rebuild values (e.g. $0.50 rebuild vs $0.49
+// incremental shows 2% drift). The pinned `max(rebuild, 1)`
+// denominator suppresses noise on sub-unit values — at the
+// dollar magnitudes the leaderboard tracks, sub-cent rounding
+// is below threshold.
+//
+// `rebuild` is the post-recompute value; `incremental` is the
+// pre-rebuild snapshot. The function uses ABSOLUTE delta so a
+// negative rebuild-vs-incremental delta (incremental had MORE)
+// also fires.
+func emitDriftIfExceeds(window, axis, pid string, incremental, rebuild, threshold float64, logger zerolog.Logger) {
+	denom := rebuild
+	if denom < 1 {
+		denom = 1
 	}
-	if denom == 0 {
-		return
-	}
-	delta := current - prev
+	delta := rebuild - incremental
 	if delta < 0 {
 		delta = -delta
 	}
@@ -177,8 +189,8 @@ func emitDriftIfExceeds(window, axis, pid string, prev, current, threshold float
 		Str("axis", axis).
 		Str("provider_id_sample", pid).
 		Float64("delta_ratio", ratio).
-		Float64("rebuild_value", current).
-		Float64("incremental_value", prev).
+		Float64("rebuild_value", rebuild).
+		Float64("incremental_value", incremental).
 		Float64("threshold", threshold).
 		Msg("rollup drift exceeds threshold; rebuild value wins")
 }

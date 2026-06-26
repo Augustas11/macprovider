@@ -513,18 +513,23 @@ func TestShapeCRebuild_FailedRollback(t *testing.T) {
 
 // (ii) Successful rebuild: MVCC ensures no observer sees an
 //
-//	empty leaderboard during the transaction.
+//	empty OR PARTIAL leaderboard during the rebuild
+//	transaction. Round-2 CODE r2 HIGH 3 fix: R0 and R1 have
+//	DISTINCT row counts (3 vs 5) so the concurrent reader can
+//	distinguish "saw R0", "saw R1", "saw a mid-tx partial".
 func TestShapeCRebuild_MVCCNoEmptyState(t *testing.T) {
 	fx, adminDB := setupRollupFixture(t)
 	rdb := rollupDB(t, fx)
-	seedProviderTokens(t, adminDB, "p_a", "p_b", "p_c")
+	logger := zerolog.Nop()
 	now := time.Now().UTC()
-	for _, pid := range []string{"p_a", "p_b", "p_c"} {
+
+	r0Providers := []string{"p_r0_a", "p_r0_b", "p_r0_c"}
+	seedProviderTokens(t, adminDB, r0Providers...)
+	for _, pid := range r0Providers {
 		seedLedgerRow(t, adminDB, pid, now.Add(-2*time.Hour), 10, 10, 1_000_000)
 	}
 
-	// Populate R0.
-	logger := zerolog.Nop()
+	// Populate R0 via a cadence tick.
 	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -535,9 +540,18 @@ func TestShapeCRebuild_MVCCNoEmptyState(t *testing.T) {
 	cancel()
 	runner.Wait()
 
-	// Concurrent reader: poll count; record any observation.
+	// Seed 2 more providers so the rebuild's R1 has 5 rows.
+	r1Extra := []string{"p_r1_d", "p_r1_e"}
+	seedProviderTokens(t, adminDB, r1Extra...)
+	for _, pid := range r1Extra {
+		seedLedgerRow(t, adminDB, pid, now.Add(-2*time.Hour), 10, 10, 1_000_000)
+	}
+
+	// Concurrent reader: poll count; record any observation
+	// that isn't 3 (R0) or 5 (R1).
 	stopReader := make(chan struct{})
-	var observedZero atomic.Bool
+	var observedMixed atomic.Bool
+	var lastCount atomic.Int64
 	go func() {
 		for {
 			select {
@@ -549,33 +563,112 @@ func TestShapeCRebuild_MVCCNoEmptyState(t *testing.T) {
 			row := adminDB.QueryRowContext(context.Background(),
 				`SELECT COUNT(*) FROM stats_leaderboard_all`,
 			)
-			if err := row.Scan(&c); err == nil && c == 0 {
-				observedZero.Store(true)
+			if err := row.Scan(&c); err == nil {
+				lastCount.Store(int64(c))
+				if c != 3 && c != 5 {
+					observedMixed.Store(true)
+				}
 			}
 			time.Sleep(2 * time.Millisecond)
 		}
 	}()
 
-	// Run rebuild.
 	cfg := freshRollupConfig().DefaultsApplied()
 	if err := statsrollup.RunNightlyRebuild(context.Background(), rdb, cfg, logger); err != nil {
 		t.Fatalf("rebuild: %v", err)
 	}
 
 	close(stopReader)
-	if observedZero.Load() {
-		t.Error("concurrent reader observed empty leaderboard during rebuild; Shape C MVCC invariant violated")
+	if observedMixed.Load() {
+		t.Errorf("concurrent reader saw mid-rebuild partial state (last observed count=%d, expected 3 or 5); Shape C MVCC invariant violated", lastCount.Load())
 	}
 
-	// Verify post-commit equivalence: R1 has the same providers.
 	var c int
 	if err := adminDB.QueryRowContext(context.Background(),
 		`SELECT COUNT(*) FROM stats_leaderboard_all`,
 	).Scan(&c); err != nil {
 		t.Fatalf("post-rebuild count: %v", err)
 	}
-	if c != 3 {
-		t.Errorf("post-rebuild count = %d, want 3", c)
+	if c != 5 {
+		t.Errorf("post-rebuild count = %d, want 5 (R1)", c)
+	}
+}
+
+// ==========================================================================
+// rpm-only failure isolation: tpm continues fresh when rpm fails
+// (per-component fault isolation). Round-2 CODE r2 MEDIUM 2 fix.
+// ==========================================================================
+func TestRollupTimeseriesPerComponentFailureIsolation(t *testing.T) {
+	fx, adminDB := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+
+	seedProviderTokens(t, adminDB, "p_x")
+	now := time.Now().UTC()
+	seedLedgerRow(t, adminDB, "p_x", now.Add(-5*time.Minute), 10, 10, 1_000_000)
+
+	// Break the rpm table by adding a CHECK that no row can
+	// satisfy. The tpm tick continues working.
+	if _, err := adminDB.ExecContext(context.Background(),
+		`ALTER TABLE stats_timeseries_rpm_30m ADD CONSTRAINT _rpm_break CHECK (false) NOT VALID`,
+	); err != nil {
+		t.Fatalf("add rpm break: %v", err)
+	}
+	defer func() {
+		_, _ = adminDB.ExecContext(context.Background(),
+			`ALTER TABLE stats_timeseries_rpm_30m DROP CONSTRAINT IF EXISTS _rpm_break`,
+		)
+	}()
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.Start(ctx)
+	time.Sleep(700 * time.Millisecond)
+	cancel()
+	runner.Wait()
+
+	var rpmErrAt sql.NullTime
+	var tpmGenAt time.Time
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT last_error_at FROM stats_components_health WHERE component = 'timeseries_rpm'`,
+	).Scan(&rpmErrAt); err != nil {
+		t.Fatalf("rpm health scan: %v", err)
+	}
+	if err := adminDB.QueryRowContext(context.Background(),
+		`SELECT generated_at FROM stats_components_health WHERE component = 'timeseries_tpm'`,
+	).Scan(&tpmGenAt); err != nil {
+		t.Fatalf("tpm health scan: %v", err)
+	}
+
+	if !rpmErrAt.Valid {
+		t.Error("rpm last_error_at not set; rpm tick should have failed")
+	}
+	if time.Since(tpmGenAt) > 10*time.Second {
+		t.Errorf("tpm generated_at stale: %v (now: %v); component isolation broken", tpmGenAt, time.Now())
+	}
+}
+
+// ==========================================================================
+// Retention clamp+warn: New(LateEventsRetentionDays=15) clamps
+// to 30 without erroring. Round-2 ARCH r2 LOW 1 + BUILD §E.2.
+// ==========================================================================
+func TestRollupRetentionClampWarn(t *testing.T) {
+	fx, _ := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+	logger := zerolog.Nop()
+
+	cfg := freshRollupConfig()
+	cfg.LateEventsRetentionDays = 15
+
+	runner, err := statsrollup.New(rdb, cfg, statsrollup.ZeroSnapshotProvider{}, logger)
+	if err != nil {
+		t.Fatalf("New with retention=15 (should clamp + warn, not error): %v", err)
+	}
+	if runner == nil {
+		t.Fatal("runner.New returned nil")
 	}
 }
 
@@ -726,11 +819,14 @@ func TestRollupGeneratedAtConsistency(t *testing.T) {
 }
 
 // ==========================================================================
-// blocked_from_partner_projection = TRUE excludes provider from
-// leaderboard storage entirely (v0.1.7 column stub becomes
-// load-bearing here). Step 2 round-1 ARCH r1 HIGH 3 fix.
+// blocked_from_partner_projection = TRUE is a v0.1 column STUB —
+// the rollup MUST NOT branch on it (SPEC §6.1 + §11 Q11; BUILD
+// §6). Step 2 round-2 ARCH/CODE/SECURITY r2 HIGH 1 fix: this
+// test now asserts the v0.1 contract — blocked providers STILL
+// appear in leaderboard storage; v0.2 will define partner-
+// projection suppression semantics.
 // ==========================================================================
-func TestRollupBlockedProviderExcluded(t *testing.T) {
+func TestRollupBlockedProviderStillAppearsInV01(t *testing.T) {
 	fx, adminDB := setupRollupFixture(t)
 	rdb := rollupDB(t, fx)
 	logger := zerolog.Nop()
@@ -739,7 +835,6 @@ func TestRollupBlockedProviderExcluded(t *testing.T) {
 	now := time.Now().UTC()
 	seedLedgerRow(t, adminDB, "p_blocked", now.Add(-1*time.Hour), 100, 100, 1_000_000)
 
-	// Mark as blocked.
 	if _, err := adminDB.ExecContext(context.Background(),
 		`INSERT INTO provider_visibility (provider_id, mode, blocked_from_partner_projection)
          VALUES ('p_blocked', 'bucketed', TRUE)`,
@@ -763,8 +858,8 @@ func TestRollupBlockedProviderExcluded(t *testing.T) {
 	).Scan(&n); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if n != 0 {
-		t.Errorf("p_blocked appeared in leaderboard despite blocked_from_partner_projection=TRUE: count=%d", n)
+	if n != 1 {
+		t.Errorf("v0.1 rollup MUST NOT branch on blocked_from_partner_projection (§6.1 + §11 Q11); p_blocked count = %d, want 1", n)
 	}
 }
 

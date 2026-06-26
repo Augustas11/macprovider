@@ -166,15 +166,18 @@ func computeLeaderboardRows(ctx context.Context, db *sql.DB, cfg Config, window 
 	zeroRat := big.NewRat(0, 1)
 	rows := make([]leaderboardRow, 0, len(providerIDs))
 	for pid := range providerIDs {
-		// HIGH 3 fix: provider_visibility left-join default
-		// tuple — absent row defaults to `mode='bucketed' AND
-		// blocked=FALSE`. v0.1 storage filter: when blocked,
-		// EXCLUDE the row from the leaderboard so neither
-		// the public nor partner projection in Step 3 sees it.
-		v, present := visibility[pid]
-		if present && v.Blocked {
-			continue
-		}
+		// Round-2 ARCH/CODE/SECURITY r2 unanimous HIGH 1 fix:
+		// v0.1 §6.1 + §11 Q11 + BUILD §6 explicitly forbid
+		// branching on `blocked_from_partner_projection`. The
+		// rollup MAY load the column for join-evidence (left-
+		// join semantics demonstration) but MUST NOT remove
+		// the provider from leaderboard storage based on it.
+		// SPEC v0.2 will define the partner-projection
+		// suppression semantics; v0.1 ships the column as a
+		// stub only. Reading the value into `_` keeps the
+		// load-bearing default-tuple coverage from r1 while
+		// honoring the v0.1 contract.
+		_ = visibility[pid] // intentional read; do NOT branch on .Blocked in v0.1
 
 		w, hasWork := work[pid]
 		workUSD := usdFromCredits(w.credits, cfg.UsdPerMillionCredits)

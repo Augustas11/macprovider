@@ -212,21 +212,26 @@ func main() {
 		case "full":
 			partialUnix = 0
 		case "partial":
+			// Round-2 ARCH r2 HIGH 2 fix: backfill_mode = "partial"
+			// requires a non-empty RFC 3339 partial_history_since
+			// when stats.enabled = true. Path A semantics demand
+			// a rollup-start boundary that Step 3 can emit as
+			// the JSON `partial_history_since` field. Empty +
+			// partial would silently behave like "full" while
+			// leaving Step 3 with no field to emit — two
+			// conforming sessions could disagree about which
+			// path is in effect. Force the operator to be
+			// explicit.
 			if cfg.Stats.Rollup.PartialHistorySince == "" {
-				// Allow empty for dev/test: partial mode with
-				// no boundary behaves identically to full at
-				// the OLTP-scan layer. The §9.7 Step 3
-				// `partial_history_since` JSON field is only
-				// emitted when a boundary is set.
-				partialUnix = 0
-			} else {
-				parsed, perr := parseRFC3339Strict(cfg.Stats.Rollup.PartialHistorySince)
-				if perr != nil {
-					fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.partial_history_since must parse as RFC 3339 when backfill_mode = 'partial' (got %q): %v\n", cfg.Stats.Rollup.PartialHistorySince, perr)
-					os.Exit(1)
-				}
-				partialUnix = parsed.Unix()
+				fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.partial_history_since must be non-empty when backfill_mode = 'partial'; use backfill_mode = 'full' for unconstrained history\n")
+				os.Exit(1)
 			}
+			parsed, perr := parseRFC3339Strict(cfg.Stats.Rollup.PartialHistorySince)
+			if perr != nil {
+				fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.partial_history_since must parse as RFC 3339 when backfill_mode = 'partial' (got %q): %v\n", cfg.Stats.Rollup.PartialHistorySince, perr)
+				os.Exit(1)
+			}
+			partialUnix = parsed.Unix()
 		default:
 			fmt.Fprintf(os.Stderr, "stats rollup: stats.rollup.backfill_mode must be 'partial' or 'full' (got %q)\n", mode)
 			os.Exit(1)

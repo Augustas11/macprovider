@@ -203,22 +203,20 @@ func (r *Runner) runOne(ctx context.Context, name string, c component, fn func(c
 }
 
 // classifyPanic returns a bounded redacted classification of a
-// panic value. Type name + at most 64 characters of the panic's
-// short hint. Round-1 SECURITY r1 MED-2: avoid persisting
-// arbitrary strings into structured logs / stats_components_health
-// .last_error_message.
+// panic value. Type-name only — DOES NOT include the panic
+// payload's message.
+//
+// Round-2 SECURITY r2 MED-2 fix: the earlier draft appended up
+// to 64 chars of err.Error(), but a low-layer panic carrying a
+// DSN, raw token, or token_hash substring could persist the
+// first 64 bytes into structured logs AND
+// `stats_components_health.last_error_message`. v0.1 IMPL drops
+// the message hint entirely — type name alone is enough for an
+// operator to triage panic class; the full message is available
+// in the panic-handler's stack trace if a debug log sink is
+// wired (operator-side, not in this code).
 func classifyPanic(rec any) string {
-	const maxHint = 64
-	hint := fmt.Sprintf("%T", rec)
-	// Append a short summary for common error-like types; truncate.
-	if err, ok := rec.(error); ok {
-		s := err.Error()
-		if len(s) > maxHint {
-			s = s[:maxHint]
-		}
-		hint += ": " + s
-	}
-	return hint
+	return fmt.Sprintf("%T", rec)
 }
 
 // spawnNightlyRebuild fires the §9.4 rebuild at the configured
