@@ -52,28 +52,61 @@ func seedRotationHandlerFixture(t *testing.T, adminDB *sql.DB) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// Round-3 CODE M1: the locked schema (001_stats_tables.up.sql)
+	// uses:
+	//   stats_rewards_populated.window_label (NOT singleton)
+	//   stats_leaderboard_24h.rank_earnings/rank_tokens/rank_jobs +
+	//       pseudonym + earnings_bucket (NOT a single `rank`,
+	//       NOT active_accounts).
+	// The bootstrap migration (002_*) already seeds the four
+	// stats_rewards_populated window_label rows + the seven
+	// stats_components_health components — so we only need to
+	// refresh generated_at + insert a leaderboard row.
 	for _, q := range []string{
-		`INSERT INTO stats_components_health (component, generated_at)
-		 VALUES ('leaderboard_24h', now())
-		 ON CONFLICT (component) DO UPDATE SET generated_at = now()`,
-		`INSERT INTO stats_components_health (component, generated_at)
-		 VALUES ('overview', now())
-		 ON CONFLICT (component) DO UPDATE SET generated_at = now()`,
-		`INSERT INTO stats_rewards_populated (singleton, rewards_populated, generated_at)
-		 VALUES (TRUE, FALSE, now())
-		 ON CONFLICT (singleton) DO UPDATE SET generated_at = now()`,
+		`UPDATE stats_components_health
+		    SET generated_at = now()
+		  WHERE component IN ('leaderboard_24h','overview',
+		                      'timeseries_rpm','timeseries_tpm',
+		                      'leaderboard_7d','leaderboard_30d',
+		                      'leaderboard_all')`,
+		`UPDATE stats_rewards_populated
+		    SET generated_at = now()
+		  WHERE window_label IN ('24h','7d','30d','all')`,
 		`INSERT INTO stats_leaderboard_24h (
-			provider_id, rank, tokens, jobs, active_accounts,
+			provider_id, pseudonym, generated_at,
+			rank_earnings, rank_tokens, rank_jobs,
 			earnings_usd, earnings_work_usd, earnings_rewards_usd,
-			first_seen_at, last_seen_at, generated_at)
-		 VALUES ('p1', 1, 100, 5, 1,
+			earnings_bucket, tokens, jobs,
+			first_seen_at, last_seen_at)
+		 VALUES ('p1', 'pseud-p1', now(),
+			1, 1, 1,
 			1.0, 0.5, 0.5,
-			now()-interval '1 day', now(), now())
+			'$1-$10', 100, 5,
+			now()-interval '1 day', now())
 		 ON CONFLICT (provider_id) DO UPDATE SET generated_at = now()`,
 	} {
 		if _, err := adminDB.ExecContext(ctx, q); err != nil {
 			t.Fatalf("seed rotation fixture: %v\nquery: %s", err, q)
 		}
+	}
+	// Also seed a fresh stats_overview_current row so the
+	// handler's overview pre-check (which doesn't run on
+	// /leaderboard, but the test exercises a partner key —
+	// future expansion may hit other endpoints) does not 503.
+	if _, err := adminDB.ExecContext(ctx,
+		`INSERT INTO stats_overview_current (
+			singleton, generated_at,
+			tokens_in, tokens_out, requests,
+			nodes_online, nodes_hardware_attested,
+			bandwidth_gb_per_s, network_power_kw,
+			network_utilization_pct,
+			gpu_cores_total, cpu_cores_total,
+			unified_ram_gb_total, models_serving)
+		 VALUES (TRUE, now(),
+			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+		 ON CONFLICT (singleton) DO UPDATE SET generated_at = now()`,
+	); err != nil {
+		t.Fatalf("seed overview: %v", err)
 	}
 	// Rotate the stats_reader role to a known password so the
 	// handler can connect through it (same pattern as Step 3's

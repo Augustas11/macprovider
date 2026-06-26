@@ -34,6 +34,20 @@ CLI_BINARY="$DIST_DIR/coordinator-cli-linux-amd64"
 CONFIG="$DIST_DIR/coordinator.yaml"
 SERVICE="$DIST_DIR/macprovider-coordinator.service"
 NGINX_SITE="$DIST_DIR/nginx-coordinator.streamvc.live.conf"
+# SPEC-017 v0.1.8 Step 4.B — additional nginx artifacts the
+# coordinator vhost depends on:
+#   - stats-shared.conf is the http-context snippet declaring the
+#     `$public_rl_key` map, the per-endpoint `stats_*` zones, the
+#     `stats_public` cache, and the `stats_redacted` log format.
+#     Both the coordinator vhost and the stats vhost reference
+#     these names; without the snippet installed first, `nginx -t`
+#     fails (Step 4.B CODE r1 CRITICAL).
+#   - nginx-stats.streamvc.live.conf is the standalone
+#     `stats.streamvc.live` vhost.
+# Both files MUST exist before this deploy proceeds; they are
+# installed below alongside the coordinator vhost.
+NGINX_STATS_SHARED="$DIST_DIR/nginx-snippets/stats-shared.conf"
+NGINX_STATS_SITE="$DIST_DIR/nginx-stats.streamvc.live.conf"
 CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}"
 
 # coordinator-cli is required ALONGSIDE the daemon (SPEC-003 v0.8.3
@@ -42,7 +56,8 @@ CATALOG_SOURCE="${CATALOG_SOURCE:-$DIST_DIR/../../.omc/tier2/tier2-catalog.json}
 # prune-tokens / list-tokens also belong on Pearl). If absent, the
 # operator forgot to run build-linux.sh after the M2 update that
 # extended it. Fail closed — do NOT silently deploy with a stale CLI.
-for f in "$BINARY" "$CLI_BINARY" "$CONFIG" "$SERVICE" "$NGINX_SITE"; do
+for f in "$BINARY" "$CLI_BINARY" "$CONFIG" "$SERVICE" "$NGINX_SITE" \
+         "$NGINX_STATS_SHARED" "$NGINX_STATS_SITE"; do
   [ -f "$f" ] || { echo "missing required file: $f" >&2; exit 1; }
 done
 
@@ -286,6 +301,14 @@ $SCP "$CLI_BINARY" "$VPS_USER@$VPS_HOST:/tmp/coordinator-cli-linux-amd64"
 $SCP "$CONFIG" "$VPS_USER@$VPS_HOST:/tmp/coordinator.yaml"
 $SCP "$SERVICE" "$VPS_USER@$VPS_HOST:/tmp/macprovider-coordinator.service"
 $SCP "$NGINX_SITE" "$VPS_USER@$VPS_HOST:/tmp/nginx-coordinator-full.conf"
+# SPEC-017 v0.1.8 Step 4.B artifacts (snippet must land at
+# /etc/nginx/conf.d/ so the http-context declarations are visible
+# to BOTH the coordinator vhost (for /v1/stats/* allow-through)
+# and the stats vhost. Installation step below is wired BEFORE
+# the coordinator vhost full-TLS install so `nginx -t` does not
+# trip on missing zone names.).
+$SCP "$NGINX_STATS_SHARED" "$VPS_USER@$VPS_HOST:/tmp/nginx-stats-shared.conf"
+$SCP "$NGINX_STATS_SITE"   "$VPS_USER@$VPS_HOST:/tmp/nginx-stats.streamvc.live.conf"
 if [ -n "$CATALOG_REMOTE_PATH" ]; then
   $SCP "$CATALOG_SOURCE" "$VPS_USER@$VPS_HOST:/tmp/tier2-catalog.json"
 fi
@@ -370,8 +393,19 @@ $SSH "set -e
   fi
 "
 
-log "step 6b/9: install full TLS nginx site"
+log "step 6b/9: install SPEC-017 nginx artifacts + full TLS site"
 $SSH "set -e
+  # SPEC-017 Step 4.B — install the shared http-context snippet
+  # FIRST so the coordinator vhost's /v1/stats/* allow-through
+  # block has its limit_req_zone / proxy_cache_path / log_format
+  # names declared. Then install the stats vhost so
+  # stats.streamvc.live serves the same handler from a dedicated
+  # hostname.
+  install -o root -g root -m 0644 /tmp/nginx-stats-shared.conf /etc/nginx/conf.d/stats-shared.conf
+  install -o root -g root -m 0644 /tmp/nginx-stats.streamvc.live.conf /etc/nginx/sites-available/stats.streamvc.live
+  ln -sf /etc/nginx/sites-available/stats.streamvc.live /etc/nginx/sites-enabled/stats.streamvc.live
+  rm -f /tmp/nginx-stats-shared.conf /tmp/nginx-stats.streamvc.live.conf
+
   install -o root -g root -m 0644 /tmp/nginx-coordinator-full.conf /etc/nginx/sites-available/$DOMAIN
   rm -f /tmp/nginx-coordinator-full.conf
   # The full site config ships with ssl_certificate lines commented; the
