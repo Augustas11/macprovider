@@ -714,6 +714,8 @@ Crash after COMMIT preserves all rows together.
 No 2PC is used.
 The coordinator SQLite database MUST be operated in WAL mode (`PRAGMA journal_mode = WAL`). Recovery scans MUST execute under `BEGIN DEFERRED` to obtain a consistent reader snapshot.
 
+**Pool cap (operational invariant).** The Go `*sql.DB` handle backing the coordinator SQLite store MUST set `MaxOpenConns(1)` and `MaxIdleConns(1)`. SQLite already serializes writers at one-at-a-time; the Go-pool cap converts that into an enforceable serialization point and eliminates the implicit-pool unbounded growth that surfaced as latent p99 latency and post-inference `request_log_failed` 500s on prior uncapped builds (issue #21 / ARCH-3 / 2026-06-10 audit QW-5). Callers that share the requestlog/billing/admission `*sql.DB` MUST NOT hold an outer `*sql.Rows` cursor open across an inner query against the SAME pool, and inside a transaction MUST NOT call helpers that issue against the un-pinned `*sql.DB` (they will deadlock waiting for a second connection that cannot be obtained while the tx pins the only one). The reference IMPL is `phase4-coordinator/internal/requestlog/store.go` `OpenStore`.
+
 ### 10.2 Startup scan
 
 Startup scans prior 24 hours.
