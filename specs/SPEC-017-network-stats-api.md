@@ -915,7 +915,6 @@ CREATE TABLE partner_keys (
   prefix            TEXT NOT NULL,
   allowed_origins   TEXT[] NOT NULL DEFAULT '{}',
   rate_limit_rpm    INT  NOT NULL DEFAULT 600,
-  rate_limit_burst  INT  NOT NULL DEFAULT 1200,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
   created_by        TEXT NOT NULL,
   revoked_at        TIMESTAMPTZ,
@@ -948,9 +947,13 @@ Field rules:
   `https://partner.example.com`). Empty array means "no Origin
   restriction" — public partner usage from any origin. See §5.7 CORS
   rules for how this interacts with browser-side embedding.
-- `rate_limit_rpm` / `rate_limit_burst` — per-key per-endpoint limits.
-  The operator MAY set higher values per key; the API MUST clamp to
-  the configured values from `partner_keys`, not to a global default.
+- `rate_limit_rpm` — per-key per-endpoint hard limit. The operator
+  MAY set a higher value per key; the API MUST clamp to the
+  configured value from `partner_keys`, not to a global default. There
+  is NO burst column on the partner-key path in v0.1.8 (dropped to
+  match the §5.6 hard-limit/no-burst reconciliation with AC-8;
+  earlier drafts had `rate_limit_burst INT DEFAULT 1200` which was
+  inconsistent with the v0.1.8 deterministic 601st-returns-429 rule).
 - `revoked_at` — once set, the key MUST be rejected with 401. Lookup
   is by `token_hash`, so a revoked key cannot be reactivated by clearing
   `revoked_at` without operator action.
@@ -965,7 +968,9 @@ Q2). Concretely:
 
 1. Operator runs a coordinator CLI subcommand
    `coordinator partner-keys issue --label "Acme Corp dashboard"
-   [--allowed-origin https://acme.example.com] [--rpm 600] [--burst 1200]`.
+   [--allowed-origin https://acme.example.com] [--rpm 600]`. v0.1.8
+   removed the `--burst` flag — there is no per-key burst column
+   anymore.
 2. The subcommand:
    a. Generates 32 cryptographically random bytes via the system
       CSPRNG.
@@ -1099,8 +1104,9 @@ just a tighter accountability surface.
 
 | Tier | Per-IP limit | Per-key limit | Enforced at |
 |---|---|---|---|
-| Public anon | 60 req/min per IP per endpoint | n/a | nginx `limit_req_zone` (primary), in-process bucket (fallback) |
-| Partner keyed | n/a | 600 req/min per key per endpoint | in-process bucket keyed by `partner_keys.id` |
+| Public anon (no `Authorization`) | 60 req/min per IP per endpoint | n/a | nginx `limit_req_zone` (primary), in-process bucket (fallback) |
+| Partner keyed (success) | n/a | 600 req/min per key per endpoint | in-process bucket keyed by `partner_keys.id` |
+| Auth-failure (v0.1.8 — `Authorization` present but produces 401 per §5.4.3 rows 3/5/6/7) | 300 req/min per IP per endpoint (5× public floor) | n/a | in-process bucket keyed on client IP, runs BEFORE the §5.4.3 hash+SELECT |
 
 **v0.1.8 reconciliation with AC-8.** Earlier drafts (v0.1.6 / v0.1.7)
 named "burst 120" / "burst 1200" in this table. That was mechanically
@@ -1120,11 +1126,29 @@ primary enforcement layer for the public tier so a misbehaving
 partner cannot starve the coordinator process; the in-process bucket
 exists as a defense-in-depth fallback.
 
+**Auth-failure tier (v0.1.8 binding).** Because the public nginx
+limiter is keyed empty for Authorization-bearing requests (per the
+nginx-keying rule below), the implementation MUST place an
+in-process per-IP+endpoint bucket on the failed-bearer path BEFORE
+the §5.4.3 hash + SELECT executes. Otherwise a flood of
+syntactically-bearer-shaped invalid/revoked/rejected-origin requests
+could drive unbounded `partner_keys` lookup load on the
+direct-to-coordinator surface. The floor is 300 req/min per IP per
+endpoint (5× the public floor); the operator MAY tighten via
+runtime config. The bucket MUST NOT differentiate by Origin
+validation result, no-match vs revoked-match, or any other branch
+that would create a timing/cardinality side-channel on key existence
+(per §5.4.3 rule 4). Returns `429` with `Retry-After` and the §5.9
+`rate_limited` envelope on exhaustion. AC-22 (added in v0.1.8 §10)
+verifies this.
+
 **Authorization-aware nginx keying (v0.1.8).** The public-tier
 `limit_req_zone` MUST NOT throttle Authorization-bearing requests at
 the edge — partner-keyed traffic is rate-limited by
 `partner_keys.rate_limit_rpm` in-process (§5.4.7) and would otherwise
-be double-counted. The nginx config MUST either:
+be double-counted. Auth-failure traffic is rate-limited by the
+auth-failure tier above (in-process, pre-hash-SELECT), so it ALSO
+does NOT need to flow through the public-tier nginx limiter. The nginx config MUST either:
 
 - (a) Use an `nginx map` so the public `limit_req_zone` key is empty
   when `Authorization` is present (effectively bypassing the public
@@ -2306,6 +2330,15 @@ runbook step.
   HEAD, OPTIONS against any `/v1/stats/*` path) returns 405 with
   `Allow: GET, HEAD, OPTIONS` and the §5.9 envelope
   `{"error":{"code":"method_not_allowed", ...}}`.
+- **AC-22 (v0.1.8).** Auth-failure rate limit per §5.6: from a single
+  client IP, issue 301 requests in 60s to
+  `/v1/stats/leaderboard` each carrying `Authorization: Bearer
+  mpk_invalid_<random>`. The 301st request MUST return `429` with
+  `code: "rate_limited"` and `Retry-After`. SQL instrumentation MUST
+  show that the `partner_keys` SELECT count for those 301 requests is
+  ≤300 (the auth-failure bucket cap), proving the limiter ran BEFORE
+  the §5.4.3 hash+SELECT and did not leak key-existence work to
+  flood traffic. AC-18 timing samples MUST run below this threshold.
 
 ---
 
