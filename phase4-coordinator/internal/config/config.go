@@ -1596,8 +1596,13 @@ func (c Config) Validate() error {
 	if c.Auth.GatewayServiceToken == "" {
 		return fmt.Errorf("auth.gateway_service_token must be set (post-M3-2 cutover: required for /internal/* gateway auth)")
 	}
-	if c.Auth.GatewayServiceToken == c.Auth.OperatorKey {
-		return fmt.Errorf("auth.gateway_service_token must differ from auth.operator_key (rotation discipline: equal values defeat the operator-vs-service credential split)")
+	// Compare after TrimSpace: auth.BearerTokenMatchesHeader trims both
+	// sides before matching, so "X" and "X " (or "X\n") collapse to the
+	// same value at runtime. A strict == on the raw fields would let an
+	// operator pass distinctness while still effectively reusing the
+	// operator credential on /internal/*.
+	if strings.TrimSpace(c.Auth.GatewayServiceToken) == strings.TrimSpace(c.Auth.OperatorKey) {
+		return fmt.Errorf("auth.gateway_service_token must differ from auth.operator_key (rotation discipline: equal values — including whitespace-equivalent — defeat the operator-vs-service credential split)")
 	}
 	if err := c.validateCompatibilitySet(); err != nil {
 		return err

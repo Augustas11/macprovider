@@ -193,18 +193,39 @@ if gw:
 # the operator-vs-service split this PR is meant to finish. Check on each
 # side (coordinator self, gateway self) AND cross-file (gateway operator_key
 # vs coordinator gateway_service_token, when both resolvable).
+def _env_name(raw):
+    """If raw is a well-formed env:NAME ref, return NAME. Else None."""
+    if not raw or not raw.startswith("env:"):
+        return None
+    m = ENV_REF.match(raw)
+    return m.group(1) if m else None
+
 def _resolved_value(raw):
-    """Return the resolvable value or None if deferred/malformed/missing."""
+    """Return the resolved value (whitespace-trimmed) or None if deferred/
+    malformed/missing. TrimSpace mirrors auth.BearerTokenMatchesHeader so a
+    config with `service_token: "X "` is judged the same way the runtime
+    will judge it on the wire."""
     if not raw:
         return None
     if raw.startswith("env:"):
         m = ENV_REF.match(raw)
         if not m:
             return None
-        return os.environ.get(m.group(1)) or None
-    return raw
+        v = os.environ.get(m.group(1))
+        return v.strip() if v else None
+    return raw.strip()
 
 def _check_distinct(label_a, raw_a, label_b, raw_b):
+    # Same-env-NAME bypass: env:SHARED on both sides resolves to the same
+    # value at runtime, but _resolved_value returns None if the env var is
+    # unset at gate time. Catch that statically before falling through.
+    na = _env_name(raw_a)
+    nb = _env_name(raw_b)
+    if na is not None and na == nb:
+        hard(f"C2c: {label_a} and {label_b} both reference env:{na} — "
+             f"runtime resolution collapses them to the same value; "
+             f"rotation discipline violated")
+        return
     a = _resolved_value(raw_a)
     b = _resolved_value(raw_b)
     if a is None or b is None:
@@ -215,6 +236,31 @@ def _check_distinct(label_a, raw_a, label_b, raw_b):
              f"operator credential would still authenticate /internal/* by value")
     else:
         ok(f"C2c {label_a} vs {label_b}: distinct")
+
+def _check_pair_equal(label_a, raw_a, label_b, raw_b):
+    """C2c pairing: assert two fields hold the SAME secret (gateway sends
+    coordinator.service_token on the wire; coordinator accepts only its
+    own auth.gateway_service_token). A mismatch boots green and 401s every
+    /internal/* call.
+
+    Same-env-NAME on both sides resolves to the same value at runtime, so
+    treat that as a pass even though _resolved_value can't read it now."""
+    na = _env_name(raw_a)
+    nb = _env_name(raw_b)
+    if na is not None and na == nb:
+        ok(f"C2c pairing {label_a} == {label_b}: both reference env:{na} "
+           f"(resolves to same value at runtime)")
+        return
+    a = _resolved_value(raw_a)
+    b = _resolved_value(raw_b)
+    if a is None or b is None:
+        ok(f"C2c pairing {label_a} == {label_b}: skipped (one or both deferred to runtime)")
+        return
+    if a != b:
+        hard(f"C2c: {label_a} != {label_b} — gateway sends a credential the "
+             f"coordinator rejects; every /internal/* call would 401")
+    else:
+        ok(f"C2c pairing {label_a} == {label_b}: match")
 
 coord_op = g_section(coord, "auth", "operator_key")
 coord_svc = g_section(coord, "auth", "gateway_service_token")
@@ -231,6 +277,13 @@ if gw:
     # value collapse — same hazard.
     _check_distinct("gateway coordinator.operator_key", gw_op,
                     "coordinator auth.gateway_service_token", coord_svc)
+    # C2c pairing: gateway sends coordinator.service_token on /internal/*;
+    # coordinator accepts ONLY its own auth.gateway_service_token. These
+    # are the two ends of the same shared secret — a mismatch is an instant
+    # /internal/* outage that both module Validate()s would miss because
+    # each can only see its own file.
+    _check_pair_equal("gateway coordinator.service_token", gw_svc,
+                      "coordinator auth.gateway_service_token", coord_svc)
 
 # --- require_provider_tokens ---
 # Security-sensitive: the binary default is `true` (fail-closed), but a

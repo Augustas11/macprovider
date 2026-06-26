@@ -45,6 +45,10 @@
 #   T32 — C2c gateway operator_key == service_token (inline same)               -> FAIL
 #   T33 — C2c cross-file gw operator_key == coord gateway_service_token         -> FAIL
 #   T34 — C2c all tokens env-deferred                                           -> skipped (pass)
+#   T35 — C2c same env:NAME on both sides (static catch, env unresolved)        -> FAIL
+#   T36 — C2c pairing gw service_token != coord service_token (inline)          -> FAIL
+#   T37 — C2c pairing mismatch via different env vars resolving differently     -> FAIL
+#   T38 — C2c pairing match via different env vars resolving to same value      -> pass
 #
 # Run from repo root or any cwd: SCRIPT_DIR is derived from $0.
 # Skips with a noisy message if python3 is unavailable (the gate needs it).
@@ -626,6 +630,61 @@ test_c2c_deferred_env_skipped() {
   rm -rf "$wd"
 }
 
+test_c2c_same_env_name_bypass_caught() {
+  # Audit-r2 finding: env:SHARED on both sides resolves to the same value
+  # at runtime, but the unresolved env var made _resolved_value return None
+  # which previously caused _check_distinct to skip. Static catch: same env
+  # NAME -> hard fail before resolution.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:SHARED_TOKEN"
+  write_gw "$wd" 300 "env:SHARED_TOKEN"
+  # SHARED_TOKEN unset on purpose — the check must NOT depend on resolution.
+  run_check "$wd" SHARED_TOKEN=
+  assert_exit 1 "T35 same env:NAME on both sides -> FAIL (static catch)"
+  assert_contains "both reference env:SHARED_TOKEN" "T35 same-env-name message"
+  rm -rf "$wd"
+}
+
+test_c2c_pairing_inline_mismatch_fails() {
+  # Audit-r2 convergent (3/3 lanes): gateway sends Coordinator.ServiceToken
+  # on /internal/*; coordinator accepts ONLY its auth.gateway_service_token.
+  # Mismatched-but-individually-valid 64-hex passes both module Validate()s
+  # and earlier deploy gate -> instant /internal/* outage. The pairing gate
+  # catches it.
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: \"$HEX64B\""
+  # gateway service_token = a third distinct value (HEX64C) — passes
+  # individual hex checks and distinctness, but mismatches coordinator.
+  local HEX64C=11112222333344445555666677778888999900001111222233334444aaaabbbb
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: \"$HEX64C\""
+  run_check "$wd"
+  assert_exit 1 "T36 gateway/coord service_token mismatch (inline) -> FAIL"
+  assert_contains "gateway coordinator.service_token != coordinator auth.gateway_service_token" "T36 pairing-mismatch message"
+  rm -rf "$wd"
+}
+
+test_c2c_pairing_env_resolved_mismatch_fails() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: env:GW_SVC"
+  # Both env vars set but to different values.
+  run_check "$wd" COORD_SVC="$HEX64B" GW_SVC=11112222333344445555666677778888999900001111222233334444aaaabbbb
+  assert_exit 1 "T37 gateway/coord service_token mismatch (env-resolved) -> FAIL"
+  assert_contains "gateway coordinator.service_token != coordinator auth.gateway_service_token" "T37 env-mismatch message"
+  rm -rf "$wd"
+}
+
+test_c2c_pairing_env_resolved_match_passes() {
+  local wd; wd="$(mk_workdir)"
+  write_coord "$wd" "\"$HEX64\"" 280 "gateway_service_token: env:COORD_SVC"
+  write_gw "$wd" 300 "\"$HEX64\"" "service_token: env:GW_SVC"
+  # Both env vars set to the SAME value via different names — pairing ok.
+  run_check "$wd" COORD_SVC="$HEX64B" GW_SVC="$HEX64B"
+  assert_exit 0 "T38 gateway/coord service_token match (env-resolved, diff names) -> pass"
+  assert_contains "C2c pairing gateway coordinator.service_token == coordinator auth.gateway_service_token: match" "T38 pairing-match message"
+  rm -rf "$wd"
+}
+
 # ---- run -------------------------------------------------------------------
 
 echo "== check-deploy-config.sh tests =="
@@ -666,6 +725,10 @@ test_c2c_coord_operator_equals_service_fails
 test_c2c_gateway_operator_equals_service_fails
 test_c2c_cross_file_gw_operator_equals_coord_service_fails
 test_c2c_deferred_env_skipped
+test_c2c_same_env_name_bypass_caught
+test_c2c_pairing_inline_mismatch_fails
+test_c2c_pairing_env_resolved_mismatch_fails
+test_c2c_pairing_env_resolved_match_passes
 
 echo
 echo "== summary =="

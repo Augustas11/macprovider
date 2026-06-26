@@ -347,8 +347,12 @@ func (c Config) Validate() error {
 	if c.Coordinator.ServiceToken == "" {
 		return fmt.Errorf("coordinator.service_token must be set (post-M3-2 cutover: required for /internal/* upstream calls)")
 	}
-	if c.Coordinator.ServiceToken == c.Coordinator.OperatorKey {
-		return fmt.Errorf("coordinator.service_token must differ from coordinator.operator_key (rotation discipline: equal values would let the operator credential authenticate /internal/* by value)")
+	// Compare after TrimSpace: the coordinator strips both sides before
+	// matching the bearer, so "X" and "X " collapse to the same value
+	// on the wire. A strict == on the raw fields would let an operator
+	// pass distinctness while effectively reusing the operator credential.
+	if strings.TrimSpace(c.Coordinator.ServiceToken) == strings.TrimSpace(c.Coordinator.OperatorKey) {
+		return fmt.Errorf("coordinator.service_token must differ from coordinator.operator_key (rotation discipline: equal values — including whitespace-equivalent — would let the operator credential authenticate /internal/* by value)")
 	}
 	if c.Coordinator.PoolzPollInterval <= 0 {
 		return fmt.Errorf("coordinator.poolz_poll_interval_s must be > 0")

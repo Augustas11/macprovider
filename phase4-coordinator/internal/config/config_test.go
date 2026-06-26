@@ -247,6 +247,33 @@ func TestModelClassRejectsMembersAndModelsTogether(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsWhitespaceEquivalentServiceToken pins the audit-r2
+// fix for the whitespace-bypass MEDIUM: auth.BearerTokenMatchesHeader
+// trims both sides before matching, so "X" and "X " or "X\n" collapse
+// to the same value on the wire. Validate must reject that collision
+// instead of relying on a strict == that misses it.
+func TestValidateRejectsWhitespaceEquivalentServiceToken(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		op, svc  string
+	}{
+		{"trailing space", "operator-key", "operator-key "},
+		{"leading space", "operator-key", " operator-key"},
+		{"trailing newline", "operator-key", "operator-key\n"},
+		{"both padded", "  operator-key", "operator-key  "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := Default()
+			cfg.Auth.OperatorKey = tc.op
+			cfg.Auth.GatewayServiceToken = tc.svc
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), "must differ from auth.operator_key") {
+				t.Fatalf("Validate err=%v want distinctness rejection", err)
+			}
+		})
+	}
+}
+
 func TestProviderTokensRequiredByDefault(t *testing.T) {
 	cfg := Default()
 	if !cfg.Auth.RequireProviderTokens {
