@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"reflect"
@@ -495,6 +496,7 @@ func main() {
 		buyer.WithRoutingConfig(cfg.Routing),
 		buyer.WithTier2Config(cfg.Tier2),
 		buyer.WithLimitsConfig(cfg.Limits),
+		buyer.WithTrustedProxies(mustParseTrustedProxies(cfg, logger)),
 		buyer.WithInternalAuthKey(cfg.Auth.OperatorKey),
 		buyer.WithGatewayServiceToken(cfg.Auth.GatewayServiceToken),
 		buyer.WithRelay(wsServer.DispatchInference, time.Duration(cfg.Routing.RequestTimeoutS)*time.Second),
@@ -650,6 +652,24 @@ func main() {
 
 type requestLogPruner interface {
 	PruneBefore(context.Context, time.Time) (int64, error)
+}
+
+// mustParseTrustedProxies parses cfg.Proxy.TrustedProxies into the
+// netip.Prefix slice the buyer Server's rate-limit keying expects.
+// Validate() at config.Load already rejected malformed CIDRs and
+// default-route prefixes, so this helper should never fail in
+// practice. If it DOES fail post-Validate (drift between Validate
+// and TrustedProxyPrefixes, e.g. a future contributor splits the
+// validation), the architect-lane r1 audit (issue #125 L3) called
+// out the prior silent-nil fallback as a weakening of the
+// validation contract — a proxied-clients-collapse bug masquerading
+// as a non-event. Fail-fast at startup instead. Issue #125.
+func mustParseTrustedProxies(cfg config.Config, logger zerolog.Logger) []netip.Prefix {
+	prefixes, err := cfg.TrustedProxyPrefixes()
+	if err != nil {
+		logger.Fatal().Err(err).Msg("trusted_proxies parse failed at startup")
+	}
+	return prefixes
 }
 
 func setupCanarySanctionStore(ctx context.Context, cfg config.Config, db *sql.DB, registry *pool.Registry) (providerws.CanarySanctionStore, error) {

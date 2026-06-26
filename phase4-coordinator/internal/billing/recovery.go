@@ -150,7 +150,11 @@ SELECT provider_id FROM ledger_provider_identity_snapshots
 			quarantined++
 			continue
 		}
-		snapshotID, rewards, multiplier, share, err := s.snapshotAt(ctx, ts)
+		// Use the tx-bound queryer — at MaxOpenConns(1), calling
+		// s.snapshotAt (which uses s.db) here would deadlock waiting for a
+		// second connection that cannot be obtained while this tx pins the
+		// only one. Issue #21 / ARCH-3.
+		snapshotID, rewards, multiplier, share, err := snapshotAtTx(ctx, tx, ts)
 		if err != nil {
 			affected, quarantineErr := quarantineExistingLedgerForRequestAttemptTx(ctx, tx, requestID, attemptN, assignedID, "missing_config_snapshot", now)
 			if quarantineErr != nil {

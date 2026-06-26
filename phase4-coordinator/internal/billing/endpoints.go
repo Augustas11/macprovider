@@ -129,31 +129,51 @@ func (h *handler) providers(w http.ResponseWriter, r *http.Request) {
 	if includeQuarantined {
 		quarantineFilter = ""
 	}
+	// Single grouped LEFT JOIN — the prior shape was outer-aggregate +
+	// per-row h.sum(...) on ledger_payout_ready, which (a) deadlocked at
+	// MaxOpenConns(1) on the requestlog-shared pool (issue #21 / ARCH-3),
+	// (b) was an N+1 with up to limit*2 statements serialized on the only
+	// connection, (c) wasn't snapshot-consistent (the per-row sum could
+	// observe a different write than the aggregate above it), and (d)
+	// silently emitted pending_payout_credits=0 on a per-row inner-query
+	// error because h.sum swallows errors. Folding the pending-payout
+	// total into a grouped subquery joined on provider_id fixes all four
+	// at once — one statement, one connection acquisition, point-in-time
+	// consistent within the SQLite read transaction, errors propagate.
+	// The grouped subquery scans ledger_payout_ready once for the whole
+	// page, which is strictly cheaper than the per-provider sum loop.
 	rows, err := h.store.db.QueryContext(ctx, `
-SELECT provider_id,
-       SUM(provider_credits),
-       SUM(CASE WHEN ts_utc >= ? THEN provider_credits ELSE 0 END),
-       MAX(ts_utc),
-       SUM(CASE WHEN fault_flag != 'none' THEN 1 ELSE 0 END),
-       SUM(CASE WHEN quarantined=1 THEN 1 ELSE 0 END),
-       MAX(attestation_class)
-  FROM ledger_request_credits
- WHERE provider_id > ? `+quarantineFilter+`
- GROUP BY provider_id
- ORDER BY provider_id
+SELECT lrc.provider_id,
+       SUM(lrc.provider_credits),
+       SUM(CASE WHEN lrc.ts_utc >= ? THEN lrc.provider_credits ELSE 0 END),
+       MAX(lrc.ts_utc),
+       SUM(CASE WHEN lrc.fault_flag != 'none' THEN 1 ELSE 0 END),
+       SUM(CASE WHEN lrc.quarantined=1 THEN 1 ELSE 0 END),
+       MAX(lrc.attestation_class),
+       COALESCE(pp.pending_payout, 0) AS pending_payout
+  FROM ledger_request_credits lrc
+  LEFT JOIN (
+        SELECT provider_id, SUM(provider_credits) AS pending_payout
+          FROM ledger_payout_ready
+         WHERE status = 'ready'
+         GROUP BY provider_id
+  ) pp ON pp.provider_id = lrc.provider_id
+ WHERE lrc.provider_id > ? `+quarantineFilter+`
+ GROUP BY lrc.provider_id
+ ORDER BY lrc.provider_id
  LIMIT ?`, current, cursor, limit+1)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 		return
 	}
 	defer rows.Close()
-	items := []map[string]any{}
+	items := make([]map[string]any, 0, limit)
 	nextCursor := any(nil)
 	for rows.Next() {
 		var providerID string
-		var total, currentWindow, faultCount, quarantinedCount sql.NullInt64
+		var total, currentWindow, faultCount, quarantinedCount, pendingPayout sql.NullInt64
 		var lastActivity, attestation sql.NullString
-		if err := rows.Scan(&providerID, &total, &currentWindow, &lastActivity, &faultCount, &quarantinedCount, &attestation); err != nil {
+		if err := rows.Scan(&providerID, &total, &currentWindow, &lastActivity, &faultCount, &quarantinedCount, &attestation, &pendingPayout); err != nil {
 			writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
 			return
 		}
@@ -165,12 +185,16 @@ SELECT provider_id,
 			"provider_id":            providerID,
 			"total_provider_credits": nullInt(total),
 			"current_window_credits": nullInt(currentWindow),
-			"pending_payout_credits": h.sum(ctx, `SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE provider_id=? AND status='ready'`, providerID),
+			"pending_payout_credits": nullInt(pendingPayout),
 			"last_activity_utc":      nullStringAny(lastActivity),
 			"fault_count":            nullInt(faultCount),
 			"quarantined_count":      nullInt(quarantinedCount),
 			"attestation_class":      nullStringAny(attestation),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", err.Error())
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"providers": items, "next_cursor": nextCursor})
 }
@@ -253,6 +277,28 @@ INSERT INTO ledger_reconciliation_runs (
 }
 
 func (h *handler) buyerEquivalentCredits(ctx context.Context, from, to time.Time) (int64, error) {
+	// Two-pass to avoid nested-cursor deadlock at MaxOpenConns(1). Issue #21 /
+	// ARCH-3: the prior loop held the request_log cursor open while running
+	// h.byteEstimatedLedgerGross(...) and h.store.snapshotAt(...) per row,
+	// both of which Query against the same shared *sql.DB. At cap=1 the
+	// inner Query blocks on the pinned connection. Drain the request_log
+	// scan into a typed scratch slice, close the cursor, then run the
+	// per-row work.
+	// Carry the raw ts text through the first pass — the second pass
+	// applies the 503 filter BEFORE parsing, mirroring origin/main's
+	// behavior (a malformed ts on a 503 row was ignored, not surfaced as
+	// a hard error). The second pass only parses ts for rows that
+	// actually contribute to the credit total.
+	type requestLogScan struct {
+		requestID  string
+		tsText     string
+		model      string
+		prompt     sql.NullInt64
+		completion sql.NullInt64
+		status     int
+		errorCode  sql.NullString
+		attemptN   int
+	}
 	rows, err := h.store.db.QueryContext(ctx, `
 SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_tokens, rl.status, rl.error_code,
        COALESCE((
@@ -265,33 +311,40 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_token
 	if err != nil {
 		return 0, err
 	}
-	defer rows.Close()
-	total := int64(0)
+	scratch := []requestLogScan{}
 	for rows.Next() {
-		var requestID, tsText, model string
-		var prompt, completion sql.NullInt64
-		var status, attemptN int
-		var errorCode sql.NullString
-		if err := rows.Scan(&requestID, &tsText, &model, &prompt, &completion, &status, &errorCode, &attemptN); err != nil {
+		var s requestLogScan
+		if err := rows.Scan(&s.requestID, &s.tsText, &s.model, &s.prompt, &s.completion, &s.status, &s.errorCode, &s.attemptN); err != nil {
+			rows.Close()
 			return 0, err
 		}
-		if status == http.StatusServiceUnavailable {
+		scratch = append(scratch, s)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	total := int64(0)
+	for _, s := range scratch {
+		if s.status == http.StatusServiceUnavailable {
 			continue
 		}
-		ts, err := time.Parse(time.RFC3339Nano, tsText)
+		ts, err := time.Parse(time.RFC3339Nano, s.tsText)
 		if err != nil {
 			return 0, err
 		}
 		var pp, cp *int64
-		if prompt.Valid {
-			v := prompt.Int64
+		if s.prompt.Valid {
+			v := s.prompt.Int64
 			pp = &v
 		}
-		if completion.Valid {
-			v := completion.Int64
+		if s.completion.Valid {
+			v := s.completion.Int64
 			cp = &v
 		}
-		if gross, ok, err := h.byteEstimatedLedgerGross(ctx, requestID, attemptN, pp); err != nil {
+		if gross, ok, err := h.byteEstimatedLedgerGross(ctx, s.requestID, s.attemptN, pp); err != nil {
 			return 0, err
 		} else if ok {
 			total += gross
@@ -301,10 +354,10 @@ SELECT rl.request_id, rl.ts_utc, rl.model, rl.prompt_tokens, rl.completion_token
 		if err != nil {
 			continue
 		}
-		row := ComputeCredits(pp, cp, nil, usageFor(errorCode.String, nil), FaultNone, RateFor(rewards.RateCard, model), multiplier, share)
+		row := ComputeCredits(pp, cp, nil, usageFor(s.errorCode.String, nil), FaultNone, RateFor(rewards.RateCard, s.model), multiplier, share)
 		total += row.GrossCredits
 	}
-	return total, rows.Err()
+	return total, nil
 }
 
 func (h *handler) byteEstimatedLedgerGross(ctx context.Context, requestID string, attemptN int, promptTokens *int64) (int64, bool, error) {

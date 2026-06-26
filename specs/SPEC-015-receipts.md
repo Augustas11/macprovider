@@ -1,7 +1,18 @@
 # SPEC-015 — Verifiable inference receipts
 
-**Version:** 0.3.3 (2026-06-24, model-hash binding — LOCKED)
+**Version:** 0.3.4 (2026-06-26, additive — `non_default_tls_trust` warning kind added to §10.4.2 `warnings[]` enum; preserves wire shape, callers that ignore unknown kinds are unaffected; issue #128)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4 (v1.5 candidate `GET /v1/receipt-keys/<provider_id>` buyer-safe pubkey resolver; v1.6 candidate `/poolz` catalog fields + `/catalog/<catalog_id>` + `/catalog/pubkey` per §M.4), SPEC-005 v0.3, SPEC-006 v0.9, SPEC-008 v0.3 (hard — §5.3-5.6 model-hash semantics; §5.5 hash_status enum), SPEC-010 v1.5, SPEC-011 v0.5 (hard — §3.3.1 heartbeat `model_hash`; §3.2 warm-swap state machine; §3.3.0 opt-in gating), SPEC-013 v0.3
+
+**Change log v0.3.4 (2026-06-26, additive — issue #128):**
+- §10.4.2 `warnings[]` enum gains `non_default_tls_trust` kind with
+  `ca_file_path` (string) field. Verifiers MUST emit this warning
+  when the `MACPROVIDER_VERIFY_TLS_CA_FILE` env var is honored and
+  successfully augments the TLS trust pool — surfaces silent trust
+  widening that previously produced a `valid` result with no
+  visible indicator. Schema enum updated at
+  `phase7-verify/schemas/output.schema.json` (all three result
+  contexts). Preserves wire shape: pre-v0.3.4 consumers that ignore
+  unknown `kind` values are unaffected; this is strictly additive.
 
 **Lock state v0.3:** Round-3 codex audit returned `READY TO LOCK` across all three lenses (code, security, architect) on 2026-06-24 — see `specs/SPEC-015-v0-3-audit.md`. Three-round audit history captured 3 CRITICAL + 11 MAJOR + 4 MINOR + 1 QUESTION findings; all CRITICAL / MAJOR resolved across v0.3.1 (round-1 fix pass) and v0.3.2 (round-2 fix pass). One round-3 MINOR (stale "four new flags" wording in staged IMPL prompt) fixed in v0.3.3. v0.3 changes the wire shape (7-field tuple → 9-field tuple, adding `model_hash` and `receipt_version`) and per [[feedback-bundle-spec-impl-one-pr]] EXCEPTION rule ships SPEC-only (no bundled IMPL) because it is a major version bump with a downstream implementer; the BUILD prompt for IMPL is staged at `specs/BUILD_SPEC_015_v0_3_MODELHASH_IMPL_PROMPT.md` for the next session.
 
@@ -2231,6 +2242,7 @@ v0.2-known values for v0.2-mapped cases.
 | `explicit_vs_live_divergence` | `live_pubkey` (string), `coordinator_host` (string) | Explicit `--pubkey` was used AND a live `/v1/receipt-keys` fetch succeeded AND returned a different pubkey for the same `provider_id`. |
 | `live_check_skipped` | `reason` (one of `offline_flag`, `network_unreachable`, `provider_id_unresolvable`) | The live divergence check did not run. `offline_flag`: `--offline` was passed. `network_unreachable`: live fetch failed (network down, 5xx, timeout, 429). `provider_id_unresolvable`: explicit `--pubkey` was supplied AND no `provider_id` was recoverable from CLI, bundle, or cache (the verifier had nothing to address the resolver with). |
 | `non_default_coordinator` | `coordinator_host` (string) | A non-default coordinator (i.e. not `coordinator.streamvc.live`) was used as the trust-root source. |
+| `non_default_tls_trust` | `ca_file_path` (string) | The `MACPROVIDER_VERIFY_TLS_CA_FILE` env var was honored and successfully augmented the TLS trust pool used to reach the coordinator. Surfaces silent trust widening so a buyer running under a wrapper script (CI helper, devcontainer setup, ~/.profile modification by malware) where the env var has been set to point at an attacker-controlled CA chain sees a visible indicator. Added in SPEC-015 v0.3.4 (issue #128). |
 | `clock_skew` | `unix_ts` (int), `system_time` (int), `delta_seconds` (int) | Receipt `unix_ts` differs from the verifier's system clock by more than 24 hours. Informational only — does NOT downgrade `result` per §10.6. |
 
 A verifier MUST emit `warnings[]` entries regardless of `--quiet`
@@ -2477,6 +2489,14 @@ provided the coordinator returns the exact shape.
   `10 req/sec` per source IP, with a `429` response on overage.
   This protects the coordinator against amplification attacks
   while leaving headroom for batch buyer-side verification.
+  **Source-IP derivation (issue #125).** Per-source bucket keying
+  goes through the operator-configured `proxy.trusted_proxies`
+  CIDR set (see SPEC-002 v1.4.x `proxy.trusted_proxies` block):
+  when the immediate peer is in the trusted set the coordinator
+  parses `X-Forwarded-For` rightmost-untrusted-hop first, falling
+  back to `X-Real-IP`; for untrusted peers the forwarded headers
+  are ignored and the peer's own IP is the bucket key (spoof
+  rejection).
 - **Caching headers:** Response MUST include `Cache-Control: public,
   max-age=300` (5 minutes). Verifiers SHOULD NOT bypass this cache
   via `Cache-Control: no-cache` request headers — staleness up to
@@ -3333,7 +3353,8 @@ covered by the "effectively active catalog" condition above.
 - **Authentication:** None (public).
 - **Rate limiting:** Operator-configurable; recommended floor
   10 req/sec per source IP, mirroring §10.7's
-  `/v1/receipt-keys` posture.
+  `/v1/receipt-keys` posture. Source-IP derivation goes through
+  `proxy.trusted_proxies` (issue #125; see §10.7 and SPEC-002 v1.4.x).
 - **Cache-Control:** `public, max-age=300` (5 minutes; same as
   §10.7).
 - **Response:** the literal signed catalog bytes accepted by the

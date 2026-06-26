@@ -179,11 +179,18 @@ CREATE INDEX IF NOT EXISTS idx_lpis_provider ON ledger_provider_identity_snapsho
 }
 
 func (s *Store) rebuildLegacyConfigSnapshots(ctx context.Context) error {
+	// Two-pass to avoid holding the outer PRAGMA index_list cursor open while
+	// running per-index PRAGMA index_info queries. Issue #21 / ARCH-3 — at
+	// MaxOpenConns(1) on the requestlog-shared *sql.DB the nested-cursor
+	// variant deadlocks because the inner Query waits for the connection the
+	// outer cursor still pins. Collect the unique-index names first, close
+	// the outer cursor, then run the inner PRAGMA per name. The set is small
+	// (one table, a handful of indexes), so the extra slice has no cost.
 	rows, err := s.db.QueryContext(ctx, `PRAGMA index_list(ledger_config_snapshots)`)
 	if err != nil {
 		return err
 	}
-	hasLegacyUnique := false
+	uniqueIndexNames := []string{}
 	for rows.Next() {
 		var seq int
 		var name string
@@ -194,29 +201,7 @@ func (s *Store) rebuildLegacyConfigSnapshots(ctx context.Context) error {
 			return err
 		}
 		if unique == 1 {
-			indexInfo, err := s.db.QueryContext(ctx, `PRAGMA index_info(`+name+`)`)
-			if err != nil {
-				rows.Close()
-				return err
-			}
-			cols := []string{}
-			for indexInfo.Next() {
-				var seqno, cid int
-				var col string
-				if err := indexInfo.Scan(&seqno, &cid, &col); err != nil {
-					indexInfo.Close()
-					return err
-				}
-				cols = append(cols, col)
-			}
-			if err := indexInfo.Err(); err != nil {
-				indexInfo.Close()
-				return err
-			}
-			indexInfo.Close()
-			if len(cols) == 1 && cols[0] == "config_hash" {
-				hasLegacyUnique = true
-			}
+			uniqueIndexNames = append(uniqueIndexNames, name)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -224,6 +209,33 @@ func (s *Store) rebuildLegacyConfigSnapshots(ctx context.Context) error {
 		return err
 	}
 	rows.Close()
+
+	hasLegacyUnique := false
+	for _, name := range uniqueIndexNames {
+		indexInfo, err := s.db.QueryContext(ctx, `PRAGMA index_info(`+name+`)`)
+		if err != nil {
+			return err
+		}
+		cols := []string{}
+		for indexInfo.Next() {
+			var seqno, cid int
+			var col string
+			if err := indexInfo.Scan(&seqno, &cid, &col); err != nil {
+				indexInfo.Close()
+				return err
+			}
+			cols = append(cols, col)
+		}
+		if err := indexInfo.Err(); err != nil {
+			indexInfo.Close()
+			return err
+		}
+		indexInfo.Close()
+		if len(cols) == 1 && cols[0] == "config_hash" {
+			hasLegacyUnique = true
+			break
+		}
+	}
 	if !hasLegacyUnique {
 		return nil
 	}

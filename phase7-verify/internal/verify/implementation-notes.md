@@ -46,6 +46,24 @@ future spec revision may define a narrower bundle-layer detection that
 distinguishes intra-bundle identity drift; the schema/enum is
 forward-compatible.
 
+### Reserved-reason convention
+
+`TestReasonEnumBijection` (`enum_drift_test.go`) AST-walks this package's
+`reasonXxx` string constants and fails if any are declared but never
+referenced in non-test source. To declare a constant that is intentionally
+reserved for a future SPEC revision (like `reasonBundlePubkeyProviderMismatch`
+above), open the constant's doc comment with the literal token
+`FORWARD-COMPAT` or `RESERVED` at the start of a line (optionally after a
+list-marker prefix like `*` or `-`). Natural forms accepted:
+
+- `// FORWARD-COMPAT v0.3+: reserved for ...`
+- `// RESERVED (do not delete)`
+- `// * RESERVED *`
+
+Prose negations like `// NOT RESERVED`, `// DEFINITELY NOT-RESERVED`, or
+`// may someday be RESERVED` do NOT silence the check — the marker must
+lead its line. The pinned contract lives in `TestReservedMarkerRE`.
+
 ## Warning Merge Strategy
 
 The resolver owns trust-root warnings:

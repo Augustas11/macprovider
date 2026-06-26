@@ -57,6 +57,19 @@ func OpenStore(dbPath string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
+	// SQLite supports one writer at a time; the pool-wide connection cap
+	// is the natural primitive for serializing writes and bounding the
+	// implicit Go-pool cap. Issue #21 / ARCH-3 / 2026-06-10 audit QW-5:
+	// auth.OpenStore and audit.OpenStore already cap at 1; requestlog
+	// (which billing reuses via billing.NewStore(reqLogStore.DB()) at
+	// cmd/coordinator/main.go) was the missing third store. PR #14's
+	// previous attempt hung at this cap because of nested-cursor
+	// patterns in internal/billing/{store,endpoints,recovery}.go — those
+	// were refactored to two-pass / tx-bound queryers in the same change
+	// as this cap so the requestlog + billing shared *sql.DB no longer
+	// deadlocks.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
 	s := &Store{db: db}
 	ctx := context.Background()
 	if _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode=WAL`); err != nil {

@@ -124,16 +124,22 @@ func TestReceiptBundleFixturesEndToEnd(t *testing.T) {
 		expectJSON    bool
 		expectNetwork bool
 	}{
-		{name: "valid_fresh", file: "valid_fresh.bundle.json", exitCode: 0, result: "valid", reason: "signature_and_canonicalization_match", warnings: []string{"non_default_coordinator"}, expectJSON: true, expectNetwork: true},
-		{name: "valid_prev_key_in_grace", file: "valid_prev_key_in_grace.bundle.json", exitCode: 0, result: "valid", reason: "signature_and_canonicalization_match", warnings: []string{"non_default_coordinator"}, expectJSON: true, expectNetwork: true},
-		{name: "invalid_tampered_output", file: "invalid_tampered_output.bundle.json", exitCode: 1, result: "invalid", reason: "output_hash_mismatch", warnings: []string{"non_default_coordinator"}, expectJSON: true, expectNetwork: true},
-		{name: "invalid_tampered_prompt", file: "invalid_tampered_prompt.bundle.json", exitCode: 1, result: "invalid", reason: "prompt_hash_mismatch", warnings: []string{"non_default_coordinator"}, expectJSON: true, expectNetwork: true},
-		{name: "invalid_tampered_unix_ts", file: "invalid_tampered_unix_ts.bundle.json", exitCode: 1, result: "invalid", reason: "signature_verify_failed", warnings: []string{"non_default_coordinator"}, expectJSON: true, expectNetwork: true},
-		{name: "invalid_pubkey_not_endorsed", file: "invalid_pubkey_not_endorsed.bundle.json", exitCode: 1, result: "invalid", reason: "pubkey_not_endorsed", warnings: []string{"non_default_coordinator"}, expectJSON: true, expectNetwork: true},
-		{name: "invalid_prev_key_outside_grace", file: "invalid_prev_key_outside_grace.bundle.json", exitCode: 1, result: "invalid", reason: "previous_key_outside_grace_window", warnings: []string{"non_default_coordinator"}, expectJSON: true, expectNetwork: true},
-		{name: "inconclusive_pubkey_unresolvable", file: "valid_fresh.bundle.json", exitCode: 2, result: "inconclusive", reason: "pubkey_unresolvable", warnings: []string{"live_check_skipped", "non_default_coordinator"}, fail5xx: true, expectJSON: true, expectNetwork: true},
-		{name: "inconclusive_resolver_404", file: "inconclusive_resolver_404.bundle.json", exitCode: 2, result: "inconclusive", reason: "provider_id_not_in_pool", warnings: []string{"non_default_coordinator"}, fail404: true, expectJSON: true, expectNetwork: true},
-		{name: "inconclusive_stale_cache_live_fail", file: "inconclusive_stale_cache_live_fail.bundle.json", exitCode: 2, result: "inconclusive", reason: "cache_stale_and_live_unreachable", warnings: []string{"live_check_skipped", "non_default_coordinator"}, fail5xx: true, seedStale: true, expectJSON: true, expectNetwork: true},
+		// Issue #128 / SPEC-015 v0.3.4: every scenario below runs with
+		// MACPROVIDER_VERIFY_TLS_CA_FILE pointing at the integration's
+		// mock CA (line 357 below), so the verifier MUST also emit a
+		// `non_default_tls_trust` warning per the new normative rule.
+		// The mock-CA setup is unchanged; only the expected warnings[]
+		// slice grows.
+		{name: "valid_fresh", file: "valid_fresh.bundle.json", exitCode: 0, result: "valid", reason: "signature_and_canonicalization_match", warnings: []string{"non_default_coordinator", "non_default_tls_trust"}, expectJSON: true, expectNetwork: true},
+		{name: "valid_prev_key_in_grace", file: "valid_prev_key_in_grace.bundle.json", exitCode: 0, result: "valid", reason: "signature_and_canonicalization_match", warnings: []string{"non_default_coordinator", "non_default_tls_trust"}, expectJSON: true, expectNetwork: true},
+		{name: "invalid_tampered_output", file: "invalid_tampered_output.bundle.json", exitCode: 1, result: "invalid", reason: "output_hash_mismatch", warnings: []string{"non_default_coordinator", "non_default_tls_trust"}, expectJSON: true, expectNetwork: true},
+		{name: "invalid_tampered_prompt", file: "invalid_tampered_prompt.bundle.json", exitCode: 1, result: "invalid", reason: "prompt_hash_mismatch", warnings: []string{"non_default_coordinator", "non_default_tls_trust"}, expectJSON: true, expectNetwork: true},
+		{name: "invalid_tampered_unix_ts", file: "invalid_tampered_unix_ts.bundle.json", exitCode: 1, result: "invalid", reason: "signature_verify_failed", warnings: []string{"non_default_coordinator", "non_default_tls_trust"}, expectJSON: true, expectNetwork: true},
+		{name: "invalid_pubkey_not_endorsed", file: "invalid_pubkey_not_endorsed.bundle.json", exitCode: 1, result: "invalid", reason: "pubkey_not_endorsed", warnings: []string{"non_default_coordinator", "non_default_tls_trust"}, expectJSON: true, expectNetwork: true},
+		{name: "invalid_prev_key_outside_grace", file: "invalid_prev_key_outside_grace.bundle.json", exitCode: 1, result: "invalid", reason: "previous_key_outside_grace_window", warnings: []string{"non_default_coordinator", "non_default_tls_trust"}, expectJSON: true, expectNetwork: true},
+		{name: "inconclusive_pubkey_unresolvable", file: "valid_fresh.bundle.json", exitCode: 2, result: "inconclusive", reason: "pubkey_unresolvable", warnings: []string{"live_check_skipped", "non_default_coordinator", "non_default_tls_trust"}, fail5xx: true, expectJSON: true, expectNetwork: true},
+		{name: "inconclusive_resolver_404", file: "inconclusive_resolver_404.bundle.json", exitCode: 2, result: "inconclusive", reason: "provider_id_not_in_pool", warnings: []string{"non_default_coordinator", "non_default_tls_trust"}, fail404: true, expectJSON: true, expectNetwork: true},
+		{name: "inconclusive_stale_cache_live_fail", file: "inconclusive_stale_cache_live_fail.bundle.json", exitCode: 2, result: "inconclusive", reason: "cache_stale_and_live_unreachable", warnings: []string{"live_check_skipped", "non_default_coordinator", "non_default_tls_trust"}, fail5xx: true, seedStale: true, expectJSON: true, expectNetwork: true},
 		{name: "malformed_bundle", file: "malformed_bundle.bundle.json", exitCode: 65},
 		{name: "malformed_receipt", file: "malformed_receipt.bundle.json", exitCode: 65},
 	}

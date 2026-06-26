@@ -518,6 +518,12 @@ func providerMap(p pool.Provider, token map[string]any) map[string]any {
 		"encrypted_leg":           p.EncryptedLeg,
 		"token_status":            token["status"],
 		"token_prefix":            token["token_prefix"],
+		// auth_state surfaces WHY a session is (non-)routable per
+		// SPEC-003 FR-C9.4 (#82 item 4). Empty string is the legacy
+		// pre-FR-C9 admit; operators see the same distinct values
+		// /poolz exposes (bearer_validated / self_minted /
+		// bearerless_duplicate / mint_failed).
+		"auth_state": p.AuthState,
 	}
 }
 
