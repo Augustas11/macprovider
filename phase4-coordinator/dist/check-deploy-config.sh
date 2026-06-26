@@ -145,9 +145,29 @@ def check_hex_secret(label, raw):
     if raw.startswith("env:"):
         m = ENV_REF.match(raw)
         if not m:
-            hard(f"{label} malformed env indirection {raw!r}; expected env:NAME")
+            # Never echo `raw`: if an operator typoed `env:<actual-hex-secret>`
+            # the full bearer-shaped value would otherwise reach the deploy
+            # log. Audit-r6 (security + code lanes) caught this leak path.
+            hard(f"{label} malformed env indirection (value redacted); "
+                 f"expected env:NAME where NAME matches [A-Za-z_][A-Za-z0-9_]*")
             return
         name = m.group(1)
+        # Secret-shape sniff on the NAME itself. If an operator typoed
+        # `env:<hex-secret>` and the secret happens to start with [a-f],
+        # ENV_REF accepts it as a "valid env name" (NAME = [A-Za-z_]+)
+        # and the deferred-OK line would otherwise echo the full bearer
+        # value into deploy logs. Treat any long pure-hex env name as a
+        # near-certain operator typo and hard-fail with a REDACTED
+        # message — real env var names are uppercase + underscores
+        # (e.g. COORDINATOR_OPERATOR_KEY) and never collide with this
+        # heuristic. Audit-r6 follow-up to the explicit `env:` malformed
+        # leak fix above.
+        if len(name) >= 32 and re.fullmatch(r"[0-9a-fA-F]+", name):
+            hard(f"{label} suspected secret-value typo: env name appears "
+                 f"to be a 32+ char hex string (value redacted). Did you "
+                 f"mean to inline the secret, or to reference an env var "
+                 f"like env:COORDINATOR_OPERATOR_KEY?")
+            return
         resolved = os.environ.get(name)
         if not resolved:
             ok(f"{label} deferred to runtime via env:{name} "

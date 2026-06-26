@@ -17,7 +17,8 @@
 #   T4 — env:NAME, var SET to a too-short value        -> FAIL (resolution still validates)
 #   T5 — env:NAME, var SET to a placeholder            -> FAIL (resolution still validates)
 #   T6 — inline placeholder (REPLACE_ME...)            -> FAIL (original guard preserved)
-#   T7 — malformed env ref ("env:" / "env:1bad")       -> FAIL (clear message)
+#   T7a/b — malformed env ref ("env:" / "env:1bad")    -> FAIL (clear message)
+#   T7c — env:<hex-secret> typo                         -> FAIL, secret value redacted (audit-r6)
 #   T8 — operator_key absent                           -> FAIL
 #   T9 — env-indirected key does NOT mask a real C2 timer inversion -> FAIL on C2
 #   T10 — gateway operator_key inline placeholder      -> FAIL (symmetric guard)
@@ -241,11 +242,44 @@ test_malformed_env_ref_fails() {
   run_check "$wd"
   assert_exit 1 "T7a env: (empty NAME) -> FAIL"
   assert_contains "malformed env indirection" "T7a malformed message"
+  assert_contains "value redacted" "T7a redaction note present"
   # Leading digit is not a valid env var identifier.
   write_coord "$wd" "env:1bad"
   run_check "$wd"
   assert_exit 1 "T7b env:1bad -> FAIL"
   assert_contains "malformed env indirection" "T7b malformed message"
+  assert_absent "1bad" "T7b raw indirection value not leaked"
+  rm -rf "$wd"
+}
+
+test_malformed_env_does_not_leak_hex_secret() {
+  # Audit-r6 (security + code lanes -> HIGH): a typoed env:<hex-secret>
+  # would otherwise reach the deploy log. Two leak paths:
+  #   (a) hex starting with a digit (e.g. HEX64 "0123...") — fails the
+  #       ENV_REF regex (NAME starts with [A-Za-z_]) -> malformed branch.
+  #   (b) hex starting with a letter (e.g. HEX64B "fedcba...") — passes
+  #       ENV_REF as a "valid env name", reaches the deferred-OK line
+  #       which previously echoed `env:fedcba...` to deploy logs.
+  # r6 fixes both: malformed redacts via `value redacted`; deferred-OK
+  # path adds a secret-shape sniff on the NAME and hard-fails with a
+  # redacted typo-suspect message when len>=32 and pure-hex.
+  local wd; wd="$(mk_workdir)"
+
+  # Path (a) — hex starts with digit -> malformed.
+  write_gw "$wd"
+  write_coord "$wd" "env:$HEX64"
+  run_check "$wd"
+  assert_exit 1 "T7c-a env:<digit-leading-hex> typo -> FAIL"
+  assert_contains "malformed env indirection" "T7c-a malformed message"
+  assert_absent "$HEX64" "T7c-a HEX64 not leaked into output"
+
+  # Path (b) — hex starts with letter -> deferred-OK secret-shape sniff.
+  write_coord "$wd" "env:$HEX64B"
+  run_check "$wd"
+  assert_exit 1 "T7c-b env:<letter-leading-hex> typo -> FAIL"
+  assert_contains "suspected secret-value typo" "T7c-b typo-suspect message"
+  assert_absent "$HEX64B" "T7c-b HEX64B not leaked into output"
+
   rm -rf "$wd"
 }
 
@@ -788,6 +822,7 @@ test_env_ref_set_short_fails
 test_env_ref_set_placeholder_fails
 test_inline_placeholder_fails
 test_malformed_env_ref_fails
+test_malformed_env_does_not_leak_hex_secret
 test_missing_key_fails
 test_env_ref_does_not_mask_c2_inversion
 test_gateway_operator_key_inline_placeholder_fails
