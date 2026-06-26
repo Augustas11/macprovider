@@ -1,9 +1,16 @@
 package resolver
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -629,4 +636,167 @@ func assertNoWarning(t *testing.T, root ResolvedRoot, kind string) {
 			t.Fatalf("unexpected warning %s in %#v", kind, root.Warnings)
 		}
 	}
+}
+
+// Issue #128 coverage — silent TLS trust widening MUST surface as a
+// warnings[] entry of kind non_default_tls_trust with the CA file
+// path. Pre-fix: env var was honored silently, valid result emitted
+// with no visible indicator that the verifier was trusting a
+// non-default CA chain.
+
+func TestResolveEmitsNonDefaultTLSTrustWarningWhenEnvVarHonored(t *testing.T) {
+	// Write a small PEM file that AppendCertsFromPEM will accept.
+	// Use a known-valid self-signed cert PEM for the predicate; the
+	// content doesn't need to chain anywhere because the warning fires
+	// purely on successful pool augmentation, before any TLS handshake.
+	caPath := writeFakeCAPEM(t)
+	t.Setenv("MACPROVIDER_VERIFY_TLS_CA_FILE", caPath)
+
+	var calls int32
+	server := receiptKeyServer(t, testKey(1), http.StatusOK, &calls)
+	defer server.Close()
+
+	root, err := Resolve(providerID, testKey(1), ResolveOpts{
+		Offline:         true, // offline keeps the test hermetic; the warning fires from Resolve's top, NOT from network state.
+		CoordinatorHost: server.URL,
+		HTTPClient:      server.Client(),
+		Now:             func() time.Time { return fixedNow },
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	assertWarning(t, root, "non_default_tls_trust", "ca_file_path", caPath)
+}
+
+func TestResolveDoesNotEmitNonDefaultTLSTrustWarningWhenEnvVarUnset(t *testing.T) {
+	// The TestMain sets MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR
+	// but never MACPROVIDER_VERIFY_TLS_CA_FILE. Defensively clear it
+	// in case a stray runtime ever sets it.
+	t.Setenv("MACPROVIDER_VERIFY_TLS_CA_FILE", "")
+
+	var calls int32
+	server := receiptKeyServer(t, testKey(1), http.StatusOK, &calls)
+	defer server.Close()
+
+	root, err := Resolve(providerID, testKey(1), ResolveOpts{
+		Offline:         true,
+		CoordinatorHost: server.URL,
+		HTTPClient:      server.Client(),
+		Now:             func() time.Time { return fixedNow },
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	assertNoWarning(t, root, "non_default_tls_trust")
+}
+
+func TestResolveDoesNotEmitNonDefaultTLSTrustWarningWhenCAFileUnreadable(t *testing.T) {
+	// Env var set but path doesn't exist → augmentation cannot
+	// happen, so the warning MUST NOT fire (false-positive would
+	// alarm operators about a non-event).
+	t.Setenv("MACPROVIDER_VERIFY_TLS_CA_FILE", "/nonexistent-ca-file-xyzzy")
+
+	var calls int32
+	server := receiptKeyServer(t, testKey(1), http.StatusOK, &calls)
+	defer server.Close()
+
+	root, err := Resolve(providerID, testKey(1), ResolveOpts{
+		Offline:         true,
+		CoordinatorHost: server.URL,
+		HTTPClient:      server.Client(),
+		Now:             func() time.Time { return fixedNow },
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	assertNoWarning(t, root, "non_default_tls_trust")
+}
+
+func TestResolveDoesNotEmitNonDefaultTLSTrustWarningWhenCAFileNotPEM(t *testing.T) {
+	// File exists and is readable but isn't a PEM cert →
+	// AppendCertsFromPEM returns false → augmentation didn't
+	// happen → no warning.
+	dir := t.TempDir()
+	junkPath := filepath.Join(dir, "not-a-cert.pem")
+	if err := os.WriteFile(junkPath, []byte("this is not a PEM cert\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MACPROVIDER_VERIFY_TLS_CA_FILE", junkPath)
+
+	var calls int32
+	server := receiptKeyServer(t, testKey(1), http.StatusOK, &calls)
+	defer server.Close()
+
+	root, err := Resolve(providerID, testKey(1), ResolveOpts{
+		Offline:         true,
+		CoordinatorHost: server.URL,
+		HTTPClient:      server.Client(),
+		Now:             func() time.Time { return fixedNow },
+	})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	assertNoWarning(t, root, "non_default_tls_trust")
+}
+
+// Issue #126 coverage — private/loopback --coordinator without
+// MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR=1 returns an error
+// that wraps ErrPrivateCoordinatorDenied. cli.exitForError uses
+// errors.Is on this sentinel to map to exit 64 (EX_USAGE).
+
+func TestNormalizeCoordinatorRejectsPrivateHostsWithSentinel(t *testing.T) {
+	t.Setenv("MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR", "")
+	_, err := normalizeCoordinator("https://127.0.0.1:8080")
+	if err == nil {
+		t.Fatal("normalizeCoordinator(127.0.0.1) want error, got nil")
+	}
+	if !errors.Is(err, ErrPrivateCoordinatorDenied) {
+		t.Fatalf("err = %v; want errors.Is ErrPrivateCoordinatorDenied", err)
+	}
+	// Restore the default for the rest of the test run since
+	// TestMain set it to 1.
+	t.Setenv("MACPROVIDER_VERIFY_ALLOW_PRIVATE_COORDINATOR", "1")
+}
+
+func TestNormalizeCoordinatorAllowsPrivateHostsWithEscapeHatch(t *testing.T) {
+	// TestMain sets the env var to 1.
+	_, err := normalizeCoordinator("https://127.0.0.1:8080")
+	if err != nil {
+		t.Fatalf("normalizeCoordinator with escape hatch err=%v want nil", err)
+	}
+}
+
+// writeFakeCAPEM generates a real self-signed P-256 cert at runtime
+// and writes its PEM encoding to a temp file. The cert is never
+// actually used in a TLS handshake — we only need its DER to be
+// valid so AppendCertsFromPEM accepts it and the
+// nonDefaultTLSTrustWarning predicate fires. A hand-crafted PEM
+// fixture is rejected because x509.AppendCertsFromPEM requires the
+// inner DER to be well-formed even if the cert is never trust-
+// validated downstream.
+func writeFakeCAPEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "test.macprovider.local"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		IsCA:         true,
+		KeyUsage:     x509.KeyUsageCertSign,
+		BasicConstraintsValid: true,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	path := filepath.Join(t.TempDir(), "test-ca.pem")
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
