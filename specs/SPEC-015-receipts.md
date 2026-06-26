@@ -2477,6 +2477,14 @@ provided the coordinator returns the exact shape.
   `10 req/sec` per source IP, with a `429` response on overage.
   This protects the coordinator against amplification attacks
   while leaving headroom for batch buyer-side verification.
+  **Source-IP derivation (issue #125).** Per-source bucket keying
+  goes through the operator-configured `proxy.trusted_proxies`
+  CIDR set (see SPEC-002 v1.4.x `proxy.trusted_proxies` block):
+  when the immediate peer is in the trusted set the coordinator
+  parses `X-Forwarded-For` rightmost-untrusted-hop first, falling
+  back to `X-Real-IP`; for untrusted peers the forwarded headers
+  are ignored and the peer's own IP is the bucket key (spoof
+  rejection).
 - **Caching headers:** Response MUST include `Cache-Control: public,
   max-age=300` (5 minutes). Verifiers SHOULD NOT bypass this cache
   via `Cache-Control: no-cache` request headers — staleness up to
@@ -3333,7 +3341,8 @@ covered by the "effectively active catalog" condition above.
 - **Authentication:** None (public).
 - **Rate limiting:** Operator-configurable; recommended floor
   10 req/sec per source IP, mirroring §10.7's
-  `/v1/receipt-keys` posture.
+  `/v1/receipt-keys` posture. Source-IP derivation goes through
+  `proxy.trusted_proxies` (issue #125; see §10.7 and SPEC-002 v1.4.x).
 - **Cache-Control:** `public, max-age=300` (5 minutes; same as
   §10.7).
 - **Response:** the literal signed catalog bytes accepted by the

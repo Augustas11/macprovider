@@ -9,6 +9,19 @@ listen:
   provider_port: 8444
   bind_address: "127.0.0.1"
 
+proxy:
+  # Production sits behind nginx on localhost — the default
+  # ["127.0.0.0/8", "::1/128"] is correct. The coordinator parses
+  # X-Forwarded-For / X-Real-IP only when r.RemoteAddr falls in one
+  # of these CIDRs; for any other peer the forwarded headers are
+  # IGNORED so an attacker on the open internet cannot spoof their
+  # bucket key. If you move the coordinator behind a remote LB,
+  # ADD the LB's CIDR here — do NOT widen to non-actual-proxy
+  # ranges. Issue #125.
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+
 pool:
   heartbeat_interval_s: 30
   disconnect_grace_period_s: 30

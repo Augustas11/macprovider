@@ -3,6 +3,19 @@ listen:
   provider_port: 8444
   bind_address: "127.0.0.1"
 
+proxy:
+  # CIDR ranges whose X-Forwarded-For / X-Real-IP headers the
+  # coordinator honors when deriving the per-source rate-limit key for
+  # /v1/pool/check, /v1/receipt-keys/*, and /catalog/*. Default is
+  # loopback-only — production sits behind nginx on localhost. Add the
+  # proxy's CIDR(s) here ONLY if you front the coordinator with a
+  # non-loopback reverse proxy; expanding to non-actual-proxy CIDRs
+  # lets attackers in those CIDRs spoof their bucket key via
+  # X-Forwarded-For. Issue #125.
+  trusted_proxies:
+    - "127.0.0.0/8"
+    - "::1/128"
+
 pool:
   heartbeat_interval_s: 30
   disconnect_grace_period_s: 30
