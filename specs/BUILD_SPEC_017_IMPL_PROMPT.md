@@ -16,8 +16,15 @@ Your job is to implement [`specs/SPEC-017-network-stats-api.md`](SPEC-017-networ
 
 ## 0. Controlling contract
 
-- **SPEC:** [`specs/SPEC-017-network-stats-api.md`](SPEC-017-network-stats-api.md) at **v0.1.7** (LOCKED on commit `4a26826` on the v0.1 LOCK branch; codex round-8 declared READY TO LOCK at 0/0/0 on the Claude critic+designer fix pass on top of the prior v0.1.6 LOCK). Re-read every "MUST / MUST NOT / SHOULD" in the SPEC before you write the corresponding IMPL code. Every section heading referenced below (`§5.1`, `§7.2.2`, `§9.1`, etc.) points at the merged SPEC.
-- **v0.1.7 deltas vs v0.1.6 (binding for this prompt):** the Claude fix pass that produced v0.1.7 changed the contract in ways the IMPL author MUST honor:
+- **SPEC:** [`specs/SPEC-017-network-stats-api.md`](SPEC-017-network-stats-api.md) at **v0.1.8** (LOCKED on commit `62468cb` on the v0.1 LOCK branch; codex round-10 declared READY TO LOCK at 0/0/0 on the IMPL-prompt-audit-driven SPEC fix pass on top of the prior v0.1.7 LOCK). v0.1.8 added **Shape C** to §9.4 (single-transaction DELETE+INSERT executable under the locked §7.2.2 grant set; the only v0.1 default), reconciled §5.6 with AC-8 (dropped burst from both tiers; added Authorization-aware nginx keying; added auth-failure tier limiter), removed `partner_keys.rate_limit_burst` from §5.4.1 and `--burst` from the CLI, and added AC-22 verifying the auth-failure tier. Re-read every "MUST / MUST NOT / SHOULD" in the SPEC before you write the corresponding IMPL code. Every section heading referenced below (`§5.1`, `§7.2.2`, `§9.1`, etc.) points at the merged SPEC.
+- **v0.1.8 deltas vs v0.1.7 (binding for this prompt):**
+  - §9.4 now lists **three** rebuild shapes — Shape A (TRUNCATE swap), Shape B (atomic rename), and **Shape C (single-tx DELETE + INSERT)**. Shape C is the only one executable under the locked §7.2.2 grant set; the v0.1 IMPL MUST use Shape C unless the operator widens grants for A/B at deploy time.
+  - §5.6 dropped the `burst` column from both the public and partner tiers. Public tier is now a hard 60 req/min per IP per endpoint; partner tier a hard 600 req/min per key per endpoint; no burst absorption. Step 4.B is no longer hard-blocked on a SPEC reconciliation.
+  - §5.6 added **Authorization-aware nginx keying** — the public-tier `limit_req_zone` MUST NOT throttle Authorization-bearing requests at the edge. Use either an `nginx map` (public RL key empty when Authorization is present) OR a split location block.
+  - §5.6 added the **auth-failure tier**: an in-process per-IP+endpoint bucket running BEFORE the §5.4.3 hash+SELECT, floor 300 req/min per IP, that catches floods of invalid/revoked/rejected-origin Authorization-bearing requests on the direct-to-coordinator path. AC-22 verifies.
+  - §5.4.1 removed the `rate_limit_burst INT` column; §5.4.2 removed the `--burst` CLI flag. The v0.1.8 hard-limit model has no per-key burst.
+  - §10 added **AC-22** for the auth-failure tier.
+- **v0.1.7 deltas vs v0.1.6 (still binding, kept for context):** the Claude fix pass that produced v0.1.7 changed the contract in ways the IMPL author MUST honor:
   - §5.2 public projection NO LONGER exposes `totals.earnings_usd`, `totals.earnings_work_usd`, or `totals.earnings_rewards_usd`. The public `totals` object carries only `tokens`, `jobs`, `active_accounts`.
   - §5.2 public projection ships ONE bucket axis (`earnings_bucket`) and ONE exact field (`exact_earnings`). The earlier per-axis buckets (`earnings_work_bucket`, `earnings_rewards_bucket`) and per-axis exact fields (`exact_earnings_work`, `exact_earnings_rewards`) are REMOVED. Partner-key projection still has per-axis exact-$ (`earnings_work_usd`, `earnings_rewards_usd`).
   - §5.2 adds top-level `partial_history_since` (RFC 3339, present per §9.7 rules) and `meta.rewards_populated` (REQUIRED boolean).
@@ -36,7 +43,7 @@ Your job is to implement [`specs/SPEC-017-network-stats-api.md`](SPEC-017-networ
   - §9.3 pins `stats_late_events` 90-day retention (operator-configurable, ≥30 days).
   - §9.4 pins nightly rebuild MUST execute in a single PostgreSQL transaction (Shape A temp-table swap OR Shape B atomic table rename).
   - §11 Q9 is now CLOSED (per-axis buckets stripped). Q11 is PARTIAL (column stub landed; rollup semantic still v0.2).
-- **Per-round SPEC audit detail:** [`specs/SPEC-017-r1-audit.md`](SPEC-017-r1-audit.md) through [`specs/SPEC-017-r8-audit.md`](SPEC-017-r8-audit.md). Skim these for the *why* behind individual SPEC requirements — many normative paragraphs close a specific audit finding (e.g. round-2 C1 the partner-key 47-char format, round-2 C2 the deferred rewards-source semantics, round-4 M2 the implementation-authored OLTP source grants, round-6 M1 the BIGSERIAL backing-sequence grants, round-8 Claude H1–H5 + M1–M7 + designer D-H1/H2/M1).
+- **Per-round SPEC audit detail:** [`specs/SPEC-017-r1-audit.md`](SPEC-017-r1-audit.md) through [`specs/SPEC-017-r10-audit.md`](SPEC-017-r10-audit.md). Skim these for the *why* behind individual SPEC requirements — many normative paragraphs close a specific audit finding (e.g. round-2 C1 the partner-key 47-char format, round-2 C2 the deferred rewards-source semantics, round-4 M2 the implementation-authored OLTP source grants, round-6 M1 the BIGSERIAL backing-sequence grants, round-8 Claude H1–H5 + M1–M7 + designer D-H1/H2/M1, round-9 IMPL-audit-driven §9.4 Shape C + §5.6 burst drop + §5.6 auth-failure tier, round-10 lock).
 - **Per-round IMPL-prompt audit detail:** [`specs/SPEC-017-IMPL-PROMPT-arch-rN-audit.md`](SPEC-017-IMPL-PROMPT-arch-r1-audit.md) / `-code-` / `-security-` for each round. This version of the prompt absorbed round-1..6 findings across all three lanes (the round-5/6 SPEC-v0.1.6 convergence) plus the v0.1.7 re-anchor pass (new rounds opened from this commit forward).
 - **Locked design rationale:** [`specs/SPEC-017-advisor-round-2026-06-25.md`](SPEC-017-advisor-round-2026-06-25.md) records the four LOCKED Q1-Q4 picks (separate rollup pipeline, public overview + optional partner keys on leaderboard, bucketed-default earnings + provider opt-in, embed in coordinator binary). **DO NOT re-litigate any of those picks in this IMPL.**
 - **Decision rationale:** [`beta/DECISION_CRITERIA.md`](../beta/DECISION_CRITERIA.md) Entry 90 records why one-contract-three-consumers, why bucketed default, why partner keys on leaderboard only, and why embed-not-split.
@@ -245,22 +252,20 @@ Per current code at [`phase4-coordinator/cmd/coordinator/main.go`](../phase4-coo
 
 **Drift detection per §9.4:** nightly rebuild compares against incremental snapshot; `>0.5%` divergence on any axis emits `stats_rollup_drift_detected` structured-log event AND records the divergence in the operator alerting pipeline (Step 4); rebuild value wins.
 
-**Nightly rebuild atomicity (v0.1.7, §9.4) — pin this:** the nightly rebuild of `stats_leaderboard_all` (and `stats_leaderboard_30d`) MUST execute in a single PostgreSQL transaction so the leaderboard never serves a half-rebuilt state. SPEC §9.4 names Shape A (temp-table swap with `TRUNCATE`) and Shape B (atomic rename with `ALTER TABLE ... RENAME` + `DROP TABLE`). **Both require privileges (`TRUNCATE`, `ALTER`, `DROP`, ownership) that are NOT in the locked `stats_rollup` grant set (§7.2.2 grants are SELECT/INSERT/UPDATE/DELETE only).** Until a SPEC v0.1.8 candidate either widens the grant set OR adds Shape C below to §9.4, the IMPL author MUST use:
+**Nightly rebuild atomicity (v0.1.8 §9.4) — pin this:** the nightly rebuild of `stats_leaderboard_all` (and `stats_leaderboard_30d`) MUST execute in a single PostgreSQL transaction so the leaderboard never serves a half-rebuilt state. SPEC v0.1.8 §9.4 lists three shapes — Shape A (temp-table swap with `TRUNCATE`), Shape B (atomic rename), and **Shape C (single-tx DELETE + INSERT)**. **Shape C is the only one executable under the locked §7.2.2 `stats_rollup` grant set (SELECT/INSERT/UPDATE/DELETE only); Shapes A/B require `TRUNCATE`/`ALTER`/`DROP` privileges that the locked grants do NOT include.** v0.1 IMPL MUST use Shape C unless the operator widens grants at deploy time:
 
-- **Shape C (executable under the locked §7.2.2 grants) — single-transaction DELETE + INSERT:**
+- **Shape C (v0.1 default per SPEC v0.1.8 §9.4):**
   ```sql
   BEGIN ISOLATION LEVEL READ COMMITTED;
-  -- 1. Build the new rows into a CTE / sub-query.
-  -- 2. Delete all existing rows.
   DELETE FROM stats_leaderboard_all;
-  -- 3. INSERT the rebuilt rows from the same connection.
-  INSERT INTO stats_leaderboard_all (provider_id, pseudonym, generated_at, rank_earnings, ...)
+  INSERT INTO stats_leaderboard_all (provider_id, pseudonym, generated_at,
+    rank_earnings, rank_tokens, rank_jobs, earnings_usd, earnings_work_usd,
+    earnings_rewards_usd, earnings_bucket, tokens, jobs, first_seen_at,
+    last_seen_at)
   SELECT ... FROM ... ; -- the rebuilt source query
   COMMIT;
   ```
-  Atomicity guarantee: PostgreSQL MVCC means concurrent `stats_reader` SELECTs see the pre-DELETE snapshot until the transaction commits, then see the post-INSERT snapshot. There is no window where the handler observes an empty leaderboard. A failed transaction MUST roll back, leaving the pre-rebuild state intact.
-
-The IMPL author MUST file a SPEC v0.1.8 candidate that EITHER (a) widens §7.2.2 to grant `TRUNCATE`/ALTER on the leaderboard tables to `stats_rollup` (re-enabling Shapes A/B), OR (b) adds Shape C explicitly to §9.4 as a §7.2.2-grant-compatible variant. Until that candidate locks, Shape C is the only executable atomicity-preserving shape under the locked grants. The IMPL author MUST NOT widen the role in code without the SPEC change.
+  Atomicity guarantee (from SPEC §9.4): PostgreSQL MVCC means concurrent `stats_reader` SELECTs see the pre-DELETE snapshot until the transaction commits, then see the post-INSERT snapshot. There is no window where the handler observes an empty leaderboard. A failed transaction MUST roll back, leaving the pre-rebuild state intact.
 
 The rebuild MUST NOT interleave per-provider UPSERT operations against the live table outside a transaction. A test MUST verify (i) a deliberately-aborted rebuild leaves the live table unchanged, AND (ii) a concurrent `stats_reader` query during a successful rebuild sees consistent state (never an empty leaderboard).
 
@@ -303,6 +308,12 @@ A seed SQL file under `phase4-coordinator/internal/stats/testdata/` MUST contain
 - Integration (v0.1.7 — rebuild atomicity per §9.4): run a deliberately-aborted nightly rebuild (e.g. inject a SQL error inside the transaction body); assert `SELECT * FROM stats_leaderboard_all` is unchanged from the pre-rebuild state. Then run a successful rebuild and assert the swap landed atomically (e.g. for Shape B the `_old` table no longer exists; for Shape A the temp table was dropped on commit).
 - Integration (v0.1.7 — `stats_late_events` retention per §9.3): seed `stats_late_events` rows with `recorded_at = now() - INTERVAL '100 days'` AND `recorded_at = now() - INTERVAL '30 days'`. Run the nightly job. Assert the 100-day-old row is DELETED; the 30-day-old row is preserved. Set `stats.rollup.late_events_retention_days = 15` and assert the IMPL refuses to start (or clamps + logs — match the pinned behavior).
 - Integration (v0.1.7 — `rewards_populated` computation per §9.1a + §5.2): with empty `provider_rewards_ledger`, run a rollup tick and assert the persisted `rewards_populated` value for each of `{24h, 7d, 30d, all}` is `false`. Insert one `provider_rewards_ledger` row with `unix_ts` inside the 7d window; re-run the tick; assert `rewards_populated[7d] = true` AND `rewards_populated[24h] = false` (assuming the inserted unix_ts is older than 24h ago).
+- Integration (ARCH r7 H2 — Step 2 OWNS rollup `provider_visibility` left-join + bucket computation, NOT just Step 1 fixture + Step 3 projection): the rollup MUST left-join `provider_visibility` when producing `stats_leaderboard_*` rows. Absence of a row defaults to `mode = 'bucketed'` AND `blocked_from_partner_projection = FALSE` (per §6.1). The rollup MUST compute `earnings_bucket` from the stored `NUMERIC(18,2)` total per §6.2 boundary semantics. Test fixtures MUST include:
+  - A provider with NO `provider_visibility` row → `stats_leaderboard_24h.earnings_bucket` computed against thresholds; rollup produces the row.
+  - A provider with `provider_visibility.mode = 'exact'` → row populated (Step 3 then exposes `exact_earnings` per §5.2).
+  - A provider with `provider_visibility.mode = 'bucketed'` explicitly → row populated (Step 3 then exposes `exact_earnings: null` in public projection).
+  - Bucket-boundary fixtures: provider with `earnings_usd = 4.99` → `earnings_bucket = '$'`; `5.00` → `'$$'`; `49.99` → `'$$'`; `50.00` → `'$$$'` (against the 24h window thresholds). These prove the §6.2 `[a, b)` boundary semantics are encoded in the rollup, NOT only the handler.
+  Keep Step 3 as projection / redaction verification on seeded `stats_leaderboard_*` rows; Step 2 is the first place these defaulting and bucket-computation semantics are proven.
 
 **Step 2 audit prompt authoring**: three lanes.
 
@@ -395,7 +406,7 @@ The handler MUST enforce this split — using `ACAO: *` on any partner-key proje
 
 The handler MUST emit the Vary header for the projection actually returned (i.e. the public branch and partner-key branch of `/v1/stats/leaderboard` set different Vary headers). A keyed request that auth-fails with 401 takes the public-projection Vary (since the response carries no key-derived content).
 
-**`X-Stats-Generated-At` header on every `/v1/stats/*` response** per §5.1 / §5.2 / §5.3.
+**`X-Stats-Generated-At` header on every non-304 `/v1/stats/*` response** per §5.1 / §5.2 / §5.3 (CODE r8 M2 fix). 304 Not Modified is exempt per locked §5.9 — a 304 carries ONLY the RFC 7232 headers `ETag`, `Cache-Control`, and `Vary` with an empty body. Do NOT emit `X-Stats-Generated-At` on 304 responses. The Step 3 test list narrows the blanket assertion to non-304 responses; the AC-12 round-trip test asserts the absence of `X-Stats-Generated-At` on the 304 response specifically.
 
 **Middleware stack (pinned — exactly this order, outermost to innermost):**
 
@@ -404,15 +415,20 @@ The recover-vs-redaction ordering issue is resolved by pinning a single stack an
 1. **Redaction-context middleware (outermost):** runs first on the inbound request. Reads `Authorization`, replaces the header value with `REDACTED` in the request's logging context (`r.Header.Set` or a request-clone pattern), and stores the parsed bearer token in `r.Context()` under an unexported typed key — e.g. `type authKey struct{}` + `r = r.WithContext(context.WithValue(r.Context(), authKey{}, parsedToken))`. The auth dispatcher (step 5 below) retrieves the token via `r.Context().Value(authKey{})`. NO goroutine-local storage, NO package globals, NO `sync.Map` keyed by goroutine ID — those patterns are non-idiomatic Go and unsafe under concurrent serving. The unexported typed key prevents accidental cross-package retrieval. Every downstream log/trace/metric emitter reads ONLY the redacted header context; the raw token in `r.Context()` is consumed by the auth dispatcher and discarded after the SELECT.
 2. **Recover middleware:** wraps the entire `/v1/stats/*` subtree (all methods including GET, HEAD, OPTIONS, and the 405 path for other verbs). On panic: log `event=stats_handler_panic` (structured) using the REDACTED context — so `Authorization` is already `REDACTED`, no raw token, no `token_hash`, no raw SQL, no stack in the public log line. Stack MAY go to a debug-only sink. The recover middleware MUST ALSO perform its own first-line `Authorization` strip as defense-in-depth (in case the redaction context is bypassed for any reason); this is the SECURITY guarantee.
 3. **Access-logging / tracing middleware:** reads only the redacted context.
-4. **Pre-auth coarse rate limiter (v0.1.7 SECURITY H1 fix) — per-IP, NOT keyed on partner_keys.id:** runs BEFORE the auth dispatcher. Keys on client IP (or `X-Forwarded-For` first IP per the existing coordinator pattern). Limits set to a coarse multiple of the §5.6 public tier (e.g. 5×60 req/min = 300 req/min per IP across `/v1/stats/*`). On exceed: return 429 with §5.9 `rate_limited` envelope BEFORE the auth dispatcher runs ANY `sha256 + SELECT` work. This protects the nginx-bypass code path (direct-to-coordinator) from flood-by-invalid-bearer probes that would otherwise drive unbounded `partner_keys` lookups. The pre-auth limiter MUST NOT differentiate by Authorization presence — any `/v1/stats/*` request (absent / present-valid / present-invalid / present-revoked / present-rejected-origin) consumes the same per-IP bucket. AC-18 timing samples MUST be taken below this threshold so timing equivalence is measured on non-limited 401s.
+4. **Auth-failure tier limiter (v0.1.8 SPEC §5.6 + SECURITY r5 H1 trusted-proxy fix) — per-IP, NOT keyed on partner_keys.id:** runs BEFORE the auth dispatcher. **Client-IP derivation MUST use a trusted-proxy allowlist:**
+   - If the immediate peer (`r.RemoteAddr`) is in the operator-configured trusted-proxy allowlist (e.g. `["127.0.0.1/32", "10.0.0.0/8"]` for nginx running on localhost or in a private network), parse the first `X-Forwarded-For` hop AFTER the trusted proxy as the client IP.
+   - Otherwise (direct-to-coordinator, no trusted proxy in front), use `r.RemoteAddr` directly. The implementation MUST NOT trust `X-Forwarded-For` from an untrusted immediate peer — the v8 prompt's permissive "client IP (or `X-Forwarded-For` first IP per the existing coordinator pattern)" was the SECURITY r5 H1 gap: an attacker could rotate spoofed `X-Forwarded-For` values on a direct-to-coordinator socket and bypass the per-IP bucket. The trusted-proxy allowlist closes that.
+   Per SPEC §5.6 v0.1.8 auth-failure tier, the floor is 300 req/min per IP per endpoint (5× the public floor). Limits any `/v1/stats/*` request that produces a 401 per §5.4.3 rows 3/5/6/7 (Authorization present + would fail) AND any request with absent/valid Authorization — the bucket is keyed on IP-and-endpoint, not on Authorization status, so it MUST NOT differentiate by auth result (per §5.4.3 rule 4 timing equivalence). On exceed: return 429 with §5.9 `rate_limited` envelope BEFORE the auth dispatcher runs ANY `sha256 + SELECT` work. AC-22 verifies. AC-18 timing samples MUST be taken below this threshold so timing equivalence is measured on non-limited 401s.
 5. **Auth dispatcher:** reads the bearer token from `r.Context().Value(authKey{})` (set in step 1), hashes via `sha256(token_utf8_bytes)`, performs SELECT against `partner_keys`, enforces §5.4.3 7-row decision table.
 6. **Post-auth success rate-limit middleware (per-tier):** keys on client IP (public tier success bucket per §5.6) or `partner_keys.id` (partner tier per §5.6 + §5.4.7). Tracks successful 2xx accounting only; stale-503 responses MUST NOT debit this bucket (so a rollup outage does not exhaust quotas for healthy clients). The public-tier bucket here is the "fallback when nginx is bypassed" surface §5.6 names.
 7. **Handler:** computes JSON, returns response. Recover MUST be set on `500 internal` with §5.9 envelope on panic.
 
-**Tests for the pre-auth limiter (SECURITY H1):**
+**Tests for the auth-failure tier (v0.1.8 AC-22 + SECURITY r5 H1):**
 
-- Direct-to-coordinator (nginx bypassed) flood test: send 350 `/v1/stats/leaderboard` requests in 60s with `Authorization: Bearer mpk_invalid_<random>` from a single client IP. Assert: the 301st request returns 429 with §5.9 envelope BEFORE the auth dispatcher runs a SELECT (verify via SQL query counter — the `partner_keys` SELECT count for the test client IP MUST be ≤300 even though 350 requests were sent). The pre-auth limiter catches the flood without consuming DB work for the excess.
-- AC-18 statistical test (rows 5/6/7) MUST run at a request rate below the pre-auth threshold (i.e. ≤270 req/min sustained) so timing samples are not coupled to the pre-auth 429s. Pin the rate explicitly in the test setup.
+- Direct-to-coordinator (nginx bypassed) flood test from a single socket: send 350 `/v1/stats/leaderboard` requests in 60s with `Authorization: Bearer mpk_invalid_<random>`. Assert: the 301st request returns 429 with §5.9 envelope BEFORE the auth dispatcher runs a SELECT (verify via SQL query counter — the `partner_keys` SELECT count for the test client IP MUST be ≤300 even though 350 requests were sent).
+- **Spoofed `X-Forwarded-For` test (SECURITY r5 H1):** from the same single socket, rotate `X-Forwarded-For` header across 350 distinct synthetic IPs. Assert: with the trusted-proxy allowlist EMPTY (direct-to-coordinator), the 301st request STILL returns 429 — the limiter ignores the spoofed header and keys on `r.RemoteAddr`. With the trusted-proxy allowlist INCLUDING `127.0.0.1/32` AND the connection actually coming through localhost nginx, the rotated `X-Forwarded-For` values produce distinct per-IP buckets and the test rate stays below the limit per IP. This proves both: untrusted XFF is ignored, trusted XFF is parsed.
+- Nginx-surface real-IP test: real proxied requests through nginx (with `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for`) group by the actual client IP correctly.
+- AC-18 statistical test (rows 5/6/7) MUST run at a request rate below the auth-failure threshold (i.e. ≤270 req/min sustained) so timing samples are not coupled to 429 responses. Pin the rate explicitly in the test setup.
 
 Returns `500 internal` with the §5.9 envelope and `Content-Type: application/json; charset=utf-8`. AC-11 verifies via an injected panic in a test handler that `/healthz` (the coordinator's own liveness endpoint) survives.
 
@@ -422,10 +438,11 @@ Returns `500 internal` with the §5.9 envelope and `Content-Type: application/js
 - **Log allowance (different from metric allowance):** logs MAY reference `partner_keys.id` (integer), `partner_keys.label`, and the 8-char `prefix` (the prefix is permitted in logs for human correlation per SPEC §5.4.6).
 - **Metric allowance (tighter than log allowance):** metric labels MAY reference `partner_keys.id` (integer) and bounded enums (e.g. `tier ∈ {"public","partner"}`). Metric labels MUST NOT include `prefix`, `partner_keys.label` (operator text), `token_hash`, raw token, any random-substring, Origin string, or untrusted user input. See SECURITY M5 + ARCH H3 / CODE-R2-007 for why metrics is tighter than logs (metric cardinality + external observability retention).
 
-**Rate limiting per §5.6:**
+**Rate limiting per §5.6 (v0.1.8 three-tier model):**
 
-- Public tier: nginx `limit_req_zone` is PRIMARY (configured in Step 4). In-process bucket is FALLBACK — defense-in-depth for the case nginx is bypassed (direct `coordinator.streamvc.live` access during a debugging window).
-- Partner tier: in-process bucket keyed on `partner_keys.id` (NOT raw token, NOT prefix). Limits per `partner_keys.rate_limit_rpm` / `rate_limit_burst` columns; IMPL MUST clamp to per-row values, not a global default.
+- **Public tier (no Authorization)** — nginx `limit_req_zone` is PRIMARY (configured in Step 4.B), in-process bucket is FALLBACK. Hard 60 req/min per IP per endpoint; no burst absorption.
+- **Partner tier (valid Authorization → 200 partner projection)** — in-process bucket keyed on `partner_keys.id` (NOT raw token, NOT prefix). Hard limit per `partner_keys.rate_limit_rpm` (default 600). v0.1.8 removed the `rate_limit_burst` column; IMPL MUST clamp to `rate_limit_rpm` per-row, no burst.
+- **Auth-failure tier (Authorization present → 401 per §5.4.3 rows 3/5/6/7)** — in-process bucket pre-auth (see middleware stack step 4 above), keyed on IP+endpoint with trusted-proxy-allowlist client-IP derivation. Floor 300 req/min. Runs BEFORE `sha256+SELECT` so invalid-bearer floods cannot drive unbounded DB lookups. AC-22 verifies.
 - 429 response includes `Retry-After: <seconds>` and §5.9 `rate_limited` envelope.
 
 **Tests for Step 3 — AC-to-step matrix (replaces "every AC in Step 3"):**
@@ -454,7 +471,7 @@ Step 3 OWNS these ACs (writes the test):
 Additionally for Step 3 specifically:
 - **Cache-Control header assertions** for all four (endpoint, projection) cells in the table above.
 - **Vary header assertions (v0.1.7)** — public-projection `/v1/stats/leaderboard` response MUST have `Vary: Accept-Encoding, Origin` (NOT including `Authorization`); partner-key projection MUST have `Vary: Accept-Encoding, Origin, Authorization`. A 401 keyed-but-invalid response MUST take the public-projection Vary (the response body is not key-derived).
-- **`X-Stats-Generated-At`** present on every `/v1/stats/*` response.
+- **`X-Stats-Generated-At`** present on every NON-304 `/v1/stats/*` response (CODE r8 M2 — 304 path per §5.9 carries only RFC 7232 headers). A separate AC-12 sub-assertion verifies the 304 response does NOT carry `X-Stats-Generated-At`.
 - **§5.4.3 7-row decision-table test** — one fixture per row, including the absent-Origin case (row 3).
 - **CORS sibling-subdomain reject test** — `Origin: https://evil.streamvc.live` rejected; `Origin: https://portal.streamvc.live` accepted only if EXACTLY in allowlist.
 - **CORS partner-key projection NEVER `ACAO: *` test (v0.1.7 H1)** — drive all 7 §5.7 rows; assert that for partner-key projection rows (rows 3, 4, 5 in v0.1.7), the response `Access-Control-Allow-Origin` is either the echoed normalized Origin (when set) OR omitted entirely (server-to-server context), NEVER `*`. Also assert `Allow-Credentials: true` is paired with the echoed-Origin case and omitted in the server-to-server case.
@@ -499,7 +516,7 @@ Flags:
 - `--label "<text>"` (required) — human-readable label.
 - `--allowed-origin <url>` (repeatable, optional) — populates `allowed_origins`. Multiple = allowlist. Empty = no Origin restriction. **v0.1.7 binding (§5.4.3 rule 5):** the CLI MUST validate each `--allowed-origin` value against the RFC 6454 ASCII serialization rule. Reject (non-zero exit, no INSERT) any value that does not parse to its own normalized form — e.g. `HTTPS://Acme.Example/` MUST be rejected (trailing slash, mixed case) and the operator MUST re-issue as `https://acme.example`. This is an idempotency check: a normalized value passes the check; a non-normalized value does not.
 - `--rpm <int>` (default 600) — populates `rate_limit_rpm`.
-- `--burst <int>` (default 1200) — populates `rate_limit_burst`.
+- **v0.1.8 removed `--burst`** — the `rate_limit_burst` column no longer exists in `partner_keys` (v0.1.8 hard-limit model has no per-key burst). The CLI MUST NOT accept the `--burst` flag; the test suite includes a negative assertion that the bare flag produces a clear error.
 - `--created-by <text>` (OPTIONAL — if omitted, defaults to a non-empty operator principal: `$USER@$(hostname)` from environment, or `"unknown@<hostname>"` if `$USER` is unset; populates the `created_by TEXT NOT NULL` column per §5.4.1). The default MUST be non-empty so the locked SPEC AC-17 command `coordinator partner-keys issue --label X` (NO `--created-by` flag) still passes argument validation, generates a token, and INSERTs a row with non-empty `created_by`. CI tests run BOTH the bare AC-17 command AND the explicit `--created-by ops@example.com` variant.
 - `--rotate-from <existing_id>` (optional) — see rotation flow below.
 
@@ -509,7 +526,7 @@ Issuance flow:
 2. Encode unpadded base64url (RFC 4648 §5, no `=` padding) → 43-character body.
 3. Prefix with `mpk_` → 47-character raw token (length math: `mpk_` is 4 chars + 43 base64url chars = 47).
 4. Compute `token_hash = sha256(raw_token_utf8_bytes)`.
-5. INSERT into `partner_keys` with: `token_hash`, `token_hash_alg = 'sha256'`, `prefix = <first 8 chars of raw token>` (always begins `mpk_`), `label`, `allowed_origins`, `rate_limit_rpm`, `rate_limit_burst`, `created_by`, `rotated_from_id` (if `--rotate-from` was passed, else NULL).
+5. INSERT into `partner_keys` with: `token_hash`, `token_hash_alg = 'sha256'`, `prefix = <first 8 chars of raw token>` (always begins `mpk_`), `label`, `allowed_origins`, `rate_limit_rpm`, `created_by`, `rotated_from_id` (if `--rotate-from` was passed, else NULL). v0.1.8 removed `rate_limit_burst` from the column list per SPEC §5.4.1.
 6. Print raw token to stdout exactly ONCE. Process exit MUST NOT log the raw token anywhere — verified by the AC-17 assertion.
 
 **Rotation per §5.4.4** — there is NO standalone `rotate-from` subcommand. Rotation is performed by `coordinator partner-keys issue --rotate-from <existing_id>`, which INSERTs a new row with `rotated_from_id = <existing_id>` and leaves the predecessor's `revoked_at = NULL` for the operator-decided overlap window.
@@ -530,25 +547,43 @@ Issuance flow:
 
 **Nginx server-block on Pearl** for `stats.streamvc.live` AND a path-prefix block for `coordinator.streamvc.live/v1/stats/*`. Required directives:
 
-- `limit_req_zone` declaration per endpoint at the `http` block (defines the zone — no `nodelay` here; `nodelay` is invalid on `limit_req_zone`).
-- `limit_req zone=<name> nodelay;` (note: NO `burst=<n>` for the AC-8 surface — see below). Applied to each endpoint's `location` block.
+- `limit_req_zone` declaration per endpoint at the `http` block (defines the zone). v0.1.8 SPEC §5.6 dropped burst from both tiers — the public-tier zone declaration MUST use `rate=60r/m` and the location block MUST use `limit_req zone=<name> nodelay;` with NO `burst=` parameter. This is the production config, not a test-only harness — Step 4.B is no longer blocked.
 - `limit_req_status 429;` per endpoint location.
 
-**Burst conflict between locked §5.6 and locked AC-8 — Step 4.B is BLOCKED on SPEC reconciliation:**
+**v0.1.8 — Authorization-aware nginx keying (binding, per SPEC §5.6).** The public-tier `limit_req_zone` MUST NOT throttle Authorization-bearing requests at the edge. The IMPL author picks one of these two shapes:
 
-SPEC §5.6 names "60 req/min, 120 burst" for the public tier. SPEC AC-8 requires "61st request from same IP within 60s returns 429 with `Retry-After`". With nginx semantics `rate=60r/m` and `burst=120 nodelay`, 61 requests within 60s would NOT trigger 429 — the 120-token burst budget would absorb the excess. The two pins are mechanically inconsistent in plain nginx.
+- **Shape (a) — map-based bypass:**
+  ```nginx
+  map $http_authorization $public_rl_key {
+      ""      $binary_remote_addr;
+      default "";
+  }
+  limit_req_zone $public_rl_key zone=stats_public:10m rate=60r/m;
+  ```
+  When `Authorization` is present, the key is empty and the limiter does not count the request.
+- **Shape (b) — split location block:**
+  ```nginx
+  location /v1/stats/leaderboard {
+      if ($http_authorization != "") { ... no public limit_req ... }
+      limit_req zone=stats_public nodelay;
+      limit_req_status 429;
+      proxy_pass http://coordinator;
+  }
+  ```
 
-**Both §5.6 and AC-8 are locked.** The IMPL author MUST NOT silently pick one over the other, AND the IMPL author MUST NOT accept an operator-recorded local divergence from either locked clause — an IMPL prompt cannot authorize shipping behavior that knowingly violates a locked contract clause (per ARCH r6 C2 / CODE r7 finding 003). Step 4.B production nginx rate-limit config is **HARD BLOCKED** until the controlling contract has one mechanical behavior. The only resolution is to lock a new SPEC version:
+Either way, valid partner-key traffic flows through nginx un-throttled at the public tier; the partner-tier limit (600 req/min per `partner_keys.id`) is enforced **in-process** per §5.6 partner tier and §5.4.7. The auth-failure tier (300 req/min per IP, in-process, pre-hash-SELECT per SPEC §5.6) catches invalid-bearer floods — see Step 3 middleware stack.
 
-- **SPEC v0.1.8 reconciliation (the only acceptable path).** File a SPEC v0.1.8 candidate that reconciles §5.6 and AC-8 (e.g. clarifies that "Burst 120" applies to short legitimate spikes but the per-IP token bucket refill rate triggers AC-8's 429 at the 61st request inside the 60s window only when burst tokens are exhausted; OR drops the `120 burst` figure from §5.6 to align with the AC; OR rewords AC-8 to a higher request count consistent with the locked burst). Run the codex SPEC-audit loop on v0.1.8 until 0/0/0; lock; THEN start Step 4.B. The IMPL author MUST NOT open the Step 4.B production-nginx PR before this lock lands.
+**SECURITY r5 C1 fix — `proxy_no_cache` alongside `proxy_cache_bypass`:** nginx `proxy_cache_bypass` only governs whether the response is **read from** the cache; it does NOT prevent the response from being **saved to** the cache. The partner-key projection carries exact `$` for ALL providers (SPEC §6.6.2) and MUST never be persisted at the edge. The nginx config MUST set BOTH:
 
-There is no operator-side waiver path. The previous "Path R2 — operator opts in to a divergence" option is REMOVED. An IMPL prompt cannot authorize behavior that fails either a locked SPEC clause or a locked AC — the controlling-contract semantics in §0 are absolute.
+```nginx
+proxy_cache_bypass $http_authorization;   # do not serve from cache when Authorization is present
+proxy_no_cache     $http_authorization;   # do not save to cache when Authorization is present (SECURITY r5 C1)
+```
 
-**For CI / fixture tests only (NEVER as the shipped production config):** a non-production test harness MAY use `limit_req zone=<name> nodelay;` (omit `burst=`) to demonstrate AC-8 mechanics deterministically. The test harness MUST be labeled `# test-only — not the shipped §5.6 config` in the nginx-config file and MUST NOT be loaded by the production deploy script. This makes AC-8 mechanically verifiable in CI without prejudicing the §5.6 vs AC-8 SPEC reconciliation.
+A test MUST assert that after a successful partner-key request through nginx, the cache directory contains NO entry for that URL+Authorization combination (verify via `proxy_cache_path` filesystem inspection or by issuing an anonymous follow-up request and asserting the cache status header shows `MISS`/`BYPASS` rather than `HIT`).
 
-Partner tier (`Authorization: Bearer mpk_*`) is in-process per §5.6 and does NOT use nginx `limit_req`, so the burst question doesn't apply there; the partner bucket uses `partner_keys.rate_limit_rpm` / `rate_limit_burst` columns directly.
 - Strip `Authorization` header from access logs (`log_format` excludes `$http_authorization`, or use `set $authorization "REDACTED"` pattern).
-- `proxy_cache_path` for public projections ONLY. The partner-key projection (carries `Cache-Control: private`) MUST NOT be cached at nginx — gate via `proxy_cache_bypass $http_authorization` so any request with `Authorization` bypasses the cache.
+- `proxy_cache_path` for public projections ONLY (per the bypass+no-cache pair above).
 - `proxy_set_header X-Forwarded-For` per existing coordinator pattern.
 - TLS per existing cert pipeline.
 
@@ -593,7 +628,7 @@ Partner tier (`Authorization: Bearer mpk_*`) is in-process per §5.6 and does NO
 - **Restarting the rollup scheduler after a panic-restart loop:** systemd unit pattern; recover middleware should prevent the panic from crashing the process, but if the rollup scheduler enters a tight error loop, the runbook step is to disable the offending component via config flag, investigate, then re-enable.
 - **Emergency earnings-visibility suppression:** operator may flip a provider from `exact` → `bucketed` via an operator-only CLI `coordinator visibility revert --id <provider_id> --reason "<text>"`. This subcommand UPDATEs `provider_visibility.mode = 'bucketed'` and inserts a `provider_visibility_audit` row with `actor_kind = 'operator'`. **The CLI MUST refuse to write `mode = 'exact'` — there is no operator path to exact-enable a provider. The `bucketed → exact` direction is exclusively the SPEC-014 v0.9 provider-authenticated portal flow (or, if SPEC-014 v0.9 has not landed, a test fixture with `actor_kind = 'provider'` for CI assertion only — NEVER a production operator path).** AC-20 CI assertion catches any `new_mode = 'exact' AND actor_kind = 'operator'` row.
 
-**Public changelog** `docs/network-stats-api/CHANGELOG.md` per §8.5, with v0.1.7 entry citing the PR numbers (one per step) and the SPEC version.
+**Public changelog** `docs/network-stats-api/CHANGELOG.md` per §8.5, with v0.1.8 entry citing the PR numbers (one per step) and the SPEC version.
 
 **Partner-key broader-exposure provider disclosure (§6.6.2 — HARD cutover deliverable, v0.1.7-tightened):**
 
@@ -646,8 +681,9 @@ This obligation does NOT block public cutover of the public `/v1/stats/leaderboa
 | AC-19 | Step 1 + Step 3 | SQL fixture (Step 1) + handler integration (Step 3) |
 | AC-20 | Step 1 + Step 4.C | CI SQL assertion (runs on every PR) |
 | AC-21 | Step 3 | 405 envelope test |
+| AC-22 (v0.1.8) | Step 3 | auth-failure tier limiter — 301st invalid-bearer request returns 429 before sha256+SELECT runs; SQL counter ≤300; combined with SECURITY r5 H1 spoofed-XFF + trusted-proxy tests |
 
-End-of-implementation: re-run ALL 21 ACs as a final smoke against the merged main; this is a Step 4.C deliverable.
+End-of-implementation: re-run ALL 22 ACs (v0.1.8 added AC-22) as a final smoke against the merged main; this is a Step 4.C deliverable.
 
 ## 3. Per-step audit-loop discipline (NON-NEGOTIABLE)
 
@@ -662,7 +698,7 @@ Per [[feedback-codex-only-audits]] and the SPEC audit-loop convention:
 
 - [`specs/SPEC-017-network-stats-api.md`](SPEC-017-network-stats-api.md) — the LOCKED contract. Read fully, all 12 sections, 21 ACs.
 - [`specs/SPEC-017-advisor-round-2026-06-25.md`](SPEC-017-advisor-round-2026-06-25.md) — locked Q1-Q4 design picks.
-- `specs/SPEC-017-r1-audit.md` through `r8-audit.md` — skim for the why behind each MUST. r8 is the v0.1.7 lock audit and explains the Claude critic+designer fix pass that produced the v0.1.7 contract this prompt now anchors to.
+- `specs/SPEC-017-r1-audit.md` through `r10-audit.md` — skim for the why behind each MUST. r8 was the v0.1.7 lock audit (Claude critic+designer fix pass); r9 surfaced the §9.4 / §7.2.2 grant mismatch + the §5.6 / AC-8 burst inconsistency; r10 locked v0.1.8 with Shape C + burst dropped + auth-failure tier added. This prompt anchors to v0.1.8.
 - `specs/SPEC-017-IMPL-PROMPT-{arch,code,security}-rN-audit.md` for every available round — round-1..6 were the v0.1.6 IMPL convergence (ARCH r5, CODE r6, SECURITY r3 each reached 0/0/0); the next rounds opened with the v0.1.7 re-anchor (ARCH r6, CODE r7, SECURITY r4 — the round-N+1 fix-pass) and the loop continues from there.
 - [`specs/SPEC-002-coordinator.md`](SPEC-002-coordinator.md) — line 3 (current locked version), §4 (provider state), §7 (HTTP surfaces). Stats handlers mount here.
 - [`specs/SPEC-005-billing.md`](SPEC-005-billing.md) — line 3, §5.1 (work-$ semantics), §4.3-§4.8 (ledger table definitions, the OLTP source for the rollup), §10 (crash recovery / reconciliation behavior), §11.4 (tokens-out accounting).
@@ -721,25 +757,26 @@ Per-step:
 End-of-implementation:
 
 1. All four step PRs merged in order (step 1 → 2 → 3 → 4) with each rebased on the squash-merged tip of the previous.
-2. `docs/network-stats-api/CHANGELOG.md` written with the v0.1.7 LOCK + IMPL entry (Step 4.C).
+2. `docs/network-stats-api/CHANGELOG.md` written with the v0.1.8 LOCK + IMPL entry (Step 4.C).
 3. `OPS.md` updated with: partner-key rotation runbook, partner-key revocation runbook, rollup-restart runbook, emergency `exact → bucketed` suppression runbook (operator may suppress; operator MUST NOT exact-enable), AND the §6.6.2 partner-key-disclosure obligation copy + the cutover-runbook checkbox for the launch-sequencing gate.
-4. `beta/DECISION_CRITERIA.md` Entry NN added: "SPEC-017 v0.1.7 IMPL shipped (Pearl deploy date, monitoring snapshot, partner-key issuance count + the cutover-runbook checkbox satisfied, AC sweep result, top-N leaderboard validation against a known provider)."
+4. `beta/DECISION_CRITERIA.md` Entry NN added: "SPEC-017 v0.1.8 IMPL shipped (Pearl deploy date, monitoring snapshot, partner-key issuance count + the cutover-runbook checkbox satisfied, AC sweep result, top-N leaderboard validation against a known provider)."
 5. Operator-side cutover runbook: backfill mode selection (Path A or B), partner-key issuance for the first N partners (gated on §6.6.2 launch-sequencing precondition), nginx flip, public announcement.
 
 **You are not done when the code compiles. You are done when:**
 
 - All four step audit loops close at `0 CRITICAL + 0 HIGH + 0 MEDIUM` per lane.
-- All 21 ACs in the §2.4 matrix verified in CI on the merged tip of `main`.
+- All 22 ACs (v0.1.8 added AC-22 for the auth-failure tier limiter) in the §2.4 matrix verified in CI on the merged tip of `main`.
 - Pearl deploy serves `/v1/stats/health` returning `{"status": "ok"}` with a `generated_at` within the §9.5 SLA, and the `components` map has exactly 7 keys (`overview`, `timeseries_rpm`, `timeseries_tpm`, four `leaderboard_*` per v0.1.7 M1).
 - A partner key issued via CLI unlocks the partner projection on `/v1/stats/leaderboard`, with `Access-Control-Allow-Origin` echoing the partner's Origin (NEVER `*`) and `Access-Control-Allow-Credentials: true` per v0.1.7 H1.
 - A bucketed provider's `exact_earnings` field appears as JSON `null` in the public projection (SINGLE field per v0.1.7 D-M1; the per-axis fields no longer exist).
 - An `exact`-mode provider's row appears with the exact `$` value in `exact_earnings`.
 - The public response carries `meta.rewards_populated: false` while `provider_rewards_ledger` is empty, and switches to `true` for windows that overlap with seeded ledger rows.
 - The public response carries no `totals.earnings_*` keys (v0.1.7 H3) and the partner-key response carries all three.
-- A 61st request from a single IP returns 429 with `Retry-After` per AC-8 (nginx tier) once the §5.6/AC-8 SPEC reconciliation has landed (Step 4.B is blocked on that — see Path R1/R2 under 4.B).
+- A 61st request from a single IP returns 429 with `Retry-After` per AC-8 (nginx tier). v0.1.8 reconciled §5.6 with AC-8 by dropping `burst` — Step 4.B is no longer blocked.
+- A 301st invalid-bearer request from a single IP returns 429 per AC-22 (auth-failure tier, in-process, pre-hash-SELECT).
 - The CI assertion AC-20 finds zero `new_mode = 'exact' AND actor_kind = 'operator'` rows.
 - The redaction sweep finds zero raw-token / `token_hash` / random-portion-substring occurrences across journalctl, nginx logs, structured logs, metric labels, response bodies.
 - The §6.6.2 launch-sequencing gate is discharged before the first production partner-key issuance.
 - The three SPEC-014 follow-up items (portal toggle UI, operator-portal canonical UI, etc.) are documented in OPS.md as non-blocking follow-ups, not as cutover gates.
 
-**SPEC-017 v0.1.7 IMPL is a public partner-facing contract.** Treat the audit-loop discipline as load-bearing, not ceremonial.
+**SPEC-017 v0.1.8 IMPL is a public partner-facing contract.** Treat the audit-loop discipline as load-bearing, not ceremonial.
