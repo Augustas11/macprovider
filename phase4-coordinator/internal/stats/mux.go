@@ -134,7 +134,7 @@ func (m *Mux) dispatch(w http.ResponseWriter, r *http.Request) {
 		// /overview + /health: synthesize a public authResult
 		// with normalized Origin for CORS reflection. The
 		// Authorization header (if any) is IGNORED.
-		norm, valid := normalizeOrigin(r.Header.Get("Origin"))
+		norm, valid := NormalizeOrigin(r.Header.Get("Origin"))
 		ar = authResult{
 			projection:    "public",
 			statusCode:    0,

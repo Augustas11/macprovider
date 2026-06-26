@@ -7,7 +7,7 @@ import (
 	"golang.org/x/net/idna"
 )
 
-// normalizeOrigin applies RFC 6454 ASCII serialization to a
+// NormalizeOrigin applies RFC 6454 ASCII serialization to a
 // raw `Origin` header value per §5.7 / §5.4.3 rule 5.
 //
 // Returns ("", false) when the input is empty OR malformed
@@ -25,7 +25,15 @@ import (
 //
 // Only http and https are accepted per RFC 6454. Other schemes
 // (ws, wss, file, data, custom) return ok=false.
-func normalizeOrigin(raw string) (string, bool) {
+//
+// Step 4.A SECURITY-H constraint: the Step 4.A
+// `coordinator partner-keys issue --allowed-origin` CLI MUST
+// call THIS function (NOT a parallel reimplementation) so that
+// CLI-validated values are equivalent to handler-time
+// comparisons. A parallel impl would let normalizations drift
+// — operator inserts a key with one normalization the handler
+// then rejects with a different one.
+func NormalizeOrigin(raw string) (string, bool) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return "", false

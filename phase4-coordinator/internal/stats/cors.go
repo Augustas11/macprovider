@@ -61,7 +61,7 @@ func servePreflight(w http.ResponseWriter, r *http.Request, st *store.Store, cor
 	w.Header().Set("Access-Control-Max-Age", strconv.Itoa(maxAge))
 	w.Header().Set("Vary", "Origin")
 
-	norm, ok := normalizeOrigin(r.Header.Get("Origin"))
+	norm, ok := NormalizeOrigin(r.Header.Get("Origin"))
 	if ok && isOriginOnGlobalAllowlistUnion(r, norm, st, cors.PartnerOriginAllowlist) {
 		w.Header().Set("Access-Control-Allow-Origin", norm)
 		w.Header().Set("Access-Control-Allow-Credentials", "true")

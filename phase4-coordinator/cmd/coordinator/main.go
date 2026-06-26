@@ -53,6 +53,26 @@ func parseRFC3339Strict(s string) (time.Time, error) {
 var version = "dev"
 
 func main() {
+	// SPEC-017 v0.1.8 Step 4.A — subcommand dispatch. When the
+	// first positional arg is a known operator-CLI verb, route
+	// to the corresponding handler and exit with its code. The
+	// daemon path is preserved below for argv shapes that DON'T
+	// match (the historical `coordinator --config=... --version`
+	// invocations).
+	//
+	// Why before flag.Parse(): the daemon's flag set rejects
+	// non-flag positional args ("partner-keys" would error out
+	// of flag.Parse with "flag provided but not defined"). We
+	// intercept first.
+	if len(os.Args) >= 2 {
+		switch os.Args[1] {
+		case "partner-keys":
+			os.Exit(runPartnerKeys(os.Args[2:]))
+		case "visibility":
+			os.Exit(runVisibility(os.Args[2:]))
+		}
+	}
+
 	configPath := flag.String("config", "coordinator.yaml", "path to coordinator YAML config")
 	showVersion := flag.Bool("version", false, "print build version and exit")
 	flag.Parse()

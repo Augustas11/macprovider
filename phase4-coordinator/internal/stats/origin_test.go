@@ -27,13 +27,13 @@ func TestNormalizeOrigin(t *testing.T) {
 		{"not-a-url", "", false},
 	}
 	for _, c := range cases {
-		got, ok := normalizeOrigin(c.in)
+		got, ok := NormalizeOrigin(c.in)
 		if ok != c.wantOk {
-			t.Errorf("normalizeOrigin(%q) ok=%v want %v", c.in, ok, c.wantOk)
+			t.Errorf("NormalizeOrigin(%q) ok=%v want %v", c.in, ok, c.wantOk)
 			continue
 		}
 		if got != c.want {
-			t.Errorf("normalizeOrigin(%q) = %q, want %q", c.in, got, c.want)
+			t.Errorf("NormalizeOrigin(%q) = %q, want %q", c.in, got, c.want)
 		}
 	}
 }

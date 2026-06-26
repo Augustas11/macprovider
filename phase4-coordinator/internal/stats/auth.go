@@ -135,7 +135,7 @@ func dispatchAuth(ctx context.Context, st *store.Store, r *http.Request) (authRe
 	bearer, ok := bearerFromContext(ctx)
 	if !ok || bearer == "" {
 		// Origin normalized for CORS reflection.
-		norm, valid := normalizeOrigin(r.Header.Get("Origin"))
+		norm, valid := NormalizeOrigin(r.Header.Get("Origin"))
 		if authPresentFromContext(ctx) {
 			// Round-1 ARCH C3 fix: Authorization header is
 			// present but failed to parse as Bearer — this is
@@ -168,7 +168,7 @@ func dispatchAuth(ctx context.Context, st *store.Store, r *http.Request) (authRe
 	}
 
 	rawOrigin := r.Header.Get("Origin")
-	normOrigin, originValid := normalizeOrigin(rawOrigin)
+	normOrigin, originValid := NormalizeOrigin(rawOrigin)
 	res := authResult{
 		bearerPresent: true,
 		originPresent: originValid,
