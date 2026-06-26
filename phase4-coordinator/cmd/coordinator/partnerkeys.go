@@ -173,21 +173,6 @@ func runPartnerKeysIssue(args []string, stdout, stderr io.Writer) int {
 	createdBy := fs.String("created-by", "", "operator principal (defaults to $USER@hostname)")
 	rotateFrom := fs.Int64("rotate-from", 0, "predecessor partner_keys.id (rotation flow)")
 	tokenOut := fs.String("token-out", "", "write the raw mpk_* token to this file path with mode 0600 instead of stdout (mandatory when stdout is captured by systemd-journal — round-1 SECURITY H1)")
-	// Final adversarial audit (SECURITY r2 CRITICAL — defense-in-
-	// depth gate for SPEC §6.6.2's "production issuance MUST NOT
-	// begin until ... sign-off entry"). The SPEC defers the gate
-	// mechanism to the operator runbook (out of scope), but the
-	// runbook-only enforcement fails under operator error or
-	// wrapper-script automation. The `--production` flag is
-	// opt-in: staging issuance (the default) is unchanged and
-	// has no preconditions; production issuance requires the
-	// operator to acknowledge the OPS.md §10.5 sign-off via the
-	// `--signoff-spec-6-6-2` flag whose value MUST reference the
-	// SPEC-014 v0.9 commit SHA and the date the disclosure surface
-	// went live. The acknowledgment string is persisted in the
-	// `stats_partner_key_issued` audit event for post-hoc review.
-	production := fs.Bool("production", false, "production issuance — REQUIRES --signoff-spec-6-6-2 per SPEC §6.6.2 launch-sequencing precondition. Defaults false (staging). See OPS.md §10.5.")
-	signoff := fs.String("signoff-spec-6-6-2", "", "operator acknowledgment that the SPEC §6.6.2 disclosure sign-off is recorded in OPS.md §10.5. Required when --production is set. Value MUST reference the SPEC-014 v0.9 commit SHA and the date the disclosure surface went live (e.g. \"SPEC-014 sha=abc1234 disclosure-live=2026-09-01\")")
 	var origins originsFlag
 	fs.Var(&origins, "allowed-origin", "RFC 6454 allowed Origin (repeatable)")
 	if err := fs.Parse(args); err != nil {
@@ -202,36 +187,62 @@ func runPartnerKeysIssue(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "partner-keys issue: --rpm must be positive")
 		return 2
 	}
-	// Final adversarial audit (SECURITY r2) — fail-closed
-	// production gate. Validate the signoff before any DSN
-	// resolution / DB connection so an operator who forgot the
-	// signoff doesn't see the admin DSN failure mode first.
-	if *production {
-		v := strings.TrimSpace(*signoff)
-		if v == "" {
-			fmt.Fprintln(stderr, "partner-keys issue: --production requires --signoff-spec-6-6-2 (the SPEC §6.6.2 launch-sequencing precondition is BLOCKING for production issuance; see OPS.md §10.5 for the sign-off template).")
+	// Final adversarial audit (ARCH r3 + CODE r3 CRITICAL closure):
+	// config-driven §6.6.2 sign-off gate. The previous opt-in
+	// `--production` flag was bypassable by wrapper-script
+	// automation that forgot the flag. The deployed coordinator
+	// config is now the source of truth for "is this coordinator
+	// production"; the operator's act of placing the signoff file
+	// at the configured path IS the gate.
+	//
+	// Behavior:
+	//   - If `stats.partner_keys.production_signoff_path` is UNSET
+	//     in the config (or the config file itself is absent), the
+	//     coordinator is treated as staging — no preconditions
+	//     apply. Test fixtures using `--admin-dsn` directly with
+	//     no `--config` fall here.
+	//   - If the field is SET, the CLI reads the file at that path
+	//     and validates content matches the SPEC §6.6.2 sign-off
+	//     template (SPEC-014 SHA + YYYY-MM-DD date). Issuance
+	//     fails closed if the file is missing, empty, or
+	//     malformed. The content is persisted into the
+	//     `stats_partner_key_issued` event for post-hoc audit.
+	//
+	// Failing closed BEFORE DSN resolution / DB connection so an
+	// operator who hasn't recorded the sign-off doesn't see the
+	// admin-DSN failure mode first.
+	productionMode := false
+	signoffContent := ""
+	signoffPathConfigured := ""
+	sigPath, sigErr := parseProductionSignoffPathFromYAML(*configPath)
+	if sigErr != nil && !os.IsNotExist(sigErr) {
+		fmt.Fprintf(stderr, "partner-keys issue: failed to read config %s: %v\n", *configPath, sigErr)
+		return 2
+	}
+	if sigPath != "" {
+		productionMode = true
+		signoffPathConfigured = sigPath
+		body, err := os.ReadFile(sigPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "partner-keys issue: stats.partner_keys.production_signoff_path %q is configured but the sign-off file cannot be read: %v. The SPEC §6.6.2 launch-sequencing precondition is BLOCKING for production issuance; record the sign-off per OPS.md §10.5 before retrying.\n", sigPath, err)
 			return 2
 		}
-		// Minimal sanity: the signoff string MUST reference the
-		// SPEC-014 commit SHA AND a date. This is not crypto
-		// verification — an operator who lies in the flag value
-		// is committing a recorded audit fraud (the value is
-		// persisted in the stats_partner_key_issued event).
-		hasSHA := regexp.MustCompile(`(?i)spec-014.*sha\s*=\s*[A-Fa-f0-9]{7,}`).MatchString(v)
-		hasDate := regexp.MustCompile(`\b20\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b`).MatchString(v)
+		sig := strings.TrimSpace(string(body))
+		if sig == "" {
+			fmt.Fprintf(stderr, "partner-keys issue: stats.partner_keys.production_signoff_path %q is configured but the sign-off file is empty. Record the SPEC §6.6.2 sign-off per OPS.md §10.5 before issuing production partner keys.\n", sigPath)
+			return 2
+		}
+		hasSHA := regexp.MustCompile(`(?i)spec-014.*sha\s*=\s*[A-Fa-f0-9]{7,}`).MatchString(sig)
+		hasDate := regexp.MustCompile(`\b20\d\d-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])\b`).MatchString(sig)
 		if !hasSHA {
-			fmt.Fprintln(stderr, "partner-keys issue: --signoff-spec-6-6-2 must reference the SPEC-014 v0.9 commit SHA (e.g. \"SPEC-014 sha=abc1234 ...\").")
+			fmt.Fprintf(stderr, "partner-keys issue: sign-off file at %q must reference the SPEC-014 v0.9 commit SHA (e.g. \"SPEC-014 sha=abc1234 ...\"). See OPS.md §10.5 for the template.\n", sigPath)
 			return 2
 		}
 		if !hasDate {
-			fmt.Fprintln(stderr, "partner-keys issue: --signoff-spec-6-6-2 must include the date both disclosure surfaces went live in YYYY-MM-DD form.")
+			fmt.Fprintf(stderr, "partner-keys issue: sign-off file at %q must include the date both disclosure surfaces went live in YYYY-MM-DD form. See OPS.md §10.5 for the template.\n", sigPath)
 			return 2
 		}
-	} else if strings.TrimSpace(*signoff) != "" {
-		// Operator passed a signoff but forgot --production. Fail
-		// loud rather than silently dropping the acknowledgment.
-		fmt.Fprintln(stderr, "partner-keys issue: --signoff-spec-6-6-2 supplied without --production. The signoff gate only fires for --production; staging issuance has no preconditions. Drop the signoff flag OR add --production.")
-		return 2
+		signoffContent = sig
 	}
 
 	// SECURITY H: validate each --allowed-origin via the SAME
@@ -369,15 +380,18 @@ RETURNING id, created_at`
 			"created_by":      principal,
 			"rotated_from_id": nullInt64String(rotatedFrom),
 		}
-		// Final adversarial audit (SECURITY r2) — persist the
-		// production-signoff acknowledgment into the structured
-		// event so post-hoc audits can verify which sign-off
-		// string the operator referenced at issuance time. The
-		// flag is empty for staging issuance (the default) so
-		// the field is only present in production-mode events.
-		if *production {
+		// Final adversarial audit (ARCH r3 + CODE r3) — persist
+		// the production-signoff acknowledgment into the
+		// structured event so post-hoc audits can verify which
+		// sign-off file content authorized this issuance. The
+		// `production_signoff_path` field carries the configured
+		// file path; the `signoff_spec_6_6_2` field carries the
+		// validated file content. Fields are absent for staging
+		// issuance.
+		if productionMode {
 			payload["production"] = true
-			payload["signoff_spec_6_6_2"] = strings.TrimSpace(*signoff)
+			payload["production_signoff_path"] = signoffPathConfigured
+			payload["signoff_spec_6_6_2"] = signoffContent
 		}
 		emitPartnerKeyEvent(stderr, "stats_partner_key_issued", payload)
 	}

@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -43,4 +44,33 @@ func parseAdminDSNFromYAML(path string) (string, error) {
 		return "", errors.New("stats.partner_keys_admin_dsn missing")
 	}
 	return trimmed.Stats.PartnerKeysAdminDSN, nil
+}
+
+// parseProductionSignoffPathFromYAML reads
+// `stats.partner_keys.production_signoff_path` from the same
+// coordinator YAML the admin DSN comes from.
+//
+// Final adversarial audit (ARCH r3 + CODE r3 CRITICAL closure):
+// the sign-off gate moved from opt-in CLI flag to config-driven
+// so a wrapper-script that forgets a flag cannot bypass. The
+// coordinator config is the source of truth for "is this
+// coordinator production"; the deployed config carries this
+// path when (and only when) the deploy is production. Returns
+// "" if absent.
+func parseProductionSignoffPathFromYAML(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var trimmed struct {
+		Stats struct {
+			PartnerKeys struct {
+				ProductionSignoffPath string `yaml:"production_signoff_path"`
+			} `yaml:"partner_keys"`
+		} `yaml:"stats"`
+	}
+	if err := yaml.Unmarshal(b, &trimmed); err != nil {
+		return "", fmt.Errorf("yaml parse: %w", err)
+	}
+	return strings.TrimSpace(trimmed.Stats.PartnerKeys.ProductionSignoffPath), nil
 }

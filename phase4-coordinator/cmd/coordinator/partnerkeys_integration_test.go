@@ -543,71 +543,122 @@ func TestRotationOverlap(t *testing.T) {
 }
 
 // ===========================================================================
-// Final adversarial audit (SECURITY r2 CRITICAL) — production sign-off gate.
-// `coordinator partner-keys issue` MUST refuse production issuance unless
-// the operator has acknowledged the SPEC §6.6.2 launch-sequencing precondition
-// via --signoff-spec-6-6-2. Staging issuance (the default) has no preconditions.
+// Final adversarial audit (ARCH r3 + CODE r3 CRITICAL closure) —
+// config-driven §6.6.2 sign-off gate. The deployed coordinator config is the
+// source of truth for "is this coordinator production"; the operator's act
+// of placing the signoff file at the configured path IS the gate. A
+// wrapper-script that forgets a flag cannot bypass because production-vs-
+// staging is decided by the deploy-time config, not the CLI invocation.
 // ===========================================================================
-func TestProductionRequiresSignoff(t *testing.T) {
+func TestProductionSignoffPathGate(t *testing.T) {
 	fx, _ := startCLIPostgres(t)
+	tmp := t.TempDir()
 
-	t.Run("staging default needs no signoff", func(t *testing.T) {
+	writeConfig := func(name, signoffPath string) string {
+		p := tmp + "/" + name
+		body := "stats:\n  partner_keys_admin_dsn: \"" + fx.adminDSN() + "\"\n"
+		if signoffPath != "" {
+			body += "  partner_keys:\n    production_signoff_path: \"" + signoffPath + "\"\n"
+		}
+		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+			t.Fatalf("write config %s: %v", name, err)
+		}
+		return p
+	}
+	writeSignoff := func(name, body string) string {
+		p := tmp + "/" + name
+		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+			t.Fatalf("write signoff %s: %v", name, err)
+		}
+		return p
+	}
+
+	t.Run("no signoff_path in config = staging (no gate)", func(t *testing.T) {
+		cfg := writeConfig("staging.yaml", "")
 		code, _, stderr, _, _ := runIssue(
-			"--admin-dsn", fx.adminDSN(),
+			"--config", cfg,
 			"--label", "staging-key",
 		)
 		if code != 0 {
-			t.Fatalf("staging issue without --production should succeed; got exit=%d stderr=%q", code, stderr)
+			t.Fatalf("staging issue (no signoff_path) should succeed; got exit=%d stderr=%q", code, stderr)
 		}
 	})
 
-	t.Run("--production without signoff fails closed", func(t *testing.T) {
-		code, stdout, stderr, _, _ := runIssue(
-			"--admin-dsn", fx.adminDSN(),
-			"--label", "prod-key-no-signoff",
-			"--production",
+	t.Run("signoff_path configured + file missing → fail-closed", func(t *testing.T) {
+		cfg := writeConfig("prod-missing.yaml", tmp+"/nonexistent-signoff.txt")
+		code, _, stderr, _, _ := runIssue(
+			"--config", cfg,
+			"--label", "prod-missing-file",
 		)
 		if code == 0 {
-			t.Fatalf("--production without --signoff-spec-6-6-2 MUST fail closed; got exit=0 stdout=%q", stdout)
-		}
-		if !strings.Contains(stderr, "signoff-spec-6-6-2") {
-			t.Errorf("error must name the missing flag; got %q", stderr)
+			t.Fatalf("missing signoff file MUST fail closed")
 		}
 		if !strings.Contains(stderr, "OPS.md") {
-			t.Errorf("error should point operator at the runbook; got %q", stderr)
+			t.Errorf("error should point at the runbook; got %q", stderr)
 		}
 	})
 
-	t.Run("--production with malformed signoff fails", func(t *testing.T) {
+	t.Run("signoff_path configured + file empty → fail-closed", func(t *testing.T) {
+		sig := writeSignoff("empty-signoff.txt", "")
+		cfg := writeConfig("prod-empty.yaml", sig)
 		code, _, stderr, _, _ := runIssue(
-			"--admin-dsn", fx.adminDSN(),
-			"--label", "prod-key-bad-signoff",
-			"--production",
-			"--signoff-spec-6-6-2", "I acknowledge",
+			"--config", cfg,
+			"--label", "prod-empty-file",
 		)
 		if code == 0 {
-			t.Fatalf("--production with malformed signoff MUST fail")
+			t.Fatalf("empty signoff file MUST fail closed")
 		}
-		// Either the SHA or the date check should trip.
-		if !strings.Contains(stderr, "SPEC-014") && !strings.Contains(stderr, "YYYY-MM-DD") {
-			t.Errorf("error should explain what's missing; got %q", stderr)
+		if !strings.Contains(stderr, "empty") {
+			t.Errorf("error should mention empty; got %q", stderr)
 		}
 	})
 
-	t.Run("--production with well-formed signoff succeeds + event carries it", func(t *testing.T) {
+	t.Run("signoff_path configured + malformed → fail-closed (missing SHA)", func(t *testing.T) {
+		sig := writeSignoff("no-sha.txt", "I acknowledge the §6.6.2 disclosure on 2026-09-01.")
+		cfg := writeConfig("prod-no-sha.yaml", sig)
+		code, _, stderr, _, _ := runIssue(
+			"--config", cfg,
+			"--label", "prod-no-sha",
+		)
+		if code == 0 {
+			t.Fatalf("signoff without SPEC-014 SHA MUST fail")
+		}
+		if !strings.Contains(stderr, "SPEC-014") {
+			t.Errorf("error should explain missing SHA; got %q", stderr)
+		}
+	})
+
+	t.Run("signoff_path configured + malformed → fail-closed (missing date)", func(t *testing.T) {
+		sig := writeSignoff("no-date.txt", "SPEC-014 sha=abc1234 acknowledged by ops@example.com")
+		cfg := writeConfig("prod-no-date.yaml", sig)
+		code, _, stderr, _, _ := runIssue(
+			"--config", cfg,
+			"--label", "prod-no-date",
+		)
+		if code == 0 {
+			t.Fatalf("signoff without YYYY-MM-DD date MUST fail")
+		}
+		if !strings.Contains(stderr, "YYYY-MM-DD") {
+			t.Errorf("error should explain missing date; got %q", stderr)
+		}
+	})
+
+	t.Run("signoff_path configured + valid signoff → success + event carries content", func(t *testing.T) {
+		sig := writeSignoff("good-signoff.txt",
+			"SPEC-017 v0.1.8 §6.6.2 disclosure sign-off\n"+
+				"SPEC-014 sha=abc1234de5f6789 disclosure-live=2026-09-01\n"+
+				"acknowledged by ops@example.com")
+		cfg := writeConfig("prod-good.yaml", sig)
 		code, stdout, stderr, _, _ := runIssue(
-			"--admin-dsn", fx.adminDSN(),
-			"--label", "prod-key-real",
-			"--production",
-			"--signoff-spec-6-6-2", "SPEC-014 sha=abc1234 disclosure-live=2026-09-01 acknowledged by ops@example.com",
+			"--config", cfg,
+			"--label", "prod-good-signoff",
 		)
 		if code != 0 {
-			t.Fatalf("--production with well-formed signoff should succeed; got exit=%d stderr=%q", code, stderr)
+			t.Fatalf("valid signoff should succeed; got exit=%d stderr=%q", code, stderr)
 		}
 		assertStdoutIsTokenOnly(t, stdout)
-		// Event carries the signoff for post-hoc audit.
 		if !strings.Contains(stderr, `"event":"stats_partner_key_issued"`) {
-			t.Errorf("stats_partner_key_issued event missing: %q", stderr)
+			t.Errorf("event missing: %q", stderr)
 		}
 		if !strings.Contains(stderr, `"production":true`) {
 			t.Errorf("event missing production:true: %q", stderr)
@@ -615,22 +666,31 @@ func TestProductionRequiresSignoff(t *testing.T) {
 		if !strings.Contains(stderr, `"signoff_spec_6_6_2"`) {
 			t.Errorf("event missing signoff_spec_6_6_2 field: %q", stderr)
 		}
-		if !strings.Contains(stderr, "SPEC-014 sha=abc1234") {
-			t.Errorf("event missing the signoff value: %q", stderr)
+		if !strings.Contains(stderr, `"production_signoff_path"`) {
+			t.Errorf("event missing production_signoff_path field: %q", stderr)
+		}
+		if !strings.Contains(stderr, "SPEC-014 sha=abc1234de5f6789") {
+			t.Errorf("event missing the validated signoff content: %q", stderr)
 		}
 	})
 
-	t.Run("signoff without --production fails loud", func(t *testing.T) {
+	t.Run("admin-dsn override does NOT bypass the config gate", func(t *testing.T) {
+		// A wrapper script that passes --admin-dsn directly must
+		// still respect the --config signoff gate. The opt-in
+		// flag bypass that r2 used is closed: the config is the
+		// authority on production-vs-staging.
+		cfg := writeConfig("prod-with-admin-override.yaml",
+			tmp+"/nonexistent-signoff-bypass.txt")
 		code, _, stderr, _, _ := runIssue(
 			"--admin-dsn", fx.adminDSN(),
-			"--label", "staging-but-signoff",
-			"--signoff-spec-6-6-2", "SPEC-014 sha=abc1234 disclosure-live=2026-09-01",
+			"--config", cfg,
+			"--label", "bypass-attempt",
 		)
 		if code == 0 {
-			t.Fatalf("signoff without --production should fail loud (not silently drop)")
+			t.Fatalf("--admin-dsn override MUST NOT bypass the config-driven signoff gate; got exit=0 stderr=%q", stderr)
 		}
-		if !strings.Contains(stderr, "without --production") {
-			t.Errorf("error should explain the mismatch; got %q", stderr)
+		if !strings.Contains(stderr, "production_signoff_path") {
+			t.Errorf("error should name the config field; got %q", stderr)
 		}
 	})
 }

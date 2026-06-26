@@ -636,16 +636,18 @@ with rate-limit + cache directives per BUILD §2 Step 4.B.
 # CLI looks for the relative path `coordinator.yaml` in the
 # current working directory and fails to resolve the admin DSN.
 #
-# PRODUCTION issuance: pass `--production` AND
-# `--signoff-spec-6-6-2 "..."` after the §6.6.2 sign-off (§10.5)
-# is recorded. The CLI fails closed without the signoff value;
-# the signoff string is persisted into the
-# `stats_partner_key_issued` event for post-hoc audit. Staging
-# issuance (the default) has no preconditions.
+# PRODUCTION issuance: the gate is CONFIG-DRIVEN, not flag-
+# driven (ARCH r3 + CODE r3 closure). The deployed
+# `coordinator.yaml` sets
+# `stats.partner_keys.production_signoff_path: /opt/macprovider/spec017-signoff.txt`
+# on the production Pearl deploy. The CLI reads that file
+# before any INSERT and refuses issuance if the file is
+# missing, empty, or malformed. Record the sign-off per §10.5
+# below — the act of writing the file IS the gate. Staging
+# deploys MUST NOT set production_signoff_path; the field
+# absence is the staging signal.
 sudo -u macprovider /opt/macprovider/coordinator partner-keys issue \
   --config /opt/macprovider/coordinator.yaml \
-  --production \
-  --signoff-spec-6-6-2 "SPEC-014 sha=<sha> disclosure-live=<YYYY-MM-DD> ack=ops@example.com" \
   --label "ACME inc rotated 2026-09-01" \
   --rotate-from 17
 

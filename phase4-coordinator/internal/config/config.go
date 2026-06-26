@@ -84,6 +84,30 @@ type StatsConfig struct {
 type StatsPartnerKeysConfig struct {
 	LastUsedAtUpdatesEnabled bool   `yaml:"last_used_at_updates_enabled"`
 	WriterDSN                string `yaml:"writer_dsn"`
+
+	// ProductionSignoffPath is the v0.1.8 erratum
+	// (2026-06-26) mechanical gate for SPEC §6.6.2's
+	// launch-sequencing precondition. When this field is set
+	// on a deployed coordinator config, `partner-keys issue`
+	// reads the file at this path AND requires its content
+	// to match the SPEC-014 SHA + YYYY-MM-DD sign-off
+	// template (see OPS.md §10.5). Issuance fails closed if
+	// the file is missing, empty, or malformed.
+	//
+	// When this field is UNSET (empty), the coordinator is
+	// treated as staging — no preconditions apply, and
+	// `partner-keys issue` operates against fixture DSNs
+	// without sign-off. Production deploys MUST set this
+	// field in coordinator.yaml; staging / test fixtures
+	// MUST NOT.
+	//
+	// ARCH r3 CRITICAL closure: the gate is config-driven
+	// (rather than opt-in via a `--production` CLI flag) so
+	// a wrapper-script automation that forgets the flag
+	// cannot accidentally bypass the runbook sign-off. The
+	// deployed config is the source of truth for
+	// "is this coordinator production".
+	ProductionSignoffPath string `yaml:"production_signoff_path"`
 }
 
 type StatsRollupConfig struct {
