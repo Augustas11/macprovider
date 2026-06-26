@@ -2,8 +2,9 @@
 
 package stats_test
 
-// SPEC-017 v0.1.8 Step 4.C round-1 fixes — wired-mux observability
-// tests (ARCH M1 / CODE M1) + new event emission tests (CODE H5).
+// SPEC-017 v0.1.8 Step 4.C round-1 + round-3 fixes — wired-mux
+// observability tests (ARCH M1 / CODE M1) + new event emission
+// tests (CODE H5 + round-3 CODE M3).
 //
 // Reuses the testcontainers fixtures from integration_test.go /
 // rollup_integration_test.go / handlers_integration_test.go (same
@@ -11,17 +12,21 @@ package stats_test
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog"
 
 	"github.com/augstar/macprovider-coordinator/internal/stats"
 	statsmetrics "github.com/augstar/macprovider-coordinator/internal/stats/metrics"
+	statsrollup "github.com/augstar/macprovider-coordinator/internal/stats/rollup"
 	"github.com/augstar/macprovider-coordinator/internal/stats/store"
 )
 
@@ -64,20 +69,58 @@ func TestStep4C_WiredMux_MetricLabelHygiene(t *testing.T) {
 	_ = doReq("/v1/stats/leaderboard?window=24h", "garbage", "")
 	_ = doReq("/v1/stats/overview", "", "https://evil.streamvc.live")
 
+	// Round-3 ARCH M1 / CODE M2 fix: seed a real partner_keys
+	// row + send a real `Bearer mpk_*` leaderboard request so
+	// `stats_partner_key_request_total{partner_key_id}` is
+	// emitted through the production auth dispatcher + access-log
+	// middleware (NOT a synthetic
+	// `m.PartnerKeyRequestTotal.WithLabelValues("17").Inc()`).
+	// This proves the round-2 PartnerKeyID-on-requestObs context
+	// propagation actually reaches the metric label.
+	bearer := "mpk_step4c_partner_secret_token"
+	hash := sha256Hex(bearer)
+	if _, err := adminDB.Exec(
+		`INSERT INTO partner_keys (label, token_hash, prefix, allowed_origins, rate_limit_rpm, created_by)
+         VALUES ('step4c-wired', decode($1, 'hex'), 'mpk_step', '{}', 600, 'test')`,
+		hash,
+	); err != nil {
+		t.Fatalf("seed partner_keys: %v", err)
+	}
+	// Seed leaderboard_24h fixture rows so the partner request
+	// returns 200 (otherwise the freshness check 503s and the
+	// metric still fires but we want to exercise the success path).
+	driveOneRollupTick(t, fx)
+	_ = doReq("/v1/stats/leaderboard?window=24h", bearer, "")
+
 	// Round-2 CODE M1 fix: exercise all five required metric
 	// families. The public-tier 60 rpm limiter fires on the
 	// 61st `/v1/stats/overview` request from the same IP; drive
-	// 61 to land at least one row in `stats_rate_limit_exceeded_total`.
+	// 65 to land at least one row in `stats_rate_limit_exceeded_total`.
 	for i := 0; i < 65; i++ {
 		_ = doReq("/v1/stats/overview", "", "")
 	}
-	// Manually nudge the lag gauge + the rollup-errors counter
-	// so all 5 metrics gather non-empty samples. (The real
-	// observers run on background goroutines / rollup ticks
-	// which are exercised by separate integration suites; the
-	// hygiene test only needs *something* in every label set.)
-	m.RollupLagSeconds.WithLabelValues("overview").Set(0.5)
-	m.RollupErrorsTotal.WithLabelValues("leaderboard_24h").Inc()
+
+	// Round-3 ARCH M1 / CODE M2 fix: drive `stats_rollup_lag_seconds`
+	// through the real production observer (one synchronous pass
+	// over the §9.5 components against the reader DB) instead of a
+	// synthetic Set() call.
+	statsrollup.ObserveRollupLagOnce(context.Background(), readerDB, m)
+
+	// Round-3 ARCH M1 / CODE M2 fix: drive `stats_rollup_errors_total`
+	// through the real Runner.runOne error-path metric emit (NOT a
+	// synthetic Inc()). Use an admin-DSN DB so healthFail can write
+	// to stats_components_health for the failed tick.
+	adminRollupDB := rollupDB(t, fx)
+	runner, err := statsrollup.New(adminRollupDB, freshRollupConfig(), nil, zerolog.Nop())
+	if err != nil {
+		t.Fatalf("rollup.New: %v", err)
+	}
+	runner.WithMetrics(m)
+	runner.RunTickOnceForTest(
+		context.Background(),
+		"leaderboard_24h", "leaderboard_24h",
+		func(ctx context.Context) error { return errors.New("synthetic step4c tick error") },
+	)
 
 	families, err := reg.Gather()
 	if err != nil {
@@ -203,5 +246,50 @@ func TestStep4C_StatsHandlerPanicEvent(t *testing.T) {
 		if strings.Contains(line, `"path"`) {
 			t.Errorf("stats_handler_panic event contains forbidden path field: %q", line)
 		}
+	}
+}
+
+// TestStep4C_StatsRollupTickCompletedEvent — round-3 CODE r3
+// MEDIUM 3 fix: direct landing assertion that the success path of
+// Runner.runOne emits `stats_rollup_tick_completed` with the
+// locked field set {component, generated_at, duration_ms}.
+func TestStep4C_StatsRollupTickCompletedEvent(t *testing.T) {
+	fx, _ := setupRollupFixture(t)
+	rdb := rollupDB(t, fx)
+
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+
+	runner, err := statsrollup.New(rdb, freshRollupConfig(), nil, logger)
+	if err != nil {
+		t.Fatalf("rollup.New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	// Drive a successful tick on a real §9.5 component.
+	runner.RunTickOnceForTest(ctx, "overview", "overview",
+		func(c context.Context) error { return nil })
+
+	out := buf.String()
+	if !strings.Contains(out, `"event":"stats_rollup_tick_completed"`) {
+		t.Errorf("missing stats_rollup_tick_completed event: %q", out)
+	}
+	for _, want := range []string{
+		`"component":"overview"`,
+		`"generated_at"`,
+		`"duration_ms"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("event missing field %s: %q", want, out)
+		}
+	}
+	// The rewards_populated tick (c == "") must NOT emit a
+	// stats_rollup_tick_completed event per round-1 CODE H3 fix.
+	buf.Reset()
+	runner.RunTickOnceForTest(ctx, "rewards_populated", "",
+		func(c context.Context) error { return nil })
+	if strings.Contains(buf.String(), `"event":"stats_rollup_tick_completed"`) {
+		t.Errorf("rewards_populated tick (c=\"\") MUST NOT emit stats_rollup_tick_completed; got %q", buf.String())
 	}
 }

@@ -934,43 +934,21 @@ func tier2ReloadFieldChanged(name string, startup, next reflect.Value) bool {
 //
 // Read-only via the reader pool — does NOT contend with the
 // rollup writer pool.
+//
+// Round-3 ARCH r3 MEDIUM 1 / CODE r3 MEDIUM 2 fix: the per-tick
+// SQL pass moved into `statsrollup.ObserveRollupLagOnce` so the
+// Step 4.C wired-mux hygiene test can drive the gauge through the
+// same production code path instead of a synthetic Set() call.
 func observeRollupLag(ctx context.Context, readerDB *sql.DB, m *statsmetrics.Metrics, logger zerolog.Logger) {
 	tick := time.NewTicker(15 * time.Second)
 	defer tick.Stop()
-	components := []string{
-		"overview",
-		"timeseries_rpm",
-		"timeseries_tpm",
-		"leaderboard_24h",
-		"leaderboard_7d",
-		"leaderboard_30d",
-		"leaderboard_all",
-	}
-	const q = `SELECT generated_at FROM stats_components_health WHERE component = $1`
+	_ = logger // keep import used; no per-tick log line
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			now := time.Now().UTC()
-			for _, c := range components {
-				var ts time.Time
-				row := readerDB.QueryRowContext(ctx, q, c)
-				if err := row.Scan(&ts); err != nil {
-					// Missing row / read error → record zero
-					// rather than skipping; absence of an update
-					// is itself a signal a downstream dashboard
-					// may want to alert on.
-					m.RollupLagSeconds.WithLabelValues(c).Set(0)
-					continue
-				}
-				lag := now.Sub(ts).Seconds()
-				if lag < 0 {
-					lag = 0
-				}
-				m.RollupLagSeconds.WithLabelValues(c).Set(lag)
-			}
-			_ = logger // keep import used; no per-tick log line
+			statsrollup.ObserveRollupLagOnce(ctx, readerDB, m)
 		}
 	}
 }

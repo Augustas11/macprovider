@@ -10,7 +10,7 @@ package metrics
 //     or `Authorization`
 //   - the partner_key_id label only takes positive-integer
 //     decimal strings (no prefix, no label-text)
-//   - tier ∈ {public, partner, auth_failure}
+//   - tier ∈ {public, partner}
 //   - endpoint ∈ {overview, leaderboard, health}
 //   - component ∈ the locked §9.5 component set
 

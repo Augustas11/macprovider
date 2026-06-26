@@ -142,6 +142,25 @@ func RunLateEventsRetention(ctx context.Context, db *sql.DB, cfg Config) error {
 	return runLateEventsRetention(ctx, db, cfg)
 }
 
+// RunTickOnceForTest runs a single tick through the production
+// per-tick recovery + metrics-emit seam (Runner.runOne). Exposed
+// for Step 4.C integration tests asserting that
+// `stats_rollup_tick_completed` (success path) and
+// `stats_rollup_errors_total` (error / panic paths) fire on the
+// real Runner code path rather than via synthetic
+// `m.RollupErrorsTotal.Inc()` calls.
+//
+// `comp` MUST be one of the §9.5 component identifiers
+// (overview, timeseries_rpm, timeseries_tpm, leaderboard_24h,
+// leaderboard_7d, leaderboard_30d, leaderboard_all) so the metric
+// emit + healthFail UPDATE land on a real component row. Pass ""
+// to drive the rewards_populated tick's success-skip branch.
+//
+// Round-3 CODE r3 MEDIUM 2 / ARCH r3 MEDIUM 1 fix.
+func (r *Runner) RunTickOnceForTest(ctx context.Context, name, comp string, fn func(context.Context) error) {
+	r.runOne(ctx, name, component(comp), fn)
+}
+
 // spawnTick is the shared scaffold for the per-table jobs.
 //
 // Round-1 ARCH r1 HIGH 4 + CODE r1 HIGH 2 + SECURITY r1 MED-1

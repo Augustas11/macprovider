@@ -868,3 +868,130 @@ func TestRotationThroughHandler_Subprocess(t *testing.T) {
 		t.Errorf("B post-revoke: got %d, want 200", got)
 	}
 }
+
+// ===========================================================================
+// Step 4.C round-3 CODE r3 MEDIUM 3 — direct landing assertion that the
+// `stats_partner_key_issued` event lands on stderr ONLY when the raw token
+// has been successfully delivered to the operator (round-3 CODE M1 closes
+// the success-boundary gap). Asserts:
+//   - bare-stdout success path emits the event with the locked field set
+//   - `--token-out` success path emits the event after writeFile succeeds
+//   - JOURNAL_STREAM-suppressed exit-1 path does NOT emit the event
+//   - the event NEVER carries `prefix`, `created_at`, `token_hash`,
+//     the raw token, or any 43-char base64url body
+//
+// ===========================================================================
+func TestStep4C_StatsPartnerKeyIssuedEvent(t *testing.T) {
+	fx, _ := startCLIPostgres(t)
+
+	// Bare-stdout success path — event MUST emit after the raw
+	// token reaches stdout.
+	code, _, stderr, _, _ := runIssue(
+		"--admin-dsn", fx.adminDSN(),
+		"--label", "step4c-evt",
+	)
+	if code != 0 {
+		t.Fatalf("issue exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, `"event":"stats_partner_key_issued"`) {
+		t.Fatalf("missing stats_partner_key_issued event in stderr: %q", stderr)
+	}
+	if !strings.Contains(stderr, `"label":"step4c-evt"`) {
+		t.Errorf("event missing label field: %q", stderr)
+	}
+	if !strings.Contains(stderr, `"created_by"`) {
+		t.Errorf("event missing created_by field: %q", stderr)
+	}
+	// Locked field set forbids `prefix`, `created_at`, token_hash, raw token.
+	for _, banned := range []string{`"prefix"`, `"created_at"`, "token_hash", "mpk_step4c"} {
+		if strings.Contains(stderr, banned) {
+			t.Errorf("event leaks forbidden substring %q: %q", banned, stderr)
+		}
+	}
+	// No 43-char base64url body anywhere in stderr.
+	if regexp.MustCompile(`[A-Za-z0-9_-]{43}`).MatchString(stderr) {
+		t.Errorf("event leaks 43-char token body in stderr: %q", stderr)
+	}
+
+	// --token-out success path — event MUST emit after writeFile.
+	tmpDir := t.TempDir()
+	tokenPath := tmpDir + "/secret.token"
+	t.Setenv("JOURNAL_STREAM", "1:2")
+	code, _, stderr, _, _ = runIssue(
+		"--admin-dsn", fx.adminDSN(),
+		"--label", "step4c-tokenout",
+		"--token-out", tokenPath,
+	)
+	if code != 0 {
+		t.Fatalf("--token-out exit=%d stderr=%q", code, stderr)
+	}
+	if !strings.Contains(stderr, `"event":"stats_partner_key_issued"`) {
+		t.Errorf("--token-out success path missing stats_partner_key_issued event: %q", stderr)
+	}
+	if !strings.Contains(stderr, `"label":"step4c-tokenout"`) {
+		t.Errorf("--token-out path event missing label: %q", stderr)
+	}
+
+	// JOURNAL_STREAM suppression (no --token-out) — exit 1, NO event.
+	code, _, stderr, _, _ = runIssue(
+		"--admin-dsn", fx.adminDSN(),
+		"--label", "step4c-suppressed",
+	)
+	if code == 0 {
+		t.Fatalf("JOURNAL_STREAM should suppress; got exit=0 stderr=%q", stderr)
+	}
+	if strings.Contains(stderr, `"event":"stats_partner_key_issued"`) {
+		t.Errorf("JOURNAL_STREAM-suppressed path MUST NOT emit stats_partner_key_issued; got stderr=%q", stderr)
+	}
+}
+
+// ===========================================================================
+// Step 4.C round-3 CODE r3 MEDIUM 3 — direct landing assertion that the
+// `stats_partner_key_revoked` event lands on stderr after a successful
+// revoke, with locked field set {id, reason, actor}.
+// ===========================================================================
+func TestStep4C_StatsPartnerKeyRevokedEvent(t *testing.T) {
+	fx, adminDB := startCLIPostgres(t)
+
+	code, _, stderr, _, _ := runIssue(
+		"--admin-dsn", fx.adminDSN(),
+		"--label", "revoke-evt-src",
+	)
+	if code != 0 {
+		t.Fatalf("issue exit=%d stderr=%q", code, stderr)
+	}
+	var id int64
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := adminDB.QueryRowContext(ctx,
+		`SELECT id FROM partner_keys WHERE label='revoke-evt-src' ORDER BY id DESC LIMIT 1`,
+	).Scan(&id); err != nil {
+		t.Fatalf("find issued id: %v", err)
+	}
+
+	code, _, rstderr := runRevoke(
+		"--admin-dsn", fx.adminDSN(),
+		"--id", fmt.Sprintf("%d", id),
+		"--reason", "step4c-test-reason",
+	)
+	if code != 0 {
+		t.Fatalf("revoke exit=%d stderr=%q", code, rstderr)
+	}
+	if !strings.Contains(rstderr, `"event":"stats_partner_key_revoked"`) {
+		t.Fatalf("missing stats_partner_key_revoked event in stderr: %q", rstderr)
+	}
+	if !strings.Contains(rstderr, fmt.Sprintf(`"id":%d`, id)) {
+		t.Errorf("event missing id field: %q", rstderr)
+	}
+	if !strings.Contains(rstderr, `"reason":"step4c-test-reason"`) {
+		t.Errorf("event missing reason field: %q", rstderr)
+	}
+	if !strings.Contains(rstderr, `"actor"`) {
+		t.Errorf("event missing actor field: %q", rstderr)
+	}
+	for _, banned := range []string{"token_hash", "mpk_"} {
+		if strings.Contains(rstderr, banned) {
+			t.Errorf("revoke event leaks forbidden substring %q: %q", banned, rstderr)
+		}
+	}
+}

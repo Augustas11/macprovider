@@ -76,8 +76,11 @@ unique findings; round-2 fixes landed on top of `2130a87`:
 - ARCH H1 — `stats_handler_panic` field-set drift; extra
   `stats_handler_panic_stack` event widened public taxonomy.
   Closed: middleware now emits ONLY the locked `stats_handler_panic`
-  event with `route` + `request_id` + `panic_type` fields; the
-  debug stack dump is no longer tagged as a `stats_*` event.
+  event with `route` + `request_id` fields; the debug stack dump
+  is no longer tagged as a `stats_*` event. (Round-2 ARCH M2 /
+  CODE H2 follow-on narrowed the event further by removing
+  `panic_type` — that triage hint now lives on the untagged
+  debug-only stack line.)
 - ARCH H2 / SECURITY H1 — `stats_partner_key_issued` contained
   `prefix` (token-derived) + `created_at` (outside locked set).
   Closed: event now emits `id`, `label`, `created_by`,
@@ -85,9 +88,17 @@ unique findings; round-2 fixes landed on top of `2130a87`:
 - ARCH H3 — CHANGELOG missing per-step PR refs. Closed: per-step
   table now carries a PR column (each row cites #173 for this
   release; future releases will split).
-- CODE H1 — auth-failure 429s mislabeled as `tier=public`. Closed:
-  `tierOverrideKey` context value lets the dispatcher tag the
-  reject site as `auth_failure`; access-log middleware reads it.
+- CODE H1 — auth-failure 429s mislabeled as `tier=public`.
+  REOPENED + RE-CLOSED in round 2: round-1's
+  `tier="auth_failure"` fix violated BUILD's closed
+  `{public, partner}` label vocabulary. Round-2 ARCH M1 reverted
+  to the closed set; auth-failure 429s remain labeled
+  `tier="public"`, differentiated operationally via
+  `endpoint=leaderboard + status=429` (only path that runs the
+  auth-failure tier per §4.3) versus public-limiter 429s on
+  `/overview` + `/health`. Round-3 CODE H1 (separate finding —
+  immutable `r.WithContext` propagation) closed by moving
+  `PartnerKeyID` onto the mutable `requestObs` struct pointer.
 - CODE H2 — nightly rebuild errors/panics didn't increment
   `stats_rollup_errors_total`. Closed: both the rebuild error
   and panic paths increment the counter for
@@ -105,11 +116,13 @@ unique findings; round-2 fixes landed on top of `2130a87`:
   Origin fragment; wired-mux integration test drives real
   requests through `stats.NewMuxWithMetrics` and asserts no
   attacker-supplied substring lands in any label.
-- CODE M2 — `stats_rollup_lag_seconds` untested. PARTIAL: the
-  observation loop lives in `cmd/coordinator/main.go` and is
-  driven by a real testcontainers Postgres in CI; a unit-level
-  seam test is a follow-up note in the convergence record (Step
-  4.C v0.2 candidate).
+- CODE M2 — `stats_rollup_lag_seconds` untested. Closed in
+  round 3: the per-tick SQL pass moved into
+  `internal/stats/rollup/observer.go::ObserveRollupLagOnce`, and
+  the wired hygiene integration test now drives the gauge through
+  that real production helper instead of a synthetic Set() call.
+  `cmd/coordinator/main.go::observeRollupLag` is now a thin 15-s
+  ticker over the same helper.
 - CODE M3 — OPS.md missing "if this fails" recovery paragraphs.
   Closed: §10.1 / 10.2 / 10.3 / 10.4 each carry an
   **If this fails** block.
@@ -121,10 +134,15 @@ unique findings; round-2 fixes landed on top of `2130a87`:
 | Lane     | Round | Verdict                | Counts                          |
 |----------|-------|------------------------|---------------------------------|
 | ARCH     | r1    | NOT READY TO LOCK      | 1C / 3H / 1M / 1L / 9 INFO      |
+| ARCH     | r2    | NOT READY TO LOCK      | 0C / 0H / 3M / 1L / 10 INFO     |
+| ARCH     | r3    | REQUEST CHANGES        | 0C / 0H / 1M / 1L / 12 INFO     |
 | CODE     | r1    | NOT READY TO LOCK      | 0C / 5H / 3M / 2L / various INFO |
+| CODE     | r2    | NOT READY TO LOCK      | 0C / 2H / 2M / 0L / various      |
+| CODE     | r3    | NOT READY TO LOCK      | 0C / 0H / 3M / 2L / 9 INFO       |
 | SECURITY | r1    | NOT CONVERGED          | 1C / 1H / 0M / 2L / 8 INFO      |
+| SECURITY | r2    | READY TO LOCK          | 0C / 0H / 0M / 2L / 9 INFO       |
 
-Round 2 fires after this convergence commit lands.
+Round 4 fires after the round-3 fix commit (this commit) lands.
 
 ## Step 4.C deliverables (cumulative)
 
@@ -137,7 +155,9 @@ Round 2 fires after this convergence commit lands.
   surface; kept).
 - `stats_handler_panic` — recover middleware
   (`middleware.go::recoverMiddleware`); fields: route + request_id
-  + panic_type only.
+  only (round-2 ARCH M2 / CODE H2 narrowed by removing
+  `panic_type`; triage detail lives on an untagged debug-only
+  stack-dump line).
 - `stats_partner_key_issued` — CLI issue
   (`cmd/coordinator/partnerkeys.go::runPartnerKeysIssue`); fields:
   id, label, created_by, rotated_from_id only.

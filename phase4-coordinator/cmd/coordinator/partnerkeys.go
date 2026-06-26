@@ -284,7 +284,23 @@ RETURNING id, created_at`
 		return 1
 	}
 
-	// Step 4.C — locked §8.5 event for a successful issuance.
+	// Print metadata first (operator-facing diagnostic). The
+	// metadata is journal-safe — contains only label / id /
+	// prefix / created_by / rotated_from_id / created_at.
+	fmt.Fprintf(stdout, "id=%d label=%s prefix=%s created_by=%s rotated_from_id=%s created_at=%s\n",
+		id, *label, prefix, principal, nullInt64String(rotatedFrom), createdAt.UTC().Format(time.RFC3339))
+
+	// Round-3 CODE r3 MEDIUM 1 fix: the locked §8.5
+	// `stats_partner_key_issued` event MUST emit only after the
+	// raw token has been successfully delivered to the operator
+	// (file-write succeeded OR rawToken printed to stdout). The
+	// failure exit paths below (file-write error, JOURNAL_STREAM
+	// suppression) deliberately do NOT emit the event — the
+	// orphaned row in `partner_keys` requires a follow-up
+	// `partner-keys revoke`, and a stats_partner_key_issued
+	// event for a never-delivered token would corrupt
+	// event-driven audits of successfully delivered keys.
+	//
 	// Fields per BUILD §2 Step 4.C: partner_keys.id, label,
 	// created_by, rotated_from_id_or_null. NEVER the raw token,
 	// 43-char body, token_hash bytes, OR the `prefix` substring
@@ -293,18 +309,14 @@ RETURNING id, created_at`
 	// narrower structured-event taxonomy). The event lands on
 	// stderr-bound zerolog so it survives JOURNAL_STREAM-aware
 	// stdout suppression (operator still gets the audit trail).
-	emitPartnerKeyEvent(stderr, "stats_partner_key_issued", map[string]any{
-		"id":              id,
-		"label":           *label,
-		"created_by":      principal,
-		"rotated_from_id": nullInt64String(rotatedFrom),
-	})
-
-	// Print metadata first (operator-facing diagnostic). The
-	// metadata is journal-safe — contains only label / id /
-	// prefix / created_by / rotated_from_id / created_at.
-	fmt.Fprintf(stdout, "id=%d label=%s prefix=%s created_by=%s rotated_from_id=%s created_at=%s\n",
-		id, *label, prefix, principal, nullInt64String(rotatedFrom), createdAt.UTC().Format(time.RFC3339))
+	emitIssued := func() {
+		emitPartnerKeyEvent(stderr, "stats_partner_key_issued", map[string]any{
+			"id":              id,
+			"label":           *label,
+			"created_by":      principal,
+			"rotated_from_id": nullInt64String(rotatedFrom),
+		})
+	}
 
 	// Round-1 SECURITY H1: if stdout is captured by systemd-
 	// journal (JOURNAL_STREAM env set by systemd-run / systemd
@@ -323,6 +335,7 @@ RETURNING id, created_at`
 			return 1
 		}
 		fmt.Fprintf(stdout, "token written to %s (mode 0600)\n", *tokenOut)
+		emitIssued()
 		return 0
 	}
 	if os.Getenv("JOURNAL_STREAM") != "" {
@@ -332,6 +345,7 @@ RETURNING id, created_at`
 		return 1
 	}
 	fmt.Fprintln(stdout, rawToken)
+	emitIssued()
 	return 0
 }
 
