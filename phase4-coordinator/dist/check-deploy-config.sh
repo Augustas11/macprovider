@@ -309,7 +309,7 @@ else:
     def get_sec(k): return g_payout("security", k)
     def get_tun(k): return g_payout("tuning", k)
 
-    def check_payout_field(label, raw, *, hex_64=False, allow_empty=False):
+    def check_payout_field(label, raw, *, hex_64=False, allow_empty=False, is_rpc_url=False):
         """Validate a payout config field: present-with-value or env:NAME.
 
         - missing                              -> HARD fail
@@ -317,7 +317,10 @@ else:
         - "env:NAME", NAME set to placeholder  -> HARD fail
         - "env:" / "env:1bad"                  -> HARD fail (malformed)
         - inline literal placeholder           -> HARD fail
-        - inline literal value                 -> ok (hex-validated if hex_64)
+        - inline literal value                 -> ok (hex-validated if hex_64;
+                                                  https / non-internal target
+                                                  if is_rpc_url -- FULL-r1
+                                                  [full-sec:r1-1] closure)
         """
         if raw is None or raw == "":
             if allow_empty:
@@ -345,12 +348,62 @@ else:
         if hex_64 and not re.fullmatch(r"[0-9a-fA-F]{64}", raw_s):
             hard(f"{label} is not 64-hex (len {len(raw_s)}){src}; expected SHA-256 SPKI pin")
             return
+        if is_rpc_url:
+            err = validate_payout_rpc_url(raw_s)
+            if err is not None:
+                hard(f"{label} invalid{src}: {err}")
+                return
         ok(f"{label} present{src}")
+
+    # FULL-r1 [full-sec:r1-1] HIGH closure: payout RPC URLs are the
+    # trust root for the §4.4 two-RPC discipline. Mirror the runtime
+    # validation in internal/config/config.go::validatePayoutRPCURL —
+    # reject non-https, userinfo, loopback / private / link-local /
+    # unspecified IPs. Hostnames pass through (DNS not resolved in
+    # the deploy gate); the SPKI pin is the runtime trust root.
+    def validate_payout_rpc_url(raw):
+        from urllib.parse import urlparse
+        import ipaddress
+        try:
+            u = urlparse(raw.strip())
+        except Exception as exc:
+            return f"unparseable URL ({exc})"
+        if not u.hostname:
+            return "missing hostname"
+        if u.scheme != "https":
+            return f"scheme {u.scheme!r} must be https (SPKI pin only fires on https)"
+        if u.username or u.password:
+            return "must not contain userinfo (credentials in URL leak into logs)"
+        host = u.hostname
+        try:
+            ip = ipaddress.ip_address(host)
+        except ValueError:
+            return None  # hostname literal: defer trust to SPKI pin
+        if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_unspecified:
+            return f"IP literal {host} is loopback / private / link-local / unspecified (SSRF defense)"
+        return None
 
     # security namespace (required when enabled=true)
     check_payout_field("payout.security.hot_wallet_address", get_sec("hot_wallet_address"))
-    check_payout_field("payout.security.rpc_url_primary",   get_sec("rpc_url_primary"))
-    check_payout_field("payout.security.rpc_url_secondary", get_sec("rpc_url_secondary"))
+    check_payout_field("payout.security.rpc_url_primary",   get_sec("rpc_url_primary"),   is_rpc_url=True)
+    check_payout_field("payout.security.rpc_url_secondary", get_sec("rpc_url_secondary"), is_rpc_url=True)
+    # FULL-r1 [full-sec:r1-1] HIGH closure: distinct-host check (only
+    # when both RPC URLs are inline literals; env:NAME values that
+    # didn't resolve are deferred to runtime and already gated by
+    # internal/config/config.go::Validate).
+    pri_raw = get_sec("rpc_url_primary")
+    sec_raw = get_sec("rpc_url_secondary")
+    if pri_raw and sec_raw and not pri_raw.startswith("env:") and not sec_raw.startswith("env:"):
+        from urllib.parse import urlparse as _up
+        try:
+            pri_host = (_up(pri_raw).hostname or "").lower()
+            sec_host = (_up(sec_raw).hostname or "").lower()
+            if pri_host and sec_host and pri_host == sec_host:
+                hard("payout.security.rpc_url_primary and rpc_url_secondary use the same hostname (SPEC-016 §4.4 trust separation)")
+            elif pri_host and sec_host:
+                ok("payout.security.rpc_url_{primary,secondary} use distinct hostnames")
+        except Exception:
+            pass
     check_payout_field("payout.security.encrypted_wallet_path", get_sec("encrypted_wallet_path"))
     # caps + cancel + abandon (no env: indirection expected; integers)
     for key in (

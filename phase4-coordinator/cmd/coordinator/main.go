@@ -664,15 +664,21 @@ func setupPayout(ctx context.Context, db *sql.DB, cfg config.Config, tokenStore 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("load security config: %w", err)
 	}
-	// SPEC §3.3 co-residency invariant — assert BEFORE building
-	// any service so a misconfigured deployment fails fast at
-	// startup, not on the first request. Step 2 tightens to
-	// require RunnerCoResident=true.
+	// SPEC §3.3 + §6.3 co-residency / Linux-only invariant — assert
+	// BEFORE building any service so a misconfigured deployment
+	// fails fast at startup, not on the first request.
+	//
+	// FULL-r1 [full-arch:r1-1] MEDIUM closure: SPEC §6.3 requires
+	// "IMPL MUST refuse to start the runner on runtime.GOOS !=
+	// \"linux\"". Step 1 r2 convergence carried LinuxRequired=true
+	// as a Step 2 tightening; this flip lands it. The topology
+	// assertion is now the single startup authority for §6.3
+	// Linux-only refusal, not a downstream comment in signer.go.
 	if err := payout.AssertPayoutRuntimeTopology(payout.PayoutRuntimeTopology{
 		HandlerEnabled:         true,
 		RunnerCoResident:       true,
 		HotWalletAddressPinned: sec.HotWalletAddress,
-		LinuxRequired:          false, // Step 4 will flip this true in production deploys
+		LinuxRequired:          true,
 	}); err != nil {
 		return nil, nil, nil, fmt.Errorf("payout topology: %w", err)
 	}

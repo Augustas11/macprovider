@@ -231,6 +231,26 @@ func (r *Runner) HaltReason() string {
 	return ""
 }
 
+// EmitAdminInvokedWhileHalted records the §7.1 observability event
+// when an admin endpoint with the explicit-bypass-during-halt policy
+// is invoked while RequestHalt is in effect. Closes FULL-r1
+// [full-code:r1-3] MEDIUM. The endpoint is named (abandon-attempt,
+// pause-registration, etc.) so a runbook can correlate operator
+// triage actions to the halt reason. Non-blocking: the handler still
+// runs; this is observability only.
+func (r *Runner) EmitAdminInvokedWhileHalted(endpoint string) {
+	if r == nil {
+		return
+	}
+	r.opts.Logger.Warn().
+		Str("event", "payout_admin_invoked_while_halted").
+		Str("severity", "WARN").
+		Str("endpoint", endpoint).
+		Str("reason", r.HaltReason()).
+		Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
+		Send()
+}
+
 // NewRunner builds a Runner. The caller MUST have already
 // performed Acquire() so state carries a valid holder_token.
 func NewRunner(opts RunnerOptions, state LeaseState) (*Runner, error) {
@@ -503,6 +523,28 @@ func (r *Runner) RunOnce(ctx context.Context) (string, error) {
 
 rowLoop:
 	for _, row := range rows {
+		// FULL-r1 [full-code:r1-2] HIGH closure: halt may be
+		// requested mid-cycle (the chain-balance worker calls
+		// RequestHalt on payout_chain_balance_drift_negative). Gate
+		// at the row-loop boundary so an in-flight cycle stops
+		// before processing the next row. Emit a single
+		// observability event the FIRST time a halted row is
+		// skipped; the chain-balance worker already emitted the
+		// PAGE event at halt time, and RunOnce's pre-cycle gate
+		// emits payout_runner_halted_skipping_cycle on next
+		// invocation. Defense-in-depth gates inside
+		// allocateBuildSignBroadcast / rebroadcastAndPoll /
+		// claimAndLog cover the irreversible chain-write windows
+		// (post-COMMIT, post-SelfFence, pre-broadcast, pre-claim).
+		if r.halted.Load() {
+			r.opts.Logger.Warn().
+				Str("event", "payout_runner_halted_skipping_rows").
+				Str("run_id", runID).
+				Str("reason", r.HaltReason()).
+				Str("ts_utc", r.opts.NowFn().UTC().Format(time.RFC3339Nano)).
+				Send()
+			break rowLoop
+		}
 		if !row.EffectiveAddress.Valid {
 			// §4.3 step 1: NULL effective_address is a hard
 			// invariant violation (impossible given WHERE).
@@ -748,6 +790,13 @@ func (r *Runner) rebroadcastAndPoll(ctx context.Context, conn *sql.Conn, runID s
 	if err := SelfFence(ctx, r.opts.DB, r.state); err != nil {
 		return rowOutcomeFailed, err
 	}
+	// FULL-r1 [full-code:r1-2] HIGH closure: defense-in-depth halt
+	// gate before re-broadcasting persisted bytes — same rationale
+	// as allocateBuildSignBroadcast. The bytes stay persisted; the
+	// next non-halted cycle (post operator restart) will rebroadcast.
+	if r.halted.Load() {
+		return rowOutcomeSkipped, nil
+	}
 	acceptedAny, _, _, primErr, secErr := r.opts.RPCs.BroadcastBoth(ctx, attempt.RawSignedTx)
 	if !acceptedAny {
 		// Both rejected — leave broadcast_at_utc NULL; the next
@@ -810,11 +859,24 @@ func (r *Runner) pollCancelOnce(ctx context.Context, runID string, cancel Attemp
 		r.emitRPCDisagreement(cancel.PayoutID, cancel.AttemptSeq, recA, recB)
 		return rowOutcomeFailed
 	}
-	head, err := r.opts.RPCs.Primary.BlockNumber(ctx)
+	// FULL-r1 [full-code:r1-1] HIGH closure: SPEC §4.3 step 7
+	// requires BOTH RPCs at depth >= ConfirmationBlocks. A lagging
+	// secondary can return the same receipt before its own head is
+	// deep enough; if we measured depth on the primary head only
+	// we could mark cancel-confirmed using single-RPC depth.
+	headPri, err := r.opts.RPCs.Primary.BlockNumber(ctx)
 	if err != nil {
 		return rowOutcomeFailed
 	}
-	if int64(head)-int64(recA.BlockNumber) < int64(r.snap().ConfirmationBlocks) {
+	headSec, err := r.opts.RPCs.Secondary.BlockNumber(ctx)
+	if err != nil {
+		return rowOutcomeFailed
+	}
+	conf := int64(r.snap().ConfirmationBlocks)
+	if int64(headPri)-int64(recA.BlockNumber) < conf {
+		return rowOutcomeFailed
+	}
+	if int64(headSec)-int64(recB.BlockNumber) < conf {
 		return rowOutcomeFailed
 	}
 	if recA.Status != 1 {
@@ -1077,6 +1139,18 @@ func (r *Runner) allocateBuildSignBroadcast(ctx context.Context, runID string, r
 		time.Sleep(r.opts.SleepAfterPostCommitLeaseReread)
 	}
 
+	// FULL-r1 [full-code:r1-2] HIGH closure: defense-in-depth halt
+	// gate immediately before the irreversible chain-write. The
+	// COMMIT above persisted the attempt + bumped the nonce cursor,
+	// but the chain-write (BroadcastBoth) has not happened yet; if
+	// halt was requested in the post-COMMIT window we MUST NOT
+	// broadcast. The unbroadcast row is reaped by §4.8c stale-CAS
+	// once it ages out. Silent return — the row-loop top emit and
+	// the prior PAGE event already make the halt visible.
+	if r.halted.Load() {
+		return rowOutcomeSkipped, nil
+	}
+
 	// Broadcast on both RPCs.
 	acceptedAny, _, _, primErr, secErr := r.opts.RPCs.BroadcastBoth(ctx, signed)
 	if !acceptedAny {
@@ -1142,14 +1216,25 @@ func (r *Runner) pollAndConfirm(ctx context.Context, conn *sql.Conn, runID strin
 		recPri, perrA = r.opts.RPCs.Primary.TransactionReceipt(ctx, txHash)
 		recSec, perrB = r.opts.RPCs.Secondary.TransactionReceipt(ctx, txHash)
 		if perrA == nil && perrB == nil && recPri != nil && recSec != nil {
-			// Confirmation depth check.
-			head, err := r.opts.RPCs.Primary.BlockNumber(ctx)
-			if err != nil {
+			// FULL-r1 [full-code:r1-1] HIGH closure: SPEC §4.3
+			// step 7 requires BOTH RPCs at depth >=
+			// ConfirmationBlocks. Read both heads and gate on the
+			// stricter (per-RPC) depth so a lagging secondary
+			// cannot let a primary-deep receipt drive confirmation.
+			headPri, errPri := r.opts.RPCs.Primary.BlockNumber(ctx)
+			if errPri != nil {
 				time.Sleep(r.opts.ReceiptPollInterval)
 				continue
 			}
-			depth := int64(head) - int64(recPri.BlockNumber)
-			if depth >= int64(r.snap().ConfirmationBlocks) {
+			headSec, errSec := r.opts.RPCs.Secondary.BlockNumber(ctx)
+			if errSec != nil {
+				time.Sleep(r.opts.ReceiptPollInterval)
+				continue
+			}
+			conf := int64(r.snap().ConfirmationBlocks)
+			depthPri := int64(headPri) - int64(recPri.BlockNumber)
+			depthSec := int64(headSec) - int64(recSec.BlockNumber)
+			if depthPri >= conf && depthSec >= conf {
 				break
 			}
 		}
@@ -1210,6 +1295,15 @@ func (r *Runner) pollAndConfirm(ctx context.Context, conn *sql.Conn, runID strin
 // claimAndLog issues ClaimPayoutReady and emits payout_paid /
 // payout_failed.
 func (r *Runner) claimAndLog(ctx context.Context, runID string, row ReadyRow, attempt *AttemptRow) (rowOutcome, error) {
+	// FULL-r1 [full-code:r1-2] HIGH closure: defense-in-depth halt
+	// gate before ClaimPayoutReady. The chain has already confirmed
+	// the transfer; if halt fires here we defer the billing-side
+	// claim to a future cycle. The runner's confirmed row stays in
+	// the DB and will be re-claimed once the operator clears the
+	// halt (process restart).
+	if r.halted.Load() {
+		return rowOutcomeSkipped, nil
+	}
 	claimed, err := r.opts.Claimer.ClaimPayoutReady(ctx, row.PayoutID, row.GrossCredits, attempt.TxHash.String, "USDC-BASE")
 	nowStr := r.opts.NowFn().UTC().Format(time.RFC3339Nano)
 	if err != nil {

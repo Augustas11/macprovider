@@ -143,15 +143,19 @@ func LoadLocalFileSigner(wallet EncryptedWalletFile, kek []byte) (*LocalFileSign
 		// leak whether the KEK is close-to-correct.
 		return nil, errors.New("LoadLocalFileSigner: wallet decrypt failed")
 	}
+	// FULL-r1 [full-sec:r1-2] LOW closure: zeroize via defer so
+	// the malformed-length error path also wipes decrypted bytes.
+	// Defensive: the secp256k1 PrivateKey allocates its own copy
+	// of the key material, so wiping pt after construction is safe.
+	defer func() {
+		for i := range pt {
+			pt[i] = 0
+		}
+	}()
 	if len(pt) != 32 {
 		return nil, fmt.Errorf("LoadLocalFileSigner: decrypted key length = %d, want 32", len(pt))
 	}
 	priv := secp256k1.PrivKeyFromBytes(pt)
-	// Defensive zeroize of the plaintext slice — the secp256k1
-	// PrivateKey holds its own internal copy.
-	for i := range pt {
-		pt[i] = 0
-	}
 	address, err := deriveEthereumAddress(priv.PubKey())
 	if err != nil {
 		return nil, fmt.Errorf("LoadLocalFileSigner: derive address: %w", err)

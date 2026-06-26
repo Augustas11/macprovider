@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -568,8 +569,8 @@ func Default() Config {
 		Payout: PayoutConfig{
 			Enabled: false,
 			Security: PayoutSecurityConfig{
-				PerPayoutCapUSDCBaseUnits:        500_000_000,    // $500
-				PerDayCapUSDCBaseUnits:           5_000_000_000,  // $5,000
+				PerPayoutCapUSDCBaseUnits:        500_000_000,   // $500
+				PerDayCapUSDCBaseUnits:           5_000_000_000, // $5,000
 				CancelMaxTipMultiplier:           5.0,
 				CancelMaxGasNativeWei:            10_000_000_000_000_000, // 0.01 ETH (1e16)
 				CancelMaxGasNativeWeiPer24h:      50_000_000_000_000_000, // 0.05 ETH (5e16)
@@ -1055,8 +1056,26 @@ func (c Config) Validate() error {
 		if c.Payout.Security.RPCURLPrimary == "" || c.Payout.Security.RPCURLSecondary == "" {
 			return fmt.Errorf("payout.security.rpc_url_primary and rpc_url_secondary must both be set (SPEC-016 §4.4 two-RPC discipline)")
 		}
-		if c.Payout.Security.RPCURLPrimary == c.Payout.Security.RPCURLSecondary {
-			return fmt.Errorf("payout.security.rpc_url_primary and rpc_url_secondary must differ (SPEC-016 §4.4 trust separation)")
+		// FULL-r1 [full-sec:r1-1] HIGH closure: payout RPC URLs are
+		// the trust root for the §4.4 two-RPC discipline. An
+		// attacker-controlled origin can return agreeing chain IDs,
+		// receipts, and balanceOf results — defeating
+		// ReceiptsAgree / chain-balance drift detection. Enforce
+		// https-only (TLS+SPKI pin runs only on https handshakes),
+		// no userinfo (avoids credential leak in URL logs), no
+		// loopback/private/link-local/unspecified targets (SSRF +
+		// internal-pivot defense), and distinct hostnames between
+		// primary and secondary (independent providers).
+		priURL, err := validatePayoutRPCURL("payout.security.rpc_url_primary", c.Payout.Security.RPCURLPrimary)
+		if err != nil {
+			return err
+		}
+		secURL, err := validatePayoutRPCURL("payout.security.rpc_url_secondary", c.Payout.Security.RPCURLSecondary)
+		if err != nil {
+			return err
+		}
+		if strings.EqualFold(priURL.Hostname(), secURL.Hostname()) {
+			return fmt.Errorf("payout.security.rpc_url_primary and rpc_url_secondary must use distinct hostnames (SPEC-016 §4.4 independent-providers trust separation)")
 		}
 		if c.Payout.Security.PerPayoutCapUSDCBaseUnits <= 0 {
 			return fmt.Errorf("payout.security.per_payout_cap_usdc_base_units must be > 0")
@@ -1244,6 +1263,37 @@ func validateSPKIPin(value, name string) error {
 		return fmt.Errorf("%s must be empty or a valid 64-hex-char SHA-256", name)
 	}
 	return nil
+}
+
+// validatePayoutRPCURL enforces the SPEC-016 §4.4 trust-root
+// constraints on payout RPC URLs. Closes FULL-r1 [full-sec:r1-1]
+// HIGH: an unconstrained RPC URL defeats two-RPC discipline.
+//
+// MUST:
+//   - parse as a URL with a non-empty hostname,
+//   - use https (TLS+SPKI pin verification only fires on https),
+//   - have NO userinfo (credential URLs leak into logs),
+//   - resolve to a non-loopback / non-private / non-link-local /
+//     non-unspecified IP if the host is a literal IP (SSRF +
+//     internal-pivot defense; hostnames are validated at TLS time
+//     via the SPKI pin, which is the runtime trust root).
+func validatePayoutRPCURL(name, raw string) (*url.URL, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" {
+		return nil, fmt.Errorf("%s must be a valid URL with a hostname", name)
+	}
+	if u.Scheme != "https" {
+		return nil, fmt.Errorf("%s must use https (SPEC-016 §4.4 + SPKI pin)", name)
+	}
+	if u.User != nil {
+		return nil, fmt.Errorf("%s must not contain userinfo (credential leak in logs)", name)
+	}
+	if ip, err := netip.ParseAddr(u.Hostname()); err == nil {
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+			return nil, fmt.Errorf("%s must not target loopback / private / link-local / unspecified IPs (SSRF defense)", name)
+		}
+	}
+	return u, nil
 }
 
 func ValidateEndpointURL(endpoint string) error {

@@ -162,12 +162,16 @@ func NewMuxStep2(opts Step2MuxOptions) (http.Handler, error) {
 
 	// Operator-key auth shim for the admin routes.
 	auth := operatorKeyMiddleware(opts.OperatorKey)
-	r.With(auth).Post("/admin/payout/abandon-attempt", func(w http.ResponseWriter, req *http.Request) {
-		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
-	})
+	r.With(auth).Post("/admin/payout/abandon-attempt", withHaltObservability(
+		"abandon-attempt", opts.Runner,
+		func(w http.ResponseWriter, req *http.Request) {
+			opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
+		}))
 	// Step 4 r2 [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR
 	// closure: delegate to shared RunNowController which enforces
 	// run_now_min_interval rate-limit and emits payout_run_now_invoked.
+	// run-now is the only admin endpoint halt-blocked (the controller
+	// returns 409 + runner_halted body); see RunNowController.ServeRunNow.
 	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
 		opts.RunNow.ServeRunNow(w, req, "operator_key")
 	})
@@ -228,25 +232,35 @@ func NewMuxStep3(opts Step3MuxOptions) (http.Handler, error) {
 	r.HandleFunc("/providers/*", opts.Fallback.ServeHTTP)
 
 	auth := operatorKeyMiddleware(opts.OperatorKey)
-	r.With(auth).Post("/admin/payout/abandon-attempt", func(w http.ResponseWriter, req *http.Request) {
-		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
-	})
+	r.With(auth).Post("/admin/payout/abandon-attempt", withHaltObservability(
+		"abandon-attempt", opts.Runner,
+		func(w http.ResponseWriter, req *http.Request) {
+			opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
+		}))
 	// Step 4 r2 [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR
 	// closure: shared RunNowController enforces rate-limit + event.
+	// run-now is the only admin endpoint halt-blocked (see Step2 mux).
 	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
 		opts.RunNow.ServeRunNow(w, req, "operator_key")
 	})
-	// §6.4.1 pause/resume.
-	r.With(auth).Post("/admin/payout/pause-registration", func(w http.ResponseWriter, req *http.Request) {
-		opts.Pause.ServePause(w, req, opts.Actor)
-	})
-	r.With(auth).Post("/admin/payout/resume-registration", func(w http.ResponseWriter, req *http.Request) {
-		opts.Pause.ServeResume(w, req, opts.Actor)
-	})
-	// §4.9 record-funding.
-	r.With(auth).Post("/admin/payout/record-funding", opts.Funding.ServeRecordFunding)
-	// §4.7 record-orphan.
-	r.With(auth).Post("/admin/payout/record-orphan", opts.Orphans.ServeRecordOrphan)
+	// §6.4.1 pause/resume — explicit allow-during-halt per
+	// FULL-r1 [full-code:r1-3] bypass policy (operator triage tool).
+	r.With(auth).Post("/admin/payout/pause-registration", withHaltObservability(
+		"pause-registration", opts.Runner,
+		func(w http.ResponseWriter, req *http.Request) {
+			opts.Pause.ServePause(w, req, opts.Actor)
+		}))
+	r.With(auth).Post("/admin/payout/resume-registration", withHaltObservability(
+		"resume-registration", opts.Runner,
+		func(w http.ResponseWriter, req *http.Request) {
+			opts.Pause.ServeResume(w, req, opts.Actor)
+		}))
+	// §4.9 record-funding — explicit allow-during-halt.
+	r.With(auth).Post("/admin/payout/record-funding", withHaltObservability(
+		"record-funding", opts.Runner, opts.Funding.ServeRecordFunding))
+	// §4.7 record-orphan — explicit allow-during-halt.
+	r.With(auth).Post("/admin/payout/record-orphan", withHaltObservability(
+		"record-orphan", opts.Runner, opts.Orphans.ServeRecordOrphan))
 
 	if err := verifyPathTable(r, step3PathTable); err != nil {
 		return nil, err
@@ -309,29 +323,67 @@ func NewMuxStep4(opts Step4MuxOptions) (http.Handler, error) {
 	r.HandleFunc("/providers/*", opts.Fallback.ServeHTTP)
 
 	auth := operatorKeyMiddleware(opts.OperatorKey)
-	// Step 2: §4.6 abandon + §4.2 run-now.
-	r.With(auth).Post("/admin/payout/abandon-attempt", func(w http.ResponseWriter, req *http.Request) {
-		opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
-	})
-	// Step 4 r2 [code:r2-1]/[sec:r2-1]/[arch:r2-4.1] CONVERGENT MAJOR
-	// closure: shared RunNowController enforces rate-limit + event.
+	// FULL-r1 [full-code:r1-3] MEDIUM closure: admin halt-bypass
+	// policy — every admin endpoint OTHER than run-now is wrapped
+	// with withHaltObservability so an invocation during halt
+	// emits payout_admin_invoked_while_halted but does NOT block.
+	// Rationale: the operator MUST be able to abandon a stuck row,
+	// pause registration, record funding, and mark a reorg orphan
+	// while triaging the incident that triggered halt. run-now
+	// triggers chain operations and is the only halt-blocked
+	// admin endpoint; the 409 gate lives in RunNowController.
+	r.With(auth).Post("/admin/payout/abandon-attempt", withHaltObservability(
+		"abandon-attempt", opts.Runner,
+		func(w http.ResponseWriter, req *http.Request) {
+			opts.Abandon.ServeAbandon(w, req, "operator_key", opts.Caps)
+		}))
 	r.With(auth).Post("/admin/payout/run-now", func(w http.ResponseWriter, req *http.Request) {
 		opts.RunNow.ServeRunNow(w, req, "operator_key")
 	})
-	// Step 3: §6.4.1 pause/resume + §4.9 record-funding + §4.7 record-orphan.
-	r.With(auth).Post("/admin/payout/pause-registration", func(w http.ResponseWriter, req *http.Request) {
-		opts.Pause.ServePause(w, req, opts.Actor)
-	})
-	r.With(auth).Post("/admin/payout/resume-registration", func(w http.ResponseWriter, req *http.Request) {
-		opts.Pause.ServeResume(w, req, opts.Actor)
-	})
-	r.With(auth).Post("/admin/payout/record-funding", opts.Funding.ServeRecordFunding)
-	r.With(auth).Post("/admin/payout/record-orphan", opts.Orphans.ServeRecordOrphan)
+	r.With(auth).Post("/admin/payout/pause-registration", withHaltObservability(
+		"pause-registration", opts.Runner,
+		func(w http.ResponseWriter, req *http.Request) {
+			opts.Pause.ServePause(w, req, opts.Actor)
+		}))
+	r.With(auth).Post("/admin/payout/resume-registration", withHaltObservability(
+		"resume-registration", opts.Runner,
+		func(w http.ResponseWriter, req *http.Request) {
+			opts.Pause.ServeResume(w, req, opts.Actor)
+		}))
+	r.With(auth).Post("/admin/payout/record-funding", withHaltObservability(
+		"record-funding", opts.Runner, opts.Funding.ServeRecordFunding))
+	r.With(auth).Post("/admin/payout/record-orphan", withHaltObservability(
+		"record-orphan", opts.Runner, opts.Orphans.ServeRecordOrphan))
 
 	if err := verifyPathTable(r, step4PathTable); err != nil {
 		return nil, err
 	}
 	return r, nil
+}
+
+// withHaltObservability wraps an admin handler with the FULL-r1
+// [full-code:r1-3] MEDIUM bypass policy: admin endpoints OTHER
+// than run-now are explicitly ALLOWED during runner halt because
+// the operator needs them to triage the incident that triggered
+// halt — abandon a stuck broadcast, pause provider registration,
+// record a manual funding event, mark a reorg orphan. The wrapper
+// emits a non-blocking payout_admin_invoked_while_halted
+// observability event so a runbook can correlate the triage
+// action to the halt reason.
+//
+// run-now is the only admin endpoint that triggers chain operations
+// (RunOnce); its halt gate lives inside RunNowController and remains
+// 409-rejecting.
+//
+// runner may be nil (Step1MuxOptions does not carry a Runner); in
+// that posture the wrapper is a no-op pass-through.
+func withHaltObservability(name string, runner *Runner, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		if runner != nil && runner.IsHalted() {
+			runner.EmitAdminInvokedWhileHalted(name)
+		}
+		next(w, req)
+	}
 }
 
 func operatorKeyMiddleware(operatorKey string) func(http.Handler) http.Handler {

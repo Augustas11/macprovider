@@ -5,11 +5,23 @@ import (
 	"database/sql"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/augstar/macprovider-coordinator/internal/payout/migrations"
 )
+
+// addColumnStmt matches a single SQLite ALTER TABLE ADD COLUMN
+// statement (any whitespace, optional column-constraint trail).
+// Captures: 1=table, 2=column. Closes FULL-r1 [full-code:r1-4]
+// MEDIUM: bare ADD COLUMN is non-idempotent on SQLite (rerun
+// fails "duplicate column"); if the process crashes after the
+// ALTER but before payout_schema_applied gets the marker, the
+// next boot would fail on the same file. The migration runner
+// now pre-checks PRAGMA table_info and skips ADD COLUMN if the
+// column already exists.
+var addColumnStmt = regexp.MustCompile(`(?is)\bALTER\s+TABLE\s+([A-Za-z_][A-Za-z0-9_]*)\s+ADD\s+COLUMN\s+([A-Za-z_][A-Za-z0-9_]*)\b`)
 
 // Migrate applies every SPEC-016 schema migration to db in
 // lexicographic filename order. Each migration MAY use either
@@ -70,7 +82,18 @@ CREATE TABLE IF NOT EXISTS payout_schema_applied (
 		if err != nil {
 			return fmt.Errorf("payout.Migrate: read %s: %w", name, err)
 		}
-		if _, err := db.ExecContext(ctx, string(body)); err != nil {
+		// FULL-r1 [full-code:r1-4] MEDIUM closure: rewrite any
+		// non-idempotent ADD COLUMN into an idempotent NO-OP if
+		// the column already exists. Covers the crash-window where
+		// a prior boot executed the ALTER but died before recording
+		// the applied marker — the next boot must NOT fail with
+		// "duplicate column". Each ADD COLUMN site is checked
+		// independently; non-matching SQL passes through unchanged.
+		stmt, err := stripExistingColumnAlters(ctx, db, string(body))
+		if err != nil {
+			return fmt.Errorf("payout.Migrate: prepare %s: %w", name, err)
+		}
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("payout.Migrate: exec %s: %w", name, err)
 		}
 		if _, err := db.ExecContext(ctx,
@@ -81,6 +104,88 @@ CREATE TABLE IF NOT EXISTS payout_schema_applied (
 		}
 	}
 	return nil
+}
+
+// stripExistingColumnAlters scans body for ALTER TABLE ADD COLUMN
+// statements and, for each (table, column) pair whose column
+// already exists per PRAGMA table_info, replaces the entire
+// statement with a SQL comment so the runner can execute the
+// remainder idempotently. Closes FULL-r1 [full-code:r1-4] MEDIUM.
+//
+// SQLite has no ALTER TABLE ... ADD COLUMN IF NOT EXISTS form, so
+// the SPEC-016 migrations 0010 + 0012 historically ran a bare
+// ALTER. A crash between the ALTER and the payout_schema_applied
+// INSERT would leave the schema with the column but no marker;
+// the next boot would re-execute the file and fail "duplicate
+// column". This helper makes those statements rerun-safe by
+// detecting the prior application and dropping them.
+//
+// Non-ALTER statements pass through unchanged. The function is
+// conservative: it operates only on whole-statement matches and
+// preserves byte layout outside those matches, so newly authored
+// migrations are unaffected.
+func stripExistingColumnAlters(ctx context.Context, db *sql.DB, body string) (string, error) {
+	matches := addColumnStmt.FindAllStringSubmatchIndex(body, -1)
+	if len(matches) == 0 {
+		return body, nil
+	}
+	var b strings.Builder
+	prev := 0
+	for _, m := range matches {
+		start, end := m[0], m[1]
+		tableStart, tableEnd := m[2], m[3]
+		colStart, colEnd := m[4], m[5]
+		table := body[tableStart:tableEnd]
+		column := body[colStart:colEnd]
+		exists, err := columnExists(ctx, db, table, column)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			continue
+		}
+		// Extend the match to the trailing semicolon so the
+		// rewritten comment covers the whole statement (the
+		// regex already matched up through the column name; the
+		// remainder of the statement — type, constraints,
+		// terminator — sits between end and the next `;`).
+		stmtEnd := end
+		for stmtEnd < len(body) && body[stmtEnd] != ';' {
+			stmtEnd++
+		}
+		if stmtEnd < len(body) {
+			stmtEnd++ // include the semicolon
+		}
+		b.WriteString(body[prev:start])
+		fmt.Fprintf(&b, "-- payout.Migrate: ADD COLUMN %s.%s already present, statement skipped (rerun-safe)", table, column)
+		prev = stmtEnd
+	}
+	b.WriteString(body[prev:])
+	return b.String(), nil
+}
+
+// columnExists returns true when PRAGMA table_info(<table>) lists
+// the named column. Safe against missing tables (returns false +
+// no error).
+func columnExists(ctx context.Context, db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%q)`, table))
+	if err != nil {
+		return false, fmt.Errorf("PRAGMA table_info(%s): %w", table, err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("scan table_info(%s): %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 // AssertPragmas verifies that the open *sql.DB has the PRAGMA
