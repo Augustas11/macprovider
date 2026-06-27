@@ -85,6 +85,19 @@ Every gateway response MUST include `X-Request-ID` (the SPEC-002
 JSON envelope with `code`, `message`, `type`. 429 MUST include
 the rate-limit headers per R-G2.
 
+**Coordinator-side column name (cross-reference).** The gateway
+`X-Request-ID` (also stored as gateway `usage_events.request_id` and
+request-scoped `audit_events.request_id`) joins to coordinator
+`request_log.external_request_id`. **Do NOT join to coordinator
+`request_log.request_id`** — that column is coordinator-internal per
+SPEC-002 v1.4.2 R-2.
+
+**Per-request forwarding scope.** "Every forwarded buyer request"
+includes both `/v1/chat/completions` and `/v1/models`. The gateway
+MUST set `X-Request-ID: <buyer-supplied-or-minted UUID>` on every
+upstream coordinator call originating from a buyer-facing path; it
+MUST NOT mint a fresh UUID per upstream call.
+
 The gateway audit log MUST record:
 
 - Final HTTP status
