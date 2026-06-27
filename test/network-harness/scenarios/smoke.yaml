@@ -2,47 +2,39 @@
 # One buyer, three sequential non-streaming prompts, conservative
 # max_tokens so a run costs cents, not dollars.
 #
-# Run:
-#   export BUYER_TOKEN="..."           # buyer bearer token
-#   ./harness run scenarios/smoke.yaml --out artifacts/smoke-$(date -u +%Y%m%dT%H%M%S)
-#
 # What this scenario validates:
 #   - The harness itself: parser, buyer client, artifact bundle, invariant evaluator.
 #   - That a single buyer can reach the live gateway, get routed to a provider,
 #     and receive a complete response.
 #
-# What gets recorded (phase A, descriptive):
-#   - HTTP status codes
-#   - Route attribution (X-Provider-Id if exposed)
-#   - TTFT and total latency
-#
 # What gets asserted (the 4 hard invariants):
-#   - I1 SKIPPED on live runs (no read access to Pearl SQLite DBs).
-#   - I2, I3, I4 all run.
+#   - I1 runs — pulls VACUUM INTO snapshot from Pearl via ssh pearl alias.
+#   - I2 runs — 5xx-must-have-request-id.
+#   - I3 structural check.
+#   - I4 silent-hang check.
 name: smoke
 description: |
   Live sanity scenario: one buyer fires three sequential non-streaming
   chat completions against api.streamvc.live. Confirms harness pipeline
-  end-to-end without exercising concurrency, streaming, or failover.
+  end-to-end against the live network.
 
 expected_shape: |
   Phase A note (descriptive, not asserted):
    - All 3 requests should return HTTP 200.
    - At least one provider should appear in route_distribution if the
      gateway exposes provider attribution headers.
+   - I1 should reconcile cleanly (3 requests on both sides, matching tokens).
    - No silent hangs, no orphan 5xx.
-   - I1 will be marked SKIPPED (DB paths intentionally unset for live).
 
 target:
   gateway_url: https://api.streamvc.live
   coordinator_url: https://coordinator.streamvc.live
   buyer_token: ${BUYER_TOKEN}
-  # Live ledger reconciliation: harness SCPs a VACUUM INTO snapshot of
-  # each SQLite file from Pearl before reconcile. Set PEARL_SSH to the
-  # ssh target (e.g. PEARL_SSH=root@pearl-vps.streamvc.live). Adjust the
-  # paths if the production install layout differs.
-  coordinator_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-coordinator/coordinator.db
-  gateway_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-gateway/gateway.db
+  # Pearl SSH alias from ~/.ssh/config. DB files belong to the
+  # `macprovider` service user; db_sudo_user wraps sqlite3 in sudo -u.
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
 
 buyers:
   count: 1
@@ -50,17 +42,19 @@ buyers:
   pattern: constant
   requests_per_buyer: 3
 
-duration: 120s
-request_timeout: 60s
+duration: 180s
+request_timeout: 90s
 silent_hang_threshold: 30s
 
 prompts:
-  - model: llama-3.2-3b-instruct-4bit
+  # mlx-community/Qwen3-32B-4bit is the hash-verified
+  # model currently served by the non-local provider. Stable choice.
+  - model: mlx-community/Qwen3-32B-4bit
     user: "Say hello in one short sentence."
     max_tokens: 32
-  - model: llama-3.2-3b-instruct-4bit
+  - model: mlx-community/Qwen3-32B-4bit
     user: "What is 2+2? Answer in one word."
     max_tokens: 16
-  - model: llama-3.2-3b-instruct-4bit
+  - model: mlx-community/Qwen3-32B-4bit
     user: "Name one ocean."
     max_tokens: 16

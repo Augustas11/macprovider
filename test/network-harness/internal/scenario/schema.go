@@ -87,12 +87,17 @@ type Target struct {
 	// CoordinatorDBSSH + GatewayDBSSH enable I1 against a live remote
 	// stack (Pearl). Form: "user@host:/absolute/path/to.db". When set,
 	// the harness pulls a WAL-consistent snapshot via:
-	//   ssh user@host "sqlite3 /path 'VACUUM INTO /tmp/snap.db'"
+	//   ssh user@host "[sudo -u DBSudoUser] sqlite3 /path 'VACUUM INTO /tmp/snap.db'"
 	//   scp user@host:/tmp/snap.db <local-tmp>
 	//   ssh user@host "rm /tmp/snap.db"
 	// then opens the local copy read-only. Set both or neither.
 	CoordinatorDBSSH string `yaml:"coordinator_db_ssh"`
 	GatewayDBSSH     string `yaml:"gateway_db_ssh"`
+
+	// DBSudoUser, when set, wraps the remote sqlite3 invocation in
+	// `sudo -u <DBSudoUser>`. Required on Pearl where the SQLite files
+	// are owned by the `macprovider` service user, not root.
+	DBSudoUser string `yaml:"db_sudo_user"`
 
 	// BuyerToken is the bearer token sent in Authorization header.
 	// Either BuyerToken or DemoIdentity must be set.

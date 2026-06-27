@@ -1,58 +1,44 @@
-# 06_cold_start_race.yaml — buyer fires a prompt while a provider has
-# just restarted but its model isn't yet loaded. Validates the
-# cold-start window: queue, reject, reroute, or silent hang.
+# 06_cold_start_race.yaml — buyer fires a prompt while THIS Mac's
+# provider has just restarted but Qwen3-32B isn't yet reloaded.
+#
+# Local chaos via launchctl. No SSH required.
 #
 # What we want to learn (phase A, descriptive — recorded only):
 #  - Per SPEC-001 FR-17, a provider declares slots_free in hello and
-#    updates via heartbeat. Between hello (sent on WS connect) and
-#    first inference, is the provider routable?
-#  - If only this provider serves the model, does the buyer:
-#      (a) get queued until model loads
-#      (b) get 503 no_provider_available (no candidate has slots_free > 0)
-#      (c) get routed and time out waiting on first byte
-#      (d) silent hang (I4 catches this)
-#  - If another provider serves the same model, does the buyer get
-#    rerouted to the warm one?
+#    updates via heartbeat. Between hello (sent on WS connect) and first
+#    inference, is the provider routable?
+#  - Only this Mac serves Qwen3-32B, so the buyer can't get rerouted to
+#    a warm peer.
+#  - Behavior options:
+#      (a) queued until model loads
+#      (b) 503 no_provider_available (no candidate has slots_free > 0)
+#      (c) routed and times out on first byte
+#      (d) silent hang (I4 catches)
 #  - PHASE B TRIAGE: should the network define a "ready" state distinct
-#    from "connected" so cold providers aren't routable until model_load_time
+#    from "connected" so cold providers aren't routable until model_load
 #    completes? Today: no explicit ready signal.
 #
-# What gets asserted (the 4 hard invariants):
-#  - I1 runs against the live Pearl snapshot.
-#  - I2 runs — any 5xx must carry a request id.
-#  - I3 runs.
-#  - I4 runs — silent hang is the worst failure mode here.
-#
-# Required env:
-#   BUYER_TOKEN  — live buyer bearer
-#   PEARL_SSH    — "user@host" for Pearl coordinator+gateway
-#   PROVIDER_SSH — "user@host" of the Mac to restart (e.g. ops@m1-tunnel)
-#
-# IMPORTANT: this scenario assumes you can identify a provider whose
-# model is otherwise unique (so the buyer can't be rerouted to a warm
-# peer). If both M1 and M4 serve the same model, this scenario will
-# instead surface the reroute path — also informative, just a different
-# finding to triage.
+# What gets asserted (the 4 hard invariants): all 4 run.
 name: cold_start_race
 description: |
-  Restart a provider at t=0. At t=500ms, a single buyer fires a chat
-  completion for the model that provider serves. Captures whether the
-  network queues, errors, reroutes, or hangs while the model loads.
+  Restart this Mac's provider at t=0. At t=2s a buyer fires a chat
+  completion for Qwen3-32B-4bit. Captures whether the network queues,
+  errors, or hangs while the model loads.
 
 expected_shape: |
   Phase A note (descriptive, not asserted):
    - One of: (a) 503 no_provider_available, (b) HTTP 200 with elevated
      TTFT (cold-start latency), (c) timeout, (d) silent hang.
-   - per_request.jsonl TTFT distinguishes (a)/(b)/(c) cleanly.
-   - I4 fires only on (d), which is the worst outcome and triage-worthy.
+   - I4 fires only on (d) — the worst outcome and most triage-worthy.
    - PHASE B TRIAGE: decide on a "ready" state for routability.
 
 target:
   gateway_url: https://api.streamvc.live
   coordinator_url: https://coordinator.streamvc.live
   buyer_token: ${BUYER_TOKEN}
-  coordinator_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-coordinator/coordinator.db
-  gateway_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-gateway/gateway.db
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
 
 buyers:
   count: 1
@@ -60,21 +46,19 @@ buyers:
   pattern: constant
   requests_per_buyer: 1
 
-duration: 90s
-request_timeout: 60s
-silent_hang_threshold: 30s
+duration: 120s
+request_timeout: 90s
+silent_hang_threshold: 45s
 
 prompts:
-  - model: llama-3.2-3b-instruct-4bit
+  - model: mlx-community/Qwen3-32B-4bit
     user: "Reply with exactly the word: warmth."
     max_tokens: 32
 
 chaos_events:
   - at: 0s
-    description: "Kill provider — triggers restart by launchd KeepAlive (or operator action)"
-    command: ssh -o BatchMode=yes ${PROVIDER_SSH} pkill -SIGKILL macprovider-cli || true
-  - at: 1s
-    description: "Ensure provider is restarting (best-effort kickstart)"
-    command: ssh -o BatchMode=yes ${PROVIDER_SSH} 'launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider' || true
-  # Buyer pattern fires at scenario t=0; the request_timeout of 60s
-  # gives the cold start enough headroom to complete or fail.
+    description: "Kill local provider to force a cold start"
+    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+  # Buyer fleet fires at t=0 (constant pattern, no ramp). The single
+  # buyer request happens before the 32B model has reloaded. The 90s
+  # request_timeout / 120s duration give the cold start ~110s of room.

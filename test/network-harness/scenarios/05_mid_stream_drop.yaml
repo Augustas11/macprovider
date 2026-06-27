@@ -1,62 +1,51 @@
-# 05_mid_stream_drop.yaml — kill a provider's local process while a
-# buyer is mid-stream. Validates what happens to an in-flight SSE
-# connection, the buyer's outcome, and billing settlement when a
-# provider disappears.
+# 05_mid_stream_drop.yaml — kill THIS Mac's provider process while a
+# buyer is mid-stream against the model that provider serves.
+#
+# This Mac is provider augustass-macbook-air, serving
+# mlx-community/Qwen3-32B-4bit, managed by launchd label
+# `live.streamvc.macprovider`. Chaos events use local launchctl —
+# no SSH required.
 #
 # What we want to learn (phase A, descriptive — recorded only):
-#  - Per the survey, gateway DOES NOT failover mid-stream (chat_proxy.go:495).
-#    Expectation: buyer sees a `stream_truncated` SSE error event, billing
-#    settles for tokens already delivered, no reroute attempt.
-#  - Does the harness see I4 (silent hang)? It SHOULD NOT — there should
-#    be a terminating error.
-#  - Does I1 reconciliation show the partial token count consistently
-#    across coordinator and gateway?
-#  - PHASE B TRIAGE: is "no failover" the contract we want for beta, or
-#    should the gateway retry with the exclude list? Today's behavior is
-#    defensible; just write it down.
+#  - Per chat_proxy.go:495, gateway DOES NOT failover mid-stream.
+#    Expectation: buyer sees `stream_truncated` SSE error event, billing
+#    settles for tokens already delivered, no reroute.
+#  - Does I4 (silent hang) fire? It SHOULD NOT — there should be a
+#    terminating error.
+#  - Does I1 reconcile show partial token count consistently across
+#    coordinator and gateway?
+#  - PHASE B TRIAGE: is "no failover" the contract for beta, or should
+#    the gateway retry with the exclude list?
 #
-# What gets asserted (the 4 hard invariants):
-#  - I1 runs against the live Pearl snapshot.
-#  - I2 runs — any 5xx must carry a request id.
-#  - I3 runs — partial tokens delivered MUST equal billed tokens, no
-#    overcharge on truncation.
-#  - I4 runs — buyer should see a terminating error, not dead air.
+# What gets asserted (the 4 hard invariants): all 4 run.
 #
-# Required env:
-#   BUYER_TOKEN  — live buyer bearer
-#   PEARL_SSH    — "user@host" for Pearl coordinator+gateway (e.g. root@pearl-vps)
-#   PROVIDER_SSH — "user@host" of the Mac to chaos-kill (e.g. ops@m1-tunnel)
-#
-# IMPORTANT (operator action required after the run):
-# This scenario kills the provider process. After the run, log into the
-# affected Mac and restart it, or run `08_provider_restart.yaml`. The
-# trailing chaos event in this scenario attempts a best-effort restart
-# but assumes a launchd / shell-runnable serve invocation that you must
-# adjust to match how your provider is started.
+# IMPORTANT: this scenario stops the local provider. The second chaos
+# event restarts it via launchctl kickstart -k. If launchd KeepAlive is
+# enabled (it is, per live.streamvc.macprovider managed unit), the
+# restart is automatic and the kickstart is a belt-and-suspenders.
 name: mid_stream_drop
 description: |
-  One buyer fires a streaming chat completion. 5 seconds in, a chaos
-  event kills the provider process on a target Mac. Harness records
-  buyer outcome, partial token count, billing settlement state.
+  One buyer fires a streaming chat completion to Qwen3-32B (served only
+  by this Mac). At t=5s a chaos event kills the local provider process.
+  Harness records buyer outcome, partial token count, billing settlement.
 
 expected_shape: |
   Phase A note (descriptive, not asserted):
-   - Buyer should see Outcome != "ok" with a SHORT (post-truncation)
-     completion_tokens_received > 0.
-   - SawTerminator may be true (if stream_truncated marker is sent) or
-     false; either is informative.
-   - I4 (silent hang) should NOT fire — the gateway should write an
-     error event before the connection ends.
-   - I1 should show partial token agreement: coord.completion == gw.completion
-     == bytes-derived count.
-   - PHASE B TRIAGE: confirm or refute "no mid-stream reroute" as the contract.
+   - Buyer should see Outcome != "ok" with SHORT completion_tokens_received > 0.
+   - SawTerminator may be true (stream_truncated marker) or false.
+   - I4 (silent hang) should NOT fire — gateway should write an error event
+     before connection close.
+   - I1 should show partial token agreement: coord.completion ==
+     gw.completion == bytes-derived count.
+   - PHASE B TRIAGE: confirm or refute "no mid-stream reroute" as contract.
 
 target:
   gateway_url: https://api.streamvc.live
   coordinator_url: https://coordinator.streamvc.live
   buyer_token: ${BUYER_TOKEN}
-  coordinator_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-coordinator/coordinator.db
-  gateway_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-gateway/gateway.db
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
 
 buyers:
   count: 1
@@ -69,22 +58,15 @@ request_timeout: 45s
 silent_hang_threshold: 20s
 
 prompts:
-  - model: llama-3.2-3b-instruct-4bit
-    # Long enough generation that we reliably hit mid-stream when the
-    # chaos event fires at t=5s.
+  - model: mlx-community/Qwen3-32B-4bit
+    # Long generation so we reliably hit mid-stream when chaos fires at t=5s.
     user: "Write a 200-word story about a lighthouse keeper. Take your time."
     max_tokens: 384
 
 chaos_events:
   - at: 5s
-    description: "Kill the provider process mid-stream"
-    # Edit pkill pattern to match your provider binary name. The
-    # canonical name from the swift build is macprovider-cli.
-    command: ssh -o BatchMode=yes ${PROVIDER_SSH} pkill -SIGKILL macprovider-cli || true
-  - at: 30s
-    description: "Best-effort: restart the provider so subsequent scenarios have a provider"
-    # ADJUST: replace with whatever your provider start command is. This
-    # is a placeholder. Common forms:
-    #   ssh ${PROVIDER_SSH} 'launchctl kickstart -k gui/$(id -u ops)/live.streamvc.macprovider'
-    #   ssh ${PROVIDER_SSH} 'nohup /usr/local/bin/macprovider-cli serve >/dev/null 2>&1 &'
-    command: ssh -o BatchMode=yes ${PROVIDER_SSH} 'launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider' || true
+    description: "Kill local provider process — buyer is mid-stream"
+    command: launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider
+  - at: 25s
+    description: "Sanity restart (launchd KeepAlive should already have brought it back)"
+    command: launchctl kickstart gui/$(id -u)/live.streamvc.macprovider

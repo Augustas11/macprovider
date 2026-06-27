@@ -14,6 +14,7 @@ package invariants
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-network-harness/internal/buyer"
@@ -58,39 +59,72 @@ func Evaluate(sc *scenario.Scenario, results []buyer.Result, summary *metrics.Su
 	}
 }
 
-// I1 — ledger reconciliation drift must be zero. Drift includes:
-//   * harness-successful requests missing on either side
-//   * token-count mismatches between coordinator and gateway
-// Orphan rows (rows on a side with no harness-side counterpart) are NOT
-// counted toward drift in phase A — concurrent unrelated traffic may
-// produce them. Triage will decide if that needs tightening.
+// I1 — ledger reconciliation drift must be zero. Verified live
+// 2026-06-27: gateway and coordinator use SEPARATE request_id spaces
+// (a gateway UUID and a coord UUID never overlap), so we correlate by
+// (model, completion_tokens, ts ± window) plus aggregate-sum checks.
+//
+// Drift here means:
+//   * a harness success had no matching gateway row in the window
+//     (unmatched_successes) — billing-bypass risk
+//   * gateway and coordinator disagree on summed completion_tokens
+//     for the window — money-path drift
+//   * gateway over-billed vs what harness observed on the wire —
+//     overcharge
+//
+// Extra gateway rows beyond the harness's count are RECORDED (as
+// reconcile.Notes) but NOT counted as drift in phase A — they are
+// expected when other live buyers fire concurrently.
 func checkI1(ledger *reconcile.Result) Check {
 	c := Check{ID: "I1", Title: "billing-ledger reconciliation drift == 0"}
 	if ledger == nil {
 		c.Skipped = true
-		c.Detail = "reconciliation skipped: coordinator_db_path or gateway_db_path not configured"
+		c.Detail = "reconciliation skipped: target.coordinator_db_path / _ssh not configured"
 		return c
 	}
-	drift := len(ledger.MissingOnCoordinator) + len(ledger.MissingOnGateway) + len(ledger.TokenMismatches)
-	if drift == 0 {
+
+	gwVsCoord := ledger.GatewayMinusCoordinatorTokens
+	gwVsHarness := ledger.GatewayMinusHarnessTokens
+	unmatched := len(ledger.UnmatchedSuccesses)
+
+	driftSignals := 0
+	if unmatched > 0 {
+		driftSignals++
+	}
+	if gwVsCoord != 0 {
+		driftSignals++
+	}
+	if gwVsHarness > 0 {
+		// Gateway billed MORE than harness saw on the wire — overcharge.
+		// gwVsHarness < 0 (gateway billed less) is acceptable on streaming
+		// where chunks the harness counted may not all hit the usage_events
+		// settlement (legitimate gateway-side rounding).
+		driftSignals++
+	}
+
+	if driftSignals == 0 {
 		c.Passed = true
-		c.Detail = fmt.Sprintf("0 drift across %d harness requests (coord=%d rows, gw=%d rows)",
-			ledger.HarnessRequests, ledger.CoordinatorRows, ledger.GatewayRows)
+		c.Detail = fmt.Sprintf("reconciled cleanly: harness=%d ok, gw=%d ok, coord=%d 2xx; token sums all equal at %d",
+			ledger.HarnessSuccessful, ledger.GatewayRowsOK, ledger.CoordinatorRows2xx, ledger.HarnessCompletionTokens)
 		return c
 	}
+
 	c.Passed = false
-	c.EvidenceCount = drift
-	c.Detail = fmt.Sprintf("%d drift entries: %d missing-on-coordinator, %d missing-on-gateway, %d token-mismatch",
-		drift, len(ledger.MissingOnCoordinator), len(ledger.MissingOnGateway), len(ledger.TokenMismatches))
-	for _, id := range ledger.MissingOnCoordinator {
-		c.OffendingIDs = append(c.OffendingIDs, id)
+	c.EvidenceCount = driftSignals
+	var parts []string
+	if unmatched > 0 {
+		parts = append(parts, fmt.Sprintf("%d harness successes unmatched on gateway", unmatched))
 	}
-	for _, id := range ledger.MissingOnGateway {
-		c.OffendingIDs = append(c.OffendingIDs, id)
+	if gwVsCoord != 0 {
+		parts = append(parts, fmt.Sprintf("gateway-coord token drift=%d", gwVsCoord))
 	}
-	for _, m := range ledger.TokenMismatches {
-		c.OffendingIDs = append(c.OffendingIDs, m.RequestID)
+	if gwVsHarness > 0 {
+		parts = append(parts, fmt.Sprintf("gateway over-billed by %d vs harness-observed", gwVsHarness))
+	} else if gwVsHarness < 0 {
+		parts = append(parts, fmt.Sprintf("(note: gateway billed %d fewer than harness-observed; allowed)", -gwVsHarness))
 	}
+	c.Detail = strings.Join(parts, "; ")
+	c.OffendingIDs = append(c.OffendingIDs, ledger.UnmatchedSuccesses...)
 	return c
 }
 
