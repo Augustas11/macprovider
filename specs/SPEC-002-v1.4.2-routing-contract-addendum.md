@@ -63,28 +63,102 @@ buyer request <300ms later. The coordinator returned HTTP 404 despite
 the model being in pool history. **Filed as code bug
 (issue #185). Not a spec change.**
 
-### R-2 — `X-Request-ID` propagation across gateway↔coordinator↔provider
+### R-2 — `X-Request-ID` propagation: gateway↔coordinator reconciliation
 
-**Status:** RE-AFFIRMATION of SPEC-002 v1.4.1 § 11 (lines 2239-2243).
+**Status:** RE-AFFIRMATION + RESHAPE of SPEC-002 v1.4.1 § 11 (lines
+2239-2243). Splits the original three-leg §11 mandate into two
+clauses (R-2 here, R-2b below) to keep code/spec ownership aligned.
 
-Per § 11:
+#### R-2 normative — gateway↔coordinator reconciliation column
 
-- The coordinator MUST honor any inbound `X-Request-ID` header on
-  buyer-facing `/v1/*` requests and store it in
-  `request_log.request_id`.
-- When forwarding work to a provider via the SPEC-001 § 6.6
-  `inference_request` message, the coordinator MUST preserve the
-  buyer-facing request id.
-- Gateway-originated traffic (SPEC-006 v0.3+) uses `X-Request-ID` as
-  the join key between gateway `usage_events`, gateway
-  `audit_events`, and coordinator `request_log`.
+The buyer-visible request id MUST be persisted on the coordinator
+side in a NEW column `request_log.external_request_id` (TEXT NULL).
+This is the join key between gateway `usage_events.request_id`,
+gateway `audit_events.request_id`, and coordinator
+`request_log.external_request_id`.
 
-**Empirical observation:** the live gateway and coordinator currently
-generate independent UUIDs per request — they never overlap in the
-`usage_events` ↔ `request_log` join. This is a § 11 violation and
-breaks billing reconciliation for any out-of-process auditor.
-**Filed as code bug (issue #188 — P0 blocker for external-buyer
-beta). Not a spec change.**
+`request_log.request_id` retains its existing per-attempt
+coordinator-generated semantics. SPEC-002 v1.4.1 § 11 line 1291's
+prose ("`UUID v4 from inbound X-Request-ID when present`") is now
+re-interpreted via this clause: that text described intent rather
+than the actual implementation, which has long generated per-attempt
+request_ids and verified the property in tests (see
+`TestRequestLogBuyerMultiAttemptRows` and
+`TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID`).
+v1.4.2 R-2 makes the distinction explicit:
+
+- **`request_id`** — per-attempt coordinator id. One row per
+  provider attempt; retries on the same logical request share this
+  value on the non-pinned path and differ on the pinned-client path.
+- **`external_request_id`** — buyer-facing id propagated through
+  gateway. Shared across all attempts of one logical request.
+  Reconciliation join.
+
+#### R-2 normative — schema migration
+
+Coordinators MUST ship the migration:
+
+```sql
+ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL;
+CREATE INDEX IF NOT EXISTS idx_request_log_external_request_id
+    ON request_log(external_request_id) WHERE external_request_id IS NOT NULL;
+```
+
+Implementations SHOULD use a partial-NULL index (as above) so
+pre-migration rows do not consume index space.
+
+#### R-2 normative — sanitization
+
+Coordinators MUST apply length and control-character bounds to the
+inbound header before storage. A reference normalization (see
+`sanitizeExternalRequestID` in `phase4-coordinator/internal/buyer/server.go`):
+
+- TrimSpace the inbound value.
+- Reject (treat as absent) if empty or > 128 bytes.
+- Reject (treat as absent) any byte < 0x20, == 0x7f, or in the
+  C1 range 0x80-0x9f.
+
+Rejected values are stored as NULL — the row still logs but is
+opted out of reconciliation.
+
+#### R-2b deferred — coordinator↔provider preservation
+
+SPEC-002 v1.4.1 § 11 line 2241 says "When forwarding work to a
+provider over the SPEC-001 § 6.6 `inference_request` message,
+coordinator MUST preserve the request ID it recorded for the buyer
+request." Empirical observation: today the coordinator sends a
+per-attempt id to providers, not the buyer-facing one. Existing
+tests codify the per-attempt behavior. **R-2b retains the spec
+text as the intended end-state but defers implementation to a
+follow-up.** Phase-C harness assertions that depend on R-2b MUST
+mark themselves dependent until R-2b is resolved.
+
+#### R-2 implementation reference
+
+[PR #195](https://github.com/Augustas11/macprovider/pull/195) closes
+[#188](https://github.com/Augustas11/macprovider/issues/188), shipping
+R-2 (column + migration + sanitization + plumbing). R-2b is not in
+that PR.
+
+#### Phase-C harness expectations
+
+Out-of-process auditors (the internal e2e harness, future SRE audit
+scripts, dispute-resolution tooling) MUST detect the
+`external_request_id` column via schema introspection. If the column
+is absent, the auditor SHOULD report "exact reconciliation
+unsupported on legacy coordinator" rather than silently falling back
+to fuzzy `(ts, model, completion_tokens)` matching (which is lossy
+under concurrent traffic).
+
+#### Glossary (added with this addendum)
+
+- **request_id** — coordinator-generated per-attempt identifier; one
+  row per provider attempt in `request_log`. Never equal to any
+  inbound header value.
+- **external_request_id** — inbound `X-Request-ID` header value
+  honored at the coordinator buyer-port ingress. Shared across all
+  retry attempts of one logical request. Reconciliation join key
+  with gateway-side stores.
 
 ### R-3 — Mid-stream provider disconnect SSE error envelope
 
