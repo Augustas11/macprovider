@@ -194,6 +194,36 @@ read-only; `external_request_id` is added by SPEC-002 v1.4.2 and is
 read by SPEC-005-side joiners exactly the way they read any other
 `request_log` column.
 
+**SPEC-005 § AC-REQUEST-LOG-READONLY scope clarification.** SPEC-005
+v0.3 § AC-REQUEST-LOG-READONLY ("Grep migrations for `ALTER TABLE
+request_log`. Expected: No ALTER appears.") constrains
+**SPEC-005-owned billing migrations only**. SPEC-002-owned additive
+coordinator-observability migrations — including this
+`request_log.external_request_id` column and any future
+SPEC-002-versioned `request_log` additive columns — are explicitly
+permitted: SPEC-002 is the owner of the coordinator-observability
+schema and is the only spec entitled to evolve `request_log`'s shape.
+SPEC-005 readers MUST tolerate additional `request_log` columns
+inserted by SPEC-002 versioned migrations. The SPEC-005 AC SHOULD be
+read as "no SPEC-005-rooted `ALTER TABLE request_log` appears".
+
+#### Aggregation semantics (auditor contract)
+
+`external_request_id` is a **logical-request grouping key**, not a
+coordinator-row unique key. Auditors and harnesses MUST treat the
+gateway↔coordinator relationship as one-to-many:
+
+- A gateway `usage_events` row (with its `request_id` PK) may join
+  to **zero, one, or many** coordinator `request_log` rows.
+- Reconciliation MUST aggregate the matched coordinator rows for
+  one `external_request_id` according to SPEC-005's existing
+  attempt/token-source rules (provider-credit row keyed by
+  `request_id + attempt_n + provider_id`) **before** comparing the
+  aggregate to gateway `usage_events.tokens`/`cost`.
+- Multiple attempts that resolve to a single billed total on the
+  gateway side are an expected, in-contract shape — not a
+  duplicate or a reconciliation failure.
+
 #### SPEC-006 companion cross-reference
 
 The paired SPEC-006 v0.X.Y addendum maps the gateway-side join
