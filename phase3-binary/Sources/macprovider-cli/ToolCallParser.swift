@@ -1,11 +1,17 @@
 import Foundation
 
 enum ToolCallParser {
+    private static let maxArgumentJSONBytes = 256 * 1024
+    private static let maxArgumentJSONDepth = 32
+
     static func parseToolCalls(
         rawOutput: String,
         modelID: String,
         allowedFunctionNames: Set<String>? = nil
     ) -> (cleanedContent: String?, toolCalls: [ToolCall]) {
+        guard !modelID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return (nilIfBlank(rawOutput), [])
+        }
         let format = ToolCallFormat.detect(modelID: modelID, rawOutput: rawOutput)
         guard let format else {
             return (nilIfBlank(rawOutput), [])
@@ -264,6 +270,9 @@ enum ToolCallParser {
     }
 
     private static func validateNoDuplicateJSONKeys(_ rawJSON: String) throws {
+        guard rawJSON.utf8.count <= maxArgumentJSONBytes else {
+            throw ParseError.invalidArguments
+        }
         var validator = JSONDuplicateKeyValidator(rawJSON)
         try validator.validate()
     }
@@ -291,14 +300,14 @@ enum ToolCallParser {
 
         mutating func validate() throws {
             skipWhitespace()
-            try parseValue()
+            try parseValue(depth: 0)
             skipWhitespace()
             guard index == rawJSON.endIndex else {
                 throw ParseError.invalidArguments
             }
         }
 
-        private mutating func parseValue() throws {
+        private mutating func parseValue(depth: Int) throws {
             skipWhitespace()
             guard index < rawJSON.endIndex else {
                 throw ParseError.invalidArguments
@@ -306,9 +315,9 @@ enum ToolCallParser {
 
             switch rawJSON[index] {
             case "{":
-                try parseObject()
+                try parseObject(depth: depth + 1)
             case "[":
-                try parseArray()
+                try parseArray(depth: depth + 1)
             case "\"":
                 _ = try parseString()
             case "t":
@@ -324,7 +333,10 @@ enum ToolCallParser {
             }
         }
 
-        private mutating func parseObject() throws {
+        private mutating func parseObject(depth: Int) throws {
+            guard depth <= maxArgumentJSONDepth else {
+                throw ParseError.invalidArguments
+            }
             advance()
             skipWhitespace()
             var keys = Set<String>()
@@ -346,7 +358,7 @@ enum ToolCallParser {
                 guard consume(":") else {
                     throw ParseError.invalidArguments
                 }
-                try parseValue()
+                try parseValue(depth: depth)
                 skipWhitespace()
                 if consume("}") {
                     return
@@ -357,7 +369,10 @@ enum ToolCallParser {
             }
         }
 
-        private mutating func parseArray() throws {
+        private mutating func parseArray(depth: Int) throws {
+            guard depth <= maxArgumentJSONDepth else {
+                throw ParseError.invalidArguments
+            }
             advance()
             skipWhitespace()
 
@@ -366,7 +381,7 @@ enum ToolCallParser {
             }
 
             while true {
-                try parseValue()
+                try parseValue(depth: depth)
                 skipWhitespace()
                 if consume("]") {
                     return
@@ -479,11 +494,13 @@ private enum ToolCallFormat {
         }
     }
 
-    static func detect(modelID: String, rawOutput: String) -> ToolCallFormat? {
-        if modelID.localizedCaseInsensitiveContains("llama-3.3") || rawOutput.contains("<|python_tag|>") {
+    static func detect(modelID: String, rawOutput _: String) -> ToolCallFormat? {
+        if modelID.localizedCaseInsensitiveContains("llama-3.3") {
             return .llama33
         }
-        if modelID.localizedCaseInsensitiveContains("qwen2.5") || rawOutput.contains("<tool_call>") {
+        if modelID.localizedCaseInsensitiveContains("qwen2.5") ||
+            modelID.localizedCaseInsensitiveContains("qwen3")
+        {
             return .qwen25
         }
         return nil

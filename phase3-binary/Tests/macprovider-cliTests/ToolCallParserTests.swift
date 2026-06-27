@@ -43,10 +43,22 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
     }
 
-    func testQwenDelimiterParsesIndependentOfModelID() throws {
+    func testDelimiterOnlyDetection_SentinelWithoutModelID_FallsBackToPlainContent() {
+        let raw = #"<tool_call>find_definition(symbol="ToolCallParser")</tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
-            rawOutput: #"<tool_call>find_definition(symbol="ToolCallParser")</tool_call>"#,
+            rawOutput: raw,
             modelID: "mlx-community/Other-Instruct-7B-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testQwen3ModelID_TriggersQwenParser() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#,
+            modelID: "mlx-community/Qwen3-32B-4bit",
             allowedFunctionNames: ["find_definition"]
         )
 
@@ -54,6 +66,30 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(parsed.toolCalls.count, 1)
         XCTAssertEqual(call.functionName, "find_definition")
         XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
+    }
+
+    func testEmptyModelID_FallsBackToPlainContent() {
+        let raw = #"<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testWhitespaceModelID_FallsBackToPlainContent() {
+        let raw = #"<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: " \n\t ",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
     }
 
     func testQwenPythonStyleToolCallKeepsThinkingOutOfToolArguments() throws {
@@ -172,6 +208,44 @@ final class ToolCallParserTests: XCTestCase {
 
     func testNonObjectArgumentsFallBackToPlainText() {
         let raw = #"<tool_call>{"name":"find_definition","arguments":["ToolCallParser"]}</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testEmptyToolCallObjectFallsBackToPlainText() {
+        let raw = #"<tool_call>{}</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testDeepNestedArgumentsFallBackToPlainText() {
+        var nested = "1"
+        for i in stride(from: 100, through: 1, by: -1) {
+            nested = #"{"k\#(i)":\#(nested)}"#
+        }
+        let raw = #"<tool_call>{"name":"find_definition","arguments":"\#(nested.replacingOccurrences(of: "\"", with: "\\\""))"}</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testOversizedArgumentsFallBackToPlainText() {
+        let oversized = #"{"blob":"\#(String(repeating: "x", count: 256 * 1024))"}"#
+        let raw = #"<tool_call>{"name":"find_definition","arguments":"\#(oversized.replacingOccurrences(of: "\"", with: "\\\""))"}</tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
