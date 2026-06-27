@@ -211,6 +211,16 @@ func TestCommitSignal_InvalidToolCallsWithOtherSignals_Rejected(t *testing.T) {
 	}
 }
 
+func TestCommitSignal_InvalidToolCallsStatusPoisonsPreCommit(t *testing.T) {
+	line := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{}]}}]}\n")
+	if got := inspectCommitWorthyDataLine(line); got != commitLineMalformedToolCalls {
+		t.Fatalf("inspectCommitWorthyDataLine = %v, want malformed tool_calls", got)
+	}
+	if isCommitWorthyDataLine(line) {
+		t.Fatal("malformed tool_calls must not be commit-worthy")
+	}
+}
+
 func TestCommitSignal_MinimalValidShape_Accepted(t *testing.T) {
 	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n"
 	if !isCommitWorthyDataLine([]byte(line)) {

@@ -2389,6 +2389,11 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if p, c := tokenPointersFromSSE(line); p != nil || c != nil {
 				promptTok, completionTok = p, c
 			}
+			status := inspectCommitWorthyDataLine(line)
+			if status == commitLineMalformedToolCalls {
+				s.log.Warn().Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed pre-commit tool_calls delta")
+				return errPreCommitMalformedToolCalls
+			}
 			preCommit.Write(line)
 			lineBuf.Reset()
 			if isSSEBlankLine(line) {
@@ -2397,7 +2402,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				}
 				continue
 			}
-			if isCommitWorthyDataLine(line) {
+			if status == commitLineWorthy {
 				sawCommitWorthyDataLine = true
 			}
 		}
@@ -2406,6 +2411,10 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if errors.Is(preCommitErr, errPreCommitCapExceeded) {
 			s.handleProviderFailure(provider, http.StatusBadGateway)
 			return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider exceeded pre-commit buffer without commit-worthy event", FaultFlag: billing.FaultBreakerQualifying}
+		}
+		if errors.Is(preCommitErr, errPreCommitMalformedToolCalls) {
+			s.handleProviderFailure(provider, http.StatusBadGateway)
+			return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed pre-commit tool_calls delta", FaultFlag: billing.FaultBreakerQualifying}
 		}
 		if r.Context().Err() != nil {
 			return wsForwardCancelled, 0, requestLogAttempt{}
@@ -2485,6 +2494,19 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 // timeout / network errors so the caller can log a specific reason.
 var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 
+// errPreCommitMalformedToolCalls is returned when a provider emits a
+// malformed tool_calls delta before the stream commits. Commit-worthy gates
+// billing settlement; rejection must NOT settle provider-positive usage.
+var errPreCommitMalformedToolCalls = errors.New("malformed pre-commit tool_calls delta")
+
+type commitLineStatus int
+
+const (
+	commitLineNoSignal commitLineStatus = iota
+	commitLineWorthy
+	commitLineMalformedToolCalls
+)
+
 // isCommitWorthyDataLine reports whether the given SSE line counts as
 // real provider work for the purposes of forwardStreaming's commit
 // threshold. Codex r5 audit tightened the predicate from "field present"
@@ -2515,19 +2537,24 @@ var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 // A leading UTF-8 BOM (0xEF 0xBB 0xBF) on the line is tolerated for
 // SSE-source compatibility; some HTTP libraries emit one on stream init.
 func isCommitWorthyDataLine(line []byte) bool {
+	return inspectCommitWorthyDataLine(line) == commitLineWorthy
+}
+
+func inspectCommitWorthyDataLine(line []byte) commitLineStatus {
 	trimmed := bytes.TrimRight(line, "\r\n")
 	trimmed = bytes.TrimPrefix(trimmed, []byte{0xEF, 0xBB, 0xBF})
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
-		return false
+		return commitLineNoSignal
 	}
 	content := bytes.TrimSpace(trimmed[len("data:"):])
 	if len(content) == 0 || bytes.Equal(content, []byte("[DONE]")) {
-		return false
+		return commitLineNoSignal
 	}
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(content, &parsed); err != nil {
-		return false
+		return commitLineNoSignal
 	}
+	status := commitLineNoSignal
 	if raw, ok := parsed["choices"]; ok {
 		var arr []json.RawMessage
 		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
@@ -2536,24 +2563,37 @@ func isCommitWorthyDataLine(line []byte) bool {
 				if err := json.Unmarshal(choice, &obj); err != nil {
 					continue
 				}
-				if raw, has := obj["delta"]; has && hasOpenAIDeltaSignal(raw) {
-					return true
+				if raw, has := obj["delta"]; has {
+					switch inspectOpenAIDeltaSignal(raw) {
+					case deltaSignalMalformedToolCalls:
+						return commitLineMalformedToolCalls
+					case deltaSignalWorthy:
+						status = commitLineWorthy
+					}
 				}
-				if raw, has := obj["message"]; has && hasOpenAIDeltaSignal(raw) {
-					return true
+				if raw, has := obj["message"]; has {
+					switch inspectOpenAIDeltaSignal(raw) {
+					case deltaSignalMalformedToolCalls:
+						return commitLineMalformedToolCalls
+					case deltaSignalWorthy:
+						status = commitLineWorthy
+					}
 				}
 				if raw, has := obj["finish_reason"]; has && isNonEmptyJSONString(raw) {
-					return true
+					status = commitLineWorthy
 				}
 			}
 		}
 	}
+	if status == commitLineWorthy {
+		return status
+	}
 	if raw, ok := parsed["usage"]; ok {
 		if isValidUsageObject(raw) {
-			return true
+			return commitLineWorthy
 		}
 	}
-	return false
+	return commitLineNoSignal
 }
 
 // isNonEmptyJSONObject reports whether raw decodes to a JSON object
@@ -2567,6 +2607,14 @@ func isNonEmptyJSONObject(raw json.RawMessage) bool {
 	}
 	return len(obj) > 0
 }
+
+type deltaSignalStatus int
+
+const (
+	deltaSignalNoSignal deltaSignalStatus = iota
+	deltaSignalWorthy
+	deltaSignalMalformedToolCalls
+)
 
 // hasOpenAIDeltaSignal reports whether raw decodes to a JSON object
 // carrying at least one KNOWN OpenAI delta/message field with a value
@@ -2584,38 +2632,42 @@ func isNonEmptyJSONObject(raw json.RawMessage) bool {
 //   - function_call: non-empty object (legacy function calling)
 //   - reasoning: non-empty string (reasoning-model trace stream)
 func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
+	return inspectOpenAIDeltaSignal(raw) == deltaSignalWorthy
+}
+
+func inspectOpenAIDeltaSignal(raw json.RawMessage) deltaSignalStatus {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return false
+		return deltaSignalNoSignal
 	}
 	if raw, has := obj["tool_calls"]; has {
 		var arr []json.RawMessage
 		if err := json.Unmarshal(raw, &arr); err != nil || len(arr) == 0 {
-			return false
+			return deltaSignalMalformedToolCalls
 		}
 		for _, call := range arr {
 			if !isCommitWorthyToolCallDelta(call) {
-				return false
+				return deltaSignalMalformedToolCalls
 			}
 		}
-		return true
+		return deltaSignalWorthy
 	}
 	if raw, has := obj["content"]; has && isNonEmptyJSONString(raw) {
-		return true
+		return deltaSignalWorthy
 	}
 	if raw, has := obj["role"]; has && isNonEmptyJSONString(raw) {
-		return true
+		return deltaSignalWorthy
 	}
 	if raw, has := obj["refusal"]; has && isNonEmptyJSONString(raw) {
-		return true
+		return deltaSignalWorthy
 	}
 	if raw, has := obj["reasoning"]; has && isNonEmptyJSONString(raw) {
-		return true
+		return deltaSignalWorthy
 	}
 	if raw, has := obj["function_call"]; has && isNonEmptyJSONObject(raw) {
-		return true
+		return deltaSignalWorthy
 	}
-	return false
+	return deltaSignalNoSignal
 }
 
 // isCommitWorthyToolCallDelta validates the minimum OpenAI tool-call
