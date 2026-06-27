@@ -1055,7 +1055,7 @@ func TestSeenModelsLifetimeCap(t *testing.T) {
 	// Drive the lifetime set above cap via the locked record path,
 	// using fresh providers per per-provider-budget window.
 	registry.mu.Lock()
-	idsPerProvider := maxSeenModelsPerProvider
+	idsPerProvider := maxLifetimeContribPerProvider
 	providers := (maxSeenModelsLifetime + 10 + idsPerProvider - 1) / idsPerProvider
 	for p := 0; p < providers; p++ {
 		pid := fmt.Sprintf("provider-%d", p)
@@ -1124,28 +1124,101 @@ func TestRecordSeenModelLockedRejectsOversizeID(t *testing.T) {
 }
 
 // TestRecordSeenModelLockedPerProviderBudgetGatesLifetime pins the
-// ISS-185 R1 security-lane MAJOR fix: a single provider can contribute
-// at most maxSeenModelsPerProvider distinct ids to seenModelsLifetime
-// during one session, so a churning provider cannot consume the
-// lifetime cap past its per-provider budget.
+// ISS-185 R2 security/architect-lane MAJOR fix: the lifetime
+// accumulator is gated INDEPENDENTLY of per-session attribution.
+//
+// - Per-session map (seenModelsByProvider) caps each session at
+//   maxSeenModelsPerProvider distinct ids; gets cleared on
+//   disconnect / session replacement.
+// - Lifetime accumulator caps each provider_id at
+//   maxLifetimeContribPerProvider distinct ids OVER THE ENTIRE
+//   PROCESS LIFETIME — survives reconnect — so churn-via-reconnect
+//   cannot consume more lifetime budget than that per-provider
+//   total.
+//
+// This test fires 2x the per-provider lifetime cap and asserts the
+// gate kicks in at exactly maxLifetimeContribPerProvider.
 func TestRecordSeenModelLockedPerProviderBudgetGatesLifetime(t *testing.T) {
 	registry := NewRegistry(nil)
 	registry.mu.Lock()
-	// Fire 2x per-provider budget worth of distinct ids from one
-	// provider. Only the first maxSeenModelsPerProvider should be
-	// retained; the remainder should NOT consume lifetime capacity.
-	for i := 0; i < 2*maxSeenModelsPerProvider; i++ {
+	// Fire 2x the per-provider lifetime contribution budget from one
+	// provider. Only the first maxLifetimeContribPerProvider should
+	// be retained; the remainder should NOT consume lifetime budget.
+	for i := 0; i < 2*maxLifetimeContribPerProvider; i++ {
 		registry.recordSeenModelLocked("noisy", fmt.Sprintf("id-%d", i))
 	}
 	gotLifetime := len(registry.seenModelsLifetime)
-	gotPerProvider := len(registry.seenModelsByProvider["noisy"])
+	gotContrib := registry.lifetimeContribByProvider["noisy"]
+	gotPerSession := len(registry.seenModelsByProvider["noisy"])
 	registry.mu.Unlock()
-	if gotPerProvider != maxSeenModelsPerProvider {
-		t.Fatalf("seenModelsByProvider[noisy] = %d, want %d", gotPerProvider, maxSeenModelsPerProvider)
+	if gotPerSession != maxSeenModelsPerProvider {
+		t.Fatalf("seenModelsByProvider[noisy] = %d, want %d (per-session cap)",
+			gotPerSession, maxSeenModelsPerProvider)
 	}
-	if gotLifetime != maxSeenModelsPerProvider {
-		t.Fatalf("seenModelsLifetime = %d, want %d (one provider must NOT consume lifetime past per-provider budget)",
-			gotLifetime, maxSeenModelsPerProvider)
+	if gotLifetime != maxLifetimeContribPerProvider {
+		t.Fatalf("seenModelsLifetime = %d, want %d (one provider must not consume lifetime past per-provider lifetime budget)",
+			gotLifetime, maxLifetimeContribPerProvider)
+	}
+	if gotContrib != maxLifetimeContribPerProvider {
+		t.Fatalf("lifetimeContribByProvider[noisy] = %d, want %d (per-provider lifetime counter not at cap)",
+			gotContrib, maxLifetimeContribPerProvider)
+	}
+}
+
+// TestLifetimeContribByProviderSurvivesReconnect pins the ISS-185
+// R2 security-lane MAJOR fix: the per-provider lifetime contribution
+// counter is NOT reset on session disconnect / replacement, so a
+// churning attacker cannot bypass the per-provider cap by repeatedly
+// reconnecting.
+func TestLifetimeContribByProviderSurvivesReconnect(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	// Session 1: contribute up to the per-provider lifetime cap.
+	registry.Register(&Provider{
+		ProviderID:       "churn",
+		AssignedID:       "session-1",
+		ModelID:          "id-anchor",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	registry.mu.Lock()
+	for i := 0; i < maxLifetimeContribPerProvider; i++ {
+		registry.recordSeenModelLocked("churn", fmt.Sprintf("id-%d", i))
+	}
+	contribBefore := registry.lifetimeContribByProvider["churn"]
+	registry.mu.Unlock()
+	if contribBefore < maxLifetimeContribPerProvider {
+		t.Fatalf("setup failed: contribBefore = %d, want >= %d", contribBefore, maxLifetimeContribPerProvider)
+	}
+
+	// Disconnect — per-session map gets cleared by RemoveIfSession.
+	if !registry.RemoveIfSession("churn", "session-1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+
+	// Try to contribute new ids after reconnect. The per-provider
+	// lifetime counter must persist; ALL new ids should drop.
+	registry.mu.Lock()
+	beforeReconnect := len(registry.seenModelsLifetime)
+	for i := 0; i < 64; i++ {
+		registry.recordSeenModelLocked("churn", fmt.Sprintf("postreconnect-%d", i))
+	}
+	afterReconnect := len(registry.seenModelsLifetime)
+	contribAfter := registry.lifetimeContribByProvider["churn"]
+	registry.mu.Unlock()
+	if afterReconnect != beforeReconnect {
+		t.Fatalf("seenModelsLifetime grew by %d after reconnect; per-provider lifetime gate is reset by disconnect (security regression)",
+			afterReconnect-beforeReconnect)
+	}
+	if contribAfter != contribBefore {
+		t.Fatalf("lifetimeContribByProvider[churn] = %d, want %d (counter reset by disconnect)",
+			contribAfter, contribBefore)
 	}
 }
 

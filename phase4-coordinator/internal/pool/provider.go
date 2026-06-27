@@ -253,18 +253,25 @@ type Registry struct {
 	// which degrades cold-start races to the legacy 404 behavior for
 	// rare/transient models without crashing.
 	seenModelsLifetime     map[string]struct{}
-	// lifetimeCapWarnedOnce gates the warn-log + cap-reached counter
-	// so the operator gets one signal at first cap exhaustion, not a
-	// per-heartbeat spam. ISS-185 R1 security-lane MINOR
-	// (observability).
-	lifetimeCapWarnedOnce  bool
+	// lifetimeContribByProvider tracks how many DISTINCT model ids a
+	// given provider_id has contributed to seenModelsLifetime over
+	// the entire coordinator process lifetime — NOT reset on session
+	// replacement or disconnect. This bounds churn-via-reconnect: a
+	// malicious provider cannot consume the lifetime cap by repeatedly
+	// disconnecting and reconnecting with new model ids. Capped per
+	// provider at maxLifetimeContribPerProvider (4x the per-session
+	// budget). ISS-185 R2 security-lane MAJOR.
+	lifetimeContribByProvider map[string]int
+	// lifetimeCapWarnedOnce gates the warn-log so the operator gets
+	// one signal at first cap exhaustion, not per-heartbeat spam.
+	lifetimeCapWarnedOnce bool
 	// lifetimeCapDroppedCount counts model-id inserts that were
-	// dropped because seenModelsLifetime was at cap. Operators can
-	// scrape this via the explorer endpoints; nonzero = either a
-	// runaway provider churn or a legitimate catalog larger than
-	// expected.
+	// dropped because seenModelsLifetime was at cap. Exposed via
+	// LifetimeCapStats() so explorer / metrics can scrape it; nonzero
+	// = either runaway provider churn or a legitimate catalog larger
+	// than expected.
 	lifetimeCapDroppedCount uint64
-	breakerFaults          map[string][]time.Time
+	breakerFaults           map[string][]time.Time
 	recoveryHolds          map[string]recoveryHold
 	canarySanctions        map[string]canarySanction
 	lastBreakerRecoveries  map[string]time.Time
@@ -306,6 +313,20 @@ const maxSeenModelsLifetime = 4096
 // "never seen" 404 path.
 const maxModelIDByteLen = 256
 
+// maxLifetimeContribPerProvider bounds how many DISTINCT model ids
+// a single provider_id can contribute to seenModelsLifetime over
+// the entire coordinator process lifetime, surviving disconnect and
+// session replacement. This bounds churn-via-reconnect by a
+// malicious provider while keeping the per-session attribution map
+// (seenModelsByProvider, capped at maxSeenModelsPerProvider = 32)
+// free to fill independently each session. 128 is 4x the per-session
+// cap — generous enough that a legitimate provider rebooting many
+// times across the process lifetime won't be capped, but tight
+// enough that one malicious provider cannot consume more than
+// 128/4096 ≈ 3% of total lifetime budget. ISS-185 R2 security-lane
+// MAJOR (per-provider gating must survive reconnect).
+const maxLifetimeContribPerProvider = 128
+
 // ReceiptRotationGrace is the SPEC-015 overlap window during which buyers may
 // validate receipts signed by the previous provider receipt key.
 const ReceiptRotationGrace = 7 * 24 * time.Hour
@@ -337,8 +358,9 @@ func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Reg
 		providers:             map[string]*Provider{},
 		sessions:              map[string]*Provider{},
 		endpoints:             endpoints,
-		seenModelsByProvider:  map[string]map[string]struct{}{},
-		seenModelsLifetime:    map[string]struct{}{},
+		seenModelsByProvider:      map[string]map[string]struct{}{},
+		seenModelsLifetime:        map[string]struct{}{},
+		lifetimeContribByProvider: map[string]int{},
 		breakerFaults:         map[string][]time.Time{},
 		recoveryHolds:         map[string]recoveryHold{},
 		canarySanctions:       map[string]canarySanction{},
@@ -632,58 +654,57 @@ func cloneBytes(in []byte) []byte {
 }
 
 // recordSeenModelLocked records a model id under a provider's set
-// AND in the pool-lifetime accumulator, respecting both caps. Caller
-// must hold r.mu in WRITE mode.
+// AND in the pool-lifetime accumulator. Caller must hold r.mu in
+// WRITE mode.
 //
-// Insertion ordering matters (ISS-185 R1 security-lane MAJOR): the
-// per-provider cap is checked FIRST so that one churning provider
-// cannot consume the lifetime accumulator's capacity past its own
-// per-provider budget (maxSeenModelsPerProvider). Concretely: a
-// single provider can contribute at most maxSeenModelsPerProvider
-// distinct ids to seenModelsLifetime during one session; subsequent
-// distinct ids from the same provider drop without consuming
-// lifetime budget.
+// The two maps are gated INDEPENDENTLY (ISS-185 R2 architect/code/
+// security-lane MAJORs):
+//
+//   - seenModelsByProvider[provider_id] holds the current session's
+//     attribution, capped per session at maxSeenModelsPerProvider
+//     and cleared on RemoveIfSession / session-replacement.
+//   - seenModelsLifetime is the SPEC-002 § 7.2 pool-lifetime model
+//     history, capped overall at maxSeenModelsLifetime and per-
+//     provider at maxLifetimeContribPerProvider (the latter counter
+//     SURVIVES disconnect/session-replacement, so churn-via-
+//     reconnect cannot consume more lifetime than that per-provider
+//     budget).
 //
 // seenModelsLifetime keys are the lowercase canonical form of the
-// model id (the existing ModelKnown contract is case-insensitive).
-// This converts the lookup in ModelKnown from a 4096-step EqualFold
-// scan into an O(1) hash hit (ISS-185 R1 security-lane MINOR perf).
+// model id; ModelKnown's lookup is then O(1).
 func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 	if providerID == "" || modelID == "" {
 		return
 	}
 	// ISS-185 R1 security-lane CRITICAL: bound the persisted byte
 	// size. `requireString` in internal/ws/messages.go does not cap
-	// model_id length, so without this check a misbehaving provider
-	// could store arbitrarily large strings in lifetime memory.
+	// model_id length.
 	if len(modelID) > maxModelIDByteLen {
 		return
 	}
+
+	// 1. Per-session attribution map (M2-5 / audit #47 invariant).
 	set, ok := r.seenModelsByProvider[providerID]
 	if !ok {
 		set = map[string]struct{}{}
 		r.seenModelsByProvider[providerID] = set
 	}
-	if _, already := set[modelID]; already {
-		// Already accounted for in both maps. No-op.
-		return
+	if _, already := set[modelID]; !already && len(set) < maxSeenModelsPerProvider {
+		set[modelID] = struct{}{}
 	}
-	if len(set) >= maxSeenModelsPerProvider {
-		// This provider has already contributed its full per-provider
-		// budget. Drop further inserts BEFORE touching lifetime so the
-		// lifetime cap is not consumable past per-provider budget.
-		return
-	}
-	set[modelID] = struct{}{}
 
-	// SPEC-002 § 7.2 / issue #185: lifetime accumulator drives the
-	// 404-vs-503 distinction, regardless of which provider advertised
-	// it. Append-only within maxSeenModelsLifetime; canonical lowercase
-	// key for O(1) case-insensitive lookup.
+	// 2. Pool-lifetime accumulator (SPEC-002 § 7.2).
 	canonical := strings.ToLower(modelID)
 	if _, already := r.seenModelsLifetime[canonical]; already {
 		return
 	}
+	// 2a. Per-provider lifetime contribution budget (survives
+	// disconnect/replacement so reconnects can't fill the cap).
+	if r.lifetimeContribByProvider[providerID] >= maxLifetimeContribPerProvider {
+		r.lifetimeCapDroppedCount++
+		return
+	}
+	// 2b. Global lifetime cap (PERF-5 bound).
 	if len(r.seenModelsLifetime) >= maxSeenModelsLifetime {
 		r.lifetimeCapDroppedCount++
 		if !r.lifetimeCapWarnedOnce {
@@ -697,6 +718,21 @@ func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 		return
 	}
 	r.seenModelsLifetime[canonical] = struct{}{}
+	r.lifetimeContribByProvider[providerID]++
+}
+
+// LifetimeCapStats returns the current size of the pool-lifetime
+// model-id accumulator and the cumulative number of model_id
+// inserts dropped because either the global or per-provider lifetime
+// cap was at the limit. Operators can scrape these via explorer /
+// metrics surfaces — nonzero `dropped` is the security-relevant
+// signal of either runaway provider churn or a catalog larger than
+// the configured budget. ISS-185 R2 code/security-lane MINOR
+// (observability).
+func (r *Registry) LifetimeCapStats() (size int, dropped uint64) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.seenModelsLifetime), r.lifetimeCapDroppedCount
 }
 
 func (r *Registry) SetTier(providerID string, tier Tier) (Provider, bool) {
@@ -1249,21 +1285,40 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	// Lifetime accumulator is the SPEC-002 § 7.2 contract surface.
-	// Lowercase canonical key keeps lookup O(1) — the live-provider
-	// scan below stays O(N_providers) but is only reachable when the
-	// id was already removed from lifetime (lifetime is a strict
-	// superset of currently-live providers' models), so in practice
-	// this branch terminates on the map hit for any model the
-	// coordinator has ever seen during its process lifetime.
+	// Lowercase canonical key keeps lookup O(1). Hit covers any model
+	// the coordinator has ever seen and recorded into lifetime.
 	if _, ok := r.seenModelsLifetime[canonical]; ok {
 		return true
 	}
-	// Fallback: a currently-connected provider may have advertised
-	// this model id but the lifetime accumulator was at cap when it
-	// did, so it never got recorded. Iterate live providers.
+	// Fallback paths cover the case where lifetime was at one of its
+	// caps (global maxSeenModelsLifetime or per-provider
+	// maxLifetimeContribPerProvider) when the model was first
+	// advertised, so it was dropped from lifetime even though the
+	// provider that advertised it may still be connected.
+	//
+	// 1. Live providers' current ModelID field.
 	for _, p := range r.providers {
 		if strings.EqualFold(p.ModelID, modelID) {
 			return true
+		}
+	}
+	// 2. Per-session attribution map. ISS-185 R2 code-lane MAJOR: a
+	// provider may have previously advertised this model id via
+	// heartbeat (it's in their per-session set) while their CURRENT
+	// ModelID is something else. Without this iteration, ModelKnown
+	// would return false → 404 even though a connected provider has
+	// the model id in its session history.
+	for _, set := range r.seenModelsByProvider {
+		if _, ok := set[modelID]; ok {
+			return true
+		}
+		// Case-insensitive fallback. set keys are stored in their
+		// original case, so use EqualFold per entry. Bounded by
+		// maxSeenModelsPerProvider * N_providers (32 * small N).
+		for stored := range set {
+			if strings.EqualFold(stored, modelID) {
+				return true
+			}
 		}
 	}
 	return false
