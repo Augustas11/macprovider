@@ -1171,14 +1171,14 @@ func TestRecordSeenModelLockedRejectsOversizeID(t *testing.T) {
 // ISS-185 R2 security/architect-lane MAJOR fix: the lifetime
 // accumulator is gated INDEPENDENTLY of per-session attribution.
 //
-// - Per-session map (seenModelsByProvider) caps each session at
-//   maxSeenModelsPerProvider distinct ids; gets cleared on
-//   disconnect / session replacement.
-// - Lifetime accumulator caps each provider_id at
-//   maxLifetimeContribPerProvider distinct ids OVER THE ENTIRE
-//   PROCESS LIFETIME — survives reconnect — so churn-via-reconnect
-//   cannot consume more lifetime budget than that per-provider
-//   total.
+//   - Per-session map (seenModelsByProvider) caps each session at
+//     maxSeenModelsPerProvider distinct ids; gets cleared on
+//     disconnect / session replacement.
+//   - Lifetime accumulator caps each provider_id at
+//     maxLifetimeContribPerProvider distinct ids OVER THE ENTIRE
+//     PROCESS LIFETIME — survives reconnect — so churn-via-reconnect
+//     cannot consume more lifetime budget than that per-provider
+//     total.
 //
 // This test fires 2x the per-provider lifetime cap and asserts the
 // gate kicks in at exactly maxLifetimeContribPerProvider.

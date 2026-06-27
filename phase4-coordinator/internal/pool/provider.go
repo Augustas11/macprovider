@@ -252,7 +252,7 @@ type Registry struct {
 	// still holds — beyond cap, further model ids are silently dropped,
 	// which degrades cold-start races to the legacy 404 behavior for
 	// rare/transient models without crashing.
-	seenModelsLifetime     map[string]struct{}
+	seenModelsLifetime map[string]struct{}
 	// lifetimeContribByProvider tracks how many DISTINCT model ids a
 	// given provider_id has contributed to seenModelsLifetime over
 	// the entire coordinator process lifetime — NOT reset on session
@@ -272,13 +272,13 @@ type Registry struct {
 	// than expected.
 	lifetimeCapDroppedCount uint64
 	breakerFaults           map[string][]time.Time
-	recoveryHolds          map[string]recoveryHold
-	canarySanctions        map[string]canarySanction
-	lastBreakerRecoveries  map[string]time.Time
-	maxProvider            int
-	hashVerifier           HeartbeatHashVerifier
-	swapEmitter            SwapEventEmitter
-	receiptRotationEmitter ReceiptRotationEventEmitter
+	recoveryHolds           map[string]recoveryHold
+	canarySanctions         map[string]canarySanction
+	lastBreakerRecoveries   map[string]time.Time
+	maxProvider             int
+	hashVerifier            HeartbeatHashVerifier
+	swapEmitter             SwapEventEmitter
+	receiptRotationEmitter  ReceiptRotationEventEmitter
 }
 
 // maxSeenModelsPerProvider caps the seenModelsByProvider inner set so a
@@ -355,16 +355,16 @@ func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Reg
 		endpoints[p.ProviderID] = p
 	}
 	r := &Registry{
-		providers:             map[string]*Provider{},
-		sessions:              map[string]*Provider{},
-		endpoints:             endpoints,
+		providers:                 map[string]*Provider{},
+		sessions:                  map[string]*Provider{},
+		endpoints:                 endpoints,
 		seenModelsByProvider:      map[string]map[string]struct{}{},
 		seenModelsLifetime:        map[string]struct{}{},
 		lifetimeContribByProvider: map[string]int{},
-		breakerFaults:         map[string][]time.Time{},
-		recoveryHolds:         map[string]recoveryHold{},
-		canarySanctions:       map[string]canarySanction{},
-		lastBreakerRecoveries: map[string]time.Time{},
+		breakerFaults:             map[string][]time.Time{},
+		recoveryHolds:             map[string]recoveryHold{},
+		canarySanctions:           map[string]canarySanction{},
+		lastBreakerRecoveries:     map[string]time.Time{},
 	}
 	for _, opt := range opts {
 		opt(r)
