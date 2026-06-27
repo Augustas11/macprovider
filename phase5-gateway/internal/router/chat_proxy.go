@@ -510,10 +510,18 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		// see the exact FR-B6 envelope so OpenAI-compatible SDKs
 		// distinguish a truncated successful response from a provider
 		// drop and react (retry / surface to caller). The internal
-		// settlement outcome remains `stream_truncated` per SPEC-006
-		// § 17.7 — that maps to usage_events.outcome, a separate
-		// field from the buyer-visible SSE error.code.
-		writeSSEError(w, "Provider disconnected during streaming", "server_error", "provider_disconnected")
+		// settlement outcome remains `stream_truncated` per the gateway
+		// settlement convention + SPEC-006 § 17.7 quota-debit policy —
+		// that maps to usage_events.outcome, a separate field from the
+		// buyer-visible SSE error.code.
+		//
+		// NOTE: error.type=server_error signals OpenAI-compatible SDKs
+		// that the request is retriable. Gateway-side Idempotency-Key
+		// dedupe is the open follow-up tracked in issue #200 — until
+		// that lands, a buyer retrying after this envelope MAY incur
+		// a fresh reservation if the coordinator's idempotency-cache
+		// response isn't refund-honored on the gateway side.
+		writeProviderDisconnectedSSE(w)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -819,6 +827,16 @@ func writeSSEError(w http.ResponseWriter, message, errType, code string) {
 	_, _ = w.Write([]byte("data: "))
 	_, _ = w.Write(payload)
 	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+}
+
+// writeProviderDisconnectedSSE emits the SPEC-002 § FR-B6 mid-stream
+// provider-disconnect envelope verbatim. The strings are
+// load-bearing: SDK clients route on (error.code, error.type) and
+// any drift breaks compatibility. Centralizing the call here lets
+// future refactors lean on a single named contract surface instead
+// of free-form writeSSEError args. Issue #186; architect R1 NOTE.
+func writeProviderDisconnectedSSE(w http.ResponseWriter) {
+	writeSSEError(w, "Provider disconnected during streaming", "server_error", "provider_disconnected")
 }
 
 func parseChatRequest(body []byte) (chatRequest, error) {

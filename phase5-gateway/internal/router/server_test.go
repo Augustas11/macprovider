@@ -2247,10 +2247,12 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 // OpenAI-compatible SDK clients route on (error.code, error.type)
 // to distinguish a normal short response from a provider drop.
 //
-// The internal settlement outcome stays `stream_truncated` (per
-// SPEC-006 § 17.7 — a separate usage_events.outcome field, not the
-// buyer-visible SSE error.code). Earlier the buyer-visible code
-// was also `stream_truncated`, conflating settlement and signaling
+// The internal settlement outcome stays `stream_truncated` per the
+// gateway settlement convention and SPEC-006 § 17.7 quota-debit
+// policy (partial stream → prompt + actual completion tokens
+// charged) — a separate usage_events.outcome field, not the
+// buyer-visible SSE error.code. Earlier the buyer-visible code was
+// also `stream_truncated`, conflating settlement and signaling
 // (and silently truncating responses for SDK consumers).
 func TestStreamingMidStreamProviderDisconnectEmitsFRB6Envelope(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`
@@ -2328,6 +2330,28 @@ func TestStreamingScannerErrorSettlesStreamTruncated(t *testing.T) {
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	// Issue #186 / code R1 NOTE: pin the BUYER-VISIBLE envelope on
+	// the buffer-full gateway-truncation path. This is intentionally
+	// stream_truncated / api_error (NOT FR-B6's
+	// provider_disconnected / server_error) because the line-too-
+	// long failure is gateway protection, not a provider drop. If
+	// the codepath drifts, OpenAI SDK consumers would misclassify
+	// gateway truncation as a retriable provider failure.
+	bodyStr := resp.Body.String()
+	doneIdx := strings.Index(bodyStr, "data: [DONE]")
+	if doneIdx < 0 {
+		t.Fatalf("response missing data: [DONE]; body=%s", bodyStr)
+	}
+	preDone := bodyStr[:doneIdx]
+	if !strings.Contains(preDone, `"code":"stream_truncated"`) {
+		t.Fatalf("buffer-full envelope missing code=stream_truncated; preDone=%s", preDone)
+	}
+	if !strings.Contains(preDone, `"type":"api_error"`) {
+		t.Fatalf("buffer-full envelope missing type=api_error; preDone=%s", preDone)
+	}
+	if strings.Contains(preDone, `"provider_disconnected"`) {
+		t.Fatalf("buffer-full envelope leaked provider_disconnected; gateway-truncation must NOT use the FR-B6 envelope; preDone=%s", preDone)
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
 	if outcome != "stream_truncated" || source != "gateway_estimated" {
