@@ -78,10 +78,13 @@ gateway `audit_events.request_id`, and coordinator
 `request_log.external_request_id`.
 
 `request_log.request_id` retains its existing per-attempt
-coordinator-generated semantics. SPEC-002 v1.4.1 § 11 line 1291's
-prose ("`UUID v4 from inbound X-Request-ID when present`") is now
-re-interpreted via this clause: that text described intent rather
-than the actual implementation, which has long generated per-attempt
+coordinator-generated semantics. **This clause supersedes the FR-B9
+schema-row description of `request_id`** in SPEC-002 v1.4.1 § 11 line
+1291 (`UUID v4 from inbound X-Request-ID when present`): going forward
+`request_id` is coordinator-internal and is NEVER equal to the inbound
+`X-Request-ID`, while `external_request_id` is the column that stores
+inbound `X-Request-ID`. The prior wording described intent rather than
+the actual implementation, which has long generated per-attempt
 request_ids and verified the property in tests (see
 `TestRequestLogBuyerMultiAttemptRows` and
 `TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID`).
@@ -112,6 +115,20 @@ CREATE INDEX IF NOT EXISTS idx_request_log_external_request_id
 
 Implementations SHOULD use a partial-NULL index (as above) so
 pre-migration rows do not consume index space.
+
+#### R-2 normative — FR-B9 schema-row delta
+
+The FR-B9 `request_log` schema table in SPEC-002 v1.4.1 § 11 line
+1284-1296 is amended as follows. The new row is **additive**; rows
+above and below are unchanged. The `request_id` row description is
+updated by the supersession clause above. Together:
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `request_id` | TEXT | Coordinator-internal request/billing id. NEVER equal to the inbound `X-Request-ID`. Multiple `request_log` rows (provider attempts) may share or differ on this value (see normative supersession above). |
+| `external_request_id` | TEXT NULL | Inbound `X-Request-ID` after sanitization. NULL when absent or rejected. Reconciliation join key for gateway `usage_events.request_id` and `audit_events.request_id`. Indexed (partial-NULL). |
+
+All other FR-B9 columns are unchanged.
 
 #### R-2 normative — sanitization
 
