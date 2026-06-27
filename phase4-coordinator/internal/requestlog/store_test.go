@@ -382,6 +382,26 @@ CREATE TABLE request_log (
 	if err != nil {
 		t.Fatalf("seed old schema: %v", err)
 	}
+	// Seed a row INTO the old schema (no external_request_id column),
+	// directly via raw SQL — this is the actual pre-migration row the
+	// assertion below verifies. Insert via store.Insert (after OpenStore)
+	// would be post-migration and wouldn't test the legacy path.
+	if _, err := db.Exec(`
+INSERT INTO request_log (
+    ts_utc, request_id, model, provider_assigned_id,
+    prompt_tokens, completion_tokens, total_tokens,
+    latency_ms, routing_ms, status, stream,
+    buyer_ip, error, pref_header, provider_header, retried
+) VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, 0, ?, 0, ?, NULL, NULL, NULL, 0)`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		"req-pre-migration",
+		"model-a",
+		"session-pre",
+		200,
+		"127.0.0.1",
+	); err != nil {
+		t.Fatalf("seed pre-migration row: %v", err)
+	}
 	_ = db.Close()
 
 	store, err := OpenStore(dbPath)
@@ -407,11 +427,41 @@ CREATE TABLE request_log (
 	if !errorCode.Valid || errorCode.String != "error_internal" {
 		t.Fatalf("error_code = %#v, want error_internal", errorCode)
 	}
-	for _, name := range []string{"idx_request_log_ts_utc", "idx_request_log_request_id_id"} {
+	for _, name := range []string{"idx_request_log_ts_utc", "idx_request_log_request_id_id", "idx_request_log_external_request_id"} {
 		var got string
 		if err := store.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'index' AND name = ?`, name).Scan(&got); err != nil {
 			t.Fatalf("index %s missing: %v", name, err)
 		}
+	}
+	// SPEC-002 v1.4.2 R-2: the row inserted INTO the old schema above
+	// predates external_request_id; a SELECT after migration MUST
+	// return NULL (not an error and not a garbage default) so the
+	// reconciliation join (gateway.usage_events.request_id =
+	// coord.request_log.external_request_id) cleanly skips legacy
+	// rows instead of false-matching them.
+	var migrated sql.NullString
+	if err := store.db.QueryRow(`SELECT external_request_id FROM request_log WHERE request_id = ?`, "req-pre-migration").Scan(&migrated); err != nil {
+		t.Fatalf("query external_request_id on pre-migration row: %v", err)
+	}
+	if migrated.Valid {
+		t.Fatalf("pre-migration row external_request_id = %#v, want NULL", migrated)
+	}
+	// A fresh insert with ExternalRequestID set MUST persist the value.
+	if err := store.Insert(context.Background(), Row{
+		TSUtc:             time.Now().UTC(),
+		RequestID:         "req-fresh",
+		ExternalRequestID: "55555555-5555-4555-8555-555555555555",
+		Model:             "model-a",
+		Status:            200,
+	}); err != nil {
+		t.Fatalf("insert fresh row with external_request_id: %v", err)
+	}
+	var fresh sql.NullString
+	if err := store.db.QueryRow(`SELECT external_request_id FROM request_log WHERE request_id = ?`, "req-fresh").Scan(&fresh); err != nil {
+		t.Fatalf("query external_request_id on fresh row: %v", err)
+	}
+	if !fresh.Valid || fresh.String != "55555555-5555-4555-8555-555555555555" {
+		t.Fatalf("fresh external_request_id = %#v, want UUID", fresh)
 	}
 }
 

@@ -1535,8 +1535,14 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	if got := resp.Header().Get("X-MacProvider-Route"); got != "" {
 		t.Fatalf("buyer response exposed route=%q", got)
 	}
-	if got := captured.Get("X-Request-ID"); got == "" || got == "55555555-5555-4555-8555-555555555555" {
-		t.Fatalf("forwarded X-Request-ID = %q, want gateway-generated coordinator ID", got)
+	// SPEC-002 §11 + v1.4.2 R-2 + issue #188: the gateway MUST forward
+	// the buyer-supplied X-Request-ID verbatim so the coordinator can
+	// store it in request_log.external_request_id, giving out-of-process
+	// auditors a stable shared id between gateway usage_events and
+	// coordinator request_log. Earlier behavior minted a fresh UUID
+	// here, breaking that join.
+	if got := captured.Get("X-Request-ID"); got != "55555555-5555-4555-8555-555555555555" {
+		t.Fatalf("forwarded X-Request-ID = %q, want buyer-supplied value preserved", got)
 	}
 	if got := captured.Get("X-MacProvider-Retry"); got != "1" {
 		t.Fatalf("forwarded retry = %q, want 1", got)

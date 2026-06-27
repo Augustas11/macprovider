@@ -25,10 +25,19 @@ type execer interface {
 }
 
 type Row struct {
-	TSUtc               time.Time
-	RequestID           string
-	Model               string
-	ProviderAssignedID  string
+	TSUtc time.Time
+	// RequestID is the coordinator's per-attempt identifier (one row per
+	// provider attempt). Generated internally; not equal to whatever the
+	// inbound X-Request-ID was.
+	RequestID string
+	// ExternalRequestID is the inbound X-Request-ID header value (per
+	// SPEC-002 §11). Shared across all rows for one logical request and
+	// across the gateway's usage_events.request_id for the same logical
+	// request, enabling end-to-end billing reconciliation. Empty when
+	// the inbound request carried no X-Request-ID.
+	ExternalRequestID string
+	Model             string
+	ProviderAssignedID string
 	PromptTokens        *int64
 	CompletionTokens    *int64
 	EstimatedCompTokens *int64
@@ -107,6 +116,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_utc               TEXT    NOT NULL,
     request_id           TEXT    NOT NULL,
+    external_request_id  TEXT    NULL,
     model                TEXT    NOT NULL,
     provider_assigned_id TEXT    NULL,
     prompt_tokens        INTEGER NULL,
@@ -128,6 +138,13 @@ CREATE INDEX IF NOT EXISTS idx_request_log_ts_utc
     ON request_log(ts_utc);
 CREATE INDEX IF NOT EXISTS idx_request_log_request_id_id
     ON request_log(request_id, id);
+-- Index for SPEC-002 v1.4.2 R-2 reconciliation scans (column added
+-- in ensureColumns; index also created from there) is NOT issued in
+-- the inline schema block — on a pre-existing DB the table won't have
+-- the column yet at this point in execution, so CREATE INDEX would
+-- reference a non-existent column. ensureColumns runs ALTER TABLE
+-- ADD COLUMN and CREATE INDEX in order, which works for both fresh
+-- DBs and legacy upgrades.
 
 CREATE TABLE IF NOT EXISTS request_idempotency_keys (
     idempotency_key TEXT PRIMARY KEY,
@@ -300,6 +317,7 @@ func insert(ctx context.Context, db execer, row Row) error {
 INSERT INTO request_log (
     ts_utc,
     request_id,
+    external_request_id,
     model,
     provider_assigned_id,
     prompt_tokens,
@@ -316,9 +334,10 @@ INSERT INTO request_log (
     pref_header,
     provider_header,
     retried
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.TSUtc.UTC().Format(time.RFC3339Nano),
 		row.RequestID,
+		nullString(row.ExternalRequestID),
 		row.Model,
 		nullString(row.ProviderAssignedID),
 		nullInt64(row.PromptTokens),
@@ -363,6 +382,11 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		{name: "pref_header", sql: `ALTER TABLE request_log ADD COLUMN pref_header TEXT NULL`},
 		{name: "provider_header", sql: `ALTER TABLE request_log ADD COLUMN provider_header TEXT NULL`},
 		{name: "retried", sql: `ALTER TABLE request_log ADD COLUMN retried INTEGER NOT NULL DEFAULT 0`},
+		// SPEC-002 v1.4.2 R-2 / §11: inbound X-Request-ID, the
+		// reconciliation join-key shared with gateway usage_events.
+		// Pre-existing rows scan as NULL; new INSERTs carry the
+		// gateway-forwarded id when present.
+		{name: "external_request_id", sql: `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL`},
 	} {
 		if cols[migration.name] {
 			continue
@@ -371,7 +395,30 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 			return err
 		}
 	}
-	return s.requireColumns(ctx, []string{"id", "ts_utc", "request_id", "model"})
+	if err := s.requireColumns(ctx, []string{"id", "ts_utc", "request_id", "model"}); err != nil {
+		return err
+	}
+	return s.ensureIndexes(ctx)
+}
+
+// ensureIndexes creates request_log indexes that depend on
+// ensureColumns having already added their underlying columns.
+// CREATE INDEX IF NOT EXISTS is idempotent; we don't gate by an
+// existence check because index existence isn't tracked alongside
+// columns (PRAGMA table_info doesn't list indexes).
+func (s *Store) ensureIndexes(ctx context.Context) error {
+	for _, ddl := range []string{
+		// SPEC-002 v1.4.2 R-2: reconciliation scans join gateway
+		// usage_events to request_log on external_request_id; the
+		// partial-NULL index keeps the index small (legacy rows have
+		// NULL and are not indexed).
+		`CREATE INDEX IF NOT EXISTS idx_request_log_external_request_id ON request_log(external_request_id) WHERE external_request_id IS NOT NULL`,
+	} {
+		if _, err := s.db.ExecContext(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) columns(ctx context.Context) (map[string]bool, error) {
