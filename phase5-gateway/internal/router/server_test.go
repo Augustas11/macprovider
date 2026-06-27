@@ -1589,7 +1589,7 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	}
 }
 
-// SPEC-006 v0.X R-G2: gateway forwards buyer X-Request-ID on every
+// SPEC-006 v0.X R-G3: gateway forwards buyer X-Request-ID on every
 // buyer-facing coordinator proxy path, not only /v1/chat/completions.
 // /v1/models is the other buyer-facing surface; this test pins that
 // behavior so a refactor doesn't silently revert it to newUUID().
@@ -1618,6 +1618,46 @@ func TestModelsForwardsBuyerRequestID(t *testing.T) {
 	}
 	if capturedModelsXRequestID != buyerID {
 		t.Fatalf("forwarded X-Request-ID on /v1/models = %q, want buyer-supplied %q", capturedModelsXRequestID, buyerID)
+	}
+}
+
+// SPEC-006 v0.X R-G3 / SPEC-002 v1.4.2 R-2: when the buyer omits
+// X-Request-ID, gateway middleware mints a UUID, sets it as the
+// response header, AND forwards that SAME id upstream. The two MUST
+// agree so the buyer can correlate their request id with what reaches
+// the coordinator's request_log.external_request_id. R5 architect
+// audit MINOR: previous tests only covered buyer-supplied; this pins
+// the middleware-minted branch.
+func TestChatForwardsMiddlewareMintedRequestIDWhenBuyerOmits(t *testing.T) {
+	var capturedChatXRequestID string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/chat/completions" {
+			capturedChatXRequestID = r.Header.Get("X-Request-ID")
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}},
+			`{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_minted_rid")
+
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	// No X-Request-ID header: gateway middleware MUST mint one.
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	respID := resp.Header().Get("X-Request-ID")
+	if !isUUIDLike(respID) {
+		t.Fatalf("response X-Request-ID = %q, want middleware-minted UUID", respID)
+	}
+	if capturedChatXRequestID != respID {
+		t.Fatalf("forwarded X-Request-ID = %q, want response/middleware-minted %q", capturedChatXRequestID, respID)
 	}
 }
 

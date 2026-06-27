@@ -143,13 +143,13 @@ CREATE INDEX IF NOT EXISTS idx_request_log_ts_utc
     ON request_log(ts_utc);
 CREATE INDEX IF NOT EXISTS idx_request_log_request_id_id
     ON request_log(request_id, id);
--- Index for SPEC-002 v1.4.2 R-2 reconciliation scans (column added
--- in ensureColumns; index also created from there) is NOT issued in
--- the inline schema block — on a pre-existing DB the table won't have
--- the column yet at this point in execution, so CREATE INDEX would
--- reference a non-existent column. ensureColumns runs ALTER TABLE
--- ADD COLUMN and CREATE INDEX in order, which works for both fresh
--- DBs and legacy upgrades.
+-- SPEC-002 v1.4.2 R-2 reconciliation scans want an index on
+-- request_log.external_request_id. The column is added by
+-- ensureColumns (additive ALTER TABLE, cheap). The matching partial-
+-- NULL index is built by MigrateIndexes, invoked via the operator-
+-- runbook subcommand "coordinator migrate-indexes" — NOT from the
+-- daemon startup path, because SQLite has no concurrent index build
+-- and the request-log store caps the pool at one writer connection.
 
 CREATE TABLE IF NOT EXISTS request_idempotency_keys (
     idempotency_key TEXT PRIMARY KEY,
