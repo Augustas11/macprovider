@@ -68,6 +68,20 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
     }
 
+    func testMixedFamilyModelID_UsesQwenTableOrderPrecedence() throws {
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: #"<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#,
+            modelID: "mlx-community/Qwen3-Llama-3.3-hybrid",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertNil(parsed.cleanedContent)
+        XCTAssertEqual(parsed.toolCalls.count, 1)
+        XCTAssertEqual(call.functionName, "find_definition")
+        XCTAssertEqual(try argumentValue(call.arguments, key: "symbol") as? String, "ToolCallParser")
+    }
+
     func testEmptyModelID_FallsBackToPlainContent() {
         let raw = #"<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
@@ -249,6 +263,30 @@ final class ToolCallParserTests: XCTestCase {
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testOversizedQwenPythonStyleArgumentsFallBackToPlainText() {
+        let raw = #"<tool_call>find_definition(blob="\#(String(repeating: "x", count: 256 * 1024))")</tool_call>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen3-32B-4bit",
+            allowedFunctionNames: ["find_definition"]
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testOversizedLlamaPythonStyleArgumentsFallBackToPlainText() {
+        let raw = #"<|python_tag|>find_definition(blob="\#(String(repeating: "x", count: 256 * 1024))")<|eom_id|>"#
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Llama-3.3-70B-Instruct-4bit",
+            allowedFunctionNames: ["find_definition"]
         )
 
         XCTAssertEqual(parsed.cleanedContent, raw)

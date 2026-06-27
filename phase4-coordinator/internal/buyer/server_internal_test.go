@@ -191,6 +191,26 @@ func TestCommitSignal_MixedInvalidToolCalls_Rejected(t *testing.T) {
 	}
 }
 
+func TestCommitSignal_InvalidToolCallsWithOtherSignals_Rejected(t *testing.T) {
+	oversizedArguments := `{"blob":"` + strings.Repeat("x", 256*1024) + `"}`
+	cases := []struct {
+		name  string
+		delta string
+	}{
+		{"role_with_empty_object", `"role":"assistant","tool_calls":[{}]`},
+		{"content_with_non_object_arguments", `"content":"x","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"[]"}}]`},
+		{"reasoning_with_oversized_arguments", `"reasoning":"trace","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":` + string(mustJSONString(t, oversizedArguments)) + `}}]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "data: {\"choices\":[{\"delta\":{" + tc.delta + "}}]}\n"
+			if isCommitWorthyDataLine([]byte(line)) {
+				t.Fatal("invalid tool_calls must reject the whole delta even when another signal is present")
+			}
+		})
+	}
+}
+
 func TestCommitSignal_MinimalValidShape_Accepted(t *testing.T) {
 	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n"
 	if !isCommitWorthyDataLine([]byte(line)) {

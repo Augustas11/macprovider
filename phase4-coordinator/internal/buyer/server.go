@@ -2588,6 +2588,18 @@ func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return false
 	}
+	if raw, has := obj["tool_calls"]; has {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err != nil || len(arr) == 0 {
+			return false
+		}
+		for _, call := range arr {
+			if !isCommitWorthyToolCallDelta(call) {
+				return false
+			}
+		}
+		return true
+	}
 	if raw, has := obj["content"]; has && isNonEmptyJSONString(raw) {
 		return true
 	}
@@ -2599,17 +2611,6 @@ func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
 	}
 	if raw, has := obj["reasoning"]; has && isNonEmptyJSONString(raw) {
 		return true
-	}
-	if raw, has := obj["tool_calls"]; has {
-		var arr []json.RawMessage
-		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
-			for _, call := range arr {
-				if !isCommitWorthyToolCallDelta(call) {
-					return false
-				}
-			}
-			return true
-		}
 	}
 	if raw, has := obj["function_call"]; has && isNonEmptyJSONObject(raw) {
 		return true

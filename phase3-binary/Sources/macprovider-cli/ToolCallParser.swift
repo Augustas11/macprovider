@@ -125,7 +125,9 @@ enum ToolCallParser {
             throw ParseError.invalidArguments
         }
         let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes])
-        return String(decoding: data, as: UTF8.self)
+        let arguments = String(decoding: data, as: UTF8.self)
+        try validateNoDuplicateJSONKeys(arguments)
+        return arguments
     }
 
     private static func splitPythonArguments(_ rawArguments: String) throws -> [String] {
@@ -495,13 +497,13 @@ private enum ToolCallFormat {
     }
 
     static func detect(modelID: String, rawOutput _: String) -> ToolCallFormat? {
-        if modelID.localizedCaseInsensitiveContains("llama-3.3") {
-            return .llama33
-        }
         if modelID.localizedCaseInsensitiveContains("qwen2.5") ||
             modelID.localizedCaseInsensitiveContains("qwen3")
         {
             return .qwen25
+        }
+        if modelID.localizedCaseInsensitiveContains("llama-3.3") {
+            return .llama33
         }
         return nil
     }
