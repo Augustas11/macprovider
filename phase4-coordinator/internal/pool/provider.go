@@ -236,11 +236,22 @@ type Registry struct {
 	// (no cleanup on provider removal); per the 2026-06-10 audit it could
 	// outgrow the pool unboundedly. Now keyed by providerID and dropped
 	// on RemoveIfSession / RemoveIfSessionState, with a per-provider cap
-	// to bound a single provider's contribution. ModelKnown is a view
-	// over currently-connected providers' sets — so when a provider
-	// disconnects, models only it had reported correctly disappear from
-	// the global "seen" answer.
-	seenModelsByProvider   map[string]map[string]struct{}
+	// to bound a single provider's contribution.
+	seenModelsByProvider map[string]map[string]struct{}
+	// seenModelsLifetime is the SPEC-002 v1.4.1 § 7.2 pool-lifetime
+	// model history: any model id ever advertised during this coordinator
+	// process lifetime, retained even after the advertising provider
+	// disconnects. Issue #185: the M2-5 cleanup of seenModelsByProvider
+	// on provider disconnect inadvertently shrank `ModelKnown`'s answer
+	// to "currently-connected only", which made cold-start races (only
+	// provider for a model disconnects, buyer asks for that model)
+	// return 404 model_not_found instead of the spec-mandated 503
+	// no_provider_available. seenModelsLifetime is append-only within a
+	// hard cap (maxSeenModelsLifetime) so the PERF-5 memory bound
+	// still holds — beyond cap, further model ids are silently dropped,
+	// which degrades cold-start races to the legacy 404 behavior for
+	// rare/transient models without crashing.
+	seenModelsLifetime     map[string]struct{}
 	breakerFaults          map[string][]time.Time
 	recoveryHolds          map[string]recoveryHold
 	canarySanctions        map[string]canarySanction
@@ -257,6 +268,16 @@ type Registry struct {
 // at a time); reaching this cap silently drops further model IDs.
 // M2-5 / PERF-5.
 const maxSeenModelsPerProvider = 32
+
+// maxSeenModelsLifetime caps the pool-lifetime model-id accumulator that
+// implements SPEC-002 § 7.2's 404-vs-503 distinction. 4096 is several
+// orders of magnitude above any realistic mac-provider catalog — most
+// deployments serve 5-50 distinct model ids — so reaching the cap means
+// a buggy provider is churning model ids. At the cap further inserts
+// are silently dropped, which degrades cold-start races to the legacy
+// 404 behavior for the dropped ids without unbounded growth. Issue #185
+// / SPEC-002 § 7.2 + PERF-5 / 2026-06-10 audit reconciliation.
+const maxSeenModelsLifetime = 4096
 
 // ReceiptRotationGrace is the SPEC-015 overlap window during which buyers may
 // validate receipts signed by the previous provider receipt key.
@@ -290,6 +311,7 @@ func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Reg
 		sessions:              map[string]*Provider{},
 		endpoints:             endpoints,
 		seenModelsByProvider:  map[string]map[string]struct{}{},
+		seenModelsLifetime:    map[string]struct{}{},
 		breakerFaults:         map[string][]time.Time{},
 		recoveryHolds:         map[string]recoveryHold{},
 		canarySanctions:       map[string]canarySanction{},
@@ -574,11 +596,18 @@ func cloneBytes(in []byte) []byte {
 	return out
 }
 
-// recordSeenModelLocked records a model id under a provider's set,
-// respecting the per-provider cap. Caller must hold r.mu in WRITE mode.
+// recordSeenModelLocked records a model id under a provider's set
+// AND in the pool-lifetime accumulator, respecting both caps. Caller
+// must hold r.mu in WRITE mode.
 func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 	if providerID == "" || modelID == "" {
 		return
+	}
+	// SPEC-002 § 7.2 / issue #185: lifetime accumulator drives the
+	// 404-vs-503 distinction, regardless of which provider advertised
+	// it. Append-only within maxSeenModelsLifetime.
+	if _, already := r.seenModelsLifetime[modelID]; !already && len(r.seenModelsLifetime) < maxSeenModelsLifetime {
+		r.seenModelsLifetime[modelID] = struct{}{}
 	}
 	set, ok := r.seenModelsByProvider[providerID]
 	if !ok {
@@ -592,7 +621,7 @@ func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 		// Cap is well above legitimate use; reaching it means this
 		// provider is misbehaving or buggy. Silent-drop is operationally
 		// safe — ModelKnown still answers true via the currently-connected
-		// provider's live ModelID field.
+		// provider's live ModelID field or via the lifetime accumulator.
 		return
 	}
 	set[modelID] = struct{}{}
@@ -1124,6 +1153,22 @@ func (r *Registry) Touch(providerID, assignedID string, at time.Time) {
 	}
 }
 
+// ModelKnown implements SPEC-002 § 7.2's pool-lifetime "has the
+// coordinator ever seen this model id" check that drives the 404 vs
+// 503 distinction on the buyer port. Returns true iff the model id has
+// been advertised by ANY provider at ANY point during this coordinator
+// process lifetime (within the maxSeenModelsLifetime cap), whether or
+// not the advertising provider is still connected.
+//
+// Issue #185: a previous implementation iterated seenModelsByProvider
+// only, which the M2-5 / PERF-5 audit had wired up to drop on
+// provider disconnect. Cold-start races (only provider for a model
+// disconnects, buyer asks for that model ~200ms later) returned 404
+// model_not_found instead of 503 no_provider_available, leading
+// OpenAI-compatible clients to abandon the model as misconfigured
+// instead of backing off and retrying. The lifetime accumulator added
+// in #185 is append-only with a hard cap, so PERF-5's memory bound
+// still holds while SPEC § 7.2's behavior is restored.
 func (r *Registry) ModelKnown(modelID string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -1132,18 +1177,9 @@ func (r *Registry) ModelKnown(modelID string) bool {
 			return true
 		}
 	}
-	// M2-5 / PERF-5: iterate per-provider seenModels (only entries for
-	// currently-connected providers, since RemoveIfSession{,State} drop
-	// the inner map). The pre-M2-5 behaviour was a registry-wide
-	// accumulator that retained models from disconnected providers
-	// forever — a memory leak the audit flagged. The new semantic is
-	// "known iff a currently-connected provider has at any point served
-	// it during its current session."
-	for _, set := range r.seenModelsByProvider {
-		for seen := range set {
-			if strings.EqualFold(seen, modelID) {
-				return true
-			}
+	for seen := range r.seenModelsLifetime {
+		if strings.EqualFold(seen, modelID) {
+			return true
 		}
 	}
 	return false

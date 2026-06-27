@@ -3,6 +3,7 @@ package pool
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -969,11 +970,20 @@ func TestApplyHeartbeatSwapEmitterDoesNotFireWhenNoPriorLoading(t *testing.T) {
 	}
 }
 
-// TestModelKnownShrinksOnProviderDisconnect pins the M2-5 / PERF-5
-// guarantee: ModelKnown answers from currently-connected providers only.
-// Pre-M2-5 the registry-wide seenModels map accumulated forever — a
-// 31-day model id observed once still answered true 1y later.
-func TestModelKnownShrinksOnProviderDisconnect(t *testing.T) {
+// TestModelKnownPersistsInLifetimeAccumulator pins the SPEC-002 § 7.2 /
+// issue #185 contract: ModelKnown returns true for any model id ever
+// advertised during the coordinator process lifetime — not only for
+// currently-connected providers' models. The per-provider
+// seenModelsByProvider map still shrinks on RemoveIfSession (PERF-5
+// memory bound), but the dedicated seenModelsLifetime accumulator is
+// append-only within maxSeenModelsLifetime so cold-start races route
+// to 503 no_provider_available instead of 404 model_not_found.
+//
+// Pre-#185, ModelKnown iterated only seenModelsByProvider, so the
+// "only provider disconnected" case answered false and the buyer port
+// returned 404 — the SPEC-002 § 7.2 violation that this test guards
+// against regressing.
+func TestModelKnownPersistsInLifetimeAccumulator(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Unix(1716768000, 0).UTC()
 
@@ -1002,25 +1012,82 @@ func TestModelKnownShrinksOnProviderDisconnect(t *testing.T) {
 	if !registry.ModelKnown("model-a") {
 		t.Fatal("ModelKnown(model-a) = false; per-session memory regressed")
 	}
-	// Disconnect p1 — both models it ever reported should drop from the
-	// global view.
+	// Disconnect p1. seenModelsByProvider["p1"] is dropped (PERF-5
+	// invariant), but seenModelsLifetime retains every model id ever
+	// advertised so SPEC-002 § 7.2's 404-vs-503 distinction is preserved.
 	if !registry.RemoveIfSession("p1", "s1") {
 		t.Fatal("RemoveIfSession returned false")
 	}
-	if registry.ModelKnown("model-a") {
-		t.Fatal("ModelKnown(model-a) still true after the only provider serving it disconnected — leak (PERF-5)")
+	if !registry.ModelKnown("model-a") {
+		t.Fatal("ModelKnown(model-a) = false after p1 disconnected; SPEC-002 § 7.2 cold-start race regressed (issue #185)")
 	}
-	if registry.ModelKnown("model-b") {
-		t.Fatal("ModelKnown(model-b) still true after the only provider serving it disconnected — leak (PERF-5)")
+	if !registry.ModelKnown("model-b") {
+		t.Fatal("ModelKnown(model-b) = false after p1 disconnected; SPEC-002 § 7.2 cold-start race regressed (issue #185)")
+	}
+	// PERF-5 invariant: the per-provider map IS dropped, even though
+	// the lifetime accumulator retains the model ids.
+	registry.mu.RLock()
+	if _, exists := registry.seenModelsByProvider["p1"]; exists {
+		registry.mu.RUnlock()
+		t.Fatal("seenModelsByProvider[p1] still present after RemoveIfSession; PERF-5 cleanup regressed")
+	}
+	registry.mu.RUnlock()
+	// Never-seen model id MUST still answer false — the cap is on
+	// "seen", not on "any id is true".
+	if registry.ModelKnown("nonexistent-model-9000") {
+		t.Fatal("ModelKnown(nonexistent-model-9000) = true; lifetime accumulator returning false positives")
+	}
+}
+
+// TestSeenModelsLifetimeCap pins the PERF-5 reconciliation in issue
+// #185: the lifetime accumulator is bounded at maxSeenModelsLifetime.
+// Beyond the cap, further inserts silently drop, degrading cold-start
+// races to legacy 404 behavior for the dropped ids without unbounded
+// growth.
+func TestSeenModelsLifetimeCap(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-anchor",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	// Drive the lifetime set to cap via the locked record path.
+	registry.mu.Lock()
+	for i := 0; i < maxSeenModelsLifetime+10; i++ {
+		registry.recordSeenModelLocked("p1", fmt.Sprintf("synthetic-%d", i))
+	}
+	got := len(registry.seenModelsLifetime)
+	registry.mu.Unlock()
+	if got > maxSeenModelsLifetime {
+		t.Fatalf("seenModelsLifetime = %d entries, want <= %d (cap)", got, maxSeenModelsLifetime)
 	}
 }
 
 // TestRegisterReplaceSessionClearsSeenModels pins the M2-5 / PERF-5 fix for the
-// codex code-audit 2026-06-11 #47 finding: a session replacement (same
-// provider_id, new assigned_id) MUST clear the per-provider seen-model
-// history, else stale model ids from the prior session survive into the
-// new one and ModelKnown over-reports.
-func TestRegisterReplaceSessionClearsSeenModels(t *testing.T) {
+// TestRegisterReplaceSessionClearsPerProviderAttribution pins the
+// codex code-audit 2026-06-11 #47 finding at its native level — the
+// per-provider attribution map — after issue #185 split the
+// pool-lifetime accumulator out from per-provider attribution.
+//
+// Audit #47's concern was stale model attribution leaking across a
+// session replacement (same provider_id, new assigned_id), which
+// would have ModelKnown over-report when the old surface aggregated
+// per-provider entries. With #185 in place, ModelKnown reads from the
+// pool-lifetime accumulator (which DOES retain all model ids ever
+// advertised, per SPEC-002 § 7.2 — that's the 404-vs-503 distinction).
+// The audit #47 invariant moved down a layer: session replacement
+// MUST drop seenModelsByProvider[provider_id] so any future
+// per-provider attribution / explorer-style queries see only the
+// current session.
+func TestRegisterReplaceSessionClearsPerProviderAttribution(t *testing.T) {
 	registry := NewRegistry(nil)
 	start := time.Unix(1716768000, 0).UTC()
 
@@ -1043,8 +1110,6 @@ func TestRegisterReplaceSessionClearsSeenModels(t *testing.T) {
 	}
 
 	// Session 2 replaces session 1 with a different model entirely.
-	// (Same provider_id, new assigned_id — the direct-replacement path
-	// inside Register, not the RemoveIfSession path.)
 	registry.Register(&Provider{
 		ProviderID:       "p1",
 		AssignedID:       "s2",
@@ -1060,11 +1125,32 @@ func TestRegisterReplaceSessionClearsSeenModels(t *testing.T) {
 	if !registry.ModelKnown("model-c") {
 		t.Fatal("session-2 model not recorded after replacement")
 	}
-	if registry.ModelKnown("model-a") {
-		t.Fatal("ModelKnown(model-a) leaked across session replacement; prior history should be cleared")
+
+	// SPEC-002 § 7.2: prior-session models REMAIN in the pool-lifetime
+	// accumulator. ModelKnown reports them — that's the cold-start
+	// race fix (issue #185).
+	if !registry.ModelKnown("model-a") {
+		t.Fatal("ModelKnown(model-a) = false after session replacement; SPEC-002 § 7.2 lifetime accumulator regressed")
 	}
-	if registry.ModelKnown("model-b") {
-		t.Fatal("ModelKnown(model-b) leaked across session replacement; prior history should be cleared")
+	if !registry.ModelKnown("model-b") {
+		t.Fatal("ModelKnown(model-b) = false after session replacement; SPEC-002 § 7.2 lifetime accumulator regressed")
+	}
+
+	// Audit #47 invariant on the per-provider attribution map:
+	// session replacement DROPS the prior session's per-provider
+	// entries so attribution-style queries see only the current
+	// session's models.
+	registry.mu.RLock()
+	defer registry.mu.RUnlock()
+	set := registry.seenModelsByProvider["p1"]
+	if _, has := set["model-a"]; has {
+		t.Fatal("seenModelsByProvider[p1] still contains model-a after session replacement; audit #47 attribution invariant regressed")
+	}
+	if _, has := set["model-b"]; has {
+		t.Fatal("seenModelsByProvider[p1] still contains model-b after session replacement; audit #47 attribution invariant regressed")
+	}
+	if _, has := set["model-c"]; !has {
+		t.Fatal("seenModelsByProvider[p1] missing model-c after registering session 2")
 	}
 }
 

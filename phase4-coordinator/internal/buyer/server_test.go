@@ -4134,6 +4134,53 @@ func TestChatCompletionsSplitsUnknownModelAndUnavailableProvider(t *testing.T) {
 	}
 }
 
+// SPEC-002 § 7.2 / issue #185: when the only provider for a model
+// disconnects (cold-start race), the next buyer request for that
+// model MUST return 503 no_provider_available, not 404
+// model_not_found. The model is in pool-lifetime history; the
+// distinction matters because OpenAI-compatible clients treat 404
+// as misconfiguration ("the model id is wrong, stop trying") and
+// 503 as transient ("back off, retry").
+//
+// Pre-#185, ModelKnown iterated only seenModelsByProvider, which the
+// M2-5 / PERF-5 audit had wired up to drop on provider disconnect.
+// This test pins the new lifetime accumulator (seenModelsLifetime) so
+// a future PERF revert doesn't silently reintroduce the spec
+// violation.
+func TestChatCompletionsColdStartRaceReturnsNoProviderAvailable(t *testing.T) {
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "http://p1.example"}})
+	// 1. Provider registers and advertises model-a.
+	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateReady, 20000, 1, "http://p1.example", 20)
+	// 2. Provider disconnects (the cold-start race). RemoveIfSession
+	// drops seenModelsByProvider["p1"] per M2-5 / PERF-5. The model is
+	// only retained via seenModelsLifetime.
+	if !registry.RemoveIfSession("p1", "session-1") {
+		t.Fatalf("RemoveIfSession returned false; provider was not registered as expected")
+	}
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
+
+	// 3. Buyer asks for the recently-seen model. Must be 503
+	// no_provider_available, NOT 404 model_not_found.
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("cold-start race status = %d, want 503; body=%s", rr.Code, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"no_provider_available"`)) {
+		t.Fatalf("cold-start race body = %s, want no_provider_available", rr.Body.String())
+	}
+
+	// 4. A model id NEVER advertised in this coordinator's lifetime
+	// still returns 404 model_not_found — the never-seen path is
+	// unchanged.
+	unseen := postChat(t, server, []byte(`{"model":"nonexistent-model-9000-test-only","messages":[{"role":"user","content":"hi"}]}`), nil)
+	if unseen.Code != http.StatusNotFound {
+		t.Fatalf("never-seen model status = %d, want 404; body=%s", unseen.Code, unseen.Body.String())
+	}
+	if !bytes.Contains(unseen.Body.Bytes(), []byte(`"code":"model_not_found"`)) {
+		t.Fatalf("never-seen model body = %s, want model_not_found", unseen.Body.String())
+	}
+}
+
 func TestChatCompletionsDoesNotRouteToDegradedProvider(t *testing.T) {
 	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: "http://p1.example"}})
 	registerWithEndpoint(registry, "p1", "session-1", "model-a", pool.StateDegraded, 20000, 1, "http://p1.example", 20)
