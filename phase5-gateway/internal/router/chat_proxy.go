@@ -199,7 +199,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	copyForwardHeaders(upReq.Header, r.Header)
 	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("X-Request-ID", newUUID())
+	// SPEC-002 §11 + v1.4.2 R-2: forward the gateway-visible request id
+	// (which itself was honored from the buyer's inbound X-Request-ID
+	// when present, else minted by the gateway middleware) so the
+	// coordinator can store it in request_log.external_request_id and
+	// out-of-process auditors can join gateway usage_events with
+	// coordinator request_log on this shared id. Earlier code minted a
+	// fresh UUID here, breaking that join.
+	upReq.Header.Set("X-Request-ID", requestID(r))
 	if s.cfg.Routing.StickyEnabled && !authn.Demo {
 		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
 			if !validConversationTag(tag) {

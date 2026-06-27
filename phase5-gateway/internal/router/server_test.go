@@ -1535,8 +1535,14 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	if got := resp.Header().Get("X-MacProvider-Route"); got != "" {
 		t.Fatalf("buyer response exposed route=%q", got)
 	}
-	if got := captured.Get("X-Request-ID"); got == "" || got == "55555555-5555-4555-8555-555555555555" {
-		t.Fatalf("forwarded X-Request-ID = %q, want gateway-generated coordinator ID", got)
+	// SPEC-002 §11 + v1.4.2 R-2 + issue #188: the gateway MUST forward
+	// the buyer-supplied X-Request-ID verbatim so the coordinator can
+	// store it in request_log.external_request_id, giving out-of-process
+	// auditors a stable shared id between gateway usage_events and
+	// coordinator request_log. Earlier behavior minted a fresh UUID
+	// here, breaking that join.
+	if got := captured.Get("X-Request-ID"); got != "55555555-5555-4555-8555-555555555555" {
+		t.Fatalf("forwarded X-Request-ID = %q, want buyer-supplied value preserved", got)
 	}
 	if got := captured.Get("X-MacProvider-Retry"); got != "1" {
 		t.Fatalf("forwarded retry = %q, want 1", got)
@@ -1580,6 +1586,78 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 		if got := resp.Header().Get(header); got != "" {
 			t.Fatalf("failure response exposed %s=%q", header, got)
 		}
+	}
+}
+
+// SPEC-006 v0.X R-G3: gateway forwards buyer X-Request-ID on every
+// buyer-facing coordinator proxy path, not only /v1/chat/completions.
+// /v1/models is the other buyer-facing surface; this test pins that
+// behavior so a refactor doesn't silently revert it to newUUID().
+func TestModelsForwardsBuyerRequestID(t *testing.T) {
+	var capturedModelsXRequestID string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/models" {
+			capturedModelsXRequestID = r.Header.Get("X-Request-ID")
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"object":"list","data":[]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_xrequestid")
+
+	const buyerID = "66666666-6666-4666-8666-666666666666"
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("X-Real-IP", "1.2.3.4")
+	req.Header.Set("X-Request-ID", buyerID)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("models status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if capturedModelsXRequestID != buyerID {
+		t.Fatalf("forwarded X-Request-ID on /v1/models = %q, want buyer-supplied %q", capturedModelsXRequestID, buyerID)
+	}
+}
+
+// SPEC-006 v0.X R-G3 / SPEC-002 v1.4.2 R-2: when the buyer omits
+// X-Request-ID, gateway middleware mints a UUID, sets it as the
+// response header, AND forwards that SAME id upstream. The two MUST
+// agree so the buyer can correlate their request id with what reaches
+// the coordinator's request_log.external_request_id. R5 architect
+// audit MINOR: previous tests only covered buyer-supplied; this pins
+// the middleware-minted branch.
+func TestChatForwardsMiddlewareMintedRequestIDWhenBuyerOmits(t *testing.T) {
+	var capturedChatXRequestID string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/chat/completions" {
+			capturedChatXRequestID = r.Header.Get("X-Request-ID")
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}},
+			`{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_minted_rid")
+
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	// No X-Request-ID header: gateway middleware MUST mint one.
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	respID := resp.Header().Get("X-Request-ID")
+	if !isUUIDLike(respID) {
+		t.Fatalf("response X-Request-ID = %q, want middleware-minted UUID", respID)
+	}
+	if capturedChatXRequestID != respID {
+		t.Fatalf("forwarded X-Request-ID = %q, want response/middleware-minted %q", capturedChatXRequestID, respID)
 	}
 }
 

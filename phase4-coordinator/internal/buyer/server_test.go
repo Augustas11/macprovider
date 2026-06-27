@@ -1147,6 +1147,165 @@ func TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID(t *testing.T)
 			t.Fatalf("request_log rows for %s = %d, want 1: %#v", id, len(rows), rows)
 		}
 	}
+	// SPEC-002 v1.4.2 R-2: external_request_id MUST equal the inbound
+	// X-Request-ID on EVERY row of one logical request, **regardless of
+	// pinning** (i.e., even when per-row request_id differs). This test
+	// covers the pinned-retry-shape branch: each row carries a distinct
+	// coordinator-generated request_id (asserted above via
+	// providerRequestIDs[0] != providerRequestIDs[1]) yet both rows must
+	// carry the same external_request_id.
+	allRows := queryAllRequestLogRows(t, dbPath)
+	if len(allRows) != 2 {
+		t.Fatalf("queryAllRequestLogRows = %d rows, want 2", len(allRows))
+	}
+	for i, row := range allRows {
+		if !row.ExternalRequestID.Valid || row.ExternalRequestID.String != clientRequestID {
+			t.Fatalf("row[%d] external_request_id = %#v, want %q", i, row.ExternalRequestID, clientRequestID)
+		}
+	}
+	if allRows[0].RequestID == allRows[1].RequestID {
+		t.Fatalf("guarded invariant broken: expected distinct request_id per row, got %q twice", allRows[0].RequestID)
+	}
+}
+
+// SPEC-002 v1.4.2 R-2 / §11 + issue #188: when an inbound buyer
+// request carries an X-Request-ID header, the coordinator MUST store
+// that value in request_log.external_request_id on every row that
+// covers the logical request (success row + any retry rows). This is
+// the reconciliation join-key shared with gateway usage_events.
+// request_log.request_id continues to be the coordinator's per-attempt
+// internal id (unchanged behavior); SPEC-002 v1.4.2 names the inbound
+// header value as external_request_id specifically to avoid disturbing
+// the per-attempt-unique invariant the existing test suite verifies.
+func TestRequestLogPreservesInboundXRequestIDAcrossAttempts(t *testing.T) {
+	const externalID = "55555555-5555-4555-8555-555555555555"
+	failUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "bad gateway", http.StatusBadGateway)
+	}))
+	defer failUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "fail", EndpointURL: failUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "fail", "s1", "model-a", pool.StateReady, 20000, 1, failUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 1,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{externalID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("request_log rows = %d, want 2 (fail + ok attempt): %#v", len(rows), rows)
+	}
+	for i, row := range rows {
+		if !row.ExternalRequestID.Valid || row.ExternalRequestID.String != externalID {
+			t.Fatalf("row[%d] external_request_id = %#v, want %q", i, row.ExternalRequestID, externalID)
+		}
+		// Existing invariant preserved: per-attempt request_id is coord-generated
+		// and MUST NOT equal the buyer's X-Request-ID.
+		if row.RequestID == externalID {
+			t.Fatalf("row[%d] request_id == buyer X-Request-ID; should be coord-generated", i)
+		}
+	}
+	// In the non-pinned retry path (this test), both attempt rows share
+	// the SAME coord-generated request_id (see existing
+	// TestRequestLogBuyerMultiAttemptRows at line ~1093). The shared
+	// external_request_id above is the property new to v1.4.2.
+	if rows[0].RequestID != rows[1].RequestID {
+		t.Fatalf("non-pinned retry rows should share request_id; got %q vs %q", rows[0].RequestID, rows[1].RequestID)
+	}
+}
+
+// When the inbound request carries NO X-Request-ID, the coordinator
+// MUST still log a row but external_request_id is NULL (empty
+// sql.NullString). Existing buyer flows that omit the header remain
+// observable.
+// Malformed inbound X-Request-ID headers (control characters,
+// over-128 bytes) MUST be rejected at the handler boundary and stored
+// as NULL, not passed through to the persistent log column.
+// Defense-in-depth per the codex security-lane audit (ISS-188 R1).
+// The inbound header is buyer-controllable; an empty / NULL
+// external_request_id loses the reconciliation join for this row but
+// keeps malformed payloads out of structured logs and DB rows.
+func TestRequestLogExternalRequestIDRejectsMalformedHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+
+	for name, badHeader := range map[string]string{
+		"control_null": "req-\x00abc",
+		"control_lf":   "req-\nabc",
+		"del_char":     "req-\x7fabc",
+		"over_128":     strings.Repeat("a", 129),
+	} {
+		t.Run(name, func(t *testing.T) {
+			reqLog, dbPath := openBuyerRequestLog(t)
+			defer reqLog.Close()
+			registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+			registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+			server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRequestLog(reqLog))
+
+			rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`),
+				http.Header{"X-Request-ID": []string{badHeader}})
+			if rr.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			rows := queryAllRequestLogRows(t, dbPath)
+			if len(rows) != 1 {
+				t.Fatalf("rows=%d want 1: %#v", len(rows), rows)
+			}
+			if rows[0].ExternalRequestID.Valid {
+				t.Fatalf("malformed inbound header persisted as %#v; want NULL",
+					rows[0].ExternalRequestID)
+			}
+		})
+	}
+}
+
+func TestRequestLogExternalRequestIDNullWhenHeaderAbsent(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"ok","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}}`))
+	}))
+	defer upstream.Close()
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{{ProviderID: "p1", EndpointURL: upstream.URL}})
+	registerWithEndpoint(registry, "p1", "s1", "model-a", pool.StateReady, 20000, 1, upstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0), buyer.WithRequestLog(reqLog))
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1: %#v", len(rows), rows)
+	}
+	if rows[0].ExternalRequestID.Valid {
+		t.Fatalf("external_request_id = %#v, want NULL", rows[0].ExternalRequestID)
+	}
 }
 
 func TestSuccessfulNonStreamingBillingClampsInflatedProviderCompletion(t *testing.T) {
@@ -4221,6 +4380,7 @@ func deadMidInferenceRelay(ctx context.Context, provider pool.Provider, requestI
 type requestLogTestRow struct {
 	ID                 int64
 	RequestID          string
+	ExternalRequestID  sql.NullString
 	Model              string
 	ProviderAssignedID sql.NullString
 	PromptTokens       sql.NullInt64
@@ -4248,8 +4408,8 @@ func queryRequestLogRows(t *testing.T, dbPath, requestID string) []requestLogTes
 	}
 	defer db.Close()
 	rows, err := db.Query(`
-SELECT id, request_id, model, provider_assigned_id, prompt_tokens,
-       completion_tokens, status, error_code, retried
+SELECT id, request_id, external_request_id, model, provider_assigned_id,
+       prompt_tokens, completion_tokens, status, error_code, retried
 FROM request_log
 WHERE request_id = ?
 ORDER BY id ASC`, requestID)
@@ -4263,6 +4423,7 @@ ORDER BY id ASC`, requestID)
 		if err := rows.Scan(
 			&row.ID,
 			&row.RequestID,
+			&row.ExternalRequestID,
 			&row.Model,
 			&row.ProviderAssignedID,
 			&row.PromptTokens,
@@ -4289,8 +4450,8 @@ func queryAllRequestLogRows(t *testing.T, dbPath string) []requestLogTestRow {
 	}
 	defer db.Close()
 	rows, err := db.Query(`
-SELECT id, request_id, model, provider_assigned_id, prompt_tokens,
-       completion_tokens, status, error_code, retried
+SELECT id, request_id, external_request_id, model, provider_assigned_id,
+       prompt_tokens, completion_tokens, status, error_code, retried
 FROM request_log
 ORDER BY id ASC`)
 	if err != nil {
@@ -4303,6 +4464,7 @@ ORDER BY id ASC`)
 		if err := rows.Scan(
 			&row.ID,
 			&row.RequestID,
+			&row.ExternalRequestID,
 			&row.Model,
 			&row.ProviderAssignedID,
 			&row.PromptTokens,
