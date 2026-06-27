@@ -129,6 +129,20 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	// SPEC-002 v1.4.2 R-2 / ISS-188: request_log.external_request_id
+	// is added by OpenStore as an additive column. The matching partial-
+	// NULL index is built asynchronously here: SQLite holds the writer
+	// lock through CREATE INDEX, so doing this inline would stall the
+	// hot path during deploy. A failure here only loses the
+	// reconciliation-side index — INSERTs and the new column still work
+	// — so we log and continue. Repeated calls are idempotent.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := reqLogStore.MigrateIndexes(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "requestlog MigrateIndexes (non-fatal): %v\n", err)
+		}
+	}()
 	canaryStore, err := setupCanarySanctionStore(context.Background(), cfg, reqLogStore.DB(), registry)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "canary sanction storage: %v\n", err)

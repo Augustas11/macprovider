@@ -1147,6 +1147,25 @@ func TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID(t *testing.T)
 			t.Fatalf("request_log rows for %s = %d, want 1: %#v", id, len(rows), rows)
 		}
 	}
+	// SPEC-002 v1.4.2 R-2: external_request_id MUST equal the inbound
+	// X-Request-ID on EVERY row of one logical request, **regardless of
+	// pinning** (i.e., even when per-row request_id differs). This test
+	// covers the pinned-retry-shape branch: each row carries a distinct
+	// coordinator-generated request_id (asserted above via
+	// providerRequestIDs[0] != providerRequestIDs[1]) yet both rows must
+	// carry the same external_request_id.
+	allRows := queryAllRequestLogRows(t, dbPath)
+	if len(allRows) != 2 {
+		t.Fatalf("queryAllRequestLogRows = %d rows, want 2", len(allRows))
+	}
+	for i, row := range allRows {
+		if !row.ExternalRequestID.Valid || row.ExternalRequestID.String != clientRequestID {
+			t.Fatalf("row[%d] external_request_id = %#v, want %q", i, row.ExternalRequestID, clientRequestID)
+		}
+	}
+	if allRows[0].RequestID == allRows[1].RequestID {
+		t.Fatalf("guarded invariant broken: expected distinct request_id per row, got %q twice", allRows[0].RequestID)
+	}
 }
 
 // SPEC-002 v1.4.2 R-2 / §11 + issue #188: when an inbound buyer

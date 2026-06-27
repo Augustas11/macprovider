@@ -405,6 +405,14 @@ INSERT INTO request_log (
 	_ = db.Close()
 
 	store, err := OpenStore(dbPath)
+	// SPEC-002 v1.4.2 R-2 / ISS-188 R4 audit: OpenStore is column-only;
+	// the partial-NULL index ships via MigrateIndexes invoked from main.
+	// Tests asserting index presence call it synchronously here.
+	if err == nil {
+		if mErr := store.MigrateIndexes(context.Background()); mErr != nil {
+			t.Fatalf("MigrateIndexes: %v", mErr)
+		}
+	}
 	if err != nil {
 		t.Fatalf("open migrated store: %v", err)
 	}

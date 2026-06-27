@@ -26,9 +26,14 @@ type execer interface {
 
 type Row struct {
 	TSUtc time.Time
-	// RequestID is the coordinator's per-attempt identifier (one row per
-	// provider attempt). Generated internally; not equal to whatever the
-	// inbound X-Request-ID was.
+	// RequestID is the coordinator-generated request/billing id. Always
+	// internally generated; NEVER equal to the inbound X-Request-ID. On the
+	// non-pinned retry path multiple request_log rows for one logical
+	// buyer request share this value (verified by
+	// TestRequestLogBuyerMultiAttemptRows). On the pinned-client retry
+	// path successive rows carry distinct request_ids (verified by
+	// TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID).
+	// Attempt identity is `id` (auto-increment PK) plus `retried`.
 	RequestID string
 	// ExternalRequestID is the inbound X-Request-ID header value (per
 	// SPEC-002 §11). Shared across all rows for one logical request and
@@ -395,23 +400,20 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := s.requireColumns(ctx, []string{"id", "ts_utc", "request_id", "model"}); err != nil {
-		return err
-	}
-	return s.ensureIndexes(ctx)
+	return s.requireColumns(ctx, []string{"id", "ts_utc", "request_id", "model"})
 }
 
-// ensureIndexes creates request_log indexes that depend on
-// ensureColumns having already added their underlying columns.
+// MigrateIndexes builds the request_log indexes whose underlying
+// columns ensureColumns has already added.
 //
-// We probe sqlite_master first so the write lock + table scan that
-// `CREATE INDEX` triggers is paid exactly once per coordinator deploy
-// lifetime, not on every process restart. `CREATE INDEX IF NOT EXISTS`
-// is idempotent but still acquires a write lock and inspects the table
-// to confirm the existing index matches — on a large request_log that
-// would stall every restart for the duration of the scan. The gating
-// query is a cheap point read against sqlite_master.
-func (s *Store) ensureIndexes(ctx context.Context) error {
+// Intentionally NOT called from OpenStore. SQLite has no concurrent
+// index build; CREATE INDEX takes the writer lock and table-scans the
+// underlying table. Running it inside OpenStore would block the hot
+// path during process startup. Callers SHOULD invoke MigrateIndexes
+// asynchronously after startup completes (e.g., a goroutine in main)
+// so the deploy is not gated on the scan. Repeated calls are cheap:
+// a sqlite_master point lookup decides whether the DDL runs at all.
+func (s *Store) MigrateIndexes(ctx context.Context) error {
 	// SPEC-002 v1.4.2 R-2: reconciliation scans join gateway
 	// usage_events to request_log on external_request_id; the
 	// partial-NULL index keeps the index small (legacy rows have
