@@ -4,6 +4,7 @@ import os
 from openai import OpenAI
 
 
+# Security model: emitted `tool_calls[]` reflect model output, not provider-verified intent; buyer-side agent frameworks MUST validate before execution.
 MODEL = os.getenv("MACPROVIDER_MODEL", "mlx-community/Qwen2.5-7B-Instruct-4bit")
 BASE_URL = os.getenv("MACPROVIDER_BASE_URL", "https://api.streamvc.live/v1")
 API_KEY = os.getenv("MACPROVIDER_API_KEY", "<key>")

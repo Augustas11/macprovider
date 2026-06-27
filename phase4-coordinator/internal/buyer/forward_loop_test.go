@@ -675,6 +675,72 @@ func TestM92_RowSequence_HTTPStreamingDoneOnlyTriggersFailover(t *testing.T) {
 	}
 }
 
+func TestSpec018_HTTPStreamingMalformedToolCallsThenContentTriggersFailover(t *testing.T) {
+	const requestID = "55555555-1818-4818-8818-555555555555"
+	badUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{}]}}]}\n\n"))
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"must-not-commit\"}}]}\n\n"))
+	}))
+	defer badUpstream.Close()
+	okUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		_, _ = w.Write([]byte("data: {\"id\":\"ok\",\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n"))
+		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+	}))
+	defer okUpstream.Close()
+
+	reqLog, dbPath := openBuyerRequestLog(t)
+	defer reqLog.Close()
+	registry := pool.NewRegistry([]config.ProviderConfig{
+		{ProviderID: "bad", EndpointURL: badUpstream.URL},
+		{ProviderID: "ok", EndpointURL: okUpstream.URL},
+	})
+	registerWithEndpoint(registry, "bad", "s1", "model-a", pool.StateReady, 20000, 1, badUpstream.URL, 30)
+	registerWithEndpoint(registry, "ok", "s2", "model-a", pool.StateReady, 20000, 1, okUpstream.URL, 20)
+	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0),
+		buyer.WithRequestLog(reqLog),
+		buyer.WithRoutingConfig(config.RoutingConfig{
+			MaxRetries:              1,
+			RetryPerAttemptTimeoutS: 5,
+			StickyTTLS:              1800,
+			StickyMaxEntries:        10000,
+		}),
+	)
+
+	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}],"stream":true}`), http.Header{
+		"X-MacProvider-Retry": []string{"1"},
+		"X-Request-ID":        []string{requestID},
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-MacProvider-Provider") != "ok" {
+		t.Fatalf("provider = %q, want ok (after failover from malformed tool_calls provider)", rr.Header().Get("X-MacProvider-Provider"))
+	}
+	if bytes.Contains(rr.Body.Bytes(), []byte("must-not-commit")) {
+		t.Fatalf("malformed pre-commit provider bytes reached buyer: %s", rr.Body.String())
+	}
+	rows := queryAllRequestLogRows(t, dbPath)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2 (malformed tool_calls then success): %#v", len(rows), rows)
+	}
+	if rows[0].Status != http.StatusBadGateway || rows[0].Retried != 0 {
+		t.Fatalf("rows[0] = %+v, want 502/retried=0 (malformed pre-commit tool_calls MUST NOT be Committed)", rows[0])
+	}
+	if rows[1].Status != http.StatusOK || rows[1].Retried != 1 {
+		t.Fatalf("rows[1] = %+v, want 200/retried=1", rows[1])
+	}
+}
+
 // Scenario 11 (issue #92 codex r4 MINOR): legitimate provider first event
 // is a usage-only chunk (OpenAI shape when stream_options.include_usage=true
 // is set with no content chunks beforehand — rare but valid). The commit
