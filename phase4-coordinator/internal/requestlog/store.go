@@ -406,13 +406,18 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 // MigrateIndexes builds the request_log indexes whose underlying
 // columns ensureColumns has already added.
 //
-// Intentionally NOT called from OpenStore. SQLite has no concurrent
-// index build; CREATE INDEX takes the writer lock and table-scans the
-// underlying table. Running it inside OpenStore would block the hot
-// path during process startup. Callers SHOULD invoke MigrateIndexes
-// asynchronously after startup completes (e.g., a goroutine in main)
-// so the deploy is not gated on the scan. Repeated calls are cheap:
-// a sqlite_master point lookup decides whether the DDL runs at all.
+// Intentionally NOT called from OpenStore, nor from a goroutine in
+// the coordinator daemon. SQLite has no concurrent index build;
+// CREATE INDEX takes the writer lock and table-scans the underlying
+// table, and the request-log store caps the SQL pool at one writer
+// connection (see SetMaxOpenConns(1) in OpenStore), so any in-daemon
+// invocation would starve the 6s-timeout INSERT hot path. The
+// supported invocation path is the operator subcommand `coordinator
+// migrate-indexes`, run once per deploy before binding traffic or
+// during a maintenance window — see
+// phase4-coordinator/cmd/coordinator/migrate_indexes.go. Repeated
+// calls are cheap: a sqlite_master point lookup decides whether the
+// DDL runs at all.
 func (s *Store) MigrateIndexes(ctx context.Context) error {
 	// SPEC-002 v1.4.2 R-2: reconciliation scans join gateway
 	// usage_events to request_log on external_request_id; the
