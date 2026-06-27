@@ -359,8 +359,11 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// SPEC-006 v0.X R-G3: gateway forwards the buyer-visible request id
-	// on every forwarded buyer-facing request so the coordinator
-	// audit log joins to gateway usage on a single key.
+	// on every forwarded buyer-facing coordinator call. /v1/sticky is
+	// request-scoped audit-diagnostic surface, not a usage-event path,
+	// so the join target here is gateway audit_events.request_id ↔
+	// coordinator audit_events / request_log diagnostics — NOT the
+	// gateway usage_events join used by /v1/chat/completions.
 	upReq.Header.Set("X-Request-ID", requestID(r))
 	// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
 	// OperatorKey so a not-yet-upgraded coordinator keeps accepting us.
