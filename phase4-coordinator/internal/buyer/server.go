@@ -1973,7 +1973,7 @@ func (s *Server) attemptTimeout(r *http.Request) time.Duration {
 
 func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider, stream bool, timeout time.Duration) (wsForwardResult, requestLogAttempt) {
 	if s.relay == nil {
-		writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
+		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 		return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is not reachable"}
 	}
 	reserved := false
@@ -2001,7 +2001,7 @@ func (s *Server) forwardWS(w http.ResponseWriter, r *http.Request, requestID str
 			if stream {
 				return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is not reachable"}
 			}
-			writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
+			writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 			return wsForwardUnavailable, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is not reachable"}
 		}
 		if errors.Is(err, providerws.ErrRelayAEADFailed) {
@@ -2136,7 +2136,7 @@ func (s *Server) forwardWSNonStreaming(w http.ResponseWriter, r *http.Request, r
 				writeError(w, http.StatusBadGateway, "tier2_aead_decrypt_failed", "Provider encrypted response failed authentication")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider encrypted response failed authentication"}
 			} else if errors.Is(err, providerws.ErrRelayNAKFallback) {
-				writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
+				writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 				return wsForwardFailed, requestLogAttempt{Status: http.StatusServiceUnavailable, Error: "Selected provider is not reachable"}
 			} else {
 				writeError(w, http.StatusBadGateway, "provider_failed", "Selected provider failed; buyer should retry")
@@ -3402,7 +3402,7 @@ func writeStreamForwardError(w http.ResponseWriter, result wsForwardResult) {
 	case wsForwardTimedOut:
 		writeError(w, http.StatusGatewayTimeout, "provider_timeout", "Selected provider timed out; buyer should retry")
 	case wsForwardUnavailable:
-		writeError(w, http.StatusServiceUnavailable, "provider_unavailable", "Selected provider is not reachable")
+		writeError(w, http.StatusServiceUnavailable, "no_provider_available", "Selected provider is not reachable")
 	case wsForwardProviderDisconnected:
 		writeError(w, http.StatusBadGateway, "provider_disconnected", "Selected provider disconnected; buyer should retry")
 	case wsForwardCancelled, wsForwardProviderDisconnectedCommitted:
@@ -4815,7 +4815,7 @@ func writeWSEndError(w http.ResponseWriter, end providerws.InferenceResponseEnd)
 	case "error_context_exceeded":
 		writeError(w, wsEndHTTPStatus(end.Status), "context_exceeds_capacity", "Request exceeds provider context capacity")
 	case "error_model_not_loaded", "error_queue_full":
-		writeError(w, wsEndHTTPStatus(end.Status), "provider_unavailable", "Selected provider is not reachable")
+		writeError(w, wsEndHTTPStatus(end.Status), "no_provider_available", "Selected provider is not reachable")
 	case "cancelled":
 		return
 	default:

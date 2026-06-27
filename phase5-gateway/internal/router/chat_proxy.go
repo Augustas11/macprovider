@@ -291,7 +291,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			return
 		}
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "provider_unavailable", "No provider available")
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "no_provider_available", "No provider available")
 		return
 	}
 	if resp.StatusCode == http.StatusGatewayTimeout {
@@ -356,7 +356,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "provider_unavailable", "No provider available")
+		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "no_provider_available", "No provider available")
 		return
 	}
 	if resp.StatusCode != http.StatusOK {
