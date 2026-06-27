@@ -75,6 +75,7 @@ def model_dump(value: Any) -> dict[str, Any]:
     raise AssertionError(f"object is not pydantic-dumpable: {type(value)!r}")
 
 
+# Security model: emitted `tool_calls[]` reflect model output, not provider-verified intent; buyer-side agent frameworks MUST validate before execution.
 def assert_tool_call(call: Any) -> dict[str, Any]:
     if call.function.name != "find_definition":
         raise AssertionError(f"unexpected function name: {call.function.name!r}")
