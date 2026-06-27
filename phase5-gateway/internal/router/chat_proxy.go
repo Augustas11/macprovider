@@ -815,13 +815,16 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
-// writeSSEError emits the FR-B6 mid-stream OpenAI-compatible error
-// envelope followed by `data: [DONE]`. errType is the OpenAI error
-// `type` field; the canonical SPEC-002 FR-B6 example for a mid-stream
-// provider disconnect uses `server_error`. Other call sites
-// (malformed upstream, gateway-side truncation, max-tokens overflow)
-// continue to use `api_error` — the spec only fixes the
-// provider-disconnect shape.
+// writeSSEError emits an SSE error event followed by `data: [DONE]`.
+// errType is the OpenAI error `type` field. Call sites use this
+// helper for several mid-stream error shapes: malformed upstream
+// chunks (api_error / stream_malformed), max-tokens overflow
+// (api_error / stream_output_exceeded), gateway-side line
+// truncation (api_error / stream_truncated), and the SPEC-002
+// FR-B6 provider-disconnect envelope (server_error /
+// provider_disconnected). The FR-B6 envelope is built via the
+// dedicated writeProviderDisconnectedSSE wrapper so its strings
+// are centralized and resistant to drift.
 func writeSSEError(w http.ResponseWriter, message, errType, code string) {
 	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": errType, "code": code}})
 	_, _ = w.Write([]byte("data: "))

@@ -57,7 +57,38 @@ phase5-gateway/internal/router/server_test.go
 
 ## Scope: PR-INTRODUCED findings only
 
-Per the locked three-lane convergence convention.
+Per the locked three-lane convergence convention: this audit gates
+this PR on findings INTRODUCED by the diff against origin/main.
+Pre-existing vulnerabilities visible to your audit but NOT modified
+by this PR — even if THIS PR makes them more salient or more
+exploitable in practice — are out of scope for blocking
+convergence. They may be worth filing as separate issues but they
+do NOT block this PR.
+
+Specifically out of scope for THIS PR:
+
+- **Gateway-side Idempotency-Key dedupe.** The diff changes only
+  the SSE error envelope strings (`code`, `type`, `message`). It
+  does NOT introduce or modify the gateway's reservation/
+  settlement flow, nor its Idempotency-Key handling. The pre-
+  existing gateway-side dedupe gap is filed as
+  [#200](https://github.com/Augustas11/macprovider/issues/200)
+  with full repro + fix options + acceptance. PR #199 (this PR)
+  is correct per SPEC-002 FR-B6 — the spec explicitly mandates
+  `type: server_error` for the mid-stream-disconnect envelope,
+  and a buyer's retry policy is on the buyer's SDK, not the
+  gateway's choice of envelope type.
+
+  Re-finding this as a CRITICAL or MAJOR is a duplicate of #200's
+  intent; drop it from your findings and add a one-line NOTE
+  referencing the issue.
+
+If you find a NEW security issue that this PR genuinely introduces
+— e.g., the new envelope leaks internal state, the new helper has
+a path-traversal-style flaw, the new comment is wrong about
+something load-bearing — surface it as MAJOR/CRITICAL. But the
+specific "server_error is retriable → no gateway dedupe → double-
+billing risk" path is out of scope here.
 
 ## Output format
 
