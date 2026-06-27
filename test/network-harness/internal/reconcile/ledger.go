@@ -7,6 +7,9 @@ package reconcile
 import (
 	"database/sql"
 	"fmt"
+	"os"
+	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/augstar/macprovider-network-harness/internal/buyer"
@@ -49,7 +52,10 @@ type Mismatch struct {
 
 // Run opens both SQLite DBs read-only and reconciles harness results
 // against rows whose ts_utc / created_at fall within the run window
-// (with a small grace pad to absorb settlement latency).
+// (with a small grace pad to absorb settlement latency). When the
+// scenario target uses *_db_ssh, a WAL-consistent snapshot is pulled
+// to a local temp file before the query runs; temp files are cleaned
+// up on return.
 func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Time) (*Result, error) {
 	pad := 5 * time.Second
 	winStart := startUTC.Add(-pad)
@@ -61,13 +67,25 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 		HarnessRequests: len(results),
 	}
 
-	coordRows, err := queryCoordinator(sc.Target.CoordinatorDBPath, winStart, winEnd)
+	coordPath, cleanupC, err := resolveDB(sc.Target.CoordinatorDBPath, sc.Target.CoordinatorDBSSH, "coordinator")
+	if err != nil {
+		return r, fmt.Errorf("coordinator snapshot: %w", err)
+	}
+	defer cleanupC()
+
+	gwPath, cleanupG, err := resolveDB(sc.Target.GatewayDBPath, sc.Target.GatewayDBSSH, "gateway")
+	if err != nil {
+		return r, fmt.Errorf("gateway snapshot: %w", err)
+	}
+	defer cleanupG()
+
+	coordRows, err := queryCoordinator(coordPath, winStart, winEnd)
 	if err != nil {
 		return r, fmt.Errorf("coordinator query: %w", err)
 	}
 	r.CoordinatorRows = len(coordRows)
 
-	gwRows, err := queryGateway(sc.Target.GatewayDBPath, winStart, winEnd)
+	gwRows, err := queryGateway(gwPath, winStart, winEnd)
 	if err != nil {
 		return r, fmt.Errorf("gateway query: %w", err)
 	}
@@ -194,4 +212,64 @@ func openRO(path string) (*sql.DB, error) {
 	// during/after the run.
 	dsn := fmt.Sprintf("file:%s?mode=ro&_journal_mode=WAL", path)
 	return sql.Open("sqlite", dsn)
+}
+
+// resolveDB returns a local filesystem path to a queryable SQLite file
+// plus a cleanup callback. When `sshSpec` is set (form
+// "user@host:/abs/path/to.db"), a WAL-consistent snapshot is pulled
+// using sqlite3's VACUUM INTO over SSH and SCP'd down. The returned
+// cleanup removes the local temp file and best-effort removes the
+// remote snapshot. When `localPath` is set, it's returned as-is and
+// cleanup is a no-op. Neither set returns "" and the caller decides.
+func resolveDB(localPath, sshSpec, tag string) (string, func(), error) {
+	noop := func() {}
+	if sshSpec == "" {
+		return localPath, noop, nil
+	}
+	at := strings.Index(sshSpec, "@")
+	colon := strings.Index(sshSpec, ":")
+	if at < 0 || colon < 0 || colon < at {
+		return "", noop, fmt.Errorf("ssh spec must be user@host:/path (got %q)", sshSpec)
+	}
+	userHost := sshSpec[:colon]
+	remotePath := sshSpec[colon+1:]
+	if remotePath == "" {
+		return "", noop, fmt.Errorf("ssh spec missing remote path: %q", sshSpec)
+	}
+
+	localTmp, err := os.CreateTemp("", "harness-"+tag+"-*.db")
+	if err != nil {
+		return "", noop, err
+	}
+	localTmp.Close()
+	localPathTmp := localTmp.Name()
+
+	remoteSnap := fmt.Sprintf("/tmp/harness-%s-%d.db", tag, os.Getpid())
+
+	// Step 1: VACUUM INTO on the remote side produces a consistent copy.
+	backupCmd := fmt.Sprintf("sqlite3 %q \"VACUUM INTO '%s'\"", remotePath, remoteSnap)
+	if out, err := runSSH(userHost, backupCmd); err != nil {
+		os.Remove(localPathTmp)
+		return "", noop, fmt.Errorf("remote sqlite3 backup: %w (output: %s)", err, strings.TrimSpace(out))
+	}
+
+	// Step 2: SCP the snapshot down.
+	scp := exec.Command("scp", "-q", fmt.Sprintf("%s:%s", userHost, remoteSnap), localPathTmp)
+	if out, err := scp.CombinedOutput(); err != nil {
+		_, _ = runSSH(userHost, fmt.Sprintf("rm -f %q", remoteSnap))
+		os.Remove(localPathTmp)
+		return "", noop, fmt.Errorf("scp snapshot: %w (output: %s)", err, strings.TrimSpace(string(out)))
+	}
+
+	cleanup := func() {
+		_, _ = runSSH(userHost, fmt.Sprintf("rm -f %q", remoteSnap))
+		os.Remove(localPathTmp)
+	}
+	return localPathTmp, cleanup, nil
+}
+
+func runSSH(userHost, remoteCmd string) (string, error) {
+	cmd := exec.Command("ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", userHost, remoteCmd)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }

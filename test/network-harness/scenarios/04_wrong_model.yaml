@@ -37,6 +37,8 @@ target:
   gateway_url: https://api.streamvc.live
   coordinator_url: https://coordinator.streamvc.live
   buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-coordinator/coordinator.db
+  gateway_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-gateway/gateway.db
 
 buyers:
   count: 3

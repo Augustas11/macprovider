@@ -36,8 +36,13 @@ expected_shape: |
 target:
   gateway_url: https://api.streamvc.live
   coordinator_url: https://coordinator.streamvc.live
-  # DB paths intentionally unset for live runs — I1 marks skipped.
   buyer_token: ${BUYER_TOKEN}
+  # Live ledger reconciliation: harness SCPs a VACUUM INTO snapshot of
+  # each SQLite file from Pearl before reconcile. Set PEARL_SSH to the
+  # ssh target (e.g. PEARL_SSH=root@pearl-vps.streamvc.live). Adjust the
+  # paths if the production install layout differs.
+  coordinator_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-coordinator/coordinator.db
+  gateway_db_ssh: ${PEARL_SSH}:/var/lib/macprovider-gateway/gateway.db
 
 buyers:
   count: 1

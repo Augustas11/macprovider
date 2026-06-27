@@ -16,6 +16,7 @@ import (
 
 	"github.com/augstar/macprovider-network-harness/internal/artifact"
 	"github.com/augstar/macprovider-network-harness/internal/buyer"
+	"github.com/augstar/macprovider-network-harness/internal/chaos"
 	"github.com/augstar/macprovider-network-harness/internal/invariants"
 	"github.com/augstar/macprovider-network-harness/internal/metrics"
 	"github.com/augstar/macprovider-network-harness/internal/reconcile"
@@ -107,30 +108,47 @@ func cmdRun(args []string) error {
 
 	meta := runmeta.New(sc.Name, scenarioPath)
 
-	log.Printf("scenario %q: starting %d buyers, target %s for %s",
-		sc.Name, sc.Buyers.Count, sc.Target.GatewayURL, sc.Duration)
+	log.Printf("scenario %q: starting %d buyers, target %s for %s (chaos events: %d)",
+		sc.Name, sc.Buyers.Count, sc.Target.GatewayURL, sc.Duration, len(sc.ChaosEvents))
+
+	var chaosRunner *chaos.Runner
+	if len(sc.ChaosEvents) > 0 {
+		chaosRunner = chaos.NewRunner(sc.ChaosEvents)
+		chaosRunner.Start(ctx)
+	}
 
 	results, err := buyer.Run(ctx, sc)
 	if err != nil {
 		return fmt.Errorf("buyer run: %w", err)
 	}
 	log.Printf("scenario %q: completed %d requests", sc.Name, len(results))
+	if chaosRunner != nil {
+		chaosRunner.Wait()
+	}
 
 	meta.Finish()
 
 	summary := metrics.Aggregate(results)
 
 	var ledger *reconcile.Result
-	if sc.Target.CoordinatorDBPath != "" && sc.Target.GatewayDBPath != "" {
+	hasLocalDBs := sc.Target.CoordinatorDBPath != "" && sc.Target.GatewayDBPath != ""
+	hasRemoteDBs := sc.Target.CoordinatorDBSSH != "" && sc.Target.GatewayDBSSH != ""
+	switch {
+	case hasLocalDBs || hasRemoteDBs:
 		ledger, err = reconcile.Run(sc, results, meta.StartUTC, meta.EndUTC)
 		if err != nil {
 			log.Printf("reconcile: %v (continuing with partial artifact)", err)
 		}
-	} else {
-		log.Printf("reconcile: skipped (no coordinator_db_path / gateway_db_path in target)")
+	default:
+		log.Printf("reconcile: skipped (no coordinator_db_path/_ssh and gateway_db_path/_ssh in target)")
 	}
 
 	inv := invariants.Evaluate(sc, results, summary, ledger)
+
+	var chaosResults []chaos.EventResult
+	if chaosRunner != nil {
+		chaosResults = chaosRunner.Results()
+	}
 
 	bundle := &artifact.Bundle{
 		Scenario:     sc,
@@ -140,6 +158,7 @@ func cmdRun(args []string) error {
 		Reconcile:    ledger,
 		Invariants:   inv,
 		Meta:         meta,
+		ChaosEvents:  chaosResults,
 	}
 	if err := bundle.Write(*outDir); err != nil {
 		return fmt.Errorf("write artifact bundle: %w", err)

@@ -52,6 +52,22 @@ type Scenario struct {
 
 	// RequestTimeout is a per-request hard cap. Default 120s if unset.
 	RequestTimeout time.Duration `yaml:"request_timeout"`
+
+	// ChaosEvents is a timeline of shell commands fired alongside the
+	// buyer fleet. Used to script provider WS kills, restarts, network
+	// throttles for chaos scenarios. Each command runs via /bin/sh -c;
+	// stdout/stderr/exit are captured into run_meta.json.
+	ChaosEvents []ChaosEvent `yaml:"chaos_events"`
+}
+
+// ChaosEvent is one scheduled shell action. `At` is measured from
+// scenario start (the moment buyer.Run begins). Late events whose `At`
+// falls outside the scenario `Duration` are still executed, so a cleanup
+// command like "restart the provider we just killed" reliably fires.
+type ChaosEvent struct {
+	At          time.Duration `yaml:"at"`
+	Command     string        `yaml:"command"`
+	Description string        `yaml:"description"`
 }
 
 // Target identifies the running stack the harness fires against. The
@@ -67,6 +83,16 @@ type Target struct {
 	// skipped and I1 is marked skipped (not failed).
 	CoordinatorDBPath string `yaml:"coordinator_db_path"`
 	GatewayDBPath     string `yaml:"gateway_db_path"`
+
+	// CoordinatorDBSSH + GatewayDBSSH enable I1 against a live remote
+	// stack (Pearl). Form: "user@host:/absolute/path/to.db". When set,
+	// the harness pulls a WAL-consistent snapshot via:
+	//   ssh user@host "sqlite3 /path 'VACUUM INTO /tmp/snap.db'"
+	//   scp user@host:/tmp/snap.db <local-tmp>
+	//   ssh user@host "rm /tmp/snap.db"
+	// then opens the local copy read-only. Set both or neither.
+	CoordinatorDBSSH string `yaml:"coordinator_db_ssh"`
+	GatewayDBSSH     string `yaml:"gateway_db_ssh"`
 
 	// BuyerToken is the bearer token sent in Authorization header.
 	// Either BuyerToken or DemoIdentity must be set.
@@ -152,6 +178,23 @@ func (s *Scenario) Validate() error {
 	}
 	if s.Target.BuyerToken != "" && s.Target.DemoIdentity != "" {
 		return fmt.Errorf("target.buyer_token and target.demo_identity are mutually exclusive")
+	}
+	if (s.Target.CoordinatorDBSSH != "") != (s.Target.GatewayDBSSH != "") {
+		return fmt.Errorf("target.coordinator_db_ssh and target.gateway_db_ssh must be set together")
+	}
+	if s.Target.CoordinatorDBSSH != "" && s.Target.CoordinatorDBPath != "" {
+		return fmt.Errorf("target.coordinator_db_ssh and target.coordinator_db_path are mutually exclusive")
+	}
+	if s.Target.GatewayDBSSH != "" && s.Target.GatewayDBPath != "" {
+		return fmt.Errorf("target.gateway_db_ssh and target.gateway_db_path are mutually exclusive")
+	}
+	for i, c := range s.ChaosEvents {
+		if c.Command == "" {
+			return fmt.Errorf("chaos_events[%d].command is required", i)
+		}
+		if c.At < 0 {
+			return fmt.Errorf("chaos_events[%d].at must be >= 0", i)
+		}
 	}
 	if s.Buyers.Count < 1 {
 		return fmt.Errorf("buyers.count must be >= 1")
