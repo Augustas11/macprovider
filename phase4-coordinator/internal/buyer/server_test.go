@@ -4160,14 +4160,14 @@ func TestChatCompletionsColdStartRaceReturnsNoProviderAvailable(t *testing.T) {
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
 
 	// 3. Buyer asks for the recently-seen model. Must be 503
-	// no_provider_available, NOT 404 model_not_found.
+	// no_provider_available, NOT 404 model_not_found. Assert the full
+	// OpenAI error envelope shape so SDK clients can correctly route
+	// on (code, type), not just status (code-lane R1 MAJOR).
 	rr := postChat(t, server, []byte(`{"model":"model-a","messages":[{"role":"user","content":"hello"}]}`), nil)
 	if rr.Code != http.StatusServiceUnavailable {
 		t.Fatalf("cold-start race status = %d, want 503; body=%s", rr.Code, rr.Body.String())
 	}
-	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"no_provider_available"`)) {
-		t.Fatalf("cold-start race body = %s, want no_provider_available", rr.Body.String())
-	}
+	assertOpenAIErrorEnvelope(t, rr, "no_provider_available", "service_unavailable")
 
 	// 4. A model id NEVER advertised in this coordinator's lifetime
 	// still returns 404 model_not_found — the never-seen path is
@@ -4176,8 +4176,38 @@ func TestChatCompletionsColdStartRaceReturnsNoProviderAvailable(t *testing.T) {
 	if unseen.Code != http.StatusNotFound {
 		t.Fatalf("never-seen model status = %d, want 404; body=%s", unseen.Code, unseen.Body.String())
 	}
-	if !bytes.Contains(unseen.Body.Bytes(), []byte(`"code":"model_not_found"`)) {
-		t.Fatalf("never-seen model body = %s, want model_not_found", unseen.Body.String())
+	assertOpenAIErrorEnvelope(t, unseen, "model_not_found", "invalid_request_error")
+}
+
+// assertOpenAIErrorEnvelope decodes the response body and verifies
+// the full OpenAI error envelope shape (error.code, error.type,
+// error.message non-empty, error.param is null). Used by the cold-
+// start race test to ensure OpenAI-compatible SDK clients can route
+// on a structured error rather than a substring match.
+func assertOpenAIErrorEnvelope(t *testing.T, rr *httptest.ResponseRecorder, wantCode, wantType string) {
+	t.Helper()
+	var body struct {
+		Error struct {
+			Code    string `json:"code"`
+			Type    string `json:"type"`
+			Message string `json:"message"`
+			Param   any    `json:"param"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("error envelope decode failed: %v; body=%s", err, rr.Body.String())
+	}
+	if body.Error.Code != wantCode {
+		t.Fatalf("error.code = %q, want %q; body=%s", body.Error.Code, wantCode, rr.Body.String())
+	}
+	if body.Error.Type != wantType {
+		t.Fatalf("error.type = %q, want %q; body=%s", body.Error.Type, wantType, rr.Body.String())
+	}
+	if body.Error.Message == "" {
+		t.Fatalf("error.message is empty; body=%s", rr.Body.String())
+	}
+	if body.Error.Param != nil {
+		t.Fatalf("error.param = %v, want null; body=%s", body.Error.Param, rr.Body.String())
 	}
 }
 

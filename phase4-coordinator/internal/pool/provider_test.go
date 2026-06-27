@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1041,33 +1042,110 @@ func TestModelKnownPersistsInLifetimeAccumulator(t *testing.T) {
 
 // TestSeenModelsLifetimeCap pins the PERF-5 reconciliation in issue
 // #185: the lifetime accumulator is bounded at maxSeenModelsLifetime.
-// Beyond the cap, further inserts silently drop, degrading cold-start
-// races to legacy 404 behavior for the dropped ids without unbounded
-// growth.
+// Beyond the cap, further inserts drop (with a warn-once log + a
+// counter), degrading cold-start races to legacy 404 behavior for the
+// dropped ids without unbounded growth.
+//
+// Per-provider gating (security-lane MAJOR R1): the cap exhaustion
+// scenario must be driven via DISTINCT providers, since one provider
+// is limited to maxSeenModelsPerProvider distinct ids by design.
 func TestSeenModelsLifetimeCap(t *testing.T) {
 	registry := NewRegistry(nil)
-	start := time.Unix(1716768000, 0).UTC()
-	registry.Register(&Provider{
-		ProviderID:       "p1",
-		AssignedID:       "s1",
-		ModelID:          "model-anchor",
-		State:            StateReady,
-		SlotsFree:        1,
-		SlotsTotal:       1,
-		LastHeartbeatAt:  start,
-		LastActivityAt:   start,
-		MaxConcurrency:   1,
-		MaxContextTokens: 20000,
-	}, nil)
-	// Drive the lifetime set to cap via the locked record path.
+
+	// Drive the lifetime set above cap via the locked record path,
+	// using fresh providers per per-provider-budget window.
 	registry.mu.Lock()
-	for i := 0; i < maxSeenModelsLifetime+10; i++ {
-		registry.recordSeenModelLocked("p1", fmt.Sprintf("synthetic-%d", i))
+	idsPerProvider := maxSeenModelsPerProvider
+	providers := (maxSeenModelsLifetime + 10 + idsPerProvider - 1) / idsPerProvider
+	for p := 0; p < providers; p++ {
+		pid := fmt.Sprintf("provider-%d", p)
+		for i := 0; i < idsPerProvider; i++ {
+			modelID := fmt.Sprintf("synthetic-%d-%d", p, i)
+			registry.recordSeenModelLocked(pid, modelID)
+		}
 	}
+
 	got := len(registry.seenModelsLifetime)
+	dropped := registry.lifetimeCapDroppedCount
+	warned := registry.lifetimeCapWarnedOnce
+	// Confirm the early id is retained (filled cap, not cleared).
+	_, earlyRetained := registry.seenModelsLifetime["synthetic-0-0"]
+	// A late id beyond cap must be absent.
+	_, lateAbsent := registry.seenModelsLifetime[fmt.Sprintf("synthetic-%d-%d", providers-1, idsPerProvider-1)]
 	registry.mu.Unlock()
-	if got > maxSeenModelsLifetime {
-		t.Fatalf("seenModelsLifetime = %d entries, want <= %d (cap)", got, maxSeenModelsLifetime)
+
+	if got != maxSeenModelsLifetime {
+		t.Fatalf("seenModelsLifetime = %d entries, want exactly %d (cap)", got, maxSeenModelsLifetime)
+	}
+	if !earlyRetained {
+		t.Fatal("seenModelsLifetime dropped the early synthetic-0-0 entry; cap policy is supposed to drop tail, not head")
+	}
+	if lateAbsent {
+		t.Fatal("seenModelsLifetime contains a beyond-cap entry; cap is not enforced")
+	}
+	if dropped == 0 {
+		t.Fatal("lifetimeCapDroppedCount = 0 after driving cap exhaustion; observability counter not wired")
+	}
+	if !warned {
+		t.Fatal("lifetimeCapWarnedOnce = false after driving cap exhaustion; warn-once observability not wired")
+	}
+
+	// Probe ModelKnown for both retained and dropped ids — confirms
+	// the SPEC § 7.2 contract degrades to legacy 404 only for the
+	// dropped ids.
+	if !registry.ModelKnown("synthetic-0-0") {
+		t.Fatal("ModelKnown(synthetic-0-0) = false; retained id not visible to routing decision")
+	}
+	if registry.ModelKnown(fmt.Sprintf("synthetic-%d-%d", providers-1, idsPerProvider-1)) {
+		t.Fatal("ModelKnown(beyond-cap-id) = true; dropped id is leaking into routing decision")
+	}
+}
+
+// TestRecordSeenModelLockedRejectsOversizeID pins the ISS-185 R1
+// security-lane CRITICAL fix: model_id strings beyond
+// maxModelIDByteLen are not persisted into either the per-provider
+// attribution map or the lifetime accumulator. Without this bound an
+// admitted provider could store arbitrarily-large strings in
+// process-lifetime memory.
+func TestRecordSeenModelLockedRejectsOversizeID(t *testing.T) {
+	registry := NewRegistry(nil)
+	oversize := strings.Repeat("x", maxModelIDByteLen+1)
+	registry.mu.Lock()
+	registry.recordSeenModelLocked("p1", oversize)
+	gotLifetime := len(registry.seenModelsLifetime)
+	gotPerProvider := len(registry.seenModelsByProvider["p1"])
+	registry.mu.Unlock()
+	if gotLifetime != 0 {
+		t.Fatalf("oversize id leaked into seenModelsLifetime: %d entries", gotLifetime)
+	}
+	if gotPerProvider != 0 {
+		t.Fatalf("oversize id leaked into seenModelsByProvider[p1]: %d entries", gotPerProvider)
+	}
+}
+
+// TestRecordSeenModelLockedPerProviderBudgetGatesLifetime pins the
+// ISS-185 R1 security-lane MAJOR fix: a single provider can contribute
+// at most maxSeenModelsPerProvider distinct ids to seenModelsLifetime
+// during one session, so a churning provider cannot consume the
+// lifetime cap past its per-provider budget.
+func TestRecordSeenModelLockedPerProviderBudgetGatesLifetime(t *testing.T) {
+	registry := NewRegistry(nil)
+	registry.mu.Lock()
+	// Fire 2x per-provider budget worth of distinct ids from one
+	// provider. Only the first maxSeenModelsPerProvider should be
+	// retained; the remainder should NOT consume lifetime capacity.
+	for i := 0; i < 2*maxSeenModelsPerProvider; i++ {
+		registry.recordSeenModelLocked("noisy", fmt.Sprintf("id-%d", i))
+	}
+	gotLifetime := len(registry.seenModelsLifetime)
+	gotPerProvider := len(registry.seenModelsByProvider["noisy"])
+	registry.mu.Unlock()
+	if gotPerProvider != maxSeenModelsPerProvider {
+		t.Fatalf("seenModelsByProvider[noisy] = %d, want %d", gotPerProvider, maxSeenModelsPerProvider)
+	}
+	if gotLifetime != maxSeenModelsPerProvider {
+		t.Fatalf("seenModelsLifetime = %d, want %d (one provider must NOT consume lifetime past per-provider budget)",
+			gotLifetime, maxSeenModelsPerProvider)
 	}
 }
 
