@@ -252,7 +252,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
-	upReq.Header.Set("X-Request-ID", newUUID())
+	// SPEC-006 v0.X R-G2 / SPEC-002 v1.4.2 R-2: gateway forwards the
+	// buyer-visible request id verbatim so the coordinator's
+	// request_log.external_request_id matches the gateway's
+	// usage_events.request_id on a per-request basis.
+	upReq.Header.Set("X-Request-ID", requestID(r))
 	resp, err := s.client.Do(upReq)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -354,7 +358,10 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
-	upReq.Header.Set("X-Request-ID", newUUID())
+	// SPEC-006 v0.X R-G2: gateway forwards the buyer-visible request id
+	// on every forwarded buyer-facing request so the coordinator
+	// audit log joins to gateway usage on a single key.
+	upReq.Header.Set("X-Request-ID", requestID(r))
 	// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
 	// OperatorKey so a not-yet-upgraded coordinator keeps accepting us.
 	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())

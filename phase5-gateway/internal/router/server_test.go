@@ -1589,6 +1589,38 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	}
 }
 
+// SPEC-006 v0.X R-G2: gateway forwards buyer X-Request-ID on every
+// buyer-facing coordinator proxy path, not only /v1/chat/completions.
+// /v1/models is the other buyer-facing surface; this test pins that
+// behavior so a refactor doesn't silently revert it to newUUID().
+func TestModelsForwardsBuyerRequestID(t *testing.T) {
+	var capturedModelsXRequestID string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/models" {
+			capturedModelsXRequestID = r.Header.Get("X-Request-ID")
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"object":"list","data":[]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_xrequestid")
+
+	const buyerID = "66666666-6666-4666-8666-666666666666"
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("X-Real-IP", "1.2.3.4")
+	req.Header.Set("X-Request-ID", buyerID)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("models status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if capturedModelsXRequestID != buyerID {
+		t.Fatalf("forwarded X-Request-ID on /v1/models = %q, want buyer-supplied %q", capturedModelsXRequestID, buyerID)
+	}
+}
+
 func TestStickyConversationDerivesInternalHeaderAndStripsInjection(t *testing.T) {
 	var captured http.Header
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

@@ -403,18 +403,39 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 
 // ensureIndexes creates request_log indexes that depend on
 // ensureColumns having already added their underlying columns.
-// CREATE INDEX IF NOT EXISTS is idempotent; we don't gate by an
-// existence check because index existence isn't tracked alongside
-// columns (PRAGMA table_info doesn't list indexes).
+//
+// We probe sqlite_master first so the write lock + table scan that
+// `CREATE INDEX` triggers is paid exactly once per coordinator deploy
+// lifetime, not on every process restart. `CREATE INDEX IF NOT EXISTS`
+// is idempotent but still acquires a write lock and inspects the table
+// to confirm the existing index matches — on a large request_log that
+// would stall every restart for the duration of the scan. The gating
+// query is a cheap point read against sqlite_master.
 func (s *Store) ensureIndexes(ctx context.Context) error {
-	for _, ddl := range []string{
-		// SPEC-002 v1.4.2 R-2: reconciliation scans join gateway
-		// usage_events to request_log on external_request_id; the
-		// partial-NULL index keeps the index small (legacy rows have
-		// NULL and are not indexed).
-		`CREATE INDEX IF NOT EXISTS idx_request_log_external_request_id ON request_log(external_request_id) WHERE external_request_id IS NOT NULL`,
-	} {
-		if _, err := s.db.ExecContext(ctx, ddl); err != nil {
+	// SPEC-002 v1.4.2 R-2: reconciliation scans join gateway
+	// usage_events to request_log on external_request_id; the
+	// partial-NULL index keeps the index small (legacy rows have
+	// NULL and are not indexed).
+	indexes := []struct {
+		name string
+		ddl  string
+	}{
+		{
+			name: "idx_request_log_external_request_id",
+			ddl:  `CREATE INDEX idx_request_log_external_request_id ON request_log(external_request_id) WHERE external_request_id IS NOT NULL`,
+		},
+	}
+	for _, ix := range indexes {
+		var existing string
+		switch err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name=?`, ix.name).Scan(&existing); err {
+		case nil:
+			continue
+		case sql.ErrNoRows:
+			// fall through and create
+		default:
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, ix.ddl); err != nil {
 			return err
 		}
 	}
