@@ -54,8 +54,13 @@ in phase B.
 
 ```
 go build -o harness ./cmd/harness
+export BUYER_TOKEN="..."     # scenarios use ${BUYER_TOKEN} so it's never committed
 ./harness run scenarios/smoke.yaml --out artifacts/smoke-run-1
 ```
+
+Scenario YAML supports `${VAR}` expansion. Required secrets (`BUYER_TOKEN`,
+optionally `OPERATOR_TOKEN`) are read from the environment at load time.
+Unset vars expand to empty and `Validate()` rejects empty required fields.
 
 Exit codes:
 
@@ -69,18 +74,47 @@ Exit codes:
 ## Pointing at different stacks
 
 The harness does **not** spawn coordinator/gateway. Caller is responsible.
-Three typical targets:
 
-- **Local stack (synthetic provider)** — start via `test/integration`
-  helpers or `make dev-stack`. Use `127.0.0.1` URLs and `/tmp` DB paths.
-  Best for harness self-validation and fast iteration.
-- **Local stack (real M-series provider)** — same coordinator+gateway,
-  but with an actual `macprovider-cli serve` attached over WS. Catches
-  real model timing / sleep / thermal quirks.
-- **Pearl coordinator + remote providers** — full-fidelity. Leave
-  `coordinator_db_path` / `gateway_db_path` unset; I1 will mark skipped
-  (we don't read prod DBs from the harness machine). Other invariants
-  still run.
+**Default for phase A is the live network** at `https://api.streamvc.live`
+with the user's own M-series providers attached. All committed scenarios
+target this. I1 is marked SKIPPED on live (no read access to Pearl's
+SQLite DBs from the harness machine); the other three invariants run.
+
+Other targets are supported by editing `target.gateway_url` /
+`target.coordinator_url` in a scenario:
+
+- **Local stack (real M-series provider)** — start coordinator+gateway
+  locally, attach `macprovider-cli serve` over WS. Set `coordinator_db_path`
+  + `gateway_db_path` to the local SQLite files to enable I1.
+- **Local stack (synthetic provider)** — via `test/integration` helpers.
+  Best for harness self-validation, but won't catch real-model quirks.
+
+## Cost discipline
+
+Scenarios target the live network and consume real provider time. The
+committed scenarios use conservative `max_tokens` (16–32) and small
+buyer fleets — a full pass of all 4 scenarios costs cents, not dollars.
+Before scaling a scenario up (e.g., 100 buyers, longer outputs), think
+about the bill. Pearl logs every settled request; don't run 10× the
+same scenario without reading the artifact bundle first.
+
+## Chaos lane (deferred)
+
+Two scenarios from the original phase-A plan require lifecycle control
+we don't have remote-yank-able against live providers:
+
+- **Mid-stream provider drop** — kill a provider's WS connection at
+  token N of M and observe whether the gateway returns `stream_truncated`
+  (current behavior per `chat_proxy.go:495`), reroutes, or hangs.
+- **Cold-start race** — buyer prompt fires while a provider has just
+  connected (hello sent, model not yet loaded). Observable error vs.
+  queue vs. silent hang.
+
+Both are deferred to a future "chaos lane" PR that either runs against
+a local stack with a scripted provider WS kill, or coordinates with the
+operator to manually restart a Mac during a scripted scenario. Phase A
+proceeds without them; phase B triage will tell us how high to prioritize
+the chaos lane.
 
 ## Artifact bundle
 
@@ -100,10 +134,20 @@ For phase-B triage, the artifact bundle is the input. Read
 `ledger_reconcile.json` for billing drift; `per_request.jsonl` for any
 case the summaries elide.
 
-## Scenario YAML
+## Scenarios committed
 
-See [`scenarios/smoke.yaml`](scenarios/smoke.yaml) for the minimal example
-and [`internal/scenario/schema.go`](internal/scenario/schema.go) for the
+Run in order. Each captures a finding into its artifact bundle; phase B
+triage reads them as a set.
+
+| File | Shape | What it surfaces |
+|---|---|---|
+| [`scenarios/smoke.yaml`](scenarios/smoke.yaml) | 1 buyer × 3 prompts | Harness pipeline + basic reachability |
+| [`scenarios/01_happy_path_concurrent.yaml`](scenarios/01_happy_path_concurrent.yaml) | 5 buyers × 2 requests | Routing distribution under modest concurrency, two-model parity |
+| [`scenarios/02_capacity_contention.yaml`](scenarios/02_capacity_contention.yaml) | 10 buyers, burst at t=0 | Capacity-exhaustion behavior (queue / fail-fast / preflight reject) |
+| [`scenarios/03_sticky_multi_turn.yaml`](scenarios/03_sticky_multi_turn.yaml) | 3 buyers × 5 sequential | Whether sticky affinity is active in production |
+| [`scenarios/04_wrong_model.yaml`](scenarios/04_wrong_model.yaml) | 3 buyers, nonexistent model | Negative-path error code + no-charge guarantee |
+
+See [`internal/scenario/schema.go`](internal/scenario/schema.go) for the
 authoritative field reference.
 
 Key fields:

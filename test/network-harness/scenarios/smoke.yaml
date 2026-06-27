@@ -1,38 +1,43 @@
-# smoke.yaml — minimal scenario: 1 buyer, 3 sequential non-streaming
-# prompts against a local stack. Used to validate the harness itself
-# (parser, buyer client, artifact bundle, invariant evaluator) before
-# any real network-behavior scenario is wired up.
+# smoke.yaml — basic live sanity scenario against api.streamvc.live.
+# One buyer, three sequential non-streaming prompts, conservative
+# max_tokens so a run costs cents, not dollars.
 #
-# To run:
-#   1. Start coordinator + gateway locally (e.g. via test/integration
-#      helpers or `make dev-stack`).
-#   2. Note the buyer-token printed by the gateway during startup.
-#   3. ./harness run scenarios/smoke.yaml --out artifacts/smoke-$(date -u +%Y%m%dT%H%M%S)
+# Run:
+#   export BUYER_TOKEN="..."           # buyer bearer token
+#   ./harness run scenarios/smoke.yaml --out artifacts/smoke-$(date -u +%Y%m%dT%H%M%S)
 #
-# All 4 hard invariants are expected to PASS on a healthy local stack.
-# A failure here means the harness or the stack is misconfigured —
-# investigate before running real scenarios.
+# What this scenario validates:
+#   - The harness itself: parser, buyer client, artifact bundle, invariant evaluator.
+#   - That a single buyer can reach the live gateway, get routed to a provider,
+#     and receive a complete response.
+#
+# What gets recorded (phase A, descriptive):
+#   - HTTP status codes
+#   - Route attribution (X-Provider-Id if exposed)
+#   - TTFT and total latency
+#
+# What gets asserted (the 4 hard invariants):
+#   - I1 SKIPPED on live runs (no read access to Pearl SQLite DBs).
+#   - I2, I3, I4 all run.
 name: smoke
 description: |
-  Sanity scenario: one buyer fires three sequential non-streaming chat
-  completions. Validates the harness pipeline end-to-end without
-  exercising concurrency, streaming, or failover.
+  Live sanity scenario: one buyer fires three sequential non-streaming
+  chat completions against api.streamvc.live. Confirms harness pipeline
+  end-to-end without exercising concurrency, streaming, or failover.
 
 expected_shape: |
   Phase A note (descriptive, not asserted):
    - All 3 requests should return HTTP 200.
-   - One provider should appear in route_distribution.
-   - Token counts should reconcile cleanly across coordinator and gateway.
+   - At least one provider should appear in route_distribution if the
+     gateway exposes provider attribution headers.
    - No silent hangs, no orphan 5xx.
+   - I1 will be marked SKIPPED (DB paths intentionally unset for live).
 
 target:
-  gateway_url: http://127.0.0.1:8080
-  coordinator_url: http://127.0.0.1:8081
-  # Adjust these to wherever the local stack writes its DBs. Comment
-  # both out to skip I1 (reconciliation).
-  coordinator_db_path: /tmp/macprovider-coordinator.db
-  gateway_db_path: /tmp/macprovider-gateway.db
-  buyer_token: REPLACE_ME_WITH_LOCAL_BUYER_TOKEN
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  # DB paths intentionally unset for live runs — I1 marks skipped.
+  buyer_token: ${BUYER_TOKEN}
 
 buyers:
   count: 1
@@ -40,17 +45,17 @@ buyers:
   pattern: constant
   requests_per_buyer: 3
 
-duration: 60s
-request_timeout: 30s
+duration: 120s
+request_timeout: 60s
 silent_hang_threshold: 30s
 
 prompts:
-  - model: llama-3.1-8b-instruct
+  - model: llama-3.2-3b-instruct-4bit
     user: "Say hello in one short sentence."
     max_tokens: 32
-  - model: llama-3.1-8b-instruct
+  - model: llama-3.2-3b-instruct-4bit
     user: "What is 2+2? Answer in one word."
     max_tokens: 16
-  - model: llama-3.1-8b-instruct
+  - model: llama-3.2-3b-instruct-4bit
     user: "Name one ocean."
     max_tokens: 16

@@ -1,0 +1,65 @@
+# 03_sticky_multi_turn.yaml — 3 buyers each fire 5 sequential prompts
+# with the same conversation tag, to surface whether sticky affinity
+# is active and whether it survives across turns.
+#
+# What we want to learn (phase A, descriptive — recorded only):
+#  - Per the survey, stickyEnabled defaults FALSE on the coordinator
+#    (SPEC-004 v0.3.1 conservative posture). If we see each buyer's 5
+#    requests scattered across multiple providers, sticky is off — that's
+#    a valid finding to write into the contract addendum ("v1 contract:
+#    no sticky affinity in production").
+#  - If sticky IS on, all 5 turns from one buyer should land on the same
+#    provider until TTL expires.
+#  - PHASE B TRIAGE: do we WANT sticky for beta? If providers have model
+#    context cached, sticky reduces TTFT. If not, sticky just trades fairness.
+#
+# What gets asserted (the 4 hard invariants):
+#  - I1 SKIPPED on live runs.
+#  - I2, I3, I4 run.
+#
+# Note: this scenario CANNOT tell sticky on/off if the gateway doesn't
+# expose provider attribution headers. If route_distribution is empty
+# in the artifact bundle, file a follow-up to plumb X-Provider-Id.
+#
+# Cost estimate (15 requests x 32 max_tokens):
+#  Order of cents.
+name: sticky_multi_turn
+description: |
+  3 buyers, each sends 5 sequential non-streaming requests with the
+  same conversation_key implicit in their session. Used to detect
+  whether sticky routing fires on multi-turn workloads.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - 15 total requests (3 buyers x 5 each).
+   - route_distribution per-buyer: with sticky ON, each buyer's 5 requests
+     concentrate on one provider; with sticky OFF, they scatter.
+   - per_request.jsonl is the authoritative source — group by buyer_index
+     and look at route_provider_id distribution.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+
+buyers:
+  count: 3
+  stream: false
+  pattern: interval
+  interval_ms: 1500
+  requests_per_buyer: 5
+
+duration: 300s
+request_timeout: 60s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: llama-3.2-3b-instruct-4bit
+    user: "Turn 1: pick a fruit and remember it."
+    max_tokens: 24
+  - model: llama-3.2-3b-instruct-4bit
+    user: "Turn 2: what was the fruit?"
+    max_tokens: 24
+  - model: llama-3.2-3b-instruct-4bit
+    user: "Turn 3: count to three."
+    max_tokens: 24

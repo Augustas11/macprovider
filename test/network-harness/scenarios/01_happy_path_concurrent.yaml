@@ -1,0 +1,62 @@
+# 01_happy_path_concurrent.yaml — the network shape we're shipping into
+# beta: 2 providers serving 2 different models, 5 concurrent buyers,
+# requests rotate across both models.
+#
+# What we want to learn (phase A, descriptive — recorded only):
+#  - Does route_distribution show BOTH providers receiving requests, or
+#    does one starve the other?
+#  - When a buyer asks for model A, does it land on a model-A provider
+#    (not silently re-routed to model B)?
+#  - Are TTFT and tokens/sec consistent across providers, or wildly
+#    different (catches one Mac being throttled / sleeping)?
+#  - Does the error_taxonomy reveal any unexpected failure modes
+#    under modest concurrency?
+#
+# What gets asserted (the 4 hard invariants):
+#  - I1 SKIPPED on live runs.
+#  - I2, I3, I4 all run.
+#
+# Cost estimate (10 requests x 64 max_tokens):
+#  Order of cents, not dollars. Run with confidence.
+name: happy_path_concurrent
+description: |
+  5 concurrent buyers, each sends 2 sequential non-streaming requests,
+  prompts rotate across two model IDs. Validates the typical "beta day
+  1" load shape: low concurrency, two models, two providers.
+
+expected_shape: |
+  Phase A note (descriptive, not asserted):
+   - 10 total requests (5 buyers x 2 each).
+   - All should return HTTP 200.
+   - route_distribution should show both providers.
+   - Latency_ms histogram p95 should be comfortably under request_timeout.
+   - PHASE B TRIAGE: if route_distribution is heavily skewed, decide whether
+     that's a routing-contract bug (sortCandidates default objective biases
+     toward SlotsFree asc) or expected given provider capacity asymmetry.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+
+buyers:
+  count: 5
+  stream: false
+  pattern: constant
+  requests_per_buyer: 2
+
+duration: 180s
+request_timeout: 90s
+silent_hang_threshold: 30s
+
+prompts:
+  - model: llama-3.2-3b-instruct-4bit
+    user: "Reply with exactly the word: alpha."
+    max_tokens: 16
+  - model: llama-3.2-3b-instruct-4bit
+    user: "Reply with exactly the word: bravo."
+    max_tokens: 16
+  # If a second model is attached, edit one of these to its model_id.
+  # Phase A records what the network does — leaving both rows on the
+  # same model produces a "single-model-two-providers" finding, which
+  # is also valuable.

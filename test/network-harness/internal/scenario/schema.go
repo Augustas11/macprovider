@@ -8,11 +8,25 @@ package scenario
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// envVarPattern matches `${VAR}` references for safe expansion at load
+// time. Lets scenarios reference secrets like ${BUYER_TOKEN} without
+// committing them. Unset vars expand to "" — Validate() then rejects
+// any required field that's empty.
+var envVarPattern = regexp.MustCompile(`\$\{([A-Z_][A-Z0-9_]*)\}`)
+
+func expandEnv(input []byte) []byte {
+	return envVarPattern.ReplaceAllFunc(input, func(match []byte) []byte {
+		name := envVarPattern.FindSubmatch(match)[1]
+		return []byte(os.Getenv(string(name)))
+	})
+}
 
 // Scenario is the top-level YAML root.
 type Scenario struct {
@@ -99,6 +113,7 @@ func Load(path string) (*Scenario, error) {
 	if err != nil {
 		return nil, err
 	}
+	b = expandEnv(b)
 	var sc Scenario
 	if err := yaml.Unmarshal(b, &sc); err != nil {
 		return nil, fmt.Errorf("yaml: %w", err)
