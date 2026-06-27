@@ -1,8 +1,13 @@
 package buyer
 
 import (
+	"bytes"
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
 func TestTokenPointersFromUsageObjectPreservesInvalidUsageForBillingFault(t *testing.T) {
@@ -98,7 +103,8 @@ func TestIsCommitWorthyDataLine(t *testing.T) {
 		{"choices_with_delta_content_string", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n", true},
 		{"choices_with_delta_refusal_string", "data: {\"choices\":[{\"delta\":{\"refusal\":\"i cannot\"}}]}\n", true},
 		{"choices_with_delta_reasoning_string", "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n", true},
-		{"choices_with_delta_tool_calls_array", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"f\"}}]}}]}\n", true},
+		{"choices_with_delta_tool_calls_array_invalid_minimal_shape", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"f\"}}]}}]}\n", false},
+		{"choices_with_delta_tool_calls_array", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n", true},
 		{"choices_with_delta_function_call_object", "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"f\"}}}]}\n", true},
 		{"choices_with_message_content_string", "data: {\"choices\":[{\"message\":{\"content\":\"hi\"}}]}\n", true},
 
@@ -127,6 +133,199 @@ func TestIsCommitWorthyDataLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCommitSignal_EmptyToolCallObject_Rejected(t *testing.T) {
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{}]}}]}\n"
+	if isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("empty tool-call object must not be commit-worthy")
+	}
+}
+
+func TestCommitSignal_NonObjectArguments_Rejected(t *testing.T) {
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"[]\"}}]}}]}\n"
+	if isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("non-object function.arguments must not be commit-worthy")
+	}
+}
+
+func TestCommitSignal_DeepNestedArguments_Rejected(t *testing.T) {
+	arguments := "1"
+	for i := 0; i < 100; i++ {
+		arguments = `{"x":` + arguments + `}`
+	}
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":" + string(mustJSONString(t, arguments)) + "}}]}}]}\n"
+	if isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("deeply nested function.arguments must not be commit-worthy")
+	}
+}
+
+func TestCommitSignal_OversizedArguments_Rejected(t *testing.T) {
+	arguments := `{"blob":"` + strings.Repeat("x", 256*1024) + `"}`
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":" + string(mustJSONString(t, arguments)) + "}}]}}]}\n"
+	if isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("oversized function.arguments must not be commit-worthy")
+	}
+}
+
+func TestCommitSignal_MixedInvalidToolCalls_Rejected(t *testing.T) {
+	valid := `{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"{\"a\":1}"}}`
+	oversizedArguments := `{"blob":"` + strings.Repeat("x", 256*1024) + `"}`
+	oversized := `{"index":1,"id":"call_2","type":"function","function":{"name":"f","arguments":` + string(mustJSONString(t, oversizedArguments)) + `}}`
+	nonObjectArguments := `{"index":2,"id":"call_3","type":"function","function":{"name":"f","arguments":"[]"}}`
+	cases := []struct {
+		name  string
+		calls string
+	}{
+		{"empty_object_then_valid", `{}` + "," + valid},
+		{"valid_then_non_object_arguments", valid + "," + nonObjectArguments},
+		{"valid_then_oversized_arguments", valid + "," + oversized},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[" + tc.calls + "]}}]}\n"
+			if isCommitWorthyDataLine([]byte(line)) {
+				t.Fatal("mixed valid/invalid tool-call delta must not be commit-worthy")
+			}
+		})
+	}
+}
+
+func TestCommitSignal_InvalidToolCallsWithOtherSignals_Rejected(t *testing.T) {
+	oversizedArguments := `{"blob":"` + strings.Repeat("x", 256*1024) + `"}`
+	cases := []struct {
+		name  string
+		delta string
+	}{
+		{"role_with_empty_object", `"role":"assistant","tool_calls":[{}]`},
+		{"content_with_non_object_arguments", `"content":"x","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":"[]"}}]`},
+		{"reasoning_with_oversized_arguments", `"reasoning":"trace","tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"f","arguments":` + string(mustJSONString(t, oversizedArguments)) + `}}]`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "data: {\"choices\":[{\"delta\":{" + tc.delta + "}}]}\n"
+			if isCommitWorthyDataLine([]byte(line)) {
+				t.Fatal("invalid tool_calls must reject the whole delta even when another signal is present")
+			}
+		})
+	}
+}
+
+func TestCommitSignal_InvalidToolCallsStatusPoisonsPreCommit(t *testing.T) {
+	line := []byte("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{}]}}]}\n")
+	if got := inspectCommitWorthyDataLine(line); got != commitLineMalformedToolCalls {
+		t.Fatalf("inspectCommitWorthyDataLine = %v, want malformed tool_calls", got)
+	}
+	if isCommitWorthyDataLine(line) {
+		t.Fatal("malformed tool_calls must not be commit-worthy")
+	}
+}
+
+func TestCommitSignal_MinimalValidShape_Accepted(t *testing.T) {
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n"
+	if !isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("minimal valid tool-call delta must be commit-worthy")
+	}
+}
+
+func mustJSONString(t *testing.T, value string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("json marshal string: %v", err)
+	}
+	return raw
+}
+
+func TestRequestSidePassThrough_ToolCalls_ByteEquivalent(t *testing.T) {
+	body := []byte(`{
+			"model":"model-a",
+			"messages":[
+				{"role":"user","content":"plan"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_alpha-1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"ToolCallParser\",\"n\":1}"}},
+				{"id":"call.beta_2","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"phase3-binary/Sources/macprovider-cli/ToolCallParser.swift\"}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_alpha-1","content":"{\"ok\":true}"},
+				{"role":"tool","tool_call_id":"call.beta_2","content":"{\"bytes\":42}"}
+			]
+		}`)
+	req, status, code, msg := validateChatRequest(body)
+	if status != 0 {
+		t.Fatalf("validateChatRequest status=%d code=%s msg=%s", status, code, msg)
+	}
+
+	originalToolCalls, originalToolIDs := requestSideToolFields(t, body)
+	for _, tc := range []struct {
+		name            string
+		providerModelID string
+	}{
+		{"same_model_raw_path", "model-a"},
+		{"rewritten_model_path", "provider-model-b"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			outbound, err := dispatchBodyForProvider(req, pool.Provider{ModelID: tc.providerModelID})
+			if err != nil {
+				t.Fatalf("dispatchBodyForProvider: %v", err)
+			}
+			frameRaw, err := json.Marshal(providerws.InferenceRequest{
+				Type:      "inference_request",
+				RequestID: "req-ac24",
+				Stream:    false,
+				Body:      string(outbound),
+			})
+			if err != nil {
+				t.Fatalf("marshal inference request: %v", err)
+			}
+			var frame providerws.InferenceRequest
+			if err := json.Unmarshal(frameRaw, &frame); err != nil {
+				t.Fatalf("unmarshal inference request frame: %v", err)
+			}
+
+			forwardedToolCalls, forwardedToolIDs := requestSideToolFields(t, []byte(frame.Body))
+			if !bytes.Equal(originalToolCalls, forwardedToolCalls) {
+				t.Fatalf("tool_calls bytes mutated:\noriginal=%s\nforwarded=%s", originalToolCalls, forwardedToolCalls)
+			}
+			if len(originalToolIDs) != len(forwardedToolIDs) {
+				t.Fatalf("tool_call_id count = %d, want %d", len(forwardedToolIDs), len(originalToolIDs))
+			}
+			for i := range originalToolIDs {
+				if !bytes.Equal(originalToolIDs[i], forwardedToolIDs[i]) {
+					t.Fatalf("tool_call_id[%d] bytes = %s, want %s", i, forwardedToolIDs[i], originalToolIDs[i])
+				}
+			}
+		})
+	}
+}
+
+func requestSideToolFields(t *testing.T, body []byte) (json.RawMessage, []json.RawMessage) {
+	t.Helper()
+	var parsed struct {
+		Messages []struct {
+			Role       string          `json:"role"`
+			ToolCalls  json.RawMessage `json:"tool_calls"`
+			ToolCallID json.RawMessage `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	var calls json.RawMessage
+	var ids []json.RawMessage
+	for _, msg := range parsed.Messages {
+		switch msg.Role {
+		case "assistant":
+			if len(msg.ToolCalls) > 0 && !bytes.Equal(msg.ToolCalls, []byte("null")) {
+				calls = append(calls[:0], msg.ToolCalls...)
+			}
+		case "tool":
+			ids = append(ids, append(json.RawMessage(nil), msg.ToolCallID...))
+		}
+	}
+	if len(calls) == 0 {
+		t.Fatal("assistant tool_calls not found")
+	}
+	return calls, ids
 }
 
 // TestIsSSEBlankLine locks the blank-line terminator detection used
