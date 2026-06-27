@@ -118,7 +118,7 @@ API reference → [api.streamvc.live/docs#api-reference](https://api.streamvc.li
 
 ### Security model: buyer-side validation obligation
 
-For tool-calling responses, emitted `tool_calls[]` reflect model output, not provider-verified intent; buyer-side agent frameworks MUST validate before execution. MacProvider transports the parsed OpenAI-compatible tool-call shape; it does not decide whether a requested tool name or argument payload is safe for your agent policy.
+For tool-calling responses, emitted `tool_calls[]` reflect model output, not provider-verified intent; buyer-side agent frameworks MUST validate before execution. MacProvider v0.1 tool calling is a first-turn OpenAI wire-shape compatibility surface: it can emit parsed assistant `tool_calls[]` from recognized model/template output, but it is not a complete multi-turn agent loop. Second-turn `role:"tool"` messages or assistant-history `tool_calls[]` remain intentionally unsupported until a later SPEC-018 revision. MacProvider transports the parsed OpenAI-compatible shape; it does not decide whether a requested tool name or argument payload is safe for your agent policy.
 
 ## Releases
 
@@ -128,7 +128,7 @@ Latest release and signed binaries: [github.com/augustas11/macprovider/releases]
 
 :white_check_mark: **Signed inference receipts — Shipped in v1.0.0.** The SPEC-015 v0.2 verifier is available as the open-source [macprovider-verify](phase7-verify/README.md) CLI.
 
-:white_check_mark: **OpenAI-compatible tool calling — Shipped for recognized MLX tool-call templates.** Requests with `tools` are rendered through the MLX chat template, and Qwen-style `<tool_call>...</tool_call>` or Llama 3.3-style `<|python_tag|>...<|eom_id|>` outputs emit `choices[0].message.tool_calls[]` with `function.arguments` as a JSON string. Other models safely fall back to normal assistant text unless their model ID and template emit one of those recognized formats. See [examples/tool_calling_demo.py](examples/tool_calling_demo.py).
+:white_check_mark: **OpenAI-compatible tool calling — Shipped for first-turn recognized MLX tool-call templates.** Requests with `tools` are rendered through the MLX chat template, and Qwen-style `<tool_call>...</tool_call>` or Llama 3.3-style `<|python_tag|>...<|eom_id|>` outputs emit `choices[0].message.tool_calls[]` with `function.arguments` as a JSON string. This v0.1 surface is a wire-shape compatibility certificate, not full multi-turn agent-loop support; second-turn `role:"tool"` messages and assistant-history `tool_calls[]` are rejected as unsupported. Other models safely fall back to normal assistant text unless their model ID and template emit one of those recognized formats. See [examples/tool_calling_demo.py](examples/tool_calling_demo.py).
 
 Every request through MacProvider carries a signed receipt that lets the caller later prove which provider signed the canonical prompt/output binding. The receipt is issued on the response path and signed with the provider's receipt key:
 

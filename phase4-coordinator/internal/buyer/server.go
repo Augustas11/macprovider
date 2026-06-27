@@ -2604,10 +2604,11 @@ func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
 		var arr []json.RawMessage
 		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
 			for _, call := range arr {
-				if isCommitWorthyToolCallDelta(call) {
-					return true
+				if !isCommitWorthyToolCallDelta(call) {
+					return false
 				}
 			}
+			return true
 		}
 	}
 	if raw, has := obj["function_call"]; has && isNonEmptyJSONObject(raw) {

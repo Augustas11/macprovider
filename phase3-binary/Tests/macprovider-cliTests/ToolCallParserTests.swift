@@ -255,6 +255,64 @@ final class ToolCallParserTests: XCTestCase {
         XCTAssertTrue(parsed.toolCalls.isEmpty)
     }
 
+    func testMaxDepthArgumentsAccepted() throws {
+        let arguments = nestedObject(depth: 32)
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: qwenToolCallRaw(argumentsJSON: arguments),
+            modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        )
+
+        let call = try XCTUnwrap(parsed.toolCalls.first)
+        XCTAssertNil(parsed.cleanedContent)
+        XCTAssertEqual(parsed.toolCalls.count, 1)
+        XCTAssertEqual(call.functionName, "find_definition")
+    }
+
+    func testMaxDepthPlusOneArgumentsFallBackToPlainText() {
+        let raw = qwenToolCallRaw(argumentsJSON: nestedObject(depth: 33))
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
+    func testMultibyteArgumentsUnderByteLimitAccepted() throws {
+        let prefix = #"{"blob":""#
+        let suffix = #""}"#
+        let envelopeBytes = qwenToolCallJSON(argumentsJSON: prefix + suffix).utf8.count
+        let repeatCount = ((256 * 1024) - envelopeBytes) / "€".utf8.count
+        let arguments = prefix + String(repeating: "€", count: repeatCount) + suffix
+        XCTAssertLessThanOrEqual(arguments.utf8.count, 256 * 1024)
+        XCTAssertLessThanOrEqual(qwenToolCallJSON(argumentsJSON: arguments).utf8.count, 256 * 1024)
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: qwenToolCallRaw(argumentsJSON: arguments),
+            modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        )
+
+        XCTAssertNil(parsed.cleanedContent)
+        XCTAssertEqual(parsed.toolCalls.count, 1)
+        _ = try XCTUnwrap(parsed.toolCalls.first)
+    }
+
+    func testMultibyteArgumentsOverByteLimitFallBackToPlainText() {
+        let prefix = #"{"blob":""#
+        let suffix = #""}"#
+        let repeatCount = ((256 * 1024) - prefix.utf8.count - suffix.utf8.count) / "€".utf8.count + 1
+        let arguments = prefix + String(repeating: "€", count: repeatCount) + suffix
+        XCTAssertGreaterThan(arguments.utf8.count, 256 * 1024)
+        let raw = qwenToolCallRaw(argumentsJSON: arguments)
+        let parsed = ToolCallParser.parseToolCalls(
+            rawOutput: raw,
+            modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+        )
+
+        XCTAssertEqual(parsed.cleanedContent, raw)
+        XCTAssertTrue(parsed.toolCalls.isEmpty)
+    }
+
     func testMixedProseAndToolCallKeepsCleanedContent() throws {
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: #"I'll check that.<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#,
@@ -340,5 +398,24 @@ final class ToolCallParserTests: XCTestCase {
         let data = try XCTUnwrap(arguments.data(using: .utf8))
         let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
         return object[key]
+    }
+
+    private func nestedObject(depth: Int) -> String {
+        var nested = "1"
+        for i in stride(from: depth, through: 1, by: -1) {
+            nested = #"{"k\#(i)":\#(nested)}"#
+        }
+        return nested
+    }
+
+    private func qwenToolCallRaw(argumentsJSON: String) -> String {
+        #"<tool_call>\#(qwenToolCallJSON(argumentsJSON: argumentsJSON))</tool_call>"#
+    }
+
+    private func qwenToolCallJSON(argumentsJSON: String) -> String {
+        let escaped = argumentsJSON
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return #"{"name":"find_definition","arguments":"\#(escaped)"}"#
     }
 }
