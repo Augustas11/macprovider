@@ -87,12 +87,18 @@ request_ids and verified the property in tests (see
 `TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID`).
 v1.4.2 R-2 makes the distinction explicit:
 
-- **`request_id`** — per-attempt coordinator id. One row per
-  provider attempt; retries on the same logical request share this
-  value on the non-pinned path and differ on the pinned-client path.
+- **`request_id`** — coordinator-internal request/billing id. Multiple
+  `request_log` rows (one per provider attempt) may **share** this
+  value on the non-pinned retry path or **differ** on the pinned-client
+  retry path. Attempt identity is `request_log.id` (auto-increment PK)
+  combined with `request_log.retried` (the per-row attempt counter).
+  Verified by existing tests `TestRequestLogBuyerMultiAttemptRows`
+  (shared) and `TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID`
+  (differs).
 - **`external_request_id`** — buyer-facing id propagated through
-  gateway. Shared across all attempts of one logical request.
-  Reconciliation join.
+  gateway. Always shared across all attempts of one logical request,
+  regardless of pinning. Reconciliation join key with gateway-side
+  `usage_events.request_id` and `audit_events.request_id`.
 
 #### R-2 normative — schema migration
 
@@ -152,13 +158,32 @@ under concurrent traffic).
 
 #### Glossary (added with this addendum)
 
-- **request_id** — coordinator-generated per-attempt identifier; one
-  row per provider attempt in `request_log`. Never equal to any
-  inbound header value.
+- **request_id** — coordinator-internal request/billing id. Never
+  equal to any inbound header value. Multiple `request_log` rows may
+  share or differ on this value depending on pinning (see normative
+  text above).
 - **external_request_id** — inbound `X-Request-ID` header value
-  honored at the coordinator buyer-port ingress. Shared across all
-  retry attempts of one logical request. Reconciliation join key
-  with gateway-side stores.
+  honored at the coordinator buyer-port ingress. Always shared
+  across all retry attempts of one logical request. Reconciliation
+  join key with gateway-side stores.
+
+#### SPEC-005 boundary clarification
+
+This SPEC-002-owned schema migration (`ALTER TABLE request_log ADD
+COLUMN external_request_id`) does NOT relax the SPEC-005 rule that
+SPEC-005 implementations must read `request_log` by JOIN only.
+SPEC-005 continues to treat existing `request_log` columns as
+read-only; `external_request_id` is added by SPEC-002 v1.4.2 and is
+read by SPEC-005-side joiners exactly the way they read any other
+`request_log` column.
+
+#### SPEC-006 companion cross-reference
+
+The paired SPEC-006 v0.X.Y addendum maps the gateway-side join
+explicitly: gateway `usage_events.request_id` and request-scoped
+`audit_events.request_id` match coordinator
+`request_log.external_request_id`. They do NOT match coordinator
+`request_log.request_id`.
 
 ### R-3 — Mid-stream provider disconnect SSE error envelope
 
