@@ -38,6 +38,11 @@ import (
 
 var errBodyTooLarge = errors.New("upstream response body too large")
 
+const (
+	maxToolCallArgumentsBytes = 256 * 1024
+	maxToolCallArgumentsDepth = 32
+)
+
 type Server struct {
 	pool                   *pool.Registry
 	log                    zerolog.Logger
@@ -88,13 +93,13 @@ type Server struct {
 	// construction (config.go TrustedProxyPrefixes) so the hot path
 	// never re-parses. Default loopback-only — see WithTrustedProxies.
 	// Issue #125.
-	trustedProxies         []netip.Prefix
-	billingMu              sync.RWMutex
-	billing                *billing.Store
-	billingCfg             config.RewardsConfig
-	billingSnapshotID      int64
-	now                    func() time.Time
-	version                string
+	trustedProxies    []netip.Prefix
+	billingMu         sync.RWMutex
+	billing           *billing.Store
+	billingCfg        config.RewardsConfig
+	billingSnapshotID int64
+	now               func() time.Time
+	version           string
 }
 
 type stickyEntry struct {
@@ -415,9 +420,9 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		// loopback behavior (X-Real-IP / X-Forwarded-For honored only
 		// when r.RemoteAddr is 127.0.0.0/8 or ::1). WithTrustedProxies
 		// replaces this set. Issue #125.
-		trustedProxies:         []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
-		now:                    func() time.Time { return time.Now().UTC() },
-		version:                "dev",
+		trustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
+		now:            func() time.Time { return time.Now().UTC() },
+		version:        "dev",
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -1671,6 +1676,7 @@ func (s *Server) forwardWSNonStreamSequence(
 //   - handleProviderFailure called on non-200 status (HTTP-only fault
 //     tracking — WS path has its own MarkState semantics via classifier
 //     markBusy flag).
+//
 // httpDispatchExtra carries the HTTP dispatch's post-classification
 // scratch state forward to the renderRetryExhausted / logRetryAttempt
 // callbacks (status code, raw err, ErrorCode, retryRequested flag).
@@ -2489,7 +2495,8 @@ var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 //
 //   - `delta`: an object carrying at least one KNOWN OpenAI field
 //     (content/role/refusal/reasoning non-empty string, tool_calls
-//     non-empty array, function_call non-empty object).
+//     non-empty array whose entries satisfy the SPEC-018 §8.4
+//     minimal-shape validator, function_call non-empty object).
 //     Arbitrary-key objects like `{"":0}` or `{"x":"y"}` reject.
 //
 //   - `message`: same allowlist as `delta` (matches non-streaming
@@ -2572,7 +2579,8 @@ func isNonEmptyJSONObject(raw json.RawMessage) bool {
 //   - content: non-empty string (the streaming token delta)
 //   - role: non-empty string (the role-assignment first chunk)
 //   - refusal: non-empty string (safety-refusal stream)
-//   - tool_calls: non-empty array (function/tool calling)
+//   - tool_calls: non-empty array whose entries satisfy the SPEC-018
+//     §8.4 minimal-shape validator (function/tool calling)
 //   - function_call: non-empty object (legacy function calling)
 //   - reasoning: non-empty string (reasoning-model trace stream)
 func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
@@ -2595,13 +2603,100 @@ func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
 	if raw, has := obj["tool_calls"]; has {
 		var arr []json.RawMessage
 		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
-			return true
+			for _, call := range arr {
+				if isCommitWorthyToolCallDelta(call) {
+					return true
+				}
+			}
 		}
 	}
 	if raw, has := obj["function_call"]; has && isNonEmptyJSONObject(raw) {
 		return true
 	}
 	return false
+}
+
+// isCommitWorthyToolCallDelta validates the minimum OpenAI tool-call
+// delta shape before the stream can cross the commit threshold.
+// Commit-worthy gates billing settlement; rejection must NOT settle
+// provider-positive usage.
+func isCommitWorthyToolCallDelta(raw json.RawMessage) bool {
+	var call struct {
+		Index    *int            `json:"index"`
+		ID       string          `json:"id"`
+		Type     string          `json:"type"`
+		Function json.RawMessage `json:"function"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	// Unknown fields remain allowed for SPEC-018 §10c forward compatibility.
+	if err := dec.Decode(&call); err != nil {
+		return false
+	}
+	if call.Index == nil || *call.Index < 0 || call.ID == "" || call.Type != "function" || len(call.Function) == 0 || bytes.Equal(call.Function, []byte("null")) {
+		return false
+	}
+	var fn struct {
+		Name      string  `json:"name"`
+		Arguments *string `json:"arguments"`
+	}
+	dec = json.NewDecoder(bytes.NewReader(call.Function))
+	// Unknown fields remain allowed for SPEC-018 §10c forward compatibility.
+	if err := dec.Decode(&fn); err != nil {
+		return false
+	}
+	if fn.Name == "" || fn.Arguments == nil {
+		return false
+	}
+	return validToolCallArgumentsObject(*fn.Arguments)
+}
+
+func validToolCallArgumentsObject(arguments string) bool {
+	if len(arguments) > maxToolCallArgumentsBytes {
+		return false
+	}
+	dec := json.NewDecoder(strings.NewReader(arguments))
+	if !jsonArgumentsDepthWithinLimit(dec, maxToolCallArgumentsDepth) {
+		return false
+	}
+	var obj map[string]json.RawMessage
+	dec = json.NewDecoder(strings.NewReader(arguments))
+	if err := dec.Decode(&obj); err != nil {
+		return false
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return false
+	}
+	return obj != nil
+}
+
+func jsonArgumentsDepthWithinLimit(dec *json.Decoder, maxDepth int) bool {
+	depth := 0
+	sawToken := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return sawToken && depth == 0
+		}
+		if err != nil {
+			return false
+		}
+		sawToken = true
+		if delim, ok := tok.(json.Delim); ok {
+			switch delim {
+			case '{', '[':
+				depth++
+				if depth > maxDepth {
+					return false
+				}
+			case '}', ']':
+				depth--
+				if depth < 0 {
+					return false
+				}
+			}
+		}
+	}
 }
 
 // isNonEmptyJSONString reports whether raw decodes to a JSON string

@@ -2,6 +2,7 @@ package buyer
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -98,7 +99,8 @@ func TestIsCommitWorthyDataLine(t *testing.T) {
 		{"choices_with_delta_content_string", "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n", true},
 		{"choices_with_delta_refusal_string", "data: {\"choices\":[{\"delta\":{\"refusal\":\"i cannot\"}}]}\n", true},
 		{"choices_with_delta_reasoning_string", "data: {\"choices\":[{\"delta\":{\"reasoning\":\"thinking\"}}]}\n", true},
-		{"choices_with_delta_tool_calls_array", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"f\"}}]}}]}\n", true},
+		{"choices_with_delta_tool_calls_array_invalid_minimal_shape", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"function\":{\"name\":\"f\"}}]}}]}\n", false},
+		{"choices_with_delta_tool_calls_array", "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{}\"}}]}}]}\n", true},
 		{"choices_with_delta_function_call_object", "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"f\"}}}]}\n", true},
 		{"choices_with_message_content_string", "data: {\"choices\":[{\"message\":{\"content\":\"hi\"}}]}\n", true},
 
@@ -127,6 +129,55 @@ func TestIsCommitWorthyDataLine(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCommitSignal_EmptyToolCallObject_Rejected(t *testing.T) {
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{}]}}]}\n"
+	if isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("empty tool-call object must not be commit-worthy")
+	}
+}
+
+func TestCommitSignal_NonObjectArguments_Rejected(t *testing.T) {
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"[]\"}}]}}]}\n"
+	if isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("non-object function.arguments must not be commit-worthy")
+	}
+}
+
+func TestCommitSignal_DeepNestedArguments_Rejected(t *testing.T) {
+	arguments := "1"
+	for i := 0; i < 100; i++ {
+		arguments = `{"x":` + arguments + `}`
+	}
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":" + string(mustJSONString(t, arguments)) + "}}]}}]}\n"
+	if isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("deeply nested function.arguments must not be commit-worthy")
+	}
+}
+
+func TestCommitSignal_OversizedArguments_Rejected(t *testing.T) {
+	arguments := `{"blob":"` + strings.Repeat("x", 256*1024) + `"}`
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":" + string(mustJSONString(t, arguments)) + "}}]}}]}\n"
+	if isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("oversized function.arguments must not be commit-worthy")
+	}
+}
+
+func TestCommitSignal_MinimalValidShape_Accepted(t *testing.T) {
+	line := "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"f\",\"arguments\":\"{\\\"a\\\":1}\"}}]}}]}\n"
+	if !isCommitWorthyDataLine([]byte(line)) {
+		t.Fatal("minimal valid tool-call delta must be commit-worthy")
+	}
+}
+
+func mustJSONString(t *testing.T, value string) []byte {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("json marshal string: %v", err)
+	}
+	return raw
 }
 
 // TestIsSSEBlankLine locks the blank-line terminator detection used
