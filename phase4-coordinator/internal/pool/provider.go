@@ -1281,14 +1281,29 @@ func (r *Registry) ModelKnown(modelID string) bool {
 	if modelID == "" {
 		return false
 	}
+	// ISS-185 R3 code-lane MAJOR: strings.ToLower is NOT equivalent to
+	// strings.EqualFold for Turkish/Greek edges (e.g.
+	// EqualFold("Σ","ς")==true but ToLower differs;
+	// EqualFold("İ","i")==false but ToLower agrees). Preserve the
+	// existing EqualFold contract by:
+	// 1. Fast O(1) hit on strings.ToLower canonical key (covers the
+	//    ASCII/Latin common case, ~all realistic model ids).
+	// 2. On miss, EqualFold scan the lifetime accumulator before
+	//    falling through to the live/per-session paths.
 	canonical := strings.ToLower(modelID)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	// Lifetime accumulator is the SPEC-002 § 7.2 contract surface.
-	// Lowercase canonical key keeps lookup O(1). Hit covers any model
-	// the coordinator has ever seen and recorded into lifetime.
 	if _, ok := r.seenModelsLifetime[canonical]; ok {
 		return true
+	}
+	// Non-ASCII / case-folding-edge fallback: EqualFold scan of
+	// lifetime keys. Bounded by maxSeenModelsLifetime = 4096; only
+	// pays the cost on the never-recorded path (i.e., the 404
+	// candidate).
+	for stored := range r.seenModelsLifetime {
+		if strings.EqualFold(stored, modelID) {
+			return true
+		}
 	}
 	// Fallback paths cover the case where lifetime was at one of its
 	// caps (global maxSeenModelsLifetime or per-provider
@@ -1312,9 +1327,6 @@ func (r *Registry) ModelKnown(modelID string) bool {
 		if _, ok := set[modelID]; ok {
 			return true
 		}
-		// Case-insensitive fallback. set keys are stored in their
-		// original case, so use EqualFold per entry. Bounded by
-		// maxSeenModelsPerProvider * N_providers (32 * small N).
 		for stored := range set {
 			if strings.EqualFold(stored, modelID) {
 				return true

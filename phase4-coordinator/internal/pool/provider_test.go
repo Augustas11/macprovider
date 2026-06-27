@@ -1101,6 +1101,50 @@ func TestSeenModelsLifetimeCap(t *testing.T) {
 	}
 }
 
+// TestModelKnownPreservesEqualFoldOnLifetimeOnlyPath pins the
+// ISS-185 R3 code-lane MAJOR fix: ModelKnown's case-folding contract
+// has historically been Unicode strings.EqualFold (not
+// strings.ToLower), so Turkish-I / Greek-sigma edges that
+// EqualFold-match must continue to return true even after the
+// advertising provider disconnects (so the lookup is on the
+// lifetime-only path).
+//
+// strings.ToLower("İ") == "i̇" (with combining dot above) while
+// strings.EqualFold("İ", "İ") == true. A ToLower-only key store
+// would miss this case. With the R3 EqualFold scan fallback on
+// the lifetime accumulator, the SPEC § 7.2 contract is preserved
+// for these edges.
+func TestModelKnownPreservesEqualFoldOnLifetimeOnlyPath(t *testing.T) {
+	registry := NewRegistry(nil)
+	start := time.Unix(1716768000, 0).UTC()
+
+	// Greek capital sigma "Σ" and final sigma "ς" EqualFold-match;
+	// ToLower differs.
+	registry.Register(&Provider{
+		ProviderID:       "p1",
+		AssignedID:       "s1",
+		ModelID:          "model-Σ",
+		State:            StateReady,
+		SlotsFree:        1,
+		SlotsTotal:       1,
+		LastHeartbeatAt:  start,
+		LastActivityAt:   start,
+		MaxConcurrency:   1,
+		MaxContextTokens: 20000,
+	}, nil)
+	if !registry.RemoveIfSession("p1", "s1") {
+		t.Fatal("RemoveIfSession returned false")
+	}
+	// Now the lookup goes through the lifetime-only path. Both forms
+	// must return true via the EqualFold contract.
+	if !registry.ModelKnown("model-Σ") {
+		t.Fatal("ModelKnown(model-Σ) = false; lifetime-only path lost the recorded id")
+	}
+	if !registry.ModelKnown("model-ς") {
+		t.Fatal("ModelKnown(model-ς) = false; EqualFold contract regressed (ToLower-only canonical key would miss this)")
+	}
+}
+
 // TestRecordSeenModelLockedRejectsOversizeID pins the ISS-185 R1
 // security-lane CRITICAL fix: model_id strings beyond
 // maxModelIDByteLen are not persisted into either the per-provider
