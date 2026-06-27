@@ -1,9 +1,13 @@
 package buyer
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/augstar/macprovider-coordinator/internal/pool"
+	providerws "github.com/augstar/macprovider-coordinator/internal/ws"
 )
 
 func TestTokenPointersFromUsageObjectPreservesInvalidUsageForBillingFault(t *testing.T) {
@@ -178,6 +182,101 @@ func mustJSONString(t *testing.T, value string) []byte {
 		t.Fatalf("json marshal string: %v", err)
 	}
 	return raw
+}
+
+func TestRequestSidePassThrough_ToolCalls_ByteEquivalent(t *testing.T) {
+	body := []byte(`{
+		"model":"model-a",
+		"messages":[
+			{"role":"user","content":"plan"},
+			{"role":"assistant","content":null,"tool_calls":[
+				{"id":"call_alpha-1","type":"function","function":{"name":"lookup","arguments":"{\"q\":\"ToolCallParser\",\"n\":1}"}},
+				{"id":"call.beta_2","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"phase3-binary/Sources/macprovider-cli/ToolCallParser.swift\"}"}}
+			]},
+			{"role":"tool","tool_call_id":"call_alpha-1","content":"{\"ok\":true}"},
+			{"role":"tool","tool_call_id":"call.beta_2","content":"{\"bytes\":42}"}
+		]
+	}`)
+	req, status, code, msg := validateChatRequest(body)
+	if status != 0 {
+		t.Fatalf("validateChatRequest status=%d code=%s msg=%s", status, code, msg)
+	}
+	outbound, err := dispatchBodyForProvider(req, pool.Provider{ModelID: "model-a"})
+	if err != nil {
+		t.Fatalf("dispatchBodyForProvider: %v", err)
+	}
+	frameRaw, err := json.Marshal(providerws.InferenceRequest{
+		Type:      "inference_request",
+		RequestID: "req-ac24",
+		Stream:    false,
+		Body:      string(outbound),
+	})
+	if err != nil {
+		t.Fatalf("marshal inference request: %v", err)
+	}
+	var frame providerws.InferenceRequest
+	if err := json.Unmarshal(frameRaw, &frame); err != nil {
+		t.Fatalf("unmarshal inference request frame: %v", err)
+	}
+
+	originalToolCalls, originalToolIDs := requestSideToolFields(t, body)
+	forwardedToolCalls, forwardedToolIDs := requestSideToolFields(t, []byte(frame.Body))
+	if !bytes.Equal(canonicalJSON(t, originalToolCalls), canonicalJSON(t, forwardedToolCalls)) {
+		t.Fatalf("tool_calls mutated:\noriginal=%s\nforwarded=%s", originalToolCalls, forwardedToolCalls)
+	}
+	if len(originalToolIDs) != len(forwardedToolIDs) {
+		t.Fatalf("tool_call_id count = %d, want %d", len(forwardedToolIDs), len(originalToolIDs))
+	}
+	for i := range originalToolIDs {
+		if originalToolIDs[i] != forwardedToolIDs[i] {
+			t.Fatalf("tool_call_id[%d] = %q, want %q", i, forwardedToolIDs[i], originalToolIDs[i])
+		}
+	}
+}
+
+func requestSideToolFields(t *testing.T, body []byte) (json.RawMessage, []string) {
+	t.Helper()
+	var parsed struct {
+		Messages []struct {
+			Role       string          `json:"role"`
+			ToolCalls  json.RawMessage `json:"tool_calls"`
+			ToolCallID string          `json:"tool_call_id"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		t.Fatalf("unmarshal body: %v", err)
+	}
+	var calls json.RawMessage
+	var ids []string
+	for _, msg := range parsed.Messages {
+		switch msg.Role {
+		case "assistant":
+			if len(msg.ToolCalls) > 0 && !bytes.Equal(msg.ToolCalls, []byte("null")) {
+				calls = append(calls[:0], msg.ToolCalls...)
+			}
+		case "tool":
+			ids = append(ids, msg.ToolCallID)
+		}
+	}
+	if len(calls) == 0 {
+		t.Fatal("assistant tool_calls not found")
+	}
+	return calls, ids
+}
+
+func canonicalJSON(t *testing.T, raw json.RawMessage) []byte {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	var value any
+	if err := dec.Decode(&value); err != nil {
+		t.Fatalf("decode canonical json: %v", err)
+	}
+	out, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal canonical json: %v", err)
+	}
+	return out
 }
 
 // TestIsSSEBlankLine locks the blank-line terminator detection used
