@@ -2240,6 +2240,67 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 	}
 }
 
+// SPEC-002 § FR-B6 / issue #186: when the upstream coordinator
+// stream dies mid-flight (provider disconnect surfaces here as an
+// io.Pipe close-with-error), the gateway MUST emit the exact
+// provider_disconnected SSE error envelope BEFORE `data: [DONE]`.
+// OpenAI-compatible SDK clients route on (error.code, error.type)
+// to distinguish a normal short response from a provider drop.
+//
+// The internal settlement outcome stays `stream_truncated` (per
+// SPEC-006 § 17.7 — a separate usage_events.outcome field, not the
+// buyer-visible SSE error.code). Earlier the buyer-visible code
+// was also `stream_truncated`, conflating settlement and signaling
+// (and silently truncating responses for SDK consumers).
+func TestStreamingMidStreamProviderDisconnectEmitsFRB6Envelope(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`
+	accountID := "acct_provider_disconnected"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			// One valid delta, then force an unexpected upstream close.
+			_, _ = pw.Write([]byte(`data: {"id":"chatcmpl","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+			_ = pw.CloseWithError(errors.New("forced upstream provider disconnect"))
+		}()
+		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: pr}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+
+	// Locate the FR-B6 error event in the SSE stream BEFORE [DONE].
+	bodyStr := resp.Body.String()
+	doneIdx := strings.Index(bodyStr, "data: [DONE]")
+	if doneIdx < 0 {
+		t.Fatalf("response missing data: [DONE]; body=%s", bodyStr)
+	}
+	preDone := bodyStr[:doneIdx]
+	if !strings.Contains(preDone, `"code":"provider_disconnected"`) {
+		t.Fatalf("FR-B6 envelope missing provider_disconnected before [DONE]; preDone=%s", preDone)
+	}
+	if !strings.Contains(preDone, `"type":"server_error"`) {
+		t.Fatalf("FR-B6 envelope missing type=server_error before [DONE]; preDone=%s", preDone)
+	}
+	if !strings.Contains(preDone, `"message":"Provider disconnected during streaming"`) {
+		t.Fatalf("FR-B6 envelope missing canonical message before [DONE]; preDone=%s", preDone)
+	}
+
+	// Internal settlement outcome stays stream_truncated (SPEC-006
+	// § 17.7); the buyer-visible code is a SEPARATE field. This
+	// assertion guards against any accidental coupling.
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "stream_truncated" || source != "gateway_estimated" {
+		t.Fatalf("settlement outcome/source = %s/%s, want stream_truncated/gateway_estimated", outcome, source)
+	}
+}
+
 func TestStreamingScannerErrorSettlesStreamTruncated(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"large line"}]}`
 	accountID := "acct_stream_truncated"
