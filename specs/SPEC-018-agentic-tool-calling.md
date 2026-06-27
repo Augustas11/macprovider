@@ -1,11 +1,12 @@
 # SPEC-018 — Agentic tool calling (provider-side response synthesis)
 
-**Version:** 0.1.1 (2026-06-27, round-1 audit absorption — re-scoped to "first-turn wire-shape compatibility certificate" + security (a)+(b))
+**Version:** 0.1.2 (2026-06-27, round-2 audit polish — §3.1 Qwen-row collapse + Qwen3 modelID match + §2.3 SDK obligation removal + §10 additive-invariant + 11 other precision fixes)
 **Depends on:** SPEC-001 v1.6, SPEC-002 v1.4.1, SPEC-006 v0.9, SPEC-008 (Pillar A model-hash trust layer — referenced by §10a), SPEC-011 v0.5 (warm-swap heartbeat `model_hash` — referenced by §10a), SPEC-015 v0.3 (receipts canonical output binding — see AC-17)
 **Status:** Draft
 
 ## Change log
 
+- **v0.1.2 (2026-06-27, round-2 audit polish):** Round-2 returned 0 CRITICAL + 0 HIGH across all 4 lanes; product-design + security both READY TO LOCK; architect + code returned 5 MEDIUMs that v0.1.2 absorbs. §3.1 Qwen2.5/Qwen3-native and Qwen-coding-tuned rows collapsed into one "Qwen (2.5 / 3 / coder variants)" row with predicate `modelID` substring `qwen2.5` OR `qwen3` — closes Arch M-1 table-order ambiguity AND Code Q-3 Qwen3 detection gap. §2.3 "SDKs MUST JSON-parse and schema-validate before execution" removed — that obligation is SPEC-018's external-client concern, not response-synthesis (Arch M-2); buyer-side validation guidance lives in §1 + AC-20 only. §1 enumerates 3 IMPL deltas (§3.2 modelID-match, §3.6 mixed-sentinel fallback, §8.4 commit-worthy validator). §3.6 mixed-sentinel now in §1's IMPL-delta list (Code M-1). §7 lowercase informative voice (Arch m-1). §8.4 + AC-21 tighten `function.arguments` to "JSON-object string" not just parseable (Sec m-1); citation relabeled as "current commit-signal path to patch" (Code M-3). §5 disambiguated — `function.arguments` cap is §10a #7 v0.2-gating, `max_tool_calls` is §10b future (Sec m-2). §10a #2 citation corrected to `provider.go:132-133` + `:1001-1052` (Code M-2), buyer-facing sentence added (PD m-2), v0.2 unknown-hash fail-closed requirement added (Sec Q-1). §10 adds additive v0.2 invariant (PD Q-1). §1 narrowly defines "certificate" as AC-16a + AC-16b evidence (PD m-1). §11 Q1 reframed as v0.2 product decision (PD Q-2). Round-2 narrative: `specs/SPEC-018-r2-audit.md`; per-lane: `specs/SPEC-018-{architect,code,security,product-design}-r2-audit.md`.
 - **v0.1.1 (2026-06-27, round-1 audit absorption):** Re-scoped from "Ring-1 product" to "first-turn OpenAI tool-call wire-shape compatibility certificate" after PD C-1 + Architect M-3 found Ring-1 framing did not survive turn 2 of any real agent session. §3 detection grammar tightened to require `modelID` substring match (Security C-1 (a)) — content-sentinel-only detection is no longer normative. §1 adds buyer-side validation obligation (Security C-1 (b)). §10 split into §10a "Required for full Ring-1 product (v0.2 targets)" — multi-turn provider acceptance, model-hash → family registry leveraging the live SPEC-008/SPEC-011 `model_hash` infrastructure, prompt-echo guard, token-incremental streaming promotion, structured `malformed_tool_call` signal — and §10b "Future enhancements" — structured output, prefix-cache signaling (SPEC-006 header-allowlist allocation required, no concrete header reserved), `max_tool_calls` cap, SDK examples. §7 made informative; gateway YAML normative authority returned to SPEC-002 / SPEC-006. §8.4 adds commit-worthy delta minimal-shape validation (Security H-1). Multiple AC reshuffles (split, parametric, scope). Round narrative: `specs/SPEC-018-r1-audit.md`; per-lane findings: `specs/SPEC-018-{architect,code,security,product-design}-r1-audit.md`.
 - **v0.1 (2026-06-27, initial draft):** Post-hoc ratification of cf2f135, c823a96, and 7b8b1be as the network's tool-calling baseline. Superseded by v0.1.1 round-1 absorption.
 
@@ -13,7 +14,7 @@
 
 SPEC-018 defines OpenAI-compatible tool-calling wire compatibility for provider-side response synthesis on the macprovider network.
 
-**v0.1 product surface: a first-turn OpenAI tool-call wire-shape compatibility certificate.** A buyer MAY point an OpenAI-shaped client at the buyer-side gateway and receive a single assistant tool-call response that the client can parse without macprovider-specific response adapters. v0.1 does NOT certify full multi-turn client-side agent loops; the current phase3 provider rejects `role: "tool"` messages and assistant-history `tool_calls[]` with HTTP 400 `unsupported_tool_messages` (AC-14). Full client-side agent loop support — what users running Cline, Cursor, Aider, OpenCode, Continue, Zed, Claude Code, or any other OpenAI-shape agent framework actually need — is the v0.2 deliverable per §10a.
+**v0.1 product surface: a first-turn OpenAI tool-call wire-shape compatibility certificate.** "Certificate" here is defined narrowly: AC-16a + AC-16b first-turn-parse evidence. It is NOT a certification of full agent-framework integration or multi-turn agent loop completion. A buyer MAY point an OpenAI-shaped client at the buyer-side gateway and receive a single assistant tool-call response that the client can parse without macprovider-specific response adapters. v0.1 does NOT certify full multi-turn client-side agent loops; the current phase3 provider rejects `role: "tool"` messages and assistant-history `tool_calls[]` with HTTP 400 `unsupported_tool_messages` (AC-14). Full client-side agent loop support — what users running Cline, Cursor, Aider, OpenCode, Continue, Zed, Claude Code, or any other OpenAI-shape agent framework actually need — is the v0.2 deliverable per §10a.
 
 The agent loop runs on the buyer's machine. The model runs on the seller. The network is the marketplace and transport.
 
@@ -28,7 +29,15 @@ The following products are out of scope for SPEC-018 entirely:
 - Ring 2: provider-side agent execution, where a provider runs the agent loop locally with sandbox, filesystem, shell, or network egress authority. That product is reserved for SPEC-019.
 - Ring 3: provider-hosted MCP servers reachable from the model's tool loop. That product is reserved for SPEC-020.
 
-SPEC-018 v0.1.1 ratifies the as-built response-synthesis behavior in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift`, `OutputCanonicalizer.swift`, `ModelRuntime.swift`, `HTTPServer.swift`, `InferenceRelay.swift`, coordinator relay pass-through, and gateway pass-through, with two normative deltas vs the as-built that the v0.1.1 IMPL prompt will patch: §3 `modelID`-match-required tightening and §8.4 commit-worthy delta minimal-shape validation. All other §2–§8 behavior is post-hoc ratification.
+SPEC-018 v0.1.2 ratifies the as-built response-synthesis behavior in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift`, `OutputCanonicalizer.swift`, `ModelRuntime.swift`, `HTTPServer.swift`, `InferenceRelay.swift`, coordinator relay pass-through, and gateway pass-through, with **three normative deltas vs the as-built** that the v0.1.2 IMPL prompt will patch:
+
+1. **§3.2 `modelID`-match-required.** As-built (`ToolCallParser.swift:482-487`) uses OR-based detection (modelID substring match OR raw output sentinel). v0.1.2 normative: modelID match required; sentinel-only detection MUST fall back to plain content. AC-19. Tests in `ToolCallParserTests.swift:46-57` will need updating alongside the parser patch.
+2. **§3.6 mixed-sentinel fallback.** As-built detects whichever sentinel appears first by family priority (`<|python_tag|>` wins over `<tool_call>` because Llama is checked first). v0.1.2 normative: output containing sentinels from BOTH Qwen AND Llama families MUST fall back to plain content. AC-22.
+3. **§8.4 commit-worthy delta validator.** As-built `hasOpenAIDeltaSignal` (`phase4-coordinator/internal/buyer/server.go:2482-2605`) commits on any non-empty `tool_calls[]` array. v0.1.2 normative: commit-worthy only if delta validates as minimal OpenAI shape (integer `index`, non-empty `id` string, `type == "function"`, non-empty `function.name`, `function.arguments` as a string whose decoded value is a JSON object). AC-21. New coordinator test required that rejects `[{}]` and accepts only minimal valid delta.
+
+All other §2–§8 behavior is post-hoc ratification.
+
+The v0.1.2 IMPL prompt will additionally enumerate the AC-20 documentation locations: `README.md`, `examples/tool_calling_demo.py`, `test/integration/tool_calling/README.md:38-53`, `test/integration/tool_calling/openai_tool_call_e2e.py:78-85` MUST contain the buyer-side validation obligation phrase ("emitted `tool_calls[]` reflect model output, not provider-verified intent; buyer-side agent frameworks MUST validate before execution").
 
 ### 1.1 Known v0.1 limitations (single user-facing callout)
 
@@ -89,7 +98,7 @@ The v0.1 canonicalization rules are:
 - Missing `arguments` or `parameters` MUST serialize as `{}`.
 - Explicit `null` arguments MUST NOT produce a tool call; the response falls back to plain assistant content.
 - JSON object arguments decoded from a structured object MUST be serialized with sorted keys, no insignificant whitespace, and without escaping `/`.
-- JSON string arguments MUST be validated as a JSON object and MUST be emitted byte-for-byte as supplied by the model after validation. (Validation-only — not re-canonicalized; SDKs MUST JSON-parse and schema-validate before execution.)
+- JSON string arguments MUST be validated as a JSON object and MUST be emitted byte-for-byte as supplied by the model after validation. (Validation-only — not re-canonicalized. The buyer-side validation obligation in §1 + AC-20 covers downstream parsing and schema validation; SPEC-018 imposes no normative SDK requirement.)
 - Python-style keyword arguments MUST be converted to a JSON object string with sorted keys, no insignificant whitespace, and without escaping `/`.
 - Non-object argument values MUST NOT produce a tool call; the response falls back to plain assistant content.
 
@@ -111,9 +120,10 @@ The provider does not receive structured tool calls from the underlying MLX mode
 
 | Family | `modelID` match (required) | Body grammar | Argument field | Source |
 |---|---|---|---|---|
-| Qwen2.5 / Qwen3 native | `modelID` substring contains `qwen2.5` | `<tool_call>{...}</tool_call>` JSON body | `arguments` preferred; `parameters` accepted as fallback | `ToolCallParser.swift:451-491` |
-| Qwen coding-tuned | `modelID` substring contains `qwen2.5` (Qwen coding-tuned models advertise as Qwen2.5 derivatives) | `<tool_call>name(key=value, ...)</tool_call>` Python-style call | keyword args | `ToolCallParser.swift:77-123`, `ToolCallParser.swift:451-491` |
-| Llama 3.3 MLX | `modelID` substring contains `llama-3.3` | `<\|python_tag\|>{...}<\|eom_id\|>` JSON body, OR `<\|python_tag\|>name(key=value)<\|eom_id\|>` Python-style body | `parameters` preferred for JSON body; `arguments` accepted as fallback; keyword args for Python-style body | `ToolCallParser.swift:451-491` |
+| Qwen (2.5 / 3 / Coder variants) | `modelID` substring contains `qwen2.5` OR `qwen3` (case-insensitive) | EITHER `<tool_call>{...}</tool_call>` JSON body OR `<tool_call>name(key=value, ...)</tool_call>` Python-style call (the parser tries JSON body parsing first; on failure, falls back to Python-style parsing) | `arguments` preferred for JSON body; `parameters` accepted as JSON-body fallback; keyword args for Python-style body | `ToolCallParser.swift:77-123`, `ToolCallParser.swift:451-491` |
+| Llama 3.3 MLX | `modelID` substring contains `llama-3.3` (case-insensitive) | `<\|python_tag\|>{...}<\|eom_id\|>` JSON body, OR `<\|python_tag\|>name(key=value)<\|eom_id\|>` Python-style body (JSON body parsing tried first) | `parameters` preferred for JSON body; `arguments` accepted as JSON-body fallback; keyword args for Python-style body | `ToolCallParser.swift:451-491` |
+
+Note: production Qwen-coding SKUs (e.g. `mlx-community/Qwen2.5-Coder-32B-Instruct-4bit`, `mlx-community/Qwen3-32B-4bit`) match the Qwen family row via `qwen2.5` or `qwen3` substring. There is no separate "coding-tuned" row in §3.1 — coding-tuned variants advertise as Qwen2.5/Qwen3 derivatives and select the same family; body-grammar disambiguation is performed by the parser per the OR rule above.
 
 ### 3.2 modelID match required (Security C-1 (a))
 
@@ -146,9 +156,11 @@ Source: `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:4-27`, `phas
 
 ### 3.6 Multi-family priority and mixed sentinels
 
-When the buyer-supplied `modelID` substring-matches more than one family row in §3.1, deterministic precedence is declared by table order: the first matching row in §3.1 selects the parser family. (At v0.1, no `modelID` matches more than one row, but the rule is normative.)
+When the buyer-supplied `modelID` substring-matches more than one family row in §3.1, deterministic precedence is declared by table order: the first matching row in §3.1 selects the parser family. At v0.1.2, the two rows have disjoint predicates (`qwen2.5`/`qwen3` for Qwen; `llama-3.3` for Llama) so no `modelID` realistically matches both; the rule is normative for future family additions.
 
-When model output contains sentinels from multiple families simultaneously (e.g. both `<tool_call>` and `<|python_tag|>`), the parser MUST treat the output as malformed and fall back to plain assistant content. This closes the cross-family bypass surface identified in Security m-1.
+When model output contains sentinels from multiple families simultaneously — specifically, BOTH a Qwen family sentinel (`<tool_call>` opening or `</tool_call>` closing) AND a Llama family sentinel (`<|python_tag|>` or `<|eom_id|>`) appear in the same response — the parser MUST treat the output as malformed and fall back to plain assistant content. This closes the cross-family bypass surface identified in Security m-1.
+
+**v0.1.2 IMPL delta (§1 #2):** the as-built parser detects whichever family's sentinel appears first by family priority (`ToolCallParser.swift:482-487`); a model output containing `<|python_tag|>...<|eom_id|>` plus extra `<tool_call>` text currently selects Llama parsing and discards the Qwen markup as cleaned content. The v0.1.2 IMPL prompt will add a pre-detection pass that scans for sentinels from both families and triggers the mixed-sentinel fallback before either family parser runs. AC-22 verifies the new behavior.
 
 ### 3.7 Adding a new family
 
@@ -208,7 +220,12 @@ The v0.1 response-synthesis error behavior is:
 
 Source: fallback behavior in `phase3-binary/Sources/macprovider-cli/ToolCallParser.swift:4-27`; provider scope validation in `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:909-940`; tests in `phase3-binary/Tests/macprovider-cliTests/HTTPServerReceiptTests.swift:99-155`.
 
-SPEC-018 v0.1 imposes no `max_tool_calls` limit and no per-call `function.arguments` byte cap. No `tool_call_limit_exceeded` error exists in v0.1. §10b reserves both as future-enhancement candidates; §10a promotes a structured `malformed_tool_call` signal to v0.2.
+SPEC-018 v0.1 imposes no `max_tool_calls` limit and no per-call `function.arguments` byte cap. No `tool_call_limit_exceeded` error exists in v0.1.
+
+Disambiguation of v0.2+ commitments:
+- **`function.arguments` byte cap** is committed to v0.2 per §10a #7 with fail-closed semantics; it is a v0.2 gating item for full Ring-1 product release, not a §10b future candidate.
+- **Structured `malformed_tool_call` signal** is committed to v0.2 per §10a #5.
+- **`max_tool_calls` cap and `tool_call_limit_exceeded` error** remain §10b future-enhancement candidates with no committed version.
 
 If the underlying model reaches `max_tokens` mid-tool-call and no complete tool call can be parsed, the provider MUST NOT emit a partial tool call. It emits plain assistant content with `finish_reason = "length"` when the token limit is reached.
 
@@ -238,7 +255,7 @@ Tool-call buffered-to-end response synthesis (§4) creates first-header latency 
 
 c823a96 raised the default to 60 seconds; the current as-built gateway default is 300 seconds with validation requiring `coordinator_header_timeout_seconds >= coordinator_request_seconds`.
 
-§7 is **informative** in SPEC-018: the normative authority for gateway YAML configuration is SPEC-006 (buyer API gateway), and the normative authority for the coordinator-side request/header timeout ordering is SPEC-002 (coordinator). Compliant deployments of tool-call workloads MUST satisfy the SPEC-002 / SPEC-006 timeout invariants. SPEC-018 records the rationale tying tool-call buffered-to-end synthesis to first-header latency so that a SPEC-006 amendment can absorb explicit tool-call-workload guidance.
+§7 is **informative** in SPEC-018: the normative authority for gateway YAML configuration is SPEC-006 (buyer API gateway), and the normative authority for the coordinator-side request/header timeout ordering is SPEC-002 (coordinator). Compliant deployments of tool-call workloads need to satisfy the SPEC-002 / SPEC-006 timeout invariants — those SPECs hold the normative MUST. SPEC-018 records the rationale tying tool-call buffered-to-end synthesis to first-header latency so that a SPEC-006 amendment can absorb explicit tool-call-workload guidance.
 
 Source for the current gateway timeout machinery: `phase5-gateway/internal/config/config.go:123-127`, `phase5-gateway/internal/config/config.go:183`, `phase5-gateway/internal/config/config.go:361-373`, `phase5-gateway/internal/config/config.go:462-475`, and `phase5-gateway/cmd/gateway/main.go:81-95`.
 
@@ -276,13 +293,13 @@ For direct provider HTTP streaming, the coordinator MAY inspect SSE events only 
 - `id`: non-empty string
 - `type == "function"`
 - `function.name`: non-empty string
-- `function.arguments`: present and parseable as a JSON string
+- `function.arguments`: present, a JSON string whose decoded value is a JSON object (an empty object `"{}"` is valid; arrays, scalars, or `null` are not)
 
-Malformed pre-commit tool-call deltas (e.g. `{"choices":[{"delta":{"tool_calls":[{}]}}]}`) MUST NOT commit the response and MUST NOT settle provider-positive usage. This closes the Security H-1 commit-on-bogus-delta path; the IMPL prompt will add the validator to the coordinator commit-signal code path.
+Malformed pre-commit tool-call deltas — including `{"choices":[{"delta":{"tool_calls":[{}]}}]}` (empty tool-call object) and `{"function":{"arguments":"[]"}}` (arguments decodes to non-object) — MUST NOT commit the response and MUST NOT settle provider-positive usage. This closes the Security H-1 commit-on-bogus-delta path and the round-2 residual where a JSON-array `arguments` string would otherwise pass.
 
 After commit, the coordinator MUST pass bytes through without rewriting `tool_calls[]`.
 
-Source: `phase4-coordinator/internal/buyer/server.go:1982-2195`, `phase4-coordinator/internal/buyer/server.go:2320-2473`, `phase4-coordinator/internal/buyer/server.go:2482-2605`; commit-signal tests in `phase4-coordinator/internal/buyer/server_internal_test.go:70-103`.
+**Source (current commit-signal path to patch):** as-built `hasOpenAIDeltaSignal` at `phase4-coordinator/internal/buyer/server.go:2482-2605` currently accepts any non-empty `tool_calls[]` array (insufficient under v0.1.2). v0.1.2 IMPL prompt adds the minimal-shape validator to this code path and adds a new coordinator test that rejects `[{}]` and `{"function":{"arguments":"[]"}}` while accepting only the minimal valid delta. Surrounding integration in `phase4-coordinator/internal/buyer/server.go:1982-2195`, `phase4-coordinator/internal/buyer/server.go:2320-2473`; existing commit-signal tests at `phase4-coordinator/internal/buyer/server_internal_test.go:70-103` (to be extended).
 
 ### 8.5 Gateway
 
@@ -338,9 +355,11 @@ AC-19. **modelID-match-required (Security C-1 (a)).** A request with enabled too
 
 AC-20. **Buyer-side validation obligation visibility (Security C-1 (b)).** Public documentation (README, examples, AC-16a/AC-16b harnesses) MUST state that emitted `tool_calls[]` reflect model output, not provider-verified intent, and that buyer-side agent frameworks MUST validate before execution. macprovider MUST NOT semantically validate `tool_calls[].function.name` or `function.arguments` against the buyer's tool policy.
 
-AC-21. **Commit-worthy delta minimal-shape validation (Security H-1).** The coordinator commit-signal code path (§8.4) MUST validate that any `delta.tool_calls[]` event chosen as commit-worthy has integer `index`, non-empty `id` string, `type == "function"`, non-empty `function.name`, and parseable `function.arguments` JSON string. Malformed pre-commit deltas (e.g. `[{}]`) MUST NOT commit the response or settle provider-positive usage. Verified by a new coordinator test on the commit-signal path.
+AC-21. **Commit-worthy delta minimal-shape validation (Security H-1).** The coordinator commit-signal code path (§8.4) MUST validate that any `delta.tool_calls[]` event chosen as commit-worthy has integer `index`, non-empty `id` string, `type == "function"`, non-empty `function.name`, and `function.arguments` as a JSON string whose decoded value is a JSON object. Malformed pre-commit deltas — including `[{}]` (empty tool-call object) and `{"function":{"arguments":"[]"}}` (arguments decodes to non-object) — MUST NOT commit the response or settle provider-positive usage. Verified by a new coordinator test on the commit-signal path that rejects both forms and accepts the minimal valid shape.
 
 AC-22. **Mixed-sentinel fallback (Security m-1).** Output containing sentinels from multiple §3.1 families simultaneously (e.g. both `<tool_call>` and `<|python_tag|>` in the same response) produces no `tool_calls[]`; the response falls back to plain assistant content.
+
+AC-23. **Forward compatibility invariant (PD r2 Q-1, §10c).** A v0.2-or-later regression test replays v0.1.2 non-streaming tool-call response fixtures and verifies that a v0.1.2-targeted client parser (e.g. OpenAI Python SDK 1.x at the version locked when v0.1.2 ships) successfully parses each response. Verified as a release gate for any SPEC-018 vN.M version that follows v0.1.2.
 
 ## 10. Future versions — Required, then Enhancement
 
@@ -349,7 +368,7 @@ AC-22. **Mixed-sentinel fallback (Security m-1).** Output containing sentinels f
 Each item below is a v0.2 deliverable that gates the "actual Ring-1 product" release. A user running Cline / Cursor / Aider / OpenCode against macprovider for real coding work needs ALL of these, not just some:
 
 1. **Multi-turn provider acceptance.** Provider accepts `role: "tool"` messages and assistant-history `tool_calls[]` without rejecting at the provider boundary. Closes AC-14 limitation. This is the gate between v0.1 wire-shape-certificate and v0.2 actual-product.
-2. **Model-hash → family registry (closes Security C-1 path (c)).** Extends the live SPEC-008 Pillar A + SPEC-011 v0.5 `model_hash` infrastructure (already plumbed in `phase4-coordinator/internal/pool/provider.go:158-162`, `phase4-coordinator/internal/buyer/server.go:3743-3764`, and the `/v1/status` `model_hash` block) with a registry mapping `model_hash` → tool-call grammar family. The parser selects grammar from the verified loaded `model_hash`, not from the buyer-supplied `modelID` substring. Design questions: where the registry lives (binary, coordinator-pushed, community-signed), curation model, behavior when `model_hash` is unknown. These resolve as part of v0.2 SPEC design.
+2. **Model-hash → family registry (closes Security C-1 path (c)).** Extends the live SPEC-008 Pillar A + SPEC-011 v0.5 `model_hash` infrastructure already plumbed end-to-end in production: the `ModelHash` + `HashStatus` fields on the coordinator's pool/provider struct (`phase4-coordinator/internal/pool/provider.go:132-133`), heartbeat-driven `model_hash` updates (`phase4-coordinator/internal/pool/provider.go:1001-1052`), hash-verification routing eligibility (`phase4-coordinator/internal/buyer/server.go:3743-3764`), and the `/v1/status` `model_hash` block. v0.2 adds a registry mapping `model_hash` → tool-call grammar family on top of this infrastructure. The parser selects grammar from the verified loaded `model_hash`, not from the buyer-supplied `modelID` substring. **Buyer-facing impact:** prevents a provider from advertising a tool-call-capable model family while serving a different model or grammar. Design questions to resolve in v0.2 SPEC: where the registry lives (binary, coordinator-pushed catalog, community-signed root), curation model, and — **per Security r2 Q-1** — fail-closed behavior when `model_hash` is unknown or unregistered. v0.2 MUST require unknown-or-unregistered `model_hash` to fail closed for tool-call synthesis (NOT fall back to modelID substring matching), unless an explicit operator override is logged and buyer-visible.
 3. **Prompt-echo guard.** Parser refuses to synthesize `tool_calls[]` whose entire markup (sentinel + body + close-sentinel) appears verbatim in the request prompt content. Closes the residual prompt-injection vector where a tool-call-capable model echoes hostile content from a poisoned user prompt.
 4. **Token-incremental streaming promotion.** Tool-call streaming MAY emit `delta.tool_calls[].function.arguments` as additive partial substrings as generation proceeds. Release gate: SDK compatibility, byte-equivalence of concatenated deltas vs. non-streaming `arguments`, and parse-failure fallback tests pass. v0.1 ratifies buffered-to-end (§4); v0.2 promotes.
 5. **Structured `malformed_tool_call` signal.** Parse failures (malformed body, duplicate keys, undeclared name, sentinel-without-modelID, mixed sentinels) surface as a structured response-side signal — e.g. a `malformed_tool_call` field in the response object or a response header — so buyers can programmatically distinguish "normal model text" from "recognized tool-call parse failed." Replaces the current silent plain-content fallback observability gap (Security M-3).
@@ -366,9 +385,23 @@ Items below are interesting but neither v0.2-gating nor on a named timeline:
 - SDK examples or helper libraries (Python, TypeScript) for tool-call workloads. SDK packaging lives in SPEC-006 / a dedicated SDK SPEC, not in SPEC-018 — wire-shape is normative here, library packaging is downstream.
 - Promotion of `id` minting from a per-response opaque UUID to a `(provider_id, request_id, choice_index)`-scoped identifier (Security M-2 v0.3+ candidate).
 
+### 10c. Forward compatibility invariant (additive-only guarantee)
+
+Future SPEC-018 versions (v0.2 and beyond) **MUST preserve the v0.1.2 non-streaming response shape** defined in §2 (`role`, `content`, `tool_calls[]` schema with `id`, `type`, `function.name`, `function.arguments`; `finish_reason = "tool_calls"`). A client that successfully parses a v0.1.2 non-streaming tool-call response MUST continue parsing the equivalent v0.2+ response without code changes.
+
+Future versions MAY add new fields, new SSE delta shapes, or new finish reasons — but additions MUST NOT break existing parsing. Specifically:
+
+- **Streaming improvements (§10a #4 token-incremental promotion)** MAY emit additive partial-string `function.arguments` deltas across multiple SSE events, but the concatenation of those deltas for a given `index` MUST reproduce the v0.1.2 byte-for-byte single-fragment behavior (AC-9).
+- **Multi-turn (§10a #1)** MAY accept `role:"tool"` and assistant-history `tool_calls[]` request messages, but MUST NOT change the assistant-response shape produced after a successful turn.
+- **Model-hash → family registry (§10a #2)** MAY change which providers are eligible to synthesize tool calls, but MUST NOT change the wire shape of synthesized calls.
+- **Structured `malformed_tool_call` signal (§10a #5)** MAY add a new response field or header, but MUST NOT remove or rename existing v0.1.2 response fields.
+- **`function.arguments` byte cap (§10a #7)** MAY cause a request to fail closed, but MUST NOT silently rewrite a tool call that would have succeeded under v0.1.2.
+
+This invariant gives buyers a stable platform: code written against v0.1.2 wire shape continues to work in v0.2 and beyond. AC-23 verifies the invariant via a v0.2 regression test that replays v0.1.2 response fixtures.
+
 ## 11. Open Questions
 
-Q1. v0.1 streaming is buffered-to-end for tool-enabled requests. The promotion path is committed to §10a #4 with a defined release gate. The remaining question: which agent framework's user-visible streaming behavior change (incremental tool-call rendering) is the v0.2 release-readiness signal — Cline, Aider, OpenCode, or all of them?
+Q1. **v0.2 release-readiness framework signal — product decision needed before v0.2 design.** v0.1 streaming is buffered-to-end for tool-enabled requests; promotion is committed to §10a #4 with a release gate. The product decision SPEC-018 v0.2 must answer: is v0.2 "Ring-1 release-ready" when (a) ONE primary agent framework (e.g. Cline) completes a multi-turn coding session against macprovider with incremental tool-call rendering, OR (b) a named compatibility matrix passes for ALL the §1-listed frameworks (Cline, Cursor, Aider, OpenCode, Continue, Zed, Claude Code, Vercel AI SDK, LangChain, LlamaIndex, Pydantic-AI, n8n), OR (c) some middle ground (e.g. 3 named primary frameworks)? §1 currently names many frameworks as targets; if the answer is (a), §1 should be reworded to name the primary framework explicitly and demote the others to "expected-compatible" status.
 
 Q2. Should provider-minted tool-call IDs eventually be deterministic so retries reproduce the same IDs, or remain non-deterministic UUIDs? v0.1 is non-deterministic; §10b reserves a `(provider_id, request_id, choice_index)` rescope as a future enhancement.
 
