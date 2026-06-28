@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>live.streamvc.macprovider-watchdog</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__WATCHDOG_PATH__</string>
+  </array>
+
+  <!-- Tick every 60 seconds. Fast enough to recover within a
+       coordinator inactivity-drop window (90s), slow enough that
+       continuous netstat polling is not noisy. -->
+  <key>StartInterval</key>
+  <integer>60</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__LOG_DIR__/watchdog.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__LOG_DIR__/watchdog.err.log</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__USER_HOME__</string>
+    <key>PATH</key>
+    <!-- Issue #191 R4 architect HIGH: include /usr/sbin and /sbin
+         so the watchdog can find sysctl + netstat under launchd's
+         minimal PATH. Without these, current_boot_id and
+         has_established_conn would exit 127 and the script would
+         silently die under set -e. -->
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>MACPROVIDER_WATCHDOG_LABEL</key>
+    <string>__SERVICE_LABEL__</string>
+    <key>MACPROVIDER_CONFIG_PATH</key>
+    <string>__CONFIG_PATH__</string>
+    <key>MACPROVIDER_COORDINATOR_HOST</key>
+    <string>__COORDINATOR_HOST__</string>
+    <key>MACPROVIDER_LOG_DIR</key>
+    <string>__LOG_DIR__</string>
+  </dict>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

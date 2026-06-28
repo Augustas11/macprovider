@@ -794,3 +794,105 @@ disclosure deployment is the remaining cutover prerequisite before
 any production partner-key issuance. The Step 4.C PR may merge
 with this template in place; the live sign-off is the operator-side
 gate executed AFTER the merge.
+
+## 11. Operator-side provider watchdog (issue #189 / #191)
+
+Every install of `macprovider-cli` via the public
+`get.streamvc.live/install.sh` flow now ships an external LaunchAgent
+that catches a class of silent half-open-TCP wedge originally tracked
+in issue #189 (the in-process bounded send + Darwin.exit(1) liveness
+watchdog landed in PR #204 prevents the wedge on fresh builds; this
+external watchdog is the belt-and-suspenders insurance for operators
+on older binaries and a long-tail catch for any future regression).
+
+### What it does
+
+`~/.local/share/macprovider-watchdog/watchdog.sh` runs every 60s via
+launchd (label `live.streamvc.macprovider-watchdog`). It:
+
+1. Reads the operator's `provider_id` from
+   `~/.config/macprovider/config.yaml`.
+2. Resolves `coordinator.streamvc.live` via dscacheutil (with `host`
+   fallback).
+3. Runs `netstat -an -p tcp` and looks for an ESTABLISHED outbound
+   row to `<coord_ip>.443`.
+4. If absent, runs
+   `launchctl kickstart -k gui/$UID/live.streamvc.macprovider` to
+   restart the provider LaunchAgent.
+
+Healthy ticks are silent so the log file does not bloat. Detection
+ticks and kicks write to `~/Library/Logs/macprovider/watchdog.log`.
+
+### Recovery target
+
+- **Detection latency**: ≤60s after a previously-armed connection
+  drops (one tick interval). The watchdog stays disarmed until it
+  has observed at least one healthy ESTABLISHED connection, so a
+  cold-start install with a 10-20 min model load is NOT killed
+  prematurely.
+- **Post-kick grace**: ≥300s between kicks
+  (`MACPROVIDER_WATCHDOG_KICK_GRACE_SECONDS`), so a launchd
+  respawn that triggers a model reload is not re-kicked while it
+  is still warming back up.
+- **End-to-end recovery (wedge → ESTABLISHED again)**: typically
+  ≤75s on a warm model (kick + launchd respawn + cached model load
+  + reconnect). Cold-cache adds the full model-load window (often
+  10-20 min); the grace period is sized to absorb that.
+- **Known limitation**: the netstat check matches *any* local
+  ESTABLISHED connection to `coordinator.streamvc.live.443`, not
+  specifically the provider's process. A separate process (a
+  browser tab on the portal, another shell with curl, etc.)
+  holding a long-lived connection to the coordinator host can mask
+  a wedged provider. Tightening this to the provider's PID via
+  `lsof` is tracked as future work — for the current fleet a
+  spurious 443 connection to coord is rare on operator macs.
+
+### Install
+
+Automatic via the public installer (`curl -fsSL get.streamvc.live/install.sh | sh`).
+To install or re-install manually from the repo:
+
+```bash
+bash ops/macprovider-watchdog/install.sh
+```
+
+Set `MACPROVIDER_NO_WATCHDOG=1` on the main installer's env to skip
+the watchdog (expert / debug override only).
+
+### Inspect
+
+```bash
+launchctl list | grep live.streamvc.macprovider-watchdog
+cat ~/Library/Logs/macprovider/watchdog.log
+```
+
+To force a tick out-of-cadence (useful for testing the kick path
+without waiting 60s):
+
+```bash
+launchctl kickstart -k gui/$UID/live.streamvc.macprovider-watchdog
+```
+
+### Uninstall
+
+The main provider uninstaller (`phase3-binary/dist/uninstall.sh`)
+removes the watchdog alongside the provider. To remove the watchdog
+alone (e.g. to disable it on a specific Mac without touching the
+provider):
+
+```bash
+bash ops/macprovider-watchdog/uninstall.sh
+```
+
+### Failure modes the watchdog does NOT catch
+
+- **Provider connected but silently dropped from the coordinator's
+  `ready` pool.** Different failure mode: TCP is ESTABLISHED but the
+  coordinator no longer routes inference. Polling
+  `/v1/models` server-side from the watchdog was scoped out of #191
+  pending evidence we see this happen in production; for now the
+  in-process liveness watchdog (#189 / PR #204) is the primary
+  detection path.
+- **macprovider-cli process not running at all.** launchd's
+  `KeepAlive` on the main service handles this; the watchdog only
+  helps when the process is running but its WebSocket is wedged.
