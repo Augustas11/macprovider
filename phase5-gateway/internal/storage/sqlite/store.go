@@ -87,20 +87,21 @@ func (s *Store) Ping(ctx context.Context) error {
 }
 
 // maxKnownSchemaVersion is the highest schema_migrations.version this
-// binary understands. Bumped from 1 → 2 by issue #196 (usage_events
-// composite PK rebuild). At Open time the store reads the current
-// applied version; if it exceeds this constant the binary is older
-// than the DB and refuses to start, preventing the silent data
-// hazards described in the architect R1 HIGH "rollback" finding
-// (e.g., the legacy `WHERE request_id = ?` lookup returning a
-// wrong-account row after the composite PK has allowed cross-account
-// collisions).
+// binary understands. Version history:
+//   v1 — original schema.
+//   v2 — issue #196: usage_events PK (account_id, request_id).
+//   v3 — issue #210: demo_usage_events PK (demo_token_hash, request_id).
 //
-// Operators rolling back the gateway binary on a DB already at
-// version 2 must restore /var/lib/macprovider/gateway.db from the
-// pre-deploy snapshot (deploy-pearl-vps.sh writes one). Future
-// version bumps land here.
-const maxKnownSchemaVersion = 2
+// At Open time the store reads the current applied version; if it
+// exceeds this constant the binary is older than the DB and refuses
+// to start, preventing silent data hazards on rollback (e.g., a
+// legacy `WHERE request_id = ?` lookup returning a wrong-identity
+// row once cross-identity collisions exist).
+//
+// Operators rolling back the gateway binary on a DB at a higher
+// version must restore /var/lib/macprovider/gateway.db from the
+// pre-deploy snapshot (deploy-pearl-vps.sh step 5b writes one).
+const maxKnownSchemaVersion = 3
 
 func (s *Store) Migrate(ctx context.Context) error {
 	if err := s.checkSchemaVersionGate(ctx); err != nil {
@@ -120,10 +121,19 @@ func (s *Store) Migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, usageEventsAuxiliaryDDL); err != nil {
 		return err
 	}
+	if _, err := s.db.ExecContext(ctx, demoUsageEventsTableDDL); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, demoUsageEventsAuxiliaryDDL); err != nil {
+		return err
+	}
 	if err := s.ensureOAuthStateActionColumn(ctx); err != nil {
 		return err
 	}
 	if err := s.ensureUsageEventsCompositePK(ctx); err != nil {
+		return err
+	}
+	if err := s.ensureDemoUsageEventsCompositePK(ctx); err != nil {
 		return err
 	}
 	// Stamp the schema version. We always insert v1 (preserves
@@ -141,6 +151,9 @@ func (s *Store) Migrate(ctx context.Context) error {
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)", now); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)", now); err != nil {
 		return err
 	}
 	return nil
@@ -324,6 +337,92 @@ func (s *Store) ensureUsageEventsCompositePK(ctx context.Context) error {
 		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(2, ?)`,
 		encodeTime(time.Now().UTC())); err != nil {
 		return fmt.Errorf("stamp schema_migrations v2 inside rebuild tx: %w", err)
+	}
+	return tx.Commit()
+}
+
+// ensureDemoUsageEventsCompositePK is the issue #210 sibling of
+// ensureUsageEventsCompositePK. Migrates `demo_usage_events` from
+// PRIMARY KEY (request_id) — pre-existing global uniqueness across
+// all demo identities, exploitable when two demo_token_hash values
+// collide on the same buyer-supplied X-Request-ID — to composite
+// PRIMARY KEY (demo_token_hash, request_id).
+//
+// Same rebuild pattern as the v2 migration: detect legacy shape,
+// rename-aside + create-canonical + copy + drop, stamp v3 inside
+// the same transaction so the shape change and the version marker
+// commit atomically.
+func (s *Store) ensureDemoUsageEventsCompositePK(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(demo_usage_events)`)
+	if err != nil {
+		return err
+	}
+	type col struct {
+		name string
+		pk   int
+	}
+	var pkCols []col
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull int
+		var defaultValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if pk > 0 {
+			pkCols = append(pkCols, col{name: name, pk: pk})
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	// Composite (demo_token_hash, request_id) — already migrated.
+	if len(pkCols) == 2 &&
+		((pkCols[0].name == "demo_token_hash" && pkCols[1].name == "request_id") ||
+			(pkCols[0].name == "request_id" && pkCols[1].name == "demo_token_hash")) {
+		return nil
+	}
+	if !(len(pkCols) == 1 && pkCols[0].name == "request_id") {
+		return fmt.Errorf("demo_usage_events PK shape unrecognized: %+v", pkCols)
+	}
+	if _, err := s.db.ExecContext(ctx, `PRAGMA foreign_keys = OFF`); err != nil {
+		return err
+	}
+	defer func() {
+		_, _ = s.db.ExecContext(ctx, `PRAGMA foreign_keys = ON`)
+	}()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `ALTER TABLE demo_usage_events RENAME TO demo_usage_events_legacy`); err != nil {
+		return fmt.Errorf("rename legacy demo_usage_events aside: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, demoUsageEventsTableDDL); err != nil {
+		return fmt.Errorf("create new demo_usage_events: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO demo_usage_events
+			(request_id, client_ip, demo_token_hash, window_date, total_tokens, created_at)
+		SELECT request_id, client_ip, demo_token_hash, window_date, total_tokens, created_at
+		FROM demo_usage_events_legacy`); err != nil {
+		return fmt.Errorf("copy demo_usage_events rows: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DROP TABLE demo_usage_events_legacy`); err != nil {
+		return fmt.Errorf("drop legacy demo_usage_events table: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, demoUsageEventsAuxiliaryDDL); err != nil {
+		return fmt.Errorf("recreate demo_usage_events index/trigger: %w", err)
+	}
+	// Stamp v3 inside the same transaction — atomicity per ISS-196 R4.
+	if _, err := tx.ExecContext(ctx,
+		`INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)`,
+		encodeTime(time.Now().UTC())); err != nil {
+		return fmt.Errorf("stamp schema_migrations v3 inside rebuild tx: %w", err)
 	}
 	return tx.Commit()
 }

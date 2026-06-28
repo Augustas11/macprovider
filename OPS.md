@@ -155,8 +155,9 @@ quota table, which has no BEFORE-DELETE trigger.
 - `phase5-gateway/dist/archive-restore.sh` — forensic-restore path.
   Verifies the `.sha256` checksum, decompresses, runs `PRAGMA
   integrity_check`, refuses if the archive's `schema_migrations` max
-  version exceeds the binary's expected version (currently 2, after
-  issue #196 made `usage_events` PK composite), and
+  version exceeds the binary's expected version (currently 3 — after
+  #196 made `usage_events` PK composite and #210 made
+  `demo_usage_events` PK composite), and
   installs to a tempfile target (default `/tmp/gateway-restored-<ts>.db`).
   `--to-live` does the destructive replace-the-live-DB path; requires
   `ASSUME_YES=1`. Snapshots the existing live DB to a `.pre-restore.<ts>`
