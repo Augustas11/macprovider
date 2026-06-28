@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.1.3 (2026-06-28, round-3 defensive absorption)
+**Version:** 0.1.4 (2026-06-28, round-4 polish absorption)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** DRAFT — r4 defensive audit pending.
+**Status:** DRAFT — final defensive check pending.
 
 ## Quick orientation
 
@@ -370,8 +370,11 @@ envelope, no behavior change.
 
 AC-30. openai-python paired fixture:
 `test/integration/spec_019/openai_python_strict_json_schema/` contains:
-- request body with `response_format.json_schema` for `Person` (Pydantic model:
-  `class Person(BaseModel): name: str; age: int`),
+- request body with `response_format.json_schema` for `Person`
+  (Pydantic model: `class Person(BaseModel): name: str; age: float`
+  -- note v0.1.0 fixture uses `float` rather than `int` so that the
+  emitted JSON Schema `{"type":"number"}` matches Vercel AI SDK's
+  `z.number()` output for byte parity per AC-31),
 - `openai==2.44.0`,
 - captured outbound HTTP body (`fixture_request_body.json`),
 - expected returned parsed `Person` model,
@@ -379,7 +382,7 @@ AC-30. openai-python paired fixture:
   comparison.
 The macprovider response parses into the same `Person` model and the
 JCS-canonicalized `response_format.json_schema.schema` matches the golden
-fixture modulo an explicit allow-list (`title`, `description`).
+fixture modulo an explicit allow-list (`title`, `description`, `$schema`).
 
 AC-31. Vercel AI SDK paired fixture: `test/integration/spec_019/
 vercel_ai_sdk_strict_json_schema/` uses the SAME logical `Person` contract as
@@ -389,7 +392,7 @@ keywords which §3 rejects; v0.1.0 fixtures use unconstrained `z.number()` until
 v0.2 widens the §3 subset to include numeric bounds.) The fixture captures the
 outbound HTTP body (`fixture_request_body.json`). A normalization step strips
 the `$schema` top-level key from the captured Vercel body before
-canonical-schema comparison; v0.1.0 §3 rejects `$schema` (per AC-3
+canonical-schema comparison; v0.1.0 §3 rejects `$schema` (per AC-5
 rejected-keyword list). With `createOpenAICompatible({
 supportsStructuredOutputs: true, ... })` and `@ai-sdk/openai-compatible
 @2.0.38`, the AC asserts `response_format.type == "json_schema"`,
@@ -397,7 +400,9 @@ supportsStructuredOutputs: true, ... })` and `@ai-sdk/openai-compatible
 `response_format.json_schema.schema` MUST match the AC-30 Pydantic schema modulo
 `title` / `description` AND `$schema`. v0.1.0 documents the `$schema` strip +
 `.int()` substitution as v0.1.0 fixture constraints; v0.2 considers widening §3
-to accept these keywords.
+to accept these keywords. Production Vercel buyers using
+`supportsStructuredOutputs:true` without the test-side `$schema` normalization
+receive HTTP 400 from §3's rejected-keyword list in v0.1.0.
 
 AC-32. Vercel default-path fixture (separate file): without
 `supportsStructuredOutputs:true`, Vercel emits `json_object` not `json_schema`.
@@ -435,8 +440,8 @@ Allowed schema keywords:
 | `description` | string | Prompt data only; no validation effect. |
 | `title` | string | Prompt data only; no validation effect. |
 
-Rejected keywords in v0.1.0: count = 33. v0.1.0 rejects `oneOf`, `anyOf`,
-`allOf`, `not`, `$ref`, `$defs`, `definitions`, `pattern`, `format`,
+Rejected keywords in v0.1.0: count = 34. v0.1.0 rejects `oneOf`, `anyOf`,
+`allOf`, `not`, `$schema`, `$ref`, `$defs`, `definitions`, `pattern`, `format`,
 `minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `multipleOf`,
 `minLength`, `maxLength`, `minItems`, `maxItems`, `uniqueItems`, `contains`,
 `minProperties`, `maxProperties`, `propertyNames`, `patternProperties`,
@@ -747,21 +752,26 @@ then creates the upstream coordinator request from the original `body`
 `bytes.NewReader(body)`). SPEC-019 adds no gateway schema parser and no new
 endpoint.
 
-**Inbound `Content-Encoding` posture (v0.1.0)**: the gateway and coordinator
-MUST reject any request with a `Content-Encoding` header (`gzip`, `deflate`,
-`br`, or any non-empty value) with HTTP 415
-`request_content_encoding_unsupported` and an actionable message ("v0.1.0 does
-not accept compressed request bodies; resend with no `Content-Encoding` header.
-Compressed-request support is deferred to v0.2 per §10."). This sidesteps three
-problems with transparent decompression in v0.1.0: (a) current gateway
-`parseChatRequest` reads `r.Body` directly without `gzip.NewReader` (cite
-`phase5-gateway/internal/router/chat_proxy.go:102-117`); (b) decompressed-byte
-caps would need a second tier of limits; (c) gateway, coordinator, and provider
-would need identical decompression semantics to preserve the
-`json_schema.schema` byte cap and JCS canonicalization invariants. v0.1.0 keeps
-a single byte-domain (uncompressed request body) for all three components. No
-SPEC-006 or SPEC-001 amendment is required: SPEC-006 §1650-1657 already covers
-request-body size limits and 413; this adds 415 for a separate header gate.
+**Inbound `Content-Encoding` posture (v0.1.0)**: the gateway and
+coordinator MUST reject any request with a `Content-Encoding` header
+whose normalized field value is not exactly `identity` (RFC 9110
+§8.4.1.1 explicit no-op encoding). `Content-Encoding: identity` and
+omitted `Content-Encoding` are accepted. All other values (`gzip`,
+`deflate`, `br`, or any compressed encoding) return HTTP 415
+`request_content_encoding_unsupported` with an actionable message
+("v0.1.0 accepts `Content-Encoding: identity` or no `Content-Encoding`
+header; compressed request bodies are deferred to v0.2 per §10.").
+This sidesteps three problems with transparent decompression in v0.1.0:
+(a) current gateway `parseChatRequest` reads `r.Body` directly without
+`gzip.NewReader` (cite `phase5-gateway/internal/router/chat_proxy.go:102-117`);
+(b) decompressed-byte caps would need a second tier of
+limits; (c) gateway, coordinator, and provider would need identical
+decompression semantics to preserve the `json_schema.schema` byte cap
+and JCS canonicalization invariants. v0.1.0 keeps a single byte-domain
+(uncompressed request body) for all three components. No SPEC-006 or
+SPEC-001 amendment is required: SPEC-006 §1650-1657 already covers
+request-body size limits and 413; this adds 415 for a separate
+content-coding gate.
 
 **Settlement double-attribution prevention**: for the gateway-passed-through
 detail codes `malformed_json_response` and `json_schema_validation_failed`, the
@@ -845,30 +855,35 @@ migration.
 
 Deferred to v0.2:
 
-- streaming structured output with partial-JSON-prefix validation per chunk;
-- Cline structured-output enablement on the active streaming path;
-- Vercel AI SDK and OpenAI SDK matrix expansion beyond the v0.1.0 anchor
-  fixtures;
-- wider schema subset after Cline and Vercel AI SDK compatibility evidence;
-- schema warm-cache between requests on the same connection;
-- Transparent gateway-side decompression of `Content-Encoding: gzip` /
-  `deflate` / `br` request bodies with a decompressed-byte cap is deferred to
-  v0.2. v0.1.0 keeps the single uncompressed byte-domain invariant for caps and
-  JCS;
-- §3 numeric-bound keywords (`minimum`, `maximum`, `multipleOf`) and `$schema`
-  top-level acceptance are deferred to v0.2 to enable direct round-trip with
-  Vercel AI SDK's full Zod expressivity without an SDK-side normalization step;
-- AC-30 uses a flat Pydantic model. Nested Pydantic models emit `$defs` / `$ref`
-  which §3 rejects (per v0.1.0 reject-list); fixtures with nested classes are
-  deferred to v0.2 when `$ref` / `$defs` schema reuse is in scope.
+- v0.2: streaming structured output with partial-JSON-prefix validation per
+  chunk.
+- v0.2: Cline structured-output enablement on the active streaming path.
+- v0.2: Vercel AI SDK and OpenAI SDK matrix expansion beyond the v0.1.0 anchor
+  fixtures.
+- v0.2: wider schema subset after Cline and Vercel AI SDK compatibility
+  evidence.
+- v0.2: schema warm-cache between requests on the same connection.
+- v0.2: transparent gateway-side decompression of `Content-Encoding: gzip` /
+  `deflate` / `br` request bodies with a decompressed-byte cap. v0.1.0 keeps
+  the single uncompressed byte-domain invariant for caps and JCS. v0.1.0
+  returns HTTP 415 `request_content_encoding_unsupported` for compressed bodies
+  until v0.2 decompression semantics land.
+- v0.2: §3 numeric-bound keywords (`minimum`, `maximum`, `multipleOf`) and
+  `$schema` top-level acceptance to enable direct round-trip with Vercel AI
+  SDK's full Zod expressivity without an SDK-side normalization step.
 
 Deferred to v0.3 or later:
 
-- `oneOf` / `anyOf` polymorphism;
-- `$ref` / `$defs` schema reuse;
-- non-strict mode (`strict:false`) as observability without enforcement;
-- auto-retry with tightened prompt on validation failure;
-- model-hash-bound structured-output family renderer registry.
+- v0.3 or later: `oneOf` / `anyOf` polymorphism.
+- v0.3 or later: `$ref` / `$defs` schema reuse.
+- v0.3 or later: nested Pydantic fixtures. AC-30 uses a flat Pydantic model
+  because nested Pydantic models emit `$defs` / `$ref`, which §3 rejects per
+  the v0.1.0 reject-list; fixtures with nested classes are deferred to v0.3
+  when `$ref` / `$defs` schema reuse is in scope.
+- v0.3 or later: non-strict mode (`strict:false`) as observability without
+  enforcement.
+- v0.3 or later: auto-retry with tightened prompt on validation failure.
+- v0.3 or later: model-hash-bound structured-output family renderer registry.
 
 A buyer-facing migration note in the public release notes is a v0.1.0 release
 acceptance criterion.
@@ -914,24 +929,44 @@ Audit lanes should probe:
 
 ## 12. Document metadata
 
-**Status:** DRAFT — r4 defensive audit pending. This SPEC becomes LOCKED only
-after the audit loop converges at 0 CRITICAL, 0 HIGH, and 0 MEDIUM across all
-required lanes.
+**Status:** DRAFT — final defensive check pending OR locking target.
 
-**Version:** 0.1.3 (2026-06-28, round-3 defensive absorption)
+**Version:** 0.1.4 (2026-06-28, round-4 polish absorption)
 
 Precondition: SPEC-018 v0.2.4 LOCKED at `7e50832` via PR #202, with
 implementation shipped at `c77313a` via PR #209
 (`specs/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors).
 
-Successor: TBD. Expected next version is v0.1.4 for defensive audit absorption
+Successor: TBD. Expected next version is v0.1.5 for defensive audit absorption
 or v0.2.0 if the audit loop promotes streaming structured output into scope.
 
 Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
 change, no new HTTP endpoint.
 
 ### Change log
+
+- **v0.1.4 (2026-06-28, round-4 polish absorption):** Absorbed 2 HIGH +
+  3 MEDIUM + 6 minor across 6 audit lanes. Three lanes (security,
+  product-design, narrative) returned READY TO LOCK at r4. `Content-
+  Encoding: identity` accept/reject contradiction resolved -- §7 now
+  rejects only non-`identity` non-empty values (architect + critic
+  convergent). AC-30 Pydantic fixture changed from `int` to `float`
+  so both Pydantic and Vercel Zod fixtures emit
+  `{"type":"number"}` (code). AC-31 citation fix: rejected-keyword
+  list AC reference corrected; §3 explicitly includes `$schema` in
+  reject list (critic). §10 nested-Pydantic deferral target corrected
+  from v0.2 to v0.3 to align with $ref/$defs deferral (critic).
+  §10 transparent-decompression bullet names the v0.1.0 error code
+  `request_content_encoding_unsupported` for traceability (code minor).
+  AC-31 footnote: production Vercel buyers with
+  `supportsStructuredOutputs:true` and no normalization receive HTTP
+  400 in v0.1.0 (critic minor). §10 bullet-shape normalized (narrative
+  minor). Round narrative: `specs/SPEC-019-v0_1-r4-audit.md`; per-lane
+  findings: `specs/SPEC-019-v0_1-{architect,code,security,
+  product-design,critic,narrative}-r4-audit.md`. Codex security,
+  product-design, and Claude narrative lanes = first 3 READY TO LOCK
+  at the same round.
 
 - **v0.1.3 (2026-06-28, round-3 defensive absorption):** Absorbed 2
   HIGH + 7 MEDIUM + 4 minor + 1 Q across 6 audit lanes. Gzip posture
