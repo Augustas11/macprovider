@@ -258,7 +258,7 @@ final class ToolCallParserTests: XCTestCase {
     }
 
     func testOversizedArgumentsFallBackToPlainText() {
-        let oversized = #"{"blob":"\#(String(repeating: "x", count: 256 * 1024))"}"#
+        let oversized = #"{"blob":"\#(String(repeating: "x", count: ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP))"}"#
         let raw = #"<tool_call>{"name":"find_definition","arguments":"\#(oversized.replacingOccurrences(of: "\"", with: "\\\""))"}</tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,
@@ -270,7 +270,7 @@ final class ToolCallParserTests: XCTestCase {
     }
 
     func testOversizedQwenPythonStyleArgumentsFallBackToPlainText() {
-        let raw = #"<tool_call>find_definition(blob="\#(String(repeating: "x", count: 256 * 1024))")</tool_call>"#
+        let raw = #"<tool_call>find_definition(blob="\#(String(repeating: "x", count: ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP))")</tool_call>"#
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,
             modelID: "mlx-community/Qwen3-32B-4bit",
@@ -282,7 +282,7 @@ final class ToolCallParserTests: XCTestCase {
     }
 
     func testOversizedLlamaPythonStyleArgumentsFallBackToPlainText() {
-        let raw = #"<|python_tag|>find_definition(blob="\#(String(repeating: "x", count: 256 * 1024))")<|eom_id|>"#
+        let raw = #"<|python_tag|>find_definition(blob="\#(String(repeating: "x", count: ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP))")<|eom_id|>"#
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,
             modelID: "mlx-community/Llama-3.3-70B-Instruct-4bit",
@@ -321,10 +321,10 @@ final class ToolCallParserTests: XCTestCase {
         let prefix = #"{"blob":""#
         let suffix = #""}"#
         let envelopeBytes = qwenToolCallJSON(argumentsJSON: prefix + suffix).utf8.count
-        let repeatCount = ((256 * 1024) - envelopeBytes) / "€".utf8.count
+        let repeatCount = (ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP - envelopeBytes) / "€".utf8.count
         let arguments = prefix + String(repeating: "€", count: repeatCount) + suffix
-        XCTAssertLessThanOrEqual(arguments.utf8.count, 256 * 1024)
-        XCTAssertLessThanOrEqual(qwenToolCallJSON(argumentsJSON: arguments).utf8.count, 256 * 1024)
+        XCTAssertLessThanOrEqual(arguments.utf8.count, ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP)
+        XCTAssertLessThanOrEqual(qwenToolCallJSON(argumentsJSON: arguments).utf8.count, ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP)
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: qwenToolCallRaw(argumentsJSON: arguments),
             modelID: "mlx-community/Qwen2.5-7B-Instruct-4bit"
@@ -338,9 +338,9 @@ final class ToolCallParserTests: XCTestCase {
     func testMultibyteArgumentsOverByteLimitFallBackToPlainText() {
         let prefix = #"{"blob":""#
         let suffix = #""}"#
-        let repeatCount = ((256 * 1024) - prefix.utf8.count - suffix.utf8.count) / "€".utf8.count + 1
+        let repeatCount = (ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP - prefix.utf8.count - suffix.utf8.count) / "€".utf8.count + 1
         let arguments = prefix + String(repeating: "€", count: repeatCount) + suffix
-        XCTAssertGreaterThan(arguments.utf8.count, 256 * 1024)
+        XCTAssertGreaterThan(arguments.utf8.count, ToolCallParser.SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP)
         let raw = qwenToolCallRaw(argumentsJSON: arguments)
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: raw,

@@ -15,6 +15,10 @@ public struct ChatCompletionRequest: Sendable {
     public let promptSource: ChatCompletionPromptSource
 
     public static func parse(data: Data) throws -> ChatCompletionRequest {
+        guard data.count <= RequestValidation.rawBodyByteCap else {
+            throw APIError(status: 413, message: "Request body exceeds 4 MiB", code: "request_body_too_large")
+        }
+
         let json: Any
         do {
             json = try JSONSerialization.jsonObject(with: data)
@@ -80,6 +84,7 @@ public struct ChatCompletionRequest: Sendable {
         let messages = try rawMessages.enumerated().map { index, raw in
             try ChatMessage.parse(raw, index: index)
         }
+        try RequestValidation.validate(messages)
 
         try validateTools(dict["tools"])
         try validateToolChoice(dict["tool_choice"])
@@ -175,6 +180,8 @@ public enum ChatRole: String, Sendable {
 public struct ChatMessage: Sendable {
     public let role: ChatRole
     public let content: String?
+    public let toolCallID: String?
+    public let toolCalls: [ToolCall]?
 
     static func parse(_ raw: Any, index: Int) throws -> ChatMessage {
         guard let dict = raw as? [String: Any] else {
@@ -190,24 +197,42 @@ public struct ChatMessage: Sendable {
             guard let content, !content.isEmpty else {
                 throw APIError(status: 400, message: "messages[\(index)].content must be non-empty", code: "invalid_request")
             }
-            return ChatMessage(role: role, content: content)
+            return ChatMessage(role: role, content: content, toolCallID: nil, toolCalls: nil)
         case .assistant:
             let content = try textProjection(from: dict["content"], messageIndex: index, allowNull: true)
+            let parsedToolCalls: [ToolCall]?
             if let toolCalls = dict["tool_calls"], !(toolCalls is NSNull) {
-                try validateAssistantToolCalls(toolCalls, messageIndex: index)
+                parsedToolCalls = try parseAssistantToolCalls(toolCalls, messageIndex: index)
             } else if content == nil {
                 throw APIError(status: 400, message: "assistant message requires content or tool_calls", code: "invalid_request")
+            } else {
+                parsedToolCalls = nil
             }
-            return ChatMessage(role: role, content: content)
+            return ChatMessage(role: role, content: content, toolCallID: nil, toolCalls: parsedToolCalls)
         case .tool:
-            guard dict["tool_call_id"] is String else {
-                throw APIError(status: 400, message: "tool message requires tool_call_id", code: "invalid_request")
+            guard let toolCallID = dict["tool_call_id"] as? String, !toolCallID.isEmpty else {
+                throw APIError(status: 400, message: "tool message requires tool_call_id", code: "invalid_tool_call_id", param: "messages[\(index)].tool_call_id")
+            }
+            guard !(dict["content"] is NSNull) else {
+                throw APIError(status: 400, message: "tool message requires content", code: "invalid_request", param: "messages[\(index)].content")
             }
             guard let content = try textProjection(from: dict["content"], messageIndex: index, allowNull: false) else {
-                throw APIError(status: 400, message: "tool message requires content", code: "invalid_request")
+                throw APIError(status: 400, message: "tool message requires content", code: "invalid_request", param: "messages[\(index)].content")
             }
-            return ChatMessage(role: role, content: content)
+            return ChatMessage(role: role, content: content, toolCallID: toolCallID, toolCalls: nil)
         }
+    }
+}
+
+public struct ToolCall: Equatable, Sendable {
+    public let id: String
+    public let functionName: String
+    public let arguments: String
+
+    public init(id: String, functionName: String, arguments: String) {
+        self.id = id
+        self.functionName = functionName
+        self.arguments = arguments
     }
 }
 
@@ -239,6 +264,10 @@ public struct APIError: Error, Sendable {
                 "type": type,
                 "param": paramValue,
                 "code": code,
+                "retryable": false,
+                "request_id": NSNull(),
+                "inference_ran": false,
+                "settlement_ran": false,
             ]
         ]
     }
@@ -361,26 +390,31 @@ private func validateToolChoice(_ raw: Any?) throws {
     }
 }
 
-private func validateAssistantToolCalls(_ raw: Any, messageIndex: Int) throws {
+private func parseAssistantToolCalls(_ raw: Any, messageIndex: Int) throws -> [ToolCall] {
     guard let calls = raw as? [Any], !calls.isEmpty else {
         throw APIError(status: 400, message: "messages[\(messageIndex)].tool_calls must be a non-empty array", code: "invalid_tools")
     }
-    for (index, rawCall) in calls.enumerated() {
+    return try calls.enumerated().map { index, rawCall in
         guard let call = rawCall as? [String: Any] else {
             throw APIError(status: 400, message: "Invalid messages[\(messageIndex)].tool_calls[\(index)]", code: "invalid_tools")
         }
-        guard call["id"] is String, call["type"] as? String == "function",
+        guard let id = call["id"] as? String, call["type"] as? String == "function",
               let function = call["function"] as? [String: Any],
-              function["name"] is String,
+              let name = function["name"] as? String,
+              !name.isEmpty,
               let arguments = function["arguments"] as? String
         else {
             throw APIError(status: 400, message: "Invalid messages[\(messageIndex)].tool_calls[\(index)]", code: "invalid_tools")
         }
+        guard arguments.utf8.count <= RequestValidation.toolCallArgumentsPerCallByteCap else {
+            throw APIError(status: 413, message: "tool_call arguments exceed 1 MiB", code: "tool_call_arguments_too_large", param: "messages[\(messageIndex)].tool_calls[\(index)].function.arguments")
+        }
         guard let data = arguments.data(using: .utf8),
-              (try? JSONSerialization.jsonObject(with: data)) != nil
+              (try? JSONSerialization.jsonObject(with: data)) is [String: Any]
         else {
             throw APIError(status: 400, message: "Invalid tool_call arguments JSON", code: "invalid_tools")
         }
+        return ToolCall(id: id, functionName: name, arguments: arguments)
     }
 }
 
@@ -425,4 +459,88 @@ private func textProjection(from raw: Any?, messageIndex: Int, allowNull: Bool) 
         }
     }
     return textParts.joined(separator: "\n")
+}
+
+private enum RequestValidation {
+    static let rawBodyByteCap = 4 * 1024 * 1024
+    static let toolResultPerMessageByteCap = 256 * 1024
+    static let toolResultsAggregateByteCap = 1024 * 1024
+    static let toolCallArgumentsPerCallByteCap = 1024 * 1024
+    static let toolCallArgumentsAggregateByteCap = 2 * 1024 * 1024
+    static let maxMessages = 256
+    static let maxAssistantToolCalls = 128
+
+    static func validate(_ messages: [ChatMessage]) throws {
+        guard messages.count <= maxMessages else {
+            throw APIError(status: 400, message: "messages may contain at most 256 entries", code: "messages_too_long")
+        }
+
+        var assistantIDs: [String: Int] = [:]
+        var duplicateAssistantID: String?
+        var totalToolCalls = 0
+        var aggregateArgumentsBytes = 0
+
+        for (messageIndex, message) in messages.enumerated() {
+            guard let calls = message.toolCalls else { continue }
+            totalToolCalls += calls.count
+            guard totalToolCalls <= maxAssistantToolCalls else {
+                throw APIError(status: 400, message: "assistant tool_calls may contain at most 128 entries", code: "too_many_tool_calls")
+            }
+            for (callIndex, call) in calls.enumerated() {
+                guard isRequestAcceptedToolCallID(call.id) else {
+                    throw APIError(status: 400, message: "Invalid tool_call id", code: "invalid_tool_call_id", param: "messages[\(messageIndex)].tool_calls[\(callIndex)].id")
+                }
+                if assistantIDs[call.id] != nil {
+                    duplicateAssistantID = call.id
+                } else {
+                    assistantIDs[call.id] = messageIndex
+                }
+                aggregateArgumentsBytes += call.arguments.utf8.count
+                guard aggregateArgumentsBytes <= toolCallArgumentsAggregateByteCap else {
+                    throw APIError(status: 413, message: "assistant-history tool_call arguments exceed aggregate cap", code: "tool_call_arguments_aggregate_too_large")
+                }
+            }
+        }
+        if duplicateAssistantID != nil {
+            throw APIError(status: 400, message: "Duplicate assistant tool_call id", code: "duplicate_tool_call_id")
+        }
+
+        var fulfilledToolIDs: Set<String> = []
+        var aggregateToolResultBytes = 0
+        for (messageIndex, message) in messages.enumerated() where message.role == .tool {
+            guard let toolCallID = message.toolCallID, isRequestAcceptedToolCallID(toolCallID) else {
+                throw APIError(status: 400, message: "Invalid tool_call_id", code: "invalid_tool_call_id", param: "messages[\(messageIndex)].tool_call_id")
+            }
+            guard let assistantIndex = assistantIDs[toolCallID] else {
+                throw APIError(status: 400, message: "tool_call_id does not reference an earlier assistant tool_call", code: "tool_call_id_not_found")
+            }
+            guard assistantIndex < messageIndex else {
+                throw APIError(status: 400, message: "tool result appears before matching assistant tool_call", code: "tool_call_result_out_of_order")
+            }
+            guard !fulfilledToolIDs.contains(toolCallID) else {
+                throw APIError(status: 400, message: "Duplicate tool result for tool_call_id", code: "duplicate_tool_call_id")
+            }
+            fulfilledToolIDs.insert(toolCallID)
+
+            let contentBytes = message.content?.utf8.count ?? 0
+            guard contentBytes <= toolResultPerMessageByteCap else {
+                throw APIError(status: 413, message: "tool message content exceeds 256 KiB", code: "tool_result_too_large", param: "messages[\(messageIndex)].content")
+            }
+            aggregateToolResultBytes += contentBytes
+            guard aggregateToolResultBytes <= toolResultsAggregateByteCap else {
+                throw APIError(status: 413, message: "tool message content exceeds aggregate cap", code: "tool_results_aggregate_too_large")
+            }
+        }
+    }
+
+    static func isRequestAcceptedToolCallID(_ value: String) -> Bool {
+        guard value.hasPrefix("call_") else { return false }
+        let suffix = value.dropFirst(5)
+        guard (16 ... 64).contains(suffix.utf8.count) else { return false }
+        return suffix.utf8.allSatisfy { byte in
+            (byte >= 48 && byte <= 57) ||
+                (byte >= 65 && byte <= 90) ||
+                (byte >= 97 && byte <= 122)
+        }
+    }
 }

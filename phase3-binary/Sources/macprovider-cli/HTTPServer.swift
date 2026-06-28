@@ -483,15 +483,17 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
 
                 if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
-                    writer.writeSSEJSON(
-                        Self.chatCompletionChunk(
-                            id: id,
-                            created: created,
-                            model: request.model,
-                            delta: ["tool_calls": Self.toolCallDeltas(toolCalls)],
-                            finishReason: NSNull()
+                    for delta in Self.toolCallDeltaChunks(toolCalls) {
+                        writer.writeSSEJSON(
+                            Self.chatCompletionChunk(
+                                id: id,
+                                created: created,
+                                model: request.model,
+                                delta: ["tool_calls": delta],
+                                finishReason: NSNull()
+                            )
                         )
-                    )
+                    }
                 }
 
                 writer.writeSSEJSON(
@@ -510,11 +512,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         "created": created,
                         "model": request.model,
                         "choices": [],
-                        "usage": [
-                            "prompt_tokens": completion.promptTokens,
-                            "completion_tokens": completion.completionTokens,
-                            "total_tokens": completion.promptTokens + completion.completionTokens,
-                        ],
+                        "usage": Self.usage(completion),
                     ]
                 )
                 writer.writeSSEDone()
@@ -787,11 +785,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     "finish_reason": completion.finishReason,
                 ]
             ],
-            "usage": [
-                "prompt_tokens": completion.promptTokens,
-                "completion_tokens": completion.completionTokens,
-                "total_tokens": completion.promptTokens + completion.completionTokens,
-            ],
+            "usage": Self.usage(completion),
         ]
     }
 
@@ -828,10 +822,46 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
         return message
     }
 
-    private static func toolCallDeltas(_ toolCalls: [ToolCall]) -> [[String: Any]] {
-        toolCalls.enumerated().map { index, call in
-            call.openAIDelta(index: index)
+    private static func toolCallDeltaChunks(_ toolCalls: [ToolCall]) -> [[[String: Any]]] {
+        var chunks: [[[String: Any]]] = []
+        for (index, call) in toolCalls.enumerated() {
+            chunks.append([call.openAIInitialDelta(index: index)])
+            for fragment in splitArguments(call.arguments) {
+                chunks.append([call.openAIArgumentsDelta(index: index, fragment: fragment)])
+            }
         }
+        return chunks
+    }
+
+    private static func splitArguments(_ arguments: String, chunkBytes: Int = 2048) -> [String] {
+        guard !arguments.isEmpty else { return [] }
+        var result: [String] = []
+        var current = ""
+        var currentBytes = 0
+        for scalar in arguments.unicodeScalars {
+            let scalarString = String(scalar)
+            let scalarBytes = scalarString.utf8.count
+            if currentBytes > 0, currentBytes + scalarBytes > chunkBytes {
+                result.append(current)
+                current = ""
+                currentBytes = 0
+            }
+            current += scalarString
+            currentBytes += scalarBytes
+        }
+        if !current.isEmpty {
+            result.append(current)
+        }
+        return result
+    }
+
+    private static func usage(_ completion: CompletionResult) -> [String: Any] {
+        [
+            "prompt_tokens": completion.promptTokens,
+            "completion_tokens": completion.completionTokens,
+            "total_tokens": completion.promptTokens + completion.completionTokens,
+            "macprovider_model_hash_observed": completion.modelHashObserved ?? NSNull(),
+        ]
     }
 
     private static func statusResponse(_ snapshot: ProviderSnapshot, providerID: String?, coordinatorURL: String?) -> [String: Any] {

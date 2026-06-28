@@ -50,6 +50,40 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertTrue(response.body.contains(#""content":"answer""#), response.body)
     }
 
+    func testHTTPResponseUsageIncludesKnownObservedModelHash() async throws {
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+            ],
+            receiptBuilder: nil,
+            modelHash: hash
+        )
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any])
+        let usage = try XCTUnwrap(json["usage"] as? [String: Any])
+        XCTAssertEqual(usage["macprovider_model_hash_observed"] as? String, hash)
+    }
+
+    func testHTTPResponseUsageIncludesNullObservedModelHashWhenUnknown() async throws {
+        let response = try await roundTripChatCompletion(
+            body: [
+                "model": "fixture-model",
+                "messages": [["role": "user", "content": "hello"]],
+            ],
+            receiptBuilder: nil,
+            modelHash: nil
+        )
+
+        XCTAssertEqual(response.status, .ok, response.body)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(response.body.utf8)) as? [String: Any])
+        let usage = try XCTUnwrap(json["usage"] as? [String: Any])
+        XCTAssertTrue(usage.keys.contains("macprovider_model_hash_observed"))
+        XCTAssertTrue(usage["macprovider_model_hash_observed"] is NSNull)
+    }
+
     func testHTTPNonStreamingHandlerEmitsOpenAIToolCallsShape() async throws {
         let response = try await roundTripChatCompletion(
             body: [
@@ -74,7 +108,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 finishReason: "tool_calls",
                 promptTokens: 10,
                 completionTokens: 4,
-                toolCalls: [ToolCall(id: "call_test", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)]
+                toolCalls: [ToolCall(id: "call_0123456789abcdef", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)]
             )
         )
 
@@ -87,7 +121,7 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertTrue(message["content"] is NSNull)
         let toolCalls = try XCTUnwrap(message["tool_calls"] as? [[String: Any]])
         let call = try XCTUnwrap(toolCalls.first)
-        XCTAssertEqual(call["id"] as? String, "call_test")
+        XCTAssertEqual(call["id"] as? String, "call_0123456789abcdef")
         XCTAssertEqual(call["type"] as? String, "function")
         let function = try XCTUnwrap(call["function"] as? [String: Any])
         XCTAssertEqual(function["name"] as? String, "get_weather")
@@ -121,17 +155,18 @@ final class HTTPServerReceiptTests: XCTestCase {
         XCTAssertTrue(response.body.contains(#""code":"unsupported_tool_choice""#), response.body)
     }
 
-    func testHTTPRejectsMultiTurnToolMessagesForV1Slice() async throws {
+    func testHTTPAcceptsMultiTurnToolMessagesForV2Slice() async throws {
+        let modelID = "mlx-community/Qwen3-32B-4bit"
         let response = try await roundTripChatCompletion(
             body: [
-                "model": "fixture-model",
+                "model": modelID,
                 "messages": [
                     ["role": "user", "content": "What is the weather in Vilnius?"],
                     [
                         "role": "assistant",
                         "content": NSNull(),
                         "tool_calls": [[
-                            "id": "call_test",
+                            "id": "call_0123456789abcdef",
                             "type": "function",
                             "function": [
                                 "name": "get_weather",
@@ -141,17 +176,19 @@ final class HTTPServerReceiptTests: XCTestCase {
                     ],
                     [
                         "role": "tool",
-                        "tool_call_id": "call_test",
+                        "tool_call_id": "call_0123456789abcdef",
                         "content": #"{"temperature_c":21}"#,
                     ],
                 ],
             ],
+            routerModelID: modelID,
             receiptBuilder: nil,
-            completion: CompletionResult(content: "should-not-run", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            completion: CompletionResult(content: "It is 21 C.", finishReason: "stop", promptTokens: 1, completionTokens: 1),
+            loadedModelID: modelID
         )
 
-        XCTAssertEqual(response.status, .badRequest, response.body)
-        XCTAssertTrue(response.body.contains(#""code":"unsupported_tool_messages""#), response.body)
+        XCTAssertEqual(response.status, .ok, response.body)
+        XCTAssertTrue(response.body.contains(#""content":"It is 21 C.""#), response.body)
     }
 
     func testHTTPGenericInferenceFailureGetsNullUsageReceipt() async throws {
@@ -204,6 +241,7 @@ final class HTTPServerReceiptTests: XCTestCase {
 
     func testHTTPStreamingHandlerWritesNoMacProviderHeaders() async throws {
         let key = try Curve25519.Signing.PrivateKey(rawRepresentation: Data(0..<32))
+        let hash = "a3f1b2c8d4e5f6090807060504030201f0e1d2c3b4a5968778695a4b3c2d1e0f"
         let response = try await roundTripChatCompletion(
             body: [
                 "model": "fixture-model",
@@ -211,13 +249,16 @@ final class HTTPServerReceiptTests: XCTestCase {
                 "stream": true,
             ],
             receiptBuilder: ReceiptBuilder(keyStore: HTTPFixedReceiptKeyStore(key: key)),
-            completion: CompletionResult(content: "chunk", finishReason: "stop", promptTokens: 1, completionTokens: 1)
+            completion: CompletionResult(content: "chunk", finishReason: "stop", promptTokens: 1, completionTokens: 1),
+            modelHash: hash,
+            readStreamingBody: true
         )
 
         XCTAssertEqual(response.status, .ok, response.body)
         XCTAssertEqual(response.headers.first(name: "content-type"), "text/event-stream; charset=utf-8")
         XCTAssertFalse(response.headers.contains(name: RouterHandler.receiptHeaderName))
         XCTAssertFalse(response.headers.containsMacProviderHeader)
+        XCTAssertTrue(response.body.contains(#""macprovider_model_hash_observed":"\#(hash)""#), response.body)
     }
 
     func testHTTPStreamingToolCallE2EEmitsDeltaWithoutRawDelimiters() async throws {
@@ -245,7 +286,7 @@ final class HTTPServerReceiptTests: XCTestCase {
                 finishReason: "tool_calls",
                 promptTokens: 10,
                 completionTokens: 4,
-                toolCalls: [ToolCall(id: "call_test", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)]
+                toolCalls: [ToolCall(id: "call_0123456789abcdef", functionName: "get_weather", arguments: #"{"city":"Vilnius"}"#)]
             ),
             readStreamingBody: true
         )
@@ -790,10 +831,11 @@ private func roundTripChatCompletion(
     completionError: Error? = nil,
     warmSwapEnabled: Bool = false,
     modelHash: String? = nil,
+    loadedModelID: String = "fixture-model",
     readStreamingBody: Bool = false
 ) async throws -> HTTPReceiptResponse {
     let runtime = ModelRuntime(
-        modelID: "fixture-model",
+        modelID: loadedModelID,
         modelHash: modelHash,
         warmSwapEnabled: warmSwapEnabled,
         loader: { _ in throw HTTPReceiptFixtureError.inferenceFailed },
@@ -810,7 +852,7 @@ private func roundTripChatCompletion(
         }
     )
     let status = ProviderStatus(
-        modelID: "fixture-model",
+        modelID: loadedModelID,
         modelLoaded: true,
         capacity: ProviderCapacity(maxContextOverride: nil, maxConcurrencyOverride: nil)
     )

@@ -65,6 +65,8 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(usage["prompt_tokens"] as? Int, 7)
         XCTAssertEqual(usage["completion_tokens"] as? Int, 2)
         XCTAssertEqual(usage["total_tokens"] as? Int, 9)
+        XCTAssertTrue(usage.keys.contains("macprovider_model_hash_observed"))
+        XCTAssertTrue(usage["macprovider_model_hash_observed"] is NSNull)
     }
 
     func testUnknownCancelIsIdempotent() async throws {
@@ -102,6 +104,8 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(usage["prompt_tokens"] as? Int, 0)
         XCTAssertEqual(usage["completion_tokens"] as? Int, 0)
         XCTAssertEqual(usage["total_tokens"] as? Int, 0)
+        XCTAssertTrue(usage.keys.contains("macprovider_model_hash_observed"))
+        XCTAssertTrue(usage["macprovider_model_hash_observed"] is NSNull)
     }
 
     func testInvalidInferenceRequestSendsNak() async throws {

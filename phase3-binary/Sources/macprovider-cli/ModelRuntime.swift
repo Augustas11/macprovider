@@ -350,7 +350,7 @@ actor ModelRuntime: ModelRuntimeServing {
         )
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
-        try Self.validateToolCallingV1Scope(request)
+        try Self.validateToolChoiceScope(request)
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
         return RequestHandle(
@@ -371,7 +371,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let maxContextTokens = maxContextTokens
         try await inferenceGate.withPermit {
             return try await container.perform { context in
-                let input = UserInput(chat: request.messages.map { $0.mlxMessage }, tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
+                let input = UserInput(chat: try ToolPromptRenderer.renderMessages(request.messages, modelID: request.model), tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
                 let lmInput = try await context.processor.prepare(input: input)
                 try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
             }
@@ -400,7 +400,7 @@ actor ModelRuntime: ModelRuntimeServing {
         let snapshot = await currentSnapshot()
         try Self.validateReady(snapshot.state)
         try request.validateModelMatches(snapshot.modelID)
-        try Self.validateToolCallingV1Scope(request)
+        try Self.validateToolChoiceScope(request)
         let drainCancelled = DrainCancelToken()
         let registrationID = registerInFlight { drainCancelled.fire() }
         defer { unregisterInFlight(registrationID) }
@@ -408,7 +408,7 @@ actor ModelRuntime: ModelRuntimeServing {
             let result = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
             }
-            return (result, snapshot)
+            return (result.withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash)), snapshot)
         }
         guard let container = snapshot.container else {
             throw APIError(status: 503, message: "Model not loaded", type: "server_error", code: "model_not_loaded")
@@ -425,7 +425,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = UserInput(chat: request.messages.map { $0.mlxMessage }, tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
+                    let input = UserInput(chat: try ToolPromptRenderer.renderMessages(request.messages, modelID: request.model), tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
@@ -470,7 +470,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         promptTokens: result.promptTokenCount,
                         completionTokens: result.generationTokenCount,
                         ttftMilliseconds: firstToken.elapsedMilliseconds(since: completionStartedAt),
-                        toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls
+                        toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                        modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
                     )
                 }
             }
@@ -489,7 +490,7 @@ actor ModelRuntime: ModelRuntimeServing {
         if let testCompletion {
             let completion = try await Self.withDrainCancellation(drainCancelled) {
                 try await testCompletion(snapshot, request)
-            }
+            }.withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
             if !completion.content.isEmpty {
                 onChunk(completion.content)
             }
@@ -510,7 +511,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 return try await container.perform { context in
                     try drainCancelled.check()
                     try Task.checkCancellation()
-                    let input = UserInput(chat: request.messages.map { $0.mlxMessage }, tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
+                    let input = UserInput(chat: try ToolPromptRenderer.renderMessages(request.messages, modelID: request.model), tools: Self.mlxToolsForTemplate(from: request.promptSource.tools))
                     let lmInput = try await context.processor.prepare(input: input)
                     try Self.validatePromptTokenCount(lmInput.text.tokens.size, maxContextTokens: maxContextTokens)
                     let parameters = GenerateParameters(
@@ -595,7 +596,8 @@ actor ModelRuntime: ModelRuntimeServing {
                         finishReason: finishReason,
                         promptTokens: result.promptTokenCount,
                         completionTokens: result.generationTokenCount,
-                        toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls
+                        toolCalls: parsed.toolCalls.isEmpty ? nil : parsed.toolCalls,
+                        modelHashObserved: Self.validObservedModelHash(snapshot.modelHash)
                     )
                 }
             }
@@ -761,6 +763,16 @@ actor ModelRuntime: ModelRuntimeServing {
         bytes.map { String(format: "%02x", $0) }.joined()
     }
 
+    private static func validObservedModelHash(_ hash: String?) -> String? {
+        guard let hash, hash.utf8.count == 64 else { return nil }
+        guard hash.utf8.allSatisfy({ byte in
+            (byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)
+        }) else {
+            return nil
+        }
+        return hash
+    }
+
     private static func applyOutputFilters(
         _ text: String,
         stopTokenFilter: StopTokenFilter,
@@ -906,7 +918,7 @@ actor ModelRuntime: ModelRuntimeServing {
         }
     }
 
-    private static func validateToolCallingV1Scope(_ request: ChatCompletionRequest) throws {
+    private static func validateToolChoiceScope(_ request: ChatCompletionRequest) throws {
         if let toolChoice = request.promptSource.toolChoice,
            !isSupportedToolChoice(toolChoice)
         {
@@ -915,27 +927,6 @@ actor ModelRuntime: ModelRuntimeServing {
                 message: "tool_choice values other than auto are not supported by this provider",
                 code: "unsupported_tool_choice"
             )
-        }
-
-        for (index, message) in request.promptSource.messages.enumerated() {
-            guard case .object(let object) = message else {
-                continue
-            }
-            if case .string("tool")? = object["role"] {
-                throw APIError(
-                    status: 400,
-                    message: "tool role messages are not supported by this provider",
-                    code: "unsupported_tool_messages"
-                )
-            }
-            if let toolCalls = object["tool_calls"], toolCalls != .null {
-                throw APIError(
-                    status: 400,
-                    message: "assistant tool_calls in messages are not supported by this provider",
-                    code: "unsupported_tool_messages",
-                    param: "messages[\(index)].tool_calls"
-                )
-            }
         }
     }
 
@@ -1024,6 +1015,7 @@ struct CompletionResult: Sendable {
     let completionTokens: Int
     let ttftMilliseconds: Int64?
     let toolCalls: [ToolCall]?
+    let modelHashObserved: String?
 
     init(
         content: String,
@@ -1031,7 +1023,8 @@ struct CompletionResult: Sendable {
         promptTokens: Int,
         completionTokens: Int,
         ttftMilliseconds: Int64? = nil,
-        toolCalls: [ToolCall]? = nil
+        toolCalls: [ToolCall]? = nil,
+        modelHashObserved: String? = nil
     ) {
         self.content = content
         self.finishReason = finishReason
@@ -1039,6 +1032,20 @@ struct CompletionResult: Sendable {
         self.completionTokens = completionTokens
         self.ttftMilliseconds = ttftMilliseconds
         self.toolCalls = toolCalls
+        self.modelHashObserved = modelHashObserved
+    }
+
+    func withModelHashObservedIfMissing(_ observed: String?) -> CompletionResult {
+        guard modelHashObserved == nil, let observed else { return self }
+        return CompletionResult(
+            content: content,
+            finishReason: finishReason,
+            promptTokens: promptTokens,
+            completionTokens: completionTokens,
+            ttftMilliseconds: ttftMilliseconds,
+            toolCalls: toolCalls,
+            modelHashObserved: observed
+        )
     }
 }
 
@@ -1061,20 +1068,5 @@ private final class FirstTokenRecorder: @unchecked Sendable {
             return nil
         }
         return max(0, Int64(timestamp.timeIntervalSince(start) * 1000))
-    }
-}
-
-private extension ChatMessage {
-    var mlxMessage: Chat.Message {
-        switch role {
-        case .system:
-            return .system(content ?? "")
-        case .user:
-            return .user(content ?? "")
-        case .assistant:
-            return .assistant(content ?? "")
-        case .tool:
-            return .tool(content ?? "")
-        }
     }
 }

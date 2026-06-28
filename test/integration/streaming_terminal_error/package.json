@@ -1,0 +1,15 @@
+{
+  "name": "spec018-streaming-terminal-error",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "2.0.38"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3",
+    "vitest": "4.0.15"
+  }
+}
