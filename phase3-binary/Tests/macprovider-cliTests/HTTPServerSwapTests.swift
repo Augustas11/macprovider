@@ -166,7 +166,9 @@ final class HTTPServerSwapTests: XCTestCase {
             try await runtime.preflight(request, with: handle)
             let streamTask = Task {
                 try await runtime.stream(request, with: handle) { chunk in
-                    chunks.append(chunk)
+                    if case .content(let text) = chunk {
+                        chunks.append(text)
+                    }
                 }
             }
             try await waitUntil {

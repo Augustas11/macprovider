@@ -1,68 +1,139 @@
-import { describe, expect, it } from "vitest";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { afterEach, describe, expect, it } from "vitest";
+import { streamText } from "ai";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 
-type ToolCallState = {
-  id?: string;
-  name?: string;
-  arguments: string;
-  terminalError: boolean;
-  finishReason?: string;
-};
-
-const terminalErrorStream = [
-  `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_0123456789abcdef","type":"function","function":{"name":"write_file","arguments":"{\\"path\\":\\"README.md\\","}}]}}]}`,
-  `data: {"choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\\"content\\":\\"partial"}}]}}]}`,
-  `data: {"error":{"message":"Provider closed before tool-call stream completed","type":"server_error","code":"tool_call_final_close_failed","param":null}}`,
-  "data: [DONE]",
+const terminalErrorEvents = [
+  {
+    id: "chatcmpl-ac48b",
+    object: "chat.completion.chunk",
+    choices: [
+      {
+        index: 0,
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              id: "call_0123456789abcdef",
+              type: "function",
+              function: { name: "write_file", arguments: "{\"path\":\"README.md\"," },
+            },
+          ],
+        },
+        finish_reason: null,
+      },
+    ],
+  },
+  {
+    id: "chatcmpl-ac48b",
+    object: "chat.completion.chunk",
+    choices: [
+      {
+        index: 0,
+        delta: {
+          tool_calls: [
+            {
+              index: 0,
+              function: { arguments: "\"content\":\"partial" },
+            },
+          ],
+        },
+        finish_reason: null,
+      },
+    ],
+  },
+  {
+    error: {
+      message: "Provider closed before tool-call stream completed",
+      type: "server_error",
+      code: "tool_call_final_close_failed",
+      param: null,
+      retryable: true,
+      request_id: "req-ac48b",
+      inference_ran: true,
+      settlement_ran: false,
+    },
+  },
 ];
 
-function accumulateAtAgentRuntimeBoundary(lines: string[]): ToolCallState {
-  const state: ToolCallState = { arguments: "", terminalError: false };
-  for (const line of lines) {
-    if (!line.startsWith("data: ")) continue;
-    const payload = line.slice("data: ".length);
-    if (payload === "[DONE]") break;
-    const event = JSON.parse(payload);
-    if (event.error) {
-      state.terminalError = true;
-      continue;
-    }
-    for (const choice of event.choices ?? []) {
-      if (choice.finish_reason) state.finishReason = choice.finish_reason;
-      for (const call of choice.delta?.tool_calls ?? []) {
-        if (call.id) state.id = call.id;
-        if (call.function?.name) state.name = call.function.name;
-        if (call.function?.arguments) state.arguments += call.function.arguments;
-      }
-    }
-  }
-  return state;
-}
+let cleanup: (() => Promise<void>) | undefined;
 
-function isDispatchable(state: ToolCallState): boolean {
-  if (state.terminalError) return false;
-  if (state.finishReason !== "tool_calls") return false;
-  if (!state.id || !state.name) return false;
-  try {
-    JSON.parse(state.arguments);
-    return true;
-  } catch {
-    return false;
+afterEach(async () => {
+  if (cleanup) {
+    await cleanup();
+    cleanup = undefined;
   }
+});
+
+function terminalErrorServer(): Promise<{ baseURL: string; close: () => Promise<void> }> {
+  const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
+    if (req.method !== "POST" || req.url !== "/v1/chat/completions") {
+      res.statusCode = 404;
+      res.end();
+      return;
+    }
+    for await (const _ of req) {
+      // drain request body
+    }
+    res.writeHead(200, {
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache",
+    });
+    for (const event of terminalErrorEvents) {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+    res.write("data: [DONE]\n\n");
+    res.end();
+  });
+
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (typeof address !== "object" || address === null) {
+        reject(new Error("server did not bind a TCP port"));
+        return;
+      }
+      resolve({
+        baseURL: `http://127.0.0.1:${address.port}/v1`,
+        close: () => new Promise<void>((done, fail) => server.close((err) => (err ? fail(err) : done()))),
+      });
+    });
+  });
 }
 
 describe("AC-48b Cline OpenAI-compatible terminal error", () => {
-  it("imports the Cline SDK dependency and blocks dispatchable tool_calls after terminal SSE error", () => {
+  it("routes terminal-error SSE through Vercel AI SDK without yielding dispatchable tool calls", async () => {
+    const server = await terminalErrorServer();
+    cleanup = server.close;
     const provider = createOpenAICompatible({
       name: "macprovider-ac48b",
-      baseURL: "http://127.0.0.1:9/v1",
+      baseURL: server.baseURL,
       apiKey: "test",
     });
-    expect(provider).toBeTruthy();
 
-    const state = accumulateAtAgentRuntimeBoundary(terminalErrorStream);
-    expect(state.terminalError).toBe(true);
-    expect(state.finishReason).not.toBe("tool_calls");
-    expect(isDispatchable(state)).toBe(false);
+    let sawToolCallPart = false;
+    let sawSuccessfulText = false;
+    let threw = false;
+    try {
+      const result = streamText({
+        model: provider.chatModel("fixture-model"),
+        prompt: "write README.md",
+      });
+      for await (const part of result.fullStream) {
+        if (String(part.type).includes("tool-call")) {
+          sawToolCallPart = true;
+        }
+        if (part.type === "text-delta" && part.text) {
+          sawSuccessfulText = true;
+        }
+      }
+    } catch {
+      threw = true;
+    }
+
+    expect(sawToolCallPart).toBe(false);
+    expect(sawSuccessfulText).toBe(false);
+    expect(threw || (!sawToolCallPart && !sawSuccessfulText)).toBe(true);
   });
 });

@@ -457,7 +457,10 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 }
                 try await modelRuntime.preflight(request, with: handle)
 
-                writer.startSSE()
+                writer.startSSE(extraHeaders: [
+                    ("X-MacProvider-Provider-ToolCallOpen-Unix-Ms", "\(Int64(Date().timeIntervalSince1970 * 1000))"),
+                    ("X-MacProvider-Provider-Unix-Ms", "\(Int64(Date().timeIntervalSince1970 * 1000))"),
+                ])
                 sseStarted = true
                 writer.writeSSEJSON(
                     Self.chatCompletionChunk(
@@ -469,20 +472,38 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                 )
 
+                var streamedAnyToolCallDelta = false
                 let completion = try await modelRuntime.stream(request, with: handle) { chunk in
-                    writer.writeSSEJSON(
-                        Self.chatCompletionChunk(
-                            id: id,
-                            created: created,
-                            model: request.model,
-                            delta: ["content": chunk],
-                            finishReason: NSNull()
+                    switch chunk {
+                    case .content(let text):
+                        writer.writeSSEJSON(
+                            Self.chatCompletionChunk(
+                                id: id,
+                                created: created,
+                                model: request.model,
+                                delta: ["content": text],
+                                finishReason: NSNull()
+                            )
                         )
-                    )
+                    case .toolCallDelta(let toolDelta):
+                        streamedAnyToolCallDelta = true
+                        writer.writeSSEJSON(
+                            Self.chatCompletionChunk(
+                                id: id,
+                                created: created,
+                                model: request.model,
+                                delta: ["tool_calls": [toolDelta.openAIDeltaDict()]],
+                                finishReason: NSNull()
+                            )
+                        )
+                    }
                 }
                 await providerStatus.finishRequest(startedAt: startedAt, completion: completion, failed: false)
 
-                if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
+                // Fallback for non-streaming-incremental path: if tool calls landed only
+                // in the final CompletionResult (e.g. buffered/downgrade/test paths) and
+                // were never streamed via .toolCallDelta chunks, emit them now.
+                if !streamedAnyToolCallDelta, let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
                     for delta in Self.toolCallDeltaChunks(toolCalls) {
                         writer.writeSSEJSON(
                             Self.chatCompletionChunk(
@@ -996,9 +1017,9 @@ private struct ResponseWriter: @unchecked Sendable {
         )
     }
 
-    func startSSE() {
+    func startSSE(extraHeaders: [(String, String)] = []) {
         context.eventLoop.execute {
-            writeRawSSEHead(context: context)
+            writeRawSSEHead(context: context, extraHeaders: extraHeaders)
         }
     }
 
@@ -1055,8 +1076,8 @@ private func writeRawJSON(
     }
 }
 
-private func writeRawSSEHead(context: ChannelHandlerContext) {
-    let headers = makeSSEResponseHeaders()
+private func writeRawSSEHead(context: ChannelHandlerContext, extraHeaders: [(String, String)] = []) {
+    let headers = makeSSEResponseHeaders(extraHeaders: extraHeaders)
     let head = HTTPResponseHead(version: .http1_1, status: .ok, headers: headers)
     context.writeAndFlush(NIOAny(HTTPServerResponsePart.head(head)), promise: nil)
 }
@@ -1086,12 +1107,15 @@ func makeJSONResponseHeaders(
     return headers
 }
 
-func makeSSEResponseHeaders() -> HTTPHeaders {
+func makeSSEResponseHeaders(extraHeaders: [(String, String)] = []) -> HTTPHeaders {
     var headers = HTTPHeaders()
     headers.add(name: "content-type", value: "text/event-stream; charset=utf-8")
     headers.add(name: "cache-control", value: "no-cache")
     headers.add(name: "connection", value: "close")
     headers.add(name: "transfer-encoding", value: "chunked")
+    for (name, value) in extraHeaders {
+        headers.add(name: name, value: value)
+    }
     return headers
 }
 

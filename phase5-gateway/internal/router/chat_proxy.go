@@ -228,9 +228,11 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// coordinator can store it in request_log.external_request_id and
 	// out-of-process auditors can join gateway usage_events with
 	// coordinator request_log on this shared id. Earlier code minted a
-	// fresh UUID here, breaking that join.
-	upReq.Header.Set("X-Request-ID", requestID(r))
-	if s.cfg.Routing.StickyEnabled && !authn.Demo {
+		// fresh UUID here, breaking that join.
+		upReq.Header.Set("X-Request-ID", requestID(r))
+		upReq.Header.Set("X-MacProvider-Gateway-FirstByte-Unix-Ms", strconv.FormatInt(s.now().UnixMilli(), 10))
+		upReq.Header.Set("X-MacProvider-NTP-Skew-Ms", "0")
+		if s.cfg.Routing.StickyEnabled && !authn.Demo {
 		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
 			if !validConversationTag(tag) {
 				_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
@@ -383,6 +385,8 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		return
 	}
 	copyCleanHeaders(w.Header(), resp.Header)
+	w.Header().Set("X-MacProvider-Gateway-FirstByte-Unix-Ms", strconv.FormatInt(s.now().UnixMilli(), 10))
+	w.Header().Set("X-MacProvider-NTP-Skew-Ms", "0")
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	// Issue #190 R2 security HIGH: keep no-store (set at handler
 	// entry) on streaming responses too — the SSE body carries

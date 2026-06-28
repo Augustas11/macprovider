@@ -13,11 +13,37 @@ protocol ModelRuntimeServing: Actor {
     /// turn — distinct from a caller-side `currentSnapshot()` sample,
     /// which can drift across an actor interleaving / warm-swap.
     func completeWithServedSnapshot(_ request: ChatCompletionRequest, shouldCancel: @escaping @Sendable () -> Bool) async throws -> (CompletionResult, RuntimeSnapshot)
-    func stream(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (String) -> Void) async throws -> CompletionResult
+    func stream(_ request: ChatCompletionRequest, with handle: RequestHandle, shouldCancel: @escaping @Sendable () -> Bool, onChunk: @escaping @Sendable (StreamChunk) -> Void) async throws -> CompletionResult
     func preflight(_ request: ChatCompletionRequest, with handle: RequestHandle) async throws
     func acquireRequestHandle(_ request: ChatCompletionRequest) throws -> RequestHandle
     func unregisterInFlight(_ id: Int)
     func currentSnapshot() async -> RuntimeSnapshot
+}
+
+enum StreamChunk: Sendable {
+    case content(String)
+    case toolCallDelta(StreamToolCallDelta)
+}
+
+struct StreamToolCallDelta: Sendable {
+    let index: Int
+    let id: String?
+    let type: String?
+    let functionName: String?
+    let arguments: String?
+
+    /// OpenAI wire-shape conversion: first delta carries id/type/function.name;
+    /// subsequent deltas carry function.arguments fragments. All deltas carry index.
+    func openAIDeltaDict() -> [String: Any] {
+        var delta: [String: Any] = ["index": index]
+        if let id { delta["id"] = id }
+        if let type { delta["type"] = type }
+        var function: [String: Any] = [:]
+        if let functionName { function["name"] = functionName }
+        if let arguments { function["arguments"] = arguments }
+        if !function.isEmpty { delta["function"] = function }
+        return delta
+    }
 }
 
 extension ModelRuntimeServing {
@@ -483,7 +509,7 @@ actor ModelRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool = { false },
-        onChunk: @escaping @Sendable (String) -> Void
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         let snapshot = handle.snapshot
         let drainCancelled = handle.drainCancelled
@@ -492,7 +518,7 @@ actor ModelRuntime: ModelRuntimeServing {
                 try await testCompletion(snapshot, request)
             }.withModelHashObservedIfMissing(Self.validObservedModelHash(snapshot.modelHash))
             if !completion.content.isEmpty {
-                onChunk(completion.content)
+                onChunk(.content(completion.content))
             }
             return completion
         }
@@ -524,24 +550,12 @@ actor ModelRuntime: ModelRuntimeServing {
 
                     var emittedText = ""
                     var stoppedByRequestStop = false
+                    var toolStreamer = NativeToolCallStreamEmitter(modelID: request.model)
 
-                    let bufferForToolParsing = Self.hasEnabledTools(request.promptSource.tools)
+                    let streamToolsIncrementally = Self.hasEnabledTools(request.promptSource.tools)
                     let result: GenerateResult = try generate(input: lmInput, parameters: parameters, context: context) { tokens in
                         if Task.isCancelled || shouldCancel() || drainCancelled.isFired {
                             return .stop
-                        }
-                        if bufferForToolParsing {
-                            let decoded = context.tokenizer.decode(tokens: tokens)
-                            let candidate = Self.streamingSafePrefix(
-                                decoded,
-                                stopTokenFilter: stopTokenFilter,
-                                requestStops: request.stop
-                            )
-                            if candidate.hitStop {
-                                stoppedByRequestStop = true
-                                return .stop
-                            }
-                            return .more
                         }
                         let decoded = context.tokenizer.decode(tokens: tokens)
                         let candidate = Self.streamingSafePrefix(
@@ -549,11 +563,21 @@ actor ModelRuntime: ModelRuntimeServing {
                             stopTokenFilter: stopTokenFilter,
                             requestStops: request.stop
                         )
+                        if streamToolsIncrementally {
+                            for event in toolStreamer.observe(candidate.text) {
+                                onChunk(event)
+                            }
+                            if candidate.hitStop {
+                                stoppedByRequestStop = true
+                                return .stop
+                            }
+                            return .more
+                        }
 
                         let delta = Self.delta(from: emittedText, to: candidate.text)
                         if !delta.isEmpty {
                             emittedText = candidate.text
-                            onChunk(delta)
+                            onChunk(.content(delta))
                         }
 
                         if candidate.hitStop {
@@ -572,10 +596,15 @@ actor ModelRuntime: ModelRuntimeServing {
                     )
                     let finalDelta = Self.delta(from: emittedText, to: final.text)
                     let parsed = Self.parseToolCallsIfRequested(final.text, request: request)
-                    if bufferForToolParsing, parsed.toolCalls.isEmpty, !parsed.content.isEmpty {
-                        onChunk(parsed.content)
-                    } else if !bufferForToolParsing, !finalDelta.isEmpty {
-                        onChunk(finalDelta)
+                    if streamToolsIncrementally {
+                        for event in toolStreamer.observe(final.text) {
+                            onChunk(event)
+                        }
+                        if parsed.toolCalls.isEmpty, !parsed.content.isEmpty {
+                            onChunk(.content(parsed.content))
+                        }
+                    } else if !finalDelta.isEmpty {
+                        onChunk(.content(finalDelta))
                     }
 
                     let finishReason: String
@@ -939,6 +968,113 @@ actor ModelRuntime: ModelRuntimeServing {
         default:
             return false
         }
+    }
+}
+
+private struct NativeToolCallStreamEmitter {
+    private let startDelimiter: String
+    private let endDelimiter: String
+    private let argumentKey: String
+    private var opened = false
+    private var closed = false
+    private var emittedArguments = ""
+    private var callID = "call_\(UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased())"
+
+    init(modelID: String) {
+        if modelID.localizedCaseInsensitiveContains("llama-3.3") {
+            startDelimiter = "<|python_tag|>"
+            endDelimiter = "<|eom_id|>"
+            argumentKey = "parameters"
+        } else {
+            startDelimiter = "<tool_call>"
+            endDelimiter = "</tool_call>"
+            argumentKey = "arguments"
+        }
+    }
+
+    mutating func observe(_ text: String) -> [StreamChunk] {
+        guard !closed, let start = text.range(of: startDelimiter) else {
+            return []
+        }
+        let afterStart = start.upperBound
+        let bodyEnd = text.range(of: endDelimiter, range: afterStart..<text.endIndex)?.lowerBound ?? text.endIndex
+        let body = String(text[afterStart..<bodyEnd])
+        guard let name = stringField("name", in: body),
+              let arguments = argumentPrefix(in: body)
+        else {
+            return []
+        }
+
+        var events: [StreamChunk] = []
+        if !opened {
+            opened = true
+            events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: callID, type: "function", functionName: name, arguments: "")))
+        }
+        let fragment = Self.delta(from: emittedArguments, to: arguments)
+        if !fragment.isEmpty {
+            emittedArguments = arguments
+            events.append(.toolCallDelta(StreamToolCallDelta(index: 0, id: nil, type: nil, functionName: nil, arguments: fragment)))
+        }
+        if text.range(of: endDelimiter, range: afterStart..<text.endIndex) != nil {
+            closed = true
+        }
+        return events
+    }
+
+    private func stringField(_ key: String, in body: String) -> String? {
+        guard let keyRange = body.range(of: "\"\(key)\""),
+              let colon = body.range(of: ":", range: keyRange.upperBound..<body.endIndex)
+        else {
+            return nil
+        }
+        var index = colon.upperBound
+        while index < body.endIndex, body[index].isWhitespace {
+            index = body.index(after: index)
+        }
+        guard index < body.endIndex, body[index] == "\"" else {
+            return nil
+        }
+        index = body.index(after: index)
+        var value = ""
+        var escaped = false
+        while index < body.endIndex {
+            let ch = body[index]
+            if escaped {
+                value.append(ch)
+                escaped = false
+            } else if ch == "\\" {
+                escaped = true
+            } else if ch == "\"" {
+                return value
+            } else {
+                value.append(ch)
+            }
+            index = body.index(after: index)
+        }
+        return nil
+    }
+
+    private func argumentPrefix(in body: String) -> String? {
+        guard let keyRange = body.range(of: "\"\(argumentKey)\"") ?? body.range(of: #""arguments""#),
+              let colon = body.range(of: ":", range: keyRange.upperBound..<body.endIndex)
+        else {
+            return nil
+        }
+        var index = colon.upperBound
+        while index < body.endIndex, body[index].isWhitespace {
+            index = body.index(after: index)
+        }
+        guard index < body.endIndex else {
+            return nil
+        }
+        return String(body[index..<body.endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func delta(from old: String, to new: String) -> String {
+        guard new.hasPrefix(old) else {
+            return new
+        }
+        return String(new.dropFirst(old.count))
     }
 }
 

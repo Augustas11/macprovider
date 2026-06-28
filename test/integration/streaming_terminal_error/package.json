@@ -9,6 +9,7 @@
     "@ai-sdk/openai-compatible": "2.0.38"
   },
   "devDependencies": {
+    "ai": "^5.0.87",
     "typescript": "5.9.3",
     "vitest": "4.0.15"
   }

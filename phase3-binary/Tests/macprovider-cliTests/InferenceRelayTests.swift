@@ -343,7 +343,7 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool,
-        onChunk: @escaping @Sendable (String) -> Void
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
     }
@@ -390,11 +390,11 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool,
-        onChunk: @escaping @Sendable (String) -> Void
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
-        onChunk("one")
+        onChunk(.content("one"))
         try await Task.sleep(nanoseconds: 20_000_000)
-        onChunk("two")
+        onChunk(.content("two"))
         while !shouldCancel() {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
@@ -426,9 +426,9 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool,
-        onChunk: @escaping @Sendable (String) -> Void
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
-        onChunk("encrypted answer")
+        onChunk(.content("encrypted answer"))
         return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
     }
 

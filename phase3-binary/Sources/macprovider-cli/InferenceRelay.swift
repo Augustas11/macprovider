@@ -422,14 +422,27 @@ actor InferenceRelay {
                 finishReason: NSNull()
             )))
 
+            var streamedAnyToolCallDelta = false
             let completion = try await modelRuntime.stream(request, with: handle, shouldCancel: { state.isCancelled }) { chunk in
-                _ = buffer.enqueue(sseEvent(chatCompletionChunk(
-                    id: id,
-                    created: created,
-                    model: request.model,
-                    delta: ["content": chunk],
-                    finishReason: NSNull()
-                )))
+                switch chunk {
+                case .content(let text):
+                    _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+                        id: id,
+                        created: created,
+                        model: request.model,
+                        delta: ["content": text],
+                        finishReason: NSNull()
+                    )))
+                case .toolCallDelta(let toolDelta):
+                    streamedAnyToolCallDelta = true
+                    _ = buffer.enqueue(sseEvent(chatCompletionChunk(
+                        id: id,
+                        created: created,
+                        model: request.model,
+                        delta: ["tool_calls": [toolDelta.openAIDeltaDict()]],
+                        finishReason: NSNull()
+                    )))
+                }
             }
 
             state.setUsage(completion)
@@ -449,7 +462,10 @@ actor InferenceRelay {
                 return completion
             }
 
-            if let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
+            // Fallback for non-streaming-incremental path: if tool calls landed only
+            // in the final CompletionResult and were never streamed via .toolCallDelta
+            // chunks, emit them now.
+            if !streamedAnyToolCallDelta, let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
                 for delta in toolCallDeltaChunks(toolCalls) {
                     _ = buffer.enqueue(sseEvent(chatCompletionChunk(
                         id: id,

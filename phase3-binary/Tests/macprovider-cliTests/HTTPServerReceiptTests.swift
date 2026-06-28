@@ -1080,9 +1080,24 @@ private final class HTTPEmptyReceiptKeyStore: ReceiptKeyStoring, @unchecked Send
 }
 
 private extension HTTPHeaders {
+    /// v0.1 invariant: response headers MUST NOT carry receipt-bearing MacProvider data.
+    /// v0.2 §10d.4 + AC-44 adds NORMATIVE diagnostic headers (Streaming-Mode, timing
+    /// instrumentation) that are explicitly allowed. This predicate excludes the
+    /// known v0.2-normative headers from the "no MacProvider headers" check.
     var containsMacProviderHeader: Bool {
-        contains { name, _ in
-            name.lowercased().hasPrefix("x-macprovider-")
+        let v02NormativeSuffixes: Set<String> = [
+            "streaming-mode",
+            "provider-toolcallopen-unix-ms",
+            "provider-unix-ms",
+            "coordinator-firstforward-unix-ms",
+            "gateway-firstbyte-unix-ms",
+            "ntp-skew-ms",
+        ]
+        return contains { name, _ in
+            let lower = name.lowercased()
+            guard lower.hasPrefix("x-macprovider-") else { return false }
+            let suffix = String(lower.dropFirst("x-macprovider-".count))
+            return !v02NormativeSuffixes.contains(suffix)
         }
     }
 

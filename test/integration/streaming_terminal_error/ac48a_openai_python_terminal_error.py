@@ -49,6 +49,10 @@ SSE_EVENTS = [
             "type": "server_error",
             "code": "tool_call_final_close_failed",
             "param": None,
+            "retryable": True,
+            "request_id": "req-ac48a",
+            "inference_ran": True,
+            "settlement_ran": False,
         }
     },
 ]
@@ -83,6 +87,7 @@ def main() -> int:
     client = OpenAI(api_key="test", base_url=f"http://127.0.0.1:{server.server_port}/v1")
     saw_exception = False
     saw_successful_tool_finish = False
+    saw_dispatchable_tool_call = False
     accumulated = ""
     try:
         stream = client.chat.completions.create(
@@ -97,6 +102,12 @@ def main() -> int:
                 for call in choice.delta.tool_calls or []:
                     if call.function and call.function.arguments:
                         accumulated += call.function.arguments
+                        try:
+                            parsed = json.loads(accumulated)
+                            if isinstance(parsed, dict) and call.id and call.function.name:
+                                saw_dispatchable_tool_call = True
+                        except json.JSONDecodeError:
+                            pass
     except APIError:
         saw_exception = True
     finally:
@@ -104,9 +115,9 @@ def main() -> int:
 
     if saw_successful_tool_finish:
         raise AssertionError("openai-python yielded finish_reason=tool_calls after terminal error")
-    if not saw_exception and accumulated.endswith("}"):
-        raise AssertionError("openai-python accumulated a complete dispatchable tool call without raising")
-    print(json.dumps({"ac": "AC-48a", "passed": True, "sdk_exception": saw_exception, "accumulated_bytes": len(accumulated)}))
+    if saw_dispatchable_tool_call:
+        raise AssertionError("openai-python accumulated a complete dispatchable tool call after terminal error")
+    print(json.dumps({"ac": "AC-48a", "passed": True, "sdk_exception": saw_exception, "accumulated_bytes": len(accumulated), "dispatchable_tool_call": saw_dispatchable_tool_call}))
     return 0
 
 

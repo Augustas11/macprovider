@@ -242,6 +242,25 @@ public enum ResponseFormat: String, Sendable {
 }
 
 public struct APIError: Error, Sendable {
+    private static let retryableByCode: [String: Bool] = [
+        "byte_cap_exceeded": false,
+        "response_byte_cap_exceeded": false,
+        "malformed_tool_call_final_json": true,
+        "provider_stream_downgraded": true,
+        "request_body_too_large": false,
+        "tool_result_too_large": false,
+        "tool_results_aggregate_too_large": false,
+        "tool_call_arguments_too_large": false,
+        "tool_call_arguments_aggregate_too_large": false,
+        "messages_too_long": false,
+        "too_many_tool_calls": false,
+        "invalid_tool_call_id": false,
+        "tool_call_id_not_found": false,
+        "duplicate_tool_call_id": false,
+        "tool_call_result_out_of_order": false,
+        "unsupported_modelID_for_multi_turn": false,
+    ]
+
     public let status: Int
     public let message: String
     public let type: String
@@ -264,7 +283,7 @@ public struct APIError: Error, Sendable {
                 "type": type,
                 "param": paramValue,
                 "code": code,
-                "retryable": false,
+                "retryable": Self.retryableByCode[code] ?? false,
                 "request_id": NSNull(),
                 "inference_ran": false,
                 "settlement_ran": false,

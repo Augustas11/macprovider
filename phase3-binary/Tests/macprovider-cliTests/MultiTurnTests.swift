@@ -38,6 +38,26 @@ final class MultiTurnTests: XCTestCase {
         }
     }
 
+    func testSpec018RetryableEnvelopeMap() throws {
+        let cases: [(code: String, retryable: Bool)] = [
+            ("malformed_tool_call_final_json", true),
+            ("provider_stream_downgraded", true),
+            ("byte_cap_exceeded", false),
+            ("tool_result_too_large", false),
+            ("tool_call_arguments_aggregate_too_large", false),
+            ("unsupported_modelID_for_multi_turn", false),
+        ]
+
+        for tc in cases {
+            let error = APIError(status: 400, message: tc.code, code: tc.code)
+            let envelope = try XCTUnwrap(error.envelope["error"] as? [String: Any])
+            XCTAssertEqual(envelope["retryable"] as? Bool, tc.retryable, tc.code)
+            XCTAssertNotNil(envelope["request_id"], tc.code)
+            XCTAssertEqual(envelope["inference_ran"] as? Bool, false, tc.code)
+            XCTAssertEqual(envelope["settlement_ran"] as? Bool, false, tc.code)
+        }
+    }
+
     func testToolResultPerMessageCap() throws {
         var messages = Self.validMultiTurnMessages()
         messages[2]["content"] = String(repeating: "x", count: 256 * 1024 + 1)
