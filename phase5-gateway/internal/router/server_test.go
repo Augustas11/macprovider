@@ -1950,17 +1950,84 @@ func TestUsageFromJSONValidatesProviderReportedUsage(t *testing.T) {
 		{name: "exceeds_request_bound", body: `{"usage":{"prompt_tokens":1,"completion_tokens":10,"total_tokens":11}}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, ok, err := usageFromJSON([]byte(tc.body), 10); !ok || err == nil {
+			if _, ok, err := usageFromJSON([]byte(tc.body), 10, 10); !ok || err == nil {
 				t.Fatalf("usageFromJSON ok=%v err=%v, want provider usage validation error", ok, err)
 			}
 		})
 	}
-	usage, ok, err := usageFromJSON([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2}}`), 10)
+	usage, ok, err := usageFromJSON([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":2}}`), 10, 10)
 	if err != nil || !ok || usage.TotalTokens != 3 {
 		t.Fatalf("valid usage = %#v ok=%v err=%v, want total 3", usage, ok, err)
 	}
-	if _, ok, err := usageFromJSON([]byte(`{"usage":null}`), 10); ok || err != nil {
+	if _, ok, err := usageFromJSON([]byte(`{"usage":null}`), 10, 10); ok || err != nil {
 		t.Fatalf("usage null ok=%v err=%v, want absent usage", ok, err)
+	}
+}
+
+// TestEstimatePromptTokensHeadroomCoversAir5 regresses the 2026-06-28
+// phase-A re-run finding where a 115-byte body + max_tokens=4 produced
+// a cap of 33, but mlx-community/Qwen2.5-Coder-7B-Instruct-4bit's
+// tokenizer reported prompt=30 + completion=4 = 34, tripping the
+// usageFromJSON cap as invalid_provider_usage even though the
+// provider's response was correct. The fix adds
+// promptHeadroomTokens (= 64) padding to the byte-heuristic so a
+// 1-token discrepancy between heuristic and actual tokenizer no
+// longer breaks chat completions with small max_tokens.
+func TestEstimatePromptTokensHeadroomCoversAir5(t *testing.T) {
+	body := []byte(`{"model":"mlx-community/Qwen2.5-Coder-7B-Instruct-4bit","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}`)
+	maxTokens := int64(4)
+	// Cap uses promptCapTokens (with chat-template headroom). Billing
+	// paths use bare estimatePromptTokens — see chat_proxy.go split.
+	maxUsageTokens := promptCapTokens(body) + maxTokens
+	// Provider's actual tokenization for this body.
+	providerUsage := []byte(`{"usage":{"prompt_tokens":30,"completion_tokens":4,"total_tokens":34}}`)
+	usage, ok, err := usageFromJSON(providerUsage, maxUsageTokens, maxTokens)
+	if !ok || err != nil {
+		t.Fatalf("usageFromJSON ok=%v err=%v, want clean accept of provider tokenization within headroom (cap=%d, sum=34)", ok, err, maxUsageTokens)
+	}
+	if usage.PromptTokens != 30 || usage.CompletionTokens != 4 || usage.TotalTokens != 34 {
+		t.Fatalf("usage=%#v, want prompt=30 completion=4 total=34", usage)
+	}
+
+	// Sanity: a malicious provider reporting prompt=10000 for the same
+	// 115-byte body must STILL trip the cap. Headroom doesn't break
+	// the over-billing defense.
+	abusiveUsage := []byte(`{"usage":{"prompt_tokens":10000,"completion_tokens":1,"total_tokens":10001}}`)
+	if _, _, err := usageFromJSON(abusiveUsage, maxUsageTokens, maxTokens); err == nil {
+		t.Fatalf("expected cap rejection for prompt=10000 on a 115-byte body (cap=%d)", maxUsageTokens)
+	}
+
+	// R1 CODE HIGH #1: a malicious provider must NOT be able to spend
+	// the prompt-cap headroom as inflated completion_tokens. Buyer
+	// asked for max_tokens=4; provider reporting completion=68 (well
+	// under maxUsageTokens=97 thanks to the +64 prompt headroom)
+	// would over-bill the buyer 17× the requested max. Must reject
+	// on the explicit completion check.
+	inflatedCompletion := []byte(`{"usage":{"prompt_tokens":10,"completion_tokens":68,"total_tokens":78}}`)
+	if _, _, err := usageFromJSON(inflatedCompletion, maxUsageTokens, maxTokens); err == nil {
+		t.Fatalf("expected rejection of completion=68 when max_tokens=4 (sum=78 within maxUsageTokens=%d but completion exceeds max)", maxUsageTokens)
+	}
+}
+
+// TestCompletionFromHeaderCapsAtMaxTokens — R2 CODE HIGH: the
+// X-MacProvider-Completion-Tokens header path is used on the
+// upstream-error settlement paths. With the +64 prompt-cap
+// headroom, a malicious upstream could send a header value above
+// max_tokens and over-bill the buyer through the gateway-estimated
+// fallback. The completionFromHeaderCapped wrapper clamps to
+// maxTokens, mirroring the JSON-usage maxCompletion check.
+func TestCompletionFromHeaderCapsAtMaxTokens(t *testing.T) {
+	header := http.Header{}
+	header.Set("X-MacProvider-Completion-Tokens", "68")
+	if got := completionFromHeaderCapped(header, 4); got != 4 {
+		t.Fatalf("completionFromHeaderCapped clamped=%d, want 4 (max_tokens cap)", got)
+	}
+	if got := completionFromHeaderCapped(header, 100); got != 68 {
+		t.Fatalf("completionFromHeaderCapped under cap=%d, want 68 (pass-through)", got)
+	}
+	emptyHeader := http.Header{}
+	if got := completionFromHeaderCapped(emptyHeader, 4); got != 0 {
+		t.Fatalf("completionFromHeaderCapped no-header=%d, want 0", got)
 	}
 }
 
@@ -2631,7 +2698,7 @@ func TestStreamingProviderReportedUsageCannotUnderstateTruncatedOutput(t *testin
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
 	promptEstimate := estimatePromptTokens([]byte(body))
-	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), promptEstimate, promptEstimate+500)
+	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), 500)
 	wantUsed := float64(promptEstimate + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
@@ -3247,7 +3314,7 @@ func TestStreamingProviderReportedUsageCannotUnderstateObservedOutput(t *testing
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
 	promptEstimate := estimatePromptTokens([]byte(body))
-	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), promptEstimate, promptEstimate+500)
+	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), 500)
 	wantUsed := float64(promptEstimate + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
@@ -3288,7 +3355,7 @@ func TestStreamingUnderreportedUsageWithHighProviderPromptFallsBackToGatewayEsti
 	}
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
-	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), promptEstimate, promptEstimate+20)
+	wantCompletion := estimateStreamingCompletionTokens(int64(len(output)), 20)
 	wantUsed := float64(promptEstimate + wantCompletion)
 	if quota["daily_tokens_used"].(float64) != wantUsed {
 		t.Fatalf("daily_tokens_used=%v want %v", quota["daily_tokens_used"], wantUsed)
