@@ -99,10 +99,29 @@ func (s *Server) handleExplorerSessionDetail(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusNotFound, "invalid_request_error", "not_found", "Explorer resource not found")
 		return
 	}
+	// Issue #196: a request_id can now legitimately match rows in
+	// multiple accounts under the composite-PK schema. Operators
+	// disambiguate with ?account_id=<id>.
+	accountID := r.URL.Query().Get("account_id")
 	ctx, cancel := context.WithTimeout(r.Context(), time.Duration(explorerQueryTimeoutMs)*time.Millisecond)
 	defer cancel()
-	out, err := s.readStore().ExplorerSessionDetail(ctx, requestID)
+	out, err := s.readStore().ExplorerSessionDetail(ctx, accountID, requestID)
 	if err != nil {
+		// Surface the ambiguity case as 409 with the matching
+		// account list so the UI can render a disambiguation
+		// picker rather than a generic 500.
+		if errors.Is(err, storage.ErrExplorerAmbiguousRequestID) {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"error": map[string]any{
+					"type":    "invalid_request_error",
+					"code":    "ambiguous_request_id",
+					"message": "request_id matches multiple accounts; supply ?account_id= to disambiguate",
+				},
+				"request_id":          requestID,
+				"matched_account_ids": out.MatchedAccountIDs,
+			})
+			return
+		}
 		writeExplorerStorageError(w, err)
 		return
 	}

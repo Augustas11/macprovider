@@ -2448,14 +2448,16 @@ func TestStreamingSettlementFallbackWritesUsageEventOnMissingReservation(t *test
 	}
 }
 
-// TestEnsureUsageEventRejectsCrossAccountConflict pins the ISS-187
-// R1 code+security MAJOR: when the gateway's INSERT OR IGNORE
-// silently no-ops on the pre-existing #196 PK-collision attack
-// surface, EnsureUsageEvent now reads the existing row and rejects
-// the call if (account_id, demo_identity, token_source, outcome)
-// don't match — preventing a malicious buyer from skipping their
-// audit row by colliding with an unrelated request_id.
-func TestEnsureUsageEventRejectsCrossAccountConflict(t *testing.T) {
+// TestEnsureUsageEventCrossAccountInsertsBothRows pins the issue
+// #196 schema fix: usage_events PRIMARY KEY is now
+// (account_id, request_id), so a buyer using the same X-Request-ID
+// under two different accounts produces TWO distinct rows — each
+// account is billed independently and the attack surface that
+// motivated the earlier ISS-187 R1 payload-verify defense no longer
+// exists. The verify code is retained as defense in depth against
+// same-account payload drift (covered by the sibling
+// TestEnsureUsageEventRejectsSameIdentityPayloadMismatch).
+func TestEnsureUsageEventCrossAccountInsertsBothRows(t *testing.T) {
 	dir := t.TempDir()
 	st, err := sqlite.Open(context.Background(), dir+"/test.db")
 	if err != nil {
@@ -2464,21 +2466,36 @@ func TestEnsureUsageEventRejectsCrossAccountConflict(t *testing.T) {
 	defer st.Close()
 	rid := "55555555-5555-4555-8555-555555555555"
 	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
-	if err := st.InsertUsageEvent(context.Background(), storage.UsageEvent{
+	victim := storage.UsageEvent{
 		RequestID: rid, AccountID: "victim_account",
 		WindowDate: "2026-06-28", PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30,
 		TokenSource: "provider_reported", Outcome: "ok", CreatedAt: now,
-	}); err != nil {
+	}
+	if err := st.InsertUsageEvent(context.Background(), victim); err != nil {
 		t.Fatalf("InsertUsageEvent (victim row): %v", err)
 	}
-	// Attacker tries to write the SAME request_id under a different account.
-	err = st.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+	attacker := storage.UsageEvent{
 		RequestID: rid, AccountID: "attacker_account",
 		WindowDate: "2026-06-28", PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
 		TokenSource: "gateway_estimated", Outcome: "stream_truncated", CreatedAt: now,
-	})
-	if !errors.Is(err, storage.ErrUsageEventConflict) {
-		t.Fatalf("EnsureUsageEvent on cross-account PK collision: err=%v, want ErrUsageEventConflict", err)
+	}
+	if err := st.EnsureUsageEvent(context.Background(), attacker); err != nil {
+		t.Fatalf("EnsureUsageEvent for cross-account same-request_id must succeed under composite PK: %v", err)
+	}
+	// Both rows persisted, each billed against its own account.
+	victimUsed, _, err := st.DailyUsage(context.Background(), "victim_account", "2026-06-28")
+	if err != nil {
+		t.Fatalf("DailyUsage(victim): %v", err)
+	}
+	if victimUsed != 30 {
+		t.Errorf("victim used = %d, want 30", victimUsed)
+	}
+	attackerUsed, _, err := st.DailyUsage(context.Background(), "attacker_account", "2026-06-28")
+	if err != nil {
+		t.Fatalf("DailyUsage(attacker): %v", err)
+	}
+	if attackerUsed != 2 {
+		t.Errorf("attacker used = %d, want 2 (must be billed independently from victim)", attackerUsed)
 	}
 }
 

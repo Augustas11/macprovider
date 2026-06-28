@@ -1,5 +1,51 @@
 package sqlite
 
+// usageEventsTableDDL is the canonical CREATE TABLE for usage_events
+// in its post-#196 composite-PK shape. Used both inside schemaSQL
+// (fresh installs) and inside ensureUsageEventsCompositePK
+// (in-place upgrades) so the sqlite_master.sql entry for the table
+// is byte-for-byte identical across paths. ISS-196 R2 architect
+// MEDIUM finding.
+const usageEventsTableDDL = `CREATE TABLE IF NOT EXISTS usage_events (
+	request_id TEXT NOT NULL,
+	account_id TEXT NOT NULL,
+	demo_identity TEXT NOT NULL DEFAULT '',
+	window_date TEXT NOT NULL,
+	prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
+	completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
+	total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
+	token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated', 'manual_fixture')),
+	outcome TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (account_id, request_id)
+)`
+
+// usageEventsAuxiliaryDDL is the canonical text for the usage_events
+// secondary indexes and append-only triggers. Used both inside
+// schemaSQL (for fresh installs) and by ensureUsageEventsCompositePK
+// (for in-place upgrades from the pre-issue-#196 single-column PK
+// shape) so the post-migration sqlite_master entries are byte-for-byte
+// identical to a fresh install. Architect R1 MEDIUM finding.
+const usageEventsAuxiliaryDDL = `
+CREATE INDEX IF NOT EXISTS idx_usage_account_date ON usage_events(account_id, window_date);
+CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage_events(created_at);
+-- request_id-leading index restored after issue #196 made the PK
+-- composite (account_id, request_id). Without this, the explorer
+-- "find request by id" path (explorerAccountIDsForRequest, the
+-- ambiguity probe, and SPEC-007 session-detail unscoped lookups)
+-- would full-scan the table.
+CREATE INDEX IF NOT EXISTS idx_usage_request ON usage_events(request_id);
+
+CREATE TRIGGER IF NOT EXISTS usage_events_no_update BEFORE UPDATE ON usage_events
+BEGIN
+	SELECT RAISE(ABORT, 'usage_events are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS usage_events_no_delete BEFORE DELETE ON usage_events
+BEGIN
+	SELECT RAISE(ABORT, 'usage_events are append-only');
+END;
+`
+
 const schemaSQL = `
 PRAGMA foreign_keys = ON;
 
@@ -65,21 +111,9 @@ CREATE TABLE IF NOT EXISTS api_key_events (
 
 CREATE INDEX IF NOT EXISTS idx_api_key_events_key ON api_key_events(key_id);
 
-CREATE TABLE IF NOT EXISTS usage_events (
-	request_id TEXT PRIMARY KEY,
-	account_id TEXT NOT NULL,
-	demo_identity TEXT NOT NULL DEFAULT '',
-	window_date TEXT NOT NULL,
-	prompt_tokens INTEGER NOT NULL CHECK (prompt_tokens >= 0),
-	completion_tokens INTEGER NOT NULL CHECK (completion_tokens >= 0),
-	total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
-	token_source TEXT NOT NULL CHECK (token_source IN ('provider_reported', 'gateway_estimated', 'manual_fixture')),
-	outcome TEXT NOT NULL,
-	created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_usage_account_date ON usage_events(account_id, window_date);
-CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage_events(created_at);
+-- usage_events table: see usageEventsTableDDL constant for the canonical
+-- shape. Executed alongside schemaSQL in Migrate() so both paths share
+-- one source of truth post-#196.
 
 CREATE TABLE IF NOT EXISTS quota_reservations (
 	account_id TEXT NOT NULL,
@@ -181,14 +215,6 @@ CREATE TABLE IF NOT EXISTS runtime_config (
 	updated_at TEXT NOT NULL
 );
 
-CREATE TRIGGER IF NOT EXISTS usage_events_no_update BEFORE UPDATE ON usage_events
-BEGIN
-	SELECT RAISE(ABORT, 'usage_events are append-only');
-END;
-CREATE TRIGGER IF NOT EXISTS usage_events_no_delete BEFORE DELETE ON usage_events
-BEGIN
-	SELECT RAISE(ABORT, 'usage_events are append-only');
-END;
 CREATE TRIGGER IF NOT EXISTS feedback_events_no_update BEFORE UPDATE ON feedback_events
 BEGIN
 	SELECT RAISE(ABORT, 'feedback_events are append-only');
