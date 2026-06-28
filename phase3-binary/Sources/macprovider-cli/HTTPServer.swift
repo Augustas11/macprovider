@@ -487,10 +487,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                         )
                     case .toolCallDelta(let toolDelta):
                         if toolCallOpenEmitted.setIfUnset() {
-                            writer.writeSSEJSON([
-                                "type": "macprovider_tool_call_open",
-                                "unix_ms": Int64(Date().timeIntervalSince1970 * 1000),
-                            ])
+                            let unixMs = Int64(Date().timeIntervalSince1970 * 1000)
+                            writer.writeRawSSE(": macprovider_tool_call_open unix_ms=\(unixMs)\n\n")
                         }
                         streamedAnyToolCallDelta.set()
                         writer.writeSSEJSON(
@@ -1053,6 +1051,12 @@ private struct ResponseWriter: @unchecked Sendable {
             writeRawSSEData(context: context, payload: payload)
         }
     }
+
+    func writeRawSSE(_ payload: String) {
+        context.eventLoop.execute {
+            writeRawSSEPayload(context: context, payload: payload)
+        }
+    }
 }
 
 private func writeRawJSON(
@@ -1090,6 +1094,11 @@ private func writeRawSSEHead(context: ChannelHandlerContext, extraHeaders: [(Str
 
 private func writeRawSSEData(context: ChannelHandlerContext, payload: String) {
     let line = "data: \(payload)\n\n"
+    writeRawSSEPayload(context: context, payload: line)
+}
+
+private func writeRawSSEPayload(context: ChannelHandlerContext, payload: String) {
+    let line = payload
     var buffer = context.channel.allocator.buffer(capacity: line.utf8.count)
     buffer.writeString(line)
     context.writeAndFlush(NIOAny(HTTPServerResponsePart.body(.byteBuffer(buffer))), promise: nil)

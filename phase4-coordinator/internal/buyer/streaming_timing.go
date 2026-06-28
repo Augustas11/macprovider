@@ -1,8 +1,6 @@
 package buyer
 
 import (
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -108,25 +106,16 @@ func (c *streamingTimingCollector) observeFromHeadersAndProviderOpen(requestID, 
 }
 
 func toolCallOpenFromSSELine(line []byte) (time.Time, bool) {
-	if !bytes.Contains(line, []byte(`"type":"macprovider_tool_call_open"`)) {
-		return time.Time{}, false
-	}
+	const prefix = ": macprovider_tool_call_open unix_ms="
 	text := strings.TrimSpace(string(line))
-	if !strings.HasPrefix(text, "data:") {
+	if !strings.HasPrefix(text, prefix) {
 		return time.Time{}, false
 	}
-	payload := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
-	var event struct {
-		Type   string `json:"type"`
-		UnixMS int64  `json:"unix_ms"`
+	s := strings.TrimSpace(strings.TrimPrefix(text, prefix))
+	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return time.UnixMilli(v).UTC(), true
 	}
-	if err := json.Unmarshal([]byte(payload), &event); err != nil {
-		return time.Time{}, false
-	}
-	if event.Type != "macprovider_tool_call_open" || event.UnixMS <= 0 {
-		return time.Time{}, false
-	}
-	return time.UnixMilli(event.UnixMS).UTC(), true
+	return time.Time{}, false
 }
 
 func (c *streamingTimingCollector) snapshot() ([]streamingTimingRecord, int) {
