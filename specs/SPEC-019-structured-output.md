@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.1.4 (2026-06-28, round-4 polish absorption)
+**Version:** 0.1.5 (2026-06-28, round-5 final polish)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** DRAFT — final defensive check pending.
+**Status:** DRAFT — final defensive lock candidate.
 
 ## Quick orientation
 
@@ -351,14 +351,22 @@ MUST forward the original request bytes to the coordinator as it does today
 `phase5-gateway/internal/router/chat_proxy.go:217-224`, coordinator request
 construction from `bytes.NewReader(body)`).
 
-AC-28a. `Content-Encoding` reject fixture: any request with a
-`Content-Encoding` header returns HTTP 415
+AC-28a. `Content-Encoding` reject fixture: a request whose
+`Content-Encoding` header has a normalized field value other than exactly
+`identity` (RFC 9110 §8.4.1.1 no-op encoding) returns HTTP 415
 `request_content_encoding_unsupported`, `param:"Content-Encoding"`,
-`retryable:false`, `inference_ran:false`, `settlement_ran:false`, identical at
-gateway and coordinator (parity). Both gzip-compressed JSON bodies and a
-header-only fixture (no actual compression) MUST reject; the SPEC does not
-require the gateway/coordinator to validate the body's compression.
-`Content-Encoding: identity` is the only accepted value (or omitted header).
+`retryable:false`, `inference_ran:false`, `settlement_ran:false`,
+identical at gateway and coordinator (parity). Both gzip-compressed
+JSON bodies and a header-only fixture (no actual compression) MUST
+reject; the SPEC does not require the gateway/coordinator to validate
+the body's compression. Accepted: omitted `Content-Encoding` and
+`Content-Encoding: identity` (case-insensitive per RFC 9110 §5.5;
+optionally surrounded by whitespace, which the parser MUST strip
+before comparison). Adversarial fixtures MUST include: `gzip`,
+`deflate`, `br`, empty-after-trim (header present with whitespace-only
+value), whitespace-surrounded `identity` (accepted after normalization),
+case-variant `Identity` / `IDENTITY` (accepted), and a comma-separated
+multi-value `identity, gzip` (rejected — not exactly `identity`).
 
 ### Buyer-facing UX
 
@@ -929,22 +937,37 @@ Audit lanes should probe:
 
 ## 12. Document metadata
 
-**Status:** DRAFT — final defensive check pending OR locking target.
+**Version:** 0.1.5 (2026-06-28, round-5 final polish)
 
-**Version:** 0.1.4 (2026-06-28, round-4 polish absorption)
+**Status:** DRAFT — final defensive lock candidate.
 
 Precondition: SPEC-018 v0.2.4 LOCKED at `7e50832` via PR #202, with
 implementation shipped at `c77313a` via PR #209
 (`specs/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors).
 
-Successor: TBD. Expected next version is v0.1.5 for defensive audit absorption
-or v0.2.0 if the audit loop promotes streaming structured output into scope.
+Successor: TBD. Expected next step is architect-only r5 re-fire for 0/0/0
+closure before lock, or v0.2.0 if the audit loop promotes streaming structured
+output into scope.
 
 Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
 change, no new HTTP endpoint.
 
 ### Change log
+
+- **v0.1.5 (2026-06-28, round-5 final polish):** Absorbed the single
+  r5 MEDIUM. AC-28a fixture wording rewritten to match the §7
+  `Content-Encoding: identity` carve-out from r4 (architect M-1).
+  AC-28a now defines a single coherent fixture: reject when
+  normalized value is not exactly `identity`; accept omitted header
+  and `identity` (case-insensitive, whitespace-tolerant). Adversarial
+  fixture rows added for case-variants, whitespace surrounds, and
+  multi-value `identity, gzip` rejection. 5 of 6 r5 lanes returned
+  READY TO LOCK; only the architect lane found this fixture
+  inconsistency. Round narrative: `specs/SPEC-019-v0_1-r5-audit.md`;
+  per-lane findings: `specs/SPEC-019-v0_1-{architect,code,security,
+  product-design,critic,narrative}-r5-audit.md`. Re-fire architect-
+  only lane to confirm 0/0/0 closure before lock.
 
 - **v0.1.4 (2026-06-28, round-4 polish absorption):** Absorbed 2 HIGH +
   3 MEDIUM + 6 minor across 6 audit lanes. Three lanes (security,
