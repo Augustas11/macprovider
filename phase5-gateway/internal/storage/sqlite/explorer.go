@@ -15,6 +15,12 @@ var _ storage.ExplorerStore = (*Store)(nil)
 type listCursor struct {
 	TS string `json:"ts,omitempty"`
 	ID string `json:"id"`
+	// AccountID was added in issue #196 to break ties when two
+	// accounts share both created_at AND request_id under the new
+	// composite PK. Optional for backward compatibility — pre-#196
+	// cursors lacking AccountID fall through the (?='') predicate
+	// branch and behave as before.
+	AccountID string `json:"acct,omitempty"`
 }
 
 type activityCursor struct {
@@ -216,16 +222,26 @@ func (s *Store) ExplorerListSessions(ctx context.Context, q storage.ExplorerSess
 	if err != nil {
 		return storage.ExplorerSessionList{}, err
 	}
+	// Cursor predicate is lexicographic over (created_at, request_id,
+	// account_id). The account_id tiebreaker is load-bearing post-
+	// #196 because (created_at, request_id) is no longer unique
+	// across accounts. ISS-196 R2 codex CODE MEDIUM.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at
 		FROM usage_events
 		WHERE created_at >= ? AND created_at < ?
 		  AND (? = '' OR account_id = ?)
-		  AND (? = '' OR created_at < ? OR (created_at = ? AND request_id < ?))
-		ORDER BY created_at DESC, request_id DESC
+		  AND (? = '' OR created_at < ?
+		       OR (created_at = ? AND request_id < ?)
+		       OR (created_at = ? AND request_id = ? AND account_id < ?))
+		ORDER BY created_at DESC, request_id DESC, account_id DESC
 		LIMIT ?`,
 		encodeTime(q.From), encodeTime(q.To), q.AccountID, q.AccountID,
-		cursor.TS, cursor.TS, cursor.TS, cursor.ID, q.Limit+1)
+		cursor.TS,
+		cursor.TS,
+		cursor.TS, cursor.ID,
+		cursor.TS, cursor.ID, cursor.AccountID,
+		q.Limit+1)
 	if err != nil {
 		return storage.ExplorerSessionList{}, err
 	}
@@ -243,41 +259,70 @@ func (s *Store) ExplorerListSessions(ctx context.Context, q storage.ExplorerSess
 	}
 	if len(out.Items) > q.Limit {
 		last := out.Items[q.Limit-1]
-		next := encodeListCursor(last.CreatedAt, last.RequestID)
+		next := encodeListCursorWithAccount(last.CreatedAt, last.RequestID, last.AccountID)
 		out.NextCursor = &next
 		out.Items = out.Items[:q.Limit]
 	}
 	return out, nil
 }
 
-func (s *Store) ExplorerSessionDetail(ctx context.Context, requestID string) (storage.ExplorerSessionDetail, error) {
-	out := storage.ExplorerSessionDetail{RequestID: requestID, Partial: false, Error: nil}
-	usage, err := s.explorerUsageEvents(ctx, "", requestID, time.Time{}, time.Time{}, 1)
+// ExplorerSessionDetail looks up the session row trail for a
+// (accountID, requestID). The legacy single-arg call site passed
+// accountID="" — that path still works for backward compatibility,
+// but issue #196 made `usage_events` PK composite, so a request_id
+// can now legitimately match rows in multiple accounts. Pre-fix,
+// the unscoped lookup silently returned one arbitrary row; now it
+// detects ambiguity and returns ErrExplorerAmbiguousRequestID with
+// `MatchedAccountIDs` populated so the caller can re-issue a
+// scoped lookup. The HTTP handler surfaces this as a 409 with the
+// account list.
+func (s *Store) ExplorerSessionDetail(ctx context.Context, accountID, requestID string) (storage.ExplorerSessionDetail, error) {
+	out := storage.ExplorerSessionDetail{RequestID: requestID, AccountID: accountID, Partial: false, Error: nil}
+	// Ambiguity check fires only on the unscoped path. Probe with
+	// limit=2 so we can detect "more than one" without paging the
+	// whole result set.
+	if accountID == "" {
+		// Ambiguity probe spans all three session-detail tables that
+		// share (account_id, request_id) keys. Quota and concurrency
+		// already had composite PKs pre-#196 and could carry
+		// cross-account collisions before usage_events ever has a
+		// row (e.g., reservation reserved but not yet settled).
+		// Caught by ISS-196 R2 codex ARCHITECT HIGH.
+		accountIDs, err := s.explorerAccountIDsForRequest(ctx, requestID)
+		if err != nil {
+			return storage.ExplorerSessionDetail{}, err
+		}
+		if len(accountIDs) > 1 {
+			out.MatchedAccountIDs = accountIDs
+			return out, storage.ErrExplorerAmbiguousRequestID
+		}
+	}
+	usage, err := s.explorerUsageEvents(ctx, accountID, requestID, time.Time{}, time.Time{}, 1)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
 	if len(usage) > 0 {
 		out.UsageEvent = &usage[0]
 	}
-	quota, err := s.explorerQuotaReservations(ctx, "", requestID, time.Time{}, time.Time{}, 1)
+	quota, err := s.explorerQuotaReservations(ctx, accountID, requestID, time.Time{}, time.Time{}, 1)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
 	if len(quota) > 0 {
 		out.QuotaReservation = &quota[0]
 	}
-	concurrency, err := s.explorerConcurrencyReservations(ctx, "", requestID, time.Time{}, time.Time{}, 1)
+	concurrency, err := s.explorerConcurrencyReservations(ctx, accountID, requestID, time.Time{}, time.Time{}, 1)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
 	if len(concurrency) > 0 {
 		out.ConcurrencyReservation = &concurrency[0]
 	}
-	out.FeedbackEvents, err = s.explorerFeedbackEvents(ctx, "", requestID, time.Time{}, time.Time{}, 50)
+	out.FeedbackEvents, err = s.explorerFeedbackEvents(ctx, accountID, requestID, time.Time{}, time.Time{}, 50)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
-	out.AuditEvents, err = s.explorerAuditEvents(ctx, "", requestID, time.Time{}, time.Time{}, 50)
+	out.AuditEvents, err = s.explorerAuditEvents(ctx, accountID, requestID, time.Time{}, time.Time{}, 50)
 	if err != nil {
 		return storage.ExplorerSessionDetail{}, err
 	}
@@ -285,6 +330,36 @@ func (s *Store) ExplorerSessionDetail(ctx context.Context, requestID string) (st
 		return storage.ExplorerSessionDetail{}, storage.ErrNotFound
 	}
 	return out, nil
+}
+
+// explorerAccountIDsForRequest returns the distinct account_id set
+// for a given request_id across all three session-detail tables
+// (usage_events, quota_reservations, concurrency_reservations). All
+// three are keyed by (account_id, request_id) and can independently
+// carry rows for cross-account collisions, so the ambiguity check
+// must union them. ISS-196 R2 architect HIGH.
+func (s *Store) explorerAccountIDsForRequest(ctx context.Context, requestID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT DISTINCT account_id FROM (
+			SELECT account_id FROM usage_events WHERE request_id = ?
+			UNION
+			SELECT account_id FROM quota_reservations WHERE request_id = ?
+			UNION
+			SELECT account_id FROM concurrency_reservations WHERE request_id = ?
+		) ORDER BY account_id`, requestID, requestID, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 func (s *Store) ExplorerActivity(ctx context.Context, q storage.ExplorerActivityQuery) (storage.ExplorerActivityList, error) {
@@ -727,6 +802,14 @@ func decodeListID(raw string) (string, error) {
 
 func encodeListCursor(ts time.Time, id string) string {
 	b, _ := json.Marshal(listCursor{TS: encodeTime(ts), ID: id})
+	return base64.RawURLEncoding.EncodeToString(b)
+}
+
+// encodeListCursorWithAccount is the post-issue-#196 cursor encoder.
+// AccountID is the third tiebreaker so pagination over usage_events
+// is total across the composite (account_id, request_id) PK.
+func encodeListCursorWithAccount(ts time.Time, id, accountID string) string {
+	b, _ := json.Marshal(listCursor{TS: encodeTime(ts), ID: id, AccountID: accountID})
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 

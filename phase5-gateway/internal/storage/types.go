@@ -344,13 +344,20 @@ type ExplorerSessionList struct {
 
 type ExplorerSessionDetail struct {
 	RequestID              string                          `json:"request_id"`
+	AccountID              string                          `json:"account_id,omitempty"`
 	UsageEvent             *ExplorerUsageEvent             `json:"usage_event"`
 	QuotaReservation       *ExplorerQuotaReservation       `json:"quota_reservation"`
 	ConcurrencyReservation *ExplorerConcurrencyReservation `json:"concurrency_reservation"`
 	FeedbackEvents         []ExplorerFeedbackEvent         `json:"feedback_events"`
 	AuditEvents            []ExplorerAuditEvent            `json:"audit_events"`
-	Partial                bool                            `json:"partial"`
-	Error                  any                             `json:"error"`
+	// MatchedAccountIDs is populated when the lookup is ambiguous —
+	// i.e. accountID was empty AND the request_id resolves to rows
+	// from multiple accounts (issue #196 composite-PK semantics).
+	// Returned together with ErrExplorerAmbiguousRequestID so the
+	// caller can re-issue scoped lookups.
+	MatchedAccountIDs []string `json:"matched_account_ids,omitempty"`
+	Partial           bool     `json:"partial"`
+	Error             any      `json:"error"`
 }
 
 type ExplorerUsageEvent struct {

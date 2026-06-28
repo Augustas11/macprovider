@@ -197,6 +197,49 @@ EOF
 fi
 log "  ok: $INFLIGHT in-flight requests (or FORCE_RESTART=1 set)"
 
+log "step 5b/8: pre-restart snapshot of gateway.db (rollback safety, issue #196)"
+# The new binary's first start runs Migrate() which may upgrade schema
+# in place (e.g. v1 -> v2 composite-PK rebuild). The old binary CANNOT
+# read the upgraded schema correctly — its WHERE request_id = ? lookup
+# returns wrong-account rows once cross-account collisions exist. So
+# binary-only rollback via gateway.prev is INVALID after a schema
+# upgrade. We snapshot the DB BEFORE the new binary starts; rollback
+# becomes binary.prev + db.pre-deploy.<ts>.
+#
+# Snapshot uses `sqlite3 .backup` (which serializes a WAL-consistent
+# copy from a still-running gateway) rather than a raw `install`/`cp`
+# of just gateway.db. Raw copy misses rows still in gateway.db-wal
+# that have been COMMITTED but not yet checkpointed into the main
+# file — a rollback to that snapshot would silently lose money-path
+# audit rows. ISS-196 R3 codex SECURITY + ARCHITECT HIGH.
+$SSH 'set -e
+  TS=$(date -u +%Y%m%dT%H%M%SZ)
+  DB=/var/lib/macprovider/gateway.db
+  if [ -f "$DB" ]; then
+    SNAP="${DB}.pre-deploy.${TS}"
+    # .backup opens a read txn that pins a consistent WAL view; the
+    # output file is a single .db with WAL already merged in (no
+    # accompanying -wal/-shm sidecars), so rollback restore is a
+    # single-file copy.
+    sudo -u macprovider sqlite3 "$DB" ".backup ${SNAP}"
+    chmod 0600 "$SNAP"
+    chown macprovider:macprovider "$SNAP"
+    INTEG=$(sudo -u macprovider sqlite3 "$SNAP" "PRAGMA integrity_check;" 2>&1 | head -1)
+    if [ "$INTEG" != "ok" ]; then
+      echo "  ERROR: snapshot integrity_check returned: $INTEG" >&2
+      rm -f "$SNAP"
+      exit 5
+    fi
+    echo "  db snapshot saved at $SNAP (WAL-consistent, integrity=ok)"
+    # Retain the 5 most recent pre-deploy snapshots; older ones are
+    # auto-pruned to bound disk growth.
+    ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* 2>/dev/null \
+      | tail -n +6 | xargs -r rm -f
+  else
+    echo "  no live gateway.db at $DB — first deploy, no snapshot needed"
+  fi
+'
+
 log "step 6/8: enable + start gateway service"
 $SSH 'set -e
   systemctl daemon-reload
@@ -240,5 +283,19 @@ $SSH 'journalctl -u macprovider-gateway --no-pager -n 20'
 
 log "DONE. gateway is live at https://$DOMAIN"
 echo
-echo "Rollback (one command on Pearl):"
-echo "  ssh $VPS_USER@$VPS_HOST 'install -o macprovider -g macprovider -m 0755 /opt/macprovider/gateway.prev /opt/macprovider/gateway && systemctl restart macprovider-gateway'"
+echo "Rollback:"
+echo
+echo "  IMPORTANT — issue #196 added a schema upgrade (v1 -> v2) the OLD"
+echo "  binary cannot safely read. After any deploy that crosses schema"
+echo "  versions, restore BOTH the binary AND the pre-deploy DB snapshot:"
+echo
+echo "    ssh $VPS_USER@$VPS_HOST '"
+echo "      systemctl stop macprovider-gateway &&"
+echo "      install -o macprovider -g macprovider -m 0755 /opt/macprovider/gateway.prev /opt/macprovider/gateway &&"
+echo "      LATEST=\$(ls -1t /var/lib/macprovider/gateway.db.pre-deploy.* | head -1) &&"
+echo "      install -o macprovider -g macprovider -m 0600 \"\$LATEST\" /var/lib/macprovider/gateway.db &&"
+echo "      systemctl start macprovider-gateway"
+echo "    '"
+echo
+echo "  Binary-only rollback (gateway.prev only) is SAFE only if no schema"
+echo "  bump happened between the two deploys."

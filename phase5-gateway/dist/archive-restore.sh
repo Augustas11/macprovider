@@ -157,7 +157,7 @@ if [ "$INTEGRITY" != "ok" ]; then
 fi
 
 # Schema-version check.
-EXPECTED_VERSION=1
+EXPECTED_VERSION=2  # bumped 1→2 by issue #196 (usage_events composite PK)
 ARCHIVE_VERSION=$(sqlite3 "$TMP_DB" "SELECT COALESCE(MAX(version), 0) FROM schema_migrations;" 2>/dev/null || echo 0)
 log "archive schema version=$ARCHIVE_VERSION expected=$EXPECTED_VERSION"
 if [ "$ARCHIVE_VERSION" -gt "$EXPECTED_VERSION" ]; then

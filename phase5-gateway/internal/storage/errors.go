@@ -15,4 +15,11 @@ var (
 	// surface: this sentinel forces the caller to refund + log
 	// instead of silently absorbing the duplicate.
 	ErrUsageEventConflict = errors.New("usage event conflicts with existing row for request_id")
+	// ErrExplorerAmbiguousRequestID is returned by ExplorerSessionDetail
+	// when the request_id resolves to rows from multiple accounts and
+	// the caller did not supply an account scope. Issue #196 made
+	// (account_id, request_id) the usage_events PK, which allows
+	// legitimate cross-account collisions; explorer callers must
+	// disambiguate.
+	ErrExplorerAmbiguousRequestID = errors.New("explorer session request_id matches multiple accounts; supply account_id")
 )
