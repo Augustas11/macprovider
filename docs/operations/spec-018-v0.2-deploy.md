@@ -99,9 +99,10 @@ response body to the buyer. Unix milliseconds since epoch.
 
 ### `X-MacProvider-NTP-Skew-Ms`
 
-Optional, emitted by phase4-coordinator at request start when known. Absolute
-value of clock skew between provider and gateway in milliseconds. Samples
-with skew > 100 ms are discarded from AC-44 p95 calculation.
+DEFERRED TO v0.3 — gateway-side NTP skew measurement requires reference-clock
+infrastructure not present in v0.2. AC-44 v0.2 relies on OS-level NTP sync
+(chrony/timesyncd) without runtime verification of skew. v0.3 will add
+reference-clock handshake at gateway.
 
 ## Auto-downgrade behavior
 

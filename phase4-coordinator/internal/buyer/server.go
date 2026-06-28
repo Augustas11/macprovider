@@ -50,22 +50,22 @@ const (
 )
 
 var spec018RetryableByCode = map[string]bool{
-	"byte_cap_exceeded":                         false,
-	"response_byte_cap_exceeded":                false,
-	"malformed_tool_call_final_json":            true,
-	"provider_stream_downgraded":                true,
-	"request_body_too_large":                    false,
-	"tool_result_too_large":                     false,
-	"tool_results_aggregate_too_large":          false,
-	"tool_call_arguments_too_large":             false,
-	"tool_call_arguments_aggregate_too_large":   false,
-	"messages_too_long":                         false,
-	"too_many_tool_calls":                       false,
-	"invalid_tool_call_id":                      false,
-	"tool_call_id_not_found":                    false,
-	"duplicate_tool_call_id":                    false,
-	"tool_call_result_out_of_order":             false,
-	"unsupported_modelID_for_multi_turn":        false,
+	"byte_cap_exceeded":                       false,
+	"response_byte_cap_exceeded":              false,
+	"malformed_tool_call_final_json":          true,
+	"provider_stream_downgraded":              true,
+	"request_body_too_large":                  false,
+	"tool_result_too_large":                   false,
+	"tool_results_aggregate_too_large":        false,
+	"tool_call_arguments_too_large":           false,
+	"tool_call_arguments_aggregate_too_large": false,
+	"messages_too_long":                       false,
+	"too_many_tool_calls":                     false,
+	"invalid_tool_call_id":                    false,
+	"tool_call_id_not_found":                  false,
+	"duplicate_tool_call_id":                  false,
+	"tool_call_result_out_of_order":           false,
+	"unsupported_modelID_for_multi_turn":      false,
 }
 
 func spec018Retryable(code string) bool {
@@ -2545,6 +2545,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// '\n' the accumulated line is processed: tokens extracted, appended
 	// to preCommit, and the commit predicate (a commit-worthy data line
 	// followed by a blank-line terminator) is evaluated.
+	var providerToolCallOpen time.Time
 	preCommitErr := func() error {
 		for {
 			b, err := reader.ReadByte()
@@ -2562,6 +2563,11 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			line := lineBuf.Bytes()
 			if p, c := tokenPointersFromSSE(line); p != nil || c != nil {
 				promptTok, completionTok = p, c
+			}
+			if providerToolCallOpen.IsZero() {
+				if openedAt, ok := toolCallOpenFromSSELine(line); ok {
+					providerToolCallOpen = openedAt
+				}
 			}
 			status := inspectCommitWorthyDataLine(line)
 			if status == commitLineMalformedToolCalls {
@@ -2627,7 +2633,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		timingHeaders.Set(streamingTimingCoordinatorHeader, strconv.FormatInt(firstForwardedAt.UnixMilli(), 10))
 		copyTimingHeader(timingHeaders, r.Header, streamingTimingGatewayByteHeader)
 		copyTimingHeader(timingHeaders, r.Header, streamingTimingSkewHeader)
-		s.streamingTiming.observeFromHeaders(requestID, provider.ProviderID, streamingMode, timingHeaders, firstForwardedAt)
+		s.streamingTiming.observeFromHeadersAndProviderOpen(requestID, provider.ProviderID, streamingMode, timingHeaders, firstForwardedAt, providerToolCallOpen)
 	}
 	bytesEmitted = preCommit.Len()
 	preCommit.Reset()
@@ -2813,7 +2819,7 @@ func collectStreamingToolCalls(raw []byte) ([]bufferedToolCall, error) {
 			Choices []struct {
 				Delta struct {
 					ToolCalls []struct {
-						Index    *int `json:"index"`
+						Index    *int   `json:"index"`
 						ID       string `json:"id"`
 						Type     string `json:"type"`
 						Function struct {

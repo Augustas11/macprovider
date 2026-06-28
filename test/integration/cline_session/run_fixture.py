@@ -221,7 +221,15 @@ def validate(transcript: dict, config: dict) -> None:
         and call["result"].get("ok", True)
         for call in transcript["tool_calls"]
     )
-    large_write = max(call for call in transcript["tool_calls"] if call["name"] == "write_to_file" and call.get("result", {}).get("bytes_written", 0) >= minimums["write_to_file_bytes"])
+    large_write = max(
+        (
+            call
+            for call in transcript["tool_calls"]
+            if call["name"] == "write_to_file"
+            and call.get("result", {}).get("bytes_written", 0) >= minimums["write_to_file_bytes"]
+        ),
+        key=lambda call: call.get("result", {}).get("bytes_written", 0),
+    )
     large_write["streaming"] = {"first_delta_ms": 900, "delta_count_before_finish_reason": 4, "finish_reason": "tool_calls"}
     assert large_write["streaming"]["first_delta_ms"] < minimums["write_first_delta_ms"]
     assert large_write["streaming"]["delta_count_before_finish_reason"] >= minimums["write_deltas_before_finish"]

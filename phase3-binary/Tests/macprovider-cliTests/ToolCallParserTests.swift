@@ -4,6 +4,12 @@ import MacProviderCore
 @testable import macprovider_cli
 
 final class ToolCallParserTests: XCTestCase {
+    func testAC46_KnownButMalformedHashReturnsNilAndLogs() {
+        let result = ModelRuntime.validObservedModelHash("not-a-hex-string")
+        XCTAssertNil(result, "AC-46: malformed hex input must return nil")
+        // Logging happens; test passes if no fatal error.
+    }
+
     func testSingleQwenToolCall() throws {
         let parsed = ToolCallParser.parseToolCalls(
             rawOutput: #"<tool_call>{"name":"find_definition","arguments":{"symbol":"ToolCallParser"}}</tool_call>"#,

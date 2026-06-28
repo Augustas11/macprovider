@@ -1,6 +1,8 @@
 package buyer
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
@@ -21,6 +23,10 @@ const (
 	streamingTimingSkewBound          = 100 * time.Millisecond
 )
 
+// Streaming timing samples are triggered by the provider's
+// macprovider_tool_call_open SSE event, emitted when phase3 observes the first
+// ModelRuntime.stream .toolCallDelta. The legacy response header remains a
+// fallback for older providers.
 type streamingTimingCollector struct {
 	mu          sync.Mutex
 	records     []streamingTimingRecord
@@ -44,12 +50,19 @@ func newStreamingTimingCollector() *streamingTimingCollector {
 }
 
 func (c *streamingTimingCollector) observeFromHeaders(requestID, providerID, mode string, headers http.Header, firstForwarded time.Time) {
+	c.observeFromHeadersAndProviderOpen(requestID, providerID, mode, headers, firstForwarded, time.Time{})
+}
+
+func (c *streamingTimingCollector) observeFromHeadersAndProviderOpen(requestID, providerID, mode string, headers http.Header, firstForwarded, providerOpen time.Time) {
 	if c == nil {
 		return
 	}
-	providerOpen, ok := unixMillisHeader(headers, streamingTimingProviderOpenHeader)
-	if !ok {
-		return
+	if providerOpen.IsZero() {
+		headerOpen, ok := unixMillisHeader(headers, streamingTimingProviderOpenHeader)
+		if !ok {
+			return
+		}
+		providerOpen = headerOpen
 	}
 	gatewayByte, _ := unixMillisHeader(headers, streamingTimingGatewayByteHeader)
 	if gatewayByte.IsZero() {
@@ -92,6 +105,28 @@ func (c *streamingTimingCollector) observeFromHeaders(requestID, providerID, mod
 	c.mu.Lock()
 	c.records = append(c.records, record)
 	c.mu.Unlock()
+}
+
+func toolCallOpenFromSSELine(line []byte) (time.Time, bool) {
+	if !bytes.Contains(line, []byte(`"type":"macprovider_tool_call_open"`)) {
+		return time.Time{}, false
+	}
+	text := strings.TrimSpace(string(line))
+	if !strings.HasPrefix(text, "data:") {
+		return time.Time{}, false
+	}
+	payload := strings.TrimSpace(strings.TrimPrefix(text, "data:"))
+	var event struct {
+		Type   string `json:"type"`
+		UnixMS int64  `json:"unix_ms"`
+	}
+	if err := json.Unmarshal([]byte(payload), &event); err != nil {
+		return time.Time{}, false
+	}
+	if event.Type != "macprovider_tool_call_open" || event.UnixMS <= 0 {
+		return time.Time{}, false
+	}
+	return time.UnixMilli(event.UnixMS).UTC(), true
 }
 
 func (c *streamingTimingCollector) snapshot() ([]streamingTimingRecord, int) {

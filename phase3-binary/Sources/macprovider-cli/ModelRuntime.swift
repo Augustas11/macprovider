@@ -792,11 +792,17 @@ actor ModelRuntime: ModelRuntimeServing {
         bytes.map { String(format: "%02x", $0) }.joined()
     }
 
-    private static func validObservedModelHash(_ hash: String?) -> String? {
-        guard let hash, hash.utf8.count == 64 else { return nil }
+    static func validObservedModelHash(_ hash: String?) -> String? {
+        guard let hash, hash.utf8.count == 64 else {
+            if let hash, !hash.isEmpty {
+                FileHandle.standardError.write(Data("AC-46: validObservedModelHash rejected malformed value: \(hash.prefix(16))...\n".utf8))
+            }
+            return nil
+        }
         guard hash.utf8.allSatisfy({ byte in
             (byte >= 48 && byte <= 57) || (byte >= 97 && byte <= 102)
         }) else {
+            FileHandle.standardError.write(Data("AC-46: validObservedModelHash rejected non-hex value: \(hash.prefix(16))...\n".utf8))
             return nil
         }
         return hash
@@ -1204,5 +1210,32 @@ private final class FirstTokenRecorder: @unchecked Sendable {
             return nil
         }
         return max(0, Int64(timestamp.timeIntervalSince(start) * 1000))
+    }
+}
+
+final class StreamedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = false
+
+    func set() {
+        lock.lock()
+        value = true
+        lock.unlock()
+    }
+
+    func setIfUnset() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if value {
+            return false
+        }
+        value = true
+        return true
+    }
+
+    func get() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }

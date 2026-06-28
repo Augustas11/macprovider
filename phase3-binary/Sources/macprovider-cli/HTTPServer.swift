@@ -458,7 +458,6 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 try await modelRuntime.preflight(request, with: handle)
 
                 writer.startSSE(extraHeaders: [
-                    ("X-MacProvider-Provider-ToolCallOpen-Unix-Ms", "\(Int64(Date().timeIntervalSince1970 * 1000))"),
                     ("X-MacProvider-Provider-Unix-Ms", "\(Int64(Date().timeIntervalSince1970 * 1000))"),
                 ])
                 sseStarted = true
@@ -472,7 +471,8 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                     )
                 )
 
-                var streamedAnyToolCallDelta = false
+                let toolCallOpenEmitted = StreamedFlag()
+                let streamedAnyToolCallDelta = StreamedFlag()
                 let completion = try await modelRuntime.stream(request, with: handle) { chunk in
                     switch chunk {
                     case .content(let text):
@@ -486,7 +486,13 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                             )
                         )
                     case .toolCallDelta(let toolDelta):
-                        streamedAnyToolCallDelta = true
+                        if toolCallOpenEmitted.setIfUnset() {
+                            writer.writeSSEJSON([
+                                "type": "macprovider_tool_call_open",
+                                "unix_ms": Int64(Date().timeIntervalSince1970 * 1000),
+                            ])
+                        }
+                        streamedAnyToolCallDelta.set()
                         writer.writeSSEJSON(
                             Self.chatCompletionChunk(
                                 id: id,
@@ -503,7 +509,7 @@ final class RouterHandler: ChannelInboundHandler, @unchecked Sendable {
                 // Fallback for non-streaming-incremental path: if tool calls landed only
                 // in the final CompletionResult (e.g. buffered/downgrade/test paths) and
                 // were never streamed via .toolCallDelta chunks, emit them now.
-                if !streamedAnyToolCallDelta, let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
+                if !streamedAnyToolCallDelta.get(), let toolCalls = completion.toolCalls, !toolCalls.isEmpty {
                     for delta in Self.toolCallDeltaChunks(toolCalls) {
                         writer.writeSSEJSON(
                             Self.chatCompletionChunk(
