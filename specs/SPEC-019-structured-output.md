@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.1.5 (2026-06-28, round-5 final polish)
+**Version:** 0.1.5 LOCKED (2026-06-28, round-5b architect re-fire 0/0/0)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** DRAFT — final defensive lock candidate.
+**Status:** LOCKED — all 6 audit lanes returned READY TO LOCK.
 
 ## Quick orientation
 
