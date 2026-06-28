@@ -26,6 +26,40 @@ const usageEventsTableDDL = `CREATE TABLE IF NOT EXISTS usage_events (
 // (for in-place upgrades from the pre-issue-#196 single-column PK
 // shape) so the post-migration sqlite_master entries are byte-for-byte
 // identical to a fresh install. Architect R1 MEDIUM finding.
+// demoUsageEventsTableDDL is the canonical CREATE TABLE for
+// demo_usage_events in its post-#210 composite-PK shape. The PK
+// `(demo_token_hash, request_id)` closes the cross-demo collision
+// where two demo identities could share a buyer-controlled
+// X-Request-ID and have the second settlement silently drop the
+// audit row.
+const demoUsageEventsTableDDL = `CREATE TABLE IF NOT EXISTS demo_usage_events (
+	request_id TEXT NOT NULL,
+	client_ip TEXT NOT NULL,
+	demo_token_hash TEXT NOT NULL,
+	window_date TEXT NOT NULL,
+	total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
+	created_at TEXT NOT NULL,
+	PRIMARY KEY (demo_token_hash, request_id)
+)`
+
+// demoUsageEventsAuxiliaryDDL covers the secondary index + append-only
+// triggers for demo_usage_events. Mirrors usageEventsAuxiliaryDDL.
+const demoUsageEventsAuxiliaryDDL = `
+CREATE INDEX IF NOT EXISTS idx_demo_usage_ip_token_date ON demo_usage_events(client_ip, demo_token_hash, window_date);
+-- request_id-leading index keeps unscoped audit-trail lookups indexed
+-- (explorer activity view, future reconciliation tooling).
+CREATE INDEX IF NOT EXISTS idx_demo_usage_request ON demo_usage_events(request_id);
+
+CREATE TRIGGER IF NOT EXISTS demo_usage_events_no_update BEFORE UPDATE ON demo_usage_events
+BEGIN
+	SELECT RAISE(ABORT, 'demo_usage_events are append-only');
+END;
+CREATE TRIGGER IF NOT EXISTS demo_usage_events_no_delete BEFORE DELETE ON demo_usage_events
+BEGIN
+	SELECT RAISE(ABORT, 'demo_usage_events are append-only');
+END;
+`
+
 const usageEventsAuxiliaryDDL = `
 CREATE INDEX IF NOT EXISTS idx_usage_account_date ON usage_events(account_id, window_date);
 CREATE INDEX IF NOT EXISTS idx_usage_created_at ON usage_events(created_at);
@@ -174,16 +208,10 @@ CREATE TABLE IF NOT EXISTS demo_session_events (
 
 CREATE INDEX IF NOT EXISTS idx_demo_session_ip_created ON demo_session_events(client_ip, created_at);
 
-CREATE TABLE IF NOT EXISTS demo_usage_events (
-	request_id TEXT PRIMARY KEY,
-	client_ip TEXT NOT NULL,
-	demo_token_hash TEXT NOT NULL,
-	window_date TEXT NOT NULL,
-	total_tokens INTEGER NOT NULL CHECK (total_tokens >= 0),
-	created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_demo_usage_ip_token_date ON demo_usage_events(client_ip, demo_token_hash, window_date);
+-- demo_usage_events table: see demoUsageEventsTableDDL constant.
+-- See [[usageEventsTableDDL]] for the parallel pattern on usage_events
+-- (#196). Both fresh installs and in-place upgrades execute the same
+-- DDL constants so sqlite_master entries are byte-equal.
 
 CREATE TABLE IF NOT EXISTS audit_events (
 	event_id TEXT PRIMARY KEY,
@@ -239,14 +267,8 @@ CREATE TRIGGER IF NOT EXISTS api_key_events_no_delete BEFORE DELETE ON api_key_e
 BEGIN
 	SELECT RAISE(ABORT, 'api_key_events are append-only');
 END;
-CREATE TRIGGER IF NOT EXISTS demo_usage_events_no_update BEFORE UPDATE ON demo_usage_events
-BEGIN
-	SELECT RAISE(ABORT, 'demo_usage_events are append-only');
-END;
-CREATE TRIGGER IF NOT EXISTS demo_usage_events_no_delete BEFORE DELETE ON demo_usage_events
-BEGIN
-	SELECT RAISE(ABORT, 'demo_usage_events are append-only');
-END;
+-- demo_usage_events auxiliary DDL (index + triggers) lives in
+-- demoUsageEventsAuxiliaryDDL, mirroring the #196 usage_events pattern.
 CREATE TRIGGER IF NOT EXISTS capacity_signal_events_no_update BEFORE UPDATE ON capacity_signal_events
 BEGIN
 	SELECT RAISE(ABORT, 'capacity_signal_events are append-only');
