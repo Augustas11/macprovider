@@ -813,6 +813,64 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertFalse(json.contains("boot-hash"), json)
     }
 
+    // Issue #203: authInitialMessage (v2 auth on connect/reconnect) must
+    // source model_id and model_hash from ModelRuntime.currentSnapshot()
+    // when warm-swap is enabled, exactly like helloMessage does. Without
+    // this, a reconnect after a completed warm-swap re-admits the
+    // provider with stale pre-swap metadata until the next regular
+    // heartbeat corrects it — coordinator routing decisions in that
+    // window use the wrong model_id.
+    func testAuthInitialEnabledModeReadsFromModelRuntime() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let runtime = makeRuntime(modelID: "model-b", modelHash: "runtime-hash", warmSwapEnabled: true)
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "boot-hash"
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: true, modelRuntime: runtime)
+
+        let attempt = Tier2AuthAttempt()
+        let auth = await client.authInitialMessage(attempt: attempt)
+        let json = Self.jsonString(auth)
+
+        XCTAssertEqual(auth["model_id"] as? String, "model-b",
+                       "auth_request must publish runtime modelID, not ProviderStatus's pre-swap value")
+        XCTAssertEqual(auth["model_hash"] as? String, "runtime-hash",
+                       "auth_request must publish runtime modelHash, not ProviderStatus's boot-time value")
+        let supportedModels = try XCTUnwrap(auth["supported_models"] as? [String])
+        XCTAssertTrue(supportedModels.contains("model-b"),
+                      "supported_models must validate against post-swap modelID: \(supportedModels)")
+        XCTAssertFalse(json.contains("boot-hash"),
+                       "auth payload must not leak the pre-swap boot hash: \(json)")
+        XCTAssertFalse(json.contains("\"model_id\":\"model-a\""),
+                       "auth payload must not leak the pre-swap modelID: \(json)")
+    }
+
+    // Counterpart to testHelloDisabledModeReadsFromProviderStatus —
+    // when warm-swap is disabled, authInitialMessage continues to
+    // source from ProviderStatus (no behavioral change for the
+    // default path).
+    func testAuthInitialDisabledModeReadsFromProviderStatus() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        // Runtime would carry a different value, but warmSwapEnabled=false
+        // makes authInitialMessage ignore it.
+        let runtime = makeRuntime(modelID: "model-runtime", modelHash: "runtime-hash", warmSwapEnabled: false)
+        let status = ProviderStatus(
+            modelID: "model-status",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1),
+            modelHash: "status-hash"
+        )
+        let client = try await makeClient(status: status, recorder: recorder, enableWarmSwap: false, modelRuntime: runtime)
+
+        let auth = await client.authInitialMessage(attempt: Tier2AuthAttempt())
+
+        XCTAssertEqual(auth["model_id"] as? String, "model-status")
+        XCTAssertEqual(auth["model_hash"] as? String, "status-hash")
+    }
+
     func testHelloDuringInFlightSwapReturnsOldHash() async throws {
         let recorder = CoordinatorFrameRecorder()
         let gate = SwapLoaderGate()

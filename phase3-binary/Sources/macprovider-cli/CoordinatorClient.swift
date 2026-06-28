@@ -1620,14 +1620,35 @@ actor CoordinatorClient {
         providerReceiptPublicKeyOverride: String? = nil
     ) async -> [String: Any] {
         let snapshot = await providerStatus.snapshot()
+        // Issue #203: when warm-swap is enabled, the authoritative
+        // post-swap model metadata lives in `ModelRuntime.currentSnapshot()`,
+        // not in `ProviderStatus` (which carries boot-time / pre-swap
+        // values that drift). helloMessage already routes through the
+        // runtime snapshot; authInitialMessage (v2 auth) historically
+        // missed this, so a reconnect AFTER a completed warm-swap
+        // re-admitted the provider with the STALE pre-swap model_id
+        // until the next regular heartbeat corrected it. Coordinator
+        // routing decisions in that window used the wrong metadata.
+        // Fix: source modelID + modelHash from the same place
+        // helloMessage does.
+        let resolvedModelID: String
+        let resolvedModelHash: String?
+        if warmSwapEnabled {
+            let runtimeSnapshot = await modelRuntime.currentSnapshot()
+            resolvedModelID = runtimeSnapshot.modelID ?? ""
+            resolvedModelHash = runtimeSnapshot.modelHash
+        } else {
+            resolvedModelID = snapshot.modelID ?? ""
+            resolvedModelHash = snapshot.modelHash
+        }
         var message: [String: Any] = [
             "type": "auth_request",
             "version": 2,
             "stage": "initial",
             "provider_id": providerID,
             "hostname": Host.current().localizedName ?? "unknown",
-            "model_id": snapshot.modelID ?? "",
-            "model_params_b": snapshot.capacity.modelParamsB(modelID: snapshot.modelID),
+            "model_id": resolvedModelID,
+            "model_params_b": snapshot.capacity.modelParamsB(modelID: resolvedModelID),
             "ram_gb": snapshot.capacity.ramGB,
             "max_context_tokens": snapshot.capacity.maxContextTokens,
             "max_concurrency": snapshot.capacity.maxConcurrency,
@@ -1643,11 +1664,11 @@ actor CoordinatorClient {
         let resolvedCatalog: [String]
         do {
             resolvedCatalog = try SupportedModels.validate(
-                model: snapshot.modelID ?? "",
+                model: resolvedModelID,
                 supportedModels: supportedModels
             )
         } catch {
-            resolvedCatalog = [snapshot.modelID ?? ""]
+            resolvedCatalog = [resolvedModelID]
         }
         message["supported_models"] = resolvedCatalog
         if publishesSupportedModels {
@@ -1660,7 +1681,7 @@ actor CoordinatorClient {
         if let endpointURL {
             message["endpoint_url"] = endpointURL
         }
-        if let modelHash = snapshot.modelHash {
+        if let modelHash = resolvedModelHash {
             message["model_hash"] = modelHash
         }
         return message
