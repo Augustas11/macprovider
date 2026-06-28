@@ -1535,8 +1535,14 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 	if got := resp.Header().Get("X-MacProvider-Route"); got != "" {
 		t.Fatalf("buyer response exposed route=%q", got)
 	}
-	if got := captured.Get("X-Request-ID"); got == "" || got == "55555555-5555-4555-8555-555555555555" {
-		t.Fatalf("forwarded X-Request-ID = %q, want gateway-generated coordinator ID", got)
+	// SPEC-002 §11 + v1.4.2 R-2 + issue #188: the gateway MUST forward
+	// the buyer-supplied X-Request-ID verbatim so the coordinator can
+	// store it in request_log.external_request_id, giving out-of-process
+	// auditors a stable shared id between gateway usage_events and
+	// coordinator request_log. Earlier behavior minted a fresh UUID
+	// here, breaking that join.
+	if got := captured.Get("X-Request-ID"); got != "55555555-5555-4555-8555-555555555555" {
+		t.Fatalf("forwarded X-Request-ID = %q, want buyer-supplied value preserved", got)
 	}
 	if got := captured.Get("X-MacProvider-Retry"); got != "1" {
 		t.Fatalf("forwarded retry = %q, want 1", got)
@@ -1580,6 +1586,78 @@ func TestProviderPinningHeadersStripped(t *testing.T) {
 		if got := resp.Header().Get(header); got != "" {
 			t.Fatalf("failure response exposed %s=%q", header, got)
 		}
+	}
+}
+
+// SPEC-006 v0.X R-G3: gateway forwards buyer X-Request-ID on every
+// buyer-facing coordinator proxy path, not only /v1/chat/completions.
+// /v1/models is the other buyer-facing surface; this test pins that
+// behavior so a refactor doesn't silently revert it to newUUID().
+func TestModelsForwardsBuyerRequestID(t *testing.T) {
+	var capturedModelsXRequestID string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/models" {
+			capturedModelsXRequestID = r.Header.Get("X-Request-ID")
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}}, `{"object":"list","data":[]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_models_xrequestid")
+
+	const buyerID = "66666666-6666-4666-8666-666666666666"
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("X-Real-IP", "1.2.3.4")
+	req.Header.Set("X-Request-ID", buyerID)
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("models status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	if capturedModelsXRequestID != buyerID {
+		t.Fatalf("forwarded X-Request-ID on /v1/models = %q, want buyer-supplied %q", capturedModelsXRequestID, buyerID)
+	}
+}
+
+// SPEC-006 v0.X R-G3 / SPEC-002 v1.4.2 R-2: when the buyer omits
+// X-Request-ID, gateway middleware mints a UUID, sets it as the
+// response header, AND forwards that SAME id upstream. The two MUST
+// agree so the buyer can correlate their request id with what reaches
+// the coordinator's request_log.external_request_id. R5 architect
+// audit MINOR: previous tests only covered buyer-supplied; this pins
+// the middleware-minted branch.
+func TestChatForwardsMiddlewareMintedRequestIDWhenBuyerOmits(t *testing.T) {
+	var capturedChatXRequestID string
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/chat/completions" {
+			capturedChatXRequestID = r.Header.Get("X-Request-ID")
+		}
+		return responseWithBody(http.StatusOK, http.Header{"Content-Type": []string{"application/json"}},
+			`{"id":"chatcmpl_1","object":"chat.completion","usage":{"prompt_tokens":3,"completion_tokens":4,"total_tokens":7},"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`), nil
+	})}
+	h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, "acct_minted_rid")
+
+	body := `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+fullKey)
+	req.Header.Set("Content-Type", "application/json")
+	// No X-Request-ID header: gateway middleware MUST mint one.
+	resp := httptest.NewRecorder()
+	h.ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+	}
+	respID := resp.Header().Get("X-Request-ID")
+	if !isUUIDLike(respID) {
+		t.Fatalf("response X-Request-ID = %q, want middleware-minted UUID", respID)
+	}
+	if capturedChatXRequestID != respID {
+		t.Fatalf("forwarded X-Request-ID = %q, want response/middleware-minted %q", capturedChatXRequestID, respID)
 	}
 }
 
@@ -2162,6 +2240,69 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 	}
 }
 
+// SPEC-002 § FR-B6 / issue #186: when the upstream coordinator
+// stream dies mid-flight (provider disconnect surfaces here as an
+// io.Pipe close-with-error), the gateway MUST emit the exact
+// provider_disconnected SSE error envelope BEFORE `data: [DONE]`.
+// OpenAI-compatible SDK clients route on (error.code, error.type)
+// to distinguish a normal short response from a provider drop.
+//
+// The internal settlement outcome stays `stream_truncated` per the
+// gateway settlement convention and SPEC-006 § 17.7 quota-debit
+// policy (partial stream → prompt + actual completion tokens
+// charged) — a separate usage_events.outcome field, not the
+// buyer-visible SSE error.code. Earlier the buyer-visible code was
+// also `stream_truncated`, conflating settlement and signaling
+// (and silently truncating responses for SDK consumers).
+func TestStreamingMidStreamProviderDisconnectEmitsFRB6Envelope(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`
+	accountID := "acct_provider_disconnected"
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			// One valid delta, then force an unexpected upstream close.
+			_, _ = pw.Write([]byte(`data: {"id":"chatcmpl","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+			_ = pw.CloseWithError(errors.New("forced upstream provider disconnect"))
+		}()
+		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: pr}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+
+	// Locate the FR-B6 error event in the SSE stream BEFORE [DONE].
+	bodyStr := resp.Body.String()
+	doneIdx := strings.Index(bodyStr, "data: [DONE]")
+	if doneIdx < 0 {
+		t.Fatalf("response missing data: [DONE]; body=%s", bodyStr)
+	}
+	preDone := bodyStr[:doneIdx]
+	if !strings.Contains(preDone, `"code":"provider_disconnected"`) {
+		t.Fatalf("FR-B6 envelope missing provider_disconnected before [DONE]; preDone=%s", preDone)
+	}
+	if !strings.Contains(preDone, `"type":"server_error"`) {
+		t.Fatalf("FR-B6 envelope missing type=server_error before [DONE]; preDone=%s", preDone)
+	}
+	if !strings.Contains(preDone, `"message":"Provider disconnected during streaming"`) {
+		t.Fatalf("FR-B6 envelope missing canonical message before [DONE]; preDone=%s", preDone)
+	}
+
+	// Internal settlement outcome stays stream_truncated (SPEC-006
+	// § 17.7); the buyer-visible code is a SEPARATE field. This
+	// assertion guards against any accidental coupling.
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "stream_truncated" || source != "gateway_estimated" {
+		t.Fatalf("settlement outcome/source = %s/%s, want stream_truncated/gateway_estimated", outcome, source)
+	}
+}
+
 func TestStreamingScannerErrorSettlesStreamTruncated(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":20,"messages":[{"role":"user","content":"large line"}]}`
 	accountID := "acct_stream_truncated"
@@ -2189,6 +2330,28 @@ func TestStreamingScannerErrorSettlesStreamTruncated(t *testing.T) {
 
 	if resp.Code != http.StatusOK {
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	// Issue #186 / code R1 NOTE: pin the BUYER-VISIBLE envelope on
+	// the buffer-full gateway-truncation path. This is intentionally
+	// stream_truncated / api_error (NOT FR-B6's
+	// provider_disconnected / server_error) because the line-too-
+	// long failure is gateway protection, not a provider drop. If
+	// the codepath drifts, OpenAI SDK consumers would misclassify
+	// gateway truncation as a retriable provider failure.
+	bodyStr := resp.Body.String()
+	doneIdx := strings.Index(bodyStr, "data: [DONE]")
+	if doneIdx < 0 {
+		t.Fatalf("response missing data: [DONE]; body=%s", bodyStr)
+	}
+	preDone := bodyStr[:doneIdx]
+	if !strings.Contains(preDone, `"code":"stream_truncated"`) {
+		t.Fatalf("buffer-full envelope missing code=stream_truncated; preDone=%s", preDone)
+	}
+	if !strings.Contains(preDone, `"type":"api_error"`) {
+		t.Fatalf("buffer-full envelope missing type=api_error; preDone=%s", preDone)
+	}
+	if strings.Contains(preDone, `"provider_disconnected"`) {
+		t.Fatalf("buffer-full envelope leaked provider_disconnected; gateway-truncation must NOT use the FR-B6 envelope; preDone=%s", preDone)
 	}
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
 	if outcome != "stream_truncated" || source != "gateway_estimated" {

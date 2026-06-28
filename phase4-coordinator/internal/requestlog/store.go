@@ -25,10 +25,24 @@ type execer interface {
 }
 
 type Row struct {
-	TSUtc               time.Time
-	RequestID           string
-	Model               string
-	ProviderAssignedID  string
+	TSUtc time.Time
+	// RequestID is the coordinator-generated request/billing id. Always
+	// internally generated; NEVER equal to the inbound X-Request-ID. On the
+	// non-pinned retry path multiple request_log rows for one logical
+	// buyer request share this value (verified by
+	// TestRequestLogBuyerMultiAttemptRows). On the pinned-client retry
+	// path successive rows carry distinct request_ids (verified by
+	// TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID).
+	// Attempt identity is `id` (auto-increment PK) plus `retried`.
+	RequestID string
+	// ExternalRequestID is the inbound X-Request-ID header value (per
+	// SPEC-002 §11). Shared across all rows for one logical request and
+	// across the gateway's usage_events.request_id for the same logical
+	// request, enabling end-to-end billing reconciliation. Empty when
+	// the inbound request carried no X-Request-ID.
+	ExternalRequestID string
+	Model             string
+	ProviderAssignedID string
 	PromptTokens        *int64
 	CompletionTokens    *int64
 	EstimatedCompTokens *int64
@@ -107,6 +121,7 @@ CREATE TABLE IF NOT EXISTS request_log (
     id                   INTEGER PRIMARY KEY AUTOINCREMENT,
     ts_utc               TEXT    NOT NULL,
     request_id           TEXT    NOT NULL,
+    external_request_id  TEXT    NULL,
     model                TEXT    NOT NULL,
     provider_assigned_id TEXT    NULL,
     prompt_tokens        INTEGER NULL,
@@ -128,6 +143,13 @@ CREATE INDEX IF NOT EXISTS idx_request_log_ts_utc
     ON request_log(ts_utc);
 CREATE INDEX IF NOT EXISTS idx_request_log_request_id_id
     ON request_log(request_id, id);
+-- SPEC-002 v1.4.2 R-2 reconciliation scans want an index on
+-- request_log.external_request_id. The column is added by
+-- ensureColumns (additive ALTER TABLE, cheap). The matching partial-
+-- NULL index is built by MigrateIndexes, invoked via the operator-
+-- runbook subcommand "coordinator migrate-indexes" — NOT from the
+-- daemon startup path, because SQLite has no concurrent index build
+-- and the request-log store caps the pool at one writer connection.
 
 CREATE TABLE IF NOT EXISTS request_idempotency_keys (
     idempotency_key TEXT PRIMARY KEY,
@@ -300,6 +322,7 @@ func insert(ctx context.Context, db execer, row Row) error {
 INSERT INTO request_log (
     ts_utc,
     request_id,
+    external_request_id,
     model,
     provider_assigned_id,
     prompt_tokens,
@@ -316,9 +339,10 @@ INSERT INTO request_log (
     pref_header,
     provider_header,
     retried
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		row.TSUtc.UTC().Format(time.RFC3339Nano),
 		row.RequestID,
+		nullString(row.ExternalRequestID),
 		row.Model,
 		nullString(row.ProviderAssignedID),
 		nullInt64(row.PromptTokens),
@@ -363,6 +387,11 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		{name: "pref_header", sql: `ALTER TABLE request_log ADD COLUMN pref_header TEXT NULL`},
 		{name: "provider_header", sql: `ALTER TABLE request_log ADD COLUMN provider_header TEXT NULL`},
 		{name: "retried", sql: `ALTER TABLE request_log ADD COLUMN retried INTEGER NOT NULL DEFAULT 0`},
+		// SPEC-002 v1.4.2 R-2 / §11: inbound X-Request-ID, the
+		// reconciliation join-key shared with gateway usage_events.
+		// Pre-existing rows scan as NULL; new INSERTs carry the
+		// gateway-forwarded id when present.
+		{name: "external_request_id", sql: `ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL`},
 	} {
 		if cols[migration.name] {
 			continue
@@ -372,6 +401,52 @@ func (s *Store) ensureColumns(ctx context.Context) error {
 		}
 	}
 	return s.requireColumns(ctx, []string{"id", "ts_utc", "request_id", "model"})
+}
+
+// MigrateIndexes builds the request_log indexes whose underlying
+// columns ensureColumns has already added.
+//
+// Intentionally NOT called from OpenStore, nor from a goroutine in
+// the coordinator daemon. SQLite has no concurrent index build;
+// CREATE INDEX takes the writer lock and table-scans the underlying
+// table, and the request-log store caps the SQL pool at one writer
+// connection (see SetMaxOpenConns(1) in OpenStore), so any in-daemon
+// invocation would starve the 6s-timeout INSERT hot path. The
+// supported invocation path is the operator subcommand `coordinator
+// migrate-indexes`, run once per deploy before binding traffic or
+// during a maintenance window — see
+// phase4-coordinator/cmd/coordinator/migrate_indexes.go. Repeated
+// calls are cheap: a sqlite_master point lookup decides whether the
+// DDL runs at all.
+func (s *Store) MigrateIndexes(ctx context.Context) error {
+	// SPEC-002 v1.4.2 R-2: reconciliation scans join gateway
+	// usage_events to request_log on external_request_id; the
+	// partial-NULL index keeps the index small (legacy rows have
+	// NULL and are not indexed).
+	indexes := []struct {
+		name string
+		ddl  string
+	}{
+		{
+			name: "idx_request_log_external_request_id",
+			ddl:  `CREATE INDEX idx_request_log_external_request_id ON request_log(external_request_id) WHERE external_request_id IS NOT NULL`,
+		},
+	}
+	for _, ix := range indexes {
+		var existing string
+		switch err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type='index' AND name=?`, ix.name).Scan(&existing); err {
+		case nil:
+			continue
+		case sql.ErrNoRows:
+			// fall through and create
+		default:
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, ix.ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Store) columns(ctx context.Context) (map[string]bool, error) {

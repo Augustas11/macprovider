@@ -1246,7 +1246,7 @@ type chatMessage struct {
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	externalRequestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+	externalRequestID := sanitizeExternalRequestID(r.Header.Get("X-Request-ID"))
 	requestID := requestIDForBuyerRequest()
 	routingRequestID := uuid.NewString()
 	originalRequestID := requestID
@@ -1266,7 +1266,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// setRequestID land before the first provider-bound recordRow call,
 	// preserving the pre-refactor closure's "latest value at fire time"
 	// semantics for what used to be captured outer-scope variables.
-	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID)
+	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID)
 	maxBodyBytes := s.maxChatBodyBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
@@ -4057,6 +4057,37 @@ func normalizeIdempotencyKey(value string) string {
 	}
 	for _, r := range value {
 		if r < 0x21 || r > 0x7e {
+			return ""
+		}
+	}
+	return value
+}
+
+// sanitizeExternalRequestID normalizes the inbound X-Request-ID header
+// for persistent storage in request_log.external_request_id. SPEC-002
+// §11 requires the coordinator to "honor any inbound X-Request-ID";
+// this honoring is bounded by defense-in-depth:
+//
+//   - Trim surrounding whitespace.
+//   - Cap at 128 bytes (UUID v4 is 36; allowing for vendor-prefixed
+//     ids like "req_<48hex>" gives reasonable headroom without
+//     unbounded growth).
+//   - Reject control characters (< 0x20, 0x7f, and the C1 range
+//     0x80-0x9f) to keep the value safe for structured logs and DB
+//     storage.
+//
+// On failure, returns "" — the coordinator treats the value as if no
+// header was present, which is allowed by §11 ("If absent, coordinator
+// MAY generate its own UUID v4"). The malformed header is not
+// surfaced to the buyer; logging it as-is would replay any
+// log-injection payload.
+func sanitizeExternalRequestID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			return ""
 		}
 	}
