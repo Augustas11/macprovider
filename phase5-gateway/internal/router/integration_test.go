@@ -383,7 +383,7 @@ func TestProviderUnavailableReturns503AndRefunds(t *testing.T) {
 	if resp.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
 	}
-	assertErrorCode(t, resp.Body.String(), "provider_unavailable")
+	assertErrorCode(t, resp.Body.String(), "no_provider_available")
 	usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
 	quota := readQuota(t, usageResp)
 	if quota["daily_tokens_used"].(float64) != 0 || quota["daily_tokens_reserved"].(float64) != 0 {
