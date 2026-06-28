@@ -3,6 +3,7 @@ package pool
 import (
 	"bytes"
 	"fmt"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -236,19 +237,48 @@ type Registry struct {
 	// (no cleanup on provider removal); per the 2026-06-10 audit it could
 	// outgrow the pool unboundedly. Now keyed by providerID and dropped
 	// on RemoveIfSession / RemoveIfSessionState, with a per-provider cap
-	// to bound a single provider's contribution. ModelKnown is a view
-	// over currently-connected providers' sets — so when a provider
-	// disconnects, models only it had reported correctly disappear from
-	// the global "seen" answer.
-	seenModelsByProvider   map[string]map[string]struct{}
-	breakerFaults          map[string][]time.Time
-	recoveryHolds          map[string]recoveryHold
-	canarySanctions        map[string]canarySanction
-	lastBreakerRecoveries  map[string]time.Time
-	maxProvider            int
-	hashVerifier           HeartbeatHashVerifier
-	swapEmitter            SwapEventEmitter
-	receiptRotationEmitter ReceiptRotationEventEmitter
+	// to bound a single provider's contribution.
+	seenModelsByProvider map[string]map[string]struct{}
+	// seenModelsLifetime is the SPEC-002 v1.4.1 § 7.2 pool-lifetime
+	// model history: any model id ever advertised during this coordinator
+	// process lifetime, retained even after the advertising provider
+	// disconnects. Issue #185: the M2-5 cleanup of seenModelsByProvider
+	// on provider disconnect inadvertently shrank `ModelKnown`'s answer
+	// to "currently-connected only", which made cold-start races (only
+	// provider for a model disconnects, buyer asks for that model)
+	// return 404 model_not_found instead of the spec-mandated 503
+	// no_provider_available. seenModelsLifetime is append-only within a
+	// hard cap (maxSeenModelsLifetime) so the PERF-5 memory bound
+	// still holds — beyond cap, further model ids are silently dropped,
+	// which degrades cold-start races to the legacy 404 behavior for
+	// rare/transient models without crashing.
+	seenModelsLifetime map[string]struct{}
+	// lifetimeContribByProvider tracks how many DISTINCT model ids a
+	// given provider_id has contributed to seenModelsLifetime over
+	// the entire coordinator process lifetime — NOT reset on session
+	// replacement or disconnect. This bounds churn-via-reconnect: a
+	// malicious provider cannot consume the lifetime cap by repeatedly
+	// disconnecting and reconnecting with new model ids. Capped per
+	// provider at maxLifetimeContribPerProvider (4x the per-session
+	// budget). ISS-185 R2 security-lane MAJOR.
+	lifetimeContribByProvider map[string]int
+	// lifetimeCapWarnedOnce gates the warn-log so the operator gets
+	// one signal at first cap exhaustion, not per-heartbeat spam.
+	lifetimeCapWarnedOnce bool
+	// lifetimeCapDroppedCount counts model-id inserts that were
+	// dropped because seenModelsLifetime was at cap. Exposed via
+	// LifetimeCapStats() so explorer / metrics can scrape it; nonzero
+	// = either runaway provider churn or a legitimate catalog larger
+	// than expected.
+	lifetimeCapDroppedCount uint64
+	breakerFaults           map[string][]time.Time
+	recoveryHolds           map[string]recoveryHold
+	canarySanctions         map[string]canarySanction
+	lastBreakerRecoveries   map[string]time.Time
+	maxProvider             int
+	hashVerifier            HeartbeatHashVerifier
+	swapEmitter             SwapEventEmitter
+	receiptRotationEmitter  ReceiptRotationEventEmitter
 }
 
 // maxSeenModelsPerProvider caps the seenModelsByProvider inner set so a
@@ -257,6 +287,45 @@ type Registry struct {
 // at a time); reaching this cap silently drops further model IDs.
 // M2-5 / PERF-5.
 const maxSeenModelsPerProvider = 32
+
+// maxSeenModelsLifetime caps the pool-lifetime model-id accumulator that
+// implements SPEC-002 § 7.2's 404-vs-503 distinction. 4096 is several
+// orders of magnitude above any realistic mac-provider catalog — most
+// deployments serve 5-50 distinct model ids — so reaching the cap means
+// a buggy provider is churning model ids. At the cap further inserts
+// are dropped (logged via warn-once + counter), which degrades cold-
+// start races to the legacy 404 behavior for the dropped ids without
+// unbounded growth. Issue #185 / SPEC-002 § 7.2 + PERF-5 / 2026-06-10
+// audit reconciliation.
+const maxSeenModelsLifetime = 4096
+
+// maxModelIDByteLen bounds the size of a single model_id string that
+// gets persisted into the lifetime / per-provider seen-model maps.
+// ISS-185 R1 security-lane CRITICAL: without this bound a provider
+// could advertise very-large model_id strings and force the
+// coordinator to retain them in seenModelsLifetime for the process
+// lifetime, since `requireString` in
+// phase4-coordinator/internal/ws/messages.go does not byte-cap the
+// raw string. 256 bytes aligns with the existing `supported_models`
+// byte cap precedent and is several KB above realistic model ids
+// (e.g. "mlx-community/Qwen3-32B-4bit" is 28 bytes). Oversize ids
+// are not persisted; routing requests for them fall through to the
+// "never seen" 404 path.
+const maxModelIDByteLen = 256
+
+// maxLifetimeContribPerProvider bounds how many DISTINCT model ids
+// a single provider_id can contribute to seenModelsLifetime over
+// the entire coordinator process lifetime, surviving disconnect and
+// session replacement. This bounds churn-via-reconnect by a
+// malicious provider while keeping the per-session attribution map
+// (seenModelsByProvider, capped at maxSeenModelsPerProvider = 32)
+// free to fill independently each session. 128 is 4x the per-session
+// cap — generous enough that a legitimate provider rebooting many
+// times across the process lifetime won't be capped, but tight
+// enough that one malicious provider cannot consume more than
+// 128/4096 ≈ 3% of total lifetime budget. ISS-185 R2 security-lane
+// MAJOR (per-provider gating must survive reconnect).
+const maxLifetimeContribPerProvider = 128
 
 // ReceiptRotationGrace is the SPEC-015 overlap window during which buyers may
 // validate receipts signed by the previous provider receipt key.
@@ -286,14 +355,16 @@ func NewRegistry(providers []config.ProviderConfig, opts ...RegistryOption) *Reg
 		endpoints[p.ProviderID] = p
 	}
 	r := &Registry{
-		providers:             map[string]*Provider{},
-		sessions:              map[string]*Provider{},
-		endpoints:             endpoints,
-		seenModelsByProvider:  map[string]map[string]struct{}{},
-		breakerFaults:         map[string][]time.Time{},
-		recoveryHolds:         map[string]recoveryHold{},
-		canarySanctions:       map[string]canarySanction{},
-		lastBreakerRecoveries: map[string]time.Time{},
+		providers:                 map[string]*Provider{},
+		sessions:                  map[string]*Provider{},
+		endpoints:                 endpoints,
+		seenModelsByProvider:      map[string]map[string]struct{}{},
+		seenModelsLifetime:        map[string]struct{}{},
+		lifetimeContribByProvider: map[string]int{},
+		breakerFaults:             map[string][]time.Time{},
+		recoveryHolds:             map[string]recoveryHold{},
+		canarySanctions:           map[string]canarySanction{},
+		lastBreakerRecoveries:     map[string]time.Time{},
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -431,13 +502,21 @@ func (r *Registry) RegisterAtDetailed(p *Provider, conn net.Conn, now time.Time)
 		old = existing.conn
 		delete(r.sessions, existing.AssignedID)
 		// M2-5: this is a session replacement (same provider_id, new
-		// assigned_id). The "currently-connected session only" invariant
-		// for ModelKnown requires the stale model history to be cleared
-		// here too — RemoveIfSession{,State} only fire on clean
-		// disconnect, not on this direct replacement path. Without this
-		// delete, model ids from the prior session would survive into
-		// the new one and ModelKnown would over-report. (Codex code-audit
-		// 2026-06-11 #47.)
+		// assigned_id). Drop the prior session's per-provider model-id
+		// attribution so per-provider explorer / debug queries reflect
+		// only the current session. RemoveIfSession{,State} only fire
+		// on clean disconnect, not on this direct replacement path.
+		// (Codex code-audit 2026-06-11 #47.)
+		//
+		// ISS-185: the obsolete pre-185 form of this comment said the
+		// delete was required to keep `ModelKnown` from over-reporting.
+		// That is no longer true: ModelKnown reads from
+		// `seenModelsLifetime`, which is the SPEC-002 § 7.2 pool-
+		// lifetime accumulator (append-only) and SHOULD retain
+		// prior-session model ids so cold-start races route to 503
+		// `no_provider_available` instead of 404 `model_not_found`.
+		// The invariant this delete still preserves is per-provider
+		// attribution only.
 		delete(r.seenModelsByProvider, p.ProviderID)
 	} else {
 		if r.stageReceiptPublicationLocked(nil, p, now) == RegisterRefusalReceiptRotationGraceActive {
@@ -574,28 +653,86 @@ func cloneBytes(in []byte) []byte {
 	return out
 }
 
-// recordSeenModelLocked records a model id under a provider's set,
-// respecting the per-provider cap. Caller must hold r.mu in WRITE mode.
+// recordSeenModelLocked records a model id under a provider's set
+// AND in the pool-lifetime accumulator. Caller must hold r.mu in
+// WRITE mode.
+//
+// The two maps are gated INDEPENDENTLY (ISS-185 R2 architect/code/
+// security-lane MAJORs):
+//
+//   - seenModelsByProvider[provider_id] holds the current session's
+//     attribution, capped per session at maxSeenModelsPerProvider
+//     and cleared on RemoveIfSession / session-replacement.
+//   - seenModelsLifetime is the SPEC-002 § 7.2 pool-lifetime model
+//     history, capped overall at maxSeenModelsLifetime and per-
+//     provider at maxLifetimeContribPerProvider (the latter counter
+//     SURVIVES disconnect/session-replacement, so churn-via-
+//     reconnect cannot consume more lifetime than that per-provider
+//     budget).
+//
+// seenModelsLifetime keys are the lowercase canonical form of the
+// model id; ModelKnown's lookup is then O(1).
 func (r *Registry) recordSeenModelLocked(providerID, modelID string) {
 	if providerID == "" || modelID == "" {
 		return
 	}
+	// ISS-185 R1 security-lane CRITICAL: bound the persisted byte
+	// size. `requireString` in internal/ws/messages.go does not cap
+	// model_id length.
+	if len(modelID) > maxModelIDByteLen {
+		return
+	}
+
+	// 1. Per-session attribution map (M2-5 / audit #47 invariant).
 	set, ok := r.seenModelsByProvider[providerID]
 	if !ok {
 		set = map[string]struct{}{}
 		r.seenModelsByProvider[providerID] = set
 	}
-	if _, already := set[modelID]; already {
+	if _, already := set[modelID]; !already && len(set) < maxSeenModelsPerProvider {
+		set[modelID] = struct{}{}
+	}
+
+	// 2. Pool-lifetime accumulator (SPEC-002 § 7.2).
+	canonical := strings.ToLower(modelID)
+	if _, already := r.seenModelsLifetime[canonical]; already {
 		return
 	}
-	if len(set) >= maxSeenModelsPerProvider {
-		// Cap is well above legitimate use; reaching it means this
-		// provider is misbehaving or buggy. Silent-drop is operationally
-		// safe — ModelKnown still answers true via the currently-connected
-		// provider's live ModelID field.
+	// 2a. Per-provider lifetime contribution budget (survives
+	// disconnect/replacement so reconnects can't fill the cap).
+	if r.lifetimeContribByProvider[providerID] >= maxLifetimeContribPerProvider {
+		r.lifetimeCapDroppedCount++
 		return
 	}
-	set[modelID] = struct{}{}
+	// 2b. Global lifetime cap (PERF-5 bound).
+	if len(r.seenModelsLifetime) >= maxSeenModelsLifetime {
+		r.lifetimeCapDroppedCount++
+		if !r.lifetimeCapWarnedOnce {
+			r.lifetimeCapWarnedOnce = true
+			slog.Warn("pool: seenModelsLifetime cap reached; further model_ids will be silently dropped, degrading SPEC-002 § 7.2 cold-start race recovery to legacy 404 for the dropped ids",
+				"cap", maxSeenModelsLifetime,
+				"provider_id", providerID,
+				"dropped_model_id", modelID,
+			)
+		}
+		return
+	}
+	r.seenModelsLifetime[canonical] = struct{}{}
+	r.lifetimeContribByProvider[providerID]++
+}
+
+// LifetimeCapStats returns the current size of the pool-lifetime
+// model-id accumulator and the cumulative number of model_id
+// inserts dropped because either the global or per-provider lifetime
+// cap was at the limit. Operators can scrape these via explorer /
+// metrics surfaces — nonzero `dropped` is the security-relevant
+// signal of either runaway provider churn or a catalog larger than
+// the configured budget. ISS-185 R2 code/security-lane MINOR
+// (observability).
+func (r *Registry) LifetimeCapStats() (size int, dropped uint64) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.seenModelsLifetime), r.lifetimeCapDroppedCount
 }
 
 func (r *Registry) SetTier(providerID string, tier Tier) (Provider, bool) {
@@ -1124,24 +1261,74 @@ func (r *Registry) Touch(providerID, assignedID string, at time.Time) {
 	}
 }
 
+// ModelKnown implements SPEC-002 § 7.2's pool-lifetime "has the
+// coordinator ever seen this model id" check that drives the 404 vs
+// 503 distinction on the buyer port. Returns true iff the model id has
+// been advertised by ANY provider at ANY point during this coordinator
+// process lifetime (within the maxSeenModelsLifetime cap), whether or
+// not the advertising provider is still connected.
+//
+// Issue #185: a previous implementation iterated seenModelsByProvider
+// only, which the M2-5 / PERF-5 audit had wired up to drop on
+// provider disconnect. Cold-start races (only provider for a model
+// disconnects, buyer asks for that model ~200ms later) returned 404
+// model_not_found instead of 503 no_provider_available, leading
+// OpenAI-compatible clients to abandon the model as misconfigured
+// instead of backing off and retrying. The lifetime accumulator added
+// in #185 is append-only with a hard cap, so PERF-5's memory bound
+// still holds while SPEC § 7.2's behavior is restored.
 func (r *Registry) ModelKnown(modelID string) bool {
+	if modelID == "" {
+		return false
+	}
+	// ISS-185 R3 code-lane MAJOR: strings.ToLower is NOT equivalent to
+	// strings.EqualFold for Turkish/Greek edges (e.g.
+	// EqualFold("Σ","ς")==true but ToLower differs;
+	// EqualFold("İ","i")==false but ToLower agrees). Preserve the
+	// existing EqualFold contract by:
+	// 1. Fast O(1) hit on strings.ToLower canonical key (covers the
+	//    ASCII/Latin common case, ~all realistic model ids).
+	// 2. On miss, EqualFold scan the lifetime accumulator before
+	//    falling through to the live/per-session paths.
+	canonical := strings.ToLower(modelID)
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	if _, ok := r.seenModelsLifetime[canonical]; ok {
+		return true
+	}
+	// Non-ASCII / case-folding-edge fallback: EqualFold scan of
+	// lifetime keys. Bounded by maxSeenModelsLifetime = 4096; only
+	// pays the cost on the never-recorded path (i.e., the 404
+	// candidate).
+	for stored := range r.seenModelsLifetime {
+		if strings.EqualFold(stored, modelID) {
+			return true
+		}
+	}
+	// Fallback paths cover the case where lifetime was at one of its
+	// caps (global maxSeenModelsLifetime or per-provider
+	// maxLifetimeContribPerProvider) when the model was first
+	// advertised, so it was dropped from lifetime even though the
+	// provider that advertised it may still be connected.
+	//
+	// 1. Live providers' current ModelID field.
 	for _, p := range r.providers {
 		if strings.EqualFold(p.ModelID, modelID) {
 			return true
 		}
 	}
-	// M2-5 / PERF-5: iterate per-provider seenModels (only entries for
-	// currently-connected providers, since RemoveIfSession{,State} drop
-	// the inner map). The pre-M2-5 behaviour was a registry-wide
-	// accumulator that retained models from disconnected providers
-	// forever — a memory leak the audit flagged. The new semantic is
-	// "known iff a currently-connected provider has at any point served
-	// it during its current session."
+	// 2. Per-session attribution map. ISS-185 R2 code-lane MAJOR: a
+	// provider may have previously advertised this model id via
+	// heartbeat (it's in their per-session set) while their CURRENT
+	// ModelID is something else. Without this iteration, ModelKnown
+	// would return false → 404 even though a connected provider has
+	// the model id in its session history.
 	for _, set := range r.seenModelsByProvider {
-		for seen := range set {
-			if strings.EqualFold(seen, modelID) {
+		if _, ok := set[modelID]; ok {
+			return true
+		}
+		for stored := range set {
+			if strings.EqualFold(stored, modelID) {
 				return true
 			}
 		}

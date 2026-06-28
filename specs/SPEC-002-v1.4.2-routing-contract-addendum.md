@@ -1,202 +1,325 @@
-# SPEC-002 v1.4.2 — routing-contract addendum (DRAFT)
+# SPEC-002 v1.4.2 — routing-contract addendum
 
-**Status:** DRAFT, derived from phase-A network-harness findings 2026-06-27.
-**Author intent:** consolidate the routing/error contract the network
-**actually exhibits** under live conditions into a single normative
-reference so the e2e harness (and external buyer clients) can assert
-against it. Where current behavior is defensible, this addendum
-**writes it down**. Where it is contradictory or a product call,
-items are tagged `[PRODUCT DECISION]` and left to the maintainer.
+**Bumps SPEC-002 from v1.4.1 → v1.4.2.** Five coordinator-side
+clauses, each either codifying already-implicit behavior or marking
+an empirical observation as a violation of an existing locked
+contract.
 
-This addendum proposes bumping SPEC-002 from v1.4.1 → v1.4.2 with the
-clauses below. It does **not** yet propose code changes — each clause
-is either documenting existing behavior (no code change) or naming a
-deviation (code change tracked separately).
+**Companion**: a parallel SPEC-006 v0.X.Y gateway-contract addendum
+(separate PR) covers gateway-side clauses surfaced by the same
+review pass (settlement matrix re-affirmation, rate-limit response
+headers, observability requirements).
 
-Findings narrative lives in
-`docs/internal/phase-A-findings-2026-06-27.md` (internal).
+## Audit provenance
 
-## R-clauses (proposed)
+This addendum is the result of an internal e2e network-harness pass
+against the live `https://api.streamvc.live` stack (2026-06-27),
+followed by a three-lane audit:
 
-Each clause is named `R-N` so harness scenarios can cite
-`asserts: [R-3, R-7]` in their YAML (phase C will add these
-assertions).
+- **Architect lane (codex via `omc ask codex`)** — 16 findings, 3
+  CRITICAL, 8 MAJOR.
+- **Architect lane (Claude adversarial verification)** — 13
+  findings, 4 CRITICAL, 5 MAJOR.
 
-### R-1 — Per-account concurrency limit `[PRODUCT DECISION]`
+Both lanes converged on the conclusion that most clauses in an
+earlier draft conflated coordinator-vs-gateway scope and contradicted
+existing locked spec contracts. This revision focuses on coordinator-
+side surface only and re-affirms the existing contracts that empirical
+runs observed violations of.
 
-A single buyer account is limited to N concurrent in-flight requests
-across the gateway. Excess attempts receive `HTTP 429
-rate_limit_exceeded` with a `Retry-After` header.
+## Change-log entry
 
-**Observed in phase A:** N appears to be very low (≤2). 10 concurrent
-buyers from one account → 7×429 in scenario 02.
+> **v1.4.2 (2026-06-27, additive — internal e2e audit):**
+> Codifies five coordinator-side observations from internal e2e
+> testing against the live `https://api.streamvc.live` stack. R-1,
+> R-2, R-3 are **re-affirmations of existing locked contracts**
+> (§ 7.2, § 11, FR-B6) that empirical runs observed violations of;
+> the violations are filed as separate code-side issues. R-4
+> corrects an earlier-draft tie-break misstatement. R-5 disambiguates
+> a coordinator-internal error-code drift. No new buyer HTTP
+> surface; no routing-algorithm changes.
 
-**Decision needed:** what value of N is the contract? Is it
-configurable per-account? Today the limit is undocumented and lower
-than the network's nominal capacity.
+## R-clauses
 
-### R-2 — Capacity-exhaustion error code
+### R-1 — `404 model_not_found` vs `503 no_provider_available` split
 
-When no provider has `slots_free ≥ 1` for a requested model and no
-buyer-side rate limit has fired, the gateway returns:
+**Status:** RE-AFFIRMATION of SPEC-002 v1.4.1 § 7.2.
+
+Per § 7.2 (lines 2381-2389):
+
+- `404 model_not_found`: the `model_id` has NEVER appeared in any
+  provider's hello/heartbeat history during this coordinator process
+  lifetime.
+- `503 no_provider_available`: the `model_id` is recognized
+  (in pool-lifetime history) but no currently-eligible provider can
+  take the request right now.
+
+The buyer-facing semantic distinction (404 = misconfiguration, 503 =
+backoff-and-retry) is part of the contract.
+
+**Empirical observation (non-spec content, for triage):** an internal
+e2e scenario killed the only Qwen3-32B-4bit provider, then fired a
+buyer request <300ms later. The coordinator returned HTTP 404 despite
+the model being in pool history. **Filed as code bug
+(issue #185). Not a spec change.**
+
+### R-2 — `X-Request-ID` propagation: gateway↔coordinator reconciliation
+
+**Status:** RE-AFFIRMATION + RESHAPE of SPEC-002 v1.4.1 § 11 (lines
+2239-2243). Splits the original three-leg §11 mandate into two
+clauses (R-2 here, R-2b below) to keep code/spec ownership aligned.
+
+#### R-2 normative — gateway↔coordinator reconciliation column
+
+The buyer-visible request id MUST be persisted on the coordinator
+side in a NEW column `request_log.external_request_id` (TEXT NULL).
+This is the join key between gateway `usage_events.request_id`,
+gateway `audit_events.request_id`, and coordinator
+`request_log.external_request_id`.
+
+`request_log.request_id` retains its existing per-attempt
+coordinator-generated semantics. **This clause supersedes the FR-B9
+schema-row description of `request_id`** in SPEC-002 v1.4.1 § 11 line
+1291 (`UUID v4 from inbound X-Request-ID when present`): going forward
+`request_id` is coordinator-internal and is NEVER equal to the inbound
+`X-Request-ID`, while `external_request_id` is the column that stores
+inbound `X-Request-ID`. The prior wording described intent rather than
+the actual implementation, which has long generated per-attempt
+request_ids and verified the property in tests (see
+`TestRequestLogBuyerMultiAttemptRows` and
+`TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID`).
+v1.4.2 R-2 makes the distinction explicit:
+
+- **`request_id`** — coordinator-internal request/billing id. Multiple
+  `request_log` rows (one per provider attempt) may **share** this
+  value on the non-pinned retry path or **differ** on the pinned-client
+  retry path. Attempt identity is `request_log.id` (auto-increment PK)
+  combined with `request_log.retried` (the per-row attempt counter).
+  Verified by existing tests `TestRequestLogBuyerMultiAttemptRows`
+  (shared) and `TestRequestLogBuyerPinnedClientRequestIDDoesNotReuseBillingID`
+  (differs).
+- **`external_request_id`** — buyer-facing id propagated through
+  gateway. Always shared across all attempts of one logical request,
+  regardless of pinning. Reconciliation join key with gateway-side
+  `usage_events.request_id` and `audit_events.request_id`.
+
+#### R-2 normative — schema migration
+
+Coordinators MUST ship the migration:
+
+```sql
+ALTER TABLE request_log ADD COLUMN external_request_id TEXT NULL;
+CREATE INDEX IF NOT EXISTS idx_request_log_external_request_id
+    ON request_log(external_request_id) WHERE external_request_id IS NOT NULL;
+```
+
+Implementations SHOULD use a partial-NULL index (as above) so
+pre-migration rows do not consume index space.
+
+#### R-2 normative — FR-B9 schema-row delta
+
+The FR-B9 `request_log` schema table in SPEC-002 v1.4.1 § 11 line
+1284-1296 is amended as follows. The new row is **additive**; rows
+above and below are unchanged. The `request_id` row description is
+updated by the supersession clause above. Together:
+
+| Column | Type | Description |
+| --- | --- | --- |
+| `request_id` | TEXT | Coordinator-internal request/billing id. NEVER equal to the inbound `X-Request-ID`. Multiple `request_log` rows (provider attempts) may share or differ on this value (see normative supersession above). |
+| `external_request_id` | TEXT NULL | Inbound `X-Request-ID` after sanitization. NULL when absent or rejected. Reconciliation join key for gateway `usage_events.request_id` and `audit_events.request_id`. Indexed (partial-NULL). |
+
+All other FR-B9 columns are unchanged.
+
+#### R-2 normative — sanitization
+
+Coordinators MUST apply length and control-character bounds to the
+inbound header before storage. A reference normalization (see
+`sanitizeExternalRequestID` in `phase4-coordinator/internal/buyer/server.go`):
+
+- TrimSpace the inbound value.
+- Reject (treat as absent) if empty or > 128 bytes.
+- Reject (treat as absent) any byte < 0x20, == 0x7f, or in the
+  C1 range 0x80-0x9f.
+
+Rejected values are stored as NULL — the row still logs but is
+opted out of reconciliation.
+
+#### R-2b deferred — coordinator↔provider preservation
+
+SPEC-002 v1.4.1 § 11 line 2241 says "When forwarding work to a
+provider over the SPEC-001 § 6.6 `inference_request` message,
+coordinator MUST preserve the request ID it recorded for the buyer
+request." Empirical observation: today the coordinator sends a
+per-attempt id to providers, not the buyer-facing one. Existing
+tests codify the per-attempt behavior. **R-2b retains the spec
+text as the intended end-state but defers implementation to a
+follow-up.** Phase-C harness assertions that depend on R-2b MUST
+mark themselves dependent until R-2b is resolved.
+
+#### R-2 implementation reference
+
+[PR #195](https://github.com/Augustas11/macprovider/pull/195) closes
+[#188](https://github.com/Augustas11/macprovider/issues/188), shipping
+R-2 (column + migration + sanitization + plumbing). R-2b is not in
+that PR.
+
+#### Phase-C harness expectations
+
+Out-of-process auditors (the internal e2e harness, future SRE audit
+scripts, dispute-resolution tooling) MUST detect the
+`external_request_id` column via schema introspection. If the column
+is absent, the auditor SHOULD report "exact reconciliation
+unsupported on legacy coordinator" rather than silently falling back
+to fuzzy `(ts, model, completion_tokens)` matching (which is lossy
+under concurrent traffic).
+
+#### Glossary (added with this addendum)
+
+- **request_id** — coordinator-internal request/billing id. Never
+  equal to any inbound header value. Multiple `request_log` rows may
+  share or differ on this value depending on pinning (see normative
+  text above).
+- **external_request_id** — inbound `X-Request-ID` header value
+  honored at the coordinator buyer-port ingress. Always shared
+  across all retry attempts of one logical request. Reconciliation
+  join key with gateway-side stores.
+
+#### SPEC-005 boundary clarification
+
+This SPEC-002-owned schema migration (`ALTER TABLE request_log ADD
+COLUMN external_request_id`) does NOT relax the SPEC-005 rule that
+SPEC-005 implementations must read `request_log` by JOIN only.
+SPEC-005 continues to treat existing `request_log` columns as
+read-only; `external_request_id` is added by SPEC-002 v1.4.2 and is
+read by SPEC-005-side joiners exactly the way they read any other
+`request_log` column.
+
+**SPEC-005 § AC-REQUEST-LOG-READONLY scope clarification.** SPEC-005
+v0.3 § AC-REQUEST-LOG-READONLY ("Grep migrations for `ALTER TABLE
+request_log`. Expected: No ALTER appears.") constrains
+**SPEC-005-owned billing migrations only**. SPEC-002-owned additive
+coordinator-observability migrations — including this
+`request_log.external_request_id` column and any future
+SPEC-002-versioned `request_log` additive columns — are explicitly
+permitted: SPEC-002 is the owner of the coordinator-observability
+schema and is the only spec entitled to evolve `request_log`'s shape.
+SPEC-005 readers MUST tolerate additional `request_log` columns
+inserted by SPEC-002 versioned migrations. The SPEC-005 AC SHOULD be
+read as "no SPEC-005-rooted `ALTER TABLE request_log` appears".
+
+#### Aggregation semantics (auditor contract)
+
+`external_request_id` is a **logical-request grouping key**, not a
+coordinator-row unique key. Auditors and harnesses MUST treat the
+gateway↔coordinator relationship as one-to-many:
+
+- A gateway `usage_events` row (with its `request_id` PK) may join
+  to **zero, one, or many** coordinator `request_log` rows.
+- Reconciliation MUST aggregate the matched coordinator rows for
+  one `external_request_id` according to SPEC-005's existing
+  attempt/token-source rules (provider-credit row keyed by
+  `request_id + attempt_n + provider_id`) **before** comparing the
+  aggregate to gateway `usage_events.tokens`/`cost`.
+- Multiple attempts that resolve to a single billed total on the
+  gateway side are an expected, in-contract shape — not a
+  duplicate or a reconciliation failure.
+
+#### SPEC-006 companion cross-reference
+
+The paired SPEC-006 v0.X.Y addendum maps the gateway-side join
+explicitly: gateway `usage_events.request_id` and request-scoped
+`audit_events.request_id` match coordinator
+`request_log.external_request_id`. They do NOT match coordinator
+`request_log.request_id`.
+
+### R-3 — Mid-stream provider disconnect SSE error envelope
+
+**Status:** RE-AFFIRMATION of SPEC-002 v1.4.1 FR-B6 (lines 1248-1254).
+
+Per FR-B6, when a provider disconnects mid-stream the coordinator
+MUST emit:
 
 ```
-HTTP 503
-{
-  "error": {
-    "code": "provider_unavailable",
-    "type": "service_unavailable",
-    "message": "No provider available"
-  }
-}
-```
+data: {"error":{"message":"Provider disconnected during streaming","type":"server_error","code":"provider_disconnected"}}
 
-**Observed in phase A:** scenarios 02 (capacity_contention) and the
-post-warmup 503s in 03 confirm this code is emitted today.
-
-### R-3 — Unknown model error code `[PRODUCT DECISION]`
-
-When the requested model id matches no provider in the routable pool,
-the gateway returns:
-
-**Option A** (current code): `HTTP 404 not_found`.
-**Option B** (current SPEC-002 FR-B1): `HTTP 503 no_provider_available`.
-
-**Phase-A observation:** code emits Option A; spec says Option B.
-**Decision needed:** keep the 404 (matches OpenAI semantics for
-"endpoint/model not found") or fix the code to match the spec.
-
-### R-4 — Mid-stream provider drop `[PRODUCT DECISION]`
-
-When a provider's WebSocket dies during streaming inference, the
-gateway terminates the SSE stream cleanly:
-
-1. Emits a final `data: [DONE]` marker (so buyer's parser doesn't
-   hang).
-2. Returns HTTP status 200 (already sent at headers, can't change).
-
-**Phase-A observation:** that's the current behavior. The gap is:
-
-- Buyer receives partial content with no error signal.
-- **No `usage_events` row is written** — provider isn't billed,
-  buyer isn't charged.
-
-**Decision needed:** one of
-- **R-4a** Status quo: explicit contract that mid-stream drop = no
-  charge, no provider compensation. Buyer client expected to detect
-  truncation via content inspection.
-- **R-4b** Settle partial: gateway writes a usage_events row with
-  `outcome=stream_truncated` and tokens actually delivered. Buyer
-  charged, provider compensated.
-- **R-4c** Failover: gateway retries on a different provider with
-  `excluded=[failed]`. Stream concatenates / restarts; buyer sees a
-  warning header but ultimately gets full output.
-
-### R-5 — Cold-start window `[PRODUCT DECISION]`
-
-When the requested model has a provider connected but in a transient
-unready state (model still loading, just-restarted, warming), the
-gateway today returns the same code as "model doesn't exist" — see
-R-3 deviation. This is indistinguishable to clients.
-
-**Decision needed:** introduce a `model_warming` / `try_again` state
-exposed as `HTTP 503 model_warming` with `Retry-After: <seconds>`?
-Or accept the conflation as an acceptable simplification.
-
-### R-6 — Request-id space (factual, not a decision)
-
-**Gateway** generates a request id (UUID v4) per inbound request and
-returns it via `X-Request-Id` response header. This id is the
-authoritative buyer-facing identifier.
-
-**Coordinator** generates an **independent** request id when the
-gateway forwards inference traffic over the WS tunnel. This id is
-stored in `request_log.request_id`.
-
-**These two ids never overlap.** There is currently no field on
-either side that correlates them.
-
-**Implication for reconciliation:** out-of-process auditors (the
-network harness, any future SRE audit script) must correlate by
-`(ts ± window, model, completion_tokens, account)`, not by request_id.
-
-**Engineering follow-up (separate work item, not this addendum):**
-plumb a shared `correlation_id` — see issue #N.
-
-### R-7 — Sticky affinity (default OFF)
-
-`/v1/models` `tier1_disclosure.sticky_affinity.enabled` reports the
-authoritative state. Today: `false`. Multi-turn requests with the
-same `conversation_key` are NOT preferentially routed to the same
-provider; tie-breaking uses the SPEC-002 v1.4.1 § 5 default-objective
-(sortCandidates → `SlotsFree` asc, `throughput_tps` desc, random
-within epsilon on `requestID`).
-
-**Decision needed for v1.5+:** if sticky becomes enabled, the disclosure
-flips and this clause updates. No protocol changes required.
-
-### R-8 — Silent provider disconnection (operational, not protocol)
-
-A provider whose WS dies but whose host process remains alive is
-detectable from the coordinator via heartbeat timeout (90s
-`provider_inactive_threshold` per current code). The coordinator's
-contract is "drop after threshold; do not route to the dead provider"
-— this is functioning correctly.
-
-The PROVIDER-SIDE contract obligation is: when the WS dies, the
-provider MUST re-establish within a bounded time
-(`reconnectGraceNanoseconds`, currently 10s post-drain) OR exit.
-
-**Phase A finding:** a class of bug exists where the Swift WS
-reconnect loop wedges silently. Not a routing-contract issue per se,
-but operators need either (a) external watchdog (shipped, see
-`ops/macprovider-watchdog/`) or (b) Swift-side fix. Tracked as a
-separate engineering work item — see issue #M.
-
-### R-9 — Billing settlement on 5xx (factual)
-
-Every 5xx response carries an `X-Request-Id` header. The buyer-side
-contract: a 5xx never produces a `usage_events` row that charges the
-buyer; the harness's I2 invariant confirms this across all phase-A
-scenarios.
-
-The `usage_events` table may, however, contain a `outcome != ok` row
-for the same request_id when the gateway logged the failure (e.g.,
-`outcome=upstream_error`, `prompt_tokens=0`, `completion_tokens=0`).
-That's an **audit row**, not a billed row.
-
-### R-10 — Streaming token billing source `[PRODUCT DECISION]`
-
-When the gateway settles streaming requests in `usage_events`, the
-`completion_tokens` count comes from one of:
-- the final SSE chunk's `usage.completion_tokens` (provider-reported)
-- a gateway-side count of delta content (not currently done)
-
-**Phase-A observation:** the existing `token_source` field already
-records this (`provider_reported`, `gateway_estimated`,
-`manual_fixture`). Confirmed against the live `usage_events` schema.
-
-**Decision needed:** for mid-stream truncation (R-4), what's the
-contract value of `completion_tokens` if R-4b is chosen? Bytes
-delivered ÷ avg token length? Last seen chunk's count?
-
-## Open items NOT addressed in this addendum
-
-- The harness's own streaming-token-counter limitation (separate
-  harness fix).
-- Multi-model routing fairness under sustained load (need higher
-  capacity than 2×1 slot to observe meaningfully).
-- Sticky-affinity ON behavior (deferred until product decides to
-  enable).
-- Cross-buyer fairness (need ≥2 buyer accounts to test).
-
-## Change-log entry (proposed, to land at top of `SPEC-002-coordinator.md`)
+data: [DONE]
 
 ```
-**Change log v1.4.2 (2026-06-27, additive — phase-A harness):**
-- R-1..R-10 routing-contract clauses added. R-1, R-3, R-4, R-5, R-10
-  flagged [PRODUCT DECISION] — current behavior documented but not
-  yet ratified as the contract. R-2, R-6, R-7, R-8, R-9 codify
-  existing behavior. See docs/internal/phase-A-findings-2026-06-27.md
-  for the empirical evidence behind each clause.
-```
+
+The error event is REQUIRED before `[DONE]`. The buyer cannot rely
+on truncated content alone to detect failure.
+
+**Empirical observation:** an internal e2e scenario killing the
+provider mid-stream observed the gateway emitting `data: [DONE]`
+with **no preceding error event**. The gateway code path emits
+`stream_truncated` instead of `provider_disconnected`. **Filed as
+code bug (issue #186), plus a tightly-coupled SPEC-006 §17.7
+settlement violation (issue #187 — P0). Not a spec change.**
+
+### R-4 — Default-objective tie-break (correction)
+
+**Status:** CORRECTION to an earlier misstatement; no normative
+change.
+
+An earlier review note described the SPEC-002 § 5 default-objective
+tie-break as "random within epsilon on `requestID`". Per § 5, the
+actual sequence is:
+
+1. Filter by model, RoutingEligible, context capacity, quota.
+2. Sort by `(SlotsFree asc, throughput_tps_estimate desc,
+   connected_at asc)`.
+3. Random epsilon-tie-break is applied ONLY when the configured
+   `objective` carries a non-zero `epsilon` (default 0 =
+   deterministic).
+
+Apologies for the misstatement; this clause exists to keep downstream
+harness assertions from relying on the wrong tie-break shape.
+
+### R-5 — Coordinator-internal 503 error-code drift
+
+**Status:** CLEANUP within SPEC-002 scope.
+
+`phase4-coordinator/internal/buyer/server.go` emits **two distinct
+codes** for the same 503 conceptual case:
+
+- `no_provider_available` (matches FR-B4) at lines 3122, 3183,
+  3661, 3704 — the routing rejection paths.
+- `provider_unavailable` (NOT in FR-B4 enumeration) at lines 1924,
+  1952, 2087, 2726, 3989 — the WS-forward / preflight rejection
+  paths.
+
+Per FR-B4 (line 1232) and § 7.2, the normative code is
+`no_provider_available`. The `provider_unavailable` string is
+non-conformant; both paths MUST emit `no_provider_available`.
+
+**Filed as code bug (issue #184). The addendum codifies "all 503
+zero-provider scenarios use `no_provider_available`" as the
+normative contract.**
+
+## Phase-A audit-pass: clauses considered but withdrawn
+
+To avoid muddling the contract, the following clauses from an earlier
+draft were withdrawn after the codex + Claude audit:
+
+| Earlier-draft clause | Disposition | Rationale |
+|---|---|---|
+| Per-account rate limit | Moved to SPEC-006 addendum | Gateway-side scope, not SPEC-002. |
+| Capacity-exhaustion 503 envelope | Absorbed into R-5 | Same root cause as the code-drift cleanup. |
+| Mid-stream billing policy | Moved to SPEC-006 §17.7 re-affirmation | §17.7 already specifies the settlement matrix. |
+| Cold-start `model_warming` proposal | Withdrawn | SPEC-001 v1.4 R-6.8.4 already defines `503 provider_loading`; no new vocab needed. |
+| 5xx never billed | Withdrawn (was incorrect) | Contradicts SPEC-006 §17.7. |
+| Streaming token source | Moved to SPEC-006 addendum | Gateway-side settlement, not coordinator routing. |
+| Provider WS silent disconnect | Dropped from spec | Operational, not protocol; tracked as engineering issue #189 + #191. |
+
+## Filed companion issues
+
+| Issue | Type | Spec referenced | Severity |
+|---|---|---|---|
+| [#184](https://github.com/Augustas11/macprovider/issues/184) | code bug | SPEC-002 FR-B4 | high |
+| [#185](https://github.com/Augustas11/macprovider/issues/185) | code bug | SPEC-002 § 7.2 | high |
+| [#186](https://github.com/Augustas11/macprovider/issues/186) | code bug | SPEC-002 FR-B6 | high |
+| [#187](https://github.com/Augustas11/macprovider/issues/187) | code bug | SPEC-006 §17.7 | **P0** |
+| [#188](https://github.com/Augustas11/macprovider/issues/188) | code bug | SPEC-002 §11 | **P0** |
+| [#189](https://github.com/Augustas11/macprovider/issues/189) | engineering | (operational) | high |
+| [#190](https://github.com/Augustas11/macprovider/issues/190) | feat + decision | SPEC-006 R-G2 | medium |
+| [#191](https://github.com/Augustas11/macprovider/issues/191) | feat (ops) | n/a | medium |

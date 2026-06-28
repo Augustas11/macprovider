@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -252,7 +253,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
-	upReq.Header.Set("X-Request-ID", newUUID())
+	// SPEC-006 v0.X R-G3 / SPEC-002 v1.4.2 R-2: gateway forwards the
+	// buyer-visible request id verbatim so the coordinator's
+	// request_log.external_request_id matches the gateway's
+	// usage_events.request_id on a per-request basis.
+	upReq.Header.Set("X-Request-ID", requestID(r))
 	resp, err := s.client.Do(upReq)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
@@ -354,7 +359,13 @@ func (s *Server) handleStickyDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "service_unavailable", "coordinator_unavailable", "Coordinator unavailable")
 		return
 	}
-	upReq.Header.Set("X-Request-ID", newUUID())
+	// SPEC-006 v0.X R-G3: gateway forwards the buyer-visible request id
+	// on every forwarded buyer-facing coordinator call. /v1/sticky is
+	// request-scoped audit-diagnostic surface, not a usage-event path,
+	// so the join target here is gateway audit_events.request_id ↔
+	// coordinator audit_events / request_log diagnostics — NOT the
+	// gateway usage_events join used by /v1/chat/completions.
+	upReq.Header.Set("X-Request-ID", requestID(r))
 	// M3-2 / SECU-4: prefer ServiceToken when set; falls back to
 	// OperatorKey so a not-yet-upgraded coordinator keeps accepting us.
 	upReq.Header.Set("Authorization", "Bearer "+s.cfg.Coordinator.UpstreamCoordinatorBearer())
@@ -791,10 +802,37 @@ func copyCleanHeadersWithReceipt(dst, src http.Header, allowReceipt bool) {
 		if isMacProviderHeader(key) && !(allowReceipt && isReceiptResponseHeader(key)) {
 			continue
 		}
+		// Issue #190: the gateway is authoritative for rate-limit
+		// and Retry-After headers on chat responses. Dropping any
+		// upstream values prevents duplicate / contradictory
+		// headers that SDKs may parse inconsistently (comma-joined
+		// repeats in some HTTP libraries).
+		if isGatewayOwnedRateLimitHeader(key) {
+			continue
+		}
 		for _, value := range values {
 			dst.Add(key, value)
 		}
 	}
+}
+
+// Issue #190: header names the gateway emits and treats as
+// authoritative on /v1/chat/completions responses. Upstream
+// (coordinator / provider) variants of the same name are dropped
+// in copyCleanHeadersWithReceipt so the gateway-set values are
+// the only ones the buyer sees.
+func isGatewayOwnedRateLimitHeader(key string) bool {
+	switch strings.ToLower(key) {
+	case "x-ratelimit-limit",
+		"x-ratelimit-remaining",
+		"x-ratelimit-reset",
+		"x-ratelimit-limit-requests",
+		"x-ratelimit-remaining-requests",
+		"x-ratelimit-reset-requests",
+		"retry-after":
+		return true
+	}
+	return false
 }
 
 func isReceiptResponseHeader(key string) bool {
@@ -827,6 +865,41 @@ func setRateLimitHeaders(w http.ResponseWriter, limit, remaining, reset int64) {
 	w.Header().Set("X-RateLimit-Remaining", fmt.Sprintf("%d", remaining))
 	w.Header().Set("X-RateLimit-Reset", fmt.Sprintf("%d", reset))
 }
+
+// Issue #190: per-account concurrency rate-limit headers, distinct
+// from the daily-token quota headers above. OpenAI-compatible
+// clients honor the *-Requests variants for self-pacing the
+// in-flight request count, whereas the unsuffixed variants (still
+// emitted on the daily-quota path) describe the token budget.
+//
+// We emit these on EVERY admitted request so SDKs can pre-emptively
+// throttle, and again on the 429 reject path with Remaining=0 and
+// a Retry-After hint. retryAfterSeconds = 0 suppresses the
+// Retry-After header (used on the admitted-path call).
+func setConcurrencyRateLimitHeaders(w http.ResponseWriter, limit, remaining int, retryAfterSeconds int, now time.Time) {
+	w.Header().Set("X-RateLimit-Limit-Requests", strconv.Itoa(limit))
+	if remaining < 0 {
+		remaining = 0
+	}
+	w.Header().Set("X-RateLimit-Remaining-Requests", strconv.Itoa(remaining))
+	if retryAfterSeconds > 0 {
+		// X-RateLimit-Reset-Requests communicates the wall-clock
+		// instant (unix seconds) at which the buyer can retry; it
+		// must be consistent with Retry-After. We anchor both to
+		// the same `now` to remove TOCTOU drift between header
+		// values within a single response.
+		w.Header().Set("X-RateLimit-Reset-Requests", strconv.FormatInt(now.Unix()+int64(retryAfterSeconds), 10))
+		w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+	}
+}
+
+// Issue #190: Retry-After hint for concurrency 429. Conservative
+// constant — 1 second — so OpenAI-compatible SDKs back off briefly
+// without hammering, while still being short enough to recover
+// quickly once an in-flight request completes. Bounded so future
+// changes can not accidentally produce huge values.
+const concurrencyRetryAfterSeconds = 1
+
 
 func resetUnix(windowDate string) int64 {
 	t, err := time.Parse("2006-01-02", windowDate)

@@ -1,37 +1,100 @@
 #!/usr/bin/env bash
-# install.sh — install the macprovider-watchdog LaunchAgent.
-# Idempotent: safe to re-run after edits to the plist or script.
+# Standalone installer for the macprovider-watchdog LaunchAgent.
+#
+# This script is also invoked by the main installer
+# (phase3-binary/dist/install.sh) — it MUST be idempotent so a
+# re-install does not double-load the LaunchAgent or leak the
+# previous plist.
+
 set -euo pipefail
 
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-label="live.streamvc.macprovider-watchdog"
-plist_src="${here}/${label}.plist"
-plist_dst="${HOME}/Library/LaunchAgents/${label}.plist"
+WATCHDOG_DIR_DEFAULT="$HOME/.local/share/macprovider-watchdog"
+WATCHDOG_DIR="${MACPROVIDER_WATCHDOG_DIR:-$WATCHDOG_DIR_DEFAULT}"
+WATCHDOG_PATH="$WATCHDOG_DIR/watchdog.sh"
+PLIST_TEMPLATE_PATH="${MACPROVIDER_WATCHDOG_TEMPLATE:-$(cd "$(dirname "$0")" && pwd)/live.streamvc.macprovider-watchdog.plist.template}"
+SOURCE_WATCHDOG="$(cd "$(dirname "$0")" && pwd)/watchdog.sh"
+PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
+LOG_DIR="${MACPROVIDER_LOG_DIR:-$HOME/Library/Logs/macprovider}"
+CONFIG_PATH="${MACPROVIDER_CONFIG_PATH:-$HOME/.config/macprovider/config.yaml}"
+COORDINATOR_HOST="${MACPROVIDER_COORDINATOR_HOST:-coordinator.streamvc.live}"
+SERVICE_LABEL="${MACPROVIDER_SERVICE_LABEL:-live.streamvc.macprovider}"
+DRY_RUN=0
 
-# 1. Make the script executable.
-chmod +x "${here}/watchdog.sh"
+log() { printf "[macprovider-watchdog-install] %s\n" "$*"; }
+die() {
+  printf "[macprovider-watchdog-install] ERROR: %s\n" "$*" >&2
+  exit 1
+}
 
-# 2. Copy plist into ~/Library/LaunchAgents.
-mkdir -p "${HOME}/Library/LaunchAgents"
-cp -f "${plist_src}" "${plist_dst}"
-echo "installed plist to ${plist_dst}"
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help)
+      printf "Usage: bash install.sh [--dry-run]\n"
+      exit 0
+      ;;
+    *) die "unknown argument: $arg" ;;
+  esac
+done
 
-# 3. If already loaded, bootout first so the new plist takes effect.
-uid_num="$(id -u)"
-if launchctl print "gui/${uid_num}/${label}" >/dev/null 2>&1; then
-  echo "watchdog already loaded; bootout to refresh"
-  launchctl bootout "gui/${uid_num}" "${plist_dst}" || true
+run() {
+  if [ "$DRY_RUN" -eq 1 ]; then
+    printf "[dry-run] "; printf "%q " "$@"; printf "\n"
+  else
+    "$@"
+  fi
+}
+
+# Best-effort XML escape. Same approach as the main installer's
+# render_plist; keeps the substituted values safe inside the
+# generated plist.
+xml_escape() {
+  printf "%s" "$1" | LC_ALL=C sed \
+    -e 's/&/\&amp;/g' \
+    -e 's/</\&lt;/g' \
+    -e 's/>/\&gt;/g' \
+    -e 's/"/\&quot;/g' \
+    -e "s/'/\&apos;/g"
+}
+
+[ -r "$SOURCE_WATCHDOG" ] || die "missing source $SOURCE_WATCHDOG"
+[ -r "$PLIST_TEMPLATE_PATH" ] || die "missing template $PLIST_TEMPLATE_PATH"
+
+log "Installing watchdog to $WATCHDOG_DIR"
+run mkdir -p "$WATCHDOG_DIR" "$LOG_DIR" "$(dirname "$PLIST_PATH")"
+
+if [ "$DRY_RUN" -eq 0 ]; then
+  install -m 0755 "$SOURCE_WATCHDOG" "$WATCHDOG_PATH"
+else
+  log "[dry-run] install -m 0755 $SOURCE_WATCHDOG $WATCHDOG_PATH"
 fi
 
-# 4. Bootstrap (load).
-launchctl bootstrap "gui/${uid_num}" "${plist_dst}"
-echo "bootstrapped: gui/${uid_num}/${label}"
+# Render the plist with the operator's actual paths substituted.
+rendered="$(sed \
+  -e "s|__WATCHDOG_PATH__|$(xml_escape "$WATCHDOG_PATH")|g" \
+  -e "s|__LOG_DIR__|$(xml_escape "$LOG_DIR")|g" \
+  -e "s|__USER_HOME__|$(xml_escape "$HOME")|g" \
+  -e "s|__SERVICE_LABEL__|$(xml_escape "$SERVICE_LABEL")|g" \
+  -e "s|__CONFIG_PATH__|$(xml_escape "$CONFIG_PATH")|g" \
+  -e "s|__COORDINATOR_HOST__|$(xml_escape "$COORDINATOR_HOST")|g" \
+  "$PLIST_TEMPLATE_PATH")"
 
-# 5. Kickstart so RunAtLoad fires immediately even if it didn't.
-launchctl kickstart "gui/${uid_num}/${label}" || true
+if [ "$DRY_RUN" -eq 1 ]; then
+  log "[dry-run] would write rendered plist to $PLIST_PATH:"
+  printf "%s\n" "$rendered"
+  log "[dry-run] would: launchctl bootout gui/$UID $PLIST_PATH (ignore if absent)"
+  log "[dry-run] would: launchctl bootstrap gui/$UID $PLIST_PATH"
+  exit 0
+fi
 
-# 6. Show that it's loaded.
-launchctl list | grep "${label}" || echo "warning: not visible in launchctl list yet"
-echo
-echo "watchdog will fire every 60s."
-echo "log: ${HOME}/Library/Logs/macprovider/watchdog.log"
+printf "%s\n" "$rendered" > "$PLIST_PATH"
+plutil -lint "$PLIST_PATH" >/dev/null || die "rendered watchdog plist is invalid"
+
+# Idempotent re-install: bootout the old plist (silently if absent)
+# before bootstrapping the new one. This is the same pattern the
+# main installer uses for the provider LaunchAgent.
+launchctl bootout "gui/$UID" "$PLIST_PATH" >/dev/null 2>&1 || true
+launchctl enable "gui/$UID/live.streamvc.macprovider-watchdog" || die "failed to enable watchdog"
+launchctl bootstrap "gui/$UID" "$PLIST_PATH" || die "failed to bootstrap watchdog"
+
+log "Watchdog installed. Inspect logs at $LOG_DIR/watchdog.log"

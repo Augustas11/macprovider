@@ -648,27 +648,125 @@ func (s *Store) ReleaseConcurrency(ctx context.Context, accountID, requestID str
 }
 
 func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) error {
+	_, err := s.insertUsageEventExec(ctx, event, false)
+	return err
+}
+
+// EnsureUsageEvent inserts a usage_events row idempotently — duplicate
+// request_id PKs are absorbed via INSERT OR IGNORE. Used as the
+// SPEC-006 § 17.7 fallback path in chat_proxy.settleAfterCommit when
+// the normal SettleReservation path fails: even if the reservation
+// is missing or in an unexpected state, the buyer-facing usage record
+// MUST exist after bytes have flowed (issue #187).
+//
+// PK-collision verify (ISS-187 R1 code+security MAJOR): the gateway
+// `usage_events.request_id` is a GLOBAL primary key (issue #196,
+// pre-existing). If INSERT OR IGNORE silently no-ops on conflict,
+// an attacker with two accounts could collide a request_id and skip
+// the audit row. EnsureUsageEvent now checks RowsAffected; on 0, it
+// reads the existing row and confirms (account_id, demo_identity,
+// token_source, outcome) MATCH the incoming event. If they
+// disagree, returns ErrUsageEventConflict so the caller knows the
+// fallback failed and must refund.
+func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) error {
+	result, err := s.insertUsageEventExec(ctx, event, true)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected > 0 {
+		return nil
+	}
+	// PK collision. Read the existing row and verify it matches the
+	// incoming event's billing-relevant fields. Mismatch => cross-
+	// account collision, a corrupted prior write, OR a payload
+	// drift (e.g., same account/request_id retrying with a different
+	// token count) — none of which should silently succeed.
+	// R2 code MAJOR: verify the FULL billing payload (tokens + window
+	// + identity), not just identity. Without this, a buyer who can
+	// race two settle paths with different token counts could pin a
+	// low-token row first and then have higher-token settles
+	// silently no-op.
+	var existing struct {
+		AccountID        string
+		DemoIdentity     string
+		WindowDate       string
+		PromptTokens     int64
+		CompletionTokens int64
+		TotalTokens      int64
+		TokenSource      string
+		Outcome          string
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome
+		FROM usage_events WHERE request_id = ?`, event.RequestID).Scan(
+		&existing.AccountID, &existing.DemoIdentity, &existing.WindowDate,
+		&existing.PromptTokens, &existing.CompletionTokens, &existing.TotalTokens,
+		&existing.TokenSource, &existing.Outcome,
+	); err != nil {
+		return err
+	}
+	if existing.AccountID != event.AccountID ||
+		existing.DemoIdentity != event.DemoIdentity ||
+		existing.WindowDate != event.WindowDate ||
+		existing.PromptTokens != event.PromptTokens ||
+		existing.CompletionTokens != event.CompletionTokens ||
+		existing.TotalTokens != event.TotalTokens ||
+		existing.TokenSource != event.TokenSource ||
+		existing.Outcome != event.Outcome {
+		return storage.ErrUsageEventConflict
+	}
+	return nil
+}
+
+// EnsureDemoUsageEvent inserts a demo_usage_events row idempotently
+// — duplicates on the request_id PK silently no-op. The
+// EnsureUsageEvent caller already runs the cross-account payload
+// verify on usage_events, so a benign duplicate here on the
+// demo-side table is not a security regression: an attacker who
+// could pass the usage_events conflict check could already write
+// the demo row legitimately.
+func (s *Store) EnsureDemoUsageEvent(ctx context.Context, event storage.DemoUsageEvent) error {
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO demo_usage_events(request_id, client_ip, demo_token_hash, window_date, total_tokens, created_at)
+		VALUES(?, ?, ?, ?, ?, ?)`,
+		event.RequestID, event.ClientIP, event.DemoTokenHash, event.WindowDate, event.TotalTokens, encodeTime(event.CreatedAt))
+	return err
+}
+
+func (s *Store) insertUsageEventExec(ctx context.Context, event storage.UsageEvent, idempotent bool) (sql.Result, error) {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
 	if event.PromptTokens < 0 || event.CompletionTokens < 0 || event.TotalTokens < 0 {
-		return fmt.Errorf("usage tokens must be non-negative")
+		return nil, fmt.Errorf("usage tokens must be non-negative")
 	}
 	if event.PromptTokens > math.MaxInt64-event.CompletionTokens {
-		return fmt.Errorf("usage token total overflows int64")
+		return nil, fmt.Errorf("usage token total overflows int64")
 	}
 	sum := event.PromptTokens + event.CompletionTokens
 	if event.TotalTokens == 0 {
 		event.TotalTokens = sum
 	} else if event.TotalTokens != sum {
-		return fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
+		return nil, fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	stmt := `
 		INSERT INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	if idempotent {
+		stmt = `
+		INSERT OR IGNORE INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	}
+	return s.db.ExecContext(ctx, stmt,
 		event.RequestID, event.AccountID, event.DemoIdentity, event.WindowDate, event.PromptTokens, event.CompletionTokens,
 		event.TotalTokens, event.TokenSource, event.Outcome, encodeTime(event.CreatedAt))
-	return err
 }
 
 func normalizeSettlementTokens(settlement *storage.ReservationSettlement) error {

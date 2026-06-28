@@ -58,6 +58,35 @@ type UsageStore interface {
 	SettleDemoReservation(ctx context.Context, settlement ReservationSettlement, demo DemoUsageEvent) error
 	RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error
+	// EnsureUsageEvent inserts a usage_events row idempotently. The
+	// behavior on a request_id PK conflict is the SPEC-006 § 17.7
+	// money-path contract for the failure-mode fallback in
+	// chat_proxy.settleAfterCommit (issue #187):
+	//
+	//   - Returns nil on a fresh insert.
+	//   - Returns nil when an existing row at the same request_id
+	//     matches the incoming event in EVERY billing-relevant field
+	//     (account_id, demo_identity, window_date, prompt_tokens,
+	//     completion_tokens, total_tokens, token_source, outcome).
+	//   - Returns ErrUsageEventConflict when an existing row at the
+	//     same request_id DIFFERS from the incoming event in any of
+	//     those fields — covers cross-account collisions (#196
+	//     pre-existing) and any same-account payload drift.
+	//
+	// The caller must treat ErrUsageEventConflict as a failure to
+	// settle (i.e., the audit trail is unrecoverable for THIS event)
+	// and proceed to refund + log loudly.
+	EnsureUsageEvent(ctx context.Context, event UsageEvent) error
+	// EnsureDemoUsageEvent is the demo-token sibling of
+	// EnsureUsageEvent: idempotently inserts a demo_usage_events row
+	// (INSERT OR IGNORE on request_id PK). Used by the SPEC-006
+	// fallback path when SettleDemoReservation fails so the demo
+	// audit trail required by SPEC-006 §4.5 / §14.3 still exists.
+	// Returns nil on insert OR on a benign duplicate; the gateway's
+	// fallback path bounds collision exposure via the earlier
+	// EnsureUsageEvent call, which already runs the cross-account
+	// payload-mismatch check.
+	EnsureDemoUsageEvent(ctx context.Context, event DemoUsageEvent) error
 	DailyUsage(ctx context.Context, accountID, windowDate string) (usedTokens, activeReservedTokens int64, err error)
 	ReapExpiredReservations(ctx context.Context, now time.Time) (int64, error)
 	// DeleteTerminalQuotaReservations drops quota_reservations rows in a

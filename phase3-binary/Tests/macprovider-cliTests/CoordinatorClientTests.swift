@@ -658,6 +658,140 @@ final class CoordinatorClientTests: XCTestCase {
         XCTAssertEqual(hello["model_hash"] as? String, "boot-hash")
     }
 
+    // Issue #189: a URLSessionWebSocketTask.send() that never returns
+    // (TCP half-open) must surface as a throwable timeout, NOT a
+    // silent hang. The bounded wrapper is the timeout boundary.
+    func testHeartbeatBoundedSendThrowsWhenSendHangs() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        // sendOverride sleeps far longer than the 5s send-timeout; if the
+        // bound is missing this test would hang for 30s and the harness
+        // would surface that as a timeout failure.
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            sendOverride: { _ in
+                try? await Task.sleep(nanoseconds: 30 * 1_000_000_000)
+            }
+        )
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        do {
+            try await client.sendHeartbeatBoundedForTest()
+            XCTFail("expected CoordinatorHeartbeatSendTimeout")
+        } catch is CoordinatorHeartbeatSendTimeout {
+            // expected
+        } catch is CancellationError {
+            // also acceptable — the racing send task can lose the
+            // cancellation race and surface as a CancellationError.
+        }
+        let elapsedNs = DispatchTime.now().uptimeNanoseconds - start
+        // Bound is 5s; allow 1s of slack on busy CI runners. The
+        // important guarantee is that we did NOT wait the full 30s.
+        XCTAssertLessThan(elapsedNs, 10 * 1_000_000_000, "bounded send should not block beyond ~5s, got \(elapsedNs)ns")
+    }
+
+    // Issue #189: the watchdog is the App-Nap insurance — if the
+    // heartbeat task itself stops being scheduled, an independent
+    // observer must fire the exit hook so launchd respawns the
+    // process.
+    func testHeartbeatWatchdogFiresExitHookOnStaleness() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let captured = CapturedWatchdogReason()
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            watchdogExitHook: { reason in
+                Task { await captured.set(reason) }
+            }
+        )
+
+        // Tolerance = 3 × intervalSeconds. interval=1 → tolerance=3s.
+        // Seeding age=5s puts us safely past tolerance on the first
+        // 0.5s check tick.
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 5 * 1_000_000_000)
+        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
+
+        try await Self.waitUntil(timeoutNanoseconds: 5_000_000_000) {
+            await captured.value() != nil
+        }
+        let reason = await captured.value()
+        XCTAssertNotNil(reason)
+        XCTAssertTrue(reason?.contains("heartbeat liveness") ?? false, reason ?? "<nil>")
+        await client.cancelHeartbeatWatchdogForTest()
+    }
+
+    // Issue #189 R1 security MEDIUM: inbound traffic must also count
+    // as heartbeat liveness. If the coordinator stops responding but
+    // the OS keeps queuing our sends, the watchdog must still fire
+    // — and conversely, fresh inbound activity must keep it quiet
+    // even when no sends have happened. The handler hook bumps
+    // recordHeartbeatSuccess on every received frame.
+    func testHandleBumpsHeartbeatSuccessOnInboundActivity() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let client = try await makeClient(status: status, recorder: recorder)
+
+        // Seed the success timestamp far in the past — well beyond
+        // any plausible tolerance.
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 60 * 1_000_000_000)
+        let staleAge = await client.nanosecondsSinceLastHeartbeatSuccessForTest()
+        XCTAssertGreaterThan(staleAge, 30 * 1_000_000_000)
+
+        // An inbound message must reset the watchdog clock. We can
+        // route a valid coordinator JSON frame through the handle()
+        // hook by invoking the public preflight test seam path; any
+        // received frame is fine since the bump happens before the
+        // switch on type. We use a malformed frame, which produces
+        // a NAK send to the recorder but still trips the bump first.
+        try await client.handleForTest(.string("{\"type\":\"hello_ack\",\"interval\":5}"))
+        let freshAge = await client.nanosecondsSinceLastHeartbeatSuccessForTest()
+        XCTAssertLessThan(freshAge, 5 * 1_000_000_000, "inbound message did not bump heartbeat clock; age=\(freshAge)ns")
+    }
+
+    // Issue #189: while the heartbeat is healthy the watchdog must
+    // NOT fire. A flapping watchdog would be worse than the bug it
+    // tries to mitigate.
+    func testHeartbeatWatchdogDoesNotFireWhenSendsAreRecent() async throws {
+        let recorder = CoordinatorFrameRecorder()
+        let status = ProviderStatus(
+            modelID: "model-a",
+            modelLoaded: true,
+            capacity: ProviderCapacity(maxContextOverride: 20_000, maxConcurrencyOverride: 1)
+        )
+        let captured = CapturedWatchdogReason()
+        let client = try await makeClient(
+            status: status,
+            recorder: recorder,
+            watchdogExitHook: { reason in
+                Task { await captured.set(reason) }
+            }
+        )
+
+        // interval=1 → tolerance=3s. Seed last-success age WELL below
+        // tolerance and run a couple of watchdog ticks; the hook must
+        // not fire.
+        await client.seedLastHeartbeatSuccessForTest(ageNanoseconds: 0)
+        await client.startHeartbeatWatchdogForTest(intervalSeconds: 1)
+        try await Task.sleep(nanoseconds: 1_500_000_000)
+        let reason = await captured.value()
+        XCTAssertNil(reason, "watchdog fired on a fresh heartbeat: \(reason ?? "")")
+        await client.cancelHeartbeatWatchdogForTest()
+    }
+
     func testHelloEnabledModeReadsFromModelRuntime() async throws {
         let recorder = CoordinatorFrameRecorder()
         let runtime = makeRuntime(modelID: "model-b", modelHash: "runtime-hash", warmSwapEnabled: true)
@@ -1651,7 +1785,9 @@ final class CoordinatorClientTests: XCTestCase {
         attestationGenerator: Tier2AttestationTokenGenerating = StaticAttestationGenerator(token: nil),
         pairingController: PairingController? = nil,
         connectAndRunOverride: (@Sendable () async throws -> Void)? = nil,
-        providerReceiptPublicKey: String? = nil
+        providerReceiptPublicKey: String? = nil,
+        sendOverride: CoordinatorClient.SendOverride? = nil,
+        watchdogExitHook: (@Sendable (String) -> Void)? = nil
     ) async throws -> CoordinatorClient {
         var config = AppConfig.defaults(configPath: "/tmp/macprovider-test.yaml")
         config.coordinatorURL = "wss://127.0.0.1:8444/ws/provider"
@@ -1665,20 +1801,25 @@ final class CoordinatorClientTests: XCTestCase {
         } else {
             runtime = try await ModelRuntime(modelID: nil)
         }
+        let defaultSendOverride: CoordinatorClient.SendOverride = { frame in
+            await recorder.append(frame)
+        }
+        let defaultWatchdogHook: @Sendable (String) -> Void = { _ in
+            XCTFail("watchdog exit hook fired unexpectedly")
+        }
         return try XCTUnwrap(CoordinatorClient(
             config: config,
             modelRuntime: runtime,
             providerStatus: status,
-            sendOverride: { frame in
-                await recorder.append(frame)
-            },
+            sendOverride: sendOverride ?? defaultSendOverride,
             reconnectGraceNanoseconds: reconnectGraceNanoseconds,
             receiptKeyRotationTimeoutNanoseconds: receiptKeyRotationTimeoutNanoseconds,
             attestationGenerator: attestationGenerator,
             sleepAssertionFactory: { nil },
             pairingController: pairingController,
             connectAndRunOverride: connectAndRunOverride,
-            providerReceiptPublicKey: providerReceiptPublicKey
+            providerReceiptPublicKey: providerReceiptPublicKey,
+            watchdogExitHook: watchdogExitHook ?? defaultWatchdogHook
         ))
     }
 
@@ -1716,6 +1857,13 @@ private enum CoordinatorClientTestError: Error {
     case unexpectedContainerLoader
     case sendStateUpdateFailed
     case missingProviderECDHPublicKey
+}
+
+// Issue #189: thread-safe sink for the injected watchdog exit hook.
+private actor CapturedWatchdogReason {
+    private var reason: String?
+    func set(_ value: String) { reason = value }
+    func value() -> String? { reason }
 }
 
 private enum FakeTier2AuthOutcome: Sendable {

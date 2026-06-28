@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -239,12 +240,75 @@ func TestAccountConcurrencyCap(t *testing.T) {
 		t.Fatalf("third status=%d body=%s", third.Code, third.Body.String())
 	}
 	assertErrorCode(t, third.Body.String(), "account_concurrency_exceeded")
+	// Issue #190: 429 must carry OpenAI-compatible concurrency
+	// rate-limit headers so SDKs can self-pace.
+	assertConcurrencyRejectHeaders(t, third, 2)
+	// Issue #190 R1 security HIGH: per-tenant headers must not
+	// be cacheable.
+	assertNoStoreCacheHeaders(t, third)
 	close(release)
 	for i := 0; i < 2; i++ {
 		resp := <-done
 		if resp.Code != http.StatusOK {
 			t.Fatalf("in-flight response status=%d body=%s", resp.Code, resp.Body.String())
 		}
+		// Issue #190: admitted 2xx responses must also carry
+		// X-RateLimit-Limit-Requests so SDKs know the cap before
+		// they hit it.
+		if got := resp.Header().Get("X-RateLimit-Limit-Requests"); got != "2" {
+			t.Errorf("admitted response X-RateLimit-Limit-Requests=%q want 2", got)
+		}
+		if got := resp.Header().Get("Retry-After"); got != "" {
+			t.Errorf("admitted response carries Retry-After=%q (must be unset)", got)
+		}
+	}
+}
+
+// Issue #190 R1 security HIGH helper: confirm chat responses are
+// non-cacheable so per-tenant headers cannot leak via a shared
+// CDN/proxy cache.
+func assertNoStoreCacheHeaders(t *testing.T, resp *httptest.ResponseRecorder) {
+	t.Helper()
+	if got := resp.Header().Get("Cache-Control"); !strings.Contains(got, "no-store") {
+		t.Errorf("Cache-Control=%q must contain no-store", got)
+	}
+	// Vary may be a single comma-joined value or multiple Add-ed
+	// values; check both representations.
+	varyJoined := strings.Join(resp.Header().Values("Vary"), ", ")
+	if !strings.Contains(varyJoined, "Authorization") {
+		t.Errorf("Vary=%q must contain Authorization", varyJoined)
+	}
+	if !strings.Contains(varyJoined, "X-Demo-Token") {
+		t.Errorf("Vary=%q must contain X-Demo-Token", varyJoined)
+	}
+}
+
+// Issue #190 helper: verify the 429 concurrency-reject path emits
+// every header an OpenAI-compatible SDK looks for.
+func assertConcurrencyRejectHeaders(t *testing.T, resp *httptest.ResponseRecorder, wantLimit int) {
+	t.Helper()
+	wantLimitStr := strconv.Itoa(wantLimit)
+	if got := resp.Header().Get("X-RateLimit-Limit-Requests"); got != wantLimitStr {
+		t.Errorf("X-RateLimit-Limit-Requests=%q want %s", got, wantLimitStr)
+	}
+	if got := resp.Header().Get("X-RateLimit-Remaining-Requests"); got != "0" {
+		t.Errorf("X-RateLimit-Remaining-Requests=%q want 0", got)
+	}
+	resetStr := resp.Header().Get("X-RateLimit-Reset-Requests")
+	if resetStr == "" {
+		t.Errorf("X-RateLimit-Reset-Requests missing on 429")
+	} else if reset, err := strconv.ParseInt(resetStr, 10, 64); err != nil {
+		t.Errorf("X-RateLimit-Reset-Requests=%q not parsable: %v", resetStr, err)
+	} else if reset <= 0 {
+		t.Errorf("X-RateLimit-Reset-Requests=%d must be positive unix seconds", reset)
+	}
+	retryAfterStr := resp.Header().Get("Retry-After")
+	if retryAfterStr == "" {
+		t.Errorf("Retry-After missing on 429")
+	} else if retryAfter, err := strconv.Atoi(retryAfterStr); err != nil {
+		t.Errorf("Retry-After=%q not parsable: %v", retryAfterStr, err)
+	} else if retryAfter < 1 || retryAfter > 60 {
+		t.Errorf("Retry-After=%d outside [1, 60]", retryAfter)
 	}
 }
 
@@ -295,6 +359,9 @@ func TestDemoConcurrencyCap(t *testing.T) {
 		t.Fatalf("third demo request status=%d body=%s, want 429", third.Code, third.Body.String())
 	}
 	assertErrorCode(t, third.Body.String(), "demo_concurrency_exceeded")
+	// Issue #190: demo path must carry the same headers as the
+	// authenticated path.
+	assertConcurrencyRejectHeaders(t, third, 2)
 	close(release)
 	for i := 0; i < 2; i++ {
 		resp := <-done

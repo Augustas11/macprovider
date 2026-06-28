@@ -1,95 +1,95 @@
 # macprovider-watchdog
 
-External LaunchAgent that detects the "silent disconnection" failure mode
-in `macprovider-cli` and forces a fresh process via `launchctl kickstart -k`.
+External LaunchAgent that catches the silent half-open-TCP wedge of
+the Mac provider's WebSocket to the coordinator. Operator-visibility
+insurance for the failure mode tracked in GitHub issue #189; ships
+alongside every install of `macprovider-cli` via the public
+`get.streamvc.live/install.sh` flow.
 
-## What it fixes
+## What it does
 
-Observed on `augustass-macbook-air` 2026-06-25 → 2026-06-27 (~42 hours):
+Every 60 seconds, `watchdog.sh` runs `netstat -an -p tcp` and looks
+for an ESTABLISHED outbound connection from the provider process to
+`coordinator.streamvc.live:443`. If none is found, it issues
+`launchctl kickstart -k gui/$UID/live.streamvc.macprovider` so the
+provider LaunchAgent is restarted by launchd.
 
-- `macprovider-cli` process alive, listening on `127.0.0.1:18080` for local
-  inference.
-- `lsof -p <pid>` showed **no outbound TCP socket** to coordinator — the
-  WebSocket connection was dead.
-- `Library/Logs/macprovider/macprovider.out.log` had no entries between
-  `2026-06-25 13:17` and the next manual restart, despite the heartbeat
-  task being scheduled every ~5s.
-- Coordinator stopped routing traffic after the 90s inactive-threshold
-  fired; live `/v1/models` reported `provider_count: 0` for this Mac's
-  model; operator had no signal until buyers started seeing 502s.
+It reads the provider identity from
+`~/.config/macprovider/config.yaml` (the file
+`macprovider-cli` itself reads) — so it generalizes across every
+operator without any hardcoded provider id.
 
-The Swift WS reconnect loop in `phase3-binary` v1.6.1 SHOULD recover
-from this — the heartbeat task closes the WS on send failure, and
-`runReconnectLoop` exponentially backs off and retries. In practice it
-did not, for a duration measured in days. Root cause requires a repro
-(suspected: Swift cooperative-task starvation under macOS App Nap /
-power management, but unconfirmed).
+## Files
 
-This watchdog is the **operator-visibility / external recovery** layer.
-It does not replace the Swift-side fix; it makes the failure mode
-non-silent until that fix lands.
+| File | Purpose |
+|---|---|
+| `watchdog.sh` | The poll script. Idempotent; safe to invoke repeatedly. |
+| `live.streamvc.macprovider-watchdog.plist.template` | LaunchAgent template; substituted by `install.sh`. |
+| `install.sh` | Idempotent installer. Invoked by both the main `get.streamvc.live/install.sh` flow and by an operator running this directory by hand. |
+| `uninstall.sh` | Removes the LaunchAgent and the `~/.local/share/macprovider-watchdog` directory. |
 
-## How it works
+## Operator runbook
 
-Every 60 seconds (LaunchAgent `StartInterval: 60`):
+### Install (standalone — most operators will not need this)
 
-1. Find the `macprovider-cli` PID by argv pattern.
-2. If absent, do nothing — launchd `KeepAlive` will respawn on its own.
-3. If present, count outbound `ESTABLISHED` TCP sockets on port 443.
-   The provider opens exactly one (the WS to `coordinator.streamvc.live`).
-4. Count `== 0` → log SILENT DISCONNECT, run
-   `launchctl kickstart -k gui/$(id -u)/live.streamvc.macprovider`.
-5. Wait 8s, verify a new PID exists.
+The watchdog is installed automatically by the main provider
+installer. To re-install (or install manually if the operator skipped
+it):
 
-Fallback path on kickstart failure: `launchctl bootout` + `bootstrap`
-the agent. Anything that still fails is logged for the operator.
-
-## Install
-
-```
-cd ops/macprovider-watchdog
-./install.sh
+```bash
+bash ops/macprovider-watchdog/install.sh
 ```
 
-`install.sh`:
-- copies the plist to `~/Library/LaunchAgents/`
-- boots out any previously-loaded version (so plist edits take effect)
-- `launchctl bootstrap`s it into the user GUI domain
-- kicks it once so `RunAtLoad` fires immediately
+The install is idempotent: re-running it `bootout`s the previous
+LaunchAgent before bootstrapping the new one.
 
-## Inspect
+### Inspect
 
-```
-# launchctl knows about it
-launchctl list | grep macprovider-watchdog
+The watchdog logs to `~/Library/Logs/macprovider/watchdog.log` (only
+when it detects an issue or kicks the provider — healthy ticks are
+silent so the log does not bloat). To see whether the LaunchAgent is
+loaded:
 
-# tail the log
-tail -F ~/Library/Logs/macprovider/watchdog.log
-
-# probe what the watchdog probes
-PID=$(pgrep -f "macprovider-cli.*augustass-macbook-air" | head -1)
-lsof -p "$PID" -nP -iTCP -sTCP:ESTABLISHED | awk 'NR>1 && /->.+:443/'
+```bash
+launchctl list | grep live.streamvc.macprovider-watchdog
 ```
 
-## Uninstall
+To manually fire a tick out-of-cadence:
 
+```bash
+launchctl kickstart -k gui/$UID/live.streamvc.macprovider-watchdog
 ```
-launchctl bootout "gui/$(id -u)" ~/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist
-rm ~/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist
+
+### Uninstall
+
+```bash
+bash ops/macprovider-watchdog/uninstall.sh
 ```
 
-## Open question (fleet-wide)
+The main provider uninstaller (`phase3-binary/dist/uninstall.sh`)
+removes the watchdog too — operators only need this when they want to
+remove the watchdog without removing the provider.
 
-This script is local to `augustass-macbook-air` because the process
-matcher is hardcoded to that provider id. Generalizing requires:
+## Why this is operator-visibility insurance, not the fix
 
-1. Read provider id from `~/.config/macprovider/config.yaml`.
-2. Ship the watchdog as part of the provider installer
-   (`get.streamvc.live/install.sh`), not the harness worktree.
-3. Decide whether the watchdog also pings the gateway's `/v1/models`
-   periodically to cross-check that coordinator sees this provider as
-   `ready` (catches the case where the WS is established but the
-   provider has been silently dropped from the ready pool).
+The underlying bug is in the Swift WebSocket reconnect loop. PR #204
+landed the in-process bounded send + Darwin.exit(1) liveness watchdog
+that prevents the wedge from happening at all on new builds. This
+external LaunchAgent is the belt-and-suspenders safety net for
+operators still on older builds, and a long-tail catch for any future
+regression in the in-process protection.
 
-Tracked for a follow-up engineering pass; this watchdog is the minimum
-viable mitigation for the current internal e2e testing window.
+## Environment overrides (advanced)
+
+Both `install.sh` and `watchdog.sh` accept env overrides for testing:
+
+| Variable | Default |
+|---|---|
+| `MACPROVIDER_WATCHDOG_DIR` | `~/.local/share/macprovider-watchdog` |
+| `MACPROVIDER_CONFIG_PATH` | `~/.config/macprovider/config.yaml` |
+| `MACPROVIDER_LOG_DIR` | `~/Library/Logs/macprovider` |
+| `MACPROVIDER_COORDINATOR_HOST` | `coordinator.streamvc.live` |
+| `MACPROVIDER_SERVICE_LABEL` | `live.streamvc.macprovider` |
+
+These let an operator point the watchdog at a staging coordinator or
+verify the install path before rolling to production.

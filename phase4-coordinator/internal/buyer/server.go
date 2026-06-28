@@ -38,6 +38,11 @@ import (
 
 var errBodyTooLarge = errors.New("upstream response body too large")
 
+const (
+	maxToolCallArgumentsBytes = 256 * 1024
+	maxToolCallArgumentsDepth = 32
+)
+
 type Server struct {
 	pool                   *pool.Registry
 	log                    zerolog.Logger
@@ -88,13 +93,13 @@ type Server struct {
 	// construction (config.go TrustedProxyPrefixes) so the hot path
 	// never re-parses. Default loopback-only — see WithTrustedProxies.
 	// Issue #125.
-	trustedProxies         []netip.Prefix
-	billingMu              sync.RWMutex
-	billing                *billing.Store
-	billingCfg             config.RewardsConfig
-	billingSnapshotID      int64
-	now                    func() time.Time
-	version                string
+	trustedProxies    []netip.Prefix
+	billingMu         sync.RWMutex
+	billing           *billing.Store
+	billingCfg        config.RewardsConfig
+	billingSnapshotID int64
+	now               func() time.Time
+	version           string
 }
 
 type stickyEntry struct {
@@ -415,9 +420,9 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		// loopback behavior (X-Real-IP / X-Forwarded-For honored only
 		// when r.RemoteAddr is 127.0.0.0/8 or ::1). WithTrustedProxies
 		// replaces this set. Issue #125.
-		trustedProxies:         []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
-		now:                    func() time.Time { return time.Now().UTC() },
-		version:                "dev",
+		trustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
+		now:            func() time.Time { return time.Now().UTC() },
+		version:        "dev",
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -1241,7 +1246,7 @@ type chatMessage struct {
 }
 
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
-	externalRequestID := strings.TrimSpace(r.Header.Get("X-Request-ID"))
+	externalRequestID := sanitizeExternalRequestID(r.Header.Get("X-Request-ID"))
 	requestID := requestIDForBuyerRequest()
 	routingRequestID := uuid.NewString()
 	originalRequestID := requestID
@@ -1261,7 +1266,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	// setRequestID land before the first provider-bound recordRow call,
 	// preserving the pre-refactor closure's "latest value at fire time"
 	// semantics for what used to be captured outer-scope variables.
-	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID)
+	rec := s.newBillingRecorder(r, state, startedAt, originalRequestID, externalRequestID)
 	maxBodyBytes := s.maxChatBodyBytes
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
@@ -1671,6 +1676,7 @@ func (s *Server) forwardWSNonStreamSequence(
 //   - handleProviderFailure called on non-200 status (HTTP-only fault
 //     tracking — WS path has its own MarkState semantics via classifier
 //     markBusy flag).
+//
 // httpDispatchExtra carries the HTTP dispatch's post-classification
 // scratch state forward to the renderRetryExhausted / logRetryAttempt
 // callbacks (status code, raw err, ErrorCode, retryRequested flag).
@@ -2383,6 +2389,11 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if p, c := tokenPointersFromSSE(line); p != nil || c != nil {
 				promptTok, completionTok = p, c
 			}
+			status := inspectCommitWorthyDataLine(line)
+			if status == commitLineMalformedToolCalls {
+				s.log.Warn().Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed pre-commit tool_calls delta")
+				return errPreCommitMalformedToolCalls
+			}
 			preCommit.Write(line)
 			lineBuf.Reset()
 			if isSSEBlankLine(line) {
@@ -2391,7 +2402,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 				}
 				continue
 			}
-			if isCommitWorthyDataLine(line) {
+			if status == commitLineWorthy {
 				sawCommitWorthyDataLine = true
 			}
 		}
@@ -2400,6 +2411,10 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if errors.Is(preCommitErr, errPreCommitCapExceeded) {
 			s.handleProviderFailure(provider, http.StatusBadGateway)
 			return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider exceeded pre-commit buffer without commit-worthy event", FaultFlag: billing.FaultBreakerQualifying}
+		}
+		if errors.Is(preCommitErr, errPreCommitMalformedToolCalls) {
+			s.handleProviderFailure(provider, http.StatusBadGateway)
+			return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed pre-commit tool_calls delta", FaultFlag: billing.FaultBreakerQualifying}
 		}
 		if r.Context().Err() != nil {
 			return wsForwardCancelled, 0, requestLogAttempt{}
@@ -2479,6 +2494,19 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 // timeout / network errors so the caller can log a specific reason.
 var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 
+// errPreCommitMalformedToolCalls is returned when a provider emits a
+// malformed tool_calls delta before the stream commits. Commit-worthy gates
+// billing settlement; rejection must NOT settle provider-positive usage.
+var errPreCommitMalformedToolCalls = errors.New("malformed pre-commit tool_calls delta")
+
+type commitLineStatus int
+
+const (
+	commitLineNoSignal commitLineStatus = iota
+	commitLineWorthy
+	commitLineMalformedToolCalls
+)
+
 // isCommitWorthyDataLine reports whether the given SSE line counts as
 // real provider work for the purposes of forwardStreaming's commit
 // threshold. Codex r5 audit tightened the predicate from "field present"
@@ -2489,7 +2517,8 @@ var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 //
 //   - `delta`: an object carrying at least one KNOWN OpenAI field
 //     (content/role/refusal/reasoning non-empty string, tool_calls
-//     non-empty array, function_call non-empty object).
+//     non-empty array whose entries satisfy the SPEC-018 §8.4
+//     minimal-shape validator, function_call non-empty object).
 //     Arbitrary-key objects like `{"":0}` or `{"x":"y"}` reject.
 //
 //   - `message`: same allowlist as `delta` (matches non-streaming
@@ -2508,19 +2537,24 @@ var errPreCommitCapExceeded = errors.New("pre-commit buffer cap exceeded")
 // A leading UTF-8 BOM (0xEF 0xBB 0xBF) on the line is tolerated for
 // SSE-source compatibility; some HTTP libraries emit one on stream init.
 func isCommitWorthyDataLine(line []byte) bool {
+	return inspectCommitWorthyDataLine(line) == commitLineWorthy
+}
+
+func inspectCommitWorthyDataLine(line []byte) commitLineStatus {
 	trimmed := bytes.TrimRight(line, "\r\n")
 	trimmed = bytes.TrimPrefix(trimmed, []byte{0xEF, 0xBB, 0xBF})
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
-		return false
+		return commitLineNoSignal
 	}
 	content := bytes.TrimSpace(trimmed[len("data:"):])
 	if len(content) == 0 || bytes.Equal(content, []byte("[DONE]")) {
-		return false
+		return commitLineNoSignal
 	}
 	var parsed map[string]json.RawMessage
 	if err := json.Unmarshal(content, &parsed); err != nil {
-		return false
+		return commitLineNoSignal
 	}
+	status := commitLineNoSignal
 	if raw, ok := parsed["choices"]; ok {
 		var arr []json.RawMessage
 		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
@@ -2529,24 +2563,37 @@ func isCommitWorthyDataLine(line []byte) bool {
 				if err := json.Unmarshal(choice, &obj); err != nil {
 					continue
 				}
-				if raw, has := obj["delta"]; has && hasOpenAIDeltaSignal(raw) {
-					return true
+				if raw, has := obj["delta"]; has {
+					switch inspectOpenAIDeltaSignal(raw) {
+					case deltaSignalMalformedToolCalls:
+						return commitLineMalformedToolCalls
+					case deltaSignalWorthy:
+						status = commitLineWorthy
+					}
 				}
-				if raw, has := obj["message"]; has && hasOpenAIDeltaSignal(raw) {
-					return true
+				if raw, has := obj["message"]; has {
+					switch inspectOpenAIDeltaSignal(raw) {
+					case deltaSignalMalformedToolCalls:
+						return commitLineMalformedToolCalls
+					case deltaSignalWorthy:
+						status = commitLineWorthy
+					}
 				}
 				if raw, has := obj["finish_reason"]; has && isNonEmptyJSONString(raw) {
-					return true
+					status = commitLineWorthy
 				}
 			}
 		}
 	}
+	if status == commitLineWorthy {
+		return status
+	}
 	if raw, ok := parsed["usage"]; ok {
 		if isValidUsageObject(raw) {
-			return true
+			return commitLineWorthy
 		}
 	}
-	return false
+	return commitLineNoSignal
 }
 
 // isNonEmptyJSONObject reports whether raw decodes to a JSON object
@@ -2561,6 +2608,14 @@ func isNonEmptyJSONObject(raw json.RawMessage) bool {
 	return len(obj) > 0
 }
 
+type deltaSignalStatus int
+
+const (
+	deltaSignalNoSignal deltaSignalStatus = iota
+	deltaSignalWorthy
+	deltaSignalMalformedToolCalls
+)
+
 // hasOpenAIDeltaSignal reports whether raw decodes to a JSON object
 // carrying at least one KNOWN OpenAI delta/message field with a value
 // that signals real provider work. The fresh security-review lane on
@@ -2572,36 +2627,130 @@ func isNonEmptyJSONObject(raw json.RawMessage) bool {
 //   - content: non-empty string (the streaming token delta)
 //   - role: non-empty string (the role-assignment first chunk)
 //   - refusal: non-empty string (safety-refusal stream)
-//   - tool_calls: non-empty array (function/tool calling)
+//   - tool_calls: non-empty array whose entries satisfy the SPEC-018
+//     §8.4 minimal-shape validator (function/tool calling)
 //   - function_call: non-empty object (legacy function calling)
 //   - reasoning: non-empty string (reasoning-model trace stream)
 func hasOpenAIDeltaSignal(raw json.RawMessage) bool {
+	return inspectOpenAIDeltaSignal(raw) == deltaSignalWorthy
+}
+
+func inspectOpenAIDeltaSignal(raw json.RawMessage) deltaSignalStatus {
 	var obj map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &obj); err != nil {
-		return false
-	}
-	if raw, has := obj["content"]; has && isNonEmptyJSONString(raw) {
-		return true
-	}
-	if raw, has := obj["role"]; has && isNonEmptyJSONString(raw) {
-		return true
-	}
-	if raw, has := obj["refusal"]; has && isNonEmptyJSONString(raw) {
-		return true
-	}
-	if raw, has := obj["reasoning"]; has && isNonEmptyJSONString(raw) {
-		return true
+		return deltaSignalNoSignal
 	}
 	if raw, has := obj["tool_calls"]; has {
 		var arr []json.RawMessage
-		if err := json.Unmarshal(raw, &arr); err == nil && len(arr) > 0 {
-			return true
+		if err := json.Unmarshal(raw, &arr); err != nil || len(arr) == 0 {
+			return deltaSignalMalformedToolCalls
 		}
+		for _, call := range arr {
+			if !isCommitWorthyToolCallDelta(call) {
+				return deltaSignalMalformedToolCalls
+			}
+		}
+		return deltaSignalWorthy
+	}
+	if raw, has := obj["content"]; has && isNonEmptyJSONString(raw) {
+		return deltaSignalWorthy
+	}
+	if raw, has := obj["role"]; has && isNonEmptyJSONString(raw) {
+		return deltaSignalWorthy
+	}
+	if raw, has := obj["refusal"]; has && isNonEmptyJSONString(raw) {
+		return deltaSignalWorthy
+	}
+	if raw, has := obj["reasoning"]; has && isNonEmptyJSONString(raw) {
+		return deltaSignalWorthy
 	}
 	if raw, has := obj["function_call"]; has && isNonEmptyJSONObject(raw) {
-		return true
+		return deltaSignalWorthy
 	}
-	return false
+	return deltaSignalNoSignal
+}
+
+// isCommitWorthyToolCallDelta validates the minimum OpenAI tool-call
+// delta shape before the stream can cross the commit threshold.
+// Commit-worthy gates billing settlement; rejection must NOT settle
+// provider-positive usage.
+func isCommitWorthyToolCallDelta(raw json.RawMessage) bool {
+	var call struct {
+		Index    *int            `json:"index"`
+		ID       string          `json:"id"`
+		Type     string          `json:"type"`
+		Function json.RawMessage `json:"function"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	// Unknown fields remain allowed for SPEC-018 §10c forward compatibility.
+	if err := dec.Decode(&call); err != nil {
+		return false
+	}
+	if call.Index == nil || *call.Index < 0 || call.ID == "" || call.Type != "function" || len(call.Function) == 0 || bytes.Equal(call.Function, []byte("null")) {
+		return false
+	}
+	var fn struct {
+		Name      string  `json:"name"`
+		Arguments *string `json:"arguments"`
+	}
+	dec = json.NewDecoder(bytes.NewReader(call.Function))
+	// Unknown fields remain allowed for SPEC-018 §10c forward compatibility.
+	if err := dec.Decode(&fn); err != nil {
+		return false
+	}
+	if fn.Name == "" || fn.Arguments == nil {
+		return false
+	}
+	return validToolCallArgumentsObject(*fn.Arguments)
+}
+
+func validToolCallArgumentsObject(arguments string) bool {
+	if len(arguments) > maxToolCallArgumentsBytes {
+		return false
+	}
+	dec := json.NewDecoder(strings.NewReader(arguments))
+	if !jsonArgumentsDepthWithinLimit(dec, maxToolCallArgumentsDepth) {
+		return false
+	}
+	var obj map[string]json.RawMessage
+	dec = json.NewDecoder(strings.NewReader(arguments))
+	if err := dec.Decode(&obj); err != nil {
+		return false
+	}
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err != io.EOF {
+		return false
+	}
+	return obj != nil
+}
+
+func jsonArgumentsDepthWithinLimit(dec *json.Decoder, maxDepth int) bool {
+	depth := 0
+	sawToken := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return sawToken && depth == 0
+		}
+		if err != nil {
+			return false
+		}
+		sawToken = true
+		if delim, ok := tok.(json.Delim); ok {
+			switch delim {
+			case '{', '[':
+				depth++
+				if depth > maxDepth {
+					return false
+				}
+			case '}', ']':
+				depth--
+				if depth < 0 {
+					return false
+				}
+			}
+		}
+	}
 }
 
 // isNonEmptyJSONString reports whether raw decodes to a JSON string
@@ -3908,6 +4057,37 @@ func normalizeIdempotencyKey(value string) string {
 	}
 	for _, r := range value {
 		if r < 0x21 || r > 0x7e {
+			return ""
+		}
+	}
+	return value
+}
+
+// sanitizeExternalRequestID normalizes the inbound X-Request-ID header
+// for persistent storage in request_log.external_request_id. SPEC-002
+// §11 requires the coordinator to "honor any inbound X-Request-ID";
+// this honoring is bounded by defense-in-depth:
+//
+//   - Trim surrounding whitespace.
+//   - Cap at 128 bytes (UUID v4 is 36; allowing for vendor-prefixed
+//     ids like "req_<48hex>" gives reasonable headroom without
+//     unbounded growth).
+//   - Reject control characters (< 0x20, 0x7f, and the C1 range
+//     0x80-0x9f) to keep the value safe for structured logs and DB
+//     storage.
+//
+// On failure, returns "" — the coordinator treats the value as if no
+// header was present, which is allowed by §11 ("If absent, coordinator
+// MAY generate its own UUID v4"). The malformed header is not
+// surfaced to the buyer; logging it as-is would replay any
+// log-injection payload.
+func sanitizeExternalRequestID(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
 			return ""
 		}
 	}

@@ -58,6 +58,12 @@ type billingRecorder struct {
 	model     string
 	stream    bool
 	requestID string
+	// externalRequestID is the inbound X-Request-ID per SPEC-002 §11 /
+	// v1.4.2 R-2 — preserved into request_log.external_request_id so
+	// out-of-process auditors can join gateway usage_events with
+	// coordinator request_log by a stable shared id. Empty when the
+	// inbound request carried no X-Request-ID.
+	externalRequestID string
 
 	// attemptN is the running per-provider-attempt counter. Pre-refactor
 	// this was billingAttemptN, incremented via deferred closure on
@@ -70,13 +76,14 @@ type billingRecorder struct {
 // forwardState pointer the sequence helpers will mutate; the recorder
 // reads state.routingDone at write time to compute RoutingMs (matching
 // the pre-refactor closure's live-capture semantics).
-func (s *Server) newBillingRecorder(r *http.Request, state *forwardState, startedAt time.Time, requestID string) *billingRecorder {
+func (s *Server) newBillingRecorder(r *http.Request, state *forwardState, startedAt time.Time, requestID, externalRequestID string) *billingRecorder {
 	return &billingRecorder{
-		server:    s,
-		state:     state,
-		req:       r,
-		startedAt: startedAt,
-		requestID: requestID,
+		server:            s,
+		state:             state,
+		req:               r,
+		startedAt:         startedAt,
+		requestID:         requestID,
+		externalRequestID: externalRequestID,
 	}
 }
 
@@ -137,6 +144,7 @@ func (b *billingRecorder) recordRow(
 	row := requestlog.Row{
 		TSUtc:               b.startedAt,
 		RequestID:           b.requestID,
+		ExternalRequestID:   b.externalRequestID,
 		Model:               b.model,
 		ProviderAssignedID:  providerAssignedID,
 		PromptTokens:        promptTok,

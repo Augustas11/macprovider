@@ -51,6 +51,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	start := s.now()
 	sw := &statusWriter{ResponseWriter: w, statusCode: 0}
 	w = sw
+	// Issue #190 R1 security HIGH: chat-completion responses now
+	// carry per-tenant headers (X-RateLimit-Remaining-Requests).
+	// Forbid intermediary caching unconditionally so a misconfigured
+	// CDN/proxy cannot serve another buyer's rate-limit state via
+	// a shared cache. Vary covers both auth modes (bearer + demo
+	// token) so any proxy that does cache will at least key
+	// correctly per-tenant.
+	setNoStoreHeaders(w.Header())
+	// Use Add (not Set) so an existing CORS-supplied Vary: Origin
+	// is preserved alongside the auth-mode signals we add here.
+	w.Header().Add("Vary", "Authorization")
+	w.Header().Add("Vary", "X-Demo-Token")
 	var accountID, model string
 	var streamMode bool
 	defer func() {
@@ -170,21 +182,32 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		concurrencyErrCode = "demo_concurrency_exceeded"
 		concurrencyErrMsg = "Demo concurrency limit exceeded"
 	}
-	if _, err := s.store.AcquireConcurrency(r.Context(), storage.ConcurrencyRequest{
+	concurrencyDecision, concurrencyErr := s.store.AcquireConcurrency(r.Context(), storage.ConcurrencyRequest{
 		AccountID: subject.AccountID, RequestID: requestID(r), Limit: concurrencyLimit,
 		CreatedAt: s.now(), ExpiresAt: s.now().Add(s.cfg.CoordinatorTimeout() + time.Minute),
-	}); errors.Is(err, storage.ErrQuotaExceeded) {
+	})
+	if errors.Is(concurrencyErr, storage.ErrQuotaExceeded) {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		// Issue #190: surface OpenAI-compatible concurrency
+		// rate-limit headers so client SDKs can self-pace
+		// instead of retrying blindly until 429.
+		setConcurrencyRateLimitHeaders(w, concurrencyLimit, 0, concurrencyRetryAfterSeconds, s.now())
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", concurrencyErrCode, concurrencyErrMsg)
 		return
-	} else if err != nil {
+	} else if concurrencyErr != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(concurrencyErr, context.Canceled) || errors.Is(concurrencyErr, context.DeadlineExceeded) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "server_error", "concurrency_reservation_failed", "Could not reserve concurrency")
 		return
 	}
+	// Issue #190: emit concurrency headers on admitted requests too
+	// so OpenAI-compatible SDKs can pre-emptively throttle before
+	// they hit the cap. Remaining is derived from the decision's
+	// post-acquire Active count (already includes this request).
+	remainingRequests := concurrencyLimit - concurrencyDecision.Active
+	setConcurrencyRateLimitHeaders(w, concurrencyLimit, remainingRequests, 0, s.now())
 	defer func() {
 		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
 	}()
@@ -199,7 +222,14 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 	copyForwardHeaders(upReq.Header, r.Header)
 	upReq.Header.Set("Content-Type", "application/json")
-	upReq.Header.Set("X-Request-ID", newUUID())
+	// SPEC-002 §11 + v1.4.2 R-2: forward the gateway-visible request id
+	// (which itself was honored from the buyer's inbound X-Request-ID
+	// when present, else minted by the gateway middleware) so the
+	// coordinator can store it in request_log.external_request_id and
+	// out-of-process auditors can join gateway usage_events with
+	// coordinator request_log on this shared id. Earlier code minted a
+	// fresh UUID here, breaking that join.
+	upReq.Header.Set("X-Request-ID", requestID(r))
 	if s.cfg.Routing.StickyEnabled && !authn.Demo {
 		if tag := strings.TrimSpace(r.Header.Get("X-MacProvider-Conversation")); tag != "" {
 			if !validConversationTag(tag) {
@@ -228,7 +258,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	promptEstimate := estimatePromptTokens(body)
 	maxUsageTokens := promptEstimate + maxTokens
 	if chat.Stream {
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, cancelUpstream)
+		// ISS-187 R1 architect/code MAJOR: thread the reservation
+		// window through to forwardStreamingChat so the SPEC-006 §
+		// 17.7 fallback usage_events insert in settleAfterCommit
+		// uses the SAME window_date as the original reservation
+		// (avoids drift for streams that cross UTC midnight).
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, cancelUpstream, window)
 		return
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens)
@@ -308,7 +343,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	_, _ = w.Write(body)
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens int64, cancelUpstream func()) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens int64, cancelUpstream func(), reservationWindow string) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
@@ -349,7 +384,12 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	copyCleanHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	// Issue #190 R2 security HIGH: keep no-store (set at handler
+	// entry) on streaming responses too — the SSE body carries
+	// per-tenant X-RateLimit-*-Requests headers and must never be
+	// cacheable by an intermediary. no-cache + no-transform are
+	// the existing SSE-specific guarantees; we prepend no-store.
+	w.Header().Set("Cache-Control", "no-store, no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
@@ -374,17 +414,17 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		usage := *reported
 		observedCompletion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
 		if observedCompletion > usage.CompletionTokens {
-			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome)
+			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
 			return
 		}
-		s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome)
+		s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome, reservationWindow)
 	}
 	settleTruncated := func() {
 		if reported != nil {
 			settleReported("stream_truncated")
 			return
 		}
-		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated")
+		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated", reservationWindow)
 	}
 	forwardLine := func(line []byte) bool {
 		select {
@@ -393,7 +433,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return false
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
 			return false
 		default:
 		}
@@ -403,13 +443,13 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
 				if !parseOK {
 					slog.Warn("streaming gateway estimate saw malformed chunk; truncating stream", "request_id", requestID(r))
-					writeSSEError(w, "Upstream stream returned malformed data", "stream_malformed")
+					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
 					if flusher != nil {
 						flusher.Flush()
 					}
 					cancelCoordinator()
 					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
-					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed")
+					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow)
 					return false
 				}
 				if deltaBytes > 0 {
@@ -417,12 +457,12 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					maxCompletion := maxStreamingCompletionTokens(promptEstimate, maxUsageTokens)
 					if projectedCompletion > maxCompletion {
 						slog.Warn("streaming gateway estimate exceeded request maximum; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", projectedCompletion, "max_completion_tokens", maxCompletion)
-						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "stream_output_exceeded")
+						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
 						if flusher != nil {
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						s.settleAfterCommit(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded")
+						s.settleAfterCommit(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
 						return false
 					}
 					emitted += deltaBytes
@@ -437,13 +477,13 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 				} else if !hasChoices {
 					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
-					writeSSEError(w, "Upstream stream returned malformed data", "stream_malformed")
+					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
 					if flusher != nil {
 						flusher.Flush()
 					}
 					cancelCoordinator()
 					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
-					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed")
+					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow)
 					return false
 				}
 			}
@@ -454,7 +494,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return false
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
 			return false
 		}
 		if flusher != nil {
@@ -466,7 +506,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		line, err := reader.ReadSlice('\n')
 		if errors.Is(err, bufio.ErrBufferFull) {
 			slog.Error("streaming coordinator line exceeded limit", "request_id", requestID(r), "max_line_bytes", maxStreamingLineBytes)
-			writeSSEError(w, "Upstream stream failed", "stream_truncated")
+			// Gateway-side truncation due to oversized line — NOT a
+			// provider disconnect. Keep the legacy stream_truncated /
+			// api_error envelope; this is gateway protection, not
+			// upstream failure.
+			writeSSEError(w, "Upstream stream failed", "api_error", "stream_truncated")
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -489,11 +533,28 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
 			return
 		}
 		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
-		writeSSEError(w, "Upstream stream failed", "stream_truncated")
+		// SPEC-002 § FR-B6 / issue #186: an unexpected read error on
+		// the coordinator-side stream (not EOF, not buyer cancel) is
+		// the mid-stream provider-disconnect surface. The buyer MUST
+		// see the exact FR-B6 envelope so OpenAI-compatible SDKs
+		// distinguish a truncated successful response from a provider
+		// drop and react (retry / surface to caller). The internal
+		// settlement outcome remains `stream_truncated` per the gateway
+		// settlement convention + SPEC-006 § 17.7 quota-debit policy —
+		// that maps to usage_events.outcome, a separate field from the
+		// buyer-visible SSE error.code.
+		//
+		// NOTE: error.type=server_error signals OpenAI-compatible SDKs
+		// that the request is retriable. Gateway-side Idempotency-Key
+		// dedupe is the open follow-up tracked in issue #200 — until
+		// that lands, a buyer retrying after this envelope MAY incur
+		// a fresh reservation if the coordinator's idempotency-cache
+		// response isn't refund-honored on the gateway side.
+		writeProviderDisconnectedSSE(w)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -505,14 +566,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleReported("client_disconnect")
 			return
 		}
-		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
 		return
 	}
 	if reported != nil && !invalidReportedUsage {
 		settleReported("ok")
 		return
 	}
-	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "ok")
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "ok", reservationWindow)
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
@@ -564,9 +625,9 @@ func openAIErrorCode(body []byte) string {
 	return strings.TrimSpace(envelope.Error.Code)
 }
 
-func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens int64, cancelCoordinator func()) {
+func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens int64, cancelCoordinator func(), reservationWindow string) {
 	cancelCoordinator()
-	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "client_disconnect")
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow)
 }
 
 func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) bool {
@@ -579,10 +640,117 @@ func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, su
 	return true
 }
 
-func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) {
+func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string) {
 	if err := s.settleRequest(r, subject, prompt, completion, maxTotal, source, outcome); err != nil {
-		slog.Error("gateway settlement failed after response commit", "request_id", requestID(r), "account_id", subject.AccountID, "source", source, "outcome", outcome, "error", err)
+		slog.Error("gateway settlement failed after response commit",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"source", source,
+			"outcome", outcome,
+			"error", err,
+		)
+		// SPEC-006 § 17.7 / issue #187: response bytes already flowed
+		// to the buyer. The buyer MUST be debited and the audit row
+		// (gateway-side usage_events) MUST exist regardless of why
+		// SettleReservation failed (missing reservation, status
+		// drift, transient DB error). Pre-#187 behavior fell back to
+		// RefundReservation, silently losing the audit row and
+		// undercharging the buyer.
+		//
+		// SCOPE: this fallback restores the BUYER-SIDE billing
+		// invariant. The provider-credit / mirror path lives on the
+		// COORDINATOR (per SPEC-005 § 10.3, "SPEC-005 does NOT read
+		// SPEC-006 usage tables"; provider credit composes from
+		// coordinator request_log), so the SPEC-005 mirror is
+		// unaffected by this fix.
+		//
+		// WINDOW: use the reservation window captured at admission
+		// time (not s.now()) so a stream that crosses UTC midnight
+		// settles against the SAME daily quota window the buyer's
+		// reservation was made against. ISS-187 R1 architect+code
+		// MAJOR.
+		window := reservationWindow
+		if window == "" {
+			window = s.now().UTC().Format("2006-01-02")
+		}
+		ev := storage.UsageEvent{
+			RequestID:        requestID(r),
+			AccountID:        subject.AccountID,
+			DemoIdentity:     subject.DemoIdentity,
+			WindowDate:       window,
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+			TotalTokens:      prompt + completion,
+			TokenSource:      source,
+			Outcome:          outcome,
+			CreatedAt:        s.now(),
+		}
+		if fallbackErr := s.store.EnsureUsageEvent(context.Background(), ev); fallbackErr != nil {
+			// Both the normal settle path and the idempotent fallback
+			// failed. Could be a genuine DB pathology OR (per #196 PK
+			// collision territory) a cross-account request_id
+			// collision detected via row-mismatch verify inside
+			// EnsureUsageEvent. Log loudly and release the
+			// reservation hold so the buyer's quota is not held
+			// forever. The audit row is lost; operators must
+			// reconcile from coordinator-side request_log.
+			slog.Error("gateway SPEC-006 § 17.7 fallback usage_events insert failed",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"source", source,
+				"outcome", outcome,
+				"settle_error", err.Error(),
+				"fallback_error", fallbackErr.Error(),
+			)
+			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+			return
+		}
+		// Fallback insert succeeded (or the row already existed via
+		// race AND matches by full billing payload). The buyer is now
+		// debited via usage_events.
+		//
+		// R3 architect MINOR: for demo-token requests, also write
+		// the matching demo_usage_events row idempotently so the
+		// demo-side audit trail required by SPEC-006 §4.5 / §14.3
+		// stays consistent with the buyer-side usage_events row.
+		// EnsureDemoUsageEvent is INSERT OR IGNORE on PK; a failure
+		// here is non-fatal because the usage_events row above is the
+		// load-bearing money-path record.
+		if subject.DemoIdentity != "" {
+			if demoErr := s.store.EnsureDemoUsageEvent(context.Background(), storage.DemoUsageEvent{
+				RequestID:     requestID(r),
+				ClientIP:      subject.DemoIdentity,
+				DemoTokenHash: subject.DemoTokenHash,
+				WindowDate:    window,
+				TotalTokens:   prompt + completion,
+				CreatedAt:     s.now(),
+			}); demoErr != nil {
+				slog.Warn("gateway SPEC-006 fallback demo_usage_events insert failed (usage_events row is OK)",
+					"request_id", requestID(r),
+					"account_id", subject.AccountID,
+					"demo_identity", subject.DemoIdentity,
+					"error", demoErr.Error(),
+				)
+			}
+		}
+		//
+		// R2 architect MAJOR: release any still-active reservation
+		// hold so DailyUsage doesn't double-count the buyer's quota
+		// (sum of usage_events.total_tokens AND active
+		// quota_reservations.reserved_tokens). RefundReservation is a
+		// no-op when the reservation row is missing or already
+		// terminal (which is the common case here — settle_error was
+		// ErrReservationNotFound or status != 'active'); when the row
+		// IS still active (e.g., settleRequest failed on a transient
+		// DB error, leaving the reservation row in 'active' state),
+		// the call releases the quota hold.
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		slog.Warn("gateway settlement used SPEC-006 § 17.7 fallback usage_events insert (settle_path failure)",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"outcome", outcome,
+			"settle_error", err.Error(),
+		)
 	}
 }
 
@@ -787,11 +955,31 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
-func writeSSEError(w http.ResponseWriter, message, code string) {
-	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "api_error", "code": code}})
+// writeSSEError emits an SSE error event followed by `data: [DONE]`.
+// errType is the OpenAI error `type` field. Call sites use this
+// helper for several mid-stream error shapes: malformed upstream
+// chunks (api_error / stream_malformed), max-tokens overflow
+// (api_error / stream_output_exceeded), gateway-side line
+// truncation (api_error / stream_truncated), and the SPEC-002
+// FR-B6 provider-disconnect envelope (server_error /
+// provider_disconnected). The FR-B6 envelope is built via the
+// dedicated writeProviderDisconnectedSSE wrapper so its strings
+// are centralized and resistant to drift.
+func writeSSEError(w http.ResponseWriter, message, errType, code string) {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": errType, "code": code}})
 	_, _ = w.Write([]byte("data: "))
 	_, _ = w.Write(payload)
 	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+}
+
+// writeProviderDisconnectedSSE emits the SPEC-002 § FR-B6 mid-stream
+// provider-disconnect envelope verbatim. The strings are
+// load-bearing: SDK clients route on (error.code, error.type) and
+// any drift breaks compatibility. Centralizing the call here lets
+// future refactors lean on a single named contract surface instead
+// of free-form writeSSEError args. Issue #186; architect R1 NOTE.
+func writeProviderDisconnectedSSE(w http.ResponseWriter) {
+	writeSSEError(w, "Provider disconnected during streaming", "server_error", "provider_disconnected")
 }
 
 func parseChatRequest(body []byte) (chatRequest, error) {

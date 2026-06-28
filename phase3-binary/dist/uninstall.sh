@@ -9,6 +9,10 @@ BINARY_PATH="$BIN_DIR/macprovider-cli"
 PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider.plist"
 LOG_DIR="$HOME/Library/Logs/macprovider"
 CACHE_DIR="$HOME/.cache/macprovider"
+# Issue #191: watchdog companion install paths. Remove alongside
+# the main provider so an uninstall leaves no orphaned LaunchAgent.
+WATCHDOG_DIR="$HOME/.local/share/macprovider-watchdog"
+WATCHDOG_PLIST_PATH="$HOME/Library/LaunchAgents/live.streamvc.macprovider-watchdog.plist"
 DRY_RUN=0
 NO_PROMPT="${MACPROVIDER_NO_PROMPT:-0}"
 
@@ -104,6 +108,17 @@ main() {
     run rm -f "$PLIST_PATH"
   else
     log "No launchd plist found at $PLIST_PATH."
+  fi
+
+  # Issue #191: remove the watchdog companion. Idempotent — silent
+  # if absent (operators with older installs predating the watchdog
+  # see no extra noise).
+  if [ -f "$WATCHDOG_PLIST_PATH" ]; then
+    run launchctl bootout "gui/$UID" "$WATCHDOG_PLIST_PATH" >/dev/null 2>&1 || true
+    run rm -f "$WATCHDOG_PLIST_PATH"
+  fi
+  if [ -d "$WATCHDOG_DIR" ]; then
+    run rm -rf "$WATCHDOG_DIR"
   fi
 
   # v1.2.2+: BINARY_PATH is a symlink to $INSTALL_DIR/macprovider-cli.

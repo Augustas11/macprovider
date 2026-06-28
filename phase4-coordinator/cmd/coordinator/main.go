@@ -76,6 +76,8 @@ func main() {
 			os.Exit(runPartnerKeys(os.Args[2:]))
 		case "visibility":
 			os.Exit(runVisibility(os.Args[2:]))
+		case "migrate-indexes":
+			os.Exit(runMigrateIndexes(os.Args[2:]))
 		}
 		// Round-1 CODE H1 fix: a non-flag first positional that
 		// is NEITHER a known daemon flag NOR a known CLI verb is
@@ -91,6 +93,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "  coordinator --version           (print build version)")
 			fmt.Fprintln(os.Stderr, "  coordinator partner-keys <issue|revoke|list> [flags]")
 			fmt.Fprintln(os.Stderr, "  coordinator visibility revert --id <pid> --reason TEXT")
+			fmt.Fprintln(os.Stderr, "  coordinator migrate-indexes --config <path>  (one-shot operator migration)")
 			os.Exit(2)
 		}
 	}
@@ -129,6 +132,16 @@ func main() {
 		os.Exit(1)
 	}
 	defer reqLogStore.Close()
+	// SPEC-002 v1.4.2 R-2 / ISS-188: request_log.external_request_id
+	// is added by OpenStore as an additive column. The matching partial-
+	// NULL reconciliation index is NOT auto-built here — the request-log
+	// store caps the pool at one writer connection (see
+	// requestlog.OpenStore SetMaxOpenConns(1)), so running CREATE INDEX
+	// from the daemon would contend with the 6s-timeout INSERT hot
+	// path. The index ships via the `coordinator migrate-indexes`
+	// subcommand, intended to be invoked once per deploy by the
+	// operator runbook before binding traffic (or during a maintenance
+	// window).
 	canaryStore, err := setupCanarySanctionStore(context.Background(), cfg, reqLogStore.DB(), registry)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "canary sanction storage: %v\n", err)

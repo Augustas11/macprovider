@@ -165,7 +165,19 @@ func Default() Config {
 			AccountDailyTokens:        100000,
 			DemoDailyTokensPerIP:      1000,
 			DemoSessionsPerIPPerHour:  10,
-			AccountConcurrency:        2,
+			// Issue #190: AccountConcurrency=3 matches phase-A
+			// network capacity (3 providers × 1 slot each) and the
+			// "user types follow-up while previous reply still
+			// streaming" UX pattern for paying buyers.
+			// DemoConcurrency stays at 2 because M1-8 / PERF-6
+			// documented that 3+ parallel demo requests from one
+			// IP saturate the MLX-serialized provider pool for up
+			// to CoordinatorTimeout — an accidental DoS against
+			// paying buyers. Bumping the demo default to 3 would
+			// re-introduce that regression. Operators can override
+			// either via account_concurrency / demo_concurrency
+			// in gateway.yaml.
+			AccountConcurrency:        3,
 			DemoConcurrency:           2,
 			SignupAccountsPerIPPerDay: 3,
 			ReaperIntervalHours:       1,
