@@ -235,7 +235,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	promptEstimate := estimatePromptTokens(body)
 	maxUsageTokens := promptEstimate + maxTokens
 	if chat.Stream {
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, cancelUpstream)
+		// ISS-187 R1 architect/code MAJOR: thread the reservation
+		// window through to forwardStreamingChat so the SPEC-006 §
+		// 17.7 fallback usage_events insert in settleAfterCommit
+		// uses the SAME window_date as the original reservation
+		// (avoids drift for streams that cross UTC midnight).
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, cancelUpstream, window)
 		return
 	}
 	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens)
@@ -315,7 +320,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	_, _ = w.Write(body)
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens int64, cancelUpstream func()) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens int64, cancelUpstream func(), reservationWindow string) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
@@ -381,17 +386,17 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		usage := *reported
 		observedCompletion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
 		if observedCompletion > usage.CompletionTokens {
-			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome)
+			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
 			return
 		}
-		s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome)
+		s.settleAfterCommit(r, subject, usage.PromptTokens, usage.CompletionTokens, maxUsageTokens, "provider_reported", outcome, reservationWindow)
 	}
 	settleTruncated := func() {
 		if reported != nil {
 			settleReported("stream_truncated")
 			return
 		}
-		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated")
+		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated", reservationWindow)
 	}
 	forwardLine := func(line []byte) bool {
 		select {
@@ -400,7 +405,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return false
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
 			return false
 		default:
 		}
@@ -416,7 +421,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 					cancelCoordinator()
 					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
-					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed")
+					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow)
 					return false
 				}
 				if deltaBytes > 0 {
@@ -429,7 +434,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 							flusher.Flush()
 						}
 						cancelCoordinator()
-						s.settleAfterCommit(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded")
+						s.settleAfterCommit(r, subject, promptEstimate, maxCompletion, maxUsageTokens, "gateway_estimated", "stream_output_exceeded", reservationWindow)
 						return false
 					}
 					emitted += deltaBytes
@@ -450,7 +455,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 					cancelCoordinator()
 					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
-					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed")
+					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow)
 					return false
 				}
 			}
@@ -461,7 +466,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return false
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
 			return false
 		}
 		if flusher != nil {
@@ -500,7 +505,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
 			return
 		}
 		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
@@ -533,14 +538,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleReported("client_disconnect")
 			return
 		}
-		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator)
+		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
 		return
 	}
 	if reported != nil && !invalidReportedUsage {
 		settleReported("ok")
 		return
 	}
-	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "ok")
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "ok", reservationWindow)
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
@@ -592,9 +597,9 @@ func openAIErrorCode(body []byte) string {
 	return strings.TrimSpace(envelope.Error.Code)
 }
 
-func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens int64, cancelCoordinator func()) {
+func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens int64, cancelCoordinator func(), reservationWindow string) {
 	cancelCoordinator()
-	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "client_disconnect")
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow)
 }
 
 func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) bool {
@@ -607,7 +612,7 @@ func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, su
 	return true
 }
 
-func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) {
+func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome, reservationWindow string) {
 	if err := s.settleRequest(r, subject, prompt, completion, maxTotal, source, outcome); err != nil {
 		slog.Error("gateway settlement failed after response commit",
 			"request_id", requestID(r),
@@ -618,17 +623,32 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		)
 		// SPEC-006 § 17.7 / issue #187: response bytes already flowed
 		// to the buyer. The buyer MUST be debited and the audit row
-		// MUST exist regardless of why SettleReservation failed
-		// (missing reservation, status drift, transient DB error).
-		// Falling back to RefundReservation here — the previous
-		// behavior — silently lost the usage_events row and
-		// undercharged buyer + provider on every partial-stream
-		// settlement failure.
+		// (gateway-side usage_events) MUST exist regardless of why
+		// SettleReservation failed (missing reservation, status
+		// drift, transient DB error). Pre-#187 behavior fell back to
+		// RefundReservation, silently losing the audit row and
+		// undercharging the buyer.
+		//
+		// SCOPE: this fallback restores the BUYER-SIDE billing
+		// invariant. The provider-credit / mirror path lives on the
+		// COORDINATOR (SPEC-005 reads coord request_log, NOT this
+		// gateway-side usage_events row), so the SPEC-005 mirror is
+		// unaffected by this fix.
+		//
+		// WINDOW: use the reservation window captured at admission
+		// time (not s.now()) so a stream that crosses UTC midnight
+		// settles against the SAME daily quota window the buyer's
+		// reservation was made against. ISS-187 R1 architect+code
+		// MAJOR.
+		window := reservationWindow
+		if window == "" {
+			window = s.now().UTC().Format("2006-01-02")
+		}
 		ev := storage.UsageEvent{
 			RequestID:        requestID(r),
 			AccountID:        subject.AccountID,
 			DemoIdentity:     subject.DemoIdentity,
-			WindowDate:       s.now().UTC().Format("2006-01-02"),
+			WindowDate:       window,
 			PromptTokens:     prompt,
 			CompletionTokens: completion,
 			TotalTokens:      prompt + completion,
@@ -638,10 +658,13 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		}
 		if fallbackErr := s.store.EnsureUsageEvent(context.Background(), ev); fallbackErr != nil {
 			// Both the normal settle path and the idempotent fallback
-			// failed. Genuine DB-level pathology — log loudly and
-			// release the reservation hold so the buyer's quota is
-			// not held forever. The audit row is lost; operators
-			// must reconcile from coordinator-side request_log.
+			// failed. Could be a genuine DB pathology OR (per #196 PK
+			// collision territory) a cross-account request_id
+			// collision detected via row-mismatch verify inside
+			// EnsureUsageEvent. Log loudly and release the
+			// reservation hold so the buyer's quota is not held
+			// forever. The audit row is lost; operators must
+			// reconcile from coordinator-side request_log.
 			slog.Error("gateway SPEC-006 § 17.7 fallback usage_events insert failed",
 				"request_id", requestID(r),
 				"account_id", subject.AccountID,
@@ -654,9 +677,9 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 			return
 		}
 		// Fallback insert succeeded (or the row already existed via
-		// race). Log at warn — the path fired, but the spec is now
-		// satisfied. Buyer's reservation hold stays as-is; the
-		// subsequent reaper will tidy it.
+		// race AND matches by account_id). Log at warn — the path
+		// fired, but the spec is now satisfied. Buyer's reservation
+		// hold stays as-is; the subsequent reaper will tidy it.
 		slog.Warn("gateway settlement used SPEC-006 § 17.7 fallback usage_events insert (settle_path failure)",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,

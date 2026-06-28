@@ -648,7 +648,8 @@ func (s *Store) ReleaseConcurrency(ctx context.Context, accountID, requestID str
 }
 
 func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) error {
-	return s.insertUsageEvent(ctx, event, false)
+	_, err := s.insertUsageEventExec(ctx, event, false)
+	return err
 }
 
 // EnsureUsageEvent inserts a usage_events row idempotently — duplicate
@@ -657,25 +658,68 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) 
 // the normal SettleReservation path fails: even if the reservation
 // is missing or in an unexpected state, the buyer-facing usage record
 // MUST exist after bytes have flowed (issue #187).
+//
+// PK-collision verify (ISS-187 R1 code+security MAJOR): the gateway
+// `usage_events.request_id` is a GLOBAL primary key (issue #196,
+// pre-existing). If INSERT OR IGNORE silently no-ops on conflict,
+// an attacker with two accounts could collide a request_id and skip
+// the audit row. EnsureUsageEvent now checks RowsAffected; on 0, it
+// reads the existing row and confirms (account_id, demo_identity,
+// token_source, outcome) MATCH the incoming event. If they
+// disagree, returns ErrUsageEventConflict so the caller knows the
+// fallback failed and must refund.
 func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) error {
-	return s.insertUsageEvent(ctx, event, true)
+	result, err := s.insertUsageEventExec(ctx, event, true)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected > 0 {
+		return nil
+	}
+	// PK collision. Read the existing row and verify it matches the
+	// incoming event's identity fields. Mismatch => cross-account
+	// collision (or a corrupted prior write), NOT a benign duplicate.
+	var existing struct {
+		AccountID    string
+		DemoIdentity string
+		TokenSource  string
+		Outcome      string
+	}
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT account_id, demo_identity, token_source, outcome
+		FROM usage_events WHERE request_id = ?`, event.RequestID).Scan(
+		&existing.AccountID, &existing.DemoIdentity, &existing.TokenSource, &existing.Outcome,
+	); err != nil {
+		return err
+	}
+	if existing.AccountID != event.AccountID ||
+		existing.DemoIdentity != event.DemoIdentity ||
+		existing.TokenSource != event.TokenSource ||
+		existing.Outcome != event.Outcome {
+		return storage.ErrUsageEventConflict
+	}
+	return nil
 }
 
-func (s *Store) insertUsageEvent(ctx context.Context, event storage.UsageEvent, idempotent bool) error {
+func (s *Store) insertUsageEventExec(ctx context.Context, event storage.UsageEvent, idempotent bool) (sql.Result, error) {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
 	if event.PromptTokens < 0 || event.CompletionTokens < 0 || event.TotalTokens < 0 {
-		return fmt.Errorf("usage tokens must be non-negative")
+		return nil, fmt.Errorf("usage tokens must be non-negative")
 	}
 	if event.PromptTokens > math.MaxInt64-event.CompletionTokens {
-		return fmt.Errorf("usage token total overflows int64")
+		return nil, fmt.Errorf("usage token total overflows int64")
 	}
 	sum := event.PromptTokens + event.CompletionTokens
 	if event.TotalTokens == 0 {
 		event.TotalTokens = sum
 	} else if event.TotalTokens != sum {
-		return fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
+		return nil, fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
 	}
 	stmt := `
 		INSERT INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
@@ -685,10 +729,9 @@ func (s *Store) insertUsageEvent(ctx context.Context, event storage.UsageEvent, 
 		INSERT OR IGNORE INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
 		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	}
-	_, err := s.db.ExecContext(ctx, stmt,
+	return s.db.ExecContext(ctx, stmt,
 		event.RequestID, event.AccountID, event.DemoIdentity, event.WindowDate, event.PromptTokens, event.CompletionTokens,
 		event.TotalTokens, event.TokenSource, event.Outcome, encodeTime(event.CreatedAt))
-	return err
 }
 
 func normalizeSettlementTokens(settlement *storage.ReservationSettlement) error {

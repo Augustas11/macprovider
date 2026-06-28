@@ -2259,17 +2259,21 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 func TestStreamingSettlementFallbackWritesUsageEventOnMissingReservation(t *testing.T) {
 	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`
 	accountID := "acct_fallback_usage_event"
-	// Track when the upstream stream has started, so the test can
-	// refund the reservation AFTER the gateway has already
-	// committed response headers and started forwarding bytes.
+	// Synchronization channels. The test goroutine waits for the
+	// gateway's first delta to flush, deletes the reservation row
+	// deterministically, signals via deleteDone, and only THEN does
+	// the upstream stream close — guaranteeing the settlement path
+	// sees a missing reservation. Polling avoided per ISS-187 R1
+	// code/security NOTEs.
 	var streamStarted = make(chan struct{}, 1)
+	var deleteDone = make(chan error, 1)
+	var releaseUpstream = make(chan struct{}, 1)
 	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		pr, pw := io.Pipe()
 		go func() {
 			_, _ = pw.Write([]byte(`data: {"id":"chatcmpl","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
 			streamStarted <- struct{}{}
-			// Block until the test refunds, then close the stream.
-			time.Sleep(50 * time.Millisecond)
+			<-releaseUpstream
 			_ = pw.CloseWithError(errors.New("forced upstream provider disconnect"))
 		}()
 		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
@@ -2280,49 +2284,122 @@ func TestStreamingSettlementFallbackWritesUsageEventOnMissingReservation(t *test
 	}, WithHTTPClient(client))
 	fullKey := createAccountAndKey(t, store, cfg, accountID)
 
-	// Wait for the upstream stream to begin, then refund out from
-	// under the gateway's settlement attempt. Done in a goroutine
-	// because postChat below blocks until the response completes.
 	go func() {
 		<-streamStarted
-		// Find the reservation's request_id by reading
-		// quota_reservations directly. Use sql.Open instead of the
-		// gateway's store to avoid any in-flight lock.
 		db, err := sql.Open("sqlite", dbPath)
 		if err != nil {
+			deleteDone <- fmt.Errorf("sql.Open: %w", err)
+			releaseUpstream <- struct{}{}
 			return
 		}
 		defer db.Close()
+		// Poll-with-deadline for the reservation row. The reservation
+		// is inserted very early in handleChatCompletions (before the
+		// upstream request fires), so by the time streamStarted
+		// signals, the row almost certainly exists. The poll
+		// tolerates a tiny window for slow CI runners.
 		var requestID string
-		for i := 0; i < 50; i++ {
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
 			if err := db.QueryRow(`SELECT request_id FROM quota_reservations WHERE account_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1`, accountID).Scan(&requestID); err == nil {
 				break
 			}
-			time.Sleep(2 * time.Millisecond)
+			time.Sleep(5 * time.Millisecond)
 		}
 		if requestID == "" {
+			deleteDone <- errors.New("timed out waiting for quota_reservations row")
+			releaseUpstream <- struct{}{}
 			return
 		}
-		// Delete the reservation row to simulate the production
-		// failure mode where SettleReservation returns
-		// ErrReservationNotFound. This is more pathological than
-		// any code path actually triggers, but the defensive fix
-		// must handle it regardless.
-		_, _ = db.Exec(`DELETE FROM quota_reservations WHERE account_id = ? AND request_id = ?`, accountID, requestID)
+		res, err := db.Exec(`DELETE FROM quota_reservations WHERE account_id = ? AND request_id = ?`, accountID, requestID)
+		if err != nil {
+			deleteDone <- fmt.Errorf("delete: %w", err)
+			releaseUpstream <- struct{}{}
+			return
+		}
+		rows, _ := res.RowsAffected()
+		if rows != 1 {
+			deleteDone <- fmt.Errorf("delete affected %d rows, want 1", rows)
+			releaseUpstream <- struct{}{}
+			return
+		}
+		deleteDone <- nil
+		releaseUpstream <- struct{}{}
 	}()
 
 	resp := postChat(t, h, fullKey, body, nil)
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("test setup failed: %v", err)
+	}
 	if resp.Code != http.StatusOK {
 		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
 	}
-	// The SPEC-006 § 17.7 invariant: a usage_events row exists for
-	// this account even though the reservation was wiped.
 	outcome, source := usageEventOutcome(t, dbPath, accountID)
 	if outcome != "stream_truncated" {
 		t.Fatalf("usage_events outcome = %q, want stream_truncated; fallback did not record the partial-stream row (#187 regression)", outcome)
 	}
 	if source != "gateway_estimated" {
 		t.Fatalf("usage_events token_source = %q, want gateway_estimated", source)
+	}
+}
+
+// TestEnsureUsageEventRejectsCrossAccountConflict pins the ISS-187
+// R1 code+security MAJOR: when the gateway's INSERT OR IGNORE
+// silently no-ops on the pre-existing #196 PK-collision attack
+// surface, EnsureUsageEvent now reads the existing row and rejects
+// the call if (account_id, demo_identity, token_source, outcome)
+// don't match — preventing a malicious buyer from skipping their
+// audit row by colliding with an unrelated request_id.
+func TestEnsureUsageEventRejectsCrossAccountConflict(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.Open(context.Background(), dir+"/test.db")
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer st.Close()
+	rid := "55555555-5555-4555-8555-555555555555"
+	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	if err := st.InsertUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID: rid, AccountID: "victim_account",
+		WindowDate: "2026-06-28", PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30,
+		TokenSource: "provider_reported", Outcome: "ok", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertUsageEvent (victim row): %v", err)
+	}
+	// Attacker tries to write the SAME request_id under a different account.
+	err = st.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID: rid, AccountID: "attacker_account",
+		WindowDate: "2026-06-28", PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+		TokenSource: "gateway_estimated", Outcome: "stream_truncated", CreatedAt: now,
+	})
+	if !errors.Is(err, storage.ErrUsageEventConflict) {
+		t.Fatalf("EnsureUsageEvent on cross-account PK collision: err=%v, want ErrUsageEventConflict", err)
+	}
+}
+
+// TestEnsureUsageEventAcceptsMatchingRetry confirms the benign
+// idempotency case: a duplicate INSERT with all matching identity
+// fields (account, source, outcome) is treated as success — covers
+// retries / race-with-normal-settle scenarios.
+func TestEnsureUsageEventAcceptsMatchingRetry(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.Open(context.Background(), dir+"/test.db")
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer st.Close()
+	rid := "66666666-6666-4666-8666-666666666666"
+	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	ev := storage.UsageEvent{
+		RequestID: rid, AccountID: "buyer",
+		WindowDate: "2026-06-28", PromptTokens: 5, CompletionTokens: 7, TotalTokens: 12,
+		TokenSource: "gateway_estimated", Outcome: "stream_truncated", CreatedAt: now,
+	}
+	if err := st.InsertUsageEvent(context.Background(), ev); err != nil {
+		t.Fatalf("InsertUsageEvent first call: %v", err)
+	}
+	if err := st.EnsureUsageEvent(context.Background(), ev); err != nil {
+		t.Fatalf("EnsureUsageEvent retry with matching fields: %v", err)
 	}
 }
 
