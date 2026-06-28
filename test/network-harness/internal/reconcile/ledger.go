@@ -44,13 +44,19 @@ type Result struct {
 	CoordinatorRows5xx  int `json:"coordinator_rows_5xx"`
 	GatewayRows         int `json:"gateway_rows"`
 	GatewayRowsOK       int `json:"gateway_rows_ok"`
+	GatewayRowsFallback int `json:"gateway_rows_fallback"`
 	GatewayRowsNotOK    int `json:"gateway_rows_not_ok"`
 
 	// Aggregate token sums (over the same window). A clean reconcile has
 	// HarnessCompletionTokens == GatewayCompletionTokens == CoordinatorCompletionTokens.
-	HarnessCompletionTokens     int64 `json:"harness_completion_tokens"`
-	GatewayCompletionTokens     int64 `json:"gateway_completion_tokens"`
-	CoordinatorCompletionTokens int64 `json:"coordinator_completion_tokens"`
+	// Fallback rows (stream_truncated/malformed/output_exceeded/upstream_error)
+	// are tracked separately because the coordinator has no settlement
+	// row for them (provider died mid-stream) and the harness SSE parser
+	// is known to undercount (F-8); gateway is the truth-of-record there.
+	HarnessCompletionTokens         int64 `json:"harness_completion_tokens"`
+	GatewayCompletionTokens         int64 `json:"gateway_completion_tokens"`
+	GatewayCompletionTokensFallback int64 `json:"gateway_completion_tokens_fallback"`
+	CoordinatorCompletionTokens     int64 `json:"coordinator_completion_tokens"`
 
 	// Per-request fuzzy matches. Each harness success is matched against
 	// gateway by (model, completion_tokens, ts proximity).
@@ -134,10 +140,17 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	}
 	r.GatewayRows = len(gwRows)
 	for _, g := range gwRows {
-		if g.Outcome == "ok" {
+		switch {
+		case g.Outcome == "ok":
 			r.GatewayRowsOK++
 			r.GatewayCompletionTokens += g.CompletionTokens
-		} else {
+		case isSettlementComplete(g.Outcome):
+			// Streaming-fallback outcomes: counted for matching but
+			// excluded from drift sums because coord has no row and
+			// harness undercounts (F-8) — drift would be spurious.
+			r.GatewayRowsFallback++
+			r.GatewayCompletionTokensFallback += g.CompletionTokens
+		default:
 			r.GatewayRowsNotOK++
 		}
 	}
@@ -215,7 +228,7 @@ func pickClosestGw(pool *[]gwRow, h buyer.Result) int {
 	best := -1
 	bestScore := int64(-1)
 	for i, g := range *pool {
-		if g.Outcome != "ok" {
+		if !isSettlementComplete(g.Outcome) {
 			continue
 		}
 		// Model is not in usage_events on gateway side (verified live
@@ -265,6 +278,29 @@ func absInt64(x int64) int64 {
 		return -x
 	}
 	return x
+}
+
+// isSettlementComplete returns true for any gateway outcome value that
+// represents a complete settlement event from a money-path perspective.
+// "ok" is the canonical happy-path value; the rest are SPEC-006 § 17.7
+// streaming-fallback outcomes — the gateway still writes a usage_events
+// row with bytes emitted so far, so the audit trail is complete. From
+// the reconciler's point of view, any of these rows is a valid match
+// for a harness-success result (the harness saw a 200 + a terminator
+// signal, the gateway recorded the settlement row).
+//
+// Source enumeration: phase5-gateway/internal/router/chat_proxy.go
+// settleAfterCommit() / settleBeforeResponse() call sites.
+func isSettlementComplete(outcome string) bool {
+	switch outcome {
+	case "ok",
+		"stream_truncated",
+		"stream_malformed",
+		"stream_output_exceeded",
+		"upstream_error":
+		return true
+	}
+	return false
 }
 
 type coordRow struct {
