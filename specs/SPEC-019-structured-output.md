@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.1.2 (2026-06-28, round-2 defensive absorption)
+**Version:** 0.1.3 (2026-06-28, round-3 defensive absorption)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** DRAFT - r3 defensive audit pending.
+**Status:** DRAFT — r4 defensive audit pending.
 
 ## Quick orientation
 
@@ -351,12 +351,14 @@ MUST forward the original request bytes to the coordinator as it does today
 `phase5-gateway/internal/router/chat_proxy.go:217-224`, coordinator request
 construction from `bytes.NewReader(body)`).
 
-AC-28a. Body-byte preservation: a buyer-sent compressed request body
-(`Content-Encoding: gzip` with a 14 KiB `json_schema.schema`) is forwarded to
-the coordinator without gateway-side decompression. The coordinator-side
-decompressed schema bytes equal the provider parser's decompressed schema bytes
-(byte-equivalent). Receipt prompt-hash matches a buyer-sent identical-content
-uncompressed request.
+AC-28a. `Content-Encoding` reject fixture: any request with a
+`Content-Encoding` header returns HTTP 415
+`request_content_encoding_unsupported`, `param:"Content-Encoding"`,
+`retryable:false`, `inference_ran:false`, `settlement_ran:false`, identical at
+gateway and coordinator (parity). Both gzip-compressed JSON bodies and a
+header-only fixture (no actual compression) MUST reject; the SPEC does not
+require the gateway/coordinator to validate the body's compression.
+`Content-Encoding: identity` is the only accepted value (or omitted header).
 
 ### Buyer-facing UX
 
@@ -379,16 +381,23 @@ The macprovider response parses into the same `Person` model and the
 JCS-canonicalized `response_format.json_schema.schema` matches the golden
 fixture modulo an explicit allow-list (`title`, `description`).
 
-AC-31. Vercel AI SDK paired fixture:
-`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/` contains the SAME
-logical `Person` contract translated to Zod (`z.object({ name: z.string(), age:
-z.number().int() })`) with `createOpenAICompatible({
-supportsStructuredOutputs: true, ... })`, `@ai-sdk/openai-compatible @2.0.38`,
-captured outbound HTTP body (`fixture_request_body.json`), and assertion that
-`response_format.type == "json_schema"` and `json_schema.strict == true`. The
-JCS-canonicalized `response_format.json_schema.schema` MUST match the AC-30
-Pydantic schema modulo `title` / `description` differences. False-green between
-the two SDK paths is the failure case this fixture prevents.
+AC-31. Vercel AI SDK paired fixture: `test/integration/spec_019/
+vercel_ai_sdk_strict_json_schema/` uses the SAME logical `Person` contract as
+AC-30 translated to a v0.1.0-compatible Zod shape: `z.object({ name:
+z.string(), age: z.number() })`. (`z.number().int()` emits `minimum`/`maximum`
+keywords which §3 rejects; v0.1.0 fixtures use unconstrained `z.number()` until
+v0.2 widens the §3 subset to include numeric bounds.) The fixture captures the
+outbound HTTP body (`fixture_request_body.json`). A normalization step strips
+the `$schema` top-level key from the captured Vercel body before
+canonical-schema comparison; v0.1.0 §3 rejects `$schema` (per AC-3
+rejected-keyword list). With `createOpenAICompatible({
+supportsStructuredOutputs: true, ... })` and `@ai-sdk/openai-compatible
+@2.0.38`, the AC asserts `response_format.type == "json_schema"`,
+`json_schema.strict == true`. The JCS-canonicalized
+`response_format.json_schema.schema` MUST match the AC-30 Pydantic schema modulo
+`title` / `description` AND `$schema`. v0.1.0 documents the `$schema` strip +
+`.int()` substitution as v0.1.0 fixture constraints; v0.2 considers widening §3
+to accept these keywords.
 
 AC-32. Vercel default-path fixture (separate file): without
 `supportsStructuredOutputs:true`, Vercel emits `json_object` not `json_schema`.
@@ -567,6 +576,15 @@ validator internal error. Fallback code mapping: JSON parse internals →
 handler MUST NOT escape this boundary on the structured-output postprocess
 path.
 
+**Partial-validator-state rule**: when the validator does not complete normally
+— thrown error, panic / fatal assertion, recursion / stack overflow,
+resource-limit abort, or any other internal failure — partial validation state
+MUST be discarded before emitting the fallback envelope. The fallback envelope
+MUST use `error.param:""` (RFC 6901 root) and a generic message (e.g. "Schema
+validation aborted before completion"); the envelope MUST NOT report a JSON
+pointer derived from partially-completed validation, since that pointer could
+mislead the buyer about which field actually failed.
+
 **Empty content under `json_schema` / `json_object`**: if final inference output
 (post stop-token filtering,
 `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:811-828`) is the empty
@@ -577,11 +595,18 @@ Empty string is not a JSON value.
 **Empty-content subcase override**: when the offending output is the empty
 string `""` after stop-token filtering, the response envelope MUST set
 `retryable:false` and the `error.message` MUST recommend a buyer-side fix (e.g.
-"Model emitted zero tokens for the requested schema; modify the prompt,
-increase `max_tokens`, or relax the schema before retrying — automatic
-same-request retry will not succeed."). This prevents deterministic empty output
-from burning the buyer's retry budget. Non-empty malformed JSON output keeps
-`retryable:true` per the standard envelope.
+"Model emitted zero tokens for the requested schema; adjust `temperature` /
+`seed` (for stochastic models), or modify the prompt or schema before retrying
+— automatic same-request retry will not succeed."). This prevents deterministic
+empty output from burning the buyer's retry budget. Non-empty malformed JSON
+output keeps `retryable:true` per the standard envelope.
+
+**Retry semantics**: `retryable:false` means the buyer's SDK SHOULD NOT blindly
+replay the identical request (including same `seed` / `temperature` / `prompt` /
+`schema`). Buyers MAY issue a deliberately modified retry — different `seed`,
+different `temperature`, a relaxed schema, or a clarifying prompt — after their
+own retry policy decision. The `retryable:false` value prevents the SDK
+auto-retry loop, not buyer-initiated recovery.
 
 `malformed_json_response` is used when parsing fails, duplicate keys are found,
 the top-level value is not object-or-array for `json_object`, the final content
@@ -615,6 +640,7 @@ No internal retry is allowed in v0.1.0. Buyer retries happen at the buyer layer.
 | `json_schema_invalid_name` | 400 | pre-inference request validation | false | `json_schema.name` outside machine-name constraint. |
 | `json_schema_too_large` | 413 | pre-inference request validation | false | Schema JSON value over `16_384` raw UTF-8 bytes. |
 | `json_schema_too_deep` | 400 | pre-inference request validation | false | Schema nesting exceeds 32 levels. |
+| `request_content_encoding_unsupported` | 415 | gateway + coordinator pre-validation | false | v0.1.0 rejects compressed request bodies. |
 | `malformed_json_response` | 502 | post-inference output validation | true* | Output not valid JSON text, duplicate keys, empty content, or invalid `json_object` root. |
 | `json_schema_validation_failed` | 502 | post-inference output validation | true | Parsed JSON does not satisfy schema or output depth. |
 | `response_byte_cap_exceeded` | 502 | post-inference raw output cap | true | Existing SPEC-018 code; parsing and validation do not run. |
@@ -656,7 +682,7 @@ before inference. Depth is counted at every level (`properties[*]`, `items`,
 nested `items`/`properties`). Same constant as the output-validation depth cap
 in AC-13, by design.
 
-Both `json_schema_max_depth` (schema-side, §6) and AC-27 (output-instance side)
+Both `json_schema_max_depth` (schema-side, §6) and AC-13 (output-instance side)
 use the same constant 32 by design — a schema at depth 32 can match an instance
 at depth 32.
 
@@ -670,6 +696,13 @@ same level do not increase depth. Provider and coordinator MUST use this
 identical algorithm. Example: `{"type":"object","properties":{"a":{"type":
 "object","properties":{"b":{"type":"string"}}}}}` is depth 3 (root →
 properties.a → properties.a.properties.b).
+
+Mixed-keyword example: `{"type":"array","items":{"type":"array",
+"items":{"type":"object","properties":{"id":{"type":"string"}}}}}` is depth 4
+— root array (depth 1) → items array (depth 2) → items object (depth 3) →
+properties.id string (depth 4). Both `items` subtree and `properties[*]`
+subtree increment the counter by 1, regardless of which keyword is used at each
+level. Provider and coordinator MUST compute the same value.
 
 SPEC-019 inherits the SPEC-018 §9 / §10d.7 response-size posture
 (`specs/SPEC-018-agentic-tool-calling.md:963-975`, cap values and fail-closed
@@ -714,15 +747,21 @@ then creates the upstream coordinator request from the original `body`
 `bytes.NewReader(body)`). SPEC-019 adds no gateway schema parser and no new
 endpoint.
 
-**Inbound content-encoding preservation**: the gateway MUST forward the inbound
-request body bytes to the coordinator without decompressing any
-`Content-Encoding` (`gzip`, `deflate`, `br`). The `json_schema.schema` byte cap
-(§6) and JCS canonicalization (SPEC-015 §1191-1204) are computed over the same
-byte sequence at gateway, coordinator, and provider parser; mid-path
-decompression would split the byte-equivalence invariant. If a buyer sends a
-compressed body, the coordinator's reader-side handles decompression with
-identical byte semantics. Provider parser sees the canonical decompressed
-bytes.
+**Inbound `Content-Encoding` posture (v0.1.0)**: the gateway and coordinator
+MUST reject any request with a `Content-Encoding` header (`gzip`, `deflate`,
+`br`, or any non-empty value) with HTTP 415
+`request_content_encoding_unsupported` and an actionable message ("v0.1.0 does
+not accept compressed request bodies; resend with no `Content-Encoding` header.
+Compressed-request support is deferred to v0.2 per §10."). This sidesteps three
+problems with transparent decompression in v0.1.0: (a) current gateway
+`parseChatRequest` reads `r.Body` directly without `gzip.NewReader` (cite
+`phase5-gateway/internal/router/chat_proxy.go:102-117`); (b) decompressed-byte
+caps would need a second tier of limits; (c) gateway, coordinator, and provider
+would need identical decompression semantics to preserve the
+`json_schema.schema` byte cap and JCS canonicalization invariants. v0.1.0 keeps
+a single byte-domain (uncompressed request body) for all three components. No
+SPEC-006 or SPEC-001 amendment is required: SPEC-006 §1650-1657 already covers
+request-body size limits and 413; this adds 415 for a separate header gate.
 
 **Settlement double-attribution prevention**: for the gateway-passed-through
 detail codes `malformed_json_response` and `json_schema_validation_failed`, the
@@ -811,7 +850,17 @@ Deferred to v0.2:
 - Vercel AI SDK and OpenAI SDK matrix expansion beyond the v0.1.0 anchor
   fixtures;
 - wider schema subset after Cline and Vercel AI SDK compatibility evidence;
-- schema warm-cache between requests on the same connection.
+- schema warm-cache between requests on the same connection;
+- Transparent gateway-side decompression of `Content-Encoding: gzip` /
+  `deflate` / `br` request bodies with a decompressed-byte cap is deferred to
+  v0.2. v0.1.0 keeps the single uncompressed byte-domain invariant for caps and
+  JCS;
+- §3 numeric-bound keywords (`minimum`, `maximum`, `multipleOf`) and `$schema`
+  top-level acceptance are deferred to v0.2 to enable direct round-trip with
+  Vercel AI SDK's full Zod expressivity without an SDK-side normalization step;
+- AC-30 uses a flat Pydantic model. Nested Pydantic models emit `$defs` / `$ref`
+  which §3 rejects (per v0.1.0 reject-list); fixtures with nested classes are
+  deferred to v0.2 when `$ref` / `$defs` schema reuse is in scope.
 
 Deferred to v0.3 or later:
 
@@ -865,23 +914,45 @@ Audit lanes should probe:
 
 ## 12. Document metadata
 
-Status: DRAFT. This SPEC becomes LOCKED only after the audit loop converges at
-0 CRITICAL, 0 HIGH, and 0 MEDIUM across all required lanes.
+**Status:** DRAFT — r4 defensive audit pending. This SPEC becomes LOCKED only
+after the audit loop converges at 0 CRITICAL, 0 HIGH, and 0 MEDIUM across all
+required lanes.
 
-Version: 0.1.2 (2026-06-28, round-2 defensive absorption).
+**Version:** 0.1.3 (2026-06-28, round-3 defensive absorption)
 
 Precondition: SPEC-018 v0.2.4 LOCKED at `7e50832` via PR #202, with
 implementation shipped at `c77313a` via PR #209
 (`specs/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors).
 
-Successor: TBD. Expected next version is v0.1.3 for defensive audit absorption
+Successor: TBD. Expected next version is v0.1.4 for defensive audit absorption
 or v0.2.0 if the audit loop promotes streaming structured output into scope.
 
 Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
 change, no new HTTP endpoint.
 
 ### Change log
+
+- **v0.1.3 (2026-06-28, round-3 defensive absorption):** Absorbed 2
+  HIGH + 7 MEDIUM + 4 minor + 1 Q across 6 audit lanes. Gzip posture
+  switched from gateway-decompression to HTTP 415 reject in v0.1.0
+  (critic + architect + security convergent on r2's gzip block being
+  unimplementable against current gateway code) — transparent
+  decompression deferred to v0.2. AC-31 Vercel fixture changed to
+  v0.1.0-compatible Zod shape (`z.number()` instead of
+  `z.number().int()`) + `$schema` strip step documented (PD).
+  §5 panic catch-all partial-validator-state discard rule added
+  (security). §5 empty-content actionable message replaced
+  `max_tokens` with `temperature` / `seed` (critic). §6 dual-axis
+  signpost AC citation corrected to AC-13 (narrative). §6 depth-
+  counting algorithm gains mixed `items`/`properties` worked example
+  (critic). Empty-content `retryable:false` semantics clarified as
+  "no SDK auto-retry, buyer-initiated modified retry permitted" (PD).
+  Nested-Pydantic v0.1.0 limitation documented in §10 (critic minor).
+  Round narrative: `specs/SPEC-019-v0_1-r3-audit.md`; per-lane
+  findings: `specs/SPEC-019-v0_1-{architect,code,security,
+  product-design,critic,narrative}-r3-audit.md`. Codex code lane was
+  the first lane to return READY TO LOCK at any round.
 
 - **v0.1.1 (2026-06-28, round-1 audit absorption):** Absorbed 3 CRITICAL
   + 14 HIGH + 14 MEDIUM findings across 6 audit lanes. Cross-spec
