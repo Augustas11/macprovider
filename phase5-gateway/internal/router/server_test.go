@@ -1482,6 +1482,21 @@ func TestStreamingReceiptHeaderStripped(t *testing.T) {
 			t.Fatalf("streaming buyer response exposed %s=%q", header, got)
 		}
 	}
+	// Issue #190 R2 security HIGH: streaming success responses
+	// carry per-tenant X-RateLimit-*-Requests headers and must NOT
+	// be cacheable. The SSE-required no-cache/no-transform must
+	// coexist with no-store; previously the streaming path
+	// overwrote the entry-level no-store header.
+	cacheControl := resp.Header().Get("Cache-Control")
+	if !strings.Contains(cacheControl, "no-store") {
+		t.Errorf("streaming Cache-Control=%q must contain no-store", cacheControl)
+	}
+	if !strings.Contains(cacheControl, "no-cache") || !strings.Contains(cacheControl, "no-transform") {
+		t.Errorf("streaming Cache-Control=%q must keep no-cache and no-transform", cacheControl)
+	}
+	if got := resp.Header().Get("X-RateLimit-Limit-Requests"); got == "" {
+		t.Errorf("streaming response missing X-RateLimit-Limit-Requests")
+	}
 }
 
 func TestProviderPinningHeadersStripped(t *testing.T) {

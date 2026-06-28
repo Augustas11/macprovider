@@ -51,6 +51,18 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	start := s.now()
 	sw := &statusWriter{ResponseWriter: w, statusCode: 0}
 	w = sw
+	// Issue #190 R1 security HIGH: chat-completion responses now
+	// carry per-tenant headers (X-RateLimit-Remaining-Requests).
+	// Forbid intermediary caching unconditionally so a misconfigured
+	// CDN/proxy cannot serve another buyer's rate-limit state via
+	// a shared cache. Vary covers both auth modes (bearer + demo
+	// token) so any proxy that does cache will at least key
+	// correctly per-tenant.
+	setNoStoreHeaders(w.Header())
+	// Use Add (not Set) so an existing CORS-supplied Vary: Origin
+	// is preserved alongside the auth-mode signals we add here.
+	w.Header().Add("Vary", "Authorization")
+	w.Header().Add("Vary", "X-Demo-Token")
 	var accountID, model string
 	var streamMode bool
 	defer func() {
@@ -170,21 +182,32 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		concurrencyErrCode = "demo_concurrency_exceeded"
 		concurrencyErrMsg = "Demo concurrency limit exceeded"
 	}
-	if _, err := s.store.AcquireConcurrency(r.Context(), storage.ConcurrencyRequest{
+	concurrencyDecision, concurrencyErr := s.store.AcquireConcurrency(r.Context(), storage.ConcurrencyRequest{
 		AccountID: subject.AccountID, RequestID: requestID(r), Limit: concurrencyLimit,
 		CreatedAt: s.now(), ExpiresAt: s.now().Add(s.cfg.CoordinatorTimeout() + time.Minute),
-	}); errors.Is(err, storage.ErrQuotaExceeded) {
+	})
+	if errors.Is(concurrencyErr, storage.ErrQuotaExceeded) {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		// Issue #190: surface OpenAI-compatible concurrency
+		// rate-limit headers so client SDKs can self-pace
+		// instead of retrying blindly until 429.
+		setConcurrencyRateLimitHeaders(w, concurrencyLimit, 0, concurrencyRetryAfterSeconds, s.now())
 		writeError(w, http.StatusTooManyRequests, "rate_limit_exceeded", concurrencyErrCode, concurrencyErrMsg)
 		return
-	} else if err != nil {
+	} else if concurrencyErr != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(concurrencyErr, context.Canceled) || errors.Is(concurrencyErr, context.DeadlineExceeded) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "server_error", "concurrency_reservation_failed", "Could not reserve concurrency")
 		return
 	}
+	// Issue #190: emit concurrency headers on admitted requests too
+	// so OpenAI-compatible SDKs can pre-emptively throttle before
+	// they hit the cap. Remaining is derived from the decision's
+	// post-acquire Active count (already includes this request).
+	remainingRequests := concurrencyLimit - concurrencyDecision.Active
+	setConcurrencyRateLimitHeaders(w, concurrencyLimit, remainingRequests, 0, s.now())
 	defer func() {
 		_ = s.store.ReleaseConcurrency(context.Background(), subject.AccountID, requestID(r), s.now())
 	}()
@@ -361,7 +384,12 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	}
 	copyCleanHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-cache, no-transform")
+	// Issue #190 R2 security HIGH: keep no-store (set at handler
+	// entry) on streaming responses too — the SSE body carries
+	// per-tenant X-RateLimit-*-Requests headers and must never be
+	// cacheable by an intermediary. no-cache + no-transform are
+	// the existing SSE-specific guarantees; we prepend no-store.
+	w.Header().Set("Cache-Control", "no-store, no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher, _ := w.(http.Flusher)
