@@ -2244,9 +2244,10 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 // normal SettleReservation path fails after bytes have already
 // flowed to the buyer, the gateway MUST still write a usage_events
 // row (via the new EnsureUsageEvent fallback) so the buyer-side
-// SPEC-006 accounting + audit trail are preserved. SPEC-005 §6.9's
+// SPEC-006 accounting + audit trail are preserved. Per SPEC-005
+// § 10.3 ('SPEC-005 does NOT read SPEC-006 usage tables'),
 // provider-credit composition is computed on the COORDINATOR from
-// request_log (NOT from gateway usage_events), so it's unaffected
+// request_log, NOT from gateway usage_events — so it's unaffected
 // by either the bug or the fix. Pre-#187, the failure mode silently
 // called RefundReservation and lost the buyer-side audit row.
 //

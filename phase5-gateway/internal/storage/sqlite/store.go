@@ -722,6 +722,24 @@ func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) 
 	return nil
 }
 
+// EnsureDemoUsageEvent inserts a demo_usage_events row idempotently
+// — duplicates on the request_id PK silently no-op. The
+// EnsureUsageEvent caller already runs the cross-account payload
+// verify on usage_events, so a benign duplicate here on the
+// demo-side table is not a security regression: an attacker who
+// could pass the usage_events conflict check could already write
+// the demo row legitimately.
+func (s *Store) EnsureDemoUsageEvent(ctx context.Context, event storage.DemoUsageEvent) error {
+	if event.CreatedAt.IsZero() {
+		event.CreatedAt = time.Now().UTC()
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO demo_usage_events(request_id, client_ip, demo_token_hash, window_date, total_tokens, created_at)
+		VALUES(?, ?, ?, ?, ?, ?)`,
+		event.RequestID, event.ClientIP, event.DemoTokenHash, event.WindowDate, event.TotalTokens, encodeTime(event.CreatedAt))
+	return err
+}
+
 func (s *Store) insertUsageEventExec(ctx context.Context, event storage.UsageEvent, idempotent bool) (sql.Result, error) {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()

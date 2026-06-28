@@ -77,6 +77,16 @@ type UsageStore interface {
 	// settle (i.e., the audit trail is unrecoverable for THIS event)
 	// and proceed to refund + log loudly.
 	EnsureUsageEvent(ctx context.Context, event UsageEvent) error
+	// EnsureDemoUsageEvent is the demo-token sibling of
+	// EnsureUsageEvent: idempotently inserts a demo_usage_events row
+	// (INSERT OR IGNORE on request_id PK). Used by the SPEC-006
+	// fallback path when SettleDemoReservation fails so the demo
+	// audit trail required by SPEC-006 §4.5 / §14.3 still exists.
+	// Returns nil on insert OR on a benign duplicate; the gateway's
+	// fallback path bounds collision exposure via the earlier
+	// EnsureUsageEvent call, which already runs the cross-account
+	// payload-mismatch check.
+	EnsureDemoUsageEvent(ctx context.Context, event DemoUsageEvent) error
 	DailyUsage(ctx context.Context, accountID, windowDate string) (usedTokens, activeReservedTokens int64, err error)
 	ReapExpiredReservations(ctx context.Context, now time.Time) (int64, error)
 	// DeleteTerminalQuotaReservations drops quota_reservations rows in a

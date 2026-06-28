@@ -631,8 +631,9 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		//
 		// SCOPE: this fallback restores the BUYER-SIDE billing
 		// invariant. The provider-credit / mirror path lives on the
-		// COORDINATOR (SPEC-005 reads coord request_log, NOT this
-		// gateway-side usage_events row), so the SPEC-005 mirror is
+		// COORDINATOR (per SPEC-005 § 10.3, "SPEC-005 does NOT read
+		// SPEC-006 usage tables"; provider credit composes from
+		// coordinator request_log), so the SPEC-005 mirror is
 		// unaffected by this fix.
 		//
 		// WINDOW: use the reservation window captured at admission
@@ -679,6 +680,31 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 		// Fallback insert succeeded (or the row already existed via
 		// race AND matches by full billing payload). The buyer is now
 		// debited via usage_events.
+		//
+		// R3 architect MINOR: for demo-token requests, also write
+		// the matching demo_usage_events row idempotently so the
+		// demo-side audit trail required by SPEC-006 §4.5 / §14.3
+		// stays consistent with the buyer-side usage_events row.
+		// EnsureDemoUsageEvent is INSERT OR IGNORE on PK; a failure
+		// here is non-fatal because the usage_events row above is the
+		// load-bearing money-path record.
+		if subject.DemoIdentity != "" {
+			if demoErr := s.store.EnsureDemoUsageEvent(context.Background(), storage.DemoUsageEvent{
+				RequestID:     requestID(r),
+				ClientIP:      subject.DemoIdentity,
+				DemoTokenHash: subject.DemoTokenHash,
+				WindowDate:    window,
+				TotalTokens:   prompt + completion,
+				CreatedAt:     s.now(),
+			}); demoErr != nil {
+				slog.Warn("gateway SPEC-006 fallback demo_usage_events insert failed (usage_events row is OK)",
+					"request_id", requestID(r),
+					"account_id", subject.AccountID,
+					"demo_identity", subject.DemoIdentity,
+					"error", demoErr.Error(),
+				)
+			}
+		}
 		//
 		// R2 architect MAJOR: release any still-active reservation
 		// hold so DailyUsage doesn't double-count the buyer's quota
