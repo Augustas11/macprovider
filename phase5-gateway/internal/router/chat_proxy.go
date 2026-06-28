@@ -410,7 +410,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				deltaBytes, hasChoices, parseOK := streamingCompletionDeltaBytes(data)
 				if !parseOK {
 					slog.Warn("streaming gateway estimate saw malformed chunk; truncating stream", "request_id", requestID(r))
-					writeSSEError(w, "Upstream stream returned malformed data", "stream_malformed")
+					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
 					if flusher != nil {
 						flusher.Flush()
 					}
@@ -424,7 +424,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					maxCompletion := maxStreamingCompletionTokens(promptEstimate, maxUsageTokens)
 					if projectedCompletion > maxCompletion {
 						slog.Warn("streaming gateway estimate exceeded request maximum; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", projectedCompletion, "max_completion_tokens", maxCompletion)
-						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "stream_output_exceeded")
+						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
 						if flusher != nil {
 							flusher.Flush()
 						}
@@ -444,7 +444,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 				} else if !hasChoices {
 					slog.Warn("streaming gateway estimate saw data chunk without choices or usage; truncating stream", "request_id", requestID(r))
-					writeSSEError(w, "Upstream stream returned malformed data", "stream_malformed")
+					writeSSEError(w, "Upstream stream returned malformed data", "api_error", "stream_malformed")
 					if flusher != nil {
 						flusher.Flush()
 					}
@@ -473,7 +473,11 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 		line, err := reader.ReadSlice('\n')
 		if errors.Is(err, bufio.ErrBufferFull) {
 			slog.Error("streaming coordinator line exceeded limit", "request_id", requestID(r), "max_line_bytes", maxStreamingLineBytes)
-			writeSSEError(w, "Upstream stream failed", "stream_truncated")
+			// Gateway-side truncation due to oversized line — NOT a
+			// provider disconnect. Keep the legacy stream_truncated /
+			// api_error envelope; this is gateway protection, not
+			// upstream failure.
+			writeSSEError(w, "Upstream stream failed", "api_error", "stream_truncated")
 			if flusher != nil {
 				flusher.Flush()
 			}
@@ -500,7 +504,24 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
-		writeSSEError(w, "Upstream stream failed", "stream_truncated")
+		// SPEC-002 § FR-B6 / issue #186: an unexpected read error on
+		// the coordinator-side stream (not EOF, not buyer cancel) is
+		// the mid-stream provider-disconnect surface. The buyer MUST
+		// see the exact FR-B6 envelope so OpenAI-compatible SDKs
+		// distinguish a truncated successful response from a provider
+		// drop and react (retry / surface to caller). The internal
+		// settlement outcome remains `stream_truncated` per the gateway
+		// settlement convention + SPEC-006 § 17.7 quota-debit policy —
+		// that maps to usage_events.outcome, a separate field from the
+		// buyer-visible SSE error.code.
+		//
+		// NOTE: error.type=server_error signals OpenAI-compatible SDKs
+		// that the request is retriable. Gateway-side Idempotency-Key
+		// dedupe is the open follow-up tracked in issue #200 — until
+		// that lands, a buyer retrying after this envelope MAY incur
+		// a fresh reservation if the coordinator's idempotency-cache
+		// response isn't refund-honored on the gateway side.
+		writeProviderDisconnectedSSE(w)
 		if flusher != nil {
 			flusher.Flush()
 		}
@@ -794,11 +815,31 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
-func writeSSEError(w http.ResponseWriter, message, code string) {
-	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": "api_error", "code": code}})
+// writeSSEError emits an SSE error event followed by `data: [DONE]`.
+// errType is the OpenAI error `type` field. Call sites use this
+// helper for several mid-stream error shapes: malformed upstream
+// chunks (api_error / stream_malformed), max-tokens overflow
+// (api_error / stream_output_exceeded), gateway-side line
+// truncation (api_error / stream_truncated), and the SPEC-002
+// FR-B6 provider-disconnect envelope (server_error /
+// provider_disconnected). The FR-B6 envelope is built via the
+// dedicated writeProviderDisconnectedSSE wrapper so its strings
+// are centralized and resistant to drift.
+func writeSSEError(w http.ResponseWriter, message, errType, code string) {
+	payload, _ := json.Marshal(map[string]any{"error": map[string]any{"message": message, "type": errType, "code": code}})
 	_, _ = w.Write([]byte("data: "))
 	_, _ = w.Write(payload)
 	_, _ = w.Write([]byte("\n\ndata: [DONE]\n\n"))
+}
+
+// writeProviderDisconnectedSSE emits the SPEC-002 § FR-B6 mid-stream
+// provider-disconnect envelope verbatim. The strings are
+// load-bearing: SDK clients route on (error.code, error.type) and
+// any drift breaks compatibility. Centralizing the call here lets
+// future refactors lean on a single named contract surface instead
+// of free-form writeSSEError args. Issue #186; architect R1 NOTE.
+func writeProviderDisconnectedSSE(w http.ResponseWriter) {
+	writeSSEError(w, "Provider disconnected during streaming", "server_error", "provider_disconnected")
 }
 
 func parseChatRequest(body []byte) (chatRequest, error) {
