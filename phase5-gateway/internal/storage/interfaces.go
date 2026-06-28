@@ -58,13 +58,24 @@ type UsageStore interface {
 	SettleDemoReservation(ctx context.Context, settlement ReservationSettlement, demo DemoUsageEvent) error
 	RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error
-	// EnsureUsageEvent inserts a usage_events row idempotently —
-	// returns nil on either fresh insert or pre-existing row at the
-	// same request_id PK. Used as a SPEC-006 § 17.7 fallback path
-	// when SettleReservation fails after bytes have already flowed
-	// to the buyer (issue #187): the buyer MUST be debited and the
-	// audit trail MUST exist even if the reservation row is missing
-	// or in an unexpected state.
+	// EnsureUsageEvent inserts a usage_events row idempotently. The
+	// behavior on a request_id PK conflict is the SPEC-006 § 17.7
+	// money-path contract for the failure-mode fallback in
+	// chat_proxy.settleAfterCommit (issue #187):
+	//
+	//   - Returns nil on a fresh insert.
+	//   - Returns nil when an existing row at the same request_id
+	//     matches the incoming event in EVERY billing-relevant field
+	//     (account_id, demo_identity, window_date, prompt_tokens,
+	//     completion_tokens, total_tokens, token_source, outcome).
+	//   - Returns ErrUsageEventConflict when an existing row at the
+	//     same request_id DIFFERS from the incoming event in any of
+	//     those fields — covers cross-account collisions (#196
+	//     pre-existing) and any same-account payload drift.
+	//
+	// The caller must treat ErrUsageEventConflict as a failure to
+	// settle (i.e., the audit trail is unrecoverable for THIS event)
+	// and proceed to refund + log loudly.
 	EnsureUsageEvent(ctx context.Context, event UsageEvent) error
 	DailyUsage(ctx context.Context, accountID, windowDate string) (usedTokens, activeReservedTokens int64, err error)
 	ReapExpiredReservations(ctx context.Context, now time.Time) (int64, error)

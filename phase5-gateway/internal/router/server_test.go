@@ -2243,10 +2243,12 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 // SPEC-006 § 17.7 / issue #187 (P0 money-path): when the gateway's
 // normal SettleReservation path fails after bytes have already
 // flowed to the buyer, the gateway MUST still write a usage_events
-// row (via the new EnsureUsageEvent fallback) so the buyer is
-// debited and the SPEC-005 § 6.9 mirror-credit path has data to
-// work with. Pre-#187, the failure mode silently called
-// RefundReservation, lost the audit row, and undercharged everyone.
+// row (via the new EnsureUsageEvent fallback) so the buyer-side
+// SPEC-006 accounting + audit trail are preserved. SPEC-005 §6.9's
+// provider-credit composition is computed on the COORDINATOR from
+// request_log (NOT from gateway usage_events), so it's unaffected
+// by either the bug or the fix. Pre-#187, the failure mode silently
+// called RefundReservation and lost the buyer-side audit row.
 //
 // Repro: provider streams partial bytes (well under max_tokens),
 // then errors out. Between the bytes flowing and settlement
@@ -2341,6 +2343,26 @@ func TestStreamingSettlementFallbackWritesUsageEventOnMissingReservation(t *test
 	if source != "gateway_estimated" {
 		t.Fatalf("usage_events token_source = %q, want gateway_estimated", source)
 	}
+	// R2 architect MAJOR: after the fallback writes the usage_events
+	// row, the reservation hold MUST also be released so the buyer's
+	// quota is not double-counted (sum of usage_events.total_tokens
+	// AND active quota_reservations.reserved_tokens). The test
+	// deletes the reservation row out from under settlement, so the
+	// RefundReservation call after EnsureUsageEvent is a no-op
+	// here — but the assertion still pins the contract that there
+	// is NO 'active' reservation row left after the handler returns.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open for post-condition check: %v", err)
+	}
+	defer db.Close()
+	var activeCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'active'`, accountID).Scan(&activeCount); err != nil {
+		t.Fatalf("count active reservations: %v", err)
+	}
+	if activeCount != 0 {
+		t.Fatalf("active quota_reservations rows = %d, want 0 (R2 architect MAJOR: quota double-count regression)", activeCount)
+	}
 }
 
 // TestEnsureUsageEventRejectsCrossAccountConflict pins the ISS-187
@@ -2377,10 +2399,50 @@ func TestEnsureUsageEventRejectsCrossAccountConflict(t *testing.T) {
 	}
 }
 
+// TestEnsureUsageEventRejectsSameIdentityPayloadMismatch pins the
+// R2 code MAJOR fix: the conflict-verify check covers the FULL
+// billing payload (tokens + window_date), not just identity. Without
+// this, a buyer racing two settle paths could pin a low-token row
+// first and then have higher-token settles silently no-op,
+// undercharging themselves.
+func TestEnsureUsageEventRejectsSameIdentityPayloadMismatch(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.Open(context.Background(), dir+"/test.db")
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer st.Close()
+	rid := "77777777-7777-4777-8777-777777777777"
+	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	base := storage.UsageEvent{
+		RequestID: rid, AccountID: "buyer",
+		WindowDate: "2026-06-28", PromptTokens: 5, CompletionTokens: 7, TotalTokens: 12,
+		TokenSource: "gateway_estimated", Outcome: "stream_truncated", CreatedAt: now,
+	}
+	if err := st.InsertUsageEvent(context.Background(), base); err != nil {
+		t.Fatalf("InsertUsageEvent (base row): %v", err)
+	}
+	// Same identity (account, source, outcome) but DIFFERENT
+	// completion tokens — must be rejected as a conflict.
+	bumped := base
+	bumped.CompletionTokens = 50
+	bumped.TotalTokens = 55
+	if err := st.EnsureUsageEvent(context.Background(), bumped); !errors.Is(err, storage.ErrUsageEventConflict) {
+		t.Fatalf("EnsureUsageEvent with bumped tokens: err=%v, want ErrUsageEventConflict", err)
+	}
+	// Same identity + tokens but DIFFERENT window_date — also must
+	// be rejected (covers UTC-midnight-crossing race attempts).
+	shifted := base
+	shifted.WindowDate = "2026-06-29"
+	if err := st.EnsureUsageEvent(context.Background(), shifted); !errors.Is(err, storage.ErrUsageEventConflict) {
+		t.Fatalf("EnsureUsageEvent with shifted window: err=%v, want ErrUsageEventConflict", err)
+	}
+}
+
 // TestEnsureUsageEventAcceptsMatchingRetry confirms the benign
 // idempotency case: a duplicate INSERT with all matching identity
-// fields (account, source, outcome) is treated as success — covers
-// retries / race-with-normal-settle scenarios.
+// + token + window fields is treated as success — covers retries
+// and race-with-normal-settle scenarios.
 func TestEnsureUsageEventAcceptsMatchingRetry(t *testing.T) {
 	dir := t.TempDir()
 	st, err := sqlite.Open(context.Background(), dir+"/test.db")

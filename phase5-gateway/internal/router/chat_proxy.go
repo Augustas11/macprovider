@@ -677,9 +677,20 @@ func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt
 			return
 		}
 		// Fallback insert succeeded (or the row already existed via
-		// race AND matches by account_id). Log at warn — the path
-		// fired, but the spec is now satisfied. Buyer's reservation
-		// hold stays as-is; the subsequent reaper will tidy it.
+		// race AND matches by full billing payload). The buyer is now
+		// debited via usage_events.
+		//
+		// R2 architect MAJOR: release any still-active reservation
+		// hold so DailyUsage doesn't double-count the buyer's quota
+		// (sum of usage_events.total_tokens AND active
+		// quota_reservations.reserved_tokens). RefundReservation is a
+		// no-op when the reservation row is missing or already
+		// terminal (which is the common case here — settle_error was
+		// ErrReservationNotFound or status != 'active'); when the row
+		// IS still active (e.g., settleRequest failed on a transient
+		// DB error, leaving the reservation row in 'active' state),
+		// the call releases the quota hold.
+		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
 		slog.Warn("gateway settlement used SPEC-006 § 17.7 fallback usage_events insert (settle_path failure)",
 			"request_id", requestID(r),
 			"account_id", subject.AccountID,

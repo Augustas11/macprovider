@@ -681,23 +681,40 @@ func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) 
 		return nil
 	}
 	// PK collision. Read the existing row and verify it matches the
-	// incoming event's identity fields. Mismatch => cross-account
-	// collision (or a corrupted prior write), NOT a benign duplicate.
+	// incoming event's billing-relevant fields. Mismatch => cross-
+	// account collision, a corrupted prior write, OR a payload
+	// drift (e.g., same account/request_id retrying with a different
+	// token count) — none of which should silently succeed.
+	// R2 code MAJOR: verify the FULL billing payload (tokens + window
+	// + identity), not just identity. Without this, a buyer who can
+	// race two settle paths with different token counts could pin a
+	// low-token row first and then have higher-token settles
+	// silently no-op.
 	var existing struct {
-		AccountID    string
-		DemoIdentity string
-		TokenSource  string
-		Outcome      string
+		AccountID        string
+		DemoIdentity     string
+		WindowDate       string
+		PromptTokens     int64
+		CompletionTokens int64
+		TotalTokens      int64
+		TokenSource      string
+		Outcome          string
 	}
 	if err := s.db.QueryRowContext(ctx, `
-		SELECT account_id, demo_identity, token_source, outcome
+		SELECT account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome
 		FROM usage_events WHERE request_id = ?`, event.RequestID).Scan(
-		&existing.AccountID, &existing.DemoIdentity, &existing.TokenSource, &existing.Outcome,
+		&existing.AccountID, &existing.DemoIdentity, &existing.WindowDate,
+		&existing.PromptTokens, &existing.CompletionTokens, &existing.TotalTokens,
+		&existing.TokenSource, &existing.Outcome,
 	); err != nil {
 		return err
 	}
 	if existing.AccountID != event.AccountID ||
 		existing.DemoIdentity != event.DemoIdentity ||
+		existing.WindowDate != event.WindowDate ||
+		existing.PromptTokens != event.PromptTokens ||
+		existing.CompletionTokens != event.CompletionTokens ||
+		existing.TotalTokens != event.TotalTokens ||
 		existing.TokenSource != event.TokenSource ||
 		existing.Outcome != event.Outcome {
 		return storage.ErrUsageEventConflict
