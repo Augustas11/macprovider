@@ -19,6 +19,7 @@ import (
 	"net/netip"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -39,9 +40,37 @@ import (
 var errBodyTooLarge = errors.New("upstream response body too large")
 
 const (
-	maxToolCallArgumentsBytes = 256 * 1024
-	maxToolCallArgumentsDepth = 32
+	maxToolCallArgumentsBytes         = 1_048_576
+	maxToolCallArgumentsResponseBytes = 2_097_152
+	maxToolCallArgumentsDepth         = 32
+	maxToolResultBytes                = 256 * 1024
+	maxToolResultsAggregateBytes      = 1_048_576
+	maxChatMessages                   = 256
+	maxAssistantToolCalls             = 128
 )
+
+var spec018RetryableByCode = map[string]bool{
+	"byte_cap_exceeded":                       false,
+	"response_byte_cap_exceeded":              false,
+	"malformed_tool_call_final_json":          true,
+	"provider_stream_downgraded":              true,
+	"request_body_too_large":                  false,
+	"tool_result_too_large":                   false,
+	"tool_results_aggregate_too_large":        false,
+	"tool_call_arguments_too_large":           false,
+	"tool_call_arguments_aggregate_too_large": false,
+	"messages_too_long":                       false,
+	"too_many_tool_calls":                     false,
+	"invalid_tool_call_id":                    false,
+	"tool_call_id_not_found":                  false,
+	"duplicate_tool_call_id":                  false,
+	"tool_call_result_out_of_order":           false,
+	"unsupported_modelID_for_multi_turn":      false,
+}
+
+func spec018Retryable(code string) bool {
+	return spec018RetryableByCode[code]
+}
 
 type Server struct {
 	pool                   *pool.Registry
@@ -88,6 +117,8 @@ type Server struct {
 	receiptKeysLimiters    map[string]receiptKeysBucket
 	receiptKeysMaxEntries  int
 	receiptKeysTTL         time.Duration
+	streamingDowngrade     *streamingDowngradeStore
+	streamingTiming        *streamingTimingCollector
 	// trustedProxies is the parsed CIDR set whose X-Forwarded-For /
 	// X-Real-IP headers the rate-limit keying honors. Pre-parsed at
 	// construction (config.go TrustedProxyPrefixes) so the hot path
@@ -414,6 +445,8 @@ func NewServer(registry *pool.Registry, logger zerolog.Logger, startedAt time.Ti
 		receiptKeysLimiters:    map[string]receiptKeysBucket{},
 		receiptKeysMaxEntries:  4096,
 		receiptKeysTTL:         5 * time.Minute,
+		streamingDowngrade:     newStreamingDowngradeStore(),
+		streamingTiming:        newStreamingTimingCollector(),
 		// Default trusted-proxy set mirrors config.Default()'s
 		// loopback-only posture so callers that construct via NewServer
 		// without WithTrustedProxies keep the production nginx-on-
@@ -444,8 +477,14 @@ func (s *Server) Handler() http.Handler {
 	r.Get("/catalog/current", s.handleCatalogCurrent)
 	r.Get("/catalog/pubkey", s.handleCatalogPubkey)
 	r.Get("/catalog/{catalog_id}", s.handleCatalogFile)
+	r.Get("/metrics/streaming", s.handleStreamingMetrics)
 	r.Post("/v1/chat/completions", s.handleChatCompletions)
 	return r
+}
+
+func (s *Server) handleStreamingMetrics(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write([]byte(s.streamingTiming.prometheusText()))
 }
 
 func (s *Server) InternalHandler() http.Handler {
@@ -1245,6 +1284,13 @@ type chatMessage struct {
 	ToolCalls  json.RawMessage `json:"tool_calls"`
 }
 
+type requestToolCall struct {
+	ID        string
+	Name      string
+	Arguments string
+	MsgIndex  int
+}
+
 func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	externalRequestID := sanitizeExternalRequestID(r.Header.Get("X-Request-ID"))
 	requestID := requestIDForBuyerRequest()
@@ -1277,7 +1323,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	rec.setModel(modelForRequestLog(body))
 	if int64(len(body)) > maxBodyBytes {
 		rec.logBuyerFailure(http.StatusRequestEntityTooLarge, "Request body too large")
-		writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "Request body too large")
+		writeError(w, http.StatusRequestEntityTooLarge, "request_body_too_large", "Request body too large")
 		return
 	}
 	req, status, code, msg := validateChatRequest(body)
@@ -2109,8 +2155,14 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	committed := false
 	finishReason := ""
 	bytesEmitted := 0
+	toolFinal := newStreamToolCallFinalValidator()
+	streamingMode := s.streamingMode(r, provider)
+	streamingBuyer := s.streamingBuyerKey(r)
 	progressAttempt := func(message string, faultFlag string) requestLogAttempt {
 		return requestLogAttempt{Status: http.StatusOK, Error: message, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(bytesEmitted), FaultFlag: faultFlag}
+	}
+	if streamingMode != streamingModeIncremental {
+		return s.forwardWSStreamingBuffered(w, r, requestID, provider, relay, streamingMode, streamingBuyer)
 	}
 	commit := func() {
 		if committed {
@@ -2121,6 +2173,7 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 		w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+		w.Header().Set(streamingModeHeader, streamingMode)
 		w.WriteHeader(http.StatusOK)
 		committed = true
 	}
@@ -2144,6 +2197,18 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 		}
 		if reason := finishReasonFromSSE(checked); reason != "" {
 			finishReason = reason
+		}
+		if err := toolFinal.observeBlock(checked); err != nil {
+			relay.Cancel("malformed_tool_call_stream")
+			if s.streamingDowngrade != nil {
+				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+			}
+			commit()
+			writeSSEError(w, "Provider emitted malformed tool-call stream", "malformed_tool_call")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			return true, wsForwardFailed
 		}
 		commit()
 		if _, err := w.Write([]byte(checked)); err != nil {
@@ -2213,8 +2278,23 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			if end.Status == "complete" && s.zeroTokenFault(end, finishReason) {
 				attempt.FaultFlag = billing.FaultBreakerQualifying
 			}
+			if end.Status == "complete" && !toolFinal.finalCloseOK() {
+				writeSSEError(w, "Provider closed before tool-call stream completed", "tool_call_final_close_failed")
+				if s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
+				attempt.Error = "Provider closed before tool-call stream completed"
+				attempt.ErrorCode = "tool_call_final_close_failed"
+				attempt.FaultFlag = billing.FaultBreakerQualifying
+				if attempt.CompletionTokens == nil {
+					attempt.EstimatedCompTokens = s.estimatedCompletionTokensFromBytes(bytesEmitted)
+				}
+			}
 			if end.Status != "complete" && end.Status != "cancelled" {
 				writeSSEError(w, "Provider failed during streaming", "provider_error")
+				if toolFinal.toolOpened && s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
 				attempt.Error = endErrorMessage(end)
 				attempt.ErrorCode = spec001EndStatus(end.Status)
 				attempt.FaultFlag = billing.FaultBreakerQualifying
@@ -2224,6 +2304,9 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 			}
 			if flusher != nil {
 				flusher.Flush()
+			}
+			if end.Status == "complete" && attempt.FaultFlag == "" && s.streamingDowngrade != nil {
+				s.streamingDowngrade.recordClean(streamingBuyer, provider.ProviderID, s.now())
 			}
 			return wsForwardComplete, attempt
 		case err := <-relay.Errors:
@@ -2275,6 +2358,90 @@ func (s *Server) forwardWSStreaming(w http.ResponseWriter, r *http.Request, requ
 	}
 }
 
+func (s *Server) forwardWSStreamingBuffered(w http.ResponseWriter, r *http.Request, requestID string, provider pool.Provider, relay *providerws.RelayStream, streamingMode, streamingBuyer string) (wsForwardResult, requestLogAttempt) {
+	guard := tier2.NewPillarDGuard(s.tier2Config(), requestID, provider, s.log)
+	var raw bytes.Buffer
+	toolFinal := newStreamToolCallFinalValidator()
+	for {
+		select {
+		case <-r.Context().Done():
+			relay.Cancel("buyer_disconnected")
+			return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
+		case chunk, ok := <-relay.Chunks:
+			if !ok {
+				continue
+			}
+			checked, stop, err := guard.CheckStreamingChunk(chunk.Data)
+			if err != nil {
+				relay.Cancel("tier2_encoding_invalid")
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider returned invalid Tier2 output encoding", FaultFlag: billing.FaultBreakerQualifying}
+			}
+			if raw.Len() > int(maxUpstreamResponseBodyBytes)-len(checked) {
+				relay.Cancel("buffered_stream_too_large")
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider buffered stream exceeded cap", FaultFlag: billing.FaultBreakerQualifying}
+			}
+			raw.WriteString(checked)
+			if err := toolFinal.observeBlock(checked); err != nil {
+				relay.Cancel("malformed_tool_call_stream")
+				if s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying}
+			}
+			if stop {
+				relay.Cancel("tier2_output_truncated")
+				return wsForwardComplete, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.estimatedCompletionTokensFromBytes(raw.Len())}
+			}
+		case end := <-relay.Done:
+			if end.Status != "complete" {
+				if toolFinal.toolOpened && s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
+				return wsForwardFailed, requestLogAttempt{Status: wsEndHTTPStatus(end.Status), Error: endErrorMessage(end), ErrorCode: spec001EndStatus(end.Status), FaultFlag: billing.FaultBreakerQualifying}
+			}
+			if !toolFinal.finalCloseOK() {
+				if s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider closed before tool-call stream completed", ErrorCode: "tool_call_final_close_failed", FaultFlag: billing.FaultBreakerQualifying}
+			}
+			out, err := consolidatedToolCallSSE(raw.Bytes())
+			if err != nil {
+				if s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
+				return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying}
+			}
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			w.Header().Set("X-Accel-Buffering", "no")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+			w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+			w.Header().Set(streamingModeHeader, streamingMode)
+			w.WriteHeader(http.StatusOK)
+			if _, err := w.Write(out); err != nil {
+				relay.Cancel("buyer_disconnected")
+				return wsForwardCancelled, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
+			}
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			if s.streamingDowngrade != nil {
+				s.streamingDowngrade.recordClean(streamingBuyer, provider.ProviderID, s.now())
+			}
+			attempt := requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(len(out))}
+			attempt.PromptTokens, attempt.CompletionTokens = tokenPointersFromUsageObject(end.Usage)
+			return wsForwardComplete, attempt
+		case err := <-relay.Errors:
+			s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("ws buffered streaming relay failed")
+			if toolFinal.toolOpened && s.streamingDowngrade != nil {
+				s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+			}
+			return wsForwardFailed, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider failed during buffered streaming", FaultFlag: billing.FaultBreakerQualifying}
+		}
+	}
+}
+
 func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, requestID string, body []byte, provider pool.Provider, modelScope string, timeout time.Duration) (wsForwardResult, int, requestLogAttempt) {
 	upstreamURL := provider.EndpointURL + "/v1/chat/completions"
 	attemptCtx := r.Context()
@@ -2306,6 +2473,8 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		return wsForwardFailed, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: err.Error()}
 	}
 	defer resp.Body.Close()
+	streamingMode := s.streamingMode(r, provider)
+	streamingBuyer := s.streamingBuyerKey(r)
 	if resp.StatusCode != http.StatusOK {
 		s.log.Warn().Int("status", resp.StatusCode).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider returned non-200")
 		s.handleProviderFailure(provider, resp.StatusCode)
@@ -2315,6 +2484,9 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			return wsForwardTimedOut, resp.StatusCode, attempt
 		}
 		return wsForwardFailed, resp.StatusCode, attempt
+	}
+	if streamingMode != streamingModeIncremental {
+		return s.forwardStreamingBuffered(w, r, requestID, resp, provider, modelScope, streamingMode, streamingBuyer)
 	}
 
 	// Issue #92: do NOT WriteHeader until the provider has streamed at
@@ -2337,6 +2509,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// only fires before the first commit-worthy event arrives. Once
 	// committed, EOF/error are committed-terminal exactly as before.
 	reader := bufio.NewReader(resp.Body)
+	toolFinal := newStreamToolCallFinalValidator()
 	var preCommit bytes.Buffer
 	var lineBuf bytes.Buffer
 	sawCommitWorthyDataLine := false
@@ -2356,6 +2529,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
 		w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+		w.Header().Set(streamingModeHeader, streamingMode)
 		w.WriteHeader(http.StatusOK)
 	}
 	// NOTE: HTTP-streaming sticky write is deferred to after io.EOF (clean
@@ -2371,6 +2545,7 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// '\n' the accumulated line is processed: tokens extracted, appended
 	// to preCommit, and the commit predicate (a commit-worthy data line
 	// followed by a blank-line terminator) is evaluated.
+	var providerToolCallOpen time.Time
 	preCommitErr := func() error {
 		for {
 			b, err := reader.ReadByte()
@@ -2389,9 +2564,18 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			if p, c := tokenPointersFromSSE(line); p != nil || c != nil {
 				promptTok, completionTok = p, c
 			}
+			if providerToolCallOpen.IsZero() {
+				if openedAt, ok := toolCallOpenFromSSELine(line); ok {
+					providerToolCallOpen = openedAt
+				}
+			}
 			status := inspectCommitWorthyDataLine(line)
 			if status == commitLineMalformedToolCalls {
 				s.log.Warn().Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted malformed pre-commit tool_calls delta")
+				return errPreCommitMalformedToolCalls
+			}
+			if err := toolFinal.observeLine(line); err != nil {
+				s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider emitted invalid pre-commit tool_calls stream")
 				return errPreCommitMalformedToolCalls
 			}
 			preCommit.Write(line)
@@ -2439,9 +2623,17 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 	// From this point on, errors are committed-terminal — wsForwardCancelled
 	// / wsForwardProviderDisconnectedCommitted / wsForwardComplete only.
 	writeBuyerHeaders()
+	firstForwardedAt := s.now()
 	if _, writeErr := w.Write(preCommit.Bytes()); writeErr != nil {
 		s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer pre-commit write failed")
 		return wsForwardCancelled, 0, progressAttempt("Buyer disconnected during streaming", billing.FaultNone)
+	}
+	if s.streamingTiming != nil {
+		timingHeaders := resp.Header.Clone()
+		timingHeaders.Set(streamingTimingCoordinatorHeader, strconv.FormatInt(firstForwardedAt.UnixMilli(), 10))
+		copyTimingHeader(timingHeaders, r.Header, streamingTimingGatewayByteHeader)
+		copyTimingHeader(timingHeaders, r.Header, streamingTimingSkewHeader)
+		s.streamingTiming.observeFromHeadersAndProviderOpen(requestID, provider.ProviderID, streamingMode, timingHeaders, firstForwardedAt, providerToolCallOpen)
 	}
 	bytesEmitted = preCommit.Len()
 	preCommit.Reset()
@@ -2453,6 +2645,17 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		if len(line) > 0 {
 			if p, c := tokenPointersFromSSE(line); p != nil || c != nil {
 				promptTok, completionTok = p, c
+			}
+			if observeErr := toolFinal.observeLine(line); observeErr != nil {
+				s.log.Warn().Err(observeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider failed tool-call final-close validation")
+				if s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
+				writeSSEError(w, "Provider emitted malformed tool-call stream", "malformed_tool_call")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider emitted malformed tool-call stream", billing.FaultBreakerQualifying)
 			}
 			if _, writeErr := w.Write(line); writeErr != nil {
 				s.log.Warn().Err(writeErr).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buyer streaming write failed")
@@ -2467,6 +2670,20 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 			continue
 		}
 		if err == io.EOF {
+			if !toolFinal.finalCloseOK() {
+				s.log.Warn().Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("streaming provider closed before tool-call final-close conditions")
+				if s.streamingDowngrade != nil {
+					s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+				}
+				writeSSEError(w, "Provider closed before tool-call stream completed", "tool_call_final_close_failed")
+				if flusher != nil {
+					flusher.Flush()
+				}
+				return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider closed before tool-call stream completed", billing.FaultBreakerQualifying)
+			}
+			if s.streamingDowngrade != nil {
+				s.streamingDowngrade.recordClean(streamingBuyer, provider.ProviderID, s.now())
+			}
 			s.stickyStore(r.Header, provider, modelScope)
 			return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, PromptTokens: promptTok, CompletionTokens: completionTok, EstimatedCompTokens: s.observedCompletionTokensFromBytes(bytesEmitted)}
 		}
@@ -2486,6 +2703,185 @@ func (s *Server) forwardStreaming(w http.ResponseWriter, r *http.Request, reques
 		}
 		return wsForwardProviderDisconnectedCommitted, http.StatusOK, progressAttempt("Provider disconnected during streaming", billing.FaultBreakerQualifying)
 	}
+}
+
+func (s *Server) forwardStreamingBuffered(w http.ResponseWriter, r *http.Request, requestID string, resp *http.Response, provider pool.Provider, modelScope, streamingMode, streamingBuyer string) (wsForwardResult, int, requestLogAttempt) {
+	raw, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
+	if err != nil {
+		s.log.Warn().Err(err).Str("request_id", requestID).Str("provider_id", provider.ProviderID).Msg("buffered streaming provider body read failed")
+		s.handleProviderFailure(provider, http.StatusBadGateway)
+		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider buffered stream failed", FaultFlag: billing.FaultBreakerQualifying}
+	}
+	validator := newStreamToolCallFinalValidator()
+	if err := validator.observeBlock(string(raw)); err != nil || !validator.finalCloseOK() {
+		if s.streamingDowngrade != nil {
+			s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+		}
+		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying}
+	}
+	out, err := consolidatedToolCallSSE(raw)
+	if err != nil {
+		if s.streamingDowngrade != nil {
+			s.streamingDowngrade.recordMalformed(streamingBuyer, provider.ProviderID, s.now())
+		}
+		return wsForwardProviderDisconnected, http.StatusBadGateway, requestLogAttempt{Status: http.StatusBadGateway, Error: "Provider emitted malformed buffered tool-call stream", ErrorCode: "provider_stream_downgraded", FaultFlag: billing.FaultBreakerQualifying}
+	}
+	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-MacProvider-Provider", provider.ProviderID)
+	w.Header().Set("X-MacProvider-Route", provider.AssignedID)
+	w.Header().Set(streamingModeHeader, streamingMode)
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write(out); err != nil {
+		return wsForwardCancelled, 0, requestLogAttempt{Status: http.StatusOK, Error: "Buyer disconnected during buffered streaming", FaultFlag: billing.FaultNone}
+	}
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	if s.streamingDowngrade != nil {
+		s.streamingDowngrade.recordClean(streamingBuyer, provider.ProviderID, s.now())
+	}
+	s.stickyStore(r.Header, provider, modelScope)
+	return wsForwardComplete, http.StatusOK, requestLogAttempt{Status: http.StatusOK, EstimatedCompTokens: s.observedCompletionTokensFromBytes(len(out))}
+}
+
+type bufferedToolCall struct {
+	Index     int
+	ID        string
+	Type      string
+	Name      string
+	Arguments string
+}
+
+func consolidatedToolCallSSE(raw []byte) ([]byte, error) {
+	calls, err := collectStreamingToolCalls(raw)
+	if err != nil {
+		return nil, err
+	}
+	if len(calls) == 0 {
+		return raw, nil
+	}
+	toolCalls := make([]map[string]any, 0, len(calls))
+	for _, call := range calls {
+		toolCalls = append(toolCalls, map[string]any{
+			"index": call.Index,
+			"id":    call.ID,
+			"type":  call.Type,
+			"function": map[string]any{
+				"name":      call.Name,
+				"arguments": call.Arguments,
+			},
+		})
+	}
+	chunk := map[string]any{"choices": []map[string]any{{
+		"delta":         map[string]any{"tool_calls": toolCalls},
+		"finish_reason": nil,
+	}}}
+	finish := map[string]any{"choices": []map[string]any{{
+		"delta":         map[string]any{},
+		"finish_reason": "tool_calls",
+	}}}
+	var out bytes.Buffer
+	for _, event := range []map[string]any{chunk, finish} {
+		data, err := json.Marshal(event)
+		if err != nil {
+			return nil, err
+		}
+		out.WriteString("data: ")
+		out.Write(data)
+		out.WriteString("\n\n")
+	}
+	out.WriteString("data: [DONE]\n\n")
+	return out.Bytes(), nil
+}
+
+func collectStreamingToolCalls(raw []byte) ([]bufferedToolCall, error) {
+	byIndex := map[int]*bufferedToolCall{}
+	var order []int
+	finished := false
+	done := false
+	for _, line := range bytes.Split(raw, []byte("\n")) {
+		trimmed := bytes.TrimSpace(line)
+		if !bytes.HasPrefix(trimmed, []byte("data:")) {
+			continue
+		}
+		payload := bytes.TrimSpace(trimmed[len("data:"):])
+		if len(payload) == 0 {
+			continue
+		}
+		if bytes.Equal(payload, []byte("[DONE]")) {
+			done = true
+			continue
+		}
+		var event struct {
+			Error   any `json:"error"`
+			Choices []struct {
+				Delta struct {
+					ToolCalls []struct {
+						Index    *int   `json:"index"`
+						ID       string `json:"id"`
+						Type     string `json:"type"`
+						Function struct {
+							Name      string  `json:"name"`
+							Arguments *string `json:"arguments"`
+						} `json:"function"`
+					} `json:"tool_calls"`
+				} `json:"delta"`
+				FinishReason *string `json:"finish_reason"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal(payload, &event); err != nil {
+			return nil, err
+		}
+		if event.Error != nil {
+			return nil, errors.New("terminal error in provider stream")
+		}
+		for _, choice := range event.Choices {
+			if choice.FinishReason != nil && *choice.FinishReason == "tool_calls" {
+				finished = true
+			}
+			for _, delta := range choice.Delta.ToolCalls {
+				if delta.Index == nil {
+					return nil, errors.New("tool call delta missing index")
+				}
+				call := byIndex[*delta.Index]
+				if call == nil {
+					call = &bufferedToolCall{Index: *delta.Index}
+					byIndex[*delta.Index] = call
+					order = append(order, *delta.Index)
+				}
+				if delta.ID != "" {
+					call.ID = delta.ID
+				}
+				if delta.Type != "" {
+					call.Type = delta.Type
+				}
+				if delta.Function.Name != "" {
+					call.Name = delta.Function.Name
+				}
+				if delta.Function.Arguments != nil {
+					call.Arguments += *delta.Function.Arguments
+				}
+			}
+		}
+	}
+	if len(order) == 0 {
+		return nil, nil
+	}
+	if !finished || !done {
+		return nil, errors.New("tool call stream missing final close")
+	}
+	sort.Ints(order)
+	out := make([]bufferedToolCall, 0, len(order))
+	for _, index := range order {
+		call := byIndex[index]
+		if call.ID == "" || call.Type != "function" || call.Name == "" || !validToolCallArgumentsObject(call.Arguments) {
+			return nil, errors.New("malformed consolidated tool call")
+		}
+		out = append(out, *call)
+	}
+	return out, nil
 }
 
 // errPreCommitCapExceeded is the sentinel returned by forwardStreaming's
@@ -2701,7 +3097,10 @@ func isCommitWorthyToolCallDelta(raw json.RawMessage) bool {
 	if fn.Name == "" || fn.Arguments == nil {
 		return false
 	}
-	return validToolCallArgumentsObject(*fn.Arguments)
+	if len([]byte(*fn.Arguments)) > maxToolCallArgumentsBytes {
+		return false
+	}
+	return true
 }
 
 func validToolCallArgumentsObject(arguments string) bool {
@@ -2722,6 +3121,137 @@ func validToolCallArgumentsObject(arguments string) bool {
 		return false
 	}
 	return obj != nil
+}
+
+type streamToolCallFinalValidator struct {
+	opened       map[int]struct{}
+	arguments    map[int]string
+	totalBytes   int
+	toolOpened   bool
+	finishedTool bool
+	done         bool
+}
+
+func newStreamToolCallFinalValidator() *streamToolCallFinalValidator {
+	return &streamToolCallFinalValidator{
+		opened:    map[int]struct{}{},
+		arguments: map[int]string{},
+	}
+}
+
+func (v *streamToolCallFinalValidator) observeLine(line []byte) error {
+	trimmed := bytes.TrimRight(line, "\r\n")
+	trimmed = bytes.TrimPrefix(trimmed, []byte{0xEF, 0xBB, 0xBF})
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return nil
+	}
+	content := bytes.TrimSpace(trimmed[len("data:"):])
+	if len(content) == 0 {
+		return nil
+	}
+	if bytes.Equal(content, []byte("[DONE]")) {
+		v.done = true
+		return nil
+	}
+	var event struct {
+		Choices []struct {
+			Delta struct {
+				Content   *string           `json:"content"`
+				ToolCalls []json.RawMessage `json:"tool_calls"`
+			} `json:"delta"`
+			FinishReason *string `json:"finish_reason"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(content, &event); err != nil {
+		return nil
+	}
+	for _, choice := range event.Choices {
+		if choice.FinishReason != nil && *choice.FinishReason == "tool_calls" {
+			v.finishedTool = true
+		}
+		if v.toolOpened && choice.Delta.Content != nil && *choice.Delta.Content != "" {
+			return errors.New("tool-call stream fell back to content")
+		}
+		for _, rawCall := range choice.Delta.ToolCalls {
+			if err := v.observeToolCall(rawCall); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (v *streamToolCallFinalValidator) observeBlock(block string) error {
+	for _, line := range bytes.SplitAfter([]byte(block), []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		if err := v.observeLine(line); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (v *streamToolCallFinalValidator) observeToolCall(raw json.RawMessage) error {
+	var call struct {
+		Index    *int            `json:"index"`
+		ID       string          `json:"id"`
+		Type     string          `json:"type"`
+		Function json.RawMessage `json:"function"`
+	}
+	if err := json.Unmarshal(raw, &call); err != nil {
+		return errors.New("malformed tool_calls delta")
+	}
+	if call.Index == nil || *call.Index < 0 || len(call.Function) == 0 || bytes.Equal(call.Function, []byte("null")) {
+		return errors.New("malformed tool_calls delta")
+	}
+	var fn struct {
+		Name      string  `json:"name"`
+		Arguments *string `json:"arguments"`
+	}
+	if err := json.Unmarshal(call.Function, &fn); err != nil {
+		return errors.New("malformed tool_calls function delta")
+	}
+	index := *call.Index
+	if _, ok := v.opened[index]; !ok {
+		if call.ID == "" || call.Type != "function" || fn.Name == "" || fn.Arguments == nil {
+			return errors.New("malformed tool-call opening delta")
+		}
+		v.opened[index] = struct{}{}
+		v.toolOpened = true
+	}
+	if fn.Arguments == nil {
+		return nil
+	}
+	next := v.arguments[index] + *fn.Arguments
+	nextBytes := len([]byte(next))
+	prevBytes := len([]byte(v.arguments[index]))
+	if nextBytes > maxToolCallArgumentsBytes {
+		return errors.New("byte_cap_exceeded")
+	}
+	if v.totalBytes-prevBytes+nextBytes > maxToolCallArgumentsResponseBytes {
+		return errors.New("response_byte_cap_exceeded")
+	}
+	v.arguments[index] = next
+	v.totalBytes = v.totalBytes - prevBytes + nextBytes
+	return nil
+}
+
+func (v *streamToolCallFinalValidator) finalCloseOK() bool {
+	if !v.toolOpened {
+		return true
+	}
+	if !v.finishedTool || !v.done {
+		return false
+	}
+	for index := range v.opened {
+		arguments, ok := v.arguments[index]
+		if !ok || !validToolCallArgumentsObject(arguments) {
+			return false
+		}
+	}
+	return true
 }
 
 func jsonArgumentsDepthWithinLimit(dec *json.Decoder, maxDepth int) bool {
@@ -3087,7 +3617,17 @@ func validateOptionalFields(raw map[string]json.RawMessage) (int, string, string
 }
 
 func validateMessages(messages []chatMessage) (int, string, string) {
-	for _, m := range messages {
+	if len(messages) > maxChatMessages {
+		return http.StatusBadRequest, "messages_too_long", "messages may contain at most 256 entries"
+	}
+
+	allIDs := map[string]int{}
+	var parsedByMessage = make([][]requestToolCall, len(messages))
+	totalToolCalls := 0
+	totalArgumentBytes := 0
+	duplicateAssistantID := false
+
+	for i, m := range messages {
 		switch m.Role {
 		case "system", "user":
 			if !rawStringNonEmpty(m.Content) {
@@ -3102,12 +3642,75 @@ func validateMessages(messages []chatMessage) (int, string, string) {
 			if !hasContent && !hasTools {
 				return http.StatusBadRequest, "invalid_request", "Assistant message requires content or tool_calls"
 			}
+			if hasTools {
+				calls, status, code, msg := parseRequestToolCalls(m.ToolCalls, i)
+				if status != 0 {
+					return status, code, msg
+				}
+				totalToolCalls += len(calls)
+				if totalToolCalls > maxAssistantToolCalls {
+					return http.StatusBadRequest, "too_many_tool_calls", "assistant tool_calls may contain at most 128 entries"
+				}
+				for _, call := range calls {
+					if !validRequestToolCallID(call.ID) {
+						return http.StatusBadRequest, "invalid_tool_call_id", "Invalid tool_call id"
+					}
+					if _, exists := allIDs[call.ID]; exists {
+						duplicateAssistantID = true
+					} else {
+						allIDs[call.ID] = i
+					}
+					totalArgumentBytes += len([]byte(call.Arguments))
+					if totalArgumentBytes > maxToolCallArgumentsResponseBytes {
+						return http.StatusRequestEntityTooLarge, "tool_call_arguments_aggregate_too_large", "assistant-history tool_call arguments exceed aggregate cap"
+					}
+				}
+				parsedByMessage[i] = calls
+			}
 		case "tool":
-			if m.ToolCallID == "" || !rawString(m.Content) {
-				return http.StatusBadRequest, "invalid_request", "Invalid tool message"
+			if m.ToolCallID == "" || !validRequestToolCallID(m.ToolCallID) {
+				return http.StatusBadRequest, "invalid_tool_call_id", "Invalid tool_call_id"
+			}
+			if string(m.Content) == "null" || !rawString(m.Content) {
+				return http.StatusBadRequest, "invalid_request", "Invalid tool message content"
 			}
 		default:
 			return http.StatusBadRequest, "invalid_request", "Invalid message role"
+		}
+	}
+	if duplicateAssistantID {
+		return http.StatusBadRequest, "duplicate_tool_call_id", "Duplicate assistant tool_call id"
+	}
+
+	seenAssistantIDs := map[string]struct{}{}
+	fulfilledToolIDs := map[string]struct{}{}
+	totalToolResultBytes := 0
+	for i, m := range messages {
+		for _, call := range parsedByMessage[i] {
+			seenAssistantIDs[call.ID] = struct{}{}
+		}
+		if m.Role != "tool" {
+			continue
+		}
+		if _, ok := allIDs[m.ToolCallID]; !ok {
+			return http.StatusBadRequest, "tool_call_id_not_found", "tool_call_id does not reference an earlier assistant tool_call"
+		}
+		if _, ok := seenAssistantIDs[m.ToolCallID]; !ok {
+			return http.StatusBadRequest, "tool_call_result_out_of_order", "tool result appears before matching assistant tool_call"
+		}
+		if _, exists := fulfilledToolIDs[m.ToolCallID]; exists {
+			return http.StatusBadRequest, "duplicate_tool_call_id", "Duplicate tool result for tool_call_id"
+		}
+		fulfilledToolIDs[m.ToolCallID] = struct{}{}
+		var content string
+		_ = json.Unmarshal(m.Content, &content)
+		contentBytes := len([]byte(content))
+		if contentBytes > maxToolResultBytes {
+			return http.StatusRequestEntityTooLarge, "tool_result_too_large", "tool message content exceeds 256 KiB"
+		}
+		totalToolResultBytes += contentBytes
+		if totalToolResultBytes > maxToolResultsAggregateBytes {
+			return http.StatusRequestEntityTooLarge, "tool_results_aggregate_too_large", "tool message content exceeds aggregate cap"
 		}
 	}
 	return 0, "", ""
@@ -3153,6 +3756,52 @@ func validateTools(raw map[string]json.RawMessage, messages []chatMessage) (int,
 		}
 	}
 	return 0, "", ""
+}
+
+func parseRequestToolCalls(raw json.RawMessage, messageIndex int) ([]requestToolCall, int, string, string) {
+	var wire []struct {
+		ID       string `json:"id"`
+		Type     string `json:"type"`
+		Function struct {
+			Name      string `json:"name"`
+			Arguments string `json:"arguments"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(raw, &wire); err != nil || len(wire) == 0 {
+		return nil, http.StatusBadRequest, "invalid_tools", "Invalid tool_calls"
+	}
+	out := make([]requestToolCall, 0, len(wire))
+	for _, call := range wire {
+		if call.ID == "" || call.Type != "function" || call.Function.Name == "" {
+			return nil, http.StatusBadRequest, "invalid_tools", "Invalid tool_calls"
+		}
+		if len([]byte(call.Function.Arguments)) > maxToolCallArgumentsBytes {
+			return nil, http.StatusRequestEntityTooLarge, "tool_call_arguments_too_large", "tool_call arguments exceed 1 MiB"
+		}
+		if !validToolCallArgumentsObject(call.Function.Arguments) {
+			return nil, http.StatusBadRequest, "invalid_tools", "Invalid tool_call arguments"
+		}
+		out = append(out, requestToolCall{ID: call.ID, Name: call.Function.Name, Arguments: call.Function.Arguments, MsgIndex: messageIndex})
+	}
+	return out, 0, "", ""
+}
+
+func validRequestToolCallID(value string) bool {
+	if !strings.HasPrefix(value, "call_") {
+		return false
+	}
+	suffix := value[5:]
+	if len(suffix) < 16 || len(suffix) > 64 {
+		return false
+	}
+	for i := 0; i < len(suffix); i++ {
+		c := suffix[i]
+		if (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func rawString(raw json.RawMessage) bool {
@@ -4185,9 +4834,44 @@ func wsEndHTTPStatus(status string) int {
 	}
 }
 
-func writeSSEError(w http.ResponseWriter, message, code string) {
-	_, _ = fmt.Fprintf(w, "data: {\"error\":{\"message\":%q,\"type\":\"server_error\",\"code\":%q}}\n\n", message, code)
+func writeSSEError(w http.ResponseWriter, message, code string, requestID ...string) {
+	id := any(nil)
+	if len(requestID) > 0 && strings.TrimSpace(requestID[0]) != "" {
+		id = requestID[0]
+	}
+	payload, _ := json.Marshal(map[string]any{
+		"error": map[string]any{
+			"message":        message,
+			"type":           spec018ErrorType(code, "server_error"),
+			"param":          nil,
+			"code":           code,
+			"retryable":      spec018Retryable(code),
+			"request_id":     id,
+			"inference_ran":  true,
+			"settlement_ran": false,
+		},
+	})
+	_, _ = w.Write([]byte("data: "))
+	_, _ = w.Write(payload)
+	_, _ = w.Write([]byte("\n\n"))
 	_, _ = w.Write([]byte("data: [DONE]\n\n"))
+}
+
+func spec018ErrorType(code, fallback string) string {
+	switch code {
+	case "request_body_too_large", "tool_result_too_large", "tool_results_aggregate_too_large",
+		"tool_call_arguments_too_large", "tool_call_arguments_aggregate_too_large",
+		"messages_too_long", "too_many_tool_calls", "invalid_tool_call_id",
+		"tool_call_id_not_found", "duplicate_tool_call_id",
+		"tool_call_result_out_of_order", "unsupported_modelID_for_multi_turn":
+		return "invalid_request_error"
+	case "byte_cap_exceeded", "response_byte_cap_exceeded", "malformed_tool_call_final_json":
+		return "upstream_provider_error"
+	case "provider_stream_downgraded":
+		return "api_error"
+	default:
+		return fallback
+	}
 }
 
 func (s *Server) handleProviderFailure(provider pool.Provider, status int) {
@@ -4340,10 +5024,14 @@ func writeErrorTyped(w http.ResponseWriter, status int, typ, code, message strin
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"error": map[string]any{
-			"message": message,
-			"type":    typ,
-			"param":   nil,
-			"code":    code,
+			"message":        message,
+			"type":           typ,
+			"param":          nil,
+			"code":           code,
+			"retryable":      spec018Retryable(code),
+			"request_id":     nil,
+			"inference_ran":  false,
+			"settlement_ran": false,
 		},
 	})
 }

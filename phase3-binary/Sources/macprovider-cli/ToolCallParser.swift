@@ -1,8 +1,9 @@
 import Foundation
 
 enum ToolCallParser {
-    private static let maxArgumentJSONBytes = 256 * 1024
-    private static let maxArgumentJSONDepth = 32
+    static let SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP = 1_048_576
+    static let SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP = 2_097_152
+    static let SPEC018_ARGUMENTS_MAX_JSON_DEPTH = 32
 
     static func parseToolCalls(
         rawOutput: String,
@@ -36,6 +37,7 @@ enum ToolCallParser {
         var searchStart = rawOutput.startIndex
         var cleaned = ""
         var calls: [ToolCall] = []
+        var responseArgumentBytes = 0
 
         while let startRange = rawOutput.range(of: format.startDelimiter, range: searchStart..<rawOutput.endIndex) {
             cleaned += rawOutput[searchStart..<startRange.lowerBound]
@@ -44,7 +46,16 @@ enum ToolCallParser {
                 throw ParseError.missingEndDelimiter
             }
             let body = String(rawOutput[bodyStart..<endRange.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
-            calls.append(try parseCall(body, argumentKey: format.argumentKey))
+            let call = try parseCall(body, argumentKey: format.argumentKey)
+            let argumentBytes = call.arguments.utf8.count
+            guard argumentBytes <= SPEC018_ARGUMENTS_PER_CALL_BYTE_CAP else {
+                throw ParseError.byteCapExceeded
+            }
+            responseArgumentBytes += argumentBytes
+            guard responseArgumentBytes <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
+                throw ParseError.responseByteCapExceeded
+            }
+            calls.append(call)
             searchStart = endRange.upperBound
         }
 
@@ -272,7 +283,7 @@ enum ToolCallParser {
     }
 
     private static func validateNoDuplicateJSONKeys(_ rawJSON: String) throws {
-        guard rawJSON.utf8.count <= maxArgumentJSONBytes else {
+        guard rawJSON.utf8.count <= SPEC018_ARGUMENTS_PER_RESPONSE_BYTE_CAP else {
             throw ParseError.invalidArguments
         }
         var validator = JSONDuplicateKeyValidator(rawJSON)
@@ -289,6 +300,8 @@ enum ToolCallParser {
         case invalidUTF8
         case invalidShape
         case invalidArguments
+        case byteCapExceeded
+        case responseByteCapExceeded
     }
 
     private struct JSONDuplicateKeyValidator {
@@ -336,7 +349,7 @@ enum ToolCallParser {
         }
 
         private mutating func parseObject(depth: Int) throws {
-            guard depth <= maxArgumentJSONDepth else {
+            guard depth <= SPEC018_ARGUMENTS_MAX_JSON_DEPTH else {
                 throw ParseError.invalidArguments
             }
             advance()
@@ -372,7 +385,7 @@ enum ToolCallParser {
         }
 
         private mutating func parseArray(depth: Int) throws {
-            guard depth <= maxArgumentJSONDepth else {
+            guard depth <= SPEC018_ARGUMENTS_MAX_JSON_DEPTH else {
                 throw ParseError.invalidArguments
             }
             advance()

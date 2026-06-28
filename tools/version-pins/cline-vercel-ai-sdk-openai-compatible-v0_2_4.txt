@@ -1,0 +1,2 @@
+@ai-sdk/openai-compatible==2.0.38
+source: cline/cline sdk/packages/llms/package.json at 92806c60 declares ^2.0.38

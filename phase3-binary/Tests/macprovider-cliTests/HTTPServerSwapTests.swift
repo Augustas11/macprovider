@@ -13,7 +13,7 @@ final class HTTPServerSwapTests: XCTestCase {
         XCTAssertEqual(error?.status, 503)
         XCTAssertEqual(error?.code, "provider_loading")
         XCTAssertEqual(error?.type, "service_unavailable")
-        XCTAssertEqual(error?.envelopeJSONString, #"{"error":{"code":"provider_loading","message":"Provider is loading a new model and is temporarily unavailable. Retry after the indicated interval.","param":null,"type":"service_unavailable"}}"#)
+        XCTAssertEqual(error?.envelopeJSONString, #"{"error":{"code":"provider_loading","inference_ran":false,"message":"Provider is loading a new model and is temporarily unavailable. Retry after the indicated interval.","param":null,"request_id":null,"retryable":false,"settlement_ran":false,"type":"service_unavailable"}}"#)
     }
 
     func testInferenceReturns503WhenDraining() {
@@ -166,7 +166,9 @@ final class HTTPServerSwapTests: XCTestCase {
             try await runtime.preflight(request, with: handle)
             let streamTask = Task {
                 try await runtime.stream(request, with: handle) { chunk in
-                    chunks.append(chunk)
+                    if case .content(let text) = chunk {
+                        chunks.append(text)
+                    }
                 }
             }
             try await waitUntil {

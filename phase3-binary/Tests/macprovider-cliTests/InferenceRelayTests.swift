@@ -65,6 +65,8 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(usage["prompt_tokens"] as? Int, 7)
         XCTAssertEqual(usage["completion_tokens"] as? Int, 2)
         XCTAssertEqual(usage["total_tokens"] as? Int, 9)
+        XCTAssertTrue(usage.keys.contains("macprovider_model_hash_observed"))
+        XCTAssertTrue(usage["macprovider_model_hash_observed"] is NSNull)
     }
 
     func testUnknownCancelIsIdempotent() async throws {
@@ -102,6 +104,8 @@ final class InferenceRelayTests: XCTestCase {
         XCTAssertEqual(usage["prompt_tokens"] as? Int, 0)
         XCTAssertEqual(usage["completion_tokens"] as? Int, 0)
         XCTAssertEqual(usage["total_tokens"] as? Int, 0)
+        XCTAssertTrue(usage.keys.contains("macprovider_model_hash_observed"))
+        XCTAssertTrue(usage["macprovider_model_hash_observed"] is NSNull)
     }
 
     func testInvalidInferenceRequestSendsNak() async throws {
@@ -339,7 +343,7 @@ private actor FakeReceiptCompletionRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool,
-        onChunk: @escaping @Sendable (String) -> Void
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
         CompletionResult(content: "answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
     }
@@ -386,11 +390,11 @@ private actor FakeStreamingRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool,
-        onChunk: @escaping @Sendable (String) -> Void
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
-        onChunk("one")
+        onChunk(.content("one"))
         try await Task.sleep(nanoseconds: 20_000_000)
-        onChunk("two")
+        onChunk(.content("two"))
         while !shouldCancel() {
             try await Task.sleep(nanoseconds: 10_000_000)
         }
@@ -422,9 +426,9 @@ private actor FakeCompletionRuntime: ModelRuntimeServing {
         _ request: ChatCompletionRequest,
         with handle: RequestHandle,
         shouldCancel: @escaping @Sendable () -> Bool,
-        onChunk: @escaping @Sendable (String) -> Void
+        onChunk: @escaping @Sendable (StreamChunk) -> Void
     ) async throws -> CompletionResult {
-        onChunk("encrypted answer")
+        onChunk(.content("encrypted answer"))
         return CompletionResult(content: "encrypted answer", finishReason: "stop", promptTokens: 5, completionTokens: 2)
     }
 

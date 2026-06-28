@@ -67,7 +67,12 @@ let package = Package(
                 "MacProviderCore",
                 "macprovider-cli",
             ],
-            path: "Tests/macprovider-cliTests"
+            path: "Tests/macprovider-cliTests",
+            resources: [
+                .copy("Fixtures/SPEC015_v03_jcs/null_hash.json"),
+                .copy("Fixtures/SPEC015_v03_jcs/non_null_hash.json"),
+                .copy("Fixtures/SPEC015_v03_jcs/README.md"),
+            ]
         )
     ]
 )

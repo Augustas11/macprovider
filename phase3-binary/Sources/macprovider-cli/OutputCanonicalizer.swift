@@ -25,14 +25,23 @@ extension ToolCall {
         ]
     }
 
-    func openAIDelta(index: Int) -> [String: Any] {
+    func openAIInitialDelta(index: Int) -> [String: Any] {
         [
             "index": index,
             "id": id,
             "type": "function",
             "function": [
                 "name": functionName,
-                "arguments": arguments,
+                "arguments": "",
+            ],
+        ]
+    }
+
+    func openAIArgumentsDelta(index: Int, fragment: String) -> [String: Any] {
+        [
+            "index": index,
+            "function": [
+                "arguments": fragment,
             ],
         ]
     }

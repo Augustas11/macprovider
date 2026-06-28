@@ -2043,7 +2043,7 @@ func TestChatCompletionsRejectsOversizedBodyBeforeParsing(t *testing.T) {
 	if rr.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized invalid status=%d body=%s", rr.Code, rr.Body.String())
 	}
-	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"request_too_large"`)) {
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"code":"request_body_too_large"`)) {
 		t.Fatalf("oversized invalid body=%s", rr.Body.String())
 	}
 
@@ -3671,7 +3671,7 @@ func TestChatCompletionsProvisionalQuotaReturns429(t *testing.T) {
 func TestChatCompletionsValidationPrecedesModelLookup(t *testing.T) {
 	registry := pool.NewRegistry(nil)
 	server := buyer.NewServer(registry, zerolog.Nop(), time.Unix(1716768000, 0))
-	body := []byte(`{"model":"missing-model","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"test","arguments":"{not json}"}}]}]}`)
+	body := []byte(`{"model":"missing-model","messages":[{"role":"user","content":"hello"},{"role":"assistant","content":null,"tool_calls":[{"id":"call_0123456789abcdef","type":"function","function":{"name":"test","arguments":"{not json}"}}]}]}`)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
 	rr := httptest.NewRecorder()
 
