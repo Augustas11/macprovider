@@ -4039,6 +4039,71 @@ func TestCoordinatorTier2PolicyErrorsPassThroughAndDoNotChargeQuota(t *testing.T
 	}
 }
 
+// TestCoordinatorIdempotencyReplayPassesThroughAndRefunds pins
+// issue #200: when the coordinator returns 409
+// idempotency_key_replayed (or idempotency_key_body_mismatch), the
+// gateway MUST refund the reservation it made and pass the
+// coordinator response body through verbatim. Pre-fix it fell
+// through the generic !=200 branch, called settleBeforeResponse
+// with outcome="upstream_error" (billing the buyer for the prompt
+// estimate even though no provider work ran), and remapped the
+// response to a 502.
+func TestCoordinatorIdempotencyReplayPassesThroughAndRefunds(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{"replayed", "idempotency_key_replayed"},
+		{"body_mismatch", "idempotency_key_body_mismatch"},
+	}
+	for _, tc := range cases {
+		for _, stream := range []bool{false, true} {
+			name := tc.name + "_non_stream"
+			if stream {
+				name = tc.name + "_stream"
+			}
+			t.Run(name, func(t *testing.T) {
+				coordBody := fmt.Sprintf(`{"error":{"code":%q,"message":"idempotency","param":null,"type":"invalid_request_error"}}`, tc.code)
+				client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+					return responseWithBody(http.StatusConflict, http.Header{"Content-Type": []string{"application/json"}}, coordBody), nil
+				})}
+				h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+					cfg.Coordinator.BuyerURL = "http://coordinator.test"
+				}, WithHTTPClient(client))
+				fullKey := createAccountAndKey(t, store, cfg, "acct_"+name)
+
+				body := `{"model":"model-a","max_tokens":1000,"messages":[{"role":"user","content":"x"}]}`
+				if stream {
+					body = `{"model":"model-a","max_tokens":1000,"stream":true,"messages":[{"role":"user","content":"x"}]}`
+				}
+				resp := postChat(t, h, fullKey, body, nil)
+
+				// (a) Buyer sees the coordinator 409 + envelope verbatim,
+				//     NOT a remapped 502 / upstream_provider_error.
+				if resp.Code != http.StatusConflict {
+					t.Fatalf("status=%d, want 409, body=%s", resp.Code, resp.Body.String())
+				}
+				if !strings.Contains(resp.Body.String(), `"code":"`+tc.code+`"`) {
+					t.Fatalf("body lost coord error envelope: %s", resp.Body.String())
+				}
+				if strings.Contains(resp.Body.String(), "upstream_provider_error") {
+					t.Fatalf("body remapped to upstream_provider_error: %s", resp.Body.String())
+				}
+
+				// (b) No quota burn — refund must have fired.
+				usageResp := assertStatus(t, h, http.MethodGet, "/v1/usage", fullKey, "", "1.2.3.4", http.StatusOK)
+				quota := readQuota(t, usageResp)
+				if used := quota["daily_tokens_used"].(float64); used != 0 {
+					t.Fatalf("daily_tokens_used=%v, want 0 — idempotency 409 must not charge quota", used)
+				}
+				if reserved := quota["daily_tokens_reserved"].(float64); reserved != 0 {
+					t.Fatalf("daily_tokens_reserved=%v, want 0 — reservation must be refunded on idempotency 409", reserved)
+				}
+			})
+		}
+	}
+}
+
 // TestConversationKeyIsAccountScoped pins the structural cross-account
 // collision guarantee: account A with tag T MUST derive a different conv:
 // than account B with the same tag T. Regression-locks the SPEC-006 v0.8.1

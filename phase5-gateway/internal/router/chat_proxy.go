@@ -314,6 +314,10 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 		return
 	}
+	if coordinatorIdempotencyError(resp.StatusCode, body) {
+		s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+		return
+	}
 	if resp.StatusCode != http.StatusOK {
 		if isNullUsageProviderError(body) {
 			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body)
@@ -377,6 +381,10 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			return
 		}
 		body, _ := io.ReadAll(resp.Body)
+		if coordinatorIdempotencyError(resp.StatusCode, body) {
+			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
+			return
+		}
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
@@ -605,6 +613,30 @@ func isNullUsageProviderError(body []byte) bool {
 	default:
 		return false
 	}
+}
+
+// coordinatorIdempotencyError detects coordinator-issued 409 responses
+// that signal "no provider work happened, no charge due" — the two
+// known cases for buyer-supplied Idempotency-Key:
+//
+//   - idempotency_key_replayed: same key + same body. The original
+//     request already settled; the retry hit dedupe.
+//   - idempotency_key_body_mismatch: same key + different body (buyer
+//     error).
+//
+// In either case the gateway must refund the reservation it just
+// made (the request never reached a provider) and pass the coord
+// response through verbatim so the buyer sees the idempotency
+// semantics, not an opaque 502. Closes #200.
+func coordinatorIdempotencyError(status int, body []byte) bool {
+	if status != http.StatusConflict {
+		return false
+	}
+	switch openAIErrorCode(body) {
+	case "idempotency_key_replayed", "idempotency_key_body_mismatch":
+		return true
+	}
+	return false
 }
 
 func coordinatorTier2PolicyError(status int, body []byte) bool {
