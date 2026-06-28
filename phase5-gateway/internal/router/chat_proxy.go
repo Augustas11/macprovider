@@ -257,20 +257,24 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	defer resp.Body.Close()
 
 	promptEstimate := estimatePromptTokens(body)
-	maxUsageTokens := promptEstimate + maxTokens
+	// Validation cap uses promptCapTokens (with chat-template headroom)
+	// — generous enough to admit valid provider tokenization. Billed
+	// quantities (settle paths below) keep using the bare
+	// promptEstimate so error-path settlement does not over-charge.
+	maxUsageTokens := promptCapTokens(body) + maxTokens
 	if chat.Stream {
 		// ISS-187 R1 architect/code MAJOR: thread the reservation
 		// window through to forwardStreamingChat so the SPEC-006 §
 		// 17.7 fallback usage_events insert in settleAfterCommit
 		// uses the SAME window_date as the original reservation
 		// (avoids drift for streams that cross UTC midnight).
-		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, cancelUpstream, window)
+		s.forwardStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens, cancelUpstream, window)
 		return
 	}
-	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens)
+	s.forwardNonStreamingChat(w, r, resp, subject, promptEstimate, maxUsageTokens, maxTokens)
 }
 
-func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens int64) {
+func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64) {
 	body, err := readLimitedBody(resp.Body, maxUpstreamResponseBodyBytes)
 	if err != nil {
 		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
@@ -322,7 +326,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
 		return
 	}
-	usage, ok, usageErr := usageFromJSON(body, maxUsageTokens)
+	usage, ok, usageErr := usageFromJSON(body, maxUsageTokens, maxTokens)
 	tokenSource := "gateway_estimated"
 	if !ok {
 		usage = tokenUsage{PromptTokens: promptEstimate, CompletionTokens: 0, TotalTokens: promptEstimate}
@@ -344,7 +348,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 	_, _ = w.Write(body)
 }
 
-func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens int64, cancelUpstream func(), reservationWindow string) {
+func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, promptEstimate, maxUsageTokens, maxTokens int64, cancelUpstream func(), reservationWindow string) {
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		body, _ := io.ReadAll(resp.Body)
 		if coordinatorTier2PolicyError(resp.StatusCode, body) {
@@ -414,7 +418,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 	invalidReportedUsage := false
 	settleReported := func(outcome string) {
 		usage := *reported
-		observedCompletion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
+		observedCompletion := estimateStreamingCompletionTokens(emitted, maxTokens)
 		if observedCompletion > usage.CompletionTokens {
 			s.settleAfterCommit(r, subject, promptEstimate, observedCompletion, maxUsageTokens, "gateway_estimated", outcome, reservationWindow)
 			return
@@ -426,7 +430,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleReported("stream_truncated")
 			return
 		}
-		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "stream_truncated", reservationWindow)
+		s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "stream_truncated", reservationWindow)
 	}
 	forwardLine := func(line []byte) bool {
 		select {
@@ -435,7 +439,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return false
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, maxTokens, cancelCoordinator, reservationWindow)
 			return false
 		default:
 		}
@@ -450,13 +454,13 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						flusher.Flush()
 					}
 					cancelCoordinator()
-					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
+					completion := estimateStreamingCompletionTokens(emitted, maxTokens)
 					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow)
 					return false
 				}
 				if deltaBytes > 0 {
 					projectedCompletion := estimateTokensFromBytes(emitted + deltaBytes)
-					maxCompletion := maxStreamingCompletionTokens(promptEstimate, maxUsageTokens)
+					maxCompletion := maxStreamingCompletionTokens(maxTokens)
 					if projectedCompletion > maxCompletion {
 						slog.Warn("streaming gateway estimate exceeded request maximum; truncating stream", "request_id", requestID(r), "estimated_completion_tokens", projectedCompletion, "max_completion_tokens", maxCompletion)
 						writeSSEError(w, "Upstream stream exceeded requested max_tokens", "api_error", "stream_output_exceeded")
@@ -469,7 +473,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 					}
 					emitted += deltaBytes
 				}
-				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens); ok {
+				if usage, ok, err := usageFromJSON([]byte(data), maxUsageTokens, maxTokens); ok {
 					if err != nil {
 						invalidReportedUsage = true
 						reported = nil
@@ -484,7 +488,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 						flusher.Flush()
 					}
 					cancelCoordinator()
-					completion := estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens)
+					completion := estimateStreamingCompletionTokens(emitted, maxTokens)
 					s.settleAfterCommit(r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "stream_malformed", reservationWindow)
 					return false
 				}
@@ -496,7 +500,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return false
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, maxTokens, cancelCoordinator, reservationWindow)
 			return false
 		}
 		if flusher != nil {
@@ -535,7 +539,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 				settleReported("client_disconnect")
 				return
 			}
-			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
+			s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, maxTokens, cancelCoordinator, reservationWindow)
 			return
 		}
 		slog.Error("streaming coordinator read failed", "request_id", requestID(r), "error", err)
@@ -568,14 +572,14 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			settleReported("client_disconnect")
 			return
 		}
-		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, cancelCoordinator, reservationWindow)
+		s.settleCancelledStream(r, subject, promptEstimate, emitted, maxUsageTokens, maxTokens, cancelCoordinator, reservationWindow)
 		return
 	}
 	if reported != nil && !invalidReportedUsage {
 		settleReported("ok")
 		return
 	}
-	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "ok", reservationWindow)
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "ok", reservationWindow)
 }
 
 func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
@@ -627,9 +631,9 @@ func openAIErrorCode(body []byte) string {
 	return strings.TrimSpace(envelope.Error.Code)
 }
 
-func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens int64, cancelCoordinator func(), reservationWindow string) {
+func (s *Server) settleCancelledStream(r *http.Request, subject usageSubject, promptEstimate, emitted, maxUsageTokens, maxTokens int64, cancelCoordinator func(), reservationWindow string) {
 	cancelCoordinator()
-	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow)
+	s.settleAfterCommit(r, subject, promptEstimate, estimateStreamingCompletionTokens(emitted, maxTokens), maxUsageTokens, "gateway_estimated", "client_disconnect", reservationWindow)
 }
 
 func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) bool {
@@ -798,21 +802,27 @@ func (s *Server) settleRequest(r *http.Request, subject usageSubject, prompt, co
 	return s.store.SettleReservation(context.Background(), settlement)
 }
 
-func estimateStreamingCompletionTokens(emitted, promptEstimate, maxUsageTokens int64) int64 {
+// estimateStreamingCompletionTokens caps the streaming-fallback
+// completion-token estimate at the buyer's max_tokens. Pre-2026-06-28
+// this derived the cap as `maxUsageTokens - promptEstimate`, which
+// silently inflated by the prompt-cap headroom (R1 CODE HIGH #1):
+// a buyer who set max_tokens=1 could be billed 65 completion tokens
+// because maxUsageTokens-promptEstimate = 64 headroom + 1. Now we
+// take maxTokens directly so the billed completion side honors the
+// buyer's stated cap regardless of the cap-headroom-vs-billing split.
+func estimateStreamingCompletionTokens(emitted, maxTokens int64) int64 {
 	completion := estimateTokensFromBytes(emitted)
-	maxCompletion := maxStreamingCompletionTokens(promptEstimate, maxUsageTokens)
-	if completion > maxCompletion {
-		return maxCompletion
+	if completion > maxTokens {
+		return maxTokens
 	}
 	return completion
 }
 
-func maxStreamingCompletionTokens(promptEstimate, maxUsageTokens int64) int64 {
-	maxCompletion := maxUsageTokens - promptEstimate
-	if maxCompletion < 0 {
+func maxStreamingCompletionTokens(maxTokens int64) int64 {
+	if maxTokens < 0 {
 		return 0
 	}
-	return maxCompletion
+	return maxTokens
 }
 
 func estimateTokensFromBytes(n int64) int64 {
@@ -998,7 +1008,18 @@ func parseChatRequest(body []byte) (chatRequest, error) {
 	return req, nil
 }
 
-func usageFromJSON(body []byte, maxUsageTokens int64) (tokenUsage, bool, error) {
+// usageFromJSON validates and parses provider-reported usage.
+//
+// maxUsageTokens — overall ceiling on prompt + completion tokens
+// (computed from promptCapTokens(body) + maxTokens at the call site
+// so the chat-template headroom is included).
+//
+// maxCompletion — independent ceiling on completion_tokens (=
+// buyer's max_tokens). Without this separate check, a malicious
+// provider could spend the prompt-cap headroom as inflated
+// completion tokens, over-billing the buyer above the requested
+// max_tokens. R1 CODE HIGH #1 (2026-06-28).
+func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64) (tokenUsage, bool, error) {
 	var envelope struct {
 		Usage json.RawMessage `json:"usage"`
 	}
@@ -1031,6 +1052,9 @@ func usageFromJSON(body []byte, maxUsageTokens int64) (tokenUsage, bool, error) 
 	if usage.PromptTokens > math.MaxInt64-usage.CompletionTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total overflows int64")
 	}
+	if usage.CompletionTokens > maxCompletion {
+		return tokenUsage{}, true, fmt.Errorf("usage completion_tokens exceeds request max_tokens")
+	}
 	sum := usage.PromptTokens + usage.CompletionTokens
 	if sum > maxUsageTokens {
 		return tokenUsage{}, true, fmt.Errorf("usage token total exceeds request maximum")
@@ -1054,45 +1078,48 @@ func completionFromHeader(header http.Header) int64 {
 	return n
 }
 
-// estimatePromptTokens approximates the provider-side tokenization of
-// the request body. It is used to size the per-request reservation and
-// (via maxUsageTokens) to cap the sum reported back by the provider in
-// usageFromJSON.
+// estimatePromptTokens — billable prompt-token count for the gateway-
+// estimated settlement paths (provider error, invalid_provider_usage
+// fallback, streaming pre-commit cancel, etc.). This is what the
+// buyer actually pays for on those paths, so the value is the
+// conservative byte-heuristic (NO headroom). The value also seeds
+// the streaming completion-token estimate and the receipt audit
+// trail.
 //
-// Pre-2026-06-28 this was bare ceil(bytes/4) — fine for English prose
-// but consistently 5-50 tokens BELOW the provider's actual tokenizer
-// output because the byte-heuristic cannot see:
-//   - chat-template overhead the tokenizer adds AFTER body parse
-//     (im_start/role/content/im_end pairs etc.)
-//   - locale variance (Qwen2.5-Coder tokenizes "hi" through ~30 tokens
-//     vs the heuristic's 29 for the surrounding JSON)
-//
-// The under-estimate caused valid provider responses to fail the
-// usageFromJSON cap (`prompt + completion > maxUsageTokens`) on
-// small-max_tokens requests where the cap headroom is razor-thin.
-// Empirically reproducible on
-// mlx-community/Qwen2.5-Coder-7B-Instruct-4bit during the
-// 2026-06-28 phase-A re-run: a 115-byte body + max_tokens=4 →
-// cap=33; provider tokenized to prompt=30+completion=4=34 → falsely
-// rejected as invalid_provider_usage. Both providers were on the
-// current Swift binary; the gateway's heuristic was at fault.
-//
-// Fix: add fixed promptHeadroomTokens padding to cover the
-// chat-template overhead. Conservative on long prompts (where the
-// bytes/4 heuristic is closer to reality) and decisive on short
-// prompts (where the fixed-cost overhead dominates).
-//
-// The cap remains a safety net against provider over-billing — a
-// malicious provider reporting prompt=10000 for a 100-byte body
-// would still trip the cap because 10000 ≫ ceil(100/4) + 64 +
-// max_tokens.
-const promptHeadroomTokens = 64
-
+// Headroom for the VALIDATION cap is added separately by
+// promptCapTokens; conflating the two would over-charge the buyer on
+// every error path (R1 CODE HIGH #2, 2026-06-28).
 func estimatePromptTokens(body []byte) int64 {
 	if len(body) == 0 {
 		return 0
 	}
-	return int64(math.Ceil(float64(len(body))/4.0)) + promptHeadroomTokens
+	return int64(math.Ceil(float64(len(body)) / 4.0))
+}
+
+// promptHeadroomTokens absorbs the chat-template overhead that the
+// byte-heuristic cannot see (im_start/role/content/im_end markers,
+// BOS token, etc.) — fixed-cost per request, independent of body
+// length. 64 covers the largest chat templates observed in the
+// operator fleet with margin.
+const promptHeadroomTokens = 64
+
+// promptCapTokens — generous upper bound used ONLY in the usage-
+// validation cap (maxUsageTokens). Equal to the billable estimate
+// plus fixed chat-template headroom. Never used as a billed
+// quantity.
+//
+// Background. estimatePromptTokens returns ceil(bytes/4), which is
+// fine for English prose but consistently 5-50 tokens below the
+// provider's actual tokenizer output. The provider's tokenizer
+// applies the chat template AFTER body parse, adding fixed-cost
+// overhead the byte-heuristic cannot see. Empirically reproducible
+// on mlx-community/Qwen2.5-Coder-7B-Instruct-4bit during the
+// 2026-06-28 phase-A re-run: a 115-byte body + max_tokens=4 → bare
+// cap=33; provider tokenized to prompt=30+completion=4=34 → falsely
+// rejected as invalid_provider_usage. Adding +64 to the cap (only)
+// fixes the false reject without inflating any billed quantity.
+func promptCapTokens(body []byte) int64 {
+	return estimatePromptTokens(body) + promptHeadroomTokens
 }
 
 func copyForwardHeaders(dst, src http.Header) {
