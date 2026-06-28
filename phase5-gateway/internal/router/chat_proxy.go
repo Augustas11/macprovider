@@ -319,7 +319,7 @@ func (s *Server) forwardNonStreamingChat(w http.ResponseWriter, r *http.Request,
 			s.passThroughReceiptEligibleProviderError(w, r, resp, subject, body)
 			return
 		}
-		completion := completionFromHeader(resp.Header)
+		completion := completionFromHeaderCapped(resp.Header, maxTokens)
 		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completion, maxUsageTokens, "gateway_estimated", "upstream_error") {
 			return
 		}
@@ -381,7 +381,7 @@ func (s *Server) forwardStreamingChat(w http.ResponseWriter, r *http.Request, re
 			s.passThroughNoProviderCoordinatorError(w, r, resp, subject, body)
 			return
 		}
-		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completionFromHeader(resp.Header), maxUsageTokens, "gateway_estimated", "upstream_error") {
+		if !s.settleBeforeResponse(w, r, subject, promptEstimate, completionFromHeaderCapped(resp.Header, maxTokens), maxUsageTokens, "gateway_estimated", "upstream_error") {
 			return
 		}
 		writeError(w, http.StatusBadGateway, "api_error", "upstream_provider_error", "Upstream provider error")
@@ -1064,6 +1064,21 @@ func usageFromJSON(body []byte, maxUsageTokens, maxCompletion int64) (tokenUsage
 	}
 	usage.TotalTokens = sum
 	return usage, true, nil
+}
+
+// completionFromHeader reads the upstream's X-MacProvider-Completion-Tokens
+// hint and clamps it to maxTokens. Without the clamp, an upstream that
+// reports a header value above the buyer's max_tokens could over-bill
+// the buyer through the upstream-error and provider-timeout
+// settlement paths — same shape as the inline-usage HIGH #1 closed
+// by usageFromJSON's separate maxCompletion check (R2 CODE HIGH,
+// 2026-06-28).
+func completionFromHeaderCapped(header http.Header, maxTokens int64) int64 {
+	c := completionFromHeader(header)
+	if c > maxTokens {
+		return maxTokens
+	}
+	return c
 }
 
 func completionFromHeader(header http.Header) int64 {

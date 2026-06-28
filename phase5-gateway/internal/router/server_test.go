@@ -2009,6 +2009,28 @@ func TestEstimatePromptTokensHeadroomCoversAir5(t *testing.T) {
 	}
 }
 
+// TestCompletionFromHeaderCapsAtMaxTokens — R2 CODE HIGH: the
+// X-MacProvider-Completion-Tokens header path is used on the
+// upstream-error settlement paths. With the +64 prompt-cap
+// headroom, a malicious upstream could send a header value above
+// max_tokens and over-bill the buyer through the gateway-estimated
+// fallback. The completionFromHeaderCapped wrapper clamps to
+// maxTokens, mirroring the JSON-usage maxCompletion check.
+func TestCompletionFromHeaderCapsAtMaxTokens(t *testing.T) {
+	header := http.Header{}
+	header.Set("X-MacProvider-Completion-Tokens", "68")
+	if got := completionFromHeaderCapped(header, 4); got != 4 {
+		t.Fatalf("completionFromHeaderCapped clamped=%d, want 4 (max_tokens cap)", got)
+	}
+	if got := completionFromHeaderCapped(header, 100); got != 68 {
+		t.Fatalf("completionFromHeaderCapped under cap=%d, want 68 (pass-through)", got)
+	}
+	emptyHeader := http.Header{}
+	if got := completionFromHeaderCapped(emptyHeader, 4); got != 0 {
+		t.Fatalf("completionFromHeaderCapped no-header=%d, want 0", got)
+	}
+}
+
 type settlementFailStore struct {
 	*sqlite.Store
 	settleErr   error
