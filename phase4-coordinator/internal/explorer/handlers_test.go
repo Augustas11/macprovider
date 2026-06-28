@@ -300,8 +300,16 @@ func TestAC13_ConsumedAndVoidedSettlementsAreImmutable(t *testing.T) {
 	seedSettlement(t, db, "provider_consumed", "consumed", fixedExplorerTime().Add(-48*time.Hour), "settlement_consumed")
 	seedSettlement(t, db, "provider_voided", "voided", fixedExplorerTime().Add(-72*time.Hour), "settlement_voided")
 	before := tableCounts(t, db)
+	// parseWindow defaults `to` to time.Now().UTC(), so the
+	// default window drifts past the fixedExplorerTime() seeds as
+	// wall-clock advances (TestAC13 started failing once real-now
+	// crossed 30 days past 2026-06-01). Pass explicit from/to that
+	// bracket the seeded windowEnd values so the test is wall-
+	// clock-independent.
+	from := fixedExplorerTime().Add(-96 * time.Hour).Format(time.RFC3339)
+	to := fixedExplorerTime().Add(time.Hour).Format(time.RFC3339)
 	for _, status := range []string{"consumed", "voided"} {
-		resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/settlements?status="+status, "operator-key")
+		resp := requestExplorer(t, h, http.MethodGet, "/admin/explorer/settlements?status="+status+"&from="+from+"&to="+to, "operator-key")
 		if resp.Code != http.StatusOK {
 			t.Fatalf("%s status=%d body=%s", status, resp.Code, resp.Body.String())
 		}
