@@ -1964,6 +1964,39 @@ func TestUsageFromJSONValidatesProviderReportedUsage(t *testing.T) {
 	}
 }
 
+// TestEstimatePromptTokensHeadroomCoversAir5 regresses the 2026-06-28
+// phase-A re-run finding where a 115-byte body + max_tokens=4 produced
+// a cap of 33, but mlx-community/Qwen2.5-Coder-7B-Instruct-4bit's
+// tokenizer reported prompt=30 + completion=4 = 34, tripping the
+// usageFromJSON cap as invalid_provider_usage even though the
+// provider's response was correct. The fix adds
+// promptHeadroomTokens (= 64) padding to the byte-heuristic so a
+// 1-token discrepancy between heuristic and actual tokenizer no
+// longer breaks chat completions with small max_tokens.
+func TestEstimatePromptTokensHeadroomCoversAir5(t *testing.T) {
+	body := []byte(`{"model":"mlx-community/Qwen2.5-Coder-7B-Instruct-4bit","max_tokens":4,"messages":[{"role":"user","content":"hi"}]}`)
+	estimate := estimatePromptTokens(body)
+	maxTokens := int64(4)
+	maxUsageTokens := estimate + maxTokens
+	// Provider's actual tokenization for this body.
+	providerUsage := []byte(`{"usage":{"prompt_tokens":30,"completion_tokens":4,"total_tokens":34}}`)
+	usage, ok, err := usageFromJSON(providerUsage, maxUsageTokens)
+	if !ok || err != nil {
+		t.Fatalf("usageFromJSON ok=%v err=%v, want clean accept of provider tokenization within headroom (cap=%d, sum=34)", ok, err, maxUsageTokens)
+	}
+	if usage.PromptTokens != 30 || usage.CompletionTokens != 4 || usage.TotalTokens != 34 {
+		t.Fatalf("usage=%#v, want prompt=30 completion=4 total=34", usage)
+	}
+
+	// Sanity: a malicious provider reporting prompt=10000 for the same
+	// 115-byte body must STILL trip the cap. Headroom doesn't break
+	// the over-billing defense.
+	abusiveUsage := []byte(`{"usage":{"prompt_tokens":10000,"completion_tokens":1,"total_tokens":10001}}`)
+	if _, _, err := usageFromJSON(abusiveUsage, maxUsageTokens); err == nil {
+		t.Fatalf("expected cap rejection for prompt=10000 on a 115-byte body (cap=%d)", maxUsageTokens)
+	}
+}
+
 type settlementFailStore struct {
 	*sqlite.Store
 	settleErr   error

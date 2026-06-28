@@ -1054,11 +1054,45 @@ func completionFromHeader(header http.Header) int64 {
 	return n
 }
 
+// estimatePromptTokens approximates the provider-side tokenization of
+// the request body. It is used to size the per-request reservation and
+// (via maxUsageTokens) to cap the sum reported back by the provider in
+// usageFromJSON.
+//
+// Pre-2026-06-28 this was bare ceil(bytes/4) — fine for English prose
+// but consistently 5-50 tokens BELOW the provider's actual tokenizer
+// output because the byte-heuristic cannot see:
+//   - chat-template overhead the tokenizer adds AFTER body parse
+//     (im_start/role/content/im_end pairs etc.)
+//   - locale variance (Qwen2.5-Coder tokenizes "hi" through ~30 tokens
+//     vs the heuristic's 29 for the surrounding JSON)
+//
+// The under-estimate caused valid provider responses to fail the
+// usageFromJSON cap (`prompt + completion > maxUsageTokens`) on
+// small-max_tokens requests where the cap headroom is razor-thin.
+// Empirically reproducible on
+// mlx-community/Qwen2.5-Coder-7B-Instruct-4bit during the
+// 2026-06-28 phase-A re-run: a 115-byte body + max_tokens=4 →
+// cap=33; provider tokenized to prompt=30+completion=4=34 → falsely
+// rejected as invalid_provider_usage. Both providers were on the
+// current Swift binary; the gateway's heuristic was at fault.
+//
+// Fix: add fixed promptHeadroomTokens padding to cover the
+// chat-template overhead. Conservative on long prompts (where the
+// bytes/4 heuristic is closer to reality) and decisive on short
+// prompts (where the fixed-cost overhead dominates).
+//
+// The cap remains a safety net against provider over-billing — a
+// malicious provider reporting prompt=10000 for a 100-byte body
+// would still trip the cap because 10000 ≫ ceil(100/4) + 64 +
+// max_tokens.
+const promptHeadroomTokens = 64
+
 func estimatePromptTokens(body []byte) int64 {
 	if len(body) == 0 {
 		return 0
 	}
-	return int64(math.Ceil(float64(len(body)) / 4.0))
+	return int64(math.Ceil(float64(len(body))/4.0)) + promptHeadroomTokens
 }
 
 func copyForwardHeaders(dst, src http.Header) {
