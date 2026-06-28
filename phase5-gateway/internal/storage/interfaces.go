@@ -58,6 +58,14 @@ type UsageStore interface {
 	SettleDemoReservation(ctx context.Context, settlement ReservationSettlement, demo DemoUsageEvent) error
 	RefundReservation(ctx context.Context, accountID, requestID string, refundedAt int64) error
 	InsertUsageEvent(ctx context.Context, event UsageEvent) error
+	// EnsureUsageEvent inserts a usage_events row idempotently —
+	// returns nil on either fresh insert or pre-existing row at the
+	// same request_id PK. Used as a SPEC-006 § 17.7 fallback path
+	// when SettleReservation fails after bytes have already flowed
+	// to the buyer (issue #187): the buyer MUST be debited and the
+	// audit trail MUST exist even if the reservation row is missing
+	// or in an unexpected state.
+	EnsureUsageEvent(ctx context.Context, event UsageEvent) error
 	DailyUsage(ctx context.Context, accountID, windowDate string) (usedTokens, activeReservedTokens int64, err error)
 	ReapExpiredReservations(ctx context.Context, now time.Time) (int64, error)
 	// DeleteTerminalQuotaReservations drops quota_reservations rows in a

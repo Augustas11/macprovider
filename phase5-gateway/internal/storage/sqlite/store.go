@@ -648,6 +648,20 @@ func (s *Store) ReleaseConcurrency(ctx context.Context, accountID, requestID str
 }
 
 func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) error {
+	return s.insertUsageEvent(ctx, event, false)
+}
+
+// EnsureUsageEvent inserts a usage_events row idempotently — duplicate
+// request_id PKs are absorbed via INSERT OR IGNORE. Used as the
+// SPEC-006 § 17.7 fallback path in chat_proxy.settleAfterCommit when
+// the normal SettleReservation path fails: even if the reservation
+// is missing or in an unexpected state, the buyer-facing usage record
+// MUST exist after bytes have flowed (issue #187).
+func (s *Store) EnsureUsageEvent(ctx context.Context, event storage.UsageEvent) error {
+	return s.insertUsageEvent(ctx, event, true)
+}
+
+func (s *Store) insertUsageEvent(ctx context.Context, event storage.UsageEvent, idempotent bool) error {
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
@@ -663,9 +677,15 @@ func (s *Store) InsertUsageEvent(ctx context.Context, event storage.UsageEvent) 
 	} else if event.TotalTokens != sum {
 		return fmt.Errorf("usage total_tokens does not match prompt_tokens plus completion_tokens")
 	}
-	_, err := s.db.ExecContext(ctx, `
+	stmt := `
 		INSERT INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
-		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	if idempotent {
+		stmt = `
+		INSERT OR IGNORE INTO usage_events(request_id, account_id, demo_identity, window_date, prompt_tokens, completion_tokens, total_tokens, token_source, outcome, created_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	}
+	_, err := s.db.ExecContext(ctx, stmt,
 		event.RequestID, event.AccountID, event.DemoIdentity, event.WindowDate, event.PromptTokens, event.CompletionTokens,
 		event.TotalTokens, event.TokenSource, event.Outcome, encodeTime(event.CreatedAt))
 	return err

@@ -2240,6 +2240,92 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 	}
 }
 
+// SPEC-006 § 17.7 / issue #187 (P0 money-path): when the gateway's
+// normal SettleReservation path fails after bytes have already
+// flowed to the buyer, the gateway MUST still write a usage_events
+// row (via the new EnsureUsageEvent fallback) so the buyer is
+// debited and the SPEC-005 § 6.9 mirror-credit path has data to
+// work with. Pre-#187, the failure mode silently called
+// RefundReservation, lost the audit row, and undercharged everyone.
+//
+// Repro: provider streams partial bytes (well under max_tokens),
+// then errors out. Between the bytes flowing and settlement
+// running, we externally refund the reservation — simulating ANY
+// path that could remove the reservation row out from under
+// SettleReservation (the phase-A scenario 05 production failure
+// mode was empirically observed; root cause was not nailed down,
+// but the defensive fix here writes the usage_events row regardless
+// of why the reservation lookup fails).
+func TestStreamingSettlementFallbackWritesUsageEventOnMissingReservation(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`
+	accountID := "acct_fallback_usage_event"
+	// Track when the upstream stream has started, so the test can
+	// refund the reservation AFTER the gateway has already
+	// committed response headers and started forwarding bytes.
+	var streamStarted = make(chan struct{}, 1)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte(`data: {"id":"chatcmpl","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+			streamStarted <- struct{}{}
+			// Block until the test refunds, then close the stream.
+			time.Sleep(50 * time.Millisecond)
+			_ = pw.CloseWithError(errors.New("forced upstream provider disconnect"))
+		}()
+		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: pr}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	// Wait for the upstream stream to begin, then refund out from
+	// under the gateway's settlement attempt. Done in a goroutine
+	// because postChat below blocks until the response completes.
+	go func() {
+		<-streamStarted
+		// Find the reservation's request_id by reading
+		// quota_reservations directly. Use sql.Open instead of the
+		// gateway's store to avoid any in-flight lock.
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			return
+		}
+		defer db.Close()
+		var requestID string
+		for i := 0; i < 50; i++ {
+			if err := db.QueryRow(`SELECT request_id FROM quota_reservations WHERE account_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1`, accountID).Scan(&requestID); err == nil {
+				break
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+		if requestID == "" {
+			return
+		}
+		// Delete the reservation row to simulate the production
+		// failure mode where SettleReservation returns
+		// ErrReservationNotFound. This is more pathological than
+		// any code path actually triggers, but the defensive fix
+		// must handle it regardless.
+		_, _ = db.Exec(`DELETE FROM quota_reservations WHERE account_id = ? AND request_id = ?`, accountID, requestID)
+	}()
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	// The SPEC-006 § 17.7 invariant: a usage_events row exists for
+	// this account even though the reservation was wiped.
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "stream_truncated" {
+		t.Fatalf("usage_events outcome = %q, want stream_truncated; fallback did not record the partial-stream row (#187 regression)", outcome)
+	}
+	if source != "gateway_estimated" {
+		t.Fatalf("usage_events token_source = %q, want gateway_estimated", source)
+	}
+}
+
 // SPEC-002 § FR-B6 / issue #186: when the upstream coordinator
 // stream dies mid-flight (provider disconnect surfaces here as an
 // io.Pipe close-with-error), the gateway MUST emit the exact

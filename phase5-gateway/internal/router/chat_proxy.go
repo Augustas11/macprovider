@@ -609,8 +609,60 @@ func (s *Server) settleBeforeResponse(w http.ResponseWriter, r *http.Request, su
 
 func (s *Server) settleAfterCommit(r *http.Request, subject usageSubject, prompt, completion, maxTotal int64, source, outcome string) {
 	if err := s.settleRequest(r, subject, prompt, completion, maxTotal, source, outcome); err != nil {
-		slog.Error("gateway settlement failed after response commit", "request_id", requestID(r), "account_id", subject.AccountID, "source", source, "outcome", outcome, "error", err)
-		_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+		slog.Error("gateway settlement failed after response commit",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"source", source,
+			"outcome", outcome,
+			"error", err,
+		)
+		// SPEC-006 § 17.7 / issue #187: response bytes already flowed
+		// to the buyer. The buyer MUST be debited and the audit row
+		// MUST exist regardless of why SettleReservation failed
+		// (missing reservation, status drift, transient DB error).
+		// Falling back to RefundReservation here — the previous
+		// behavior — silently lost the usage_events row and
+		// undercharged buyer + provider on every partial-stream
+		// settlement failure.
+		ev := storage.UsageEvent{
+			RequestID:        requestID(r),
+			AccountID:        subject.AccountID,
+			DemoIdentity:     subject.DemoIdentity,
+			WindowDate:       s.now().UTC().Format("2006-01-02"),
+			PromptTokens:     prompt,
+			CompletionTokens: completion,
+			TotalTokens:      prompt + completion,
+			TokenSource:      source,
+			Outcome:          outcome,
+			CreatedAt:        s.now(),
+		}
+		if fallbackErr := s.store.EnsureUsageEvent(context.Background(), ev); fallbackErr != nil {
+			// Both the normal settle path and the idempotent fallback
+			// failed. Genuine DB-level pathology — log loudly and
+			// release the reservation hold so the buyer's quota is
+			// not held forever. The audit row is lost; operators
+			// must reconcile from coordinator-side request_log.
+			slog.Error("gateway SPEC-006 § 17.7 fallback usage_events insert failed",
+				"request_id", requestID(r),
+				"account_id", subject.AccountID,
+				"source", source,
+				"outcome", outcome,
+				"settle_error", err.Error(),
+				"fallback_error", fallbackErr.Error(),
+			)
+			_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+			return
+		}
+		// Fallback insert succeeded (or the row already existed via
+		// race). Log at warn — the path fired, but the spec is now
+		// satisfied. Buyer's reservation hold stays as-is; the
+		// subsequent reaper will tidy it.
+		slog.Warn("gateway settlement used SPEC-006 § 17.7 fallback usage_events insert (settle_path failure)",
+			"request_id", requestID(r),
+			"account_id", subject.AccountID,
+			"outcome", outcome,
+			"settle_error", err.Error(),
+		)
 	}
 }
 
