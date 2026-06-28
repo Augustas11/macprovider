@@ -2240,6 +2240,232 @@ func TestStreamingQuotaReservationAndSettlementUsesDisconnectEstimation(t *testi
 	}
 }
 
+// SPEC-006 § 17.7 / issue #187 (P0 money-path): when the gateway's
+// normal SettleReservation path fails after bytes have already
+// flowed to the buyer, the gateway MUST still write a usage_events
+// row (via the new EnsureUsageEvent fallback) so the buyer-side
+// SPEC-006 accounting + audit trail are preserved. Per SPEC-005
+// § 10.3 ('SPEC-005 does NOT read SPEC-006 usage tables'),
+// provider-credit composition is computed on the COORDINATOR from
+// request_log, NOT from gateway usage_events — so it's unaffected
+// by either the bug or the fix. Pre-#187, the failure mode silently
+// called RefundReservation and lost the buyer-side audit row.
+//
+// Repro: provider streams partial bytes (well under max_tokens),
+// then errors out. Between the bytes flowing and settlement
+// running, we externally refund the reservation — simulating ANY
+// path that could remove the reservation row out from under
+// SettleReservation (the phase-A scenario 05 production failure
+// mode was empirically observed; root cause was not nailed down,
+// but the defensive fix here writes the usage_events row regardless
+// of why the reservation lookup fails).
+func TestStreamingSettlementFallbackWritesUsageEventOnMissingReservation(t *testing.T) {
+	body := `{"model":"llama","stream":true,"max_tokens":500,"messages":[{"role":"user","content":"hi"}]}`
+	accountID := "acct_fallback_usage_event"
+	// Synchronization channels. The test goroutine waits for the
+	// gateway's first delta to flush, deletes the reservation row
+	// deterministically, signals via deleteDone, and only THEN does
+	// the upstream stream close — guaranteeing the settlement path
+	// sees a missing reservation. Polling avoided per ISS-187 R1
+	// code/security NOTEs.
+	var streamStarted = make(chan struct{}, 1)
+	var deleteDone = make(chan error, 1)
+	var releaseUpstream = make(chan struct{}, 1)
+	client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte(`data: {"id":"chatcmpl","choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+			streamStarted <- struct{}{}
+			<-releaseUpstream
+			_ = pw.CloseWithError(errors.New("forced upstream provider disconnect"))
+		}()
+		header := http.Header{"Content-Type": []string{"text/event-stream; charset=utf-8"}}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: pr}, nil
+	})}
+	h, store, dbPath, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+		cfg.Coordinator.BuyerURL = "http://coordinator.test"
+	}, WithHTTPClient(client))
+	fullKey := createAccountAndKey(t, store, cfg, accountID)
+
+	go func() {
+		<-streamStarted
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			deleteDone <- fmt.Errorf("sql.Open: %w", err)
+			releaseUpstream <- struct{}{}
+			return
+		}
+		defer db.Close()
+		// Poll-with-deadline for the reservation row. The reservation
+		// is inserted very early in handleChatCompletions (before the
+		// upstream request fires), so by the time streamStarted
+		// signals, the row almost certainly exists. The poll
+		// tolerates a tiny window for slow CI runners.
+		var requestID string
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			if err := db.QueryRow(`SELECT request_id FROM quota_reservations WHERE account_id = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1`, accountID).Scan(&requestID); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		if requestID == "" {
+			deleteDone <- errors.New("timed out waiting for quota_reservations row")
+			releaseUpstream <- struct{}{}
+			return
+		}
+		res, err := db.Exec(`DELETE FROM quota_reservations WHERE account_id = ? AND request_id = ?`, accountID, requestID)
+		if err != nil {
+			deleteDone <- fmt.Errorf("delete: %w", err)
+			releaseUpstream <- struct{}{}
+			return
+		}
+		rows, _ := res.RowsAffected()
+		if rows != 1 {
+			deleteDone <- fmt.Errorf("delete affected %d rows, want 1", rows)
+			releaseUpstream <- struct{}{}
+			return
+		}
+		deleteDone <- nil
+		releaseUpstream <- struct{}{}
+	}()
+
+	resp := postChat(t, h, fullKey, body, nil)
+	if err := <-deleteDone; err != nil {
+		t.Fatalf("test setup failed: %v", err)
+	}
+	if resp.Code != http.StatusOK {
+		t.Fatalf("stream response code=%d body=%s", resp.Code, resp.Body.String())
+	}
+	outcome, source := usageEventOutcome(t, dbPath, accountID)
+	if outcome != "stream_truncated" {
+		t.Fatalf("usage_events outcome = %q, want stream_truncated; fallback did not record the partial-stream row (#187 regression)", outcome)
+	}
+	if source != "gateway_estimated" {
+		t.Fatalf("usage_events token_source = %q, want gateway_estimated", source)
+	}
+	// R2 architect MAJOR: after the fallback writes the usage_events
+	// row, the reservation hold MUST also be released so the buyer's
+	// quota is not double-counted (sum of usage_events.total_tokens
+	// AND active quota_reservations.reserved_tokens). The test
+	// deletes the reservation row out from under settlement, so the
+	// RefundReservation call after EnsureUsageEvent is a no-op
+	// here — but the assertion still pins the contract that there
+	// is NO 'active' reservation row left after the handler returns.
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open for post-condition check: %v", err)
+	}
+	defer db.Close()
+	var activeCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM quota_reservations WHERE account_id = ? AND status = 'active'`, accountID).Scan(&activeCount); err != nil {
+		t.Fatalf("count active reservations: %v", err)
+	}
+	if activeCount != 0 {
+		t.Fatalf("active quota_reservations rows = %d, want 0 (R2 architect MAJOR: quota double-count regression)", activeCount)
+	}
+}
+
+// TestEnsureUsageEventRejectsCrossAccountConflict pins the ISS-187
+// R1 code+security MAJOR: when the gateway's INSERT OR IGNORE
+// silently no-ops on the pre-existing #196 PK-collision attack
+// surface, EnsureUsageEvent now reads the existing row and rejects
+// the call if (account_id, demo_identity, token_source, outcome)
+// don't match — preventing a malicious buyer from skipping their
+// audit row by colliding with an unrelated request_id.
+func TestEnsureUsageEventRejectsCrossAccountConflict(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.Open(context.Background(), dir+"/test.db")
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer st.Close()
+	rid := "55555555-5555-4555-8555-555555555555"
+	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	if err := st.InsertUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID: rid, AccountID: "victim_account",
+		WindowDate: "2026-06-28", PromptTokens: 10, CompletionTokens: 20, TotalTokens: 30,
+		TokenSource: "provider_reported", Outcome: "ok", CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("InsertUsageEvent (victim row): %v", err)
+	}
+	// Attacker tries to write the SAME request_id under a different account.
+	err = st.EnsureUsageEvent(context.Background(), storage.UsageEvent{
+		RequestID: rid, AccountID: "attacker_account",
+		WindowDate: "2026-06-28", PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2,
+		TokenSource: "gateway_estimated", Outcome: "stream_truncated", CreatedAt: now,
+	})
+	if !errors.Is(err, storage.ErrUsageEventConflict) {
+		t.Fatalf("EnsureUsageEvent on cross-account PK collision: err=%v, want ErrUsageEventConflict", err)
+	}
+}
+
+// TestEnsureUsageEventRejectsSameIdentityPayloadMismatch pins the
+// R2 code MAJOR fix: the conflict-verify check covers the FULL
+// billing payload (tokens + window_date), not just identity. Without
+// this, a buyer racing two settle paths could pin a low-token row
+// first and then have higher-token settles silently no-op,
+// undercharging themselves.
+func TestEnsureUsageEventRejectsSameIdentityPayloadMismatch(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.Open(context.Background(), dir+"/test.db")
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer st.Close()
+	rid := "77777777-7777-4777-8777-777777777777"
+	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	base := storage.UsageEvent{
+		RequestID: rid, AccountID: "buyer",
+		WindowDate: "2026-06-28", PromptTokens: 5, CompletionTokens: 7, TotalTokens: 12,
+		TokenSource: "gateway_estimated", Outcome: "stream_truncated", CreatedAt: now,
+	}
+	if err := st.InsertUsageEvent(context.Background(), base); err != nil {
+		t.Fatalf("InsertUsageEvent (base row): %v", err)
+	}
+	// Same identity (account, source, outcome) but DIFFERENT
+	// completion tokens — must be rejected as a conflict.
+	bumped := base
+	bumped.CompletionTokens = 50
+	bumped.TotalTokens = 55
+	if err := st.EnsureUsageEvent(context.Background(), bumped); !errors.Is(err, storage.ErrUsageEventConflict) {
+		t.Fatalf("EnsureUsageEvent with bumped tokens: err=%v, want ErrUsageEventConflict", err)
+	}
+	// Same identity + tokens but DIFFERENT window_date — also must
+	// be rejected (covers UTC-midnight-crossing race attempts).
+	shifted := base
+	shifted.WindowDate = "2026-06-29"
+	if err := st.EnsureUsageEvent(context.Background(), shifted); !errors.Is(err, storage.ErrUsageEventConflict) {
+		t.Fatalf("EnsureUsageEvent with shifted window: err=%v, want ErrUsageEventConflict", err)
+	}
+}
+
+// TestEnsureUsageEventAcceptsMatchingRetry confirms the benign
+// idempotency case: a duplicate INSERT with all matching identity
+// + token + window fields is treated as success — covers retries
+// and race-with-normal-settle scenarios.
+func TestEnsureUsageEventAcceptsMatchingRetry(t *testing.T) {
+	dir := t.TempDir()
+	st, err := sqlite.Open(context.Background(), dir+"/test.db")
+	if err != nil {
+		t.Fatalf("sqlite.Open: %v", err)
+	}
+	defer st.Close()
+	rid := "66666666-6666-4666-8666-666666666666"
+	now := time.Date(2026, 6, 28, 0, 0, 0, 0, time.UTC)
+	ev := storage.UsageEvent{
+		RequestID: rid, AccountID: "buyer",
+		WindowDate: "2026-06-28", PromptTokens: 5, CompletionTokens: 7, TotalTokens: 12,
+		TokenSource: "gateway_estimated", Outcome: "stream_truncated", CreatedAt: now,
+	}
+	if err := st.InsertUsageEvent(context.Background(), ev); err != nil {
+		t.Fatalf("InsertUsageEvent first call: %v", err)
+	}
+	if err := st.EnsureUsageEvent(context.Background(), ev); err != nil {
+		t.Fatalf("EnsureUsageEvent retry with matching fields: %v", err)
+	}
+}
+
 // SPEC-002 § FR-B6 / issue #186: when the upstream coordinator
 // stream dies mid-flight (provider disconnect surfaces here as an
 // io.Pipe close-with-error), the gateway MUST emit the exact
