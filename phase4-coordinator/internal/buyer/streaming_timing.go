@@ -112,7 +112,7 @@ func toolCallOpenFromSSELine(line []byte) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	s := strings.TrimSpace(strings.TrimPrefix(text, prefix))
-	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+	if v, err := strconv.ParseInt(s, 10, 64); err == nil && v > 0 {
 		return time.UnixMilli(v).UTC(), true
 	}
 	return time.Time{}, false

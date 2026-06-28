@@ -36,6 +36,38 @@ func TestStreamingTimingCollectorSkipsLargeSkewAndExportsP95(t *testing.T) {
 	}
 }
 
+func TestToolCallOpenFromSSELine(t *testing.T) {
+	cases := []struct {
+		name     string
+		line     string
+		wantOK   bool
+		wantTime int64
+	}{
+		{"valid", ": macprovider_tool_call_open unix_ms=1751140123456", true, 1751140123456},
+		{"valid with trailing whitespace", ": macprovider_tool_call_open unix_ms=1751140123456 ", true, 1751140123456},
+		{"old data: JSON form rejected", `data: {"type":"macprovider_tool_call_open","unix_ms":1751140123456}`, false, 0},
+		{"missing prefix", "data: ", false, 0},
+		{"missing unix_ms", ": macprovider_tool_call_open", false, 0},
+		{"non-integer suffix", ": macprovider_tool_call_open unix_ms=abc", false, 0},
+		{"empty suffix", ": macprovider_tool_call_open unix_ms=", false, 0},
+		{"zero rejected", ": macprovider_tool_call_open unix_ms=0", false, 0},
+		{"negative rejected", ": macprovider_tool_call_open unix_ms=-1", false, 0},
+		{"unrelated comment", ": some-other-comment", false, 0},
+		{"empty line", "", false, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, gotOK := toolCallOpenFromSSELine([]byte(tc.line))
+			if gotOK != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", gotOK, tc.wantOK)
+			}
+			if tc.wantOK && got.UnixMilli() != tc.wantTime {
+				t.Fatalf("time = %d, want %d", got.UnixMilli(), tc.wantTime)
+			}
+		})
+	}
+}
+
 func strconvMillis(t time.Time) string {
 	return strconv.FormatInt(t.UnixMilli(), 10)
 }
