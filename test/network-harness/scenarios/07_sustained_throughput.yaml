@@ -1,0 +1,58 @@
+# 07_sustained_throughput.yaml — benchmark scenario, phase B.
+#
+# Goal: characterize steady-state network performance under a constant
+# 2-buyer load for 5 minutes. Establishes the v0.1 baselines for B1
+# (TTFT p50), B2 (streaming TPS p50), B3 (tail ratio p99/p50), B4
+# (error rate /1000), B5 (slot util %).
+#
+# Not a chaos test — providers should stay up the whole window. Any
+# 5xx in the error_taxonomy is real signal worth investigating.
+#
+# Cost estimate (~120 requests × 64 max_tokens): order of $0.05-0.10.
+#
+# See specs/SPEC-NETWORK-BENCHMARK-v0.1.md for thresholds + invariants.
+name: sustained_throughput
+description: |
+  2 concurrent buyers, streaming, max_tokens=64, 5-min steady window.
+  Measures TTFT distribution, streaming TPS, wall-time, and provider-side
+  slot utilization. Benchmark scenario — pass/warn/fail via B1-B5.
+
+expected_shape: |
+  Phase B benchmark (descriptive, B-invariants asserted):
+   - ~120 requests over 5 min.
+   - 2 providers should both serve roughly half each.
+   - TTFT p50 ≤ 800ms (target), ≤ 2000ms (bare-min).
+   - Streaming TPS p50 ≥ 30 tok/s (target), ≥ 15 tok/s (bare-min).
+   - Error rate ≤ 5/1000 under nominal load.
+   - Slot util ≥ 40% (target), ≥ 15% (bare-min) over the window.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 2
+  stream: true
+  pattern: interval
+  interval_ms: 2500
+  requests_per_buyer: 60
+
+duration: 300s
+request_timeout: 30s
+silent_hang_threshold: 15s
+
+benchmark:
+  enabled: true
+  invariants: [B1, B2, B3, B4, B5]
+
+prompts:
+  - model: mlx-community/Qwen2.5-Coder-7B-Instruct-4bit
+    user: "Write a single concise paragraph about a yellow finch."
+    max_tokens: 64
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Write a single concise paragraph about a yellow finch."
+    max_tokens: 64

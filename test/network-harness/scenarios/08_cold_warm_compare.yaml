@@ -1,0 +1,55 @@
+# 08_cold_warm_compare.yaml — benchmark, phase B.
+#
+# Goal: characterize the cold-start TTFT penalty. Fires alternating
+# "warm" (back-to-back) and "cold" (post-60s-idle) requests. Provides
+# a direct measure of: how much worse is the first request to an
+# idle pool vs a request to a hot one?
+#
+# Pattern: idle 60s → fire 1 → fire 1 immediately → idle 60s → fire 1
+# → fire 1 immediately → ... × 10 pairs.
+#
+# Note: requires the provider to actually go idle in the 60s window.
+# Some MLX models keep weights resident on Apple Silicon even when
+# idle, so the "cold" here means "no recent request" rather than
+# "model freshly loaded from disk."
+#
+# Cost estimate (20 requests × 8 max_tokens): negligible.
+name: cold_warm_compare
+description: |
+  10 pairs of (cold-request, warm-request). Idle 60s between pairs.
+  Measures TTFT distribution split by cold vs warm.
+  Benchmark scenario — uses B1 (cold p50 ≤ 2× warm p50).
+
+expected_shape: |
+  Phase B benchmark:
+   - 20 total requests, 10 "cold" (post-idle), 10 "warm" (back-to-back).
+   - TTFT cold > TTFT warm. The ratio quantifies the cold penalty.
+   - B1 fires WARN if cold/warm > 2×, FAIL if > 5×.
+
+target:
+  gateway_url: https://api.streamvc.live
+  coordinator_url: https://coordinator.streamvc.live
+  buyer_token: ${BUYER_TOKEN}
+  coordinator_db_ssh: pearl:/var/lib/macprovider/coordinator.db
+  gateway_db_ssh: pearl:/var/lib/macprovider/gateway.db
+  db_sudo_user: macprovider
+
+buyers:
+  count: 1
+  stream: true
+  pattern: cold_warm_pairs
+  requests_per_buyer: 20
+  inter_pair_idle_seconds: 60
+
+duration: 900s
+request_timeout: 60s
+silent_hang_threshold: 30s
+
+benchmark:
+  enabled: true
+  invariants: [B1]
+
+prompts:
+  - model: mlx-community/Qwen3-32B-4bit
+    user: "Say: ready."
+    max_tokens: 8
