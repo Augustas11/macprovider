@@ -1,8 +1,8 @@
 # SPEC-019 - Structured output (`response_format: json_schema`)
 
-**Version:** 0.1.1 (2026-06-28, round-1 audit absorption)
+**Version:** 0.1.2 (2026-06-28, round-2 defensive absorption)
 **Depends on:** SPEC-001, SPEC-006, SPEC-015, SPEC-018 v0.2.4 LOCKED
-**Status:** DRAFT - r2 defensive audit pending.
+**Status:** DRAFT - r3 defensive audit pending.
 
 ## Quick orientation
 
@@ -179,12 +179,28 @@ AC-8. Schemas with type-mismatched `const` or `enum`, for example
 `{"type":"string","const":42}`, return HTTP 400
 `json_schema_invalid_const_or_enum_type` with JSON-pointer `param`.
 
-### Schema-shape parity
+AC-8a. Invalid-name rejection: requests with `json_schema.name` that fails the
+anchored regex `^[A-Za-z0-9_-]{1,64}$` return HTTP 400
+`json_schema_invalid_name` at both provider parser and coordinator.
+Adversarial fixtures include: 65-byte names, non-ASCII names (e.g. "café"),
+names containing newline / control characters, substring-only valid sequences
+(e.g. "good\nSYSTEM"), names with disallowed punctuation ("good.evil",
+"valid<script>"). The dashed name "person-v1" MUST be accepted
+(OpenAI-compatible; v0.1.1 incorrectly rejected this).
+
+### Schema-shape & key-comparison
 
 AC-9. NFC-vs-NFD property name fixture: a schema with NFC property name "café"
 (U+0063 U+0061 U+0066 U+00E9) and a model output with NFD property name
 `"cafe\u0301"` are byte-distinct; `additionalProperties:false` rejects the NFD
 key as `json_schema_validation_failed`.
+Adversarial extension: schema with NFC property name "café" plus
+attacker-supplied output with visually-equivalent NFD property name
+`"cafe\u0301"` -> validator rejects byte-distinct keys as
+`json_schema_validation_failed` AND log / error envelope preserves the
+offending byte sequence (escaped per JSON string rules; codepoints unchanged).
+No Unicode normalization at log time. Future implementations MUST NOT weaken
+byte-distinct comparison to NFC-normalized comparison; doing so breaks this AC.
 
 ### Caps
 
@@ -240,7 +256,8 @@ provider returns HTTP 502 `json_schema_validation_failed` with type
 AC-18. Empty-content fixture: when the model emits zero tokens after stop-token
 filtering and `json_schema` or `json_object` is requested, the response is HTTP
 502 `malformed_json_response`, not 200 with empty content. Settlement is
-`FaultBreakerQualifying`.
+`FaultBreakerQualifying`. The envelope asserts `retryable:false` and an
+actionable message recommending a buyer-side fix before retry.
 
 AC-19. Response-cap order fixture: output over the `2_097_152`-byte response cap
 returns HTTP 502 `response_byte_cap_exceeded` before JSON parsing or schema
@@ -268,10 +285,20 @@ family matching) and the existing render hook sites
 `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:454`,
 `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:540`).
 
-AC-22. Composite-render fixture: a request with both `tools` (multi-turn
-history) and `response_format:json_schema` renders BOTH the tool prompt template
-AND the schema instruction in the system position, in deterministic order,
-byte-equivalent to the Qwen3 / Llama-3.3 fixture.
+AC-22a. Composite-render empty-tool-history fixture: a request with `tools` and
+`response_format:json_schema`, but no multi-turn tool data, follows the §4
+order and renders the schema instruction byte-equivalently through the
+`ToolPromptRenderer.renderMessages(...)` short-circuit path for Qwen3 and
+Llama-3.3. Fail condition: the renderer drops, moves, or duplicates the schema
+instruction when `containsMultiTurnToolData == false`.
+
+AC-22b. Composite-render non-empty-tool-history fixture: a request with both
+`tools` multi-turn history and `response_format:json_schema` follows the §4
+order and renders BOTH the schema instruction and the family-keyed tool prompt
+template in the deterministic system-position composition, byte-equivalent to
+the Qwen3 / Llama-3.3 fixture. Fail condition: alternative ordering, missing
+schema instruction, missing tool template markup, or mutation of the original
+`tools` array.
 
 AC-23. Concurrent-request fixture: two simultaneous requests with different
 schemas render their own schemas into their own system prompts; no cross-render
@@ -322,8 +349,14 @@ gateway may parse enough to enforce existing quota and stream routing, but it
 MUST forward the original request bytes to the coordinator as it does today
 (`phase5-gateway/internal/router/chat_proxy.go:102-117`, inbound body read;
 `phase5-gateway/internal/router/chat_proxy.go:217-224`, coordinator request
-construction; `phase5-gateway/internal/router/chat_proxy.go:997-1008`,
-body-preserving helper).
+construction from `bytes.NewReader(body)`).
+
+AC-28a. Body-byte preservation: a buyer-sent compressed request body
+(`Content-Encoding: gzip` with a 14 KiB `json_schema.schema`) is forwarded to
+the coordinator without gateway-side decompression. The coordinator-side
+decompressed schema bytes equal the provider parser's decompressed schema bytes
+(byte-equivalent). Receipt prompt-hash matches a buyer-sent identical-content
+uncompressed request.
 
 ### Buyer-facing UX
 
@@ -333,25 +366,33 @@ envelope, no behavior change.
 
 ### Forward-compat regression fixtures
 
-AC-30. Fixture:
-`test/integration/spec_019/openai_python_strict_json_schema/` contains a
-request body, a schema (`Person { name: str, age: int }` strict-mode), an
-expected `pydantic` parsed model, SDK version `openai==2.44.0`, and a target
-test file `test_strict_parity.py`. The macprovider response parses into the
-same `pydantic` model as the OpenAI `gpt-4o-2024-08-06` golden fixture
-committed alongside the test.
+AC-30. openai-python paired fixture:
+`test/integration/spec_019/openai_python_strict_json_schema/` contains:
+- request body with `response_format.json_schema` for `Person` (Pydantic model:
+  `class Person(BaseModel): name: str; age: int`),
+- `openai==2.44.0`,
+- captured outbound HTTP body (`fixture_request_body.json`),
+- expected returned parsed `Person` model,
+- golden OpenAI `gpt-4o-2024-08-06` response committed for side-by-side
+  comparison.
+The macprovider response parses into the same `Person` model and the
+JCS-canonicalized `response_format.json_schema.schema` matches the golden
+fixture modulo an explicit allow-list (`title`, `description`).
 
-AC-31. Fixture:
-`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/` uses
-`createOpenAICompatible({ supportsStructuredOutputs: true, ... })`, NOT default
-because default emits `json_object` not `json_schema`. The outbound request body
-MUST contain `response_format.type == "json_schema"` and
-`json_schema.strict == true`.
+AC-31. Vercel AI SDK paired fixture:
+`test/integration/spec_019/vercel_ai_sdk_strict_json_schema/` contains the SAME
+logical `Person` contract translated to Zod (`z.object({ name: z.string(), age:
+z.number().int() })`) with `createOpenAICompatible({
+supportsStructuredOutputs: true, ... })`, `@ai-sdk/openai-compatible @2.0.38`,
+captured outbound HTTP body (`fixture_request_body.json`), and assertion that
+`response_format.type == "json_schema"` and `json_schema.strict == true`. The
+JCS-canonicalized `response_format.json_schema.schema` MUST match the AC-30
+Pydantic schema modulo `title` / `description` differences. False-green between
+the two SDK paths is the failure case this fixture prevents.
 
-AC-32. Vercel default-path fixture:
-`test/integration/spec_019/vercel_ai_sdk_json_object_default/` proves
-`createOpenAICompatible({ supportsStructuredOutputs:false, ... })` emits
-`json_object` and is enforced by AC-14.
+AC-32. Vercel default-path fixture (separate file): without
+`supportsStructuredOutputs:true`, Vercel emits `json_object` not `json_schema`.
+Asserts default path remains v0.1.1 `json_object` enforcement (AC-7).
 
 AC-33. Prompt-injection fixture covers hostile strings in
 `json_schema.description`, `json_schema.name`, property names, property
@@ -411,11 +452,15 @@ Property names are compared by raw UTF-8 byte sequence. No Unicode
 normalization is applied at validation. Two property names with different byte
 sequences are distinct keys even if they normalize to the same form.
 
-`json_schema.name` is untrusted prompt data when rendered into the chat-template
-system position. The renderer MUST embed it only as JSON string data (escaped,
-length-bounded). Recommended constraint: max 64 ASCII chars matching
-`[A-Za-z0-9_]+` (OpenAI machine-name convention); names outside this set return
-HTTP 400 `json_schema_invalid_name`.
+`json_schema.name` is buyer-controlled, untrusted prompt data when rendered
+into the system-position chat template. The provider request parser and
+coordinator validator MUST reject names that do not match the anchored regex
+`^[A-Za-z0-9_-]{1,64}$` (OpenAI-compatible machine-name shape: letters,
+digits, underscore, hyphen, 1-64 bytes). Names that fail this constraint return
+HTTP 400 `json_schema_invalid_name`,
+`param:"response_format.json_schema.name"`, `inference_ran:false`. Provider and
+coordinator MUST enforce identical constraint semantics; a coordinator-direct
+path that bypasses the provider parser MUST still reject.
 
 The validator MUST reject schemas that rely on unsupported keywords for safety
 or correctness.
@@ -449,20 +494,26 @@ the renderer creates one. The instruction MUST include:
 - the directive that the final assistant content must be only JSON with no
   Markdown fences, prose preface, or trailing commentary.
 
-**Composite render rule when both `tools` and `response_format:json_schema` are
-present**: the IMPL MUST first render multi-turn `tools` history per SPEC-018
-§10d.1 (`phase3-binary/Sources/macprovider-cli/ToolPromptRenderer.swift`, tool
-prompt renderer), then prepend the structured-output schema instruction
-immediately after, all in the system position. Order at each `ModelRuntime.swift`
-hook (`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:400`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:454`,
-`phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:540`):
+**Composite render rule when both `tools` and `response_format: json_schema`
+are present** — the implementation MUST follow this exact order at each
+`ModelRuntime.swift` hook site (cite `:400`, `:454`, `:540`):
 
-1. Build structured-output-adjusted `ChatMessage` values, with schema
-   instruction at system position.
-2. Pass to `ToolPromptRenderer.renderMessages` for tool prompt template
-   rendering.
-3. Create `UserInput` with unchanged `tools` array.
+1. Construct schema-adjusted `ChatMessage` values: prepend the
+   structured-output schema instruction to the system-position message,
+   leaving all other messages unchanged.
+2. Pass the adjusted `ChatMessage` array to
+   `ToolPromptRenderer.renderMessages(...)`. The renderer is a no-op
+   short-circuit when no multi-turn tool data is present
+   (`containsMultiTurnToolData == false`) and renders the family-keyed
+   tool prompt-template when present; either path preserves the
+   prepended schema instruction.
+3. Construct `UserInput(chat: rendered, tools: request.tools)` with the
+   original `tools` array unchanged.
+
+This is a single normative order. No alternative ordering is permitted.
+A request with both `tools` history and `response_format: json_schema`
+produces a deterministic system-position composed of: schema
+instruction followed by family-keyed tool prompt-template markup.
 
 **Stateless renderer**: the structured-output renderer MUST be stateless across
 requests in v0.1.0. No schema cache (in-process, per-connection, or per-family)
@@ -503,12 +554,34 @@ On `malformed_json_response` or `json_schema_validation_failed`, no success
 receipt is emitted; the request is settled as `FaultBreakerQualifying` per §8
 with zero provider-positive credits.
 
+**Validator panic / fatal-error catch-all**: after inference starts, every
+structured-output postprocess failure path MUST be caught and converted to a
+terminal HTTP 502 SPEC-019 envelope with `inference_ran:true`,
+`settlement_ran:true`, `FaultBreakerQualifying`, no success receipt emitted, no
+sticky-success route written, and zero provider-positive credits. Failure modes
+covered: thrown errors, runtime panics or fatal assertions, recursion /
+stack-overflow, resource-limit aborts (timeout / memory), and any unexpected
+validator internal error. Fallback code mapping: JSON parse internals →
+`malformed_json_response`; validator internals →
+`json_schema_validation_failed`. An empty / default HTTP 500 from the request
+handler MUST NOT escape this boundary on the structured-output postprocess
+path.
+
 **Empty content under `json_schema` / `json_object`**: if final inference output
 (post stop-token filtering,
 `phase3-binary/Sources/macprovider-cli/ModelRuntime.swift:811-828`) is the empty
 string `""`, the response is classified as HTTP 502 `malformed_json_response`
 with `inference_ran:true`, `settlement_ran:true`, `FaultBreakerQualifying`.
 Empty string is not a JSON value.
+
+**Empty-content subcase override**: when the offending output is the empty
+string `""` after stop-token filtering, the response envelope MUST set
+`retryable:false` and the `error.message` MUST recommend a buyer-side fix (e.g.
+"Model emitted zero tokens for the requested schema; modify the prompt,
+increase `max_tokens`, or relax the schema before retrying — automatic
+same-request retry will not succeed."). This prevents deterministic empty output
+from burning the buyer's retry budget. Non-empty malformed JSON output keeps
+`retryable:true` per the standard envelope.
 
 `malformed_json_response` is used when parsing fails, duplicate keys are found,
 the top-level value is not object-or-array for `json_object`, the final content
@@ -542,9 +615,13 @@ No internal retry is allowed in v0.1.0. Buyer retries happen at the buyer layer.
 | `json_schema_invalid_name` | 400 | pre-inference request validation | false | `json_schema.name` outside machine-name constraint. |
 | `json_schema_too_large` | 413 | pre-inference request validation | false | Schema JSON value over `16_384` raw UTF-8 bytes. |
 | `json_schema_too_deep` | 400 | pre-inference request validation | false | Schema nesting exceeds 32 levels. |
-| `malformed_json_response` | 502 | post-inference output validation | true | Output not valid JSON text, duplicate keys, empty content, or invalid `json_object` root. |
+| `malformed_json_response` | 502 | post-inference output validation | true* | Output not valid JSON text, duplicate keys, empty content, or invalid `json_object` root. |
 | `json_schema_validation_failed` | 502 | post-inference output validation | true | Parsed JSON does not satisfy schema or output depth. |
 | `response_byte_cap_exceeded` | 502 | post-inference raw output cap | true | Existing SPEC-018 code; parsing and validation do not run. |
+
+* Empty-content subcase override: `malformed_json_response` caused by `""` after
+  stop-token filtering is `retryable:false` with an actionable buyer-side fix
+  message; non-empty malformed JSON remains `retryable:true`.
 
 Minimum terminal error envelope:
 
@@ -578,6 +655,21 @@ time return HTTP 400 `json_schema_too_deep` at both provider and coordinator
 before inference. Depth is counted at every level (`properties[*]`, `items`,
 nested `items`/`properties`). Same constant as the output-validation depth cap
 in AC-13, by design.
+
+Both `json_schema_max_depth` (schema-side, §6) and AC-27 (output-instance side)
+use the same constant 32 by design — a schema at depth 32 can match an instance
+at depth 32.
+
+**Depth counting algorithm**: the count is the maximum nesting of the schema
+JSON tree itself, NOT instance-implied depth. Algorithm: at the root schema
+object, depth = 1; each nested `properties[*]` subtree, `items` subtree,
+`additionalProperties` subtree, or schema-typed value inside `oneOf`/`anyOf`
+(note: those keywords are rejected per §3, but the counter rule still applies
+if support is added later) increments the count by 1. Sibling schemas at the
+same level do not increase depth. Provider and coordinator MUST use this
+identical algorithm. Example: `{"type":"object","properties":{"a":{"type":
+"object","properties":{"b":{"type":"string"}}}}}` is depth 3 (root →
+properties.a → properties.a.properties.b).
 
 SPEC-019 inherits the SPEC-018 §9 / §10d.7 response-size posture
 (`specs/SPEC-018-agentic-tool-calling.md:963-975`, cap values and fail-closed
@@ -618,9 +710,27 @@ Gateway behavior remains pass-through. The gateway currently reads the inbound
 body, parses only the minimal `chatRequest` fields for quota and stream routing,
 then creates the upstream coordinator request from the original `body`
 (`phase5-gateway/internal/router/chat_proxy.go:102-117`, inbound body read;
-`phase5-gateway/internal/router/chat_proxy.go:217-224`, upstream request build;
-`phase5-gateway/internal/router/chat_proxy.go:997-1008`, body-preserving
-request helper). SPEC-019 adds no gateway schema parser and no new endpoint.
+`phase5-gateway/internal/router/chat_proxy.go:217`, upstream request build from
+`bytes.NewReader(body)`). SPEC-019 adds no gateway schema parser and no new
+endpoint.
+
+**Inbound content-encoding preservation**: the gateway MUST forward the inbound
+request body bytes to the coordinator without decompressing any
+`Content-Encoding` (`gzip`, `deflate`, `br`). The `json_schema.schema` byte cap
+(§6) and JCS canonicalization (SPEC-015 §1191-1204) are computed over the same
+byte sequence at gateway, coordinator, and provider parser; mid-path
+decompression would split the byte-equivalence invariant. If a buyer sends a
+compressed body, the coordinator's reader-side handles decompression with
+identical byte semantics. Provider parser sees the canonical decompressed
+bytes.
+
+**Settlement double-attribution prevention**: for the gateway-passed-through
+detail codes `malformed_json_response` and `json_schema_validation_failed`, the
+gateway MUST NOT invoke `settleBeforeResponse`
+(`phase5-gateway/internal/router/chat_proxy.go` — grep for current line) on
+these specific codes. These are downstream `FaultBreakerQualifying` outcomes
+already settled by the coordinator; a second gateway-side settle would
+double-debit the buyer.
 
 **Gateway pass-through allow-list amendment**: SPEC-019 v0.1.0 amends SPEC-006's
 provider-5xx normalization (`specs/SPEC-006-buyer-api.md:2556`, gateway 502
@@ -630,8 +740,10 @@ gateway-pass-through detail-code allow-list. Other 502 codes from the provider
 continue to normalize to `api_error` / `upstream_provider_error` per SPEC-006.
 The current gateway normalization paths are
 `phase5-gateway/internal/router/chat_proxy.go:317-327`, non-OK coordinator
-response normalization, and `phase5-gateway/internal/router/chat_proxy.go:601-607`,
-receipt-eligible provider error pass-through helper.
+response normalization, `phase5-gateway/internal/router/chat_proxy.go:593-599`,
+receipt-eligible provider error pass-through helper, and
+`phase5-gateway/internal/router/chat_proxy.go:601-607`,
+`isNullUsageProviderError` predicate.
 
 ## 8. Money path
 
@@ -756,14 +868,14 @@ Audit lanes should probe:
 Status: DRAFT. This SPEC becomes LOCKED only after the audit loop converges at
 0 CRITICAL, 0 HIGH, and 0 MEDIUM across all required lanes.
 
-Version: 0.1.1 (2026-06-28, round-1 audit absorption).
+Version: 0.1.2 (2026-06-28, round-2 defensive absorption).
 
 Precondition: SPEC-018 v0.2.4 LOCKED at `7e50832` via PR #202, with
 implementation shipped at `c77313a` via PR #209
 (`specs/SPEC-018-v0_2-IMPL-NOTES.md:7-10`, release note and implementation
 commit anchors).
 
-Successor: TBD. Expected next version is v0.1.2 for defensive audit absorption
+Successor: TBD. Expected next version is v0.1.3 for defensive audit absorption
 or v0.2.0 if the audit loop promotes streaming structured output into scope.
 
 Drafting scope: no implementation code, no SPEC-018 edits, no SPEC-015 schema
@@ -773,16 +885,37 @@ change, no new HTTP endpoint.
 
 - **v0.1.1 (2026-06-28, round-1 audit absorption):** Absorbed 3 CRITICAL
   + 14 HIGH + 14 MEDIUM findings across 6 audit lanes. Cross-spec
-  amendments to SPEC-001 (§A.1) and SPEC-006 (§A.2). New strict-mode
-  parity rule (§B.1) and new error codes. Schema-depth cap added (§D.1).
-  Money-path receipt-ordering normative (§C.1). Empty-content
-  classification (§C.2). Composite tool×schema render order (§E.1).
-  Stateless renderer required (§E.2). Concrete AC-15/AC-16 fixtures
-  (§F). Versioned error-code suffixes dropped (§G.1). Quick orientation
-  + AC categories restructured (§I.1, §I.2). Round narrative:
+  amendments to SPEC-001 (§1) and SPEC-006 (§7). New strict-mode parity rule
+  (§3), const/enum type-conformance rule (§3), NFC/NFD byte-comparison rule
+  (§3), and new error codes. Money-path receipt-ordering normative (§5 + §2
+  AC-26). Empty-content classification (§5). Defaulted-strict receipt scope
+  clarified (§9). Schema-depth cap added (§6), response cap pre-parse order
+  fixed (§6), and `json_schema.name` rule added (§3 + §2 AC-33). Composite
+  tool×schema render order (§4) and stateless renderer requirement (§4) added.
+  Concrete SDK fixtures (§2 AC-30/AC-31). Versioned error-code suffixes dropped
+  (§1 + §2 AC-11/AC-22). Quick orientation + AC categories restructured (§0 /
+  §2). Round narrative:
   `specs/SPEC-019-v0_1-r1-audit.md`; per-lane findings:
   `specs/SPEC-019-v0_1-{architect,code,security,product-design,critic,
   narrative}-r1-audit.md`.
+
+- **v0.1.2 (2026-06-28, round-2 defensive absorption):** Absorbed 6
+  HIGH + 9 MEDIUM + 3 minor findings across 6 audit lanes. Composite
+  render order unified to single normative sequence in §4 (architect/
+  code/critic convergent). `json_schema.name` rule made
+  OpenAI-compatible (`^[A-Za-z0-9_-]{1,64}$`), mandatory, and AC-
+  asserted at provider + coordinator (critic/code/PD/security
+  convergent). Empty-content `retryable:false` override added in §5
+  (PD). Validator panic / fatal-error catch-all normative block added
+  in §5 (security). AC-30/AC-31 SDK parity rewritten as paired
+  fixture (PD). Schema-depth counting algorithm specified in §6
+  (critic). NFC/NFD adversarial fixture added to AC-9 (security).
+  gzip body-byte preservation added to §7 (critic / carried-from-r1).
+  Gateway double-settlement prevention added to §7 (critic). Stale
+  gateway citations fixed in §7 (code). Round narrative:
+  `specs/SPEC-019-v0_1-r2-audit.md`; per-lane findings:
+  `specs/SPEC-019-v0_1-{architect,code,security,product-design,
+  critic,narrative}-r2-audit.md`.
 
 - **v0.1.0 (2026-06-28, first draft for audit):** Initial structured-output
   draft for non-streaming `json_schema` and `json_object` post-hoc enforcement.
