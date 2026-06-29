@@ -534,6 +534,9 @@ func main() {
 	// gates the §11.6 force-void endpoint at the route layer. Default
 	// false: endpoint returns HTTP 404 until the operator explicitly
 	// flips the flag via the existing config-reload primitive.
+	// The flag is held as an atomic on billingStore; SIGHUP reload
+	// calls billingStore.SetForceVoidEnabled which emits the
+	// `billing_config_flag_changed` audit event on real flips.
 	billingHandler := billingStore.HandlersWithQuarantineGate(
 		cfg.Auth.OperatorKey,
 		tokenStore,
@@ -541,6 +544,11 @@ func main() {
 		cfg.Endpoints.ProviderEarnings.RateLimitPerMinute,
 		cfg.Billing.QuarantineResolutionForceVoidEnabled,
 	)
+	// §11.5 launch-gate item 10 — operator-visible startup state.
+	logger.Info().
+		Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+		Str("event", "spec005_v0_4_route_layer_flag_init").
+		Msg("quarantine force-void route-layer flag initialized")
 	providerMux.Handle("/admin/ledger/", billingHandler)
 	if cfg.Auth.RequireProviderTokens {
 		providerMux.Handle("/providers/", billingHandler)
@@ -888,6 +896,17 @@ func reloadTier2Config(configPath string, startupTier2 config.Tier2Config, logge
 		}
 		buyerServer.SetBillingConfig(cfg.Rewards, snapshotID)
 		billingStores[0].SetSettlementConfig(cfg.Settlement)
+		// SPEC-005 v0.4 §11.6.4 + §13.2 — emit
+		// `billing_config_flag_changed` audit event on actual flips
+		// of the route-layer flag. No-op when value is unchanged.
+		if err := billingStores[0].SetForceVoidEnabled(context.Background(), cfg.Billing.QuarantineResolutionForceVoidEnabled, "sighup"); err != nil {
+			logger.Error().Err(err).Msg("billing force-void flag reload failed")
+			return
+		}
+		logger.Info().
+			Bool("billing.quarantine_resolution_force_void_enabled", cfg.Billing.QuarantineResolutionForceVoidEnabled).
+			Str("event", "spec005_v0_4_route_layer_flag_reload").
+			Msg("quarantine force-void route-layer flag reloaded")
 	}
 	updated := wsServer.RefreshTier2HashStatuses()
 	logger.Info().Int("provider_hash_statuses_updated", updated).Msg("tier2 config reloaded")

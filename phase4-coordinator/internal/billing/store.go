@@ -3,9 +3,12 @@ package billing
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/augstar/macprovider-coordinator/internal/config"
 	_ "modernc.org/sqlite"
@@ -19,6 +22,12 @@ type Store struct {
 	db           *sql.DB
 	settlementMu sync.RWMutex
 	settlement   SettlementConfig
+	// SPEC-005 v0.4 §13.2 — billing.quarantine_resolution_force_void_enabled
+	// route-layer flag. Held as atomic.Bool so the handler reads it on
+	// every request (no re-wire of the HTTP handler on reload).
+	// SetForceVoidEnabled is the only writer and emits the
+	// billing_config_flag_changed audit event on actual flips.
+	forceVoidEnabled atomic.Bool
 }
 
 func NewStore(db *sql.DB) (*Store, error) {
@@ -351,4 +360,66 @@ func nullInt64(v *int64) sql.NullInt64 {
 		return sql.NullInt64{}
 	}
 	return sql.NullInt64{Int64: *v, Valid: true}
+}
+
+// ForceVoidEnabled returns the current value of the SPEC-005 v0.4
+// route-layer flag. Reads are atomic; safe under concurrent flips
+// from SIGHUP-driven config reload.
+func (s *Store) ForceVoidEnabled() bool {
+	return s.forceVoidEnabled.Load()
+}
+
+// SetForceVoidEnabled atomically updates the route-layer flag and,
+// on actual flips (old != new), emits the SPEC-005 v0.4 §11.6.4
+// `billing_config_flag_changed` audit-log row inside the billing
+// store's `audit_log` table via a dedicated BEGIN IMMEDIATE tx. No
+// audit row is written when the value is unchanged (SPEC §13.2
+// "reload-no-change" rule).
+//
+// reloadSource MUST be one of "startup" | "sighup" | "http_reload".
+// "startup" callers MUST pass a zero-value old (we infer first-time
+// init from changed == false on the swap).
+func (s *Store) SetForceVoidEnabled(ctx context.Context, newValue bool, reloadSource string) error {
+	oldValue := s.forceVoidEnabled.Swap(newValue)
+	if oldValue == newValue {
+		return nil
+	}
+	// Startup writes do NOT emit an audit row per SPEC §11.6.4:
+	// "v0.4 does NOT emit at startup, because 'no prior acknowledged
+	// value' has no defined `old_value` and the startup
+	// `ledger_config_snapshots` row already captures the initial
+	// state."
+	if reloadSource == "startup" {
+		return nil
+	}
+	payload := map[string]any{
+		"flag":          "quarantine_resolution_force_void_enabled",
+		"old_value":     oldValue,
+		"new_value":     newValue,
+		"reload_source": reloadSource,
+		"ts_utc":        time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal flag-change payload: %w", err)
+	}
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire conn for flag-change audit: %w", err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("begin immediate for flag-change audit: %w", err)
+	}
+	now := payload["ts_utc"].(string)
+	if _, err := conn.ExecContext(ctx, `
+INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json)
+VALUES (?, 'billing_config_flag_changed', NULL, ?)`, now, string(payloadJSON)); err != nil {
+		_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		return fmt.Errorf("insert flag-change audit: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("commit flag-change audit: %w", err)
+	}
+	return nil
 }

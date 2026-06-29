@@ -4,9 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -496,5 +499,195 @@ func TestForceVoidNoNestedQueryDeadlock(t *testing.T) {
 		}
 	case <-ctx.Done():
 		t.Fatal("force-void POST timed out (suspected deadlock)")
+	}
+}
+
+// AC-Q049: concurrent POSTs against the same id — exactly one 200
+// + (N-1) × 409; one resolution row; one audit row.
+// N is intentionally < adminBucketCapacity so this AC tests the
+// UNIQUE-constraint race, not the rate-limit bucket (which is
+// tested separately).
+func TestACQ049_ConcurrentUNIQUEConflict(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-q049")
+	handler := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true)
+	const N = 32
+	var wg sync.WaitGroup
+	var ok200 int64
+	var ok409 int64
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			body := fmt.Sprintf(`{"operator_id":"alice","reason":"r%d"}`, i)
+			req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer operator")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			switch w.Code {
+			case http.StatusOK:
+				atomic.AddInt64(&ok200, 1)
+			case http.StatusConflict:
+				atomic.AddInt64(&ok409, 1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	if ok200 != 1 {
+		t.Fatalf("200 count=%d want 1", ok200)
+	}
+	if ok409 != N-1 {
+		t.Fatalf("409 count=%d want %d", ok409, N-1)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM ledger_quarantine_resolutions`); got != 1 {
+		t.Fatalf("resolution rows=%d want 1", got)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='ledger_quarantine_force_void'`); got != 1 {
+		t.Fatalf("audit rows=%d want 1", got)
+	}
+}
+
+// AC-Q053 deeper: SIGHUP-driven reload via Store.SetForceVoidEnabled
+// emits the billing_config_flag_changed audit event on actual flips
+// AND the endpoint sees the new flag value on the next request
+// (no http.Handler re-wire needed).
+func TestACQ053_ReloadEmitsFlagChangedAuditAndFlipTakesEffect(t *testing.T) {
+	store := quarantineFixture(t)
+	handler := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, false)
+	id := insertQuarantinedCredit(t, store, "p-q053b")
+	// flag false → 404
+	req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+	req.Header.Set("Authorization", "Bearer operator")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("pre-flip status=%d want 404", w.Code)
+	}
+	// SIGHUP-style flip: false → true. Expect a
+	// billing_config_flag_changed audit row.
+	if err := store.SetForceVoidEnabled(context.Background(), true, "sighup"); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='billing_config_flag_changed'`); got != 1 {
+		t.Fatalf("flag-change audit rows=%d want 1", got)
+	}
+	// Same handler — flag flip MUST take effect immediately, no
+	// http.Handler re-wire. POST now should produce 200.
+	req2 := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", strings.NewReader(`{"operator_id":"alice","reason":"x"}`))
+	req2.Header.Set("Authorization", "Bearer operator")
+	req2.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	handler.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusOK {
+		t.Fatalf("post-flip status=%d body=%s want 200", w2.Code, w2.Body.String())
+	}
+	// Reload-no-change: same value → NO new flag-change audit row.
+	if err := store.SetForceVoidEnabled(context.Background(), true, "sighup"); err != nil {
+		t.Fatal(err)
+	}
+	if got := scalar(t, store.db, `SELECT COUNT(*) FROM audit_log WHERE event_type='billing_config_flag_changed'`); got != 1 {
+		t.Fatalf("reload-no-change emitted spurious audit row: got %d total", got)
+	}
+}
+
+// AC-Q050: SPEC-007 explorer detail surface — LEFT JOIN to
+// ledger_quarantine_resolutions exposes resolution_kind /
+// resolution_operator_id / resolution_reason / resolution_at_utc as
+// aliased columns on the ledger row when a resolution exists.
+func TestACQ050_ExplorerAliasColumns(t *testing.T) {
+	store := quarantineFixture(t)
+	id := insertQuarantinedCredit(t, store, "p-q050")
+	// Force-void via the handler to land both the resolution + audit.
+	w := doForceVoid(t, store, true, id, `{"operator_id":"alice","reason":"audited"}`, "application/json")
+	if w.Code != http.StatusOK {
+		t.Fatalf("prep force-void status=%d body=%s", w.Code, w.Body.String())
+	}
+	// Read the request_id we used to seed the row.
+	var requestID string
+	if err := store.db.QueryRow(`SELECT request_id FROM ledger_request_credits WHERE id = ?`, id).Scan(&requestID); err != nil {
+		t.Fatal(err)
+	}
+	// Mirror the explorer query against the same DB.
+	row := store.db.QueryRow(`
+SELECT lqr.resolution_kind, lqr.operator_id, lqr.resolution_reason, lqr.created_at_utc
+  FROM ledger_request_credits lrc
+  LEFT JOIN ledger_quarantine_resolutions lqr ON lqr.request_credit_id = lrc.id
+ WHERE lrc.request_id = ?`, requestID)
+	var kind, opID, reason, createdAt sql.NullString
+	if err := row.Scan(&kind, &opID, &reason, &createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if !kind.Valid || kind.String != "force_void" {
+		t.Fatalf("resolution_kind=%v want force_void", kind)
+	}
+	if !opID.Valid || opID.String != "alice" {
+		t.Fatalf("resolution_operator_id=%v want alice", opID)
+	}
+	if !reason.Valid || reason.String != "audited" {
+		t.Fatalf("resolution_reason=%v want audited", reason)
+	}
+	if !createdAt.Valid || createdAt.String == "" {
+		t.Fatal("resolution_at_utc unset")
+	}
+}
+
+// Admin rate-limit bucket — every response code path (200, 404,
+// 422) consumes one token. With a 60-token capacity and 60/sec
+// refill, a burst of 600 requests in a tight loop MUST produce a
+// significant number of 429s (the bucket cannot refill faster than
+// it drains under burst).
+func TestAdminRateLimitBucketConsumesFailures(t *testing.T) {
+	store := quarantineFixture(t)
+	handler := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true)
+	const burst = 600
+	var ok429 int64
+	for i := 0; i < burst; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
+		req.Header.Set("Authorization", "Bearer operator")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code == http.StatusTooManyRequests {
+			ok429++
+		}
+	}
+	// With capacity 60 and a tight burst, expect at least 100 of the
+	// 600 calls to be rate-limited (defensive lower-bound — burst
+	// drain dominates timing-jitter refills).
+	if ok429 < 100 {
+		t.Fatalf("rate-limit fired only %d times in burst of %d — limiter is not consuming tokens", ok429, burst)
+	}
+}
+
+// Force-void path also charges the admin bucket.
+func TestForceVoidChargesAdminBucket(t *testing.T) {
+	store := quarantineFixture(t)
+	handler := store.HandlersWithQuarantineGate("operator", fakeTokens{}, true, 60, true)
+	// Drain the bucket via cheap GETs.
+	for i := 0; i < adminBucketCapacity+1; i++ {
+		req := httptest.NewRequest(http.MethodGet, "/admin/ledger/summary", nil)
+		req.Header.Set("Authorization", "Bearer operator")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+	}
+	// Send 50 quick force-void POSTs (no row exists for any of
+	// them, so they'd otherwise be 404 / 422). The drained bucket
+	// should produce a 429 in at least some of them.
+	id := insertQuarantinedCredit(t, store, "p-q-rate-fv")
+	var ok429 int64
+	for i := 0; i < 50; i++ {
+		body := fmt.Sprintf(`{"operator_id":"alice","reason":"r%d"}`, i)
+		req := httptest.NewRequest(http.MethodPost, "/admin/ledger/quarantine/"+itoa(id)+"/force-void", strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer operator")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code == http.StatusTooManyRequests {
+			ok429++
+		}
+	}
+	if ok429 == 0 {
+		t.Fatalf("force-void POSTs should consume the same bucket; got 0 × 429 after draining via /summary")
 	}
 }

@@ -1,11 +1,13 @@
 package billing
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,33 +39,45 @@ const (
 	resolutionKindVoid     = "force_void"
 )
 
-// matchQuarantinePath returns (request_credit_id, "force-void", ok)
-// when r.URL.Path matches the §11.6 quarantine path shape. ok=false
-// otherwise — the dispatcher then routes to 404.
-func matchQuarantinePath(path string) (int64, string, bool) {
+// quarantinePathMatch distinguishes three cases:
+//   - matched=false: path doesn't look like /admin/ledger/quarantine/.../force-void;
+//     dispatcher should fall through to existing routing.
+//   - matched=true, badID=true: the route shape matches but the id is
+//     malformed (non-decimal or int64 overflow). SPEC-005 §11.6.1.1
+//     requires HTTP 400 `bad_request`.
+//   - matched=true, badID=false: id parsed cleanly; handler proceeds.
+type quarantinePathMatch struct {
+	matched bool
+	badID   bool
+	id      int64
+	kind    string
+}
+
+func matchQuarantinePath(path string) quarantinePathMatch {
 	if !strings.HasPrefix(path, quarantinePathPrefix) {
-		return 0, "", false
+		return quarantinePathMatch{}
 	}
 	rest := path[len(quarantinePathPrefix):]
 	if !strings.HasSuffix(rest, forceVoidPathSuffix) {
-		return 0, "", false
+		return quarantinePathMatch{}
 	}
 	idStr := rest[:len(rest)-len(forceVoidPathSuffix)]
+	// At this point the path SHAPE matches the force-void route.
+	// Anything wrong with the id field is now a §11.6.1.1 400, not a
+	// 404 fall-through.
 	if idStr == "" {
-		return 0, "", false
+		return quarantinePathMatch{matched: true, badID: true, kind: "force-void"}
 	}
-	// path parameter must be a base-10 int64 — SPEC-005 §11.6.1.1
-	// 400 `bad_request` for any non-integer / overflow case.
 	for _, c := range idStr {
 		if c < '0' || c > '9' {
-			return 0, "", false
+			return quarantinePathMatch{matched: true, badID: true, kind: "force-void"}
 		}
 	}
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil {
-		return 0, "", false
+		return quarantinePathMatch{matched: true, badID: true, kind: "force-void"}
 	}
-	return id, "force-void", true
+	return quarantinePathMatch{matched: true, badID: false, id: id, kind: "force-void"}
 }
 
 // forceVoidHandler implements POST /admin/ledger/quarantine/{id}/force-void
@@ -82,8 +96,10 @@ func (h *handler) forceVoidHandler(w http.ResponseWriter, r *http.Request, reque
 	}
 	// Route-layer gate (§11.5 launch-gate item 10). Disabled-flag and
 	// row-not-found both return 404 with byte-identical bodies — no
-	// leak of which case fired.
-	if !h.forceVoidEnabled {
+	// leak of which case fired. Read the flag via the Store atomic
+	// so SIGHUP-driven flips take effect on the next request without
+	// rewiring the http.Handler.
+	if !h.store.ForceVoidEnabled() {
 		writeError(w, http.StatusNotFound, "not_found", "not found")
 		return
 	}
@@ -114,8 +130,8 @@ func (h *handler) forceVoidHandler(w http.ResponseWriter, r *http.Request, reque
 		writeValidationError(w, errCode, "reason rejected: "+errCode)
 		return
 	}
-	operatorID := strings.TrimSpace(body.OperatorID)
-	reason := strings.TrimSpace(body.Reason)
+	operatorID := trimSpaceASCII(body.OperatorID)
+	reason := trimSpaceASCII(body.Reason)
 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
@@ -126,12 +142,29 @@ func (h *handler) forceVoidHandler(w http.ResponseWriter, r *http.Request, reque
 	// written via the same *sql.Tx (NOT via audit.Store.Insert)
 	// because the audit Store opens a separate *sql.DB handle and
 	// cannot participate in this transaction.
-	tx, err := h.store.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	//
+	// modernc.org/sqlite's `BeginTx(LevelSerializable)` does NOT map
+	// to `BEGIN IMMEDIATE` unless the driver is configured with
+	// `?_txlock=immediate` in the DSN. We don't control the DSN here
+	// (shared with requestlog), so we acquire a dedicated conn and
+	// execute `BEGIN IMMEDIATE` explicitly. The same conn is then
+	// used for the resolution + audit INSERTs and the COMMIT.
+	conn, err := h.store.db.Conn(ctx)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "begin tx: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "internal_error", "acquire conn: "+err.Error())
 		return
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "begin immediate: "+err.Error())
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
+		}
+	}()
 
 	// Base-row preconditions (§11.6.2). These are on
 	// ledger_request_credits, NOT on ledger_quarantine_resolutions.
@@ -141,7 +174,7 @@ func (h *handler) forceVoidHandler(w http.ResponseWriter, r *http.Request, reque
 	var attemptN int64
 	var providerID string
 	var quarantineReason sql.NullString
-	row := tx.QueryRowContext(ctx, `
+	row := conn.QueryRowContext(ctx, `
 SELECT 1, quarantined, request_id, attempt_n, provider_id, quarantine_reason
   FROM ledger_request_credits WHERE id = ?`, requestCreditID)
 	if err := row.Scan(&baseExists, &quarantined, &requestID, &attemptN, &providerID, &quarantineReason); err != nil {
@@ -160,16 +193,19 @@ SELECT 1, quarantined, request_id, attempt_n, provider_id, quarantine_reason
 	// Resolution INSERT. Race protection is the UNIQUE constraint
 	// (§11.6.6); we do NOT pre-check ledger_quarantine_resolutions.
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = tx.ExecContext(ctx, `
+	_, err = conn.ExecContext(ctx, `
 INSERT INTO ledger_quarantine_resolutions
     (request_credit_id, resolution_kind, operator_id, resolution_reason, created_at_utc)
 VALUES (?, ?, ?, ?, ?)`, requestCreditID, resolutionKindVoid, operatorID, reason, now)
 	if err != nil {
 		if isSQLiteUniqueConstraint(err) {
-			// Release the conn (MaxOpenConns(1) on the shared *sql.DB
-			// — issue #21 / ARCH-3) BEFORE re-reading via h.store.db,
-			// otherwise the re-read deadlocks until ctx expires.
-			tx.Rollback()
+			// ROLLBACK + release conn (MaxOpenConns(1) on the shared
+			// *sql.DB — issue #21 / ARCH-3) BEFORE re-reading via
+			// h.store.db, otherwise the re-read deadlocks until ctx
+			// expires.
+			_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+			committed = true // suppress the deferred ROLLBACK
+			conn.Close()
 			h.respondAlreadyResolved(w, ctx, nil, requestCreditID)
 			return
 		}
@@ -197,17 +233,18 @@ VALUES (?, ?, ?, ?, ?)`, requestCreditID, resolutionKindVoid, operatorID, reason
 		writeError(w, http.StatusInternalServerError, "internal_error", "marshal audit payload: "+err.Error())
 		return
 	}
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := conn.ExecContext(ctx, `
 INSERT INTO audit_log (ts_utc, event_type, provider_id, payload_json)
 VALUES (?, ?, ?, ?)`, now, eventForceVoid, providerID, string(payloadJSON)); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "insert audit: "+err.Error())
 		return
 	}
 
-	if err := tx.Commit(); err != nil {
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "commit: "+err.Error())
 		return
 	}
+	committed = true
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"request_credit_id": requestCreditID,
@@ -219,9 +256,10 @@ VALUES (?, ?, ?, ?)`, now, eventForceVoid, providerID, string(payloadJSON)); err
 }
 
 // respondAlreadyResolved reads the existing resolution row and emits
-// the SPEC-005 §11.6.2 409 envelope. tx may be the same transaction
-// (which will be rolled back by the defer); we don't need a fresh
-// reader because the row is committed by definition.
+// the SPEC-005 §11.6.2 409 envelope. The caller MUST release the
+// transaction's connection BEFORE calling this — re-reading via
+// `h.store.db` while a tx still holds the only conn deadlocks at
+// `MaxOpenConns(1)` (issue #21 / ARCH-3).
 func (h *handler) respondAlreadyResolved(w http.ResponseWriter, ctx context.Context, _ *sql.Tx, requestCreditID int64) {
 	// Use the DB handle (not the failing tx) so the SELECT sees the
 	// committed winner row even though our tx is about to roll back.
@@ -262,37 +300,91 @@ type forceVoidBody struct {
 	Reason     string `json:"reason"`
 }
 
-// decodeForceVoidBody parses + validates the JSON shape (presence of
-// fields, no unknown keys, no duplicate keys) per §11.6.1.1.
+// decodeForceVoidBody enforces §11.6.1.1 JSON strictness:
+//   - reject invalid UTF-8 in the raw body (BEFORE json decode would
+//     normalize to U+FFFD)
+//   - reject duplicate top-level keys (json.Decoder + map silently
+//     collapses; we token-scan to catch them)
+//   - reject unknown top-level keys (DisallowUnknownFields only
+//     applies to struct decode; map decode ignores it)
+//   - reject non-object top-level / multi-value bodies
+//   - distinguish 413 (body too large) from 400 (other JSON errors).
 func decodeForceVoidBody(w http.ResponseWriter, r *http.Request) (forceVoidBody, bool) {
-	var raw map[string]json.RawMessage
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&raw); err != nil {
-		// http.MaxBytesError → 413; any other JSON error → 400.
+	body := forceVoidBody{}
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		var mbErr *http.MaxBytesError
 		if errors.As(err, &mbErr) {
 			writeError(w, http.StatusRequestEntityTooLarge, "request_too_large", "body exceeds 4 KiB")
 		} else {
-			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+			writeError(w, http.StatusBadRequest, "bad_request", "failed to read body")
 		}
-		return forceVoidBody{}, false
+		return body, false
 	}
-	if dec.More() {
-		writeError(w, http.StatusBadRequest, "bad_request", "body must contain a single JSON object")
-		return forceVoidBody{}, false
+	// SPEC §11.6.3 rule 1: UTF-8 well-formedness BEFORE any
+	// JSON-induced normalization (json.Unmarshal silently replaces
+	// invalid UTF-8 with U+FFFD).
+	if !utf8.Valid(raw) {
+		writeValidationError(w, "invalid_utf8", "body is not valid UTF-8")
+		return body, false
 	}
-	body := forceVoidBody{}
-	if raw == nil {
+	// Token-scan the top-level object to enforce SPEC §11.6.1.1
+	// duplicate / unknown key rules.
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	tok, err := dec.Token()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+		return body, false
+	}
+	if d, ok := tok.(json.Delim); !ok || d != '{' {
 		writeError(w, http.StatusBadRequest, "bad_request", "body must be a JSON object")
 		return body, false
 	}
-	opRaw, hasOp := raw["operator_id"]
+	seenKeys := map[string]bool{}
+	allowedKeys := map[string]bool{"operator_id": true, "reason": true}
+	rawFields := map[string]json.RawMessage{}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+			return body, false
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+			return body, false
+		}
+		if seenKeys[key] {
+			writeError(w, http.StatusBadRequest, "bad_request", "duplicate key: "+key)
+			return body, false
+		}
+		seenKeys[key] = true
+		if !allowedKeys[key] {
+			writeError(w, http.StatusBadRequest, "bad_request", "unknown key: "+key)
+			return body, false
+		}
+		var val json.RawMessage
+		if err := dec.Decode(&val); err != nil {
+			writeError(w, http.StatusBadRequest, "bad_request", "invalid json value for "+key)
+			return body, false
+		}
+		rawFields[key] = val
+	}
+	// Closing `}` and EOF.
+	if _, err := dec.Token(); err != nil {
+		writeError(w, http.StatusBadRequest, "bad_request", "invalid json body")
+		return body, false
+	}
+	if dec.More() {
+		writeError(w, http.StatusBadRequest, "bad_request", "body must contain a single JSON object")
+		return body, false
+	}
+	opRaw, hasOp := rawFields["operator_id"]
 	if !hasOp {
 		writeValidationError(w, "missing_field", "operator_id is required")
 		return body, false
 	}
-	reasonRaw, hasReason := raw["reason"]
+	reasonRaw, hasReason := rawFields["reason"]
 	if !hasReason {
 		writeValidationError(w, "missing_field", "reason is required")
 		return body, false
@@ -305,7 +397,47 @@ func decodeForceVoidBody(w http.ResponseWriter, r *http.Request) (forceVoidBody,
 		writeValidationError(w, "unsanitized_reason", "reason must be a JSON string")
 		return body, false
 	}
+	// Defense-in-depth: even though we pre-validated raw body UTF-8,
+	// the post-unmarshal value MAY contain U+FFFD from a
+	// well-formed-UTF-8 JSON `\uXXXX` escape that decodes to a lone
+	// surrogate. Reject as `invalid_utf8` so the audit log byte
+	// content matches the operator's input.
+	if strings.ContainsRune(body.OperatorID, utf8.RuneError) {
+		writeValidationError(w, "invalid_utf8", "operator_id contains invalid surrogate escape")
+		return body, false
+	}
+	if strings.ContainsRune(body.Reason, utf8.RuneError) {
+		writeValidationError(w, "invalid_utf8", "reason contains invalid surrogate escape")
+		return body, false
+	}
 	return body, true
+}
+
+// trimSpaceASCII trims ONLY the §11.6.3 whitespace set (`\t \n \r
+// \v \f` + ASCII space 0x20). Avoids `strings.TrimSpace`, which
+// removes Unicode whitespace like U+0085 (NEL) — those bytes are
+// part of the C1 control range that §11.6.3 wants the sanitizer to
+// REJECT, not silently strip.
+func trimSpaceASCII(s string) string {
+	start := 0
+	for start < len(s) {
+		c := s[start]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' {
+			start++
+			continue
+		}
+		break
+	}
+	end := len(s)
+	for end > start {
+		c := s[end-1]
+		if c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f' {
+			end--
+			continue
+		}
+		break
+	}
+	return s[start:end]
 }
 
 // validateOperatorID returns the 422 `code` string for the first
@@ -314,7 +446,7 @@ func validateOperatorID(s string) string {
 	if !utf8.ValidString(s) {
 		return "invalid_utf8"
 	}
-	t := strings.TrimSpace(s)
+	t := trimSpaceASCII(s)
 	if t == "" || len(t) > maxOperatorIDLen {
 		return "bad_operator_id"
 	}
@@ -337,7 +469,7 @@ func validateReason(s string) string {
 	if !utf8.ValidString(s) {
 		return "invalid_utf8"
 	}
-	t := strings.TrimSpace(s)
+	t := trimSpaceASCII(s)
 	if t == "" {
 		return "empty_reason"
 	}

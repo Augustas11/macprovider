@@ -57,14 +57,19 @@ func (s *Store) HandlersWithBridge(operatorKey, _gatewayServiceTokenIgnoredAdmin
 }
 
 func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool) http.Handler {
+	// SPEC-005 v0.4 (issue #169) — initialize the route-layer flag
+	// via the Store's atomic. After this initial write, subsequent
+	// flips MUST go through SetForceVoidEnabled (which emits the
+	// flag-change audit event).
+	_ = s.SetForceVoidEnabled(context.Background(), forceVoidEnabled, "startup")
 	h := &handler{
 		store:                   s,
 		operatorKey:             operatorKey,
 		tokenStore:              tokenStore,
 		requireProviderTokens:   requireProviderTokens,
 		earningsRateLimitPerMin: earningsRateLimitPerMin,
-		forceVoidEnabled:        forceVoidEnabled,
 		lastEarnings:            map[string][]time.Time{},
+		adminBucket:             newAdminRateLimiter(),
 		log:                     zerolog.New(os.Stdout).With().Timestamp().Logger(),
 	}
 	return http.HandlerFunc(h.serveHTTP)
@@ -76,18 +81,40 @@ type handler struct {
 	tokenStore              tokenValidator
 	requireProviderTokens   bool
 	earningsRateLimitPerMin int
-	forceVoidEnabled        bool
 	mu                      sync.Mutex
 	lastEarnings            map[string][]time.Time
+	adminBucket             *adminRateLimiter
 	log                     zerolog.Logger
 }
 
 func (h *handler) serveHTTP(w http.ResponseWriter, r *http.Request) {
+	// SPEC-005 v0.4 §11.6.6 — every /admin/ledger/* response path
+	// consumes the same rate-limit bucket. Charge BEFORE any
+	// further branching so 4xx / 5xx responses count too.
+	isAdminPath := strings.HasPrefix(r.URL.Path, "/admin/ledger/")
+	if isAdminPath {
+		if !h.adminBucket.Allow() {
+			writeError(w, http.StatusTooManyRequests, "rate_limited", "admin rate limit exceeded")
+			return
+		}
+	}
+
 	// SPEC-005 v0.4 §11.6 quarantine surface (issue #169).
-	if id, kind, ok := matchQuarantinePath(r.URL.Path); ok {
-		switch kind {
+	// matchQuarantinePath distinguishes "not this route" from
+	// "matched route + bad id" so we can emit 400 (not 404) per
+	// §11.6.1.1.
+	if m := matchQuarantinePath(r.URL.Path); m.matched {
+		if r.Method != http.MethodPost {
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+			return
+		}
+		if m.badID {
+			writeError(w, http.StatusBadRequest, "bad_request", "request_credit_id must be a base-10 int64")
+			return
+		}
+		switch m.kind {
 		case "force-void":
-			h.forceVoidHandler(w, r, id)
+			h.forceVoidHandler(w, r, m.id)
 			return
 		}
 	}
