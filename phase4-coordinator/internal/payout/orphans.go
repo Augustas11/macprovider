@@ -465,6 +465,15 @@ chunkLoop:
 			scannedAll = false
 			break
 		}
+		// #165 R4 code LOW closure: clamp the chunk LIMIT to the
+		// remaining ceiling so we never scan past
+		// staleOutboxScanCeiling rows in a single cycle (R4 audit
+		// flagged a 20224-row worst case at chunk 256 + ceiling
+		// 20000 — off by one chunk).
+		chunkLimit := staleOutboxChunkSize
+		if remaining := staleOutboxScanCeiling - totalScanned; remaining < chunkLimit {
+			chunkLimit = remaining
+		}
 		// Keyset query: portable strict-tuple-ordering form
 		// `(updated_at_utc > ?) OR (... = ? AND payout_id > ?) OR
 		// (... = ? AND ... = ? AND attempt_seq > ?)`. Works on all
@@ -486,7 +495,7 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
    AND abandoned_at_utc IS NULL
    AND updated_at_utc < ?
  ORDER BY updated_at_utc ASC, payout_id ASC, attempt_seq ASC
- LIMIT ?`, cutoff, staleOutboxChunkSize)
+ LIMIT ?`, cutoff, chunkLimit)
 		} else {
 			rows, queryErr = db.QueryContext(ctx, `
 SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
@@ -509,7 +518,7 @@ SELECT payout_id, attempt_seq, nonce, tx_hash, block_number, updated_at_utc
 				cursorUpdated,
 				cursorUpdated, cursorPayoutID,
 				cursorUpdated, cursorPayoutID, cursorAttemptSeq,
-				staleOutboxChunkSize,
+				chunkLimit,
 			)
 		}
 		firstChunk = false
@@ -677,7 +686,7 @@ SELECT id FROM cancel_reconfirm_stale_outbox
 			}
 		}
 		} // close inner per-row range
-		if len(chunk) < staleOutboxChunkSize {
+		if len(chunk) < chunkLimit {
 			// Drained — no more candidates past the cursor.
 			break
 		}

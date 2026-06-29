@@ -78,21 +78,29 @@ stale-cancel producer's per-cycle PAGE production is capped by
 rows*, NOT *scanned candidates* — non-actionable candidates
 (missing `tx_hash`, transient RPC error, at-least-one-RPC-still-
 sees-receipt) do not consume the budget; the scan continues past
-them so persistent non-actionable rows cannot indefinitely suppress
-truly stale cancels from PAGEing. The SELECT scan is bounded by the
-predicate (is_cancel_self_transfer=1 AND un-paged AND stale-cutoff);
-in normal operation this set is small (<<1000), and a pathological
-backlog is itself the operator's signal via the WARN gauge AND the
-chronic-outage PAGE at §4.4 (`payout_rpc_chronic_outage`) when the
-root cause is RPC failure. When the production cap is hit before
-the candidate set is exhausted, the producer emits
-`payout_stale_outbox_backlog` WARN with `run_id, limit, produced,
-total_candidates, ts_utc`, and repeats every cycle until backlog
-drains under cap. `total_candidates` is the *remaining* un-paged
-candidates AFTER this cycle's production completes (i.e. backlog
-awaiting future cycles); a value of -1 is the sentinel emitted when
-the count query itself fails (degraded observability, NOT zero
-backlog). Operators sizing
+them via keyset pagination so persistent non-actionable rows
+cannot indefinitely suppress truly stale cancels from PAGEing.
+The SELECT scans in chunks of 256 rows ordered by
+`(updated_at_utc, payout_id, attempt_seq)` (covered by the
+partial index `idx_pa_stale_cancel_keyset` per migration 0013);
+each chunk advances a strict-tuple cursor so memory stays O(chunk)
+regardless of backlog. A defensive runner-cycle ceiling of
+`staleOutboxScanCeiling = 20000` rows caps total scan work and
+keeps RunOnce wall-time bounded; the final chunk's `LIMIT` is
+clamped to the remaining ceiling so total scanned rows never
+exceed 20000.
+When the production cap is hit before the candidate set is
+exhausted, the producer emits `payout_stale_outbox_backlog` with
+`run_id, limit, produced, total_candidates, scan_ceiling_hit,
+total_scanned, ts_utc`. Severity is `WARN` by default but
+escalates to `PAGE` when `scan_ceiling_hit = true` (the 20000-row
+ceiling was reached — backlog is deeper than this cycle can drain
+and demands operator action). The event repeats every cycle until
+backlog drains under cap. `total_candidates` is the *remaining*
+un-paged candidates AFTER this cycle's production completes (i.e.
+backlog awaiting future cycles); a value of -1 is the sentinel
+emitted when the count query itself fails (degraded observability,
+NOT zero backlog). Operators sizing
 `max_rows_per_run` MUST recognize it as a SHARED budget across §4.3
 step-1 ready-row payment work AND §4.7 step-5 stale-cancel PAGE
 production; lowering the cap reduces both. The cap's normative
@@ -4619,6 +4627,28 @@ fresh session after this v0.1.x merges. That prompt will:
   shouldn't see directly). The boolean is computed
   server-side as `registered_against_hot_wallet ==
   payout.security.hot_wallet_address`.
+- SPEC-016 v0.2 candidate (#165 R4 arch LOW closure):
+  revisit the defensive `staleOutboxScanCeiling = 20000`
+  cap on the §4.7 step-5 producer. Trigger conditions:
+  sustained `payout_stale_outbox_backlog scan_ceiling_hit=true`
+  observations in production OR provider count / cancel
+  backlog depth grows enough that 20000 rows per cycle is
+  no longer comfortable headroom. Decision options:
+  (a) raise the ceiling (cheap if `idx_pa_stale_cancel_keyset`
+  scales linearly), (b) shorten the runner cycle, (c) split
+  to a dedicated stale-cancel reconciliation worker
+  (heaviest; only if the producer cycle starts blowing past
+  its wall-clock budget). v0.1.22 ships with 20000 because
+  it's well above expected v0.1 scale.
+- SPEC-016 v0.2 candidate (#165 R4 sec MEDIUM closure):
+  add a build-time CI check that enforces SPEC §7.1 +
+  SPEC §9 alert-filter + `dist/payout-runbook.md` §3 stay
+  in sync with the code's emit-event-name set. Currently
+  each must be hand-edited per release; the v0.1.22 audit
+  required four parallel edits to land
+  `payout_spki_drain_skipped_unsupported_client`. A
+  reflection-based or `go generate`-based check would
+  catch drift at PR time.
 - SPEC-016 v0.2 (filed by v0.1.7 round-8 SEC-MED): replace
   the one-table-at-a-time same-DB pins (`provider_payout_
   addresses` in §3.1; `payout_reorg_orphans` in §4.7;
