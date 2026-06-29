@@ -57,11 +57,25 @@ func (s *Store) HandlersWithBridge(operatorKey, _gatewayServiceTokenIgnoredAdmin
 }
 
 func (s *Store) handlersInternal(operatorKey, _gatewayServiceTokenIgnoredAdminOnly string, tokenStore tokenValidator, requireProviderTokens bool, earningsRateLimitPerMin int, forceVoidEnabled bool) http.Handler {
-	// SPEC-005 v0.4 (issue #169) — initialize the route-layer flag
-	// via the Store's atomic. After this initial write, subsequent
-	// flips MUST go through SetForceVoidEnabled (which emits the
-	// flag-change audit event).
-	_ = s.SetForceVoidEnabled(context.Background(), forceVoidEnabled, "startup")
+	// SPEC-005 v0.4 (issue #169) — handler CONSTRUCTION must not be
+	// able to silently flip the live route-layer flag. R8 fix
+	// (ARCH-M1) replaces the unconditional SetForceVoidEnabled call
+	// with a monotonic CompareAndSwap that only flips false→true on
+	// FIRST construction. After any caller (production main.go's
+	// startup setter, a prior constructor call, or a SIGHUP reload)
+	// has set the atomic, subsequent constructor calls cannot reset
+	// it. This is the property the codex ARCH-M1 finding required:
+	// a future legacy Handlers() call (default-false) cannot
+	// silently disable a production-enabled flag.
+	//
+	// Production wires up via main.go's explicit
+	// SetForceVoidEnabled(ctx, value, "startup") which precedes the
+	// handler construction and emits no audit (per §11.6.4 startup
+	// carve-out). Tests still pass the desired flag value here for
+	// the first-construction init case.
+	if forceVoidEnabled {
+		s.forceVoidEnabled.CompareAndSwap(false, true)
+	}
 	h := &handler{
 		store:                   s,
 		operatorKey:             operatorKey,
