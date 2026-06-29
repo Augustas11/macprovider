@@ -69,15 +69,26 @@ func (Store) SessionDetail(ctx context.Context, q ReadDB, requestID string) (map
 	if err != nil {
 		return nil, err
 	}
+	// SPEC-005 v0.4 §11.6.5 — LEFT JOIN ledger_quarantine_resolutions
+	// and surface resolution_kind / resolution_operator_id /
+	// resolution_reason / resolution_at_utc as the contract aliases
+	// the explorer client reads. Force-voided rows have
+	// `lrc.quarantined=1` AND a matching resolution row; the alias
+	// columns are non-null only when a resolution exists.
 	ledger, err := queryMaps(ctx, q, `
 		SELECT lrc.id, lrc.request_id, lrc.attempt_n, lrc.provider_id, lrc.provider_assigned_id,
 		       lrc.ts_utc, lrc.model, lrc.status, lrc.stream, lrc.prompt_tokens,
 		       lrc.completion_tokens, lrc.estimated_completion_tokens, lrc.usage_source,
 		       lrc.gross_credits, lrc.provider_credits, loc.operator_credits,
 		       lrc.fault_flag, lrc.settled, lrc.settlement_id, lrc.quarantined,
-		       lrc.quarantine_reason, lrc.recovery_source
+		       lrc.quarantine_reason, lrc.recovery_source,
+		       lqr.resolution_kind   AS resolution_kind,
+		       lqr.operator_id       AS resolution_operator_id,
+		       lqr.resolution_reason AS resolution_reason,
+		       lqr.created_at_utc    AS resolution_at_utc
 		FROM ledger_request_credits lrc
 		LEFT JOIN ledger_operator_credits loc ON loc.request_credit_id = lrc.id
+		LEFT JOIN ledger_quarantine_resolutions lqr ON lqr.request_credit_id = lrc.id
 		WHERE lrc.request_id = ?
 		ORDER BY lrc.attempt_n ASC, lrc.id ASC`, requestID)
 	if err != nil {
@@ -148,15 +159,22 @@ func (Store) ProviderDetail(ctx context.Context, q ReadDB, p pool.Provider) (map
 }
 
 func (Store) Ledger(ctx context.Context, q ReadDB, from, to time.Time, limit int) ([]map[string]any, error) {
+	// SPEC-005 v0.4 §11.6.5 — LEFT JOIN ledger_quarantine_resolutions
+	// surfaces the resolution alias columns on the ledger list view.
 	return queryMaps(ctx, q, `
 		SELECT lrc.id, lrc.request_id, lrc.attempt_n, lrc.provider_id, lrc.provider_assigned_id,
 		       lrc.ts_utc, lrc.model, lrc.status, lrc.stream, lrc.prompt_tokens,
 		       lrc.completion_tokens, lrc.estimated_completion_tokens, lrc.usage_source,
 		       lrc.gross_credits, lrc.provider_credits, loc.operator_credits,
 		       lrc.fault_flag, lrc.settled, lrc.settlement_id, lrc.quarantined,
-		       lrc.quarantine_reason, lrc.recovery_source
+		       lrc.quarantine_reason, lrc.recovery_source,
+		       lqr.resolution_kind   AS resolution_kind,
+		       lqr.operator_id       AS resolution_operator_id,
+		       lqr.resolution_reason AS resolution_reason,
+		       lqr.created_at_utc    AS resolution_at_utc
 		FROM ledger_request_credits lrc
 		LEFT JOIN ledger_operator_credits loc ON loc.request_credit_id = lrc.id
+		LEFT JOIN ledger_quarantine_resolutions lqr ON lqr.request_credit_id = lrc.id
 		WHERE lrc.ts_utc >= ? AND lrc.ts_utc < ?
 		ORDER BY lrc.ts_utc DESC, lrc.id DESC
 		LIMIT ?`, encodeTime(from), encodeTime(to), limit)
@@ -232,14 +250,25 @@ func (Store) Overview(ctx context.Context, q ReadDB, from, to time.Time) (map[st
 	if err != nil {
 		return nil, err
 	}
+	// R3 fix (SEC-M2): payable totals (current_window_provider_credits,
+	// total_gross_credits, total_provider_credits) must mirror the
+	// SPEC-005 v0.4 §11 payable predicate (lrc.quarantined=0). Without
+	// this filter, quarantined and force-voided rows inflate the
+	// explorer overview totals, which then disagree with the
+	// /admin/ledger/summary numbers operators read.
 	ledgerRows, err := queryMaps(ctx, q, `
-		SELECT COALESCE(SUM(CASE WHEN lrc.ts_utc >= ? AND lrc.ts_utc < ? THEN lrc.provider_credits ELSE 0 END), 0) AS current_window_provider_credits,
-		       COALESCE(SUM(lrc.gross_credits), 0) AS total_gross_credits,
-		       COALESCE(SUM(lrc.provider_credits), 0) AS total_provider_credits,
-		       COALESCE(SUM(loc.operator_credits), 0) AS total_operator_credits,
+		SELECT COALESCE(SUM(CASE WHEN lrc.quarantined=0 AND lrc.ts_utc >= ? AND lrc.ts_utc < ? THEN lrc.provider_credits ELSE 0 END), 0) AS current_window_provider_credits,
+		       COALESCE(SUM(CASE WHEN lrc.quarantined=0 THEN lrc.gross_credits ELSE 0 END), 0) AS total_gross_credits,
+		       COALESCE(SUM(CASE WHEN lrc.quarantined=0 THEN lrc.provider_credits ELSE 0 END), 0) AS total_provider_credits,
+		       COALESCE(SUM(CASE WHEN lrc.quarantined=0 THEN loc.operator_credits ELSE 0 END), 0) AS total_operator_credits,
 		       COALESCE((SELECT COUNT(*) FROM ledger_payout_ready WHERE status = 'ready'), 0) AS pending_payout_count,
 		       COALESCE((SELECT SUM(provider_credits) FROM ledger_payout_ready WHERE status = 'ready'), 0) AS pending_payout_credits,
-		       COALESCE(SUM(CASE WHEN lrc.quarantined != 0 THEN 1 ELSE 0 END), 0) AS quarantined_count,
+		       -- SPEC-005 v0.4 §11.6.5 OPEN_PREDICATE: surface only
+		       -- quarantined rows AWAITING operator decision
+		       -- (force-voided rows are resolved-and-excluded).
+		       COALESCE(SUM(CASE WHEN lrc.quarantined != 0 AND NOT EXISTS (
+		             SELECT 1 FROM ledger_quarantine_resolutions r WHERE r.request_credit_id = lrc.id
+		       ) THEN 1 ELSE 0 END), 0) AS quarantined_count,
 		       COALESCE(SUM(CASE WHEN lrc.fault_flag != '' AND lrc.fault_flag != 'none' THEN 1 ELSE 0 END), 0) AS fault_count
 		FROM ledger_request_credits lrc
 		LEFT JOIN ledger_operator_credits loc ON loc.request_credit_id = lrc.id`, encodeTime(from), encodeTime(to))

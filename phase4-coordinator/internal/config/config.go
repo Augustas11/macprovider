@@ -33,6 +33,7 @@ type Config struct {
 	Logging                      LoggingConfig                `yaml:"logging"`
 	Rewards                      RewardsConfig                `yaml:"rewards"`
 	Settlement                   SettlementConfig             `yaml:"settlement"`
+	Billing                      BillingConfig                `yaml:"billing"`
 	Endpoints                    EndpointsConfig              `yaml:"endpoints"`
 	Explorer                     ExplorerConfig               `yaml:"explorer"`
 	Stats                        StatsConfig                  `yaml:"stats"`
@@ -391,6 +392,20 @@ type SettlementConfig struct {
 	NightlyReconcileWindowDays  int   `yaml:"nightly_reconcile_window_days"`
 	RecoveryGraceSeconds        int   `yaml:"recovery_grace_seconds"`
 	JobEnabled                  bool  `yaml:"job_enabled"`
+}
+
+// BillingConfig is the SPEC-005 v0.4 (issue #169) billing-side
+// operator-toggleable surface. v0.4 ships one flag gating the
+// quarantine-VOID admin endpoint at the route layer; v0.5 will
+// add a force-credit flag alongside the pre-payout hold.
+type BillingConfig struct {
+	// QuarantineResolutionForceVoidEnabled gates POST
+	// /admin/ledger/quarantine/{id}/force-void (SPEC-005 v0.4
+	// §11.6.1). Default false — the endpoint returns HTTP 404
+	// `not_found` (route-layer gate per §11.5 launch-gate item
+	// 10) until the operator explicitly flips this to true via
+	// the existing config-reload primitive.
+	QuarantineResolutionForceVoidEnabled bool `yaml:"quarantine_resolution_force_void_enabled"`
 }
 
 type EndpointsConfig struct {
