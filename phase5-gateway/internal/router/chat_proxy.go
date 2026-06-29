@@ -740,6 +740,15 @@ func (s *Server) passThroughNoProviderCoordinatorError(w http.ResponseWriter, r 
 
 func (s *Server) passThroughReceiptEligibleProviderError(w http.ResponseWriter, r *http.Request, resp *http.Response, subject usageSubject, body []byte) {
 	_ = s.store.RefundReservation(context.Background(), subject.AccountID, requestID(r), s.now().Unix())
+	// PR #250 R1 code MEDIUM: this path serves provider-SELECTED
+	// errors (null-usage 5xx, etc.) where the coord did pick a
+	// provider before the failure (server.go:1886, :1909 set
+	// X-MacProvider-Provider on selected-provider non-200 responses).
+	// Without emitting attribution here, B5/B6 benchmark verdicts
+	// would still mis-attribute provider-side failures as anonymous.
+	// passThroughNoProviderCoordinatorError stays unchanged because
+	// no provider was selected on its callers' paths.
+	emitProviderAttribution(w.Header(), resp.Header)
 	copyReceiptEligibleHeaders(w.Header(), resp.Header)
 	w.Header().Set("Content-Type", contentTypeOrJSON(resp.Header))
 	w.WriteHeader(resp.StatusCode)

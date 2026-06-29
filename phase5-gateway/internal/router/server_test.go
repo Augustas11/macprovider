@@ -1577,6 +1577,44 @@ func TestProviderAttributionHeadersEmitted(t *testing.T) {
 		}
 	})
 
+	t.Run("provider-selected-error-attributed", func(t *testing.T) {
+		// PR #250 R1 code MEDIUM: provider-SELECTED errors (null-usage
+		// 5xx via passThroughReceiptEligibleProviderError) must also
+		// surface attribution. Coord sets X-MacProvider-Provider on
+		// selected-provider non-200 responses (phase4-coordinator
+		// server.go:1886 + :1909) so B5/B6 can attribute per-Mac
+		// failures, not just successes.
+		client := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			h := http.Header{}
+			h.Set("Content-Type", "application/json")
+			h.Set("X-MacProvider-Provider", peerID)
+			h.Set("X-MacProvider-Route", routeToken)
+			return responseWithBody(http.StatusBadGateway, h, `{"error":{"message":"model not loaded","type":"api_error","param":null,"code":"error_model_not_loaded"}}`), nil
+		})}
+		h, store, _, cfg := newTestHarnessConfig(t, fakeOAuth{}, func(cfg *config.Config) {
+			cfg.Coordinator.BuyerURL = "http://coordinator.test"
+		}, WithHTTPClient(client))
+		fullKey := createAccountAndKey(t, store, cfg, "acct_attr_provider_err")
+
+		resp := postChat(t, h, fullKey, `{"model":"llama","max_tokens":20,"messages":[{"role":"user","content":"hi"}]}`, nil)
+
+		if resp.Code != http.StatusBadGateway {
+			t.Fatalf("status=%d body=%s", resp.Code, resp.Body.String())
+		}
+		if got := resp.Header().Get("X-Provider-Id"); got != peerID {
+			t.Errorf("provider-selected error X-Provider-Id = %q, want %q", got, peerID)
+		}
+		if got := resp.Header().Get("X-MacProvider-Provider"); got != "" {
+			t.Errorf("provider-selected error leaked internal X-MacProvider-Provider = %q", got)
+		}
+		if got := resp.Header().Get("X-MacProvider-Route"); got != "" {
+			t.Errorf("provider-selected error leaked X-MacProvider-Route = %q", got)
+		}
+		if got := resp.Header().Get("X-Provider-Assigned-Id"); got != "" {
+			t.Errorf("provider-selected error surfaced X-Provider-Assigned-Id = %q", got)
+		}
+	})
+
 	t.Run("empty-source-suppresses-output", func(t *testing.T) {
 		// Coord paths that don't carry provider attribution (policy
 		// errors, cold-start 503s without a peer selected) must not
