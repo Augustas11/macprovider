@@ -38,11 +38,27 @@ We are in phase A.
 These fail the run (exit 10) regardless of any contract:
 
 - **I1** — billing-ledger reconciliation drift == 0
-  (no harness-successful request missing on coordinator request_log or gateway usage_events; coordinator and gateway agree on completion tokens)
+  (per-matched-pair semantics since #226; the `drift_basis` field in
+  `ledger_reconcile.json` pins which algorithm produced the sums.
+  I1 fails on any of:
+    1. unmatched harness successes (`UnmatchedSuccesses`),
+    2. unmatched gateway "ok" rows (`UnmatchedGatewayOKRows`),
+    3. unmatched coord 2xx rows (`UnmatchedCoordinator2xxRows`),
+    4. gateway-ok pairs with no coord row (`MatchedCoordMissing`;
+       fallback outcomes legitimately lack coord rows and are excluded),
+    5. positive gateway-vs-harness overbill across pairs
+       (`GatewayOverbillVsHarnessTokens` > 0; only "ok" outcomes — fallback
+       pairs are excluded per F-8 SSE-undercount artifact, see issue #232),
+    6. absolute gateway-vs-coord mismatch across pairs
+       (`AbsGatewayCoordinatorMismatchTokens` > 0; both directions, since
+       gateway and coord are both settlement systems and must agree).
+  Gateway-vs-harness underbill alone is allowed — gateway-side streaming
+  rounding is legitimate.)
 - **I2** — no 5xx response without a billing settlement entry
   (gateway must echo a request id on every 5xx; orphaning is a billing-bypass risk)
 - **I3** — no charged-tokens > delivered-tokens
-  (phase-A structural check; the DB-level overcharge signal lives in `ledger_reconcile.json` → `token_mismatches`)
+  (phase-A structural check; the DB-level overcharge signal lives in
+  `ledger_reconcile.json` → `overbilled_pairs` and `gateway_overbill_*_tokens`)
 - **I4** — no silent hang
   (a streaming response that stays open past `silent_hang_threshold` with no bytes and no `data: [DONE]` is a UX failure regardless of what the contract says about latency)
 
