@@ -32,6 +32,13 @@ import (
 )
 
 type Result struct {
+	// DriftBasis identifies the algorithm the drift fields below use.
+	// Pinned to "per_matched_pair_v2" since issue #226 — earlier artifacts
+	// (pre-#229) carry no field and were aggregate-population sums, which
+	// false-fired on fallback-heavy runs. Triage tooling that compares
+	// `gateway_minus_*` across versions MUST gate on this value.
+	DriftBasis string `json:"drift_basis"`
+
 	WindowStartUTC time.Time `json:"window_start_utc"`
 	WindowEndUTC   time.Time `json:"window_end_utc"`
 
@@ -47,12 +54,12 @@ type Result struct {
 	GatewayRowsFallback int `json:"gateway_rows_fallback"`
 	GatewayRowsNotOK    int `json:"gateway_rows_not_ok"`
 
-	// Aggregate token sums (over the same window). A clean reconcile has
-	// HarnessCompletionTokens == GatewayCompletionTokens == CoordinatorCompletionTokens.
-	// Fallback rows (stream_truncated/malformed/output_exceeded/upstream_error)
-	// are tracked separately because the coordinator has no settlement
-	// row for them (provider died mid-stream) and the harness SSE parser
-	// is known to undercount (F-8); gateway is the truth-of-record there.
+	// Aggregate token sums (over the same window). REFERENCE ONLY — these
+	// are NOT drift inputs. Issue #226 surfaced that aggregating across
+	// gateway-ok-only rows vs all-harness-ok rows is population-mismatched
+	// when most gateway settlements land as SPEC-006 §17.7 fallback
+	// outcomes. The drift fields below use per-pair sums instead. Future
+	// engineers: do not re-introduce aggregate-sum drift.
 	HarnessCompletionTokens         int64 `json:"harness_completion_tokens"`
 	GatewayCompletionTokens         int64 `json:"gateway_completion_tokens"`
 	GatewayCompletionTokensFallback int64 `json:"gateway_completion_tokens_fallback"`
@@ -63,14 +70,67 @@ type Result struct {
 	MatchedSuccesses   []MatchedPair `json:"matched_successes"`
 	UnmatchedSuccesses []string      `json:"unmatched_successes"`
 
-	// Drift signals — summed across MATCHED PAIRS only (not aggregate
-	// totals across populations of different sizes). Issue #226 fix:
-	// when most gateway settlements classify as SPEC-006 §17.7 fallback
-	// outcomes, aggregate-sum drift is population-mismatched and
-	// spuriously non-zero. Per-pair drift is the honest signal.
-	// Positive = side has more tokens than its counterpart in matched pairs.
-	GatewayMinusCoordinatorTokens int64 `json:"gateway_minus_coordinator_tokens"`
-	GatewayMinusHarnessTokens     int64 `json:"gateway_minus_harness_tokens"`
+	// UnmatchedGatewayOKRows lists gateway settlement rows with outcome="ok"
+	// that did NOT match any harness success. These represent either
+	// orphan / leaked gateway settlements (real bugs) or concurrent
+	// background traffic from other buyers; triage decides. Fallback-
+	// outcome leftovers are EXCLUDED here because they're noisy on a
+	// live network.
+	UnmatchedGatewayOKRows []string `json:"unmatched_gateway_ok_rows,omitempty"`
+
+	// UnmatchedCoordinator2xxRows lists coord request_log rows with
+	// 2xx status that did NOT match any harness success. Symmetric with
+	// UnmatchedGatewayOKRows on the coordinator side: orphan settlement
+	// or concurrent traffic. #229 R5 security HIGH — without this signal,
+	// a run with 100 clean matched pairs + 1 extra coord 2xx row leaves
+	// every drift signal at zero (the leftover coord row stays invisible).
+	UnmatchedCoordinator2xxRows []string `json:"unmatched_coordinator_2xx_rows,omitempty"`
+
+	// MatchedCoordMissing lists matched-pair harness request_ids where the
+	// gateway row has outcome="ok" but no coordinator request_log row was
+	// found in the window. This is suspicious for "ok" outcomes — a
+	// successfully-billed request should leave a coord trail. Fallback
+	// outcomes legitimately lack a coord row (provider died mid-stream)
+	// and are NOT included here.
+	MatchedCoordMissing []string `json:"matched_coord_missing,omitempty"`
+
+	// Drift signals — summed across MATCHED PAIRS only. The fields below
+	// supersede aggregate-population subtraction (#226). Positive =
+	// gateway has more tokens than its counterpart in the matched pair.
+	//
+	// NetGatewayMinus* is the signed sum; it can ride on zero when a
+	// +N overbill and -N underbill cancel. Triage should NOT use it
+	// as the headline pass/fail signal — use PositiveOverbillTokens
+	// and OverbilledPairs which preserve per-pair detection.
+	NetGatewayMinusCoordinatorTokens int64 `json:"net_gateway_minus_coordinator_tokens"`
+	NetGatewayMinusHarnessTokens     int64 `json:"net_gateway_minus_harness_tokens"`
+
+	// Gateway-vs-Harness positive overbill: I1 headline signal for this
+	// axis. Sums per-pair (gateway − harness) where gateway > harness.
+	// Underbill alone is allowed because gateway-side streaming rounding
+	// can legitimately undercount vs the harness's SSE byte timeline.
+	// Positive-only means a +N overbill is not hidden behind a −N
+	// underbill (#229 R1 CRITICAL).
+	GatewayOverbillVsHarnessTokens int64    `json:"gateway_overbill_vs_harness_tokens"`
+	OverbilledPairs                []string `json:"overbilled_pairs,omitempty"` // harness request_ids of overbilled pairs
+
+	// Gateway-vs-Coordinator positive overbill: REFERENCE ONLY for triage.
+	// Both gateway and coord are settlement systems and MUST agree on
+	// per-pair tokens, so I1's headline signal for this axis is the
+	// directional-agnostic AbsGatewayCoordinatorMismatchTokens below —
+	// NOT this positive-only sum. Kept in the artifact for diagnostic
+	// readability (per-axis breakdown of which side has more tokens).
+	GatewayOverbillVsCoordinatorTokens int64 `json:"gateway_overbill_vs_coordinator_tokens"`
+
+	// Gateway-vs-Coordinator absolute mismatch: I1 headline signal for
+	// this axis. Sum of |gateway − coord| across matched pairs (#229 R2
+	// HIGH). Unlike gateway-vs-harness — where streaming rounding makes
+	// underbill legit — gateway and coordinator are both settlement
+	// systems and MUST agree on per-request token counts. Any direction
+	// of mismatch is a money-path ledger inconsistency. I1 fails on
+	// non-zero.
+	AbsGatewayCoordinatorMismatchTokens int64    `json:"abs_gateway_coordinator_mismatch_tokens"`
+	GatewayCoordMismatchedPairs         []string `json:"gateway_coord_mismatched_pairs,omitempty"`
 
 	// Notes records discoveries that don't fit a drift count but matter
 	// for triage — e.g. extra rows attributable to background traffic.
@@ -85,6 +145,7 @@ type MatchedPair struct {
 	HarnessCompletionTokens     int64  `json:"harness_completion_tokens"`
 	GatewayRequestID            string `json:"gateway_request_id"`
 	GatewayCompletionTokens     int64  `json:"gateway_completion_tokens"`
+	GatewayOutcome              string `json:"gateway_outcome"` // "ok" or SPEC-006 §17.7 fallback name; distinguishes coord-missing severity
 	CoordinatorRequestID        string `json:"coordinator_request_id,omitempty"`
 	CoordinatorCompletionTokens int64  `json:"coordinator_completion_tokens"`
 	GatewayLagMs                int64  `json:"gateway_lag_ms"`
@@ -160,8 +221,11 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 		}
 	}
 
-	matchByFuzzy(r, results, gwRows, coordRows)
+	r.DriftBasis = "per_matched_pair_v2"
+	leftoverGw, leftoverCoord := matchByFuzzy(r, results, gwRows, coordRows)
 	computePerPairDrift(r)
+	collectUnmatchedGatewayOK(r, leftoverGw)
+	collectUnmatchedCoord2xx(r, leftoverCoord)
 
 	// Background-traffic note: extra rows beyond the harness's count
 	// likely belong to other buyers on the live network. Recorded as a
@@ -174,28 +238,118 @@ func Run(sc *scenario.Scenario, results []buyer.Result, startUTC, endUTC time.Ti
 	return r, nil
 }
 
-// computePerPairDrift sums the token deltas across matched (harness,
-// gateway, coord) triples. Replaces the earlier aggregate-sum approach
-// which subtracted gateway-ok-only token totals from full-harness-ok
-// totals — a population-mismatch that produced spurious non-zero drift
-// whenever the gateway settled most successful streams as SPEC-006
-// §17.7 fallback outcomes (stream_truncated, stream_output_exceeded,
-// upstream_error). See issue #226 for the 2026-06-29 production trip.
+// computePerPairDrift derives drift signals from r.MatchedSuccesses.
+// Replaces the earlier aggregate-sum approach which subtracted gateway-
+// ok-only token totals from full-harness-ok totals — a population-
+// mismatch that produced spurious non-zero drift whenever the gateway
+// settled most successful streams as SPEC-006 §17.7 fallback outcomes
+// (issue #226 production trip on 2026-06-29).
 //
-// Drift definitions (positive = side has more in matched pairs):
-//   - GatewayMinusHarnessTokens: Σ(gateway - harness) over matched pairs
-//   - GatewayMinusCoordinatorTokens: Σ(gateway - coord) over pairs with
-//     a coord-side match (some matches lack a coord row, e.g. when the
-//     coord 2xx for the request fell outside the SQL window).
+// Emits four drift fields per axis (gateway-vs-harness, gateway-vs-coord):
+//
+//	NetGateway*-: signed sum of per-pair (gateway - other) deltas.
+//	             A +N overbill and -N underbill cancel to 0 here; this
+//	             field is for triage reference, NOT the I1 pass/fail
+//	             input (3-lane codex audit CRITICAL on PR #229 R1).
+//
+//	GatewayOverbill*-: sum of POSITIVE-only per-pair deltas; an overbilled
+//	                  pair contributes its overbill amount, an underbilled
+//	                  pair contributes 0. This is the headline overbill
+//	                  signal — does NOT cancel against other pairs.
+//
+// Also populates OverbilledPairs with harness request IDs of any pair
+// where the gateway billed more than the harness observed, so triage
+// can drill into the offending requests.
+//
+// MatchedCoordMissing is populated for pairs whose gateway outcome is
+// "ok" but no coord row matched — fallback outcomes legitimately lack
+// a coord row (provider died mid-stream) and aren't flagged here.
 //
 // Unmatched harness successes are NOT counted here — they show up
-// independently as r.UnmatchedSuccesses, which I1 inspects separately.
+// independently as r.UnmatchedSuccesses for I1's "missing on gateway"
+// signal.
 func computePerPairDrift(r *Result) {
 	for _, p := range r.MatchedSuccesses {
-		r.GatewayMinusHarnessTokens += p.GatewayCompletionTokens - p.HarnessCompletionTokens
-		if p.CoordinatorRequestID != "" {
-			r.GatewayMinusCoordinatorTokens += p.GatewayCompletionTokens - p.CoordinatorCompletionTokens
+		// Gateway vs Harness — fold the delta into the headline overbill
+		// signal ONLY for gateway "ok" pairs. SPEC-006 §17.7 fallback
+		// outcomes (stream_truncated etc.) have a known asymmetry: the
+		// gateway records the bytes it actually emitted before the upstream
+		// error, while the harness's SSE parser undercounts (F-8). The
+		// pre-existing #226 production scenario specifically had fallback
+		// gateway tokens >> harness tokens; if we counted those as overbill,
+		// I1 would false-fail on exactly the shape this PR is meant to fix
+		// (#229 R5 architect HIGH).
+		dh := p.GatewayCompletionTokens - p.HarnessCompletionTokens
+		r.NetGatewayMinusHarnessTokens += dh
+		if dh > 0 && isGatewayOKOutcome(p.GatewayOutcome) {
+			r.GatewayOverbillVsHarnessTokens += dh
+			r.OverbilledPairs = append(r.OverbilledPairs, p.HarnessRequestID)
 		}
+
+		// Gateway vs Coordinator — only when a coord match exists.
+		// Coord and gateway are BOTH settlement systems for the same
+		// request, so any per-pair token disagreement (in either
+		// direction) is a ledger inconsistency that I1 must surface.
+		// AbsGatewayCoordinatorMismatchTokens uses |delta| to avoid
+		// signed-cancel across pairs (#229 R2 HIGH).
+		//
+		// When a coord row is missing for a gateway-OK pair (i.e. the
+		// gateway settled cleanly but no coord trail), surface separately
+		// in MatchedCoordMissing rather than dropping the signal.
+		if p.CoordinatorRequestID != "" {
+			dc := p.GatewayCompletionTokens - p.CoordinatorCompletionTokens
+			r.NetGatewayMinusCoordinatorTokens += dc
+			if dc > 0 {
+				r.GatewayOverbillVsCoordinatorTokens += dc
+			}
+			if dc != 0 {
+				if dc < 0 {
+					r.AbsGatewayCoordinatorMismatchTokens += -dc
+				} else {
+					r.AbsGatewayCoordinatorMismatchTokens += dc
+				}
+				r.GatewayCoordMismatchedPairs = append(r.GatewayCoordMismatchedPairs, p.HarnessRequestID)
+			}
+		} else if isGatewayOKOutcome(p.GatewayOutcome) {
+			r.MatchedCoordMissing = append(r.MatchedCoordMissing, p.HarnessRequestID)
+		}
+	}
+}
+
+// collectUnmatchedGatewayOK lists gateway rows with outcome="ok" that
+// matchByFuzzy did NOT consume into a MatchedSuccesses pair. These are
+// either orphan gateway settlements (real bugs — gateway billed for a
+// request the harness never fired) or concurrent background traffic
+// from other buyers. Triage decides. Fallback-outcome leftovers are
+// EXCLUDED because they are noisy on a live network where streams can
+// truncate without involving the harness.
+//
+// IMPORTANT: this takes the leftover gwPool returned by matchByFuzzy,
+// not the original gwRows. The pool is identity-tracked by slice
+// position, NOT by request_id, so we never accidentally mark a duplicate
+// (account_id, request_id) row consumed (#229 R3 security HIGH).
+func collectUnmatchedGatewayOK(r *Result, leftoverGw []gwRow) {
+	for _, g := range leftoverGw {
+		if g.Outcome != "ok" {
+			continue
+		}
+		r.UnmatchedGatewayOKRows = append(r.UnmatchedGatewayOKRows, g.RequestID)
+	}
+}
+
+// collectUnmatchedCoord2xx surfaces coord request_log rows with 2xx
+// status that matchByFuzzy did NOT consume. Symmetric with the
+// gateway-ok orphan path: a coord row representing a settled request
+// with no harness/gateway counterpart is either orphan/leaked or
+// concurrent buyer traffic. I1 must fail on these — without this
+// signal, a 100-clean-pairs + 1-extra-coord-row run leaves all drift
+// fields at zero (#229 R5 security HIGH).
+func collectUnmatchedCoord2xx(r *Result, leftoverCoord []coordRow) {
+	for _, c := range leftoverCoord {
+		if c.Status < 200 || c.Status >= 300 {
+			continue
+		}
+		r.UnmatchedCoordinator2xxRows = append(r.UnmatchedCoordinator2xxRows, c.RequestID)
 	}
 }
 
@@ -204,7 +358,13 @@ func computePerPairDrift(r *Result) {
 // most likely coordinator row by (model, completion_tokens, ts proximity).
 // Once a row is consumed by a match, it's removed from the pool so the
 // next harness request can't re-match the same DB row.
-func matchByFuzzy(r *Result, results []buyer.Result, gwRows []gwRow, coordRows []coordRow) {
+//
+// Returns the leftover gateway pool — rows that did NOT consume into a
+// match. Callers use this to detect orphan/leaked settlement rows
+// directly from row identity, NOT from request_id (which the gateway
+// schema does not guarantee globally unique under the composite PK
+// `(account_id, request_id)`; #229 R3 security HIGH).
+func matchByFuzzy(r *Result, results []buyer.Result, gwRows []gwRow, coordRows []coordRow) ([]gwRow, []coordRow) {
 	gwPool := make([]gwRow, len(gwRows))
 	copy(gwPool, gwRows)
 	coordPool := make([]coordRow, len(coordRows))
@@ -227,7 +387,6 @@ func matchByFuzzy(r *Result, results []buyer.Result, gwRows []gwRow, coordRows [
 
 	for _, h := range ordered {
 		gwIdx := pickClosestGw(&gwPool, h.res)
-		coordIdx := pickClosestCoord(&coordPool, h.res)
 		pair := MatchedPair{
 			HarnessRequestID:        h.res.RequestID,
 			HarnessCompletionTokens: h.res.CompletionTokensReceived,
@@ -236,20 +395,31 @@ func matchByFuzzy(r *Result, results []buyer.Result, gwRows []gwRow, coordRows [
 			g := gwPool[gwIdx]
 			pair.GatewayRequestID = g.RequestID
 			pair.GatewayCompletionTokens = g.CompletionTokens
+			pair.GatewayOutcome = g.Outcome
 			pair.GatewayLagMs = g.CreatedAt.Sub(h.res.StartUTC).Milliseconds()
 			gwPool = append(gwPool[:gwIdx], gwPool[gwIdx+1:]...)
 		} else {
 			r.UnmatchedSuccesses = append(r.UnmatchedSuccesses, h.res.RequestID)
 			continue
 		}
-		if coordIdx >= 0 {
-			c := coordPool[coordIdx]
-			pair.CoordinatorRequestID = c.RequestID
-			pair.CoordinatorCompletionTokens = c.CompletionTokens
-			coordPool = append(coordPool[:coordIdx], coordPool[coordIdx+1:]...)
+		// Only attempt a coord match when the gateway settled as "ok".
+		// SPEC-006 §17.7 fallback outcomes (stream_truncated, etc.)
+		// legitimately lack a coord row (provider died mid-stream), so
+		// pulling one in would (a) consume a coord row that a later
+		// real "ok" pair needs, and (b) misattribute a token mismatch
+		// to a fallback pair where coord disagreement is expected.
+		// This avoids the false I1 failure mode flagged on PR #229 R4.
+		if isGatewayOKOutcome(pair.GatewayOutcome) {
+			if coordIdx := pickClosestCoord(&coordPool, h.res); coordIdx >= 0 {
+				c := coordPool[coordIdx]
+				pair.CoordinatorRequestID = c.RequestID
+				pair.CoordinatorCompletionTokens = c.CompletionTokens
+				coordPool = append(coordPool[:coordIdx], coordPool[coordIdx+1:]...)
+			}
 		}
 		r.MatchedSuccesses = append(r.MatchedSuccesses, pair)
 	}
+	return gwPool, coordPool
 }
 
 func pickClosestGw(pool *[]gwRow, h buyer.Result) int {
@@ -306,6 +476,16 @@ func absInt64(x int64) int64 {
 		return -x
 	}
 	return x
+}
+
+// isGatewayOKOutcome reports whether a gateway outcome value represents
+// a clean SPEC-006 streaming completion that SHOULD have a corresponding
+// coord row. Centralizing this in one place — symmetric with
+// isSettlementComplete — keeps the drift logic from going out of sync
+// when SPEC-006 §17.7 adds new fallback outcome names (#229 R2 architect
+// MEDIUM).
+func isGatewayOKOutcome(outcome string) bool {
+	return outcome == "ok"
 }
 
 // isSettlementComplete returns true for any gateway outcome value that
